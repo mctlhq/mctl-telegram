@@ -67,6 +67,11 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 		"Self-service controls",
 		"A human reply marks the conversation",
 		"audit/verify",
+		// Telegram API terms §1.5 and §2.2 (#852)
+		`id="ai-use"`,
+		"never uses message content, or anything derived from it, to train",
+		"switch off any setting that lets the provider use your conversations",
+		"unofficial third-party Telegram client built on the Telegram API",
 		"privacy@mctl.ai",
 		"support@mctl.ai",
 		// shared chrome — unified with landing/docs
@@ -137,6 +142,9 @@ func TestTerms_ServesHTML(t *testing.T) {
 	for _, must := range []string{
 		"Terms of",
 		"not affiliated with, endorsed by, or operated by Telegram, OpenAI or Anthropic",
+		// Telegram API terms §2.2 and §1.5 (#852)
+		"unofficial third-party Telegram client: it uses the Telegram API",
+		"must not use it to train or fine-tune AI models",
 		"your own",
 		"read-only by default",
 		"spam",
@@ -162,6 +170,7 @@ func TestLanding_HasTransparencySections(t *testing.T) {
 	for _, must := range []string{
 		"inside Claude</span></h1>",
 		"Connect in Claude",
+		"unofficial third-party Telegram client that uses the Telegram API",
 		`href="#claude"`,
 		`id="claude"`,
 		"Customize &#8594; Connectors",

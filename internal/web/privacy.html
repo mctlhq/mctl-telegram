@@ -34,11 +34,20 @@
   <h2>Claude, ChatGPT and other MCP users</h2>
   <p>When you connect MCTL to Claude, ChatGPT, or another MCP client, the following data flows apply:</p>
   <ul>
-    <li><strong>User-authorized account access:</strong> this service operates only on the Telegram account you explicitly connect. It is an independent project and is not affiliated with, endorsed by, or operated by Telegram, Anthropic, or OpenAI.</li>
+    <li><strong>User-authorized account access:</strong> this service operates only on the Telegram account you explicitly connect. It is an unofficial third-party Telegram client built on the Telegram API, and an independent project: it is not affiliated with, endorsed by, or operated by Telegram, Anthropic, or OpenAI.</li>
     <li><strong>Through your MCP client:</strong> your prompts, MCP tool arguments (for example peer identifiers or draft text), and tool results returned by this server. That traffic is also processed by the MCP client provider under its own privacy policy.</li>
     <li><strong>Stored by this server for ordinary MCP calls:</strong> an encrypted MTProto session blob, your Telegram user id and display name/username, and audit metadata (tool name, redacted peer reference, status). Message bodies returned by read tools are fetched for that request and are not copied into the audit log. Accounts onboarded through <a href="/docs/local-bridge">Local Bridge</a> <code>activate</code> have no stored session blob here.</li>
     <li><strong>Stored when Communication Agent is enabled:</strong> relevant incoming Telegram events, agent-visible conversation messages, and proposed action payloads are durably stored so the queue, policy, approval, and recovery flow can operate. Sensitive body/payload fields are encrypted at rest with your derived key. Message/event bodies and terminal or inactive pre-send action content use the agent retention window below; executing action content remains until persisted-random-ID recovery reaches a terminal state.</li>
     <li><strong>Revoke access:</strong> <code>disconnect_telegram_account</code> (or <code>POST /api/account/disconnect</code>, or disconnect at <code>/telegram/connect/manage</code> after signing in with Telegram) ends the Telegram session but keeps your client's OAuth connection, so reconnecting Telegram does not require re-adding the connector. <code>delete_telegram_account</code> (or <code>DELETE /api/account</code>) also revokes every OAuth client's refresh tokens, every worker token issued for your Telegram id, and every Local Bridge device. Removing the app/connector from your client settings revokes its tokens only if that client calls <code>/oauth/revoke</code>; we cannot see the removal otherwise. These calls need a connection granted <code>account:manage</code>. Access tokens already issued expire within their lifetime (at most 1 hour in production).</li>
+  </ul>
+
+  <h2 id="ai-use">AI use of your messages</h2>
+  <p>Your chats contain messages written by other people, who have not agreed to anything with this service. Telegram's terms forbid using Telegram data to train AI models without consent, so the rules here are narrow:</p>
+  <ul>
+    <li><strong>Inference for your own requests only.</strong> Message content is read only to answer a request you make through your own AI assistant, and is returned to that assistant and nowhere else.</li>
+    <li><strong>No training by this service.</strong> This service never uses message content, or anything derived from it, to train, fine-tune or evaluate any AI model, and never sells or shares it for that purpose.</li>
+    <li><strong>Turn off training in your AI client.</strong> Your MCP client provider handles the tool results it receives under its own policy. Before connecting, switch off any setting that lets the provider use your conversations to improve its models.</li>
+    <li><strong>Kept no longer than the feature needs.</strong> Ordinary MCP calls fetch messages for that request and do not store them. Only Communication Agent stores message content, encrypted, for the retention window in the table below.</li>
   </ul>
 
   <h2>Data inventory</h2>
