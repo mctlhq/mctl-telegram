@@ -180,3 +180,17 @@ func TestChromeBrandIsMCTL(t *testing.T) {
 		}
 	}
 }
+
+// TestCtrlListColumnCanShrink guards the phone layout: a bare 1fr grid column
+// has an auto minimum, so a <pre> snippet inside a ul.ctrl item widened the
+// whole list to ~550px at a 375px viewport and clipped every item's text.
+func TestCtrlListColumnCanShrink(t *testing.T) {
+	i := strings.Index(componentsCSS, "ul.ctrl {")
+	if i < 0 {
+		t.Fatal("ul.ctrl rule not found")
+	}
+	rule := componentsCSS[i : i+strings.Index(componentsCSS[i:], "}")]
+	if !strings.Contains(rule, "grid-template-columns: minmax(0, 1fr);") {
+		t.Fatalf("ul.ctrl column must be minmax(0, 1fr); rule:\n%s", rule)
+	}
+}

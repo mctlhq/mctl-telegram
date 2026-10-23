@@ -414,7 +414,10 @@
     padding: 0;
     margin: 0;
     display: grid;
-    grid-template-columns: 1fr;
+    /* minmax(0, 1fr), not 1fr: a bare 1fr column has an auto minimum, so a
+       <pre> snippet inside an item would widen the whole list past a phone
+       viewport instead of scrolling inside its own box. */
+    grid-template-columns: minmax(0, 1fr);
     gap: 1px;
     background: var(--border);
     border: 1px solid var(--border);
@@ -428,6 +431,7 @@
     font-size: 14px;
     transition: background .12s;
   }
+  ul.ctrl > li pre { margin: 10px 0 0; }
   ul.ctrl > li:hover { background: var(--surface-2); }
   ul.ctrl > li strong { color: var(--text); font-weight: 600; display: inline-block; margin-right: 6px; }
 
