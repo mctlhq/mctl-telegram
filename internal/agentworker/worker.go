@@ -210,15 +210,17 @@ func (w *Worker) Loop(ctx context.Context) error {
 			release(held - len(jobs))
 		}
 		for i, job := range jobs {
-			if i >= held {
-				// The server returned more than asked for; honour the claim
-				// anyway rather than leave it to time out.
-				slots <- struct{}{}
-			}
+			// A job past held means the server returned more than asked for.
+			// Honour the claim at once, outside the slots, rather than block
+			// the loop (and shutdown) until a slot frees while its deadline
+			// runs.
+			slotted := i < held
 			wg.Add(1)
 			go func(job JobEnvelope) {
 				defer wg.Done()
-				defer func() { <-slots }()
+				if slotted {
+					defer func() { <-slots }()
+				}
 				w.runJob(ctx, gate, job)
 			}(job)
 		}

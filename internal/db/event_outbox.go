@@ -167,8 +167,14 @@ func (s *Store) routeJobEventTx(ctx context.Context, tx *sql.Tx, jobID int64, re
 }
 
 // RouteUnclaimedAgentJobs moves every pending job that was never claimed
-// (attempts = 0) and is older than after to terminal routed, and forwards its
-// source event to the operator stream with RouteWorkerUnclaimed. It does
+// (attempts = 0), is older than after, and was itself claimable, to terminal
+// routed, and forwards its source event to the operator stream with
+// RouteWorkerUnclaimed. "Claimable" is ClaimAgentJobs' per-conversation rule:
+// no earlier job of the conversation is pending and none is processing. A job
+// waiting behind a slow or backing-off head is being served, not unclaimed,
+// and routing it would take the message away from a healthy worker. Once a
+// stuck head is routed, its followers become claimable and age into the next
+// sweep. It does
 // nothing unless operator routing is on and after > 0. The status
 // compare-and-set serializes with ClaimAgentJobs on the row lock, so a job is
 // never both routed and claimed. An event already routed for another reason
@@ -187,11 +193,11 @@ func (s *Store) RouteUnclaimedAgentJobs(ctx context.Context, after time.Duration
 	ids, err := requeueTransition(ctx, tx,
 		`UPDATE agent_jobs SET status = $1, last_error = $2, updated_at = $3
 		  WHERE status = $4 AND attempts = 0 AND created_at < $5
-			    AND NOT EXISTS (
-			        SELECT 1 FROM agent_jobs p
-			         WHERE p.conversation_id = agent_jobs.conversation_id
-			           AND (p.status = $6 OR (p.status = $4 AND p.id < agent_jobs.id))
-			    )
+		    AND NOT EXISTS (
+		        SELECT 1 FROM agent_jobs p
+		         WHERE p.conversation_id = agent_jobs.conversation_id
+		           AND (p.status = $6 OR (p.status = $4 AND p.id < agent_jobs.id))
+		    )
 		 RETURNING id`,
 		JobRouted, "unclaimed past threshold, routed to operator", now, JobPending, now.Add(-after), JobProcessing)
 	if err != nil {

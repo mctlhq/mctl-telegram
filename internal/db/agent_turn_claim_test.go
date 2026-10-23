@@ -2,8 +2,10 @@ package db
 
 import (
 	"context"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -158,8 +160,9 @@ func TestTurnClaim_ReplayAndRetryKeepTurnID(t *testing.T) { // T1.3
 	}
 	f.now = time.Now().UTC().Add(time.Hour)
 	again := f.claim(t, 1)
-	if len(again) != 1 || again[0].TurnID != j1.TurnID || len(again[0].SourceEventIDs) != 2 {
-		t.Fatalf("retry claim = %+v", again)
+	if len(again) != 1 || again[0].TurnID != j1.TurnID ||
+		strings.Join(again[0].SourceEventIDs, ",") != strings.Join(j1.SourceEventIDs, ",") {
+		t.Fatalf("retry claim = %+v, want membership %v", again, j1.SourceEventIDs)
 	}
 	// Replay the same rows into a fresh store (the shared in-memory database
 	// only goes away once the first store is closed).
@@ -327,23 +330,152 @@ func TestRouteUnclaimed_SkipsClaimedAndKeepsFirstReason(t *testing.T) { // T3.2,
 	}
 }
 
-func TestRouteUnclaimed_SkipsFollowerBehindProcessingHead(t *testing.T) {
+// A job that only waits behind an earlier job of its conversation is being
+// served, not unclaimed: the sweep must leave it alone while the head is
+// processing or backing off (claude P2 on #876). A head nobody claimed is
+// routed, and its follower is routed by the next sweep, not the same one.
+func TestRouteUnclaimed_SkipsJobsWaitingBehindHead(t *testing.T) { // T3.2
 	f := newTurnFixture(t, nil)
+	ctx := context.Background()
 	head := f.ingest(t, 555, 10, 5, 0)
 	follower := f.ingest(t, 555, 11, 5, time.Second)
 	if _, err := f.s.DB.Exec(`UPDATE agent_jobs SET created_at = $1`, time.Now().UTC().Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	ctx := context.Background()
-	got := f.claim(t, 1)
+	got := f.claim(t, 5)
 	if len(got) != 1 || got[0].EventID != head {
 		t.Fatalf("claim = %+v", got)
 	}
-	f.s.operatorRouting = true
 	if n, err := f.s.RouteUnclaimedAgentJobs(ctx, time.Minute); err != nil || n != 0 {
-		t.Fatalf("sweep with processing head: %d %v", n, err)
+		t.Fatalf("sweep behind a processing head: %d %v", n, err)
 	}
-	if st, _ := f.status(t, follower); st != JobPending {
-		t.Fatalf("follower status = %s, want pending", st)
+	if _, err := f.s.RetryAgentJob(ctx, got[0].ID, got[0].Attempts, "boom"); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := f.s.RouteUnclaimedAgentJobs(ctx, time.Minute); err != nil || n != 0 {
+		t.Fatalf("sweep behind a backing-off head: %d %v", n, err)
+	}
+	for _, id := range []string{head, follower} {
+		if st, _ := f.status(t, id); st != JobPending {
+			t.Fatalf("%s status = %s, want pending", id, st)
+		}
+	}
+
+	// Bob's conversation: nobody ever claimed the head.
+	bHead := f.ingest(t, 556, 20, 5, 0)
+	bNext := f.ingest(t, 556, 21, 5, time.Second)
+	if _, err := f.s.DB.Exec(`UPDATE agent_jobs SET created_at = $1 WHERE event_id IN ($2, $3)`,
+		time.Now().UTC().Add(-time.Hour), bHead, bNext); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := f.s.RouteUnclaimedAgentJobs(ctx, time.Minute); err != nil || n != 1 {
+		t.Fatalf("first sweep: %d %v", n, err)
+	}
+	if st, _ := f.status(t, bHead); st != JobRouted {
+		t.Fatalf("unclaimed head status = %s", st)
+	}
+	if st, _ := f.status(t, bNext); st != JobPending {
+		t.Fatalf("follower routed in the same sweep: %s", st)
+	}
+	if n, err := f.s.RouteUnclaimedAgentJobs(ctx, time.Minute); err != nil || n != 1 {
+		t.Fatalf("second sweep: %d %v", n, err)
+	}
+	if st, _ := f.status(t, bNext); st != JobRouted {
+		t.Fatalf("follower status = %s", st)
+	}
+}
+
+// T3.4: the sweep and a claim racing for one job move it exactly once. On
+// SQLite the single connection serializes them; on Postgres
+// (TEST_DATABASE_URL) the row lock does.
+func TestRouteUnclaimed_RaceWithClaimMovesJobOnce(t *testing.T) { // T3.4
+	for i := 0; i < 20; i++ {
+		f := newTurnFixture(t, nil)
+		ctx := context.Background()
+		ev := f.ingest(t, 555, 10, 5, 0)
+		if _, err := f.s.DB.Exec(`UPDATE agent_jobs SET created_at = $1, next_run_at = $1`, time.Now().UTC().Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		var claimed []AgentJob
+		var routed int64
+		var claimErr, routeErr error
+		wg.Add(2)
+		go func() { defer wg.Done(); claimed, claimErr = f.s.ClaimAgentJobs(ctx, "r", f.uid, 1) }()
+		go func() { defer wg.Done(); routed, routeErr = f.s.RouteUnclaimedAgentJobs(ctx, time.Minute) }()
+		wg.Wait()
+		if claimErr != nil || routeErr != nil {
+			t.Fatalf("claim %v, route %v", claimErr, routeErr)
+		}
+		if (len(claimed) == 1) == (routed == 1) {
+			t.Fatalf("run %d: claimed %d and routed %d, want exactly one", i, len(claimed), routed)
+		}
+		st, _ := f.status(t, ev)
+		if len(claimed) == 1 && (st != JobProcessing || outboxCount(t, f.s) != 0) {
+			t.Fatalf("run %d: claimed job is %s with %d outbox rows", i, st, outboxCount(t, f.s))
+		}
+		if routed == 1 && st != JobRouted {
+			t.Fatalf("run %d: routed job is %s", i, st)
+		}
+		_ = f.s.DB.Close()
+	}
+}
+
+// Task 2: ingest records the plaintext size, and only the size.
+func TestIngest_RecordsBodyBytes(t *testing.T) {
+	f := newTurnFixture(t, nil)
+	ev := f.ingest(t, 555, 10, 37, 0)
+	var n int
+	var sealed []byte
+	if err := f.s.DB.QueryRow(`SELECT j.body_bytes, e.body_encrypted FROM agent_jobs j
+		JOIN incoming_events e ON e.event_id = j.event_id WHERE j.event_id = $1`, ev).Scan(&n, &sealed); err != nil {
+		t.Fatal(err)
+	}
+	if n != 37 {
+		t.Fatalf("body_bytes = %d, want 37", n)
+	}
+	if strings.Contains(string(sealed), strings.Repeat("x", 37)) {
+		t.Fatal("body stored in plaintext")
+	}
+}
+
+// Task 1: on a database from before slice 2, the migration adds the turn
+// columns (NULL on existing rows) and a second run changes nothing.
+func TestMigrateAgent_TurnColumnsUpgradeAndRerun(t *testing.T) {
+	t.Run("sqlite", func(t *testing.T) {
+		s := newTestStore(t)
+		checkTurnColumnsUpgrade(t, s, false)
+	})
+	t.Run("postgres", func(t *testing.T) {
+		dsn := os.Getenv("TEST_DATABASE_URL")
+		if dsn == "" {
+			t.Skip("TEST_DATABASE_URL not set")
+		}
+		checkTurnColumnsUpgrade(t, newPostgresTestStore(t, dsn), true)
+	})
+}
+
+func checkTurnColumnsUpgrade(t *testing.T, s *Store, pg bool) {
+	t.Helper()
+	ctx := context.Background()
+	cols := []string{"turn_id", "coalesced_into", "body_bytes"}
+	if _, err := s.DB.ExecContext(ctx, `DROP INDEX IF EXISTS idx_agent_jobs_coalesced_into`); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cols {
+		if _, err := s.DB.ExecContext(ctx, `ALTER TABLE agent_jobs DROP COLUMN `+c); err != nil {
+			t.Fatalf("drop %s: %v", c, err)
+		}
+	}
+	for run := 1; run <= 2; run++ {
+		if err := migrateAgent(ctx, s.DB, pg); err != nil {
+			t.Fatalf("migrate run %d: %v", run, err)
+		}
+		for _, c := range cols {
+			ok, err := columnExists(ctx, s.DB, pg, "agent_jobs", c)
+			if err != nil || !ok {
+				t.Fatalf("run %d: column %s present=%v err=%v", run, c, ok, err)
+			}
+		}
 	}
 }
