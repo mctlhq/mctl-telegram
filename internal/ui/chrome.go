@@ -4,7 +4,6 @@
 // because both internal/web and internal/oauth render pages and web
 // deliberately avoids importing oauth.
 //
-// Two tiers are provided:
 // The look follows the shared public site shell of mctl.ai and docs.mctl.ai
 // (mctl-design): full-width header with the accent-"M" wordmark, Title Case
 // nav in the display face, the BaseButton/BaseCard recipes, the docs table

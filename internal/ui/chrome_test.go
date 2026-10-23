@@ -194,3 +194,15 @@ func TestCtrlListColumnCanShrink(t *testing.T) {
 		t.Fatalf("ul.ctrl column must be minmax(0, 1fr); rule:\n%s", rule)
 	}
 }
+
+// The mobile-menu checkbox must not be focusable on desktop, where nothing
+// gives it meaning: display:none outside the mobile query.
+func TestNavToggleHiddenOnDesktop(t *testing.T) {
+	if !strings.Contains(componentsCSS, "  .nav-toggle { display: none; }") {
+		t.Fatal(".nav-toggle must be display:none outside the mobile query")
+	}
+	m := strings.Index(componentsCSS, "@media (max-width: 767px)")
+	if m < 0 || !strings.Contains(componentsCSS[m:], ".nav-toggle {\n      display: block;") {
+		t.Fatal(".nav-toggle must be re-enabled (visually hidden) inside the mobile query")
+	}
+}

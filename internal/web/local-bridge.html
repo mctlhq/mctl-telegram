@@ -35,7 +35,9 @@
     border-left: 3px solid var(--border); color: var(--text-dim);
   }
   /* Rendered markdown tables have no wrapper: scroll them in place. */
-  .doc table { display: block; overflow-x: auto; }
+  /* display:block lets the table scroll in place; drop the shared outer frame,
+     which would be drawn at full width around a grid that hugs the left. */
+  .doc table { display: block; overflow-x: auto; border: 0; }
   .doc th { white-space: nowrap; }
   .doc hr { border: 0; border-top: 1px solid var(--border); margin: 32px 0; }
   .doc-source { color: var(--text-dim); font-size: 13px; margin-top: 40px; }
