@@ -67,7 +67,7 @@
     <thead><tr><th>Boundary</th><th>Trusted credential / state</th><th>Lives</th></tr></thead>
     <tbody>
       <tr>
-        <td>Inbound HTTP (ChatGPT / Claude / MCP clients &#8594; <code>/mcp</code>)</td>
+        <td>Inbound HTTP (Claude / ChatGPT / MCP clients &#8594; <code>/mcp</code>)</td>
         <td>OAuth JWT issued and verified by this server; legacy mode may use <code>api.mctl.ai</code></td>
         <td>Bearer header, per request</td>
       </tr>
@@ -136,7 +136,7 @@
   <p>This guarantee applies to logs and audit rows. Communication Agent message/action tables intentionally store encrypted content as described above.</p>
 
   <h2>Known coupling: shared-hmac-legacy mode</h2>
-  <p><code>AUTH_MODE=shared-hmac-legacy</code> validates JWTs using secret material shared with an external authorization service. This coupling does not apply to the default <code>local-jwt</code> mode.</p>
+  <p><code>AUTH_MODE=shared-hmac-legacy</code> validates JWTs using secret material shared with an external authorization service. It must also be unlocked explicitly with <code>AUTH_ALLOW_SHARED_HMAC_LEGACY=true</code>. The coupling does not apply to <code>local-jwt</code>, the mode tg.mctl.ai runs.</p>
   <ul>
     <li><strong>Impact:</strong> compromise of either service's shared secret can affect both trust domains.</li>
     <li><strong>Mitigation:</strong> rotate the shared secret for both services in the same change and prefer <code>local-jwt</code> for new deployments.</li>
@@ -151,14 +151,14 @@
   </ul>
 
   <h2>Send gate (defense in depth)</h2>
-  <p>Every newly connected account starts read-only (<code>send_enabled=false</code>). Real Telegram sends through <code>send_message</code> or <code>send_media</code> require <strong>all</strong> of:</p>
+  <p>Every newly connected account starts read-only (<code>send_enabled=false</code>) unless its owner chooses <em>Read + send</em> on the permissions step while connecting. Every write to Telegram — <code>send_message</code>, <code>send_media</code>, <code>edit_message</code>, <code>delete_messages</code>, <code>forward_messages</code>, <code>set_reaction</code>, <code>pin_message</code> and <code>send_reply</code> — requires <strong>all</strong> of:</p>
   <ol>
     <li>Server flag <code>ALLOW_SEND=true</code>. This is the operator kill switch: on for production <code>tg.mctl.ai</code>; set <code>ALLOW_SEND=false</code> on a deployment that must never deliver.</li>
-    <li>Identity has <code>telegram:messages:send</code> scope.</li>
-    <li><code>telegram_accounts.send_enabled = true</code> for that account (owner sets this via <code>set_send_consent</code>{{if .ShowManage}} or <a href="/telegram/connect/manage">/telegram/connect/manage</a>{{end}}).</li>
+    <li>Identity has the tool's scope (<code>telegram:messages:send</code>, or <code>telegram:messages:pin</code> for pins). A tool outside the token's scopes, or outside the connection's tool profile, is not listed and is refused as unknown.</li>
+    <li><code>telegram_accounts.send_enabled = true</code> for that account (owner sets this on the permissions step, via <code>set_send_consent</code>{{if .ShowManage}} or <a href="/telegram/connect/manage">/telegram/connect/manage</a>{{end}}).</li>
     <li>The per-peer send rate limit is not exhausted.</li>
   </ol>
-  <p>Any failed condition returns a dry-run result (<code>sent=false</code>) with a <code>dry_reason</code>; no send RPC reaches Telegram. A denied media call does not fetch its URL or decode its base64 payload.</p>
+  <p>Any failed condition returns a dry-run result (<code>sent=false</code>) with a <code>dry_reason</code> — or, for <code>send_reply</code>, an error naming the condition, never a preview — and no send RPC reaches Telegram. <code>pin_message</code> and <code>send_reply</code> additionally require a single-use confirmation issued by <code>prepare_pin_message</code> or <code>draft_reply</code>. A denied media call does not fetch its URL or decode its base64 payload.</p>
 
   <h2>Authentication-required mode</h2>
   <ul>

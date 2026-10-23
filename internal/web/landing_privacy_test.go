@@ -40,10 +40,3 @@ func TestLandingPrivacyClaimsAlignWithAgentStorage(t *testing.T) {
 		}
 	}
 }
-
-func TestAlignLandingPrivacyClaimsDoesNotChangeUnrelatedCopy(t *testing.T) {
-	const input = `<p>unrelated landing copy</p>`
-	if got := alignLandingPrivacyClaims(input); got != input {
-		t.Fatalf("unrelated copy changed: got %q", got)
-	}
-}

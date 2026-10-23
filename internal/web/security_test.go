@@ -23,7 +23,7 @@ func TestSecurity_ServesHTML(t *testing.T) {
 		"security@mctl.ai",
 		"support@mctl.ai",
 		"End-user support",
-		"ChatGPT / Claude / MCP clients",
+		"Claude / ChatGPT / MCP clients",
 		"Communication Agent safety boundary",
 		"Crash-safe ingestion",
 		"Saved Messages privacy",
@@ -54,7 +54,7 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 	}
 	body := w.Body.String()
 	for _, must := range []string{
-		"ChatGPT Apps and MCP users",
+		"Claude, ChatGPT and other MCP users",
 		"Data inventory",
 		"Communication Agent controls",
 		"incoming_events",
@@ -160,8 +160,15 @@ func TestLanding_HasTransparencySections(t *testing.T) {
 	for _, must := range []string{
 		"Your Telegram,",
 		"inside your AI assistant",
-		"Connect in ChatGPT",
+		"Connect in Claude",
+		`href="#claude"`,
+		`id="claude"`,
+		"Customize &#8594; Connectors",
+		"Add custom connector",
+		"claude mcp add --transport http",
+		"Read + send",
 		"Copy MCP URL",
+		// old ChatGPT anchor kept so existing links still land somewhere
 		`id="chatgpt"`,
 		`id="support"`,
 		"Settings &#8594; Apps",
@@ -171,7 +178,7 @@ func TestLanding_HasTransparencySections(t *testing.T) {
 		`href="/security"`,
 		`href="/privacy"`,
 		"Common questions",
-		"What data does ChatGPT see?",
+		"What does my AI assistant see?",
 	} {
 		if !strings.Contains(body, must) {
 			t.Fatalf("landing missing %q", must)
@@ -193,8 +200,12 @@ func TestDocs_ServesHTML(t *testing.T) {
 	for _, must := range []string{
 		"Available tools",
 		"https://tg.mctl.ai/mcp",
-		"Deployment pre-flight checklist",
-		"chatgpt-setup",
+		"Connect a client",
+		`id="chatgpt-setup"`,
+		`id="first-login"`,
+		"draft_reply",
+		"core-reply",
+		"tool-descriptors.json",
 		"support@mctl.ai",
 		"send_enabled=false",
 		// mobile: wide tables must sit in horizontal-scroll wrappers
@@ -213,7 +224,7 @@ func TestPrivacy_HasSupportContact(t *testing.T) {
 	if !strings.Contains(body, "support@mctl.ai") {
 		t.Fatal("/privacy missing support@mctl.ai")
 	}
-	if !strings.Contains(body, "ChatGPT Apps and MCP users") {
+	if !strings.Contains(body, "Claude, ChatGPT and other MCP users") {
 		t.Fatal("/privacy missing MCP users section")
 	}
 }
@@ -305,5 +316,44 @@ func TestLanding_ManageLinkGatedByShowManage(t *testing.T) {
 	Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", false).ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
 	if strings.Contains(w.Body.String(), `/telegram/connect/manage`) {
 		t.Fatal("showManage=false must not render a link to the unmounted manage route")
+	}
+}
+
+// TestLanding_ClaudeFirst pins the client order: the primary call to action
+// and the first setup section are Claude's, and ChatGPT is one entry among
+// the other clients rather than its own leading section.
+func TestLanding_ClaudeFirst(t *testing.T) {
+	w := httptest.NewRecorder()
+	Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	body := w.Body.String()
+	if !strings.Contains(body, `<a class="cta-btn" href="#claude">`) {
+		t.Fatal("landing primary CTA is not the Claude setup")
+	}
+	claude, chatgpt := strings.Index(body, `id="claude"`), strings.Index(body, `id="chatgpt"`)
+	if claude < 0 || chatgpt < 0 || claude > chatgpt {
+		t.Fatalf("Claude section must precede ChatGPT (claude=%d chatgpt=%d)", claude, chatgpt)
+	}
+	if strings.Contains(body, "Connect in ChatGPT") {
+		t.Fatal("landing still leads with a ChatGPT section")
+	}
+}
+
+// TestDocs_NoSubmissionChecklist keeps App Directory submission notes off the
+// public reference: they belong in the runbook, and the reviewer-login item
+// advertised a password sign-in path to every visitor.
+func TestDocs_NoSubmissionChecklist(t *testing.T) {
+	w := httptest.NewRecorder()
+	Docs("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/docs", nil))
+	body := w.Body.String()
+	for _, banned := range []string{
+		"Deployment pre-flight checklist",
+		"OpenAI Platform Dashboard",
+		"password-gated reviewer login",
+		"phone &#8594; SMS code",
+		"every tool call returns 403",
+	} {
+		if strings.Contains(body, banned) {
+			t.Fatalf("/docs still contains %q", banned)
+		}
 	}
 }

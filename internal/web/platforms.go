@@ -114,6 +114,10 @@ func humanBytes(n int64) string {
 		return fmt.Sprintf("%d MiB", n>>20)
 	case n%(1<<10) == 0:
 		return fmt.Sprintf("%d KiB", n>>10)
+	case n%1_000_000 == 0:
+		// Decimal caps such as the 12 MB media limit (12000000) are set in
+		// SI units; rendering them as raw bytes reads like a typo.
+		return fmt.Sprintf("%d MB", n/1_000_000)
 	}
 	return fmt.Sprintf("%d bytes", n)
 }
