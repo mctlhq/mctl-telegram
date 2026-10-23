@@ -65,6 +65,10 @@ func TestEnableUI_DefaultsToReadOnly(t *testing.T) {
 	if strings.Contains(perm, `value="send" checked`) {
 		t.Errorf("permissions screen must not default-select send")
 	}
+	// The user chooses send while knowing the account can be limited (#853).
+	if !strings.Contains(perm, "Telegram can limit or freeze an account") || !strings.Contains(perm, `href="/security#account-risk"`) {
+		t.Errorf("permissions screen must carry the account-risk notice; body=%s", perm)
+	}
 
 	phoneRec := httptest.NewRecorder()
 	renderEnablePhone(phoneRec, enablePhonePage{Issuer: "https://tg.mctl.ai", EnableToken: "tok"})

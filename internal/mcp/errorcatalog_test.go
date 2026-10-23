@@ -162,3 +162,33 @@ func TestMtprotoErrResultPeerFlood(t *testing.T) {
 		t.Error("action must not be empty")
 	}
 }
+
+// A frozen account's writes fail with FROZEN_* (code 420 for the method
+// error). They must reach the model as the catalog's plain explanation, not
+// as an unknown failure, and must not be retried as if they were a flood
+// wait (#853).
+func TestMtprotoErrResultFrozenAccount(t *testing.T) {
+	for _, tc := range []struct {
+		code int
+		key  string
+	}{
+		{420, "FROZEN_METHOD_INVALID"},
+		{400, "FROZEN_PARTICIPANT_MISSING"},
+	} {
+		err := tgerr.New(tc.code, tc.key)
+		result := mtprotoErrResult("send_message", err)
+		if result == nil {
+			t.Fatalf("%s: mtprotoErrResult returned nil", tc.key)
+		}
+		text := contentText(result)
+		if !strings.HasPrefix(text, "Telegram has frozen this account") || !strings.Contains(text, "Do not retry.") {
+			t.Errorf("%s: text = %q", tc.key, text)
+		}
+		if got := classifyToolResultReason(result); got != ReasonTelegramError {
+			t.Errorf("%s: reason = %q, want %q", tc.key, got, ReasonTelegramError)
+		}
+		if ok, _ := retryPolicy(err); ok {
+			t.Errorf("%s: retryPolicy must not retry a frozen account", tc.key)
+		}
+	}
+}

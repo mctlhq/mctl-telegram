@@ -24,6 +24,18 @@ type transientEntry struct {
 }
 
 var mtprotoErrCatalog = map[string]catalogEntry{
+	// A frozen account (https://core.telegram.org/api/auth#frozen-accounts)
+	// keeps read access while Telegram reviews it; most writes fail with
+	// FROZEN_METHOD_INVALID. Retrying cannot help and only adds to the
+	// traffic that got the account frozen (#853).
+	"FROZEN_METHOD_INVALID": {
+		message: "Telegram has frozen this account: it can still read, but Telegram refuses this action.",
+		action:  "Do not retry. The account owner can appeal in the Telegram app or by messaging @SpamBot (https://t.me/spambot).",
+	},
+	"FROZEN_PARTICIPANT_MISSING": {
+		message: "Telegram has frozen this account and removed it from that chat's participants, so it cannot act there.",
+		action:  "Do not retry. The account owner can appeal in the Telegram app or by messaging @SpamBot (https://t.me/spambot).",
+	},
 	"PEER_ID_INVALID": {
 		message: "The peer ID is not valid for this account. Use @username, user:<id>, chat:<id>, or channel:<id>.",
 		action:  "Call list_dialogs and pass the id exactly as returned there — a bare numeric id copied from a link or forwarded-message header carries no access hash.",

@@ -38,6 +38,7 @@ keeps in sync as traffic shifts.
 7. [`invalid_redirect_uri`](#7-invalid_redirect_uri)
 8. [`RPC_CALL_FAIL`](#8-rpc_call_fail)
 9. [Supported OAuth clients and redirect rules](#9-supported-oauth-clients-and-redirect-rules)
+10. [Frozen account (`FROZEN_METHOD_INVALID` / `FROZEN_PARTICIPANT_MISSING`)](#10-frozen-account)
 
 ---
 
@@ -454,3 +455,44 @@ by trial and error at `/oauth/register`:
 For the day-to-day OAuth refresh/re-authorization behavior after a scope
 change, see
 [docs/runbook.md#oauth-refresh-reauthorization](runbook.md#oauth-refresh-reauthorization).
+
+---
+
+## 10. Frozen account
+
+<a id="10-frozen-account"></a>
+
+### Symptom
+
+A write tool (sending, editing, forwarding, reacting, pinning) fails with one
+of these messages:
+
+<!-- catalog: FROZEN_METHOD_INVALID -->
+> Telegram has frozen this account: it can still read, but Telegram refuses this action. Do not retry. The account owner can appeal in the Telegram app or by messaging @SpamBot (https://t.me/spambot).
+
+<!-- catalog: FROZEN_PARTICIPANT_MISSING -->
+> Telegram has frozen this account and removed it from that chat's participants, so it cannot act there. Do not retry. The account owner can appeal in the Telegram app or by messaging @SpamBot (https://t.me/spambot).
+
+Read tools usually keep working.
+
+### Cause
+
+Telegram has frozen the connected account
+([Telegram docs](https://core.telegram.org/api/auth#frozen-accounts)),
+usually after its anti-spam system flagged the account's traffic. MCTL is an
+unofficial client, and on the hosted deployment every session reaches
+Telegram from the same datacenter, so an account that sends spam-like traffic
+through it is limited like one that does so from any other client.
+
+### What the client or agent should do
+
+Stop issuing write calls for that account and tell the user. Retrying cannot
+lift the freeze and adds to the traffic that caused it.
+
+### What the operator can do
+
+Nothing server-side lifts a freeze. The account owner appeals in the Telegram
+app (it shows the freeze and an appeal link), by messaging
+[@SpamBot](https://t.me/spambot), or by writing to `recover@telegram.org`. An
+owner who wants their Telegram traffic to leave from their own machine and IP
+can move the account to [Local Bridge](local-bridge.md) mode.

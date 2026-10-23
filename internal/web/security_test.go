@@ -21,6 +21,10 @@ func TestSecurity_ServesHTML(t *testing.T) {
 	body := w.Body.String()
 	for _, must := range []string{
 		"Not zero-knowledge",
+		// #853
+		`id="account-risk"`,
+		"The server does not retry a frozen account's refusals.",
+		"recover@telegram.org",
 		"Cryptographic invariants",
 		"security@mctl.ai",
 		"support@mctl.ai",
