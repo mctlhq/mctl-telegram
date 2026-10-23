@@ -1205,3 +1205,22 @@ func TestToolInvocations_ServerFaultAfterStagedRefusalBurnsTheSLI(t *testing.T) 
 		})
 	}
 }
+
+// TestBorrowErrResult_BroadcastContentIsRefused: a broadcast-channel content
+// refusal (issue #851) is this server's policy, recorded as refused rather
+// than as a Telegram failure.
+func TestBorrowErrResult_BroadcastContentIsRefused(t *testing.T) {
+	store := newToolsTestStore(t)
+	srv := &Server{Store: store, Metrics: metrics.New()}
+	const uid int64 = 4243
+	m := hintTestServer(t, srv, "tg_tool", func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		return borrowErrResult(ctx, "tg_tool", fmt.Errorf("get: %w", telegram.ErrBroadcastContent)), nil
+	})
+	res := callTool(t, auth.With(context.Background(), &auth.Identity{UserID: uid}), m, "tg_tool", map[string]any{})
+	if !res.IsError {
+		t.Fatalf("expected error result, got %+v", res)
+	}
+	if r := latestAuditReason(t, store, uid); r != ReasonRefused {
+		t.Fatalf("reason = %q, want %q", r, ReasonRefused)
+	}
+}

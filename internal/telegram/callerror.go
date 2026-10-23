@@ -58,8 +58,9 @@ func isDeploymentFault(msg string) bool {
 
 // IsCallerRefusal reports whether err is Telegram answering a request and
 // refusing it as the caller's mistake: an MTProto 400 or 403 reply (an
-// unknown peer, a missing permission), ErrPeerNotAccessible, or one of the
-// draft_reply refusals ErrNoExistingDialog, ErrCannotPost and ErrPeerDeleted.
+// unknown peer, a missing permission), ErrPeerNotAccessible, one of the
+// draft_reply refusals ErrNoExistingDialog, ErrCannotPost and ErrPeerDeleted,
+// or ErrBroadcastContent.
 // Such a reply proves the session and the service work, so availability SLIs
 // must not count it as a failure.
 //
@@ -80,7 +81,7 @@ func IsCallerRefusal(err error) bool {
 	// server's own policy refusals, read off a getPeerDialogs reply that
 	// succeeded: the session worked, and the caller picked a conversation
 	// draft_reply will not use.
-	if errors.Is(err, ErrPeerNotAccessible) || errors.Is(err, ErrNoExistingDialog) || errors.Is(err, ErrCannotPost) || errors.Is(err, ErrPeerDeleted) || IsFrozenAccount(err) {
+	if errors.Is(err, ErrPeerNotAccessible) || errors.Is(err, ErrNoExistingDialog) || errors.Is(err, ErrCannotPost) || errors.Is(err, ErrPeerDeleted) || errors.Is(err, ErrBroadcastContent) || IsFrozenAccount(err) {
 		return true
 	}
 	var te *tgerr.Error
