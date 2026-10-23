@@ -194,10 +194,18 @@ func TestRateLimiter_SweepDropsOnlyFullBuckets(t *testing.T) {
 
 func TestRateLimiter_PeerKeyIsNotStoredRaw(t *testing.T) {
 	r := NewRateLimiter(0)
-	r.AllowPeer(&auth.Identity{Subject: "tg:1"}, "u:7001", 20, time.Hour)
+	id := &auth.Identity{Subject: "tg:1"}
+	r.AllowPeer(id, "u:7001", 20, time.Hour)
+	// Match the exact digest key rather than scanning for "7001": a random
+	// hex digest can contain those digits by chance. The raw key has a
+	// colon, which hex never does, so it cannot appear in a digest.
+	want := identityKey(id) + ":peer:" + r.peerDigest("u:7001")
+	if len(r.buckets) != 1 || r.buckets[want] == nil {
+		t.Fatalf("buckets = %v, want exactly the digest key %q", r.buckets, want)
+	}
 	for k := range r.buckets {
-		if strings.Contains(k, "7001") {
-			t.Fatalf("bucket key %q carries the raw peer id", k)
+		if strings.Contains(k, "u:7001") {
+			t.Fatalf("bucket key %q carries the raw peer key", k)
 		}
 	}
 }
