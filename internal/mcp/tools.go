@@ -773,7 +773,7 @@ Use get_messages to find message IDs before calling this tool. The two-step prep
 		// stays allowed, like the cleanup budget.
 		if !unpin && s.Limiter != nil {
 			if left := s.Limiter.WriteHold(id.UserID); left > 0 {
-				r := peerFloodHoldRefusal + " — retry in " + retryAfterText(left) + "."
+				r := peerFloodHoldMessage(left)
 				s.auditRefusal(ctx, id, "pin_message:paused", telegram.RedactPeer(peer), errors.New(r), startedAt, ReasonTelegramError)
 				return mcplib.NewToolResultError(r), nil
 			}
@@ -2138,7 +2138,7 @@ func evaluateDirectSendLimiterN(limiter *audit.RateLimiter, id *auth.Identity, p
 	// Checked before the budget so a paused account is not also debited.
 	if id != nil {
 		if left := limiter.WriteHold(id.UserID); left > 0 {
-			return true, peerFloodHoldRefusal + " — retry in " + retryAfterText(left) + ". Do not retry earlier; the account owner can check the restriction by messaging @SpamBot in Telegram."
+			return true, peerFloodHoldMessage(left)
 		}
 	}
 	d := limiter.DecidePeer(id, telegram.PeerLimitKey(peer), cost, audit.PeerSendCap, audit.PeerWindow)
@@ -2149,6 +2149,13 @@ func evaluateDirectSendLimiterN(limiter *audit.RateLimiter, id *auth.Identity, p
 // account's PEER_FLOOD pause (audit.PeerFloodHold) is running. reasons.go
 // classifies on it.
 const peerFloodHoldRefusal = "writes from this account are paused after Telegram's anti-spam system refused one of its calls (PEER_FLOOD)"
+
+// peerFloodHoldMessage is the full refusal for a write made with left of
+// the PEER_FLOOD pause still to run. Every write path uses it, so the model
+// gets the same guidance whichever tool hit the pause.
+func peerFloodHoldMessage(left time.Duration) string {
+	return peerFloodHoldRefusal + " — retry in " + retryAfterText(left) + ". Do not retry earlier; the account owner can check the restriction by messaging @SpamBot in Telegram."
+}
 
 // limiterRefusalReason is the audit reason for a refusal from
 // evaluateDirectSendLimiter: the PEER_FLOOD pause is Telegram's verdict,

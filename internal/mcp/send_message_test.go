@@ -206,7 +206,7 @@ func TestToolPinMessage_PeerFloodHoldBlocksWithoutConsumingConfirmation(t *testi
 
 	limiter.HoldWrites(uid, audit.PeerFloodHold)
 	res := callPin(t, srv, id, confirmationID)
-	if !res.IsError || !strings.HasPrefix(contentText(res), peerFloodHoldRefusal) {
+	if !res.IsError || !strings.HasPrefix(contentText(res), peerFloodHoldRefusal) || !strings.Contains(contentText(res), "@SpamBot") {
 		t.Fatalf("pin during the PEER_FLOOD hold: %s", contentText(res))
 	}
 	if tool, status, _ := latestAudit(t, store, uid); tool != "pin_message:paused" || status != "error" {
