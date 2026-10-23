@@ -124,6 +124,6 @@ The tool exposes no trusted client-controlled bypass for these gates. Apart from
 
 ## Rate limiting
 
-The default per-identity token bucket is 30 requests/minute with the same burst; it applies to authenticated requests. Write paths also apply per-peer limits.
+The default per-identity token bucket is 30 requests/minute with the same burst; it applies to authenticated requests. Write paths also apply per-recipient limits, per Telegram account (shared by every connector and worker token of that account): 20 sends, forwards, edits, reactions or pins per hour to one recipient, and a separate 60 per hour for cleanup (deleting messages, removing a reaction, unpinning). The recipient key folds the spellings of one target (`@Alice` and `alice`, `user:42` and `42`) but does not resolve a username to its numeric id, so those two remain separate budgets. The buckets are in process memory and reset when the pod restarts; they are an anti-flooding guard, not a durable quota.
 
 Unauthenticated endpoints are limited per source IP only where the service does it itself: `POST /oauth/register` (`OAUTH_REGISTER_RATE_PER_MIN`, default 10/minute), the demo-reviewer sign-in, and Local Bridge activation. `/oauth/authorize`, `/oauth/token`, health, readiness, public pages and well-known documents have no per-IP limit, in the service or in the deployment's ingress configuration.

@@ -829,7 +829,7 @@ func TestRefusalPaths_AuditOneErrorRow(t *testing.T) {
 		const uid int64 = 4270
 		id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:pin"}}
 		const peer = "@limited_peer"
-		if !limiter.AllowPeerN(id, telegram.RedactPeer(peer), audit.PeerSendCap, audit.PeerSendCap, audit.PeerWindow) {
+		if !limiter.AllowPeerN(id, telegram.PeerLimitKey(peer), audit.PeerSendCap, audit.PeerSendCap, audit.PeerWindow) {
 			t.Fatal("could not drain the per-peer budget")
 		}
 		res := callTool(t, auth.With(context.Background(), id), mcpSrv, "prepare_pin_message",

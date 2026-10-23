@@ -469,6 +469,7 @@ func main() {
 		RateLimitPerUser:   cfg.RateLimitPerUser,
 		RegisterRatePerMin: cfg.OAUTHRegisterRatePerMin,
 		PeerSendCap:        audit.PeerSendCap,
+		PeerCleanupCap:     audit.PeerCleanupCap,
 		PeerWindow:         audit.PeerWindow,
 		AccessTokenTTL:     cfg.OAUTHAccessTokenTTL,
 		RefreshTokenTTL:    cfg.OAUTHRefreshTokenTTL,
