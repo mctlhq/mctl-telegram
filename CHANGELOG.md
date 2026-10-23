@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.92.1](https://github.com/mctlhq/mctl-telegram/compare/0.92.0...0.92.1) (2026-10-23)
+
+
+### Bug Fixes
+
+* **web:** rebrand the share card as MCTL Assistant ([da19f07](https://github.com/mctlhq/mctl-telegram/commit/da19f0759f405c07c841bc5dcaf27e7a92367bf7))
+* **web:** rebrand the share card as MCTL Assistant ([4d8fe98](https://github.com/mctlhq/mctl-telegram/commit/4d8fe98069728c577331ed64fa9ecce1b2e242bc))
+
 ## [0.92.0](https://github.com/mctlhq/mctl-telegram/compare/0.91.0...0.92.0) (2026-10-23)
 
 
