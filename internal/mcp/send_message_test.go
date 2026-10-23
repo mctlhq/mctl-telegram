@@ -8,6 +8,7 @@ import (
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -188,6 +189,44 @@ func TestToolPinMessage_ConsentBlocksWithoutConsumingConfirmation(t *testing.T) 
 	}()
 	if res := callPin(t, srv, id, confirmationID); res.IsError {
 		t.Fatalf("confirmation was consumed by the consent refusal: %s", contentText(res))
+	}
+}
+
+// A pin prepared before a PEER_FLOOD must not go out during the write pause:
+// the confirm step debits no budget, so it checks the hold itself (#849).
+func TestToolPinMessage_PeerFloodHoldBlocksWithoutConsumingConfirmation(t *testing.T) {
+	store := newToolsTestStore(t)
+	uid := seedLocalAccount(t, store, 910)
+	hub := bridge.NewHub()
+	send := hub.Register(uid, "dev-pin")
+	limiter := audit.NewRateLimiter(0)
+	srv := &Server{Store: store, Hub: hub, AllowSend: true, Confirms: NewConfirmStore(), Limiter: limiter}
+	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:pin"}}
+	confirmationID := issuePinConfirmation(t, srv, uid)
+
+	limiter.HoldWrites(uid, audit.PeerFloodHold)
+	res := callPin(t, srv, id, confirmationID)
+	if !res.IsError || !strings.HasPrefix(contentText(res), peerFloodHoldRefusal) || !strings.Contains(contentText(res), "@SpamBot") {
+		t.Fatalf("pin during the PEER_FLOOD hold: %s", contentText(res))
+	}
+	if tool, status, _ := latestAudit(t, store, uid); tool != "pin_message:paused" || status != "error" {
+		t.Fatalf("paused pin not audited: tool=%q status=%q", tool, status)
+	}
+	select {
+	case env := <-send:
+		t.Fatalf("paused pin reached Local Bridge: %#v", env)
+	default:
+	}
+}
+
+// The audit reason for a limiter refusal names who refused: Telegram for
+// the PEER_FLOOD pause, this server for its own budget.
+func TestLimiterRefusalReason(t *testing.T) {
+	if got := limiterRefusalReason(peerFloodHoldRefusal + " — retry in about 60 min."); got != ReasonTelegramError {
+		t.Errorf("hold refusal reason = %q, want %q", got, ReasonTelegramError)
+	}
+	if got := limiterRefusalReason("per-peer send rate limit reached (20/hour to one peer) — retry in about 3 min"); got != ReasonRateLimited {
+		t.Errorf("budget refusal reason = %q, want %q", got, ReasonRateLimited)
 	}
 }
 

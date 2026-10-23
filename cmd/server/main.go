@@ -205,6 +205,7 @@ func main() {
 	pool := telegram.NewClientPool(cfg.TGAPIID, cfg.TGAPIHash, cfg.IdleClientTimeout, store).
 		WithMaxSessions(cfg.TelegramMaxSessions).
 		WithGlobalMiddleware(globalTGLimiter).
+		WithPeerFloodHook(func(userID int64) { limiter.HoldWrites(userID, audit.PeerFloodHold) }).
 		WithMetrics(m).
 		WithAgentRuntime(agentListener)
 	defer pool.Shutdown()

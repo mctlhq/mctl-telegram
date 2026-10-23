@@ -7,9 +7,12 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gotd/td/tgerr"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/mctlhq/mctl-telegram/internal/audit"
 )
 
 type catalogEntry struct {
@@ -94,14 +97,19 @@ var mtprotoErrCatalog = map[string]catalogEntry{
 	},
 }
 
-// mtprotoTransientCatalog lists MTProto error codes that are transient (not
-// permanent permission failures) and should be surfaced with a structured
-// RISK_GATED envelope so callers can retry intelligently.
+// mtprotoTransientCatalog lists MTProto error codes that are not permanent
+// permission failures and should be surfaced with a structured RISK_GATED
+// envelope, so callers back off instead of treating them as a bad argument.
 var mtprotoTransientCatalog = map[string]transientEntry{
+	// PEER_FLOOD is Telegram's anti-spam verdict on the account, not a rate
+	// limit with a wait: repeating the refused call is what gets accounts
+	// banned. The server pauses writes from the account for
+	// audit.PeerFloodHold (#849), and retry_after_seconds says when that
+	// pause ends, not when Telegram will lift its restriction.
 	"PEER_FLOOD": {
-		message:           "Telegram's anti-abuse gate temporarily blocked this peer operation.",
-		action:            "Wait 60 seconds and retry the same call.",
-		retryAfterSeconds: 60,
+		message:           "Telegram's anti-spam system has restricted this account from starting new conversations or messaging this peer.",
+		action:            "Do not retry. Writes from this account are paused for " + peerFloodHoldText + ". The account owner can check the restriction by messaging @SpamBot in Telegram.",
+		retryAfterSeconds: int(audit.PeerFloodHold / time.Second),
 	},
 }
 
