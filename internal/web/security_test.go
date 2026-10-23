@@ -37,7 +37,7 @@ func TestSecurity_ServesHTML(t *testing.T) {
 		// shared chrome — unified with landing/docs
 		`class="topbar"`,
 		`class="theme-toggle"`,
-		`<a href="/security" class="active">security</a>`,
+		`<a href="/security" class="active">Security</a>`,
 		// mobile: wide table must sit in a horizontal-scroll wrapper
 		`class="table-scroll"`,
 	} {
@@ -71,7 +71,7 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 		// shared chrome — unified with landing/docs
 		`class="topbar"`,
 		`class="theme-toggle"`,
-		`<a href="/privacy" class="active">privacy</a>`,
+		`<a href="/privacy" class="active">Privacy</a>`,
 		// mobile: wide table must sit in a horizontal-scroll wrapper
 		`class="table-scroll"`,
 	} {
@@ -143,7 +143,7 @@ func TestTerms_ServesHTML(t *testing.T) {
 		"support@mctl.ai",
 		// shared chrome — unified with landing/docs
 		`class="topbar"`,
-		`<a href="/terms" class="active">terms</a>`,
+		`<a href="/terms" class="active">Terms</a>`,
 	} {
 		if !strings.Contains(body, must) {
 			t.Fatalf("/terms missing %q", must)

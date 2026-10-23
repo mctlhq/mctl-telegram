@@ -23,13 +23,19 @@ func TestFullChrome(t *testing.T) {
 
 	for _, s := range []string{
 		`class="topbar"`,
-		"ui.mctl.ai/0.5.0/mctl.css",
-		"family=Onest",
+		"ui.mctl.ai/0.14.0/mctl.css",
+		// global.css is pinned as a set with mctl.css.
+		"ui.mctl.ai/0.14.0/global.css",
+		"family=Onest:wght@300;400;500;600;700;800",
+		"Instrument+Serif",
 		"JetBrains+Mono",
 		"ui.mctl.ai/brand/favicon-telegram.svg",
 		"<footer>",
 		"https://tg.mctl.ai",
-		`<a href="/docs" class="active">docs</a>`,
+		`<a href="/docs" class="active">Docs</a>`,
+		// CSS-only mobile menu: works without JS.
+		`<input type="checkbox" id="site-nav-toggle" class="nav-toggle"`,
+		`<label for="site-nav-toggle" class="nav-burger"`,
 		"support@mctl.ai",
 		// GitHub icon link — inline SVG with accessible label.
 		`aria-label="GitHub"`,
@@ -102,6 +108,46 @@ func TestLiteChromeHasNoExternalDeps(t *testing.T) {
 			t.Errorf("lite fallback still has stale design token %q", bad)
 		}
 	}
+	// The lite pages have no external CSS, so the inlined tokens must carry the
+	// 0.14 site-shell roles and the AA palette the shared components read.
+	for _, s := range []string{
+		"--surface-fg-subtle: #7d828b", "--surface-fg-subtle: #656a73",
+		"--accent-fg:", "--accent-text:", "--status-bad-text:", "--status-warn-soft:",
+		"--site-header-height:", "--site-wordmark-size:", "--site-grid-line:",
+		"--text-hero-size:", "--text-section-size:",
+	} {
+		if !strings.Contains(out, s) {
+			t.Errorf("lite fallback tokens missing %q", s)
+		}
+	}
+}
+
+// Dark is the default on every tier, matching mctl.ai and docs.mctl.ai: the
+// pre-paint script falls back to dark (not the OS preference) when nothing is
+// stored, and the inline tokens no longer switch to light on their own.
+func TestThemeDefaultsToDark(t *testing.T) {
+	if strings.Contains(prepaintJS, "matchMedia") {
+		t.Error("pre-paint script must not follow the OS preference; default is dark")
+	}
+	if !strings.Contains(prepaintJS, "t = 'dark'") {
+		t.Error("pre-paint script must fall back to dark")
+	}
+	if strings.Contains(tokensCSS, "prefers-color-scheme") {
+		t.Error("inline tokens must not switch theme on prefers-color-scheme")
+	}
+}
+
+// Primary buttons must take their ink from --accent-fg, which flips with the
+// theme; a fixed dark ink fails AA on the light theme's accent.
+func TestButtonsUseAccentFg(t *testing.T) {
+	for name, css := range map[string]string{"components": componentsCSS, "auth": AuthCSS} {
+		if strings.Contains(css, "#0a0b0d") {
+			t.Errorf("%s CSS hard-codes #0a0b0d; use var(--accent-fg)", name)
+		}
+	}
+	if !strings.Contains(componentsCSS, ".btn, .cta-btn { background: var(--accent); color: var(--accent-fg); }") {
+		t.Error("shared primary button must use --accent-fg")
+	}
 }
 
 // The app name is MCTL: Telegram API ToS §2.3 bars "Telegram" from an app's
@@ -116,8 +162,13 @@ func TestChromeBrandIsMCTL(t *testing.T) {
 	}
 	for name, page := range pages {
 		out := render(t, name, page, Data{Title: "T", PublicBaseURL: "https://tg.mctl.ai"})
-		if !strings.Contains(out, "<span>MCTL</span>") || !strings.Contains(out, `<span class="brand-mark">MCTL</span>`) {
-			t.Errorf("%s page: topbar and footer must carry the MCTL brand", name)
+		// Accent "M" + "CTL" wordmark, in both the topbar and the footer.
+		const mark = `<span class="wordmark"><span class="wordmark-m">M</span><span class="wordmark-ctl">CTL</span></span>`
+		if n := strings.Count(out, mark); n != 2 {
+			t.Errorf("%s page: topbar and footer must both carry the MCTL wordmark, found %d", name, n)
+		}
+		if !strings.Contains(out, "© 2026 MCTL") {
+			t.Errorf("%s page: footer must carry the MCTL copyright line", name)
 		}
 		if name == "full" && !strings.Contains(out, `<meta property="og:site_name" content="MCTL">`) {
 			t.Errorf("%s page: og:site_name must be MCTL", name)
@@ -127,5 +178,31 @@ func TestChromeBrandIsMCTL(t *testing.T) {
 				t.Errorf("%s page still has old brand %q", name, bad)
 			}
 		}
+	}
+}
+
+// TestCtrlListColumnCanShrink guards the phone layout: a bare 1fr grid column
+// has an auto minimum, so a <pre> snippet inside a ul.ctrl item widened the
+// whole list to ~550px at a 375px viewport and clipped every item's text.
+func TestCtrlListColumnCanShrink(t *testing.T) {
+	i := strings.Index(componentsCSS, "ul.ctrl {")
+	if i < 0 {
+		t.Fatal("ul.ctrl rule not found")
+	}
+	rule := componentsCSS[i : i+strings.Index(componentsCSS[i:], "}")]
+	if !strings.Contains(rule, "grid-template-columns: minmax(0, 1fr);") {
+		t.Fatalf("ul.ctrl column must be minmax(0, 1fr); rule:\n%s", rule)
+	}
+}
+
+// The mobile-menu checkbox must not be focusable on desktop, where nothing
+// gives it meaning: display:none outside the mobile query.
+func TestNavToggleHiddenOnDesktop(t *testing.T) {
+	if !strings.Contains(componentsCSS, "  .nav-toggle { display: none; }") {
+		t.Fatal(".nav-toggle must be display:none outside the mobile query")
+	}
+	m := strings.Index(componentsCSS, "@media (max-width: 767px)")
+	if m < 0 || !strings.Contains(componentsCSS[m:], ".nav-toggle {\n      display: block;") {
+		t.Fatal(".nav-toggle must be re-enabled (visually hidden) inside the mobile query")
 	}
 }

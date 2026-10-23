@@ -311,7 +311,7 @@ const manageExtraCSS = `
   .btn-danger {
     display: inline-block; margin-top: 16px; font-family: var(--font-display), system-ui, sans-serif;
     font-size: 14px; font-weight: 600; padding: 9px 16px; border: 0; cursor: pointer;
-    border-radius: var(--mctl-radius-md); background: var(--danger); color: #fff;
+    border-radius: var(--mctl-radius-md); background: var(--danger); color: var(--accent-fg); /* dark ink on dark, cream on light: AA either way */
   }
   .btn-danger:hover { filter: brightness(.92); }
   .card .btn-secondary { margin-top: 16px; margin-left: 8px; }
