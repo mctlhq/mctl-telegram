@@ -28,9 +28,9 @@ func TestVerifyAuditChain_FreshChainVerifies(t *testing.T) {
 	s := newTestStore(t)
 	uid, _ := s.EnsureUser(ctx, "alice", "", "test")
 
-	s.LogToolCall(ctx, uid, "list_dialogs", "", "ok", "", "", "")
-	s.LogToolCall(ctx, uid, "get_messages", "user:hash", "ok", "", "", "")
-	s.LogToolCall(ctx, uid, "send_message:draft", "user:hash", "ok", "", "", "")
+	s.LogToolCall(ctx, ToolCall{UserID: uid, Tool: "list_dialogs", Status: "ok"})
+	s.LogToolCall(ctx, ToolCall{UserID: uid, Tool: "get_messages", PeerRedacted: "user:hash", Status: "ok"})
+	s.LogToolCall(ctx, ToolCall{UserID: uid, Tool: "send_message:draft", PeerRedacted: "user:hash", Status: "ok"})
 
 	res, err := s.VerifyAuditChain(ctx, uid)
 	if err != nil {
@@ -48,9 +48,9 @@ func TestVerifyAuditChain_DetectsTamperedRow(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	uid, _ := s.EnsureUser(ctx, "alice", "", "test")
-	s.LogToolCall(ctx, uid, "list_dialogs", "", "ok", "", "", "")
-	s.LogToolCall(ctx, uid, "get_messages", "user:hash", "ok", "", "", "")
-	s.LogToolCall(ctx, uid, "send_message:sent", "user:hash", "ok", "", "", "")
+	s.LogToolCall(ctx, ToolCall{UserID: uid, Tool: "list_dialogs", Status: "ok"})
+	s.LogToolCall(ctx, ToolCall{UserID: uid, Tool: "get_messages", PeerRedacted: "user:hash", Status: "ok"})
+	s.LogToolCall(ctx, ToolCall{UserID: uid, Tool: "send_message:sent", PeerRedacted: "user:hash", Status: "ok"})
 
 	// Tamper: rewrite the middle row's tool_name without touching its hash.
 	var middleID int64
@@ -82,8 +82,8 @@ func TestLogToolCall_ChainsAcrossEntries(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	uid, _ := s.EnsureUser(ctx, "alice", "", "test")
-	s.LogToolCall(ctx, uid, "a", "", "ok", "", "", "")
-	s.LogToolCall(ctx, uid, "b", "", "ok", "", "", "")
+	s.LogToolCall(ctx, ToolCall{UserID: uid, Tool: "a", Status: "ok"})
+	s.LogToolCall(ctx, ToolCall{UserID: uid, Tool: "b", Status: "ok"})
 
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT entry_hash, prev_hash FROM audit_logs WHERE user_id=$1 ORDER BY id ASC`,
@@ -140,7 +140,7 @@ func TestVerifyAuditChain_PreM4NullCallPathVerifies(t *testing.T) {
 	}
 
 	// An M4 row (non-NULL call_path) chains on top of the legacy row.
-	s.LogToolCall(ctx, uid, "m4_tool", "", "ok", "", "local", "")
+	s.LogToolCall(ctx, ToolCall{UserID: uid, Tool: "m4_tool", Status: "ok", CallPath: "local"})
 
 	res, err := s.VerifyAuditChain(ctx, uid)
 	if err != nil {
@@ -159,9 +159,9 @@ func TestVerifyAuditChain_IsolatedPerUser(t *testing.T) {
 	s := newTestStore(t)
 	alice, _ := s.EnsureUser(ctx, "alice", "", "test")
 	bob, _ := s.EnsureUser(ctx, "bob", "", "test")
-	s.LogToolCall(ctx, alice, "a", "", "ok", "", "", "")
-	s.LogToolCall(ctx, bob, "b", "", "ok", "", "", "")
-	s.LogToolCall(ctx, alice, "c", "", "ok", "", "", "")
+	s.LogToolCall(ctx, ToolCall{UserID: alice, Tool: "a", Status: "ok"})
+	s.LogToolCall(ctx, ToolCall{UserID: bob, Tool: "b", Status: "ok"})
+	s.LogToolCall(ctx, ToolCall{UserID: alice, Tool: "c", Status: "ok"})
 
 	// alice's chain doesn't include bob's row, so alice's chain is
 	// a→c (verified). bob's chain has one row (verified). Tamper bob
@@ -201,8 +201,8 @@ func TestLogToolCall_ReasonIsExcludedFromTheHash(t *testing.T) {
 	// reason) and comparing against the stored entry_hash proves reason
 	// played no part in producing it — whether or not the row actually
 	// carries one.
-	s.LogToolCall(ctx, alice, "search_messages", "user:hash", "error", "identity missing scope telegram:messages:read", "", "scope_denied")
-	s.LogToolCall(ctx, bob, "search_messages", "user:hash", "error", "identity missing scope telegram:messages:read", "", "")
+	s.LogToolCall(ctx, ToolCall{UserID: alice, Tool: "search_messages", PeerRedacted: "user:hash", Status: "error", ErrMsg: "identity missing scope telegram:messages:read", Reason: "scope_denied"})
+	s.LogToolCall(ctx, ToolCall{UserID: bob, Tool: "search_messages", PeerRedacted: "user:hash", Status: "error", ErrMsg: "identity missing scope telegram:messages:read"})
 
 	for _, tc := range []struct {
 		name       string
@@ -237,9 +237,8 @@ func TestLogToolCall_ReasonIsExcludedFromTheHash(t *testing.T) {
 	// Mixed with call_path and edge columns set (M4 / Slice 2 style rows),
 	// a chain carrying reason on some rows and not others must still
 	// verify end to end for both users.
-	s.LogToolCall(edgectx.With(ctx, edgectx.Context{RequestID: "ray", Route: edgectx.RoutePortal}),
-		alice, "list_dialogs", "", "ok", "", "local", "")
-	s.LogToolCall(ctx, alice, "get_my_audit_log", "", "error", "before must be RFC3339 (e.g. 2026-05-14T00:00:00Z)", "", "invalid_argument")
+	s.LogToolCall(edgectx.With(ctx, edgectx.Context{RequestID: "ray", Route: edgectx.RoutePortal}), ToolCall{UserID: alice, Tool: "list_dialogs", Status: "ok", CallPath: "local"})
+	s.LogToolCall(ctx, ToolCall{UserID: alice, Tool: "get_my_audit_log", Status: "error", ErrMsg: "before must be RFC3339 (e.g. 2026-05-14T00:00:00Z)", Reason: "invalid_argument"})
 
 	res, err := s.VerifyAuditChain(ctx, alice)
 	if err != nil {

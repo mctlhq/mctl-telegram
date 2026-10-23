@@ -2020,11 +2020,24 @@ func (s *Store) SweepAuditLog(ctx context.Context, retention time.Duration) (int
 	return rows, nil
 }
 
+// ToolCall is one audit row passed to Store.LogToolCall. Zero values mean
+// "absent": empty PeerRedacted, ErrMsg and Reason are stored as NULL; empty
+// CallPath is stored as "" (hosted call).
+type ToolCall struct {
+	UserID       int64
+	Tool         string
+	PeerRedacted string
+	Status       string
+	ErrMsg       string
+	CallPath     string // "local" for relay-forwarded calls, "" for hosted
+	Reason       string // operator-only; never hashed (see hashAuditEntry)
+}
+
 // LogToolCall writes one audit row. Errors are non-fatal to the caller —
 // audit must never block a user request — but a write that fails leaves a
 // gap in the per-user hash chain that VerifyAuditChain will report.
 //
-// callPath distinguishes relay-forwarded calls ("local") from server-side
+// CallPath distinguishes relay-forwarded calls ("local") from server-side
 // hosted calls (""). Every M4+ row stores a non-NULL call_path (the empty
 // string for hosted calls) so it is distinguishable from pre-M4 rows, whose
 // call_path is NULL. Both the stored value and its hash contribution are the
@@ -2043,13 +2056,15 @@ func (s *Store) SweepAuditLog(ctx context.Context, retention time.Duration) (int
 // the same effect on a single-writer connection. Without this, two
 // concurrent writes would race on prev_hash and break the chain.
 //
-// reason (mctl-telegram#696) is an operator-only classification of a
-// failing call (see internal/mcp's reason taxonomy); non-MCP callers pass
-// "". It is written to its own nullable column and is deliberately NOT
+// Reason (mctl-telegram#696) is an operator-only classification of a
+// failing call (see internal/mcp's reason taxonomy); non-MCP callers leave
+// it empty. It is written to its own nullable column and is deliberately NOT
 // folded into hashAuditEntry's input — see internal/db/audit_chain.go — so
 // it never changes the canonical hash of a row and is invisible to
 // VerifyAuditChain and to db.AuditEntry / ListAuditFor.
-func (s *Store) LogToolCall(ctx context.Context, userID int64, tool, peerRedacted, status, errMsg, callPath, reason string) {
+func (s *Store) LogToolCall(ctx context.Context, c ToolCall) {
+	userID, tool, peerRedacted, status := c.UserID, c.Tool, c.PeerRedacted, c.Status
+	errMsg, callPath, reason := c.ErrMsg, c.CallPath, c.Reason
 	createdAt := time.Now().UTC()
 	// The error column is free text, and peer-resolution failures format the
 	// caller's peer verbatim (`peer "channel:<id>" could not be accessed`,
@@ -2062,8 +2077,7 @@ func (s *Store) LogToolCall(ctx context.Context, userID int64, tool, peerRedacte
 	errMsg = audit.ScrubText(errMsg)
 	// How the call arrived (mctl-telegram#617 Slice 2). Captured in
 	// internal/mcp.httpContext, which builds the context of every MCP tool
-	// call, and read from ctx here rather than taken as a parameter so the
-	// ~25 existing call sites did not have to be rewritten.
+	// call, and read from ctx here rather than taken as a field of ToolCall.
 	//
 	// Capture is MCP_PATH only. The OAuth connect flow
 	// (internal/oauth/enable_access.go) and internal/agentapi pass an

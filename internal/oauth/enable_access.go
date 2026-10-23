@@ -775,7 +775,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		// the select below). This is our own store refusing to answer, and it
 		// must not read as Telegram flakiness on the dashboard.
 		observePhoneStep("mode_check_error")
-		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:mode_check", "", "error", cErr.Error(), "", "")
+		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:failed:mode_check", Status: "error", ErrMsg: cErr.Error()})
 		// The clear above already ran: this arm cannot re-derive the account
 		// state -- that is what just failed -- so all it knows is "unknown",
 		// and "unknown" must not outrank the retry it is about to offer.
@@ -783,7 +783,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if local {
 		observePhoneStep("mode_conflict")
-		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(db.ErrAccountModeConflict), "", "error", db.ErrAccountModeConflict.Error(), "", "")
+		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:failed:" + shortReason(db.ErrAccountModeConflict), Status: "error", ErrMsg: db.ErrAccountModeConflict.Error()})
 		s.renderEnableTerminalError(w, es, db.ErrAccountModeConflict)
 		return
 	}
@@ -802,7 +802,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	select {
 	case <-lf.needCode:
 		observePhoneStep("ok")
-		s.store.LogToolCall(r.Context(), es.uid, "connect:phone_submitted", "", "ok", "", "", "")
+		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:phone_submitted", Status: "ok"})
 		renderEnableCode(w, enableCodePage{
 			Issuer:      s.cfg.Issuer,
 			EnableToken: esTok,
@@ -828,7 +828,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 			// screens (which got this treatment) are never reached.
 			if errors.Is(lf.err, db.ErrAccountModeConflict) {
 				observePhoneStep("mode_conflict")
-				s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error(), "", "")
+				s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:failed:" + shortReason(lf.err), Status: "error", ErrMsg: lf.err.Error()})
 				s.renderEnableTerminalError(w, es, lf.err)
 				return
 			}
@@ -841,7 +841,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 			// symmetric clear would be dead code, not extra safety.
 			if errors.Is(lf.err, errModeCheckFailed) {
 				observePhoneStep("mode_check_error")
-				s.store.LogToolCall(r.Context(), es.uid, "connect:failed:mode_check", "", "error", lf.err.Error(), "", "")
+				s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:failed:mode_check", Status: "error", ErrMsg: lf.err.Error()})
 				s.renderModeCheckRetry(w, es, esTok, rawPhone, sendOptIn)
 				return
 			}
@@ -851,7 +851,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 			}
 			observePhoneStep(result)
 			reason := shortReason(lf.err)
-			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+reason, "", "error", lf.err.Error(), "", "")
+			s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:failed:" + reason, Status: "error", ErrMsg: lf.err.Error()})
 			msg := framedLoginErr("Telegram rejected the request: ", lf.err, " Try again.")
 			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: rawPhone, SendOptIn: sendOptIn,
@@ -865,7 +865,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		s.finishEnable(w, r, es, esTok)
 	case <-time.After(enableSendCodeWait):
 		observePhoneStep("timeout")
-		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:timeout", "", "error", "send code timeout", "", "")
+		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:failed:timeout", Status: "error", ErrMsg: "send code timeout"})
 		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: rawPhone, SendOptIn: sendOptIn,
 			Error: "Timed out contacting Telegram. Please try again.",
@@ -943,7 +943,7 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case <-lf.needPw:
-		s.store.LogToolCall(r.Context(), es.uid, "connect:code_submitted", "", "ok", "", "", "")
+		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:code_submitted", Status: "ok"})
 		es.step = stepPassword
 		renderEnablePassword(w, enablePasswordPage{
 			Issuer:      s.cfg.Issuer,
@@ -953,7 +953,7 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 		})
 	case <-lf.done:
 		if lf.err != nil {
-			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+shortReason(lf.err), "", "error", lf.err.Error(), "", "")
+			s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:failed:" + shortReason(lf.err), Status: "error", ErrMsg: lf.err.Error()})
 			// A mode conflict or a delete since the sign-in started is
 			// terminal, not a bad code: retrying the flow re-hits the same
 			// guard. Render the dead-end screen rather than
@@ -968,10 +968,10 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		s.store.LogToolCall(r.Context(), es.uid, "connect:code_submitted", "", "ok", "", "", "")
+		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:code_submitted", Status: "ok"})
 		s.finishEnable(w, r, es, esTok)
 	case <-time.After(enableSignInWait):
-		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:timeout", "", "error", "verify code timeout", "", "")
+		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:failed:timeout", Status: "error", ErrMsg: "verify code timeout"})
 		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
 			Error: "Timed out verifying the code. Please start again.",
@@ -1042,7 +1042,7 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 	case <-lf.done:
 		if lf.err != nil {
 			reason := shortReason(lf.err)
-			s.store.LogToolCall(r.Context(), es.uid, "connect:failed:"+reason, "", "error", lf.err.Error(), "", "")
+			s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:failed:" + reason, Status: "error", ErrMsg: lf.err.Error()})
 			// Terminal, same as in handleEnableCode: neither refusal is a
 			// wrong password and restarting cannot clear it.
 			if isTerminalLoginErr(lf.err) {
@@ -1076,10 +1076,10 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		s.store.LogToolCall(r.Context(), es.uid, "connect:2fa_submitted", "", "ok", "", "", "")
+		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:2fa_submitted", Status: "ok"})
 		s.finishEnable(w, r, es, esTok)
 	case <-time.After(enableSignInWait):
-		s.store.LogToolCall(r.Context(), es.uid, "connect:failed:timeout", "", "error", "verify password timeout", "", "")
+		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:failed:timeout", Status: "error", ErrMsg: "verify password timeout"})
 		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
 			Error: "Timed out verifying the password. Please start again.",
@@ -1094,7 +1094,7 @@ func (s *Server) finishEnable(w http.ResponseWriter, r *http.Request, es *enable
 	s.mu.Lock()
 	delete(s.enables, esTok)
 	s.mu.Unlock()
-	s.store.LogToolCall(r.Context(), es.uid, "connect:success", "", "ok", "", "", "")
+	s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:success", Status: "ok"})
 	// Completing MTProto login is the registration event: persist the
 	// client tier so an auto-approved user keeps access after
 	// AUTO_APPROVE_CLIENTS is flipped off. Only write when open

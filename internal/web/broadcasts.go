@@ -102,7 +102,7 @@ func (b *BroadcastServer) authorize(w http.ResponseWriter, r *http.Request, acti
 		// view is only logged: any signed-in user can load the URL, and an
 		// audit row per reload would be free rows in the primary DB.
 		if r.Method == http.MethodPost {
-			b.store.LogToolCall(r.Context(), id.UserID, action, "", "error", reason, "", "")
+			b.store.LogToolCall(r.Context(), db.ToolCall{UserID: id.UserID, Tool: action, Status: "error", ErrMsg: reason})
 		}
 		slog.Warn("broadcast web: refused", "action", action, "user_id", id.UserID, "reason", reason)
 		http.Error(w, "forbidden: this page requires a broadcast operator signed in with Telegram in a browser", http.StatusForbidden)
@@ -456,7 +456,7 @@ func (b *BroadcastServer) handleAction(w http.ResponseWriter, r *http.Request, a
 	if err != nil {
 		status, msg = "error", err.Error()
 	}
-	b.store.LogToolCall(r.Context(), actor.UserID, action, "", status, msg, "", "")
+	b.store.LogToolCall(r.Context(), db.ToolCall{UserID: actor.UserID, Tool: action, Status: status, ErrMsg: msg})
 	if err != nil {
 		if !isBroadcastConflict(err) {
 			// Not the operator's doing: keep internals out of the page.

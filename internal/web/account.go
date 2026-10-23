@@ -118,7 +118,7 @@ func isBrowserSignIn(id *auth.Identity, connectClient string) bool {
 func auditScopeDenied(r *http.Request, store *db.Store, id *auth.Identity, tool string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
 	defer cancel()
-	store.LogToolCall(ctx, id.UserID, tool, "", "error", "identity missing scope "+accountManageScope, "", reasonScopeDenied)
+	store.LogToolCall(ctx, db.ToolCall{UserID: id.UserID, Tool: tool, Status: "error", ErrMsg: "identity missing scope " + accountManageScope, Reason: reasonScopeDenied})
 }
 
 // Register binds the account endpoints onto a router. Paths are
@@ -381,7 +381,7 @@ func (h *AccountHandlers) audit(r *http.Request, id *auth.Identity, tool string,
 		status = "error"
 		msg = err.Error()
 	}
-	h.Store.LogToolCall(r.Context(), id.UserID, tool, "", status, msg, "", "")
+	h.Store.LogToolCall(r.Context(), db.ToolCall{UserID: id.UserID, Tool: tool, Status: status, ErrMsg: msg})
 }
 
 func writeAccountJSON(w http.ResponseWriter, code int, body any) {
