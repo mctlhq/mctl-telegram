@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
@@ -67,6 +68,9 @@ func (g *agentSendGate) Allow(ctx context.Context, userID, peerTGID int64) error
 		return fmt.Errorf("%w: send_enabled=false", errAgentSendGateDenied)
 	}
 	if g.limiter != nil {
+		if left := g.limiter.WriteHold(userID); left > 0 {
+			return fmt.Errorf("%w: writes paused for %s after PEER_FLOOD", errAgentSendGateDenied, left.Round(time.Second))
+		}
 		id := &auth.Identity{UserID: userID, Subject: "tg:" + strconv.FormatInt(tgID, 10), TelegramID: tgID}
 		peer := telegram.PeerLimitKey("user:" + strconv.FormatInt(peerTGID, 10))
 		if !g.limiter.AllowPeer(id, peer, audit.PeerSendCap, audit.PeerWindow) {

@@ -32,21 +32,19 @@ const (
 )
 
 // retryPolicy returns whether err should trigger a retry and how many seconds
-// to sleep before the next attempt. It covers FLOOD_WAIT_X, FLOOD_PREMIUM_WAIT_X,
-// and PEER_FLOOD (code 420 without a numeric suffix).
+// to sleep before the next attempt. It covers FLOOD_WAIT_X and
+// FLOOD_PREMIUM_WAIT_X only. PEER_FLOOD is deliberately not retried: it is
+// Telegram's anti-spam verdict on the account, not a wait, and sending the
+// refused call again is what gets an account banned (telegram.IsPeerFlood).
 func retryPolicy(err error) (bool, int) {
 	if n := telegram.FloodWaitSeconds(err); n > 0 {
 		return true, n
-	}
-	var rpcErr *tgerr.Error
-	if errors.As(err, &rpcErr) && rpcErr.Message == "PEER_FLOOD" {
-		return true, 60
 	}
 	return false, 0
 }
 
 // borrowWithRetry wraps Pool.Borrow with up to maxFloodWaitRetries transparent
-// retries when Telegram returns FLOOD_WAIT_X or PEER_FLOOD. Each wait is capped
+// retries when Telegram returns FLOOD_WAIT_X. Each wait is capped
 // at maxFloodWaitSleep. Context cancellation during a sleep causes an immediate
 // return with ctx.Err(). The flood-wait counter is incremented on every
 // observed transient error (including the one on the final attempt).
@@ -2127,9 +2125,23 @@ func evaluateDirectSendLimiterN(limiter *audit.RateLimiter, id *auth.Identity, p
 	if limiter == nil {
 		return false, ""
 	}
+	// Checked before the budget so a paused account is not also debited.
+	if id != nil {
+		if left := limiter.WriteHold(id.UserID); left > 0 {
+			return true, peerFloodHoldRefusal + " — retry in " + retryAfterText(left) + ". Do not retry earlier; the account owner can check the restriction by messaging @SpamBot in Telegram."
+		}
+	}
 	d := limiter.DecidePeer(id, telegram.PeerLimitKey(peer), cost, audit.PeerSendCap, audit.PeerWindow)
 	return peerLimitRefusal(d, fmt.Sprintf("per-peer send rate limit reached (%d/hour to one peer)", audit.PeerSendCap), ", pick a different recipient, or send fewer messages per call")
 }
+
+// peerFloodHoldRefusal opens the refusal for a write made while the
+// account's PEER_FLOOD pause (audit.PeerFloodHold) is running. reasons.go
+// classifies on it.
+const peerFloodHoldRefusal = "writes from this account are paused after Telegram's anti-spam system refused one of its calls (PEER_FLOOD)"
+
+// peerFloodHoldText renders audit.PeerFloodHold for the error catalog.
+var peerFloodHoldText = fmt.Sprintf("%d minutes", int(audit.PeerFloodHold/time.Minute))
 
 // cleanupLimiterPrefix separates the cleanup budget's buckets from the send
 // budget's for the same peer.

@@ -432,14 +432,15 @@ func TestRetryPolicy_FloodWait(t *testing.T) {
 	}
 }
 
-func TestRetryPolicy_PeerFlood(t *testing.T) {
-	err := tgerr.New(420, "PEER_FLOOD")
-	ok, n := retryPolicy(err)
-	if !ok {
-		t.Fatal("expected retry=true for PEER_FLOOD")
-	}
-	if n != 60 {
-		t.Errorf("sleep = %d, want 60", n)
+// PEER_FLOOD is Telegram's anti-spam verdict on the account, not a wait.
+// Sending the refused call again is what gets an account banned, so it must
+// never be retried, whichever code Telegram sends it with (#849).
+func TestRetryPolicy_PeerFloodIsNotRetried(t *testing.T) {
+	for _, code := range []int{400, 420} {
+		ok, n := retryPolicy(tgerr.New(code, "PEER_FLOOD"))
+		if ok || n != 0 {
+			t.Errorf("code %d: retryPolicy(PEER_FLOOD) = (%v, %d), want (false, 0)", code, ok, n)
+		}
 	}
 }
 
@@ -1679,6 +1680,35 @@ func TestDirectSendLimiter_SeparateBudgetPerRecipient(t *testing.T) {
 		if blocked, _ := evaluateDirectSendLimiter(limiter, id, alias); !blocked {
 			t.Errorf("%q escaped the exhausted user:7002 budget", alias)
 		}
+	}
+}
+
+// After PEER_FLOOD the account's writes are paused for every recipient,
+// without debiting the per-peer budget, and the refusal classifies as
+// Telegram's verdict rather than this server's rate limit (#849).
+func TestDirectSendLimiter_PeerFloodHoldRefusesEveryRecipient(t *testing.T) {
+	limiter := audit.NewRateLimiter(0)
+	id := &auth.Identity{UserID: 1, Subject: "tg:7001"}
+	limiter.HoldWrites(id.UserID, audit.PeerFloodHold)
+	for _, peer := range []string{"@alice", "user:7002"} {
+		blocked, reason := evaluateDirectSendLimiter(limiter, id, peer)
+		if !blocked {
+			t.Fatalf("%s: write allowed during the PEER_FLOOD hold", peer)
+		}
+		if !strings.HasPrefix(reason, peerFloodHoldRefusal) || !strings.Contains(reason, "retry in about 60 min") {
+			t.Errorf("%s: refusal %q", peer, reason)
+		}
+		if got := classifyToolResultReason(mcplib.NewToolResultError(reason)); got != ReasonTelegramError {
+			t.Errorf("%s: reason = %q, want %q", peer, got, ReasonTelegramError)
+		}
+	}
+	other := &auth.Identity{UserID: 2, Subject: "tg:7003"}
+	if blocked, r := evaluateDirectSendLimiter(limiter, other, "@alice"); blocked {
+		t.Fatalf("another account refused: %s", r)
+	}
+	// The refused calls did not touch the budget.
+	if d := limiter.DecidePeer(id, telegram.PeerLimitKey("@alice"), audit.PeerSendCap, audit.PeerSendCap, audit.PeerWindow); !d.Allowed {
+		t.Fatal("refusals during the hold debited the per-peer budget")
 	}
 }
 

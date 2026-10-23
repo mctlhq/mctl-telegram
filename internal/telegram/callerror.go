@@ -84,7 +84,7 @@ func IsCallerRefusal(err error) bool {
 		return true
 	}
 	var te *tgerr.Error
-	if !errors.As(err, &te) || te.Message == "PEER_FLOOD" || isDeploymentFault(te.Message) {
+	if !errors.As(err, &te) || IsPeerFlood(err) || isDeploymentFault(te.Message) {
 		return false
 	}
 	return te.Code == 400 || te.Code == 403

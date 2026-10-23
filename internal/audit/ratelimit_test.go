@@ -209,3 +209,30 @@ func TestRateLimiter_PeerKeyIsNotStoredRaw(t *testing.T) {
 		}
 	}
 }
+
+// HoldWrites pauses one account until the hold runs out, never shortens an
+// earlier hold, and leaves other accounts alone (#849).
+func TestWriteHold_PausesOneAccountUntilExpiry(t *testing.T) {
+	r := NewRateLimiter(0)
+	base := time.Unix(1_700_000_000, 0)
+	r.now = func() time.Time { return base }
+	r.HoldWrites(1, PeerFloodHold)
+	if got := r.WriteHold(1); got != PeerFloodHold {
+		t.Fatalf("WriteHold(1) = %v, want %v", got, PeerFloodHold)
+	}
+	if got := r.WriteHold(2); got != 0 {
+		t.Fatalf("WriteHold(2) = %v, want 0: the hold leaked to another account", got)
+	}
+	r.HoldWrites(1, time.Minute)
+	if got := r.WriteHold(1); got != PeerFloodHold {
+		t.Fatalf("a shorter hold shortened the pause to %v", got)
+	}
+	r.now = func() time.Time { return base.Add(PeerFloodHold - time.Second) }
+	if got := r.WriteHold(1); got != time.Second {
+		t.Fatalf("WriteHold(1) one second before expiry = %v", got)
+	}
+	r.now = func() time.Time { return base.Add(PeerFloodHold) }
+	if got := r.WriteHold(1); got != 0 {
+		t.Fatalf("WriteHold(1) after expiry = %v, want 0", got)
+	}
+}

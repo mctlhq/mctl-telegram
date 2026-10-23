@@ -88,7 +88,10 @@ type ClientPool struct {
 	// WithGlobalMiddleware. The login client (telegram.Login) receives the same
 	// instance so the whole process throttles against one shared TG_API_ID.
 	globalMW telegram.Middleware
-	Store    *db.Store
+	// onPeerFlood, when set, is told the user id whenever a borrowed call
+	// fails with PEER_FLOOD (WithPeerFloodHook).
+	onPeerFlood func(userID int64)
+	Store       *db.Store
 	// metrics is optional; when non-nil, pool size and error counters are
 	// maintained.
 	metrics *metrics.Registry
@@ -154,6 +157,15 @@ func (p *ClientPool) WithMaxSessions(n int) *ClientPool {
 // bound by the same budget. nil is a no-op. Returns the receiver for chaining.
 func (p *ClientPool) WithGlobalMiddleware(mw telegram.Middleware) *ClientPool {
 	p.globalMW = mw
+	return p
+}
+
+// WithPeerFloodHook registers fn to be called with the user id each time a
+// call made through Borrow fails with PEER_FLOOD, whoever made it: an MCP
+// tool, the background executor or the agent listener. The server uses it
+// to pause the account's writes (#849). Returns the receiver for chaining.
+func (p *ClientPool) WithPeerFloodHook(fn func(userID int64)) *ClientPool {
+	p.onPeerFlood = fn
 	return p
 }
 
@@ -251,6 +263,9 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 		p.Store.MarkLastUsed(ctx, userID)
 	}
 	callErr := fn(ctx, e.client)
+	if p.onPeerFlood != nil && IsPeerFlood(callErr) {
+		p.onPeerFlood(userID)
+	}
 	if sentinel := sessionErrorFor(callErr); sentinel != nil && p.Store != nil {
 		// Telegram rejected the stored session — it was an unfinished
 		// enable_access session, or the session was revoked / the account
@@ -299,7 +314,8 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 // counted two things that say nothing about the session:
 //
 //   - flood_wait: Telegram asked the caller to slow down (code 420, or
-//     PEER_FLOOD). borrowWithRetry sleeps and calls Borrow again, so one tool
+//     PEER_FLOOD). borrowWithRetry sleeps on FLOOD_WAIT_X and calls Borrow
+//     again (never on PEER_FLOOD, see IsPeerFlood), so one tool
 //     call that the user sees succeed left one "error" per retried attempt.
 //     On 2026-10-06 that was 41 of the 47 errors in 24 hours and fired
 //     MctlTelegramSessionBorrowSlowBurn while 99% of tool calls were ok.
@@ -317,7 +333,7 @@ func borrowCallResult(err error) string {
 		return "error"
 	}
 	var te *tgerr.Error
-	if errors.As(err, &te) && (te.Code == 420 || te.Message == "PEER_FLOOD") {
+	if (errors.As(err, &te) && te.Code == 420) || IsPeerFlood(err) {
 		return "flood_wait"
 	}
 	if IsCallerRefusal(err) {
