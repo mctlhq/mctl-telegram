@@ -355,6 +355,12 @@ type Config struct {
 	EventsValkeyURL      string
 	EventsValkeyPassword string
 	EventsStream         string
+	// EventsOperatorRouting (EVENTS_OPERATOR_ROUTING, default false) stops
+	// publishing a telegram.message.* envelope at ingest for an event the
+	// agent job queue took, and publishes one only when the job ends in a
+	// deny, require_approval or worker failure, so the operator stream
+	// carries just the messages the conversation worker did not handle.
+	EventsOperatorRouting bool
 	// AgentProfilePath is the deprecated mounted-YAML migration source. At
 	// startup it is imported into the target tenant's encrypted DB profile
 	// only when that document is still missing; it is never consulted on
@@ -441,6 +447,7 @@ func Load() (*Config, error) {
 		EventsValkeyURL:               os.Getenv("EVENTS_VALKEY_URL"),
 		EventsValkeyPassword:          os.Getenv("EVENTS_VALKEY_PASSWORD"),
 		EventsStream:                  envOr("EVENTS_STREAM", "mctl:events:telegram"),
+		EventsOperatorRouting:         envBool("EVENTS_OPERATOR_ROUTING", false),
 		AgentProfilePath:              os.Getenv("AGENT_PROFILE_PATH"),
 		AgentProfileOwnerTGID:         envInt64("AGENT_PROFILE_OWNER_TG_ID", 0),
 		AgentTestCrashAfterReserve:    envBool("AGENT_TEST_CRASH_AFTER_RESERVE", false),

@@ -162,7 +162,8 @@ func main() {
 			os.Exit(1)
 		}
 		relay := events.NewRelay(store, valkey, m)
-		store.WithEventOutbox(events.OutboxBuilder(cfg.EventsStream)).WithEventOutboxNotify(relay.Notify)
+		store.WithEventOutbox(events.OutboxBuilder(cfg.EventsStream)).WithEventOutboxNotify(relay.Notify).
+			WithOperatorRouting(cfg.EventsOperatorRouting)
 		go relay.Run(ctx)
 		slog.Info("event outbox enabled", "stream", cfg.EventsStream)
 	}
