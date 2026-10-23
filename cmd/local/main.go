@@ -36,6 +36,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/config"
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	tg "github.com/mctlhq/mctl-telegram/internal/telegram"
@@ -712,17 +713,17 @@ var errNoServerConfigured = errors.New("no server configured -- run `mctl-telegr
 
 // ---- helpers -------------------------------------------------------------
 
+// localTestDC reports whether TG_TEST_DC points this bridge at Telegram's
+// test datacenters (issue #854), parsed exactly as cmd/server and cmd/login
+// parse it. The bridge needs no ENV guard: its store is its own local file,
+// never the hosted database.
+func localTestDC() bool {
+	return config.TestDCFromEnv()
+}
+
 // openLocalStore opens (or creates) the local SQLite DB at the standard path,
 // migrates the schema, and returns a *db.Store, a close function, and the
 // single local user ID (always 1 after seed).
-// localTestDC reports whether TG_TEST_DC points this bridge at Telegram's
-// test datacenters (issue #854). Anything other than an explicit true is
-// production, the safe reading for a flag whose wrong value revokes sessions.
-func localTestDC() bool {
-	on, err := strconv.ParseBool(strings.TrimSpace(os.Getenv("TG_TEST_DC")))
-	return err == nil && on
-}
-
 func openLocalStore(ctx context.Context, keyHex string) (*db.Store, func(), int64) {
 	dbPath, err := dbFilePath()
 	if err != nil {

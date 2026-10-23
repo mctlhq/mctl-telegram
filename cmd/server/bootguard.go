@@ -51,26 +51,11 @@ func checkBootGuard(cfg *config.Config) error {
 }
 
 // checkTestDC refuses TG_TEST_DC=true unless ENV names a local or test tier
-// explicitly (issue #854). An empty ENV is not enough here, although
-// checkBootGuard accepts it as local: the production deployment leaves ENV
-// unset, so an empty value proves nothing about the tier, and a production
-// process on the test DCs would lose every user's session. The store's DC
-// stamp (db.Store.EnsureDCMode) is the second, independent check.
+// explicitly (issue #854); see config.CheckTestDC, which cmd/login shares.
+// An empty ENV is not enough here, although checkBootGuard accepts it as
+// local: the production deployment leaves ENV unset.
 func checkTestDC(cfg *config.Config) error {
-	if !cfg.TGTestDC {
-		return nil
-	}
-	if strings.TrimSpace(cfg.Environment) == "" || !isLocalEnv(cfg.Environment) {
-		var named []string
-		for _, name := range localEnvNames {
-			if name != "" {
-				named = append(named, name)
-			}
-		}
-		return fmt.Errorf("refusing to start: TG_TEST_DC=true needs ENV set to a local or test tier (%s), got ENV=%q",
-			strings.Join(named, ", "), cfg.Environment)
-	}
-	return nil
+	return config.CheckTestDC(cfg)
 }
 
 // insecureAuth reports whether cfg grants the local-dev auth bypass: either

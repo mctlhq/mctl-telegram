@@ -441,7 +441,7 @@ func Load() (*Config, error) {
 		OAUTHJWTAudReq:                envBool("OAUTH_JWT_AUDIENCE_REQUIRED", false),
 		WorkerTokenRevocationCacheTTL: envDuration("WORKER_TOKEN_REVOCATION_CACHE_TTL", 10*time.Second),
 		TGAPIHash:                     os.Getenv("TG_API_HASH"),
-		TGTestDC:                      envBool("TG_TEST_DC", false),
+		TGTestDC:                      TestDCFromEnv(),
 		AllowSend:                     envBool("ALLOW_SEND", false),
 		IdleClientTimeout:             envDuration("IDLE_CLIENT_TIMEOUT", 10*time.Minute),
 		RateLimitPerUser:              envInt("RATE_LIMIT_PER_USER", 30),
@@ -722,6 +722,42 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// TestDCFromEnv reads TG_TEST_DC the way every binary must (issue #854):
+// cmd/server and cmd/login through Load, the Local Bridge directly. An
+// unrecognised value is production, the safe reading for a flag whose wrong
+// value revokes sessions.
+func TestDCFromEnv() bool {
+	return envBool("TG_TEST_DC", false)
+}
+
+// testDCTiers are the ENV values that may run with TG_TEST_DC. Unlike the
+// boot guard's local tiers in cmd/server, the empty string is not one: the
+// production deployment leaves ENV unset, so an empty value proves nothing
+// about the tier.
+var testDCTiers = []string{"local", "local-dev", "localdev", "dev", "development", "test", "ci"}
+
+// CheckTestDC refuses TG_TEST_DC=true unless ENV names a local or test tier
+// explicitly, compared case-insensitively. Every process that writes or opens
+// stored sessions calls it before opening the store: cmd/server and
+// cmd/login, whose store may be the production database. A test-DC process
+// on that store would revoke every session it touched (cmd/server), or stamp
+// a still-empty production store test so production refuses to boot
+// (cmd/login). The store's DC stamp (db.Store.EnsureDCMode) is the second,
+// independent check.
+func CheckTestDC(cfg *Config) error {
+	if !cfg.TGTestDC {
+		return nil
+	}
+	env := strings.TrimSpace(cfg.Environment)
+	for _, name := range testDCTiers {
+		if strings.EqualFold(env, name) {
+			return nil
+		}
+	}
+	return fmt.Errorf("refusing to start: TG_TEST_DC=true needs ENV set to a local or test tier (%s), got ENV=%q",
+		strings.Join(testDCTiers, ", "), cfg.Environment)
 }
 
 func envBool(key string, def bool) bool {

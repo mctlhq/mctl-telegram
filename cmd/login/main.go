@@ -51,6 +51,11 @@ func main() {
 	if err != nil {
 		die(err)
 	}
+	// Before the store is opened: on a production database that holds no
+	// accounts yet, EnsureDCMode below would stamp it test for good.
+	if err := config.CheckTestDC(cfg); err != nil {
+		die(err)
+	}
 	if cfg.TGAPIID == 0 || cfg.TGAPIHash == "" {
 		die(errors.New("TG_API_ID and TG_API_HASH must be set (register at https://my.telegram.org)"))
 	}
