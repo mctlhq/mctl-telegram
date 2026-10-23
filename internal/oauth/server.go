@@ -134,6 +134,18 @@ type Server struct {
 	// removed — one mutex per onboarded user is negligible.
 	loginMu sync.Map
 
+	// loginFlows is the live enable_access login goroutine per users.id (key
+	// int64 -> *loginFlow). loginMu only serialises the goroutines; on its own
+	// it lets an abandoned flow (tab closed at the code screen) hold the
+	// mutex for the whole CodeTTL while every later attempt for the same
+	// account -- from a new wizard token, so handleEnableStart's own
+	// same-session supersede never sees it -- queues behind it, times out at
+	// the phone step, and later sends a stray login code when the mutex
+	// finally frees. startLoginFlow swaps itself in here and cancels whatever
+	// it displaced, so the newest attempt always wins the mutex promptly.
+	// The goroutine removes its own entry on exit (mctl-telegram#859).
+	loginFlows sync.Map
+
 	// modeCheckFn, when non-nil, replaces the store's HasActiveLocalAccount on
 	// both enable_access mode checks. Test seam (nil in production): the store
 	// is a real *db.Store in these tests, so this is the only way to reach the
