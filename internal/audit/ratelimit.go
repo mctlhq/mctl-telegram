@@ -1,7 +1,12 @@
 package audit
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"math"
 	"net/http"
 	"sync"
 	"time"
@@ -21,18 +26,66 @@ type RateLimiter struct {
 	buckets    map[string]*bucket
 	// metrics is optional; when non-nil, 429 responses are counted.
 	metrics *metrics.Registry
+	// peerSecret keys the HMAC that turns a canonical peer key into a
+	// bucket name, so raw Telegram ids and handles never sit in buckets.
+	// Random per process: buckets are in memory and die with it anyway.
+	peerSecret []byte
+	lastSweep  time.Time
 }
 
 type bucket struct {
 	tokens   float64
 	lastFill time.Time
+	// max and perSec let sweep tell a full bucket, which behaves exactly
+	// like an absent one, from a draining one without knowing its caller.
+	max    float64
+	perSec float64
 }
+
+// sweepEvery bounds how often a call walks the bucket map to drop full
+// buckets. Per-peer keys grow with the number of distinct recipients, so
+// without eviction the map would only ever grow.
+const sweepEvery = 10 * time.Minute
 
 func NewRateLimiter(perMin int) *RateLimiter {
 	return &RateLimiter{
 		RatePerMin: perMin,
 		now:        time.Now,
 		buckets:    make(map[string]*bucket),
+		peerSecret: newPeerSecret(),
+	}
+}
+
+func newPeerSecret() []byte {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand does not fail on supported platforms; a fixed key
+		// still separates peers, it only loses the at-rest blinding.
+		return []byte("mctl-telegram-peer-limiter")
+	}
+	return b
+}
+
+// refill tops b up to now. Caller holds r.mu.
+func (b *bucket) refill(now time.Time) {
+	b.tokens += now.Sub(b.lastFill).Seconds() * b.perSec
+	if b.tokens > b.max {
+		b.tokens = b.max
+	}
+	b.lastFill = now
+}
+
+// sweep drops every bucket that has refilled to capacity. Caller holds r.mu.
+func (r *RateLimiter) sweep(now time.Time) {
+	if now.Sub(r.lastSweep) < sweepEvery {
+		return
+	}
+	r.lastSweep = now
+	for k, b := range r.buckets {
+		b.refill(now)
+		if b.tokens >= b.max {
+			delete(r.buckets, k)
+		}
 	}
 }
 
@@ -50,19 +103,14 @@ func (r *RateLimiter) allow(key string) bool {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	b, ok := r.buckets[key]
 	now := r.now()
+	r.sweep(now)
+	b, ok := r.buckets[key]
 	if !ok {
-		b = &bucket{tokens: float64(r.RatePerMin), lastFill: now}
+		b = &bucket{tokens: float64(r.RatePerMin), lastFill: now, max: float64(r.RatePerMin), perSec: float64(r.RatePerMin) / 60.0}
 		r.buckets[key] = b
 	}
-	// Refill.
-	elapsed := now.Sub(b.lastFill).Seconds()
-	b.tokens += elapsed * float64(r.RatePerMin) / 60.0
-	if b.tokens > float64(r.RatePerMin) {
-		b.tokens = float64(r.RatePerMin)
-	}
-	b.lastFill = now
+	b.refill(now)
 	if b.tokens < 1 {
 		return false
 	}
@@ -77,21 +125,37 @@ func (r *RateLimiter) allow(key string) bool {
 // we actually care about.
 const PeerSendCap = 20
 
+// PeerCleanupCap is the per-(identity, peer) budget for writes that only
+// take something back: deleting messages, removing a reaction, unpinning.
+// It is a separate bucket so that a caller who hit PeerSendCap can still
+// clean up what it sent, and it is larger because cleanup reaches nobody.
+const PeerCleanupCap = 60
+
 // PeerWindow is the bucket capacity refill horizon for AllowPeer.
 const PeerWindow = time.Hour
 
+// PeerDecision is the outcome of a per-peer debit.
+type PeerDecision struct {
+	Allowed bool
+	// RetryAfter is how long until the bucket holds enough tokens for the
+	// same cost. Zero when Allowed, and zero with TooLarge set when the
+	// cost exceeds the bucket's capacity and can never fit.
+	RetryAfter time.Duration
+	TooLarge   bool
+}
+
 // AllowPeer is a separate token bucket for per-(identity, peer) sends.
 // max is the burst capacity; the bucket refills at max/window-seconds.
-// peerHash should be the RedactPeer output (or any stable token derived
-// from the peer); we never key on the raw peer string so a redacted audit
-// log can still reconstruct which bucket was touched.
+// peerKey must identify the recipient — telegram.PeerLimitKey, never the
+// RedactPeer audit tag, which collapses every user:<id> into one value.
+// The limiter stores only an HMAC of it.
 //
-// Called from the destructive-action gate (send / prepare_pin_message / pin)
-// in addition to the per-request middleware
-// limiter. A user can issue many reads per minute but only N writes per
-// peer per hour.
-func (r *RateLimiter) AllowPeer(id *auth.Identity, peerHash string, max int, window time.Duration) bool {
-	return r.AllowPeerN(id, peerHash, 1, max, window)
+// Called from the write gates (send, forward, edit, reaction, pin, and the
+// cleanup budget for delete/unreact/unpin) in addition to the per-request
+// middleware limiter. A user can issue many reads per minute but only N
+// writes per peer per hour.
+func (r *RateLimiter) AllowPeer(id *auth.Identity, peerKey string, max int, window time.Duration) bool {
+	return r.AllowPeerN(id, peerKey, 1, max, window)
 }
 
 // AllowPeerN is AllowPeer but debits cost tokens atomically instead of 1 —
@@ -100,33 +164,49 @@ func (r *RateLimiter) AllowPeer(id *auth.Identity, peerHash string, max int, win
 // volume rather than call count. cost <= 0 is treated as 1. Denies (without
 // debiting) when fewer than cost tokens are available, even if some tokens
 // remain — a batch either fits within the budget or is rejected outright.
-func (r *RateLimiter) AllowPeerN(id *auth.Identity, peerHash string, cost, max int, window time.Duration) bool {
+func (r *RateLimiter) AllowPeerN(id *auth.Identity, peerKey string, cost, max int, window time.Duration) bool {
+	return r.DecidePeer(id, peerKey, cost, max, window).Allowed
+}
+
+// DecidePeer is AllowPeerN that also reports when a denied debit could
+// succeed, so a refusal can tell the caller how long to wait.
+func (r *RateLimiter) DecidePeer(id *auth.Identity, peerKey string, cost, max int, window time.Duration) PeerDecision {
 	if max <= 0 || window <= 0 {
-		return true
+		return PeerDecision{Allowed: true}
 	}
 	if cost <= 0 {
 		cost = 1
 	}
-	key := identityKey(id) + ":peer:" + peerHash
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	b, ok := r.buckets[key]
+	key := identityKey(id) + ":peer:" + r.peerDigest(peerKey)
 	now := r.now()
+	r.sweep(now)
+	b, ok := r.buckets[key]
 	if !ok {
-		b = &bucket{tokens: float64(max), lastFill: now}
+		b = &bucket{tokens: float64(max), lastFill: now, max: float64(max), perSec: float64(max) / window.Seconds()}
 		r.buckets[key] = b
 	}
-	elapsed := now.Sub(b.lastFill).Seconds()
-	b.tokens += elapsed * float64(max) / window.Seconds()
-	if b.tokens > float64(max) {
-		b.tokens = float64(max)
+	b.refill(now)
+	if cost > max {
+		return PeerDecision{TooLarge: true}
 	}
-	b.lastFill = now
 	if b.tokens < float64(cost) {
-		return false
+		wait := math.Ceil((float64(cost) - b.tokens) / b.perSec)
+		return PeerDecision{RetryAfter: time.Duration(wait) * time.Second}
 	}
 	b.tokens -= float64(cost)
-	return true
+	return PeerDecision{Allowed: true}
+}
+
+// peerDigest blinds a peer key for use as a map key. Caller holds r.mu.
+func (r *RateLimiter) peerDigest(peerKey string) string {
+	if r.peerSecret == nil {
+		r.peerSecret = newPeerSecret()
+	}
+	m := hmac.New(sha256.New, r.peerSecret)
+	m.Write([]byte(peerKey))
+	return hex.EncodeToString(m.Sum(nil)[:16])
 }
 
 func (r *RateLimiter) Middleware() func(http.Handler) http.Handler {

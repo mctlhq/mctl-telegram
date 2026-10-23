@@ -109,6 +109,7 @@
     <tbody>
       <tr><td>Tool calls per user</td><td>{{.RateLimitPerUser}} per minute</td></tr>
       <tr><td>Sends to one recipient</td><td>{{.PeerSendCap}} per {{.PeerWin}}</td></tr>
+      <tr><td>Cleanup in one chat (delete, unreact, unpin)</td><td>{{.PeerCleanupCap}} per {{.PeerWin}}</td></tr>
       <tr><td>Access token lifetime</td><td>{{.AccessTTL}}</td></tr>
       <tr><td>Refresh token lifetime</td><td>{{.RefreshTTL}}, rotated on every use; reusing a rotated token revokes the whole family</td></tr>
       <tr><td>Media download</td><td>{{.MediaMax}} per file</td></tr>

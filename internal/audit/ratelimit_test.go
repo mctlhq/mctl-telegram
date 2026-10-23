@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -136,5 +137,75 @@ func TestAllowPeerN_NonPositiveCostTreatedAsOne(t *testing.T) {
 	}
 	if r.AllowPeerN(id, "peerA", 0, 1, time.Hour) {
 		t.Fatal("cost=0 treated as 1 should have exhausted a cap-1 bucket")
+	}
+}
+
+func TestDecidePeer_RetryAfterAndTooLarge(t *testing.T) {
+	r := NewRateLimiter(0)
+	base := time.Now()
+	r.now = func() time.Time { return base }
+	id := &auth.Identity{Subject: "tg:1"}
+
+	// 20/hour refills one token per 180 s.
+	if d := r.DecidePeer(id, "u:7001", 20, 20, time.Hour); !d.Allowed {
+		t.Fatalf("draining a fresh bucket was refused: %+v", d)
+	}
+	d := r.DecidePeer(id, "u:7001", 1, 20, time.Hour)
+	if d.Allowed || d.TooLarge || d.RetryAfter != 180*time.Second {
+		t.Fatalf("empty bucket = %+v, want refused with RetryAfter 180s", d)
+	}
+	r.now = func() time.Time { return base.Add(60 * time.Second) }
+	if d := r.DecidePeer(id, "u:7001", 1, 20, time.Hour); d.Allowed || d.RetryAfter != 120*time.Second {
+		t.Fatalf("after 60 s = %+v, want refused with RetryAfter 120s", d)
+	}
+	r.now = func() time.Time { return base.Add(180 * time.Second) }
+	if d := r.DecidePeer(id, "u:7001", 1, 20, time.Hour); !d.Allowed {
+		t.Fatalf("after 180 s = %+v, want allowed", d)
+	}
+	if d := r.DecidePeer(id, "u:7002", 21, 20, time.Hour); d.Allowed || !d.TooLarge || d.RetryAfter != 0 {
+		t.Fatalf("batch above capacity = %+v, want TooLarge", d)
+	}
+}
+
+func TestRateLimiter_SweepDropsOnlyFullBuckets(t *testing.T) {
+	r := NewRateLimiter(0)
+	base := time.Now()
+	r.now = func() time.Time { return base }
+	r.lastSweep = base
+	id := &auth.Identity{Subject: "tg:1"}
+
+	r.AllowPeer(id, "u:7001", 20, time.Hour)      // one token spent, refills in 180 s
+	r.AllowPeerN(id, "u:7002", 20, 20, time.Hour) // drained, refills in 1 h
+	if n := len(r.buckets); n != 2 {
+		t.Fatalf("buckets = %d, want 2", n)
+	}
+
+	r.now = func() time.Time { return base.Add(sweepEvery) }
+	r.AllowPeer(id, "u:7003", 20, time.Hour) // triggers the sweep
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.buckets[identityKey(id)+":peer:"+r.peerDigest("u:7001")]; ok {
+		t.Error("a bucket that refilled to capacity survived the sweep")
+	}
+	if _, ok := r.buckets[identityKey(id)+":peer:"+r.peerDigest("u:7002")]; !ok {
+		t.Error("a bucket still draining was swept, which would reset its budget")
+	}
+}
+
+func TestRateLimiter_PeerKeyIsNotStoredRaw(t *testing.T) {
+	r := NewRateLimiter(0)
+	id := &auth.Identity{Subject: "tg:1"}
+	r.AllowPeer(id, "u:7001", 20, time.Hour)
+	// Match the exact digest key rather than scanning for "7001": a random
+	// hex digest can contain those digits by chance. The raw key has a
+	// colon, which hex never does, so it cannot appear in a digest.
+	want := identityKey(id) + ":peer:" + r.peerDigest("u:7001")
+	if len(r.buckets) != 1 || r.buckets[want] == nil {
+		t.Fatalf("buckets = %v, want exactly the digest key %q", r.buckets, want)
+	}
+	for k := range r.buckets {
+		if strings.Contains(k, "u:7001") {
+			t.Fatalf("bucket key %q carries the raw peer key", k)
+		}
 	}
 }

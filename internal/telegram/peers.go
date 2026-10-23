@@ -112,6 +112,38 @@ func ResolvePeerCached(ctx context.Context, c *telegram.Client, peerSpec string,
 	return peer, nil
 }
 
+// PeerLimitKey returns a canonical key for the recipient a peer spec names,
+// for per-peer rate limiting. It folds the spellings ResolvePeer treats as
+// the same target: "@Alice" and "alice" (usernames are case-insensitive),
+// "user:42" and "42". It does not resolve anything, so a username and the
+// numeric id of the same account stay two keys: the limiter runs before
+// any Telegram call, and for Local Bridge accounts resolution happens on
+// the daemon. The key carries the raw identifier, so it must never be
+// logged; the limiter keeps only an HMAC of it.
+func PeerLimitKey(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "@") || (!strings.Contains(raw, ":") && !isNumeric(raw)) {
+		return "h:" + strings.ToLower(strings.TrimPrefix(raw, "@"))
+	}
+	for _, p := range []struct{ prefix, tag string }{{"user:", "u:"}, {"chat:", "c:"}, {"channel:", "ch:"}} {
+		if strings.HasPrefix(raw, p.prefix) {
+			if id, err := strconv.ParseInt(strings.TrimPrefix(raw, p.prefix), 10, 64); err == nil {
+				return p.tag + strconv.FormatInt(id, 10)
+			}
+			return "x:" + raw
+		}
+	}
+	if isNumeric(raw) {
+		if id, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			return "u:" + strconv.FormatInt(id, 10)
+		}
+	}
+	return "x:" + raw
+}
+
 // RedactPeer turns a peer string into a stable tag suitable for audit logs.
 // We never log usernames or numeric ids verbatim — emit type + length only.
 func RedactPeer(raw string) string {
