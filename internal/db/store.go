@@ -60,6 +60,8 @@ type Store struct {
 	// (see WithEventOutbox). nil disables the outbox entirely.
 	outbox       OutboxBuilder
 	outboxNotify func()
+	// operatorRouting: see WithOperatorRouting.
+	operatorRouting bool
 }
 
 // AccountInfo is the user-visible projection of a telegram_accounts row,

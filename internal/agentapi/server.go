@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/queue"
+	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
@@ -57,6 +58,10 @@ type Server struct {
 	// workers are confirmed healthy.
 	AllowLegacyJobCompletion bool
 
+	// jobTokenSigner mints the per-job "agent-job" credential returned by
+	// POST /jobs/claim. Nil leaves job_token out of the response.
+	jobTokenSigner *localjwt.Issuer
+
 	longPollTimeout time.Duration
 	jobVisibility   time.Duration
 	m               *metrics.Registry
@@ -84,6 +89,14 @@ func New(store *db.Store, q *queue.Queue, jobVisibility time.Duration, m *metric
 // chaining.
 func (s *Server) WithProfile(p OwnerProfileProvider) *Server {
 	s.Profile = p
+	return s
+}
+
+// WithJobTokenSigner enables per-job credentials: every claimed job then
+// carries a job_token bound to its job, attempt and conversation. Returns s
+// for chaining.
+func (s *Server) WithJobTokenSigner(i *localjwt.Issuer) *Server {
+	s.jobTokenSigner = i
 	return s
 }
 

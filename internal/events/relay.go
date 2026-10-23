@@ -308,11 +308,11 @@ func (r *Relay) audit(ctx context.Context, row db.OutboxRow, at time.Time) bool 
 
 // OutboxBuilder adapts BuildEnvelope to db.OutboxBuilder for stream.
 func OutboxBuilder(stream string) db.OutboxBuilder {
-	return func(ev db.IncomingEvent, occurredAt time.Time) (db.OutboxRow, bool, error) {
+	return func(ev db.IncomingEvent, occurredAt time.Time, routingReason string) (db.OutboxRow, bool, error) {
 		if !Publishable(ev.Kind) {
 			return db.OutboxRow{}, false, nil
 		}
-		env, err := BuildEnvelope(ev, occurredAt)
+		env, err := BuildRoutedEnvelope(ev, occurredAt, routingReason)
 		if err != nil {
 			return db.OutboxRow{}, false, err
 		}

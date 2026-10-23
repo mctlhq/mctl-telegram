@@ -58,6 +58,19 @@ func Publishable(kind string) bool {
 // event_id, so a redelivered Telegram update yields the same envelope id and
 // the consumer deduplicates it.
 func BuildEnvelope(ev db.IncomingEvent, occurredAt time.Time) (Envelope, error) {
+	return BuildRoutedEnvelope(ev, occurredAt, "")
+}
+
+// BuildRoutedEnvelope is BuildEnvelope with an optional routing reason, one
+// of the closed db.Route* constants, written to subject.routing_reason. An
+// empty reason yields exactly the envelope BuildEnvelope always produced. The
+// reason is a fixed enum: no policy reason text or message content is added.
+func BuildRoutedEnvelope(ev db.IncomingEvent, occurredAt time.Time, routingReason string) (Envelope, error) {
+	switch routingReason {
+	case "", db.RoutePolicyDeny, db.RoutePolicyRequireApproval, db.RouteWorkerFailure:
+	default:
+		return Envelope{}, fmt.Errorf("unknown routing reason %q", routingReason)
+	}
 	typ, ok := eventTypes[ev.Kind]
 	if !ok {
 		return Envelope{}, fmt.Errorf("event kind %q is not published", ev.Kind)
@@ -70,7 +83,7 @@ func BuildEnvelope(ev db.IncomingEvent, occurredAt time.Time) (Envelope, error) 
 		return Envelope{}, fmt.Errorf("event %q does not name a Telegram account", ev.EventID)
 	}
 	id := "telegram:" + ev.EventID
-	return Envelope{
+	env := Envelope{
 		SpecVersion:   SpecVersion,
 		ID:            id,
 		Type:          typ,
@@ -85,7 +98,11 @@ func BuildEnvelope(ev db.IncomingEvent, occurredAt time.Time) (Envelope, error) 
 			// The peer string the MCP get_messages tool accepts for this chat.
 			"peer": "user:" + strconv.FormatInt(ev.ChatTGID, 10),
 		},
-	}, nil
+	}
+	if routingReason != "" {
+		env.Subject["routing_reason"] = routingReason
+	}
+	return env, nil
 }
 
 // telegramAccountID returns the Telegram account id from a listener event id

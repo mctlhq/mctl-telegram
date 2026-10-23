@@ -178,6 +178,12 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if jobBound(id) && req.ConversationID == 0 {
+		req.ConversationID = id.ConversationID
+	}
+	if !s.enforceBinding(w, r, id, "propose_reply", req.ConversationID, req.JobID, req.Attempt) {
+		return
+	}
 	if req.ConversationID <= 0 {
 		writeJSONError(w, http.StatusBadRequest, "conversation_id required")
 		return
@@ -443,6 +449,12 @@ func (s *Server) handleSaveLead(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if jobBound(id) && req.ConversationID == 0 {
+		req.ConversationID = id.ConversationID
+	}
+	if !s.enforceBinding(w, r, id, "save_lead", req.ConversationID, req.JobID, req.Attempt) {
+		return
+	}
 	if req.ConversationID <= 0 {
 		writeJSONError(w, http.StatusBadRequest, "conversation_id required")
 		return
@@ -524,6 +536,12 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 	var req ownerNotifyRequest
 	if err := decodeStrict(w, r, &req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if jobBound(id) && req.ConversationID == 0 {
+		req.ConversationID = id.ConversationID
+	}
+	if !s.enforceBinding(w, r, id, tool, req.ConversationID, req.JobID, req.Attempt) {
 		return
 	}
 	if strings.TrimSpace(req.Text) == "" {

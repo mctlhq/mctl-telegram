@@ -68,7 +68,7 @@ func TestBuildEnvelope_KindsAndValidation(t *testing.T) {
 		if Publishable(kind) {
 			t.Fatalf("%s must not be published", kind)
 		}
-		if row, ok, err := OutboxBuilder(DefaultStream)(db.IncomingEvent{Kind: kind}, time.Now()); ok || err != nil {
+		if row, ok, err := OutboxBuilder(DefaultStream)(db.IncomingEvent{Kind: kind}, time.Now(), ""); ok || err != nil {
 			t.Fatalf("builder for %s: row=%+v ok=%v err=%v", kind, row, ok, err)
 		}
 	}
@@ -703,5 +703,36 @@ func TestClient_OversizedBulkReplyIsRejected(t *testing.T) {
 	defer c.Close()
 	if _, err := c.XAdd(context.Background(), "s", 10, "k", "v"); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("xadd = %v, want an oversized-reply error", err)
+	}
+}
+
+func TestBuildRoutedEnvelope_ReasonIsClosedAndAdditive(t *testing.T) {
+	at := time.Date(2026, 9, 17, 8, 0, 0, 0, time.UTC)
+
+	// Without a reason the bytes are exactly what they were before routing.
+	const golden = `{"specversion":"mctl.events/v1","id":"telegram:evt:v1:7000001:555:42","type":"telegram.message.created","source":"mctl-telegram","occurred_at":"2026-09-17T08:00:00Z","correlation_id":"telegram:evt:v1:7000001:555:42","subject":{"account_id":"7000001","chat_id":"555","kind":"telegram.message","message_id":"42","peer":"user:555"}}`
+	plain, err := BuildEnvelope(sampleEvent(), at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := plain.Marshal(); raw != golden {
+		t.Fatalf("envelope bytes changed:\n got %s\nwant %s", raw, golden)
+	}
+
+	for _, reason := range []string{db.RoutePolicyDeny, db.RoutePolicyRequireApproval, db.RouteWorkerFailure} {
+		env, err := BuildRoutedEnvelope(sampleEvent(), at, reason)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if env.Subject["routing_reason"] != reason || len(env.Subject) != len(plain.Subject)+1 {
+			t.Fatalf("subject = %v", env.Subject)
+		}
+		env.Subject = plain.Subject
+		if fmt.Sprint(env) != fmt.Sprint(plain) {
+			t.Fatalf("routed envelope differs beyond the subject key: %v", env)
+		}
+	}
+	if _, err := BuildRoutedEnvelope(sampleEvent(), at, "free text reason"); err == nil {
+		t.Fatal("an unknown reason must be rejected")
 	}
 }
