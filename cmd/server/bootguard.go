@@ -80,7 +80,7 @@ func insecureAuth(cfg *config.Config) bool {
 // ENCRYPTION_KEY — the loopback bind is the only thing between it and an
 // exposed admin bypass. Real deployments must set ENV; the intentionality of
 // this gap is pinned by TestCheckBootGuardUnsetEnvOnLoopbackIsIntentionallyAllowed.
-var localEnvNames = []string{"", "local", "local-dev", "localdev", "dev", "development", "test", "ci"}
+var localEnvNames = append([]string{""}, config.LocalTiers...)
 
 // isLocalEnv reports whether env names a local development tier, compared
 // case-insensitively after trimming surrounding whitespace (consistent with

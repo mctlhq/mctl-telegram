@@ -732,11 +732,12 @@ func TestDCFromEnv() bool {
 	return envBool("TG_TEST_DC", false)
 }
 
-// testDCTiers are the ENV values that may run with TG_TEST_DC. Unlike the
-// boot guard's local tiers in cmd/server, the empty string is not one: the
-// production deployment leaves ENV unset, so an empty value proves nothing
-// about the tier.
-var testDCTiers = []string{"local", "local-dev", "localdev", "dev", "development", "test", "ci"}
+// LocalTiers are the ENV values that explicitly name a developer machine or a
+// test tier. cmd/server's boot guard builds its list from this one (adding
+// the empty string), so the two cannot drift. TG_TEST_DC accepts only these:
+// the production deployment leaves ENV unset, so an empty value proves
+// nothing about the tier.
+var LocalTiers = []string{"local", "local-dev", "localdev", "dev", "development", "test", "ci"}
 
 // CheckTestDC refuses TG_TEST_DC=true unless ENV names a local or test tier
 // explicitly, compared case-insensitively. Every process that writes or opens
@@ -751,13 +752,13 @@ func CheckTestDC(cfg *Config) error {
 		return nil
 	}
 	env := strings.TrimSpace(cfg.Environment)
-	for _, name := range testDCTiers {
+	for _, name := range LocalTiers {
 		if strings.EqualFold(env, name) {
 			return nil
 		}
 	}
 	return fmt.Errorf("refusing to start: TG_TEST_DC=true needs ENV set to a local or test tier (%s), got ENV=%q",
-		strings.Join(testDCTiers, ", "), cfg.Environment)
+		strings.Join(LocalTiers, ", "), cfg.Environment)
 }
 
 func envBool(key string, def bool) bool {

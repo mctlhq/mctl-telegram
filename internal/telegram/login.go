@@ -34,6 +34,23 @@ type LoginConfig struct {
 	TestDC bool
 }
 
+// loginClientOptions is the gotd configuration shared by the phone and QR
+// login clients.
+func loginClientOptions(sess *SessionStore, cfg LoginConfig) telegram.Options {
+	return telegram.Options{
+		SessionStorage: sess,
+		DCList:         dcList(cfg.TestDC),
+		Device: telegram.DeviceConfig{
+			DeviceModel:    "MCTL Assistant",
+			SystemVersion:  "Linux",
+			AppVersion:     "1.0",
+			SystemLangCode: "en",
+			LangCode:       "en",
+		},
+		Middlewares: loginMiddlewares(cfg),
+	}
+}
+
 // loginFloodWaitMaxWait bounds a single FLOOD_WAIT sleep on the login client.
 // A genuine flood-wait from Telegram is honoured up to this ceiling; a longer
 // demanded wait surfaces as an error rather than parking the login goroutine
@@ -118,18 +135,7 @@ func Login(
 	}
 
 	sessStore := &SessionStore{UserID: userID, Store: store}
-	client := telegram.NewClient(apiID, apiHash, telegram.Options{
-		SessionStorage: sessStore,
-		DCList:         dcList(cfg.TestDC),
-		Device: telegram.DeviceConfig{
-			DeviceModel:    "MCTL Assistant",
-			SystemVersion:  "Linux",
-			AppVersion:     "1.0",
-			SystemLangCode: "en",
-			LangCode:       "en",
-		},
-		Middlewares: loginMiddlewares(cfg),
-	})
+	client := telegram.NewClient(apiID, apiHash, loginClientOptions(sessStore, cfg))
 
 	authenticator := &interactiveAuthenticator{
 		phone:    phone,

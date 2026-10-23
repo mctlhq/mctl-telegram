@@ -174,6 +174,15 @@ func (p *ClientPool) WithTestDC(on bool) *ClientPool {
 	return p
 }
 
+// clientOptions is the gotd configuration every pooled client starts from.
+func (p *ClientPool) clientOptions(store *SessionStore) telegram.Options {
+	opts := telegram.Options{SessionStorage: store, DCList: dcList(p.testDC)}
+	if p.globalMW != nil {
+		opts.Middlewares = []telegram.Middleware{p.globalMW}
+	}
+	return opts
+}
+
 // WithPeerFloodHook registers fn to be called with the user id each time a
 // call made through Borrow fails with PEER_FLOOD, whoever made it: an MCP
 // tool, the background executor or the agent listener. The server uses it
@@ -394,10 +403,7 @@ func (p *ClientPool) acquire(userID int64) (*entry, error) {
 	}
 
 	store := &SessionStore{UserID: userID, Store: p.Store}
-	opts := telegram.Options{SessionStorage: store, DCList: dcList(p.testDC)}
-	if p.globalMW != nil {
-		opts.Middlewares = []telegram.Middleware{p.globalMW}
-	}
+	opts := p.clientOptions(store)
 	// Agent-enabled users get an UpdateHandler and a custom run callback so
 	// incoming updates flow through the listener instead of being dropped.
 	var handler telegram.UpdateHandler
