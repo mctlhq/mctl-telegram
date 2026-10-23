@@ -189,6 +189,13 @@ func classifyToolResultReason(res *mcplib.CallToolResult) string {
 		return ReasonTelegramError
 	}
 
+	// The PEER_FLOOD write pause is Telegram's verdict, not this server's
+	// budget, even though audit.RateLimiter enforces it.
+	// Contains, not HasPrefix: tools wrap the refusal ("edit blocked: ...").
+	if strings.Contains(text, peerFloodHoldRefusal) {
+		return ReasonTelegramError
+	}
+
 	// Rate limiting (audit.RateLimiter's per-peer send cap).
 	if strings.Contains(text, "rate limit reached") {
 		return ReasonRateLimited

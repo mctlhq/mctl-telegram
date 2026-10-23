@@ -31,6 +31,9 @@ type RateLimiter struct {
 	// Random per process: buckets are in memory and die with it anyway.
 	peerSecret []byte
 	lastSweep  time.Time
+	// writeHolds maps an internal user id to the end of its write pause
+	// (HoldWrites). In memory like the buckets: a restart lifts the pause.
+	writeHolds map[int64]time.Time
 }
 
 type bucket struct {
@@ -53,7 +56,43 @@ func NewRateLimiter(perMin int) *RateLimiter {
 		now:        time.Now,
 		buckets:    make(map[string]*bucket),
 		peerSecret: newPeerSecret(),
+		writeHolds: make(map[int64]time.Time),
 	}
+}
+
+// PeerFloodHold is how long writes from an account stay paused after
+// Telegram answers one of its calls with PEER_FLOOD (#849). PEER_FLOOD is
+// the anti-spam system's verdict on the account and carries no wait of its
+// own; continuing to write is what turns a restriction into a ban, so the
+// server stops for a fixed hour rather than guessing when it lifts.
+const PeerFloodHold = time.Hour
+
+// HoldWrites pauses writes from userID for d. A later hold extends an
+// earlier one and never shortens it.
+func (r *RateLimiter) HoldWrites(userID int64, d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	until := r.now().Add(d)
+	if until.After(r.writeHolds[userID]) {
+		r.writeHolds[userID] = until
+	}
+}
+
+// WriteHold returns how long writes from userID stay paused, or 0 when
+// they are not.
+func (r *RateLimiter) WriteHold(userID int64) time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	until, ok := r.writeHolds[userID]
+	if !ok {
+		return 0
+	}
+	left := until.Sub(r.now())
+	if left <= 0 {
+		delete(r.writeHolds, userID)
+		return 0
+	}
+	return left
 }
 
 func newPeerSecret() []byte {
@@ -81,6 +120,11 @@ func (r *RateLimiter) sweep(now time.Time) {
 		return
 	}
 	r.lastSweep = now
+	for u, until := range r.writeHolds {
+		if !now.Before(until) {
+			delete(r.writeHolds, u)
+		}
+	}
 	for k, b := range r.buckets {
 		b.refill(now)
 		if b.tokens >= b.max {
