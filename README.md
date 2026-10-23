@@ -9,9 +9,12 @@
 A remote MCP server that gives AI assistants access to a user's own
 Telegram account: read dialogs and messages, search, and send only when
 the user has explicitly allowed it. It runs in production at
-`https://tg.mctl.ai/mcp` and works with ChatGPT, Claude, Cursor and any
-MCP client, including agent platforms that connect on behalf of their
-users.
+`https://tg.mctl.ai/mcp`. Claude is the client we test against —
+claude.ai, the desktop and mobile apps, and Claude Code — and ChatGPT can
+add it by URL. It is a standard remote MCP server with OAuth, so other
+clients such as Cursor, VS Code and Windsurf may work, but they are not
+yet tested against tg.mctl.ai. Agent platforms can also connect on behalf
+of their users.
 
 Written in Go on [`gotd/td`](https://github.com/gotd/td) (MTProto) and
 [`mcp-go`](https://github.com/mark3labs/mcp-go), with its own OAuth 2.1
@@ -41,7 +44,7 @@ before v1.0.
 
 ```mermaid
 flowchart LR
-    C["MCP client<br/>ChatGPT, Claude, Cursor,<br/>agent platform"]
+    C["MCP client<br/>Claude, ChatGPT,<br/>agent platform"]
     subgraph S["mctl-telegram (one Go service)"]
         AS["OAuth 2.1 server<br/>DCR, CIMD, PKCE,<br/>refresh rotation"]
         M["MCP endpoint /mcp<br/>37 tools"]
@@ -137,10 +140,16 @@ deployment boundary.**
 
 - **Claude:** Settings → Connectors → Add custom connector, URL
   `https://tg.mctl.ai/mcp`. Sign in with Telegram when the browser opens.
-- **ChatGPT:** enable Developer Mode, then add a custom connector with the
-  same URL and OAuth. The service is not in the ChatGPT App Directory.
-- **Cursor and other MCP clients:** use `https://tg.mctl.ai/mcp`; the client
-  discovers OAuth from the well-known metadata.
+- **ChatGPT:** add a custom MCP server by URL in ChatGPT on the web (under
+  Settings → Apps; some plans need Developer Mode turned on first) and
+  choose OAuth. MCTL is not listed in the ChatGPT app directory; the by-URL
+  path is the supported one.
+- **Cursor, VS Code, Windsurf and others** (not yet tested): use
+  `https://tg.mctl.ai/mcp`; the client discovers OAuth from the well-known
+  metadata. None of these has a verified sign-in against tg.mctl.ai, so
+  treat this as a starting point. A `cursor://` redirect is refused today
+  (only `https` and loopback redirects are accepted), so Cursor sign-in may
+  fail.
 - **Agent platforms:** register with Dynamic Client Registration from a
   callback host on the allowlist, or publish a Client ID Metadata Document
   on your own domain and ask for your host to be added. The integration

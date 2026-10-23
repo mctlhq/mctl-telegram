@@ -1,10 +1,10 @@
 # LLMS.md — mctl-telegram MCP Remote Server Overview
 
-> `mctl-telegram` is a hosted Go MCP (Model Context Protocol) remote server exposing user-authorized Telegram account access (via `gotd/td` MTProto) for ChatGPT, Claude.ai, and any MCP client.
+> `mctl-telegram` is a hosted Go MCP (Model Context Protocol) remote server exposing user-authorized Telegram account access (via `gotd/td` MTProto) for Claude (claude.ai, the desktop and mobile apps, and Claude Code) and for ChatGPT by URL. Other MCP clients such as Cursor, VS Code and Windsurf are not yet tested against tg.mctl.ai.
 
 ## Core Capabilities
 
-- **Hosted URL**: `https://tg.mctl.ai/mcp` (OAuth 2.1 PKCE + Dynamic Client Registration). Connect from ChatGPT (Developer Mode custom connector; not an App Directory listing), Claude.ai, Cursor, or any MCP client.
+- **Hosted URL**: `https://tg.mctl.ai/mcp` (OAuth 2.1 PKCE + Dynamic Client Registration). Claude is the client we test against: add it as a custom connector. ChatGPT can add it by URL (not an app directory listing). Cursor, VS Code and Windsurf are not yet tested against tg.mctl.ai.
 - **Read-only by default**: a newly connected account has `send_enabled=false`; write tools return previews until the owner opts in with `set_send_consent`.
 - **Data Minimization & Encryption**: Message bodies are fetched live for user-requested tool calls and are not persisted for ordinary MCP use (Communication Agent accounts store encrypted content, see `/privacy`). MTProto session blobs are encrypted at rest with AES-256-GCM under per-user HKDF keys.
 - **Archived submission packets** (historical): `docs/archive/chatgpt-submission-package.md`, `docs/archive/claude-connector-submission.md`.
