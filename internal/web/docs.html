@@ -17,15 +17,16 @@
     </div>
     <h1>Developer <span class="accent">reference</span></h1>
     <p class="lead">
-      Tool catalogue, scopes, storage schema, and release checklist for the MCTL MCP connector.
+      Connection details, tool catalogue, scopes, and account controls for the MCTL MCP server.
     </p>
     <p class="muted">
       On this page:
-      <a href="#setup">connector</a> ·
+      <a href="#setup">connect</a> ·
       <a href="#tools">tools</a> ·
       <a href="#scopes">scopes</a> ·
       <a href="#storage">storage</a> ·
       <a href="#controls">controls</a> ·
+      <a href="#smoke">smoke test</a> ·
       <a href="#local-bridge">Local Bridge</a>
     </p>
   </section>
@@ -33,47 +34,24 @@
   <!-- ============ 01 Connector setup ============ -->
   <section id="setup">
     <div class="section-head">
-      <h2>Add as a custom connector (ChatGPT, Claude, or any MCP client)</h2>
+      <h2>Connect a client</h2>
     </div>
     <ol class="steps">
-      <li><strong>ChatGPT:</strong> open <em>Settings &#8594; Apps</em> with Developer Mode on, create an app, then set the MCP server URL to <code class="url">{{.MCPURL}}</code>. See <a href="/#chatgpt">landing &#8594; Connect in ChatGPT</a> for the full flow.</li>
-      <li><strong>Claude:</strong> open <a href="https://claude.ai/customize/connectors" target="_blank" rel="noopener">claude.ai &#8594; Customize &#8594; Connectors</a> and click <em>Add custom connector</em>.</li>
-      <li>Authentication: <strong>OAuth</strong>. Clients discover this server as its own authorization server via <a class="url" href="{{.WellKnownURL}}" target="_blank" rel="noopener">{{.WellKnownURL}}</a> and <code class="url">{{.AuthServer}}/.well-known/oauth-authorization-server</code>.</li>
-      <li>Complete the Telegram sign-in flow in your browser when prompted (phone &#8594; SMS code &#8594; 2FA if enabled).</li>
-      <li>Message access (read/send) is granted by the encrypted MTProto session stored on this server. If the account is not yet provisioned, the connect screen explains the next step.</li>
+      <li><strong>Claude</strong> (claude.ai, desktop, mobile): <a href="https://claude.ai/customize/connectors" target="_blank" rel="noopener">Customize &#8594; Connectors</a> &#8594; <em>Add custom connector</em>, MCP server URL <code class="url">{{.MCPURL}}</code>, default sign-in settings. Team and Enterprise Owners add it under <em>Organization settings &#8594; Connectors</em>. Step by step: <a href="/#claude">Connect in Claude</a>.</li>
+      <li><strong>Claude Code:</strong> <code>claude mcp add --transport http --scope user mctl {{.MCPURL}}</code>, then <code>/mcp</code> to sign in.</li>
+      <li id="chatgpt-setup"><strong>ChatGPT and other clients:</strong> add <code class="url">{{.MCPURL}}</code> as a remote MCP server with OAuth. Per-client notes: <a href="/#connect">Other MCP clients</a>. MCTL is not listed in the ChatGPT app directory; adding it by URL is the supported path. Cursor, VS Code and Windsurf are not yet tested against tg.mctl.ai.</li>
     </ol>
-  </section>
-
-  <section id="chatgpt-setup">
-    <div class="section-head">
-      <h2>ChatGPT Developer Mode setup</h2>
-    </div>
-    <ol class="steps">
-      <li>Enable Developer Mode: ChatGPT &#8594; <em>Settings &#8594; Apps &#8594; Advanced settings</em> (availability depends on your plan).</li>
-      <li>Create an app under <em>Settings &#8594; Apps</em>.</li>
-      <li>Set MCP URL to <code class="url">{{.MCPURL}}</code> and auth to OAuth.</li>
-      <li>Run a read-only smoke test (<code>list_dialogs</code>) before enabling sending.</li>
-      <li>tg.mctl.ai is not listed in the ChatGPT App Directory; this by-URL path is the supported one.</li>
-    </ol>
-  </section>
-
-  <section id="preflight">
-    <div class="section-head">
-      <h2>Deployment pre-flight checklist</h2>
-    </div>
+    <h3>OAuth</h3>
     <ul class="ctrl">
-      <li><strong>Public product pages:</strong> ensure <code>/</code>, <code>/docs</code>, <code>/security</code>, and <code>/privacy</code> are accessible over HTTPS.</li>
-      <li><strong>OAuth discovery:</strong> fetch <code>/.well-known/oauth-protected-resource</code> on your host, then follow the <code>authorization_servers</code> URL it advertises and confirm that server's <code>/.well-known/oauth-authorization-server</code> resolves. In <code>local-jwt</code> mode that is your own host; in <code>shared-hmac</code> mode it is <code>api.mctl.ai</code>.</li>
-      <li><strong>MCP protocol health:</strong> run <code>initialize</code>, list tools, and one read-only tool call with MCP Inspector or ChatGPT Developer Mode.</li>
-      <li><strong>Safety defaults:</strong> new accounts start with <code>send_enabled=false</code>, so sends are previews until the owner opts in; keep <code>ALLOW_SEND=false</code> on deployments that should never deliver (tg.mctl.ai runs with it on).</li>
-      <li><strong>User controls:</strong> verify account disconnect/delete and audit-log endpoints are reachable and documented.</li>
-      <li><strong>Support contact:</strong> <code>support@mctl.ai</code> published on landing and privacy pages.</li>
-      <li><strong>Verified org:</strong> complete individual or business verification in the OpenAI Platform Dashboard before submission.</li>
-      <li><strong>Tool annotations:</strong> document <code>readOnlyHint</code>, <code>openWorldHint</code>, and <code>destructiveHint</code> justifications for each tool in the submission form.</li>
-      <li><strong>Test prompts/responses:</strong> prepare realistic examples for dashboard review (read tools first; send tools only if gates are enabled).</li>
-      <li><strong>Reviewer access:</strong> enable the password-gated reviewer login for OpenAI review, backed by a dedicated pre-provisioned Telegram demo account with sample data and no SMS/2FA blocker.</li>
-      <li><strong>Submission package:</strong> app name, logo, description, privacy policy URL, MCP/tool details, screenshots, and localization.</li>
+      <li><strong>Discovery:</strong> MCTL is its own authorization server. Clients find it through <a class="url" href="{{.WellKnownURL}}" target="_blank" rel="noopener">{{.WellKnownURL}}</a> and <code class="url">{{.AuthServer}}/.well-known/oauth-authorization-server</code>.</li>
+      <li><strong>Client registration:</strong> tg.mctl.ai supports both Client ID Metadata Documents (CIMD — what Claude uses by default) and Dynamic Client Registration, so no client ID or secret has to be entered by hand. A self-hosted deployment advertises CIMD only when it is enabled; <a href="/platforms">/platforms</a> shows this deployment's live setting. Authorization code with PKCE <code>S256</code> only. Platforms that connect many users: see <a href="/platforms">/platforms</a>.</li>
     </ul>
+    <h3 id="first-login">First sign-in</h3>
+    <ol class="steps">
+      <li><strong>Sign in with Telegram</strong> in the browser window your client opens (Telegram's own OpenID Connect login).</li>
+      <li><strong>Permissions:</strong> if the server has no Telegram session for you yet, choose <em>Read only</em> (the default) or <em>Read + send</em>. You can change it later with <code>set_send_consent</code>{{if .ShowManage}} or on the <a href="/telegram/connect/manage">manage</a> page{{end}}.</li>
+      <li><strong>Phone number:</strong> enter it, then the login code Telegram sends to your Telegram app, and your two-step verification password if you use one. The server stores an AES-256-GCM-encrypted MTProto session keyed to your Telegram identity, and the connector is ready.</li>
+    </ol>
   </section>
 
   <!-- ============ 02 Tools ============ -->
@@ -81,87 +59,32 @@
     <div class="section-head">
       <h2>Available tools</h2>
     </div>
+    <p>A connection sees only the tools its scopes allow: <code>tools/list</code> is filtered by the token, and a call to any other tool is refused as an unknown tool. The full surface, with input schemas and <code>readOnlyHint</code>/<code>destructiveHint</code> annotations, is committed as <a href="https://github.com/mctlhq/mctl-telegram/blob/main/docs/tool-descriptors.json" target="_blank" rel="noopener">docs/tool-descriptors.json</a>, and every change to it is announced in <a href="/docs/product-updates">product updates</a>.</p>
     <div class="table-scroll">
     <table class="tbl">
       <thead>
         <tr><th>Tool</th><th>Mode</th><th>Scope required</th><th>Notes</th></tr>
       </thead>
       <tbody>
-        <tr>
-          <td><code>list_dialogs</code></td>
-          <td><span class="pill pill-read">read</span></td>
-          <td><code>telegram:dialogs:read</code></td>
-          <td>Inputs: <code>limit</code> (≤200, default 50), optional <code>query</code>.</td>
-        </tr>
-        <tr>
-          <td><code>get_unread_messages</code></td>
-          <td><span class="pill pill-read">read</span></td>
-          <td><code>telegram:messages:read</code></td>
-          <td>Inputs: optional <code>peer</code>, <code>limit</code> (≤200).</td>
-        </tr>
-        <tr>
-          <td><code>get_messages</code></td>
-          <td><span class="pill pill-read">read</span></td>
-          <td><code>telegram:messages:read</code></td>
-          <td>Full history of a specific peer, not just unread.</td>
-        </tr>
-        <tr>
-          <td><code>search_messages</code></td>
-          <td><span class="pill pill-read">read</span></td>
-          <td><code>telegram:messages:read</code></td>
-          <td>Inputs: <code>query</code>, optional <code>peer</code>, <code>limit</code> (default 20, max 100), <code>min_date</code>/<code>max_date</code> (inclusive UTC bounds, RFC 3339 or plain <code>YYYY-MM-DD</code>) to bound the search to a time window. Results are newest-first.</td>
-        </tr>
-        <tr>
-          <td><code>send_message</code></td>
-          <td><span class="pill pill-write">write</span></td>
-          <td><code>telegram:messages:send</code></td>
-          <td>No mode argument — the gate decides. A real send requires all of: server <code>ALLOW_SEND=true</code> (on for tg.mctl.ai), the <code>telegram:messages:send</code> scope, and per-account <code>send_enabled=true</code> (off for new accounts until the owner opts in). Otherwise it returns a dry-run preview (<code>sent=false</code>, with <code>dry_reason</code>).</td>
-        </tr>
-        <tr>
-          <td><code>pin_message</code></td>
-          <td><span class="pill pill-write">write</span></td>
-          <td><code>telegram:messages:pin</code></td>
-          <td>Inputs: <code>peer</code>, <code>message_id</code>, <code>unpin</code> (bool).</td>
-        </tr>
-        <tr>
-          <td><code>disconnect_telegram_account</code></td>
-          <td><span class="pill pill-write">write</span></td>
-          <td><code>account:manage</code></td>
-          <td>Soft-revokes your session — see <em>Your controls</em>.</td>
-        </tr>
-        <tr>
-          <td><code>delete_telegram_account</code></td>
-          <td><span class="pill pill-write">write</span></td>
-          <td><code>account:manage</code></td>
-          <td>Hard-deletes the encrypted session blob.</td>
-        </tr>
-        <tr>
-          <td><code>set_send_consent</code></td>
-          <td><span class="pill pill-write">write</span></td>
-          <td><code>account:manage</code></td>
-          <td>Owner-only. Enable or disable real sends on <em>your</em> account. No <code>telegram_id</code> argument. This is how Local Bridge sending is turned on; see <a href="/docs/local-bridge/owner">owner controls</a>.</td>
-        </tr>
-        <tr>
-          <td><code>revoke_local_bridge_device</code></td>
-          <td><span class="pill pill-write">write</span></td>
-          <td><code>account:manage</code></td>
-          <td>Owner-only. Revoke one of your Local Bridge devices, denylist its credential lineage, and evict a live daemon connection.</td>
-        </tr>
-        <tr>
-          <td><code>list_telegram_identities</code></td>
-          <td><span class="pill pill-read">read</span></td>
-          <td><code>admin:users</code></td>
-          <td>Admin only. Roster of signed-in users with access tier and session state.</td>
-        </tr>
-        <tr>
-          <td><code>set_telegram_access</code></td>
-          <td><span class="pill pill-write">write</span></td>
-          <td><code>admin:users</code></td>
-          <td>Admin only. Grant/revoke the <code>client</code> tier for a Telegram id.</td>
-        </tr>
+        <tr><td><code>list_dialogs</code></td><td><span class="pill pill-read">read</span></td><td><code>telegram:dialogs:read</code></td><td>Your chats with type, title, username and unread count. <code>limit</code> (default 50, up to 200), optional <code>query</code>.</td></tr>
+        <tr><td><code>get_messages</code></td><td><span class="pill pill-read">read</span></td><td><code>telegram:messages:read</code></td><td>Recent history of one chat, not just unread.</td></tr>
+        <tr><td><code>get_unread_messages</code></td><td><span class="pill pill-read">read</span></td><td><code>telegram:messages:read</code></td><td>Unread messages, optionally for one chat. <code>limit</code> up to 200.</td></tr>
+        <tr><td><code>search_messages</code></td><td><span class="pill pill-read">read</span></td><td><code>telegram:messages:read</code></td><td><code>query</code>, optional <code>peer</code>, <code>limit</code> (default 20, up to 100), <code>min_date</code>/<code>max_date</code> (inclusive UTC, RFC 3339 or <code>YYYY-MM-DD</code>). Newest first.</td></tr>
+        <tr><td><code>prepare_get_media</code>, <code>get_media</code></td><td><span class="pill pill-read">read</span></td><td><code>telegram:messages:read</code></td><td>Inspect a message's media, then download it with the returned <code>confirmation_id</code>.</td></tr>
+        <tr><td><code>send_message</code>, <code>prepare_send_message</code></td><td><span class="pill pill-write">write</span></td><td><code>telegram:messages:send</code></td><td>Send a text message; <code>prepare_send_message</code> snapshots it for confirmation first. No mode argument — the send gate decides: a real send needs <code>ALLOW_SEND=true</code> on the server (on for tg.mctl.ai), the scope, and your own <code>send_enabled=true</code> (a new read-only account has <code>send_enabled=false</code>). Otherwise it returns a preview (<code>sent=false</code> with <code>dry_reason</code>).</td></tr>
+        <tr><td><code>send_media</code></td><td><span class="pill pill-write">write</span></td><td><code>telegram:messages:send</code></td><td>Photo, video, document, animation or voice note with an optional caption. Same send gate.</td></tr>
+        <tr><td><code>edit_message</code>, <code>delete_messages</code>, <code>forward_messages</code>, <code>set_reaction</code></td><td><span class="pill pill-write">write</span></td><td><code>telegram:messages:send</code></td><td>Edit your own message, delete, forward between chats, add or remove a reaction. Same send gate.</td></tr>
+        <tr><td><code>prepare_pin_message</code>, <code>pin_message</code></td><td><span class="pill pill-write">write</span></td><td><code>telegram:messages:pin</code></td><td>Pin or unpin after a confirmation step. Needs pin rights in the chat and the same send gate.</td></tr>
+        <tr><td><code>draft_reply</code>, <code>send_reply</code></td><td><span class="pill pill-write">write</span></td><td><code>telegram:messages:send</code></td><td>Only on connections bound to the restricted <code>core-reply</code> profile. <code>draft_reply</code> sends nothing and returns the exact recipient and text; <code>send_reply</code> takes only the server-issued confirmation and sends once.</td></tr>
+        <tr><td><code>get_my_identity</code>, <code>get_my_send_status</code>, <code>get_my_audit_log</code></td><td><span class="pill pill-read">read</span></td><td>any signed-in connection</td><td>Who you are signed in as, whether a send would really be delivered, and your own audit log.</td></tr>
+        <tr><td><code>set_send_consent</code></td><td><span class="pill pill-write">write</span></td><td><code>account:manage</code></td><td>Turn real sending on or off for your own account.</td></tr>
+        <tr><td><code>get_my_notification_preferences</code>, <code>set_my_notification_preferences</code></td><td><span class="pill pill-read">read</span> <span class="pill pill-write">write</span></td><td><code>account:manage</code></td><td>Product update, maintenance and security notices from the login bot.</td></tr>
+        <tr><td><code>disconnect_telegram_account</code>, <code>delete_telegram_account</code></td><td><span class="pill pill-write">write</span></td><td><code>account:manage</code></td><td>Soft revoke or hard delete — see <a href="#controls">Your controls</a>.</td></tr>
+        <tr><td><code>revoke_local_bridge_device</code></td><td><span class="pill pill-write">write</span></td><td><code>account:manage</code></td><td>Revoke one of your Local Bridge devices and evict a live daemon. See <a href="/docs/local-bridge/owner">owner controls</a>.</td></tr>
       </tbody>
     </table>
     </div>
+    <p class="muted">Operator tools (<code>admin:users</code>, <code>admin:users:read</code>) and broadcast tools (<code>admin:broadcast</code>) are listed in the descriptor file and are never shown to a regular user's connection.</p>
   </section>
 
   <!-- ============ 03 Scopes ============ -->
@@ -170,32 +93,40 @@
       <h2>Scopes and permissions</h2>
     </div>
     <p>
-      Scopes are derived from your Telegram identity. Operators on the admin allowlist
-      (<code>TG_LOGIN_ADMINS</code>) get the full <code>platform-admins</code> set.
-      Everyone else gets the <code>client</code> tier — the <code>telegram:*</code> tool
-      scopes for their <em style="color: var(--text)">own</em> account, without
-      platform-admin capability. When <code>AUTO_APPROVE_CLIENTS</code> is enabled
-      (open registration) every signed-in user is a client automatically; otherwise
-      the client tier comes from the <code>TG_LOGIN_CLIENTS</code> allowlist or an
-      operator grant. An operator can revoke any user with
-      <code>set_telegram_access</code>.
+      Scopes come from your Telegram identity. On tg.mctl.ai registration is open, so every
+      signed-in user is in the <code>client</code> tier (a self-hosted deployment may instead
+      require an operator grant, see below) and gets the scopes below for their
+      <em style="color: var(--text)">own</em> account. A client asks for a subset by naming
+      scopes in the authorization request; omitting <code>scope</code> grants the full
+      entitled set. Administrative scopes cannot be requested.
     </p>
     <div class="table-scroll">
     <table class="tbl">
       <thead>
-        <tr><th>Telegram identity</th><th>Scopes granted</th></tr>
+        <tr><th>Scope</th><th>Grants</th></tr>
       </thead>
       <tbody>
-        <tr><td>Telegram id ∈ <code>TG_LOGIN_ADMINS</code></td><td>all <code>telegram:*</code> scopes plus <code>admin:users</code></td></tr>
-        <tr><td>Telegram id ∈ <code>TG_LOGIN_CLIENTS</code></td><td><code>telegram:*</code> scopes (dialogs/messages read, send, pin) — no <code>admin:users</code></td></tr>
-        <tr><td>Any other authenticated Telegram id</td><td>none — every tool call returns 403 until the operator opts you in</td></tr>
+        <tr><td><code>telegram:dialogs:read</code></td><td>List chats</td></tr>
+        <tr><td><code>telegram:messages:read</code></td><td>Read, search and download media</td></tr>
+        <tr><td><code>telegram:messages:send</code></td><td>Send, edit, delete, forward and react — subject to your own send consent</td></tr>
+        <tr><td><code>telegram:messages:pin</code></td><td>Pin and unpin, through a confirmation step</td></tr>
+        <tr><td><code>account:manage</code></td><td>Your own account: send consent, notifications, Local Bridge devices, disconnect and delete</td></tr>
       </tbody>
     </table>
     </div>
+    <p>
+      An operator can also bind a client to a restricted <strong>tool profile</strong>, which
+      can only remove tools: <code>core-readonly</code> (reads only) or <code>core-reply</code>
+      (reads plus the two-step <code>draft_reply</code>/<code>send_reply</code>). The design is in
+      <a href="https://github.com/mctlhq/mctl-telegram/blob/main/docs/design/core-profiles.md" target="_blank" rel="noopener">docs/design/core-profiles.md</a>.
+    </p>
     <p class="muted" style="margin-top: 16px;">
-      For backward compatibility the server can still be run under
-      <code>AUTH_MODE=shared-hmac-legacy</code>, in which case the original
-      GitHub-group→scope mapping applies. The default mode is <code>local-jwt</code>.
+      Self-hosting: operators on <code>TG_LOGIN_ADMINS</code> also get <code>admin:users</code>
+      (and <code>admin:broadcast</code> when listed in <code>BROADCAST_OPERATORS</code>);
+      <code>TG_LOGIN_LOOKUP_ADMINS</code> get only the read-only <code>admin:users:read</code>.
+      Without <code>AUTO_APPROVE_CLIENTS</code>, the client tier comes from
+      <code>TG_LOGIN_CLIENTS</code> or an operator grant, and an operator can revoke any user
+      with <code>set_telegram_access</code>.
     </p>
   </section>
 
@@ -204,30 +135,12 @@
     <div class="section-head">
       <h2>What we store</h2>
     </div>
-    <div class="table-scroll">
-    <table class="tbl">
-      <thead>
-        <tr><th>Row</th><th>Contents</th><th>Retention</th></tr>
-      </thead>
-      <tbody>
-        <tr>
-          <td><code>users</code></td>
-          <td>telegram_login_id, telegram_username, telegram_display_name (synthetic <code>github_login=tg:&lt;id&gt;</code> kept for legacy joins). Legacy rows may still carry a real <code>github_login</code>.</td>
-          <td>The row is kept after <code>delete_telegram_account</code>, which clears the username, the names and the last-seen time. What stays is the Telegram id that a later sign-in is matched on, the <code>github_login</code> key (and, on legacy rows, a real GitHub login and email), the access tier, the identity source, when the account was created and onboarded, and the time of the delete (<code>account_deleted_at</code>), which stops an authorization code issued before the delete from being exchanged after it.</td>
-        </tr>
-        <tr>
-          <td><code>telegram_accounts<wbr>.session_encrypted</code></td>
-          <td>AES-256-GCM-sealed MTProto session blob, per-user HKDF-derived key.</td>
-          <td>Until you call <code>disconnect</code> (marked revoked) or <code>delete</code> (row removed).</td>
-        </tr>
-        <tr>
-          <td><code>audit_logs</code></td>
-          <td>Tool name, redacted peer reference, status, error. <strong style="color: var(--text)">Never the message body, phone number, or session bytes.</strong></td>
-          <td>Retained for 90 days, then removed by the audit-log sweeper (window configurable via <code>AUDIT_RETENTION_DAYS</code>; set to 0 to keep indefinitely). Ask the operator if you need an earlier purge.</td>
-        </tr>
-      </tbody>
-    </table>
-    </div>
+    <ul class="ctrl">
+      <li><strong>Telegram session:</strong> an AES-256-GCM-sealed MTProto session blob with a per-user HKDF-derived key, kept until you disconnect (marked revoked) or delete (removed).</li>
+      <li><strong>Audit log:</strong> tool name, redacted peer reference, status and error — <strong style="color: var(--text)">never the message body, phone number, or session bytes</strong>. Kept for 90 days by default.</li>
+      <li><strong>Account row:</strong> your Telegram id and access tier. Deleting your account clears your username, names and last-seen time; the id stays so a later sign-in is matched and an authorization code issued before the delete cannot be used after it.</li>
+    </ul>
+    <p>The complete inventory, with every table and its retention, is in the <a href="/privacy">privacy policy</a>.</p>
   </section>
 
   <!-- ============ 05 Controls ============ -->
@@ -260,25 +173,6 @@ curl -s -X POST {{.MCPURL}} \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize",
        "params":{"protocolVersion":"2025-03-26","capabilities":{},
                  "clientInfo":{"name":"smoke","version":"0"}}}'</code></pre>
-  </section>
-
-  <!-- ============ 07 First login ============ -->
-  <section id="first-login">
-    <div class="section-head">
-      <h2>First-time Telegram login</h2>
-    </div>
-    <p>
-      Sign-in via a ChatGPT, Claude, or other MCP connector authenticates you with Telegram OIDC.
-      If the server has no MTProto session for your account yet, the connect flow continues
-      straight into an in-browser <em style="color: var(--text)">"Enable message access"</em>
-      step: enter your phone number, type the login code Telegram sends you, and — if your
-      account uses it — your two-step verification password. The server then persists an
-      AES-256-GCM-encrypted MTProto session keyed to your Telegram identity, and the
-      connector is ready — no operator CLI step required. The bundled
-      <code>mctl-telegram-login</code> CLI remains available for operators as a fallback.
-      Full details in the repo
-      <a href="https://github.com/mctlhq/mctl-telegram#readme" target="_blank" rel="noopener">README</a>.
-    </p>
   </section>
 
   <section id="local-bridge">

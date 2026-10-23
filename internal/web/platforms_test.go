@@ -147,7 +147,7 @@ func TestPerWindow(t *testing.T) {
 }
 
 func TestHumanBytes(t *testing.T) {
-	for n, want := range map[int64]string{0: "no cap", 20 << 20: "20 MiB", 64 << 10: "64 KiB", 1000: "1000 bytes"} {
+	for n, want := range map[int64]string{0: "no cap", 20 << 20: "20 MiB", 64 << 10: "64 KiB", 12_000_000: "12 MB", 16_000_000: "16 MB", 1000: "1000 bytes"} {
 		if got := humanBytes(n); got != want {
 			t.Errorf("humanBytes(%d) = %q, want %q", n, got, want)
 		}

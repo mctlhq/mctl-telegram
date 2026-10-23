@@ -41,7 +41,7 @@
   </section>
 
   <h2>Who this is for</h2>
-  <p>A platform that lets its own users bring a Telegram account into an AI agent: one OAuth client on your side, one Telegram sign-in per user, each user's access confined to their own account. Individual users connecting ChatGPT, Claude or Cursor need none of this page; <a href="/docs">/docs</a> covers them.</p>
+  <p>A platform that lets its own users bring a Telegram account into an AI agent: one OAuth client on your side, one Telegram sign-in per user, each user's access confined to their own account. Individual users connecting Claude or ChatGPT need none of this page; <a href="/#claude">the landing page</a> and <a href="/docs">/docs</a> cover them.</p>
 
   <h2>Admitting your client</h2>
   <p>A platform's host is approved by the operator once. After that, every one of its users connects without further setup on either side. There are two ways in:</p>
@@ -85,8 +85,8 @@
     <thead><tr><th>Scope</th><th>Grants</th></tr></thead>
     <tbody>
       <tr><td><code>telegram:dialogs:read</code></td><td>List chats (<code>list_dialogs</code>)</td></tr>
-      <tr><td><code>telegram:messages:read</code></td><td>Read, search and fetch media (<code>get_messages</code>, <code>get_unread_messages</code>, <code>search_messages</code>, <code>get_media</code>)</td></tr>
-      <tr><td><code>telegram:messages:send</code></td><td>Send messages and media, subject to the user's own consent below</td></tr>
+      <tr><td><code>telegram:messages:read</code></td><td>Read, search and fetch media (<code>get_messages</code>, <code>get_unread_messages</code>, <code>search_messages</code>, <code>prepare_get_media</code>, <code>get_media</code>)</td></tr>
+      <tr><td><code>telegram:messages:send</code></td><td>Send messages and media, edit, delete, forward and react, and the two-step <code>draft_reply</code>/<code>send_reply</code> on <code>core-reply</code> connections, all subject to the user's own consent below</td></tr>
       <tr><td><code>telegram:messages:pin</code></td><td>Pin messages, through a confirmation step</td></tr>
       <tr><td><code>account:manage</code></td><td>The user's own account: send consent, notifications, Local Bridge devices, disconnecting and deleting the account</td></tr>
     </tbody>
@@ -95,9 +95,12 @@
   <ul>
     <li>Always name your scopes. A request that names scopes gets only those the user is entitled to; a request that omits <code>scope</code> gets the user's full entitled set, including send, pin and <code>account:manage</code>. Read the <code>scope</code> in the token response rather than assuming you got what you asked for. Administrative scopes cannot be requested.</li>
     <li><strong>The tool list follows the grant.</strong> <code>tools/list</code> shows only the tools the token's scopes allow, and a call to any other tool is refused as an unknown tool, so a read-only connection never sees the send tools.</li>
-    <li><strong>Every account starts read-only.</strong> A send succeeds only when the scope is granted, the user has turned sending on themselves (with <code>set_send_consent</code>{{if .ShowManage}} or on <code>/telegram/connect/manage</code>{{end}}), and the deployment allows sending{{if .AllowSend}} (it does on this deployment){{else}} (it does not on this deployment){{end}}. With the scope but without the user's consent, or on a deployment that does not allow sending, a send returns a preview with <code>sent=false</code>. Your platform cannot turn sending on for a user.</li>
+    <li><strong>Every account starts read-only.</strong> A send succeeds only when the scope is granted, the user has turned sending on themselves (by choosing <em>Read + send</em> when connecting, with <code>set_send_consent</code>{{if .ShowManage}} or on <code>/telegram/connect/manage</code>{{end}}), and the deployment allows sending{{if .AllowSend}} (it does on this deployment){{else}} (it does not on this deployment){{end}}. With the scope but without the user's consent, or on a deployment that does not allow sending, a send returns a preview with <code>sent=false</code>. Your platform cannot turn sending on for a user.</li>
     <li>Every tool call lands in the user's hash-chained audit log, which they can read and verify. See <a href="/security">/security</a>.</li>
   </ul>
+
+  <h3>Restricted tool profiles</h3>
+  <p>On request, the operator binds your client to a server-side tool profile, which can only remove tools from what the scopes allow and is enforced on every call, not only in <code>tools/list</code>: <code>core-readonly</code> (list, read, unread and search in one named chat, plus the user's own status tools) or <code>core-reply</code> (the same plus a two-step reply: <code>draft_reply</code> returns the exact recipient and text and sends nothing; <code>send_reply</code> takes only the server-issued confirmation). A binding matches your CIMD <code>client_id</code> or a redirect URI; ask at <a href="mailto:support@mctl.ai">support@mctl.ai</a>. Details: <a href="https://github.com/mctlhq/mctl-telegram/blob/main/docs/design/core-profiles.md" target="_blank" rel="noopener">docs/design/core-profiles.md</a>.</p>
 
   <h2>Limits on this deployment</h2>
   <div class="table-scroll">
@@ -151,10 +154,10 @@
   </ul>
 
   <h2>Bring your own session: Local Bridge</h2>
-  <p>For users or companies that will not leave a Telegram session on a hosted server, <a href="/docs/local-bridge">Local Bridge</a> keeps it on the user's machine. The user installs <code>mctl-telegram-local</code>, signs in to Telegram locally and activates the device in a browser; your platform keeps the same endpoint and the same OAuth client. The server then relays MCP calls to that machine and sees the payloads in transit, so it is not end-to-end encryption. Local Bridge is in beta: the daemon must be running, and editing, deleting, forwarding, searching and reactions are not yet available in this mode.</p>
+  <p>For users or companies that will not leave a Telegram session on a hosted server, <a href="/docs/local-bridge">Local Bridge</a> keeps it on the user's machine. The user installs <code>mctl-telegram-local</code>, signs in to Telegram locally and activates the device in a browser; your platform keeps the same endpoint and the same OAuth client. The server then relays MCP calls to that machine and sees the payloads in transit, so it is not end-to-end encryption. Local Bridge is in beta: the daemon must be running, and editing, deleting, forwarding, searching, reactions and the <code>draft_reply</code>/<code>send_reply</code> pair are not yet available in this mode.</p>
 
   <h2>Who runs this service</h2>
-  <p>MCTL is an independent open-source project, not affiliated with Telegram, OpenAI or Anthropic. The source is at <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a>.</p>
+  <p>MCTL is an independent open-source project, not affiliated with Telegram, Anthropic or OpenAI. The source is at <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a>.</p>
   <div class="pending"><strong>To be published:</strong> the operating legal entity, its jurisdiction and governing law, data location, and the list of subprocessors.</div>
 
   <h2>Contact</h2>

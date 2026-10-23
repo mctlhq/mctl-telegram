@@ -1,5 +1,5 @@
 // Package web serves the human-facing landing page that explains how
-// to connect mctl-telegram via ChatGPT Apps, Claude.ai, and other MCP clients.
+// to connect MCTL to Claude, ChatGPT, and other MCP clients.
 package web
 
 import (
@@ -41,27 +41,7 @@ func OGImage() http.HandlerFunc {
 	}
 }
 
-// alignLandingPrivacyClaims keeps the short landing-page copy consistent with
-// the long-form /privacy and /security pages. Ordinary MCP read results are
-// transient, but listener-enabled Communication Agent accounts durably store
-// encrypted message/event and action content. Absolute "message text is never
-// persisted" claims therefore must not reach the rendered page.
-func alignLandingPrivacyClaims(html string) string {
-	return strings.NewReplacer(
-		`<li><strong>Stored on this server:</strong> an AES-256-GCM encrypted Telegram session blob per account, plus audit metadata (tool name, redacted peer reference — never message text).</li>`,
-		`<li><strong>Stored on this server:</strong> an AES-256-GCM encrypted Telegram session blob per account and audit metadata without message text. When Communication Agent is enabled, relevant incoming message/event content and proposed action payloads are also stored encrypted at rest.</li>`,
-		`<li><strong>Not stored:</strong> message bodies, phone numbers, 2FA passwords, or OAuth tokens in logs.</li>`,
-		`<li><strong>Not stored in logs or audit history:</strong> message bodies, phone numbers, 2FA passwords, or OAuth tokens.</li>`,
-		`<li><strong>No message text, phone numbers, or 2FA passwords are ever logged or persisted</strong> — enforced by the slog redaction handler.</li>`,
-		`<li><strong>Message text is never written to logs or audit history.</strong> Communication Agent message and action content is encrypted at rest and retained according to the policy in <a href="/privacy">/privacy</a>.</li>`,
-		`This server stores only an encrypted session blob and audit metadata — see <a href="/privacy">/privacy</a>.`,
-		`For ordinary MCP calls, this server stores an encrypted session blob and audit metadata. Listener-enabled Communication Agent accounts additionally store encrypted message and action content as described in <a href="/privacy">/privacy</a>.`,
-		`<dd>Only an encrypted session blob per account. No message text is ever stored or logged. The audit log records tool names and redacted peer references only.</dd>`,
-		`<dd>An encrypted session blob and metadata are stored per account. When Communication Agent is enabled, relevant incoming messages/events and proposed action payloads are stored encrypted at rest; logs and audit history still exclude message bodies. See <a href="/privacy">/privacy</a> for retention details.</dd>`,
-	).Replace(html)
-}
-
-var landingTmpl = ui.New("landing", alignLandingPrivacyClaims(landingHTML))
+var landingTmpl = ui.New("landing", landingHTML)
 
 // landingData is shared by the landing and docs pages: it embeds the shared
 // chrome data (Title, NavActive, PublicBaseURL) and adds the deployment URLs
@@ -75,7 +55,7 @@ type landingData struct {
 
 // Landing renders the product landing page at PublicBaseURL/.
 // MCPPath is rendered into the page so users see the exact URL
-// to paste into ChatGPT Apps or a custom MCP connector dialog.
+// to paste into a custom connector dialog in Claude or another MCP client.
 //
 // authServer is the issuer URL used by the OAuth flow. For the Telegram-native
 // auth model this is the same as publicBaseURL — mctl-telegram is its own
