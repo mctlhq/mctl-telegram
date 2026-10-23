@@ -43,6 +43,36 @@ func TestScrubText(t *testing.T) {
 			want: "telegram client failed: context deadline exceeded",
 		},
 		{
+			name: "redacts a bare username in resolve %q",
+			in:   `peer "@alice_telegram" is not in your dialog list: resolve "alice_telegram": rpc error code 400: USERNAME_NOT_OCCUPIED`,
+			want: `peer "[redacted]" is not in your dialog list: resolve "[redacted]": rpc error code 400: USERNAME_NOT_OCCUPIED`,
+		},
+		{
+			name: "redacts a bare username passed without @",
+			in:   `peer "bob_handle" not found in dialogs`,
+			want: `peer "[redacted]" not found in dialogs`,
+		},
+		{
+			name: "redacts the typed peer in every telegram error shape",
+			in:   `could not resolve "carol_x"; cannot build InputPeer for "user:42"; unrecognized peer format: "dana?"`,
+			want: `could not resolve "[redacted]"; cannot build InputPeer for "[redacted]"; unrecognized peer format: "[redacted]"`,
+		},
+		{
+			name: "redacts a short numeric channel id in a peer position",
+			in:   `peer "channel:12345" could not be accessed (CHANNEL_INVALID)`,
+			want: `peer "[redacted]" could not be accessed (CHANNEL_INVALID)`,
+		},
+		{
+			name: "handles escaped quotes inside the value",
+			in:   `peer "a\"b_handle" not found`,
+			want: `peer "[redacted]" not found`,
+		},
+		{
+			name: "leaves quoted non-peer text alone",
+			in:   `call list_dialogs and pass an id (e.g. "channel:<id>")`,
+			want: `call list_dialogs and pass an id (e.g. "channel:<id>")`,
+		},
+		{
 			name: "redacts multiple identifiers",
 			in:   `@bobby and @carol_x both failed`,
 			want: `[redacted] and [redacted] both failed`,
