@@ -218,15 +218,15 @@
       <span class="status-dot" aria-hidden="true"></span>
       <span>Remote MCP Server · tg.mctl.ai</span>
     </div>
-    <h1>Your authorized Telegram account,<br><span class="accent">inside your AI assistant</span></h1>
+    <h1>Your authorized Telegram account,<br><span class="accent">inside Claude</span></h1>
     <p class="lead">
-      Add tg.mctl.ai as a custom connector in ChatGPT (Developer Mode), Claude, Cursor, or any MCP client. Summarise chats, search messages, and draft replies — after OAuth sign-in to the Telegram account you own and control. New accounts start read-only; you turn sending on yourself.
+      Add tg.mctl.ai as a custom connector in Claude — on the web, in the desktop and mobile apps, or in Claude Code — and ask Claude to summarise chats, search messages, and draft replies in the Telegram account you own. ChatGPT can add it by URL too; other MCP clients are not yet tested. New accounts start read-only unless you choose <em>Read + send</em> when you connect.
     </p>
     <div class="cta-row">
-      <a class="cta-btn" href="#chatgpt">Connect in ChatGPT</a>
-      <a class="btn-secondary" href="https://claude.ai/customize/connectors">Add to Claude</a>
+      <a class="cta-btn" href="#claude">Connect in Claude</a>
+      <a class="btn-secondary" href="https://claude.ai/customize/connectors" target="_blank" rel="noopener">Open Claude connectors</a>
       <button class="btn-secondary" type="button" id="copy-mcp-url" data-url="{{.MCPURL}}">Copy MCP URL</button>
-      <a href="/docs#preflight">See the docs</a>
+      <a href="/docs#setup">See the docs</a>
     </div>
     <p class="muted">
       <a href="/privacy">Privacy policy</a> · <a href="/security">Security model</a> ·
@@ -244,12 +244,12 @@
       <div class="use-card">
         <span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
         <h3>Summarise unread chats</h3>
-        <p>Ask your assistant what you missed while you were away. Get a digest of any chat, group, or channel without opening Telegram.</p>
+        <p>Ask Claude what you missed while you were away. Get a digest of any chat, group, or channel without opening Telegram.</p>
       </div>
       <div class="use-card">
         <span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></span>
         <h3>Draft and review messages</h3>
-        <p>Let your assistant write or check a reply before you send. Review tone, catch errors, or translate — then send when ready.</p>
+        <p>Let Claude write or check a reply before it goes out. Review tone, catch errors, or translate — nothing is sent until you allow sending.</p>
       </div>
       <div class="use-card">
         <span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
@@ -269,7 +269,7 @@
       <div class="use-card">
         <span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17z"/></svg></span>
         <h3>Pin what matters</h3>
-        <p>Ask your assistant to pin a key message in a chat (requires admin rights in groups) so the important thing stays at the top where everyone sees it.</p>
+        <p>Ask Claude to pin a key message so it stays at the top for everyone in the chat. It asks you to confirm first, needs sending turned on, and needs admin rights in groups.</p>
       </div>
     </div>
   </section>
@@ -281,8 +281,8 @@
     </div>
     <div class="flow-diagram">
       <div class="flow-node">
-        <span class="node-name">Your AI client</span>
-        <span class="node-label">Claude, ChatGPT…</span>
+        <span class="node-name">Claude</span>
+        <span class="node-label">or another MCP client</span>
       </div>
       <span class="flow-arrow"><svg viewBox="0 0 32 16" width="32" height="14" fill="none" aria-hidden="true"><line x1="0" y1="7" x2="22" y2="7" stroke="currentColor" stroke-width="1.5"/><polyline points="17,2 23,7 17,12" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
       <div class="flow-node">
@@ -296,25 +296,31 @@
       </div>
     </div>
     <ol class="steps">
-      <li>You authorise with Telegram sign-in. MCTL stores an encrypted MTProto session on your behalf.</li>
-      <li>When you prompt your assistant, it calls the MCP tools on this server over an OAuth-authenticated connection.</li>
-      <li>MCTL makes MTProto calls to Telegram, formats the result, and returns it to your assistant.</li>
+      <li>You sign in with Telegram and, once, give MCTL message access. MCTL stores an encrypted MTProto session on your behalf.</li>
+      <li>When you ask Claude about your chats, it calls the MCP tools on this server over an OAuth-authenticated connection.</li>
+      <li>MCTL makes MTProto calls to Telegram, formats the result, and returns it to Claude.</li>
     </ol>
   </section>
 
-  <!-- ============ ChatGPT Apps ============ -->
-  <section id="chatgpt">
+  <!-- ============ Claude ============ -->
+  <section id="claude">
     <div class="section-head">
-      <h2>Connect in ChatGPT</h2>
+      <h2>Connect in Claude</h2>
     </div>
     <ol class="steps">
-      <li>Open ChatGPT &#8594; <strong>Settings &#8594; Apps</strong>, enable <em>Developer Mode</em>, and create a new app (custom connector). This is not an App Directory listing; the connector is added by URL.</li>
-      <li>Set the MCP server URL to <code class="url">{{.MCPURL}}</code>.</li>
-      <li>Authentication: <strong>OAuth</strong>. ChatGPT discovers this server via <a class="url" href="{{.WellKnownURL}}" target="_blank" rel="noopener">{{.WellKnownURL}}</a> and <code class="url">{{.AuthServer}}/.well-known/oauth-authorization-server</code>.</li>
-      <li>Complete the Telegram sign-in flow in your browser when prompted.</li>
-      <li>Test with a read-only tool (<code>list_dialogs</code> or <code>get_unread_messages</code>). Your account starts read-only; real sends need your explicit opt-in (see <a href="/security">send-gate</a>).</li>
-      <li>Review our <a href="/privacy">privacy policy</a> and <a href="/security">security model</a> before connecting your account.</li>
+      <li>On <a href="https://claude.ai" target="_blank" rel="noopener">claude.ai</a> or in the Claude desktop app, open <a href="https://claude.ai/customize/connectors" target="_blank" rel="noopener"><strong>Customize &#8594; Connectors</strong></a> and choose <strong>Add custom connector</strong>.</li>
+      <li>Name it <code>MCTL</code> and set the MCP server URL to <code class="url">{{.MCPURL}}</code>. Keep the default sign-in settings: Claude registers itself with this server, so there is no client ID or secret to enter. Click <strong>Add</strong>.</li>
+      <li>Click <strong>Connect</strong> and sign in with Telegram in the browser window that opens. The first time, MCTL asks for message access: choose <em>Read only</em> (the default) or <em>Read + send</em>, then enter your phone number, the login code Telegram sends to your Telegram app, and your two-step verification password if you use one.</li>
+      <li>In a chat, open the <strong>+</strong> menu &#8594; <strong>Connectors</strong> and make sure MCTL is switched on. Try: <em>&ldquo;What did I miss in my unread Telegram chats today?&rdquo;</em></li>
     </ol>
+    <ul class="ctrl">
+      <li><strong>Team and Enterprise:</strong> an Owner adds the connector once in <strong>Organization settings &#8594; Connectors</strong> (<em>Add &#8594; Custom &#8594; Web</em>, same URL). Members then find it under <strong>Customize &#8594; Connectors</strong> and click <strong>Connect</strong>; each member signs in with their own Telegram account.</li>
+      <li><strong>Mobile:</strong> a connector added on the web or in the desktop app is available in the Claude iOS and Android apps once you are signed in.</li>
+      <li><strong>Free plan:</strong> Claude allows one custom connector on the Free plan.</li>
+      <li><strong>Claude Code:</strong> add it from your terminal, then run <code>/mcp</code> inside Claude Code to sign in:
+<pre><code>claude mcp add --transport http --scope user mctl {{.MCPURL}}</code></pre></li>
+    </ul>
+    <p class="muted">Anthropic's guide: <a href="https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp" target="_blank" rel="noopener">Get started with custom connectors using remote MCP</a>.</p>
   </section>
 
   <!-- ============ Other clients ============ -->
@@ -322,12 +328,15 @@
     <div class="section-head">
       <h2>Other MCP clients</h2>
     </div>
-    <ol class="steps">
-      <li><strong>Any client:</strong> copy the MCP URL <code class="url">{{.MCPURL}}</code> and add it as a custom connector. Authentication is <em>OAuth</em> — you sign in with Telegram once during setup.</li>
-      <li><strong>Claude:</strong> open <a href="https://claude.ai/customize/connectors">Connectors settings</a>, choose <em>Add custom connector</em>, and paste the MCP URL.</li>
-      <li><strong>ChatGPT:</strong> the flow above, or <em>Settings &#8594; Connectors</em> on plans that expose it; both add a custom connector by MCP URL. Requires a plan with custom connectors enabled — see OpenAI's <a href="https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt" target="_blank" rel="noopener">Developer Mode &amp; MCP apps guide</a>.</li>
-      <li><strong>Cursor, Windsurf, and others:</strong> paste the MCP URL into your client's remote MCP connector settings. See <a href="/docs#chatgpt-setup">/docs</a> for OAuth discovery URLs and a smoke-test command.</li>
-    </ol>
+    <p>MCTL is a standard remote MCP server with OAuth: add <code class="url">{{.MCPURL}}</code>, sign in with Telegram once, and pick read-only or read and send. Claude is the client we test against; the clients marked <em>not yet tested</em> below have no verified sign-in against tg.mctl.ai, so treat their snippets as a starting point.</p>
+    <ul class="ctrl">
+      <li id="chatgpt"><strong>ChatGPT:</strong> add a custom MCP server by URL in ChatGPT on the web (under <em>Settings &#8594; Apps</em>; some plans need <em>Developer Mode</em> turned on first) and choose <strong>OAuth</strong>. Which plans can add custom servers is set by OpenAI — see their <a href="https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt" target="_blank" rel="noopener">Developer Mode &amp; MCP apps guide</a>. MCTL is not listed in the ChatGPT app directory; the by-URL path is the supported one.</li>
+      <li><strong>Cursor</strong> (not yet tested)<strong>:</strong> add to <code>~/.cursor/mcp.json</code>, then sign in when Cursor prompts. A <code>cursor://</code> redirect is refused today (only <code>https</code> and loopback redirects are accepted), so sign-in may fail:
+<pre><code>{ "mcpServers": { "mctl": { "url": "{{.MCPURL}}" } } }</code></pre></li>
+      <li><strong>VS Code</strong> (not yet tested)<strong>:</strong> run <em>MCP: Add Server &#8594; HTTP</em>, or add to <code>.vscode/mcp.json</code>:
+<pre><code>{ "servers": { "mctl": { "type": "http", "url": "{{.MCPURL}}" } } }</code></pre></li>
+      <li><strong>Windsurf and others</strong> (not yet tested)<strong>:</strong> paste the MCP URL into the client's remote MCP server settings. OAuth discovery URLs and a smoke-test command are in <a href="/docs#setup">/docs</a>.</li>
+    </ul>
   </section>
 
   <!-- ============ Data at a glance ============ -->
@@ -337,10 +346,10 @@
     </div>
     <div class="trust-card">
       <ul>
-        <li><strong>Stored on this server:</strong> an AES-256-GCM encrypted Telegram session blob per account, plus audit metadata (tool name, redacted peer reference — never message text).</li>
-        <li><strong>Not stored:</strong> message bodies, phone numbers, 2FA passwords, or OAuth tokens in logs.</li>
-        <li><strong>Through ChatGPT:</strong> your prompts, tool arguments, and tool results pass through the ChatGPT client to reach this server; ChatGPT's own data practices apply to that traffic.</li>
-        <li><strong>Your controls:</strong> disconnect or delete your account at any time via MCP tools or the HTTP API. Full inventory in our <a href="/privacy">privacy policy</a>.</li>
+        <li><strong>Stored on this server:</strong> an AES-256-GCM encrypted Telegram session blob per account and audit metadata without message text. When Communication Agent is enabled, relevant incoming message/event content and proposed action payloads are also stored encrypted at rest.</li>
+        <li><strong>Not stored in logs or audit history:</strong> message bodies, phone numbers, 2FA passwords, or OAuth tokens.</li>
+        <li><strong>Through your AI assistant:</strong> your prompts, tool arguments, and tool results pass through the assistant to reach this server. The assistant's provider (Anthropic for Claude, OpenAI for ChatGPT) handles that traffic under its own policies.</li>
+        <li><strong>Your controls:</strong> disconnect or delete your account at any time via MCP tools or the HTTP API{{if .ShowManage}}, or on the <a href="/telegram/connect/manage">manage</a> page{{end}}. Full inventory in our <a href="/privacy">privacy policy</a>.</li>
       </ul>
     </div>
   </section>
@@ -354,7 +363,7 @@
       <p>MCTL holds a server-side Telegram session on your behalf. Here is exactly what that means:</p>
       <ul>
         <li><strong>Sessions are AES-256-GCM encrypted at rest</strong> with per-user keys derived via HKDF-SHA256.</li>
-        <li><strong>No message text, phone numbers, or 2FA passwords are ever logged or persisted</strong> — enforced by the slog redaction handler.</li>
+        <li><strong>Message text is never written to logs or audit history.</strong> Communication Agent message and action content is encrypted at rest and retained according to the policy in <a href="/privacy">/privacy</a>.</li>
         <li><strong>You can disconnect (soft revoke) or delete (hard delete) your session at any time</strong> using the MCP tools or the API.</li>
       </ul>
       <p>MCP endpoint: <code class="url">{{.MCPURL}}</code><br>
@@ -375,8 +384,8 @@
     <div class="trust-card">
       <p>
         <strong>Local Bridge</strong> (beta) is the self-service path where the Telegram session
-        stays on a machine you control and tg.mctl.ai acts only as a relay. It is not the ChatGPT
-        App install path. You need a machine that stays on. Activation is self-service.
+        stays on a machine you control and tg.mctl.ai acts only as a relay. It is not the standard
+        connector install path. You need a machine that stays on. Activation is self-service.
       </p>
       <ol class="steps">
         <li><code>init</code>, then <code>login --phone +…</code></li>
@@ -400,27 +409,27 @@
     <dl class="faq-list">
       <div class="faq-item">
         <dt>Which AI assistants does this work with?</dt>
-        <dd>Any client that supports remote MCP connectors — Claude, ChatGPT, Cursor, Windsurf, and others. It is a standard OAuth-authenticated MCP server, so it is not tied to a single vendor.</dd>
+        <dd>Claude first — claude.ai, the desktop and mobile apps, and Claude Code — and ChatGPT by URL. It is a standard remote MCP server with OAuth, so other clients such as Cursor, VS Code and Windsurf may work, but they are not yet tested against tg.mctl.ai.</dd>
       </div>
       <div class="faq-item">
         <dt>Is this an official Telegram app?</dt>
-        <dd>No. MCTL is an independent project, not affiliated with or endorsed by Telegram, OpenAI or Anthropic. It operates only on the Telegram account you explicitly connect, and you remain responsible for following Telegram's terms.</dd>
+        <dd>No. MCTL is an independent project, not affiliated with or endorsed by Telegram, Anthropic or OpenAI. It operates only on the Telegram account you explicitly connect, and you remain responsible for following Telegram's terms.</dd>
       </div>
       <div class="faq-item">
         <dt>Can it send messages on my behalf?</dt>
-        <dd>Only if you explicitly opt in. A newly connected account has sending off (<code>send_enabled=false</code>), so <code>send_message</code> returns a preview (<code>sent=false</code>) instead of delivering. You turn sending on with <code>set_send_consent</code>{{if .ShowManage}} or the <a href="/telegram/connect/manage">manage</a> page{{end}}; a real send also needs the <code>telegram:messages:send</code> scope and the operator-level <code>ALLOW_SEND</code> flag (on for tg.mctl.ai). There is no mode argument to bypass the gate.</dd>
+        <dd>Only if you allow it. When you connect, MCTL asks whether to give <em>Read only</em> (the default) or <em>Read + send</em> access. With sending off (<code>send_enabled=false</code>), <code>send_message</code> and <code>send_media</code> return a preview (<code>sent=false</code>) instead of delivering, and the other write tools (edit, delete, forward, react, pin) refuse with an error. You can change your choice later with <code>set_send_consent</code>{{if .ShowManage}} or the <a href="/telegram/connect/manage">manage</a> page{{end}}. A real send also needs the <code>telegram:messages:send</code> scope and the operator-level <code>ALLOW_SEND</code> flag (on for tg.mctl.ai). There is no mode argument to bypass the gate.</dd>
       </div>
       <div class="faq-item">
-        <dt>What data does ChatGPT see?</dt>
-        <dd>Your conversation prompts, the tool arguments ChatGPT sends (e.g. peer, message text for drafts), and the tool results this server returns. That traffic is handled by ChatGPT under OpenAI's policies. This server stores only an encrypted session blob and audit metadata — see <a href="/privacy">/privacy</a>.</dd>
+        <dt>What does my AI assistant see?</dt>
+        <dd>Your prompts, the tool arguments the assistant sends (for example a chat name, or the text of a draft), and the tool results this server returns. That traffic is handled by the assistant's provider under its own policies. For ordinary MCP calls, this server stores an encrypted session blob and audit metadata. Listener-enabled Communication Agent accounts additionally store encrypted message and action content as described in <a href="/privacy">/privacy</a>.</dd>
       </div>
       <div class="faq-item">
         <dt>What data does MCTL store?</dt>
-        <dd>Only an encrypted session blob per account. No message text is ever stored or logged. The audit log records tool names and redacted peer references only.</dd>
+        <dd>An encrypted session blob and metadata are stored per account. When Communication Agent is enabled, relevant incoming messages/events and proposed action payloads are stored encrypted at rest; logs and audit history still exclude message bodies. See <a href="/privacy">/privacy</a> for retention details.</dd>
       </div>
       <div class="faq-item">
         <dt>How do I revoke access?</dt>
-        <dd>Call the disconnect_telegram_account MCP tool (soft revoke, keeps row) or delete_telegram_account (hard delete, removes all your data) from a connection granted account:manage, or disconnect on the manage page after signing in with Telegram. You can also revoke from Telegram's side: Settings → Devices.</dd>
+        <dd>Remove the connector in Claude (<em>Customize &#8594; Connectors</em>) or your other client to stop it calling this server. To end the Telegram session itself, call <code>disconnect_telegram_account</code> (soft revoke, keeps the row) or <code>delete_telegram_account</code> (hard delete: removes the encrypted session and stored data, keeps only your Telegram id, tier and deletion time — see <a href="/privacy">/privacy</a>) from a connection granted <code>account:manage</code>{{if .ShowManage}}, or disconnect on the <a href="/telegram/connect/manage">manage</a> page after signing in with Telegram{{end}}. You can also revoke from Telegram's side: Settings &#8594; Devices.</dd>
       </div>
       <div class="faq-item">
         <dt>Is this open source?</dt>
