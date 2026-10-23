@@ -140,12 +140,14 @@ deployment boundary.**
 
 ### Hosted endpoint (`tg.mctl.ai`)
 
-- **Claude:** Settings → Connectors → Add custom connector, URL
-  `https://tg.mctl.ai/mcp`. Sign in with Telegram when the browser opens.
-- **ChatGPT:** add a custom MCP server by URL in ChatGPT on the web (under
-  Settings → Apps; some plans need Developer Mode turned on first) and
-  choose OAuth. MCTL is not listed in the ChatGPT app directory; the by-URL
-  path is the supported one.
+- **Claude:** [Customize → Connectors](https://claude.ai/new#customize/connectors/yours)
+  → Add custom connector, name `MCTL Assistant`, URL `https://tg.mctl.ai/mcp`.
+  Sign in with Telegram when the browser opens.
+- **ChatGPT:** on the web, [Plugins → Personal](https://chatgpt.com/plugins?directoryTab=personal)
+  → Add → Add custom MCP server: name `MCTL Assistant`, Server URL
+  `https://tg.mctl.ai/mcp`, authentication OAuth, then Create as a plugin.
+  MCTL is not listed in the public plugin directory; adding it as your own
+  plugin is the supported path.
 - **Cursor, VS Code, Windsurf and others** (not yet tested): use
   `https://tg.mctl.ai/mcp`; the client discovers OAuth from the well-known
   metadata. None of these has a verified sign-in against tg.mctl.ai, so

@@ -106,7 +106,7 @@ func TestPublicPagesSmoke(t *testing.T) {
 	// rewrites mailto addresses into /cdn-cgi/l/email-protection blobs on the
 	// live host, so "support@mctl.ai" never appears verbatim. Assert on stable
 	// structural markers instead.
-	for _, must := range []string{`id="chatgpt"`, `id="support"`, "Settings &#8594; Apps"} {
+	for _, must := range []string{`id="chatgpt"`, `id="support"`, "Add custom MCP server"} {
 		if !strings.Contains(landing, must) {
 			t.Fatalf("landing missing %q", must)
 		}

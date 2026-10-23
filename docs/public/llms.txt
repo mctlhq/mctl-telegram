@@ -1,6 +1,6 @@
 # mctl-telegram — Remote MCP Server for Telegram
 
-> `mctl-telegram` is a hosted Remote MCP connector for Telegram. It allows users to securely interact with their Telegram account via ChatGPT (Developer Mode), Claude.ai, or any MCP client with OAuth 2.1 authentication; new accounts are read-only until the owner opts in to sending.
+> `mctl-telegram` is a hosted Remote MCP connector for Telegram. It allows users to securely interact with their Telegram account via ChatGPT (as a custom MCP plugin), Claude.ai, or any MCP client with OAuth 2.1 authentication; new accounts are read-only until the owner opts in to sending.
 
 ## Key Resources & Submissions
 
