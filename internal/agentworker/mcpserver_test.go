@@ -3,6 +3,7 @@ package agentworker
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -524,5 +525,29 @@ func TestToolsRejectFurtherCallsAfterJobCompletes(t *testing.T) {
 				t.Fatalf("%s: API was called (before=%d after=%d) despite the job already being complete", c.name, before, after)
 			}
 		})
+	}
+}
+
+func TestGetEvent_CoalescedTurnReturnsEveryEventInOrder(t *testing.T) {
+	api := &fakeAPI{}
+	ids := []string{"evt:v1:1:2:3", "evt:v1:1:2:4", "evt:v1:1:2:5"}
+	b := &toolBuilder{api: api, job: JobContext{EventID: ids[0], SourceEventIDs: ids}}
+	tool, handler := b.getEvent()
+	res := callTool(t, tool, handler, nil)
+	if res.IsError {
+		t.Fatalf("error result: %+v", res)
+	}
+	if strings.Join(api.getEventCalls, ",") != strings.Join(ids, ",") {
+		t.Fatalf("getEventCalls = %v", api.getEventCalls)
+	}
+	out, ok := res.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("structured content = %T", res.StructuredContent)
+	}
+	if out["event_id"] != ids[0] {
+		t.Fatalf("head fields lost: %v", out)
+	}
+	if evs, _ := out["events"].([]any); len(evs) != 3 {
+		t.Fatalf("events = %v", out["events"])
 	}
 }

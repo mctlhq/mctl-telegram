@@ -258,3 +258,23 @@ func TestClaimJobs_NoSignerNoJobToken(t *testing.T) {
 		t.Fatalf("jobs = %+v", resp.Jobs)
 	}
 }
+
+// A job-bound credential may read every event of its coalesced turn and no
+// other event, not even one of the same account.
+func TestBinding_GetEventAllowsEveryTurnMember(t *testing.T) {
+	f := newBindingFixture(t)
+	member := "evt:v1:bind:a2"
+	memberJob := f.h.seedJob(member, f.convA.ID)
+	if _, err := f.h.store.DB.ExecContext(context.Background(),
+		`UPDATE agent_jobs SET status = 'coalesced', coalesced_into = $1 WHERE id = $2`, f.jobA, memberJob); err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range []string{f.evA, member} {
+		if rec := f.h.doAs(f.jobIdentity, "GET", "/event/"+ev, nil); rec.Code != http.StatusOK {
+			t.Fatalf("event %s: status = %d, body %s", ev, rec.Code, rec.Body.String())
+		}
+	}
+	if rec := f.h.doAs(f.jobIdentity, "GET", "/event/"+f.evB, nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("other event: status = %d", rec.Code)
+	}
+}

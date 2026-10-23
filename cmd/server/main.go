@@ -24,6 +24,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/agent/listener"
 	"github.com/mctlhq/mctl-telegram/internal/agent/profile"
 	"github.com/mctlhq/mctl-telegram/internal/agent/queue"
+	"github.com/mctlhq/mctl-telegram/internal/agent/turn"
 	"github.com/mctlhq/mctl-telegram/internal/agentapi"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
@@ -161,6 +162,15 @@ func main() {
 	} else if cleared > 0 {
 		slog.Info("session ttl exemptions applied",
 			"rows_cleared", cleared, "identities", len(cfg.SessionTTLExemptTGIDs))
+	}
+	// Claim-time turn coalescing (#760 slice 2); off unless AGENT_TURN_QUIET > 0.
+	if cfg.AgentTurnQuiet > 0 {
+		store.WithTurnCoalescing(&turn.Config{
+			QuietMS:   cfg.AgentTurnQuiet.Milliseconds(),
+			MaxWaitMS: cfg.AgentTurnMaxWait.Milliseconds(),
+			MaxMsgs:   cfg.AgentTurnMaxMsgs,
+			MaxBytes:  cfg.AgentTurnMaxBytes,
+		})
 	}
 	// Inbound events for Claude Remote (mctlhq/.github#87): an outbox row is
 	// committed with every published incoming event and relayed to Valkey
@@ -403,7 +413,7 @@ func main() {
 	// Communication-agent queue maintenance: requeues jobs whose claim
 	// outlived AGENT_JOB_VISIBILITY (worker crash recovery) and expires
 	// pending approvals past AGENT_APPROVAL_TTL. No-op on empty tables.
-	go sweeper.AgentJobs(ctx, agentQueue, cfg.AgentJobVisibility, cfg.AgentApprovalTTL)
+	go sweeper.AgentJobs(ctx, agentQueue, cfg.AgentJobVisibility, cfg.AgentApprovalTTL, cfg.AgentUnclaimedRouteAfter)
 	// Communication-agent executor: retries sends stuck in `executing` past
 	// their grace window (crash recovery) and sends guarded-mode actions
 	// that landed as `approved` with no owner to type /mctl approve.

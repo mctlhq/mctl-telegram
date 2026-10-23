@@ -235,3 +235,18 @@ func TestEnvFloat_ParsesValidValue(t *testing.T) {
 		t.Fatalf("got = %v, want 12.5", got)
 	}
 }
+
+func TestEnvConcurrency(t *testing.T) { // T2.4
+	cases := []struct {
+		val     string
+		want    int
+		wantErr bool
+	}{{"", 1, false}, {"3", 3, false}, {"10", 10, false}, {"0", 0, true}, {"11", 0, true}, {"abc", 0, true}}
+	for _, tc := range cases {
+		t.Setenv("AGENT_WORKER_CONCURRENCY", tc.val)
+		got, err := envConcurrency("AGENT_WORKER_CONCURRENCY")
+		if (err != nil) != tc.wantErr || (!tc.wantErr && got != tc.want) {
+			t.Errorf("%q: got %d, %v", tc.val, got, err)
+		}
+	}
+}

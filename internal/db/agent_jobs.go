@@ -38,6 +38,12 @@ const (
 	JobFailed     = "failed"
 	JobDeadLetter = "dead_letter"
 	JobIgnored    = "ignored"
+	// JobCoalesced marks a member of a coalesced turn; the head job
+	// (coalesced_into) carries the turn through the lifecycle. Terminal.
+	JobCoalesced = "coalesced"
+	// JobRouted marks a never-claimed job forwarded to the operator by the
+	// unclaimed sweep. Terminal.
+	JobRouted = "routed"
 )
 
 // AgentJob is one queued unit of agent work, keyed 1:1 to an incoming event.
@@ -63,6 +69,14 @@ type AgentJob struct {
 	CostUSD   sql.NullFloat64
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// TurnID is set when the job was claimed through turn coalescing.
+	TurnID string
+	// CoalescedInto is the head job id of a coalesced member, else 0.
+	CoalescedInto int64
+	// SourceEventIDs lists the event ids of the turn, head first, in arrival
+	// order. Filled by ClaimAgentJobs (coalescing on) and GetAgentJob; for a
+	// job with no members it is just the job's own event.
+	SourceEventIDs []string
 }
 
 // AgentJobBackoff returns the retry delay before attempt n+1 given n failed
@@ -262,11 +276,11 @@ func (s *Store) InsertEventAndEnqueueJob(ctx context.Context, ev IncomingEvent, 
 		convID = conversationID
 	}
 	err = tx.QueryRowContext(ctx,
-		`INSERT INTO agent_jobs(event_id, user_id, conversation_id)
-		 VALUES($1,$2,$3)
+		`INSERT INTO agent_jobs(event_id, user_id, conversation_id, body_bytes)
+		 VALUES($1,$2,$3,$4)
 		 ON CONFLICT (event_id) DO NOTHING
 		 RETURNING id`,
-		ev.EventID, ev.UserID, convID,
+		ev.EventID, ev.UserID, convID, len(ev.Body),
 	).Scan(&jobID)
 	if errors.Is(err, sql.ErrNoRows) {
 		// An orphan job already exists for this event id (only reachable if a
@@ -308,6 +322,9 @@ func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, userID int
 	}
 	if limit <= 0 {
 		limit = 1
+	}
+	if s.turnCfg != nil {
+		return s.claimCoalesced(ctx, replicaID, userID, limit)
 	}
 	now := time.Now().UTC()
 	lock := ""
@@ -352,7 +369,8 @@ func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, userID int
 		  )
 		 RETURNING id, event_id, user_id, conversation_id, status, attempts,
 		           max_attempts, next_run_at, claimed_by, claimed_at, last_error,
-		           result_action_id, result_lead_id, cost_usd, created_at, updated_at`,
+		           result_action_id, result_lead_id, cost_usd, created_at, updated_at,
+		           turn_id, coalesced_into`,
 		JobProcessing, replicaID, now, JobPending, limit, userID,
 	)
 	if err != nil {
@@ -371,7 +389,8 @@ func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, userID int
 		}
 		return jobs[i].ID < jobs[k].ID
 	})
-	for _, j := range jobs {
+	for i, j := range jobs {
+		jobs[i].SourceEventIDs = []string{j.EventID}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO agent_job_attempts(job_id, attempt, started_at) VALUES($1,$2,$3)`,
 			j.ID, j.Attempts, now,
@@ -397,10 +416,13 @@ func scanAgentJobs(rows *sql.Rows) ([]AgentJob, error) {
 			lastErr                      sql.NullString
 			resultActionID, resultLeadID sql.NullInt64
 			costUSD                      sql.NullFloat64
+			turnID                       sql.NullString
+			coalescedInto                sql.NullInt64
 		)
 		if err := rows.Scan(&j.ID, &j.EventID, &j.UserID, &convID, &j.Status, &j.Attempts,
 			&j.MaxAttempts, &j.NextRunAt, &claimedBy, &claimedAt, &lastErr,
-			&resultActionID, &resultLeadID, &costUSD, &j.CreatedAt, &j.UpdatedAt); err != nil {
+			&resultActionID, &resultLeadID, &costUSD, &j.CreatedAt, &j.UpdatedAt,
+			&turnID, &coalescedInto); err != nil {
 			return nil, fmt.Errorf("scan agent job: %w", err)
 		}
 		j.ConversationID = convID.Int64
@@ -409,6 +431,8 @@ func scanAgentJobs(rows *sql.Rows) ([]AgentJob, error) {
 		j.ResultActionID = resultActionID.Int64
 		j.ResultLeadID = resultLeadID.Int64
 		j.CostUSD = costUSD
+		j.TurnID = turnID.String
+		j.CoalescedInto = coalescedInto.Int64
 		if claimedAt.Valid {
 			j.ClaimedAt = claimedAt.Time
 		}
@@ -422,7 +446,8 @@ func (s *Store) GetAgentJob(ctx context.Context, userID, id int64) (*AgentJob, e
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT id, event_id, user_id, conversation_id, status, attempts,
 		        max_attempts, next_run_at, claimed_by, claimed_at, last_error,
-		        result_action_id, result_lead_id, cost_usd, created_at, updated_at
+		        result_action_id, result_lead_id, cost_usd, created_at, updated_at,
+		        turn_id, coalesced_into
 		   FROM agent_jobs WHERE id = $1 AND user_id = $2`,
 		id, userID,
 	)
@@ -436,7 +461,46 @@ func (s *Store) GetAgentJob(ctx context.Context, userID, id int64) (*AgentJob, e
 	if len(jobs) == 0 {
 		return nil, ErrAgentJobNotFound
 	}
+	if err := s.fillSourceEvents(ctx, s.DB, jobs[:1]); err != nil {
+		return nil, err
+	}
 	return &jobs[0], nil
+}
+
+// fillSourceEvents sets SourceEventIDs on each job: its own event first, then
+// the events of the members coalesced into it, in arrival (id) order.
+func (s *Store) fillSourceEvents(ctx context.Context, q rowsQueryer, jobs []AgentJob) error {
+	for i := range jobs {
+		jobs[i].SourceEventIDs = []string{jobs[i].EventID}
+		if jobs[i].CoalescedInto != 0 {
+			continue
+		}
+		rows, err := q.QueryContext(ctx,
+			`SELECT event_id FROM agent_jobs WHERE coalesced_into = $1 AND user_id = $2 ORDER BY id`,
+			jobs[i].ID, jobs[i].UserID)
+		if err != nil {
+			return fmt.Errorf("load turn members: %w", err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan turn member: %w", err)
+			}
+			jobs[i].SourceEventIDs = append(jobs[i].SourceEventIDs, id)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		_ = rows.Close()
+	}
+	return nil
+}
+
+// rowsQueryer is the read half shared by *sql.DB and *sql.Tx.
+type rowsQueryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
 // CompleteAgentJob closes a processing job with a terminal status

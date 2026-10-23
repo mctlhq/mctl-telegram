@@ -152,6 +152,24 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 		return err
 	}
 
+	// Turn coalescing (#760 slice 2). turn_id and coalesced_into are NULL on
+	// every pre-existing row; body_bytes is the plaintext length (a size, never
+	// content) and NULL is read as 0. coalesced_into has no FK, following the
+	// agent_actions.job_id precedent.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_jobs", "turn_id", "TEXT", "TEXT"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_jobs", "coalesced_into", "BIGINT", "INTEGER"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_jobs", "body_bytes", "INTEGER", "INTEGER"); err != nil {
+		return err
+	}
+	coalescedIdx := `CREATE INDEX IF NOT EXISTS idx_agent_jobs_coalesced_into ON agent_jobs(coalesced_into) WHERE coalesced_into IS NOT NULL`
+	if _, err := dbConn.ExecContext(ctx, coalescedIdx); err != nil {
+		return fmt.Errorf("migrate agent: %w\nstmt: %s", err, coalescedIdx)
+	}
+
 	// job_leads.job_id: added alongside A-PR6 (#296) so POST
 	// /jobs/{id}/complete can bind a lead-only result. Unlike the columns
 	// above, its index is NOT

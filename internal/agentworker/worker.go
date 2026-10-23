@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -43,10 +44,74 @@ type Worker struct {
 	poller eventPoller
 	runner Runner
 	health *Health
+	// concurrency is the number of jobs run at once; 1 (the default) is the
+	// sequential behaviour.
+	concurrency int
 }
 
 func NewWorker(poller eventPoller, runner Runner) *Worker {
-	return &Worker{poller: poller, runner: runner}
+	return &Worker{poller: poller, runner: runner, concurrency: 1}
+}
+
+// MaxConcurrency is the largest accepted worker concurrency: the server's
+// ?limit= cap on one claim.
+const MaxConcurrency = 10
+
+// WithConcurrency sets how many jobs one worker runs at once (clamped to
+// 1..MaxConcurrency). The server still never hands out two jobs of one
+// conversation at once.
+func (w *Worker) WithConcurrency(n int) *Worker {
+	if n < 1 {
+		n = 1
+	}
+	if n > MaxConcurrency {
+		n = MaxConcurrency
+	}
+	w.concurrency = n
+	return w
+}
+
+// convGate is defence in depth for the server's per-conversation
+// serialization: it never lets two jobs of one conversation run together
+// inside this process.
+type convGate struct {
+	mu      sync.Mutex
+	running map[int64]chan struct{}
+}
+
+// enter blocks until no other job of conv runs here, then marks conv running.
+// It reports whether it had to wait. Conversation 0 (none) is not gated.
+func (g *convGate) enter(conv int64) (waited bool) {
+	if conv == 0 {
+		return false
+	}
+	for {
+		g.mu.Lock()
+		if g.running == nil {
+			g.running = map[int64]chan struct{}{}
+		}
+		ch, busy := g.running[conv]
+		if !busy {
+			g.running[conv] = make(chan struct{})
+			g.mu.Unlock()
+			return waited
+		}
+		g.mu.Unlock()
+		waited = true
+		<-ch
+	}
+}
+
+func (g *convGate) leave(conv int64) {
+	if conv == 0 {
+		return
+	}
+	g.mu.Lock()
+	if ch, ok := g.running[conv]; ok {
+		delete(g.running, conv)
+		close(ch)
+	}
+	g.mu.Unlock()
 }
 
 // WithHealth attaches a Health reporter that Loop updates as it runs, for
@@ -64,24 +129,55 @@ func (w *Worker) WithHealth(h *Health) *Worker {
 // an intentional, clean shutdown.
 var ErrFatalAuth = errors.New("agent-worker: fatal auth error, poll loop stopped")
 
-// Loop polls for jobs and runs them one at a time until ctx is canceled.
-// Sequential (not concurrent) processing is a deliberate simplification for
-// the initial version: the account-scoped rate/turn limits the policy engine
-// already enforces (internal/agent/policy) are per-conversation, not
-// per-worker, so nothing here currently depends on concurrency — revisit if
-// throughput becomes a real bottleneck.
+// Loop polls for jobs and runs them, up to the configured concurrency at once
+// (WithConcurrency, default 1), until ctx is canceled. It polls for exactly as
+// many jobs as it has free slots, so no claimed job waits for a slot while its
+// visibility deadline runs. The server serializes each conversation, so two
+// jobs of one conversation never run together; the worker also enforces that
+// locally. On shutdown it stops polling and waits for in-flight jobs (each
+// bounded by its own deadline) before returning.
 //
 // Returns nil on a normal ctx-cancel shutdown, ErrFatalAuth if it stopped
 // because of an unrecoverable 401/403 (see isFatalAuthError).
 func (w *Worker) Loop(ctx context.Context) error {
 	defer w.health.SetStopped()
+	n := w.concurrency
+	if n < 1 {
+		n = 1
+	}
+	slots := make(chan struct{}, n)
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	gate := &convGate{}
 	backoff := minPollBackoff
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
-		jobs, err := w.poller.PollEvents(ctx, 1)
+		// Wait for one free slot, then take every other free slot too.
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			return nil
+		}
+		held := 1
+	more:
+		for held < n {
+			select {
+			case slots <- struct{}{}:
+				held++
+			default:
+				break more
+			}
+		}
+		release := func(k int) {
+			for ; k > 0; k-- {
+				<-slots
+			}
+		}
+		jobs, err := w.poller.PollEvents(ctx, held)
 		if err != nil {
+			release(held)
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -110,27 +206,51 @@ func (w *Worker) Loop(ctx context.Context) error {
 		}
 		w.health.SetPollResult(true)
 		backoff = minPollBackoff
-		for _, job := range jobs {
-			jobCtx, cancel := context.WithDeadline(ctx, job.ParsedDeadline(jobDeadlineFallback))
-			err := w.runner.Run(jobCtx, job)
-			cancel()
-			// event_id (format evt:v1:<account>:<chat>:<message>) is
-			// deliberately not logged here — it's not a redacted slog key,
-			// and job_id already gives an operator everything needed to
-			// correlate against the API for triage.
-			if err != nil {
-				outcome := "invocation_failed"
-				if errors.Is(err, ErrAgentDidNotCompleteJob) {
-					outcome = "model_exited_without_completion"
+		if len(jobs) < held {
+			release(held - len(jobs))
+		}
+		for i, job := range jobs {
+			// A job past held means the server returned more than asked for.
+			// Honour the claim at once, outside the slots, rather than block
+			// the loop (and shutdown) until a slot frees while its deadline
+			// runs.
+			slotted := i < held
+			wg.Add(1)
+			go func(job JobEnvelope) {
+				defer wg.Done()
+				if slotted {
+					defer func() { <-slots }()
 				}
-				slog.Warn("agent-worker: job invocation failed",
-					"job_id", job.JobID, "outcome", outcome, "err", err)
-			} else {
-				slog.Info("agent-worker: job invocation finished",
-					"job_id", job.JobID, "outcome", "completed")
-			}
+				w.runJob(ctx, gate, job)
+			}(job)
 		}
 	}
+}
+
+func (w *Worker) runJob(ctx context.Context, gate *convGate, job JobEnvelope) {
+	jobCtx, cancel := context.WithDeadline(ctx, job.ParsedDeadline(jobDeadlineFallback))
+	defer cancel()
+	if gate.enter(job.ConversationID) {
+		slog.Error("agent-worker: claimed a job of a conversation already running here; waited for it",
+			"job_id", job.JobID)
+	}
+	defer gate.leave(job.ConversationID)
+	err := w.runner.Run(jobCtx, job)
+	// event_id (format evt:v1:<account>:<chat>:<message>) is
+	// deliberately not logged here — it's not a redacted slog key,
+	// and job_id already gives an operator everything needed to
+	// correlate against the API for triage.
+	if err != nil {
+		outcome := "invocation_failed"
+		if errors.Is(err, ErrAgentDidNotCompleteJob) {
+			outcome = "model_exited_without_completion"
+		}
+		slog.Warn("agent-worker: job invocation failed",
+			"job_id", job.JobID, "outcome", outcome, "err", err)
+		return
+	}
+	slog.Info("agent-worker: job invocation finished",
+		"job_id", job.JobID, "outcome", "completed")
 }
 
 // isFatalAuthError reports whether err is an APIError carrying a 401 or 403

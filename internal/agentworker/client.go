@@ -115,6 +115,10 @@ type JobEnvelope struct {
 	// JobToken is the conversation-bound credential for this job's MCP
 	// subprocess. Empty when the server does not issue job tokens.
 	JobToken string `json:"job_token,omitempty"`
+	// TurnID and SourceEventIDs describe a coalesced turn: every event the
+	// job answers, in arrival order, head first. Empty for a single-event job.
+	TurnID         string   `json:"turn_id,omitempty"`
+	SourceEventIDs []string `json:"source_event_ids,omitempty"`
 }
 
 // JobStatus is the minimal durable postcondition returned by GET /jobs/{id}.

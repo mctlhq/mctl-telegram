@@ -365,10 +365,23 @@ type Config struct {
 	// agent job queue took, and publishes one only when the job ends in a
 	// deny, require_approval or worker failure, so the operator stream
 	// carries just the messages the conversation worker did not handle.
-	// Known gap: a job that no worker ever claims stays pending and is never
-	// routed (the stale sweeper handles only processing jobs), so enable this
-	// only where an agent worker is running.
+	// A job no worker claims within AgentUnclaimedRouteAfter is moved to
+	// routed and forwarded with routing_reason=worker_unclaimed; worst-case
+	// latency is that threshold plus one agent-jobs sweep interval (1m).
 	EventsOperatorRouting bool
+	// AgentTurnQuiet (AGENT_TURN_QUIET, default 0 = coalescing off) is the
+	// quiet window of a conversation turn: a burst of messages closer
+	// together than this becomes one agent job. AgentTurnMaxWait,
+	// AgentTurnMaxMsgs and AgentTurnMaxBytes bound a turn; they are only
+	// validated when coalescing is on.
+	AgentTurnQuiet    time.Duration // AGENT_TURN_QUIET, default 0
+	AgentTurnMaxWait  time.Duration // AGENT_TURN_MAX_WAIT, default 15s
+	AgentTurnMaxMsgs  int           // AGENT_TURN_MAX_MSGS, default 10
+	AgentTurnMaxBytes int           // AGENT_TURN_MAX_BYTES, default 16384
+	// AgentUnclaimedRouteAfter (AGENT_UNCLAIMED_ROUTE_AFTER, default 5m) is
+	// how long a never-claimed job may stay pending before it is routed to
+	// the operator. Only used while EventsOperatorRouting is on.
+	AgentUnclaimedRouteAfter time.Duration
 	// AgentProfilePath is the deprecated mounted-YAML migration source. At
 	// startup it is imported into the target tenant's encrypted DB profile
 	// only when that document is still missing; it is never consulted on
@@ -457,6 +470,11 @@ func Load() (*Config, error) {
 		EventsValkeyPassword:          os.Getenv("EVENTS_VALKEY_PASSWORD"),
 		EventsStream:                  envOr("EVENTS_STREAM", "mctl:events:telegram"),
 		EventsOperatorRouting:         envBool("EVENTS_OPERATOR_ROUTING", false),
+		AgentTurnQuiet:                envDuration("AGENT_TURN_QUIET", 0),
+		AgentTurnMaxWait:              envDuration("AGENT_TURN_MAX_WAIT", 15*time.Second),
+		AgentTurnMaxMsgs:              envInt("AGENT_TURN_MAX_MSGS", 10),
+		AgentTurnMaxBytes:             envInt("AGENT_TURN_MAX_BYTES", 16384),
+		AgentUnclaimedRouteAfter:      envDuration("AGENT_UNCLAIMED_ROUTE_AFTER", 5*time.Minute),
 		AgentProfilePath:              os.Getenv("AGENT_PROFILE_PATH"),
 		AgentProfileOwnerTGID:         envInt64("AGENT_PROFILE_OWNER_TG_ID", 0),
 		AgentTestCrashAfterReserve:    envBool("AGENT_TEST_CRASH_AFTER_RESERVE", false),
@@ -532,6 +550,20 @@ func Load() (*Config, error) {
 	// validation immediately above.
 	if c.AgentProfilePath != "" && c.AgentProfileOwnerTGID <= 0 {
 		return nil, fmt.Errorf("AGENT_PROFILE_OWNER_TG_ID must be set to a positive Telegram id when AGENT_PROFILE_PATH is set")
+	}
+	if c.AgentTurnQuiet < 0 {
+		return nil, fmt.Errorf("AGENT_TURN_QUIET must not be negative")
+	}
+	if c.AgentTurnQuiet > 0 {
+		if c.AgentTurnMaxWait <= 0 || c.AgentTurnMaxMsgs <= 0 || c.AgentTurnMaxBytes <= 0 {
+			return nil, fmt.Errorf("AGENT_TURN_MAX_WAIT, AGENT_TURN_MAX_MSGS and AGENT_TURN_MAX_BYTES must be > 0 when AGENT_TURN_QUIET is set")
+		}
+		if c.AgentUnclaimedRouteAfter <= c.AgentTurnMaxWait {
+			return nil, fmt.Errorf("AGENT_UNCLAIMED_ROUTE_AFTER must be greater than AGENT_TURN_MAX_WAIT when AGENT_TURN_QUIET is set")
+		}
+	}
+	if c.EventsOperatorRouting && c.AgentUnclaimedRouteAfter <= 0 {
+		return nil, fmt.Errorf("AGENT_UNCLAIMED_ROUTE_AFTER must be > 0 when EVENTS_OPERATOR_ROUTING is on")
 	}
 	// Mirrors the DemoReviewer validation immediately above: an adapter
 	// enabled with no way to authenticate to mctl-api, or no tenant to file

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -34,6 +35,11 @@ type jobEnvelope struct {
 	// JobToken is a short-lived credential (aud "agent-job") bound to this
 	// job, attempt and conversation. Omitted when no signer is configured.
 	JobToken string `json:"job_token,omitempty"`
+	// TurnID and SourceEventIDs are set when the job is a coalesced turn:
+	// every event of the turn in arrival order, head first. EventID stays the
+	// head's event so older workers keep working.
+	TurnID         string   `json:"turn_id,omitempty"`
+	SourceEventIDs []string `json:"source_event_ids,omitempty"`
 }
 
 // jobTokenAudience is the aud of the per-job credential.
@@ -138,6 +144,8 @@ func (s *Server) handleClaimJobs(w http.ResponseWriter, r *http.Request) {
 					Attempt:        j.Attempts,
 					Deadline:       j.ClaimedAt.Add(s.jobVisibility).UTC().Format(time.RFC3339),
 					JobToken:       s.mintJobToken(id, j),
+					TurnID:         j.TurnID,
+					SourceEventIDs: j.SourceEventIDs,
 				})
 			}
 			s.audit(ctx, id.UserID, "get_events", "ok", "")
@@ -180,9 +188,9 @@ func (s *Server) handleGetEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if jobBound(id) {
-		// A job credential may only read its own job's event.
+		// A job credential may only read the events of its own job's turn.
 		job, jerr := s.Store.GetAgentJob(r.Context(), id.UserID, id.JobID)
-		if jerr != nil || job.EventID != eventID {
+		if jerr != nil || !slices.Contains(job.SourceEventIDs, eventID) {
 			s.denyBinding(w, r, id, "get_event", fmt.Sprintf("event is not the event of job=%d", id.JobID))
 			return
 		}

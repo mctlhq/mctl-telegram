@@ -64,11 +64,11 @@ func (s *Store) InsertEventEnqueueJobAndTouch(ctx context.Context, ev IncomingEv
 	}
 
 	err = tx.QueryRowContext(ctx,
-		`INSERT INTO agent_jobs(event_id, user_id, conversation_id)
-		 VALUES($1,$2,$3)
+		`INSERT INTO agent_jobs(event_id, user_id, conversation_id, body_bytes)
+		 VALUES($1,$2,$3,$4)
 		 ON CONFLICT (event_id) DO NOTHING
 		 RETURNING id`,
-		ev.EventID, ev.UserID, conversationID,
+		ev.EventID, ev.UserID, conversationID, len(ev.Body),
 	).Scan(&jobID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, false, fmt.Errorf("enqueue agent job: %w", err)
