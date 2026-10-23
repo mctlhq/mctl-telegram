@@ -86,7 +86,7 @@ var defs = `
 {{end}}` + FaviconLink + `
 <link rel="shortcut icon" href="/favicon.ico">
 <meta property="og:type" content="website">
-<meta property="og:site_name" content="MCTL">
+<meta property="og:site_name" content="MCTL Assistant">
 <meta property="og:title" content="{{.Title}}">
 <meta property="og:description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarise unread chats, draft replies, and search your history — no extra apps.{{end}}">
 <meta property="og:url" content="{{.PublicBaseURL}}">

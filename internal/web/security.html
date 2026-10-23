@@ -103,7 +103,7 @@
   </ul>
 
   <h2 id="account-risk">Telegram account risk</h2>
-  <p>MCTL is an unofficial Telegram client. Telegram's anti-spam system can limit an account (<code>PEER_FLOOD</code>) or freeze it (<code>FROZEN_METHOD_INVALID</code>) when it sends spam-like traffic, whichever app the traffic comes from. On the hosted deployment every session reaches Telegram from the same datacenter under one app id, which gives that traffic a shared profile.</p>
+  <p>MCTL Assistant is an unofficial third-party connector using the Telegram API. Telegram's anti-spam system can limit an account (<code>PEER_FLOOD</code>) or freeze it (<code>FROZEN_METHOD_INVALID</code>) when it sends spam-like traffic, whichever app the traffic comes from. On the hosted deployment every session reaches Telegram from the same datacenter under one app id, which gives that traffic a shared profile.</p>
   <ul>
     <li><strong>The server does not retry a frozen account's refusals.</strong> The call fails with a clear error and is not repeated.</li>
     <li><strong>A frozen account can be appealed</strong> in the Telegram app, through <a href="https://t.me/spambot" target="_blank" rel="noopener">@SpamBot</a>, or at <code>recover@telegram.org</code>. Nothing on this server lifts a freeze.</li>

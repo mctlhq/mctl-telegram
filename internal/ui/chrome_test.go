@@ -170,7 +170,7 @@ func TestChromeBrandIsMCTL(t *testing.T) {
 		if !strings.Contains(out, "© 2026 MCTL") {
 			t.Errorf("%s page: footer must carry the MCTL copyright line", name)
 		}
-		if name == "full" && !strings.Contains(out, `<meta property="og:site_name" content="MCTL">`) {
+		if name == "full" && !strings.Contains(out, `<meta property="og:site_name" content="MCTL Assistant">`) {
 			t.Errorf("%s page: og:site_name must be MCTL", name)
 		}
 		for _, bad := range []string{`content="mctl-telegram"`, ">mctl-telegram<", "MCTL Telegram", `<span class="mark">`} {

@@ -158,7 +158,7 @@ func TestInProcess_ModernPathAgainstRealHandler(t *testing.T) {
 	if report.Summary != mcpprobe.OutcomePass {
 		t.Fatalf("summary = %s\nsteps: %+v\nnegatives: %+v", report.Summary, report.Steps, report.Negatives)
 	}
-	if report.Server.Name != "MCTL" {
+	if report.Server.Name != "MCTL Assistant" {
 		t.Errorf("server name = %q, want MCTL", report.Server.Name)
 	}
 	if len(report.Server.SupportedVersions) == 0 {
