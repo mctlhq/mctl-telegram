@@ -185,7 +185,10 @@ func TestLanding_HasTransparencySections(t *testing.T) {
 		// old ChatGPT anchor kept so existing links still land somewhere
 		`id="chatgpt"`,
 		`id="support"`,
-		"Settings &#8594; Apps",
+		"Add custom MCP server",
+		"chatgpt.com/plugins?directoryTab=personal",
+		"claude.ai/new#customize/connectors/yours",
+		"MCTL Assistant</code>",
 		"support@mctl.ai",
 		`id="connect"`,
 		"How it works",
@@ -196,6 +199,13 @@ func TestLanding_HasTransparencySections(t *testing.T) {
 	} {
 		if !strings.Contains(body, must) {
 			t.Fatalf("landing missing %q", must)
+		}
+	}
+	// The connector steps both clients replaced: ChatGPT's Settings -> Apps /
+	// Developer Mode path and Claude's old /customize/connectors URL.
+	for _, gone := range []string{"Settings &#8594; Apps", "Developer Mode", `href="https://claude.ai/customize/connectors"`} {
+		if strings.Contains(body, gone) {
+			t.Fatalf("landing still has the outdated connector step %q", gone)
 		}
 	}
 }
