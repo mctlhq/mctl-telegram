@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.90.1](https://github.com/mctlhq/mctl-telegram/compare/0.90.0...0.90.1) (2026-10-23)
+
+
+### Bug Fixes
+
+* **oauth:** log a flow that expired while queued as WARN, not ERROR ([0c1e0ec](https://github.com/mctlhq/mctl-telegram/commit/0c1e0ece03a5b3f000b5090dcb89718e229acb29))
+* **oauth:** supersede a parked enable_access flow across sessions ([f78c3fa](https://github.com/mctlhq/mctl-telegram/commit/f78c3fae2dc65d3f202faef90b817c71e66c3af1))
+
 ## [0.90.0](https://github.com/mctlhq/mctl-telegram/compare/0.89.0...0.90.0) (2026-10-23)
 
 
