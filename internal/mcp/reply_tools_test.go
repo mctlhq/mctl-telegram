@@ -247,7 +247,7 @@ func TestSendReply_RateLimitKeepsTheDraft(t *testing.T) {
 	s, f, id := replyServer(t, 9313)
 	s.Limiter = audit.NewRateLimiter(1000)
 	d := draftOK(t, s, id, "@alice", "hi")
-	if !s.Limiter.AllowPeerN(id, telegram.RedactPeer("user:7001"), audit.PeerSendCap, audit.PeerSendCap, audit.PeerWindow) {
+	if !s.Limiter.AllowPeerN(id, telegram.PeerLimitKey("user:7001"), audit.PeerSendCap, audit.PeerSendCap, audit.PeerWindow) {
 		t.Fatal("could not exhaust the per-peer bucket")
 	}
 	res := sendReply(t, s, id, map[string]any{"confirmation_id": d.ConfirmationID})

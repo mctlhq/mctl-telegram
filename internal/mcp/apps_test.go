@@ -313,11 +313,11 @@ func TestToolSendMessage_AppPathDebitsSamePeerLimiter(t *testing.T) {
 	limiter := audit.NewRateLimiter(1000)
 	srv := &Server{Store: store, Hub: hub, Confirms: NewConfirmStore(), AllowSend: true, Limiter: limiter}
 	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}}
-	peerRedacted := telegram.RedactPeer("@x")
+	peerKey := telegram.PeerLimitKey("@x")
 
 	// Pre-exhaust the peer budget to 1 remaining token so this one send is the
 	// last one the limiter allows.
-	if !limiter.AllowPeerN(id, peerRedacted, audit.PeerSendCap-1, audit.PeerSendCap, audit.PeerWindow) {
+	if !limiter.AllowPeerN(id, peerKey, audit.PeerSendCap-1, audit.PeerSendCap, audit.PeerWindow) {
 		t.Fatal("failed to prime the limiter")
 	}
 
@@ -327,7 +327,7 @@ func TestToolSendMessage_AppPathDebitsSamePeerLimiter(t *testing.T) {
 		t.Fatalf("expected the send to go through: %s", contentText(res))
 	}
 
-	if limiter.AllowPeer(id, peerRedacted, audit.PeerSendCap, audit.PeerWindow) {
+	if limiter.AllowPeer(id, peerKey, audit.PeerSendCap, audit.PeerWindow) {
 		t.Fatal("the App-path send did not debit the per-peer limiter: budget was not exhausted")
 	}
 }
@@ -354,11 +354,11 @@ func TestPrepareThenSend_CostsExactlyOnePeerToken(t *testing.T) {
 	limiter := audit.NewRateLimiter(1000)
 	srv := &Server{Store: store, Hub: hub, Confirms: NewConfirmStore(), AllowSend: true, Limiter: limiter}
 	id := &auth.Identity{UserID: uid, Scopes: []string{"telegram:messages:send"}}
-	peerRedacted := telegram.RedactPeer("@x")
+	peerKey := telegram.PeerLimitKey("@x")
 
 	// Leave exactly two tokens. If the pair costs one, one token survives it;
 	// if either half double-charges, the budget is empty afterwards.
-	if !limiter.AllowPeerN(id, peerRedacted, audit.PeerSendCap-2, audit.PeerSendCap, audit.PeerWindow) {
+	if !limiter.AllowPeerN(id, peerKey, audit.PeerSendCap-2, audit.PeerSendCap, audit.PeerWindow) {
 		t.Fatal("failed to prime the limiter")
 	}
 
@@ -372,7 +372,7 @@ func TestPrepareThenSend_CostsExactlyOnePeerToken(t *testing.T) {
 		t.Fatalf("expected the send to go through: %s", contentText(res))
 	}
 
-	if !limiter.AllowPeer(id, peerRedacted, audit.PeerSendCap, audit.PeerWindow) {
+	if !limiter.AllowPeer(id, peerKey, audit.PeerSendCap, audit.PeerWindow) {
 		t.Fatal("a prepare -> send pair debited more than one per-peer token: the prepare half is charging too")
 	}
 }

@@ -375,7 +375,7 @@ func TestDirectSendLimiter_BlocksWhenExhausted(t *testing.T) {
 	limiter := audit.NewRateLimiter(0)
 	id := &auth.Identity{UserID: 1}
 	for i := 0; i < audit.PeerSendCap; i++ {
-		limiter.AllowPeer(id, "@peer", audit.PeerSendCap, audit.PeerWindow)
+		limiter.AllowPeer(id, telegram.PeerLimitKey("@peer"), audit.PeerSendCap, audit.PeerWindow)
 	}
 	blocked, reason := evaluateDirectSendLimiter(limiter, id, "@peer")
 	if !blocked {
@@ -1654,5 +1654,120 @@ func TestRequireScope_ReadOnlyWorkerTokenCannotSend(t *testing.T) {
 	}
 	if err := requireScope(id, "telegram:messages:pin"); err == nil {
 		t.Error("requireScope(telegram:messages:pin) = nil, want error for a read-only-scoped identity")
+	}
+}
+
+// The limiter used to key on RedactPeer, which maps every user:<id> to one
+// tag, so exhausting one recipient refused every other recipient addressed
+// by id. Each recipient must have its own budget.
+func TestDirectSendLimiter_SeparateBudgetPerRecipient(t *testing.T) {
+	limiter := audit.NewRateLimiter(0)
+	id := &auth.Identity{UserID: 1, Subject: "tg:7001"}
+	for i := 0; i < audit.PeerSendCap; i++ {
+		if blocked, r := evaluateDirectSendLimiter(limiter, id, "user:7002"); blocked {
+			t.Fatalf("send %d to user:7002 refused early: %s", i+1, r)
+		}
+	}
+	if blocked, _ := evaluateDirectSendLimiter(limiter, id, "user:7002"); !blocked {
+		t.Fatal("user:7002 budget not enforced")
+	}
+	if blocked, r := evaluateDirectSendLimiter(limiter, id, "user:7003"); blocked {
+		t.Fatalf("user:7003 refused after only user:7002 was exhausted: %s", r)
+	}
+	// Spellings of one recipient share its budget.
+	for _, alias := range []string{"7002", "user:07002"} {
+		if blocked, _ := evaluateDirectSendLimiter(limiter, id, alias); !blocked {
+			t.Errorf("%q escaped the exhausted user:7002 budget", alias)
+		}
+	}
+}
+
+func TestDirectSendLimiter_RefusalNamesTheWait(t *testing.T) {
+	limiter := audit.NewRateLimiter(0)
+	id := &auth.Identity{UserID: 1, Subject: "tg:7001"}
+	for i := 0; i < audit.PeerSendCap; i++ {
+		evaluateDirectSendLimiter(limiter, id, "@alice")
+	}
+	_, reason := evaluateDirectSendLimiter(limiter, id, "@alice")
+	if !strings.Contains(reason, "rate limit reached") || !strings.Contains(reason, "retry in about 3 min") {
+		t.Errorf("refusal %q does not name the 3 min wait", reason)
+	}
+	_, reason = evaluateDirectSendLimiterN(limiter, id, "@carol", audit.PeerSendCap+1)
+	if !strings.Contains(reason, "rate limit reached") || !strings.Contains(reason, "can never fit") || strings.Contains(reason, "retry in") {
+		t.Errorf("oversized batch refusal %q should say it can never fit, not ask to wait", reason)
+	}
+}
+
+// Hitting the send cap must not stop a caller from cleaning up what it sent.
+func TestCleanupLimiter_IndependentOfSendBudget(t *testing.T) {
+	limiter := audit.NewRateLimiter(0)
+	id := &auth.Identity{UserID: 1, Subject: "tg:7001"}
+	for i := 0; i < audit.PeerSendCap; i++ {
+		evaluateDirectSendLimiter(limiter, id, "user:7002")
+	}
+	if blocked, r := evaluateCleanupLimiter(limiter, id, "user:7002"); blocked {
+		t.Fatalf("cleanup refused after the send cap: %s", r)
+	}
+	for i := 1; i < audit.PeerCleanupCap; i++ {
+		evaluateCleanupLimiter(limiter, id, "user:7002")
+	}
+	blocked, reason := evaluateCleanupLimiter(limiter, id, "user:7002")
+	if !blocked || !strings.Contains(reason, "cleanup rate limit reached") {
+		t.Fatalf("cleanup budget not enforced: blocked=%v reason=%q", blocked, reason)
+	}
+}
+
+// Handler-level: after the send budget for a peer is spent, preparing a pin
+// is refused but preparing an unpin still goes through.
+func TestPreparePin_UnpinUsesCleanupBudget(t *testing.T) {
+	store := newToolsTestStore(t)
+	limiter := audit.NewRateLimiter(1000)
+	srv := &Server{Store: store, Limiter: limiter, Confirms: NewConfirmStore()}
+	mcpSrv := srv.newMCPServer()
+	id := &auth.Identity{UserID: 4272, Subject: "tg:7001", Scopes: []string{"telegram:messages:pin"}}
+	ctx := auth.With(context.Background(), id)
+	if !limiter.AllowPeerN(id, telegram.PeerLimitKey("chat:7002"), audit.PeerSendCap, audit.PeerSendCap, audit.PeerWindow) {
+		t.Fatal("could not drain the send budget")
+	}
+	if res := callTool(t, ctx, mcpSrv, "prepare_pin_message", map[string]any{"peer": "chat:7002", "message_id": 7}); !res.IsError {
+		t.Fatalf("pin after the send cap should be refused, got %s", contentText(res))
+	}
+	if res := callTool(t, ctx, mcpSrv, "prepare_pin_message", map[string]any{"peer": "chat:7002", "message_id": 7, "unpin": true}); res.IsError {
+		t.Fatalf("unpin after the send cap was refused: %s", contentText(res))
+	}
+}
+
+// Handler-level: after the send budget for a peer is spent, delete_messages
+// and removing a reaction are not refused by the limiter, while adding a
+// reaction is.
+func TestCleanupTools_NotRefusedBySendCap(t *testing.T) {
+	store := newToolsTestStore(t)
+	uid := seedLocalAccount(t, store, 7004)
+	limiter := audit.NewRateLimiter(1000)
+	// A local-mode account with a Hub returns "not yet supported for
+	// local-bridge accounts" right after the limiter, so no Telegram
+	// session is needed to see whether the limiter refused.
+	srv := &Server{Store: store, Limiter: limiter, AllowSend: true, Hub: bridge.NewHub()}
+	mcpSrv := srv.newMCPServer()
+	id := &auth.Identity{UserID: uid, Subject: "tg:7004", Scopes: []string{"telegram:messages:send"}}
+	ctx := auth.With(context.Background(), id)
+	if !limiter.AllowPeerN(id, telegram.PeerLimitKey("user:7002"), audit.PeerSendCap, audit.PeerSendCap, audit.PeerWindow) {
+		t.Fatal("could not drain the send budget")
+	}
+	cases := []struct {
+		tool      string
+		args      map[string]any
+		wantLimit bool
+	}{
+		{"delete_messages", map[string]any{"peer": "user:7002", "message_ids": []any{1, 2}}, false},
+		{"set_reaction", map[string]any{"peer": "user:7002", "message_id": 1, "emoji": ""}, false},
+		{"set_reaction", map[string]any{"peer": "user:7002", "message_id": 1, "emoji": "👍"}, true},
+	}
+	for _, c := range cases {
+		res := callTool(t, ctx, mcpSrv, c.tool, c.args)
+		limited := strings.Contains(contentText(res), "rate limit reached")
+		if limited != c.wantLimit {
+			t.Errorf("%s %v: rate-limited=%v, want %v (%s)", c.tool, c.args, limited, c.wantLimit, contentText(res))
+		}
 	}
 }

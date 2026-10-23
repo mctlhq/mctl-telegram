@@ -68,7 +68,7 @@ func (g *agentSendGate) Allow(ctx context.Context, userID, peerTGID int64) error
 	}
 	if g.limiter != nil {
 		id := &auth.Identity{UserID: userID, Subject: "tg:" + strconv.FormatInt(tgID, 10), TelegramID: tgID}
-		peer := telegram.RedactPeer("user:" + strconv.FormatInt(peerTGID, 10))
+		peer := telegram.PeerLimitKey("user:" + strconv.FormatInt(peerTGID, 10))
 		if !g.limiter.AllowPeer(id, peer, audit.PeerSendCap, audit.PeerWindow) {
 			return fmt.Errorf("%w: per-peer send rate limit reached", errAgentSendGateDenied)
 		}

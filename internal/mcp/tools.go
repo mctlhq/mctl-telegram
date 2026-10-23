@@ -455,7 +455,7 @@ Inputs (optional):
 			return mcplib.NewToolResultError(reviewerRefusalText("send_message")), nil
 		}
 		if canSend {
-			if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, telegram.RedactPeer(peer)); blocked {
+			if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peer); blocked {
 				canSend = false
 				dryReason = r
 			}
@@ -654,7 +654,7 @@ func (s *Server) toolPreparePinMessage() (mcplib.Tool, mcpserver.ToolHandlerFunc
 		outputSchema[preparePinResult](),
 		mcplib.WithDescription(`Snapshot a pin_message call you intend to confirm momentarily.
 
-Returns a one-shot confirmation_id valid for 10m that pin_message must echo back. The pair is bound to (peer, message_id, unpin) — changing any of those between prepare and confirm invalidates the confirmation. The prepare step makes no Telegram call; it issues the confirmation and counts against the same per-peer limit as a pin.
+Returns a one-shot confirmation_id valid for 10m that pin_message must echo back. The pair is bound to (peer, message_id, unpin) — changing any of those between prepare and confirm invalidates the confirmation. The prepare step makes no Telegram call; it issues the confirmation and counts against the per-peer limit: a pin against the send budget, an unpin against the separate cleanup budget.
 
 Inputs (required): peer, message_id. Optional: unpin (default false).
 Output: {confirmation_id, peer_redacted, message_id, unpin, expires_at}.`),
@@ -684,10 +684,15 @@ Output: {confirmation_id, peer_redacted, message_id, unpin, expires_at}.`),
 			return mcplib.NewToolResultError("peer and message_id are required"), nil
 		}
 		peerRedacted := telegram.RedactPeer(peer)
-		if s.Limiter != nil && !s.Limiter.AllowPeer(id, peerRedacted, audit.PeerSendCap, audit.PeerWindow) {
-			limitErr := errors.New("per-peer rate limit reached (20/hour to one peer) — wait or pick a different recipient")
-			s.auditRefusal(ctx, id, "prepare_pin_message:rate_limited", peerRedacted, limitErr, startedAt, ReasonRateLimited)
-			return mcplib.NewToolResultError(limitErr.Error()), nil
+		// A pin can notify every member, so it spends the send budget; an
+		// unpin only takes one back and spends the cleanup budget.
+		limit := evaluateDirectSendLimiter
+		if unpin {
+			limit = evaluateCleanupLimiter
+		}
+		if blocked, r := limit(s.Limiter, id, peer); blocked {
+			s.auditRefusal(ctx, id, "prepare_pin_message:rate_limited", peerRedacted, errors.New(r), startedAt, ReasonRateLimited)
+			return mcplib.NewToolResultError(r), nil
 		}
 		hash := HashPinPayload(peer, int64(messageID), unpin)
 		action := "pin"
@@ -2107,19 +2112,65 @@ func evaluateSendGateAccountFlag(enabled bool) (real bool, reason string) {
 	return true, ""
 }
 
-func evaluateDirectSendLimiter(limiter *audit.RateLimiter, id *auth.Identity, peerRedacted string) (blocked bool, reason string) {
-	return evaluateDirectSendLimiterN(limiter, id, peerRedacted, 1)
+// evaluateDirectSendLimiter debits the per-(identity, peer) send budget.
+// peer is the caller's peer spec as given; the limiter keys on
+// telegram.PeerLimitKey(peer), never on the RedactPeer audit tag.
+func evaluateDirectSendLimiter(limiter *audit.RateLimiter, id *auth.Identity, peer string) (blocked bool, reason string) {
+	return evaluateDirectSendLimiterN(limiter, id, peer, 1)
 }
 
 // evaluateDirectSendLimiterN is evaluateDirectSendLimiter but debits cost
 // tokens instead of 1 — for batch sends (e.g. forwarding N messages in a
 // single forward_messages call) so the per-peer budget tracks message volume,
 // not call count.
-func evaluateDirectSendLimiterN(limiter *audit.RateLimiter, id *auth.Identity, peerRedacted string, cost int) (blocked bool, reason string) {
-	if limiter != nil && !limiter.AllowPeerN(id, peerRedacted, cost, audit.PeerSendCap, audit.PeerWindow) {
-		return true, "per-peer send rate limit reached (20/hour to one peer) — wait, pick a different recipient, or send fewer messages per call"
+func evaluateDirectSendLimiterN(limiter *audit.RateLimiter, id *auth.Identity, peer string, cost int) (blocked bool, reason string) {
+	if limiter == nil {
+		return false, ""
 	}
-	return false, ""
+	d := limiter.DecidePeer(id, telegram.PeerLimitKey(peer), cost, audit.PeerSendCap, audit.PeerWindow)
+	return peerLimitRefusal(d, fmt.Sprintf("per-peer send rate limit reached (%d/hour to one peer)", audit.PeerSendCap), ", pick a different recipient, or send fewer messages per call")
+}
+
+// cleanupLimiterPrefix separates the cleanup budget's buckets from the send
+// budget's for the same peer.
+const cleanupLimiterPrefix = "cleanup|"
+
+// evaluateCleanupLimiter debits the per-(identity, peer) cleanup budget,
+// used by writes that only take something back (delete_messages, removing
+// a reaction, preparing an unpin). It is separate from the send budget so
+// that hitting the send cap never stops a caller from cleaning up.
+func evaluateCleanupLimiter(limiter *audit.RateLimiter, id *auth.Identity, peer string) (blocked bool, reason string) {
+	if limiter == nil {
+		return false, ""
+	}
+	d := limiter.DecidePeer(id, cleanupLimiterPrefix+telegram.PeerLimitKey(peer), 1, audit.PeerCleanupCap, audit.PeerWindow)
+	return peerLimitRefusal(d, fmt.Sprintf("per-peer cleanup rate limit reached (%d/hour to one peer)", audit.PeerCleanupCap), "")
+}
+
+// peerLimitRefusal turns a denied PeerDecision into the refusal text. Every
+// variant keeps the "rate limit reached" phrase reasons.go classifies on;
+// tail lists the caller's other ways out after the wait.
+func peerLimitRefusal(d audit.PeerDecision, head, tail string) (blocked bool, reason string) {
+	if d.Allowed {
+		return false, ""
+	}
+	if d.TooLarge {
+		return true, head + " — this batch is larger than the whole budget and can never fit; send fewer messages per call"
+	}
+	return true, head + " — retry in " + retryAfterText(d.RetryAfter) + tail
+}
+
+// retryAfterText renders a wait as whole minutes, rounding up so the
+// caller never retries early, or seconds below one minute.
+func retryAfterText(d time.Duration) string {
+	if d < time.Minute {
+		secs := int((d + time.Second - 1) / time.Second)
+		if secs < 1 {
+			secs = 1
+		}
+		return fmt.Sprintf("about %d s", secs)
+	}
+	return fmt.Sprintf("about %d min", int((d+time.Minute-1)/time.Minute))
 }
 
 func requireScope(id *auth.Identity, scope string) error {
@@ -2761,7 +2812,7 @@ Inputs (required):
 			return mcplib.NewToolResultError("edit blocked: " + s.withSendDisabledHint(id, dryReason)), nil
 		}
 		peerRedacted := telegram.RedactPeer(peer)
-		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
+		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peer); blocked {
 			s.auditRefusal(ctx, id, "edit_message:rate_limited", peerRedacted, errors.New(r), startedAt, ReasonRateLimited)
 			return mcplib.NewToolResultError(r), nil
 		}
@@ -2817,7 +2868,9 @@ Inputs (required):
 			return mcplib.NewToolResultError("delete blocked: " + s.withSendDisabledHint(id, dryReason)), nil
 		}
 		peerRedacted := telegram.RedactPeer(peer)
-		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
+		// Deleting reaches nobody, so it spends the cleanup budget, not the
+		// send budget: a caller who hit the send cap can still clean up.
+		if blocked, r := evaluateCleanupLimiter(s.Limiter, id, peer); blocked {
 			s.auditRefusal(ctx, id, "delete_messages:rate_limited", peerRedacted, errors.New(r), startedAt, ReasonRateLimited)
 			return mcplib.NewToolResultError(r), nil
 		}
@@ -2877,7 +2930,7 @@ Inputs (required):
 		// by batch size — forwarding N messages spends N of the 20/hour budget,
 		// not 1, so a single large batch can't bypass the per-peer cap.
 		toPeerRedacted := telegram.RedactPeer(toPeer)
-		if blocked, r := evaluateDirectSendLimiterN(s.Limiter, id, toPeerRedacted, len(messageIDs)); blocked {
+		if blocked, r := evaluateDirectSendLimiterN(s.Limiter, id, toPeer, len(messageIDs)); blocked {
 			s.auditRefusal(ctx, id, "forward_messages:rate_limited", toPeerRedacted, errors.New(r), startedAt, ReasonRateLimited)
 			return mcplib.NewToolResultError(r), nil
 		}
@@ -3059,7 +3112,13 @@ Inputs (optional):
 			return mcplib.NewToolResultError("reaction blocked: " + s.withSendDisabledHint(id, dryReason)), nil
 		}
 		peerRedacted := telegram.RedactPeer(peer)
-		if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
+		// Adding a reaction notifies the author and spends the send budget;
+		// removing one (empty emoji) is cleanup.
+		limit := evaluateDirectSendLimiter
+		if emoji == "" {
+			limit = evaluateCleanupLimiter
+		}
+		if blocked, r := limit(s.Limiter, id, peer); blocked {
 			s.auditRefusal(ctx, id, "set_reaction:rate_limited", peerRedacted, errors.New(r), startedAt, ReasonRateLimited)
 			return mcplib.NewToolResultError(r), nil
 		}
