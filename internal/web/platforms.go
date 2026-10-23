@@ -110,6 +110,12 @@ func humanBytes(n int64) string {
 	switch {
 	case n <= 0:
 		return "no cap"
+	case n%1_000_000 == 0:
+		// Decimal caps such as the 12 MB media limit (12000000) are set in
+		// SI units. Checked before the binary cases: 16000000 is also a
+		// multiple of 1024 and would otherwise render as "15625 KiB". No
+		// power-of-two cap is a multiple of 10^6, so those are unaffected.
+		return fmt.Sprintf("%d MB", n/1_000_000)
 	case n%(1<<20) == 0:
 		return fmt.Sprintf("%d MiB", n>>20)
 	case n%(1<<10) == 0:

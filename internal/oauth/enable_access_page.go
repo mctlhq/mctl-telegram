@@ -91,7 +91,7 @@ const enableExtraCSS = `
   .check input { margin-top: 2px; }
   button { margin-top: 16px; width: 100%; font-family: var(--font-display), system-ui, sans-serif;
            font-size: 15px; font-weight: 600; padding: 11px 16px; border: 0; cursor: pointer;
-           border-radius: var(--mctl-radius-md); background: var(--accent); color: #0a0b0d; }
+           border-radius: var(--mctl-radius-md); background: var(--accent); color: var(--accent-fg); }
   button:hover { filter: brightness(.92); }
   .pwwrap { position: relative; }
   .pwwrap input { padding-right: 46px; }
@@ -108,7 +108,7 @@ const enableExtraCSS = `
   .radio-group input { margin-top: 3px; }
   .btnlink { display: inline-block; margin-top: 16px; text-decoration: none; text-align: center;
              font-family: var(--font-display), system-ui, sans-serif; font-size: 15px; font-weight: 600;
-             padding: 11px 16px; border-radius: var(--mctl-radius-md); background: var(--accent); color: #0a0b0d; }
+             padding: 11px 16px; border-radius: var(--mctl-radius-md); background: var(--accent); color: var(--accent-fg); }
   .btnlink:hover { filter: brightness(.92); }
 `
 

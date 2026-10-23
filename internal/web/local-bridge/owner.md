@@ -41,8 +41,8 @@ sending on for yourself.
   and want to send immediately, refresh the credential your client
   authenticates with. The daemon cannot hurry this: a refused send is
   decided on the server and never reaches the daemon.
-- **On tg.mctl.ai**, `ALLOW_SEND=false` still returns a dry-run
-  *before* the daemon is contacted. Real delivery also needs the
+- **On a deployment with `ALLOW_SEND=false`** (tg.mctl.ai runs with it
+  on), a send still returns a dry-run *before* the daemon is contacted. Real delivery also needs the
   `telegram:messages:send` scope and the per-peer rate limit.
 
 If your client shows no `send_message` tool after you granted consent,

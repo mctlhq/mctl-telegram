@@ -33,7 +33,7 @@ Use Local Bridge when you want the Telegram session on a machine you
 control, and you can keep that machine on. A laptop that sleeps is a poor
 host. A small always-on machine is the right one.
 
-The hosted path on the [landing page](/) is the standard ChatGPT / Claude
+The hosted path on the [landing page](/) is the standard Claude / ChatGPT
 install. Local Bridge is optional, beta, and costs you a machine that
 stays reachable.
 
@@ -60,8 +60,9 @@ stays reachable.
 
 These are current, not permanent. Plan around them.
 
-- Five tools return an explicit error: `edit_message`, `delete_messages`,
-  `forward_messages`, `search_messages`, `set_reaction`. The daemon
+- Seven tools return an explicit error: `edit_message`, `delete_messages`,
+  `forward_messages`, `search_messages`, `set_reaction`, `draft_reply` and
+  `send_reply`. The daemon
   implements `list_dialogs`, `get_unread_messages`, `get_messages`,
   `send_message`, `send_media`, `prepare_get_media`, `get_media`, and
   `pin_message`.

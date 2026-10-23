@@ -3,16 +3,8 @@
 <head>
 {{template "ui_head" .}}
 <style>
-  /* Page-specific prose styling, built on the shared design tokens. */
-  h2 {
-    font-family: var(--font-display), system-ui, sans-serif;
-    font-size: 20px; font-weight: 600; color: var(--text);
-    margin: 44px 0 14px; padding-bottom: 10px;
-    border-bottom: 1px solid var(--border); letter-spacing: -.01em;
-  }
-  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
-  td, th { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; color: var(--text-dim); }
-  th { font-weight: 600; color: var(--text); }
+  /* Page-specific prose styling, built on the shared design tokens. Headings
+     (h2) and tables come from the shared components.css. */
   td strong { color: var(--text); }
   ul { color: var(--text-dim); padding-left: 22px; margin: 12px 0; }
   li { margin-bottom: 8px; line-height: 1.6; }
@@ -21,11 +13,6 @@
     background: var(--surface); border: 1px solid var(--border);
     border-radius: var(--mctl-radius-md); padding: 14px 16px; overflow-x: auto;
     font-family: var(--font-mono); font-size: 13px; color: var(--text);
-  }
-  @media (max-width: 640px) {
-    h2 { font-size: 18px; }
-    table { font-size: 13px; }
-    td, th { padding: 7px 8px; }
   }
 </style>
 </head>
@@ -44,10 +31,10 @@
     <p class="lead">What this service stores, for how long, who can access it, and how to remove it. See <a href="/security">/security</a> for the threat model.</p>
   </section>
 
-  <h2>ChatGPT Apps and MCP users</h2>
-  <p>When you connect MCTL to ChatGPT, Claude, or another MCP client, the following data flows apply:</p>
+  <h2>Claude, ChatGPT and other MCP users</h2>
+  <p>When you connect MCTL to Claude, ChatGPT, or another MCP client, the following data flows apply:</p>
   <ul>
-    <li><strong>User-authorized account access:</strong> this service operates only on the Telegram account you explicitly connect. It is an independent project and is not affiliated with, endorsed by, or operated by Telegram, OpenAI, or Anthropic.</li>
+    <li><strong>User-authorized account access:</strong> this service operates only on the Telegram account you explicitly connect. It is an independent project and is not affiliated with, endorsed by, or operated by Telegram, Anthropic, or OpenAI.</li>
     <li><strong>Through your MCP client:</strong> your prompts, MCP tool arguments (for example peer identifiers or draft text), and tool results returned by this server. That traffic is also processed by the MCP client provider under its own privacy policy.</li>
     <li><strong>Stored by this server for ordinary MCP calls:</strong> an encrypted MTProto session blob, your Telegram user id and display name/username, and audit metadata (tool name, redacted peer reference, status). Message bodies returned by read tools are fetched for that request and are not copied into the audit log. Accounts onboarded through <a href="/docs/local-bridge">Local Bridge</a> <code>activate</code> have no stored session blob here.</li>
     <li><strong>Stored when Communication Agent is enabled:</strong> relevant incoming Telegram events, agent-visible conversation messages, and proposed action payloads are durably stored so the queue, policy, approval, and recovery flow can operate. Sensitive body/payload fields are encrypted at rest with your derived key. Message/event bodies and terminal or inactive pre-send action content use the agent retention window below; executing action content remains until persisted-random-ID recovery reaches a terminal state.</li>
@@ -63,7 +50,7 @@
         <td><code>users</code> table</td>
         <td>Telegram user id, display name, and username</td>
         <td>Resolves your identity for per-user storage isolation</td>
-        <td>Until account deletion; related user-scoped rows are removed by database cascade where configured</td>
+        <td>Account deletion clears the display name, username and last-seen time and removes related user-scoped rows by database cascade where configured. The Telegram user id, access tier and the time of the delete are kept, so a later sign-in is matched to the same row and an authorization code issued before the delete cannot be redeemed after it.</td>
       </tr>
       <tr>
         <td><code>client_notification_prefs</code> table</td>
@@ -165,7 +152,7 @@ PUT    /api/account/notifications   # change one or more categories</pre>
   <h2>Third parties</h2>
   <ul>
     <li><strong>Telegram</strong> (transport and identity) — the connected account uses Telegram MTProto, and sign-in uses Telegram OIDC.</li>
-    <li><strong>Your MCP client provider</strong> — for example OpenAI or Anthropic — processes the conversation and tool traffic you send through that product.</li>
+    <li><strong>Your MCP client provider</strong> — for example Anthropic or OpenAI — processes the conversation and tool traffic you send through that product.</li>
     <li>No advertising or third-party analytics is injected by this service. Public content pages count visits with Umami, which we host ourselves (see <a href="#website-analytics">Website analytics</a>). OAuth/session-management pages use strict CSP and load no analytics; public content pages load the mctl design stylesheet and web fonts for presentation.</li>
   </ul>
 

@@ -1,12 +1,15 @@
   /*
    * Inline fallback for the mctl design tokens — keeps the page readable if
-   * the CDN stylesheet fails to load. When it loads it is sourced AFTER this
-   * block and overrides every token (equal specificity, later wins). Default
-   * accent is terracotta; there is no accent picker.
+   * the CDN stylesheet fails to load, and is the ONLY token source on the
+   * strict-CSP (lite) pages, which cannot load external CSS. When mctl.css
+   * loads it is sourced AFTER this block and overrides every token (equal
+   * specificity, later wins). Accent is terracotta; there is no accent picker.
    *
-   * Mirrors @mctlhq/css 0.5.0, which is what chrome.go pins. This is a hand-
+   * Mirrors @mctlhq/css 0.14.0, which is what chrome.go pins. This is a hand-
    * picked subset, not a copy of the whole sheet: only the tokens these pages
    * actually read, so it stays small enough to inline on the strict-CSP pages.
+   * Values are the resolved semantic ones (e.g. --surface-fg-subtle is the AA
+   * muted text: #7d828b dark, #656a73 light).
    *
    * Refreshing it is deliberate work, not a sync: bump the pinned version in
    * chrome.go, diff the new sheet against these values, and carry over what
@@ -14,37 +17,86 @@
    * first line names the version it was built from. The pinned path is served
    * immutable and mctl-design's CI refuses to edit a published version
    * directory, so this file can only fall behind on purpose (mctl-design#78).
+   *
+   * Theme: dark is the default, as on mctl.ai and docs.mctl.ai. Light applies
+   * only under an explicit data-theme="light" (set by the pre-paint script on
+   * the full chrome); the lite pages run no script and stay dark.
    */
   :root {
+    color-scheme: dark;
     --mctl-accent-terracotta-primary: #e25a3c;
     --mctl-radius-sm: 2px;
     --mctl-radius-md: 4px;
     --mctl-radius-lg: 8px;
+    --mctl-typography-font-weight-medium: 500;
+    --mctl-typography-font-weight-semibold: 600;
+
     --surface-bg: #0a0b0d; --surface-elevated: #0f1114; --surface-card: #15181d;
     --surface-line: #1f242b; --surface-line-strong: #2a313a;
-    --surface-fg: #e6e7e9; --surface-fg-muted: #a4a8ae; --surface-fg-subtle: #6b7079;
+    --surface-fg: #e6e7e9; --surface-fg-muted: #a4a8ae; --surface-fg-subtle: #7d828b;
+
     --accent: #e25a3c; --accent-highlight: #ff8a6a;
+    --accent-fg: #0a0b0d; --accent-soft: #241512; --accent-text: #ec6345;
+
     --status-ok: #7cf2a4; --status-warn: #f5a524; --status-bad: #ff6b6b;
+    --status-ok-text: #7cf2a4; --status-warn-text: #f5a524; --status-bad-text: #ff6b6b;
+
+    --shadow-sm: 0 4px 12px rgba(0, 0, 0, 0.28);
+    --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.36);
+
     --font-display: 'Onest', system-ui, -apple-system, sans-serif;
     --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+    --font-editorial: 'Instrument Serif', Georgia, serif;
+
+    /* Public site shell (shared with mctl.ai and docs.mctl.ai). */
+    --site-header-height: 80px;
+    --site-header-blur: 12px;
+    --site-content-width: 1400px;
+    --site-gutter: 20px;
+    --site-wordmark-size: 24px;
+    --site-wordmark-weight: 800;
+    --site-wordmark-tracking: 2px;
+    --site-wordmark-accent-gap: 2px;
+    --site-nav-size: 0.95rem;
+    --site-nav-weight: 500;
+
+    /* Public type roles. */
+    --text-hero-size: clamp(35.2px, 4.5vw, 68px);
+    --text-hero-weight: 800;
+    --text-hero-leading: 1.1;
+    --text-hero-tracking: -0.02em;
+    --text-docs-hero-size: clamp(32px, 4.5vw, 56px);
+    --text-docs-hero-weight: 800;
+    --text-docs-hero-leading: 1.15;
+    --text-docs-hero-tracking: -0.02em;
+    --text-section-size: clamp(28px, 4vw, 48px);
+    --text-section-weight: 800;
+    --text-section-leading: 1.2;
+    --text-section-tracking: -0.02em;
+    --text-prose-section-size: 24px;
+    --text-prose-section-weight: 700;
+    --text-label-size: 15.2px;
+    --text-caption-size: 13px;
   }
   [data-theme='light'] {
+    color-scheme: light;
     --surface-bg: #f1ede4; --surface-elevated: #f7f4ec; --surface-card: #fffdf8;
     --surface-line: #d8d2c4; --surface-line-strong: #c4bcae;
-    --surface-fg: #15181d; --surface-fg-muted: #3a3f47; --surface-fg-subtle: #6b7079;
+    --surface-fg: #15181d; --surface-fg-muted: #3a3f47; --surface-fg-subtle: #656a73;
     --accent: #b83d28; --accent-highlight: #9a3220;
+    --accent-fg: #fff8f3; --accent-soft: #f6e4dc; --accent-text: #ab301b;
+    --status-ok: #2a7846; --status-warn: #ae4e00; --status-bad: #c23b3b;
+    --status-ok-text: #1a6b3a; --status-warn-text: #9e3f00; --status-bad-text: #af272b;
+    --shadow-sm: 0 2px 8px rgba(40, 32, 24, 0.06);
+    --shadow-md: 0 8px 24px rgba(40, 32, 24, 0.08);
   }
-  /*
-   * No-JS fallback for strict-CSP pages (OAuth flow) that cannot run the
-   * pre-paint theme script: follow the OS preference. Only applies when no
-   * explicit data-theme attribute is present, so JS-driven pages are unaffected.
-   */
-  @media (prefers-color-scheme: light) {
-    :root:not([data-theme]) {
-      color-scheme: light;
-      --surface-bg: #f1ede4; --surface-elevated: #f7f4ec; --surface-card: #fffdf8;
-      --surface-line: #d8d2c4; --surface-line-strong: #c4bcae;
-      --surface-fg: #15181d; --surface-fg-muted: #3a3f47; --surface-fg-subtle: #6b7079;
-      --accent: #b83d28; --accent-highlight: #9a3220;
-    }
+  /* Derived colours, recomputed wherever the theme flips (as mctl.css does). */
+  :root, [data-theme] {
+    --status-ok-soft: color-mix(in srgb, var(--status-ok) 10%, transparent);
+    --status-warn-soft: color-mix(in srgb, var(--status-warn) 10%, transparent);
+    --status-bad-soft: color-mix(in srgb, var(--status-bad) 10%, transparent);
+    --accent-border: color-mix(in srgb, var(--accent) 40%, transparent);
+    --site-grid-line: color-mix(in srgb, var(--surface-fg) 2%, transparent);
+    --site-header-bg: color-mix(in srgb, var(--surface-bg) 80%, transparent);
+    --site-header-border: var(--surface-line);
   }

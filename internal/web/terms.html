@@ -3,21 +3,13 @@
 <head>
 {{template "ui_head" .}}
 <style>
-  /* Page-specific prose styling, built on the shared design tokens. */
-  h2 {
-    font-family: var(--font-display), system-ui, sans-serif;
-    font-size: 20px; font-weight: 600; color: var(--text);
-    margin: 44px 0 14px; padding-bottom: 10px;
-    border-bottom: 1px solid var(--border); letter-spacing: -.01em;
-  }
+  /* Page-specific prose styling, built on the shared design tokens. Headings
+     (h2) and tables come from the shared components.css. */
   ul { color: var(--text-dim); padding-left: 22px; margin: 12px 0; }
   li { margin-bottom: 8px; line-height: 1.6; }
   li strong { color: var(--text); }
   p { color: var(--text-dim); line-height: 1.6; }
   p strong { color: var(--text); }
-  @media (max-width: 640px) {
-    h2 { font-size: 18px; }
-  }
 </style>
 </head>
 <body>
@@ -46,7 +38,7 @@
   </ul>
 
   <h2>Sending messages</h2>
-  <p>On the hosted deployment at <code>tg.mctl.ai</code>, a newly connected account is <strong>read-only by default</strong>: <code>send_message</code> returns a preview (<code>sent=false</code>) instead of delivering anything. Real delivery happens only when every gate is enabled: your account <code>send_enabled</code> flag (your explicit opt-in), the <code>telegram:messages:send</code> scope, and the operator-level <code>ALLOW_SEND</code> flag, which is on for tg.mctl.ai. Once those are enabled, the service <strong>will send real messages to real people</strong> on your behalf, and a sent message cannot be unsent. Enable sending only if you accept that.</p>
+  <p>On the hosted deployment at <code>tg.mctl.ai</code>, a newly connected account is <strong>read-only by default</strong>: <code>send_message</code> and <code>send_media</code> return a preview (<code>sent=false</code>) and the other write tools refuse with an error, so nothing is delivered. Real delivery happens only when every gate is enabled: your account <code>send_enabled</code> flag (your explicit opt-in, either by choosing <em>Read + send</em> when you connect or later), the <code>telegram:messages:send</code> scope, and the operator-level <code>ALLOW_SEND</code> flag, which is on for tg.mctl.ai. Once those are enabled, the service <strong>will send real messages to real people</strong> on your behalf, and a sent message cannot be unsent. Enable sending only if you accept that.</p>
 
   <h2>Beta software, no warranty</h2>
   <p>The service is provided <strong>"as is" and "as available", without warranties of any kind</strong>, express or implied, including fitness for a particular purpose and non-infringement. Parts of it (including Local Bridge mode) are beta and may change or break. To the maximum extent permitted by law, the operator and contributors are <strong>not liable</strong> for any loss or damage arising from your use of the service, including account limitations, lost or misdirected messages, or downtime.</p>

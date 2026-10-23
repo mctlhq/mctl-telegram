@@ -52,10 +52,9 @@ func TestPlatforms_ServesHTML(t *testing.T) {
 		"every client's refresh tokens for that user, every worker token issued for the user's Telegram id, and every Local Bridge device",
 		"only if your client calls <code>/oauth/revoke</code>",
 		`<link rel="canonical" href="https://tg.example.test/platforms">`,
-		`<a href="/platforms" class="active">platforms</a>`,
+		`<a href="/platforms" class="active">Platforms</a>`,
 		// footer twin of the topbar entry
-		`<span class="sep">·</span>
-      <a href="/platforms">platforms</a>`,
+		`<a href="/platforms">Platforms</a>`,
 		`class="table-scroll"`,
 	} {
 		if !strings.Contains(body, must) {
@@ -148,7 +147,7 @@ func TestPerWindow(t *testing.T) {
 }
 
 func TestHumanBytes(t *testing.T) {
-	for n, want := range map[int64]string{0: "no cap", 20 << 20: "20 MiB", 64 << 10: "64 KiB", 1000: "1000 bytes"} {
+	for n, want := range map[int64]string{0: "no cap", 20 << 20: "20 MiB", 64 << 10: "64 KiB", 12_000_000: "12 MB", 16_000_000: "16 MB", 1000: "1000 bytes"} {
 		if got := humanBytes(n); got != want {
 			t.Errorf("humanBytes(%d) = %q, want %q", n, got, want)
 		}

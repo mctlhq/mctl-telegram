@@ -3,13 +3,8 @@
 <head>
 {{template "ui_head" .}}
 <style>
-  /* Page-specific prose styling, built on the shared design tokens. */
-  h2 {
-    font-family: var(--font-display), system-ui, sans-serif;
-    font-size: 20px; font-weight: 600; color: var(--text);
-    margin: 44px 0 14px; padding-bottom: 10px;
-    border-bottom: 1px solid var(--border); letter-spacing: -.01em;
-  }
+  /* Page-specific prose styling, built on the shared design tokens. Headings
+     (h2) and tables come from the shared components.css. */
   p { color: var(--text-dim); line-height: 1.6; }
   p strong { color: var(--text); }
 
@@ -49,16 +44,13 @@
     width: 24px; height: 24px; border-radius: 50%;
     display: flex; align-items: center; justify-content: center;
     font-family: var(--font-mono); font-size: 13px; font-weight: 600;
-    background: var(--accent); color: #0a0b0d;
+    background: var(--accent); color: var(--accent-fg);
   }
   ol.covers li .t { font-weight: 600; color: var(--text); }
   ol.covers li .d { display: block; margin-top: 3px; font-size: 14px; color: var(--text-dim); line-height: 1.55; }
 
   .cta { margin: 28px 0 4px; }
 
-  @media (max-width: 640px) {
-    h2 { font-size: 18px; }
-  }
 </style>
 </head>
 <body>
@@ -95,7 +87,7 @@
   <div class="video-frame">
     <div class="video-placeholder">
       <span class="big">Demo video coming soon</span>
-      <span class="sub">This page will host the review demo for MCTL.</span>
+      <span class="sub">This page will host a walkthrough of MCTL in Claude.</span>
     </div>
   </div>
   {{end}}
@@ -106,14 +98,14 @@
     <li><span class="t">Search chats and messages</span><span class="d">Find relevant chats or messages from the connected account.</span></li>
     <li><span class="t">Summarize unread or recent messages</span><span class="d">Generate a concise summary of recent Telegram activity.</span></li>
     <li><span class="t">Draft a reply</span><span class="d">Prepare a response without sending it automatically.</span></li>
-    <li><span class="t">Send with confirmation</span><span class="d">Outgoing messages require explicit user confirmation before sending.</span></li>
-    <li><span class="t">Pin important messages</span><span class="d">Save or mark important messages for later reference.</span></li>
+    <li><span class="t">Send only when you allow it</span><span class="d">Accounts start read-only, so sends are previews until you turn sending on. Pins, and replies on restricted connections, need a separate confirmation step.</span></li>
+    <li><span class="t">Pin important messages</span><span class="d">Pin a key message to the top of a chat for everyone in it, after a confirmation step (admin rights needed in groups).</span></li>
     <li><span class="t">Review audit logs</span><span class="d">Show recent app actions and account activity.</span></li>
     <li><span class="t">Disconnect or revoke access</span><span class="d">Demonstrate how the user can remove the Telegram connection.</span></li>
   </ol>
 
   <h2>User control and safety</h2>
-  <p>MCTL is an independent project designed for use with the user's own Telegram account; it is not an official Telegram app or Telegram API partner. Message sending requires explicit confirmation, and users can disconnect or revoke access at any time. See <a href="/privacy">/privacy</a> for data handling and <a href="/terms">/terms</a> for the terms of service.</p>
+  <p>MCTL is an independent project designed for use with the user's own Telegram account; it is not an official Telegram app or Telegram API partner. Sending stays off until the user turns it on, and users can disconnect or revoke access at any time. See <a href="/privacy">/privacy</a> for data handling and <a href="/terms">/terms</a> for the terms of service.</p>
 
   <p class="cta"><a class="btn-secondary" href="/">Visit app website</a></p>
 
