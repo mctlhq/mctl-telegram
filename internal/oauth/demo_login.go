@@ -276,8 +276,8 @@ var demoHead = `<!doctype html>
   <style>` + ui.TokensCSS + ui.ComponentsCSS + ui.AuthCSS + enableExtraCSS + demoExtraCSS + `</style>
 </head>
 <body>
-  <div class="wrap">
 ` + ui.TopbarLite + `
+  <div class="mctl-site-container">
   <main class="auth-main">
     <div class="card">
 `

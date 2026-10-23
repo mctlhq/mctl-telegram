@@ -5,10 +5,14 @@
    * flips are handled by the [data-theme] layer automatically. Accent is
    * terracotta from the design system.
    *
-   * The site shell (header, wordmark, footer, buttons, cards, tables, grid
-   * background) mirrors mctl.ai (mctl-web: AppHeader, LogoDefault, BaseButton,
-   * BaseCard, AppFooter) and docs.mctl.ai (mctl-docs: BrandMark, DocsFooter,
-   * custom.css tables), all built on the same --site-* / --text-* roles.
+   * The layout boxes (header, container, hero, section, card grid, reading
+   * column, footer) come from the shared .mctl-site-* classes in
+   * @mctlhq/css site.css, loaded before this sheet; the rules here only add
+   * what is specific to these pages (link underline resets, the CSS-only
+   * mobile menu, the 64px mobile header, page spacing). Buttons, cards,
+   * tables and the grid background mirror mctl.ai (mctl-web: BaseButton,
+   * BaseCard) and docs.mctl.ai (mctl-docs: custom.css tables), all built on
+   * the same --site-* / --text-* roles.
    */
   :root {
     --bg:            var(--surface-bg);
@@ -33,10 +37,9 @@
 
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
-  /* The header and footer break out of the 920px .wrap to the full viewport
-     width (100vw); clip, not hidden, so this never creates a scroll container
-     (which would break the sticky header) and the page can never be scrolled
-     sideways by a few pixels of scrollbar. */
+  /* Clip, not hidden, so this never creates a scroll container (which would
+     break the sticky header) and the page can never be scrolled sideways by a
+     few pixels of an over-wide child. */
   html { overflow-x: clip; }
 
   body {
@@ -66,48 +69,15 @@
     mask-image: linear-gradient(180deg, #000 0%, #000 55%, transparent 100%);
   }
 
-  .wrap {
-    max-width: 920px;
-    margin: 0 auto;
-    padding: 0 24px;
-  }
+  /* Pages other than the landing: an article hero and h2 sections, below
+     the header and above the footer. The landing's hero and sections carry
+     their own block padding (.mctl-site-hero, .mctl-site-section). */
+  .page { padding-block: 56px 96px; }
 
-  /* ===== Site header (mctl.ai AppHeader) ===== */
-  /* Full-bleed bar: the markup sits inside .wrap, so it spans the viewport by
-     offsetting itself to the viewport's left edge. */
-  .topbar {
-    position: sticky;
-    top: 0;
-    z-index: 50;
-    width: 100vw;
-    margin: 0 0 56px calc(50% - 50vw);
-    height: var(--site-header-height);
-    background: var(--site-header-bg);
-    -webkit-backdrop-filter: blur(var(--site-header-blur));
-    backdrop-filter: blur(var(--site-header-blur));
-    border-bottom: 1px solid var(--site-header-border);
-  }
-  .topbar-inner {
-    position: relative;
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    height: 100%;
-    /* --site-content-width is the content width, gutters excluded (mctl.ai's
-       BaseContainer is 1440px with 20px padding). Under border-box the
-       padding counts inside max-width, so add both gutters back; otherwise
-       the brand sits one gutter further in than on mctl.ai and docs.mctl.ai
-       on viewports wider than the content width plus two gutters. */
-    max-width: calc(var(--site-content-width) + 2 * var(--site-gutter));
-    margin: 0 auto;
-    padding: 0 var(--site-gutter);
-  }
-  .topbar a { border-bottom: 0; text-decoration: none; }
-  .topbar .brand {
-    display: inline-flex;
-    align-items: center;
-    margin-right: auto;
-  }
+  /* ===== Site header (site.css .mctl-site-header) ===== */
+  /* The inner box anchors the absolutely positioned mobile menu panel. */
+  .mctl-site-header__inner { position: relative; }
+  .mctl-site-header a { border-bottom: 0; text-decoration: none; }
 
   /* Wordmark: accent "M" + "CTL" (LogoDefault.vue / BrandMark.vue). */
   .wordmark {
@@ -154,7 +124,7 @@
     margin-bottom: 56px;
     position: relative;
   }
-  .hero .eyebrow {
+  .eyebrow {
     display: inline-flex;
     align-items: center;
     gap: 10px;
@@ -173,9 +143,11 @@
     to   { transform: translateY(0); }
   }
   @media (prefers-reduced-motion: no-preference) {
-    .hero .eyebrow { animation: riseIn .45s cubic-bezier(.22,.68,0,1.2) .05s backwards; }
-    .hero h1       { animation: riseIn .5s  cubic-bezier(.22,.68,0,1.2) .13s backwards; }
-    .hero .lead    { animation: riseIn .5s  cubic-bezier(.22,.68,0,1.2) .22s backwards; }
+    .eyebrow                { animation: riseIn .45s cubic-bezier(.22,.68,0,1.2) .05s backwards; }
+    .hero h1,
+    .mctl-site-hero__title  { animation: riseIn .5s  cubic-bezier(.22,.68,0,1.2) .13s backwards; }
+    .hero .lead,
+    .mctl-site-hero__lede   { animation: riseIn .5s  cubic-bezier(.22,.68,0,1.2) .22s backwards; }
   }
   .status-dot {
     width: 8px; height: 8px;
@@ -244,7 +216,7 @@
   .callout p:first-of-type { margin-top: 0; }
 
   /* ===== Section headers ===== */
-  section { margin-top: 64px; }
+  .page section { margin-top: 64px; }
   /* Article headings (privacy, security, platforms, terms, demo, docs). The
      landing scales its .section-head h2 up to the --text-section role. */
   h2 {
@@ -265,6 +237,8 @@
     margin-bottom: 22px;
   }
   .section-head h2 { margin: 0; padding-bottom: 10px; flex: 1; }
+  /* Landing section titles (site.css) are not article headings: no rule. */
+  .mctl-site-section__title { padding-bottom: 0; border-bottom: 0; }
 
   /* ===== Body content ===== */
   p { color: var(--text-dim); margin: 0 0 14px; text-wrap: pretty; }
@@ -547,34 +521,11 @@
   :root[data-theme="light"] .theme-toggle .icon-sun  { display: block; }
   :root[data-theme="light"] .theme-toggle .icon-moon { display: none; }
 
-  /* ===== Site footer (mctl.ai AppFooter / docs.mctl.ai DocsFooter) ===== */
-  footer {
-    width: 100vw;
-    margin: 96px 0 0 calc(50% - 50vw);
-    padding: 48px var(--site-gutter);
-    background: color-mix(in srgb, var(--surface-elevated) 85%, transparent);
-    border-top: 1px solid var(--surface-line);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 20px;
-    text-align: center;
-  }
-  footer .wordmark { font-size: 20px; }
-  footer .links {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: 12px 32px;
-    max-width: var(--site-content-width);
-    font-family: var(--font-display), system-ui, sans-serif;
-    font-size: 15px;
-  }
-  footer a { color: var(--accent-text); border-bottom: 0; text-decoration: none; transition: color .2s ease; }
-  footer a:hover { color: var(--text); }
-  footer .copy { margin: 0; font-size: var(--text-caption-size); color: var(--surface-fg-muted); }
-  footer .service { margin: 0; font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
-  footer code { font-size: inherit; background: transparent; border: 0; padding: 0; color: inherit; }
+  /* ===== Site footer (site.css .mctl-site-footer) ===== */
+  .mctl-site-footer .wordmark { font-size: 20px; }
+  .mctl-site-footer a { border-bottom: 0; text-decoration: none; transition: color .2s ease; }
+  .mctl-site-footer .service { margin: 0; font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+  .mctl-site-footer code { font-size: inherit; background: transparent; border: 0; padding: 0; color: inherit; }
 
   /* Inline helpers */
   /* A URL moves to the next line whole and is broken only when it is longer
@@ -587,7 +538,7 @@
 
   /* ===== Mobile header: CSS-only menu below 768px ===== */
   @media (max-width: 767px) {
-    .topbar { height: 64px; margin-bottom: 40px; }
+    .mctl-site-header { height: 64px; }
     /* Keep the anchor offset in step with the 64px mobile bar. */
     section, h2[id] { scroll-margin-top: 80px; }
     .nav-toggle {
@@ -600,7 +551,7 @@
       white-space: nowrap;
       border: 0;
     }
-    .topbar-inner { gap: 10px; }
+    .mctl-site-header__inner { gap: 10px; }
     .nav-burger {
       order: 3;
       display: inline-flex;
@@ -638,7 +589,7 @@
 
   /* Responsive */
   @media (max-width: 640px) {
-    .wrap { padding: 0 18px; }
+    .page { padding-block: 40px 72px; }
     .lead { font-size: 15px; }
     h2 { font-size: 20px; }
     .tbl, .table-scroll > table, .doc table { font-size: 13px; }
@@ -646,6 +597,4 @@
     .table-scroll > table th, .table-scroll > table td,
     .doc table th, .doc table td { padding: 7px 10px; }
     ol.steps > li { padding: 12px 14px 12px 50px; }
-    footer { margin-top: 72px; padding: 40px 18px; }
-    footer .links { gap: 10px 20px; }
   }

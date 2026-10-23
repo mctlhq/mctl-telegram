@@ -40,7 +40,7 @@ func TestSecurity_ServesHTML(t *testing.T) {
 		"Prompt-injection content boundary",
 		"Session TTL",
 		// shared chrome — unified with landing/docs
-		`class="topbar"`,
+		`class="mctl-site-header"`,
 		`class="theme-toggle"`,
 		`<a href="/security" class="active">Security</a>`,
 		// mobile: wide table must sit in a horizontal-scroll wrapper
@@ -79,7 +79,7 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 		"privacy@mctl.ai",
 		"support@mctl.ai",
 		// shared chrome — unified with landing/docs
-		`class="topbar"`,
+		`class="mctl-site-header"`,
 		`class="theme-toggle"`,
 		`<a href="/privacy" class="active">Privacy</a>`,
 		// mobile: wide table must sit in a horizontal-scroll wrapper
@@ -155,7 +155,7 @@ func TestTerms_ServesHTML(t *testing.T) {
 		"without warranties of any kind",
 		"support@mctl.ai",
 		// shared chrome — unified with landing/docs
-		`class="topbar"`,
+		`class="mctl-site-header"`,
 		`<a href="/terms" class="active">Terms</a>`,
 	} {
 		if !strings.Contains(body, must) {

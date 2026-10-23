@@ -104,12 +104,20 @@ type mcpServerConfig struct {
 // succeeded.
 var ErrAgentDidNotCompleteJob = errors.New("agent did not complete job")
 
-// Run builds and executes one `claude -p` invocation for job. The model does
-// all of its work through the 11 MCP tools, and this method reports success
-// only when both the CLI result is successful and the API confirms that this
-// exact claimed attempt reached a terminal state.
-func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
-	cfg := mcpConfig{MCPServers: map[string]mcpServerConfig{
+// mcpToken returns the credential for the MCP subprocess of job: the
+// conversation-bound job token when the server issued one, else the
+// account-wide token (a newer worker against an older server). The worker's
+// own poll, complete and cost calls keep using APIToken.
+func (c *ClaudeInvoker) mcpToken(job JobEnvelope) string {
+	if job.JobToken != "" {
+		return job.JobToken
+	}
+	return c.APIToken
+}
+
+// buildMCPConfig returns the mcp-config for one job's `claude -p` run.
+func (c *ClaudeInvoker) buildMCPConfig(job JobEnvelope) mcpConfig {
+	return mcpConfig{MCPServers: map[string]mcpServerConfig{
 		ServerName: {
 			Command: c.Self,
 			Args:    []string{"--mcp-serve"},
@@ -122,7 +130,7 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 			AlwaysLoad: true,
 			Env: map[string]string{
 				"AGENT_API_BASE_URL": c.APIBaseURL,
-				"AGENT_API_TOKEN":    c.APIToken,
+				"AGENT_API_TOKEN":    c.mcpToken(job),
 				"AGENT_JOB_ID":       fmt.Sprintf("%d", job.JobID),
 				"AGENT_JOB_ATTEMPT":  fmt.Sprintf("%d", job.Attempt),
 				"AGENT_JOB_EVENT_ID": job.EventID,
@@ -130,6 +138,14 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 			},
 		},
 	}}
+}
+
+// Run builds and executes one `claude -p` invocation for job. The model does
+// all of its work through the 11 MCP tools, and this method reports success
+// only when both the CLI result is successful and the API confirms that this
+// exact claimed attempt reached a terminal state.
+func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
+	cfg := c.buildMCPConfig(job)
 	cfgPath, cleanup, err := mcpConfigTempFile(cfg)
 	if err != nil {
 		return fmt.Errorf("write mcp config: %w", err)

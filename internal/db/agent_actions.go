@@ -194,7 +194,12 @@ func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, er
 		if s.isPostgres(ctx) {
 			lock = " FOR SHARE"
 		}
-		err = s.DB.QueryRowContext(ctx,
+		tx, txErr := s.DB.BeginTx(ctx, nil)
+		if txErr != nil {
+			return 0, fmt.Errorf("begin agent action tx: %w", txErr)
+		}
+		defer func() { _ = tx.Rollback() }()
+		err = tx.QueryRowContext(ctx,
 			`INSERT INTO agent_actions
 			   (approval_code_hash, approval_code_encrypted, job_id, conversation_id,
 			    user_id, action_type, intent, payload_encrypted, policy_decision,
@@ -217,7 +222,7 @@ func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, er
 			// job matching both id/user AND the live status+attempt gate (purged
 			// account, foreign/bogus id, or a stale/completed attempt) and the
 			// job must be reported gone.
-			lookupErr := s.DB.QueryRowContext(ctx,
+			lookupErr := tx.QueryRowContext(ctx,
 				`SELECT id FROM agent_actions
 				  WHERE job_id = $1 AND action_type = $2 AND user_id = $3`,
 				a.JobID, a.ActionType, a.UserID,
@@ -229,6 +234,30 @@ func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, er
 				return 0, fmt.Errorf("load existing agent action: %w", lookupErr)
 			}
 			return id, nil
+		}
+		if err == nil {
+			// Operator routing: a job-tied propose_reply that the policy
+			// denied or parked for approval is forwarded to the operator in
+			// the same transaction that records the decision.
+			var reason string
+			if a.ActionType == ActionTypeReply {
+				switch a.Status {
+				case ActionDenied:
+					reason = RoutePolicyDeny
+				case ActionPendingApproval:
+					reason = RoutePolicyRequireApproval
+				}
+			}
+			var routed bool
+			if reason != "" {
+				if routed, err = s.routeJobEventTx(ctx, tx, a.JobID, reason); err != nil {
+					return 0, err
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				return 0, fmt.Errorf("commit agent action: %w", err)
+			}
+			s.notifyOutbox(routed)
 		}
 	} else {
 		err = s.DB.QueryRowContext(ctx,

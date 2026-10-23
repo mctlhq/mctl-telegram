@@ -126,16 +126,16 @@ var enableHead = `<!doctype html>
   <style>` + ui.TokensCSS + ui.ComponentsCSS + ui.AuthCSS + enableExtraCSS + `</style>
 </head>
 <body>
-  <div class="wrap">
 ` + ui.TopbarLite + `
+  <div class="mctl-site-container">
   <main class="auth-main">
     <div class="card">
 `
 
 var enableFoot = `    </div>
   </main>
-` + ui.FooterLite + `
   </div>
+` + ui.FooterLite + `
 </body>
 </html>`
 

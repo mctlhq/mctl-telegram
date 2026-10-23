@@ -40,10 +40,13 @@ const (
 // the channel sends are near-instant because the login goroutine is already
 // parked in askCode/askPassword by the time a handler writes to them.
 const (
-	enableSendCodeWait = 90 * time.Second
 	enableSignInWait   = 60 * time.Second
 	enableChanSendWait = 10 * time.Second
 )
+
+// enableSendCodeWait is a var, not a const, only so tests can shorten it to
+// drive handleEnableStart's timeout arm; production never writes it.
+var enableSendCodeWait = 90 * time.Second
 
 // enableLockWait bounds how long a concurrent/duplicate step submit waits for
 // the per-session lock before giving up. The mutating steps hold the lock only
@@ -156,6 +159,24 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 	bgCtx, cancel := context.WithTimeout(context.Background(), s.cfg.CodeTTL)
 	lf.cancel = cancel
 
+	// Supersede the uid's previous flow whatever enable session it belongs
+	// to. handleEnableStart only cancels es.flow, the attempt made from the
+	// same wizard token; an attempt from a fresh tab has a fresh token and
+	// would otherwise queue on the uid mutex behind a predecessor parked in
+	// askCode until that one's CodeTTL expires -- 30 minutes in production,
+	// during which every /start for this account times out and each timed-out
+	// goroutine still sends a login code once it finally gets the mutex
+	// (mctl-telegram#859). Cancelling the predecessor makes its askCode/
+	// askPassword return at once, so it releases the mutex before this
+	// goroutine asks for it. Same superseded-then-cancel order as the
+	// in-session path, so the predecessor logs the INFO supersession line.
+	if prev, loaded := s.loginFlows.Swap(uid, lf); loaded {
+		if p, ok := prev.(*loginFlow); ok && p != nil && p != lf {
+			p.superseded.Store(true)
+			p.cancel()
+		}
+	}
+
 	askCode := func(ctx context.Context) (string, error) {
 		lf.step = "code_requested"
 		select {
@@ -188,6 +209,10 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 	go func() {
 		defer cancel()
 		defer close(lf.done)
+		// Only drop the registry entry if it is still ours: a successor has
+		// already swapped itself in when it superseded this flow, and
+		// deleting unconditionally would unregister that live successor.
+		defer s.loginFlows.CompareAndDelete(uid, lf)
 		// The per-step HTTP handler abandons its wait after enableSendCodeWait/
 		// enableSignInWait and logs only a coarse "timeout" to the audit, while
 		// this goroutine keeps running on bgCtx (CodeTTL). Without this it is the
@@ -231,6 +256,14 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 				// they keep the ERROR arm with the underlying err.
 				slog.Warn("enable: onboarding abandoned",
 					"uid", uid, "step", lf.step, "elapsed", elapsed)
+			case isAbandonment(lf.err) && lf.step == "queued":
+				// The flow's own CodeTTL ran out while it was still waiting
+				// for the uid mutex, with no supersession recorded: it never
+				// contacted the database or Telegram, so there is no failure
+				// to report, only a slot that was never reached. WARN like the
+				// walked-away case, not ERROR.
+				slog.Warn("enable: login flow expired before it started",
+					"uid", uid, "elapsed", elapsed)
 			default:
 				slog.Error("enable: telegram login failed",
 					"uid", uid, "want_tg_id", wantTgID,
@@ -250,6 +283,17 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 		}
 		ul.Lock()
 		defer ul.Unlock()
+		// The wait for the mutex is not context-aware, so a flow cancelled
+		// while queued (superseded by a newer attempt, or dropped by its
+		// handler's enableSendCodeWait) still gets here once the holder
+		// releases. Leave before touching the database or Telegram: this is
+		// exactly the goroutine that would otherwise send the stray login
+		// code the user never asked for.
+		if cErr := bgCtx.Err(); cErr != nil {
+			lf.step = "queued"
+			lf.err = cErr
+			return
+		}
 		// Re-check under the uid lock, after handleEnableStart's pre-flight
 		// check: a local account could have been provisioned between the two.
 		// This is the last point at which we can refuse and still be sure no
@@ -866,6 +910,14 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	case <-time.After(enableSendCodeWait):
 		observePhoneStep("timeout")
 		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:failed:timeout", Status: "error", ErrMsg: "send code timeout"})
+		// The user is sent back to the phone form, so the flow this request
+		// launched must not keep running behind their back: left alive it
+		// would deliver a login code minutes later, after they have already
+		// resubmitted or walked away (mctl-telegram#859). Cancelling here is
+		// safe because SendCode itself is bounded by loginRPCTimeout, far
+		// below enableSendCodeWait -- a flow still not at askCode by now is
+		// queued on the uid mutex or stalled, never mid-delivery.
+		es.abandonFlow()
 		renderEnablePhoneStep(w, es, enablePhonePage{
 			Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: rawPhone, SendOptIn: sendOptIn,
 			Error: "Timed out contacting Telegram. Please try again.",

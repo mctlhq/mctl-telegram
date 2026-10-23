@@ -55,9 +55,10 @@
 </head>
 <body>
 
-<div class="wrap">
+{{template "ui_topbar" .}}
 
-  {{template "ui_topbar" .}}
+<main class="mctl-site-container page">
+<div class="mctl-site-prose">
 
   <section class="hero" style="margin-top: 0;">
     <div class="eyebrow">
@@ -109,9 +110,10 @@
 
   <p class="cta"><a class="btn-secondary" href="/">Visit app website</a></p>
 
-  {{template "ui_footer" .}}
-
 </div>
+</main>
+
+{{template "ui_footer" .}}
 
 {{template "ui_script" .}}
 </body>

@@ -14,9 +14,10 @@
 </head>
 <body>
 
-<div class="wrap">
+{{template "ui_topbar" .}}
 
-  {{template "ui_topbar" .}}
+<main class="mctl-site-container page">
+<div class="mctl-site-prose">
 
   <section class="hero" style="margin-top: 0;">
     <div class="eyebrow">
@@ -50,9 +51,10 @@
   <h2>Contact</h2>
   <p>General support: <strong><a href="mailto:support@mctl.ai">support@mctl.ai</a></strong>. For security or vulnerability reports, see <a href="/security">/security</a>. The source is open at <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a> — audit it, self-host it, or contribute.</p>
 
-  {{template "ui_footer" .}}
-
 </div>
+</main>
+
+{{template "ui_footer" .}}
 
 {{template "ui_script" .}}
 </body>
