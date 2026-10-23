@@ -3,6 +3,7 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -403,7 +404,48 @@ func TestLanding_UntestedClientsLabelled(t *testing.T) {
 			t.Errorf("landing missing %q", label)
 		}
 	}
-	if strings.Contains(body, "It also works in ChatGPT, Cursor, VS Code") {
-		t.Error("landing still claims untested clients work")
+}
+
+// TestUntestedClients_LabelledEverywhere requires every mention of an
+// untested client to sit in the same block (paragraph, list item or FAQ
+// answer) as "not yet tested", on the public pages and in README.md and
+// LLMS.md, so a reworded support claim cannot slip in unlabelled. It also
+// keeps Claude named before ChatGPT in the repository docs, as on the pages.
+func TestUntestedClients_LabelledEverywhere(t *testing.T) {
+	render := func(h http.HandlerFunc, path string) string {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		return w.Body.String()
+	}
+	htmlBlocks := func(s string) []string {
+		return strings.FieldsFunc(strings.NewReplacer("</li>", "\x00", "</p>", "\x00", "</dd>", "\x00", "</h1>", "\x00", "</h2>", "\x00", "</h3>", "\x00").Replace(s), func(r rune) bool { return r == 0 })
+	}
+	mdBlocks := func(s string) []string {
+		return strings.Split(strings.NewReplacer("\n- ", "\n\n", "\n* ", "\n\n").Replace(s), "\n\n")
+	}
+	sources := map[string][]string{
+		"/":     htmlBlocks(render(Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true), "/")),
+		"/docs": htmlBlocks(render(Docs("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true), "/docs")),
+	}
+	for _, name := range []string{"README.md", "LLMS.md"} {
+		b, err := os.ReadFile("../../" + name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		doc := string(b)
+		sources[name] = mdBlocks(doc)
+		if c, g := strings.Index(doc, "Claude"), strings.Index(doc, "ChatGPT"); c < 0 || (g >= 0 && g < c) {
+			t.Errorf("%s: Claude is not named before ChatGPT", name)
+		}
+	}
+	for src, blocks := range sources {
+		for _, block := range blocks {
+			block = strings.Join(strings.Fields(block), " ")
+			for _, client := range []string{"Cursor", "VS Code", "Windsurf"} {
+				if strings.Contains(block, client) && !strings.Contains(block, "not yet tested") {
+					t.Errorf("%s: %s is named without \"not yet tested\" in: %s", src, client, block)
+				}
+			}
+		}
 	}
 }
