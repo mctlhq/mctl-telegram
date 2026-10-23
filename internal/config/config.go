@@ -78,12 +78,17 @@ type Config struct {
 	WorkerTokenRevocationCacheTTL time.Duration
 	TGAPIID                       int
 	TGAPIHash                     string
-	EncryptionKey                 []byte
-	AllowSend                     bool
-	IdleClientTimeout             time.Duration
-	RateLimitPerUser              int
-	AuditRetentionDays            int
-	LogLevel                      string
+	// TGTestDC points every MTProto client at Telegram's test datacenters
+	// (TG_TEST_DC, issue #854). cmd/server refuses it unless ENV names a
+	// local or test tier explicitly, and every process checks the store's DC
+	// stamp before opening a session.
+	TGTestDC           bool
+	EncryptionKey      []byte
+	AllowSend          bool
+	IdleClientTimeout  time.Duration
+	RateLimitPerUser   int
+	AuditRetentionDays int
+	LogLevel           string
 	// Telegram-native OAuth (local-jwt mode):
 	TelegramLoginBotToken string // bot token used to send the daily new-client digest
 	// TelegramLoginBotUsername is the login bot's @username (no "@"), used to
@@ -436,6 +441,7 @@ func Load() (*Config, error) {
 		OAUTHJWTAudReq:                envBool("OAUTH_JWT_AUDIENCE_REQUIRED", false),
 		WorkerTokenRevocationCacheTTL: envDuration("WORKER_TOKEN_REVOCATION_CACHE_TTL", 10*time.Second),
 		TGAPIHash:                     os.Getenv("TG_API_HASH"),
+		TGTestDC:                      envBool("TG_TEST_DC", false),
 		AllowSend:                     envBool("ALLOW_SEND", false),
 		IdleClientTimeout:             envDuration("IDLE_CLIENT_TIMEOUT", 10*time.Minute),
 		RateLimitPerUser:              envInt("RATE_LIMIT_PER_USER", 30),

@@ -49,6 +49,7 @@ func LoginQR(
 	client := gotdtelegram.NewClient(apiID, apiHash, gotdtelegram.Options{
 		SessionStorage: sessStore,
 		UpdateHandler:  dispatcher,
+		DCList:         dcList(cfg.TestDC),
 		Device: gotdtelegram.DeviceConfig{
 			DeviceModel:    "mctl Telegram Assistant",
 			SystemVersion:  "Linux",

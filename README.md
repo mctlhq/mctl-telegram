@@ -266,6 +266,7 @@ Key variables:
 | `BOT_START_BRIDGE_TOKEN`      | Optional. Bearer token (min 32 chars) for `POST /internal/bot-start-observations`, through which mctl-agent forwards a client's `/start` (issue-679). Unset: the route is not mounted. Set but shorter than 32: startup fails. See the runbook |
 | `TG_API_ID`                   | Telegram API id from my.telegram.org                                        |
 | `TG_API_HASH`                 | Telegram API hash from my.telegram.org                                      |
+| `TG_TEST_DC`                  | optional, default off. `true` connects to Telegram's test datacenters, which hold their own accounts, instead of production. Startup refuses it unless `ENV` names a local or test tier (an empty `ENV` does not count), and the database records which DCs its sessions belong to, so a store with production sessions never opens against the test DCs or the reverse. See [CONTRIBUTING.md](CONTRIBUTING.md#testing-against-telegrams-test-dcs) |
 | `ENCRYPTION_KEY`              | 32-byte hex key for encrypting session blobs at rest                        |
 | `DATABASE_URL`                | `postgres://...` or `file:./mctl-telegram.db?_pragma=journal_mode(WAL)`     |
 | `ALLOW_SEND`                  | `false` by default; set `true` only after validating the send gate          |

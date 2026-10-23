@@ -28,6 +28,10 @@ type LoginConfig struct {
 	// flood-sensitive call against the shared TG_API_ID, so it must be subject
 	// to the same ceiling as steady-state traffic.
 	GlobalMiddleware telegram.Middleware
+	// TestDC points the login client at Telegram's test datacenters
+	// (TG_TEST_DC, issue #854). It must match the ClientPool's setting, or
+	// the pool would load a session its DCs do not know.
+	TestDC bool
 }
 
 // loginFloodWaitMaxWait bounds a single FLOOD_WAIT sleep on the login client.
@@ -116,6 +120,7 @@ func Login(
 	sessStore := &SessionStore{UserID: userID, Store: store}
 	client := telegram.NewClient(apiID, apiHash, telegram.Options{
 		SessionStorage: sessStore,
+		DCList:         dcList(cfg.TestDC),
 		Device: telegram.DeviceConfig{
 			DeviceModel:    "mctl Telegram Assistant",
 			SystemVersion:  "Linux",

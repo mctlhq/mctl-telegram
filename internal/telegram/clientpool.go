@@ -88,6 +88,9 @@ type ClientPool struct {
 	// WithGlobalMiddleware. The login client (telegram.Login) receives the same
 	// instance so the whole process throttles against one shared TG_API_ID.
 	globalMW telegram.Middleware
+	// testDC points every pooled client at Telegram's test datacenters
+	// (WithTestDC, issue #854).
+	testDC bool
 	// onPeerFlood, when set, is told the user id whenever a borrowed call
 	// fails with PEER_FLOOD (WithPeerFloodHook).
 	onPeerFlood func(userID int64)
@@ -157,6 +160,17 @@ func (p *ClientPool) WithMaxSessions(n int) *ClientPool {
 // bound by the same budget. nil is a no-op. Returns the receiver for chaining.
 func (p *ClientPool) WithGlobalMiddleware(mw telegram.Middleware) *ClientPool {
 	p.globalMW = mw
+	return p
+}
+
+// WithTestDC points every client the pool constructs at Telegram's test
+// datacenters instead of production. Pass the same value to telegram.Login
+// (via LoginConfig.TestDC), and check the store's DC stamp
+// (db.Store.EnsureDCMode) before serving: a session from the other side is
+// rejected by Telegram, and the pool revokes rejected sessions. Returns the
+// receiver for chaining.
+func (p *ClientPool) WithTestDC(on bool) *ClientPool {
+	p.testDC = on
 	return p
 }
 
@@ -380,7 +394,7 @@ func (p *ClientPool) acquire(userID int64) (*entry, error) {
 	}
 
 	store := &SessionStore{UserID: userID, Store: p.Store}
-	opts := telegram.Options{SessionStorage: store}
+	opts := telegram.Options{SessionStorage: store, DCList: dcList(p.testDC)}
 	if p.globalMW != nil {
 		opts.Middlewares = []telegram.Middleware{p.globalMW}
 	}

@@ -451,6 +451,7 @@ func runLogin(args []string) {
 
 	tgID, displayName, username, err := tg.Login(
 		ctx, cfg.APIID, cfg.APIHash, store, uid, *phone, askCode, askPassword,
+		tg.LoginConfig{TestDC: localTestDC()},
 	)
 	if err != nil {
 		die(fmt.Errorf("login: %w", err))
@@ -673,7 +674,8 @@ func serveDaemon(parent context.Context) error {
 	store, closeDB, uid := openLocalStore(ctx, keyHex)
 	defer closeDB()
 
-	pool := tg.NewClientPool(cfg.APIID, cfg.APIHash, 10*time.Minute, store)
+	pool := tg.NewClientPool(cfg.APIID, cfg.APIHash, 10*time.Minute, store).
+		WithTestDC(localTestDC())
 	defer pool.Shutdown()
 
 	// Graceful shutdown on SIGINT/SIGTERM. Registered here, after the
@@ -713,6 +715,14 @@ var errNoServerConfigured = errors.New("no server configured -- run `mctl-telegr
 // openLocalStore opens (or creates) the local SQLite DB at the standard path,
 // migrates the schema, and returns a *db.Store, a close function, and the
 // single local user ID (always 1 after seed).
+// localTestDC reports whether TG_TEST_DC points this bridge at Telegram's
+// test datacenters (issue #854). Anything other than an explicit true is
+// production, the safe reading for a flag whose wrong value revokes sessions.
+func localTestDC() bool {
+	on, err := strconv.ParseBool(strings.TrimSpace(os.Getenv("TG_TEST_DC")))
+	return err == nil && on
+}
+
 func openLocalStore(ctx context.Context, keyHex string) (*db.Store, func(), int64) {
 	dbPath, err := dbFilePath()
 	if err != nil {
@@ -748,6 +758,10 @@ func openLocalStore(ctx context.Context, keyHex string) (*db.Store, func(), int6
 	}
 
 	store := db.NewStore(rawDB, cryp)
+	if err := store.EnsureDCMode(ctx, db.DCModeFor(localTestDC())); err != nil {
+		_ = rawDB.Close()
+		die(err)
+	}
 
 	// Seed the single local user row.
 	uid, err := store.EnsureUser(ctx, "local", "", "local-bridge")

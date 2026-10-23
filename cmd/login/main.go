@@ -70,6 +70,12 @@ func main() {
 		die(fmt.Errorf("crypto: %w", err))
 	}
 	store := db.NewStore(rawDB, cryp)
+	// The session this login writes must belong to the same Telegram DCs as
+	// the rest of the store (TG_TEST_DC, issue #854).
+	if err := store.EnsureDCMode(ctx, db.DCModeFor(cfg.TGTestDC)); err != nil {
+		die(err)
+	}
+	loginCfg := telegram.LoginConfig{TestDC: cfg.TGTestDC}
 
 	provider := localdev.New(store, cfg.OperatorLogin)
 	uid, err := provider.EnsureSeedUser(ctx)
@@ -116,6 +122,7 @@ func main() {
 						fmt.Println("Waiting for scan... (QR refreshes automatically)")
 						return nil
 					},
+					loginCfg,
 				)
 			})
 		if qrErr != nil {
@@ -145,7 +152,7 @@ func main() {
 		tgID, displayName, username, loginErr = runLoginOrRepair(ctx, store, uid,
 			func() (int64, string, string, error) {
 				return telegram.Login(
-					ctx, cfg.TGAPIID, cfg.TGAPIHash, store, uid, *phone, askCode, askPassword,
+					ctx, cfg.TGAPIID, cfg.TGAPIHash, store, uid, *phone, askCode, askPassword, loginCfg,
 				)
 			})
 		if loginErr != nil {

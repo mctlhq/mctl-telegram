@@ -28,6 +28,27 @@ OPERATOR_GITHUB_LOGIN=your-github-handle \
 go run ./cmd/login --phone +1...
 ```
 
+### Testing against Telegram's test DCs
+
+Send, edit, delete and flood-wait paths should not be exercised on a real
+account. Telegram runs separate [test datacenters](https://core.telegram.org/api/auth#test-accounts)
+with their own accounts: numbers of the form `99966XYYYY` (X is the DC id,
+YYYY random digits) need no SIM, and their login code is X repeated five times.
+
+```bash
+ENV=test TG_TEST_DC=true \
+TG_API_ID=12345 TG_API_HASH=hexhexhex... \
+DATABASE_URL='file:./mctl-telegram-testdc.db?_pragma=journal_mode(WAL)' \
+OPERATOR_GITHUB_LOGIN=your-github-handle \
+go run ./cmd/login --phone 9996621234
+```
+
+Run `cmd/server` with the same `ENV`, `TG_TEST_DC` and `DATABASE_URL`. Use a
+separate database file: the first process to open a store records which DCs it
+belongs to, and every later start with the other setting refuses to open it.
+A store that already holds production sessions is always production. The Local
+Bridge (`cmd/local`) reads `TG_TEST_DC` the same way.
+
 Run checks before pushing:
 
 ```bash
