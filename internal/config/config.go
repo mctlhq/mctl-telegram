@@ -360,6 +360,9 @@ type Config struct {
 	// agent job queue took, and publishes one only when the job ends in a
 	// deny, require_approval or worker failure, so the operator stream
 	// carries just the messages the conversation worker did not handle.
+	// Known gap: a job that no worker ever claims stays pending and is never
+	// routed (the stale sweeper handles only processing jobs), so enable this
+	// only where an agent worker is running.
 	EventsOperatorRouting bool
 	// AgentProfilePath is the deprecated mounted-YAML migration source. At
 	// startup it is imported into the target tenant's encrypted DB profile

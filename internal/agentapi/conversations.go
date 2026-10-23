@@ -2,6 +2,7 @@ package agentapi
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -138,7 +139,12 @@ func (s *Server) handleGetLead(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "lookup failed")
 		return
 	}
-	if !s.enforceBinding(w, r, id, "get_lead", lead.ConversationID, 0, 0) {
+	// The conversation id here comes from the stored lead, not from the
+	// request, so zero does not mean "not named": a lead whose conversation
+	// was deleted has a NULL conversation_id. A job credential may read only
+	// its own conversation's lead, so it needs an exact, non-zero match.
+	if jobBound(id) && (lead.ConversationID == 0 || lead.ConversationID != id.ConversationID) {
+		s.denyBinding(w, r, id, "get_lead", fmt.Sprintf("token conv=%d lead conv=%d", id.ConversationID, lead.ConversationID))
 		return
 	}
 	s.audit(r.Context(), id.UserID, "get_lead", "ok", "")

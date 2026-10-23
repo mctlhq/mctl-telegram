@@ -76,6 +76,29 @@ func TestBinding_ConversationContextOtherConversationDenied(t *testing.T) {
 	}
 }
 
+// A lead whose conversation was deleted (job_leads.conversation_id set NULL
+// by ON DELETE SET NULL) must not be readable with a job credential: the
+// zero conversation id comes from storage, not from the request.
+func TestBinding_LeadWithoutConversationDenied(t *testing.T) {
+	f := newBindingFixture(t)
+	if _, err := f.h.store.DB.ExecContext(context.Background(),
+		`UPDATE job_leads SET conversation_id = NULL WHERE id = $1`, f.leadB); err != nil {
+		t.Fatalf("orphan lead: %v", err)
+	}
+	path := "/leads/" + strconv.FormatInt(f.leadB, 10)
+	rec := f.h.doAs(f.jobIdentity, "GET", path, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if n := f.deniedAudits(t, "get_lead"); n != 1 {
+		t.Fatalf("denied audit rows = %d, want 1", n)
+	}
+	// The account token still reads it.
+	if rec := f.h.do("GET", path, nil); rec.Code != http.StatusOK {
+		t.Fatalf("account token status = %d, body %s", rec.Code, rec.Body.String())
+	}
+}
+
 // T3b
 func TestBinding_CrossConversationRoutesDenied(t *testing.T) {
 	f := newBindingFixture(t)
