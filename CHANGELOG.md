@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.90.0](https://github.com/mctlhq/mctl-telegram/compare/0.89.0...0.90.0) (2026-10-23)
+
+
+### Features
+
+* **agents:** issue-716-refactor-db-replace-logtoolcall-s-positi ([4f52714](https://github.com/mctlhq/mctl-telegram/commit/4f52714d910e4eafcb5e5b582dd76f4ac8c302e4))
+* explain frozen accounts and warn about account risk ([f0927b3](https://github.com/mctlhq/mctl-telegram/commit/f0927b339ca874cf70f2ca029caa3a13e217ba70))
+* explain frozen accounts and warn about account risk ([f0158b4](https://github.com/mctlhq/mctl-telegram/commit/f0158b4cdefa246ae29f1191ba597cb7ac2017ea)), closes [#853](https://github.com/mctlhq/mctl-telegram/issues/853)
+
+
+### Bug Fixes
+
+* audit hold refusals as Telegram's, pause pins, count frozen as refusal ([b03c276](https://github.com/mctlhq/mctl-telegram/commit/b03c27618a784d49e0f91316980ed721ac2eeee1)), closes [#853](https://github.com/mctlhq/mctl-telegram/issues/853)
+* give pin_message the full PEER_FLOOD pause guidance ([aa539a0](https://github.com/mctlhq/mctl-telegram/commit/aa539a030dff6702aa30ec4933506d1ed3408709)), closes [#849](https://github.com/mctlhq/mctl-telegram/issues/849)
+* match wrapped hold refusals, round the executor's wait up ([a11f2cf](https://github.com/mctlhq/mctl-telegram/commit/a11f2cf96285f933fa7d0534b0a3363a79e6710e)), closes [#849](https://github.com/mctlhq/mctl-telegram/issues/849)
+* **mcp:** key per-peer limits on the recipient, split cleanup budget ([d18d159](https://github.com/mctlhq/mctl-telegram/commit/d18d1599aaeaddee591ea691d9baf0c708ecac6b))
+* **mcp:** key per-peer limits on the recipient, split cleanup budget ([bd7e476](https://github.com/mctlhq/mctl-telegram/commit/bd7e476ff15f3edea7355e1c025c7b2453263d3c)), closes [#846](https://github.com/mctlhq/mctl-telegram/issues/846)
+* stop retrying PEER_FLOOD and pause the account's writes ([459ab59](https://github.com/mctlhq/mctl-telegram/commit/459ab5922311403492691bdc1dbf3d71b656193e))
+* stop retrying PEER_FLOOD and pause the account's writes ([7222a07](https://github.com/mctlhq/mctl-telegram/commit/7222a07afe5d9d3d631a891c2d25ab490a1f9b78)), closes [#849](https://github.com/mctlhq/mctl-telegram/issues/849)
+* **ui:** align the topbar brand with mctl.ai and docs.mctl.ai ([095f35a](https://github.com/mctlhq/mctl-telegram/commit/095f35af6903b987178235ea87fbd21b70e0997f))
+* **ui:** align the topbar brand with mctl.ai and docs.mctl.ai ([a789806](https://github.com/mctlhq/mctl-telegram/commit/a789806a41adc115244fa88a9220b6c0c29bfc28))
+
 ## [0.89.0](https://github.com/mctlhq/mctl-telegram/compare/0.88.3...0.89.0) (2026-10-23)
 
 
