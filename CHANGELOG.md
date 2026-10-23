@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.92.0](https://github.com/mctlhq/mctl-telegram/compare/0.91.0...0.92.0) (2026-10-23)
+
+
+### Features
+
+* add a guarded TG_TEST_DC mode for Telegram's test DCs ([9b2b051](https://github.com/mctlhq/mctl-telegram/commit/9b2b051408c9ba0e574940c035bd90b191b3dbd6))
+* name the product MCTL Assistant ([3f83cad](https://github.com/mctlhq/mctl-telegram/commit/3f83cadcf1d3bb01183ec540a71a445180ae576e))
+* stop returning broadcast channel content to the AI ([458bea1](https://github.com/mctlhq/mctl-telegram/commit/458bea129d8d4b7ed4d848bb20797bb5cd09e8b2))
+
+
+### Bug Fixes
+
+* guard cmd/login's TG_TEST_DC and share one parser ([2a3af3e](https://github.com/mctlhq/mctl-telegram/commit/2a3af3e0a12495c4519ce2dce8c0d80407a12777)), closes [#854](https://github.com/mctlhq/mctl-telegram/issues/854)
+
 ## [0.91.0](https://github.com/mctlhq/mctl-telegram/compare/0.90.1...0.91.0) (2026-10-23)
 
 
