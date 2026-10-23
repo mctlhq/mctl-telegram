@@ -62,6 +62,7 @@ func (s *Server) toolPrepareGetMedia() (mcplib.Tool, mcpserver.ToolHandlerFunc) 
 
 The confirmation_id is valid for 10 minutes (single-shot). It binds the download to
 the exact (peer, message_id) pair — passing different values to get_media will fail.
+Media in broadcast channels is refused: this server does not read channel posts.
 
 Inputs (required): peer, message_id.
 Output: {confirmation_id, peer_redacted, message_id, media_type, mime_type, file_name, size, expires_at}.`),
@@ -118,6 +119,9 @@ Output: {confirmation_id, peer_redacted, message_id, media_type, mime_type, file
 		if err != nil {
 			if errors.Is(err, telegram.ErrPoolFull) {
 				return mcplib.NewToolResultError("server at session capacity — try again later"), nil
+			}
+			if errors.Is(err, telegram.ErrBroadcastContent) {
+				hintReason(ctx, ReasonRefused)
 			}
 			return toolErr("prepare_get_media: %v", err), nil
 		}

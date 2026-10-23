@@ -180,9 +180,9 @@ func sanitizeFileName(name string) string {
 }
 
 // GetUnreadMessages walks the dialog list (limit-bounded) and pulls up to
-// `limit` total unread messages, scoped to one peer if provided. When peer
-// is omitted, users, legacy chats, and megagroup/supergroups are fetched
-// first; broadcast channels fill any leftover limit.
+// `limit` total unread messages, scoped to one peer if provided. Broadcast
+// channels are never read (issue #851): an unscoped call skips them, and a
+// call scoped to one fails with ErrBroadcastContent.
 func GetUnreadMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit int) ([]Message, error) {
 	msgs, _, err := GetUnreadMessagesRaw(ctx, c, peerSpec, limit)
 	return msgs, err
@@ -194,8 +194,11 @@ func GetUnreadMessages(ctx context.Context, c *telegram.Client, peerSpec string,
 // locations without a second Telegram API round-trip. GetUnreadMessages is a
 // thin wrapper that discards the raw slice.
 func GetUnreadMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec string, limit int) ([]Message, []*tg.Message, error) {
+	return getUnreadMessagesWith(ctx, c.API(), peerSpec, limit)
+}
+
+func getUnreadMessagesWith(ctx context.Context, api *tg.Client, peerSpec string, limit int) ([]Message, []*tg.Message, error) {
 	limit = clampLimit(limit)
-	api := c.API()
 
 	dlgRes, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
 		Limit:      100,
@@ -223,10 +226,14 @@ func GetUnreadMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec stri
 		if peerSpec != "" && hint.ID != peerSpec && !matchUsername(hint.Username, peerSpec) {
 			continue
 		}
+		broadcast := isBroadcastChannel(d.Peer, chats)
 		if peerSpec != "" {
 			peerFound = true
+			if broadcast {
+				return nil, nil, &broadcastContentError{peer: peerSpec}
+			}
 		}
-		if d.UnreadCount == 0 {
+		if broadcast || d.UnreadCount == 0 {
 			continue
 		}
 		input := inputPeerFromPeer(d.Peer, users, chats)
@@ -234,10 +241,9 @@ func GetUnreadMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec stri
 			continue
 		}
 		targets = append(targets, unreadTarget{
-			input:     input,
-			dialog:    d,
-			hint:      hint,
-			broadcast: isBroadcastChannel(d.Peer, chats),
+			input:  input,
+			dialog: d,
+			hint:   hint,
 		})
 	}
 
@@ -248,13 +254,6 @@ func GetUnreadMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec stri
 			return nil, nil, fmt.Errorf("peer %q not found in recent dialogs — use get_messages for this peer's full history", peerSpec)
 		}
 		return []Message{}, nil, nil
-	}
-
-	// Default (unscoped) fetch: DMs and groups first so a broadcast
-	// channel with tens of thousands of unread cannot starve the limit.
-	// Broadcast channels stay in the list and fill leftover capacity.
-	if peerSpec == "" {
-		targets = orderUnreadTargets(targets)
 	}
 
 	out := make([]Message, 0, limit)
@@ -285,16 +284,17 @@ func GetUnreadMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec stri
 }
 
 type unreadTarget struct {
-	input     tg.InputPeerClass
-	dialog    *tg.Dialog
-	hint      *Dialog
-	broadcast bool // true for broadcast channels, not megagroup/supergroups
+	input  tg.InputPeerClass
+	dialog *tg.Dialog
+	hint   *Dialog
 }
 
 // isBroadcastChannel reports whether p is a broadcast channel. Legacy chats
 // (PeerChat) and megagroup/supergroups (Channel.Megagroup) are groups and
-// return false. dialogFromPeer maps every PeerChannel to Type "channel", so
-// callers must not use hint.Type to decide unread priority.
+// return false. A channel missing from chats, or present only as
+// ChannelForbidden, counts as broadcast: its content is refused unless it is
+// known to be a group (issue #851). dialogFromPeer maps every PeerChannel to
+// Type "channel", so callers must not use hint.Type for this decision.
 func isBroadcastChannel(p tg.PeerClass, chats map[int64]tg.ChatClass) bool {
 	v, ok := p.(*tg.PeerChannel)
 	if !ok {
@@ -309,27 +309,6 @@ func isBroadcastChannel(p tg.PeerClass, chats map[int64]tg.ChatClass) bool {
 		return true
 	}
 	return !ch.Megagroup
-}
-
-// orderUnreadTargets puts DMs and groups (legacy chats and megagroups)
-// ahead of broadcast channels, preserving relative order within each
-// bucket. Used only for the unscoped get_unread_messages path so broadcast
-// channels cannot consume the entire limit before a DM is considered.
-// Channels are not dropped.
-func orderUnreadTargets(targets []unreadTarget) []unreadTarget {
-	if len(targets) < 2 {
-		return targets
-	}
-	high := make([]unreadTarget, 0, len(targets))
-	low := make([]unreadTarget, 0)
-	for _, t := range targets {
-		if t.broadcast {
-			low = append(low, t)
-			continue
-		}
-		high = append(high, t)
-	}
-	return append(high, low...)
 }
 
 func inputPeerFromPeer(p tg.PeerClass, users map[int64]*tg.User, chats map[int64]tg.ChatClass) tg.InputPeerClass {
@@ -531,12 +510,33 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 // fetch_media=true bulk-download path so it can extract file locations
 // without a second Telegram API round-trip. GetMessages is a thin wrapper
 // that discards the raw slice.
+//
+// A broadcast channel fails with ErrBroadcastContent before its history is
+// fetched (issue #851).
 func GetMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec string, limit int, beforeID int, cache *PeerCache, userID int64) ([]Message, []*tg.Message, int, error) {
+	resolve := func(ctx context.Context) (tg.InputPeerClass, error) {
+		return ResolvePeerCached(ctx, c, peerSpec, cache, userID)
+	}
+	var reResolve func(context.Context) (tg.InputPeerClass, error)
+	if cache != nil {
+		// Evict the stale entry and resolve once more.
+		reResolve = func(ctx context.Context) (tg.InputPeerClass, error) {
+			cache.Evict(userID, peerSpec)
+			return resolve(ctx)
+		}
+	}
+	return getMessagesWith(ctx, c.API(), resolve, reResolve, peerSpec, limit, beforeID, cache, userID)
+}
+
+// getMessagesWith is GetMessagesRaw over an explicit API client. resolve is
+// the direct resolution used when peerSpec is not in the dialog list;
+// reResolve, when non-nil, is the single retry after Telegram rejects the
+// resolved peer as invalid.
+func getMessagesWith(ctx context.Context, api *tg.Client, resolve, reResolve func(context.Context) (tg.InputPeerClass, error), peerSpec string, limit int, beforeID int, cache *PeerCache, userID int64) ([]Message, []*tg.Message, int, error) {
 	if peerSpec == "" {
 		return nil, nil, 0, fmt.Errorf("peer is required")
 	}
 	limit = clampLimit(limit)
-	api := c.API()
 
 	dlgRes, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
 		Limit:      200,
@@ -563,6 +563,9 @@ func GetMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec string, li
 		if hint.ID != peerSpec && !matchUsername(hint.Username, peerSpec) {
 			continue
 		}
+		if isBroadcastChannel(d.Peer, chats) {
+			return nil, nil, 0, &broadcastContentError{peer: peerSpec}
+		}
 		input := inputPeerFromPeer(d.Peer, users, chats)
 		if input == nil {
 			return nil, nil, 0, fmt.Errorf("cannot build InputPeer for %q", peerSpec)
@@ -581,10 +584,13 @@ func GetMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec string, li
 
 	// Fallback: peer not in dialog list — resolve directly.
 	slog.Debug("peer not in dialog list, falling back to direct resolution", "peer_redacted", RedactPeer(peerSpec))
-	input, resolveErr := ResolvePeerCached(ctx, c, peerSpec, cache, userID)
+	input, resolveErr := resolve(ctx)
 	if resolveErr != nil {
 		return nil, nil, 0, fmt.Errorf("peer %q is not in your dialog list and could not be resolved directly; "+
 			"call list_dialogs first and pass an id exactly as it appears there (e.g. \"channel:<id>\"): %w", peerSpec, resolveErr)
+	}
+	if err := refuseBroadcastPeer(ctx, api, peerSpec, input); err != nil {
+		return nil, nil, 0, err
 	}
 	hist, histErr := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
 		Peer:     input,
@@ -594,11 +600,14 @@ func GetMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec string, li
 	if histErr != nil {
 		var rpcErr *tgerr.Error
 		if errors.As(histErr, &rpcErr) && (rpcErr.Message == "PEER_ID_INVALID" || rpcErr.Message == "CHANNEL_INVALID") {
-			if cache != nil {
-				// Evict the stale entry and retry once with a fresh resolution.
-				// MessagesGetHistory is read-only so the retry is always safe.
-				cache.Evict(userID, peerSpec)
-				if input2, err2 := ResolvePeerCached(ctx, c, peerSpec, cache, userID); err2 == nil {
+			if reResolve != nil {
+				// Retry once with a fresh resolution. MessagesGetHistory is
+				// read-only so the retry is always safe; the fresh peer is
+				// checked again, since it may resolve to another type.
+				if input2, err2 := reResolve(ctx); err2 == nil {
+					if err := refuseBroadcastPeer(ctx, api, peerSpec, input2); err != nil {
+						return nil, nil, 0, err
+					}
 					if hist2, err3 := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
 						Peer:     input2,
 						Limit:    limit,
