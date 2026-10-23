@@ -440,7 +440,7 @@ OGG/Opus; the server does not transcode.`),
 			return mcplib.NewToolResultError(reviewerRefusalText("send_media")), nil
 		}
 		if canSend {
-			if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peerRedacted); blocked {
+			if blocked, r := evaluateDirectSendLimiter(s.Limiter, id, peer); blocked {
 				canSend = false
 				dryReason = r
 			}

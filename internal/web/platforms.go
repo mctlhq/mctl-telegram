@@ -25,6 +25,7 @@ type PlatformFacts struct {
 	RateLimitPerUser   int
 	RegisterRatePerMin int
 	PeerSendCap        int
+	PeerCleanupCap     int
 	PeerWindow         time.Duration
 	AccessTokenTTL     time.Duration
 	RefreshTokenTTL    time.Duration
