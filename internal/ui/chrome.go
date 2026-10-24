@@ -26,8 +26,8 @@
 //   - "lite"  — OAuth-flow pages served under a strict CSP
 //     (default-src 'none'; style-src 'unsafe-inline'; img-src https://ui.mctl.ai).
 //     No external CSS/JS: same palette and layout via inlined tokens and the
-//     site.css mirror (dark, since there is no script to read a stored choice). The tab icon is the only CDN fetch
-//     (favicon-telegram.svg).
+//     site.css mirror (dark, since there is no script to read a stored
+//     choice). The tab icon is the only CDN fetch (favicon-telegram.svg).
 package ui
 
 import (

@@ -227,7 +227,10 @@ func TestNavToggleHiddenOnDesktop(t *testing.T) {
 // differently from the pinned sheet. The published file's first line names
 // its version.
 func TestSiteCSSMirrorMatchesPinnedVersion(t *testing.T) {
-	first := siteCSS[:strings.Index(siteCSS, "\n")]
+	first, _, found := strings.Cut(siteCSS, "\n")
+	if !found {
+		t.Fatalf("assets/site.css header line is missing its newline")
+	}
 	if want := "/* @mctlhq/css " + DesignVersion + " — site.css. */"; first != want {
 		t.Fatalf("assets/site.css header = %q, want %q (refresh the mirror with the pin)", first, want)
 	}
