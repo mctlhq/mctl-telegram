@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.94.0](https://github.com/mctlhq/mctl-telegram/compare/0.93.0...0.94.0) (2026-10-24)
+
+
+### Features
+
+* **agents:** issue-865-ui-tidy-two-p3s-from-860-site-css-header ([57f3a61](https://github.com/mctlhq/mctl-telegram/commit/57f3a61ae1e9b9b36a441c7bae19f97cb3599885))
+
 ## [0.93.0](https://github.com/mctlhq/mctl-telegram/compare/0.92.2...0.93.0) (2026-10-23)
 
 
