@@ -221,6 +221,101 @@ func TestTurnClaim_MaxMsgsClosesTurn(t *testing.T) { // T1.6
 	}
 }
 
+// completeAt completes j and pins its attempt's finished_at to turnBase+at
+// (CompleteAgentJob stamps the wall clock).
+func (f *turnFixture) completeAt(t *testing.T, j AgentJob, at time.Duration) {
+	t.Helper()
+	if err := f.s.CompleteAgentJob(context.Background(), j.ID, j.Attempts, JobIgnored, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.s.DB.Exec(`UPDATE agent_job_attempts SET finished_at = $1 WHERE job_id = $2`, turnBase.Add(at), j.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTurnClaim_BacklogBehindProcessingTurnCoalesces(t *testing.T) { // mctl-telegram#885
+	f := newTurnFixture(t, &turnCfg)
+	f.ingest(t, 555, 10, 5, 0)
+	f.now = turnBase.Add(4 * time.Second)
+	first := f.claim(t, 5)
+	if len(first) != 1 {
+		t.Fatalf("first = %+v", first)
+	}
+	// Arrive 5s apart (over the 3s quiet window) while the first turn runs.
+	backlog := []string{
+		f.ingest(t, 555, 11, 5, 6*time.Second),
+		f.ingest(t, 555, 12, 5, 11*time.Second),
+		f.ingest(t, 555, 13, 5, 16*time.Second),
+	}
+	f.now = turnBase.Add(20 * time.Second)
+	if more := f.claim(t, 5); len(more) != 0 {
+		t.Fatalf("claimed behind a processing turn: %+v", more)
+	}
+	f.completeAt(t, first[0], 20*time.Second)
+	// Arrives after the turn ended, 5s after the last backlog job: a new turn.
+	later := f.ingest(t, 555, 14, 5, 21*time.Second)
+	f.now = turnBase.Add(21 * time.Second)
+	got := f.claim(t, 5)
+	if len(got) != 1 || strings.Join(got[0].SourceEventIDs, ",") != strings.Join(backlog, ",") {
+		t.Fatalf("backlog turn = %+v, want %v", got, backlog)
+	}
+	if st, _ := f.status(t, later); st != JobPending {
+		t.Fatalf("later job %s, want pending", st)
+	}
+}
+
+func TestTurnClaim_BacklogKeepsCapsAndSpansTurns(t *testing.T) { // mctl-telegram#885
+	cfg := turnCfg
+	cfg.MaxMsgs = 2
+	f := newTurnFixture(t, &cfg)
+	f.ingest(t, 555, 10, 5, 0)
+	f.now = turnBase.Add(4 * time.Second)
+	first := f.claim(t, 5)
+	if len(first) != 1 {
+		t.Fatalf("first = %+v", first)
+	}
+	a := f.ingest(t, 555, 11, 5, 6*time.Second)
+	b := f.ingest(t, 555, 12, 5, 12*time.Second)
+	c := f.ingest(t, 555, 13, 5, 14*time.Second)
+	f.completeAt(t, first[0], 20*time.Second)
+	f.now = turnBase.Add(20 * time.Second)
+	// MaxMsgs closes a+b at once; c is the rest of the backlog.
+	got := f.claim(t, 5)
+	if len(got) != 1 || strings.Join(got[0].SourceEventIDs, ",") != a+","+b {
+		t.Fatalf("capped backlog turn = %+v", got)
+	}
+	// d arrives while a+b runs. c was created before that turn started, yet
+	// it waited behind it too, so c and d are one backlog (closed by MaxMsgs).
+	d := f.ingest(t, 555, 14, 5, 25*time.Second)
+	f.completeAt(t, got[0], 30*time.Second)
+	f.now = turnBase.Add(30 * time.Second)
+	if rest := f.claim(t, 5); len(rest) != 1 || strings.Join(rest[0].SourceEventIDs, ",") != c+","+d {
+		t.Fatalf("rest = %+v, want %s,%s", rest, c, d)
+	}
+}
+
+func TestTurnClaim_BacklogQuietWindowRunsFromLastArrival(t *testing.T) { // mctl-telegram#885
+	f := newTurnFixture(t, &turnCfg)
+	f.ingest(t, 555, 10, 5, 0)
+	f.now = turnBase.Add(4 * time.Second)
+	first := f.claim(t, 5)
+	if len(first) != 1 {
+		t.Fatalf("first = %+v", first)
+	}
+	x := f.ingest(t, 555, 11, 5, 6*time.Second)
+	y := f.ingest(t, 555, 12, 5, 19*time.Second)
+	f.completeAt(t, first[0], 20*time.Second)
+	// y arrived 1s before the turn ended: the sender may still be typing.
+	f.now = turnBase.Add(22 * time.Second)
+	if early := f.claim(t, 5); len(early) != 0 {
+		t.Fatalf("claimed inside the quiet window of the last arrival: %+v", early)
+	}
+	f.now = turnBase.Add(23 * time.Second)
+	if got := f.claim(t, 5); len(got) != 1 || strings.Join(got[0].SourceEventIDs, ",") != x+","+y {
+		t.Fatalf("backlog turn = %+v, want %s,%s", got, x, y)
+	}
+}
+
 func TestTurnClaim_FailedTurnRoutesEverySourceEvent(t *testing.T) { // T1.7
 	f := newTurnFixture(t, &turnCfg)
 	a := f.ingest(t, 555, 10, 5, 0)
