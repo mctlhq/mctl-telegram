@@ -55,6 +55,8 @@ type claimCandidate struct {
 // it runs the slice-1 coalescer over the head and the conversation's
 // never-claimed pending jobs, and claims the head only when its turn is READY.
 // The other members of the turn move to coalesced in the same transaction.
+// Jobs that queued behind a processing turn coalesce regardless of their
+// arrival gaps (see readyTurn).
 func (s *Store) claimCoalesced(ctx context.Context, replicaID string, userID int64, limit int) ([]AgentJob, error) {
 	now := s.now()
 	lock := ""
@@ -184,14 +186,37 @@ func (s *Store) readyTurn(ctx context.Context, tx *sql.Tx, userID int64, c claim
 	if err != nil {
 		return "", nil, false, err
 	}
+	events := append([]claimCandidate{c}, followers...)
+	// Backlog: jobs that arrived while an earlier turn of this conversation
+	// was processing could not be claimed however far apart they arrived, so
+	// their gaps say nothing about the sender's burst. They are offered at the
+	// arrival time of the last of them, which merges them into one turn (still
+	// within MaxMsgs/MaxBytes) and starts the quiet window from that last
+	// arrival rather than from the end of the earlier turn.
+	until, blocked, err := backlogUntil(ctx, tx, c)
+	if err != nil {
+		return "", nil, false, err
+	}
+	var backlogAt time.Time
+	if blocked {
+		for _, e := range events {
+			if e.createdAt.Before(until) && e.createdAt.After(backlogAt) {
+				backlogAt = e.createdAt
+			}
+		}
+	}
 	byEvent := map[string]claimCandidate{}
 	var closed []turn.Turn
-	for _, e := range append([]claimCandidate{c}, followers...) {
+	for _, e := range events {
 		byEvent[e.eventID] = e
+		at := e.createdAt
+		if blocked && at.Before(until) {
+			at = backlogAt
+		}
 		closed = append(closed, co.Offer(turn.Event{
 			ID:         e.eventID,
 			SessionKey: turn.SessionKey(userID, e.chatTGID),
-			At:         e.createdAt,
+			At:         at,
 			Bytes:      e.bytes,
 		})...)
 	}
@@ -207,6 +232,32 @@ func (s *Store) readyTurn(ctx context.Context, tx *sql.Tx, userID int64, c claim
 		return t.TurnID, members, true, nil
 	}
 	return "", nil, false, nil
+}
+
+// backlogUntil reports whether head c arrived while an earlier job of its
+// conversation was processing, and if so when the latest such attempt
+// finished. Jobs created before that moment are the conversation's backlog.
+func backlogUntil(ctx context.Context, tx *sql.Tx, c claimCandidate) (time.Time, bool, error) {
+	if !c.conversationID.Valid {
+		return time.Time{}, false, nil
+	}
+	var until sql.NullTime
+	err := tx.QueryRowContext(ctx,
+		`SELECT a.finished_at
+		   FROM agent_job_attempts a
+		   JOIN agent_jobs p ON p.id = a.job_id
+		  WHERE p.conversation_id = $1 AND p.id < $2
+		    AND a.started_at <= $3 AND a.finished_at > $3
+		  ORDER BY a.finished_at DESC
+		  LIMIT 1`,
+		c.conversationID.Int64, c.id, c.createdAt).Scan(&until)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("load turn backlog: %w", err)
+	}
+	return until.Time, until.Valid, nil
 }
 
 // blockingLock turns a SKIP LOCKED suffix into a plain row lock: followers
