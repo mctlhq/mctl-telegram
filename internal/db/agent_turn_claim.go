@@ -55,7 +55,7 @@ type claimCandidate struct {
 // it runs the slice-1 coalescer over the head and the conversation's
 // never-claimed pending jobs, and claims the head only when its turn is READY.
 // The other members of the turn move to coalesced in the same transaction.
-// Jobs that queued behind a processing turn coalesce regardless of their
+// Jobs that waited behind an earlier turn coalesce regardless of their
 // arrival gaps (see readyTurn).
 func (s *Store) claimCoalesced(ctx context.Context, replicaID string, userID int64, limit int) ([]AgentJob, error) {
 	now := s.now()
@@ -187,8 +187,8 @@ func (s *Store) readyTurn(ctx context.Context, tx *sql.Tx, userID int64, c claim
 		return "", nil, false, err
 	}
 	events := append([]claimCandidate{c}, followers...)
-	// Backlog: jobs that arrived while an earlier turn of this conversation
-	// was processing could not be claimed however far apart they arrived, so
+	// Backlog: jobs that waited behind an earlier turn of this conversation
+	// could not be claimed however far apart they arrived, so
 	// their gaps say nothing about the sender's burst. They are offered at the
 	// arrival time of the last of them, which merges them into one turn (still
 	// within MaxMsgs/MaxBytes) and starts the quiet window from that last
@@ -234,20 +234,25 @@ func (s *Store) readyTurn(ctx context.Context, tx *sql.Tx, userID int64, c claim
 	return "", nil, false, nil
 }
 
-// backlogUntil reports whether head c arrived while an earlier job of its
-// conversation was processing, and if so when the latest such attempt
-// finished. Jobs created before that moment are the conversation's backlog.
+// backlogUntil reports whether head c waited behind an earlier attempt of its
+// conversation, and if so when the latest such attempt finished. Jobs created before that moment are the conversation's backlog.
 func backlogUntil(ctx context.Context, tx *sql.Tx, c claimCandidate) (time.Time, bool, error) {
 	if !c.conversationID.Valid {
 		return time.Time{}, false, nil
 	}
+	// Any attempt of an earlier job that finished after c arrived held c back,
+	// whether it started before c arrived or after (c left over by a capped
+	// turn, or queued behind a head still collecting). created_at is stamped
+	// by the database and finished_at by the app, so skew between the two
+	// clocks (or SQLite's whole-second CURRENT_TIMESTAMP) can only miss a job
+	// at the boundary, which falls back to arrival-gap coalescing.
 	var until sql.NullTime
 	err := tx.QueryRowContext(ctx,
 		`SELECT a.finished_at
 		   FROM agent_job_attempts a
 		   JOIN agent_jobs p ON p.id = a.job_id
 		  WHERE p.conversation_id = $1 AND p.id < $2
-		    AND a.started_at <= $3 AND a.finished_at > $3
+		    AND a.finished_at > $3
 		  ORDER BY a.finished_at DESC
 		  LIMIT 1`,
 		c.conversationID.Int64, c.id, c.createdAt).Scan(&until)

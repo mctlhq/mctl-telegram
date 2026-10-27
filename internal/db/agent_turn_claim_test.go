@@ -264,7 +264,7 @@ func TestTurnClaim_BacklogBehindProcessingTurnCoalesces(t *testing.T) { // mctl-
 	}
 }
 
-func TestTurnClaim_BacklogWaitsQuietFromLastArrivalAndKeepsCaps(t *testing.T) { // mctl-telegram#885
+func TestTurnClaim_BacklogKeepsCapsAndSpansTurns(t *testing.T) { // mctl-telegram#885
 	cfg := turnCfg
 	cfg.MaxMsgs = 2
 	f := newTurnFixture(t, &cfg)
@@ -276,7 +276,7 @@ func TestTurnClaim_BacklogWaitsQuietFromLastArrivalAndKeepsCaps(t *testing.T) { 
 	}
 	a := f.ingest(t, 555, 11, 5, 6*time.Second)
 	b := f.ingest(t, 555, 12, 5, 12*time.Second)
-	c := f.ingest(t, 555, 13, 5, 19*time.Second)
+	c := f.ingest(t, 555, 13, 5, 14*time.Second)
 	f.completeAt(t, first[0], 20*time.Second)
 	f.now = turnBase.Add(20 * time.Second)
 	// MaxMsgs closes a+b at once; c is the rest of the backlog.
@@ -284,15 +284,35 @@ func TestTurnClaim_BacklogWaitsQuietFromLastArrivalAndKeepsCaps(t *testing.T) { 
 	if len(got) != 1 || strings.Join(got[0].SourceEventIDs, ",") != a+","+b {
 		t.Fatalf("capped backlog turn = %+v", got)
 	}
-	f.completeAt(t, got[0], 21*time.Second)
-	// c arrived during both earlier turns; its quiet window runs from 19s.
-	f.now = turnBase.Add(21 * time.Second)
+	// d arrives while a+b runs. c was created before that turn started, yet
+	// it waited behind it too, so c and d are one backlog (closed by MaxMsgs).
+	d := f.ingest(t, 555, 14, 5, 25*time.Second)
+	f.completeAt(t, got[0], 30*time.Second)
+	f.now = turnBase.Add(30 * time.Second)
+	if rest := f.claim(t, 5); len(rest) != 1 || strings.Join(rest[0].SourceEventIDs, ",") != c+","+d {
+		t.Fatalf("rest = %+v, want %s,%s", rest, c, d)
+	}
+}
+
+func TestTurnClaim_BacklogQuietWindowRunsFromLastArrival(t *testing.T) { // mctl-telegram#885
+	f := newTurnFixture(t, &turnCfg)
+	f.ingest(t, 555, 10, 5, 0)
+	f.now = turnBase.Add(4 * time.Second)
+	first := f.claim(t, 5)
+	if len(first) != 1 {
+		t.Fatalf("first = %+v", first)
+	}
+	x := f.ingest(t, 555, 11, 5, 6*time.Second)
+	y := f.ingest(t, 555, 12, 5, 19*time.Second)
+	f.completeAt(t, first[0], 20*time.Second)
+	// y arrived 1s before the turn ended: the sender may still be typing.
+	f.now = turnBase.Add(22 * time.Second)
 	if early := f.claim(t, 5); len(early) != 0 {
 		t.Fatalf("claimed inside the quiet window of the last arrival: %+v", early)
 	}
 	f.now = turnBase.Add(23 * time.Second)
-	if rest := f.claim(t, 5); len(rest) != 1 || strings.Join(rest[0].SourceEventIDs, ",") != c {
-		t.Fatalf("rest = %+v, want %s", rest, c)
+	if got := f.claim(t, 5); len(got) != 1 || strings.Join(got[0].SourceEventIDs, ",") != x+","+y {
+		t.Fatalf("backlog turn = %+v, want %s,%s", got, x, y)
 	}
 }
 
