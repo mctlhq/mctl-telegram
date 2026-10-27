@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.96.0](https://github.com/mctlhq/mctl-telegram/compare/0.95.1...0.96.0) (2026-10-27)
+
+
+### Features
+
+* **login:** log how Telegram delivered the login code ([acfadfe](https://github.com/mctlhq/mctl-telegram/commit/acfadfe326b5cefec07698913001fc131de8776c))
+* **login:** log how Telegram delivered the login code ([c62c089](https://github.com/mctlhq/mctl-telegram/commit/c62c08962e5a0c8ddc04b36d264262f54e116982))
+
 ## [0.95.1](https://github.com/mctlhq/mctl-telegram/compare/0.95.0...0.95.1) (2026-10-27)
 
 
