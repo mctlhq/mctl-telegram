@@ -1,9 +1,15 @@
 package telegram
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 func TestRenderQR(t *testing.T) {
@@ -42,4 +48,51 @@ func TestRenderQR_ErrorFallback(t *testing.T) {
 	if got == "" {
 		t.Error("renderQR with empty URL returned empty string (expected fallback message)")
 	}
+}
+
+func TestPasswordAfterQR(t *testing.T) {
+	ctx := context.Background()
+	needed := fmt.Errorf("import: %w", tgerr.New(401, "SESSION_PASSWORD_NEEDED"))
+	want := &tg.AuthAuthorization{User: &tg.User{ID: 4242}}
+	ask := func(context.Context) (string, error) { return "hunter2", nil }
+
+	t.Run("2FA account checks the password", func(t *testing.T) {
+		var got string
+		authz, err := passwordAfterQR(ctx, needed, ask, func(_ context.Context, pw string) (*tg.AuthAuthorization, error) {
+			got = pw
+			return want, nil
+		})
+		if err != nil || authz != want || got != "hunter2" {
+			t.Fatalf("authz=%v err=%v checked=%q", authz, err, got)
+		}
+	})
+
+	t.Run("other errors pass through without a prompt", func(t *testing.T) {
+		other := errors.New("qr token expired")
+		asked := false
+		_, err := passwordAfterQR(ctx, other, func(context.Context) (string, error) {
+			asked = true
+			return "", nil
+		}, nil)
+		if !errors.Is(err, other) || asked {
+			t.Fatalf("err=%v asked=%v", err, asked)
+		}
+	})
+
+	t.Run("no prompt keeps the Telegram error", func(t *testing.T) {
+		_, err := passwordAfterQR(ctx, needed, nil, nil)
+		if err == nil || !tgerr.Is(err, "SESSION_PASSWORD_NEEDED") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("wrong password fails", func(t *testing.T) {
+		bad := errors.New("PASSWORD_HASH_INVALID")
+		_, err := passwordAfterQR(ctx, needed, ask, func(context.Context, string) (*tg.AuthAuthorization, error) {
+			return nil, bad
+		})
+		if !errors.Is(err, bad) {
+			t.Fatalf("err=%v", err)
+		}
+	})
 }
