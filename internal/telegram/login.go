@@ -198,8 +198,32 @@ func (a *interactiveAuthenticator) Phone(ctx context.Context) (string, error) {
 	return a.phone, nil
 }
 
-func (a *interactiveAuthenticator) Code(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
+func (a *interactiveAuthenticator) Code(ctx context.Context, sent *tg.AuthSentCode) (string, error) {
+	// The code screen cannot tell where Telegram delivered the code (app,
+	// SMS, email, Fragment), so record it: "no code arrived" is otherwise
+	// undiagnosable. Never the code, hash or phone.
+	delivery, next, timeout := codeDelivery(sent)
+	slog.InfoContext(ctx, "telegram login: code sent",
+		"delivery", delivery, "next_delivery", next, "timeout_s", timeout)
 	return a.code(ctx)
+}
+
+// codeDelivery names how Telegram sent the login code, how it would send it
+// on auth.resendCode, and the resend timeout in seconds. Names are the TL
+// constructor names (auth.sentCodeTypeApp, auth.codeTypeSms, ...); next is
+// "" and timeout 0 when Telegram did not set them.
+func codeDelivery(sent *tg.AuthSentCode) (delivery, next string, timeout int) {
+	if sent == nil || sent.Type == nil {
+		return "unknown", "", 0
+	}
+	delivery = sent.Type.TypeName()
+	if nt, ok := sent.GetNextType(); ok && nt != nil {
+		next = nt.TypeName()
+	}
+	if t, ok := sent.GetTimeout(); ok {
+		timeout = t
+	}
+	return delivery, next, timeout
 }
 
 func (a *interactiveAuthenticator) Password(ctx context.Context) (string, error) {
