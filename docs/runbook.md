@@ -10,6 +10,9 @@ header says which is which.
 Canary incidents are out of scope here; see
 [docs/runbooks/canary.md](runbooks/canary.md).
 
+To admit a new agent platform, see
+[docs/runbooks/admitting-an-agent-platform.md](runbooks/admitting-an-agent-platform.md).
+
 This runbook is alert-driven — it is organized by Prometheus alert rule, for
 on-call response. For the client-facing error families a client or LLM agent
 actually hits (the exact string a tool or the OAuth flow returned, and what
