@@ -1,4 +1,4 @@
-# Admitting an agent platform
+# Runbook: agent platform admission
 
 This runbook is the operator procedure for letting a new MCP host or agent
 platform reach `https://tg.mctl.ai/mcp`. The current state per host is in the
