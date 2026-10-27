@@ -153,7 +153,8 @@ deployment boundary.**
   metadata. None of these has a verified sign-in against tg.mctl.ai, so
   treat this as a starting point. A `cursor://` redirect is refused today
   (only `https` and loopback redirects are accepted), so Cursor sign-in may
-  fail.
+  fail. Per-host status and evidence:
+  [docs/platforms/compatibility.md](docs/platforms/compatibility.md).
 - **Agent platforms:** register with Dynamic Client Registration from a
   callback host on the allowlist, or publish a Client ID Metadata Document
   on your own domain and ask for your host to be added. The integration
