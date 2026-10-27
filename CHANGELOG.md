@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.95.1](https://github.com/mctlhq/mctl-telegram/compare/0.95.0...0.95.1) (2026-10-27)
+
+
+### Bug Fixes
+
+* **agent:** log a hand-off after a completed job at debug, not error ([b34f610](https://github.com/mctlhq/mctl-telegram/commit/b34f6103b5f08024bfcebbe7a3bfd7e632dc7a0f))
+* **agent:** log a hand-off after a completed job at debug, not error ([4b93a42](https://github.com/mctlhq/mctl-telegram/commit/4b93a42ae0fd4fc2e4a1d1b88f504ec2f9f53134)), closes [#886](https://github.com/mctlhq/mctl-telegram/issues/886)
+
 ## [0.95.0](https://github.com/mctlhq/mctl-telegram/compare/0.94.0...0.95.0) (2026-10-27)
 
 
