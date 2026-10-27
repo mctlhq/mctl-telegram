@@ -93,6 +93,15 @@ func main() {
 
 	var tgID int64
 	var displayName, username string
+	askPassword := func(ctx context.Context) (string, error) {
+		fmt.Print("Enter 2FA cloud password: ")
+		pw, err := term.ReadPassword(int(syscall.Stdin))
+		fmt.Println()
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(string(pw)), nil
+	}
 
 	// From the moment either login entrypoint is entered, a failure has to run
 	// the repair. gotd persists through the SessionStore as soon as it has an
@@ -127,6 +136,7 @@ func main() {
 						fmt.Println("Waiting for scan... (QR refreshes automatically)")
 						return nil
 					},
+					askPassword,
 					loginCfg,
 				)
 			})
@@ -142,15 +152,6 @@ func main() {
 				return "", err
 			}
 			return strings.TrimSpace(line), nil
-		}
-		askPassword := func(ctx context.Context) (string, error) {
-			fmt.Print("Enter 2FA cloud password: ")
-			pw, err := term.ReadPassword(int(syscall.Stdin))
-			fmt.Println()
-			if err != nil {
-				return "", err
-			}
-			return strings.TrimSpace(string(pw)), nil
 		}
 		slog.Info("phone login starting", "user_id", uid, "github_login", cfg.OperatorLogin, "phone", *phone)
 		var loginErr error

@@ -10,6 +10,7 @@ import (
 	gotdtelegram "github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth/qrlogin"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"rsc.io/qr"
 
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -23,6 +24,10 @@ import (
 // ~30 s and are refreshed automatically). It receives the deep-link URL and an
 // ASCII-art rendering of the same URL for terminal display.
 //
+// password is asked for the account's 2FA cloud password when Telegram accepts
+// the scan but answers SESSION_PASSWORD_NEEDED; nil makes such an account fail
+// the login.
+//
 // On success the session is persisted to the database and the resolved Telegram
 // user metadata is returned, identical to Login.
 func LoginQR(
@@ -32,6 +37,7 @@ func LoginQR(
 	store *db.Store,
 	userID int64,
 	show func(ctx context.Context, url, asciiArt string) error,
+	password func(ctx context.Context) (string, error),
 	cfgs ...LoginConfig,
 ) (telegramUserID int64, displayName, username string, err error) {
 	if apiID == 0 || apiHash == "" {
@@ -58,16 +64,19 @@ func LoginQR(
 			// of transparently importing the accepted token.
 			Migrate: client.MigrateTo,
 		})
-		auth, err := qr.Auth(ctx, loggedIn, func(ctx context.Context, token qrlogin.Token) error {
+		authz, err := qr.Auth(ctx, loggedIn, func(ctx context.Context, token qrlogin.Token) error {
 			url := token.URL()
 			return show(ctx, url, renderQR(url))
 		})
 		if err != nil {
-			return fmt.Errorf("qr auth: %w", err)
+			authz, err = passwordAfterQR(ctx, err, password, client.Auth().Password)
+			if err != nil {
+				return fmt.Errorf("qr auth: %w", err)
+			}
 		}
-		user, ok := auth.User.(*tg.User)
+		user, ok := authz.User.(*tg.User)
 		if !ok {
-			return fmt.Errorf("unexpected auth user type %T", auth.User)
+			return fmt.Errorf("unexpected auth user type %T", authz.User)
 		}
 		telegramUserID = user.ID
 		displayName = strings.TrimSpace(user.FirstName + " " + user.LastName)
@@ -90,6 +99,33 @@ func LoginQR(
 		return 0, "", "", err
 	}
 	return telegramUserID, displayName, username, nil
+}
+
+// passwordAfterQR finishes a QR login that Telegram accepted but answered with
+// SESSION_PASSWORD_NEEDED: the account has a 2FA cloud password, which is
+// asked for and checked on the same connection. Any other error is returned
+// unchanged.
+func passwordAfterQR(
+	ctx context.Context,
+	qrErr error,
+	password func(ctx context.Context) (string, error),
+	check func(ctx context.Context, password string) (*tg.AuthAuthorization, error),
+) (*tg.AuthAuthorization, error) {
+	if !tgerr.Is(qrErr, "SESSION_PASSWORD_NEEDED") {
+		return nil, qrErr
+	}
+	if password == nil {
+		return nil, fmt.Errorf("2FA password required but no prompt configured: %w", qrErr)
+	}
+	pw, err := password(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read 2FA password: %w", err)
+	}
+	authz, err := check(ctx, pw)
+	if err != nil {
+		return nil, fmt.Errorf("check 2FA password: %w", err)
+	}
+	return authz, nil
 }
 
 // renderQR encodes url as a QR code and returns an ASCII-art string suitable
