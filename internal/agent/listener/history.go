@@ -10,31 +10,47 @@ import (
 	"github.com/gotd/td/tg"
 
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
 type savedHistoryAPI interface {
 	MessagesGetHistory(context.Context, *tg.MessagesGetHistoryRequest) (tg.MessagesMessagesClass, error)
 }
 
-func (l *Listener) runSavedHistoryPoller(ctx context.Context, acct *account, api savedHistoryAPI) {
-	poll := func() {
-		if err := l.pollSavedHistory(ctx, acct, api); err != nil && ctx.Err() == nil {
-			// History RPC, FloodWait, and persistence/router failures are all
-			// retried on a later tick. They must not tear down updates.Manager
-			// or the same pinned client's inbound-DM path.
-			slog.Warn("agent saved command history poll failed", "user_id", acct.userID, "err", err)
+// runSavedHistoryPoller polls until ctx is done and then returns nil. It
+// returns early only with an error meaning Telegram rejected the session's
+// auth key: every later poll would fail the same way, and gotd does not end
+// the client on that error by itself, so the caller must.
+func (l *Listener) runSavedHistoryPoller(ctx context.Context, acct *account, api savedHistoryAPI) error {
+	poll := func() error {
+		err := l.pollSavedHistory(ctx, acct, api)
+		if err == nil || ctx.Err() != nil {
+			return nil
 		}
+		if telegram.IsSessionAuthError(err) {
+			slog.Warn("agent saved command history poll: session rejected, stopping", "user_id", acct.userID, "err", err)
+			return err
+		}
+		// History RPC, FloodWait, and persistence/router failures are all
+		// retried on a later tick. They must not tear down updates.Manager
+		// or the same pinned client's inbound-DM path.
+		slog.Warn("agent saved command history poll failed", "user_id", acct.userID, "err", err)
+		return nil
 	}
 
-	poll()
+	if err := poll(); err != nil {
+		return err
+	}
 	ticker := time.NewTicker(savedHistoryInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-ticker.C:
-			poll()
+			if err := poll(); err != nil {
+				return err
+			}
 		}
 	}
 }

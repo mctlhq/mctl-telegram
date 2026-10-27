@@ -182,16 +182,42 @@ func (l *Listener) RunFor(ctx context.Context, userID int64, c *gotdtelegram.Cli
 		<-ctx.Done()
 		return ctx.Err()
 	}
-	pollCtx, cancelPoll := context.WithCancel(ctx)
-	defer cancelPoll()
-	go l.runSavedHistoryPoller(pollCtx, a, c.API())
+	return l.runWithPoller(ctx, a, c.API(), func(ctx context.Context) error {
+		// updates.Manager retains its internal state after Run exits and
+		// rejects a second Run as "already authorized". Pool reconnects invoke
+		// RunFor again on the same account, so clear only the in-memory
+		// runtime state first; the DB watermark remains intact and is reloaded
+		// by Run for gap recovery.
+		a.mgr.Reset()
+		return a.mgr.Run(ctx, c.API(), a.tgID, updates.AuthOptions{})
+	})
+}
 
-	// updates.Manager retains its internal state after Run exits and rejects a
-	// second Run as "already authorized". Pool reconnects invoke RunFor again on
-	// the same account, so clear only the in-memory runtime state first; the DB
-	// watermark remains intact and is reloaded by Run for gap recovery.
-	a.mgr.Reset()
-	return a.mgr.Run(ctx, c.API(), a.tgID, updates.AuthOptions{})
+// runWithPoller runs the update loop alongside the Saved Messages poller.
+// When the poller reports that Telegram rejected the auth key, the update
+// loop is cancelled and that error is returned, so the pool's client exits
+// and finishRun revokes the session row. Without this a dead key was polled
+// every savedHistoryInterval until something else noticed (about 49k
+// rejected calls over three days on preview, 2026-10-24..26).
+func (l *Listener) runWithPoller(ctx context.Context, a *account, api savedHistoryAPI, run func(context.Context) error) error {
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	pollCtx, cancelPoll := context.WithCancel(ctx)
+	pollDone := make(chan error, 1)
+	go func() {
+		err := l.runSavedHistoryPoller(pollCtx, a, api)
+		if err != nil {
+			cancelRun()
+		}
+		pollDone <- err
+	}()
+
+	runErr := run(runCtx)
+	cancelPoll()
+	if pollErr := <-pollDone; pollErr != nil {
+		return pollErr
+	}
+	return runErr
 }
 
 func (l *Listener) dispatcherFor(acct *account) tg.UpdateDispatcher {

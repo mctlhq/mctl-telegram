@@ -40,14 +40,8 @@ func loginClientOptions(sess *SessionStore, cfg LoginConfig) telegram.Options {
 	return telegram.Options{
 		SessionStorage: sess,
 		DCList:         dcList(cfg.TestDC),
-		Device: telegram.DeviceConfig{
-			DeviceModel:    "MCTL Assistant",
-			SystemVersion:  "Linux",
-			AppVersion:     "1.0",
-			SystemLangCode: "en",
-			LangCode:       "en",
-		},
-		Middlewares: loginMiddlewares(cfg),
+		Device:         deviceConfig,
+		Middlewares:    loginMiddlewares(cfg),
 	}
 }
 
