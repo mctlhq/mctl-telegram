@@ -35,3 +35,17 @@ func TestClientOptionsCarryTestDC(t *testing.T) {
 		}
 	}
 }
+
+// Pooled clients serve every request after login, so they must describe the
+// session to Telegram exactly as the login client did; a pooled client that
+// sends gotd's defaults re-labels the session as an unknown server script.
+func TestClientOptionsCarryDevice(t *testing.T) {
+	pool := NewClientPool(1, "hash", time.Minute, nil)
+	got := pool.clientOptions(&SessionStore{}).Device
+	if got != loginClientOptions(&SessionStore{}, LoginConfig{}).Device {
+		t.Fatalf("pool device %+v differs from the login client's", got)
+	}
+	if got.DeviceModel != "MCTL Assistant" {
+		t.Fatalf("pool DeviceModel = %q, want %q", got.DeviceModel, "MCTL Assistant")
+	}
+}

@@ -6,13 +6,16 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/control"
 	"github.com/mctlhq/mctl-telegram/internal/agent/executor"
 	"github.com/mctlhq/mctl-telegram/internal/agent/queue"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
 type historyResult struct {
@@ -401,5 +404,60 @@ func TestPollSavedHistory_RoutesCommandWithOutFalse(t *testing.T) {
 	}
 	if event.Kind != db.EventKindSavedCommand {
 		t.Fatalf("event kind = %q, want %q", event.Kind, db.EventKindSavedCommand)
+	}
+}
+
+// A rejected auth key fails every later poll the same way, and gotd does not
+// end the client on it, so the poller must stop and hand the error back.
+func TestRunSavedHistoryPoller_StopsOnRejectedSession(t *testing.T) {
+	l, store, acct := newTestListener(t, nil)
+	if err := store.AdvanceSavedCommandCursor(context.Background(), acct.userID, 100); err != nil {
+		t.Fatalf("seed cursor: %v", err)
+	}
+	api := &fakeSavedHistoryAPI{results: []historyResult{{err: tgerr.New(401, "AUTH_KEY_UNREGISTERED")}}}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*savedHistoryInterval)
+	defer cancel()
+	err := l.runSavedHistoryPoller(ctx, acct, api)
+	if ctx.Err() != nil {
+		t.Fatal("poller kept polling a rejected session until the deadline")
+	}
+	if !telegram.IsSessionAuthError(err) {
+		t.Fatalf("poller returned %v, want the session error", err)
+	}
+}
+
+// Every other failure stays a retry on the next tick.
+func TestRunSavedHistoryPoller_RetriesOtherErrors(t *testing.T) {
+	l, store, acct := newTestListener(t, nil)
+	if err := store.AdvanceSavedCommandCursor(context.Background(), acct.userID, 100); err != nil {
+		t.Fatalf("seed cursor: %v", err)
+	}
+	api := &fakeSavedHistoryAPI{results: []historyResult{{err: tgerr.New(420, "FLOOD_WAIT_5")}}}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if err := l.runSavedHistoryPoller(ctx, acct, api); err != nil {
+		t.Fatalf("poller stopped on a retryable error: %v", err)
+	}
+}
+
+// The poller's verdict must reach the pool: the update loop is cancelled and
+// the session error is what RunFor returns, so finishRun revokes the row.
+func TestRunWithPoller_RejectedSessionEndsRun(t *testing.T) {
+	l, store, acct := newTestListener(t, nil)
+	if err := store.AdvanceSavedCommandCursor(context.Background(), acct.userID, 100); err != nil {
+		t.Fatalf("seed cursor: %v", err)
+	}
+	api := &fakeSavedHistoryAPI{results: []historyResult{{err: tgerr.New(401, "AUTH_KEY_UNREGISTERED")}}}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*savedHistoryInterval)
+	defer cancel()
+	err := l.runWithPoller(ctx, acct, api, func(runCtx context.Context) error {
+		<-runCtx.Done()
+		return runCtx.Err()
+	})
+	if ctx.Err() != nil {
+		t.Fatal("update loop kept running on a rejected session until the deadline")
+	}
+	if !telegram.IsSessionAuthError(err) {
+		t.Fatalf("runWithPoller returned %v, want the session error", err)
 	}
 }

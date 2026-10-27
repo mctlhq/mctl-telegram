@@ -50,6 +50,12 @@ func sessionErrorFor(err error) error {
 	}
 }
 
+// IsSessionAuthError reports whether err means Telegram no longer accepts
+// the session's auth key, so retrying with the same session cannot succeed.
+func IsSessionAuthError(err error) bool {
+	return sessionErrorFor(err) != nil
+}
+
 // ErrPoolFull is returned by Borrow when the pool has reached its
 // TELEGRAM_MAX_SESSIONS limit and cannot allocate a new client entry.
 var ErrPoolFull = errors.New("telegram: session pool at capacity")
@@ -174,9 +180,23 @@ func (p *ClientPool) WithTestDC(on bool) *ClientPool {
 	return p
 }
 
+// deviceConfig is how every client describes itself to Telegram in
+// initConnection, and so what the user sees for the session under Active
+// Sessions. The login and pooled clients must send the same values: a pooled
+// client that set nothing fell back to gotd's defaults (go version, "linux",
+// gotd version), so after each reconnect the session the user had just
+// approved as "MCTL Assistant" looked like an unknown server script.
+var deviceConfig = telegram.DeviceConfig{
+	DeviceModel:    "MCTL Assistant",
+	SystemVersion:  "Linux",
+	AppVersion:     "1.0",
+	SystemLangCode: "en",
+	LangCode:       "en",
+}
+
 // clientOptions is the gotd configuration every pooled client starts from.
 func (p *ClientPool) clientOptions(store *SessionStore) telegram.Options {
-	opts := telegram.Options{SessionStorage: store, DCList: dcList(p.testDC)}
+	opts := telegram.Options{SessionStorage: store, DCList: dcList(p.testDC), Device: deviceConfig}
 	if p.globalMW != nil {
 		opts.Middlewares = []telegram.Middleware{p.globalMW}
 	}
