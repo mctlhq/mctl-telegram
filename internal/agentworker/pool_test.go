@@ -1,7 +1,11 @@
 package agentworker
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -109,6 +113,93 @@ func TestWorkerPool_SameConversationNeverOverlaps(t *testing.T) { // defence in 
 	<-done
 	if atomic.LoadInt32(&r.finished) != 2 || atomic.LoadInt32(&r.peak) != 1 {
 		t.Fatalf("finished=%d peak=%d, want 2 and 1", r.finished, r.peak)
+	}
+}
+
+// handOffRunner blocks the first job it runs until release closes and then
+// returns err1; every later job returns nil at once.
+type handOffRunner struct {
+	started chan int64
+	release chan struct{}
+	err1    error
+	runs    int32
+}
+
+func (r *handOffRunner) Run(ctx context.Context, job JobEnvelope) error {
+	r.started <- job.JobID
+	if atomic.AddInt32(&r.runs, 1) == 1 {
+		<-r.release
+		return r.err1
+	}
+	return nil
+}
+
+// runHandOff runs two jobs of one conversation with concurrency 2, so job 2
+// is claimed while job 1 still runs here, and returns the worker's log.
+func runHandOff(t *testing.T, err1 error) string {
+	t.Helper()
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&lockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	p := &limitPoller{queue: []JobEnvelope{{JobID: 1, ConversationID: 7}, {JobID: 2, ConversationID: 7}}}
+	r := &handOffRunner{started: make(chan int64, 10), release: make(chan struct{}), err1: err1}
+	w := NewWorker(p, r).WithConcurrency(2)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = w.Loop(ctx); close(done) }()
+	waitStarted := func() int64 {
+		select {
+		case id := <-r.started:
+			return id
+		case <-time.After(2 * time.Second):
+			t.Fatal("a job did not start")
+			return 0
+		}
+	}
+	first := waitStarted()
+	// The other job is claimed in the same poll and waits at the gate.
+	time.Sleep(50 * time.Millisecond)
+	close(r.release)
+	if second := waitStarted(); second == first {
+		t.Fatalf("job %d started twice", first)
+	}
+	cancel()
+	<-done
+	mu.Lock()
+	defer mu.Unlock()
+	return buf.String()
+}
+
+type lockedWriter struct {
+	w  *bytes.Buffer
+	mu *sync.Mutex
+}
+
+func (l *lockedWriter) Write(b []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(b)
+}
+
+const gateErrorMsg = "claimed a job of a conversation already running here"
+
+func TestWorkerPool_HandOffAfterCompletedJobIsNotAnError(t *testing.T) { // #886
+	log := runHandOff(t, nil)
+	if strings.Contains(log, gateErrorMsg) {
+		t.Fatalf("hand-off after a completed job logged the gate ERROR:\n%s", log)
+	}
+	if !strings.Contains(log, "waited for the previous job of this conversation to exit") {
+		t.Fatalf("job 2 did not wait at the gate:\n%s", log)
+	}
+}
+
+func TestWorkerPool_WaitBehindUncompletedJobIsAnError(t *testing.T) { // #886
+	log := runHandOff(t, errors.New("turn failed"))
+	if !strings.Contains(log, "level=ERROR") || !strings.Contains(log, gateErrorMsg) {
+		t.Fatalf("waiting behind an uncompleted job did not log the gate ERROR:\n%s", log)
 	}
 }
 

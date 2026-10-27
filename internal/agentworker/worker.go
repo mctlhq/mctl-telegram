@@ -76,40 +76,53 @@ func (w *Worker) WithConcurrency(n int) *Worker {
 // inside this process.
 type convGate struct {
 	mu      sync.Mutex
-	running map[int64]chan struct{}
+	running map[int64]*convRun
+}
+
+// convRun is one job of a conversation running here. completed is set before
+// done closes, so a waiter reads it after <-done without the lock.
+type convRun struct {
+	done      chan struct{}
+	completed bool
 }
 
 // enter blocks until no other job of conv runs here, then marks conv running.
-// It reports whether it had to wait. Conversation 0 (none) is not gated.
-func (g *convGate) enter(conv int64) (waited bool) {
+// It reports whether it had to wait and, if so, whether the job it last waited
+// for had completed (its attempt confirmed terminal by the API). Conversation
+// 0 (none) is not gated.
+func (g *convGate) enter(conv int64) (waited, prevCompleted bool) {
 	if conv == 0 {
-		return false
+		return false, false
 	}
 	for {
 		g.mu.Lock()
 		if g.running == nil {
-			g.running = map[int64]chan struct{}{}
+			g.running = map[int64]*convRun{}
 		}
-		ch, busy := g.running[conv]
+		run, busy := g.running[conv]
 		if !busy {
-			g.running[conv] = make(chan struct{})
+			g.running[conv] = &convRun{done: make(chan struct{})}
 			g.mu.Unlock()
-			return waited
+			return waited, prevCompleted
 		}
 		g.mu.Unlock()
 		waited = true
-		<-ch
+		<-run.done
+		prevCompleted = run.completed
 	}
 }
 
-func (g *convGate) leave(conv int64) {
+// leave marks conv no longer running here. completed reports whether the job
+// that ran reached a terminal state through complete_agent_job.
+func (g *convGate) leave(conv int64, completed bool) {
 	if conv == 0 {
 		return
 	}
 	g.mu.Lock()
-	if ch, ok := g.running[conv]; ok {
+	if run, ok := g.running[conv]; ok {
 		delete(g.running, conv)
-		close(ch)
+		run.completed = completed
+		close(run.done)
 	}
 	g.mu.Unlock()
 }
@@ -230,12 +243,25 @@ func (w *Worker) Loop(ctx context.Context) error {
 func (w *Worker) runJob(ctx context.Context, gate *convGate, job JobEnvelope) {
 	jobCtx, cancel := context.WithDeadline(ctx, job.ParsedDeadline(jobDeadlineFallback))
 	defer cancel()
-	if gate.enter(job.ConversationID) {
+	// The server releases a conversation once its job is completed, but the
+	// runner returns only after the claude process exits, a few seconds
+	// later. A free slot can claim the conversation's next job in that gap:
+	// waiting behind a job whose completion the API already confirmed is that
+	// normal hand-off. Waiting behind one that did not complete means the
+	// server handed out the conversation while this process still held it.
+	waited, prevCompleted := gate.enter(job.ConversationID)
+	switch {
+	case waited && prevCompleted:
+		slog.Debug("agent-worker: waited for the previous job of this conversation to exit",
+			"job_id", job.JobID)
+	case waited:
 		slog.Error("agent-worker: claimed a job of a conversation already running here; waited for it",
 			"job_id", job.JobID)
 	}
-	defer gate.leave(job.ConversationID)
+	completed := false
+	defer func() { gate.leave(job.ConversationID, completed) }()
 	err := w.runner.Run(jobCtx, job)
+	completed = err == nil
 	// event_id (format evt:v1:<account>:<chat>:<message>) is
 	// deliberately not logged here — it's not a redacted slog key,
 	// and job_id already gives an operator everything needed to
