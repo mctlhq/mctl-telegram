@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.95.0](https://github.com/mctlhq/mctl-telegram/compare/0.94.0...0.95.0) (2026-10-27)
+
+
+### Features
+
+* **agent:** coalesce jobs that queued behind a processing turn ([80c2bb5](https://github.com/mctlhq/mctl-telegram/commit/80c2bb58ed9a8bfc0261591af0851fdfb39eaa25))
+* **agent:** coalesce jobs that queued behind a processing turn ([69d4ec2](https://github.com/mctlhq/mctl-telegram/commit/69d4ec25776434010d5d58c28974e29bfaeffc84)), closes [#885](https://github.com/mctlhq/mctl-telegram/issues/885)
+* **agents:** issue-881-docs-platform-compatibility-matrix-and-o ([a399f1a](https://github.com/mctlhq/mctl-telegram/commit/a399f1aa63c519ec0555b43b2c57f59b49a2d1b8))
+
+
+### Bug Fixes
+
+* **agent:** count a backlog head that arrived before the blocking turn ([ac9733f](https://github.com/mctlhq/mctl-telegram/commit/ac9733f90b99c10e3560a15ec5c7ba955ab13bb2))
+
 ## [0.94.0](https://github.com/mctlhq/mctl-telegram/compare/0.93.0...0.94.0) (2026-10-24)
 
 
