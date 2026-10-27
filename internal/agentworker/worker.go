@@ -47,6 +47,9 @@ type Worker struct {
 	// concurrency is the number of jobs run at once; 1 (the default) is the
 	// sequential behaviour.
 	concurrency int
+	// onGateWait, when set, is called as a job starts waiting at the
+	// conversation gate. Tests use it to know the wait has begun.
+	onGateWait func(conv int64)
 }
 
 func NewWorker(poller eventPoller, runner Runner) *Worker {
@@ -77,6 +80,7 @@ func (w *Worker) WithConcurrency(n int) *Worker {
 type convGate struct {
 	mu      sync.Mutex
 	running map[int64]*convRun
+	onWait  func(conv int64)
 }
 
 // convRun is one job of a conversation running here. completed is set before
@@ -107,6 +111,9 @@ func (g *convGate) enter(conv int64) (waited, prevCompleted bool) {
 		}
 		g.mu.Unlock()
 		waited = true
+		if g.onWait != nil {
+			g.onWait(conv)
+		}
 		<-run.done
 		prevCompleted = run.completed
 	}
@@ -161,7 +168,7 @@ func (w *Worker) Loop(ctx context.Context) error {
 	slots := make(chan struct{}, n)
 	var wg sync.WaitGroup
 	defer wg.Wait()
-	gate := &convGate{}
+	gate := &convGate{onWait: w.onGateWait}
 	backoff := minPollBackoff
 	for {
 		if ctx.Err() != nil {

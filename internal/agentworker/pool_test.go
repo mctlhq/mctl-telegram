@@ -147,6 +147,8 @@ func runHandOff(t *testing.T, err1 error) string {
 	p := &limitPoller{queue: []JobEnvelope{{JobID: 1, ConversationID: 7}, {JobID: 2, ConversationID: 7}}}
 	r := &handOffRunner{started: make(chan int64, 10), release: make(chan struct{}), err1: err1}
 	w := NewWorker(p, r).WithConcurrency(2)
+	gateWait := make(chan struct{}, 10)
+	w.onGateWait = func(int64) { gateWait <- struct{}{} }
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { _ = w.Loop(ctx); close(done) }()
@@ -160,14 +162,19 @@ func runHandOff(t *testing.T, err1 error) string {
 		}
 	}
 	first := waitStarted()
-	// The other job is claimed in the same poll and waits at the gate.
-	time.Sleep(50 * time.Millisecond)
+	// The other job is claimed in the same poll; release the first one only
+	// once the other is waiting at the gate.
+	select {
+	case <-gateWait:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the second job did not wait at the gate")
+	}
 	close(r.release)
 	if second := waitStarted(); second == first {
 		t.Fatalf("job %d started twice", first)
 	}
 	cancel()
-	<-done
+	<-done // Loop returns only after both runJob goroutines (wg.Wait)
 	mu.Lock()
 	defer mu.Unlock()
 	return buf.String()
