@@ -222,12 +222,13 @@ func TestEnablePassword_WrongThenRightPasswordInOneFlow(t *testing.T) {
 }
 
 // The code screen says where the code actually arrives: a message from
-// "Telegram" in the app, never an SMS (#900).
+// "Telegram" in the app rather than an SMS, without promising it never is
+// one: Telegram falls back to SMS when no other session is active (#900).
 func TestEnableCodePage_SaysCodeArrivesInTheApp(t *testing.T) {
 	rec := httptest.NewRecorder()
 	renderEnableCode(rec, enableCodePage{Issuer: "https://tg.mctl.ai", EnableToken: "tok", Phone: "+14155551234"})
 	body := rec.Body.String()
-	for _, want := range []string{"message from <strong>Telegram</strong>", "inside the Telegram app", "not by SMS"} {
+	for _, want := range []string{"usually arrives", "message from <strong>Telegram</strong>", "inside the Telegram app", "rather than by SMS"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("code screen missing %q: %s", want, body)
 		}
@@ -246,4 +247,87 @@ func TestRepromptMessages(t *testing.T) {
 			t.Errorf("got %q, want %q", tc.got, tc.want)
 		}
 	}
+}
+
+// restartDuringPasswordLogin fakes telegram.Login hitting AUTH_RESTART in the
+// 2FA check after one wrong password: it restarts the sign-in and asks for the
+// new code with an auth_restart Reprompt, as runPhoneFlow does. The new code
+// then completes the flow (the stub does not ask for the password again).
+func restartDuringPasswordLogin() LoginFunc {
+	return func(ctx context.Context, apiID int, apiHash string, store *db.Store,
+		uid int64, phone string,
+		askCode func(context.Context) (string, error),
+		askPassword func(context.Context) (string, error),
+		_ ...telegram.LoginConfig,
+	) (int64, string, string, error) {
+		if _, err := askCode(ctx); err != nil {
+			return 0, "", "", err
+		}
+		if _, err := askPassword(ctx); err != nil {
+			return 0, "", "", err
+		}
+		// Wrong password, then Telegram answers the second check with AUTH_RESTART.
+		if _, err := askPassword(telegram.WithReprompt(ctx, telegram.Reprompt{
+			Reason: telegram.RepromptBadPassword, AttemptsLeft: telegram.LoginPasswordAttempts - 1,
+		})); err != nil {
+			return 0, "", "", err
+		}
+		code, err := askCode(telegram.WithReprompt(ctx, telegram.Reprompt{
+			Reason: telegram.RepromptAuthRestart, AttemptsLeft: telegram.LoginCodeAttempts,
+		}))
+		if err != nil {
+			return 0, "", "", err
+		}
+		if code != "67890" {
+			return 0, "", "", fmt.Errorf("sign in: %w", tgerr.New(400, "PHONE_CODE_INVALID"))
+		}
+		if err := store.UpdateSessionBlob(ctx, uid, []byte("fake-mtproto-session")); err != nil {
+			return 0, "", "", err
+		}
+		return 500100101, "Dana", "dana_tg", nil
+	}
+}
+
+// An AUTH_RESTART during the 2FA check sends a new code; the password POST
+// must move the user to the code screen to enter it, not wait out
+// enableSignInWait while the flow is parked asking for that code.
+func TestEnablePassword_AuthRestartMovesToCodeStep(t *testing.T) {
+	srv, mux := newEnableTestServer(t, restartDuringPasswordLogin())
+	es := driveToPhone(t, mux)
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}}); !strings.Contains(rec.Body.String(), "enable_access/code") {
+		t.Fatalf("start did not render the code screen: %s", rec.Body.String())
+	}
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {es}, "code": {"12345"}}); !strings.Contains(rec.Body.String(), "enable_access/password") {
+		t.Fatalf("code did not render the 2FA screen: %s", rec.Body.String())
+	}
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/password",
+		url.Values{"es": {es}, "password": {"hunter1"}}); !strings.Contains(rec.Body.String(), "That password did not match") {
+		t.Fatalf("wrong password did not re-render the password screen: %s", rec.Body.String())
+	}
+
+	start := time.Now()
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/password",
+		url.Values{"es": {es}, "password": {"hunter2"}})
+	if d := time.Since(start); d > 10*time.Second {
+		t.Errorf("password POST took %s: it waited for the timeout instead of following the restart", d)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `action="/oauth/telegram/enable_access/code"`) {
+		t.Fatalf("AUTH_RESTART during the password check must render the code screen: %s", body)
+	}
+	if !strings.Contains(body, "Telegram restarted the sign-in and sent you a new code.") {
+		t.Errorf("code screen missing the new-code notice: %s", body)
+	}
+	if !hasAudit(t, srv, "connect:retry:auth_restart") {
+		t.Errorf("the restart must be audited as connect:retry:auth_restart")
+	}
+	if hasAudit(t, srv, "connect:failed:timeout") {
+		t.Errorf("the restart must not be audited as a timeout")
+	}
+
+	rec = postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {es}, "code": {"67890"}})
+	authCodeRedirect(t, rec)
 }

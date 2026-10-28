@@ -1064,7 +1064,10 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 
 // handleEnablePassword feeds the 2FA cloud password to the login goroutine and
 // renders the success redirect, the password screen again after a wrong
-// password with attempts left, or the phone screen when the flow ended.
+// password with attempts left, the code screen when an AUTH_RESTART during the
+// password check made Telegram send a new code, or the phone screen when the
+// flow ended. (The reverse cannot strand the user: handleEnableCode already
+// follows the flow onto the password step through lf.needPw.)
 func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 	es, esTok, ok := s.lookupEnable(r)
 	if !ok {
@@ -1123,6 +1126,22 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	select {
+	case rp := <-lf.needCode:
+		// The password check hit AUTH_RESTART: telegram.Login restarted the
+		// sign-in, Telegram sent a new code, and the goroutine is parked in
+		// askCode for it. Move the user back to the code step so they can
+		// enter it, instead of waiting out enableSignInWait here while the
+		// flow waits for a code nobody can submit.
+		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:retry:" + rp.Reason, Status: "error", ErrMsg: rp.Reason})
+		es.step = stepCode
+		renderEnableCode(w, enableCodePage{
+			Issuer:      s.cfg.Issuer,
+			EnableToken: esTok,
+			Phone:       es.phone,
+			WizardMode:  es.isWizardMode(),
+			WizardStep:  3,
+			Error:       codeRepromptMsg(rp),
+		})
 	case rp := <-lf.needPw:
 		// A wrong password with attempts left: telegram.Login is asking again
 		// on the same connection, so the user stays on this step.

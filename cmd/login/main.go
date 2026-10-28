@@ -197,8 +197,8 @@ func main() {
 }
 
 // promptCode reads the login code from in. The first prompt says where the
-// code arrives -- a message from "Telegram" in the app on another device, not
-// an SMS -- and a repeated one says why it is asking again. Only the digits
+// code usually arrives -- a message from "Telegram" in the app on another
+// device, rather than an SMS -- and a repeated one says why it is asking again. Only the digits
 // of a line are kept, so "12 345" or a pasted "Login code: 12345." works; a
 // line with no digits is asked for again rather than sent to Telegram.
 func promptCode(ctx context.Context, in *bufio.Reader, out io.Writer) (string, error) {
@@ -209,7 +209,7 @@ func promptCode(ctx context.Context, in *bufio.Reader, out io.Writer) (string, e
 			fmt.Fprintf(out, "That code did not match, try again (%d left).\n", rp.AttemptsLeft)
 		}
 	} else {
-		fmt.Fprintln(out, `The code arrives as a message from "Telegram" inside the Telegram app on your other device, not by SMS.`)
+		fmt.Fprintln(out, `The code usually arrives as a message from "Telegram" inside the Telegram app on your other device, rather than by SMS.`)
 	}
 	for {
 		fmt.Fprint(out, "Enter the Telegram code: ")

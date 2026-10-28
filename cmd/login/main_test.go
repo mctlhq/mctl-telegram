@@ -265,7 +265,8 @@ func TestRunLoginOrRepair_LeavesASuccessfulLoginAlone(t *testing.T) {
 }
 
 // promptCode keeps only the digits of a line, re-asks on a line with none,
-// and its copy says the code is a Telegram message in the app, not an SMS
+// and its copy says the code is usually a Telegram message in the app rather
+// than an SMS
 // (#900).
 func TestPromptCode(t *testing.T) {
 	var out bytes.Buffer
@@ -273,7 +274,7 @@ func TestPromptCode(t *testing.T) {
 	if err != nil || code != "12345" {
 		t.Fatalf("promptCode = %q, %v; want 12345", code, err)
 	}
-	if got := out.String(); !strings.Contains(got, `message from "Telegram" inside the Telegram app`) || !strings.Contains(got, "not by SMS") {
+	if got := out.String(); !strings.Contains(got, `usually arrives as a message from "Telegram" inside the Telegram app`) || !strings.Contains(got, "rather than by SMS") {
 		t.Errorf("first prompt must say where the code arrives: %q", got)
 	}
 	if n := strings.Count(out.String(), "Enter the Telegram code: "); n != 2 {

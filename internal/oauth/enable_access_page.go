@@ -175,9 +175,9 @@ var enableCodeTemplate = template.Must(template.New("enableCode").Parse(enableHe
       <li{{if eq .WizardStep 4}} class="active"{{end}}>Done</li>
     </ol>{{end}}
     {{if .WizardMode}}<h1>Step {{.WizardStep}} of 4 &#8212; Login code</h1>{{else}}<h1>Enter your login code</h1>{{end}}
-    <p>Telegram sent a login code for <span class="url">{{.Phone}}</span>. It arrives as a
-       message from <strong>Telegram</strong> inside the Telegram app on your other device
-       &#8212; not by SMS.</p>
+    <p>Telegram sent a login code for <span class="url">{{.Phone}}</span>. It usually arrives
+       as a message from <strong>Telegram</strong> inside the Telegram app on your other
+       device, rather than by SMS.</p>
     {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
     <form method="POST" action="/oauth/telegram/enable_access/code" autocomplete="off">
       <input type="hidden" name="es" value="{{.EnableToken}}">

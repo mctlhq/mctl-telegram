@@ -63,6 +63,7 @@ type fakeFlowClient struct {
 	goodCode     string
 	needPassword bool
 	goodPassword string
+	passwordErrs []error // returned by Password, in order, before goodPassword is checked
 
 	sendCodes   int
 	signInCodes []string
@@ -101,6 +102,11 @@ func (f *fakeFlowClient) SignIn(_ context.Context, _, code, hash string) (*tg.Au
 
 func (f *fakeFlowClient) Password(_ context.Context, pw string) (*tg.AuthAuthorization, error) {
 	f.passwords = append(f.passwords, pw)
+	if len(f.passwordErrs) > 0 {
+		err := f.passwordErrs[0]
+		f.passwordErrs = f.passwordErrs[1:]
+		return nil, err
+	}
 	if pw != f.goodPassword {
 		// What gotd's auth.Client.Password returns for PASSWORD_HASH_INVALID.
 		return nil, auth.ErrPasswordInvalid
@@ -276,4 +282,45 @@ func TestRetryAuthRestartOnce(t *testing.T) {
 	if _, err := retryAuthRestartOnce(ctx, fn); !errors.Is(err, other) || *calls != 1 {
 		t.Errorf("other error: err=%v calls=%d, want it unretried", err, *calls)
 	}
+}
+
+// AUTH_RESTART from the 2FA check restarts at SendCode once and re-asks the
+// code with an auth_restart Reprompt, then the password from scratch.
+func TestRunPhoneFlow_AuthRestartOnPasswordReasksTheCode(t *testing.T) {
+	restart := func() error { return fmt.Errorf("check password: %w", tgerr.New(500, "AUTH_RESTART")) }
+
+	t.Run("one restart is absorbed", func(t *testing.T) {
+		f := &fakeFlowClient{goodCode: "12345", needPassword: true, goodPassword: "hunter2",
+			passwordErrs: []error{auth.ErrPasswordInvalid, restart()}}
+		codes := &scriptedPrompt{inputs: []string{"12345", "12345"}}
+		pws := &scriptedPrompt{inputs: []string{"hunter1", "hunter2", "hunter2"}}
+		if err := runScriptedPhoneFlow(f, codes, pws); err != nil {
+			t.Fatalf("flow: %v", err)
+		}
+		if f.sendCodes != 2 || fmt.Sprint(f.signInHash) != "[hash-1 hash-2]" {
+			t.Errorf("SendCode = %d, hashes = %v, want a restart onto hash-2", f.sendCodes, f.signInHash)
+		}
+		want := []Reprompt{{}, {Reason: RepromptAuthRestart, AttemptsLeft: LoginCodeAttempts}}
+		if fmt.Sprint(codes.seen) != fmt.Sprint(want) {
+			t.Errorf("code prompts saw %v, want %v", codes.seen, want)
+		}
+		wantPw := []Reprompt{{}, {Reason: RepromptBadPassword, AttemptsLeft: 2}, {}}
+		if fmt.Sprint(pws.seen) != fmt.Sprint(wantPw) {
+			t.Errorf("password prompts saw %v, want %v (a fresh budget after the restart)", pws.seen, wantPw)
+		}
+	})
+
+	t.Run("a second restart surfaces", func(t *testing.T) {
+		f := &fakeFlowClient{goodCode: "12345", needPassword: true, goodPassword: "hunter2",
+			passwordErrs: []error{restart(), restart()}}
+		codes := &scriptedPrompt{inputs: []string{"12345", "12345"}}
+		pws := &scriptedPrompt{inputs: []string{"hunter2", "hunter2"}}
+		err := runScriptedPhoneFlow(f, codes, pws)
+		if !tgerr.Is(err, "AUTH_RESTART") {
+			t.Fatalf("err = %v, want AUTH_RESTART", err)
+		}
+		if f.sendCodes != 2 {
+			t.Errorf("SendCode = %d, want 2", f.sendCodes)
+		}
+	})
 }
