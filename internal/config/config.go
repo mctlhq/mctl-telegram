@@ -249,11 +249,6 @@ type Config struct {
 	// EnableAccessQREnabled turns on the web QR login in the enable_access
 	// flow (#901). Off by default; with it off the QR routes answer 404.
 	EnableAccessQREnabled bool // ENABLE_ACCESS_QR_ENABLED
-	// EnableAccessQRAppLinkEnabled is an experiment: phone browsers are
-	// offered the QR login too, with an "Open in Telegram" link to the
-	// login token, to learn whether Telegram confirms a token on the same
-	// device. Needs EnableAccessQREnabled. Off by default; preview only.
-	EnableAccessQRAppLinkEnabled bool // ENABLE_ACCESS_QR_APP_LINK_ENABLED
 	// TelegramAppName is the Telegram API app's name, which Telegram shows
 	// when it asks the user to confirm a QR login. The QR page names it so
 	// the user can tell a genuine prompt from a phishing one. Optional.
@@ -545,7 +540,6 @@ func Load() (*Config, error) {
 	c.ReplicaID = envOr("REPLICA_ID", envOr("POD_NAME", "unknown"))
 	c.DemoVideoURL = envOr("DEMO_VIDEO_URL", "")
 	c.EnableAccessQREnabled = envBool("ENABLE_ACCESS_QR_ENABLED", false)
-	c.EnableAccessQRAppLinkEnabled = envBool("ENABLE_ACCESS_QR_APP_LINK_ENABLED", false)
 	c.TelegramAppName = strings.TrimSpace(os.Getenv("TELEGRAM_APP_NAME"))
 	c.DemoReviewerEnabled = envBool("DEMO_REVIEWER_ENABLED", false)
 	c.DemoReviewerUsername = os.Getenv("DEMO_REVIEWER_USERNAME")

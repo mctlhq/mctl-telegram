@@ -31,10 +31,6 @@ type enablePhonePage struct {
 	// the phone number below it as the alternative (#901); see
 	// enableSession.qrOffered.
 	QROffered bool
-	// QRAppLink words the QR button for a phone browser: the login is
-	// confirmed in the Telegram app on the same phone; see
-	// enableSession.qrAppLink.
-	QRAppLink bool
 }
 
 type enableCodePage struct {
@@ -47,8 +43,6 @@ type enableCodePage struct {
 	// QROffered adds "Didn't get the code? Sign in with a QR code" (#901
 	// slice 2); see enableSession.qrOffered.
 	QROffered bool
-	// QRAppLink: see enablePhonePage.QRAppLink.
-	QRAppLink bool
 }
 
 type enablePasswordPage struct {
@@ -78,11 +72,7 @@ type enableQRPage struct {
 	// AppName is the Telegram app name the login confirmation will show.
 	AppName string
 	// Stops is how long the code is shown, e.g. "5 minutes".
-	Stops string
-	// AppLink, when set, is the login token as a tg://login link for an
-	// "Open in Telegram" button on a phone browser (the
-	// EnableAccessQRAppLinkEnabled experiment). Like QR it holds the token.
-	AppLink    template.URL
+	Stops      string
 	WizardMode bool
 }
 
@@ -234,9 +224,8 @@ var enablePhoneTemplate = template.Must(template.New("enablePhone").Parse(enable
         <span>Also allow this connector to send messages on my behalf (you can turn this off later)</span>
       </label>{{end}}
       {{if .QROffered}}<button type="submit" class="default-submit" tabindex="-1" aria-hidden="true">Send code</button>
-      {{if .QRAppLink}}<button type="submit" formaction="/oauth/telegram/enable_access/qr" formnovalidate>Sign in with the Telegram app</button>
-      <p class="hint">Experimental: confirm the login in Telegram on this phone. No phone number or login code needed.</p>{{else}}<button type="submit" formaction="/oauth/telegram/enable_access/qr" formnovalidate>Sign in with a QR code</button>
-      <p class="hint">Recommended: scan it with Telegram on your phone. No phone number or login code needed.</p>{{end}}
+      <button type="submit" formaction="/oauth/telegram/enable_access/qr" formnovalidate>Sign in with a QR code</button>
+      <p class="hint">Recommended: scan it with Telegram on your phone. No phone number or login code needed.</p>
       <div class="or"><span>or use your phone number</span></div>{{end}}
       <label class="field">
         <span>Phone number (international format)</span>
@@ -274,9 +263,8 @@ var enableCodeTemplate = template.Must(template.New("enableCode").Parse(enableHe
     {{if .QROffered}}<form method="POST" action="/oauth/telegram/enable_access/qr">
       <input type="hidden" name="es" value="{{.EnableToken}}">
       <div class="or"><span>didn&#8217;t get the code?</span></div>
-      {{if .QRAppLink}}<button type="submit" class="secondary">Sign in with the Telegram app</button>
-      <p class="hint">Experimental: confirm the login in Telegram on this phone. No login code needed.</p>{{else}}<button type="submit" class="secondary">Sign in with a QR code</button>
-      <p class="hint">Scan it with Telegram on your phone. No login code needed.</p>{{end}}
+      <button type="submit" class="secondary">Sign in with a QR code</button>
+      <p class="hint">Scan it with Telegram on your phone. No login code needed.</p>
     </form>{{end}}
 ` + enableFoot))
 
@@ -363,15 +351,9 @@ var enableQRTemplate = template.Must(template.New("enableQR").Parse(enableRefres
       <li class="active">Phone number</li>
       <li>Done</li>
     </ol>{{end}}
-    {{if .AppLink}}<h1>Confirm in Telegram</h1>
-    <p>Tap the button to open Telegram on this phone and confirm the login, then come back
-       to this page. It moves on by itself once Telegram confirms.</p>
-    <a class="btnlink" href="{{.AppLink}}">Open in Telegram</a>
-    <p class="meta">Experimental. If Telegram does not open or does not ask you to confirm,
-       scan the code below from another device that is signed in to Telegram, or use your
-       phone number.</p>{{else}}<h1>Scan with Telegram on your phone</h1>
+    <h1>Scan with Telegram on your phone</h1>
     <p>Open Telegram on your phone &#8594; Settings &#8594; Devices &#8594; Link Desktop Device,
-       then scan this code.</p>{{end}}
+       then scan this code.</p>
     <div class="qrbox">{{.QR}}</div>
     <p>Scan with the account you signed in with{{if .Username}}: <strong>@{{.Username}}</strong>{{end}}.
        Any other account will be refused.</p>
