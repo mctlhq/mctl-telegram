@@ -1,10 +1,12 @@
 package oauth
 
 // enable_access_page.go holds the HTML for the in-browser enable_access flow:
-// the phone, SMS-code, 2FA-password, error, and post-auth success screens. They
-// use no external resources, so the CSP forbids every external source. Most need
-// no JavaScript; the 2FA-password (show/hide toggle) and success (auto-redirect)
-// screens carry one nonce-authorized inline <script> each.
+// the phone, SMS-code, 2FA-password, QR, error, and post-auth success screens.
+// They use no external resources, so the CSP forbids every external source. Most
+// need no JavaScript; the 2FA-password (show/hide toggle) and success
+// (auto-redirect) screens carry one nonce-authorized inline <script> each. The
+// QR screens poll with a meta refresh and draw the code as inline SVG, which
+// the CSP already allows.
 
 import (
 	"bytes"
@@ -12,6 +14,7 @@ import (
 	"encoding/base64"
 	"html/template"
 	"net/http"
+	"strings"
 
 	"github.com/mctlhq/mctl-telegram/internal/ui"
 )
@@ -24,6 +27,9 @@ type enablePhonePage struct {
 	Error       string
 	WizardMode  bool
 	WizardStep  int
+	// QROffered adds "Use a QR code instead" (#901); see
+	// enableSession.qrOffered.
+	QROffered bool
 }
 
 type enableCodePage struct {
@@ -45,6 +51,24 @@ type enablePasswordPage struct {
 	Nonce      string
 	WizardMode bool
 	WizardStep int
+}
+
+// enableQRPage is the QR login status page (#901) while a code is on screen.
+type enableQRPage struct {
+	EnableToken string
+	// QR is the code drawn by renderQRSVG. It holds a login token, so the
+	// page that carries it is never cached (renderEnable sends no-store).
+	QR template.HTML
+	// Host is this server's host name, the only place the user should scan
+	// the code on.
+	Host string
+	// Username is the Telegram username the user signed in with, if any,
+	// so they scan with the same account.
+	Username string
+	// AppName is the Telegram app name the login confirmation will show.
+	AppName    string
+	Minutes    int
+	WizardMode bool
 }
 
 type enablePermissionsPage struct {
@@ -110,6 +134,9 @@ const enableExtraCSS = `
              font-family: var(--font-display), system-ui, sans-serif; font-size: 15px; font-weight: 600;
              padding: 11px 16px; border-radius: var(--mctl-radius-md); background: var(--accent); color: var(--accent-fg); }
   .btnlink:hover { filter: brightness(.92); }
+  button.secondary { background: none; color: var(--text); border: 1px solid var(--border-strong); }
+  .qrbox { display: flex; justify-content: center; margin: 16px 0; }
+  .qrbox svg { border-radius: var(--mctl-radius-md); }
 `
 
 // enableHead / enableFoot wrap every screen, sharing the mctl design tokens,
@@ -163,6 +190,7 @@ var enablePhoneTemplate = template.Must(template.New("enablePhone").Parse(enable
         <span>Also allow this connector to send messages on my behalf (you can turn this off later)</span>
       </label>{{end}}
       <button type="submit">Send code</button>
+      {{if .QROffered}}<button type="submit" class="secondary" formaction="/oauth/telegram/enable_access/qr" formnovalidate>Use a QR code instead</button>{{end}}
     </form>
     <p class="meta">The login code is delivered inside your Telegram app. The server stores an
        encrypted session blob — never your password.</p>
@@ -259,6 +287,41 @@ var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(
     </script>
 ` + enableFoot))
 
+// enableRefreshHead is enableHead with a meta refresh of .Refresh seconds,
+// for the QR status pages: they poll by reloading, with no JavaScript.
+var enableRefreshHead = strings.Replace(enableHead,
+	`<meta name="viewport" content="width=device-width, initial-scale=1">`,
+	`<meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="{{.Refresh}}">`, 1)
+
+var enableQRTemplate = template.Must(template.New("enableQR").Parse(enableRefreshHead + `    {{with .Page}}{{if .WizardMode}}<ol class="flow-steps">
+      <li>Sign in with Telegram</li>
+      <li>Permissions</li>
+      <li class="active">Phone number</li>
+      <li>Done</li>
+    </ol>{{end}}
+    <h1>Scan with Telegram on your phone</h1>
+    <p>Open Telegram on your phone &#8594; Settings &#8594; Devices &#8594; Link Desktop Device,
+       then scan this code.</p>
+    <div class="qrbox">{{.QR}}</div>
+    <p>Scan with the account you signed in with{{if .Username}}: <strong>@{{.Username}}</strong>{{end}}.
+       Any other account will be refused.</p>
+    <div class="notice">Scanning this code gives mctl full access to your Telegram account: your
+       chats, messages and contacts. Only scan it on <span class="url">{{.Host}}</span>.
+       Telegram will ask you to confirm a login{{if .AppName}} to <strong>{{.AppName}}</strong>;
+       if it names anything else, cancel{{end}}. You can end this session at any time in
+       Telegram &#8594; Settings &#8594; Devices.</div>
+    <p class="meta">The code refreshes automatically. It stops after {{.Minutes}} minutes.</p>
+    <form method="POST" action="/oauth/telegram/enable_access/qr/cancel" autocomplete="off">
+      <input type="hidden" name="es" value="{{.EnableToken}}">
+      <button type="submit" class="secondary">Use your phone number instead</button>
+    </form>{{end}}
+` + enableFoot))
+
+var enableQRBusyTemplate = template.Must(template.New("enableQRBusy").Parse(enableRefreshHead + `    <h1>Preparing your QR code&#8230;</h1>
+    <p class="meta">This page updates by itself.</p>
+` + enableFoot))
+
 var enablePermissionsTemplate = template.Must(template.New("enablePermissions").Parse(enableHead + `    <ol class="flow-steps">
       <li>Sign in with Telegram</li>
       <li class="active">Permissions</li>
@@ -290,6 +353,21 @@ var enablePermissionsTemplate = template.Must(template.New("enablePermissions").
 
 func renderEnablePhone(w http.ResponseWriter, p enablePhonePage) {
 	renderEnable(w, http.StatusOK, enablePhoneTemplate, p, "")
+}
+
+// renderEnableQR renders the QR status page with a code on screen.
+func renderEnableQR(w http.ResponseWriter, p enableQRPage) {
+	renderEnable(w, http.StatusOK, enableQRTemplate, struct {
+		Refresh int
+		Page    enableQRPage
+	}{enableQRRefresh, p}, "")
+}
+
+// renderEnableQRBusy renders the placeholder status page that reloads after
+// enableQRBusyRefresh, while the flow prepares its first code or a step holds
+// the session lock.
+func renderEnableQRBusy(w http.ResponseWriter) {
+	renderEnable(w, http.StatusOK, enableQRBusyTemplate, struct{ Refresh int }{enableQRBusyRefresh}, "")
 }
 
 func renderEnableCode(w http.ResponseWriter, p enableCodePage) {

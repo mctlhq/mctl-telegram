@@ -35,6 +35,7 @@ const (
 	stepCode                          // awaiting the SMS code
 	stepPassword                      // awaiting the 2FA cloud password
 	stepDone                          // session provisioned, authorization code issued
+	stepQR                            // showing a QR code, waiting for a scan (#901)
 )
 
 // Per-step waits. SendCode/SignIn are network round-trips against Telegram;
@@ -94,6 +95,12 @@ type enableSession struct {
 	// terminalDesc is the error_description that goes with terminalMsg on
 	// the access_denied return to the client.
 	terminalDesc string
+
+	// qrOffered is whether the phone step shows "Use a QR code instead"
+	// (#901): the QR flag is on and the browser that reached the callback is
+	// a desktop one, where the code is scanned with the phone. Fixed at the
+	// callback. It only decides the button; the QR routes check the flag.
+	qrOffered bool
 }
 
 // loginFlow couples an HTTP handler to the background goroutine running
@@ -137,6 +144,53 @@ type loginFlow struct {
 	// sibling call site). atomic.Bool because its writers are HTTP handler
 	// goroutines, not this flow's own login goroutine.
 	superseded atomic.Bool
+
+	// method is the loginMethod name ("code" or "qr"). Set before the
+	// goroutine starts and never written again.
+	method string
+	// qrURL is the newest QR login URL telegram.LoginQR exported, for the
+	// status page to draw. It is a login token: it is never logged, written
+	// to the audit or put in a URL, and lives only as long as the flow.
+	qrURL atomic.Pointer[string]
+	// qrScanned is set once a scanned QR login asks for the 2FA password,
+	// after the needPw signal is buffered. The status page reads it, never
+	// step, which is not safe to read from a handler.
+	qrScanned atomic.Bool
+}
+
+// Login method names, the method label on mctl_login_flow_total and the
+// audit Reason on QR rows.
+const (
+	methodCode = "code"
+	methodQR   = "qr"
+)
+
+// loginMethod is how an enable_access flow signs in to Telegram (#901):
+// phone number and login code through telegram.Login, or a QR code through
+// telegram.LoginQR.
+type loginMethod struct {
+	name string
+	// firstStep is lf.step while the login runs, before it asks for input.
+	firstStep string
+	// persistsBeforeCheck is true when the login writes the session to the
+	// store before the identity check can run (telegram.Login), so a mismatch
+	// has to revoke or clear what it wrote. telegram.LoginQR holds the
+	// session in memory and writes nothing for a mismatched account; revoking
+	// after it would end the user's existing session instead (#913).
+	persistsBeforeCheck bool
+	run                 func(ctx context.Context, uid int64, lf *loginFlow, askCode, askPassword func(context.Context) (string, error), cfg telegram.LoginConfig) (int64, string, string, error)
+}
+
+// phoneLogin is the phone-number-and-code method for phone.
+func (s *Server) phoneLogin(phone string) loginMethod {
+	return loginMethod{
+		name:                methodCode,
+		firstStep:           "phone_submitted",
+		persistsBeforeCheck: true,
+		run: func(ctx context.Context, uid int64, _ *loginFlow, askCode, askPassword func(context.Context) (string, error), cfg telegram.LoginConfig) (int64, string, string, error) {
+			return s.loginFn(ctx, s.cfg.TGAPIID, s.cfg.TGAPIHash, s.store, uid, phone, askCode, askPassword, cfg)
+		},
+	}
 }
 
 // isAbandonment reports whether err is the shape a walked-away user leaves
@@ -149,22 +203,60 @@ func isAbandonment(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
 
-// startLoginFlow launches telegram.Login in a background goroutine driven by
-// channels. The goroutine owns a context with a CodeTTL deadline so it always
-// terminates even if the user abandons the browser; cancel releases it sooner
-// when a /start re-submission supersedes it. wantTgID is the OIDC-proven
-// Telegram id — the goroutine rejects the flow if the phone login resolves to
-// a different account.
-func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn bool, signInStartedAt time.Time) *loginFlow {
+// isUserWaitStep reports whether a flow at step is parked on the user: a
+// code or password prompt, or a QR code on screen. A context error there is
+// a user who walked away, not a stall on our side or Telegram's.
+func isUserWaitStep(step string) bool {
+	switch step {
+	case "code_requested", "password_requested", "qr_shown":
+		return true
+	}
+	return false
+}
+
+// enableQRWait is how long a QR code stays on screen before the flow stops
+// waiting for a scan (#901). The 2FA password asked after a scan is not part
+// of it. A var only so tests can shorten it.
+var enableQRWait = 5 * time.Minute
+
+// loginFlowResult is the result label mctl_login_flow_total records for a
+// finished flow, classified the same way as the final log line.
+func loginFlowResult(lf *loginFlow) string {
+	switch {
+	case lf.err == nil:
+		return "ok"
+	case lf.superseded.Load() && isAbandonment(lf.err):
+		return "superseded"
+	case errors.Is(lf.err, telegram.ErrQRLoginExpired):
+		return "expired"
+	case isAbandonment(lf.err) && (isUserWaitStep(lf.step) || lf.step == "queued"):
+		return "abandoned"
+	case shortReason(lf.err) == "identity_mismatch":
+		return "mismatch"
+	}
+	return "error"
+}
+
+// startLoginFlow launches the login method m in a background goroutine driven
+// by channels. The goroutine owns a context with a CodeTTL deadline so it
+// always terminates even if the user abandons the browser; cancel releases it
+// sooner when a /start re-submission supersedes it. wantTgID is the
+// OIDC-proven Telegram id — the goroutine rejects the flow if the login
+// resolves to a different account.
+func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bool, signInStartedAt time.Time) *loginFlow {
 	lf := &loginFlow{
 		codeCh:   make(chan string),
 		pwCh:     make(chan string),
 		needCode: make(chan telegram.Reprompt, 1),
 		needPw:   make(chan telegram.Reprompt, 1),
 		done:     make(chan struct{}),
+		method:   m.name,
 	}
 	bgCtx, cancel := context.WithTimeout(context.Background(), s.cfg.CodeTTL)
 	lf.cancel = cancel
+	// Read here, not on the goroutine, which can start long after this call
+	// once it gets the uid mutex.
+	qrWait := enableQRWait
 
 	// Supersede the uid's previous flow whatever enable session it belongs
 	// to. handleEnableStart only cancels es.flow, the attempt made from the
@@ -206,6 +298,9 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 		case lf.needPw <- rp:
 		default:
 		}
+		// After the signal, so the status page that sees it can take the
+		// buffered needPw before it moves the user to the password step.
+		lf.qrScanned.Store(true)
 		select {
 		case p := <-lf.pwCh:
 			lf.step = "password_submitted"
@@ -230,6 +325,11 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 		// final outcome here regardless of whether a handler is still waiting.
 		started := time.Now()
 		defer func() {
+			if s.metrics != nil {
+				s.metrics.ObserveLoginFlow(m.name, loginFlowResult(lf), time.Since(started).Seconds())
+			}
+		}()
+		defer func() {
 			elapsed := time.Since(started).String()
 			switch {
 			case lf.err == nil:
@@ -248,7 +348,12 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 				// must keep falling through to the ERROR arm with its err.
 				slog.Info("enable: login flow superseded",
 					"uid", uid, "step", lf.step, "elapsed", elapsed)
-			case isAbandonment(lf.err) && (lf.step == "code_requested" || lf.step == "password_requested"):
+			case errors.Is(lf.err, telegram.ErrQRLoginExpired):
+				// Nobody scanned the QR code in time: the user walked away
+				// from it, the QR counterpart of the arm below.
+				slog.Warn("enable: onboarding abandoned",
+					"uid", uid, "step", lf.step, "method", m.name, "elapsed", elapsed)
+			case isAbandonment(lf.err) && isUserWaitStep(lf.step):
 				// The CodeTTL deadline expired while parked in askCode/
 				// askPassword: a user who walked away from the browser. WARN,
 				// not ERROR -- see design.md's rationale. No err attribute:
@@ -322,13 +427,14 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 			lf.err = db.ErrAccountModeConflict
 			return
 		}
-		lf.step = "phone_submitted"
+		lf.step = m.firstStep
 		// WantTelegramID makes the login itself log out an account other than
 		// the OIDC-proven one, so the refusal below does not leave that
 		// account with a live device (#899).
 		loginCfg := s.loginCfg
 		loginCfg.WantTelegramID = wantTgID
-		tgID, displayName, username, err := s.loginFn(bgCtx, s.cfg.TGAPIID, s.cfg.TGAPIHash, s.store, uid, phone, askCode, askPassword, loginCfg)
+		loginCfg.QRWait = qrWait
+		tgID, displayName, username, err := m.run(bgCtx, uid, lf, askCode, askPassword, loginCfg)
 		if err != nil {
 			lf.err = err
 			return
@@ -373,6 +479,13 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 		// end up operating B's messages through A's token. telegram.Login has
 		// already persisted B's session bytes via the gotd SessionStore, so
 		// revoke that row before bailing out.
+		if tgID != wantTgID && !m.persistsBeforeCheck {
+			// The QR login kept the wrong account's session in memory, logged
+			// it out and wrote nothing, so there is nothing of it to revoke.
+			// Revoking anyway would end whatever session the user already had.
+			lf.err = errors.New("the QR code was scanned with a different Telegram account than the one you signed in with — scan it with the same account")
+			return
+		}
 		if tgID != wantTgID {
 			// telegram.Login already persisted the wrong account's session
 			// bytes under uid, and they must not stay usable: a later callback
@@ -607,6 +720,7 @@ func (s *Server) handleEnablePermissions(w http.ResponseWriter, r *http.Request)
 		SendOptIn:   es.sendOptIn,
 		WizardMode:  true,
 		WizardStep:  3,
+		QROffered:   es.qrOffered,
 	})
 }
 
@@ -623,6 +737,7 @@ func renderEnablePhoneStep(w http.ResponseWriter, es *enableSession, p enablePho
 		p.WizardStep = 3
 	}
 	es.step = stepPhone
+	p.QROffered = es.qrOffered
 	renderEnablePhone(w, p)
 }
 
@@ -853,7 +968,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	}
 	es.phone = phone
 	es.sendOptIn = sendOptIn
-	es.flow = s.startLoginFlow(es.uid, es.tgID, phone, sendOptIn, es.oc.SignInStartedAt)
+	es.flow = s.startLoginFlow(es.uid, es.tgID, s.phoneLogin(phone), sendOptIn, es.oc.SignInStartedAt)
 	es.step = stepCode
 	lf := es.flow
 
@@ -1156,11 +1271,17 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 	case <-lf.done:
 		if lf.err != nil {
 			reason := shortReason(lf.err)
-			s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:failed:" + reason, Status: "error", ErrMsg: lf.err.Error()})
+			s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:failed:" + reason, Status: "error", ErrMsg: lf.err.Error(), Reason: es.qrAuditReason()})
 			// Terminal, same as in handleEnableCode: neither refusal is a
 			// wrong password and restarting cannot clear it.
 			if isTerminalLoginErr(lf.err) {
 				s.renderEnableTerminalError(w, es, lf.err)
+				return
+			}
+			// A scanned QR login asked for this password. Its restart is a
+			// new QR code, not a phone number and a fresh code.
+			if lf.method == methodQR {
+				s.renderQRFailed(w, es, esTok, lf.err)
 				return
 			}
 			if reason == "bad_password" {
@@ -1188,7 +1309,7 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:2fa_submitted", Status: "ok"})
+		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:2fa_submitted", Status: "ok", Reason: es.qrAuditReason()})
 		s.finishEnable(w, r, es, esTok)
 	case <-time.After(enableSignInWait):
 		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:failed:timeout", Status: "error", ErrMsg: "verify password timeout"})
@@ -1206,7 +1327,7 @@ func (s *Server) finishEnable(w http.ResponseWriter, r *http.Request, es *enable
 	s.mu.Lock()
 	delete(s.enables, esTok)
 	s.mu.Unlock()
-	s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:success", Status: "ok"})
+	s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:success", Status: "ok", Reason: es.qrAuditReason()})
 	// Completing MTProto login is the registration event: persist the
 	// client tier so an auto-approved user keeps access after
 	// AUTO_APPROVE_CLIENTS is flipped off. Only write when open
@@ -1379,6 +1500,9 @@ func shortReason(err error) string {
 	}
 	if errors.Is(err, db.ErrAccountDeletedSinceGrant) {
 		return "account_deleted"
+	}
+	if errors.Is(err, telegram.ErrQRLoginExpired) {
+		return "qr_expired"
 	}
 	var rpcErr *tgerr.Error
 	if errors.As(err, &rpcErr) {

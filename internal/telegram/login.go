@@ -40,11 +40,15 @@ type LoginConfig struct {
 	// account is not left with a live device it never meant to add (#899).
 	// The caller still sees the real id and makes the refusal itself.
 	WantTelegramID int64
+	// QRWait, when positive, bounds how long LoginQR waits for a scan
+	// before it gives up with ErrQRLoginExpired. A 2FA password asked after
+	// the scan is not part of that wait. Login ignores it.
+	QRWait time.Duration
 }
 
 // loginClientOptions is the gotd configuration shared by the phone and QR
 // login clients.
-func loginClientOptions(sess *SessionStore, cfg LoginConfig) telegram.Options {
+func loginClientOptions(sess session.Storage, cfg LoginConfig) telegram.Options {
 	return telegram.Options{
 		SessionStorage: sess,
 		DCList:         dcList(cfg.TestDC),

@@ -459,6 +459,39 @@ func TestLoadBroadcastContentEnabled(t *testing.T) {
 	}
 }
 
+// TestLoadEnableAccessQR pins the web QR login (#901) off unless the flag is
+// set, so a deployment that never heard of it does not offer it.
+func TestLoadEnableAccessQR(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     map[string]string
+		want    bool
+		appName string
+	}{
+		{name: "default is off", env: map[string]string{}, want: false},
+		{name: "true turns it on", env: map[string]string{"ENABLE_ACCESS_QR_ENABLED": "true"}, want: true},
+		{name: "false keeps it off", env: map[string]string{"ENABLE_ACCESS_QR_ENABLED": "false"}, want: false},
+		{name: "app name is trimmed", env: map[string]string{"TELEGRAM_APP_NAME": "  Example App "}, appName: "Example App"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			if cfg.EnableAccessQREnabled != tc.want {
+				t.Errorf("EnableAccessQREnabled = %v, want %v", cfg.EnableAccessQREnabled, tc.want)
+			}
+			if cfg.TelegramAppName != tc.appName {
+				t.Errorf("TelegramAppName = %q, want %q", cfg.TelegramAppName, tc.appName)
+			}
+		})
+	}
+}
+
 func TestLoadToolFilter(t *testing.T) {
 	tests := []struct {
 		name    string
