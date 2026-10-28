@@ -1892,12 +1892,13 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// telegram:bot_access signal. Only an observed grant is recorded; unknown
-	// and not_granted write nothing. Best-effort: never fails the sign-in.
+	// writes nothing. Best-effort: never fails the sign-in. reported_scope is
+	// what Telegram returned, kept so the signal can be checked against it.
 	signal := string(identity.BotAccess)
 	if signal == "" {
 		signal = string(telegramoidc.BotAccessUnknown)
 	}
-	slog.Info("telegram oidc sign-in", "bot_access_signal", signal)
+	slog.Info("telegram oidc sign-in", "bot_access_signal", signal, "reported_scope", identity.ReportedScope)
 	if identity.BotAccess == telegramoidc.BotAccessGranted {
 		if _, err := s.store.RecordOIDCBotAccessGrant(r.Context(), uid, time.Now().UTC()); err != nil {
 			slog.Error("record oidc bot access grant failed", "err", err)
