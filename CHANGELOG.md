@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.101.0](https://github.com/mctlhq/mctl-telegram/compare/0.100.1...0.101.0) (2026-10-28)
+
+
+### Features
+
+* add spike issue form with intake labels ([5f25a98](https://github.com/mctlhq/mctl-telegram/commit/5f25a98746823d0c7b842550fc5429b070edffd2))
+* add spike issue form with intake labels ([9a048c5](https://github.com/mctlhq/mctl-telegram/commit/9a048c5e9b48493a6cf3e23b1221efbaf70b082c))
+
+
+### Bug Fixes
+
+* **oauth:** log out the key a re-login supersedes ([fbc8f27](https://github.com/mctlhq/mctl-telegram/commit/fbc8f27b7e3aea1da6e7b7e86f66918890efd3b8))
+* **telegram:** keep the existing session on a wrong-account re-login ([6b2a827](https://github.com/mctlhq/mctl-telegram/commit/6b2a82794b933c2dbd8fd933a5dffd5113b806a6))
+* **telegram:** keep the existing session on a wrong-account re-login ([8fdedec](https://github.com/mctlhq/mctl-telegram/commit/8fdedecb106ce3f078f513bca701da46d603f076)), closes [#913](https://github.com/mctlhq/mctl-telegram/issues/913)
+* **telegram:** revoke only the row a rejected client loaded ([c84c4ab](https://github.com/mctlhq/mctl-telegram/commit/c84c4ab6848c7f97015db9cb3790a8fdf22d64a8))
+
 ## [0.100.1](https://github.com/mctlhq/mctl-telegram/compare/0.100.0...0.100.1) (2026-10-28)
 
 
