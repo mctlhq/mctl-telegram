@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.97.1](https://github.com/mctlhq/mctl-telegram/compare/0.97.0...0.97.1) (2026-10-28)
+
+
+### Bug Fixes
+
+* **login:** log out a mismatched account before refusing it ([b17b0d6](https://github.com/mctlhq/mctl-telegram/commit/b17b0d66a215a00a253512115d13fbfb2f9af140))
+* **login:** log out a mismatched account before refusing it ([172c7c0](https://github.com/mctlhq/mctl-telegram/commit/172c7c0b75bdfe4304ad46d9fdfa97fe82f4fee5)), closes [#899](https://github.com/mctlhq/mctl-telegram/issues/899)
+
 ## [0.97.0](https://github.com/mctlhq/mctl-telegram/compare/0.96.0...0.97.0) (2026-10-28)
 
 
