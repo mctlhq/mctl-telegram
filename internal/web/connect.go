@@ -504,7 +504,7 @@ const connectCopyScript = `
   };
   btn.addEventListener('click', function () {
     var url = btn.getAttribute('data-url');
-    if (navigator.clipboard) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(url).then(function () {
         btn.textContent = 'Copied!';
         reset(2000);
