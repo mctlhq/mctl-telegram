@@ -264,6 +264,13 @@ func runPhoneFlow(ctx context.Context, client auth.FlowClient, a *interactiveAut
 		if restarted || !tgerr.Is(err, "AUTH_RESTART") {
 			return false
 		}
+		// An AUTH_RESTART from the 2FA step is not restartable: the restart
+		// would deliver a new code to a caller that is no longer asking for
+		// one (the web handler is waiting on the password step).
+		var pwErr *passwordStageError
+		if errors.As(err, &pwErr) {
+			return false
+		}
 		restarted = true
 		slog.InfoContext(ctx, "telegram login: AUTH_RESTART, restarting the sign-in once")
 		return true
@@ -335,7 +342,10 @@ func (a *interactiveAuthenticator) signIn(ctx context.Context, client auth.FlowC
 			return nil
 		case errors.Is(err, auth.ErrPasswordAuthNeeded):
 			_, err := askPasswordChecked(ctx, a.Password, client.Password)
-			return err
+			if err != nil {
+				return &passwordStageError{err: err}
+			}
+			return nil
 		case errors.As(err, &signUpRequired):
 			return a.signUp(ctx, client, hash, signUpRequired.TermsOfService)
 		case tgerr.Is(err, "PHONE_CODE_INVALID") && attempt < LoginCodeAttempts:
@@ -347,6 +357,14 @@ func (a *interactiveAuthenticator) signIn(ctx context.Context, client auth.FlowC
 		}
 	}
 }
+
+// passwordStageError marks an error from the 2FA password step so that
+// runPhoneFlow does not restart the sign-in on it. It is transparent to
+// errors.Is/As and tgerr.Is.
+type passwordStageError struct{ err error }
+
+func (e *passwordStageError) Error() string { return e.err.Error() }
+func (e *passwordStageError) Unwrap() error { return e.err }
 
 // signUp mirrors auth.Flow's sign-up branch. SignUp always refuses, so a
 // number with no Telegram account ends here with that refusal.

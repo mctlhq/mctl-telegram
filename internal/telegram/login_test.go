@@ -63,6 +63,7 @@ type fakeFlowClient struct {
 	goodCode     string
 	needPassword bool
 	goodPassword string
+	passwordErr  error
 
 	sendCodes   int
 	signInCodes []string
@@ -101,6 +102,9 @@ func (f *fakeFlowClient) SignIn(_ context.Context, _, code, hash string) (*tg.Au
 
 func (f *fakeFlowClient) Password(_ context.Context, pw string) (*tg.AuthAuthorization, error) {
 	f.passwords = append(f.passwords, pw)
+	if f.passwordErr != nil {
+		return nil, f.passwordErr
+	}
 	if pw != f.goodPassword {
 		// What gotd's auth.Client.Password returns for PASSWORD_HASH_INVALID.
 		return nil, auth.ErrPasswordInvalid
@@ -232,6 +236,20 @@ func TestRunPhoneFlow_AuthRestartOnSendCodeRetriedOnce(t *testing.T) {
 			t.Errorf("SendCode = %d, prompts = %d, want 2 and 0", f.sendCodes, len(codes.seen))
 		}
 	})
+}
+
+func TestRunPhoneFlow_AuthRestartOnPasswordStepDoesNotRestart(t *testing.T) {
+	f := &fakeFlowClient{goodCode: "12345", needPassword: true, goodPassword: "hunter2",
+		passwordErr: tgerr.New(500, "AUTH_RESTART")}
+	codes := &scriptedPrompt{inputs: []string{"12345", "12345"}}
+	pws := &scriptedPrompt{inputs: []string{"hunter1"}}
+	err := runScriptedPhoneFlow(f, codes, pws)
+	if !tgerr.Is(err, "AUTH_RESTART") {
+		t.Fatalf("err = %v, want AUTH_RESTART surfaced", err)
+	}
+	if f.sendCodes != 1 || len(codes.seen) != 1 {
+		t.Errorf("SendCode = %d, code prompts = %d, want 1 and 1 (no restart from the 2FA step)", f.sendCodes, len(codes.seen))
+	}
 }
 
 func TestRunPhoneFlow_AuthRestartOnSignInSendsANewCode(t *testing.T) {
