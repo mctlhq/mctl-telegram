@@ -90,7 +90,7 @@ func (s *Server) reportSponsoredViews(ctx context.Context, tool string, userID i
 	if sp == nil || len(sp.Messages) == 0 || res == nil || res.IsError {
 		return
 	}
-	due := s.sponsoredViews.Claim(userID, sp.Messages)
+	due, claim := s.sponsoredViews.Claim(userID, sp.Messages)
 	if s.Metrics != nil {
 		s.Metrics.TelegramSponsoredTotal.WithLabelValues(tool, "view_deduplicated").Add(float64(len(sp.Messages) - len(due)))
 	}
@@ -98,7 +98,7 @@ func (s *Server) reportSponsoredViews(ctx context.Context, tool string, userID i
 		return
 	}
 	failed, err := sponsoredViewReporter(s, ctx, userID, due)
-	s.sponsoredViews.Release(userID, failed)
+	s.sponsoredViews.Release(userID, claim, failed)
 	if err != nil {
 		slog.Warn("sponsored message views not reported", "tool", tool, "user_id", userID, "count", len(due), "err", err)
 	}

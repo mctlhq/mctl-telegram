@@ -23,32 +23,42 @@ type SponsoredViews struct {
 	now func() time.Time
 
 	mu        sync.Mutex
-	users     map[int64]map[string]time.Time // userID -> RandomID -> expiry
+	users     map[int64]map[string]viewClaim // userID -> RandomID -> claim
 	lastSweep time.Time
+	seq       uint64 // last claim token handed out
+}
+
+// viewClaim is one recorded report: when it stops counting, and the token of
+// the Claim call that made it, so Release undoes only that call's entries.
+type viewClaim struct {
+	exp   time.Time
+	token uint64
 }
 
 // NewSponsoredViews returns an empty set whose entries live for ttl.
 func NewSponsoredViews(ttl time.Duration) *SponsoredViews {
-	return &SponsoredViews{ttl: ttl, now: time.Now, users: map[int64]map[string]time.Time{}}
+	return &SponsoredViews{ttl: ttl, now: time.Now, users: map[int64]map[string]viewClaim{}}
 }
 
 // Claim returns the items of msgs whose view is due for userID and records
-// them as reported. An item claimed by an earlier call within the TTL, or
-// earlier in msgs, is left out. Items without a RandomID cannot be told apart
-// and are always returned. Claim before reporting, so two concurrent reads
-// of the same channel report an item once; give back the items whose report
-// never went out with Release.
-func (v *SponsoredViews) Claim(userID int64, msgs []SponsoredMessage) []SponsoredMessage {
+// them as reported, plus a token for Release. An item claimed by an earlier
+// call within the TTL, or earlier in msgs, is left out. Items without a
+// RandomID cannot be told apart and are always returned. Claim before
+// reporting, so two concurrent reads of the same channel report an item
+// once; give back the items whose report never went out with Release.
+func (v *SponsoredViews) Claim(userID int64, msgs []SponsoredMessage) ([]SponsoredMessage, uint64) {
 	if v == nil || len(msgs) == 0 {
-		return msgs
+		return msgs, 0
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	now := v.now()
 	v.sweepLocked(now)
+	v.seq++
+	token := v.seq
 	seen := v.users[userID]
 	if seen == nil || len(seen) >= maxSponsoredViewsPerUser {
-		seen = map[string]time.Time{}
+		seen = map[string]viewClaim{}
 		v.users[userID] = seen
 	}
 	fresh := make([]SponsoredMessage, 0, len(msgs))
@@ -57,18 +67,20 @@ func (v *SponsoredViews) Claim(userID int64, msgs []SponsoredMessage) []Sponsore
 			fresh = append(fresh, m)
 			continue
 		}
-		if exp, ok := seen[m.RandomID]; ok && now.Before(exp) {
+		if c, ok := seen[m.RandomID]; ok && now.Before(c.exp) {
 			continue
 		}
-		seen[m.RandomID] = now.Add(v.ttl)
+		seen[m.RandomID] = viewClaim{exp: now.Add(v.ttl), token: token}
 		fresh = append(fresh, m)
 	}
-	return fresh
+	return fresh, token
 }
 
 // Release forgets msgs for userID, so the next read reports them. Use it for
-// claimed items whose report was never sent.
-func (v *SponsoredViews) Release(userID int64, msgs []SponsoredMessage) {
+// items claimed under token whose report was never sent. An entry a later
+// Claim has made since (after expiry, or after the set was cleared) belongs
+// to that call and is kept: its report may have gone out.
+func (v *SponsoredViews) Release(userID int64, token uint64, msgs []SponsoredMessage) {
 	if v == nil || len(msgs) == 0 {
 		return
 	}
@@ -76,7 +88,9 @@ func (v *SponsoredViews) Release(userID int64, msgs []SponsoredMessage) {
 	defer v.mu.Unlock()
 	seen := v.users[userID]
 	for _, m := range msgs {
-		delete(seen, m.RandomID)
+		if c, ok := seen[m.RandomID]; ok && c.token == token {
+			delete(seen, m.RandomID)
+		}
 	}
 }
 
@@ -88,8 +102,8 @@ func (v *SponsoredViews) sweepLocked(now time.Time) {
 	}
 	v.lastSweep = now
 	for uid, seen := range v.users {
-		for id, exp := range seen {
-			if !now.Before(exp) {
+		for id, c := range seen {
+			if !now.Before(c.exp) {
 				delete(seen, id)
 			}
 		}

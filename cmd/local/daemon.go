@@ -120,12 +120,12 @@ func reportSponsoredViews(ctx context.Context, pool *tg.ClientPool, userID int64
 	if sp == nil || len(sp.Messages) == 0 {
 		return
 	}
-	due := sponsoredViews.Claim(userID, sp.Messages)
+	due, claim := sponsoredViews.Claim(userID, sp.Messages)
 	if len(due) == 0 {
 		return
 	}
 	failed, err := sponsoredViewReporter(ctx, pool, userID, due)
-	sponsoredViews.Release(userID, failed)
+	sponsoredViews.Release(userID, claim, failed)
 	if err != nil {
 		slog.Warn("sponsored message views not reported", "count", len(due), "err", err)
 	} else if len(failed) > 0 {
