@@ -32,6 +32,13 @@ type LoginConfig struct {
 	// (TG_TEST_DC, issue #854). It must match the ClientPool's setting, or
 	// the pool would load a session its DCs do not know.
 	TestDC bool
+	// WantTelegramID, when non-zero, is the Telegram account the caller
+	// expects to log in (enable_access passes the OIDC-proven id). If a
+	// different account completes authorization, the login logs that
+	// authorization out with auth.logOut before returning, so the other
+	// account is not left with a live device it never meant to add (#899).
+	// The caller still sees the real id and makes the refusal itself.
+	WantTelegramID int64
 }
 
 // loginClientOptions is the gotd configuration shared by the phone and QR
@@ -162,6 +169,9 @@ func Login(
 			displayName = me.Username
 		}
 		username = me.Username
+		if logOutIfMismatch(ctx, client.API(), userID, cfg.WantTelegramID, me.ID) {
+			return nil
+		}
 		// Force a session flush so the SessionStorage sees the post-auth bytes.
 		// gotd already calls StoreSession on every change, but we trigger one
 		// trivial call to be safe.

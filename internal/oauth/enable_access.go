@@ -314,7 +314,12 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 			return
 		}
 		lf.step = "phone_submitted"
-		tgID, displayName, username, err := s.loginFn(bgCtx, s.cfg.TGAPIID, s.cfg.TGAPIHash, s.store, uid, phone, askCode, askPassword, s.loginCfg)
+		// WantTelegramID makes the login itself log out an account other than
+		// the OIDC-proven one, so the refusal below does not leave that
+		// account with a live device (#899).
+		loginCfg := s.loginCfg
+		loginCfg.WantTelegramID = wantTgID
+		tgID, displayName, username, err := s.loginFn(bgCtx, s.cfg.TGAPIID, s.cfg.TGAPIHash, s.store, uid, phone, askCode, askPassword, loginCfg)
 		if err != nil {
 			lf.err = err
 			return
