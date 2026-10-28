@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.104.1](https://github.com/mctlhq/mctl-telegram/compare/0.104.0...0.104.1) (2026-10-28)
+
+
+### Reverts
+
+* drop the Telegram app link experiment ([ce02e9b](https://github.com/mctlhq/mctl-telegram/commit/ce02e9bee30f0e63ed090744d9dad16e59138a0f))
+* drop the Telegram app link experiment ([99094d7](https://github.com/mctlhq/mctl-telegram/commit/99094d7396b122e25a87c9319c44d557105b8562))
+
 ## [0.104.0](https://github.com/mctlhq/mctl-telegram/compare/0.103.0...0.104.0) (2026-10-28)
 
 
