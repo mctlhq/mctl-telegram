@@ -281,3 +281,18 @@ func TestManagePage_OnboardingPrefsReadFailureClaimsNothing(t *testing.T) {
 		t.Errorf("unknown-state note missing: %s", body)
 	}
 }
+
+func TestConnectSuccessPage_PerClientSetup(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderConnectSuccess(rec, connectSuccessData{ClaudeURL: "https://claude.test", MCPURL: "https://tg.test/mcp"})
+	body := rec.Body.String()
+	for _, want := range []string{
+		"https://tg.test/mcp", "Claude:", "ChatGPT:", "Other MCP clients:",
+		`href="/docs#setup"`, `href="/docs#chatgpt-setup"`, `href="/docs#other-clients-setup"`,
+		"list my recent Telegram chats",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("success page missing %q", want)
+		}
+	}
+}
