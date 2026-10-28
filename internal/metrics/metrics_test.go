@@ -624,3 +624,17 @@ func TestHumanInputMetrics(t *testing.T) {
 	nilReg.ObserveHumanInputDeliverLatency(time.Second)
 	nilReg.ObserveHumanInputRespondLatency(time.Second)
 }
+
+// TestCountLoginLogOut verifies the logout counter is labeled by reason and
+// outcome.
+func TestCountLoginLogOut(t *testing.T) {
+	reg := New()
+	reg.CountLoginLogOut("superseded", "ok")
+	reg.CountLoginLogOut("superseded", "error")
+	reg.CountLoginLogOut("unsaved", "ok")
+	for _, l := range [][2]string{{"superseded", "ok"}, {"superseded", "error"}, {"unsaved", "ok"}} {
+		if got := testutil.ToFloat64(reg.LoginLogOutTotal.WithLabelValues(l[0], l[1])); got != 1 {
+			t.Errorf("%s/%s = %v, want 1", l[0], l[1], got)
+		}
+	}
+}

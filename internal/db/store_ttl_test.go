@@ -654,3 +654,49 @@ func TestSweepIdleSessionsSkipsMultipleExempt(t *testing.T) {
 		t.Errorf("%d exempt sessions revoked by multi-id sweep, want 0", count)
 	}
 }
+
+// TestCheckSessionValid_RevokesOnlyTheRowItRead: each TTL and
+// incomplete-login revoke names the row the check read. A row it did not read
+// -- in production, one a sign-in committed between the read and the revoke
+// (#913) -- stays active. Two active rows stand in for that interleaving.
+func TestCheckSessionValid_RevokesOnlyTheRowItRead(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for name, newest := range map[string]struct {
+		tgID     any
+		lastUsed time.Time
+		expires  time.Time
+	}{
+		"absolute expiry":  {555, now, now.Add(-time.Hour)},
+		"idle expiry":      {555, now.Add(-31 * 24 * time.Hour), now.Add(60 * 24 * time.Hour)},
+		"login incomplete": {nil, now, now.Add(60 * 24 * time.Hour)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newTestStore(t)
+			uid, _ := s.EnsureUser(ctx, "scoped-"+name, "", "test")
+			other, err := s.DB.ExecContext(ctx,
+				`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at, connected_at) VALUES($1, $2, $3, $4, $5, $6)`,
+				uid, 555, []byte("other"), now, now.Add(60*24*time.Hour), now.Add(-time.Hour))
+			if err != nil {
+				t.Fatalf("seed other row: %v", err)
+			}
+			otherID, _ := other.LastInsertId()
+			if _, err := s.DB.ExecContext(ctx,
+				`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at, connected_at) VALUES($1, $2, $3, $4, $5, $6)`,
+				uid, newest.tgID, []byte("read"), newest.lastUsed, newest.expires, now); err != nil {
+				t.Fatalf("seed read row: %v", err)
+			}
+			if _, err := s.CheckSessionValid(ctx, uid); err == nil {
+				t.Fatal("CheckSessionValid = nil, want the newest row rejected")
+			}
+			var revoked sql.NullTime
+			if err := s.DB.QueryRowContext(ctx,
+				`SELECT revoked_at FROM telegram_accounts WHERE id = $1`, otherID).Scan(&revoked); err != nil {
+				t.Fatalf("read other row: %v", err)
+			}
+			if revoked.Valid {
+				t.Error("CheckSessionValid revoked a row it did not read")
+			}
+		})
+	}
+}
