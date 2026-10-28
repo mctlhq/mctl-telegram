@@ -910,7 +910,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 			observePhoneStep(result)
 			reason := shortReason(lf.err)
 			s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:failed:" + reason, Status: "error", ErrMsg: lf.err.Error()})
-			msg := framedLoginErr("Telegram rejected the request: ", lf.err, " Try again.")
+			msg := phoneStepErrMsg(lf.err)
 			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: rawPhone, SendOptIn: sendOptIn,
 				Error: msg,
@@ -1047,7 +1047,7 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 			}
 			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
-				Error: framedLoginErr("The code was not accepted: ", lf.err, " Start again to get a fresh code."),
+				Error: codeStepErrMsg(lf.err),
 			})
 			return
 		}
@@ -1180,9 +1180,11 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 				})
 				return
 			}
+			// Every wrong password took the bad_password arm above, so
+			// whatever ended the flow here was not the password (#909).
 			renderEnablePhoneStep(w, es, enablePhonePage{
 				Issuer: s.cfg.Issuer, EnableToken: esTok, Phone: es.phone, SendOptIn: es.sendOptIn,
-				Error: framedLoginErr("The password was not accepted: ", lf.err, " Start again."),
+				Error: framedLoginErr(signInDidNotFinishPrefix, lf.err, " Start again."),
 			})
 			return
 		}
@@ -1328,6 +1330,36 @@ func framedLoginErr(prefix string, err error, suffix string) string {
 		return friendlyErr(err)
 	}
 	return prefix + friendlyErr(err) + suffix
+}
+
+// signInDidNotFinishPrefix frames a failure that the input on the current step
+// did not cause (#909): a FLOOD_WAIT on the SendCode an AUTH_RESTART retry
+// made, the flow's CodeTTL running out, a database error while finalising the
+// session, the identity mismatch. Prefixing those with the step's own verdict
+// ("The password was not accepted: ") tells the user their input was wrong
+// when it was not, and sends them to retype something that was fine.
+const signInDidNotFinishPrefix = "The sign-in did not finish: "
+
+// phoneStepErrMsg frames a failure that ended the flow before a code was
+// asked for. "Telegram rejected the request" is said only for an actual
+// Telegram RPC error; an expired flow or a local failure is not a rejection.
+func phoneStepErrMsg(err error) string {
+	var rpcErr *tgerr.Error
+	if errors.As(err, &rpcErr) {
+		return framedLoginErr("Telegram rejected the request: ", err, " Try again.")
+	}
+	return framedLoginErr(signInDidNotFinishPrefix, err, " Try again.")
+}
+
+// codeStepErrMsg frames a failure that ended the flow after a code was
+// submitted. "The code was not accepted" is said only when Telegram rejected
+// the code itself; anything else gets the neutral prefix.
+func codeStepErrMsg(err error) string {
+	switch shortReason(err) {
+	case "code_invalid", "code_expired":
+		return framedLoginErr("The code was not accepted: ", err, " Start again to get a fresh code.")
+	}
+	return framedLoginErr(signInDidNotFinishPrefix, err, " Start again.")
 }
 
 // shortReason maps a login error to a short token suitable for use in an audit
