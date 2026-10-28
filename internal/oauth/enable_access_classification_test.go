@@ -320,7 +320,7 @@ func TestFramedLoginErr_TableTest(t *testing.T) {
 	}{
 		{"phone step", "Telegram rejected the request: ", " Try again."},
 		{"code step", "The code was not accepted: ", " Start again to get a fresh code."},
-		{"password step", "The password was not accepted: ", " Start again."},
+		{"password step", signInDidNotFinishPrefix, " Start again."},
 	}
 	authRestartErr := tgerr.New(500, "AUTH_RESTART")
 	otherErr := tgerr.New(400, "PHONE_NUMBER_INVALID")
@@ -343,5 +343,76 @@ func TestFramedLoginErr_TableTest(t *testing.T) {
 func TestIsBadPasswordErr_Nil(t *testing.T) {
 	if isBadPasswordErr(nil) {
 		t.Error("isBadPasswordErr(nil) = true, want false")
+	}
+}
+
+// TestStepErrMsg_PrefixMatchesTheCause pins #909: a step's own verdict ("The
+// code was not accepted", "Telegram rejected the request") is used only when
+// that is what happened; every other cause gets the neutral prefix.
+func TestStepErrMsg_PrefixMatchesTheCause(t *testing.T) {
+	flood := fmt.Errorf("send code: %w", tgerr.New(420, "FLOOD_WAIT_30"))
+	expired := fmt.Errorf("auth flow: %w", context.DeadlineExceeded)
+	mismatch := errors.New("the phone number belongs to a different Telegram account than the one you signed in with — log in with the same account")
+	cases := []struct {
+		name, got, prefix string
+	}{
+		{"phone step, Telegram error", phoneStepErrMsg(flood), "Telegram rejected the request: "},
+		{"phone step, expired flow", phoneStepErrMsg(expired), signInDidNotFinishPrefix},
+		{"code step, wrong code", codeStepErrMsg(tgerr.New(400, "PHONE_CODE_INVALID")), "The code was not accepted: "},
+		{"code step, expired code", codeStepErrMsg(tgerr.New(400, "PHONE_CODE_EXPIRED")), "The code was not accepted: "},
+		{"code step, flood wait", codeStepErrMsg(flood), signInDidNotFinishPrefix},
+		{"code step, expired flow", codeStepErrMsg(expired), signInDidNotFinishPrefix},
+		{"code step, identity mismatch", codeStepErrMsg(mismatch), signInDidNotFinishPrefix},
+	}
+	for _, tc := range cases {
+		if !strings.HasPrefix(tc.got, tc.prefix) {
+			t.Errorf("%s: %q, want prefix %q", tc.name, tc.got, tc.prefix)
+		}
+	}
+}
+
+// TestEnablePassword_NonPasswordFailureIsNotBlamedOnThePassword is #909's
+// reported case: the flow ends on the password step for a reason that is not
+// the password (here a FLOOD_WAIT, as on the SendCode an AUTH_RESTART retry
+// makes). The phone step must not say the password was not accepted.
+func TestEnablePassword_NonPasswordFailureIsNotBlamedOnThePassword(t *testing.T) {
+	_, mux := newEnableTestServer(t, stubLogin(true, fmt.Errorf("send code: %w", tgerr.New(420, "FLOOD_WAIT_30"))))
+	es := driveToPhone(t, mux)
+
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}}); !strings.Contains(rec.Body.String(), "enable_access/code") {
+		t.Fatalf("start did not render code screen: %s", rec.Body.String())
+	}
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {es}, "code": {"12345"}}); !strings.Contains(rec.Body.String(), "enable_access/password") {
+		t.Fatalf("code did not render 2FA screen: %s", rec.Body.String())
+	}
+	body := postForm(t, mux, "/oauth/telegram/enable_access/password",
+		url.Values{"es": {es}, "password": {"hunter2"}}).Body.String()
+	if strings.Contains(body, "password was not accepted") {
+		t.Errorf("a FLOOD_WAIT is blamed on the password: %s", body)
+	}
+	if !strings.Contains(body, "The sign-in did not finish: Telegram rate limit reached.") {
+		t.Errorf("expected the neutral prefix around the rate-limit wording: %s", body)
+	}
+}
+
+// The same class on the code step: a failure after the code was accepted
+// must not say the code was not accepted.
+func TestEnableCode_NonCodeFailureIsNotBlamedOnTheCode(t *testing.T) {
+	_, mux := newEnableTestServer(t, stubLogin(false, fmt.Errorf("send code: %w", tgerr.New(420, "FLOOD_WAIT_30"))))
+	es := driveToPhone(t, mux)
+
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}}); !strings.Contains(rec.Body.String(), "enable_access/code") {
+		t.Fatalf("start did not render code screen: %s", rec.Body.String())
+	}
+	body := postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {es}, "code": {"12345"}}).Body.String()
+	if strings.Contains(body, "The code was not accepted") {
+		t.Errorf("a FLOOD_WAIT is blamed on the code: %s", body)
+	}
+	if !strings.Contains(body, "The sign-in did not finish: Telegram rate limit reached.") {
+		t.Errorf("expected the neutral prefix around the rate-limit wording: %s", body)
 	}
 }

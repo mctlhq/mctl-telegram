@@ -150,6 +150,20 @@ var enablePhoneTemplate = template.Must(template.New("enablePhone").Parse(enable
     <p>You are connecting <span class="url">{{.Issuer}}</span> to your Telegram account. To
        read your messages, this server needs a Telegram session. Enter your phone number and
        Telegram will send you a login code.</p>
+    <div class="meta" id="why-phone">
+      <p><strong>Why a phone number?</strong> Signing in with Telegram only proved who you are.
+         Reading your chats needs a Telegram user session, and Telegram creates one only after
+         it sends a login code to your number.</p>
+      <p><strong>What happens to it:</strong> the number goes to Telegram to request the code.
+         This service does not save it in its database, session or audit log; it is held in
+         server memory only while you sign in. The session itself is stored encrypted and shows
+         up in Telegram under Active Sessions.</p>
+      <p><strong>Disconnect any time:</strong> on the
+         <a href="/telegram/connect/manage">manage page</a>, by asking your assistant to run
+         <code>disconnect_telegram_account</code>, or by ending the session in Telegram
+         (Settings &#8594; Devices).</p>
+      <p>More: <a href="/privacy">Privacy</a> &#183; <a href="/security">Security</a></p>
+    </div>
     {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
     <form method="POST" action="/oauth/telegram/enable_access/start" autocomplete="off">
       <input type="hidden" name="es" value="{{.EnableToken}}">
@@ -253,6 +267,9 @@ var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(
     <p>If {{.AppName}} does not reopen automatically (it may be behind this window), use the
        button below.</p>
     <a class="btnlink" href="{{.RedirectURL}}">Return to {{.AppName}}</a>
+    <p class="meta">Back in {{.AppName}}, try a first request such as &#8220;list my recent
+       Telegram chats&#8221;. If the Telegram tools do not show up, see the
+       <a href="/docs#setup">setup help</a>.</p>
     <p class="meta">You can close this tab once {{.AppName}} shows the connection as active.</p>
     <script nonce="{{.Nonce}}">
       setTimeout(function () { window.location.replace("{{.RedirectURL}}"); }, 1200);

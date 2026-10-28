@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/gotd/td/bin"
@@ -649,5 +650,17 @@ func TestGetUnread_SponsoredFetchesCappedPerCall(t *testing.T) {
 	want := []string{fmt.Sprintf("channel:%d", 700100001+n-2), fmt.Sprintf("channel:%d", 700100001+n-1)}
 	if fmt.Sprint(sp.Unavailable) != fmt.Sprint(want) {
 		t.Errorf("unavailable = %v, want the channels past the cap %v", sp.Unavailable, want)
+	}
+}
+
+func TestBroadcastContentError_NoRetryGuidance(t *testing.T) {
+	err := error(&broadcastContentError{peer: "channel:1"})
+	if !errors.Is(err, ErrBroadcastContent) {
+		t.Fatal("errors.Is(ErrBroadcastContent) must hold")
+	}
+	for _, want := range []string{"Retrying will not change that", "get_unread_messages without peer", "list_dialogs"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal text missing %q: %s", want, err)
+		}
 	}
 }

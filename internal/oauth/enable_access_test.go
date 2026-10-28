@@ -2,7 +2,6 @@ package oauth
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/gotd/td/tgerr"
 	"github.com/mctlhq/mctl-telegram/internal/auth/telegramoidc"
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -298,7 +298,9 @@ func TestEnableAccess_TwoFA(t *testing.T) {
 }
 
 func TestEnableAccess_BadCode_RestartsAtPhone(t *testing.T) {
-	_, mux := newEnableTestServer(t, stubLogin(false, errors.New("PHONE_CODE_INVALID")))
+	// The RPC error as gotd surfaces it: a plain string with the same text is
+	// not a code rejection, and since #909 is no longer framed as one.
+	_, mux := newEnableTestServer(t, stubLogin(false, tgerr.New(400, "PHONE_CODE_INVALID")))
 	es := driveToPhone(t, mux)
 
 	rec := postForm(t, mux, "/oauth/telegram/enable_access/start",

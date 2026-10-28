@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.99.0](https://github.com/mctlhq/mctl-telegram/compare/0.98.2...0.99.0) (2026-10-28)
+
+
+### Features
+
+* **agents:** issue-902-reduce-one-day-drop-off-phone-step-chann ([33c8588](https://github.com/mctlhq/mctl-telegram/commit/33c8588c253ec623523805e14afa88d55d441b44))
+* **agents:** issue-902-reduce-one-day-drop-off-phone-step-chann ([850d920](https://github.com/mctlhq/mctl-telegram/commit/850d920b5517ed85e5cb04245631a958ffb379a5))
+
+## [0.98.2](https://github.com/mctlhq/mctl-telegram/compare/0.98.1...0.98.2) (2026-10-28)
+
+
+### Bug Fixes
+
+* **login:** neutral wording when the sign-in fails for another reason ([ee09b78](https://github.com/mctlhq/mctl-telegram/commit/ee09b784fa1f1667ac1fa730d3cd20256221426a))
+* **login:** neutral wording when the sign-in fails for another reason ([cc44e9d](https://github.com/mctlhq/mctl-telegram/commit/cc44e9df55edce0526fcbc5d66ebeffdebe35362)), closes [#909](https://github.com/mctlhq/mctl-telegram/issues/909)
+
 ## [0.98.1](https://github.com/mctlhq/mctl-telegram/compare/0.98.0...0.98.1) (2026-10-28)
 
 
