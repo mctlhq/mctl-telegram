@@ -45,6 +45,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/auth/telegramoidc"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/notify"
 	"github.com/mctlhq/mctl-telegram/internal/oauth/cimd"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 	"github.com/mctlhq/mctl-telegram/internal/toolprofile"
@@ -307,6 +308,12 @@ type Config struct {
 	// Telegram authorization request. Computed by the caller from the rollout
 	// flag and the same-bot check.
 	TelegramOIDCRequestBotAccess bool
+	// BotChatProbe, when non-nil, is called after a sign-in that did not
+	// report the telegram:bot_access grant, with the user's Telegram id. nil
+	// error means the login bot can see the user's chat, which is recorded
+	// as reachable (notify.SourceOIDCGetChat). Wired only while the scope is
+	// requested; Telegram never echoes the grant in the token response (#930).
+	BotChatProbe func(ctx context.Context, telegramID int64) error
 	// TelegramOIDC is an injected Authenticator. When non-nil New uses it and
 	// skips OIDC discovery — the seam tests use to avoid a network call.
 	TelegramOIDC telegramoidc.Authenticator
@@ -1900,9 +1907,11 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	}
 	slog.Info("telegram oidc sign-in", "bot_access_signal", signal, "reported_scope", identity.ReportedScope)
 	if identity.BotAccess == telegramoidc.BotAccessGranted {
-		if _, err := s.store.RecordOIDCBotAccessGrant(r.Context(), uid, time.Now().UTC()); err != nil {
+		if _, err := s.store.RecordOIDCBotAccessGrant(r.Context(), uid, time.Now().UTC(), notify.SourceOIDCBotAccess); err != nil {
 			slog.Error("record oidc bot access grant failed", "err", err)
 		}
+	} else if s.cfg.BotChatProbe != nil {
+		s.probeBotChat(r.Context(), uid, identity.TelegramID)
 	}
 
 	// When open registration is on (AutoApproveClients), materialize the
@@ -3628,4 +3637,37 @@ func sanitizeOIDCError(code string) string {
 		}
 	}
 	return code
+}
+
+// botChatProbeTimeout bounds the getChat read so a slow Bot API cannot hold
+// up a sign-in for long.
+const botChatProbeTimeout = 2 * time.Second
+
+// probeBotChat asks whether the login bot can see the user's chat and
+// records reachable on success. Best-effort: a failed or inconclusive probe
+// writes nothing and never fails the sign-in. Only success is recorded; a
+// "not reachable" answer leaves any stored row alone.
+func (s *Server) probeBotChat(ctx context.Context, uid, telegramID int64) {
+	// The timeout bounds the Bot API read only; the write below uses the
+	// request context so a slow but successful probe is still recorded.
+	probeCtx, cancel := context.WithTimeout(ctx, botChatProbeTimeout)
+	defer cancel()
+	err := s.cfg.BotChatProbe(probeCtx, telegramID)
+	result := "reachable"
+	if err != nil {
+		result = "error"
+		var apiErr *notify.APIError
+		if errors.As(err, &apiErr) {
+			if o := notify.ClassifyDelivery(apiErr.StatusCode, apiErr.Description); o.Conclusive && o.State == notify.StateCannotInitiate {
+				result = "not_reachable"
+			}
+		}
+	}
+	slog.Info("telegram oidc bot chat probe", "result", result)
+	if err != nil {
+		return
+	}
+	if _, err := s.store.RecordOIDCBotAccessGrant(ctx, uid, time.Now().UTC(), notify.SourceOIDCGetChat); err != nil {
+		slog.Error("record oidc bot chat probe failed", "err", err)
+	}
 }

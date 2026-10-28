@@ -86,16 +86,21 @@ func (s *Store) RecordInboundBotReachabilityTx(ctx context.Context, tx *sql.Tx, 
 	return n > 0, nil
 }
 
-// RecordOIDCBotAccessGrant records a reachable observation from a sign-in where
-// Telegram reported the telegram:bot_access grant. It never overwrites a stored
-// blocked row (a grant does not unblock the bot) and never overwrites an
-// observation at or after observedAt. applied reports whether a row was written.
-func (s *Store) RecordOIDCBotAccessGrant(ctx context.Context, userID int64, observedAt time.Time) (applied bool, err error) {
+// RecordOIDCBotAccessGrant records a reachable observation from a sign-in:
+// Telegram reported the telegram:bot_access grant (notify.SourceOIDCBotAccess)
+// or a getChat right after it succeeded (notify.SourceOIDCGetChat). source is
+// stored as both source and reason_code. It never overwrites a stored blocked
+// row (a grant does not unblock the bot) and never overwrites an observation
+// at or after observedAt. applied reports whether a row was written.
+func (s *Store) RecordOIDCBotAccessGrant(ctx context.Context, userID int64, observedAt time.Time, source string) (applied bool, err error) {
 	if userID <= 0 {
 		return false, errors.New("user id must be positive")
 	}
 	if observedAt.IsZero() {
 		return false, errors.New("observed time must be set")
+	}
+	if source != notify.SourceOIDCBotAccess && source != notify.SourceOIDCGetChat {
+		return false, fmt.Errorf("unexpected oidc reachability source %q", source)
 	}
 	observedAt = observedAt.UTC()
 	res, err := s.DB.ExecContext(ctx,
@@ -110,7 +115,7 @@ func (s *Store) RecordOIDCBotAccessGrant(ctx context.Context, userID int64, obse
 		 WHERE client_bot_reachability.state <> $7
 		   AND (client_bot_reachability.observed_at IS NULL
 		        OR client_bot_reachability.observed_at < EXCLUDED.observed_at)`,
-		userID, notify.StateReachable, notify.SourceOIDCBotAccess, observedAt, notify.SourceOIDCBotAccess, time.Now().UTC(), notify.StateBlocked,
+		userID, notify.StateReachable, source, observedAt, source, time.Now().UTC(), notify.StateBlocked,
 	)
 	if err != nil {
 		return false, fmt.Errorf("record oidc bot access grant: %w", err)

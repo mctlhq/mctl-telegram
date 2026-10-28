@@ -1032,6 +1032,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		TelegramOIDCRedirectURL:      cfg.TelegramOIDCRedirectURL,
 		TelegramOIDCSigningAlgs:      cfg.TelegramOIDCSigningAlgs,
 		TelegramOIDCRequestBotAccess: oidcBotAccess,
+		BotChatProbe:                 botChatProbe(oidcBotAccess, cfg.TelegramLoginBotToken),
 		AdminTelegramIDs:             admins,
 		ClientTelegramIDs:            clients,
 		LookupAdminTelegramIDs:       lookupAdmins,
@@ -1453,4 +1454,16 @@ func botAccessGate(cfg *config.Config) bool {
 		slog.Warn("telegram:bot_access not requested", "reason", reason)
 	}
 	return enabled
+}
+
+// botChatProbe returns the post-sign-in getChat read, or nil when the
+// telegram:bot_access scope is not requested (nothing to observe) or there is
+// no login bot token. The gate already requires the token's bot to be the
+// OIDC client, so the probe asks the same bot the user granted.
+func botChatProbe(requested bool, token string) func(context.Context, int64) error {
+	if !requested || token == "" {
+		return nil
+	}
+	c := &botapi.Client{Token: token}
+	return c.GetChat
 }
