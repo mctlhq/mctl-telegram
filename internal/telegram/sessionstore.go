@@ -14,6 +14,13 @@ import (
 type SessionStore struct {
 	UserID int64
 	Store  *db.Store
+	// Pooled marks a client that serves an existing session and must never
+	// start one. With no active row, gotd would otherwise generate a fresh,
+	// never-authorized auth key, call Telegram with it, and StoreSession
+	// would insert it as a new row (seen on prod: a row created and revoked
+	// within 20 ms). Login clients leave it false: creating that row is
+	// their job.
+	Pooled bool
 	rowID  atomic.Int64
 }
 
@@ -26,6 +33,9 @@ func (s *SessionStore) LoadSession(ctx context.Context) ([]byte, error) {
 		return nil, err
 	}
 	if pt == nil {
+		if s.Pooled {
+			return nil, db.ErrNoActiveSession
+		}
 		return nil, session.ErrNotFound
 	}
 	// gotd can load storage more than once during one client's lifetime.
@@ -41,6 +51,9 @@ func (s *SessionStore) StoreSession(ctx context.Context, data []byte) error {
 	}
 	if rowID := s.rowID.Load(); rowID > 0 {
 		return s.Store.UpdateSessionBlobByID(ctx, s.UserID, rowID, data)
+	}
+	if s.Pooled {
+		return db.ErrNoActiveSession
 	}
 	return s.Store.UpdateSessionBlob(ctx, s.UserID, data)
 }
