@@ -187,15 +187,18 @@ func (s *Server) handleEnableQRStart(w http.ResponseWriter, r *http.Request) {
 	case es.step == stepDone:
 		renderEnableError(w, "This sign-in already completed. Return to your MCP client.")
 		return
-	case es.step != stepPhone:
-		// The QR login starts only from the phone step. In particular there
-		// is no route into it from the code step in this slice.
-		renderEnableError(w, "A QR code can be requested only from the phone number step. Go back to it and try again.")
+	case es.step != stepPhone && es.step != stepCode:
+		// The QR login starts from the phone step, or from the code step
+		// when the code did not arrive (#901 slice 2). Not from the
+		// password step: by then the phone login has a code accepted.
+		renderEnableError(w, "A QR code can be requested only from the phone number or login code step. Go back to it and try again.")
 		return
 	}
 
+	// On the code step the send opt-in was already chosen with the phone
+	// number and the QR form there does not carry it.
 	sendOptIn := es.sendOptIn
-	if !es.isWizardMode() {
+	if !es.isWizardMode() && es.step == stepPhone {
 		sendOptIn = r.FormValue("send_optin") != ""
 	}
 	// The same pre-flight mode gate as handleEnableStart, for the same

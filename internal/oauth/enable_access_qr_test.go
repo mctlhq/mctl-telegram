@@ -707,31 +707,59 @@ func TestEnableQR_StatusNeverWaitsForTheLock(t *testing.T) {
 	}
 }
 
-// TestEnableQR_OnlyFromThePhoneStep pins criterion 6 of #901: no route into
-// the QR login from the code step. A direct POST while a phone flow waits
-// for its code is refused and starts nothing.
-func TestEnableQR_OnlyFromThePhoneStep(t *testing.T) {
+// TestEnableQR_FromTheCodeStep is #901 slice 2: a desktop user whose login
+// code did not arrive can switch to the QR code from the code step. The
+// waiting phone flow is superseded, and the send opt-in chosen with the
+// phone number survives, since the QR form there does not carry it.
+func TestEnableQR_FromTheCodeStep(t *testing.T) {
 	q := newQRStub(500100101)
 	srv, mux := newQRTestServer(t, q, true)
 	es, _ := driveToPhoneAs(t, mux, desktopUA)
 	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
-		url.Values{"es": {es}, "phone": {"+14155551234"}}); !strings.Contains(rec.Body.String(), "enable_access/code") {
+		url.Values{"es": {es}, "phone": {"+14155551234"}, "send_optin": {"on"}}); !strings.Contains(rec.Body.String(), "enable_access/code") {
 		t.Fatalf("start did not reach the code step: %s", rec.Body.String())
 	}
-	if strings.Contains(postForm(t, mux, "/oauth/telegram/enable_access/code",
-		url.Values{"es": {es}, "code": {""}}).Body.String(), "Sign in with a QR code") {
-		t.Error("the code step offers the QR button")
+	page := postForm(t, mux, "/oauth/telegram/enable_access/code", url.Values{"es": {es}, "code": {""}}).Body.String()
+	if !strings.Contains(page, "get the code?") || !strings.Contains(page, `<button type="submit" class="secondary">Sign in with a QR code</button>`) {
+		t.Fatalf("the code step does not offer the QR code: %s", page)
+	}
+	phoneFlow := getEnableSession(t, srv, es).flowForTest()
+
+	c := startQR(t, mux, es)
+	pollQRStatus(t, mux, c, "<svg")
+	waitForFlowDone(t, phoneFlow, 3*time.Second)
+	if !phoneFlow.superseded.Load() {
+		t.Error("the phone flow was not marked superseded")
+	}
+	sess := getEnableSession(t, srv, es)
+	sess.lock.Lock()
+	optIn := sess.sendOptIn
+	sess.lock.Unlock()
+	if !optIn {
+		t.Error("switching to QR from the code step dropped the send opt-in")
 	}
 
-	rec := postForm(t, mux, "/oauth/telegram/enable_access/qr", url.Values{"es": {es}})
-	if rec.Code == http.StatusSeeOther {
-		t.Fatal("POST /qr from the code step started a QR login")
+	close(q.scan)
+	waitForFlowDone(t, sess.flowForTest(), 3*time.Second)
+	if body := getQRStatus(t, mux, c).Body.String(); !strings.Contains(body, "code=") {
+		t.Errorf("no authorization code after a QR login from the code step: %s", body)
 	}
-	if n := q.calls.Load(); n != 0 {
-		t.Errorf("QR login ran %d times", n)
+}
+
+// TestEnableQR_CodeStepHintOnlyWhenOffered: mobile browsers, where the code
+// would have to be scanned with the same phone, get no QR hint on the code
+// step either.
+func TestEnableQR_CodeStepHintOnlyWhenOffered(t *testing.T) {
+	q := newQRStub(500100101)
+	_, mux := newQRTestServer(t, q, true)
+	es, _ := driveToPhoneAs(t, mux, iPhoneUA)
+	postForm(t, mux, "/oauth/telegram/enable_access/start", url.Values{"es": {es}, "phone": {"+14155551234"}})
+	page := postForm(t, mux, "/oauth/telegram/enable_access/code", url.Values{"es": {es}, "code": {""}}).Body.String()
+	if !strings.Contains(page, "enable_access/code") {
+		t.Fatalf("not on the code step: %s", page)
 	}
-	if step := getEnableSession(t, srv, es).stepForTest(); step != stepCode {
-		t.Errorf("es.step = %v, want stepCode left alone", step)
+	if strings.Contains(page, "Sign in with a QR code") || strings.Contains(page, "enable_access/qr") {
+		t.Error("the mobile code step offers the QR code")
 	}
 }
 

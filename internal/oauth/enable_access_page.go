@@ -40,6 +40,9 @@ type enableCodePage struct {
 	Error       string
 	WizardMode  bool
 	WizardStep  int
+	// QROffered adds "Didn't get the code? Sign in with a QR code" (#901
+	// slice 2); see enableSession.qrOffered.
+	QROffered bool
 }
 
 type enablePasswordPage struct {
@@ -257,6 +260,12 @@ var enableCodeTemplate = template.Must(template.New("enableCode").Parse(enableHe
     </form>
     <p class="meta">Mistyped it? You can try again on this screen. Spaces and other
        characters around the digits are ignored.</p>
+    {{if .QROffered}}<form method="POST" action="/oauth/telegram/enable_access/qr">
+      <input type="hidden" name="es" value="{{.EnableToken}}">
+      <div class="or"><span>didn&#8217;t get the code?</span></div>
+      <button type="submit" class="secondary">Sign in with a QR code</button>
+      <p class="hint">Scan it with Telegram on your phone. No login code needed.</p>
+    </form>{{end}}
 ` + enableFoot))
 
 var enablePasswordTemplate = template.Must(template.New("enablePassword").Parse(enableHead + `    {{if .WizardMode}}<ol class="flow-steps">
