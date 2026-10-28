@@ -183,7 +183,7 @@ func TestPublicPages_NoStaleOperatorGateClaim(t *testing.T) {
 	}
 
 	docsRec := httptest.NewRecorder()
-	Docs("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true).
+	Docs("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true, false).
 		ServeHTTP(docsRec, httptest.NewRequest(http.MethodGet, "/docs", nil))
 	if docsRec.Code != http.StatusOK {
 		t.Fatalf("GET /docs: status %d, body: %s", docsRec.Code, docsRec.Body.String())

@@ -51,6 +51,9 @@ type landingData struct {
 	MCPURL       string
 	WellKnownURL string
 	AuthServer   string
+	// BotAccessRequested shows the "Allow messages" sign-in hint (docs only)
+	// while the telegram:bot_access scope is requested.
+	BotAccessRequested bool
 }
 
 // Landing renders the product landing page at PublicBaseURL/.

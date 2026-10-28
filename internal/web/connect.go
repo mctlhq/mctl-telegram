@@ -445,7 +445,7 @@ var connectLandingTemplate = template.Must(template.New("connectLanding").Parse(
        You will be asked to enter your phone number and a one-time code sent by Telegram.</p>
     <p>No password is stored. An encrypted Telegram session is saved on this server so the
        connector can read your messages on behalf of your MCP client.</p>
-    {{if .BotAccessRequested}}<p>Telegram may also ask whether the MCTL login bot can message you.</p>{{end}}
+    {{if .BotAccessRequested}}<p>On Telegram&#8217;s sign-in screen, turn on <strong>Allow messages</strong> so the MCTL login bot can send you setup help and the notifications you choose. Telegram leaves it off unless you switch it on, and you can sign in either way.</p>{{end}}
     <a class="btn" href="{{.AuthorizeURL}}">Connect with Telegram</a>
     <p class="meta">Already connected? You can reconnect at any time by returning to this page.</p>
 ` + connectFoot))

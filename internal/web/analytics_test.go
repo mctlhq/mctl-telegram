@@ -19,7 +19,7 @@ func TestPublicPagesLoadUmami(t *testing.T) {
 		path string
 	}{
 		"landing":         {Landing(base, "/mcp", base, true), "/"},
-		"docs":            {Docs(base, "/mcp", base, true), "/docs"},
+		"docs":            {Docs(base, "/mcp", base, true, false), "/docs"},
 		"demo":            {Demo(base, "", true), "/demo"},
 		"security":        {Security(base, true), "/security"},
 		"privacy":         {Privacy(base, true), "/privacy"},

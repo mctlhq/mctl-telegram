@@ -45,7 +45,7 @@ func TestSecurityHeaders_NoHSTSOnHTTP(t *testing.T) {
 func TestChromePages_CarryCSP(t *testing.T) {
 	pages := map[string]http.Handler{
 		"/":          Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true),
-		"/docs":      Docs("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true),
+		"/docs":      Docs("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true, false),
 		"/security":  Security("https://tg.mctl.ai", true),
 		"/privacy":   Privacy("https://tg.mctl.ai", true),
 		"/terms":     Terms("https://tg.mctl.ai", true),
