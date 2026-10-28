@@ -159,6 +159,10 @@ type loginFlow struct {
 	// after the needPw signal is buffered. The status page reads it, never
 	// step, which is not safe to read from a handler.
 	qrScanned atomic.Bool
+	// heldSession is the session a login method with holdsSession hands
+	// over through LoginConfig.HoldSession instead of writing it (#919).
+	// Written and read only by the flow's own goroutine.
+	heldSession []byte
 }
 
 // Login method names, the method label on mctl_login_flow_total and the
@@ -181,6 +185,10 @@ type loginMethod struct {
 	// session in memory and writes nothing for a mismatched account; revoking
 	// after it would end the user's existing session instead (#913).
 	persistsBeforeCheck bool
+	// holdsSession is true when the login hands its session over through
+	// LoginConfig.HoldSession (telegram.LoginQR) rather than writing it, so
+	// the flow writes it once, with the account metadata, or logs it out.
+	holdsSession bool
 	// qrWait is LoginConfig.QRWait for this flow; zero for the phone method.
 	qrWait time.Duration
 	run    func(ctx context.Context, uid int64, lf *loginFlow, askCode, askPassword func(context.Context) (string, error), cfg telegram.LoginConfig) (int64, string, string, error)
@@ -436,6 +444,20 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 		loginCfg := s.loginCfg
 		loginCfg.WantTelegramID = wantTgID
 		loginCfg.QRWait = m.qrWait
+		// A held session (QR) is an authorization only this goroutine knows
+		// about: it was never written, so no repair will ever find it. Every
+		// exit that does not commit it -- the cancel guard, a failed or
+		// refused SaveSessionForSignIn, a cancel that lands after the guard
+		// -- has to log it out, or the user keeps a device nobody holds in
+		// Active Sessions (#919). A defer, like the repair below, so a future
+		// exit cannot forget it. Registered before the login, so it runs
+		// before the flow reports done.
+		defer func() {
+			if lf.heldSession != nil {
+				s.logOutHeldSession(bgCtx, uid, lf.heldSession)
+				lf.heldSession = nil
+			}
+		}()
 		tgID, displayName, username, err := m.run(bgCtx, uid, lf, askCode, askPassword, loginCfg)
 		if err != nil {
 			lf.err = err
@@ -558,14 +580,37 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 			lf.err = errors.New("the phone number belongs to a different Telegram account than the one you signed in with — log in with the same account")
 			return
 		}
+		// The user cancelled this attempt, or another one superseded it,
+		// while the login was finishing (#919): the scan or code landed just
+		// after. It must not complete the sign-in. superseded is set before
+		// the cancel, so it also covers the moment before bgCtx sees it. A
+		// held session is an authorization nobody will use, so it is logged
+		// out; it was never written. After the identity binding, not right
+		// after the login: a phone login has already written its bytes, and
+		// a wrong account's must be revoked or cleared even when the flow
+		// expired meanwhile. A QR mismatch wrote nothing, so for QR this is
+		// the same as checking right after the login.
+		if bgCtx.Err() != nil || lf.superseded.Load() {
+			lf.err = fmt.Errorf("sign-in finished after the attempt was cancelled: %w", context.Canceled)
+			return
+		}
 		// Replicate cmd/login/main.go: telegram.Login persists the raw
 		// session bytes via the gotd SessionStore, but the telegram_accounts
 		// metadata (telegram_user_id, display name, expires_at, send_enabled
 		// default) is finalised by an explicit SaveSession.
-		pt, lerr := s.store.LoadSession(bgCtx, uid)
-		if lerr != nil {
-			lf.err = fmt.Errorf("reload session: %w", lerr)
-			return
+		//
+		// A held session (QR) was never written: it reaches the database
+		// only here, in the same transaction as its metadata, so a cancel
+		// can never leave a written blob without SaveSessionForSignIn.
+		var pt []byte
+		if m.holdsSession {
+			pt = lf.heldSession
+		} else {
+			var lerr error
+			if pt, lerr = s.store.LoadSession(bgCtx, uid); lerr != nil {
+				lf.err = fmt.Errorf("reload session: %w", lerr)
+				return
+			}
 		}
 		if pt == nil {
 			lf.err = errors.New("login completed but no session bytes were persisted")
@@ -575,6 +620,9 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 		// while this sign-in was in progress must not leave the new session
 		// behind (#821). On that refusal it has already dropped the hosted
 		// rows; the deferred repair handles a local row's blob.
+		if s.beforeSignInSave != nil {
+			s.beforeSignInSave()
+		}
 		if serr := s.store.SaveSessionForSignIn(bgCtx, uid, pt, tgID, displayName, username, signInStartedAt); serr != nil {
 			// The deferred repair above covers this: SaveSession's own guard
 			// is gated on account state rather than on ErrAccountModeConflict
@@ -585,7 +633,9 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 		}
 		// Past the point of no return for the repair: the session is now
 		// legitimately the user's, and clearing it would undo a good login.
+		// The same goes for the held session's logout.
 		saved = true
+		lf.heldSession = nil
 		if sendOptIn {
 			if _, serr := s.store.SetSendEnabled(bgCtx, uid, true); serr != nil {
 				lf.err = fmt.Errorf("enable sending: %w", serr)
@@ -595,6 +645,25 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 		lf.tgUserID = tgID
 	}()
 	return lf
+}
+
+// logOutHeldSession ends the authorization a held session carries, best
+// effort, on telegram.DetachedLogOutContext: it usually runs because bgCtx
+// was cancelled.
+func (s *Server) logOutHeldSession(bgCtx context.Context, uid int64, data []byte) {
+	ctx, cancel := telegram.DetachedLogOutContext(bgCtx)
+	defer cancel()
+	var err error
+	if s.logOutSessionFn != nil {
+		err = s.logOutSessionFn(ctx, data)
+	} else {
+		err = telegram.LogOutSession(ctx, s.cfg.TGAPIID, s.cfg.TGAPIHash, data, s.loginCfg)
+	}
+	if err != nil {
+		slog.Warn("enable: logout of an unsaved sign-in failed", "uid", uid, "err", err)
+		return
+	}
+	slog.Info("enable: logged out an unsaved sign-in", "uid", uid)
 }
 
 // hasActiveLocalAccount is the account-mode query both the pre-flight gate and

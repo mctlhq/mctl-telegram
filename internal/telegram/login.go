@@ -48,6 +48,12 @@ type LoginConfig struct {
 	// once Telegram has accepted the scan (and the 2FA password, if any),
 	// before the account check and the session write. Login ignores it.
 	OnQRAccepted func()
+	// HoldSession, when non-nil, receives the session bytes of a LoginQR
+	// that signed in to the expected account, in place of the database
+	// write. The caller then writes them together with the account metadata
+	// in one transaction, or logs the authorization out if it no longer
+	// wants it (#919). Login ignores it.
+	HoldSession func(data []byte)
 }
 
 // loginClientOptions is the gotd configuration shared by the phone and QR

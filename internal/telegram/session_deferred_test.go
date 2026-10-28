@@ -129,7 +129,7 @@ func TestSettleQRLogin_UnfinishedRunWritesNothing(t *testing.T) {
 			sess := &deferredSession{target: target}
 			_ = sess.StoreSession(ctx, []byte("unauthorized-auth-key"))
 
-			if err := settleQRLogin(ctx, sess, runErr, false, false); err == nil {
+			if err := settleQRLogin(ctx, sess, runErr, false, false, nil); err == nil {
 				t.Error("settleQRLogin = nil, want an error for a run that never signed in")
 			}
 			if len(target.writes) != 0 {
@@ -157,7 +157,7 @@ func TestSettleQRLogin_SignedIn(t *testing.T) {
 			target := &recordingStorage{}
 			sess := &deferredSession{target: target}
 			_ = sess.StoreSession(ctx, []byte("signed-in-session"))
-			if err := settleQRLogin(ctx, sess, tc.runErr, true, tc.mismatch); err != nil {
+			if err := settleQRLogin(ctx, sess, tc.runErr, true, tc.mismatch, nil); err != nil {
 				t.Fatalf("settleQRLogin: %v", err)
 			}
 			if len(target.writes) != tc.wantWrites {
@@ -186,6 +186,89 @@ func TestAcceptQRAuth_ReportsAcceptanceFirst(t *testing.T) {
 		if hooks != 1 || logOutsAtHook != 0 {
 			t.Errorf("got=%d: OnQRAccepted calls=%d, logOuts before it=%d; want 1 and 0", got, hooks, logOutsAtHook)
 		}
+	}
+}
+
+// recordLogOuts replaces logOutSessionFn for the test and returns the
+// session bytes of each logout it was asked for.
+func recordLogOuts(t *testing.T) *[][]byte {
+	t.Helper()
+	var got [][]byte
+	prev := logOutSessionFn
+	logOutSessionFn = func(ctx context.Context, _ int, _ string, data []byte, _ LoginConfig) error {
+		if ctx.Err() != nil {
+			t.Error("logout ran on a dead context")
+		}
+		got = append(got, data)
+		return nil
+	}
+	t.Cleanup(func() { logOutSessionFn = prev })
+	return &got
+}
+
+// TestFinishQRLogin_ScannedButUnfinishedIsLoggedOut pins #919: a run that
+// fails after the code was scanned, here cancelled under a cancelled
+// caller, writes nothing and logs out the authorization its buffered auth
+// key may carry, on a context that is still alive.
+func TestFinishQRLogin_ScannedButUnfinishedIsLoggedOut(t *testing.T) {
+	logOuts := recordLogOuts(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	target := &recordingStorage{row: []byte("existing-good-session")}
+	sess := &deferredSession{target: target}
+	_ = sess.StoreSession(ctx, []byte("scanned-auth-key"))
+
+	err := finishQRLogin(ctx, 1, "hash", LoginConfig{}, 1, sess, fmt.Errorf("qr auth: %w", context.Canceled), true, false, false)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want the run's context.Canceled", err)
+	}
+	if len(target.writes) != 0 {
+		t.Errorf("store writes = %d, want 0", len(target.writes))
+	}
+	if len(*logOuts) != 1 || string((*logOuts)[0]) != "scanned-auth-key" {
+		t.Errorf("logouts = %q, want the scanned auth key once", *logOuts)
+	}
+}
+
+// TestFinishQRLogin_NoLogOutWithoutAScanOrOnSuccess: an unscanned run has
+// nothing to log out, a mismatch was logged out by the account check, and a
+// completed run hands its bytes to HoldSession without writing them.
+func TestFinishQRLogin_NoLogOutWithoutAScanOrOnSuccess(t *testing.T) {
+	ctx := context.Background()
+	logOuts := recordLogOuts(t)
+	for _, tc := range []struct {
+		name                        string
+		runErr                      error
+		scanned, signedIn, mismatch bool
+		hold, wantErr               bool
+	}{
+		{"expired, never scanned", ErrQRLoginExpired, false, false, false, false, true},
+		{"mismatch", nil, true, true, true, false, false},
+		{"signed in, held", nil, true, true, false, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := &recordingStorage{}
+			sess := &deferredSession{target: target}
+			_ = sess.StoreSession(ctx, []byte("auth-key"))
+			var held []byte
+			cfg := LoginConfig{}
+			if tc.hold {
+				cfg.HoldSession = func(b []byte) { held = b }
+			}
+			err := finishQRLogin(ctx, 1, "hash", cfg, 1, sess, tc.runErr, tc.scanned, tc.signedIn, tc.mismatch)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("err = %v, want error %v", err, tc.wantErr)
+			}
+			if len(target.writes) != 0 {
+				t.Errorf("store writes = %d, want 0", len(target.writes))
+			}
+			if tc.hold && string(held) != "auth-key" {
+				t.Errorf("held = %q, want the session bytes", held)
+			}
+		})
+	}
+	if len(*logOuts) != 0 {
+		t.Errorf("logouts = %d, want 0", len(*logOuts))
 	}
 }
 

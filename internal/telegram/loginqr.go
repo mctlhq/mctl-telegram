@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	gotdtelegram "github.com/gotd/td/telegram"
@@ -57,7 +59,9 @@ func LoginQR(
 
 	sess := &deferredSession{target: &SessionStore{UserID: userID, Store: store}}
 	dispatcher := tg.NewUpdateDispatcher()
-	loggedIn := qrlogin.OnLoginToken(dispatcher)
+	var scanned atomic.Bool
+	loggedIn, onLoginToken := loginTokenSignal(&scanned)
+	dispatcher.OnLoginToken(onLoginToken)
 
 	opts := loginClientOptions(sess, cfg)
 	opts.UpdateHandler = dispatcher
@@ -90,6 +94,7 @@ func LoginQR(
 				return fmt.Errorf("qr auth: %w", err)
 			}
 		}
+		scanned.Store(true)
 		user, mm, err := acceptQRAuth(ctx, client.API(), cfg, userID, authz)
 		if err != nil {
 			return err
@@ -109,10 +114,80 @@ func LoginQR(
 		signedIn = true
 		return nil
 	})
-	if err := settleQRLogin(ctx, sess, runErr, signedIn, mismatch); err != nil {
+	if err := finishQRLogin(ctx, apiID, apiHash, cfg, userID, sess, runErr, scanned.Load(), signedIn, mismatch); err != nil {
 		return 0, "", "", err
 	}
 	return telegramUserID, displayName, username, nil
+}
+
+// finishQRLogin settles a LoginQR run (settleQRLogin) and, when the run
+// failed after the code was scanned, logs out the authorization its auth key
+// may now carry. That happens when the flow is cancelled or superseded just
+// as the scan lands: nothing is written, but without the logout the user is
+// left with a device nobody holds in Active Sessions (#919). A mismatched
+// account was already logged out by the account check.
+func finishQRLogin(ctx context.Context, apiID int, apiHash string, cfg LoginConfig, userID int64, sess *deferredSession, runErr error, scanned, signedIn, mismatch bool) error {
+	err := settleQRLogin(ctx, sess, runErr, signedIn, mismatch, cfg.HoldSession)
+	if err == nil || !scanned {
+		return err
+	}
+	if data := sess.take(); data != nil {
+		logOutCtx, cancel := DetachedLogOutContext(ctx)
+		defer cancel()
+		if lErr := logOutSessionFn(logOutCtx, apiID, apiHash, data, cfg); lErr != nil {
+			slog.WarnContext(ctx, "telegram qr login: logout of an unfinished authorization failed",
+				"user_id", userID, "err", lErr)
+		} else {
+			slog.InfoContext(ctx, "telegram qr login: logged out an unfinished authorization", "user_id", userID)
+		}
+	}
+	return err
+}
+
+// loginTokenSignal is qrlogin.OnLoginToken with two changes. It records that
+// the code was scanned: from then on the auth key may carry an authorization,
+// which a run that does not finish must log out (#919). And the signal is
+// buffered: qr.Auth reads it only while parked in its select, so an
+// unbuffered non-blocking send is lost whenever the update lands during a
+// token export or the show callback, and the accepted scan goes unnoticed.
+// One buffered slot is enough, because further updates only coalesce.
+func loginTokenSignal(scanned *atomic.Bool) (qrlogin.LoggedIn, tg.LoginTokenHandler) {
+	loginToken := make(chan struct{}, 1)
+	return loginToken, func(context.Context, tg.Entities, *tg.UpdateLoginToken) error {
+		scanned.Store(true)
+		select {
+		case loginToken <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+}
+
+// logOutTimeout bounds a logout that runs after the caller's context has
+// ended.
+const logOutTimeout = 15 * time.Second
+
+// DetachedLogOutContext is ctx without its cancellation, bounded by
+// logOutTimeout. A logout of an authorization nobody will use runs precisely
+// because ctx was cancelled, so it cannot run on ctx itself.
+func DetachedLogOutContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), logOutTimeout)
+}
+
+// logOutSessionFn is LogOutSession; a var only so tests can record it.
+var logOutSessionFn = LogOutSession
+
+// LogOutSession ends the authorization held by the session bytes data with
+// auth.logOut, on a client of its own. It is for an authorization whose
+// login client is already gone, so the bytes are all that is left of it.
+func LogOutSession(ctx context.Context, apiID int, apiHash string, data []byte, cfg LoginConfig) error {
+	client := gotdtelegram.NewClient(apiID, apiHash, loginClientOptions(&deferredSession{data: data}, cfg))
+	return client.Run(ctx, func(ctx context.Context) error {
+		if _, err := client.API().AuthLogOut(ctx); err != nil {
+			return fmt.Errorf("auth.logOut: %w", err)
+		}
+		return nil
+	})
 }
 
 // acceptQRAuth is the part of LoginQR's callback right after Telegram has
@@ -141,7 +216,7 @@ func acceptQRAuth(ctx context.Context, api authLogOuter, cfg LoginConfig, userID
 //
 // A context.Canceled after sign-in completed is client shutdown noise and
 // does not fail the login.
-func settleQRLogin(ctx context.Context, sess *deferredSession, runErr error, signedIn, mismatch bool) error {
+func settleQRLogin(ctx context.Context, sess *deferredSession, runErr error, signedIn, mismatch bool, hold func([]byte)) error {
 	if !signedIn {
 		if runErr == nil {
 			runErr = errors.New("qr login ended before sign-in completed")
@@ -150,6 +225,15 @@ func settleQRLogin(ctx context.Context, sess *deferredSession, runErr error, sig
 	}
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		return runErr
+	}
+	if hold != nil && !mismatch {
+		// The caller writes the bytes itself, with the account metadata.
+		data := sess.take()
+		if data == nil {
+			return errors.New("qr login: login completed but no session bytes were persisted")
+		}
+		hold(data)
+		return nil
 	}
 	// The only write of this login's session to the database, and only for
 	// the expected account.

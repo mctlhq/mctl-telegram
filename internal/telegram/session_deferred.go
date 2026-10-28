@@ -42,14 +42,20 @@ func (d *deferredSession) StoreSession(_ context.Context, data []byte) error {
 	return nil
 }
 
+// take empties the buffer and returns what it held.
+func (d *deferredSession) take() []byte {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	data := d.data
+	d.data = nil
+	return data
+}
+
 // settle ends the deferral: on a mismatch the buffered bytes are dropped
 // without a single write to target, otherwise the latest ones are written
 // through once.
 func (d *deferredSession) settle(ctx context.Context, mismatch bool) error {
-	d.mu.Lock()
-	data := d.data
-	d.data = nil
-	d.mu.Unlock()
+	data := d.take()
 	if mismatch {
 		return nil
 	}

@@ -3,6 +3,7 @@ package oauth
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -48,13 +49,32 @@ type qrStub struct {
 	// gotWait is the LoginConfig.QRWait of the latest call.
 	gotWait atomic.Int64
 	// release, when set, replaces the scan: the login waits for it whatever
-	// happens to its context, then reports a success without writing, the
-	// way a scan accepted just as the flow is cancelled would.
+	// happens to its context, then hands its session over and reports a
+	// success, the way a scan accepted just as the flow is cancelled would.
 	release chan struct{}
+	// beforeReturn, when set, runs on a released login right before it
+	// returns.
+	beforeReturn func()
 
 	calls   atomic.Int32
 	writes  atomic.Int32
 	logOuts atomic.Int32
+	// lateLogOuts counts the server's logouts of a held session it no
+	// longer wanted; deadLogOutCtx records one made on a dead context.
+	lateLogOuts   atomic.Int32
+	deadLogOutCtx atomic.Bool
+}
+
+// handOver gives the login's session to the caller the way LoginQR does:
+// through cfg.HoldSession when the caller set it, otherwise written
+// straight to the user's row.
+func (q *qrStub) handOver(ctx context.Context, store *db.Store, uid int64, cfg telegram.LoginConfig) error {
+	q.writes.Add(1)
+	if cfg.HoldSession != nil {
+		cfg.HoldSession([]byte("fake-qr-session"))
+		return nil
+	}
+	return store.UpdateSessionBlob(ctx, uid, []byte("fake-qr-session"))
 }
 
 func newQRStub(tgID int64) *qrStub {
@@ -77,6 +97,13 @@ func (q *qrStub) fn() QRLoginFunc {
 		}
 		if q.release != nil {
 			<-q.release
+			// The hand-over lands before the cancel does.
+			if err := q.handOver(context.WithoutCancel(ctx), store, uid, cfg); err != nil {
+				return 0, "", "", err
+			}
+			if q.beforeReturn != nil {
+				q.beforeReturn()
+			}
 			return q.tgID, "Dana", "dana_tg", nil
 		}
 		waitCtx := ctx
@@ -113,8 +140,7 @@ func (q *qrStub) fn() QRLoginFunc {
 			q.logOuts.Add(1)
 			return q.tgID, "Someone Else", "someoneelse", nil
 		}
-		q.writes.Add(1)
-		if err := store.UpdateSessionBlob(ctx, uid, []byte("fake-qr-session")); err != nil {
+		if err := q.handOver(ctx, store, uid, cfg); err != nil {
 			return 0, "", "", err
 		}
 		return q.tgID, "Dana", "dana_tg", nil
@@ -180,6 +206,13 @@ func newQRTestServer(t *testing.T, q *qrStub, enabled bool, opts ...func(*Config
 		}
 	})
 	srv.qrLoginFn = q.fn()
+	srv.logOutSessionFn = func(ctx context.Context, _ []byte) error {
+		if ctx.Err() != nil {
+			q.deadLogOutCtx.Store(true)
+		}
+		q.lateLogOuts.Add(1)
+		return nil
+	}
 	return srv, mux
 }
 
@@ -371,6 +404,11 @@ func TestEnableQR_EndToEndWithTwoFA(t *testing.T) {
 	}
 	if q.logOuts.Load() != 0 || q.writes.Load() != 1 {
 		t.Errorf("logOuts=%d writes=%d, want 0 and 1", q.logOuts.Load(), q.writes.Load())
+	}
+	// The saved session is the user's now: the held-session logout must
+	// not touch it.
+	if q.lateLogOuts.Load() != 0 {
+		t.Errorf("a saved sign-in was logged out %d time(s)", q.lateLogOuts.Load())
 	}
 
 	audit := strings.Join(auditRows(t, srv), "\n")
@@ -709,6 +747,7 @@ func TestEnableQR_CancelBeatsALateScan(t *testing.T) {
 		t.Error("the cancelled flow ended without an error")
 	}
 	assertExistingSessionUntouched(t, srv, uid)
+	assertLateLogOut(t, q)
 	if body := getQRStatus(t, mux, c).Body.String(); strings.Contains(body, "<svg") || strings.Contains(body, "linked") {
 		t.Errorf("the status page still serves the cancelled flow:\n%s", body)
 	}
@@ -754,6 +793,95 @@ func TestEnableQR_PhoneStartBeatsALateScan(t *testing.T) {
 		t.Errorf("QR flow superseded=%v err=%v, want superseded with an error", lf.superseded.Load(), lf.err)
 	}
 	assertExistingSessionUntouched(t, srv, uid)
+	assertLateLogOut(t, q)
+}
+
+// assertLateLogOut checks the late scan's authorization was logged out once,
+// on a live context (#919).
+func assertLateLogOut(t *testing.T, q *qrStub) {
+	t.Helper()
+	if q.lateLogOuts.Load() != 1 || q.deadLogOutCtx.Load() {
+		t.Errorf("late-scan logouts=%d on a dead ctx=%v, want 1 on a live one", q.lateLogOuts.Load(), q.deadLogOutCtx.Load())
+	}
+}
+
+// TestEnableQR_SupersededBeforeTheCancelLands pins the explicit guard after
+// the login (#919): a supersede marks the flow before it cancels bgCtx, and
+// a login that returns in between must not finish the sign-in, even though
+// every write on bgCtx would still succeed.
+func TestEnableQR_SupersededBeforeTheCancelLands(t *testing.T) {
+	q := newQRStub(500100101)
+	q.release = make(chan struct{})
+	srv, mux := newQRTestServer(t, q, true)
+	driveToPhoneAs(t, mux, desktopUA)
+	uid := seedExistingSession(t, srv)
+
+	lf := srv.startLoginFlow(uid, 500100101, srv.qrLogin(time.Minute), false, time.Now())
+	q.beforeReturn = func() { lf.superseded.Store(true) }
+	close(q.release)
+	waitForFlowDone(t, lf, 3*time.Second)
+
+	if !errors.Is(lf.err, context.Canceled) {
+		t.Errorf("err = %v, want a cancelled sign-in", lf.err)
+	}
+	assertExistingSessionUntouched(t, srv, uid)
+	assertLateLogOut(t, q)
+}
+
+// TestEnableQR_CancelAfterTheGuardStillLogsOut: a cancel that lands after the
+// #919 guard makes SaveSessionForSignIn fail on bgCtx. The held session was
+// never written, so no repair finds it; the flow has to log it out itself.
+func TestEnableQR_CancelAfterTheGuardStillLogsOut(t *testing.T) {
+	q := newQRStub(500100101)
+	q.release = make(chan struct{})
+	srv, mux := newQRTestServer(t, q, true)
+	driveToPhoneAs(t, mux, desktopUA)
+	uid := seedExistingSession(t, srv)
+
+	var lf *loginFlow
+	srv.beforeSignInSave = func() { lf.cancel() }
+	lf = srv.startLoginFlow(uid, 500100101, srv.qrLogin(time.Minute), false, time.Now())
+	close(q.release)
+	waitForFlowDone(t, lf, 3*time.Second)
+
+	if lf.err == nil || !strings.Contains(lf.err.Error(), "save session") || lf.tgUserID != 0 {
+		t.Errorf("err = %v, tgUserID = %d; want a failed save", lf.err, lf.tgUserID)
+	}
+	assertExistingSessionUntouched(t, srv, uid)
+	assertLateLogOut(t, q)
+}
+
+// TestEnableQR_RefusedSaveLogsOut: SaveSessionForSignIn refuses because the
+// account was deleted while the scan was being accepted (#821). The held
+// session is logged out rather than dropped.
+func TestEnableQR_RefusedSaveLogsOut(t *testing.T) {
+	q := newQRStub(500100101)
+	q.release = make(chan struct{})
+	srv, mux := newQRTestServer(t, q, true)
+	driveToPhoneAs(t, mux, desktopUA)
+	uid := seedExistingSession(t, srv)
+
+	lf := srv.startLoginFlow(uid, 500100101, srv.qrLogin(time.Minute), false, time.Now())
+	q.beforeReturn = func() {
+		if _, err := srv.store.HardDeleteAccount(context.Background(), uid); err != nil {
+			t.Errorf("HardDeleteAccount: %v", err)
+		}
+	}
+	close(q.release)
+	waitForFlowDone(t, lf, 3*time.Second)
+
+	if lf.err == nil || !strings.Contains(lf.err.Error(), "save session") || lf.tgUserID != 0 {
+		t.Errorf("err = %v, tgUserID = %d; want a refused save", lf.err, lf.tgUserID)
+	}
+	var rows int
+	if err := srv.store.DB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM telegram_accounts WHERE user_id = $1`, uid).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Errorf("%d telegram_accounts rows survive the delete", rows)
+	}
+	assertLateLogOut(t, q)
 }
 
 // TestEnableQR_NoOrForeignCookieGetsNothing: the status page and the QR
