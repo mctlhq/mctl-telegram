@@ -107,10 +107,10 @@ func (s *Store) RecordOIDCBotAccessGrant(ctx context.Context, userID int64, obse
 		     observed_at = EXCLUDED.observed_at,
 		     source = EXCLUDED.source,
 		     updated_at = EXCLUDED.updated_at
-		 WHERE client_bot_reachability.state <> 'blocked'
+		 WHERE client_bot_reachability.state <> $7
 		   AND (client_bot_reachability.observed_at IS NULL
 		        OR client_bot_reachability.observed_at < EXCLUDED.observed_at)`,
-		userID, notify.StateReachable, notify.SourceOIDCBotAccess, observedAt, notify.SourceOIDCBotAccess, time.Now().UTC(),
+		userID, notify.StateReachable, notify.SourceOIDCBotAccess, observedAt, notify.SourceOIDCBotAccess, time.Now().UTC(), notify.StateBlocked,
 	)
 	if err != nil {
 		return false, fmt.Errorf("record oidc bot access grant: %w", err)
