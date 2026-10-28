@@ -2,11 +2,13 @@ package telegram
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tgerr"
 	mcrypto "github.com/mctlhq/mctl-telegram/internal/crypto"
@@ -683,5 +685,113 @@ func TestBorrow_PeerFloodHook(t *testing.T) {
 	_ = p.Borrow(ctx, uid, func(context.Context, *telegram.Client) error { return tgerr.New(400, "PEER_FLOOD") })
 	if len(held) != 1 || held[0] != uid {
 		t.Fatalf("hook calls = %v, want [%d]", held, uid)
+	}
+}
+
+// revokedDetailOf reads revoked_reason and revoked_detail of a user's newest row.
+func revokedDetailOf(t *testing.T, store *db.Store, uid int64) (string, string) {
+	t.Helper()
+	var reason, detail sql.NullString
+	if err := store.DB.QueryRowContext(context.Background(),
+		`SELECT revoked_reason, revoked_detail FROM telegram_accounts WHERE user_id = $1 ORDER BY id DESC LIMIT 1`, uid,
+	).Scan(&reason, &detail); err != nil {
+		t.Fatalf("read revoked columns: %v", err)
+	}
+	return reason.String, detail.String
+}
+
+// Both revoke paths keep the Telegram error type, so a session Telegram
+// killed can be told from one the user ended after Loki's retention.
+func TestRevokePaths_StoreTelegramErrorType(t *testing.T) {
+	ctx := context.Background()
+	store := newBorrowTestStore(t)
+
+	uid, err := store.EnsureUser(ctx, "detail-finishrun-user", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+	if err := store.SaveSession(ctx, uid, []byte("blob"), 4242, "", ""); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	p := NewClientPool(1, "hash", time.Minute, store)
+	sessionStore := &SessionStore{UserID: uid, Store: store}
+	if _, err := sessionStore.LoadSession(ctx); err != nil {
+		t.Fatalf("load session: %v", err)
+	}
+	e := &entry{sessionStore: sessionStore, lastUsed: time.Now(), cancel: func() {}, ready: make(chan struct{})}
+	p.entries[uid] = e
+	p.finishRun(uid, e, fmt.Errorf("run: %w", tgerr.New(401, "AUTH_KEY_UNREGISTERED")))
+	if reason, detail := revokedDetailOf(t, store, uid); reason != "unauthorized" || detail != "AUTH_KEY_UNREGISTERED" {
+		t.Errorf("finishRun stored (%q, %q), want (unauthorized, AUTH_KEY_UNREGISTERED)", reason, detail)
+	}
+
+	uid2, err := store.EnsureUser(ctx, "detail-borrow-user", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+	if err := store.SaveSession(ctx, uid2, []byte("blob"), 4242, "", ""); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	if err := p.revokeRejected(ctx, uid2, fmt.Errorf("call: %w", tgerr.New(401, "SESSION_REVOKED"))); err != nil {
+		t.Fatalf("revokeRejected: %v", err)
+	}
+	if reason, detail := revokedDetailOf(t, store, uid2); reason != "unauthorized" || detail != "SESSION_REVOKED" {
+		t.Errorf("revokeRejected stored (%q, %q), want (unauthorized, SESSION_REVOKED)", reason, detail)
+	}
+}
+
+// A pooled client with no active row must fail instead of minting a fresh,
+// never-authorized auth key and inserting it as a new row. Login clients
+// (Pooled false) still get gotd's not-found and create the row.
+func TestSessionStore_PooledNeverStartsASession(t *testing.T) {
+	ctx := context.Background()
+	store := newBorrowTestStore(t)
+	uid, err := store.EnsureUser(ctx, "pooled-no-row-user", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+	pooled := &SessionStore{UserID: uid, Store: store, Pooled: true}
+	if _, err := pooled.LoadSession(ctx); !errors.Is(err, db.ErrNoActiveSession) {
+		t.Fatalf("pooled LoadSession = %v, want ErrNoActiveSession", err)
+	}
+	if err := pooled.StoreSession(ctx, []byte("fresh-key")); !errors.Is(err, db.ErrNoActiveSession) {
+		t.Fatalf("pooled StoreSession = %v, want ErrNoActiveSession", err)
+	}
+	var rows int
+	if err := store.DB.QueryRowContext(ctx, `SELECT count(*) FROM telegram_accounts WHERE user_id = $1`, uid).Scan(&rows); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("pooled client inserted %d rows, want 0", rows)
+	}
+	login := &SessionStore{UserID: uid, Store: store}
+	if _, err := login.LoadSession(ctx); !errors.Is(err, session.ErrNotFound) {
+		t.Fatalf("login LoadSession = %v, want session.ErrNotFound", err)
+	}
+}
+
+// The pool must build its clients with Pooled set: a client the pool starts
+// for a user with no active row ends with ErrNoActiveSession before it ever
+// dials Telegram.
+func TestAcquire_PooledClientWithoutRowFailsFast(t *testing.T) {
+	ctx := context.Background()
+	store := newBorrowTestStore(t)
+	uid, err := store.EnsureUser(ctx, "acquire-no-row-user", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+	p := NewClientPool(1, "hash", time.Minute, store)
+	e, err := p.acquire(uid)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer e.cancel()
+	select {
+	case <-e.ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pooled client without a row did not fail fast")
+	}
+	if !errors.Is(e.runErr, db.ErrNoActiveSession) {
+		t.Fatalf("runErr = %v, want ErrNoActiveSession", e.runErr)
 	}
 }

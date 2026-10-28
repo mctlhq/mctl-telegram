@@ -1031,10 +1031,17 @@ func (s *Store) UpdateSessionBlobByID(ctx context.Context, userID, sessionID int
 // disconnect MCP tool / HTTP endpoint), "idle_expiry" (CheckSessionValid idle
 // TTL gate), "absolute_expiry" (CheckSessionValid absolute TTL gate).
 func (s *Store) RevokeActiveSession(ctx context.Context, userID int64, reason string) (bool, error) {
+	return s.RevokeActiveSessionDetail(ctx, userID, reason, "")
+}
+
+// RevokeActiveSessionDetail is RevokeActiveSession that also records detail
+// in revoked_detail, e.g. the Telegram error type behind an 'unauthorized'
+// revoke. An empty detail is stored as NULL.
+func (s *Store) RevokeActiveSessionDetail(ctx context.Context, userID int64, reason, detail string) (bool, error) {
 	res, err := s.DB.ExecContext(ctx,
-		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = $2
+		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = $2, revoked_detail = $3
 		 WHERE user_id = $1 AND revoked_at IS NULL`,
-		userID, nullable(reason),
+		userID, nullable(reason), nullable(detail),
 	)
 	if err != nil {
 		return false, fmt.Errorf("revoke session: %w", err)
@@ -1050,14 +1057,15 @@ func (s *Store) RevokeActiveSession(ctx context.Context, userID int64, reason st
 // use this after Telegram rejects the auth key they loaded: a concurrent OAuth
 // reconnect may already have inserted a newer active row for the same user, so
 // revoking by user_id alone could invalidate the replacement session.
-func (s *Store) RevokeSessionByID(ctx context.Context, userID, sessionID int64, reason string) (bool, error) {
+// detail goes to revoked_detail (empty stores NULL).
+func (s *Store) RevokeSessionByID(ctx context.Context, userID, sessionID int64, reason, detail string) (bool, error) {
 	if sessionID <= 0 {
 		return false, nil
 	}
 	res, err := s.DB.ExecContext(ctx,
-		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = $3
+		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = $3, revoked_detail = $4
 		 WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL`,
-		sessionID, userID, nullable(reason),
+		sessionID, userID, nullable(reason), nullable(detail),
 	)
 	if err != nil {
 		return false, fmt.Errorf("revoke session by id: %w", err)
@@ -1637,7 +1645,10 @@ func (s *Store) CheckSessionValid(ctx context.Context, userID int64) (SessionExp
 		// ErrSessionUnauthorized: the caller must not route the user
 		// into enable_access while the dead partial row is still the
 		// newest loadable session, or reauth just reloads it.
-		if _, rErr := s.RevokeActiveSession(context.WithoutCancel(ctx), userID, "unauthorized"); rErr != nil {
+		// 'login_incomplete', not 'unauthorized': Telegram never rejected
+		// anything here, and counting abandoned logins as rejected sessions
+		// hid the few real server-side kills among them.
+		if _, rErr := s.RevokeActiveSession(context.WithoutCancel(ctx), userID, "login_incomplete"); rErr != nil {
 			return "", fmt.Errorf("revoke unauthorized session: %w", rErr)
 		}
 		return "", ErrSessionUnauthorized
