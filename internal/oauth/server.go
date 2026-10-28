@@ -613,6 +613,12 @@ type Config struct {
 	// Off by default; with it off those routes answer 404, so the QR flow
 	// cannot be reached by a direct request either.
 	EnableAccessQREnabled bool
+	// EnableAccessQRAppLinkEnabled offers the QR login to phone browsers
+	// as well, with an "Open in Telegram" link to the login token on the
+	// status page (an experiment: does Telegram confirm a token on the
+	// device it was opened on?). It does nothing without
+	// EnableAccessQREnabled.
+	EnableAccessQRAppLinkEnabled bool
 	// TelegramAppName is the name of the Telegram API app this server logs
 	// in as, which Telegram shows when it asks the user to confirm a QR
 	// login. The QR page tells the user to expect it. Empty keeps the
@@ -2030,7 +2036,11 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		tgID:      identity.TelegramID,
 		createdAt: s.clock(),
 		step:      stepPhone,
-		qrOffered: s.cfg.EnableAccessQREnabled && isDesktopBrowser(r.UserAgent()),
+	}
+	if s.cfg.EnableAccessQREnabled {
+		desktop := isDesktopBrowser(r.UserAgent())
+		es.qrAppLink = !desktop && s.cfg.EnableAccessQRAppLinkEnabled
+		es.qrOffered = desktop || es.qrAppLink
 	}
 	esTok := randomToken(32)
 	s.mu.Lock()
@@ -2066,7 +2076,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		// sending is opt-in. A new account starts read-only, matching the
 		// published "preview by default" promise; the owner enables sending
 		// later with set_send_consent or on the manage page.
-		renderEnablePhone(w, enablePhonePage{Issuer: s.cfg.Issuer, EnableToken: esTok, QROffered: es.qrOffered})
+		renderEnablePhone(w, enablePhonePage{Issuer: s.cfg.Issuer, EnableToken: esTok, QROffered: es.qrOffered, QRAppLink: es.qrAppLink})
 	}
 }
 

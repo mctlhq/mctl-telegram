@@ -157,6 +157,16 @@ func isDesktopBrowser(ua string) bool {
 	return true
 }
 
+// qrAppLink is the login token URL as a link html/template will emit:
+// tg: is not a scheme it trusts, so a URL of the expected shape is marked
+// safe and anything else gives no link at all.
+func qrAppLink(u string) template.URL {
+	if !strings.HasPrefix(u, "tg://login?token=") {
+		return ""
+	}
+	return template.URL(u)
+}
+
 // handleEnableQRStart launches the QR login from the phone step and sends the
 // browser to the status page.
 func (s *Server) handleEnableQRStart(w http.ResponseWriter, r *http.Request) {
@@ -358,7 +368,7 @@ func (s *Server) handleEnableQRStatus(w http.ResponseWriter, r *http.Request) {
 		renderEnableQRBusy(w)
 		return
 	}
-	renderEnableQR(w, enableQRPage{
+	page := enableQRPage{
 		EnableToken: esTok,
 		QR:          renderQRSVG(*url),
 		Host:        issuerHost(s.cfg.Issuer),
@@ -366,7 +376,11 @@ func (s *Server) handleEnableQRStatus(w http.ResponseWriter, r *http.Request) {
 		AppName:     s.cfg.TelegramAppName,
 		Stops:       qrWaitText(es.qrWait),
 		WizardMode:  es.isWizardMode(),
-	})
+	}
+	if es.qrAppLink && s.cfg.EnableAccessQRAppLinkEnabled {
+		page.AppLink = qrAppLink(*url)
+	}
+	renderEnableQR(w, page)
 }
 
 // finishQRFlow renders the end of a QR flow whose goroutine has exited.
