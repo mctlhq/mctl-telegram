@@ -8,7 +8,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
@@ -822,11 +822,7 @@ func TestEnableAccess_DBClientRoutedToPhoneScreen(t *testing.T) {
 // session.
 func TestEnableAccess_TelegramIDMismatch_Rejected(t *testing.T) {
 	srv, mux := newEnableTestServer(t, stubLoginWrongAccount())
-	var logOuts atomic.Int32
-	srv.logOutSessionFn = func(context.Context, []byte) error {
-		logOuts.Add(1)
-		return nil
-	}
+	logOuts := recordSessionLogOuts(srv, nil)
 	es := driveToPhone(t, mux)
 	uid := seedExistingSession(t, srv)
 
@@ -843,11 +839,103 @@ func TestEnableAccess_TelegramIDMismatch_Rejected(t *testing.T) {
 		t.Errorf("expected an identity-mismatch error, got: %s", rec.Body.String())
 	}
 
+	srv.bgLogOuts.Wait()
 	assertExistingSessionUntouched(t, srv, uid)
 	// The wrong account was logged out by the login itself; the flow held
-	// nothing, so it has nothing more to log out.
-	if n := logOuts.Load(); n != 0 {
-		t.Errorf("flow logouts = %d, want 0", n)
+	// nothing, and the existing key is still the user's, so the flow logs
+	// nothing out.
+	if got := logOuts(); len(got) != 0 {
+		t.Errorf("flow logouts = %q, want none", got)
+	}
+}
+
+// recordSessionLogOuts makes srv record every session it logs out, failing
+// each with err, and returns the recorded bytes.
+func recordSessionLogOuts(srv *Server, err error) func() []string {
+	var mu sync.Mutex
+	var got []string
+	srv.logOutSessionFn = func(_ context.Context, data []byte) error {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, string(data))
+		return err
+	}
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), got...)
+	}
+}
+
+// signInByPhone drives an enable_access phone sign-in to its redirect.
+func signInByPhone(t *testing.T, mux *chi.Mux, es string) *httptest.ResponseRecorder {
+	t.Helper()
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}}); !strings.Contains(rec.Body.String(), "enable_access/code") {
+		t.Fatalf("start did not render code screen: %s", rec.Body.String())
+	}
+	return postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {es}, "code": {"12345"}})
+}
+
+// TestEnableAccess_ReLoginLogsOutTheSupersededKey: a re-login to the same
+// account starts from a fresh auth key (#913), so the key of the row it
+// replaces is logged out -- exactly once, and never the new one. Before
+// #913 the login reused that key; without the logout every re-login would
+// leave an orphaned device in the user's Active Sessions.
+func TestEnableAccess_ReLoginLogsOutTheSupersededKey(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	m := &flowMetrics{}
+	srv.WithMetrics(m)
+	logOuts := recordSessionLogOuts(srv, nil)
+	es := driveToPhone(t, mux)
+	uid := seedExistingSession(t, srv)
+
+	if loc := authCodeRedirect(t, signInByPhone(t, mux, es)); loc.Query().Get("code") == "" {
+		t.Fatalf("no authorization code in %s", loc)
+	}
+	srv.bgLogOuts.Wait()
+
+	if got := logOuts(); len(got) != 1 || got[0] != "existing-good-session" {
+		t.Errorf("logouts = %q, want the superseded key once", got)
+	}
+	pt, err := srv.store.LoadSession(context.Background(), uid)
+	if err != nil || string(pt) != "fake-mtproto-session" {
+		t.Errorf("active session = %q, %v; want the new one", pt, err)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.logOuts) != 1 || m.logOuts[0] != "superseded/ok" {
+		t.Errorf("logout metrics = %v, want [superseded/ok]", m.logOuts)
+	}
+}
+
+// TestEnableAccess_SupersededLogOutFailureKeepsTheSignIn: the old key's
+// logout is best effort. When Telegram refuses it, the sign-in still
+// completes, and the failure is counted rather than surfaced.
+func TestEnableAccess_SupersededLogOutFailureKeepsTheSignIn(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	m := &flowMetrics{}
+	srv.WithMetrics(m)
+	logOuts := recordSessionLogOuts(srv, errors.New("AUTH_KEY_UNREGISTERED"))
+	es := driveToPhone(t, mux)
+	uid := seedExistingSession(t, srv)
+
+	if loc := authCodeRedirect(t, signInByPhone(t, mux, es)); loc.Query().Get("code") == "" {
+		t.Fatalf("no authorization code in %s", loc)
+	}
+	srv.bgLogOuts.Wait()
+
+	if _, err := srv.store.CheckSessionValid(context.Background(), uid); err != nil {
+		t.Errorf("session not valid after a failed old-key logout: %v", err)
+	}
+	if got := logOuts(); len(got) != 1 {
+		t.Errorf("logout attempts = %d, want 1", len(got))
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.logOuts) != 1 || m.logOuts[0] != "superseded/error" {
+		t.Errorf("logout metrics = %v, want [superseded/error]", m.logOuts)
 	}
 }
 

@@ -128,6 +128,12 @@ type Registry struct {
 	// LoginFlowDuration measures a successful flow from launch to session
 	// saved, in seconds, by method.
 	LoginFlowDuration *prometheus.HistogramVec
+	// LoginLogOutTotal counts enable_access logouts of sessions nobody holds
+	// any more, by reason -- "unsaved" (a sign-in the flow did not save,
+	// #919) or "superseded" (the old key a re-login replaced, #913) -- and
+	// outcome ("ok", "error"). An error leaves an orphaned device in the
+	// user's Active Sessions.
+	LoginLogOutTotal *prometheus.CounterVec
 
 	// TelegramReplicaID is an info-type gauge (constant value 1) labeled by
 	// replica_id. Operators use it to verify that a given user_id consistently
@@ -493,6 +499,13 @@ func (r *Registry) ObserveLoginFlow(method, result string, seconds float64) {
 	}
 }
 
+// CountLoginLogOut counts one enable_access logout of a session nobody holds
+// any more. Satisfies oauth.metricsIface. reason and outcome come from closed
+// sets in internal/oauth.
+func (r *Registry) CountLoginLogOut(reason, outcome string) {
+	r.LoginLogOutTotal.WithLabelValues(reason, outcome).Inc()
+}
+
 // New constructs a Registry with all collectors registered on a fresh
 // prometheus.Registry. Panics only if duplicate names are registered within
 // the same call (which cannot happen in practice).
@@ -587,6 +600,11 @@ func New() *Registry {
 		Help:    "Wall-clock seconds from launching an enable_access login flow to its session being saved, successful flows only, by method (code, qr).",
 		Buckets: []float64{5, 10, 20, 30, 45, 60, 90, 120, 180, 300, 600},
 	}, []string{"method"})
+
+	r.LoginLogOutTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_login_logout_total",
+		Help: "Total enable_access logouts of sessions nobody holds any more, labeled by reason (unsaved, superseded) and outcome (ok, error).",
+	}, []string{"reason", "outcome"})
 
 	r.TelegramReplicaID = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "mctl_telegram_replica_id",
@@ -765,6 +783,7 @@ func New() *Registry {
 		r.LoginPhoneStepTotal,
 		r.LoginPhoneToCodeDuration,
 		r.LoginFlowTotal,
+		r.LoginLogOutTotal,
 		r.LoginFlowDuration,
 		r.SessionsBorrowTotal,
 		r.TelegramReplicaID,

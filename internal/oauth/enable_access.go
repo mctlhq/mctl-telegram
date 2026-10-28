@@ -446,7 +446,7 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 		loginCfg.HoldSession = func(b []byte) { lf.heldSession = b }
 		defer func() {
 			if lf.heldSession != nil {
-				s.logOutHeldSession(bgCtx, uid, lf.heldSession)
+				s.logOutUnusedSession(bgCtx, uid, lf.heldSession, logOutUnsaved)
 				lf.heldSession = nil
 			}
 		}()
@@ -497,13 +497,28 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 		if s.beforeSignInSave != nil {
 			s.beforeSignInSave()
 		}
-		if serr := s.store.SaveSessionForSignIn(bgCtx, uid, pt, tgID, displayName, username, signInStartedAt); serr != nil {
+		superseded, serr := s.store.SaveSessionForSignInSuperseding(bgCtx, uid, pt, tgID, displayName, username, signInStartedAt)
+		if serr != nil {
 			lf.err = fmt.Errorf("save session: %w", serr)
 			return
 		}
 		// The session is now legitimately the user's: the defer must not
 		// log it out.
 		lf.heldSession = nil
+		// A re-login to the same account started from a fresh auth key
+		// (#913), so the key of the row it just superseded is held by
+		// nobody any more. Before #913 the phone login reused that key; now
+		// it is logged out, or the user would collect one orphaned device
+		// in Active Sessions per re-login. Off the flow's goroutine and best
+		// effort: the sign-in has already succeeded and must not wait on,
+		// or fail with, Telegram ending an old key.
+		for _, old := range superseded {
+			s.bgLogOuts.Add(1)
+			go func() {
+				defer s.bgLogOuts.Done()
+				s.logOutUnusedSession(bgCtx, uid, old, logOutSuperseded)
+			}()
+		}
 		if sendOptIn {
 			if _, serr := s.store.SetSendEnabled(bgCtx, uid, true); serr != nil {
 				lf.err = fmt.Errorf("enable sending: %w", serr)
@@ -515,10 +530,20 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 	return lf
 }
 
-// logOutHeldSession ends the authorization a held session carries, best
-// effort, on telegram.DetachedLogOutContext: it usually runs because bgCtx
-// was cancelled.
-func (s *Server) logOutHeldSession(bgCtx context.Context, uid int64, data []byte) {
+// Reasons for logOutUnusedSession, the reason label on
+// mctl_login_logout_total.
+const (
+	// logOutUnsaved: a sign-in whose session the flow did not save.
+	logOutUnsaved = "unsaved"
+	// logOutSuperseded: the old key of a row a re-login replaced.
+	logOutSuperseded = "superseded"
+)
+
+// logOutUnusedSession ends the authorization a session nobody holds any more
+// carries, best effort, on telegram.DetachedLogOutContext: it often runs
+// because bgCtx was cancelled, and a superseded key's logout runs after the
+// flow has finished. A failure is logged and counted, never returned.
+func (s *Server) logOutUnusedSession(bgCtx context.Context, uid int64, data []byte, reason string) {
 	ctx, cancel := telegram.DetachedLogOutContext(bgCtx)
 	defer cancel()
 	var err error
@@ -527,11 +552,16 @@ func (s *Server) logOutHeldSession(bgCtx context.Context, uid int64, data []byte
 	} else {
 		err = telegram.LogOutSession(ctx, s.cfg.TGAPIID, s.cfg.TGAPIHash, data, s.loginCfg)
 	}
+	outcome := "ok"
 	if err != nil {
-		slog.Warn("enable: logout of an unsaved sign-in failed", "uid", uid, "err", err)
-		return
+		outcome = "error"
+		slog.Warn("enable: logout of an unused session failed", "uid", uid, "reason", reason, "err", err)
+	} else {
+		slog.Info("enable: logged out an unused session", "uid", uid, "reason", reason)
 	}
-	slog.Info("enable: logged out an unsaved sign-in", "uid", uid)
+	if s.metrics != nil {
+		s.metrics.CountLoginLogOut(reason, outcome)
+	}
 }
 
 // hasActiveLocalAccount is the account-mode query both the pre-flight gate and

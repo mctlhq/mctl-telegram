@@ -115,12 +115,12 @@ func TestDeferredSession_StartsFromAFreshKey(t *testing.T) {
 	}
 }
 
-// TestSettleQRLogin_UnfinishedRunWritesNothing: a run that never signed in
+// TestSettleLogin_UnfinishedRunWritesNothing: a run that never signed in
 // leaves the user's row alone, whatever it ended with. The buffered bytes
 // stand in for the unauthorized auth key gotd saves on connect. The
 // cancelled case is the one gotd returns for a connection failure under
 // the callback while the caller's ctx is still live.
-func TestSettleQRLogin_UnfinishedRunWritesNothing(t *testing.T) {
+func TestSettleLogin_UnfinishedRunWritesNothing(t *testing.T) {
 	for name, runErr := range map[string]error{
 		"cancelled under a live ctx": fmt.Errorf("qr auth: %w", context.Canceled),
 		"no error and no sign-in":    nil,
@@ -142,9 +142,10 @@ func TestSettleQRLogin_UnfinishedRunWritesNothing(t *testing.T) {
 	}
 }
 
-// TestSettleQRLogin_SignedIn: a completed sign-in writes once, even when the
-// client's shutdown reports context.Canceled, and a mismatch writes nothing.
-func TestSettleQRLogin_SignedIn(t *testing.T) {
+// TestSettleLogin_SignedIn: a completed sign-in writes once, even when the
+// client's shutdown reports context.Canceled, and a mismatch writes nothing
+// and succeeds whatever the run returned after it.
+func TestSettleLogin_SignedIn(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name       string
@@ -155,6 +156,7 @@ func TestSettleQRLogin_SignedIn(t *testing.T) {
 		{"clean", nil, false, 1},
 		{"cancelled on shutdown", context.Canceled, false, 1},
 		{"mismatch", nil, true, 0},
+		{"mismatch, then a shutdown error", errors.New("connection reset"), true, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			target := &recordingStorage{}
@@ -165,6 +167,9 @@ func TestSettleQRLogin_SignedIn(t *testing.T) {
 			}
 			if len(target.writes) != tc.wantWrites {
 				t.Errorf("store writes = %d, want %d", len(target.writes), tc.wantWrites)
+			}
+			if sess.take() != nil {
+				t.Error("buffered bytes survived the settle, finishLogin would log them out again")
 			}
 		})
 	}
@@ -209,11 +214,11 @@ func recordLogOuts(t *testing.T) *[][]byte {
 	return &got
 }
 
-// TestFinishQRLogin_ScannedButUnfinishedIsLoggedOut pins #919: a run that
+// TestFinishLogin_ScannedButUnfinishedIsLoggedOut pins #919: a run that
 // fails after the code was scanned, here cancelled under a cancelled
 // caller, writes nothing and logs out the authorization its buffered auth
 // key may carry, on a context that is still alive.
-func TestFinishQRLogin_ScannedButUnfinishedIsLoggedOut(t *testing.T) {
+func TestFinishLogin_ScannedButUnfinishedIsLoggedOut(t *testing.T) {
 	logOuts := recordLogOuts(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -233,10 +238,10 @@ func TestFinishQRLogin_ScannedButUnfinishedIsLoggedOut(t *testing.T) {
 	}
 }
 
-// TestFinishQRLogin_NoLogOutWithoutAScanOrOnSuccess: an unscanned run has
+// TestFinishLogin_NoLogOutWithoutAScanOrOnSuccess: an unscanned run has
 // nothing to log out, a mismatch was logged out by the account check, and a
 // completed run hands its bytes to HoldSession without writing them.
-func TestFinishQRLogin_NoLogOutWithoutAScanOrOnSuccess(t *testing.T) {
+func TestFinishLogin_NoLogOutWithoutAScanOrOnSuccess(t *testing.T) {
 	ctx := context.Background()
 	logOuts := recordLogOuts(t)
 	for _, tc := range []struct {

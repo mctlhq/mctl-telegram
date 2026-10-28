@@ -162,6 +162,9 @@ type Server struct {
 	// logOutSessionFn, when set, replaces telegram.LogOutSession for
 	// logging out a held QR session the flow no longer wants (#919).
 	logOutSessionFn func(ctx context.Context, data []byte) error
+	// bgLogOuts tracks the superseded-key logouts a finished sign-in leaves
+	// running in the background, so tests can wait for them.
+	bgLogOuts sync.WaitGroup
 	// beforeSignInSave, when non-nil, runs in the login goroutine right
 	// before SaveSessionForSignIn. Test seam (nil in production): it is the
 	// only way to land a cancel after the #919 guard. Assigned before the
@@ -208,6 +211,10 @@ type metricsIface interface {
 	// ObserveLoginFlow records one finished enable_access login flow:
 	// method is "code" or "qr", result one of the loginFlowResult values.
 	ObserveLoginFlow(method, result string, seconds float64)
+	// CountLoginLogOut counts one logout of a session the enable_access flow
+	// no longer wants: reason is "unsaved" or "superseded", outcome "ok" or
+	// "error".
+	CountLoginLogOut(reason, outcome string)
 }
 
 // WithMetrics wires a metrics registry so oauth.Server can update the

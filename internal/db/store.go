@@ -724,7 +724,8 @@ var ErrAccountModeConflict = errors.New("account is in local mode; switch to hos
 // mctl-telegram issue-492 proposal. A revoked local row (or no active row at
 // all) does not block this call; only an active local row does.
 func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte, telegramUserID int64, displayName, username string) error {
-	return s.saveSession(ctx, userID, plaintext, telegramUserID, displayName, username, time.Time{})
+	_, err := s.saveSession(ctx, userID, plaintext, telegramUserID, displayName, username, time.Time{})
+	return err
 }
 
 // SaveSessionForSignIn is SaveSession for the in-browser enable_access
@@ -751,25 +752,39 @@ func (s *Store) SaveSession(ctx context.Context, userID int64, plaintext []byte,
 // flow of one user lock users and telegram_accounts in the same order.
 // A zero signInStartedAt is an error, not "never deleted".
 func (s *Store) SaveSessionForSignIn(ctx context.Context, userID int64, plaintext []byte, telegramUserID int64, displayName, username string, signInStartedAt time.Time) error {
+	_, err := s.SaveSessionForSignInSuperseding(ctx, userID, plaintext, telegramUserID, displayName, username, signInStartedAt)
+	return err
+}
+
+// SaveSessionForSignInSuperseding is SaveSessionForSignIn that also returns
+// the session bytes of the hosted rows it superseded for the same Telegram
+// account, decrypted, once the save has committed. A sign-in now starts from
+// a fresh auth key (#913), so the authorization those bytes carry is no
+// longer held by anyone; the caller logs it out. Rows of another or an
+// unknown Telegram account, rows without bytes and bytes that no longer
+// decrypt are left out: logging out a session nobody can attribute is not
+// this function's call. On an error nothing is returned.
+func (s *Store) SaveSessionForSignInSuperseding(ctx context.Context, userID int64, plaintext []byte, telegramUserID int64, displayName, username string, signInStartedAt time.Time) ([][]byte, error) {
 	if signInStartedAt.IsZero() {
-		return errors.New("save session: missing sign-in start")
+		return nil, errors.New("save session: missing sign-in start")
 	}
 	return s.saveSession(ctx, userID, plaintext, telegramUserID, displayName, username, signInStartedAt)
 }
 
 // saveSession implements SaveSession; a non-zero signInStartedAt adds the
-// deletion check of SaveSessionForSignIn.
-func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte, telegramUserID int64, displayName, username string, signInStartedAt time.Time) error {
+// deletion check of SaveSessionForSignIn. It returns the superseded sessions
+// SaveSessionForSignInSuperseding describes.
+func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte, telegramUserID int64, displayName, username string, signInStartedAt time.Time) ([][]byte, error) {
 	blob, err := s.Crypt.SealForUser(plaintext, userID)
 	if err != nil {
-		return fmt.Errorf("encrypt session: %w", err)
+		return nil, fmt.Errorf("encrypt session: %w", err)
 	}
 	checkDeletion := !signInStartedAt.IsZero()
 	// Resolve the dialect before BeginTx: the probe needs a second pooled
 	// connection and would deadlock on single-connection SQLite.
 	pg, err := s.postgresDialect(ctx)
 	if err != nil {
-		return fmt.Errorf("save session: %w", err)
+		return nil, fmt.Errorf("save session: %w", err)
 	}
 	lock := ""
 	if pg {
@@ -777,7 +792,7 @@ func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte,
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
 	// On Postgres both paths through saveSession lock the users row before
@@ -786,7 +801,7 @@ func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte,
 	if checkDeletion {
 		deleted, err := accountDeletedSince(ctx, tx, userID, signInStartedAt, lock)
 		if err != nil {
-			return fmt.Errorf("save session: %w", err)
+			return nil, fmt.Errorf("save session: %w", err)
 		}
 		if s.sessionSaveHook != nil {
 			s.sessionSaveHook(tx)
@@ -796,12 +811,12 @@ func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte,
 				`DELETE FROM telegram_accounts WHERE user_id = $1 AND revoked_at IS NULL AND mode <> $2`,
 				userID, ModeLocal,
 			); err != nil {
-				return fmt.Errorf("save session: drop rows of a deleted account: %w", err)
+				return nil, fmt.Errorf("save session: drop rows of a deleted account: %w", err)
 			}
 			if err := tx.Commit(); err != nil {
-				return fmt.Errorf("save session: commit drop: %w", err)
+				return nil, fmt.Errorf("save session: commit drop: %w", err)
 			}
-			return ErrAccountDeletedSinceGrant
+			return nil, ErrAccountDeletedSinceGrant
 		}
 	} else if pg {
 		// stampOnboardingCompleted updates users after the revoke below, so
@@ -809,7 +824,7 @@ func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte,
 		// users while a SaveSessionForSignIn of the same user locks users
 		// then telegram_accounts, and the two would deadlock (40P01).
 		if _, err := tx.ExecContext(ctx, `SELECT id FROM users WHERE id = $1`+lock, userID); err != nil {
-			return fmt.Errorf("save session: lock user: %w", err)
+			return nil, fmt.Errorf("save session: lock user: %w", err)
 		}
 	}
 	// The mode check IS the revoke: one statement, RETURNING the mode of every
@@ -829,31 +844,37 @@ func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte,
 	revoked, err := tx.QueryContext(ctx,
 		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = 'superseded'
 		 WHERE user_id = $1 AND revoked_at IS NULL
-		 RETURNING mode`,
+		 RETURNING mode, telegram_user_id, session_encrypted`,
 		userID,
 	)
 	if err != nil {
-		return fmt.Errorf("revoke prior sessions: %w", err)
+		return nil, fmt.Errorf("revoke prior sessions: %w", err)
 	}
 	hasLocal := false
+	var supersededBlobs [][]byte
 	for revoked.Next() {
 		var mode string
-		if err := revoked.Scan(&mode); err != nil {
+		var tgID sql.NullInt64
+		var old []byte
+		if err := revoked.Scan(&mode, &tgID, &old); err != nil {
 			revoked.Close()
-			return fmt.Errorf("scan revoked mode: %w", err)
+			return nil, fmt.Errorf("scan revoked mode: %w", err)
 		}
 		if mode == ModeLocal {
 			hasLocal = true
 		}
+		if mode == ModeHosted && tgID.Valid && tgID.Int64 == telegramUserID && old != nil {
+			supersededBlobs = append(supersededBlobs, old)
+		}
 	}
 	if err := revoked.Err(); err != nil {
 		revoked.Close()
-		return fmt.Errorf("revoke prior sessions: %w", err)
+		return nil, fmt.Errorf("revoke prior sessions: %w", err)
 	}
 	revoked.Close()
 	if hasLocal {
 		// Deferred Rollback undoes the revoke above.
-		return ErrAccountModeConflict
+		return nil, ErrAccountModeConflict
 	}
 	now := time.Now().UTC()
 	// An exempt identity gets a NULL expires_at, which every absolute-TTL
@@ -867,7 +888,7 @@ func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte,
 		 VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
 		userID, telegramUserID, nullable(displayName), nullable(username), blob, now, expires, false,
 	); err != nil {
-		return fmt.Errorf("insert session: %w", err)
+		return nil, fmt.Errorf("insert session: %w", err)
 	}
 	// Stamp onboarding_completed_at on the first session this user ever
 	// connects, mirroring the Migrate backfill's "earliest non-revoked,
@@ -875,15 +896,23 @@ func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte,
 	// value already set (from a prior SaveSession call, or the legacy
 	// backfill) untouched.
 	if err := stampOnboardingCompleted(ctx, tx, userID, now); err != nil {
-		return err
+		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		return err
+		return nil, err
 	}
 	if s.metrics != nil {
 		s.metrics.SessionsConnectedTotal.Inc()
 	}
-	return nil
+	var superseded [][]byte
+	for _, old := range supersededBlobs {
+		pt, err := s.Crypt.OpenForUser(old, userID)
+		if err != nil {
+			continue
+		}
+		superseded = append(superseded, pt)
+	}
+	return superseded, nil
 }
 
 // Session TTL policy. Borrow refuses a session whose last_used_at is older

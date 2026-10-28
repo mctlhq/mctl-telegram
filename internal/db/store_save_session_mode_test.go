@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 )
@@ -358,5 +359,57 @@ func TestClearStraySessionIfLocal_LeavesHostedOnlyUserAlone(t *testing.T) {
 	}
 	if sessionEncrypted == nil {
 		t.Error("session_encrypted = NULL, want the hosted user's own bytes left intact")
+	}
+}
+
+// TestSaveSessionForSignInSuperseding_ReturnsOnlySameAccountKeys: the save
+// hands back, decrypted, the session of every hosted row it superseded for
+// the same Telegram account, for the caller to log out (#913). A row of
+// another account or of no recorded account is superseded all the same but
+// not returned: its key is not provably the one this sign-in replaced.
+func TestSaveSessionForSignInSuperseding_ReturnsOnlySameAccountKeys(t *testing.T) {
+	ctx := context.Background()
+	s := newSaveSessionTestStore(t)
+
+	uid, err := s.EnsureUser(ctx, "relogin", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+	if err := s.SaveSession(ctx, uid, []byte("old-same-account"), 700000401, "Dana", "dana_tg"); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	for _, row := range []struct {
+		tgID any
+		data string
+	}{
+		{int64(700000402), "old-other-account"},
+		{nil, "old-unknown-account"},
+	} {
+		blob, err := s.Crypt.SealForUser([]byte(row.data), uid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DB.ExecContext(ctx,
+			`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, mode, send_enabled, connected_at)
+			 VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)`,
+			uid, row.tgID, blob, ModeHosted, false); err != nil {
+			t.Fatalf("insert %s: %v", row.data, err)
+		}
+	}
+
+	got, err := s.SaveSessionForSignInSuperseding(ctx, uid, []byte("new-session"), 700000401, "Dana", "dana_tg", time.Now())
+	if err != nil {
+		t.Fatalf("SaveSessionForSignInSuperseding: %v", err)
+	}
+	if len(got) != 1 || string(got[0]) != "old-same-account" {
+		t.Errorf("superseded = %q, want only the same account's old key", got)
+	}
+	var active int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM telegram_accounts WHERE user_id = $1 AND revoked_at IS NULL`, uid).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active != 1 {
+		t.Errorf("active rows = %d, want only the new one", active)
 	}
 }

@@ -217,7 +217,9 @@ func acceptQRAuth(ctx context.Context, api authLogOuter, cfg LoginConfig, userID
 // gotd returns when a connection fails under the callback.
 //
 // A context.Canceled after sign-in completed is client shutdown noise and
-// does not fail the login.
+// does not fail the login. Neither does any run error after a mismatch: the account check
+// already logged the new authorization out, so the buffer is dropped and the
+// caller still learns it was the wrong account, not a generic failure.
 func settleLogin(ctx context.Context, label string, sess *deferredSession, runErr error, signedIn, mismatch bool, hold func([]byte)) error {
 	if !signedIn {
 		if runErr == nil {
@@ -225,7 +227,7 @@ func settleLogin(ctx context.Context, label string, sess *deferredSession, runEr
 		}
 		return runErr
 	}
-	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+	if runErr != nil && !mismatch && !errors.Is(runErr, context.Canceled) {
 		return runErr
 	}
 	if hold != nil && !mismatch {
