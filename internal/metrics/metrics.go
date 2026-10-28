@@ -55,7 +55,8 @@ type Registry struct {
 	// "returned" (an item included in a result), "unavailable" (a channel
 	// whose posts were returned but whose sponsored messages could not be
 	// fetched), "viewed" and "view_failed" (messages.viewSponsoredMessage
-	// per returned item).
+	// per returned item), and "view_deduplicated" (a returned item whose
+	// view was already reported for the user within the de-dup TTL).
 	TelegramSponsoredTotal *prometheus.CounterVec
 
 	// Session lifecycle.
@@ -530,7 +531,7 @@ func New() *Registry {
 
 	r.TelegramSponsoredTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_telegram_sponsored_messages_total",
-		Help: "Sponsored-message events on broadcast channel reads, labeled by MCP tool and outcome (returned, unavailable, viewed, view_failed).",
+		Help: "Sponsored-message events on broadcast channel reads, labeled by MCP tool and outcome (returned, unavailable, viewed, view_failed, view_deduplicated).",
 	}, []string{"tool", "outcome"})
 
 	r.OAuthPendingAuthSize = prometheus.NewGauge(prometheus.GaugeOpts{
