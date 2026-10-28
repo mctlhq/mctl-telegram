@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -61,7 +62,7 @@ func LoginQR(
 	dispatcher := tg.NewUpdateDispatcher()
 	var scanned atomic.Bool
 	loggedIn, onLoginToken := loginTokenSignal(&scanned)
-	dispatcher.OnLoginToken(onLoginToken)
+	dispatcher.OnLoginToken(onScanReported(onLoginToken, cfg.OnQRScanned))
 
 	opts := loginClientOptions(sess, cfg)
 	opts.UpdateHandler = dispatcher
@@ -162,6 +163,21 @@ func loginTokenSignal(scanned *atomic.Bool) (qrlogin.LoggedIn, tg.LoginTokenHand
 		default:
 		}
 		return nil
+	}
+}
+
+// onScanReported wraps the updateLoginToken handler h so that onScanned,
+// when non-nil, runs after the first update only. Telegram may send the
+// update more than once; the caller wants the moment of the first.
+func onScanReported(h tg.LoginTokenHandler, onScanned func()) tg.LoginTokenHandler {
+	if onScanned == nil {
+		return h
+	}
+	var once sync.Once
+	return func(ctx context.Context, e tg.Entities, u *tg.UpdateLoginToken) error {
+		err := h(ctx, e, u)
+		once.Do(onScanned)
+		return err
 	}
 }
 

@@ -19,10 +19,12 @@ import (
 	"context"
 	"errors"
 	"html/template"
+	"log/slog"
 	"net/http"
 	neturl "net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"rsc.io/qr"
@@ -47,7 +49,28 @@ const (
 	// enableQRWaitMargin is how much sooner than the enable session a
 	// session-bounded scan wait ends; see enableQRWaitFor.
 	enableQRWaitMargin = 15 * time.Second
+	// enableQRConnectingRefresh is the refresh of the connecting page shown
+	// after the code was scanned and confirmed in Telegram (#931).
+	enableQRConnectingRefresh = 1
+	// qrConnectStallWait bounds the work between the confirmed scan and the
+	// end of LoginQR (token import, DC migration, account check). It normally
+	// takes seconds; past this the flow fails rather than leave the user on
+	// the connecting page. A 2FA password prompt stops the clock: the
+	// password step has its own waits, and a user typing must not time out.
+	qrConnectStallWait = 60 * time.Second
 )
+
+// errQRConnectStalled is a QR login that Telegram confirmed but that did not
+// finish within qrConnectStallWait.
+var errQRConnectStalled = errors.New("the QR login was confirmed in Telegram but connecting the session did not finish in time")
+
+// qrStallWaitOrDefault is qrConnectStallWait, or the test override.
+func (s *Server) qrStallWaitOrDefault() time.Duration {
+	if s.qrStallWait > 0 {
+		return s.qrStallWait
+	}
+	return qrConnectStallWait
+}
 
 // qrLogin is the QR method: telegram.LoginQR waiting up to wait for a scan,
 // with the newest exported URL kept on the flow for the status page.
@@ -64,8 +87,31 @@ func (s *Server) qrLogin(wait time.Duration) loginMethod {
 			}
 			// Off qr_shown once the scan is accepted: a stall in the work
 			// after it is ours or Telegram's, not a user who walked away.
-			cfg.OnQRAccepted = func() { lf.step = "qr_accepted" }
-			return s.qrLoginFn(ctx, s.cfg.TGAPIID, s.cfg.TGAPIHash, s.store, uid, show, askPassword, cfg)
+			cfg.OnQRAccepted = func() {
+				lf.step = "qr_accepted"
+				if at := lf.qrConfirmedAt.Load(); at != 0 {
+					slog.Info("enable: qr login accepted", "uid", uid,
+						"since_qr_confirmed", time.Since(time.Unix(0, at)).String())
+				}
+			}
+			ctx, stalled := context.WithCancelCause(ctx)
+			defer stalled(nil)
+			var stall atomic.Pointer[time.Timer]
+			cfg.OnQRScanned = func() {
+				lf.qrConfirmedAt.Store(time.Now().UnixNano())
+				stall.Store(time.AfterFunc(s.qrStallWaitOrDefault(), func() { stalled(errQRConnectStalled) }))
+			}
+			ask := func(ctx context.Context) (string, error) {
+				if t := stall.Load(); t != nil {
+					t.Stop()
+				}
+				return askPassword(ctx)
+			}
+			id, name, user, err := s.qrLoginFn(ctx, s.cfg.TGAPIID, s.cfg.TGAPIHash, s.store, uid, show, ask, cfg)
+			if err != nil && errors.Is(context.Cause(ctx), errQRConnectStalled) {
+				return 0, "", "", errQRConnectStalled
+			}
+			return id, name, user, err
 		},
 	}
 }
@@ -280,6 +326,14 @@ func (s *Server) handleEnableQRStatus(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if lf.qrConfirmedAt.Load() != 0 {
+		// Scanned and confirmed in Telegram; the import and the account
+		// check are still running. The code on screen is spent, so say what
+		// is happening instead of showing it again (#931). The flow ends in
+		// lf.done either way, success or failure, within qrConnectStallWait.
+		renderEnableQRConnecting(w, es.isWizardMode())
+		return
+	}
 	url := lf.qrURL.Load()
 	if url == nil {
 		renderEnableQRBusy(w)
@@ -366,6 +420,8 @@ func qrStepErrMsg(err error) string {
 		return friendlyErr(err)
 	case "bad_password":
 		return "That two-step verification password was not accepted. Show a new QR code to try again."
+	case "qr_connect_stalled":
+		return signInDidNotFinishPrefix + "Telegram confirmed the scan, but connecting the session took too long. Show a new QR code, or use your phone number instead."
 	}
 	return framedLoginErr(signInDidNotFinishPrefix, err, " Show a new QR code, or use your phone number instead.")
 }

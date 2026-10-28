@@ -144,3 +144,28 @@ func TestLoginTokenSignal_KeptWhileAuthIsBusy(t *testing.T) {
 		t.Fatal("the login token update was lost while Auth was busy")
 	}
 }
+
+// TestOnScanReported: the scan hook runs once, after the wrapped handler,
+// however many updateLoginToken updates arrive; a nil hook leaves the
+// handler as it is (#931).
+func TestOnScanReported(t *testing.T) {
+	var handled, hooked int
+	h := onScanReported(func(context.Context, tg.Entities, *tg.UpdateLoginToken) error {
+		handled++
+		if handled == 1 && hooked != 0 {
+			t.Error("hook ran before the wrapped handler")
+		}
+		return nil
+	}, func() { hooked++ })
+	for range 3 {
+		if err := h(context.Background(), tg.Entities{}, &tg.UpdateLoginToken{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if handled != 3 || hooked != 1 {
+		t.Errorf("handled=%d hooked=%d, want 3 and 1", handled, hooked)
+	}
+	if onScanReported(nil, nil) != nil {
+		t.Error("a nil hook must return the handler unchanged")
+	}
+}

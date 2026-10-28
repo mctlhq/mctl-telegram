@@ -123,6 +123,8 @@ type Server struct {
 	// qrLoginFn performs the Telegram QR login for the enable_access QR
 	// method (#901). Same reason as loginFn; New sets it to telegram.LoginQR.
 	qrLoginFn QRLoginFunc
+	// qrStallWait overrides qrConnectStallWait when positive; tests only.
+	qrStallWait time.Duration
 
 	// loginCfg is forwarded to loginFn on every enable_access login. It carries
 	// the shared api_id-wide rate-limit middleware so the interactive login

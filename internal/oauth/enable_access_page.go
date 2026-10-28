@@ -146,6 +146,13 @@ const enableExtraCSS = `
   .hint { margin: 8px 0 0; font-size: 13px; color: var(--text-dim); text-align: center; }
   .or { display: flex; align-items: center; gap: 12px; margin: 24px 0 4px; font-size: 13px; color: var(--text-dim); }
   .or::before, .or::after { content: ""; flex: 1; border-top: 1px solid var(--border-strong); }
+  .progress { display: flex; align-items: center; gap: 12px; }
+  .progress h1 { margin: 0; }
+  .spinner { flex: none; width: 22px; height: 22px; border-radius: 50%;
+             border: 3px solid var(--border-strong); border-top-color: var(--accent);
+             animation: spin .9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
   .qrbox { display: flex; justify-content: center; margin: 16px 0; }
   .qrbox svg { border-radius: var(--mctl-radius-md); }
 `
@@ -353,6 +360,20 @@ var enableQRTemplate = template.Must(template.New("enableQR").Parse(enableRefres
     </form>{{end}}
 ` + enableFoot))
 
+var enableQRConnectingTemplate = template.Must(template.New("enableQRConnecting").Parse(enableRefreshHead + `    {{if .WizardMode}}<ol class="flow-steps">
+      <li>Sign in with Telegram</li>
+      <li>Permissions</li>
+      <li class="active">Phone number</li>
+      <li>Done</li>
+    </ol>{{end}}
+    <div class="progress" role="status">
+      <span class="spinner" aria-hidden="true"></span>
+      <h1>Confirmed in Telegram</h1>
+    </div>
+    <p>Connecting your session&#8230; This usually takes a few seconds.</p>
+    <p class="meta">This page updates by itself. Do not scan the code again.</p>
+` + enableFoot))
+
 var enableQRBusyTemplate = template.Must(template.New("enableQRBusy").Parse(enableRefreshHead + `    <h1>Preparing your QR code&#8230;</h1>
     <p class="meta">This page updates by itself.</p>
 ` + enableFoot))
@@ -396,6 +417,15 @@ func renderEnableQR(w http.ResponseWriter, p enableQRPage) {
 		Refresh int
 		Page    enableQRPage
 	}{enableQRRefresh, p}, "")
+}
+
+// renderEnableQRConnecting renders the status page after the code was
+// scanned and confirmed in Telegram, while the login finishes (#931).
+func renderEnableQRConnecting(w http.ResponseWriter, wizard bool) {
+	renderEnable(w, http.StatusOK, enableQRConnectingTemplate, struct {
+		Refresh    int
+		WizardMode bool
+	}{enableQRConnectingRefresh, wizard}, "")
 }
 
 // renderEnableQRBusy renders the placeholder status page that reloads after
