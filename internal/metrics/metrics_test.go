@@ -26,6 +26,7 @@ var expectedMetricNames = []string{
 	"mctl_telegram_pool_capacity",
 	"mctl_telegram_client_errors_total",
 	"mctl_telegram_flood_wait_events_total",
+	"mctl_telegram_sponsored_messages_total",
 	"mctl_oauth_pending_auth_size",
 	"mctl_oauth_client_registrations_total",
 	"mctl_login_phone_step_total",
@@ -64,6 +65,7 @@ func TestNew_RegistersAllMetrics(t *testing.T) {
 	reg.TelegramPoolCapacity.Set(0)
 	reg.TelegramClientErrorsTotal.Add(0)
 	reg.TelegramFloodWaitEventsTotal.WithLabelValues("list_dialogs").Add(0)
+	reg.TelegramSponsoredTotal.WithLabelValues("get_messages", "returned").Add(0)
 	reg.OAuthPendingAuthSize.Set(0)
 	reg.OAuthClientRegistrationsTotal.WithLabelValues("accepted", "ok").Add(0)
 	reg.LoginPhoneStepTotal.WithLabelValues("ok").Add(0)

@@ -50,6 +50,67 @@ func wrapMsgs(msgs []tg.Message) []tg.Message {
 	return out
 }
 
+// wrapSponsored is the daemon's copy of internal/mcp's wrapSponsored: item
+// text is untrusted third-party content, wrapped like a message body; the
+// other fields are cleaned but kept verbatim, since they must be shown as
+// served.
+func wrapSponsored(msgs []tg.SponsoredMessage) []tg.SponsoredMessage {
+	if len(msgs) == 0 {
+		return nil
+	}
+	clean := func(s string, max int) string {
+		if s == "" {
+			return s
+		}
+		return sanitize.UserContent(s, max)
+	}
+	out := make([]tg.SponsoredMessage, len(msgs))
+	for i, m := range msgs {
+		if m.Text != "" {
+			m.Text = wrapContent(sanitize.UserContent(m.Text, 4096), tg.RedactPeer(m.Channel))
+		}
+		m.Title = clean(m.Title, 256)
+		m.URL = clean(m.URL, 2048)
+		m.ButtonText = clean(m.ButtonText, 128)
+		m.SponsorInfo = clean(m.SponsorInfo, 1024)
+		m.AdditionalInfo = clean(m.AdditionalInfo, 1024)
+		out[i] = m
+	}
+	return out
+}
+
+// addSponsored puts sp into a get_messages/get_unread_messages response under
+// the same keys the hosted server uses.
+func addSponsored(resp map[string]any, sp *tg.Sponsored) {
+	if sp == nil {
+		return
+	}
+	if len(sp.Messages) > 0 {
+		resp["sponsored"] = wrapSponsored(sp.Messages)
+	}
+	if len(sp.Unavailable) > 0 {
+		resp["sponsored_unavailable"] = sp.Unavailable
+	}
+}
+
+// reportSponsoredViews reports a view of each sponsored item a response
+// returned. Called only after the response encoded, so a failed call
+// reports nothing; a failed report never fails the call.
+func reportSponsoredViews(ctx context.Context, pool *tg.ClientPool, userID int64, sp *tg.Sponsored) {
+	if sp == nil || len(sp.Messages) == 0 {
+		return
+	}
+	failed := len(sp.Messages)
+	if err := pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
+		failed = tg.ReportSponsoredViews(ctx, c, sp.Messages)
+		return nil
+	}); err != nil {
+		slog.Warn("sponsored message views not reported", "count", len(sp.Messages), "err", err)
+	} else if failed > 0 {
+		slog.Warn("sponsored message views failed", "failed", failed, "count", len(sp.Messages))
+	}
+}
+
 const (
 	reconnectBase   = 2 * time.Second
 	reconnectMax    = 60 * time.Second
@@ -667,6 +728,10 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 		var args struct {
 			Peer  string `json:"peer"`
 			Limit int    `json:"limit"`
+			// BroadcastContent is the server's BROADCAST_CONTENT_ENABLED,
+			// set by the server on every call. Absent (an older server)
+			// means off: broadcast channels are refused.
+			BroadcastContent bool `json:"broadcast_content"`
 		}
 		if err := json.Unmarshal(envArgs(env), &args); err != nil {
 			return bridge.EncodeError(env.ID, fmt.Sprintf("get_unread_messages: bad args: %v", err))
@@ -675,32 +740,40 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 			args.Limit = 50
 		}
 		var msgs []tg.Message
+		var sponsored *tg.Sponsored
 		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
 			var err error
-			msgs, err = tg.GetUnreadMessages(ctx, c, args.Peer, args.Limit)
+			msgs, sponsored, err = tg.GetUnreadMessages(ctx, c, args.Peer, args.Limit, tg.BroadcastContent(args.BroadcastContent))
 			return err
 		})
 		if dispErr == nil {
-			result, dispErr = json.Marshal(map[string]any{
+			resp := map[string]any{
 				"messages": wrapMsgs(msgs),
 				"notice":   untrustedNotice,
-			})
+			}
+			addSponsored(resp, sponsored)
+			result, dispErr = json.Marshal(resp)
+			if dispErr == nil {
+				reportSponsoredViews(ctx, pool, userID, sponsored)
+			}
 		}
 
 	case "get_messages":
 		var args struct {
-			Peer     string `json:"peer"`
-			Limit    int    `json:"limit"`
-			BeforeID int    `json:"before_id"`
+			Peer             string `json:"peer"`
+			Limit            int    `json:"limit"`
+			BeforeID         int    `json:"before_id"`
+			BroadcastContent bool   `json:"broadcast_content"` // see get_unread_messages
 		}
 		if err := json.Unmarshal(envArgs(env), &args); err != nil {
 			return bridge.EncodeError(env.ID, fmt.Sprintf("get_messages: bad args: %v", err))
 		}
 		var msgs []tg.Message
 		var nextBeforeID int
+		var sponsored *tg.Sponsored
 		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
 			var err error
-			msgs, nextBeforeID, err = tg.GetMessages(ctx, c, args.Peer, args.Limit, args.BeforeID, nil, 0)
+			msgs, nextBeforeID, sponsored, err = tg.GetMessages(ctx, c, args.Peer, args.Limit, args.BeforeID, nil, 0, tg.BroadcastContent(args.BroadcastContent))
 			return err
 		})
 		if dispErr == nil {
@@ -711,7 +784,11 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 			if nextBeforeID > 0 {
 				resp["next_before_id"] = nextBeforeID
 			}
+			addSponsored(resp, sponsored)
 			result, dispErr = json.Marshal(resp)
+			if dispErr == nil {
+				reportSponsoredViews(ctx, pool, userID, sponsored)
+			}
 		}
 
 	case "send_message":
@@ -807,8 +884,9 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 
 	case "prepare_get_media":
 		var args struct {
-			Peer      string `json:"peer"`
-			MessageID int    `json:"message_id"`
+			Peer             string `json:"peer"`
+			MessageID        int    `json:"message_id"`
+			BroadcastContent bool   `json:"broadcast_content"` // see get_unread_messages
 		}
 		if err := json.Unmarshal(envArgs(env), &args); err != nil {
 			return bridge.EncodeError(env.ID, fmt.Sprintf("prepare_get_media: bad args: %v", err))
@@ -820,7 +898,7 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 		var loc *tg.MediaFileLocation
 		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
 			var err error
-			info, loc, err = tg.PrepareMediaRef(ctx, c, args.Peer, args.MessageID, nil, 0)
+			info, loc, err = tg.PrepareMediaRef(ctx, c, args.Peer, args.MessageID, nil, 0, tg.BroadcastContent(args.BroadcastContent))
 			return err
 		})
 		if dispErr == nil {

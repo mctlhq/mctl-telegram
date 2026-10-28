@@ -50,6 +50,13 @@ type Registry struct {
 	// tool name. Incremented each time borrowWithRetry observes a FloodWait
 	// error (whether or not the subsequent retry succeeds).
 	TelegramFloodWaitEventsTotal *prometheus.CounterVec
+	// TelegramSponsoredTotal counts sponsored-message events on
+	// get_messages/get_unread_messages, labeled by tool and outcome:
+	// "returned" (an item included in a result), "unavailable" (a channel
+	// whose posts were returned but whose sponsored messages could not be
+	// fetched), "viewed" and "view_failed" (messages.viewSponsoredMessage
+	// per returned item).
+	TelegramSponsoredTotal *prometheus.CounterVec
 
 	// Session lifecycle.
 	SessionsConnectedTotal prometheus.Counter
@@ -521,6 +528,11 @@ func New() *Registry {
 		Help: "Total Telegram FLOOD_WAIT_X errors observed, labeled by MCP tool name. Incremented on each FloodWait event whether or not the retry succeeds.",
 	}, []string{"tool"})
 
+	r.TelegramSponsoredTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_telegram_sponsored_messages_total",
+		Help: "Sponsored-message events on broadcast channel reads, labeled by MCP tool and outcome (returned, unavailable, viewed, view_failed).",
+	}, []string{"tool", "outcome"})
+
 	r.OAuthPendingAuthSize = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "mctl_oauth_pending_auth_size",
 		Help: "Current count of pending OAuth authorization flows. Refreshed every minute.",
@@ -709,6 +721,7 @@ func New() *Registry {
 		r.TelegramClientErrorsTotal,
 		r.TelegramPoolCapacity,
 		r.TelegramFloodWaitEventsTotal,
+		r.TelegramSponsoredTotal,
 		r.SessionsConnectedTotal,
 		r.SessionsRevokedTotal,
 		r.BotUpdatesTotal,

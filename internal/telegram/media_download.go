@@ -50,10 +50,11 @@ func (l MediaFileLocation) inputLocation() tg.InputFileLocationClass {
 // channels.getMessages (messages.getMessages cannot see channel messages);
 // everything else goes through messages.getMessages. Returns an error when
 // the message does not exist or carries no downloadable media (web pages,
-// contacts, locations, polls have MediaInfo but no file to fetch). A broadcast
-// channel fails with ErrBroadcastContent before the message is fetched
-// (issue #851).
-func PrepareMediaRef(ctx context.Context, c *telegram.Client, peerSpec string, messageID int, cache *PeerCache, userID int64) (*MediaInfo, *MediaFileLocation, error) {
+// contacts, locations, polls have MediaInfo but no file to fetch). With bc
+// off, a broadcast channel fails with ErrBroadcastContent before the message
+// is fetched (issue #851). A single media item is not a channel feed, so no
+// sponsored messages are fetched.
+func PrepareMediaRef(ctx context.Context, c *telegram.Client, peerSpec string, messageID int, cache *PeerCache, userID int64, bc BroadcastContent) (*MediaInfo, *MediaFileLocation, error) {
 	api := c.API()
 	inputPeer, err := ResolvePeerCached(ctx, c, peerSpec, cache, userID)
 	if err != nil {
@@ -72,13 +73,15 @@ func PrepareMediaRef(ctx context.Context, c *telegram.Client, peerSpec string, m
 		}
 		inputPeer = fromDialogs
 	}
-	return prepareMediaRefWith(ctx, api, peerSpec, inputPeer, messageID)
+	return prepareMediaRefWith(ctx, api, peerSpec, inputPeer, messageID, bc)
 }
 
 // prepareMediaRefWith is PrepareMediaRef after peer resolution.
-func prepareMediaRefWith(ctx context.Context, api *tg.Client, peerSpec string, inputPeer tg.InputPeerClass, messageID int) (*MediaInfo, *MediaFileLocation, error) {
-	if err := refuseBroadcastPeer(ctx, api, peerSpec, inputPeer); err != nil {
-		return nil, nil, err
+func prepareMediaRefWith(ctx context.Context, api *tg.Client, peerSpec string, inputPeer tg.InputPeerClass, messageID int, bc BroadcastContent) (*MediaInfo, *MediaFileLocation, error) {
+	if !bc {
+		if err := refuseBroadcastPeer(ctx, api, peerSpec, inputPeer); err != nil {
+			return nil, nil, err
+		}
 	}
 	var result tg.MessagesMessagesClass
 	var err error

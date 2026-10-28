@@ -38,7 +38,8 @@ const (
 	// write-gate pin block, an already-active account in
 	// provision_local_account, and a get_media claim refused because the
 	// same confirmation is already being downloaded (ErrConfirmationInFlight),
-	// and a content read of a broadcast channel (telegram.ErrBroadcastContent).
+	// and a content read of a broadcast channel while BROADCAST_CONTENT_ENABLED
+	// is off (telegram.ErrBroadcastContent).
 	ReasonRefused = "refused"
 	// ReasonRateLimited is raised when audit.RateLimiter blocks a
 	// destructive send/write action.

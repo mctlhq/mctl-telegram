@@ -351,6 +351,14 @@ type Config struct {
 	// it, with no redeploy of this repository required beyond the env change.
 	// Set via MCP_APPS_ENABLED.
 	AppsEnabled bool
+	// BroadcastContentEnabled lets the content tools return broadcast
+	// channel posts, with the channel's official sponsored messages attached
+	// (Telegram API terms §3.3). On by default. Turning it off restores the
+	// issue #851 refusal for every content read, hosted and Local Bridge,
+	// with no release: a deployment flips it in gitops if Telegram objects
+	// to how channel posts or their ads reach the AI.
+	// Set via BROADCAST_CONTENT_ENABLED; see broadcastContentFromEnv.
+	BroadcastContentEnabled bool
 
 	// EventsValkeyURL enables publishing reference-only mctl.events/v1
 	// envelopes for incoming messages to platform Valkey Streams
@@ -466,6 +474,7 @@ func Load() (*Config, error) {
 		AgentEnabled:                  envBool("AGENT_ENABLED", false),
 		AgentKillSwitch:               envBool("AGENT_KILL_SWITCH", false),
 		AppsEnabled:                   envBool("MCP_APPS_ENABLED", false),
+		BroadcastContentEnabled:       broadcastContentFromEnv(),
 		EventsValkeyURL:               os.Getenv("EVENTS_VALKEY_URL"),
 		EventsValkeyPassword:          os.Getenv("EVENTS_VALKEY_PASSWORD"),
 		EventsStream:                  envOr("EVENTS_STREAM", "mctl:events:telegram"),
@@ -791,6 +800,22 @@ func CheckTestDC(cfg *Config) error {
 	}
 	return fmt.Errorf("refusing to start: TG_TEST_DC=true needs ENV set to a local or test tier (%s), got ENV=%q",
 		strings.Join(LocalTiers, ", "), cfg.Environment)
+}
+
+// broadcastContentFromEnv reads BROADCAST_CONTENT_ENABLED. Unset or empty
+// means on. A value envBool does not recognise ("off", "disabled", a typo)
+// means off: this is a kill switch, so an operator who set it to anything
+// other than a true value meant to turn the content off.
+func broadcastContentFromEnv() bool {
+	v, ok := os.LookupEnv("BROADCAST_CONTENT_ENABLED")
+	if !ok || v == "" {
+		return true
+	}
+	switch v {
+	case "1", "true", "TRUE", "True", "yes":
+		return true
+	}
+	return false
 }
 
 func envBool(key string, def bool) bool {

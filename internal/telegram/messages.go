@@ -180,12 +180,18 @@ func sanitizeFileName(name string) string {
 }
 
 // GetUnreadMessages walks the dialog list (limit-bounded) and pulls up to
-// `limit` total unread messages, scoped to one peer if provided. Broadcast
-// channels are never read (issue #851): an unscoped call skips them, and a
-// call scoped to one fails with ErrBroadcastContent.
-func GetUnreadMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit int) ([]Message, error) {
-	msgs, _, err := GetUnreadMessagesRaw(ctx, c, peerSpec, limit)
-	return msgs, err
+// `limit` total unread messages, scoped to one peer if provided. When peer
+// is omitted, users, legacy chats, and megagroup/supergroups are fetched
+// first; broadcast channels fill any leftover limit.
+//
+// For every broadcast channel whose posts are returned, the channel's
+// sponsored messages come back in the *Sponsored result (Telegram API terms
+// §3.3). With bc off, broadcast channels are not read (issue #851): an
+// unscoped call skips them, and a call scoped to one fails with
+// ErrBroadcastContent.
+func GetUnreadMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit int, bc BroadcastContent) ([]Message, *Sponsored, error) {
+	msgs, _, sp, err := GetUnreadMessagesRaw(ctx, c, peerSpec, limit, bc)
+	return msgs, sp, err
 }
 
 // GetUnreadMessagesRaw is GetUnreadMessages plus the raw *tg.Message slice
@@ -193,19 +199,20 @@ func GetUnreadMessages(ctx context.Context, c *telegram.Client, peerSpec string,
 // needed by the fetch_media=true bulk-download path so it can extract file
 // locations without a second Telegram API round-trip. GetUnreadMessages is a
 // thin wrapper that discards the raw slice.
-func GetUnreadMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec string, limit int) ([]Message, []*tg.Message, error) {
-	return getUnreadMessagesWith(ctx, c.API(), peerSpec, limit)
+func GetUnreadMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec string, limit int, bc BroadcastContent) ([]Message, []*tg.Message, *Sponsored, error) {
+	return getUnreadMessagesWith(ctx, c.API(), peerSpec, limit, bc)
 }
 
-func getUnreadMessagesWith(ctx context.Context, api *tg.Client, peerSpec string, limit int) ([]Message, []*tg.Message, error) {
+func getUnreadMessagesWith(ctx context.Context, api *tg.Client, peerSpec string, limit int, bc BroadcastContent) ([]Message, []*tg.Message, *Sponsored, error) {
 	limit = clampLimit(limit)
+	sp := &Sponsored{}
 
 	dlgRes, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
 		Limit:      100,
 		OffsetPeer: &tg.InputPeerEmpty{},
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("MessagesGetDialogs: %w", err)
+		return nil, nil, nil, fmt.Errorf("MessagesGetDialogs: %w", err)
 	}
 	users, chats, dialogs := decodeDialogsResult(dlgRes)
 
@@ -227,13 +234,14 @@ func getUnreadMessagesWith(ctx context.Context, api *tg.Client, peerSpec string,
 			continue
 		}
 		broadcast := isBroadcastChannel(d.Peer, chats)
+		refused := broadcast && !bool(bc)
 		if peerSpec != "" {
 			peerFound = true
-			if broadcast {
-				return nil, nil, &broadcastContentError{peer: peerSpec}
+			if refused {
+				return nil, nil, nil, &broadcastContentError{peer: peerSpec}
 			}
 		}
-		if broadcast || d.UnreadCount == 0 {
+		if refused || d.UnreadCount == 0 {
 			continue
 		}
 		input := inputPeerFromPeer(d.Peer, users, chats)
@@ -241,9 +249,10 @@ func getUnreadMessagesWith(ctx context.Context, api *tg.Client, peerSpec string,
 			continue
 		}
 		targets = append(targets, unreadTarget{
-			input:  input,
-			dialog: d,
-			hint:   hint,
+			input:     input,
+			dialog:    d,
+			hint:      hint,
+			broadcast: broadcast,
 		})
 	}
 
@@ -251,9 +260,16 @@ func getUnreadMessagesWith(ctx context.Context, api *tg.Client, peerSpec string,
 	// Peer found with zero unread messages → correct result is an empty slice.
 	if peerSpec != "" && len(targets) == 0 {
 		if !peerFound {
-			return nil, nil, fmt.Errorf("peer %q not found in recent dialogs — use get_messages for this peer's full history", peerSpec)
+			return nil, nil, nil, fmt.Errorf("peer %q not found in recent dialogs — use get_messages for this peer's full history", peerSpec)
 		}
-		return []Message{}, nil, nil
+		return []Message{}, nil, sp, nil
+	}
+
+	// Default (unscoped) fetch: DMs and groups first so a broadcast
+	// channel with tens of thousands of unread cannot starve the limit.
+	// Broadcast channels stay in the list and fill leftover capacity.
+	if peerSpec == "" {
+		targets = orderUnreadTargets(targets)
 	}
 
 	out := make([]Message, 0, limit)
@@ -279,22 +295,30 @@ func getUnreadMessagesWith(ctx context.Context, api *tg.Client, peerSpec string,
 		decoded, raw := decodeMessagesRaw(hist, t.hint, users, chats, take)
 		out = append(out, decoded...)
 		rawOut = append(rawOut, raw...)
+		if t.broadcast && len(decoded) > 0 {
+			if ch, ok := t.input.(*tg.InputPeerChannel); ok {
+				fetchSponsored(ctx, api, ch.ChannelID, t.input, len(decoded), sp)
+			}
+		}
 	}
-	return out, rawOut, nil
+	return out, rawOut, sp, nil
 }
 
 type unreadTarget struct {
-	input  tg.InputPeerClass
-	dialog *tg.Dialog
-	hint   *Dialog
+	input     tg.InputPeerClass
+	dialog    *tg.Dialog
+	hint      *Dialog
+	broadcast bool // true for broadcast channels, not megagroup/supergroups
 }
 
 // isBroadcastChannel reports whether p is a broadcast channel. Legacy chats
 // (PeerChat) and megagroup/supergroups (Channel.Megagroup) are groups and
 // return false. A channel missing from chats, or present only as
-// ChannelForbidden, counts as broadcast: its content is refused unless it is
-// known to be a group (issue #851). dialogFromPeer maps every PeerChannel to
-// Type "channel", so callers must not use hint.Type for this decision.
+// ChannelForbidden, counts as broadcast: with BroadcastContent off its
+// content is refused unless it is known to be a group (issue #851), and with
+// it on its sponsored messages are fetched. dialogFromPeer maps every
+// PeerChannel to Type "channel", so callers must not use hint.Type for this
+// decision.
 func isBroadcastChannel(p tg.PeerClass, chats map[int64]tg.ChatClass) bool {
 	v, ok := p.(*tg.PeerChannel)
 	if !ok {
@@ -309,6 +333,27 @@ func isBroadcastChannel(p tg.PeerClass, chats map[int64]tg.ChatClass) bool {
 		return true
 	}
 	return !ch.Megagroup
+}
+
+// orderUnreadTargets puts DMs and groups (legacy chats and megagroups)
+// ahead of broadcast channels, preserving relative order within each
+// bucket. Used only for the unscoped get_unread_messages path so broadcast
+// channels cannot consume the entire limit before a DM is considered.
+// Channels are not dropped.
+func orderUnreadTargets(targets []unreadTarget) []unreadTarget {
+	if len(targets) < 2 {
+		return targets
+	}
+	high := make([]unreadTarget, 0, len(targets))
+	low := make([]unreadTarget, 0)
+	for _, t := range targets {
+		if t.broadcast {
+			low = append(low, t)
+			continue
+		}
+		high = append(high, t)
+	}
+	return append(high, low...)
 }
 
 func inputPeerFromPeer(p tg.PeerClass, users map[int64]*tg.User, chats map[int64]tg.ChatClass) tg.InputPeerClass {
@@ -500,9 +545,14 @@ func resolveSender(from tg.PeerClass, users map[int64]*tg.User, chats map[int64]
 // is absent.
 //
 // cache and userID enable peer resolution caching; pass nil and 0 to disable.
-func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit int, beforeID int, cache *PeerCache, userID int64) ([]Message, int, error) {
-	msgs, _, cursor, err := GetMessagesRaw(ctx, c, peerSpec, limit, beforeID, cache, userID)
-	return msgs, cursor, err
+//
+// When the peer is a broadcast channel and the page holds posts, the
+// channel's sponsored messages come back in the *Sponsored result (Telegram
+// API terms §3.3). With bc off, a broadcast channel fails with
+// ErrBroadcastContent before its history is fetched (issue #851).
+func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit int, beforeID int, cache *PeerCache, userID int64, bc BroadcastContent) ([]Message, int, *Sponsored, error) {
+	msgs, _, cursor, sp, err := GetMessagesRaw(ctx, c, peerSpec, limit, beforeID, cache, userID, bc)
+	return msgs, cursor, sp, err
 }
 
 // GetMessagesRaw is GetMessages plus the raw []*tg.Message slice backing the
@@ -510,10 +560,7 @@ func GetMessages(ctx context.Context, c *telegram.Client, peerSpec string, limit
 // fetch_media=true bulk-download path so it can extract file locations
 // without a second Telegram API round-trip. GetMessages is a thin wrapper
 // that discards the raw slice.
-//
-// A broadcast channel fails with ErrBroadcastContent before its history is
-// fetched (issue #851).
-func GetMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec string, limit int, beforeID int, cache *PeerCache, userID int64) ([]Message, []*tg.Message, int, error) {
+func GetMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec string, limit int, beforeID int, cache *PeerCache, userID int64, bc BroadcastContent) ([]Message, []*tg.Message, int, *Sponsored, error) {
 	resolve := func(ctx context.Context) (tg.InputPeerClass, error) {
 		return ResolvePeerCached(ctx, c, peerSpec, cache, userID)
 	}
@@ -525,25 +572,26 @@ func GetMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec string, li
 			return resolve(ctx)
 		}
 	}
-	return getMessagesWith(ctx, c.API(), resolve, reResolve, peerSpec, limit, beforeID, cache, userID)
+	return getMessagesWith(ctx, c.API(), resolve, reResolve, peerSpec, limit, beforeID, cache, userID, bc)
 }
 
 // getMessagesWith is GetMessagesRaw over an explicit API client. resolve is
 // the direct resolution used when peerSpec is not in the dialog list;
 // reResolve, when non-nil, is the single retry after Telegram rejects the
 // resolved peer as invalid.
-func getMessagesWith(ctx context.Context, api *tg.Client, resolve, reResolve func(context.Context) (tg.InputPeerClass, error), peerSpec string, limit int, beforeID int, cache *PeerCache, userID int64) ([]Message, []*tg.Message, int, error) {
+func getMessagesWith(ctx context.Context, api *tg.Client, resolve, reResolve func(context.Context) (tg.InputPeerClass, error), peerSpec string, limit int, beforeID int, cache *PeerCache, userID int64, bc BroadcastContent) ([]Message, []*tg.Message, int, *Sponsored, error) {
 	if peerSpec == "" {
-		return nil, nil, 0, fmt.Errorf("peer is required")
+		return nil, nil, 0, nil, fmt.Errorf("peer is required")
 	}
 	limit = clampLimit(limit)
+	sp := &Sponsored{}
 
 	dlgRes, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
 		Limit:      200,
 		OffsetPeer: &tg.InputPeerEmpty{},
 	})
 	if err != nil {
-		return nil, nil, 0, fmt.Errorf("MessagesGetDialogs: %w", err)
+		return nil, nil, 0, nil, fmt.Errorf("MessagesGetDialogs: %w", err)
 	}
 	users, chats, dialogs := decodeDialogsResult(dlgRes)
 	// Seed the shared peer cache so a later get_messages/send_message for any of
@@ -563,12 +611,13 @@ func getMessagesWith(ctx context.Context, api *tg.Client, resolve, reResolve fun
 		if hint.ID != peerSpec && !matchUsername(hint.Username, peerSpec) {
 			continue
 		}
-		if isBroadcastChannel(d.Peer, chats) {
-			return nil, nil, 0, &broadcastContentError{peer: peerSpec}
+		broadcast := isBroadcastChannel(d.Peer, chats)
+		if broadcast && !bool(bc) {
+			return nil, nil, 0, nil, &broadcastContentError{peer: peerSpec}
 		}
 		input := inputPeerFromPeer(d.Peer, users, chats)
 		if input == nil {
-			return nil, nil, 0, fmt.Errorf("cannot build InputPeer for %q", peerSpec)
+			return nil, nil, 0, nil, fmt.Errorf("cannot build InputPeer for %q", peerSpec)
 		}
 		hist, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
 			Peer:     input,
@@ -576,21 +625,26 @@ func getMessagesWith(ctx context.Context, api *tg.Client, resolve, reResolve fun
 			OffsetID: beforeID,
 		})
 		if err != nil {
-			return nil, nil, 0, fmt.Errorf("MessagesGetHistory: %w", err)
+			return nil, nil, 0, nil, fmt.Errorf("MessagesGetHistory: %w", err)
 		}
 		decoded, raw := decodeMessagesRaw(hist, hint, users, chats, limit)
-		return decoded, raw, historyCursor(hist), nil
+		if ch, ok := input.(*tg.InputPeerChannel); ok && broadcast && len(decoded) > 0 {
+			fetchSponsored(ctx, api, ch.ChannelID, input, len(decoded), sp)
+		}
+		return decoded, raw, historyCursor(hist), sp, nil
 	}
 
 	// Fallback: peer not in dialog list — resolve directly.
 	slog.Debug("peer not in dialog list, falling back to direct resolution", "peer_redacted", RedactPeer(peerSpec))
 	input, resolveErr := resolve(ctx)
 	if resolveErr != nil {
-		return nil, nil, 0, fmt.Errorf("peer %q is not in your dialog list and could not be resolved directly; "+
+		return nil, nil, 0, nil, fmt.Errorf("peer %q is not in your dialog list and could not be resolved directly; "+
 			"call list_dialogs first and pass an id exactly as it appears there (e.g. \"channel:<id>\"): %w", peerSpec, resolveErr)
 	}
-	if err := refuseBroadcastPeer(ctx, api, peerSpec, input); err != nil {
-		return nil, nil, 0, err
+	if !bc {
+		if err := refuseBroadcastPeer(ctx, api, peerSpec, input); err != nil {
+			return nil, nil, 0, nil, err
+		}
 	}
 	hist, histErr := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
 		Peer:     input,
@@ -605,8 +659,10 @@ func getMessagesWith(ctx context.Context, api *tg.Client, resolve, reResolve fun
 				// read-only so the retry is always safe; the fresh peer is
 				// checked again, since it may resolve to another type.
 				if input2, err2 := reResolve(ctx); err2 == nil {
-					if err := refuseBroadcastPeer(ctx, api, peerSpec, input2); err != nil {
-						return nil, nil, 0, err
+					if !bc {
+						if err := refuseBroadcastPeer(ctx, api, peerSpec, input2); err != nil {
+							return nil, nil, 0, nil, err
+						}
 					}
 					if hist2, err3 := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
 						Peer:     input2,
@@ -614,20 +670,42 @@ func getMessagesWith(ctx context.Context, api *tg.Client, resolve, reResolve fun
 						OffsetID: beforeID,
 					}); err3 == nil {
 						decoded, raw := decodeMessagesRaw(hist2, &Dialog{ID: peerSpec, Title: peerSpec}, users, chats, limit)
-						return decoded, raw, historyCursor(hist2), nil
+						fetchSponsoredForHistory(ctx, api, input2, hist2, len(decoded), sp)
+						return decoded, raw, historyCursor(hist2), sp, nil
 					}
 				}
 			}
 			// A bare numeric "user:<id>"/"channel:<id>" carries no access_hash, so
 			// Telegram cannot identify the peer. Tell the caller how to recover
 			// instead of surfacing a raw RPC error that invites a retry loop.
-			return nil, nil, 0, &peerNotAccessibleError{peer: peerSpec, code: rpcErr.Message}
+			return nil, nil, 0, nil, &peerNotAccessibleError{peer: peerSpec, code: rpcErr.Message}
 		}
-		return nil, nil, 0, fmt.Errorf("MessagesGetHistory (fallback): %w", histErr)
+		return nil, nil, 0, nil, fmt.Errorf("MessagesGetHistory (fallback): %w", histErr)
 	}
 	hint := &Dialog{ID: peerSpec, Title: peerSpec}
 	decoded, raw := decodeMessagesRaw(hist, hint, users, chats, limit)
-	return decoded, raw, historyCursor(hist), nil
+	fetchSponsoredForHistory(ctx, api, input, hist, len(decoded), sp)
+	return decoded, raw, historyCursor(hist), sp, nil
+}
+
+// fetchSponsoredForHistory is fetchSponsored for a peer that was resolved
+// directly rather than found in the dialog list. The channel's type is read
+// off the history reply's chats; a channel the reply does not show as a
+// megagroup counts as broadcast, so its sponsored messages are asked for
+// rather than assumed absent. Nothing is fetched for a page with no posts.
+// The trade-off is deliberate: a megagroup missing from the reply's chats
+// (rare) gets an ads request too, and if that request fails it is listed in
+// sponsored_unavailable. Over-asking for a group is harmless; skipping a
+// broadcast channel would show its posts without the ads §3.3 requires.
+func fetchSponsoredForHistory(ctx context.Context, api sponsoredFetcher, input tg.InputPeerClass, hist tg.MessagesMessagesClass, shown int, sp *Sponsored) {
+	ch, ok := input.(*tg.InputPeerChannel)
+	if !ok || shown == 0 {
+		return
+	}
+	_, chats := extractSearchMaps(hist)
+	if isBroadcastChannel(&tg.PeerChannel{ChannelID: ch.ChannelID}, chats) {
+		fetchSponsored(ctx, api, ch.ChannelID, input, shown, sp)
+	}
 }
 
 func matchUsername(have, want string) bool {

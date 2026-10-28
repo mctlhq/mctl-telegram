@@ -12,7 +12,9 @@ import (
 )
 
 // Synthetic ids for issue #851: Alice is a private chat, News a broadcast
-// channel, Team a megagroup.
+// channel, Team a megagroup. Tests named *_SwitchOff* pin the refusal that
+// BROADCAST_CONTENT_ENABLED=false restores; the rest pin channel content
+// with its sponsored messages.
 const (
 	bcAliceID = 8511
 	bcNewsID  = 8521
@@ -33,6 +35,16 @@ type fakeMTProto struct {
 	lookupErr error
 	calls     []string
 	history   []tg.InputPeerClass
+
+	historyChats   []tg.ChatClass // chats attached to every history reply
+	emptyHistory   bool           // history replies carry no messages
+	historyErrOnce error          // returned by the first getHistory only
+
+	sponsored    tg.MessagesSponsoredMessagesClass // nil = messages.sponsoredMessagesEmpty
+	sponsoredErr error
+	sponsoredFor []tg.InputPeerClass
+	viewed       [][]byte
+	viewErr      error
 }
 
 func (f *fakeMTProto) Invoke(_ context.Context, input bin.Encoder, output bin.Decoder) error {
@@ -44,7 +56,38 @@ func (f *fakeMTProto) Invoke(_ context.Context, input bin.Encoder, output bin.De
 	case *tg.MessagesGetHistoryRequest:
 		f.calls = append(f.calls, "getHistory")
 		f.history = append(f.history, req.Peer)
-		res = &tg.MessagesMessages{Messages: []tg.MessageClass{&tg.Message{ID: 1, Message: "hi", PeerID: peerOf(req.Peer)}}}
+		if err := f.historyErrOnce; err != nil {
+			f.historyErrOnce = nil
+			return err
+		}
+		out := &tg.MessagesMessages{Chats: f.historyChats}
+		if !f.emptyHistory {
+			n := req.Limit
+			if n > 3 {
+				n = 3
+			}
+			for i := 1; i <= n; i++ {
+				out.Messages = append(out.Messages, &tg.Message{ID: i, Message: "hi", PeerID: peerOf(req.Peer)})
+			}
+		}
+		res = out
+	case *tg.MessagesGetSponsoredMessagesRequest:
+		f.calls = append(f.calls, "getSponsored")
+		f.sponsoredFor = append(f.sponsoredFor, req.Peer)
+		if f.sponsoredErr != nil {
+			return f.sponsoredErr
+		}
+		res = f.sponsored
+		if res == nil {
+			res = &tg.MessagesSponsoredMessagesEmpty{}
+		}
+	case *tg.MessagesViewSponsoredMessageRequest:
+		f.calls = append(f.calls, "viewSponsored")
+		f.viewed = append(f.viewed, req.RandomID)
+		if f.viewErr != nil {
+			return f.viewErr
+		}
+		res = &tg.BoolTrue{}
 	case *tg.ChannelsGetChannelsRequest:
 		f.calls = append(f.calls, "getChannels")
 		if f.lookupErr != nil {
@@ -177,9 +220,11 @@ func TestBroadcastRefusalIsCallerRefusal(t *testing.T) {
 	}
 }
 
-func TestGetUnread_UnscopedSkipsBroadcastChannels(t *testing.T) {
+// Switch off (BROADCAST_CONTENT_ENABLED=false): the issue #851 refusal.
+
+func TestGetUnread_SwitchOff_UnscopedSkipsBroadcastChannels(t *testing.T) {
 	f, api := newFake()
-	msgs, _, err := getUnreadMessagesWith(context.Background(), api, "", 50)
+	msgs, _, sp, err := getUnreadMessagesWith(context.Background(), api, "", 50, BroadcastContentRefused)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -201,13 +246,16 @@ func TestGetUnread_UnscopedSkipsBroadcastChannels(t *testing.T) {
 	if got[fmt.Sprintf("channel:%d", bcNewsID)] {
 		t.Error("returned a broadcast channel post")
 	}
+	if f.called("getSponsored") || len(sp.Messages) != 0 {
+		t.Error("sponsored messages fetched although no channel post was read")
+	}
 }
 
-func TestGetUnread_ScopedToBroadcastRefused(t *testing.T) {
+func TestGetUnread_SwitchOff_ScopedToBroadcastRefused(t *testing.T) {
 	for _, unread := range []int{40, 0} {
 		f, api := newFake()
 		f.dialogs.Dialogs[0].(*tg.Dialog).UnreadCount = unread
-		_, _, err := getUnreadMessagesWith(context.Background(), api, fmt.Sprintf("channel:%d", bcNewsID), 50)
+		_, _, _, err := getUnreadMessagesWith(context.Background(), api, fmt.Sprintf("channel:%d", bcNewsID), 50, BroadcastContentRefused)
 		if !errors.Is(err, ErrBroadcastContent) {
 			t.Errorf("unread=%d: err = %v, want ErrBroadcastContent", unread, err)
 		}
@@ -218,10 +266,15 @@ func TestGetUnread_ScopedToBroadcastRefused(t *testing.T) {
 }
 
 func TestGetUnread_ScopedToMegagroupAllowed(t *testing.T) {
-	_, api := newFake()
-	msgs, _, err := getUnreadMessagesWith(context.Background(), api, fmt.Sprintf("channel:%d", bcTeamID), 50)
-	if err != nil || len(msgs) == 0 {
-		t.Fatalf("megagroup unread: msgs=%d err=%v", len(msgs), err)
+	for _, bc := range []BroadcastContent{BroadcastContentRefused, BroadcastContentAllowed} {
+		f, api := newFake()
+		msgs, _, _, err := getUnreadMessagesWith(context.Background(), api, fmt.Sprintf("channel:%d", bcTeamID), 50, bc)
+		if err != nil || len(msgs) == 0 {
+			t.Fatalf("bc=%v megagroup unread: msgs=%d err=%v", bc, len(msgs), err)
+		}
+		if f.called("getSponsored") {
+			t.Errorf("bc=%v: sponsored messages fetched for a megagroup", bc)
+		}
 	}
 }
 
@@ -229,9 +282,9 @@ func noResolve(context.Context) (tg.InputPeerClass, error) {
 	return nil, errors.New("resolve must not be called")
 }
 
-func TestGetMessages_BroadcastInDialogsRefused(t *testing.T) {
+func TestGetMessages_SwitchOff_BroadcastInDialogsRefused(t *testing.T) {
 	f, api := newFake()
-	_, _, _, err := getMessagesWith(context.Background(), api, noResolve, nil, fmt.Sprintf("channel:%d", bcNewsID), 20, 0, nil, 0)
+	_, _, _, _, err := getMessagesWith(context.Background(), api, noResolve, nil, fmt.Sprintf("channel:%d", bcNewsID), 20, 0, nil, 0, BroadcastContentRefused)
 	if !errors.Is(err, ErrBroadcastContent) {
 		t.Fatalf("err = %v, want ErrBroadcastContent", err)
 	}
@@ -241,22 +294,28 @@ func TestGetMessages_BroadcastInDialogsRefused(t *testing.T) {
 }
 
 func TestGetMessages_MegagroupAndUserAllowed(t *testing.T) {
-	for _, spec := range []string{fmt.Sprintf("channel:%d", bcTeamID), fmt.Sprintf("user:%d", bcAliceID)} {
-		_, api := newFake()
-		msgs, _, _, err := getMessagesWith(context.Background(), api, noResolve, nil, spec, 20, 0, nil, 0)
-		if err != nil || len(msgs) == 0 {
-			t.Errorf("%s: msgs=%d err=%v", spec, len(msgs), err)
+	for _, bc := range []BroadcastContent{BroadcastContentRefused, BroadcastContentAllowed} {
+		for _, spec := range []string{fmt.Sprintf("channel:%d", bcTeamID), fmt.Sprintf("user:%d", bcAliceID)} {
+			f, api := newFake()
+			msgs, _, _, _, err := getMessagesWith(context.Background(), api, noResolve, nil, spec, 20, 0, nil, 0, bc)
+			if err != nil || len(msgs) == 0 {
+				t.Errorf("bc=%v %s: msgs=%d err=%v", bc, spec, len(msgs), err)
+			}
+			if f.called("getSponsored") {
+				t.Errorf("bc=%v %s: sponsored messages fetched for a non-broadcast peer", bc, spec)
+			}
 		}
 	}
 }
 
-func TestGetMessages_FallbackResolvedBroadcastRefused(t *testing.T) {
+func resolveTo(p tg.InputPeerClass) func(context.Context) (tg.InputPeerClass, error) {
+	return func(context.Context) (tg.InputPeerClass, error) { return p, nil }
+}
+
+func TestGetMessages_SwitchOff_FallbackResolvedBroadcastRefused(t *testing.T) {
 	f, api := newFake()
 	f.dialogs = &tg.MessagesDialogs{} // not in the dialog list: direct resolution
-	resolve := func(context.Context) (tg.InputPeerClass, error) {
-		return &tg.InputPeerChannel{ChannelID: bcNewsID, AccessHash: 2}, nil
-	}
-	_, _, _, err := getMessagesWith(context.Background(), api, resolve, nil, "@news", 20, 0, nil, 0)
+	_, _, _, _, err := getMessagesWith(context.Background(), api, resolveTo(&tg.InputPeerChannel{ChannelID: bcNewsID, AccessHash: 2}), nil, "@news", 20, 0, nil, 0, BroadcastContentRefused)
 	if !errors.Is(err, ErrBroadcastContent) {
 		t.Fatalf("err = %v, want ErrBroadcastContent", err)
 	}
@@ -265,20 +324,43 @@ func TestGetMessages_FallbackResolvedBroadcastRefused(t *testing.T) {
 	}
 }
 
-func TestGetMessages_FallbackResolvedMegagroupAllowed(t *testing.T) {
+func TestGetMessages_SwitchOff_ReResolvedBroadcastRefused(t *testing.T) {
 	f, api := newFake()
 	f.dialogs = &tg.MessagesDialogs{}
-	resolve := func(context.Context) (tg.InputPeerClass, error) {
-		return &tg.InputPeerChannel{ChannelID: bcTeamID, AccessHash: 3}, nil
+	f.historyErrOnce = tgerr.New(400, "CHANNEL_INVALID")
+	_, _, _, _, err := getMessagesWith(context.Background(), api,
+		resolveTo(&tg.InputPeerUser{UserID: bcAliceID, AccessHash: 1}),
+		resolveTo(&tg.InputPeerChannel{ChannelID: bcNewsID, AccessHash: 2}),
+		"@news", 20, 0, nil, 0, BroadcastContentRefused)
+	if !errors.Is(err, ErrBroadcastContent) {
+		t.Fatalf("err = %v, want ErrBroadcastContent", err)
 	}
-	if _, _, _, err := getMessagesWith(context.Background(), api, resolve, nil, "@team", 20, 0, nil, 0); err != nil {
-		t.Fatalf("megagroup fallback: %v", err)
+	if historyHasChannel(f, bcNewsID) {
+		t.Error("history of the re-resolved broadcast channel fetched before refusing")
 	}
 }
 
-func TestPrepareMedia_BroadcastRefused(t *testing.T) {
+func TestGetMessages_FallbackResolvedMegagroupAllowed(t *testing.T) {
 	f, api := newFake()
-	_, _, err := prepareMediaRefWith(context.Background(), api, "channel:news", &tg.InputPeerChannel{ChannelID: bcNewsID, AccessHash: 2}, 7)
+	f.dialogs = &tg.MessagesDialogs{}
+	f.historyChats = []tg.ChatClass{bcTeam}
+	if _, _, _, _, err := getMessagesWith(context.Background(), api, resolveTo(&tg.InputPeerChannel{ChannelID: bcTeamID, AccessHash: 3}), nil, "@team", 20, 0, nil, 0, BroadcastContentRefused); err != nil {
+		t.Fatalf("megagroup fallback: %v", err)
+	}
+	f, api = newFake()
+	f.dialogs = &tg.MessagesDialogs{}
+	f.historyChats = []tg.ChatClass{bcTeam}
+	if _, _, _, _, err := getMessagesWith(context.Background(), api, resolveTo(&tg.InputPeerChannel{ChannelID: bcTeamID, AccessHash: 3}), nil, "@team", 20, 0, nil, 0, BroadcastContentAllowed); err != nil {
+		t.Fatalf("megagroup fallback, switch on: %v", err)
+	}
+	if f.called("getSponsored") {
+		t.Error("sponsored messages fetched for a megagroup the history reply shows")
+	}
+}
+
+func TestPrepareMedia_SwitchOff_BroadcastRefused(t *testing.T) {
+	f, api := newFake()
+	_, _, err := prepareMediaRefWith(context.Background(), api, "channel:news", &tg.InputPeerChannel{ChannelID: bcNewsID, AccessHash: 2}, 7, BroadcastContentRefused)
 	if !errors.Is(err, ErrBroadcastContent) {
 		t.Fatalf("err = %v, want ErrBroadcastContent", err)
 	}
@@ -289,11 +371,252 @@ func TestPrepareMedia_BroadcastRefused(t *testing.T) {
 
 func TestPrepareMedia_MegagroupReachesFetch(t *testing.T) {
 	f, api := newFake()
-	_, _, err := prepareMediaRefWith(context.Background(), api, "channel:team", &tg.InputPeerChannel{ChannelID: bcTeamID, AccessHash: 3}, 7)
+	_, _, err := prepareMediaRefWith(context.Background(), api, "channel:team", &tg.InputPeerChannel{ChannelID: bcTeamID, AccessHash: 3}, 7, BroadcastContentRefused)
 	if errors.Is(err, ErrBroadcastContent) {
 		t.Fatalf("megagroup refused: %v", err)
 	}
 	if !f.called("channelGetMessages") {
 		t.Error("megagroup message was not fetched")
+	}
+}
+
+// Switch on (the default): channel posts are read, with their sponsored
+// messages.
+
+// twoAds is a sponsored reply with two items and no posts_between, so only
+// the first may be shown.
+func twoAds() *tg.MessagesSponsoredMessages {
+	return &tg.MessagesSponsoredMessages{Messages: []tg.SponsoredMessage{
+		{RandomID: []byte{0xa1, 0xa2}, Title: "Ad one", Message: "Buy one", URL: "https://example.test/one", ButtonText: "Open"},
+		{RandomID: []byte{0xb1, 0xb2}, Title: "Ad two", Message: "Buy two", URL: "https://example.test/two", Recommended: true},
+	}}
+}
+
+func TestPrepareMedia_SwitchOn_BroadcastReachesFetch(t *testing.T) {
+	f, api := newFake()
+	_, _, err := prepareMediaRefWith(context.Background(), api, "channel:news", &tg.InputPeerChannel{ChannelID: bcNewsID, AccessHash: 2}, 7, BroadcastContentAllowed)
+	if errors.Is(err, ErrBroadcastContent) {
+		t.Fatalf("broadcast media refused with the switch on: %v", err)
+	}
+	if !f.called("channelGetMessages") {
+		t.Error("broadcast message was not fetched")
+	}
+	if f.called("getChannels") || f.called("getSponsored") {
+		t.Errorf("unexpected calls for a single media item: %v", f.calls)
+	}
+}
+
+func TestGetMessages_SwitchOn_BroadcastReturnedWithSponsored(t *testing.T) {
+	f, api := newFake()
+	f.sponsored = twoAds()
+	spec := fmt.Sprintf("channel:%d", bcNewsID)
+	msgs, _, _, sp, err := getMessagesWith(context.Background(), api, noResolve, nil, spec, 20, 0, nil, 0, BroadcastContentAllowed)
+	if err != nil {
+		t.Fatalf("err = %v, want channel posts", err)
+	}
+	if len(msgs) == 0 || !historyHasChannel(f, bcNewsID) {
+		t.Fatalf("channel posts not returned: msgs=%d calls=%v", len(msgs), f.calls)
+	}
+	for _, m := range msgs {
+		if m.Peer != spec || m.Text != "hi" {
+			t.Errorf("messages hold something other than the channel's posts: %+v", m)
+		}
+	}
+	if len(f.sponsoredFor) != 1 || peerOf(f.sponsoredFor[0]).(*tg.PeerChannel).ChannelID != bcNewsID {
+		t.Fatalf("getSponsoredMessages peers = %v, want the channel once", f.sponsoredFor)
+	}
+	if len(sp.Messages) != 1 {
+		t.Fatalf("sponsored = %+v, want the one item allowed without posts_between", sp.Messages)
+	}
+	ad := sp.Messages[0]
+	if ad.Label != SponsoredLabel || ad.Channel != spec || ad.Title != "Ad one" || ad.Text != "Buy one" ||
+		ad.URL != "https://example.test/one" || ad.ButtonText != "Open" || ad.RandomID != "oaI=" {
+		t.Errorf("sponsored item = %+v", ad)
+	}
+	if len(sp.Unavailable) != 0 {
+		t.Errorf("unavailable = %v, want none", sp.Unavailable)
+	}
+}
+
+func TestGetMessages_SwitchOn_FallbackBroadcastReturnedWithSponsored(t *testing.T) {
+	f, api := newFake()
+	f.dialogs = &tg.MessagesDialogs{}
+	f.historyChats = []tg.ChatClass{bcNews}
+	f.sponsored = twoAds()
+	msgs, _, _, sp, err := getMessagesWith(context.Background(), api, resolveTo(&tg.InputPeerChannel{ChannelID: bcNewsID, AccessHash: 2}), nil, "@news", 20, 0, nil, 0, BroadcastContentAllowed)
+	if err != nil || len(msgs) == 0 {
+		t.Fatalf("fallback broadcast: msgs=%d err=%v", len(msgs), err)
+	}
+	if f.called("getChannels") {
+		t.Error("the refusal lookup ran with the switch on")
+	}
+	if len(sp.Messages) != 1 || sp.Messages[0].Channel != fmt.Sprintf("channel:%d", bcNewsID) {
+		t.Errorf("sponsored = %+v, want one item for the channel", sp.Messages)
+	}
+}
+
+func TestGetMessages_SwitchOn_ReResolvedBroadcastReturnedWithSponsored(t *testing.T) {
+	f, api := newFake()
+	f.dialogs = &tg.MessagesDialogs{}
+	f.historyChats = []tg.ChatClass{bcNews}
+	f.historyErrOnce = tgerr.New(400, "CHANNEL_INVALID")
+	f.sponsored = twoAds()
+	msgs, _, _, sp, err := getMessagesWith(context.Background(), api,
+		resolveTo(&tg.InputPeerChannel{ChannelID: bcNewsID, AccessHash: 9}),
+		resolveTo(&tg.InputPeerChannel{ChannelID: bcNewsID, AccessHash: 2}),
+		"@news", 20, 0, nil, 0, BroadcastContentAllowed)
+	if err != nil || len(msgs) == 0 {
+		t.Fatalf("re-resolved broadcast: msgs=%d err=%v", len(msgs), err)
+	}
+	if len(sp.Messages) != 1 {
+		t.Errorf("sponsored = %+v, want one item", sp.Messages)
+	}
+}
+
+func TestGetMessages_SwitchOn_EmptyPageFetchesNoSponsored(t *testing.T) {
+	f, api := newFake()
+	f.emptyHistory = true
+	f.sponsored = twoAds()
+	_, _, _, sp, err := getMessagesWith(context.Background(), api, noResolve, nil, fmt.Sprintf("channel:%d", bcNewsID), 20, 0, nil, 0, BroadcastContentAllowed)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if f.called("getSponsored") || len(sp.Messages) != 0 {
+		t.Errorf("sponsored messages fetched for a page with no posts: calls=%v", f.calls)
+	}
+}
+
+func TestGetMessages_SwitchOn_FailedSponsoredFetchIsUnknownNotNone(t *testing.T) {
+	f, api := newFake()
+	f.sponsoredErr = tgerr.New(500, "INTERNAL")
+	spec := fmt.Sprintf("channel:%d", bcNewsID)
+	msgs, _, _, sp, err := getMessagesWith(context.Background(), api, noResolve, nil, spec, 20, 0, nil, 0, BroadcastContentAllowed)
+	if err != nil {
+		t.Fatalf("a failed ad fetch must not fail the read: %v", err)
+	}
+	if len(msgs) == 0 {
+		t.Error("channel posts dropped because ads could not be fetched")
+	}
+	if len(sp.Unavailable) != 1 || sp.Unavailable[0] != spec {
+		t.Errorf("unavailable = %v, want [%s]", sp.Unavailable, spec)
+	}
+	if len(sp.Messages) != 0 {
+		t.Errorf("sponsored = %+v, want none", sp.Messages)
+	}
+}
+
+func TestGetMessages_SwitchOn_EmptySponsoredReplyIsNoneNotUnknown(t *testing.T) {
+	_, api := newFake() // f.sponsored nil: messages.sponsoredMessagesEmpty
+	_, _, _, sp, err := getMessagesWith(context.Background(), api, noResolve, nil, fmt.Sprintf("channel:%d", bcNewsID), 20, 0, nil, 0, BroadcastContentAllowed)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(sp.Messages) != 0 || len(sp.Unavailable) != 0 {
+		t.Errorf("sponsored = %+v, unavailable = %v; want both empty", sp.Messages, sp.Unavailable)
+	}
+}
+
+func TestFetchSponsored_PostsBetweenBoundsTheItems(t *testing.T) {
+	for _, tc := range []struct {
+		postsBetween, shown, want int
+	}{
+		{0, 3, 1}, // one item after all posts
+		{2, 1, 1}, // at least one when any post is shown
+		{2, 4, 2},
+		{1, 5, 2}, // never more than Telegram served
+	} {
+		f := &fakeMTProto{sponsored: func() *tg.MessagesSponsoredMessages {
+			r := twoAds()
+			r.PostsBetween = tc.postsBetween
+			return r
+		}()}
+		sp := &Sponsored{}
+		fetchSponsored(context.Background(), tg.NewClient(f), bcNewsID, &tg.InputPeerChannel{ChannelID: bcNewsID}, tc.shown, sp)
+		if len(sp.Messages) != tc.want {
+			t.Errorf("posts_between=%d shown=%d: kept %d, want %d", tc.postsBetween, tc.shown, len(sp.Messages), tc.want)
+		}
+	}
+}
+
+func TestReportSponsoredViews_OnlyReturnedItems(t *testing.T) {
+	f, api := newFake()
+	f.sponsored = twoAds()
+	_, _, _, sp, err := getMessagesWith(context.Background(), api, noResolve, nil, fmt.Sprintf("channel:%d", bcNewsID), 20, 0, nil, 0, BroadcastContentAllowed)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if failed := reportSponsoredViewsWith(context.Background(), api, sp.Messages); failed != 0 {
+		t.Fatalf("failed = %d", failed)
+	}
+	if len(f.viewed) != 1 || string(f.viewed[0]) != string([]byte{0xa1, 0xa2}) {
+		t.Errorf("viewed = %x, want only the returned item a1a2, once", f.viewed)
+	}
+
+	f.viewed = nil
+	reportSponsoredViewsWith(context.Background(), api, nil)
+	if len(f.viewed) != 0 {
+		t.Errorf("views reported with nothing returned: %x", f.viewed)
+	}
+}
+
+func TestReportSponsoredViews_FailureCounted(t *testing.T) {
+	f, api := newFake()
+	f.viewErr = tgerr.New(500, "INTERNAL")
+	msgs := []SponsoredMessage{{Channel: "channel:1", randomID: []byte{1}}, {Channel: "channel:1", randomID: []byte{2}}}
+	if failed := reportSponsoredViewsWith(context.Background(), api, msgs); failed != 2 {
+		t.Errorf("failed = %d, want 2", failed)
+	}
+}
+
+func TestGetUnread_SwitchOn_UnscopedIncludesChannelsLast(t *testing.T) {
+	f, api := newFake()
+	f.sponsored = twoAds()
+	msgs, _, sp, err := getUnreadMessagesWith(context.Background(), api, "", 50, BroadcastContentAllowed)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	// News comes first in the dialog list but is read last.
+	if len(f.history) != 3 {
+		t.Fatalf("history calls = %d, want 3", len(f.history))
+	}
+	if ch, ok := f.history[2].(*tg.InputPeerChannel); !ok || ch.ChannelID != bcNewsID {
+		t.Errorf("last history call = %v, want the broadcast channel", f.history[2])
+	}
+	var news int
+	for _, m := range msgs {
+		if m.Peer == fmt.Sprintf("channel:%d", bcNewsID) {
+			news++
+		}
+	}
+	if news == 0 {
+		t.Error("unscoped unread dropped the broadcast channel's posts")
+	}
+	if len(f.sponsoredFor) != 1 || len(sp.Messages) != 1 || sp.Messages[0].Channel != fmt.Sprintf("channel:%d", bcNewsID) {
+		t.Errorf("sponsored = %+v (fetched for %v), want one item for the channel", sp.Messages, f.sponsoredFor)
+	}
+}
+
+func TestGetUnread_SwitchOn_ScopedToBroadcastReturned(t *testing.T) {
+	f, api := newFake()
+	msgs, _, _, err := getUnreadMessagesWith(context.Background(), api, fmt.Sprintf("channel:%d", bcNewsID), 50, BroadcastContentAllowed)
+	if err != nil || len(msgs) == 0 {
+		t.Fatalf("scoped broadcast unread: msgs=%d err=%v", len(msgs), err)
+	}
+	if !f.called("getSponsored") {
+		t.Error("sponsored messages not fetched for returned channel posts")
+	}
+}
+
+func TestFetchSponsored_RecommendedItemIsLabelledRecommended(t *testing.T) {
+	r := twoAds()
+	r.PostsBetween = 1
+	f := &fakeMTProto{sponsored: r}
+	sp := &Sponsored{}
+	fetchSponsored(context.Background(), tg.NewClient(f), bcNewsID, &tg.InputPeerChannel{ChannelID: bcNewsID}, 2, sp)
+	if len(sp.Messages) != 2 {
+		t.Fatalf("kept %d items, want 2", len(sp.Messages))
+	}
+	if sp.Messages[0].Label != SponsoredLabel || sp.Messages[1].Label != RecommendedLabel {
+		t.Errorf("labels = %q, %q; want %q, %q", sp.Messages[0].Label, sp.Messages[1].Label, SponsoredLabel, RecommendedLabel)
 	}
 }

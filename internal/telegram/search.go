@@ -25,6 +25,11 @@ type SearchParams struct {
 	Limit   int
 	MinDate time.Time
 	MaxDate time.Time
+	// BroadcastContent lets hits from broadcast channels through. Off (the
+	// zero value), a search scoped to one is refused and a global search
+	// drops their hits (issue #851). Search hits are not a channel feed, so
+	// no sponsored messages are fetched either way.
+	BroadcastContent BroadcastContent
 }
 
 // searchInvoker is the subset of *tg.Client methods the search path uses. It exists so
@@ -77,9 +82,9 @@ func checkSearchBound(name string, t time.Time) error {
 // When p.Peer is non-empty the search is scoped to that chat;
 // when empty a global Telegram search is performed.
 //
-// Broadcast channels are never read (issue #851): a search scoped to one
-// fails with ErrBroadcastContent, and a global search drops hits from them,
-// so it may return fewer than p.Limit results.
+// With p.BroadcastContent off, broadcast channels are not read (issue #851):
+// a search scoped to one fails with ErrBroadcastContent, and a global search
+// drops hits from them, so it may return fewer than p.Limit results.
 func SearchMessages(ctx context.Context, c *gotdtelegram.Client, p SearchParams, cache *PeerCache, userID int64) ([]Message, error) {
 	if p.Query == "" {
 		return nil, fmt.Errorf("query must not be empty")
@@ -122,15 +127,18 @@ func searchGlobalWith(ctx context.Context, api searchInvoker, p SearchParams) ([
 		return nil, fmt.Errorf("MessagesSearchGlobal: %w", err)
 	}
 	// MessagesSearchGlobal can narrow to users, groups or broadcasts only,
-	// but cannot exclude broadcasts alone, so their hits are dropped here.
+	// but cannot exclude broadcasts alone, so with the switch off their hits
+	// are dropped here.
 	users, chats := extractSearchMaps(res)
-	return decodeGlobalSearchMessages(res, users, chats, p.Limit), nil
+	return decodeGlobalSearchMessages(res, users, chats, p.Limit, !bool(p.BroadcastContent)), nil
 }
 
 // searchPeerWith runs a per-peer search_messages query against api.
 func searchPeerWith(ctx context.Context, api searchInvoker, peer tg.InputPeerClass, p SearchParams) ([]Message, error) {
-	if err := refuseBroadcastPeer(ctx, api, p.Peer, peer); err != nil {
-		return nil, err
+	if !p.BroadcastContent {
+		if err := refuseBroadcastPeer(ctx, api, p.Peer, peer); err != nil {
+			return nil, err
+		}
 	}
 	res, err := api.MessagesSearch(ctx, &tg.MessagesSearchRequest{
 		Peer:    peer,
@@ -152,10 +160,10 @@ func searchPeerWith(ctx context.Context, api searchInvoker, peer tg.InputPeerCla
 // per-message peer identity derived from msg.PeerID. Unlike decodeMessages,
 // which uses a single Dialog hint for all messages, this function resolves
 // each message's Peer and PeerTitle from its own PeerID so callers can
-// distinguish which chat each result came from. Hits from broadcast
-// channels, or from a channel whose type the reply does not show, are
-// dropped (issue #851).
-func decodeGlobalSearchMessages(r tg.MessagesMessagesClass, users map[int64]*tg.User, chats map[int64]tg.ChatClass, max int) []Message {
+// distinguish which chat each result came from. With dropBroadcast set, hits
+// from broadcast channels, or from a channel whose type the reply does not
+// show, are dropped (issue #851).
+func decodeGlobalSearchMessages(r tg.MessagesMessagesClass, users map[int64]*tg.User, chats map[int64]tg.ChatClass, max int, dropBroadcast bool) []Message {
 	var raw []tg.MessageClass
 	switch v := r.(type) {
 	case *tg.MessagesMessages:
@@ -168,7 +176,7 @@ func decodeGlobalSearchMessages(r tg.MessagesMessagesClass, users map[int64]*tg.
 	out := make([]Message, 0, len(raw))
 	for _, m := range raw {
 		msg, ok := m.(*tg.Message)
-		if !ok || isBroadcastChannel(msg.PeerID, chats) {
+		if !ok || (dropBroadcast && isBroadcastChannel(msg.PeerID, chats)) {
 			continue
 		}
 		peerID, peerTitle := resolvePeerIDCanonical(msg.PeerID, users, chats)
