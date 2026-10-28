@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.97.0](https://github.com/mctlhq/mctl-telegram/compare/0.96.0...0.97.0) (2026-10-28)
+
+
+### Features
+
+* **login:** ask for the 2FA password after a QR login ([6639cd3](https://github.com/mctlhq/mctl-telegram/commit/6639cd3635e37402cee347fe7ade7e4ba46754bf))
+
+
+### Bug Fixes
+
+* **telegram:** record why Telegram killed a session, stop junk auth keys ([944fc4a](https://github.com/mctlhq/mctl-telegram/commit/944fc4a4066d98d2d5e3ae766ecb09d9178f4f78))
+* **telegram:** record why Telegram killed a session, stop junk auth keys ([6cc0f97](https://github.com/mctlhq/mctl-telegram/commit/6cc0f978cfa526e751521b594319c18d54fa1844))
+* **telegram:** stop polling a dead session and keep one device identity ([ebb0e29](https://github.com/mctlhq/mctl-telegram/commit/ebb0e29e16394b67d04423ad92f931b62073ada3))
+* **telegram:** stop polling a dead session and keep one device identity ([63b55f4](https://github.com/mctlhq/mctl-telegram/commit/63b55f424107e658df5006b18843dddd488c2efc))
+
 ## [0.96.0](https://github.com/mctlhq/mctl-telegram/compare/0.95.1...0.96.0) (2026-10-27)
 
 
