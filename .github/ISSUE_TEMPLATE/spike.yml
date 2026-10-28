@@ -1,0 +1,22 @@
+name: Spike
+description: A research question to settle before building it. The mctl-agents scout fills this in from a digest item.
+title: "spike: "
+# agents:intake hands the spike to the mctl-agents pipeline; spike:scout is the
+# label mctl-agents and mctl-agent use to find existing spikes by Source.
+labels: ["spike:scout", "agents:intake"]
+body:
+  # The id must stay "body": scout's "Draft spike N" link prefills it with ?body=.
+  - type: textarea
+    id: body
+    attributes:
+      label: Draft
+      description: Keep the "Source:" line. Spikes are deduplicated by it.
+      value: |
+        Source:
+        Question:
+        Outcomes:
+        Lifecycle: proposed
+        Related: none
+        Why mctl:
+    validations:
+      required: true
