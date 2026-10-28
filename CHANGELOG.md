@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.98.0](https://github.com/mctlhq/mctl-telegram/compare/0.97.1...0.98.0) (2026-10-28)
+
+
+### Features
+
+* return broadcast channel posts with sponsored messages ([20d33da](https://github.com/mctlhq/mctl-telegram/commit/20d33da83ef7504a78d53bdd0769d787fb874871))
+* return broadcast channel posts with sponsored messages ([f744ee5](https://github.com/mctlhq/mctl-telegram/commit/f744ee5c1be81dbeb6eb848209d6a790fac1a7be)), closes [#851](https://github.com/mctlhq/mctl-telegram/issues/851)
+
+
+### Bug Fixes
+
+* cite 0.97.1 in the product update, tidy two review notes ([8fee83c](https://github.com/mctlhq/mctl-telegram/commit/8fee83c2fb69dfacdb54aa193cbe55a519a4ce59))
+
 ## [0.97.1](https://github.com/mctlhq/mctl-telegram/compare/0.97.0...0.97.1) (2026-10-28)
 
 
