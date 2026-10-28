@@ -39,6 +39,22 @@ type Client struct {
 // description and any retry_after -- never the raw body. A transport failure
 // is returned with the request URL (which embeds the bot token) stripped.
 func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) error {
+	return c.call(ctx, "sendMessage", url.Values{
+		"chat_id": {strconv.FormatInt(chatID, 10)},
+		"text":    {text},
+	})
+}
+
+// GetChat reads chatID through the bot and discards the result: nil means
+// the bot can see the chat. Errors follow SendMessage's rules. It sends
+// nothing to the user.
+func (c *Client) GetChat(ctx context.Context, chatID int64) error {
+	return c.call(ctx, "getChat", url.Values{
+		"chat_id": {strconv.FormatInt(chatID, 10)},
+	})
+}
+
+func (c *Client) call(ctx context.Context, method string, form url.Values) error {
 	if c.Token == "" {
 		return errors.New("bot api: no bot token configured")
 	}
@@ -46,11 +62,7 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) err
 	if base == "" {
 		base = DefaultBaseURL
 	}
-	endpoint := strings.TrimRight(base, "/") + "/bot" + c.Token + "/sendMessage"
-	form := url.Values{
-		"chat_id": {strconv.FormatInt(chatID, 10)},
-		"text":    {text},
-	}
+	endpoint := strings.TrimRight(base, "/") + "/bot" + c.Token + "/" + method
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return errors.New("bot api: build request failed")

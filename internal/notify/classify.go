@@ -24,6 +24,11 @@ const (
 	// SourceOIDCBotAccess is the reachability source and reason_code for a
 	// telegram:bot_access grant reported at OIDC sign-in.
 	SourceOIDCBotAccess = "oidc_bot_access"
+	// SourceOIDCGetChat is the reachability source and reason_code for a Bot
+	// API getChat that succeeded right after an OIDC sign-in which requested
+	// telegram:bot_access. Telegram does not report that grant in the token
+	// response (#930), so this read is how it is observed.
+	SourceOIDCGetChat = "oidc_get_chat"
 )
 
 // DeliveryOutcome is the result of classifying one Bot API sendMessage
