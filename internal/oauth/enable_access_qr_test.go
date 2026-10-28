@@ -511,8 +511,8 @@ func TestEnableQR_WaitEndsWithTheSession(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "It stops after 2 minutes.") {
 		t.Errorf("the page does not state the session-bounded wait:\n%s", rec.Body.String())
 	}
-	if got := time.Duration(q.gotWait.Load()); got <= 2*time.Minute || got > 3*time.Minute {
-		t.Errorf("QRWait = %v, want what is left of the 3m session", got)
+	if got := time.Duration(q.gotWait.Load()); got <= 2*time.Minute || got > 3*time.Minute-enableQRWaitMargin {
+		t.Errorf("QRWait = %v, want what is left of the 3m session less the margin", got)
 	}
 	close(q.scan)
 	pollQRStatus(t, mux, c, "linked")

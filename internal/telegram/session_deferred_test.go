@@ -167,6 +167,28 @@ func TestSettleQRLogin_SignedIn(t *testing.T) {
 	}
 }
 
+// TestAcceptQRAuth_ReportsAcceptanceFirst: OnQRAccepted fires once, before
+// the account check's auth.logOut, for the expected account and for another.
+func TestAcceptQRAuth_ReportsAcceptanceFirst(t *testing.T) {
+	for _, got := range []int64{4242, 4343} {
+		api := &fakeLogOuter{}
+		hooks, logOutsAtHook := 0, -1
+		cfg := LoginConfig{WantTelegramID: 4242, OnQRAccepted: func() {
+			hooks++
+			logOutsAtHook = api.calls
+		}}
+		authz := &tg.AuthAuthorization{User: &tg.User{ID: got}}
+
+		user, mismatch, err := acceptQRAuth(context.Background(), api, cfg, 1, authz)
+		if err != nil || user.ID != got || mismatch != (got != 4242) {
+			t.Fatalf("got=%d: acceptQRAuth = %v, %v, %v", got, user, mismatch, err)
+		}
+		if hooks != 1 || logOutsAtHook != 0 {
+			t.Errorf("got=%d: OnQRAccepted calls=%d, logOuts before it=%d; want 1 and 0", got, hooks, logOutsAtHook)
+		}
+	}
+}
+
 func TestWithQRWait(t *testing.T) {
 	waitForCtx := func(ctx context.Context) (*tg.AuthAuthorization, error) {
 		<-ctx.Done()

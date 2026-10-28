@@ -44,6 +44,9 @@ const (
 	// enableQRBusyRefresh is the refresh of the placeholder page shown while
 	// the flow is being prepared or a step holds the session lock.
 	enableQRBusyRefresh = 1
+	// enableQRWaitMargin is how much sooner than the enable session a
+	// session-bounded scan wait ends; see enableQRWaitFor.
+	enableQRWaitMargin = 15 * time.Second
 )
 
 // qrLogin is the QR method: telegram.LoginQR waiting up to wait for a scan,
@@ -163,7 +166,10 @@ func (s *Server) handleEnableQRStart(w http.ResponseWriter, r *http.Request) {
 // enableQRWait, or less when the enable session expires sooner, so the code
 // on screen never outlives the session that has to finish the sign-in.
 func (s *Server) enableQRWaitFor(es *enableSession) time.Duration {
-	left := s.cfg.CodeTTL - s.clock().Sub(es.createdAt)
+	// The scan wait starts only after the flow gets the uid mutex, the mode
+	// check and the gotd connect, so it ends a little later than measured
+	// here; the margin keeps a scan from landing after the session expired.
+	left := s.cfg.CodeTTL - s.clock().Sub(es.createdAt) - enableQRWaitMargin
 	// A zero QRWait would mean no limit at all.
 	return max(min(enableQRWait, left), time.Second)
 }

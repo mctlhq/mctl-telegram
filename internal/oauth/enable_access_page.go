@@ -181,7 +181,9 @@ var enablePhoneTemplate = template.Must(template.New("enablePhone").Parse(enable
     <div class="meta" id="why-phone">
       <p><strong>Why a phone number?</strong> Signing in with Telegram only proved who you are.
          Reading your chats needs a Telegram user session, and Telegram creates one only after
-         it sends a login code to your number.</p>
+         it sends a login code to your number{{if .QROffered}}, or after you scan a QR code with
+         Telegram on a phone that is already signed in. For the QR code, use &#8220;Use a QR code
+         instead&#8221; below: no number or login code is needed{{end}}.</p>
       <p><strong>What happens to it:</strong> the number goes to Telegram to request the code.
          This service does not save it in its database, session or audit log; it is held in
          server memory only while you sign in. The session itself is stored encrypted and shows

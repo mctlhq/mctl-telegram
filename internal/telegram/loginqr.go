@@ -90,12 +90,9 @@ func LoginQR(
 				return fmt.Errorf("qr auth: %w", err)
 			}
 		}
-		if cfg.OnQRAccepted != nil {
-			cfg.OnQRAccepted()
-		}
-		user, ok := authz.User.(*tg.User)
-		if !ok {
-			return fmt.Errorf("unexpected auth user type %T", authz.User)
+		user, mm, err := acceptQRAuth(ctx, client.API(), cfg, userID, authz)
+		if err != nil {
+			return err
 		}
 		telegramUserID = user.ID
 		displayName = strings.TrimSpace(user.FirstName + " " + user.LastName)
@@ -103,7 +100,7 @@ func LoginQR(
 			displayName = user.Username
 		}
 		username = user.Username
-		if logOutIfMismatch(ctx, client.API(), userID, cfg.WantTelegramID, user.ID) {
+		if mm {
 			signedIn, mismatch = true, true
 			return nil
 		}
@@ -116,6 +113,21 @@ func LoginQR(
 		return 0, "", "", err
 	}
 	return telegramUserID, displayName, username, nil
+}
+
+// acceptQRAuth is the part of LoginQR's callback right after Telegram has
+// accepted the scan (and the 2FA password, if any). It reports that through
+// cfg.OnQRAccepted first, before any further network call, then runs the
+// account check, which logs a mismatched account out.
+func acceptQRAuth(ctx context.Context, api authLogOuter, cfg LoginConfig, userID int64, authz *tg.AuthAuthorization) (*tg.User, bool, error) {
+	if cfg.OnQRAccepted != nil {
+		cfg.OnQRAccepted()
+	}
+	user, ok := authz.User.(*tg.User)
+	if !ok {
+		return nil, false, fmt.Errorf("unexpected auth user type %T", authz.User)
+	}
+	return user, logOutIfMismatch(ctx, api, userID, cfg.WantTelegramID, user.ID), nil
 }
 
 // settleQRLogin decides what LoginQR's run leaves in the database. Only a

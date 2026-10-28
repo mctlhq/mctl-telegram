@@ -127,6 +127,23 @@ func TestEnablePhonePage_ExplainsPhoneStep(t *testing.T) {
 	}
 }
 
+// TestEnablePhonePage_WhyPhoneMentionsQROnlyWhenOffered: with the QR button
+// on the page, the phone-step explanation must not claim a login code to the
+// number is the only way to a session (#901).
+func TestEnablePhonePage_WhyPhoneMentionsQROnlyWhenOffered(t *testing.T) {
+	for _, offered := range []bool{false, true} {
+		rec := httptest.NewRecorder()
+		renderEnablePhone(rec, enablePhonePage{Issuer: "https://tg.test", EnableToken: "tok", QROffered: offered})
+		body := rec.Body.String()
+		if got := strings.Contains(body, "no number or login code is needed"); got != offered {
+			t.Errorf("QROffered=%v: QR alternative in the explanation = %v", offered, got)
+		}
+		if got := strings.Contains(body, "Use a QR code instead</button>"); got != offered {
+			t.Errorf("QROffered=%v: QR button present = %v", offered, got)
+		}
+	}
+}
+
 func TestConnectSuccessPage_FirstRequestHint(t *testing.T) {
 	rec := httptest.NewRecorder()
 	renderConnectSuccess(rec, connectSuccessPage{RedirectURL: "https://client.test/cb", AppName: "Claude", Nonce: "n"})
