@@ -103,18 +103,20 @@ func TestAuthCodeURL_BotAccessScope(t *testing.T) {
 	}
 }
 
-// T3: Exchange reports the grant signal from the token response scope only.
+// T3: Exchange reports the grant signal from the token response scope only,
+// and passes the raw scope through for logs.
 func TestExchange_BotAccessSignal(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		extra     map[string]any
 		requested bool
 		want      BotAccess
+		wantScope string
 	}{
-		{"granted", map[string]any{"scope": "openid profile telegram:bot_access"}, true, BotAccessGranted},
-		{"not granted", map[string]any{"scope": "openid profile"}, true, BotAccessNotGranted},
-		{"no scope field", nil, true, BotAccessUnknown},
-		{"not requested", map[string]any{"scope": "openid profile telegram:bot_access"}, false, BotAccessUnknown},
+		{"granted", map[string]any{"scope": "openid profile telegram:bot_access"}, true, BotAccessGranted, "openid profile telegram:bot_access"},
+		{"scope without bot access", map[string]any{"scope": "openid profile"}, true, BotAccessUnknown, "openid profile"},
+		{"no scope field", nil, true, BotAccessUnknown, ""},
+		{"not requested", map[string]any{"scope": "openid profile telegram:bot_access"}, false, BotAccessUnknown, "openid profile telegram:bot_access"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			issuer, nonce := fakeOP(t, tc.extra)
@@ -124,6 +126,9 @@ func TestExchange_BotAccessSignal(t *testing.T) {
 			}
 			if id.BotAccess != tc.want {
 				t.Errorf("BotAccess = %q, want %q", id.BotAccess, tc.want)
+			}
+			if id.ReportedScope != tc.wantScope {
+				t.Errorf("ReportedScope = %q, want %q", id.ReportedScope, tc.wantScope)
 			}
 		})
 	}
