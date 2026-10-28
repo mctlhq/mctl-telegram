@@ -274,6 +274,7 @@ func getUnreadMessagesWith(ctx context.Context, api *tg.Client, peerSpec string,
 
 	out := make([]Message, 0, limit)
 	rawOut := make([]*tg.Message, 0, limit)
+	var sponsoredQueried, sponsoredSkipped int
 	for _, t := range targets {
 		if len(out) >= limit {
 			break
@@ -297,12 +298,28 @@ func getUnreadMessagesWith(ctx context.Context, api *tg.Client, peerSpec string,
 		rawOut = append(rawOut, raw...)
 		if t.broadcast && len(decoded) > 0 {
 			if ch, ok := t.input.(*tg.InputPeerChannel); ok {
-				fetchSponsored(ctx, api, ch.ChannelID, t.input, len(decoded), sp)
+				if sponsoredQueried < maxSponsoredChannelsPerCall {
+					sponsoredQueried++
+					fetchSponsored(ctx, api, ch.ChannelID, t.input, len(decoded), sp)
+				} else {
+					// Not asked, so unknown: never "no ads".
+					sp.Unavailable = append(sp.Unavailable, fmt.Sprintf("channel:%d", ch.ChannelID))
+					sponsoredSkipped++
+				}
 			}
 		}
 	}
+	if sponsoredSkipped > 0 {
+		slog.Info("sponsored messages not fetched: per-call channel cap", "cap", maxSponsoredChannelsPerCall, "skipped", sponsoredSkipped)
+	}
 	return out, rawOut, sp, nil
 }
+
+// maxSponsoredChannelsPerCall bounds the messages.getSponsoredMessages calls
+// one unscoped get_unread_messages makes (issue #906): the calls are serial,
+// one per broadcast channel with posts in the result. Channels past the cap
+// still return their posts and are listed in Sponsored.Unavailable.
+const maxSponsoredChannelsPerCall = 10
 
 type unreadTarget struct {
 	input     tg.InputPeerClass

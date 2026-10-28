@@ -546,8 +546,8 @@ func TestReportSponsoredViews_OnlyReturnedItems(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if failed := reportSponsoredViewsWith(context.Background(), api, sp.Messages); failed != 0 {
-		t.Fatalf("failed = %d", failed)
+	if failed := reportSponsoredViewsWith(context.Background(), api, sp.Messages); len(failed) != 0 {
+		t.Fatalf("failed = %+v", failed)
 	}
 	if len(f.viewed) != 1 || string(f.viewed[0]) != string([]byte{0xa1, 0xa2}) {
 		t.Errorf("viewed = %x, want only the returned item a1a2, once", f.viewed)
@@ -564,8 +564,8 @@ func TestReportSponsoredViews_FailureCounted(t *testing.T) {
 	f, api := newFake()
 	f.viewErr = tgerr.New(500, "INTERNAL")
 	msgs := []SponsoredMessage{{Channel: "channel:1", randomID: []byte{1}}, {Channel: "channel:1", randomID: []byte{2}}}
-	if failed := reportSponsoredViewsWith(context.Background(), api, msgs); failed != 2 {
-		t.Errorf("failed = %d, want 2", failed)
+	if failed := reportSponsoredViewsWith(context.Background(), api, msgs); len(failed) != 2 {
+		t.Errorf("failed = %d items, want 2", len(failed))
 	}
 }
 
@@ -619,6 +619,37 @@ func TestFetchSponsored_RecommendedItemIsLabelledRecommended(t *testing.T) {
 	}
 	if sp.Messages[0].Label != SponsoredLabel || sp.Messages[1].Label != RecommendedLabel {
 		t.Errorf("labels = %q, %q; want %q, %q", sp.Messages[0].Label, sp.Messages[1].Label, SponsoredLabel, RecommendedLabel)
+	}
+}
+
+// Twelve broadcast channels with unread posts: an unscoped read asks for the
+// ads of the first maxSponsoredChannelsPerCall only, and lists the rest as
+// unavailable rather than ad-free (issue #906).
+func TestGetUnread_SponsoredFetchesCappedPerCall(t *testing.T) {
+	const n = maxSponsoredChannelsPerCall + 2
+	dl := &tg.MessagesDialogs{}
+	for i := 0; i < n; i++ {
+		id := int64(700100001 + i)
+		dl.Dialogs = append(dl.Dialogs, &tg.Dialog{Peer: &tg.PeerChannel{ChannelID: id}, UnreadCount: 1})
+		dl.Chats = append(dl.Chats, &tg.Channel{ID: id, AccessHash: id, Title: "Channel", Broadcast: true, Photo: &tg.ChatPhotoEmpty{}})
+	}
+	f := &fakeMTProto{dialogs: dl, sponsored: twoAds()}
+	msgs, _, sp, err := getUnreadMessagesWith(context.Background(), tg.NewClient(f), "", 50, BroadcastContentAllowed)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(msgs) != n {
+		t.Errorf("posts = %d, want one from each of the %d channels", len(msgs), n)
+	}
+	if len(f.sponsoredFor) != maxSponsoredChannelsPerCall {
+		t.Errorf("getSponsoredMessages calls = %d, want the cap %d", len(f.sponsoredFor), maxSponsoredChannelsPerCall)
+	}
+	if len(sp.Messages) != maxSponsoredChannelsPerCall {
+		t.Errorf("sponsored items = %d, want one per queried channel", len(sp.Messages))
+	}
+	want := []string{fmt.Sprintf("channel:%d", 700100001+n-2), fmt.Sprintf("channel:%d", 700100001+n-1)}
+	if fmt.Sprint(sp.Unavailable) != fmt.Sprint(want) {
+		t.Errorf("unavailable = %v, want the channels past the cap %v", sp.Unavailable, want)
 	}
 }
 

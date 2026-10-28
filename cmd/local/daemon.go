@@ -93,22 +93,74 @@ func addSponsored(resp map[string]any, sp *tg.Sponsored) {
 	}
 }
 
+// sponsoredViews de-duplicates the daemon's sponsored view reports, as the
+// hosted server does (issue #906): an item already reported within
+// tg.SponsoredViewTTL is not reported again when a channel is paged or
+// re-read.
+var sponsoredViews = tg.NewSponsoredViews(tg.SponsoredViewTTL)
+
+// sponsoredViewReporter sends the view reports for msgs and returns the
+// items whose report failed (all of them when no client could be borrowed).
+// Tests that reassign it must restore it via t.Cleanup.
+var sponsoredViewReporter = func(ctx context.Context, pool *tg.ClientPool, userID int64, msgs []tg.SponsoredMessage) ([]tg.SponsoredMessage, error) {
+	failed := msgs
+	err := pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
+		failed = tg.ReportSponsoredViews(ctx, c, msgs)
+		return nil
+	})
+	return failed, err
+}
+
 // reportSponsoredViews reports a view of each sponsored item a response
-// returned. Called only after the response encoded, so a failed call
-// reports nothing; a failed report never fails the call.
+// returned and that was not reported for userID within the TTL. Called only
+// after the response encoded, so a failed call reports nothing; a failed
+// report never fails the call, and its items are released to be reported on
+// the next read.
 func reportSponsoredViews(ctx context.Context, pool *tg.ClientPool, userID int64, sp *tg.Sponsored) {
 	if sp == nil || len(sp.Messages) == 0 {
 		return
 	}
-	failed := len(sp.Messages)
-	if err := pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
-		failed = tg.ReportSponsoredViews(ctx, c, sp.Messages)
-		return nil
-	}); err != nil {
-		slog.Warn("sponsored message views not reported", "count", len(sp.Messages), "err", err)
-	} else if failed > 0 {
-		slog.Warn("sponsored message views failed", "failed", failed, "count", len(sp.Messages))
+	due, claim := sponsoredViews.Claim(userID, sp.Messages)
+	if len(due) == 0 {
+		return
 	}
+	failed, err := sponsoredViewReporter(ctx, pool, userID, due)
+	sponsoredViews.Release(userID, claim, failed)
+	if err != nil {
+		slog.Warn("sponsored message views not reported", "count", len(due), "err", err)
+	} else if len(failed) > 0 {
+		slog.Warn("sponsored message views failed", "failed", len(failed), "count", len(due))
+	}
+}
+
+// broadcastArg is the broadcast_content argument the server adds to every
+// content read it forwards: its BROADCAST_CONTENT_ENABLED switch. Absent (an
+// older server) decodes as false, which refuses broadcast channels.
+type broadcastArg struct {
+	BroadcastContent bool `json:"broadcast_content"`
+}
+
+func (a broadcastArg) content() tg.BroadcastContent {
+	return tg.BroadcastContent(a.BroadcastContent)
+}
+
+type unreadArgs struct {
+	Peer  string `json:"peer"`
+	Limit int    `json:"limit"`
+	broadcastArg
+}
+
+type messagesArgs struct {
+	Peer     string `json:"peer"`
+	Limit    int    `json:"limit"`
+	BeforeID int    `json:"before_id"`
+	broadcastArg
+}
+
+type prepareMediaArgs struct {
+	Peer      string `json:"peer"`
+	MessageID int    `json:"message_id"`
+	broadcastArg
 }
 
 const (
@@ -725,14 +777,7 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 		}
 
 	case "get_unread_messages":
-		var args struct {
-			Peer  string `json:"peer"`
-			Limit int    `json:"limit"`
-			// BroadcastContent is the server's BROADCAST_CONTENT_ENABLED,
-			// set by the server on every call. Absent (an older server)
-			// means off: broadcast channels are refused.
-			BroadcastContent bool `json:"broadcast_content"`
-		}
+		var args unreadArgs
 		if err := json.Unmarshal(envArgs(env), &args); err != nil {
 			return bridge.EncodeError(env.ID, fmt.Sprintf("get_unread_messages: bad args: %v", err))
 		}
@@ -743,7 +788,7 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 		var sponsored *tg.Sponsored
 		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
 			var err error
-			msgs, sponsored, err = tg.GetUnreadMessages(ctx, c, args.Peer, args.Limit, tg.BroadcastContent(args.BroadcastContent))
+			msgs, sponsored, err = tg.GetUnreadMessages(ctx, c, args.Peer, args.Limit, args.content())
 			return err
 		})
 		if dispErr == nil {
@@ -759,12 +804,7 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 		}
 
 	case "get_messages":
-		var args struct {
-			Peer             string `json:"peer"`
-			Limit            int    `json:"limit"`
-			BeforeID         int    `json:"before_id"`
-			BroadcastContent bool   `json:"broadcast_content"` // see get_unread_messages
-		}
+		var args messagesArgs
 		if err := json.Unmarshal(envArgs(env), &args); err != nil {
 			return bridge.EncodeError(env.ID, fmt.Sprintf("get_messages: bad args: %v", err))
 		}
@@ -773,7 +813,7 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 		var sponsored *tg.Sponsored
 		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
 			var err error
-			msgs, nextBeforeID, sponsored, err = tg.GetMessages(ctx, c, args.Peer, args.Limit, args.BeforeID, nil, 0, tg.BroadcastContent(args.BroadcastContent))
+			msgs, nextBeforeID, sponsored, err = tg.GetMessages(ctx, c, args.Peer, args.Limit, args.BeforeID, nil, 0, args.content())
 			return err
 		})
 		if dispErr == nil {
@@ -883,11 +923,7 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 		}
 
 	case "prepare_get_media":
-		var args struct {
-			Peer             string `json:"peer"`
-			MessageID        int    `json:"message_id"`
-			BroadcastContent bool   `json:"broadcast_content"` // see get_unread_messages
-		}
+		var args prepareMediaArgs
 		if err := json.Unmarshal(envArgs(env), &args); err != nil {
 			return bridge.EncodeError(env.ID, fmt.Sprintf("prepare_get_media: bad args: %v", err))
 		}
@@ -898,7 +934,7 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 		var loc *tg.MediaFileLocation
 		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
 			var err error
-			info, loc, err = tg.PrepareMediaRef(ctx, c, args.Peer, args.MessageID, nil, 0, tg.BroadcastContent(args.BroadcastContent))
+			info, loc, err = tg.PrepareMediaRef(ctx, c, args.Peer, args.MessageID, nil, 0, args.content())
 			return err
 		})
 		if dispErr == nil {

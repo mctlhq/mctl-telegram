@@ -114,6 +114,9 @@ type Server struct {
 	// arguments. New turns it on; a bare &Server{} leaves it off, which
 	// refuses broadcast channels (fail closed). Set by WithBroadcastContent.
 	BroadcastContent telegram.BroadcastContent
+	// sponsoredViews de-duplicates sponsored view reports per user (issue
+	// #906). New sets it; nil reports every returned item.
+	sponsoredViews *telegram.SponsoredViews
 	// Replies holds draft_reply confirmations for send_reply (core-reply
 	// profile). nil makes both tools refuse.
 	Replies *ReplyStore
@@ -133,6 +136,7 @@ func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
 		Replies:    NewReplyStore(),
 
 		BroadcastContent: telegram.BroadcastContentAllowed,
+		sponsoredViews:   telegram.NewSponsoredViews(telegram.SponsoredViewTTL),
 	}
 }
 

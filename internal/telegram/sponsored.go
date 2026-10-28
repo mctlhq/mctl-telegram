@@ -121,23 +121,24 @@ type sponsoredViewer interface {
 // ReportSponsoredViews tells Telegram that each item in msgs was shown, with
 // one messages.viewSponsoredMessage call per item. Call it only with the
 // items a result actually returned, after that result is built, so a read
-// that failed afterwards reports nothing. It returns the number of reports
-// that failed; a failure is logged and never fails the read.
-func ReportSponsoredViews(ctx context.Context, c *gotdtelegram.Client, msgs []SponsoredMessage) int {
+// that failed afterwards reports nothing. It returns the items whose report
+// failed, so a caller that de-duplicates reports can let them be reported
+// again; a failure is logged and never fails the read.
+func ReportSponsoredViews(ctx context.Context, c *gotdtelegram.Client, msgs []SponsoredMessage) []SponsoredMessage {
 	if len(msgs) == 0 {
-		return 0
+		return nil
 	}
 	return reportSponsoredViewsWith(ctx, c.API(), msgs)
 }
 
-func reportSponsoredViewsWith(ctx context.Context, api sponsoredViewer, msgs []SponsoredMessage) int {
-	failed := 0
+func reportSponsoredViewsWith(ctx context.Context, api sponsoredViewer, msgs []SponsoredMessage) []SponsoredMessage {
+	var failed []SponsoredMessage
 	for _, m := range msgs {
 		if len(m.randomID) == 0 {
 			continue
 		}
 		if _, err := api.MessagesViewSponsoredMessage(ctx, m.randomID); err != nil {
-			failed++
+			failed = append(failed, m)
 			slog.Warn("sponsored message view not reported", "peer_redacted", RedactPeer(m.Channel), "err", err)
 		}
 	}

@@ -3,10 +3,12 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
@@ -96,9 +98,9 @@ func stubViewReporter(t *testing.T) *[][]telegram.SponsoredMessage {
 	t.Helper()
 	var calls [][]telegram.SponsoredMessage
 	orig := sponsoredViewReporter
-	sponsoredViewReporter = func(_ *Server, _ context.Context, _ int64, msgs []telegram.SponsoredMessage) (int, error) {
+	sponsoredViewReporter = func(_ *Server, _ context.Context, _ int64, msgs []telegram.SponsoredMessage) ([]telegram.SponsoredMessage, error) {
 		calls = append(calls, msgs)
-		return 0, nil
+		return nil, nil
 	}
 	t.Cleanup(func() { sponsoredViewReporter = orig })
 	return &calls
@@ -121,6 +123,51 @@ func TestReportSponsoredViews_OnlyForReturnedResult(t *testing.T) {
 	srv.reportSponsoredViews(context.Background(), "get_messages", 4242, spFixture(), ok)
 	if len(*calls) != 1 || len((*calls)[0]) != 1 || (*calls)[0][0].RandomID != "AQI=" {
 		t.Fatalf("views = %+v, want exactly the returned item, once", *calls)
+	}
+}
+
+// Paging or re-reading a channel serves the same ads; their views are
+// reported once per user within the TTL, and a report that failed is
+// reported again on the next read (issue #906).
+func TestReportSponsoredViews_DeduplicatedPerUser(t *testing.T) {
+	srv := New(nil, nil, false)
+	srv.Metrics = metrics.New()
+	ok := mcplib.NewToolResultText("{}")
+	var calls [][]telegram.SponsoredMessage
+	failNext := false
+	orig := sponsoredViewReporter
+	sponsoredViewReporter = func(_ *Server, _ context.Context, _ int64, msgs []telegram.SponsoredMessage) ([]telegram.SponsoredMessage, error) {
+		calls = append(calls, msgs)
+		if failNext {
+			failNext = false
+			return msgs, errors.New("borrow failed")
+		}
+		return nil, nil
+	}
+	t.Cleanup(func() { sponsoredViewReporter = orig })
+
+	srv.reportSponsoredViews(context.Background(), "get_messages", 4242, spFixture(), ok)
+	srv.reportSponsoredViews(context.Background(), "get_messages", 4242, spFixture(), ok)
+	if len(calls) != 1 {
+		t.Fatalf("view reports = %d, want 1 for the same item read twice", len(calls))
+	}
+	if got := testutil.ToFloat64(srv.Metrics.TelegramSponsoredTotal.WithLabelValues("get_messages", "view_deduplicated")); got != 1 {
+		t.Errorf("view_deduplicated = %v, want 1", got)
+	}
+
+	srv.reportSponsoredViews(context.Background(), "get_messages", 4343, spFixture(), ok)
+	if len(calls) != 2 {
+		t.Fatalf("view reports = %d, want another user's view reported", len(calls))
+	}
+
+	failNext = true
+	srv.reportSponsoredViews(context.Background(), "get_messages", 5151, spFixture(), ok)
+	srv.reportSponsoredViews(context.Background(), "get_messages", 5151, spFixture(), ok)
+	if len(calls) != 4 {
+		t.Fatalf("view reports = %d, want the failed report retried on the next read", len(calls))
+	}
+	if got := testutil.ToFloat64(srv.Metrics.TelegramSponsoredTotal.WithLabelValues("get_messages", "view_failed")); got != 1 {
+		t.Errorf("view_failed = %v, want 1", got)
 	}
 }
 

@@ -64,13 +64,14 @@ func (s *Server) attachSponsored(tool string, result *messagesResult, sp *telegr
 }
 
 // sponsoredViewReporter sends the messages.viewSponsoredMessage calls for
-// msgs and returns how many failed. Production code borrows a pooled client;
-// tests that reassign this package variable must restore it via t.Cleanup.
-var sponsoredViewReporter = func(s *Server, ctx context.Context, userID int64, msgs []telegram.SponsoredMessage) (int, error) {
+// msgs and returns the items whose report failed (all of them when no client
+// could be borrowed). Production code borrows a pooled client; tests that
+// reassign this package variable must restore it via t.Cleanup.
+var sponsoredViewReporter = func(s *Server, ctx context.Context, userID int64, msgs []telegram.SponsoredMessage) ([]telegram.SponsoredMessage, error) {
 	if s.Pool == nil {
-		return len(msgs), errors.New("no client pool")
+		return msgs, errors.New("no client pool")
 	}
-	failed := len(msgs)
+	failed := msgs
 	err := s.Pool.Borrow(ctx, userID, func(ctx context.Context, c *gotdtelegram.Client) error {
 		failed = telegram.ReportSponsoredViews(ctx, c, msgs)
 		return nil
@@ -78,20 +79,31 @@ var sponsoredViewReporter = func(s *Server, ctx context.Context, userID int64, m
 	return failed, err
 }
 
-// reportSponsoredViews reports a view of each sponsored item in sp, once per
-// item, but only when res is a successful result: the items were then
-// returned to the caller. A failed result reports nothing. Reporting never
-// changes res; a failure is logged and counted.
+// reportSponsoredViews reports a view of each sponsored item in sp, but only
+// when res is a successful result: the items were then returned to the
+// caller. A failed result reports nothing. An item whose view was reported
+// for this user within telegram.SponsoredViewTTL is not reported again, so
+// paging or re-reading a channel counts its ads once (issue #906); an item
+// whose report failed is released and reported on the next read. Reporting
+// never changes res; a failure is logged and counted.
 func (s *Server) reportSponsoredViews(ctx context.Context, tool string, userID int64, sp *telegram.Sponsored, res *mcplib.CallToolResult) {
 	if sp == nil || len(sp.Messages) == 0 || res == nil || res.IsError {
 		return
 	}
-	failed, err := sponsoredViewReporter(s, ctx, userID, sp.Messages)
+	due, claim := s.sponsoredViews.Claim(userID, sp.Messages)
+	if s.Metrics != nil {
+		s.Metrics.TelegramSponsoredTotal.WithLabelValues(tool, "view_deduplicated").Add(float64(len(sp.Messages) - len(due)))
+	}
+	if len(due) == 0 {
+		return
+	}
+	failed, err := sponsoredViewReporter(s, ctx, userID, due)
+	s.sponsoredViews.Release(userID, claim, failed)
 	if err != nil {
-		slog.Warn("sponsored message views not reported", "tool", tool, "user_id", userID, "count", len(sp.Messages), "err", err)
+		slog.Warn("sponsored message views not reported", "tool", tool, "user_id", userID, "count", len(due), "err", err)
 	}
 	if s.Metrics != nil {
-		s.Metrics.TelegramSponsoredTotal.WithLabelValues(tool, "viewed").Add(float64(len(sp.Messages) - failed))
-		s.Metrics.TelegramSponsoredTotal.WithLabelValues(tool, "view_failed").Add(float64(failed))
+		s.Metrics.TelegramSponsoredTotal.WithLabelValues(tool, "viewed").Add(float64(len(due) - len(failed)))
+		s.Metrics.TelegramSponsoredTotal.WithLabelValues(tool, "view_failed").Add(float64(len(failed)))
 	}
 }
