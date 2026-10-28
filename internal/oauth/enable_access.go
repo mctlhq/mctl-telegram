@@ -828,6 +828,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 			Phone:       es.phone,
 			WizardMode:  es.isWizardMode(),
 			WizardStep:  3,
+			QROffered:   es.qrOffered,
 		})
 		return
 	}
@@ -933,6 +934,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 			Phone:       phone,
 			WizardMode:  es.isWizardMode(),
 			WizardStep:  3,
+			QROffered:   es.qrOffered,
 		})
 	case <-lf.done:
 		if lf.err != nil {
@@ -1058,6 +1060,7 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 			Phone:       es.phone,
 			WizardMode:  es.isWizardMode(),
 			WizardStep:  3,
+			QROffered:   es.qrOffered,
 			Error:       "Enter the code Telegram sent you.",
 		})
 		return
@@ -1089,6 +1092,7 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 			Phone:       es.phone,
 			WizardMode:  es.isWizardMode(),
 			WizardStep:  3,
+			QROffered:   es.qrOffered,
 			Error:       codeRepromptMsg(rp),
 		})
 	case <-lf.needPw:
@@ -1206,6 +1210,7 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 			Phone:       es.phone,
 			WizardMode:  es.isWizardMode(),
 			WizardStep:  3,
+			QROffered:   es.qrOffered,
 			Error:       codeRepromptMsg(rp),
 		})
 	case rp := <-lf.needPw:
