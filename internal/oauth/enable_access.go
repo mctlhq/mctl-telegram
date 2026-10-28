@@ -505,6 +505,13 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 		// The session is now legitimately the user's: the defer must not
 		// log it out.
 		lf.heldSession = nil
+		// A pooled client of this user still runs on the row just
+		// superseded, and Borrow would keep handing it out (a listener's
+		// indefinitely). Stop it before the old key is logged out below, so
+		// the next call loads the new row instead of failing on a dead key.
+		if s.evictPooledClient != nil {
+			s.evictPooledClient(uid)
+		}
 		// A re-login to the same account started from a fresh auth key
 		// (#913), so the key of the row it just superseded is held by
 		// nobody any more. Before #913 the phone login reused that key; now

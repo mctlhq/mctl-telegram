@@ -162,6 +162,11 @@ type Server struct {
 	// logOutSessionFn, when set, replaces telegram.LogOutSession for
 	// logging out a held QR session the flow no longer wants (#919).
 	logOutSessionFn func(ctx context.Context, data []byte) error
+	// evictPooledClient, when set, stops the user's pooled Telegram client
+	// (telegram.ClientPool.Close). A sign-in calls it once its row is saved,
+	// so no client keeps running on the superseded row and its key (#913).
+	// Assigned at startup, before any flow runs.
+	evictPooledClient func(uid int64)
 	// bgLogOuts tracks the superseded-key logouts a finished sign-in leaves
 	// running in the background, so tests can wait for them.
 	bgLogOuts sync.WaitGroup
@@ -222,6 +227,14 @@ type metricsIface interface {
 // Returns the receiver for chaining.
 func (s *Server) WithMetrics(m metricsIface) *Server {
 	s.metrics = m
+	return s
+}
+
+// WithPooledClientEvictor sets the function a completed sign-in calls to stop
+// the user's pooled Telegram client, which still runs on the row the sign-in
+// superseded. Returns the receiver for chaining.
+func (s *Server) WithPooledClientEvictor(evict func(uid int64)) *Server {
+	s.evictPooledClient = evict
 	return s
 }
 

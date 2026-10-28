@@ -910,6 +910,46 @@ func TestEnableAccess_ReLoginLogsOutTheSupersededKey(t *testing.T) {
 	}
 }
 
+// TestEnableAccess_ReLoginEvictsThePooledClientFirst: a pooled client still
+// running on the superseded row would hit the old key's logout on its next
+// call. The sign-in stops it once the new row is saved and before any logout
+// of the old key starts, and only for the signed-in user.
+func TestEnableAccess_ReLoginEvictsThePooledClientFirst(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	var mu sync.Mutex
+	var evicted []int64
+	logOutBeforeEvict := false
+	srv.WithPooledClientEvictor(func(uid int64) {
+		mu.Lock()
+		defer mu.Unlock()
+		evicted = append(evicted, uid)
+	})
+	srv.logOutSessionFn = func(context.Context, []byte) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(evicted) == 0 {
+			logOutBeforeEvict = true
+		}
+		return nil
+	}
+	es := driveToPhone(t, mux)
+	uid := seedExistingSession(t, srv)
+
+	if loc := authCodeRedirect(t, signInByPhone(t, mux, es)); loc.Query().Get("code") == "" {
+		t.Fatalf("no authorization code in %s", loc)
+	}
+	srv.bgLogOuts.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(evicted) != 1 || evicted[0] != uid {
+		t.Errorf("evicted = %v, want [%d]", evicted, uid)
+	}
+	if logOutBeforeEvict {
+		t.Error("the old key was logged out while the pooled client still ran on it")
+	}
+}
+
 // TestEnableAccess_SupersededLogOutFailureKeepsTheSignIn: the old key's
 // logout is best effort. When Telegram refuses it, the sign-in still
 // completes, and the failure is counted rather than surfaced.

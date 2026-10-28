@@ -89,6 +89,17 @@ var ErrSessionRetiring = errors.New("telegram: session is being retired")
 // clean revoke.
 var ErrSessionRevokePersistFailed = errors.New("telegram: session rejected but revoke could not be persisted")
 
+// ErrStaleSession is returned by Borrow when Telegram rejected the auth key of
+// a pooled client whose row was no longer active: a newer sign-in had already
+// replaced it (and may have logged its key out, #913), or the user
+// disconnected. Nothing is revoked, the stale client is evicted, and a retry
+// loads whatever row is active now.
+var ErrStaleSession = errors.New("telegram: the connection used a session that is no longer active; retry the call")
+
+// errLoadedRowUnknown: Telegram rejected a pooled client's key, but which row
+// that client loaded is unknown, so no row may be revoked for it.
+var errLoadedRowUnknown = errors.New("loaded session row unknown")
+
 const asyncSessionRevokeTimeout = 5 * time.Second
 
 // ClientPool keeps one running gotd telegram.Client per user_id. Each entry has
@@ -281,7 +292,8 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 			// a startup-time AUTH_KEY_UNREGISTERED / SESSION_REVOKED never
 			// reaches the post-fn classifier below, so classify it here too.
 			if sentinel := sessionErrorFor(e.runErr); sentinel != nil && p.Store != nil {
-				if rErr := p.revokeRejected(ctx, userID, e.runErr); rErr != nil {
+				revoked, rErr := p.revokeRejected(ctx, userID, e, e.runErr)
+				if rErr != nil {
 					slog.Error("telegram session rejected at startup, revoke failed", "user_id", userID, "err", rErr)
 					if p.metrics != nil {
 						p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
@@ -293,6 +305,13 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 					// be loadable. This still marks the failure as call-wide
 					// for isSystemicPoolErr without claiming a clean revoke.
 					return fmt.Errorf("revoke rejected session: %w: %w", ErrSessionRevokePersistFailed, rErr)
+				}
+				if !revoked {
+					slog.Warn("telegram session rejected at startup on a row no longer active", "user_id", userID, "err", e.runErr)
+					if p.metrics != nil {
+						p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
+					}
+					return fmt.Errorf("%w: %v", ErrStaleSession, e.runErr)
 				}
 				slog.Warn("telegram session rejected at startup, revoked", "user_id", userID, "err", e.runErr)
 				if p.metrics != nil {
@@ -327,7 +346,8 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 		// enable_access instead of reloading a dead session. If the revoke
 		// fails the row is still loadable, so do NOT report recovery — the
 		// caller must not loop the user through reauth against a dead row.
-		if rErr := p.revokeRejected(ctx, userID, callErr); rErr != nil {
+		revoked, rErr := p.revokeRejected(ctx, userID, e, callErr)
+		if rErr != nil {
 			slog.Error("telegram session rejected, revoke failed", "user_id", userID, "err", rErr)
 			if p.metrics != nil {
 				p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
@@ -339,6 +359,13 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 			// (attempted=true) must abort rather than fold this into
 			// Skipped — without claiming a clean revoke to the user.
 			return fmt.Errorf("revoke rejected session: %w: %w", ErrSessionRevokePersistFailed, rErr)
+		}
+		if !revoked {
+			slog.Warn("telegram session rejected on a row no longer active", "user_id", userID, "err", callErr)
+			if p.metrics != nil {
+				p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
+			}
+			return fmt.Errorf("%w: %v", ErrStaleSession, callErr)
 		}
 		slog.Warn("telegram session rejected, revoked", "user_id", userID, "err", callErr)
 		if p.metrics != nil {
@@ -401,19 +428,43 @@ func borrowCallResult(err error) string {
 	return "error"
 }
 
-// revokeRejected evicts the pool entry and revokes the DB session for a user
-// whose stored session Telegram rejected. The eviction and the DB revoke run
-// under the same mutex acquire() takes, so a concurrent reconnect cannot
-// reload the dead session. context.WithoutCancel keeps the revoke alive even
-// if the request context is already done. Returns nil when the row was
-// revoked; a non-nil error means the revoke failed and the row may still be
-// loadable.
-func (p *ClientPool) revokeRejected(ctx context.Context, userID int64, cause error) error {
+// revokeRejected evicts e and revokes the row e loaded, after Telegram
+// rejected that row's auth key. Only that row: a newer sign-in may already
+// have saved a replacement row, and once it logs the superseded key out
+// (#913) the stale client's next call fails exactly like this, so revoking
+// every active row of the user would end the session the user just created.
+// finishRun does the same for exits after Borrow returned.
+//
+// The eviction and the revoke run under the mutex acquire() takes, so a
+// concurrent reconnect cannot reload the dead row; a replacement entry already
+// installed for the user is left alone. context.WithoutCancel keeps the revoke
+// alive even if the request context is already done.
+//
+// revoked reports whether the row was still active and is now revoked; false
+// with a nil error means it was no longer active (replaced or disconnected).
+// A non-nil error means the revoke failed, or the row is unknown, and the
+// dead row may still be loadable.
+func (p *ClientPool) revokeRejected(ctx context.Context, userID int64, e *entry, cause error) (revoked bool, err error) {
 	revokeCtx := context.WithoutCancel(ctx)
-	return p.RemoveAtomic(userID, func() error {
-		_, rErr := p.Store.RevokeActiveSessionDetail(revokeCtx, userID, "unauthorized", sessionErrorDetail(cause))
-		return rErr
-	})
+	rowID := int64(0)
+	if e.sessionStore != nil {
+		rowID = e.sessionStore.LoadedRowID()
+	}
+	p.mu.Lock()
+	if current, ok := p.entries[userID]; ok && current == e {
+		delete(p.entries, userID)
+	}
+	e.stopped = true
+	if rowID == 0 {
+		err = errLoadedRowUnknown
+	} else {
+		revoked, err = p.Store.RevokeSessionByID(revokeCtx, userID, rowID, "unauthorized", sessionErrorDetail(cause))
+	}
+	p.mu.Unlock()
+	if e.cancel != nil {
+		e.cancel()
+	}
+	return revoked, err
 }
 
 func (p *ClientPool) acquire(userID int64) (*entry, error) {

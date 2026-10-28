@@ -1051,26 +1051,24 @@ func (s *Store) UpdateSessionBlobByID(ctx context.Context, userID, sessionID int
 	return nil
 }
 
-// RevokeActiveSession marks the active telegram_accounts row for a user as
+// RevokeActiveSession marks every active telegram_accounts row of a user as
 // revoked. Returns true if a row was actually flipped. Idempotent: calling
 // it twice in a row only flips the first time.
 //
+// It is for a user's own decision to end their connection: reason
+// "disconnect" (self-service disconnect MCP tool / HTTP endpoint, admin
+// disconnect). Anything that revokes because of what one row did -- Telegram
+// rejecting the key a client loaded, a TTL gate -- uses RevokeSessionByID
+// instead: a sign-in can commit a fresh row at any moment, and a user-wide
+// revoke would end it too (#913).
+//
 // reason is recorded in mctl_sessions_revoked_total{reason} when a metrics
-// registry is wired. Callers should pass one of: "disconnect" (self-service
-// disconnect MCP tool / HTTP endpoint), "idle_expiry" (CheckSessionValid idle
-// TTL gate), "absolute_expiry" (CheckSessionValid absolute TTL gate).
+// registry is wired.
 func (s *Store) RevokeActiveSession(ctx context.Context, userID int64, reason string) (bool, error) {
-	return s.RevokeActiveSessionDetail(ctx, userID, reason, "")
-}
-
-// RevokeActiveSessionDetail is RevokeActiveSession that also records detail
-// in revoked_detail, e.g. the Telegram error type behind an 'unauthorized'
-// revoke. An empty detail is stored as NULL.
-func (s *Store) RevokeActiveSessionDetail(ctx context.Context, userID int64, reason, detail string) (bool, error) {
 	res, err := s.DB.ExecContext(ctx,
-		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = $2, revoked_detail = $3
+		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = $2
 		 WHERE user_id = $1 AND revoked_at IS NULL`,
-		userID, nullable(reason), nullable(detail),
+		userID, nullable(reason),
 	)
 	if err != nil {
 		return false, fmt.Errorf("revoke session: %w", err)
@@ -1645,16 +1643,17 @@ const (
 // telegram.ClientPool.Borrow.
 func (s *Store) CheckSessionValid(ctx context.Context, userID int64) (SessionExpiryReason, error) {
 	var (
+		rowID    int64
 		lastUsed sql.NullTime
 		expires  sql.NullTime
 		tgUserID sql.NullInt64
 	)
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT last_used_at, expires_at, telegram_user_id FROM telegram_accounts
+		`SELECT id, last_used_at, expires_at, telegram_user_id FROM telegram_accounts
 		 WHERE user_id = $1 AND revoked_at IS NULL
 		 ORDER BY connected_at DESC, id DESC LIMIT 1`,
 		userID,
-	).Scan(&lastUsed, &expires, &tgUserID)
+	).Scan(&rowID, &lastUsed, &expires, &tgUserID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNoActiveSession
 	}
@@ -1662,6 +1661,9 @@ func (s *Store) CheckSessionValid(ctx context.Context, userID int64) (SessionExp
 		return "", fmt.Errorf("check session: %w", err)
 	}
 	now := time.Now().UTC()
+	// Each revoke below names the row this check read, never every active
+	// row of the user: a sign-in that commits between the read and the
+	// revoke inserts a fresh row, which a user-wide revoke would end (#913).
 	// telegram_user_id is NULL only on rows the gotd SessionStore inserted
 	// mid-login that enable_access never finalised with SaveSession. Such a
 	// session carries MTProto bytes but no completed user authorization, so
@@ -1677,17 +1679,17 @@ func (s *Store) CheckSessionValid(ctx context.Context, userID int64) (SessionExp
 		// 'login_incomplete', not 'unauthorized': Telegram never rejected
 		// anything here, and counting abandoned logins as rejected sessions
 		// hid the few real server-side kills among them.
-		if _, rErr := s.RevokeActiveSession(context.WithoutCancel(ctx), userID, "login_incomplete"); rErr != nil {
+		if _, rErr := s.RevokeSessionByID(context.WithoutCancel(ctx), userID, rowID, "login_incomplete", ""); rErr != nil {
 			return "", fmt.Errorf("revoke unauthorized session: %w", rErr)
 		}
 		return "", ErrSessionUnauthorized
 	}
 	if expires.Valid && expires.Time.Before(now) {
-		_, _ = s.RevokeActiveSession(ctx, userID, "absolute_expiry")
+		_, _ = s.RevokeSessionByID(ctx, userID, rowID, "absolute_expiry", "")
 		return ReasonAbsolute, fmt.Errorf("%w: %s", ErrSessionExpired, ReasonAbsolute)
 	}
 	if lastUsed.Valid && !s.ttlExempt[tgUserID.Int64] && now.Sub(lastUsed.Time) > idleSessionTTL {
-		_, _ = s.RevokeActiveSession(ctx, userID, "idle_expiry")
+		_, _ = s.RevokeSessionByID(ctx, userID, rowID, "idle_expiry", "")
 		return ReasonIdle, fmt.Errorf("%w: %s", ErrSessionExpired, ReasonIdle)
 	}
 	return "", nil
