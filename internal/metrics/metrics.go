@@ -54,7 +54,8 @@ type Registry struct {
 	// Session lifecycle.
 	SessionsConnectedTotal prometheus.Counter
 	// SessionsRevokedTotal is labeled by reason: "disconnect", "delete",
-	// "idle_expiry", "absolute_expiry".
+	// "idle_expiry", "absolute_expiry", "unauthorized" (Telegram rejected
+	// the auth key), "login_incomplete" (a login that never finished).
 	SessionsRevokedTotal *prometheus.CounterVec
 	// BotUpdatesTotal counts inbound login-bot updates by kind and outcome
 	// (issue-619). This is how "dropped safely and counted, not logged with

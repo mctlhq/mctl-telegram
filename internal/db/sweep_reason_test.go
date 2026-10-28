@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 )
@@ -87,5 +88,67 @@ func TestSweepAbsoluteSessionsStampsReason(t *testing.T) {
 	}
 	if reason.String != "absolute_expiry" {
 		t.Errorf("revoked_reason = %q, want absolute_expiry", reason.String)
+	}
+}
+
+// A row a login never finished (telegram_user_id NULL) is revoked as
+// login_incomplete, not unauthorized: Telegram rejected nothing, and mixing
+// the two hid the few real server-side kills among abandoned logins.
+func TestCheckSessionValidIncompleteLoginStampsReason(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUser(ctx, "incomplete-login-reason", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, session_encrypted) VALUES($1,$2)`, uid, []byte("blob"),
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := s.CheckSessionValid(ctx, uid); !errors.Is(err, ErrSessionUnauthorized) {
+		t.Fatalf("CheckSessionValid = %v, want ErrSessionUnauthorized", err)
+	}
+	var reason, detail sql.NullString
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT revoked_reason, revoked_detail FROM telegram_accounts WHERE user_id = $1`, uid,
+	).Scan(&reason, &detail); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if reason.String != "login_incomplete" {
+		t.Errorf("revoked_reason = %q, want login_incomplete", reason.String)
+	}
+	if detail.Valid {
+		t.Errorf("revoked_detail = %q, want NULL", detail.String)
+	}
+}
+
+// The Telegram error type behind an 'unauthorized' revoke is kept on the row;
+// before revoked_detail it survived only in logs.
+func TestRevokeSessionByIDStoresDetail(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUser(ctx, "revoke-detail", "", "test")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	var rowID int64
+	if err := s.DB.QueryRowContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted) VALUES($1,$2,$3) RETURNING id`,
+		uid, 500100107, []byte("blob"),
+	).Scan(&rowID); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if ok, err := s.RevokeSessionByID(ctx, uid, rowID, "unauthorized", "AUTH_KEY_UNREGISTERED"); err != nil || !ok {
+		t.Fatalf("RevokeSessionByID = %v, %v", ok, err)
+	}
+	var detail sql.NullString
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT revoked_detail FROM telegram_accounts WHERE id = $1`, rowID,
+	).Scan(&detail); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if detail.String != "AUTH_KEY_UNREGISTERED" {
+		t.Errorf("revoked_detail = %q, want AUTH_KEY_UNREGISTERED", detail.String)
 	}
 }

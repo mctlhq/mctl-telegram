@@ -129,7 +129,9 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 	// revoked_reason (issue-668): names why a session was revoked, surfaced
 	// by the daily digest's onboarding-stage suffix. Values written today:
 	// 'disconnect' and 'unauthorized' (RevokeActiveSession / RevokeSessionByID
-	// callers), 'superseded' (SaveSession, on the rows a fresh login
+	// callers; 'unauthorized' = Telegram rejected the auth key),
+	// 'login_incomplete' (CheckSessionValid, on a row a login never
+	// finished), 'superseded' (SaveSession, on the rows a fresh login
 	// replaces), 'idle_expiry' and 'absolute_expiry' (the two TTL sweeps).
 	// This set overlaps the SessionsRevokedTotal metric label but neither
 	// contains the other: 'delete' is a metric label with no row to carry it
@@ -139,6 +141,15 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 	// path that names no reason", which is a true statement — the same
 	// convention call_path above already uses.
 	if err := addColumnIfMissing(ctx, dbConn, pg, "telegram_accounts", "revoked_reason",
+		"TEXT", "TEXT"); err != nil {
+		return err
+	}
+	// revoked_detail: the Telegram error type behind an 'unauthorized'
+	// revoke (AUTH_KEY_UNREGISTERED, SESSION_REVOKED, ...). Before it existed
+	// the type survived only in logs, so a session killed by Telegram could
+	// not be told apart from one the user terminated once Loki's retention
+	// had passed. NULL for every other reason.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "telegram_accounts", "revoked_detail",
 		"TEXT", "TEXT"); err != nil {
 		return err
 	}
@@ -765,7 +776,8 @@ func sqliteSchema() []string {
 			last_used_at DATETIME,
 			expires_at DATETIME,
 			mode TEXT NOT NULL DEFAULT 'hosted',
-			revoked_reason TEXT
+			revoked_reason TEXT,
+			revoked_detail TEXT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_telegram_accounts_user_active ON telegram_accounts(user_id) WHERE revoked_at IS NULL`,
 		`CREATE TABLE IF NOT EXISTS audit_logs (
@@ -1048,7 +1060,8 @@ func pgSchema() []string {
 			last_used_at TIMESTAMPTZ,
 			expires_at TIMESTAMPTZ,
 			mode TEXT NOT NULL DEFAULT 'hosted',
-			revoked_reason TEXT
+			revoked_reason TEXT,
+			revoked_detail TEXT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_telegram_accounts_user_active ON telegram_accounts(user_id) WHERE revoked_at IS NULL`,
 		`CREATE TABLE IF NOT EXISTS audit_logs (
