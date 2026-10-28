@@ -55,6 +55,13 @@ type qrStub struct {
 	// beforeReturn, when set, runs on a released login right before it
 	// returns.
 	beforeReturn func()
+	// pwBeforeScanHook, when set, asks for the password before reporting
+	// the scan: the token import beat the update goroutine's hook.
+	pwBeforeScanHook bool
+	// afterScan, when set, holds the login right after the scan is reported
+	// (LoginConfig.OnQRScanned) until it is closed or the context ends: the
+	// import and the account check still running (#931).
+	afterScan chan struct{}
 
 	calls   atomic.Int32
 	writes  atomic.Int32
@@ -121,10 +128,27 @@ func (q *qrStub) fn() QRLoginFunc {
 			}
 			return 0, "", "", ctx.Err()
 		}
+		if cfg.OnQRScanned != nil && !q.pwBeforeScanHook {
+			cfg.OnQRScanned()
+		}
+		if q.afterScan != nil {
+			select {
+			case <-q.afterScan:
+			case <-ctx.Done():
+				return 0, "", "", fmt.Errorf("qr login: %w", ctx.Err())
+			}
+		}
 		if q.err != nil {
 			return 0, "", "", q.err
 		}
 		if q.needPw {
+			if q.pwBeforeScanHook {
+				// The prompt is up; the hook lands while the user types.
+				go func() {
+					time.Sleep(10 * time.Millisecond)
+					cfg.OnQRScanned()
+				}()
+			}
 			if _, err := askPassword(ctx); err != nil {
 				return 0, "", "", err
 			}
@@ -1018,5 +1042,104 @@ func TestRenderQRSVG_CarriesNoToken(t *testing.T) {
 		if strings.Contains(svg, leak) {
 			t.Errorf("SVG contains %q", leak)
 		}
+	}
+}
+
+// TestEnableQR_ConnectingPageAfterScan (#931): once Telegram reports the
+// code scanned and confirmed, the status page stops showing the spent code
+// and says the session is being connected, then finishes the sign-in as
+// before.
+func TestEnableQR_ConnectingPageAfterScan(t *testing.T) {
+	q := newQRStub(500100101)
+	q.afterScan = make(chan struct{})
+	srv, mux := newQRTestServer(t, q, true)
+	es, _ := driveToPhoneAs(t, mux, desktopUA)
+
+	c := startQR(t, mux, es)
+	pollQRStatus(t, mux, c, "<svg")
+	close(q.scan)
+	rec := pollQRStatus(t, mux, c, "Confirmed in Telegram")
+	page := rec.Body.String()
+	if strings.Contains(page, "<svg") {
+		t.Error("connecting page still draws the spent QR code")
+	}
+	if !strings.Contains(page, `http-equiv="refresh" content="1"`) {
+		t.Error("connecting page does not refresh itself every second")
+	}
+	if !strings.Contains(page, `role="status"`) {
+		t.Error("connecting page has no status region")
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("connecting page Cache-Control = %q, want no-store", cc)
+	}
+
+	close(q.afterScan)
+	waitForFlowDone(t, getEnableSession(t, srv, es).flowForTest(), 3*time.Second)
+	if body := getQRStatus(t, mux, c).Body.String(); !strings.Contains(body, "code=") {
+		t.Errorf("no authorization code after the connecting page: %s", body)
+	}
+}
+
+// TestEnableQR_StalledConnectFails (#931): the connecting page must not
+// become an endless spinner. Work after a confirmed scan that does not
+// finish within the stall bound fails the flow with a message that says so,
+// counted as an error, not an abandonment.
+func TestEnableQR_StalledConnectFails(t *testing.T) {
+	q := newQRStub(500100101)
+	q.afterScan = make(chan struct{}) // never closed
+	srv, mux := newQRTestServer(t, q, true)
+	srv.qrStallWait = 50 * time.Millisecond
+	m := &flowMetrics{}
+	srv.WithMetrics(m)
+	es, _ := driveToPhoneAs(t, mux, desktopUA)
+
+	c := startQR(t, mux, es)
+	pollQRStatus(t, mux, c, "<svg")
+	close(q.scan)
+	rec := pollQRStatus(t, mux, c, "connecting the session took too long")
+	if !strings.Contains(rec.Body.String(), "Sign in with a QR code") {
+		t.Error("the failure page offers no new QR code")
+	}
+	if got := m.snapshot(); len(got) != 1 || got[0] != "qr/error" {
+		t.Errorf("login flow metrics = %v, want [qr/error]", got)
+	}
+	audit := strings.Join(auditRows(t, srv), "\n")
+	if !strings.Contains(audit, "connect:failed:qr_connect_stalled|qr|") {
+		t.Errorf("no qr_connect_stalled failure row in:\n%s", audit)
+	}
+}
+
+// TestEnableQR_PasswordStopsTheStallClock (#931): a 2FA account is asked for
+// its password after the scan. A user typing it must not hit the connect
+// stall bound.
+func TestEnableQR_PasswordStopsTheStallClock(t *testing.T) {
+	for _, hookLate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("hook_after_prompt=%v", hookLate), func(t *testing.T) {
+			testPasswordStopsTheStallClock(t, hookLate)
+		})
+	}
+}
+
+// testPasswordStopsTheStallClock is TestEnableQR_PasswordStopsTheStallClock
+// with the scan hook landing before the password prompt or, when hookLate,
+// after it (#934 review).
+func testPasswordStopsTheStallClock(t *testing.T, hookLate bool) {
+	q := newQRStub(500100101)
+	q.needPw = true
+	q.pwBeforeScanHook = hookLate
+	srv, mux := newQRTestServer(t, q, true)
+	srv.qrStallWait = 50 * time.Millisecond
+	es, _ := driveToPhoneAs(t, mux, desktopUA)
+
+	c := startQR(t, mux, es)
+	pollQRStatus(t, mux, c, "<svg")
+	close(q.scan)
+	pollQRStatus(t, mux, c, "/oauth/telegram/enable_access/password")
+	time.Sleep(4 * srv.qrStallWait)
+
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/password",
+		url.Values{"es": {es}, "password": {"hunter2"}})
+	if loc := authCodeRedirect(t, rec); loc.Query().Get("code") == "" {
+		t.Fatalf("no authorization code in %s", loc)
 	}
 }

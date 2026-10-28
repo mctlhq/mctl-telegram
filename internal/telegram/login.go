@@ -48,6 +48,13 @@ type LoginConfig struct {
 	// once Telegram has accepted the scan (and the 2FA password, if any),
 	// before the account check and the session write. Login ignores it.
 	OnQRAccepted func()
+	// OnQRScanned, when non-nil, is called by LoginQR once, on the update
+	// goroutine, when Telegram reports that the code was scanned and the
+	// login confirmed on another device (updateLoginToken). That is before
+	// the token is imported, the 2FA password asked and the account checked,
+	// so it means "confirmed in Telegram", not "signed in". It must not
+	// block. Login ignores it.
+	OnQRScanned func()
 	// HoldSession, when non-nil, receives the session bytes of a Login or
 	// LoginQR that signed in to the expected account, in place of the
 	// database write. The caller then writes them together with the account

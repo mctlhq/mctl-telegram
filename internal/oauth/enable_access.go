@@ -159,6 +159,12 @@ type loginFlow struct {
 	// after the needPw signal is buffered. The status page reads it, never
 	// step, which is not safe to read from a handler.
 	qrScanned atomic.Bool
+	// qrConfirmedAt is when Telegram reported the QR code scanned and the
+	// login confirmed on the phone (LoginConfig.OnQRScanned), as UnixNano;
+	// zero before that. The status page reads it to show the connecting
+	// state instead of a code that was already used (#931), and the flow's
+	// logs use it to time the work after the scan.
+	qrConfirmedAt atomic.Int64
 	// heldSession is the session the login hands over through
 	// LoginConfig.HoldSession instead of writing it (#919, #913).
 	// Written and read only by the flow's own goroutine.
@@ -332,9 +338,11 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 			elapsed := time.Since(started).String()
 			switch {
 			case lf.err == nil:
-				slog.Info("enable: telegram login succeeded",
-					"uid", uid, "tg_id", lf.tgUserID,
-					"elapsed", elapsed)
+				attrs := []any{"uid", uid, "tg_id", lf.tgUserID, "elapsed", elapsed}
+				if at := lf.qrConfirmedAt.Load(); at != 0 {
+					attrs = append(attrs, "since_qr_confirmed", time.Since(time.Unix(0, at)).String())
+				}
+				slog.Info("enable: telegram login succeeded", attrs...)
 			case lf.superseded.Load() && isAbandonment(lf.err):
 				// A later /start re-submission cancelled this flow — the user
 				// started over, not walked away. INFO, not an error: this is
@@ -1443,6 +1451,9 @@ func shortReason(err error) string {
 	}
 	if errors.Is(err, telegram.ErrQRLoginExpired) {
 		return "qr_expired"
+	}
+	if errors.Is(err, errQRConnectStalled) {
+		return "qr_connect_stalled"
 	}
 	var rpcErr *tgerr.Error
 	if errors.As(err, &rpcErr) {
