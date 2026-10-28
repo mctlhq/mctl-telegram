@@ -57,12 +57,13 @@ const (
 	BotAccessUnknown BotAccess = "unknown"
 	// BotAccessGranted means the reported scope includes telegram:bot_access.
 	BotAccessGranted BotAccess = "granted"
-	// BotAccessNotGranted means a scope was reported and excludes it.
-	BotAccessNotGranted BotAccess = "not_granted"
 )
 
 // parseBotAccess interprets the token response "scope" value. Absence of
-// information is unknown, never granted.
+// information is unknown, never granted. A scope that omits
+// telegram:bot_access is unknown too, not a refusal: Telegram does not echo
+// the grant there (the user allowed messages on preview and the scope still
+// lacked it, #930), and it documents no refusal signal at all.
 func parseBotAccess(raw any, requested bool) BotAccess {
 	if !requested {
 		return BotAccessUnknown
@@ -80,7 +81,20 @@ func parseBotAccess(raw any, requested bool) BotAccess {
 			return BotAccessGranted
 		}
 	}
-	return BotAccessNotGranted
+	return BotAccessUnknown
+}
+
+// maxReportedScopeLen caps the provider-controlled scope string kept for logs.
+const maxReportedScopeLen = 256
+
+// reportedScope returns the token response "scope" value as a string for
+// diagnostics, or "" when it is absent or not a string.
+func reportedScope(raw any) string {
+	s, _ := raw.(string)
+	if len(s) > maxReportedScopeLen {
+		s = s[:maxReportedScopeLen]
+	}
+	return s
 }
 
 // Identity is the authenticated Telegram user extracted from a verified
@@ -98,6 +112,8 @@ type Identity struct {
 	// BotAccess is the telegram:bot_access grant signal from the token
 	// response; the zero value is treated like BotAccessUnknown.
 	BotAccess BotAccess
+	// ReportedScope is the raw token response "scope" value, for logs only.
+	ReportedScope string
 }
 
 // Authenticator is the behaviour internal/oauth depends on. A real *Client
@@ -245,6 +261,7 @@ func (c *Client) Exchange(ctx context.Context, code, codeVerifier, expectedNonce
 		return nil, err
 	}
 	ident.BotAccess = parseBotAccess(tok.Extra("scope"), c.botAccessRequested)
+	ident.ReportedScope = reportedScope(tok.Extra("scope"))
 	return ident, nil
 }
 

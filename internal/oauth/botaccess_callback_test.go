@@ -28,10 +28,10 @@ func signInWithBotAccess(t *testing.T, srv *Server, mux *mockRouter, signal tele
 	return uid
 }
 
-// T9: only an observed grant writes a reachability row; unknown, not_granted
+// T9: only an observed grant writes a reachability row; unknown
 // and the zero value complete sign-in and write nothing.
 func TestTelegramCallback_BotAccessGrantRecorded(t *testing.T) {
-	for _, signal := range []telegramoidc.BotAccess{"", telegramoidc.BotAccessUnknown, telegramoidc.BotAccessNotGranted} {
+	for _, signal := range []telegramoidc.BotAccess{"", telegramoidc.BotAccessUnknown} {
 		srv := newTestServer(t)
 		mux := newMockRouter()
 		srv.Register(mux)
