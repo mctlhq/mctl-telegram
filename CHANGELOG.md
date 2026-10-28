@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.100.0](https://github.com/mctlhq/mctl-telegram/compare/0.99.0...0.100.0) (2026-10-28)
+
+
+### Features
+
+* **oauth:** web QR login behind ENABLE_ACCESS_QR_ENABLED ([38d9dc5](https://github.com/mctlhq/mctl-telegram/commit/38d9dc5bde35278eacdc3a1b78fec51c2e25836c))
+* **sponsored:** de-dup view reports, cap ad fetches per call ([7c029ea](https://github.com/mctlhq/mctl-telegram/commit/7c029eaf613b8f00c3f1cb9de2f26741ba404438))
+
+
+### Bug Fixes
+
+* **oauth:** keep the QR wait inside the session; pin the accept hook ([4c06904](https://github.com/mctlhq/mctl-telegram/commit/4c069044f434b85201b7295a8e616bd6b5040116))
+* **sponsored:** release only the caller's own view claim ([5886fc8](https://github.com/mctlhq/mctl-telegram/commit/5886fc8ed2af6a15239c19ec8eb3ada2b4b2974c)), closes [#906](https://github.com/mctlhq/mctl-telegram/issues/906)
+* **telegram:** write the QR session only after a completed sign-in ([f9688ef](https://github.com/mctlhq/mctl-telegram/commit/f9688ef5563580f32f4b1a681ccd5006dea1536a))
+
 ## [0.99.0](https://github.com/mctlhq/mctl-telegram/compare/0.98.2...0.99.0) (2026-10-28)
 
 
