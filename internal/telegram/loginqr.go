@@ -84,6 +84,9 @@ func LoginQR(
 			displayName = user.Username
 		}
 		username = user.Username
+		if logOutIfMismatch(ctx, client.API(), userID, cfg.WantTelegramID, user.ID) {
+			return nil
+		}
 		// Trigger a session flush so SessionStorage sees the post-auth bytes.
 		_, _ = client.API().HelpGetConfig(ctx)
 		return nil
