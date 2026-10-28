@@ -53,9 +53,10 @@ const (
 // with the newest exported URL kept on the flow for the status page.
 func (s *Server) qrLogin(wait time.Duration) loginMethod {
 	return loginMethod{
-		name:      methodQR,
-		firstStep: "qr_requested",
-		qrWait:    wait,
+		name:         methodQR,
+		firstStep:    "qr_requested",
+		holdsSession: true,
+		qrWait:       wait,
 		run: func(ctx context.Context, uid int64, lf *loginFlow, _, askPassword func(context.Context) (string, error), cfg telegram.LoginConfig) (int64, string, string, error) {
 			show := func(_ context.Context, url, _ string) error {
 				lf.qrURL.Store(&url)
@@ -65,6 +66,9 @@ func (s *Server) qrLogin(wait time.Duration) loginMethod {
 			// Off qr_shown once the scan is accepted: a stall in the work
 			// after it is ours or Telegram's, not a user who walked away.
 			cfg.OnQRAccepted = func() { lf.step = "qr_accepted" }
+			// The session comes back here, not through the database: the
+			// flow writes it with its metadata or logs it out (#919).
+			cfg.HoldSession = func(b []byte) { lf.heldSession = b }
 			return s.qrLoginFn(ctx, s.cfg.TGAPIID, s.cfg.TGAPIHash, s.store, uid, show, askPassword, cfg)
 		},
 	}

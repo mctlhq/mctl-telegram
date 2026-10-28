@@ -159,6 +159,9 @@ type Server struct {
 	// the re-check on the flow goroutine, so a mid-flight write would be a
 	// race like any other.
 	modeCheckFn func(context.Context, int64) (bool, error)
+	// logOutSessionFn, when set, replaces telegram.LogOutSession for
+	// logging out a held QR session the flow no longer wants (#919).
+	logOutSessionFn func(ctx context.Context, data []byte) error
 
 	// clearStrayFn, when non-nil, replaces store.ClearStraySessionIfLocal on
 	// the enable_access repair paths. Test seam (nil in production): the store
