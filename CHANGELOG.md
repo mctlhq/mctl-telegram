@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.98.1](https://github.com/mctlhq/mctl-telegram/compare/0.98.0...0.98.1) (2026-10-28)
+
+
+### Bug Fixes
+
+* address review findings ([378ac2c](https://github.com/mctlhq/mctl-telegram/commit/378ac2cbe71e5764941df3df5037f0793ec5af0f))
+* **login:** follow an AUTH_RESTART from the 2FA step to the code screen ([28d4691](https://github.com/mctlhq/mctl-telegram/commit/28d469100db0e1193dcdc5ea078764e16bc45e7b))
+* **login:** forgive typos in the login code and 2FA password ([10cd100](https://github.com/mctlhq/mctl-telegram/commit/10cd1001921edc8ac482b2b5898024fe1d1dc6d4))
+* **login:** forgive typos in the login code and 2FA password ([4210344](https://github.com/mctlhq/mctl-telegram/commit/4210344425a6bfd043bdee436fc34140f3d2aa81)), closes [#900](https://github.com/mctlhq/mctl-telegram/issues/900)
+
 ## [0.98.0](https://github.com/mctlhq/mctl-telegram/compare/0.97.1...0.98.0) (2026-10-28)
 
 
