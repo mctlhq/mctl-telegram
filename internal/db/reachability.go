@@ -86,6 +86,42 @@ func (s *Store) RecordInboundBotReachabilityTx(ctx context.Context, tx *sql.Tx, 
 	return n > 0, nil
 }
 
+// RecordOIDCBotAccessGrant records a reachable observation from a sign-in where
+// Telegram reported the telegram:bot_access grant. It never overwrites a stored
+// blocked row (a grant does not unblock the bot) and never overwrites an
+// observation at or after observedAt. applied reports whether a row was written.
+func (s *Store) RecordOIDCBotAccessGrant(ctx context.Context, userID int64, observedAt time.Time) (applied bool, err error) {
+	if userID <= 0 {
+		return false, errors.New("user id must be positive")
+	}
+	if observedAt.IsZero() {
+		return false, errors.New("observed time must be set")
+	}
+	observedAt = observedAt.UTC()
+	res, err := s.DB.ExecContext(ctx,
+		`INSERT INTO client_bot_reachability(user_id, state, reason_code, observed_at, source, updated_at)
+		 VALUES($1,$2,$3,$4,$5,$6)
+		 ON CONFLICT (user_id) DO UPDATE SET
+		     state = EXCLUDED.state,
+		     reason_code = EXCLUDED.reason_code,
+		     observed_at = EXCLUDED.observed_at,
+		     source = EXCLUDED.source,
+		     updated_at = EXCLUDED.updated_at
+		 WHERE client_bot_reachability.state <> 'blocked'
+		   AND (client_bot_reachability.observed_at IS NULL
+		        OR client_bot_reachability.observed_at < EXCLUDED.observed_at)`,
+		userID, notify.StateReachable, notify.SourceOIDCBotAccess, observedAt, notify.SourceOIDCBotAccess, time.Now().UTC(),
+	)
+	if err != nil {
+		return false, fmt.Errorf("record oidc bot access grant: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("record oidc bot access grant: rows affected: %w", err)
+	}
+	return n > 0, nil
+}
+
 func upsertBotReachability(ctx context.Context, ex execer, userID int64, outcome notify.DeliveryOutcome, source string) error {
 	now := time.Now().UTC()
 	_, err := ex.ExecContext(ctx,

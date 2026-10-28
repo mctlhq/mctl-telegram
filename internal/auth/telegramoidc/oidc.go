@@ -37,8 +37,51 @@ const DefaultIssuerURL = "https://oauth.telegram.org"
 // spurious authentication failures.
 const clockSkew = 2 * time.Minute
 
-// scopes are requested from Telegram on every authorization request.
-var scopes = []string{oidc.ScopeOpenID, "profile"}
+// ScopeBotAccess lets the login bot send direct messages to the user after
+// sign-in. It is requested only when Config.RequestBotAccess is set.
+const ScopeBotAccess = "telegram:bot_access"
+
+// requestedScopes returns the scopes for an authorization request.
+func requestedScopes(botAccess bool) []string {
+	if botAccess {
+		return []string{oidc.ScopeOpenID, "profile", ScopeBotAccess}
+	}
+	return []string{oidc.ScopeOpenID, "profile"}
+}
+
+// BotAccess is what the token response says about the telegram:bot_access grant.
+type BotAccess string
+
+const (
+	// BotAccessUnknown means no usable scope was reported (or not requested).
+	BotAccessUnknown BotAccess = "unknown"
+	// BotAccessGranted means the reported scope includes telegram:bot_access.
+	BotAccessGranted BotAccess = "granted"
+	// BotAccessNotGranted means a scope was reported and excludes it.
+	BotAccessNotGranted BotAccess = "not_granted"
+)
+
+// parseBotAccess interprets the token response "scope" value. Absence of
+// information is unknown, never granted.
+func parseBotAccess(raw any, requested bool) BotAccess {
+	if !requested {
+		return BotAccessUnknown
+	}
+	s, ok := raw.(string)
+	if !ok {
+		return BotAccessUnknown
+	}
+	fields := strings.Fields(s)
+	if len(fields) == 0 {
+		return BotAccessUnknown
+	}
+	for _, f := range fields {
+		if f == ScopeBotAccess {
+			return BotAccessGranted
+		}
+	}
+	return BotAccessNotGranted
+}
 
 // Identity is the authenticated Telegram user extracted from a verified
 // id_token. TelegramID is the numeric Telegram user id — the value the legacy
@@ -52,6 +95,9 @@ type Identity struct {
 	Username   string
 	FirstName  string
 	LastName   string
+	// BotAccess is the telegram:bot_access grant signal from the token
+	// response; the zero value is treated like BotAccessUnknown.
+	BotAccess BotAccess
 }
 
 // Authenticator is the behaviour internal/oauth depends on. A real *Client
@@ -84,12 +130,16 @@ type Config struct {
 	// SigningAlgs restricts accepted id_token signing algorithms. Empty means
 	// RS256 — the algorithm spike #48 observed Telegram using.
 	SigningAlgs []string
+	// RequestBotAccess adds the telegram:bot_access scope to the request.
+	RequestBotAccess bool
 }
 
 // Client is the production Authenticator. Construct once at boot via New.
 type Client struct {
 	oauth2   *oauth2.Config
 	verifier *oidc.IDTokenVerifier
+	// botAccessRequested records whether the scope was requested.
+	botAccessRequested bool
 }
 
 var _ Authenticator = (*Client)(nil)
@@ -142,8 +192,9 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 			ClientSecret: cfg.ClientSecret,
 			Endpoint:     endpoint,
 			RedirectURL:  cfg.RedirectURL,
-			Scopes:       scopes,
+			Scopes:       requestedScopes(cfg.RequestBotAccess),
 		},
+		botAccessRequested: cfg.RequestBotAccess,
 		verifier: provider.VerifierContext(ctx, &oidc.Config{
 			ClientID:             cfg.ClientID,
 			SupportedSigningAlgs: algs,
@@ -189,7 +240,12 @@ func (c *Client) Exchange(ctx context.Context, code, codeVerifier, expectedNonce
 	if err := idToken.Claims(&claims); err != nil {
 		return nil, fmt.Errorf("telegramoidc: decoding id_token claims: %w", err)
 	}
-	return parseIdentity(claims)
+	ident, err := parseIdentity(claims)
+	if err != nil {
+		return nil, err
+	}
+	ident.BotAccess = parseBotAccess(tok.Extra("scope"), c.botAccessRequested)
+	return ident, nil
 }
 
 // idTokenClaims is the subset of id_token claims the broker consumes. `id` is

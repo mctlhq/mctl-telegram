@@ -104,10 +104,14 @@ type Config struct {
 	TelegramOIDCIssuerURL    string   // OIDC issuer; default https://oauth.telegram.org
 	TelegramOIDCRedirectURL  string   // OIDC callback URL; empty → derived from PublicBaseURL
 	TelegramOIDCSigningAlgs  []string // accepted id_token signing algs; empty → RS256
-	OAUTHCodeTTL             time.Duration
-	OAUTHAccessTokenTTL      time.Duration
-	OAUTHRefreshTokenTTL     time.Duration // absolute lifetime of an issued refresh token
-	OAUTHAllowImplicitClient bool          // accept unregistered client_ids; default false (explicit opt-in)
+	// TelegramOIDCBotAccessEnabled is the per-environment rollout flag
+	// (TELEGRAM_OIDC_BOT_ACCESS_ENABLED, default off) for requesting the
+	// telegram:bot_access scope at OIDC sign-in.
+	TelegramOIDCBotAccessEnabled bool
+	OAUTHCodeTTL                 time.Duration
+	OAUTHAccessTokenTTL          time.Duration
+	OAUTHRefreshTokenTTL         time.Duration // absolute lifetime of an issued refresh token
+	OAUTHAllowImplicitClient     bool          // accept unregistered client_ids; default false (explicit opt-in)
 	// OAUTHCIMDAccept makes /oauth/authorize and /oauth/token resolve an
 	// https URL client_id as an OAuth Client ID Metadata Document
 	// (OAUTH_CIMD_ACCEPT, default false). It does not advertise CIMD in the
@@ -498,6 +502,7 @@ func Load() (*Config, error) {
 		TelegramLoginBotToken:         os.Getenv("TELEGRAM_LOGIN_BOT_TOKEN"),
 		TelegramLoginBotUsername:      loginBotUsernameFromEnv(),
 		TelegramOIDCClientID:          os.Getenv("TELEGRAM_OIDC_CLIENT_ID"),
+		TelegramOIDCBotAccessEnabled:  envBool("TELEGRAM_OIDC_BOT_ACCESS_ENABLED", false),
 		TelegramOIDCClientSecret:      os.Getenv("TELEGRAM_OIDC_CLIENT_SECRET"),
 		TelegramOIDCIssuerURL:         envOr("TELEGRAM_OIDC_ISSUER", "https://oauth.telegram.org"),
 		TelegramOIDCRedirectURL:       os.Getenv("TELEGRAM_OIDC_REDIRECT_URL"),
@@ -1103,4 +1108,37 @@ func parseReviewerWritePeers(raw string) ([]string, error) {
 		out = append(out, entry)
 	}
 	return out, nil
+}
+
+// BotIDFromToken returns the numeric bot id (the digits before the first
+// colon) of a Telegram bot token, or false when it is missing or not decimal.
+func BotIDFromToken(token string) (string, bool) {
+	id, _, found := strings.Cut(token, ":")
+	if !found || id == "" {
+		return "", false
+	}
+	for _, r := range id {
+		if r < '0' || r > '9' {
+			return "", false
+		}
+	}
+	return id, true
+}
+
+// LoginBotMatchesOIDCClient reports whether the login bot token belongs to the
+// same bot as the OIDC client id. When it does not, reason is one of
+// bot_token_unset, bot_token_malformed or bot_id_mismatch. The reason never
+// contains the token.
+func (c *Config) LoginBotMatchesOIDCClient() (bool, string) {
+	if c.TelegramLoginBotToken == "" {
+		return false, "bot_token_unset"
+	}
+	id, ok := BotIDFromToken(c.TelegramLoginBotToken)
+	if !ok {
+		return false, "bot_token_malformed"
+	}
+	if id != strings.TrimSpace(c.TelegramOIDCClientID) {
+		return false, "bot_id_mismatch"
+	}
+	return true, ""
 }

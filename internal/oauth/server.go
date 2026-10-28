@@ -289,6 +289,10 @@ type Config struct {
 	// TelegramOIDCSigningAlgs restricts accepted id_token signing algorithms.
 	// Empty ⇒ telegramoidc default (RS256).
 	TelegramOIDCSigningAlgs []string
+	// TelegramOIDCRequestBotAccess adds the telegram:bot_access scope to the
+	// Telegram authorization request. Computed by the caller from the rollout
+	// flag and the same-bot check.
+	TelegramOIDCRequestBotAccess bool
 	// TelegramOIDC is an injected Authenticator. When non-nil New uses it and
 	// skips OIDC discovery — the seam tests use to avoid a network call.
 	TelegramOIDC telegramoidc.Authenticator
@@ -761,6 +765,8 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 			ClientSecret: cfg.TelegramOIDCClientSecret,
 			RedirectURL:  redirectURL,
 			SigningAlgs:  cfg.TelegramOIDCSigningAlgs,
+
+			RequestBotAccess: cfg.TelegramOIDCRequestBotAccess,
 		})
 		if err != nil {
 			return nil, err
@@ -1869,6 +1875,19 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		slog.Error("ensure user failed", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
+	}
+
+	// telegram:bot_access signal. Only an observed grant is recorded; unknown
+	// and not_granted write nothing. Best-effort: never fails the sign-in.
+	signal := string(identity.BotAccess)
+	if signal == "" {
+		signal = string(telegramoidc.BotAccessUnknown)
+	}
+	slog.Info("telegram oidc sign-in", "bot_access_signal", signal)
+	if identity.BotAccess == telegramoidc.BotAccessGranted {
+		if _, err := s.store.RecordOIDCBotAccessGrant(r.Context(), uid, time.Now().UTC()); err != nil {
+			slog.Error("record oidc bot access grant failed", "err", err)
+		}
 	}
 
 	// When open registration is on (AutoApproveClients), materialize the

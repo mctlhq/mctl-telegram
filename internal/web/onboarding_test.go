@@ -73,8 +73,17 @@ func TestManagePage_BotReachabilityBlock(t *testing.T) {
 	}
 
 	srv.loginBotUsername = "mctl_demo_bot"
-	if body := getManage(t, srv, uid); !strings.Contains(body, `https://t.me/mctl_demo_bot?start=onboarding`) {
-		t.Errorf("start link missing")
+	if body := getManage(t, srv, uid); strings.Contains(body, "t.me/") || strings.Contains(body, "Let the bot message you") {
+		t.Errorf("link rendered for a reachable user")
+	}
+	for _, state := range []string{notify.StateBlocked, notify.StateCannotInitiate} {
+		if err := store.RecordBotReachability(ctx, uid, notify.DeliveryOutcome{State: state, ReasonCode: "x", Conclusive: true}, "digest"); err != nil {
+			t.Fatal(err)
+		}
+		body := getManage(t, srv, uid)
+		if !strings.Contains(body, `https://t.me/mctl_demo_bot?start=onboarding`) || !strings.Contains(body, "Let the bot message you") {
+			t.Errorf("start link missing for %s", state)
+		}
 	}
 }
 
