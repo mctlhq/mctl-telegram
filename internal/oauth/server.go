@@ -3648,9 +3648,11 @@ const botChatProbeTimeout = 2 * time.Second
 // writes nothing and never fails the sign-in. Only success is recorded; a
 // "not reachable" answer leaves any stored row alone.
 func (s *Server) probeBotChat(ctx context.Context, uid, telegramID int64) {
-	ctx, cancel := context.WithTimeout(ctx, botChatProbeTimeout)
+	// The timeout bounds the Bot API read only; the write below uses the
+	// request context so a slow but successful probe is still recorded.
+	probeCtx, cancel := context.WithTimeout(ctx, botChatProbeTimeout)
 	defer cancel()
-	err := s.cfg.BotChatProbe(ctx, telegramID)
+	err := s.cfg.BotChatProbe(probeCtx, telegramID)
 	result := "reachable"
 	if err != nil {
 		result = "error"

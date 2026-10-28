@@ -94,3 +94,20 @@ func TestTelegramCallback_BotChatProbeKeepsBlocked(t *testing.T) {
 		t.Fatalf("row = %+v, want blocked kept", r)
 	}
 }
+
+// The DB write must not inherit the probe's deadline: a probe that succeeds
+// only after its timeout context has expired is still recorded.
+func TestTelegramCallback_BotChatProbeWriteOutlivesProbeDeadline(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) {
+		c.BotChatProbe = func(ctx context.Context, _ int64) error {
+			<-ctx.Done() // succeed only once the probe deadline has passed
+			return nil
+		}
+	})
+	mux := newMockRouter()
+	srv.Register(mux)
+	uid := signInWithBotAccess(t, srv, mux, telegramoidc.BotAccessUnknown)
+	if r := reachabilityRow(t, srv, uid); r == nil || r.Source != notify.SourceOIDCGetChat {
+		t.Fatalf("row = %+v, want reachable/%s", r, notify.SourceOIDCGetChat)
+	}
+}
