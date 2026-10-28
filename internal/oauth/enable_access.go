@@ -101,6 +101,10 @@ type enableSession struct {
 	// a desktop one, where the code is scanned with the phone. Fixed at the
 	// callback. It only decides the button; the QR routes check the flag.
 	qrOffered bool
+	// qrAppLink is whether QR was offered to a phone browser, under
+	// EnableAccessQRAppLinkEnabled: the buttons say "Telegram app" and the
+	// status page links to the login token as well as drawing it.
+	qrAppLink bool
 	// qrWait is how long the current QR flow waits for a scan, fixed when
 	// it starts; the status page states it.
 	qrWait time.Duration
@@ -672,6 +676,7 @@ func (s *Server) handleEnablePermissions(w http.ResponseWriter, r *http.Request)
 		WizardMode:  true,
 		WizardStep:  3,
 		QROffered:   es.qrOffered,
+		QRAppLink:   es.qrAppLink,
 	})
 }
 
@@ -689,6 +694,7 @@ func renderEnablePhoneStep(w http.ResponseWriter, es *enableSession, p enablePho
 	}
 	es.step = stepPhone
 	p.QROffered = es.qrOffered
+	p.QRAppLink = es.qrAppLink
 	renderEnablePhone(w, p)
 }
 
@@ -829,6 +835,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 			WizardMode:  es.isWizardMode(),
 			WizardStep:  3,
 			QROffered:   es.qrOffered,
+			QRAppLink:   es.qrAppLink,
 		})
 		return
 	}
@@ -935,6 +942,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 			WizardMode:  es.isWizardMode(),
 			WizardStep:  3,
 			QROffered:   es.qrOffered,
+			QRAppLink:   es.qrAppLink,
 		})
 	case <-lf.done:
 		if lf.err != nil {
@@ -1061,6 +1069,7 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 			WizardMode:  es.isWizardMode(),
 			WizardStep:  3,
 			QROffered:   es.qrOffered,
+			QRAppLink:   es.qrAppLink,
 			Error:       "Enter the code Telegram sent you.",
 		})
 		return
@@ -1093,6 +1102,7 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 			WizardMode:  es.isWizardMode(),
 			WizardStep:  3,
 			QROffered:   es.qrOffered,
+			QRAppLink:   es.qrAppLink,
 			Error:       codeRepromptMsg(rp),
 		})
 	case <-lf.needPw:
@@ -1211,6 +1221,7 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 			WizardMode:  es.isWizardMode(),
 			WizardStep:  3,
 			QROffered:   es.qrOffered,
+			QRAppLink:   es.qrAppLink,
 			Error:       codeRepromptMsg(rp),
 		})
 	case rp := <-lf.needPw:
