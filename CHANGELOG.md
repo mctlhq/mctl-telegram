@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.98.2](https://github.com/mctlhq/mctl-telegram/compare/0.98.1...0.98.2) (2026-10-28)
+
+
+### Bug Fixes
+
+* **login:** neutral wording when the sign-in fails for another reason ([ee09b78](https://github.com/mctlhq/mctl-telegram/commit/ee09b784fa1f1667ac1fa730d3cd20256221426a))
+* **login:** neutral wording when the sign-in fails for another reason ([cc44e9d](https://github.com/mctlhq/mctl-telegram/commit/cc44e9df55edce0526fcbc5d66ebeffdebe35362)), closes [#909](https://github.com/mctlhq/mctl-telegram/issues/909)
+
 ## [0.98.1](https://github.com/mctlhq/mctl-telegram/compare/0.98.0...0.98.1) (2026-10-28)
 
 
