@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.103.0](https://github.com/mctlhq/mctl-telegram/compare/0.102.0...0.103.0) (2026-10-28)
+
+
+### Features
+
+* **connect:** add a Copy MCP URL button to the done page ([043a9a7](https://github.com/mctlhq/mctl-telegram/commit/043a9a74d0a4028085e7edb002da854b32fe1e2f))
+* **connect:** add a Copy MCP URL button to the done page ([cd69573](https://github.com/mctlhq/mctl-telegram/commit/cd6957359a1f8753e84d1ff5741f71d90d27e83e))
+* **oauth:** lead the phone step with QR sign-in on desktop ([cdec8ea](https://github.com/mctlhq/mctl-telegram/commit/cdec8ea40df70996112cf5fe4a0b058fa21404b0))
+* **oauth:** lead the phone step with QR sign-in on desktop ([7231778](https://github.com/mctlhq/mctl-telegram/commit/7231778430a89ef69732f32e2ccaf447f3897c86)), closes [#901](https://github.com/mctlhq/mctl-telegram/issues/901)
+* **oauth:** show a connecting state after the QR code is scanned ([b1c7b4e](https://github.com/mctlhq/mctl-telegram/commit/b1c7b4e49a0af9b64fc85b1a3a672dee8a4b7257))
+* **oauth:** show a connecting state after the QR code is scanned ([60467ac](https://github.com/mctlhq/mctl-telegram/commit/60467acc3578fbe2d972858f2a7b04b7810be161)), closes [#931](https://github.com/mctlhq/mctl-telegram/issues/931)
+* **oidc:** observe bot reach with getChat after sign-in ([5900997](https://github.com/mctlhq/mctl-telegram/commit/5900997d3000b1e83a974aa42bc4bda4bfce59fe))
+* **oidc:** observe bot reach with getChat after sign-in ([a6f1ce1](https://github.com/mctlhq/mctl-telegram/commit/a6f1ce136889eb0dec454bffc7f5ec457dd8f722)), closes [#930](https://github.com/mctlhq/mctl-telegram/issues/930)
+
+
+### Bug Fixes
+
+* **connect:** fall back when clipboard.writeText is missing ([9ceaa17](https://github.com/mctlhq/mctl-telegram/commit/9ceaa1703b0a593fb228bf7d8f065df2e8c413fe))
+* **connect:** keep the copy button label stable on repeated clicks ([8738f4e](https://github.com/mctlhq/mctl-telegram/commit/8738f4e80f492406cdede243ddb649c3613d134a))
+* **oauth:** keep send opt-in with QR in one phone-step form ([c94bfe1](https://github.com/mctlhq/mctl-telegram/commit/c94bfe186e5b0b3a1105ae589fa5803b5114c6e3)), closes [#901](https://github.com/mctlhq/mctl-telegram/issues/901)
+* **oauth:** no stall timer once the QR 2FA prompt is up ([cc43853](https://github.com/mctlhq/mctl-telegram/commit/cc4385336727719f28168e921ca0b68e70125657)), closes [#931](https://github.com/mctlhq/mctl-telegram/issues/931)
+* **oauth:** QR button is below the why-phone note ([7034bf7](https://github.com/mctlhq/mctl-telegram/commit/7034bf7fc8383273de8ddeeabd744cd1919554f7)), closes [#901](https://github.com/mctlhq/mctl-telegram/issues/901)
+* **oidc:** record the probe result outside the probe deadline ([3aedcb6](https://github.com/mctlhq/mctl-telegram/commit/3aedcb6eb71b7272993cb70dac25bb4e9ea15a06))
+* **oidc:** treat a scope without bot_access as unknown ([229f30a](https://github.com/mctlhq/mctl-telegram/commit/229f30afd5c164910c1439b1d8c1cb32c17a34c5))
+* **oidc:** treat a scope without bot_access as unknown ([85b3256](https://github.com/mctlhq/mctl-telegram/commit/85b3256b07d23e79020708ea63a6f179b03bfd77)), closes [#930](https://github.com/mctlhq/mctl-telegram/issues/930)
+
 ## [0.102.0](https://github.com/mctlhq/mctl-telegram/compare/0.101.0...0.102.0) (2026-10-28)
 
 
