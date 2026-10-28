@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,6 +47,10 @@ type qrStub struct {
 	stall bool
 	// gotWait is the LoginConfig.QRWait of the latest call.
 	gotWait atomic.Int64
+	// release, when set, replaces the scan: the login waits for it whatever
+	// happens to its context, then reports a success without writing, the
+	// way a scan accepted just as the flow is cancelled would.
+	release chan struct{}
 
 	calls   atomic.Int32
 	writes  atomic.Int32
@@ -68,6 +74,10 @@ func (q *qrStub) fn() QRLoginFunc {
 		}
 		if err := show(ctx, "tg://login?token="+qrTestToken, ""); err != nil {
 			return 0, "", "", err
+		}
+		if q.release != nil {
+			<-q.release
+			return q.tgID, "Dana", "dana_tg", nil
 		}
 		waitCtx := ctx
 		q.gotWait.Store(int64(cfg.QRWait))
@@ -433,18 +443,7 @@ func TestEnableQR_MismatchKeepsTheExistingSession(t *testing.T) {
 	srv, mux := newQRTestServer(t, q, true)
 	es, _ := driveToPhoneAs(t, mux, desktopUA)
 
-	// The user's existing, working session.
-	ctx := context.Background()
-	uid, _ := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
-	now := time.Now().UTC()
-	if err := srv.store.UpdateSessionBlob(ctx, uid, []byte("existing-good-session")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := srv.store.DB.ExecContext(ctx,
-		`UPDATE telegram_accounts SET telegram_user_id = $1, last_used_at = $2, expires_at = $3 WHERE user_id = $4`,
-		500100101, now, now.Add(24*time.Hour), uid); err != nil {
-		t.Fatal(err)
-	}
+	uid := seedExistingSession(t, srv)
 
 	c := startQR(t, mux, es)
 	pollQRStatus(t, mux, c, "<svg")
@@ -457,12 +456,47 @@ func TestEnableQR_MismatchKeepsTheExistingSession(t *testing.T) {
 	if q.logOuts.Load() != 1 || q.writes.Load() != 0 {
 		t.Errorf("logOuts=%d writes=%d, want 1 and 0", q.logOuts.Load(), q.writes.Load())
 	}
+	assertExistingSessionUntouched(t, srv, uid)
+}
+
+// seedExistingSession gives Dana an existing, working hosted session and
+// returns her uid.
+func seedExistingSession(t *testing.T, srv *Server) int64 {
+	t.Helper()
+	ctx := context.Background()
+	uid, _ := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
+	now := time.Now().UTC()
+	if err := srv.store.UpdateSessionBlob(ctx, uid, []byte("existing-good-session")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.store.DB.ExecContext(ctx,
+		`UPDATE telegram_accounts SET telegram_user_id = $1, last_used_at = $2, expires_at = $3 WHERE user_id = $4`,
+		500100101, now, now.Add(24*time.Hour), uid); err != nil {
+		t.Fatal(err)
+	}
+	return uid
+}
+
+// assertExistingSessionUntouched checks the session seedExistingSession made
+// is still the only row, active, valid and unchanged. A SaveSessionForSignIn
+// would have revoked it as superseded and added a row.
+func assertExistingSessionUntouched(t *testing.T, srv *Server, uid int64) {
+	t.Helper()
+	ctx := context.Background()
 	pt, err := srv.store.LoadSession(ctx, uid)
 	if err != nil || string(pt) != "existing-good-session" {
-		t.Errorf("existing session after the refusal = %q, %v; want it untouched", pt, err)
+		t.Errorf("existing session = %q, %v; want it untouched", pt, err)
 	}
 	if _, err := srv.store.CheckSessionValid(ctx, uid); err != nil {
 		t.Errorf("existing session no longer valid: %v", err)
+	}
+	var rows, active int
+	if err := srv.store.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*), COUNT(*) - COUNT(revoked_at) FROM telegram_accounts WHERE user_id = $1`, uid).Scan(&rows, &active); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 || active != 1 {
+		t.Errorf("telegram_accounts rows=%d active=%d, want the one seeded row, still active", rows, active)
 	}
 }
 
@@ -651,6 +685,192 @@ func TestEnableQR_CancelReturnsToThePhoneStep(t *testing.T) {
 	if q.writes.Load() != 0 {
 		t.Error("a cancelled QR flow wrote a session")
 	}
+}
+
+// TestEnableQR_CancelBeatsALateScan: the user cancels the QR code and the
+// scan lands right after. The cancelled flow must not finish the sign-in:
+// no SaveSessionForSignIn, the existing session untouched, and the status
+// page no longer offers the flow. Run it under -race.
+func TestEnableQR_CancelBeatsALateScan(t *testing.T) {
+	q := newQRStub(500100101)
+	q.release = make(chan struct{})
+	srv, mux := newQRTestServer(t, q, true)
+	es, _ := driveToPhoneAs(t, mux, desktopUA)
+	uid := seedExistingSession(t, srv)
+	c := startQR(t, mux, es)
+	pollQRStatus(t, mux, c, "<svg")
+	lf := getEnableSession(t, srv, es).flowForTest()
+
+	postForm(t, mux, "/oauth/telegram/enable_access/qr/cancel", url.Values{"es": {es}})
+	close(q.release)
+	waitForFlowDone(t, lf, 3*time.Second)
+
+	if lf.err == nil {
+		t.Error("the cancelled flow ended without an error")
+	}
+	assertExistingSessionUntouched(t, srv, uid)
+	if body := getQRStatus(t, mux, c).Body.String(); strings.Contains(body, "<svg") || strings.Contains(body, "linked") {
+		t.Errorf("the status page still serves the cancelled flow:\n%s", body)
+	}
+}
+
+// TestEnableQR_PhoneStartBeatsALateScan: the same race, with the QR flow
+// superseded by a phone sign-in started from a second tab.
+func TestEnableQR_PhoneStartBeatsALateScan(t *testing.T) {
+	q := newQRStub(500100101)
+	q.release = make(chan struct{})
+	srv, mux := newQRTestServer(t, q, true)
+	srv.loginFn = stubLoginParksAtCode()
+	// Both tabs reach the phone step before the session exists, the way
+	// they would for a user who had none when they opened them.
+	es, _ := driveToPhoneAs(t, mux, desktopUA)
+	es2, _ := driveToPhoneAs(t, mux, desktopUA)
+	uid := seedExistingSession(t, srv)
+	c := startQR(t, mux, es)
+	pollQRStatus(t, mux, c, "<svg")
+	lf := getEnableSession(t, srv, es).flowForTest()
+
+	// The phone /start waits for its code step, which queues on the uid
+	// mutex behind the QR flow, so it runs alongside; the scan lands once
+	// the phone start has superseded the QR flow.
+	started := make(chan struct{})
+	go func() {
+		defer close(started)
+		req := httptest.NewRequest("POST", "/oauth/telegram/enable_access/start",
+			strings.NewReader(url.Values{"es": {es2}, "phone": {"+14155551234"}}.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		mux.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	for deadline := time.Now().Add(3 * time.Second); !lf.superseded.Load(); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the phone start never superseded the QR flow")
+		}
+	}
+	close(q.release)
+	waitForFlowDone(t, lf, 3*time.Second)
+	<-started
+
+	if !lf.superseded.Load() || lf.err == nil {
+		t.Errorf("QR flow superseded=%v err=%v, want superseded with an error", lf.superseded.Load(), lf.err)
+	}
+	assertExistingSessionUntouched(t, srv, uid)
+}
+
+// TestEnableQR_NoOrForeignCookieGetsNothing: the status page and the QR
+// POSTs without the browser's own cookie or es value render the expired
+// page, leak no es value, account name or QR code, and change nothing.
+func TestEnableQR_NoOrForeignCookieGetsNothing(t *testing.T) {
+	q := newQRStub(500100101)
+	srv, mux := newQRTestServer(t, q, true)
+	es, _ := driveToPhoneAs(t, mux, desktopUA)
+	c := startQR(t, mux, es)
+	pollQRStatus(t, mux, c, "<svg")
+	lf := getEnableSession(t, srv, es).flowForTest()
+
+	check := func(name string, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		body := rec.Body.String()
+		if !strings.Contains(body, "sign-in session has expired") {
+			t.Errorf("%s: not the expired page:\n%s", name, body)
+		}
+		for _, leak := range []string{es, "dana_tg", "<svg", qrTestToken} {
+			if strings.Contains(body, leak) {
+				t.Errorf("%s: response carries %q", name, leak)
+			}
+		}
+	}
+	check("status, no cookie", getQRStatus(t, mux, nil))
+	check("status, foreign cookie", getQRStatus(t, mux, &http.Cookie{Name: enableQRCookie, Value: "not-a-session-token"}))
+	check("start, no es", postForm(t, mux, "/oauth/telegram/enable_access/qr", url.Values{}))
+	check("start, foreign es", postForm(t, mux, "/oauth/telegram/enable_access/qr", url.Values{"es": {"not-a-session-token"}}))
+	check("cancel, no es", postForm(t, mux, "/oauth/telegram/enable_access/qr/cancel", url.Values{}))
+	check("cancel, foreign es", postForm(t, mux, "/oauth/telegram/enable_access/qr/cancel", url.Values{"es": {"not-a-session-token"}}))
+
+	if got := getEnableSession(t, srv, es).stepForTest(); got != stepQR {
+		t.Errorf("step = %v, want stepQR unchanged", got)
+	}
+	if lf.superseded.Load() || q.calls.Load() != 1 {
+		t.Errorf("superseded=%v calls=%d, want the one flow still running", lf.superseded.Load(), q.calls.Load())
+	}
+	select {
+	case <-lf.done:
+		t.Error("the flow ended")
+	default:
+	}
+	close(q.scan)
+	pollQRStatus(t, mux, c, "linked")
+}
+
+// TestEnableQR_FunnelCountsAQRSuccess: a completed QR sign-in writes the
+// same plain connect:success row as the phone path, with the method only in
+// its reason, so LastConnectStepFor and the runbook's connect funnel SQL
+// count it like any other success.
+func TestEnableQR_FunnelCountsAQRSuccess(t *testing.T) {
+	q := newQRStub(500100101)
+	srv, mux := newQRTestServer(t, q, true)
+	es, _ := driveToPhoneAs(t, mux, desktopUA)
+	c := startQR(t, mux, es)
+	pollQRStatus(t, mux, c, "<svg")
+	close(q.scan)
+	pollQRStatus(t, mux, c, "linked")
+
+	rows := auditRows(t, srv)
+	if !slices.Contains(rows, "connect:success|qr|") {
+		t.Errorf("no plain connect:success row with reason qr in %v", rows)
+	}
+	for _, r := range rows {
+		if strings.HasPrefix(r, "connect:success:") {
+			t.Errorf("method-specific success row %q", r)
+		}
+	}
+
+	ctx := context.Background()
+	steps, err := srv.store.LastConnectStepFor(ctx, []int64{500100101})
+	if err != nil || steps[500100101].Step != "success" {
+		t.Errorf("LastConnectStepFor = %+v, %v; want step success", steps, err)
+	}
+
+	uid, _ := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
+	var got []int64
+	res, err := srv.store.DB.QueryContext(ctx, runbookSQLAfter(t, "Users whose last row is `connect:success`"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Close()
+	for res.Next() {
+		var id int64
+		if err := res.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, id)
+	}
+	if !slices.Contains(got, uid) {
+		t.Errorf("runbook funnel query = %v, want it to count uid %d", got, uid)
+	}
+	var qrUsers int
+	if err := srv.store.DB.QueryRowContext(ctx, runbookSQLAfter(t, "who connected by QR:")).Scan(&qrUsers); err != nil || qrUsers != 1 {
+		t.Errorf("runbook QR users query = %d, %v; want 1", qrUsers, err)
+	}
+}
+
+// runbookSQLAfter returns the first ```sql block after marker in
+// docs/runbook.md, so the funnel test runs the query operators run.
+func runbookSQLAfter(t *testing.T, marker string) string {
+	t.Helper()
+	doc, err := os.ReadFile("../../docs/runbook.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, rest, ok := strings.Cut(string(doc), marker)
+	if !ok {
+		t.Fatalf("runbook has no %q", marker)
+	}
+	_, rest, ok = strings.Cut(rest, "```sql\n")
+	if !ok {
+		t.Fatalf("no sql block after %q", marker)
+	}
+	query, _, _ := strings.Cut(rest, "```")
+	return query
 }
 
 // TestRenderQRSVG_CarriesNoToken: the SVG draws the URL's modules and holds
