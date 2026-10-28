@@ -108,6 +108,9 @@ type ConnectConfig struct {
 	// start-the-bot link on the success page. Empty renders plain-text
 	// instructions instead.
 	LoginBotUsername string
+	// BotAccessRequested is true while the telegram:bot_access sign-in scope
+	// is requested; it only adds a neutral sentence to the pre-login page.
+	BotAccessRequested bool
 	// MCPPath is the path component of the MCP URL shown on the success page.
 	// Defaults to "/mcp" when empty.
 	MCPPath string
@@ -146,6 +149,8 @@ type ConnectServer struct {
 	loginBot    string
 	clock       func() time.Time
 
+	botAccessRequested bool
+
 	mu       sync.Mutex
 	sessions map[string]*connectSession // keyed by state token
 }
@@ -166,18 +171,19 @@ func NewConnectServer(cfg ConnectConfig) *ConnectServer {
 		clk = time.Now
 	}
 	return &ConnectServer{
-		issuer:      cfg.Issuer,
-		redirectURI: cfg.Issuer + "/telegram/connect/done",
-		oauthSrv:    cfg.OAuthServer,
-		codeTTL:     cfg.CodeTTL,
-		claudeURL:   cfg.ClaudeAIConnectorURL,
-		clientID:    cfg.ClientID,
-		mcpPath:     cfg.MCPPath,
-		maxSessions: cfg.MaxSessions,
-		identifier:  cfg.Identifier,
-		loginBot:    cfg.LoginBotUsername,
-		clock:       clk,
-		sessions:    map[string]*connectSession{},
+		issuer:             cfg.Issuer,
+		redirectURI:        cfg.Issuer + "/telegram/connect/done",
+		oauthSrv:           cfg.OAuthServer,
+		codeTTL:            cfg.CodeTTL,
+		claudeURL:          cfg.ClaudeAIConnectorURL,
+		clientID:           cfg.ClientID,
+		mcpPath:            cfg.MCPPath,
+		maxSessions:        cfg.MaxSessions,
+		identifier:         cfg.Identifier,
+		loginBot:           cfg.LoginBotUsername,
+		botAccessRequested: cfg.BotAccessRequested,
+		clock:              clk,
+		sessions:           map[string]*connectSession{},
 	}
 }
 
@@ -243,7 +249,8 @@ func (s *ConnectServer) HandleConnect(w http.ResponseWriter, r *http.Request) {
 	}.Encode()
 
 	renderConnectPage(w, connectLandingData{
-		AuthorizeURL: authorizeURL,
+		AuthorizeURL:       authorizeURL,
+		BotAccessRequested: s.botAccessRequested,
 	})
 }
 
@@ -410,7 +417,8 @@ var connectFoot = `    </div>
 
 // connectLandingData is the template data for the landing page.
 type connectLandingData struct {
-	AuthorizeURL string
+	AuthorizeURL       string
+	BotAccessRequested bool
 }
 
 // connectSuccessData is the template data for the success page.
@@ -437,6 +445,7 @@ var connectLandingTemplate = template.Must(template.New("connectLanding").Parse(
        You will be asked to enter your phone number and a one-time code sent by Telegram.</p>
     <p>No password is stored. An encrypted Telegram session is saved on this server so the
        connector can read your messages on behalf of your MCP client.</p>
+    {{if .BotAccessRequested}}<p>Telegram may also ask whether the MCTL login bot can message you.</p>{{end}}
     <a class="btn" href="{{.AuthorizeURL}}">Connect with Telegram</a>
     <p class="meta">Already connected? You can reconnect at any time by returning to this page.</p>
 ` + connectFoot))

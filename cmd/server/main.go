@@ -560,6 +560,7 @@ func main() {
 		// browser (mctl_connect_token cookie) on a reused/expired state and
 		// redirect to /telegram/connect/manage instead of showing the
 		// "link already used" page.
+		botAccessOn, _ := botAccessEnabled(cfg)
 		connectSrv := web.NewConnectServer(web.ConnectConfig{
 			Issuer:               strings.TrimRight(cfg.PublicBaseURL, "/"),
 			OAuthServer:          oauthSrv,
@@ -570,6 +571,7 @@ func main() {
 			MaxSessions:          500,
 			Identifier:           provider,
 			LoginBotUsername:     cfg.TelegramLoginBotUsername,
+			BotAccessRequested:   botAccessOn,
 		})
 		mux.Get("/telegram/connect", connectSrv.HandleConnect)
 		mux.Get("/telegram/connect/done", connectSrv.HandleConnectDone)
@@ -1017,20 +1019,22 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 	// oauth.New performs OIDC discovery against Telegram — a network call at
 	// boot. It is fail-closed: a discovery failure aborts startup rather than
 	// running a server that cannot authenticate anyone.
+	oidcBotAccess := botAccessGate(cfg)
 	useDBForOAuth := strings.HasPrefix(cfg.DatabaseURL, "postgres://") ||
 		strings.HasPrefix(cfg.DatabaseURL, "postgresql://")
 	srv, err := oauth.New(ctx, oauth.Config{
-		Issuer:                   strings.TrimRight(cfg.PublicBaseURL, "/"),
-		JWTSecret:                []byte(cfg.OAUTHJWTSecret),
-		JWTAudience:              cfg.OAUTHJWTAudience,
-		TelegramOIDCClientID:     cfg.TelegramOIDCClientID,
-		TelegramOIDCClientSecret: cfg.TelegramOIDCClientSecret,
-		TelegramOIDCIssuerURL:    cfg.TelegramOIDCIssuerURL,
-		TelegramOIDCRedirectURL:  cfg.TelegramOIDCRedirectURL,
-		TelegramOIDCSigningAlgs:  cfg.TelegramOIDCSigningAlgs,
-		AdminTelegramIDs:         admins,
-		ClientTelegramIDs:        clients,
-		LookupAdminTelegramIDs:   lookupAdmins,
+		Issuer:                       strings.TrimRight(cfg.PublicBaseURL, "/"),
+		JWTSecret:                    []byte(cfg.OAUTHJWTSecret),
+		JWTAudience:                  cfg.OAUTHJWTAudience,
+		TelegramOIDCClientID:         cfg.TelegramOIDCClientID,
+		TelegramOIDCClientSecret:     cfg.TelegramOIDCClientSecret,
+		TelegramOIDCIssuerURL:        cfg.TelegramOIDCIssuerURL,
+		TelegramOIDCRedirectURL:      cfg.TelegramOIDCRedirectURL,
+		TelegramOIDCSigningAlgs:      cfg.TelegramOIDCSigningAlgs,
+		TelegramOIDCRequestBotAccess: oidcBotAccess,
+		AdminTelegramIDs:             admins,
+		ClientTelegramIDs:            clients,
+		LookupAdminTelegramIDs:       lookupAdmins,
 		// admin:broadcast (issue-439) goes only to ids that are ALSO in
 		// admins; ResolveScopes ignores a non-admin operator.
 		BroadcastOperatorTelegramIDs: telegramIDSet(cfg.BroadcastOperators),
@@ -1423,4 +1427,30 @@ func cimdResolver(cfg *config.Config) oauth.CIMDResolver {
 		return nil
 	}
 	return cimd.NewResolver(cimd.Options{AllowedHosts: cfg.OAUTHCIMDAllowedHosts})
+}
+
+// botAccessEnabled decides whether to request telegram:bot_access at sign-in:
+// the rollout flag must be on and the login bot must be the OIDC client. reason
+// is set only when the flag is on and the same-bot check fails.
+func botAccessEnabled(cfg *config.Config) (enabled bool, reason string) {
+	if !cfg.TelegramOIDCBotAccessEnabled {
+		return false, ""
+	}
+	if ok, reason := cfg.LoginBotMatchesOIDCClient(); !ok {
+		return false, reason
+	}
+	return true, ""
+}
+
+// botAccessGate is botAccessEnabled plus the boot log lines. With the flag off
+// nothing is logged.
+func botAccessGate(cfg *config.Config) bool {
+	enabled, reason := botAccessEnabled(cfg)
+	switch {
+	case enabled:
+		slog.Info("telegram:bot_access requested")
+	case reason != "":
+		slog.Warn("telegram:bot_access not requested", "reason", reason)
+	}
+	return enabled
 }

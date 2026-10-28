@@ -365,7 +365,7 @@ var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `  
     <h2 class="notif-heading">Login bot</h2>
     <div class="field-row"><span class="field-label">Reachability</span><span class="field-value">{{.Bot.Label}}</span></div>
     {{if .Bot.Unobserved}}<p class="meta">We have not yet seen your login bot respond; start it to confirm delivery.</p>{{end}}
-    {{if .Bot.StartURL}}<p class="meta"><a href="{{.Bot.StartURL}}">Start the login bot</a></p>{{else}}<p class="meta">To start the login bot, open it in Telegram and press Start.</p>{{end}}
+    {{if .Bot.NotReachable}}{{if .Bot.StartURL}}<p class="meta"><a href="{{.Bot.StartURL}}">Let the bot message you</a></p>{{else}}<p class="meta">To start the login bot, open it in Telegram and press Start.</p>{{end}}{{end}}
     {{if .Bot.NotReachable}}<p class="meta">The login bot cannot deliver the categories you enable until you start it.</p>{{end}}
     {{end}}
     {{if .Notifications}}

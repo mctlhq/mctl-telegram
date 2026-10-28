@@ -20,6 +20,10 @@ const (
 	StateReachable      = "reachable"
 	StateBlocked        = "blocked"
 	StateCannotInitiate = "cannot_initiate"
+
+	// SourceOIDCBotAccess is the reachability source and reason_code for a
+	// telegram:bot_access grant reported at OIDC sign-in.
+	SourceOIDCBotAccess = "oidc_bot_access"
 )
 
 // DeliveryOutcome is the result of classifying one Bot API sendMessage

@@ -73,8 +73,17 @@ func TestManagePage_BotReachabilityBlock(t *testing.T) {
 	}
 
 	srv.loginBotUsername = "mctl_demo_bot"
-	if body := getManage(t, srv, uid); !strings.Contains(body, `https://t.me/mctl_demo_bot?start=onboarding`) {
-		t.Errorf("start link missing")
+	if body := getManage(t, srv, uid); strings.Contains(body, "t.me/") || strings.Contains(body, "Let the bot message you") {
+		t.Errorf("link rendered for a reachable user")
+	}
+	for _, state := range []string{notify.StateBlocked, notify.StateCannotInitiate} {
+		if err := store.RecordBotReachability(ctx, uid, notify.DeliveryOutcome{State: state, ReasonCode: "x", Conclusive: true}, "digest"); err != nil {
+			t.Fatal(err)
+		}
+		body := getManage(t, srv, uid)
+		if !strings.Contains(body, `https://t.me/mctl_demo_bot?start=onboarding`) || !strings.Contains(body, "Let the bot message you") {
+			t.Errorf("start link missing for %s", state)
+		}
 	}
 }
 
@@ -294,5 +303,20 @@ func TestConnectSuccessPage_PerClientSetup(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("success page missing %q", want)
 		}
+	}
+}
+
+// T11: with no reachability row the link (or, without a username, the
+// plain-text fallback) is shown.
+func TestManagePage_BotLinkForUnobservedUser(t *testing.T) {
+	srv, store := newIsolatedManageServer(t)
+	uid := seedManageUser(t, store, 5152)
+
+	if body := getManage(t, srv, uid); !strings.Contains(body, "open it in Telegram and press Start") {
+		t.Errorf("fallback text missing for an unobserved user without a username")
+	}
+	srv.loginBotUsername = "mctl_demo_bot"
+	if body := getManage(t, srv, uid); !strings.Contains(body, `https://t.me/mctl_demo_bot?start=onboarding`) || !strings.Contains(body, "Let the bot message you") {
+		t.Errorf("start link missing for an unobserved user")
 	}
 }
