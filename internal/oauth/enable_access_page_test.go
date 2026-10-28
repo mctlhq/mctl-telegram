@@ -138,8 +138,57 @@ func TestEnablePhonePage_WhyPhoneMentionsQROnlyWhenOffered(t *testing.T) {
 		if got := strings.Contains(body, "no number or login code is needed"); got != offered {
 			t.Errorf("QROffered=%v: QR alternative in the explanation = %v", offered, got)
 		}
-		if got := strings.Contains(body, "Use a QR code instead</button>"); got != offered {
+		if got := strings.Contains(body, "Sign in with a QR code</button>"); got != offered {
 			t.Errorf("QROffered=%v: QR button present = %v", offered, got)
+		}
+	}
+}
+
+// TestEnablePhonePage_QRLeadsWhenOffered: on a desktop browser with QR on,
+// the QR sign-in is the primary action, above the phone number, in its own
+// form. The phone form must hold no QR submit: its first submit button is the
+// one Enter in the phone field presses, and that must stay "Send code" (#901).
+func TestEnablePhonePage_QRLeadsWhenOffered(t *testing.T) {
+	for _, offered := range []bool{false, true} {
+		rec := httptest.NewRecorder()
+		renderEnablePhone(rec, enablePhonePage{Issuer: "https://tg.test", EnableToken: "tok", QROffered: offered})
+		body := rec.Body.String()
+		phoneForm := body[strings.Index(body, `action="/oauth/telegram/enable_access/start"`):]
+		phoneForm = phoneForm[:strings.Index(phoneForm, "</form>")]
+		if strings.Contains(phoneForm, "enable_access/qr") {
+			t.Errorf("QROffered=%v: the phone form carries a QR submit", offered)
+		}
+		if got := strings.Contains(phoneForm, `<button type="submit" class="secondary">Send code</button>`); got != offered {
+			t.Errorf("QROffered=%v: Send code demoted to secondary = %v", offered, got)
+		}
+		if got := strings.Contains(phoneForm, "autofocus"); got == offered {
+			t.Errorf("QROffered=%v: phone field autofocus = %v", offered, got)
+		}
+		if !offered {
+			continue
+		}
+		qr := strings.Index(body, `<button type="submit">Sign in with a QR code</button>`)
+		if qr < 0 || qr > strings.Index(body, `action="/oauth/telegram/enable_access/start"`) {
+			t.Errorf("QR button is not the primary action above the phone form")
+		}
+	}
+}
+
+// TestEnablePhonePage_QRFormKeepsSendOptIn: the QR form is separate from the
+// send opt-in checkbox, so a choice already on the session (a re-rendered
+// phone step) must ride along as a hidden field, or a QR start would clear it.
+func TestEnablePhonePage_QRFormKeepsSendOptIn(t *testing.T) {
+	for _, optIn := range []bool{false, true} {
+		rec := httptest.NewRecorder()
+		renderEnablePhone(rec, enablePhonePage{Issuer: "https://tg.test", EnableToken: "tok", QROffered: true, SendOptIn: optIn})
+		body := rec.Body.String()
+		qrForm := body[strings.Index(body, `action="/oauth/telegram/enable_access/qr"`):]
+		qrForm = qrForm[:strings.Index(qrForm, "</form>")]
+		if got := strings.Contains(qrForm, `<input type="hidden" name="send_optin" value="on">`); got != optIn {
+			t.Errorf("SendOptIn=%v: hidden send_optin in the QR form = %v", optIn, got)
+		}
+		if !strings.Contains(qrForm, `name="es" value="tok"`) {
+			t.Errorf("QR form lacks the enable token")
 		}
 	}
 }
