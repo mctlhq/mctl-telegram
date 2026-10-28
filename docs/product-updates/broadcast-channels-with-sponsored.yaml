@@ -15,7 +15,7 @@ delivery: next_digest
 high_value: false
 tools: [get_messages, get_unread_messages, search_messages, prepare_get_media]
 evidence:
-  from: 0.97.0
+  from: 0.97.1
   changes:
     - {tool: get_messages, change: schema}
     - {tool: get_messages, change: schema, profile: core-readonly}

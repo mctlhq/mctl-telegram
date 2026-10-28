@@ -106,8 +106,7 @@ func reportSponsoredViews(ctx context.Context, pool *tg.ClientPool, userID int64
 		return nil
 	}); err != nil {
 		slog.Warn("sponsored message views not reported", "count", len(sp.Messages), "err", err)
-	}
-	if failed > 0 {
+	} else if failed > 0 {
 		slog.Warn("sponsored message views failed", "failed", failed, "count", len(sp.Messages))
 	}
 }

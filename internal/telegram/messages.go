@@ -693,6 +693,10 @@ func getMessagesWith(ctx context.Context, api *tg.Client, resolve, reResolve fun
 // off the history reply's chats; a channel the reply does not show as a
 // megagroup counts as broadcast, so its sponsored messages are asked for
 // rather than assumed absent. Nothing is fetched for a page with no posts.
+// The trade-off is deliberate: a megagroup missing from the reply's chats
+// (rare) gets an ads request too, and if that request fails it is listed in
+// sponsored_unavailable. Over-asking for a group is harmless; skipping a
+// broadcast channel would show its posts without the ads §3.3 requires.
 func fetchSponsoredForHistory(ctx context.Context, api sponsoredFetcher, input tg.InputPeerClass, hist tg.MessagesMessagesClass, shown int, sp *Sponsored) {
 	ch, ok := input.(*tg.InputPeerChannel)
 	if !ok || shown == 0 {
