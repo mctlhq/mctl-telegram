@@ -2802,6 +2802,17 @@ Every step of the connect flow writes one `audit_logs` row whose `tool_name` sta
 logged to the same table under the bare tool name. The queries below use only `user_id`,
 `tool_name` and `created_at`, and run on SQLite and Postgres.
 
+A QR sign-in (#901, behind `ENABLE_ACCESS_QR_ENABLED`) writes `connect:qr_started` and
+`connect:qr_scanned` instead of `connect:phone_submitted` and `connect:code_submitted`, and
+ends in the same plain `connect:success` row, with `reason = 'qr'`. So the first query below
+counts only phone submissions, while the success query counts both methods. Distinct users
+who connected by QR:
+
+```sql
+SELECT COUNT(DISTINCT user_id) FROM audit_logs
+WHERE tool_name = 'connect:success' AND reason = 'qr';
+```
+
 Share of users who signed in with Telegram and then submitted a phone number:
 
 ```sql

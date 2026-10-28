@@ -120,6 +120,9 @@ type Server struct {
 	// a field (not a direct telegram.Login call) so tests can substitute a
 	// stub without dialing real Telegram. New sets it to telegram.Login.
 	loginFn LoginFunc
+	// qrLoginFn performs the Telegram QR login for the enable_access QR
+	// method (#901). Same reason as loginFn; New sets it to telegram.LoginQR.
+	qrLoginFn QRLoginFunc
 
 	// loginCfg is forwarded to loginFn on every enable_access login. It carries
 	// the shared api_id-wide rate-limit middleware so the interactive login
@@ -202,6 +205,9 @@ type metricsIface interface {
 	// for one /oauth/register outcome. Both outcome and reason are closed
 	// compile-time constants — see regReason in registration_audit.go.
 	CountOAuthClientRegistration(outcome, reason string)
+	// ObserveLoginFlow records one finished enable_access login flow:
+	// method is "code" or "qr", result one of the loginFlowResult values.
+	ObserveLoginFlow(method, result string, seconds float64)
 }
 
 // WithMetrics wires a metrics registry so oauth.Server can update the
@@ -231,6 +237,19 @@ type LoginFunc func(
 	userID int64,
 	phone string,
 	askCode func(context.Context) (string, error),
+	askPassword func(context.Context) (string, error),
+	cfgs ...telegram.LoginConfig,
+) (telegramUserID int64, displayName, username string, err error)
+
+// QRLoginFunc matches the signature of telegram.LoginQR, which the
+// enable_access QR method (#901) drives the same way as LoginFunc.
+type QRLoginFunc func(
+	ctx context.Context,
+	apiID int,
+	apiHash string,
+	store *db.Store,
+	userID int64,
+	show func(ctx context.Context, url, asciiArt string) error,
 	askPassword func(context.Context) (string, error),
 	cfgs ...telegram.LoginConfig,
 ) (telegramUserID int64, displayName, username string, err error)
@@ -554,6 +573,18 @@ type Config struct {
 	DemoReviewerUsername string
 	DemoReviewerPassword string // compared in constant time, never logged
 	DemoReviewerTGID     int64
+
+	// EnableAccessQREnabled turns on the web QR login in enable_access
+	// (#901): a "Use a QR code instead" button on the phone step for desktop
+	// browsers, and the /oauth/telegram/enable_access/qr routes behind it.
+	// Off by default; with it off those routes answer 404, so the QR flow
+	// cannot be reached by a direct request either.
+	EnableAccessQREnabled bool
+	// TelegramAppName is the name of the Telegram API app this server logs
+	// in as, which Telegram shows when it asks the user to confirm a QR
+	// login. The QR page tells the user to expect it. Empty keeps the
+	// wording generic.
+	TelegramAppName string
 }
 
 // pendingAuth is the state captured between /oauth/authorize and the Telegram
@@ -759,6 +790,7 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 		deviceNonces:          map[string]*deviceNonce{},
 		deviceMinter:          deviceMinter,
 		loginFn:               telegram.Login,
+		qrLoginFn:             telegram.LoginQR,
 	}
 	if cfg.DemoReviewerEnabled {
 		s.demoLimiter = newDemoRateLimiter(s.clock)
@@ -1310,6 +1342,13 @@ func (s *Server) Register(mux Router) {
 	mux.Post("/oauth/telegram/enable_access/start", s.handleEnableStart)
 	mux.Post("/oauth/telegram/enable_access/code", s.handleEnableCode)
 	mux.Post("/oauth/telegram/enable_access/password", s.handleEnablePassword)
+	// Web QR login (#901). Registered unconditionally like /oauth/demo/login;
+	// every handler answers 404 unless EnableAccessQREnabled is set. The
+	// status page is a GET for its meta refresh and carries the "es" token
+	// in a path-scoped cookie, never in its URL.
+	mux.Post("/oauth/telegram/enable_access/qr", s.handleEnableQRStart)
+	mux.Get(enableQRStatusPath, s.handleEnableQRStatus)
+	mux.Post("/oauth/telegram/enable_access/qr/cancel", s.handleEnableQRCancel)
 	// Reviewer/demo auth-mode. Registered unconditionally; the handler is a
 	// no-op (404-equivalent) unless DemoReviewerEnabled is set, so a route
 	// table is stable across config. CSRF/state is carried by the server-side
@@ -1940,6 +1979,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		tgID:      identity.TelegramID,
 		createdAt: s.clock(),
 		step:      stepPhone,
+		qrOffered: s.cfg.EnableAccessQREnabled && isDesktopBrowser(r.UserAgent()),
 	}
 	esTok := randomToken(32)
 	s.mu.Lock()
@@ -1975,7 +2015,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		// sending is opt-in. A new account starts read-only, matching the
 		// published "preview by default" promise; the owner enables sending
 		// later with set_send_consent or on the manage page.
-		renderEnablePhone(w, enablePhonePage{Issuer: s.cfg.Issuer, EnableToken: esTok})
+		renderEnablePhone(w, enablePhonePage{Issuer: s.cfg.Issuer, EnableToken: esTok, QROffered: es.qrOffered})
 	}
 }
 

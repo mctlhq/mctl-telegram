@@ -117,6 +117,17 @@ type Registry struct {
 	// for successful phone steps, in seconds. The buckets reach 90s to bracket
 	// enableSendCodeWait so a near-timeout p95 is readable off a bucket edge.
 	LoginPhoneToCodeDuration prometheus.Histogram
+	// LoginFlowTotal counts finished enable_access login flows by method
+	// ("code" for phone + login code, "qr" for the web QR login, #901) and
+	// result: "ok", "error", "mismatch" (another Telegram account signed in
+	// and was refused), "expired" (a QR code nobody scanned in time),
+	// "abandoned" (the flow ran out of time waiting for the user) or
+	// "superseded" (the user started over). Unlike LoginPhoneStepTotal it
+	// covers the whole flow, so method=code and method=qr compare end to end.
+	LoginFlowTotal *prometheus.CounterVec
+	// LoginFlowDuration measures a successful flow from launch to session
+	// saved, in seconds, by method.
+	LoginFlowDuration *prometheus.HistogramVec
 
 	// TelegramReplicaID is an info-type gauge (constant value 1) labeled by
 	// replica_id. Operators use it to verify that a given user_id consistently
@@ -471,6 +482,17 @@ func (r *Registry) ObserveLoginPhoneStep(result string, seconds float64) {
 	}
 }
 
+// ObserveLoginFlow records the outcome of one finished enable_access login
+// flow. Satisfies oauth.metricsIface. Like ObserveLoginPhoneStep, only "ok"
+// lands in the duration histogram. method and result come from closed sets in
+// internal/oauth.
+func (r *Registry) ObserveLoginFlow(method, result string, seconds float64) {
+	r.LoginFlowTotal.WithLabelValues(method, result).Inc()
+	if result == "ok" {
+		r.LoginFlowDuration.WithLabelValues(method).Observe(seconds)
+	}
+}
+
 // New constructs a Registry with all collectors registered on a fresh
 // prometheus.Registry. Panics only if duplicate names are registered within
 // the same call (which cannot happen in practice).
@@ -554,6 +576,17 @@ func New() *Registry {
 		Help:    "Wall-clock seconds from phone submit to the SMS-code screen (connect + SendCode), successful steps only.",
 		Buckets: loginPhaseBuckets,
 	})
+
+	r.LoginFlowTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_login_flow_total",
+		Help: "Total finished enable_access login flows, labeled by method (code, qr) and result: ok, error, mismatch, expired, abandoned, superseded.",
+	}, []string{"method", "result"})
+
+	r.LoginFlowDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "mctl_login_flow_seconds",
+		Help:    "Wall-clock seconds from launching an enable_access login flow to its session being saved, successful flows only, by method (code, qr).",
+		Buckets: []float64{5, 10, 20, 30, 45, 60, 90, 120, 180, 300, 600},
+	}, []string{"method"})
 
 	r.TelegramReplicaID = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "mctl_telegram_replica_id",
@@ -731,6 +764,8 @@ func New() *Registry {
 		r.OAuthClientRegistrationsTotal,
 		r.LoginPhoneStepTotal,
 		r.LoginPhoneToCodeDuration,
+		r.LoginFlowTotal,
+		r.LoginFlowDuration,
 		r.SessionsBorrowTotal,
 		r.TelegramReplicaID,
 		r.BridgeActiveDaemons,

@@ -242,6 +242,13 @@ type Config struct {
 	// .mp4/.webm URL; see internal/web.classifyDemoVideo. Set via
 	// DEMO_VIDEO_URL.
 	DemoVideoURL string
+	// EnableAccessQREnabled turns on the web QR login in the enable_access
+	// flow (#901). Off by default; with it off the QR routes answer 404.
+	EnableAccessQREnabled bool // ENABLE_ACCESS_QR_ENABLED
+	// TelegramAppName is the Telegram API app's name, which Telegram shows
+	// when it asks the user to confirm a QR login. The QR page names it so
+	// the user can tell a genuine prompt from a phishing one. Optional.
+	TelegramAppName string // TELEGRAM_APP_NAME
 	// Reviewer/demo auth-mode for the ChatGPT App Directory review. When
 	// DemoReviewerEnabled is true the /oauth/authorize page offers a
 	// password-gated "reviewer access" path that authenticates as a single
@@ -527,6 +534,8 @@ func Load() (*Config, error) {
 	c.DBMaxIdleConns = envInt("DB_MAX_IDLE_CONNS", 0)
 	c.ReplicaID = envOr("REPLICA_ID", envOr("POD_NAME", "unknown"))
 	c.DemoVideoURL = envOr("DEMO_VIDEO_URL", "")
+	c.EnableAccessQREnabled = envBool("ENABLE_ACCESS_QR_ENABLED", false)
+	c.TelegramAppName = strings.TrimSpace(os.Getenv("TELEGRAM_APP_NAME"))
 	c.DemoReviewerEnabled = envBool("DEMO_REVIEWER_ENABLED", false)
 	c.DemoReviewerUsername = os.Getenv("DEMO_REVIEWER_USERNAME")
 	c.DemoReviewerPassword = os.Getenv("DEMO_REVIEWER_PASSWORD")
