@@ -49,7 +49,7 @@
     </ul>
     <h3 id="first-login">First sign-in</h3>
     <ol class="steps">
-      <li><strong>Sign in with Telegram</strong> in the browser window your client opens (Telegram's own OpenID Connect login).</li>
+      <li><strong>Sign in with Telegram</strong> in the browser window your client opens (Telegram's own OpenID Connect login).{{if .BotAccessRequested}} On Telegram&#8217;s sign-in screen, turn on <strong>Allow messages</strong> so the MCTL login bot can send you setup help and the notifications you choose. Telegram leaves it off unless you switch it on, and you can sign in either way.{{end}}</li>
       <li><strong>Permissions:</strong> if the server has no Telegram session for you yet, choose <em>Read only</em> (the default) or <em>Read + send</em>. You can change it later with <code>set_send_consent</code>{{if .ShowManage}} or on the <a href="/telegram/connect/manage">manage</a> page{{end}}.</li>
       <li><strong>Phone number:</strong> enter it, then the login code Telegram sends to your Telegram app, and your two-step verification password if you use one. The server stores an AES-256-GCM-encrypted MTProto session keyed to your Telegram identity, and the connector is ready.</li>
     </ol>

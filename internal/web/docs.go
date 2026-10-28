@@ -16,7 +16,10 @@ var docsTmpl = ui.New("docs", docsHTML)
 // Docs renders the developer reference page at /docs. It receives the same
 // deployment-specific values as Landing() and injects them into the
 // template so the displayed endpoint URLs are correct for the deployment.
-func Docs(publicBaseURL, mcpPath, authServer string, showManage bool) http.HandlerFunc {
+//
+// botAccessRequested adds the "Allow messages" hint to the first sign-in
+// steps while the telegram:bot_access scope is requested.
+func Docs(publicBaseURL, mcpPath, authServer string, showManage, botAccessRequested bool) http.HandlerFunc {
 	base := strings.TrimRight(publicBaseURL, "/")
 	mcpPath = "/" + strings.TrimLeft(mcpPath, "/")
 	if authServer == "" {
@@ -27,6 +30,8 @@ func Docs(publicBaseURL, mcpPath, authServer string, showManage bool) http.Handl
 		MCPURL:       base + mcpPath,
 		WellKnownURL: base + "/.well-known/oauth-protected-resource",
 		AuthServer:   authServer,
+
+		BotAccessRequested: botAccessRequested,
 	}
 	return chromePage(docsTmpl, "docs", data)
 }

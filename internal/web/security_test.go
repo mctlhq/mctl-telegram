@@ -212,7 +212,7 @@ func TestLanding_HasTransparencySections(t *testing.T) {
 
 func TestDocs_ServesHTML(t *testing.T) {
 	w := httptest.NewRecorder()
-	Docs("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/docs", nil))
+	Docs("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true, false).ServeHTTP(w, httptest.NewRequest("GET", "/docs", nil))
 	if w.Code != 200 {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
@@ -367,7 +367,7 @@ func TestLanding_ClaudeFirst(t *testing.T) {
 // advertised a password sign-in path to every visitor.
 func TestDocs_NoSubmissionChecklist(t *testing.T) {
 	w := httptest.NewRecorder()
-	Docs("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/docs", nil))
+	Docs("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true, false).ServeHTTP(w, httptest.NewRequest("GET", "/docs", nil))
 	body := w.Body.String()
 	for _, banned := range []string{
 		"Deployment pre-flight checklist",
@@ -448,7 +448,7 @@ func TestUntestedClients_LabelledEverywhere(t *testing.T) {
 	}
 	sources := map[string][]string{
 		"/":     htmlBlocks(render(Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true), "/")),
-		"/docs": htmlBlocks(render(Docs("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true), "/docs")),
+		"/docs": htmlBlocks(render(Docs("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true, false), "/docs")),
 	}
 	for _, name := range []string{"README.md", "LLMS.md"} {
 		b, err := os.ReadFile("../../" + name)
