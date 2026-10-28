@@ -21,6 +21,7 @@ type fakeSearchInvoker struct {
 	result     *tg.MessagesMessages
 	// broadcastIDs are the channels ChannelsGetChannels reports as broadcast.
 	broadcastIDs map[int64]bool
+	lookups      int
 }
 
 func (f *fakeSearchInvoker) MessagesSearchGlobal(_ context.Context, req *tg.MessagesSearchGlobalRequest) (tg.MessagesMessagesClass, error) {
@@ -36,6 +37,7 @@ func (f *fakeSearchInvoker) MessagesSearch(_ context.Context, req *tg.MessagesSe
 // ChannelsGetChannels reports every channel as a megagroup unless
 // broadcastIDs lists it, so the existing per-peer tests keep searching.
 func (f *fakeSearchInvoker) ChannelsGetChannels(_ context.Context, id []tg.InputChannelClass) (tg.MessagesChatsClass, error) {
+	f.lookups++
 	out := &tg.MessagesChats{}
 	for _, ic := range id {
 		chID := ic.(*tg.InputChannel).ChannelID
@@ -237,7 +239,7 @@ func TestCheckSearchBound(t *testing.T) {
 	}
 }
 
-func TestSearchPeer_BroadcastRefusedBeforeSearching(t *testing.T) {
+func TestSearchPeer_SwitchOff_BroadcastRefusedBeforeSearching(t *testing.T) {
 	f := &fakeSearchInvoker{result: fakeSearchResult(), broadcastIDs: map[int64]bool{8521: true}}
 	_, err := searchPeerWith(context.Background(), f, &tg.InputPeerChannel{ChannelID: 8521, AccessHash: 2}, SearchParams{Peer: "channel:8521", Query: "q", Limit: 10})
 	if !errors.Is(err, ErrBroadcastContent) {
@@ -258,8 +260,22 @@ func TestSearchPeer_MegagroupSearched(t *testing.T) {
 	}
 }
 
-func TestSearchGlobal_DropsBroadcastHits(t *testing.T) {
-	res := &tg.MessagesMessages{
+func TestSearchPeer_SwitchOn_BroadcastSearched(t *testing.T) {
+	f := &fakeSearchInvoker{result: fakeSearchResult(), broadcastIDs: map[int64]bool{8521: true}}
+	_, err := searchPeerWith(context.Background(), f, &tg.InputPeerChannel{ChannelID: 8521, AccessHash: 2}, SearchParams{Peer: "channel:8521", Query: "q", Limit: 10, BroadcastContent: BroadcastContentAllowed})
+	if err != nil {
+		t.Fatalf("broadcast search with the switch on: %v", err)
+	}
+	if f.lastPeer == nil {
+		t.Error("messages.search was not sent for the broadcast channel")
+	}
+	if f.lookups != 0 {
+		t.Errorf("the refusal lookup ran %d times with the switch on", f.lookups)
+	}
+}
+
+func globalSearchMixedResult() *tg.MessagesMessages {
+	return &tg.MessagesMessages{
 		Messages: []tg.MessageClass{
 			&tg.Message{ID: 1, Message: "from Alice", PeerID: &tg.PeerUser{UserID: 8511}},
 			&tg.Message{ID: 2, Message: "channel post", PeerID: &tg.PeerChannel{ChannelID: 8521}},
@@ -272,7 +288,10 @@ func TestSearchGlobal_DropsBroadcastHits(t *testing.T) {
 			&tg.Channel{ID: 8522, Title: "Team", Megagroup: true},
 		},
 	}
-	f := &fakeSearchInvoker{result: res}
+}
+
+func TestSearchGlobal_SwitchOff_DropsBroadcastHits(t *testing.T) {
+	f := &fakeSearchInvoker{result: globalSearchMixedResult()}
 	msgs, err := searchGlobalWith(context.Background(), f, SearchParams{Query: "q", Limit: 10})
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -283,5 +302,20 @@ func TestSearchGlobal_DropsBroadcastHits(t *testing.T) {
 	}
 	if len(ids) != 2 || ids[0] != 1 || ids[1] != 3 {
 		t.Errorf("ids = %v, want [1 3]: broadcast and unknown-channel hits dropped, user and megagroup kept", ids)
+	}
+}
+
+func TestSearchGlobal_SwitchOn_KeepsBroadcastHits(t *testing.T) {
+	f := &fakeSearchInvoker{result: globalSearchMixedResult()}
+	msgs, err := searchGlobalWith(context.Background(), f, SearchParams{Query: "q", Limit: 10, BroadcastContent: BroadcastContentAllowed})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	var ids []int
+	for _, m := range msgs {
+		ids = append(ids, m.ID)
+	}
+	if len(ids) != 4 {
+		t.Errorf("ids = %v, want all four hits with the switch on", ids)
 	}
 }

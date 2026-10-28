@@ -62,7 +62,7 @@ func (s *Server) toolPrepareGetMedia() (mcplib.Tool, mcpserver.ToolHandlerFunc) 
 
 The confirmation_id is valid for 10 minutes (single-shot). It binds the download to
 the exact (peer, message_id) pair — passing different values to get_media will fail.
-Media in broadcast channels is refused: this server does not read channel posts.
+A single media item is not a channel feed, so no sponsored messages come with it. When the server operator has switched broadcast channel content off, media in broadcast channels is refused.
 
 Inputs (required): peer, message_id.
 Output: {confirmation_id, peer_redacted, message_id, media_type, mime_type, file_name, size, expires_at}.`),
@@ -90,6 +90,7 @@ Output: {confirmation_id, peer_redacted, message_id, media_type, mime_type, file
 		if s.Hub != nil {
 			mode, err := s.Store.GetAccountMode(ctx, id.UserID)
 			if err == nil && mode == "local" {
+				args["broadcast_content"] = bool(s.BroadcastContent)
 				res, err2 := s.bridgeCall(ctx, id, "prepare_get_media", args)
 				s.audit(ctx, id, "prepare_get_media", telegram.RedactPeer(peer), bridgeResultErr(res), startedAt, "local")
 				return res, err2
@@ -99,7 +100,7 @@ Output: {confirmation_id, peer_redacted, message_id, media_type, mime_type, file
 		var ref *MediaDownloadRef
 		var mediaInfo *telegram.MediaInfo
 		err := s.borrowWithRetry(ctx, "prepare_get_media", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
-			info, loc, err := telegram.PrepareMediaRef(ctx, c, peer, messageID, s.PeerCache, id.UserID)
+			info, loc, err := telegram.PrepareMediaRef(ctx, c, peer, messageID, s.PeerCache, id.UserID, s.BroadcastContent)
 			if err != nil {
 				return err
 			}

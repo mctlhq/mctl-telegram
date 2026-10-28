@@ -103,6 +103,7 @@ func main() {
 		"auth_mode", cfg.AuthMode,
 		"auth_required", cfg.AuthRequired,
 		"allow_send", cfg.AllowSend,
+		"broadcast_content_enabled", cfg.BroadcastContentEnabled,
 		"telegram_test_dc", cfg.TGTestDC,
 		"mcp_path", cfg.MCPPath,
 		"addr", cfg.Addr,
@@ -608,7 +609,7 @@ func main() {
 	accountHandlers.Register(accountMux)
 	mux.Mount("/api/account", auth.Middleware(provider, true, m, resourceMeta)(accountMux))
 
-	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithVersion(version).WithLimiter(limiter).WithMetrics(m).WithPeerCache(peerCache).WithToolFilter(cfg.ToolFilter).WithAppsEnabled(cfg.AppsEnabled)
+	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithVersion(version).WithLimiter(limiter).WithMetrics(m).WithPeerCache(peerCache).WithToolFilter(cfg.ToolFilter).WithAppsEnabled(cfg.AppsEnabled).WithBroadcastContent(cfg.BroadcastContentEnabled)
 	// Broadcast operator tools (issue-439): prepare/list/get/cancel over MCP.
 	// Approval lives only on the web page registered with the manage routes.
 	mcpSrv.WithBroadcast(broadcastSvc, strings.TrimRight(cfg.PublicBaseURL, "/")+"/telegram/connect/broadcasts")

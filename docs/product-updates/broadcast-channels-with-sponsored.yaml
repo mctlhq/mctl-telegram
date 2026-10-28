@@ -1,0 +1,34 @@
+schema: mctl-telegram.product-update/v1
+id: broadcast-channels-with-sponsored
+kind: changed_behavior
+title: Broadcast channel posts are back, with sponsored messages
+summary: >-
+  get_messages and get_unread_messages read broadcast channels again, and
+  search_messages and get_media no longer refuse them. When a result holds a
+  channel's posts, it also carries that channel's official Telegram sponsored
+  messages in a separate "sponsored" field, labelled as advertising, as
+  Telegram's API terms require; "sponsored_unavailable" names a channel whose
+  sponsored messages could not be loaded. Unscoped get_unread_messages reads
+  DMs and groups first again and fills the rest of the limit from channels.
+locale: en
+delivery: next_digest
+high_value: false
+tools: [get_messages, get_unread_messages, search_messages, prepare_get_media]
+evidence:
+  from: 0.97.0
+  changes:
+    - {tool: get_messages, change: schema}
+    - {tool: get_messages, change: schema, profile: core-readonly}
+    - {tool: get_messages, change: schema, profile: core-reply}
+    - {tool: get_unread_messages, change: schema}
+    - {tool: get_unread_messages, change: schema, profile: core-readonly}
+    - {tool: get_unread_messages, change: schema, profile: core-reply}
+  links:
+    - https://github.com/mctlhq/mctl-telegram/issues/851
+status: approved
+provenance:
+  author: mashkovd
+  assisted_by: claude-opus-5-5
+  reviewed_by: mashkovd
+created_at: "2026-10-28"
+reviewed_at: "2026-10-28"

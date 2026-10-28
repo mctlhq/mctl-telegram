@@ -109,6 +109,11 @@ type Server struct {
 	// default) reproduces today's tools-only surface byte-for-byte -- see
 	// WithAppsEnabled and newMCPServer.
 	AppsEnabled bool
+	// BroadcastContent is the BROADCAST_CONTENT_ENABLED switch handed to
+	// every content read, and to the Local Bridge daemon in the call's
+	// arguments. New turns it on; a bare &Server{} leaves it off, which
+	// refuses broadcast channels (fail closed). Set by WithBroadcastContent.
+	BroadcastContent telegram.BroadcastContent
 	// Replies holds draft_reply confirmations for send_reply (core-reply
 	// profile). nil makes both tools refuse.
 	Replies *ReplyStore
@@ -126,6 +131,8 @@ func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
 		Confirms:   NewConfirmStore(),
 		MediaStore: NewMediaStore(),
 		Replies:    NewReplyStore(),
+
+		BroadcastContent: telegram.BroadcastContentAllowed,
 	}
 }
 
@@ -226,6 +233,13 @@ func (s *Server) WithToolFilter(f string) *Server {
 // receiver for chaining, following the WithToolFilter shape.
 func (s *Server) WithAppsEnabled(b bool) *Server {
 	s.AppsEnabled = b
+	return s
+}
+
+// WithBroadcastContent sets the BROADCAST_CONTENT_ENABLED switch. Returns
+// the receiver for chaining.
+func (s *Server) WithBroadcastContent(enabled bool) *Server {
+	s.BroadcastContent = telegram.BroadcastContent(enabled)
 	return s
 }
 

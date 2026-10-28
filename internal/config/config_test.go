@@ -428,6 +428,37 @@ func TestLoadAppsEnabled(t *testing.T) {
 	}
 }
 
+// TestLoadBroadcastContentEnabled: BROADCAST_CONTENT_ENABLED defaults to
+// true, and "false" or any value that is not a true value switches broadcast
+// channel content off (issue #851).
+func TestLoadBroadcastContentEnabled(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want bool
+	}{
+		{name: "default is true", env: map[string]string{}, want: true},
+		{name: "false switches it off", env: map[string]string{"BROADCAST_CONTENT_ENABLED": "false"}, want: false},
+		{name: "true keeps it on", env: map[string]string{"BROADCAST_CONTENT_ENABLED": "true"}, want: true},
+		{name: "empty is the default", env: map[string]string{"BROADCAST_CONTENT_ENABLED": ""}, want: true},
+		{name: "an unrecognised value switches it off", env: map[string]string{"BROADCAST_CONTENT_ENABLED": "off"}, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			if cfg.BroadcastContentEnabled != tc.want {
+				t.Errorf("BroadcastContentEnabled = %v, want %v", cfg.BroadcastContentEnabled, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadToolFilter(t *testing.T) {
 	tests := []struct {
 		name    string

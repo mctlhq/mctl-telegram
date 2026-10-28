@@ -1618,14 +1618,14 @@ func TestIntSliceArg(t *testing.T) {
 	}
 }
 
-func TestToolGetUnreadMessages_DescriptionSaysBroadcastsAreSkipped(t *testing.T) {
+func TestToolGetUnreadMessages_DescriptionMentionsPeerPriority(t *testing.T) {
 	s := &Server{}
 	tool, _ := s.toolGetUnreadMessages()
 	desc := tool.Description
 	for _, want := range []string{
-		"DMs and groups (including megagroup/supergroups)",
-		"Broadcast channels are skipped",
-		"a broadcast channel is refused",
+		"DMs and chats (including groups and megagroup/supergroups)",
+		"fill limit before any broadcast channel",
+		"last-priority",
 		"When peer is set",
 	} {
 		if !strings.Contains(desc, want) {

@@ -8,11 +8,25 @@ import (
 	"github.com/gotd/td/tg"
 )
 
+// BroadcastContent says whether the content tools hand broadcast channel
+// posts to the caller. It is the BROADCAST_CONTENT_ENABLED kill switch: on,
+// channel posts are read and get_messages/get_unread_messages attach the
+// channel's sponsored messages (Telegram API terms §3.3); off, every content
+// read refuses a broadcast channel exactly as issue #851 did. The zero value
+// refuses, so a caller that forgets to pass it fails closed.
+type BroadcastContent bool
+
+const (
+	BroadcastContentRefused BroadcastContent = false
+	BroadcastContentAllowed BroadcastContent = true
+)
+
 // ErrBroadcastContent marks a refusal to read the content of a broadcast
-// channel (issue #851). Telegram's API terms (§3.3) require an app that
-// displays channel posts to show official sponsored messages; this server
-// does not implement them, so it does not hand channel posts to the AI at
-// all. Match it with errors.Is.
+// channel. It is returned only while the BroadcastContent switch is off
+// (issue #851): Telegram's API terms (§3.3) require an app that displays
+// channel posts to show official sponsored messages, and with the switch off
+// this server does not hand channel posts to the AI at all. Match it with
+// errors.Is.
 //
 // Only content is refused. A channel's name, id and unread count stay in
 // list_dialogs, and private chats, legacy groups and megagroups (supergroups,
