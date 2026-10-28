@@ -599,7 +599,7 @@ type Config struct {
 	DemoReviewerTGID     int64
 
 	// EnableAccessQREnabled turns on the web QR login in enable_access
-	// (#901): a "Use a QR code instead" button on the phone step for desktop
+	// (#901): a "Sign in with a QR code" button on the phone step for desktop
 	// browsers, and the /oauth/telegram/enable_access/qr routes behind it.
 	// Off by default; with it off those routes answer 404, so the QR flow
 	// cannot be reached by a direct request either.

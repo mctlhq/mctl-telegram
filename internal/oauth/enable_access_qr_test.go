@@ -320,7 +320,7 @@ func TestEnableQR_FlagOffRefusesEveryRoute(t *testing.T) {
 	q := newQRStub(500100101)
 	_, mux := newQRTestServer(t, q, false)
 	es, page := driveToPhoneAs(t, mux, desktopUA)
-	if strings.Contains(page, "Use a QR code instead") {
+	if strings.Contains(page, "Sign in with a QR code") {
 		t.Error("phone step offers the QR button with the flag off")
 	}
 
@@ -342,10 +342,10 @@ func TestEnableQR_FlagOffRefusesEveryRoute(t *testing.T) {
 // phone browser is not offered it.
 func TestEnableQR_ButtonOnlyOnDesktop(t *testing.T) {
 	_, mux := newQRTestServer(t, newQRStub(500100101), true)
-	if _, page := driveToPhoneAs(t, mux, desktopUA); !strings.Contains(page, "Use a QR code instead") {
+	if _, page := driveToPhoneAs(t, mux, desktopUA); !strings.Contains(page, "Sign in with a QR code") {
 		t.Error("desktop browser is not offered the QR button")
 	}
-	if _, page := driveToPhoneAs(t, mux, iPhoneUA); strings.Contains(page, "Use a QR code instead") {
+	if _, page := driveToPhoneAs(t, mux, iPhoneUA); strings.Contains(page, "Sign in with a QR code") {
 		t.Error("phone browser is offered the QR button")
 	}
 }
@@ -493,7 +493,7 @@ func TestEnableQR_MismatchKeepsTheExistingSession(t *testing.T) {
 	pollQRStatus(t, mux, c, "<svg")
 	close(q.scan)
 	rec := pollQRStatus(t, mux, c, "different Telegram account")
-	if !strings.Contains(rec.Body.String(), "Use a QR code instead") {
+	if !strings.Contains(rec.Body.String(), "Sign in with a QR code") {
 		t.Error("the refusal offers no new QR code")
 	}
 
@@ -561,7 +561,7 @@ func TestEnableQR_ExpiredCodeIsAbandonment(t *testing.T) {
 	c := startQR(t, mux, es)
 
 	rec := pollQRStatus(t, mux, c, "not scanned in time")
-	if !strings.Contains(rec.Body.String(), "Use a QR code instead") {
+	if !strings.Contains(rec.Body.String(), "Sign in with a QR code") {
 		t.Error("expired page offers no new QR code")
 	}
 	out := logs.String()
@@ -640,7 +640,7 @@ func TestEnableQR_SecondAuthRestartEndsTheFlow(t *testing.T) {
 
 	rec := pollQRStatus(t, mux, c, "Telegram ended the sign-in session")
 	body := rec.Body.String()
-	if !strings.Contains(body, "Use a QR code instead") || !strings.Contains(body, "/oauth/telegram/enable_access/start") {
+	if !strings.Contains(body, "Sign in with a QR code") || !strings.Contains(body, "/oauth/telegram/enable_access/start") {
 		t.Error("the ended flow offers no way to start over")
 	}
 	if n := q.calls.Load(); n != 1 {
@@ -695,7 +695,7 @@ func TestEnableQR_OnlyFromThePhoneStep(t *testing.T) {
 		t.Fatalf("start did not reach the code step: %s", rec.Body.String())
 	}
 	if strings.Contains(postForm(t, mux, "/oauth/telegram/enable_access/code",
-		url.Values{"es": {es}, "code": {""}}).Body.String(), "Use a QR code instead") {
+		url.Values{"es": {es}, "code": {""}}).Body.String(), "Sign in with a QR code") {
 		t.Error("the code step offers the QR button")
 	}
 

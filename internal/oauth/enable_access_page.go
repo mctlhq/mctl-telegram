@@ -27,7 +27,8 @@ type enablePhonePage struct {
 	Error       string
 	WizardMode  bool
 	WizardStep  int
-	// QROffered adds "Use a QR code instead" (#901); see
+	// QROffered puts "Sign in with a QR code" first on the phone step, with
+	// the phone number below it as the alternative (#901); see
 	// enableSession.qrOffered.
 	QROffered bool
 }
@@ -136,6 +137,15 @@ const enableExtraCSS = `
              padding: 11px 16px; border-radius: var(--mctl-radius-md); background: var(--accent); color: var(--accent-fg); }
   .btnlink:hover { filter: brightness(.92); }
   button.secondary { background: none; color: var(--text); border: 1px solid var(--border-strong); }
+  /* The phone step's first submit button in tree order is the one Enter in the
+     phone field presses. With QR offered the visible first button is QR, so a
+     visually hidden "Send code" goes ahead of it to keep Enter on the phone
+     method. Not display:none: some browsers skip such a default button. */
+  .default-submit { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0;
+                    overflow: hidden; clip: rect(0 0 0 0); border: 0; }
+  .hint { margin: 8px 0 0; font-size: 13px; color: var(--text-dim); text-align: center; }
+  .or { display: flex; align-items: center; gap: 12px; margin: 24px 0 4px; font-size: 13px; color: var(--text-dim); }
+  .or::before, .or::after { content: ""; flex: 1; border-top: 1px solid var(--border-strong); }
   .qrbox { display: flex; justify-content: center; margin: 16px 0; }
   .qrbox svg { border-radius: var(--mctl-radius-md); }
 `
@@ -176,14 +186,16 @@ var enablePhoneTemplate = template.Must(template.New("enablePhone").Parse(enable
     {{if .WizardMode}}<h1>Step {{.WizardStep}} of 4 &#8212; Phone number</h1>{{else}}<h1>Enable message access</h1>{{end}}
     {{if .WizardMode}}<div class="notice">A new Telegram session will appear in your account&#8217;s Active Sessions. This is normal &#8212; it is this connector.</div>{{end}}
     <p>You are connecting <span class="url">{{.Issuer}}</span> to your Telegram account. To
-       read your messages, this server needs a Telegram session. Enter your phone number and
-       Telegram will send you a login code.</p>
+       read your messages, this server needs a Telegram session. {{if .QROffered}}The quickest
+       way is to scan a QR code with Telegram on your phone; you can also enter your phone
+       number and Telegram will send you a login code.{{else}}Enter your phone number and
+       Telegram will send you a login code.{{end}}</p>
     <div class="meta" id="why-phone">
       <p><strong>Why a phone number?</strong> Signing in with Telegram only proved who you are.
          Reading your chats needs a Telegram user session, and Telegram creates one only after
          it sends a login code to your number{{if .QROffered}}, or after you scan a QR code with
-         Telegram on a phone that is already signed in. For the QR code, use &#8220;Use a QR code
-         instead&#8221; below: no number or login code is needed{{end}}.</p>
+         Telegram on a phone that is already signed in. For the QR code, use &#8220;Sign in with a QR
+         code&#8221; below: no number or login code is needed{{end}}.</p>
       <p><strong>What happens to it:</strong> the number goes to Telegram to request the code.
          This service does not save it in its database, session or audit log; it is held in
          server memory only while you sign in. The session itself is stored encrypted and shows
@@ -197,17 +209,20 @@ var enablePhoneTemplate = template.Must(template.New("enablePhone").Parse(enable
     {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
     <form method="POST" action="/oauth/telegram/enable_access/start" autocomplete="off">
       <input type="hidden" name="es" value="{{.EnableToken}}">
-      <label class="field">
-        <span>Phone number (international format)</span>
-        <input name="phone" type="tel" inputmode="tel" placeholder="+14155551234"
-               value="{{.Phone}}" required autofocus>
-      </label>
       {{if .WizardMode}}{{else}}<label class="check">
         <input type="checkbox" name="send_optin" value="on"{{if .SendOptIn}} checked{{end}}>
         <span>Also allow this connector to send messages on my behalf (you can turn this off later)</span>
       </label>{{end}}
-      <button type="submit">Send code</button>
-      {{if .QROffered}}<button type="submit" class="secondary" formaction="/oauth/telegram/enable_access/qr" formnovalidate>Use a QR code instead</button>{{end}}
+      {{if .QROffered}}<button type="submit" class="default-submit" tabindex="-1" aria-hidden="true">Send code</button>
+      <button type="submit" formaction="/oauth/telegram/enable_access/qr" formnovalidate>Sign in with a QR code</button>
+      <p class="hint">Recommended: scan it with Telegram on your phone. No phone number or login code needed.</p>
+      <div class="or"><span>or use your phone number</span></div>{{end}}
+      <label class="field">
+        <span>Phone number (international format)</span>
+        <input name="phone" type="tel" inputmode="tel" placeholder="+14155551234"
+               value="{{.Phone}}" required{{if not .QROffered}} autofocus{{end}}>
+      </label>
+      <button type="submit"{{if .QROffered}} class="secondary"{{end}}>Send code</button>
     </form>
     <p class="meta">The login code is delivered inside your Telegram app. The server stores an
        encrypted session blob — never your password.</p>

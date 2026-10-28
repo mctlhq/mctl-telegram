@@ -96,7 +96,7 @@ type enableSession struct {
 	// the access_denied return to the client.
 	terminalDesc string
 
-	// qrOffered is whether the phone step shows "Use a QR code instead"
+	// qrOffered is whether the phone step leads with "Sign in with a QR code"
 	// (#901): the QR flag is on and the browser that reached the callback is
 	// a desktop one, where the code is scanned with the phone. Fixed at the
 	// callback. It only decides the button; the QR routes check the flag.
