@@ -33,3 +33,17 @@ func TestLoginBotMatchesOIDCClient(t *testing.T) {
 		}
 	}
 }
+
+// T12: the rollout flag reads as off when unset, empty or unparseable.
+func TestBotAccessFlagDefaultsOff(t *testing.T) {
+	for _, v := range []string{"", "maybe", "0", "false"} {
+		t.Setenv("TELEGRAM_OIDC_BOT_ACCESS_ENABLED", v)
+		if envBool("TELEGRAM_OIDC_BOT_ACCESS_ENABLED", false) {
+			t.Errorf("%q read as on", v)
+		}
+	}
+	t.Setenv("TELEGRAM_OIDC_BOT_ACCESS_ENABLED", "true")
+	if !envBool("TELEGRAM_OIDC_BOT_ACCESS_ENABLED", false) {
+		t.Error(`"true" read as off`)
+	}
+}
