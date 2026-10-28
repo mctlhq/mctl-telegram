@@ -496,10 +496,14 @@ const connectCopyScript = `
 (function () {
   var btn = document.getElementById('copy-mcp-url');
   if (!btn) { return; }
+  var label = btn.textContent;
+  var timer = null;
+  var reset = function (ms) {
+    clearTimeout(timer);
+    timer = setTimeout(function () { btn.textContent = label; }, ms);
+  };
   btn.addEventListener('click', function () {
     var url = btn.getAttribute('data-url');
-    var label = btn.textContent;
-    var reset = function (ms) { setTimeout(function () { btn.textContent = label; }, ms); };
     if (navigator.clipboard) {
       navigator.clipboard.writeText(url).then(function () {
         btn.textContent = 'Copied!';
