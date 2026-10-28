@@ -137,7 +137,13 @@ const enableExtraCSS = `
              padding: 11px 16px; border-radius: var(--mctl-radius-md); background: var(--accent); color: var(--accent-fg); }
   .btnlink:hover { filter: brightness(.92); }
   button.secondary { background: none; color: var(--text); border: 1px solid var(--border-strong); }
-  .qr-first .hint { margin: 8px 0 0; font-size: 13px; color: var(--text-dim); text-align: center; }
+  /* The phone step's first submit button in tree order is the one Enter in the
+     phone field presses. With QR offered the visible first button is QR, so a
+     visually hidden "Send code" goes ahead of it to keep Enter on the phone
+     method. Not display:none: some browsers skip such a default button. */
+  .default-submit { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0;
+                    overflow: hidden; clip: rect(0 0 0 0); border: 0; }
+  .hint { margin: 8px 0 0; font-size: 13px; color: var(--text-dim); text-align: center; }
   .or { display: flex; align-items: center; gap: 12px; margin: 24px 0 4px; font-size: 13px; color: var(--text-dim); }
   .or::before, .or::after { content: ""; flex: 1; border-top: 1px solid var(--border-strong); }
   .qrbox { display: flex; justify-content: center; margin: 16px 0; }
@@ -201,24 +207,21 @@ var enablePhoneTemplate = template.Must(template.New("enablePhone").Parse(enable
       <p>More: <a href="/privacy">Privacy</a> &#183; <a href="/security">Security</a></p>
     </div>
     {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
-    {{if .QROffered}}<form method="POST" action="/oauth/telegram/enable_access/qr" class="qr-first">
-      <input type="hidden" name="es" value="{{.EnableToken}}">
-      {{if .SendOptIn}}<input type="hidden" name="send_optin" value="on">{{end}}
-      <button type="submit">Sign in with a QR code</button>
-      <p class="hint">Recommended: scan it with Telegram on your phone. No phone number or login code needed.</p>
-    </form>
-    <div class="or"><span>or use your phone number</span></div>{{end}}
     <form method="POST" action="/oauth/telegram/enable_access/start" autocomplete="off">
       <input type="hidden" name="es" value="{{.EnableToken}}">
+      {{if .WizardMode}}{{else}}<label class="check">
+        <input type="checkbox" name="send_optin" value="on"{{if .SendOptIn}} checked{{end}}>
+        <span>Also allow this connector to send messages on my behalf (you can turn this off later)</span>
+      </label>{{end}}
+      {{if .QROffered}}<button type="submit" class="default-submit" tabindex="-1" aria-hidden="true">Send code</button>
+      <button type="submit" formaction="/oauth/telegram/enable_access/qr" formnovalidate>Sign in with a QR code</button>
+      <p class="hint">Recommended: scan it with Telegram on your phone. No phone number or login code needed.</p>
+      <div class="or"><span>or use your phone number</span></div>{{end}}
       <label class="field">
         <span>Phone number (international format)</span>
         <input name="phone" type="tel" inputmode="tel" placeholder="+14155551234"
                value="{{.Phone}}" required{{if not .QROffered}} autofocus{{end}}>
       </label>
-      {{if .WizardMode}}{{else}}<label class="check">
-        <input type="checkbox" name="send_optin" value="on"{{if .SendOptIn}} checked{{end}}>
-        <span>Also allow this connector to send messages on my behalf (you can turn this off later)</span>
-      </label>{{end}}
       <button type="submit"{{if .QROffered}} class="secondary"{{end}}>Send code</button>
     </form>
     <p class="meta">The login code is delivered inside your Telegram app. The server stores an

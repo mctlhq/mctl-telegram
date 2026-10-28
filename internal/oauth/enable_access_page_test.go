@@ -145,50 +145,45 @@ func TestEnablePhonePage_WhyPhoneMentionsQROnlyWhenOffered(t *testing.T) {
 }
 
 // TestEnablePhonePage_QRLeadsWhenOffered: on a desktop browser with QR on,
-// the QR sign-in is the primary action, above the phone number, in its own
-// form. The phone form must hold no QR submit: its first submit button is the
-// one Enter in the phone field presses, and that must stay "Send code" (#901).
+// the QR sign-in is the primary action, above the phone number. Both methods
+// share one form, so the send opt-in checkbox (non-wizard mode) is submitted
+// with either; its first submit button, which Enter in the phone field
+// presses, must stay "Send code" to the phone route (#901).
 func TestEnablePhonePage_QRLeadsWhenOffered(t *testing.T) {
-	for _, offered := range []bool{false, true} {
-		rec := httptest.NewRecorder()
-		renderEnablePhone(rec, enablePhonePage{Issuer: "https://tg.test", EnableToken: "tok", QROffered: offered})
-		body := rec.Body.String()
-		phoneForm := body[strings.Index(body, `action="/oauth/telegram/enable_access/start"`):]
-		phoneForm = phoneForm[:strings.Index(phoneForm, "</form>")]
-		if strings.Contains(phoneForm, "enable_access/qr") {
-			t.Errorf("QROffered=%v: the phone form carries a QR submit", offered)
-		}
-		if got := strings.Contains(phoneForm, `<button type="submit" class="secondary">Send code</button>`); got != offered {
-			t.Errorf("QROffered=%v: Send code demoted to secondary = %v", offered, got)
-		}
-		if got := strings.Contains(phoneForm, "autofocus"); got == offered {
-			t.Errorf("QROffered=%v: phone field autofocus = %v", offered, got)
-		}
-		if !offered {
-			continue
-		}
-		qr := strings.Index(body, `<button type="submit">Sign in with a QR code</button>`)
-		if qr < 0 || qr > strings.Index(body, `action="/oauth/telegram/enable_access/start"`) {
-			t.Errorf("QR button is not the primary action above the phone form")
-		}
-	}
-}
-
-// TestEnablePhonePage_QRFormKeepsSendOptIn: the QR form is separate from the
-// send opt-in checkbox, so a choice already on the session (a re-rendered
-// phone step) must ride along as a hidden field, or a QR start would clear it.
-func TestEnablePhonePage_QRFormKeepsSendOptIn(t *testing.T) {
-	for _, optIn := range []bool{false, true} {
-		rec := httptest.NewRecorder()
-		renderEnablePhone(rec, enablePhonePage{Issuer: "https://tg.test", EnableToken: "tok", QROffered: true, SendOptIn: optIn})
-		body := rec.Body.String()
-		qrForm := body[strings.Index(body, `action="/oauth/telegram/enable_access/qr"`):]
-		qrForm = qrForm[:strings.Index(qrForm, "</form>")]
-		if got := strings.Contains(qrForm, `<input type="hidden" name="send_optin" value="on">`); got != optIn {
-			t.Errorf("SendOptIn=%v: hidden send_optin in the QR form = %v", optIn, got)
-		}
-		if !strings.Contains(qrForm, `name="es" value="tok"`) {
-			t.Errorf("QR form lacks the enable token")
+	const qrBtn = `<button type="submit" formaction="/oauth/telegram/enable_access/qr" formnovalidate>Sign in with a QR code</button>`
+	for _, wizard := range []bool{false, true} {
+		for _, offered := range []bool{false, true} {
+			rec := httptest.NewRecorder()
+			renderEnablePhone(rec, enablePhonePage{Issuer: "https://tg.test", EnableToken: "tok", QROffered: offered, WizardMode: wizard, WizardStep: 3})
+			body := rec.Body.String()
+			if n := strings.Count(body, "<form"); n != 1 {
+				t.Fatalf("wizard=%v QROffered=%v: %d forms on the phone step, want 1", wizard, offered, n)
+			}
+			form := body[strings.Index(body, `<form method="POST" action="/oauth/telegram/enable_access/start"`):]
+			form = form[:strings.Index(form, "</form>")]
+			first := form[strings.Index(form, `<button type="submit"`):]
+			first = first[:strings.Index(first, "</button>")]
+			if strings.Contains(first, "formaction") || !strings.HasSuffix(first, ">Send code") {
+				t.Errorf("wizard=%v QROffered=%v: Enter would press %q", wizard, offered, first)
+			}
+			if got := strings.Contains(form, `<button type="submit" class="secondary">Send code</button>`); got != offered {
+				t.Errorf("wizard=%v QROffered=%v: visible Send code demoted = %v", wizard, offered, got)
+			}
+			if got := strings.Contains(form, "autofocus"); got == offered {
+				t.Errorf("wizard=%v QROffered=%v: phone field autofocus = %v", wizard, offered, got)
+			}
+			qr := strings.Index(form, qrBtn)
+			if got := qr >= 0; got != offered {
+				t.Errorf("wizard=%v QROffered=%v: QR primary button present = %v", wizard, offered, got)
+			}
+			if offered && qr > strings.Index(form, `name="phone"`) {
+				t.Errorf("wizard=%v: QR button is below the phone field", wizard)
+			}
+			if !wizard {
+				if box := strings.Index(form, `name="send_optin"`); box < 0 || (offered && box > qr) {
+					t.Errorf("QROffered=%v: send opt-in missing from the form or below the QR button", offered)
+				}
+			}
 		}
 	}
 }
