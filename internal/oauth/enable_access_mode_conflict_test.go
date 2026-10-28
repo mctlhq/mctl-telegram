@@ -565,99 +565,12 @@ func TestEnableAccess_ModeCheckFailure_DropsAStaleTerminalMessage(t *testing.T) 
 	}
 }
 
-// TestEnableAccess_StraySessionRepaired_WhenReloadFindsNothing covers an exit
-// between the login and SaveSession that the repair used to miss: the login
-// succeeds, but the reload finds no bytes and the flow returns before
-// SaveSession — where the only repair used to hang.
-//
-// The precondition is the multi-active-row state ProvisionLocalAccount's own
-// doc names: a local row provisioned in the window after the login returned.
-// It carries a NULL blob and is the newest active row, so LoadSession answers
-// nil, while the bytes the gotd SessionStore wrote a moment earlier sit on the
-// older hosted row. Leaving them there is the whole failure this change
-// exists to prevent — a hosted worker holding a live session for a user the
-// operator believes is bridge-only.
-func TestEnableAccess_StraySessionRepaired_WhenReloadFindsNothing(t *testing.T) {
-	ctx := context.Background()
-	var srv *Server
-
-	srv, mux := newEnableTestServer(t, func(lctx context.Context, apiID int, apiHash string,
-		store *db.Store, uid int64, phone string,
-		askCode func(context.Context) (string, error),
-		askPassword func(context.Context) (string, error),
-		_ ...telegram.LoginConfig,
-	) (int64, string, string, error) {
-		if _, err := askCode(lctx); err != nil {
-			return 0, "", "", err
-		}
-		// gotd's SessionStore write. With no loaded row id it targets every
-		// active row; here that is the hosted row created below.
-		if err := store.UpdateSessionBlob(lctx, uid, []byte("fake-mtproto-session")); err != nil {
-			return 0, "", "", err
-		}
-		// Self-service activation lands in the window between the login
-		// returning and the reload. Direct SQL because ProvisionLocalAccount
-		// refuses while another active row exists — that guard is exactly what
-		// makes this state a race rather than a normal one.
-		if _, err := store.DB.ExecContext(lctx,
-			`INSERT INTO telegram_accounts(user_id, telegram_user_id, display_name, username,
-			                               session_encrypted, mode, send_enabled, connected_at)
-			 VALUES ($1, $2, $3, $4, NULL, $5, $6, CURRENT_TIMESTAMP)`,
-			uid, 500100101, "Dana", "dana_tg", db.ModeLocal, false); err != nil {
-			return 0, "", "", err
-		}
-		return 500100101, "Dana", "dana_tg", nil
-	})
-	esTok := driveToPhone(t, mux)
-
-	uid, err := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
-	if err != nil {
-		t.Fatalf("ensure user: %v", err)
-	}
-	// The hosted row the login's bytes will land on.
-	if err := srv.store.SaveSession(ctx, uid, []byte("previous-session"), 500100101, "Dana", "dana_tg"); err != nil {
-		t.Fatalf("SaveSession: %v", err)
-	}
-
-	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
-		url.Values{"es": {esTok}, "phone": {"+14155551234"}}); !strings.Contains(rec.Body.String(), "enable_access/code") {
-		t.Fatalf("start did not render code screen: %s", rec.Body.String())
-	}
-	rec := postForm(t, mux, "/oauth/telegram/enable_access/code", url.Values{"es": {esTok}, "code": {"12345"}})
-
-	// This is the discriminator, and it has to be checked: the SaveSession
-	// path — which the old sentinel-gated code already covered — leaves the
-	// same two rows in the same state, so both assertions below pass on it
-	// too. Only the error text says which exit ran. Without this, a change to
-	// LoadSessionWithID's row selection could silently re-point the test at
-	// the path it says it is not exercising.
-	if body := rec.Body.String(); !strings.Contains(body, "no session bytes were persisted") {
-		t.Fatalf("the flow did not take the reload bail-out this test is named for; body=%s", body)
-	}
-
-	var blob []byte
-	if err := srv.store.DB.QueryRowContext(ctx,
-		`SELECT session_encrypted FROM telegram_accounts
-		 WHERE user_id = $1 AND revoked_at IS NULL AND mode = $2`, uid, db.ModeHosted).Scan(&blob); err != nil {
-		t.Fatalf("read hosted row: %v", err)
-	}
-	if blob != nil {
-		t.Error("the login's bytes survived a bail-out before SaveSession; a hosted worker could act as a user the operator believes is bridge-only")
-	}
-}
-
-// TestEnableAccess_IdentityMismatch_DoesNotRevokeTheBridge covers the one exit
-// where the deferred repair is not enough on its own, because the branch used
-// to destroy the thing the repair protects.
-//
-// RevokeActiveSession is `WHERE user_id AND revoked_at IS NULL` — every active
-// row. On the race this block assumes, that includes the bridge-only row, so
-// the mismatch bail-out revoked a valid Local Bridge account. It also silenced
-// the repair: both ClearStraySessionIfLocal's EXISTS and LoadSession filter on
-// revoked_at IS NULL, so after the revoke there is nothing left to match.
-//
-// Both properties are asserted, because either one alone would pass on the old
-// behaviour combined with the other bug.
+// TestEnableAccess_IdentityMismatch_DoesNotRevokeTheBridge: a bridge-only row
+// provisioned while the login runs survives a wrong-account sign-in, active
+// and with no session bytes. The mismatch bail-out used to revoke every
+// active row of the user (RevokeActiveSession), which included that row;
+// since #913 the login writes nothing for a wrong account and the flow
+// revokes nothing.
 func TestEnableAccess_IdentityMismatch_DoesNotRevokeTheBridge(t *testing.T) {
 	srv, mux := newEnableTestServer(t, stubLoginWrongAccount())
 	esTok := driveToPhone(t, mux)
@@ -697,75 +610,11 @@ func TestEnableAccess_IdentityMismatch_DoesNotRevokeTheBridge(t *testing.T) {
 	}
 }
 
-// TestEnableAccess_IdentityMismatch_UnknownRevokesTheBridge is the sibling
-// DoesNotRevokeTheBridge does not cover: cErr != nil, the branch that answers
-// "unknown" by revoking — i.e. by performing on purpose the destruction the
-// rest of #492 exists to prevent. Dropping `local = false` or treating an
-// unknown check as the local path leaves that test (and TelegramIDMismatch)
-// green, because nothing else drives the error half of the seam.
-func TestEnableAccess_IdentityMismatch_UnknownRevokesTheBridge(t *testing.T) {
-	srv, mux := newEnableTestServer(t, stubLoginWrongAccount())
-	esTok := driveToPhone(t, mux)
-
-	// Fail only the identity-mismatch check (third call). The first two are
-	// handleEnableStart's pre-flight gate and startLoginFlow's re-check;
-	// those must pass so the flow reaches the mismatch branch. Assigned
-	// before /start and never rewritten: a mid-flight write races with the
-	// flow goroutine's reads (see Server.modeCheckFn).
-	var checks atomic.Int32
-	srv.modeCheckFn = func(context.Context, int64) (bool, error) {
-		if checks.Add(1) >= 3 {
-			return false, errors.New("boom")
-		}
-		return false, nil
-	}
-
-	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
-		url.Values{"es": {esTok}, "phone": {"+14155551234"}}); !strings.Contains(rec.Body.String(), "enable_access/code") {
-		t.Fatalf("start did not render code screen: %s", rec.Body.String())
-	}
-
-	ctx := context.Background()
-	uid, err := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
-	if err != nil {
-		t.Fatalf("ensure user: %v", err)
-	}
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
-		t.Fatalf("ProvisionLocalAccount: %v", err)
-	}
-
-	rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
-		url.Values{"es": {esTok}, "code": {"12345"}})
-	body := rec.Body.String()
-	if !strings.Contains(body, "different Telegram account") {
-		t.Fatalf("unknown fallback must still report the identity mismatch, not a revoke error; body=%s", body)
-	}
-	if strings.Contains(body, "revoke wrong-account") {
-		t.Errorf("user saw the revoke error instead of the identity mismatch; body=%s", body)
-	}
-	if strings.Contains(body, "login attempt expired") {
-		t.Errorf("unknown fallback rendered as a CodeTTL expiry; body=%s", body)
-	}
-
-	var n int
-	if err := srv.store.DB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM telegram_accounts
-		 WHERE user_id = $1 AND revoked_at IS NULL AND mode = $2`,
-		uid, db.ModeLocal).Scan(&n); err != nil {
-		t.Fatalf("count local rows: %v", err)
-	}
-	if n != 0 {
-		t.Error("unknown-mode fallback left the bridge row active; that branch must revoke")
-	}
-}
-
-// TestEnableAccess_IdentityMismatch_ExpiredFlowStillReportsMismatch pins the
-// other half of the same branch: the check and the revoke/repair must not
-// inherit bgCtx's CodeTTL deadline. On expiry the check would fail, local
-// would flip to false, the revoke on the same dead context would fail too,
-// and friendlyErr would render "the login attempt expired." instead of the
-// identity mismatch — a different answer at second 59 and second 61 of the
-// same flow for no reason the code states.
+// TestEnableAccess_IdentityMismatch_ExpiredFlowStillReportsMismatch: a
+// wrong-account sign-in that returns after the flow's CodeTTL ran out still
+// reports the identity mismatch, not "the login attempt expired." -- the #919
+// cancel guard runs after the identity binding -- and leaves the bridge row
+// alone.
 func TestEnableAccess_IdentityMismatch_ExpiredFlowStillReportsMismatch(t *testing.T) {
 	srv, mux := newEnableTestServer(t, func(ctx context.Context, apiID int, apiHash string,
 		store *db.Store, uid int64, phone string,
@@ -774,9 +623,6 @@ func TestEnableAccess_IdentityMismatch_ExpiredFlowStillReportsMismatch(t *testin
 		_ ...telegram.LoginConfig,
 	) (int64, string, string, error) {
 		if _, err := askCode(ctx); err != nil {
-			return 0, "", "", err
-		}
-		if err := store.UpdateSessionBlob(ctx, uid, []byte("wrong-account-session")); err != nil {
 			return 0, "", "", err
 		}
 		// Wait out the flow's CodeTTL so the identity-mismatch branch runs
@@ -827,96 +673,5 @@ func TestEnableAccess_IdentityMismatch_ExpiredFlowStillReportsMismatch(t *testin
 	}
 	if blob != nil {
 		t.Error("the wrong account's session bytes survived on the bridge row")
-	}
-}
-
-// TestEnableAccess_IdentityMismatch_LocalCleanupFailureSurfaces is the
-// counterpart of the revoke arm's "A failed revoke must surface". The local
-// half used to leave a failed ClearStraySessionIfLocal to the deferred
-// repair, whose only failure handling is slog.Error, so lf.err still carried
-// only the identity-mismatch message and nothing told the caller the cleanup
-// did not happen.
-func TestEnableAccess_IdentityMismatch_LocalCleanupFailureSurfaces(t *testing.T) {
-	srv, mux := newEnableTestServer(t, stubLoginWrongAccount())
-	esTok := driveToPhone(t, mux)
-
-	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
-		url.Values{"es": {esTok}, "phone": {"+14155551234"}}); !strings.Contains(rec.Body.String(), "enable_access/code") {
-		t.Fatalf("start did not render code screen: %s", rec.Body.String())
-	}
-
-	srv.clearStrayFn = func(context.Context, int64) error {
-		return errors.New("repair timed out")
-	}
-
-	ctx := context.Background()
-	uid, err := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
-	if err != nil {
-		t.Fatalf("ensure user: %v", err)
-	}
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
-		t.Fatalf("ProvisionLocalAccount: %v", err)
-	}
-
-	rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
-		url.Values{"es": {esTok}, "code": {"12345"}})
-	body := rec.Body.String()
-	if !strings.Contains(body, "clear wrong-account session") {
-		t.Fatalf("a failed local cleanup was not surfaced; body=%s", body)
-	}
-}
-
-// TestEnableAccess_IdentityMismatch_CleanupDeadlineIsNotLoginExpiry covers
-// the class of bug switching off bgCtx was meant to kill: decisionCtx is
-// still a 5s timeout, so a slow (or injected) revoke/clear can return
-// DeadlineExceeded. Wrapping that with %w makes friendlyErr/shortReason
-// treat it as login CodeTTL expiry and hide the cleanup failure.
-func TestEnableAccess_IdentityMismatch_CleanupDeadlineIsNotLoginExpiry(t *testing.T) {
-	srv, mux := newEnableTestServer(t, stubLoginWrongAccount())
-	esTok := driveToPhone(t, mux)
-
-	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
-		url.Values{"es": {esTok}, "phone": {"+14155551234"}}); !strings.Contains(rec.Body.String(), "enable_access/code") {
-		t.Fatalf("start did not render code screen: %s", rec.Body.String())
-	}
-
-	srv.clearStrayFn = func(context.Context, int64) error {
-		return context.DeadlineExceeded
-	}
-
-	ctx := context.Background()
-	uid, err := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
-	if err != nil {
-		t.Fatalf("ensure user: %v", err)
-	}
-	if err := srv.store.ProvisionLocalAccount(ctx, uid, 500100101, "Dana", "dana_tg"); err != nil {
-		t.Fatalf("ProvisionLocalAccount: %v", err)
-	}
-
-	rec := postForm(t, mux, "/oauth/telegram/enable_access/code",
-		url.Values{"es": {esTok}, "code": {"12345"}})
-	body := rec.Body.String()
-	if strings.Contains(body, "login attempt expired") {
-		t.Errorf("repair-budget DeadlineExceeded rendered as login CodeTTL expiry; body=%s", body)
-	}
-	if !strings.Contains(body, "clear wrong-account session") {
-		t.Fatalf("cleanup failure was not surfaced; body=%s", body)
-	}
-
-	entries, err := srv.store.ListAuditFor(ctx, uid, 10, time.Time{})
-	if err != nil {
-		t.Fatalf("ListAuditFor: %v", err)
-	}
-	foundCleanup := false
-	for _, e := range entries {
-		if e.ToolName == "connect:failed:timeout" {
-			t.Errorf("repair deadline booked as the generic login timeout tag; entries=%+v", entries)
-		}
-		if e.ToolName == "connect:failed:identity_cleanup_timeout" {
-			foundCleanup = true
-		}
-	}
-	if !foundCleanup {
-		t.Errorf("audit log missing connect:failed:identity_cleanup_timeout; got %+v", entries)
 	}
 }

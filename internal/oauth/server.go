@@ -168,14 +168,6 @@ type Server struct {
 	// flow starts.
 	beforeSignInSave func()
 
-	// clearStrayFn, when non-nil, replaces store.ClearStraySessionIfLocal on
-	// the enable_access repair paths. Test seam (nil in production): the store
-	// is a real *db.Store, so this is the only way to reach the failure half
-	// of the identity-mismatch local cleanup, which must surface the same way
-	// a failed revoke does. Assigned before the request that reads it and not
-	// mutated while a flow is in flight.
-	clearStrayFn func(context.Context, int64) error
-
 	// loginFlowParked, when non-nil, is invoked by the enable_access login
 	// goroutine immediately before it blocks on that uid's loginMu entry.
 	// Test seam: it is the only race-free way to observe the window between
@@ -187,7 +179,7 @@ type Server struct {
 	//
 	// Assigned before the request that reads it and not mutated while a flow
 	// is in flight -- the flow goroutine reads it, so a mid-flight write would
-	// be a race like any other. Same contract as modeCheckFn and clearStrayFn
+	// be a race like any other. Same contract as modeCheckFn
 	// above; the wording is shared deliberately, because the earlier "set once
 	// during test construction" claimed more than the only caller practices
 	// (it assigns after driveToPhone has already served two requests) and a

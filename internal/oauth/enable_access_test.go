@@ -2,11 +2,13 @@ package oauth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -103,16 +105,27 @@ func newEnableTestServer(t *testing.T, login LoginFunc, opts ...func(*Config)) (
 	return srv, mux
 }
 
+// handOverSession gives a stub login's session bytes to the flow the way
+// telegram.Login does for the expected account: through
+// LoginConfig.HoldSession, never by writing them (#913).
+func handOverSession(cfgs []telegram.LoginConfig, data []byte) error {
+	if len(cfgs) == 0 || cfgs[0].HoldSession == nil {
+		return errors.New("test: login called without LoginConfig.HoldSession")
+	}
+	cfgs[0].HoldSession(data)
+	return nil
+}
+
 // stubLogin fakes telegram.Login. It always consumes the SMS code; when needPw
 // it also consumes the 2FA password. When failErr is non-nil it returns that
 // after the inputs are consumed (mimicking PHONE_CODE_INVALID etc.); otherwise
-// it persists a session blob and reports success as the admin id.
+// it hands a session over and reports success as the admin id.
 func stubLogin(needPw bool, failErr error) LoginFunc {
 	return func(ctx context.Context, apiID int, apiHash string, store *db.Store,
 		uid int64, phone string,
 		askCode func(context.Context) (string, error),
 		askPassword func(context.Context) (string, error),
-		_ ...telegram.LoginConfig,
+		cfgs ...telegram.LoginConfig,
 	) (int64, string, string, error) {
 		if _, err := askCode(ctx); err != nil {
 			return 0, "", "", err
@@ -125,7 +138,7 @@ func stubLogin(needPw bool, failErr error) LoginFunc {
 		if failErr != nil {
 			return 0, "", "", failErr
 		}
-		if err := store.UpdateSessionBlob(ctx, uid, []byte("fake-mtproto-session")); err != nil {
+		if err := handOverSession(cfgs, []byte("fake-mtproto-session")); err != nil {
 			return 0, "", "", err
 		}
 		return 500100101, "Dana", "dana_tg", nil
@@ -133,9 +146,9 @@ func stubLogin(needPw bool, failErr error) LoginFunc {
 }
 
 // stubLoginWrongAccount fakes a login that succeeds but resolves to a
-// different Telegram account than the widget-proven one (id 500100101). It
-// persists session bytes first, mimicking gotd, so the test can assert the
-// identity-mismatch path revokes them.
+// different Telegram account than the widget-proven one (id 500100101). Like
+// telegram.Login since #913 it writes and hands over nothing for that
+// account: the login itself has already logged it out.
 func stubLoginWrongAccount() LoginFunc {
 	return func(ctx context.Context, apiID int, apiHash string, store *db.Store,
 		uid int64, phone string,
@@ -144,9 +157,6 @@ func stubLoginWrongAccount() LoginFunc {
 		_ ...telegram.LoginConfig,
 	) (int64, string, string, error) {
 		if _, err := askCode(ctx); err != nil {
-			return 0, "", "", err
-		}
-		if err := store.UpdateSessionBlob(ctx, uid, []byte("wrong-account-session")); err != nil {
 			return 0, "", "", err
 		}
 		return 999000111, "Someone Else", "someoneelse", nil
@@ -805,10 +815,20 @@ func TestEnableAccess_DBClientRoutedToPhoneScreen(t *testing.T) {
 
 // TestEnableAccess_TelegramIDMismatch_Rejected confirms that a phone login
 // resolving to a different Telegram account than the widget identity is
-// rejected, and that the wrong-account session bytes are revoked.
+// rejected, and that it leaves the user's existing session alone (#913): the
+// row keeps its bytes, stays active and valid, and no second row appears.
+// Before #913 the login wrote the wrong account's bytes into that row and
+// the flow then revoked it, so one wrong-account attempt ended a working
+// session.
 func TestEnableAccess_TelegramIDMismatch_Rejected(t *testing.T) {
 	srv, mux := newEnableTestServer(t, stubLoginWrongAccount())
+	var logOuts atomic.Int32
+	srv.logOutSessionFn = func(context.Context, []byte) error {
+		logOuts.Add(1)
+		return nil
+	}
 	es := driveToPhone(t, mux)
+	uid := seedExistingSession(t, srv)
 
 	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
 		url.Values{"es": {es}, "phone": {"+14155551234"}}); rec.Code != http.StatusOK {
@@ -823,11 +843,11 @@ func TestEnableAccess_TelegramIDMismatch_Rejected(t *testing.T) {
 		t.Errorf("expected an identity-mismatch error, got: %s", rec.Body.String())
 	}
 
-	// The wrong-account session bytes must have been revoked, not left valid.
-	ctx := context.Background()
-	uid, _ := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
-	if _, err := srv.store.CheckSessionValid(ctx, uid); err == nil {
-		t.Error("wrong-account session was left valid after the mismatch")
+	assertExistingSessionUntouched(t, srv, uid)
+	// The wrong account was logged out by the login itself; the flow held
+	// nothing, so it has nothing more to log out.
+	if n := logOuts.Load(); n != 0 {
+		t.Errorf("flow logouts = %d, want 0", n)
 	}
 }
 
@@ -1288,7 +1308,7 @@ func TestEnableAccess_AccountDeletedDuringLogin(t *testing.T) {
 		uid int64, phone string,
 		askCode func(context.Context) (string, error),
 		askPassword func(context.Context) (string, error),
-		_ ...telegram.LoginConfig,
+		cfgs ...telegram.LoginConfig,
 	) (int64, string, string, error) {
 		if _, err := askCode(ctx); err != nil {
 			return 0, "", "", err
@@ -1296,8 +1316,8 @@ func TestEnableAccess_AccountDeletedDuringLogin(t *testing.T) {
 		if _, err := store.HardDeleteAccount(ctx, uid); err != nil {
 			return 0, "", "", err
 		}
-		// gotd persists the session bytes after the delete committed.
-		if err := store.UpdateSessionBlob(ctx, uid, []byte("fake-mtproto-session")); err != nil {
+		// The login hands its session over after the delete committed.
+		if err := handOverSession(cfgs, []byte("fake-mtproto-session")); err != nil {
 			return 0, "", "", err
 		}
 		return 500100101, "Dana", "dana_tg", nil

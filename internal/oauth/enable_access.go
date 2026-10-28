@@ -159,8 +159,8 @@ type loginFlow struct {
 	// after the needPw signal is buffered. The status page reads it, never
 	// step, which is not safe to read from a handler.
 	qrScanned atomic.Bool
-	// heldSession is the session a login method with holdsSession hands
-	// over through LoginConfig.HoldSession instead of writing it (#919).
+	// heldSession is the session the login hands over through
+	// LoginConfig.HoldSession instead of writing it (#919, #913).
 	// Written and read only by the flow's own goroutine.
 	heldSession []byte
 }
@@ -179,16 +179,6 @@ type loginMethod struct {
 	name string
 	// firstStep is lf.step while the login runs, before it asks for input.
 	firstStep string
-	// persistsBeforeCheck is true when the login writes the session to the
-	// store before the identity check can run (telegram.Login), so a mismatch
-	// has to revoke or clear what it wrote. telegram.LoginQR holds the
-	// session in memory and writes nothing for a mismatched account; revoking
-	// after it would end the user's existing session instead (#913).
-	persistsBeforeCheck bool
-	// holdsSession is true when the login hands its session over through
-	// LoginConfig.HoldSession (telegram.LoginQR) rather than writing it, so
-	// the flow writes it once, with the account metadata, or logs it out.
-	holdsSession bool
 	// qrWait is LoginConfig.QRWait for this flow; zero for the phone method.
 	qrWait time.Duration
 	run    func(ctx context.Context, uid int64, lf *loginFlow, askCode, askPassword func(context.Context) (string, error), cfg telegram.LoginConfig) (int64, string, string, error)
@@ -197,9 +187,8 @@ type loginMethod struct {
 // phoneLogin is the phone-number-and-code method for phone.
 func (s *Server) phoneLogin(phone string) loginMethod {
 	return loginMethod{
-		name:                methodCode,
-		firstStep:           "phone_submitted",
-		persistsBeforeCheck: true,
+		name:      methodCode,
+		firstStep: "phone_submitted",
 		run: func(ctx context.Context, uid int64, _ *loginFlow, askCode, askPassword func(context.Context) (string, error), cfg telegram.LoginConfig) (int64, string, string, error) {
 			return s.loginFn(ctx, s.cfg.TGAPIID, s.cfg.TGAPIHash, s.store, uid, phone, askCode, askPassword, cfg)
 		},
@@ -397,7 +386,7 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 		// Serialise login work for this uid. A /start re-submission cancels
 		// the prior flow and starts a new one; without this lock the cancelled
 		// predecessor — if its login RPC had already returned — could still
-		// run its revoke/SaveSession and clobber the newer flow's session.
+		// run its SaveSession and clobber the newer flow's session.
 		ul := s.uidLoginMutex(uid)
 		// Test seam (nil in production): announce that this goroutine is about
 		// to park on the mutex, so a test holding it can provision a local
@@ -420,10 +409,11 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 		}
 		// Re-check under the uid lock, after handleEnableStart's pre-flight
 		// check: a local account could have been provisioned between the two.
-		// This is the last point at which we can refuse and still be sure no
-		// Telegram session bytes have been written — s.loginFn persists them
-		// through the gotd SessionStore the moment auth succeeds, overwriting
-		// the local row's blob before SaveSession is ever reached.
+		// This is the last point at which we can refuse before the user is
+		// sent a login code (or shown a QR code) for a connect that
+		// SaveSessionForSignIn would refuse anyway. The login itself writes
+		// nothing (#913), so a local row provisioned after this point is
+		// still caught there, before any bytes reach it.
 		if local, cErr := s.hasActiveLocalAccount(bgCtx, uid); cErr != nil {
 			// Wrapped in errModeCheckFailed so handleEnableStart can give this
 			// the same treatment as the identical failure at the pre-flight
@@ -444,14 +434,16 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 		loginCfg := s.loginCfg
 		loginCfg.WantTelegramID = wantTgID
 		loginCfg.QRWait = m.qrWait
-		// A held session (QR) is an authorization only this goroutine knows
-		// about: it was never written, so no repair will ever find it. Every
-		// exit that does not commit it -- the cancel guard, a failed or
-		// refused SaveSessionForSignIn, a cancel that lands after the guard
-		// -- has to log it out, or the user keeps a device nobody holds in
-		// Active Sessions (#919). A defer, like the repair below, so a future
-		// exit cannot forget it. Registered before the login, so it runs
-		// before the flow reports done.
+		// Both methods hand their session over here instead of writing it
+		// (#919, #913). A held session is an authorization only this
+		// goroutine knows about: it was never written, so nothing else will
+		// ever find it. Every exit that does not commit it -- the cancel
+		// guard, a failed or refused SaveSessionForSignIn, a cancel that
+		// lands after the guard -- has to log it out, or the user keeps a
+		// device nobody holds in Active Sessions. A defer, so a future exit
+		// cannot forget it. Registered before the login, so it runs before
+		// the flow reports done.
+		loginCfg.HoldSession = func(b []byte) { lf.heldSession = b }
 		defer func() {
 			if lf.heldSession != nil {
 				s.logOutHeldSession(bgCtx, uid, lf.heldSession)
@@ -463,178 +455,54 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 			lf.err = err
 			return
 		}
-		// From here on the login has already persisted its session bytes
-		// through the gotd SessionStore, and with no loaded row id that write
-		// lands on EVERY active row of this uid -- including a bridge-only one
-		// provisioned since the re-check above. So every exit between here and
-		// a successful SaveSession has to run the repair, not just the
-		// SaveSession refusal: a LoadSession failure, "no session bytes were
-		// persisted" and the identity-mismatch bail-out all leave the same
-		// stray bytes behind, and a hosted worker holding a live session for
-		// an account the operator believes is local is the exact outcome this
-		// PR exists to prevent. A defer is the only form that cannot be
-		// forgotten by a future exit added in between.
-		//
-		// Detached and bounded, not merely detached: bgCtx carries the flow's
-		// CodeTTL deadline, so the repair must not die on an expiry that is
-		// itself a likely cause of getting here -- while WithoutCancel alone
-		// would strip the deadline too, and this runs under the uid login
-		// mutex, where an unresponsive database would park the goroutine
-		// forever and lock the user out of every later attempt.
-		//
-		// The identity-mismatch local half now clears inline (and surfaces a
-		// failure), and the unknown half revokes, so this defer is a no-op on
-		// that branch. It remains the backstop for a LoadSession failure, "no
-		// session bytes were persisted", and SaveSession itself.
-		saved := false
-		defer func() {
-			if saved {
-				return
-			}
-			repairCtx, repairCancel := db.StrayRepairContext(bgCtx)
-			defer repairCancel()
-			if cErr := s.clearStraySessionIfLocal(repairCtx, uid); cErr != nil {
-				slog.Error("enable: clear stray session blob failed", "uid", uid, "err", cErr)
-			}
-		}()
-		// Identity binding. The Telegram account that just completed
-		// phone/SMS/2FA MUST be the same one Telegram OIDC proved. Otherwise an
-		// admin authenticated as account A could enter account B's phone and
-		// end up operating B's messages through A's token. telegram.Login has
-		// already persisted B's session bytes via the gotd SessionStore, so
-		// revoke that row before bailing out.
-		if tgID != wantTgID && !m.persistsBeforeCheck {
-			// The QR login kept the wrong account's session in memory, logged
-			// it out and wrote nothing, so there is nothing of it to revoke.
-			// Revoking anyway would end whatever session the user already had.
-			lf.err = errors.New("the QR code was scanned with a different Telegram account than the one you signed in with — scan it with the same account")
-			return
-		}
+		// Identity binding. The Telegram account that just signed in MUST be
+		// the same one Telegram OIDC proved. Otherwise an admin authenticated
+		// as account A could enter account B's phone (or scan with B) and end
+		// up operating B's messages through A's token. The login has already
+		// logged B's new authorization out and written nothing, so there is
+		// nothing of it to revoke here -- and revoking anyway would end the
+		// session the user already had (#913).
 		if tgID != wantTgID {
-			// telegram.Login already persisted the wrong account's session
-			// bytes under uid, and they must not stay usable: a later callback
-			// would otherwise issue a token backed by them.
-			//
-			// Revoking is the right tool only when no bridge-only row is
-			// active. RevokeActiveSession is `WHERE user_id AND revoked_at IS
-			// NULL` -- every active row -- so on the race this whole block
-			// assumes it would revoke the local row too, which is the exact
-			// destruction this change exists to prevent, and it would also
-			// make the deferred repair above a no-op: both that repair's
-			// EXISTS and LoadSession filter on revoked_at IS NULL, so once
-			// the rows are revoked there is nothing left for it to match.
-			//
-			// With a local row present the repair is the better instrument
-			// anyway: it drops the wrong account's bytes from every active row
-			// while leaving the rows themselves alone, so the bridge keeps
-			// working and the stray session is gone. Called inline, not left
-			// to the defer: a failed ClearStraySessionIfLocal must surface
-			// the same way a failed revoke does, otherwise the wrong
-			// account's session stays on a row whose contract says NULL and
-			// lf.err carries only the identity-mismatch message. The defer
-			// then becomes a no-op (already-NULL blobs) or a second try.
-			//
-			// Both the check and the revoke/repair use a detached, bounded
-			// context rather than bgCtx. bgCtx carries the flow's CodeTTL
-			// deadline -- the very expiry the deferred repair was made
-			// detached to survive. On expiry the check fails, local becomes
-			// false, the revoke on the same dead context fails too, and
-			// lf.err becomes the revoke error, so friendlyErr renders "the
-			// login attempt expired." instead of the identity mismatch. The
-			// decision has to depend on account state, not on where the
-			// deadline happened to land.
-			decisionCtx, decisionCancel := db.StrayRepairContext(bgCtx)
-			defer decisionCancel()
-			local, cErr := s.hasActiveLocalAccount(decisionCtx, uid)
-			if cErr != nil {
-				// Unknown, and the two failure modes are not symmetric: an
-				// unrevoked wrong-account session is exploitable, whereas a
-				// wrongly revoked local row degrades rather than breaks -- the
-				// daemon keeps being admitted, because GetAccountMode does not
-				// filter on revoked_at, and what is lost is this PR's own
-				// protection until the user reconnects. So revoke, and say why
-				// rather than leaving it to be re-derived.
-				slog.Warn("enable: account-mode check failed on the identity-mismatch path; revoking",
-					"uid", uid, "err", cErr)
-				local = false
+			if m.name == methodQR {
+				lf.err = errors.New("the QR code was scanned with a different Telegram account than the one you signed in with — scan it with the same account")
+			} else {
+				lf.err = errors.New("the phone number belongs to a different Telegram account than the one you signed in with — log in with the same account")
 			}
-			if !local {
-				// A failed revoke must surface — otherwise the wrong session
-				// stays active. wrapIdentityCleanupErr, not %w of rErr
-				// directly: decisionCtx's own 5s budget can expire here,
-				// and a raw DeadlineExceeded would render as login CodeTTL
-				// expiry.
-				if _, rErr := s.store.RevokeActiveSession(decisionCtx, uid, "disconnect"); rErr != nil {
-					lf.err = wrapIdentityCleanupErr("revoke wrong-account session", rErr)
-					return
-				}
-			} else if clearErr := s.clearStraySessionIfLocal(decisionCtx, uid); clearErr != nil {
-				// Symmetric with the revoke arm: a cleanup we could not
-				// complete has to reach the caller. slog.Error on the defer
-				// is not enough -- the surviving row is mode='local', so
-				// nothing is served from those bytes, but they are still
-				// sitting on a row whose contract says NULL.
-				lf.err = wrapIdentityCleanupErr("clear wrong-account session", clearErr)
-				return
-			}
-			lf.err = errors.New("the phone number belongs to a different Telegram account than the one you signed in with — log in with the same account")
 			return
 		}
 		// The user cancelled this attempt, or another one superseded it,
 		// while the login was finishing (#919): the scan or code landed just
 		// after. It must not complete the sign-in. superseded is set before
-		// the cancel, so it also covers the moment before bgCtx sees it. A
-		// held session is an authorization nobody will use, so it is logged
-		// out; it was never written. After the identity binding, not right
-		// after the login: a phone login has already written its bytes, and
-		// a wrong account's must be revoked or cleared even when the flow
-		// expired meanwhile. A QR mismatch wrote nothing, so for QR this is
-		// the same as checking right after the login.
+		// the cancel, so it also covers the moment before bgCtx sees it. The
+		// held session is logged out by the defer above; it was never
+		// written. After the identity binding, so a mismatch on a flow that
+		// expired meanwhile still reports the mismatch.
 		if bgCtx.Err() != nil || lf.superseded.Load() {
 			lf.err = fmt.Errorf("sign-in finished after the attempt was cancelled: %w", context.Canceled)
 			return
 		}
-		// Replicate cmd/login/main.go: telegram.Login persists the raw
-		// session bytes via the gotd SessionStore, but the telegram_accounts
+		// The login held its session instead of writing it: it reaches the
+		// database only here, in the same transaction as the telegram_accounts
 		// metadata (telegram_user_id, display name, expires_at, send_enabled
-		// default) is finalised by an explicit SaveSession.
-		//
-		// A held session (QR) was never written: it reaches the database
-		// only here, in the same transaction as its metadata, so a cancel
-		// can never leave a written blob without SaveSessionForSignIn.
-		var pt []byte
-		if m.holdsSession {
-			pt = lf.heldSession
-		} else {
-			var lerr error
-			if pt, lerr = s.store.LoadSession(bgCtx, uid); lerr != nil {
-				lf.err = fmt.Errorf("reload session: %w", lerr)
-				return
-			}
-		}
+		// default), so a cancel or a failure can never leave a written blob
+		// without SaveSessionForSignIn.
+		pt := lf.heldSession
 		if pt == nil {
 			lf.err = errors.New("login completed but no session bytes were persisted")
 			return
 		}
 		// SaveSessionForSignIn, not SaveSession: a delete that committed
 		// while this sign-in was in progress must not leave the new session
-		// behind (#821). On that refusal it has already dropped the hosted
-		// rows; the deferred repair handles a local row's blob.
+		// behind (#821).
 		if s.beforeSignInSave != nil {
 			s.beforeSignInSave()
 		}
 		if serr := s.store.SaveSessionForSignIn(bgCtx, uid, pt, tgID, displayName, username, signInStartedAt); serr != nil {
-			// The deferred repair above covers this: SaveSession's own guard
-			// is gated on account state rather than on ErrAccountModeConflict
-			// precisely because it can fail with the CodeTTL deadline instead
-			// of the sentinel while a local row is present.
 			lf.err = fmt.Errorf("save session: %w", serr)
 			return
 		}
-		// Past the point of no return for the repair: the session is now
-		// legitimately the user's, and clearing it would undo a good login.
-		// The same goes for the held session's logout.
-		saved = true
+		// The session is now legitimately the user's: the defer must not
+		// log it out.
 		lf.heldSession = nil
 		if sendOptIn {
 			if _, serr := s.store.SetSendEnabled(bgCtx, uid, true); serr != nil {
@@ -677,39 +545,6 @@ func (s *Server) hasActiveLocalAccount(ctx context.Context, uid int64) (bool, er
 		return s.modeCheckFn(ctx, uid)
 	}
 	return s.store.HasActiveLocalAccount(ctx, uid)
-}
-
-// clearStraySessionIfLocal is the repair both the deferred backstop and the
-// identity-mismatch local half run. The seam exists so tests can drive the
-// failure half of that cleanup: without it a later edit can drop the inline
-// surface and leave only slog.Error, and every current test stays green.
-func (s *Server) clearStraySessionIfLocal(ctx context.Context, uid int64) error {
-	if s.clearStrayFn != nil {
-		return s.clearStrayFn(ctx, uid)
-	}
-	return s.store.ClearStraySessionIfLocal(ctx, uid)
-}
-
-// errIdentityCleanupTimeout is a stray-repair budget expiry on the
-// identity-mismatch revoke/clear path. It replaces context.DeadlineExceeded
-// so friendlyErr/shortReason cannot treat a failed cleanup as login CodeTTL
-// expiry ("the login attempt expired." / audit "timeout").
-var errIdentityCleanupTimeout = errors.New("repair timed out")
-
-// wrapIdentityCleanupErr records a failed identity-mismatch revoke/clear.
-// decisionCtx is bounded by StraySessionRepairTimeout; if that budget
-// expires, the store returns DeadlineExceeded — the same sentinel as a
-// login CodeTTL expiry. Wrapping that with %w would make
-// errors.Is(..., DeadlineExceeded) true and hide the cleanup failure
-// this path exists to surface.
-func wrapIdentityCleanupErr(op string, err error) error {
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return fmt.Errorf("%s: %w", op, errIdentityCleanupTimeout)
-	}
-	return fmt.Errorf("%s: %w", op, err)
 }
 
 // errModeCheckFailed marks a failure of the account-mode query itself, as
@@ -1010,10 +845,10 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	es.terminalMsg, es.terminalDesc = "", ""
 
 	// Refuse a hosted connect while a Local Bridge account is active, BEFORE
-	// any MTProto login starts. telegram.Login persists the new session bytes
-	// through the gotd SessionStore as soon as auth succeeds, so by the time
-	// SaveSession's guard fires the local row's blob is already gone; the only
-	// way to leave the bridge untouched is to never start the login.
+	// any MTProto login starts: the user would otherwise go through a login
+	// code and 2FA only for SaveSessionForSignIn to refuse the session at
+	// the end. The login writes nothing before that (#913), so the bridge
+	// row itself is safe either way.
 	if local, cErr := s.hasActiveLocalAccount(r.Context(), es.uid); cErr != nil {
 		// Not "error": that label is reserved for Telegram RPC failures (see
 		// the select below). This is our own store refusing to answer, and it
@@ -1559,9 +1394,6 @@ func codeStepErrMsg(err error) string {
 func shortReason(err error) string {
 	if err == nil {
 		return "unknown"
-	}
-	if errors.Is(err, errIdentityCleanupTimeout) {
-		return "identity_cleanup_timeout"
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return "timeout"
