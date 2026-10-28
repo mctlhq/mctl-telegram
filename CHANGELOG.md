@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.100.1](https://github.com/mctlhq/mctl-telegram/compare/0.100.0...0.100.1) (2026-10-28)
+
+
+### Bug Fixes
+
+* **telegram:** keep the scan signal and log out every unsaved QR auth ([ef845de](https://github.com/mctlhq/mctl-telegram/commit/ef845de0ee4e0dce3a73eece8d20433e2c89bd99)), closes [#919](https://github.com/mctlhq/mctl-telegram/issues/919)
+* **telegram:** log out a QR authorization whose flow was cancelled ([01af7bf](https://github.com/mctlhq/mctl-telegram/commit/01af7bf6069c36feab729fdbf18e545550a8092a))
+* **telegram:** log out a QR authorization whose flow was cancelled ([56e6b08](https://github.com/mctlhq/mctl-telegram/commit/56e6b082d7b6cc09db928d2b8019ff4a67d6e877)), closes [#919](https://github.com/mctlhq/mctl-telegram/issues/919)
+
 ## [0.100.0](https://github.com/mctlhq/mctl-telegram/compare/0.99.0...0.100.0) (2026-10-28)
 
 
