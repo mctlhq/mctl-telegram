@@ -45,7 +45,7 @@ var mtprotoErrCatalog = map[string]catalogEntry{
 	},
 	"CHANNEL_INVALID": {
 		message: "The channel or supergroup reference is not valid for this account.",
-		action:  "Call list_dialogs and pass the id exactly as returned there — a bare numeric id copied from a link or forwarded-message header carries no access hash.",
+		action:  "Call list_dialogs and pass the id exactly as returned there — a bare numeric id copied from a link or forwarded-message header carries no access hash. Retrying the same id will fail again: use an id from that list; a channel that is not there cannot be read with this account.",
 	},
 	"CHAT_ID_INVALID": {
 		message: "The chat reference is not valid for this account.",

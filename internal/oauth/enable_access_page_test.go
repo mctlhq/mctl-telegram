@@ -109,3 +109,34 @@ func TestRenderEnable_NonPasswordScreensHaveNoScriptSrc(t *testing.T) {
 		t.Fatalf("phone screen CSP must allow the CDN favicon: %q", csp)
 	}
 }
+
+func TestEnablePhonePage_ExplainsPhoneStep(t *testing.T) {
+	for _, wizard := range []bool{false, true} {
+		rec := httptest.NewRecorder()
+		renderEnablePhone(rec, enablePhonePage{Issuer: "https://tg.test", EnableToken: "tok", WizardMode: wizard, WizardStep: 3})
+		body := rec.Body.String()
+		for _, want := range []string{
+			"Why a phone number?", "Active Sessions", "disconnect_telegram_account",
+			`href="/privacy"`, `href="/security"`,
+			`action="/oauth/telegram/enable_access/start"`, `name="phone"`,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("wizard=%v: phone page missing %q", wizard, want)
+			}
+		}
+	}
+}
+
+func TestConnectSuccessPage_FirstRequestHint(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderConnectSuccess(rec, connectSuccessPage{RedirectURL: "https://client.test/cb", AppName: "Claude", Nonce: "n"})
+	body := rec.Body.String()
+	for _, want := range []string{"list my recent", `href="/docs#setup"`, "setTimeout", "1200"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("interstitial missing %q", want)
+		}
+	}
+	if strings.Contains(strings.ToLower(body), "add the connector") {
+		t.Error("interstitial must not tell the user to add the connector")
+	}
+}
