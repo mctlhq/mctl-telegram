@@ -55,6 +55,9 @@ type qrStub struct {
 	// beforeReturn, when set, runs on a released login right before it
 	// returns.
 	beforeReturn func()
+	// pwBeforeScanHook, when set, asks for the password before reporting
+	// the scan: the token import beat the update goroutine's hook.
+	pwBeforeScanHook bool
 	// afterScan, when set, holds the login right after the scan is reported
 	// (LoginConfig.OnQRScanned) until it is closed or the context ends: the
 	// import and the account check still running (#931).
@@ -125,7 +128,7 @@ func (q *qrStub) fn() QRLoginFunc {
 			}
 			return 0, "", "", ctx.Err()
 		}
-		if cfg.OnQRScanned != nil {
+		if cfg.OnQRScanned != nil && !q.pwBeforeScanHook {
 			cfg.OnQRScanned()
 		}
 		if q.afterScan != nil {
@@ -139,6 +142,13 @@ func (q *qrStub) fn() QRLoginFunc {
 			return 0, "", "", q.err
 		}
 		if q.needPw {
+			if q.pwBeforeScanHook {
+				// The prompt is up; the hook lands while the user types.
+				go func() {
+					time.Sleep(10 * time.Millisecond)
+					cfg.OnQRScanned()
+				}()
+			}
 			if _, err := askPassword(ctx); err != nil {
 				return 0, "", "", err
 			}
@@ -1103,8 +1113,20 @@ func TestEnableQR_StalledConnectFails(t *testing.T) {
 // its password after the scan. A user typing it must not hit the connect
 // stall bound.
 func TestEnableQR_PasswordStopsTheStallClock(t *testing.T) {
+	for _, hookLate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("hook_after_prompt=%v", hookLate), func(t *testing.T) {
+			testPasswordStopsTheStallClock(t, hookLate)
+		})
+	}
+}
+
+// testPasswordStopsTheStallClock is TestEnableQR_PasswordStopsTheStallClock
+// with the scan hook landing before the password prompt or, when hookLate,
+// after it (#934 review).
+func testPasswordStopsTheStallClock(t *testing.T, hookLate bool) {
 	q := newQRStub(500100101)
 	q.needPw = true
+	q.pwBeforeScanHook = hookLate
 	srv, mux := newQRTestServer(t, q, true)
 	srv.qrStallWait = 50 * time.Millisecond
 	es, _ := driveToPhoneAs(t, mux, desktopUA)

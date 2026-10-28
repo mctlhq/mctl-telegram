@@ -24,7 +24,7 @@ import (
 	neturl "net/url"
 	"strconv"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"rsc.io/qr"
@@ -96,15 +96,31 @@ func (s *Server) qrLogin(wait time.Duration) loginMethod {
 			}
 			ctx, stalled := context.WithCancelCause(ctx)
 			defer stalled(nil)
-			var stall atomic.Pointer[time.Timer]
+			// The scan hook runs on the update goroutine and the password
+			// prompt on the client goroutine, in either order: the prompt
+			// can come first when the token import beats the hook. Under
+			// one lock, a prompt stops an armed timer and keeps a later
+			// hook from arming one.
+			var (
+				stallMu sync.Mutex
+				stall   *time.Timer
+				pwAsked bool
+			)
 			cfg.OnQRScanned = func() {
 				lf.qrConfirmedAt.Store(time.Now().UnixNano())
-				stall.Store(time.AfterFunc(s.qrStallWaitOrDefault(), func() { stalled(errQRConnectStalled) }))
+				stallMu.Lock()
+				defer stallMu.Unlock()
+				if !pwAsked {
+					stall = time.AfterFunc(s.qrStallWaitOrDefault(), func() { stalled(errQRConnectStalled) })
+				}
 			}
 			ask := func(ctx context.Context) (string, error) {
-				if t := stall.Load(); t != nil {
-					t.Stop()
+				stallMu.Lock()
+				pwAsked = true
+				if stall != nil {
+					stall.Stop()
 				}
+				stallMu.Unlock()
 				return askPassword(ctx)
 			}
 			id, name, user, err := s.qrLoginFn(ctx, s.cfg.TGAPIID, s.cfg.TGAPIHash, s.store, uid, show, ask, cfg)
