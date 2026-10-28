@@ -59,20 +59,9 @@ func LoginQR(
 
 	sess := &deferredSession{target: &SessionStore{UserID: userID, Store: store}}
 	dispatcher := tg.NewUpdateDispatcher()
-	// qrlogin.OnLoginToken, plus a record that the code was scanned: from
-	// then on the auth key may carry an authorization, which a run that
-	// does not finish must log out (#919).
 	var scanned atomic.Bool
-	loginToken := make(chan struct{})
-	dispatcher.OnLoginToken(func(context.Context, tg.Entities, *tg.UpdateLoginToken) error {
-		scanned.Store(true)
-		select {
-		case loginToken <- struct{}{}:
-		default:
-		}
-		return nil
-	})
-	loggedIn := qrlogin.LoggedIn(loginToken)
+	loggedIn, onLoginToken := loginTokenSignal(&scanned)
+	dispatcher.OnLoginToken(onLoginToken)
 
 	opts := loginClientOptions(sess, cfg)
 	opts.UpdateHandler = dispatcher
@@ -143,7 +132,7 @@ func finishQRLogin(ctx context.Context, apiID int, apiHash string, cfg LoginConf
 		return err
 	}
 	if data := sess.take(); data != nil {
-		logOutCtx, cancel := detachedLogOutContext(ctx)
+		logOutCtx, cancel := DetachedLogOutContext(ctx)
 		defer cancel()
 		if lErr := logOutSessionFn(logOutCtx, apiID, apiHash, data, cfg); lErr != nil {
 			slog.WarnContext(ctx, "telegram qr login: logout of an unfinished authorization failed",
@@ -155,13 +144,33 @@ func finishQRLogin(ctx context.Context, apiID int, apiHash string, cfg LoginConf
 	return err
 }
 
-// logOutTimeout bounds LogOutSession when it runs after the caller's
-// context has ended.
+// loginTokenSignal is qrlogin.OnLoginToken with two changes. It records that
+// the code was scanned: from then on the auth key may carry an authorization,
+// which a run that does not finish must log out (#919). And the signal is
+// buffered: qr.Auth reads it only while parked in its select, so an
+// unbuffered non-blocking send is lost whenever the update lands during a
+// token export or the show callback, and the accepted scan goes unnoticed.
+// One buffered slot is enough, because further updates only coalesce.
+func loginTokenSignal(scanned *atomic.Bool) (qrlogin.LoggedIn, tg.LoginTokenHandler) {
+	loginToken := make(chan struct{}, 1)
+	return loginToken, func(context.Context, tg.Entities, *tg.UpdateLoginToken) error {
+		scanned.Store(true)
+		select {
+		case loginToken <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+}
+
+// logOutTimeout bounds a logout that runs after the caller's context has
+// ended.
 const logOutTimeout = 15 * time.Second
 
-// detachedLogOutContext is ctx without its cancellation, bounded by
-// logOutTimeout: the logout runs precisely because ctx was cancelled.
-func detachedLogOutContext(ctx context.Context) (context.Context, context.CancelFunc) {
+// DetachedLogOutContext is ctx without its cancellation, bounded by
+// logOutTimeout. A logout of an authorization nobody will use runs precisely
+// because ctx was cancelled, so it cannot run on ctx itself.
+func DetachedLogOutContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), logOutTimeout)
 }
 

@@ -444,6 +444,20 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 		loginCfg := s.loginCfg
 		loginCfg.WantTelegramID = wantTgID
 		loginCfg.QRWait = m.qrWait
+		// A held session (QR) is an authorization only this goroutine knows
+		// about: it was never written, so no repair will ever find it. Every
+		// exit that does not commit it -- the cancel guard, a failed or
+		// refused SaveSessionForSignIn, a cancel that lands after the guard
+		// -- has to log it out, or the user keeps a device nobody holds in
+		// Active Sessions (#919). A defer, like the repair below, so a future
+		// exit cannot forget it. Registered before the login, so it runs
+		// before the flow reports done.
+		defer func() {
+			if lf.heldSession != nil {
+				s.logOutHeldSession(bgCtx, uid, lf.heldSession)
+				lf.heldSession = nil
+			}
+		}()
 		tgID, displayName, username, err := m.run(bgCtx, uid, lf, askCode, askPassword, loginCfg)
 		if err != nil {
 			lf.err = err
@@ -577,10 +591,6 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 		// expired meanwhile. A QR mismatch wrote nothing, so for QR this is
 		// the same as checking right after the login.
 		if bgCtx.Err() != nil || lf.superseded.Load() {
-			if lf.heldSession != nil {
-				s.logOutHeldSession(bgCtx, uid, lf.heldSession)
-				lf.heldSession = nil
-			}
 			lf.err = fmt.Errorf("sign-in finished after the attempt was cancelled: %w", context.Canceled)
 			return
 		}
@@ -610,6 +620,9 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 		// while this sign-in was in progress must not leave the new session
 		// behind (#821). On that refusal it has already dropped the hosted
 		// rows; the deferred repair handles a local row's blob.
+		if s.beforeSignInSave != nil {
+			s.beforeSignInSave()
+		}
 		if serr := s.store.SaveSessionForSignIn(bgCtx, uid, pt, tgID, displayName, username, signInStartedAt); serr != nil {
 			// The deferred repair above covers this: SaveSession's own guard
 			// is gated on account state rather than on ErrAccountModeConflict
@@ -620,7 +633,9 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 		}
 		// Past the point of no return for the repair: the session is now
 		// legitimately the user's, and clearing it would undo a good login.
+		// The same goes for the held session's logout.
 		saved = true
+		lf.heldSession = nil
 		if sendOptIn {
 			if _, serr := s.store.SetSendEnabled(bgCtx, uid, true); serr != nil {
 				lf.err = fmt.Errorf("enable sending: %w", serr)
@@ -633,10 +648,10 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 }
 
 // logOutHeldSession ends the authorization a held session carries, best
-// effort, on a detached context bounded by heldLogOutTimeout: it runs
-// because bgCtx was cancelled.
+// effort, on telegram.DetachedLogOutContext: it usually runs because bgCtx
+// was cancelled.
 func (s *Server) logOutHeldSession(bgCtx context.Context, uid int64, data []byte) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(bgCtx), heldLogOutTimeout)
+	ctx, cancel := telegram.DetachedLogOutContext(bgCtx)
 	defer cancel()
 	var err error
 	if s.logOutSessionFn != nil {
@@ -645,14 +660,11 @@ func (s *Server) logOutHeldSession(bgCtx context.Context, uid int64, data []byte
 		err = telegram.LogOutSession(ctx, s.cfg.TGAPIID, s.cfg.TGAPIHash, data, s.loginCfg)
 	}
 	if err != nil {
-		slog.Warn("enable: logout of a cancelled sign-in failed", "uid", uid, "err", err)
+		slog.Warn("enable: logout of an unsaved sign-in failed", "uid", uid, "err", err)
 		return
 	}
-	slog.Info("enable: logged out a cancelled sign-in", "uid", uid)
+	slog.Info("enable: logged out an unsaved sign-in", "uid", uid)
 }
-
-// heldLogOutTimeout bounds logOutHeldSession.
-const heldLogOutTimeout = 15 * time.Second
 
 // hasActiveLocalAccount is the account-mode query both the pre-flight gate and
 // startLoginFlow's re-check run. It exists as a method so tests can drive the

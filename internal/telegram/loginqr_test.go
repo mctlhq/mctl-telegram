@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"unicode/utf8"
 
@@ -117,4 +118,29 @@ func TestPasswordAfterQR(t *testing.T) {
 			t.Fatalf("err=%v", err)
 		}
 	})
+}
+
+// TestLoginTokenSignal_KeptWhileAuthIsBusy: an updateLoginToken that arrives
+// while qr.Auth is not parked in its select (exporting a token, or inside the
+// show callback) must still be seen when it gets back there. An unbuffered
+// non-blocking send drops it, and the accepted scan then goes unnoticed.
+func TestLoginTokenSignal_KeptWhileAuthIsBusy(t *testing.T) {
+	var scanned atomic.Bool
+	loggedIn, onLoginToken := loginTokenSignal(&scanned)
+
+	// Nobody is receiving: the handler runs while Auth is busy. A second
+	// update coalesces rather than blocking the dispatcher.
+	for range 2 {
+		if err := onLoginToken(context.Background(), tg.Entities{}, &tg.UpdateLoginToken{}); err != nil {
+			t.Fatalf("handler: %v", err)
+		}
+	}
+	if !scanned.Load() {
+		t.Error("the scan was not recorded")
+	}
+	select {
+	case <-loggedIn:
+	default:
+		t.Fatal("the login token update was lost while Auth was busy")
+	}
 }

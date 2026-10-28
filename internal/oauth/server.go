@@ -162,6 +162,11 @@ type Server struct {
 	// logOutSessionFn, when set, replaces telegram.LogOutSession for
 	// logging out a held QR session the flow no longer wants (#919).
 	logOutSessionFn func(ctx context.Context, data []byte) error
+	// beforeSignInSave, when non-nil, runs in the login goroutine right
+	// before SaveSessionForSignIn. Test seam (nil in production): it is the
+	// only way to land a cancel after the #919 guard. Assigned before the
+	// flow starts.
+	beforeSignInSave func()
 
 	// clearStrayFn, when non-nil, replaces store.ClearStraySessionIfLocal on
 	// the enable_access repair paths. Test seam (nil in production): the store

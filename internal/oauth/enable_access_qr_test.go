@@ -405,6 +405,11 @@ func TestEnableQR_EndToEndWithTwoFA(t *testing.T) {
 	if q.logOuts.Load() != 0 || q.writes.Load() != 1 {
 		t.Errorf("logOuts=%d writes=%d, want 0 and 1", q.logOuts.Load(), q.writes.Load())
 	}
+	// The saved session is the user's now: the held-session logout must
+	// not touch it.
+	if q.lateLogOuts.Load() != 0 {
+		t.Errorf("a saved sign-in was logged out %d time(s)", q.lateLogOuts.Load())
+	}
 
 	audit := strings.Join(auditRows(t, srv), "\n")
 	if !strings.Contains(audit, "connect:success|qr|") {
@@ -820,6 +825,62 @@ func TestEnableQR_SupersededBeforeTheCancelLands(t *testing.T) {
 		t.Errorf("err = %v, want a cancelled sign-in", lf.err)
 	}
 	assertExistingSessionUntouched(t, srv, uid)
+	assertLateLogOut(t, q)
+}
+
+// TestEnableQR_CancelAfterTheGuardStillLogsOut: a cancel that lands after the
+// #919 guard makes SaveSessionForSignIn fail on bgCtx. The held session was
+// never written, so no repair finds it; the flow has to log it out itself.
+func TestEnableQR_CancelAfterTheGuardStillLogsOut(t *testing.T) {
+	q := newQRStub(500100101)
+	q.release = make(chan struct{})
+	srv, mux := newQRTestServer(t, q, true)
+	driveToPhoneAs(t, mux, desktopUA)
+	uid := seedExistingSession(t, srv)
+
+	var lf *loginFlow
+	srv.beforeSignInSave = func() { lf.cancel() }
+	lf = srv.startLoginFlow(uid, 500100101, srv.qrLogin(time.Minute), false, time.Now())
+	close(q.release)
+	waitForFlowDone(t, lf, 3*time.Second)
+
+	if lf.err == nil || !strings.Contains(lf.err.Error(), "save session") || lf.tgUserID != 0 {
+		t.Errorf("err = %v, tgUserID = %d; want a failed save", lf.err, lf.tgUserID)
+	}
+	assertExistingSessionUntouched(t, srv, uid)
+	assertLateLogOut(t, q)
+}
+
+// TestEnableQR_RefusedSaveLogsOut: SaveSessionForSignIn refuses because the
+// account was deleted while the scan was being accepted (#821). The held
+// session is logged out rather than dropped.
+func TestEnableQR_RefusedSaveLogsOut(t *testing.T) {
+	q := newQRStub(500100101)
+	q.release = make(chan struct{})
+	srv, mux := newQRTestServer(t, q, true)
+	driveToPhoneAs(t, mux, desktopUA)
+	uid := seedExistingSession(t, srv)
+
+	lf := srv.startLoginFlow(uid, 500100101, srv.qrLogin(time.Minute), false, time.Now())
+	q.beforeReturn = func() {
+		if _, err := srv.store.HardDeleteAccount(context.Background(), uid); err != nil {
+			t.Errorf("HardDeleteAccount: %v", err)
+		}
+	}
+	close(q.release)
+	waitForFlowDone(t, lf, 3*time.Second)
+
+	if lf.err == nil || !strings.Contains(lf.err.Error(), "save session") || lf.tgUserID != 0 {
+		t.Errorf("err = %v, tgUserID = %d; want a refused save", lf.err, lf.tgUserID)
+	}
+	var rows int
+	if err := srv.store.DB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM telegram_accounts WHERE user_id = $1`, uid).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Errorf("%d telegram_accounts rows survive the delete", rows)
+	}
 	assertLateLogOut(t, q)
 }
 
