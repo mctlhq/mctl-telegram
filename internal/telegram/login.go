@@ -14,6 +14,7 @@ import (
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
@@ -155,8 +156,7 @@ func Login(
 		if authErr != nil {
 			// Fresh session — proceed with flow.
 		}
-		flow := auth.NewFlow(authenticator, auth.SendCodeOptions{})
-		if err := flow.Run(ctx, client.Auth()); err != nil {
+		if err := runPhoneFlow(ctx, client.Auth(), authenticator); err != nil {
 			return fmt.Errorf("auth flow: %w", err)
 		}
 		me, err := client.Self(ctx)
@@ -190,6 +190,231 @@ func Login(
 		return 0, "", "", err
 	}
 	return telegramUserID, displayName, username, nil
+}
+
+// Attempt budgets for the interactive login (#900). A mistyped login code or
+// 2FA password used to end the whole flow, and every new flow costs the user a
+// fresh code. Three tries absorb a typo without turning the prompt into a
+// guessing loop; Telegram enforces its own limits on top of these.
+const (
+	LoginCodeAttempts     = 3
+	LoginPasswordAttempts = 3
+)
+
+// Reprompt reasons. They are the same tokens enable_access's shortReason
+// gives the matching Telegram errors, so an audit row reads the same whether
+// the flow went on or ended.
+const (
+	RepromptCodeInvalid = "code_invalid"
+	RepromptBadPassword = "bad_password"
+	RepromptAuthRestart = "auth_restart"
+)
+
+// Reprompt tells a code or password prompt that it is being called again
+// within the same login flow, and why. AttemptsLeft counts the attempt the
+// prompt is about to collect.
+type Reprompt struct {
+	Reason       string
+	AttemptsLeft int
+}
+
+type repromptKey struct{}
+
+// WithReprompt returns ctx carrying r. The login flows pass it to the prompt
+// they call again; it is exported so a prompt can be tested on its own.
+func WithReprompt(ctx context.Context, r Reprompt) context.Context {
+	return context.WithValue(ctx, repromptKey{}, r)
+}
+
+// RepromptFrom reports whether a prompt was called again after a rejection.
+// A first prompt has no Reprompt.
+func RepromptFrom(ctx context.Context) (Reprompt, bool) {
+	r, ok := ctx.Value(repromptKey{}).(Reprompt)
+	return r, ok
+}
+
+// LoginCodeDigits keeps only the ASCII digits of an entered login code, so
+// "12 345" or a pasted "Login code: 12345." reach Telegram as "12345". An
+// input with no digits comes back empty and is treated as no code at all.
+func LoginCodeDigits(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c >= '0' && c <= '9' {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// runPhoneFlow is gotd's auth.Flow.Run reworked so that a mistake does not end
+// the flow (#900). auth.Flow returns on the first SignIn or password error;
+// here:
+//
+//   - PHONE_CODE_INVALID asks for the code again and signs in with the same
+//     phone_code_hash, up to LoginCodeAttempts codes in total. No new code is
+//     sent: the one the user has stays valid.
+//   - a rejected 2FA password is asked for again, up to LoginPasswordAttempts.
+//   - AUTH_RESTART, from auth.sendCode or anything after it, restarts at
+//     auth.sendCode once per flow. A second one surfaces as before.
+//
+// PHONE_CODE_EXPIRED and every other error still end the flow.
+func runPhoneFlow(ctx context.Context, client auth.FlowClient, a *interactiveAuthenticator) error {
+	restarted := false
+	restartOnce := func(err error) bool {
+		if restarted || !tgerr.Is(err, "AUTH_RESTART") {
+			return false
+		}
+		restarted = true
+		slog.InfoContext(ctx, "telegram login: AUTH_RESTART, restarting the sign-in once")
+		return true
+	}
+	var first *Reprompt
+	for {
+		sentClass, err := client.SendCode(ctx, a.phone, auth.SendCodeOptions{})
+		if err != nil {
+			if restartOnce(err) {
+				continue
+			}
+			return fmt.Errorf("send code: %w", err)
+		}
+		var sent *tg.AuthSentCode
+		switch s := sentClass.(type) {
+		case *tg.AuthSentCode:
+			sent = s
+		case *tg.AuthSentCodeSuccess:
+			switch az := s.Authorization.(type) {
+			case *tg.AuthAuthorization:
+				// Already authorized; nothing to collect.
+				return nil
+			case *tg.AuthAuthorizationSignUpRequired:
+				return a.signUp(ctx, client, "", az.TermsOfService)
+			default:
+				return fmt.Errorf("unexpected authorization type: %T", az)
+			}
+		default:
+			return fmt.Errorf("unexpected sent code type: %T", sentClass)
+		}
+		err = a.signIn(ctx, client, sent, first)
+		if err != nil && restartOnce(err) {
+			// The restart sent a new code, so the user has to be told the
+			// one they typed is gone, not merely that it did not match.
+			first = &Reprompt{Reason: RepromptAuthRestart, AttemptsLeft: LoginCodeAttempts}
+			continue
+		}
+		return err
+	}
+}
+
+// signIn collects the code for sent and signs in with its phone_code_hash,
+// asking again after PHONE_CODE_INVALID, then collects the 2FA password if the
+// account has one. first, when non-nil, is passed to the first code prompt.
+func (a *interactiveAuthenticator) signIn(ctx context.Context, client auth.FlowClient, sent *tg.AuthSentCode, first *Reprompt) error {
+	hash := sent.PhoneCodeHash
+	rp := first
+	for attempt := 1; ; attempt++ {
+		promptCtx := ctx
+		if rp != nil {
+			promptCtx = WithReprompt(ctx, *rp)
+		}
+		var code string
+		var err error
+		if attempt == 1 {
+			// Code logs where Telegram delivered this code; a re-ask is for
+			// the same code and has nothing new to record.
+			code, err = a.Code(promptCtx, sent)
+		} else {
+			code, err = a.code(promptCtx)
+		}
+		if err != nil {
+			return fmt.Errorf("get code: %w", err)
+		}
+		_, err = client.SignIn(ctx, a.phone, code, hash)
+		var signUpRequired *auth.SignUpRequired
+		switch {
+		case err == nil:
+			return nil
+		case errors.Is(err, auth.ErrPasswordAuthNeeded):
+			_, err := askPasswordChecked(ctx, a.Password, client.Password)
+			return err
+		case errors.As(err, &signUpRequired):
+			return a.signUp(ctx, client, hash, signUpRequired.TermsOfService)
+		case tgerr.Is(err, "PHONE_CODE_INVALID") && attempt < LoginCodeAttempts:
+			left := LoginCodeAttempts - attempt
+			slog.InfoContext(ctx, "telegram login: code rejected, asking again", "attempts_left", left)
+			rp = &Reprompt{Reason: RepromptCodeInvalid, AttemptsLeft: left}
+		default:
+			return fmt.Errorf("sign in: %w", err)
+		}
+	}
+}
+
+// signUp mirrors auth.Flow's sign-up branch. SignUp always refuses, so a
+// number with no Telegram account ends here with that refusal.
+func (a *interactiveAuthenticator) signUp(ctx context.Context, client auth.FlowClient, hash string, tos tg.HelpTermsOfService) error {
+	if err := a.AcceptTermsOfService(ctx, tos); err != nil {
+		return fmt.Errorf("confirm TOS: %w", err)
+	}
+	info, err := a.SignUp(ctx)
+	if err != nil {
+		return fmt.Errorf("sign up info not provided: %w", err)
+	}
+	if _, err := client.SignUp(ctx, auth.SignUp{
+		PhoneNumber:   a.phone,
+		PhoneCodeHash: hash,
+		FirstName:     info.FirstName,
+		LastName:      info.LastName,
+	}); err != nil {
+		return fmt.Errorf("sign up: %w", err)
+	}
+	return nil
+}
+
+// askPasswordChecked asks for the 2FA cloud password and checks it, asking
+// again after a rejected password up to LoginPasswordAttempts times in total.
+// Login and LoginQR share it. The last rejection is returned wrapped, so it
+// still classifies as auth.ErrPasswordInvalid.
+func askPasswordChecked(
+	ctx context.Context,
+	ask func(ctx context.Context) (string, error),
+	check func(ctx context.Context, password string) (*tg.AuthAuthorization, error),
+) (*tg.AuthAuthorization, error) {
+	promptCtx := ctx
+	for attempt := 1; ; attempt++ {
+		pw, err := ask(promptCtx)
+		if err != nil {
+			return nil, fmt.Errorf("read 2FA password: %w", err)
+		}
+		authz, err := check(ctx, pw)
+		if err == nil {
+			return authz, nil
+		}
+		if !isPasswordRejected(err) || attempt >= LoginPasswordAttempts {
+			return nil, fmt.Errorf("check 2FA password: %w", err)
+		}
+		left := LoginPasswordAttempts - attempt
+		slog.InfoContext(ctx, "telegram login: 2FA password rejected, asking again", "attempts_left", left)
+		promptCtx = WithReprompt(ctx, Reprompt{Reason: RepromptBadPassword, AttemptsLeft: left})
+	}
+}
+
+// isPasswordRejected reports a wrong 2FA password. gotd maps
+// PASSWORD_HASH_INVALID to auth.ErrPasswordInvalid; the raw RPC error is
+// accepted too in case a caller checks the password without that mapping.
+func isPasswordRejected(err error) bool {
+	return errors.Is(err, auth.ErrPasswordInvalid) || tgerr.Is(err, "PASSWORD_HASH_INVALID")
+}
+
+// retryAuthRestartOnce calls fn and, if it fails with AUTH_RESTART, calls it
+// once more. A second AUTH_RESTART is returned to the caller. LoginQR wraps
+// qr.Auth (auth.exportLoginToken) in it; the phone flow has its own restart
+// in runPhoneFlow because it also has to re-ask for the code.
+func retryAuthRestartOnce[T any](ctx context.Context, fn func() (T, error)) (T, error) {
+	v, err := fn()
+	if err == nil || !tgerr.Is(err, "AUTH_RESTART") {
+		return v, err
+	}
+	slog.InfoContext(ctx, "telegram login: AUTH_RESTART, restarting the sign-in once")
+	return fn()
 }
 
 type interactiveAuthenticator struct {

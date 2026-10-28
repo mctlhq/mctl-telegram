@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
 // newLoginTestStore returns a Store on a per-test in-memory SQLite database
@@ -259,5 +261,35 @@ func TestRunLoginOrRepair_LeavesASuccessfulLoginAlone(t *testing.T) {
 	// unrelated storage change.
 	if blob := activeLocalBlob(t, store, uid); !bytes.Contains(blob, []byte("post-auth-session")) {
 		t.Errorf("a successful login had its session bytes cleared; blob=%q", blob)
+	}
+}
+
+// promptCode keeps only the digits of a line, re-asks on a line with none,
+// and its copy says the code is a Telegram message in the app, not an SMS
+// (#900).
+func TestPromptCode(t *testing.T) {
+	var out bytes.Buffer
+	code, err := promptCode(context.Background(), bufio.NewReader(strings.NewReader("code?\nLogin code: 12 345.\n")), &out)
+	if err != nil || code != "12345" {
+		t.Fatalf("promptCode = %q, %v; want 12345", code, err)
+	}
+	if got := out.String(); !strings.Contains(got, `message from "Telegram" inside the Telegram app`) || !strings.Contains(got, "not by SMS") {
+		t.Errorf("first prompt must say where the code arrives: %q", got)
+	}
+	if n := strings.Count(out.String(), "Enter the Telegram code: "); n != 2 {
+		t.Errorf("prompted %d times, want 2 (a line with no digits is asked again)", n)
+	}
+
+	out.Reset()
+	ctx := telegram.WithReprompt(context.Background(), telegram.Reprompt{Reason: telegram.RepromptCodeInvalid, AttemptsLeft: 2})
+	if _, err := promptCode(ctx, bufio.NewReader(strings.NewReader("12345\n")), &out); err != nil {
+		t.Fatalf("promptCode: %v", err)
+	}
+	if !strings.Contains(out.String(), "That code did not match, try again (2 left).") {
+		t.Errorf("re-prompt must say the code did not match: %q", out.String())
+	}
+
+	if _, err := promptCode(context.Background(), bufio.NewReader(strings.NewReader("")), &out); err == nil {
+		t.Errorf("EOF with no digits must be an error, not an empty code")
 	}
 }
