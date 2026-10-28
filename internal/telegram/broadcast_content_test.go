@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/gotd/td/bin"
@@ -618,5 +619,17 @@ func TestFetchSponsored_RecommendedItemIsLabelledRecommended(t *testing.T) {
 	}
 	if sp.Messages[0].Label != SponsoredLabel || sp.Messages[1].Label != RecommendedLabel {
 		t.Errorf("labels = %q, %q; want %q, %q", sp.Messages[0].Label, sp.Messages[1].Label, SponsoredLabel, RecommendedLabel)
+	}
+}
+
+func TestBroadcastContentError_NoRetryGuidance(t *testing.T) {
+	err := error(&broadcastContentError{peer: "channel:1"})
+	if !errors.Is(err, ErrBroadcastContent) {
+		t.Fatal("errors.Is(ErrBroadcastContent) must hold")
+	}
+	for _, want := range []string{"Retrying will not change that", "get_unread_messages without peer", "list_dialogs"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal text missing %q: %s", want, err)
+		}
 	}
 }

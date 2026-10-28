@@ -62,7 +62,7 @@ The peer ID is not valid for this account. Use @username, user:<id>, chat:<id>, 
 
 <!-- catalog: CHANNEL_INVALID -->
 ```
-The channel or supergroup reference is not valid for this account. Call list_dialogs and pass the id exactly as returned there — a bare numeric id copied from a link or forwarded-message header carries no access hash.
+The channel or supergroup reference is not valid for this account. Call list_dialogs and pass the id exactly as returned there — a bare numeric id copied from a link or forwarded-message header carries no access hash. Retrying the same id will fail again: use an id from that list; a channel that is not there cannot be read with this account.
 ```
 
 <!-- catalog: CHAT_ID_INVALID -->

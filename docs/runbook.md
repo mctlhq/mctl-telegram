@@ -2794,6 +2794,54 @@ the logged `err` for the specific missing/invalid configuration value, and
 in item 4 of `mctlhq/mctl-telegram#701`) for a related class of startup
 refusal.
 
+## Connect funnel (issue-902)
+
+Every step of the connect flow writes one `audit_logs` row whose `tool_name` starts with
+`connect:` (`connect:oidc_callback`, `connect:phone_submitted`, `connect:code_submitted`,
+`connect:2fa_submitted`, `connect:failed:<reason>`, `connect:success`). MCP tool calls are
+logged to the same table under the bare tool name. The queries below use only `user_id`,
+`tool_name` and `created_at`, and run on SQLite and Postgres.
+
+Share of users who signed in with Telegram and then submitted a phone number:
+
+```sql
+SELECT
+  COUNT(DISTINCT o.user_id) AS signed_in,
+  COUNT(DISTINCT p.user_id) AS submitted_phone
+FROM audit_logs o
+LEFT JOIN audit_logs p
+  ON p.user_id = o.user_id
+ AND p.tool_name = 'connect:phone_submitted'
+ AND p.created_at >= o.created_at
+WHERE o.tool_name = 'connect:oidc_callback';
+```
+
+Users whose last row is `connect:success` with no tool call after it:
+
+```sql
+SELECT s.user_id
+FROM audit_logs s
+WHERE s.tool_name = 'connect:success'
+  AND NOT EXISTS (
+    SELECT 1 FROM audit_logs t
+    WHERE t.user_id = s.user_id
+      AND t.created_at > s.created_at
+      AND t.tool_name NOT LIKE 'connect:%')
+GROUP BY s.user_id;
+```
+
+The audit rows do not record which connect flow (external OAuth client or the self-hosted
+wizard) a user took; to split them, join `oauth_refresh_tokens.client_name` on `user_id`.
+
+Share of users active on exactly one day (any row counts as activity):
+
+```sql
+SELECT COUNT(*) AS one_day_users FROM (
+  SELECT user_id FROM audit_logs
+  GROUP BY user_id
+  HAVING COUNT(DISTINCT DATE(created_at)) = 1) d;
+```
+
 ## Login bot `/start` and onboarding (issue-679)
 
 A `/start` the client sent to the login bot records "the bot may now message

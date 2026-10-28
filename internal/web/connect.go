@@ -454,12 +454,22 @@ var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(
     </ol>
     <h1>Step 4 of 4 &#8212; Done</h1>
     <p>Your Telegram account is now connected to this MCP connector.</p>
-    <p>To start using it with Claude, open the Claude.ai connector settings and add the MCP URL:</p>
+    <h2>Add the connector to your AI client</h2>
+    <p>Use this MCP URL:</p>
     <p class="url">{{.MCPURL}}</p>
     <p class="meta">A new session called &#8220;MCTL Assistant&#8221; will appear in
        your Telegram&#8217;s <strong>Active Sessions</strong> (Settings &#8594; Privacy and Security
        &#8594; Active Sessions). This is normal &#8212; it is the session this connector uses to
        read your messages.</p>
+    <ul>
+      <li><strong>Claude:</strong> add a custom connector with the MCP URL above and sign in
+        with Telegram when asked. <a href="/docs#setup">Claude steps</a></li>
+      <li><strong>ChatGPT:</strong> add a custom MCP server with the MCP URL above and OAuth.
+        <a href="/docs#chatgpt-setup">ChatGPT steps</a></li>
+      <li><strong>Other MCP clients:</strong> add a remote MCP server with the MCP URL above;
+        the client handles OAuth. <a href="/docs#other-clients-setup">Generic steps</a></li>
+    </ul>
+    <p class="meta">Then ask: &#8220;list my recent Telegram chats&#8221;.</p>
     <h2>Choose your notifications</h2>
     <p><a class="btn" href="/telegram/connect/manage?onboarding=1#notifications">Choose which notifications the login bot may send you</a></p>
     <p class="meta">Connecting your account does not subscribe you to anything. Product updates stay off until you save your choice.</p>

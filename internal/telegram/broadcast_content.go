@@ -40,9 +40,10 @@ type broadcastContentError struct {
 }
 
 func (e *broadcastContentError) Error() string {
-	return fmt.Sprintf("peer %q is a broadcast channel: MCTL Assistant does not read channel posts, "+
-		"so get_messages, get_unread_messages, search_messages and get_media refuse it. "+
-		"The channel stays listed in list_dialogs (name and unread count); private chats and groups are not affected", e.peer)
+	return fmt.Sprintf("peer %q is a broadcast channel, and reading channel posts is turned off on this server. "+
+		"Retrying will not change that: do not retry it with get_messages, get_unread_messages, search_messages or get_media, "+
+		"or with another id form. What works: list_dialogs (name, unread count), and reading private chats and groups, "+
+		"including get_unread_messages without peer", e.peer)
 }
 
 func (e *broadcastContentError) Is(target error) bool {
