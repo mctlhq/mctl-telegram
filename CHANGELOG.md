@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.102.0](https://github.com/mctlhq/mctl-telegram/compare/0.101.0...0.102.0) (2026-10-28)
+
+
+### Features
+
+* **agents:** issue-922-request-telegram-bot-access-at-telegram ([8e4b890](https://github.com/mctlhq/mctl-telegram/commit/8e4b890e38b4af9e1e0ec3dcfe09846759a95a2c))
+
 ## [0.101.0](https://github.com/mctlhq/mctl-telegram/compare/0.100.1...0.101.0) (2026-10-28)
 
 
