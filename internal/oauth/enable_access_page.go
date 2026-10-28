@@ -175,8 +175,9 @@ var enableCodeTemplate = template.Must(template.New("enableCode").Parse(enableHe
       <li{{if eq .WizardStep 4}} class="active"{{end}}>Done</li>
     </ol>{{end}}
     {{if .WizardMode}}<h1>Step {{.WizardStep}} of 4 &#8212; Login code</h1>{{else}}<h1>Enter your login code</h1>{{end}}
-    <p>Telegram sent a login code to <span class="url">{{.Phone}}</span>. Open the Telegram app
-       on another device to find it.</p>
+    <p>Telegram sent a login code for <span class="url">{{.Phone}}</span>. It usually arrives
+       as a message from <strong>Telegram</strong> inside the Telegram app on your other
+       device, rather than by SMS.</p>
     {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
     <form method="POST" action="/oauth/telegram/enable_access/code" autocomplete="off">
       <input type="hidden" name="es" value="{{.EnableToken}}">
@@ -187,8 +188,8 @@ var enableCodeTemplate = template.Must(template.New("enableCode").Parse(enableHe
       </label>
       <button type="submit">Verify code</button>
     </form>
-    <p class="meta">Wrong code? Telegram only accepts it once — start again from the phone
-       screen to receive a fresh one.</p>
+    <p class="meta">Mistyped it? You can try again on this screen. Spaces and other
+       characters around the digits are ignored.</p>
 ` + enableFoot))
 
 var enablePasswordTemplate = template.Must(template.New("enablePassword").Parse(enableHead + `    {{if .WizardMode}}<ol class="flow-steps">

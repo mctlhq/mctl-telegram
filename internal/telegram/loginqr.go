@@ -64,9 +64,13 @@ func LoginQR(
 			// of transparently importing the accepted token.
 			Migrate: client.MigrateTo,
 		})
-		authz, err := qr.Auth(ctx, loggedIn, func(ctx context.Context, token qrlogin.Token) error {
-			url := token.URL()
-			return show(ctx, url, renderQR(url))
+		// AUTH_RESTART from auth.exportLoginToken is retried once (#900): a
+		// fresh export starts the QR sign-in over without the user noticing.
+		authz, err := retryAuthRestartOnce(ctx, func() (*tg.AuthAuthorization, error) {
+			return qr.Auth(ctx, loggedIn, func(ctx context.Context, token qrlogin.Token) error {
+				url := token.URL()
+				return show(ctx, url, renderQR(url))
+			})
 		})
 		if err != nil {
 			authz, err = passwordAfterQR(ctx, err, password, client.Auth().Password)
@@ -106,8 +110,8 @@ func LoginQR(
 
 // passwordAfterQR finishes a QR login that Telegram accepted but answered with
 // SESSION_PASSWORD_NEEDED: the account has a 2FA cloud password, which is
-// asked for and checked on the same connection. Any other error is returned
-// unchanged.
+// asked for and checked on the same connection, again after a wrong one up to
+// LoginPasswordAttempts times. Any other error is returned unchanged.
 func passwordAfterQR(
 	ctx context.Context,
 	qrErr error,
@@ -120,15 +124,7 @@ func passwordAfterQR(
 	if password == nil {
 		return nil, fmt.Errorf("2FA password required but no prompt configured: %w", qrErr)
 	}
-	pw, err := password(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("read 2FA password: %w", err)
-	}
-	authz, err := check(ctx, pw)
-	if err != nil {
-		return nil, fmt.Errorf("check 2FA password: %w", err)
-	}
-	return authz, nil
+	return askPasswordChecked(ctx, password, check)
 }
 
 // renderQR encodes url as a QR code and returns an ASCII-art string suitable

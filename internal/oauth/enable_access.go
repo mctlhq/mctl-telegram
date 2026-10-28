@@ -23,6 +23,7 @@ import (
 	tdauth "github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/tgerr"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
 // enableStep tracks where an enable_access flow is. Guarded by enableSession.lock.
@@ -99,11 +100,17 @@ type enableSession struct {
 // telegram.Login. The goroutine blocks in askCode/askPassword reading codeCh
 // and pwCh; needCode/needPw signal which input the goroutine is waiting for;
 // done is closed when telegram.Login and session finalisation have returned.
+//
+// needCode/needPw carry the prompt's telegram.Reprompt: the zero value for the
+// first prompt, and the reason and attempts left when telegram.Login asks
+// again within the same flow (a mistyped code or password, or a new code after
+// AUTH_RESTART). Passing it through the channel, rather than a field, keeps it
+// ordered with the signal itself.
 type loginFlow struct {
 	codeCh   chan string
 	pwCh     chan string
-	needCode chan struct{}
-	needPw   chan struct{}
+	needCode chan telegram.Reprompt
+	needPw   chan telegram.Reprompt
 	done     chan struct{}
 	cancel   context.CancelFunc
 
@@ -152,8 +159,8 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 	lf := &loginFlow{
 		codeCh:   make(chan string),
 		pwCh:     make(chan string),
-		needCode: make(chan struct{}, 1),
-		needPw:   make(chan struct{}, 1),
+		needCode: make(chan telegram.Reprompt, 1),
+		needPw:   make(chan telegram.Reprompt, 1),
 		done:     make(chan struct{}),
 	}
 	bgCtx, cancel := context.WithTimeout(context.Background(), s.cfg.CodeTTL)
@@ -179,8 +186,9 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 
 	askCode := func(ctx context.Context) (string, error) {
 		lf.step = "code_requested"
+		rp, _ := telegram.RepromptFrom(ctx)
 		select {
-		case lf.needCode <- struct{}{}:
+		case lf.needCode <- rp:
 		default:
 		}
 		select {
@@ -193,8 +201,9 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, phone string, sendOptIn boo
 	}
 	askPassword := func(ctx context.Context) (string, error) {
 		lf.step = "password_requested"
+		rp, _ := telegram.RepromptFrom(ctx)
 		select {
-		case lf.needPw <- struct{}{}:
+		case lf.needPw <- rp:
 		default:
 		}
 		select {
@@ -930,8 +939,9 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleEnableCode feeds the SMS code to the login goroutine and renders the
-// 2FA screen, the success redirect, or the phone screen on rejection.
+// handleEnableCode feeds the login code to the login goroutine and renders the
+// 2FA screen, the success redirect, the code screen again when the code did
+// not match and attempts are left, or the phone screen when the flow ended.
 func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 	es, esTok, ok := s.lookupEnable(r)
 	if !ok {
@@ -972,7 +982,9 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	code := strings.TrimSpace(r.FormValue("code"))
+	// Only the digits reach Telegram, so "12 345" or a pasted "Login code:
+	// 12345" is the code the user meant rather than a rejected one (#900).
+	code := telegram.LoginCodeDigits(r.FormValue("code"))
 	if code == "" {
 		renderEnableCode(w, enableCodePage{
 			Issuer:      s.cfg.Issuer,
@@ -999,6 +1011,20 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	select {
+	case rp := <-lf.needCode:
+		// telegram.Login asked for the code again within the same flow: the
+		// code did not match (or Telegram restarted the sign-in and sent a new
+		// one). Stay on this step. The audit row is connect:retry:*, not
+		// connect:failed:*, because the flow is still alive.
+		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:retry:" + rp.Reason, Status: "error", ErrMsg: rp.Reason})
+		renderEnableCode(w, enableCodePage{
+			Issuer:      s.cfg.Issuer,
+			EnableToken: esTok,
+			Phone:       es.phone,
+			WizardMode:  es.isWizardMode(),
+			WizardStep:  3,
+			Error:       codeRepromptMsg(rp),
+		})
 	case <-lf.needPw:
 		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:code_submitted", Status: "ok"})
 		es.step = stepPassword
@@ -1037,7 +1063,11 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleEnablePassword feeds the 2FA cloud password to the login goroutine and
-// renders the success redirect, or the phone screen on rejection.
+// renders the success redirect, the password screen again after a wrong
+// password with attempts left, the code screen when an AUTH_RESTART during the
+// password check made Telegram send a new code, or the phone screen when the
+// flow ended. (The reverse cannot strand the user: handleEnableCode already
+// follows the flow onto the password step through lf.needPw.)
 func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 	es, esTok, ok := s.lookupEnable(r)
 	if !ok {
@@ -1096,6 +1126,33 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	select {
+	case rp := <-lf.needCode:
+		// The password check hit AUTH_RESTART: telegram.Login restarted the
+		// sign-in, Telegram sent a new code, and the goroutine is parked in
+		// askCode for it. Move the user back to the code step so they can
+		// enter it, instead of waiting out enableSignInWait here while the
+		// flow waits for a code nobody can submit.
+		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:retry:" + rp.Reason, Status: "error", ErrMsg: rp.Reason})
+		es.step = stepCode
+		renderEnableCode(w, enableCodePage{
+			Issuer:      s.cfg.Issuer,
+			EnableToken: esTok,
+			Phone:       es.phone,
+			WizardMode:  es.isWizardMode(),
+			WizardStep:  3,
+			Error:       codeRepromptMsg(rp),
+		})
+	case rp := <-lf.needPw:
+		// A wrong password with attempts left: telegram.Login is asking again
+		// on the same connection, so the user stays on this step.
+		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:retry:" + rp.Reason, Status: "error", ErrMsg: rp.Reason})
+		renderEnablePassword(w, enablePasswordPage{
+			Issuer:      s.cfg.Issuer,
+			EnableToken: esTok,
+			WizardMode:  es.isWizardMode(),
+			WizardStep:  3,
+			Error:       passwordRepromptMsg(rp),
+		})
 	case <-lf.done:
 		if lf.err != nil {
 			reason := shortReason(lf.err)
@@ -1107,16 +1164,12 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if reason == "bad_password" {
-				// Ideally this would re-render the password step directly so
-				// the user only retypes the password. That is unsafe here:
-				// gotd's Flow.password() has already returned by the time
-				// lf.done closes, so the login goroutine has exited and
-				// es.flow cannot accept a second password — a resubmit would
-				// just replay this same stale lf.err forever, never checking
-				// the new password (see design.md's caveat). Falling back to
-				// the phone step keeps the audit label and the exact wording
-				// contract; only the "stay on this step" affordance is given
-				// up, as design.md's caveat allows.
+				// Only the last of telegram.LoginPasswordAttempts wrong
+				// passwords lands here; earlier ones come back through
+				// lf.needPw above and keep the user on the password step.
+				// By now the login goroutine has exited and es.flow cannot
+				// accept another password, so the way forward is a fresh
+				// phone + code round.
 				// The copy must match the page it lands on: this is the phone
 				// step, so it tells the user to restart rather than echoing
 				// friendlyErr's "check it and try again", which only makes
@@ -1317,6 +1370,28 @@ func shortReason(err error) string {
 		return "bad_password"
 	}
 	return "unknown"
+}
+
+// codeRepromptMsg is the code step's notice when telegram.Login asks for the
+// code again within the same flow.
+func codeRepromptMsg(rp telegram.Reprompt) string {
+	if rp.Reason == telegram.RepromptAuthRestart {
+		return "Telegram restarted the sign-in and sent you a new code. Enter the new code."
+	}
+	return fmt.Sprintf("That code did not match, try again (%s left).", attemptsLeft(rp.AttemptsLeft))
+}
+
+// passwordRepromptMsg is the password step's notice after a wrong two-step
+// verification password with attempts left.
+func passwordRepromptMsg(rp telegram.Reprompt) string {
+	return fmt.Sprintf("That password did not match, try again (%s left).", attemptsLeft(rp.AttemptsLeft))
+}
+
+func attemptsLeft(n int) string {
+	if n == 1 {
+		return "1 attempt"
+	}
+	return fmt.Sprintf("%d attempts", n)
 }
 
 // badPasswordRestartMsg is shown on the phone step after a rejected two-step

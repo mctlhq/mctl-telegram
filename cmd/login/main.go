@@ -20,6 +20,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -94,6 +95,9 @@ func main() {
 	var tgID int64
 	var displayName, username string
 	askPassword := func(ctx context.Context) (string, error) {
+		if rp, ok := telegram.RepromptFrom(ctx); ok {
+			fmt.Printf("That password did not match, try again (%d left).\n", rp.AttemptsLeft)
+		}
 		fmt.Print("Enter 2FA cloud password: ")
 		pw, err := term.ReadPassword(int(syscall.Stdin))
 		fmt.Println()
@@ -146,12 +150,7 @@ func main() {
 	} else {
 		stdin := bufio.NewReader(os.Stdin)
 		askCode := func(ctx context.Context) (string, error) {
-			fmt.Print("Enter the Telegram code: ")
-			line, err := stdin.ReadString('\n')
-			if err != nil {
-				return "", err
-			}
-			return strings.TrimSpace(line), nil
+			return promptCode(ctx, stdin, os.Stdout)
 		}
 		slog.Info("phone login starting", "user_id", uid, "github_login", cfg.OperatorLogin, "phone", *phone)
 		var loginErr error
@@ -195,6 +194,33 @@ func main() {
 
 	fmt.Printf("\nLogin OK — Telegram user %d (%s @%s) bound to operator %q.\n",
 		tgID, displayName, username, cfg.OperatorLogin)
+}
+
+// promptCode reads the login code from in. The first prompt says where the
+// code usually arrives -- a message from "Telegram" in the app on another
+// device, rather than an SMS -- and a repeated one says why it is asking again. Only the digits
+// of a line are kept, so "12 345" or a pasted "Login code: 12345." works; a
+// line with no digits is asked for again rather than sent to Telegram.
+func promptCode(ctx context.Context, in *bufio.Reader, out io.Writer) (string, error) {
+	if rp, ok := telegram.RepromptFrom(ctx); ok {
+		if rp.Reason == telegram.RepromptAuthRestart {
+			fmt.Fprintln(out, "Telegram restarted the sign-in and sent you a new code.")
+		} else {
+			fmt.Fprintf(out, "That code did not match, try again (%d left).\n", rp.AttemptsLeft)
+		}
+	} else {
+		fmt.Fprintln(out, `The code usually arrives as a message from "Telegram" inside the Telegram app on your other device, rather than by SMS.`)
+	}
+	for {
+		fmt.Fprint(out, "Enter the Telegram code: ")
+		line, err := in.ReadString('\n')
+		if code := telegram.LoginCodeDigits(line); code != "" {
+			return code, nil
+		}
+		if err != nil {
+			return "", err
+		}
+	}
 }
 
 // runLoginOrRepair runs one of the telegram login entrypoints and repairs a

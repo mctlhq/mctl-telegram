@@ -86,6 +86,28 @@ func TestPasswordAfterQR(t *testing.T) {
 		}
 	})
 
+	t.Run("wrong password is asked again in the same flow", func(t *testing.T) {
+		inputs := []string{"hunter1", "hunter2"}
+		var seen []Reprompt
+		askTwice := func(ctx context.Context) (string, error) {
+			rp, _ := RepromptFrom(ctx)
+			seen = append(seen, rp)
+			return inputs[len(seen)-1], nil
+		}
+		authz, err := passwordAfterQR(ctx, needed, askTwice, func(_ context.Context, pw string) (*tg.AuthAuthorization, error) {
+			if pw != "hunter2" {
+				return nil, fmt.Errorf("check: %w", tgerr.New(400, "PASSWORD_HASH_INVALID"))
+			}
+			return want, nil
+		})
+		if err != nil || authz != want {
+			t.Fatalf("authz=%v err=%v", authz, err)
+		}
+		if len(seen) != 2 || seen[1] != (Reprompt{Reason: RepromptBadPassword, AttemptsLeft: 2}) {
+			t.Fatalf("prompts saw %v", seen)
+		}
+	})
+
 	t.Run("wrong password fails", func(t *testing.T) {
 		bad := errors.New("PASSWORD_HASH_INVALID")
 		_, err := passwordAfterQR(ctx, needed, ask, func(context.Context, string) (*tg.AuthAuthorization, error) {
