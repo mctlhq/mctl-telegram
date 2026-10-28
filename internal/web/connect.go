@@ -466,6 +466,7 @@ var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(
     <h2>Add the connector to your AI client</h2>
     <p>Use this MCP URL:</p>
     <p class="url">{{.MCPURL}}</p>
+    <button class="btn-secondary" type="button" id="copy-mcp-url" data-url="{{.MCPURL}}">Copy MCP URL</button>
     <p class="meta">A new session called &#8220;MCTL Assistant&#8221; will appear in
        your Telegram&#8217;s <strong>Active Sessions</strong> (Settings &#8594; Privacy and Security
        &#8594; Active Sessions). This is normal &#8212; it is the session this connector uses to
@@ -485,7 +486,49 @@ var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(
     {{if .LoginBotStartURL}}<p class="meta"><a href="{{.LoginBotStartURL}}">Start the login bot</a> so it can reach you.</p>{{else}}<p class="meta">To let the login bot reach you, open it in Telegram and press Start.</p>{{end}}
     <p class="meta"><a href="{{.ClaudeURL}}">Go to Claude.ai connector settings</a> &#183;
        <a href="/telegram/connect/manage">Manage your session</a></p>
+    <script>` + connectCopyScript + `</script>
 ` + connectFoot))
+
+// connectCopyScript backs the success page's "Copy MCP URL" button. It must
+// stay static (no template actions): the success page CSP allows exactly this
+// script by its sha256, so any change to the text changes the hash with it.
+const connectCopyScript = `
+(function () {
+  var btn = document.getElementById('copy-mcp-url');
+  if (!btn) { return; }
+  var label = btn.textContent;
+  var timer = null;
+  var reset = function (ms) {
+    clearTimeout(timer);
+    timer = setTimeout(function () { btn.textContent = label; }, ms);
+  };
+  btn.addEventListener('click', function () {
+    var url = btn.getAttribute('data-url');
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(function () {
+        btn.textContent = 'Copied!';
+        reset(2000);
+      }, function () {
+        btn.textContent = url;
+        reset(4000);
+      });
+    } else {
+      btn.textContent = url;
+      reset(4000);
+    }
+  });
+})();
+`
+
+// connectBaseCSP is the CSP for every connect page: no script at all.
+const connectBaseCSP = "default-src 'none'; style-src 'unsafe-inline'; img-src https://ui.mctl.ai; form-action 'self'; base-uri 'none'"
+
+// connectSuccessCSP adds the one inline script the success page carries,
+// pinned by hash so no other script can run there.
+var connectSuccessCSP = func() string {
+	sum := sha256.Sum256([]byte(connectCopyScript))
+	return connectBaseCSP + "; script-src 'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+}()
 
 var connectErrorTemplate = template.Must(template.New("connectError").Parse(connectHead + `    <h1>Connection failed</h1>
     <div class="error">{{.Message}}</div>
@@ -506,7 +549,7 @@ func renderConnectPage(w http.ResponseWriter, data connectLandingData) {
 }
 
 func renderConnectSuccess(w http.ResponseWriter, data connectSuccessData) {
-	renderConnect(w, http.StatusOK, connectSuccessTemplate, data)
+	renderConnectCSP(w, http.StatusOK, connectSuccessTemplate, data, connectSuccessCSP)
 }
 
 func renderConnectError(w http.ResponseWriter, msg, retryURL string) {
@@ -531,12 +574,15 @@ func renderConnectReused(w http.ResponseWriter, retryURL string) {
 // already-sent 200. Matches the renderEnable pattern in
 // internal/oauth/enable_access_page.go.
 func renderConnect(w http.ResponseWriter, status int, t *template.Template, data any) {
+	renderConnectCSP(w, status, t, data, connectBaseCSP)
+}
+
+func renderConnectCSP(w http.ResponseWriter, status int, t *template.Template, data any, csp string) {
 	var buf bytes.Buffer
 	if err := t.Execute(&buf, data); err != nil {
 		http.Error(w, "template execute: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	const csp = "default-src 'none'; style-src 'unsafe-inline'; img-src https://ui.mctl.ai; form-action 'self'; base-uri 'none'"
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy", csp)
 	w.Header().Set("Cache-Control", "no-store")
