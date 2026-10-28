@@ -53,7 +53,8 @@ func (d *deferredSession) take() []byte {
 
 // settle ends the deferral: on a mismatch the buffered bytes are dropped
 // without a single write to target, otherwise the latest ones are written
-// through once.
+// through once. A failed write puts them back, so the caller can still log
+// out the authorization they carry instead of leaving it orphaned.
 func (d *deferredSession) settle(ctx context.Context, mismatch bool) error {
 	data := d.take()
 	if mismatch {
@@ -62,5 +63,13 @@ func (d *deferredSession) settle(ctx context.Context, mismatch bool) error {
 	if data == nil {
 		return errors.New("login completed but no session bytes were persisted")
 	}
-	return d.target.StoreSession(ctx, data)
+	if err := d.target.StoreSession(ctx, data); err != nil {
+		d.mu.Lock()
+		if d.data == nil {
+			d.data = data
+		}
+		d.mu.Unlock()
+		return err
+	}
+	return nil
 }

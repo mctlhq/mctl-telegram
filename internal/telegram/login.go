@@ -48,11 +48,11 @@ type LoginConfig struct {
 	// once Telegram has accepted the scan (and the 2FA password, if any),
 	// before the account check and the session write. Login ignores it.
 	OnQRAccepted func()
-	// HoldSession, when non-nil, receives the session bytes of a LoginQR
-	// that signed in to the expected account, in place of the database
-	// write. The caller then writes them together with the account metadata
-	// in one transaction, or logs the authorization out if it no longer
-	// wants it (#919). Login ignores it.
+	// HoldSession, when non-nil, receives the session bytes of a Login or
+	// LoginQR that signed in to the expected account, in place of the
+	// database write. The caller then writes them together with the account
+	// metadata in one transaction, or logs the authorization out if it no
+	// longer wants it (#919, #913).
 	HoldSession func(data []byte)
 }
 
@@ -126,8 +126,16 @@ func loginMiddlewares(cfg LoginConfig) []telegram.Middleware {
 }
 
 // Login runs the interactive phone -> code -> 2FA-password flow for a single
-// user. Session bytes are persisted into the DB via the SessionStore. Returns
-// the resolved Telegram user metadata for storage in telegram_accounts.
+// user. Returns the resolved Telegram user metadata for storage in
+// telegram_accounts.
+//
+// The login always starts from a fresh auth key in a deferredSession and
+// never loads the user's existing row (#913). Its session reaches the
+// database, or LoginConfig.HoldSession, only after the account check has
+// passed, so a sign-in to the wrong account writes nothing and its logout
+// ends only the new key: the user's existing session is not touched. A
+// re-login to the right account therefore adds a new device rather than
+// reusing the old auth key.
 func Login(
 	ctx context.Context,
 	apiID int,
@@ -150,14 +158,27 @@ func Login(
 		cfg = cfgs[0]
 	}
 
-	sessStore := &SessionStore{UserID: userID, Store: store}
-	client := telegram.NewClient(apiID, apiHash, loginClientOptions(sessStore, cfg))
+	sess := &deferredSession{target: &SessionStore{UserID: userID, Store: store}}
+	client := telegram.NewClient(apiID, apiHash, loginClientOptions(sess, cfg))
 
+	// codeSubmitted records that a login code reached Telegram's sign-in:
+	// from then on the auth key may carry an authorization, which a run that
+	// does not finish must log out, like a scanned QR code.
+	var codeSubmitted bool
 	authenticator := &interactiveAuthenticator{
-		phone:    phone,
-		code:     askCode,
+		phone: phone,
+		code: func(ctx context.Context) (string, error) {
+			code, err := askCode(ctx)
+			if err == nil {
+				codeSubmitted = true
+			}
+			return code, err
+		},
 		password: askPassword,
 	}
+	// signedIn is set only once the callback got through sign-in and the
+	// account check; mismatch tells which way that check went.
+	signedIn, mismatch := false, false
 
 	// Breadcrumbs to localise where a stuck login hangs: the enable_access
 	// handler only records a coarse "send code timeout" in the audit, so these
@@ -184,23 +205,17 @@ func Login(
 		}
 		username = me.Username
 		if logOutIfMismatch(ctx, client.API(), userID, cfg.WantTelegramID, me.ID) {
+			signedIn, mismatch = true, true
 			return nil
 		}
 		// Force a session flush so the SessionStorage sees the post-auth bytes.
 		// gotd already calls StoreSession on every change, but we trigger one
 		// trivial call to be safe.
 		_, _ = client.API().HelpGetConfig(ctx)
+		signedIn = true
 		return nil
 	})
-	if runErr != nil && !errors.Is(runErr, context.Canceled) {
-		return 0, "", "", runErr
-	}
-
-	// Sanity check session persisted.
-	if _, err := sessStore.LoadSession(ctx); err != nil {
-		if errors.Is(err, session.ErrNotFound) {
-			return 0, "", "", errors.New("login completed but no session bytes were persisted")
-		}
+	if err := finishLogin(ctx, "login", apiID, apiHash, cfg, userID, sess, runErr, codeSubmitted, signedIn, mismatch); err != nil {
 		return 0, "", "", err
 	}
 	return telegramUserID, displayName, username, nil

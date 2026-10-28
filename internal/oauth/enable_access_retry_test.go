@@ -41,7 +41,7 @@ func (l *retryingLogin) fn() LoginFunc {
 		uid int64, phone string,
 		askCode func(context.Context) (string, error),
 		askPassword func(context.Context) (string, error),
-		_ ...telegram.LoginConfig,
+		cfgs ...telegram.LoginConfig,
 	) (int64, string, string, error) {
 		promptCtx := ctx
 		for attempt := 1; ; attempt++ {
@@ -80,7 +80,7 @@ func (l *retryingLogin) fn() LoginFunc {
 				})
 			}
 		}
-		if err := store.UpdateSessionBlob(ctx, uid, []byte("fake-mtproto-session")); err != nil {
+		if err := handOverSession(cfgs, []byte("fake-mtproto-session")); err != nil {
 			return 0, "", "", err
 		}
 		return 500100101, "Dana", "dana_tg", nil
@@ -258,7 +258,7 @@ func restartDuringPasswordLogin() LoginFunc {
 		uid int64, phone string,
 		askCode func(context.Context) (string, error),
 		askPassword func(context.Context) (string, error),
-		_ ...telegram.LoginConfig,
+		cfgs ...telegram.LoginConfig,
 	) (int64, string, string, error) {
 		if _, err := askCode(ctx); err != nil {
 			return 0, "", "", err
@@ -281,7 +281,7 @@ func restartDuringPasswordLogin() LoginFunc {
 		if code != "67890" {
 			return 0, "", "", fmt.Errorf("sign in: %w", tgerr.New(400, "PHONE_CODE_INVALID"))
 		}
-		if err := store.UpdateSessionBlob(ctx, uid, []byte("fake-mtproto-session")); err != nil {
+		if err := handOverSession(cfgs, []byte("fake-mtproto-session")); err != nil {
 			return 0, "", "", err
 		}
 		return 500100101, "Dana", "dana_tg", nil

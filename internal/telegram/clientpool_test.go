@@ -462,18 +462,15 @@ func TestBorrow_RevokePersistFailureMarksSystemicNotSentinel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureUser: %v", err)
 	}
-	now := time.Now().UTC()
-	if _, err := store.DB.ExecContext(ctx,
-		`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted, last_used_at, expires_at) VALUES($1, $2, $3, $4, $5)`,
-		uid, 555, []byte("blob"), now, now.Add(60*24*time.Hour),
-	); err != nil {
+	if err := store.SaveSession(ctx, uid, []byte("blob"), 555, "", ""); err != nil {
 		t.Fatalf("seed session: %v", err)
 	}
 
 	p := NewClientPool(1, "hash", time.Minute, store)
 	// Inject a synthetic ready entry so acquire() returns it without dialing
-	// Telegram — mirrors TestPoolFull / the error/pool_full subtest above.
-	e := &entry{lastUsed: time.Now(), cancel: func() {}, ready: make(chan struct{})}
+	// Telegram — mirrors TestPoolFull / the error/pool_full subtest above. It
+	// has loaded the row, so only the DB failure can fail the revoke.
+	e := loadedEntry(t, store, uid)
 	close(e.ready)
 	p.mu.Lock()
 	p.entries[uid] = e
@@ -732,8 +729,9 @@ func TestRevokePaths_StoreTelegramErrorType(t *testing.T) {
 	if err := store.SaveSession(ctx, uid2, []byte("blob"), 4242, "", ""); err != nil {
 		t.Fatalf("seed session: %v", err)
 	}
-	if err := p.revokeRejected(ctx, uid2, fmt.Errorf("call: %w", tgerr.New(401, "SESSION_REVOKED"))); err != nil {
-		t.Fatalf("revokeRejected: %v", err)
+	e2 := loadedEntry(t, store, uid2)
+	if revoked, err := p.revokeRejected(ctx, uid2, e2, fmt.Errorf("call: %w", tgerr.New(401, "SESSION_REVOKED"))); err != nil || !revoked {
+		t.Fatalf("revokeRejected = %v, %v, want true, nil", revoked, err)
 	}
 	if reason, detail := revokedDetailOf(t, store, uid2); reason != "unauthorized" || detail != "SESSION_REVOKED" {
 		t.Errorf("revokeRejected stored (%q, %q), want (unauthorized, SESSION_REVOKED)", reason, detail)
@@ -793,5 +791,123 @@ func TestAcquire_PooledClientWithoutRowFailsFast(t *testing.T) {
 	}
 	if !errors.Is(e.runErr, db.ErrNoActiveSession) {
 		t.Fatalf("runErr = %v, want ErrNoActiveSession", e.runErr)
+	}
+}
+
+// loadedEntry is a pool entry whose SessionStore loaded the user's active row,
+// as a running pooled client's has; it never dials Telegram.
+func loadedEntry(t *testing.T, store *db.Store, uid int64) *entry {
+	t.Helper()
+	ss := &SessionStore{UserID: uid, Store: store, Pooled: true}
+	if _, err := ss.LoadSession(context.Background()); err != nil {
+		t.Fatalf("load session: %v", err)
+	}
+	if ss.LoadedRowID() == 0 {
+		t.Fatal("entry loaded no row")
+	}
+	return &entry{sessionStore: ss, lastUsed: time.Now(), cancel: func() {}, ready: make(chan struct{})}
+}
+
+// TestBorrow_RejectedStaleClientKeepsTheNewRow is the #913 regression: a
+// pooled client still runs on the row a re-login superseded, the re-login
+// logs that row's key out, and the client's next call fails with
+// AUTH_KEY_UNREGISTERED. Only the row the client loaded may be revoked; the
+// row the re-login saved stays the user's active session. Both Borrow paths
+// are covered: the rejection inside fn and the one at client startup.
+func TestBorrow_RejectedStaleClientKeepsTheNewRow(t *testing.T) {
+	for _, path := range []string{"call", "startup"} {
+		t.Run(path, func(t *testing.T) {
+			ctx := context.Background()
+			store := newBorrowTestStore(t)
+			uid, err := store.EnsureUser(ctx, "stale-client-"+path, "", "test")
+			if err != nil {
+				t.Fatalf("EnsureUser: %v", err)
+			}
+			if err := store.SaveSession(ctx, uid, []byte("old-session"), 4242, "", ""); err != nil {
+				t.Fatalf("seed old session: %v", err)
+			}
+			p := NewClientPool(1, "hash", time.Minute, store)
+			stale := loadedEntry(t, store, uid)
+			rejected := fmt.Errorf("rpc: %w", tgerr.New(401, "AUTH_KEY_UNREGISTERED"))
+			if path == "startup" {
+				stale.runErr = rejected
+			}
+			close(stale.ready)
+			p.mu.Lock()
+			p.entries[uid] = stale
+			p.mu.Unlock()
+
+			// The re-login commits a new row of the same account.
+			if _, err := store.SaveSessionForSignInSuperseding(ctx, uid, []byte("new-session"), 4242, "", "", time.Now().Add(-time.Minute)); err != nil {
+				t.Fatalf("re-login save: %v", err)
+			}
+
+			got := p.Borrow(ctx, uid, func(context.Context, *telegram.Client) error { return rejected })
+			if !errors.Is(got, ErrStaleSession) {
+				t.Errorf("Borrow = %v, want ErrStaleSession", got)
+			}
+			if errors.Is(got, db.ErrSessionRevoked) || errors.Is(got, ErrSessionRevokePersistFailed) {
+				t.Errorf("Borrow = %v, must not tell the user their session is gone", got)
+			}
+			if _, err := store.CheckSessionValid(ctx, uid); err != nil {
+				t.Fatalf("the re-login's row was revoked: %v", err)
+			}
+			if blob, err := store.LoadSession(ctx, uid); err != nil || string(blob) != "new-session" {
+				t.Fatalf("active session = %q, %v, want new-session", blob, err)
+			}
+			p.mu.Lock()
+			_, still := p.entries[uid]
+			p.mu.Unlock()
+			if still {
+				t.Error("the stale client stayed in the pool")
+			}
+		})
+	}
+}
+
+// TestRevokeRejected_ScopedToTheEntry: the rejected entry's own row is revoked
+// and it is evicted, but a replacement entry already installed for the user
+// stays, and an entry whose loaded row is unknown revokes nothing and reports
+// a failed revoke rather than a clean one.
+func TestRevokeRejected_ScopedToTheEntry(t *testing.T) {
+	ctx := context.Background()
+	store := newBorrowTestStore(t)
+	uid, err := store.EnsureUser(ctx, "scoped-revoke-user", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+	if err := store.SaveSession(ctx, uid, []byte("blob"), 4242, "", ""); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	p := NewClientPool(1, "hash", time.Minute, store)
+	cause := tgerr.New(401, "AUTH_KEY_UNREGISTERED")
+
+	unknown := &entry{lastUsed: time.Now(), cancel: func() {}, ready: make(chan struct{})}
+	if revoked, err := p.revokeRejected(ctx, uid, unknown, cause); err == nil || revoked {
+		t.Errorf("unknown row: revokeRejected = %v, %v, want false and an error", revoked, err)
+	}
+	if _, err := store.CheckSessionValid(ctx, uid); err != nil {
+		t.Fatalf("an entry with no loaded row revoked the active one: %v", err)
+	}
+
+	rejected := loadedEntry(t, store, uid)
+	replacement := &entry{lastUsed: time.Now(), cancel: func() {}, ready: make(chan struct{})}
+	p.mu.Lock()
+	p.entries[uid] = replacement
+	p.mu.Unlock()
+	if revoked, err := p.revokeRejected(ctx, uid, rejected, cause); err != nil || !revoked {
+		t.Fatalf("revokeRejected = %v, %v, want true, nil", revoked, err)
+	}
+	if _, err := store.CheckSessionValid(ctx, uid); !errors.Is(err, db.ErrNoActiveSession) {
+		t.Errorf("the rejected row is still active: %v", err)
+	}
+	p.mu.Lock()
+	got := p.entries[uid]
+	p.mu.Unlock()
+	if got != replacement {
+		t.Error("revokeRejected evicted a replacement entry it did not own")
+	}
+	if !rejected.stopped {
+		t.Error("the rejected entry was not stopped")
 	}
 }

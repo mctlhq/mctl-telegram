@@ -162,19 +162,19 @@ type Server struct {
 	// logOutSessionFn, when set, replaces telegram.LogOutSession for
 	// logging out a held QR session the flow no longer wants (#919).
 	logOutSessionFn func(ctx context.Context, data []byte) error
+	// evictPooledClient, when set, stops the user's pooled Telegram client
+	// (telegram.ClientPool.Close). A sign-in calls it once its row is saved,
+	// so no client keeps running on the superseded row and its key (#913).
+	// Assigned at startup, before any flow runs.
+	evictPooledClient func(uid int64)
+	// bgLogOuts tracks the superseded-key logouts a finished sign-in leaves
+	// running in the background, so tests can wait for them.
+	bgLogOuts sync.WaitGroup
 	// beforeSignInSave, when non-nil, runs in the login goroutine right
 	// before SaveSessionForSignIn. Test seam (nil in production): it is the
 	// only way to land a cancel after the #919 guard. Assigned before the
 	// flow starts.
 	beforeSignInSave func()
-
-	// clearStrayFn, when non-nil, replaces store.ClearStraySessionIfLocal on
-	// the enable_access repair paths. Test seam (nil in production): the store
-	// is a real *db.Store, so this is the only way to reach the failure half
-	// of the identity-mismatch local cleanup, which must surface the same way
-	// a failed revoke does. Assigned before the request that reads it and not
-	// mutated while a flow is in flight.
-	clearStrayFn func(context.Context, int64) error
 
 	// loginFlowParked, when non-nil, is invoked by the enable_access login
 	// goroutine immediately before it blocks on that uid's loginMu entry.
@@ -187,7 +187,7 @@ type Server struct {
 	//
 	// Assigned before the request that reads it and not mutated while a flow
 	// is in flight -- the flow goroutine reads it, so a mid-flight write would
-	// be a race like any other. Same contract as modeCheckFn and clearStrayFn
+	// be a race like any other. Same contract as modeCheckFn
 	// above; the wording is shared deliberately, because the earlier "set once
 	// during test construction" claimed more than the only caller practices
 	// (it assigns after driveToPhone has already served two requests) and a
@@ -216,6 +216,10 @@ type metricsIface interface {
 	// ObserveLoginFlow records one finished enable_access login flow:
 	// method is "code" or "qr", result one of the loginFlowResult values.
 	ObserveLoginFlow(method, result string, seconds float64)
+	// CountLoginLogOut counts one logout of a session the enable_access flow
+	// no longer wants: reason is "unsaved" or "superseded", outcome "ok" or
+	// "error".
+	CountLoginLogOut(reason, outcome string)
 }
 
 // WithMetrics wires a metrics registry so oauth.Server can update the
@@ -223,6 +227,14 @@ type metricsIface interface {
 // Returns the receiver for chaining.
 func (s *Server) WithMetrics(m metricsIface) *Server {
 	s.metrics = m
+	return s
+}
+
+// WithPooledClientEvictor sets the function a completed sign-in calls to stop
+// the user's pooled Telegram client, which still runs on the row the sign-in
+// superseded. Returns the receiver for chaining.
+func (s *Server) WithPooledClientEvictor(evict func(uid int64)) *Server {
+	s.evictPooledClient = evict
 	return s
 }
 

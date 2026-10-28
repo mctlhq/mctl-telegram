@@ -550,6 +550,9 @@ func main() {
 		// first-time connect (auth.sendCode) — the most flood-sensitive call on
 		// the shared TG_API_ID — throttles against the same budget as the pool.
 		oauthSrv.WithLoginConfig(telegram.LoginConfig{GlobalMiddleware: globalTGLimiter, TestDC: cfg.TGTestDC})
+		// A sign-in supersedes the user's row and logs its key out (#913):
+		// stop the pooled client still running on it first.
+		oauthSrv.WithPooledClientEvictor(func(uid int64) { pool.Close(uid) })
 		// Browser-based Telegram account onboarding. Only meaningful when the
 		// OAuth issuer is active (local-jwt mode); returns 404 otherwise.
 		// Identifier is the same provider /mcp and friends authenticate

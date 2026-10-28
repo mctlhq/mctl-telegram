@@ -2,11 +2,13 @@ package oauth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -103,16 +105,27 @@ func newEnableTestServer(t *testing.T, login LoginFunc, opts ...func(*Config)) (
 	return srv, mux
 }
 
+// handOverSession gives a stub login's session bytes to the flow the way
+// telegram.Login does for the expected account: through
+// LoginConfig.HoldSession, never by writing them (#913).
+func handOverSession(cfgs []telegram.LoginConfig, data []byte) error {
+	if len(cfgs) == 0 || cfgs[0].HoldSession == nil {
+		return errors.New("test: login called without LoginConfig.HoldSession")
+	}
+	cfgs[0].HoldSession(data)
+	return nil
+}
+
 // stubLogin fakes telegram.Login. It always consumes the SMS code; when needPw
 // it also consumes the 2FA password. When failErr is non-nil it returns that
 // after the inputs are consumed (mimicking PHONE_CODE_INVALID etc.); otherwise
-// it persists a session blob and reports success as the admin id.
+// it hands a session over and reports success as the admin id.
 func stubLogin(needPw bool, failErr error) LoginFunc {
 	return func(ctx context.Context, apiID int, apiHash string, store *db.Store,
 		uid int64, phone string,
 		askCode func(context.Context) (string, error),
 		askPassword func(context.Context) (string, error),
-		_ ...telegram.LoginConfig,
+		cfgs ...telegram.LoginConfig,
 	) (int64, string, string, error) {
 		if _, err := askCode(ctx); err != nil {
 			return 0, "", "", err
@@ -125,7 +138,7 @@ func stubLogin(needPw bool, failErr error) LoginFunc {
 		if failErr != nil {
 			return 0, "", "", failErr
 		}
-		if err := store.UpdateSessionBlob(ctx, uid, []byte("fake-mtproto-session")); err != nil {
+		if err := handOverSession(cfgs, []byte("fake-mtproto-session")); err != nil {
 			return 0, "", "", err
 		}
 		return 500100101, "Dana", "dana_tg", nil
@@ -133,9 +146,9 @@ func stubLogin(needPw bool, failErr error) LoginFunc {
 }
 
 // stubLoginWrongAccount fakes a login that succeeds but resolves to a
-// different Telegram account than the widget-proven one (id 500100101). It
-// persists session bytes first, mimicking gotd, so the test can assert the
-// identity-mismatch path revokes them.
+// different Telegram account than the widget-proven one (id 500100101). Like
+// telegram.Login since #913 it writes and hands over nothing for that
+// account: the login itself has already logged it out.
 func stubLoginWrongAccount() LoginFunc {
 	return func(ctx context.Context, apiID int, apiHash string, store *db.Store,
 		uid int64, phone string,
@@ -144,9 +157,6 @@ func stubLoginWrongAccount() LoginFunc {
 		_ ...telegram.LoginConfig,
 	) (int64, string, string, error) {
 		if _, err := askCode(ctx); err != nil {
-			return 0, "", "", err
-		}
-		if err := store.UpdateSessionBlob(ctx, uid, []byte("wrong-account-session")); err != nil {
 			return 0, "", "", err
 		}
 		return 999000111, "Someone Else", "someoneelse", nil
@@ -805,10 +815,16 @@ func TestEnableAccess_DBClientRoutedToPhoneScreen(t *testing.T) {
 
 // TestEnableAccess_TelegramIDMismatch_Rejected confirms that a phone login
 // resolving to a different Telegram account than the widget identity is
-// rejected, and that the wrong-account session bytes are revoked.
+// rejected, and that it leaves the user's existing session alone (#913): the
+// row keeps its bytes, stays active and valid, and no second row appears.
+// Before #913 the login wrote the wrong account's bytes into that row and
+// the flow then revoked it, so one wrong-account attempt ended a working
+// session.
 func TestEnableAccess_TelegramIDMismatch_Rejected(t *testing.T) {
 	srv, mux := newEnableTestServer(t, stubLoginWrongAccount())
+	logOuts := recordSessionLogOuts(srv, nil)
 	es := driveToPhone(t, mux)
+	uid := seedExistingSession(t, srv)
 
 	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
 		url.Values{"es": {es}, "phone": {"+14155551234"}}); rec.Code != http.StatusOK {
@@ -823,11 +839,143 @@ func TestEnableAccess_TelegramIDMismatch_Rejected(t *testing.T) {
 		t.Errorf("expected an identity-mismatch error, got: %s", rec.Body.String())
 	}
 
-	// The wrong-account session bytes must have been revoked, not left valid.
-	ctx := context.Background()
-	uid, _ := srv.store.EnsureUserByTelegramID(ctx, 500100101, "dana_tg", "Dana")
-	if _, err := srv.store.CheckSessionValid(ctx, uid); err == nil {
-		t.Error("wrong-account session was left valid after the mismatch")
+	srv.bgLogOuts.Wait()
+	assertExistingSessionUntouched(t, srv, uid)
+	// The wrong account was logged out by the login itself; the flow held
+	// nothing, and the existing key is still the user's, so the flow logs
+	// nothing out.
+	if got := logOuts(); len(got) != 0 {
+		t.Errorf("flow logouts = %q, want none", got)
+	}
+}
+
+// recordSessionLogOuts makes srv record every session it logs out, failing
+// each with err, and returns the recorded bytes.
+func recordSessionLogOuts(srv *Server, err error) func() []string {
+	var mu sync.Mutex
+	var got []string
+	srv.logOutSessionFn = func(_ context.Context, data []byte) error {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, string(data))
+		return err
+	}
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), got...)
+	}
+}
+
+// signInByPhone drives an enable_access phone sign-in to its redirect.
+func signInByPhone(t *testing.T, mux *chi.Mux, es string) *httptest.ResponseRecorder {
+	t.Helper()
+	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}}); !strings.Contains(rec.Body.String(), "enable_access/code") {
+		t.Fatalf("start did not render code screen: %s", rec.Body.String())
+	}
+	return postForm(t, mux, "/oauth/telegram/enable_access/code",
+		url.Values{"es": {es}, "code": {"12345"}})
+}
+
+// TestEnableAccess_ReLoginLogsOutTheSupersededKey: a re-login to the same
+// account starts from a fresh auth key (#913), so the key of the row it
+// replaces is logged out -- exactly once, and never the new one. Before
+// #913 the login reused that key; without the logout every re-login would
+// leave an orphaned device in the user's Active Sessions.
+func TestEnableAccess_ReLoginLogsOutTheSupersededKey(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	m := &flowMetrics{}
+	srv.WithMetrics(m)
+	logOuts := recordSessionLogOuts(srv, nil)
+	es := driveToPhone(t, mux)
+	uid := seedExistingSession(t, srv)
+
+	if loc := authCodeRedirect(t, signInByPhone(t, mux, es)); loc.Query().Get("code") == "" {
+		t.Fatalf("no authorization code in %s", loc)
+	}
+	srv.bgLogOuts.Wait()
+
+	if got := logOuts(); len(got) != 1 || got[0] != "existing-good-session" {
+		t.Errorf("logouts = %q, want the superseded key once", got)
+	}
+	pt, err := srv.store.LoadSession(context.Background(), uid)
+	if err != nil || string(pt) != "fake-mtproto-session" {
+		t.Errorf("active session = %q, %v; want the new one", pt, err)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.logOuts) != 1 || m.logOuts[0] != "superseded/ok" {
+		t.Errorf("logout metrics = %v, want [superseded/ok]", m.logOuts)
+	}
+}
+
+// TestEnableAccess_ReLoginEvictsThePooledClientFirst: a pooled client still
+// running on the superseded row would hit the old key's logout on its next
+// call. The sign-in stops it once the new row is saved and before any logout
+// of the old key starts, and only for the signed-in user.
+func TestEnableAccess_ReLoginEvictsThePooledClientFirst(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	var mu sync.Mutex
+	var evicted []int64
+	logOutBeforeEvict := false
+	srv.WithPooledClientEvictor(func(uid int64) {
+		mu.Lock()
+		defer mu.Unlock()
+		evicted = append(evicted, uid)
+	})
+	srv.logOutSessionFn = func(context.Context, []byte) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(evicted) == 0 {
+			logOutBeforeEvict = true
+		}
+		return nil
+	}
+	es := driveToPhone(t, mux)
+	uid := seedExistingSession(t, srv)
+
+	if loc := authCodeRedirect(t, signInByPhone(t, mux, es)); loc.Query().Get("code") == "" {
+		t.Fatalf("no authorization code in %s", loc)
+	}
+	srv.bgLogOuts.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(evicted) != 1 || evicted[0] != uid {
+		t.Errorf("evicted = %v, want [%d]", evicted, uid)
+	}
+	if logOutBeforeEvict {
+		t.Error("the old key was logged out while the pooled client still ran on it")
+	}
+}
+
+// TestEnableAccess_SupersededLogOutFailureKeepsTheSignIn: the old key's
+// logout is best effort. When Telegram refuses it, the sign-in still
+// completes, and the failure is counted rather than surfaced.
+func TestEnableAccess_SupersededLogOutFailureKeepsTheSignIn(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	m := &flowMetrics{}
+	srv.WithMetrics(m)
+	logOuts := recordSessionLogOuts(srv, errors.New("AUTH_KEY_UNREGISTERED"))
+	es := driveToPhone(t, mux)
+	uid := seedExistingSession(t, srv)
+
+	if loc := authCodeRedirect(t, signInByPhone(t, mux, es)); loc.Query().Get("code") == "" {
+		t.Fatalf("no authorization code in %s", loc)
+	}
+	srv.bgLogOuts.Wait()
+
+	if _, err := srv.store.CheckSessionValid(context.Background(), uid); err != nil {
+		t.Errorf("session not valid after a failed old-key logout: %v", err)
+	}
+	if got := logOuts(); len(got) != 1 {
+		t.Errorf("logout attempts = %d, want 1", len(got))
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.logOuts) != 1 || m.logOuts[0] != "superseded/error" {
+		t.Errorf("logout metrics = %v, want [superseded/error]", m.logOuts)
 	}
 }
 
@@ -1288,7 +1436,7 @@ func TestEnableAccess_AccountDeletedDuringLogin(t *testing.T) {
 		uid int64, phone string,
 		askCode func(context.Context) (string, error),
 		askPassword func(context.Context) (string, error),
-		_ ...telegram.LoginConfig,
+		cfgs ...telegram.LoginConfig,
 	) (int64, string, string, error) {
 		if _, err := askCode(ctx); err != nil {
 			return 0, "", "", err
@@ -1296,8 +1444,8 @@ func TestEnableAccess_AccountDeletedDuringLogin(t *testing.T) {
 		if _, err := store.HardDeleteAccount(ctx, uid); err != nil {
 			return 0, "", "", err
 		}
-		// gotd persists the session bytes after the delete committed.
-		if err := store.UpdateSessionBlob(ctx, uid, []byte("fake-mtproto-session")); err != nil {
+		// The login hands its session over after the delete committed.
+		if err := handOverSession(cfgs, []byte("fake-mtproto-session")); err != nil {
 			return 0, "", "", err
 		}
 		return 500100101, "Dana", "dana_tg", nil

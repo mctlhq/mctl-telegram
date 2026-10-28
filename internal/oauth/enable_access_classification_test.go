@@ -43,7 +43,6 @@ func TestShortReason_BadPasswordAndAuthRestart(t *testing.T) {
 		{"local_mode_active", db.ErrAccountModeConflict, "local_mode_active"},
 		{"account_deleted", db.ErrAccountDeletedSinceGrant, "account_deleted"},
 		{"identity_mismatch", errors.New("resolved to a different Telegram account than expected"), "identity_mismatch"},
-		{"identity_cleanup_timeout", errIdentityCleanupTimeout, "identity_cleanup_timeout"},
 		{"unknown_nil", nil, "unknown"},
 		{"unknown_other", errors.New("some other failure"), "unknown"},
 		// New arms (issue-695).

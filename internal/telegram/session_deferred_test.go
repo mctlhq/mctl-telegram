@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 type recordingStorage struct {
 	row    []byte
 	writes [][]byte
+	// fail, when set, is returned by every write after recording it.
+	fail error
 }
 
 func (r *recordingStorage) LoadSession(context.Context) ([]byte, error) {
@@ -29,7 +32,7 @@ func (r *recordingStorage) LoadSession(context.Context) ([]byte, error) {
 
 func (r *recordingStorage) StoreSession(_ context.Context, data []byte) error {
 	r.writes = append(r.writes, data)
-	return nil
+	return r.fail
 }
 
 // TestDeferredSession_MismatchWritesNothing pins #901's criterion 2: a QR
@@ -112,12 +115,12 @@ func TestDeferredSession_StartsFromAFreshKey(t *testing.T) {
 	}
 }
 
-// TestSettleQRLogin_UnfinishedRunWritesNothing: a run that never signed in
+// TestSettleLogin_UnfinishedRunWritesNothing: a run that never signed in
 // leaves the user's row alone, whatever it ended with. The buffered bytes
 // stand in for the unauthorized auth key gotd saves on connect. The
 // cancelled case is the one gotd returns for a connection failure under
 // the callback while the caller's ctx is still live.
-func TestSettleQRLogin_UnfinishedRunWritesNothing(t *testing.T) {
+func TestSettleLogin_UnfinishedRunWritesNothing(t *testing.T) {
 	for name, runErr := range map[string]error{
 		"cancelled under a live ctx": fmt.Errorf("qr auth: %w", context.Canceled),
 		"no error and no sign-in":    nil,
@@ -129,8 +132,8 @@ func TestSettleQRLogin_UnfinishedRunWritesNothing(t *testing.T) {
 			sess := &deferredSession{target: target}
 			_ = sess.StoreSession(ctx, []byte("unauthorized-auth-key"))
 
-			if err := settleQRLogin(ctx, sess, runErr, false, false, nil); err == nil {
-				t.Error("settleQRLogin = nil, want an error for a run that never signed in")
+			if err := settleLogin(ctx, "qr login", sess, runErr, false, false, nil); err == nil {
+				t.Error("settleLogin = nil, want an error for a run that never signed in")
 			}
 			if len(target.writes) != 0 {
 				t.Errorf("store writes = %d, want 0", len(target.writes))
@@ -139,9 +142,10 @@ func TestSettleQRLogin_UnfinishedRunWritesNothing(t *testing.T) {
 	}
 }
 
-// TestSettleQRLogin_SignedIn: a completed sign-in writes once, even when the
-// client's shutdown reports context.Canceled, and a mismatch writes nothing.
-func TestSettleQRLogin_SignedIn(t *testing.T) {
+// TestSettleLogin_SignedIn: a completed sign-in writes once, even when the
+// client's shutdown reports context.Canceled, and a mismatch writes nothing
+// and succeeds whatever the run returned after it.
+func TestSettleLogin_SignedIn(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name       string
@@ -152,16 +156,20 @@ func TestSettleQRLogin_SignedIn(t *testing.T) {
 		{"clean", nil, false, 1},
 		{"cancelled on shutdown", context.Canceled, false, 1},
 		{"mismatch", nil, true, 0},
+		{"mismatch, then a shutdown error", errors.New("connection reset"), true, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			target := &recordingStorage{}
 			sess := &deferredSession{target: target}
 			_ = sess.StoreSession(ctx, []byte("signed-in-session"))
-			if err := settleQRLogin(ctx, sess, tc.runErr, true, tc.mismatch, nil); err != nil {
-				t.Fatalf("settleQRLogin: %v", err)
+			if err := settleLogin(ctx, "qr login", sess, tc.runErr, true, tc.mismatch, nil); err != nil {
+				t.Fatalf("settleLogin: %v", err)
 			}
 			if len(target.writes) != tc.wantWrites {
 				t.Errorf("store writes = %d, want %d", len(target.writes), tc.wantWrites)
+			}
+			if sess.take() != nil {
+				t.Error("buffered bytes survived the settle, finishLogin would log them out again")
 			}
 		})
 	}
@@ -206,11 +214,11 @@ func recordLogOuts(t *testing.T) *[][]byte {
 	return &got
 }
 
-// TestFinishQRLogin_ScannedButUnfinishedIsLoggedOut pins #919: a run that
+// TestFinishLogin_ScannedButUnfinishedIsLoggedOut pins #919: a run that
 // fails after the code was scanned, here cancelled under a cancelled
 // caller, writes nothing and logs out the authorization its buffered auth
 // key may carry, on a context that is still alive.
-func TestFinishQRLogin_ScannedButUnfinishedIsLoggedOut(t *testing.T) {
+func TestFinishLogin_ScannedButUnfinishedIsLoggedOut(t *testing.T) {
 	logOuts := recordLogOuts(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -218,7 +226,7 @@ func TestFinishQRLogin_ScannedButUnfinishedIsLoggedOut(t *testing.T) {
 	sess := &deferredSession{target: target}
 	_ = sess.StoreSession(ctx, []byte("scanned-auth-key"))
 
-	err := finishQRLogin(ctx, 1, "hash", LoginConfig{}, 1, sess, fmt.Errorf("qr auth: %w", context.Canceled), true, false, false)
+	err := finishLogin(ctx, "qr login", 1, "hash", LoginConfig{}, 1, sess, fmt.Errorf("qr auth: %w", context.Canceled), true, false, false)
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("err = %v, want the run's context.Canceled", err)
 	}
@@ -230,10 +238,10 @@ func TestFinishQRLogin_ScannedButUnfinishedIsLoggedOut(t *testing.T) {
 	}
 }
 
-// TestFinishQRLogin_NoLogOutWithoutAScanOrOnSuccess: an unscanned run has
+// TestFinishLogin_NoLogOutWithoutAScanOrOnSuccess: an unscanned run has
 // nothing to log out, a mismatch was logged out by the account check, and a
 // completed run hands its bytes to HoldSession without writing them.
-func TestFinishQRLogin_NoLogOutWithoutAScanOrOnSuccess(t *testing.T) {
+func TestFinishLogin_NoLogOutWithoutAScanOrOnSuccess(t *testing.T) {
 	ctx := context.Background()
 	logOuts := recordLogOuts(t)
 	for _, tc := range []struct {
@@ -255,7 +263,7 @@ func TestFinishQRLogin_NoLogOutWithoutAScanOrOnSuccess(t *testing.T) {
 			if tc.hold {
 				cfg.HoldSession = func(b []byte) { held = b }
 			}
-			err := finishQRLogin(ctx, 1, "hash", cfg, 1, sess, tc.runErr, tc.scanned, tc.signedIn, tc.mismatch)
+			err := finishLogin(ctx, "qr login", 1, "hash", cfg, 1, sess, tc.runErr, tc.scanned, tc.signedIn, tc.mismatch)
 			if (err != nil) != tc.wantErr {
 				t.Errorf("err = %v, want error %v", err, tc.wantErr)
 			}
@@ -269,6 +277,29 @@ func TestFinishQRLogin_NoLogOutWithoutAScanOrOnSuccess(t *testing.T) {
 	}
 	if len(*logOuts) != 0 {
 		t.Errorf("logouts = %d, want 0", len(*logOuts))
+	}
+}
+
+// TestFinishLogin_FailedWriteIsLoggedOut: on the path that writes the session
+// itself (cmd/login, no HoldSession), a write that fails after a matched
+// sign-in leaves an authorization nobody holds. settle gives the bytes back,
+// so finishLogin logs that authorization out instead of dropping it.
+func TestFinishLogin_FailedWriteIsLoggedOut(t *testing.T) {
+	logOuts := recordLogOuts(t)
+	ctx := context.Background()
+	target := &recordingStorage{fail: errors.New("database is locked")}
+	sess := &deferredSession{target: target}
+	_ = sess.StoreSession(ctx, []byte("signed-in-auth-key"))
+
+	err := finishLogin(ctx, "login", 1, "hash", LoginConfig{}, 1, sess, nil, true, true, false)
+	if err == nil || !strings.Contains(err.Error(), "database is locked") {
+		t.Errorf("err = %v, want the failed write", err)
+	}
+	if len(target.writes) != 1 {
+		t.Errorf("store writes = %d, want the one failed attempt", len(target.writes))
+	}
+	if len(*logOuts) != 1 || string((*logOuts)[0]) != "signed-in-auth-key" {
+		t.Errorf("logouts = %q, want the signed-in auth key once", *logOuts)
 	}
 }
 

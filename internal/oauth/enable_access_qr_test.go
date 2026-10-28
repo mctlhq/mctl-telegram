@@ -179,11 +179,17 @@ func captureQRLog(t *testing.T) *lockedBuffer {
 type flowMetrics struct {
 	mu      sync.Mutex
 	results []string
+	logOuts []string
 }
 
 func (m *flowMetrics) SetOAuthPendingAuthSize(float64)             {}
 func (m *flowMetrics) ObserveLoginPhoneStep(string, float64)       {}
 func (m *flowMetrics) CountOAuthClientRegistration(string, string) {}
+func (m *flowMetrics) CountLoginLogOut(reason, outcome string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.logOuts = append(m.logOuts, reason+"/"+outcome)
+}
 func (m *flowMetrics) ObserveLoginFlow(method, result string, _ float64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

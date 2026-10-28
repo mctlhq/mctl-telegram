@@ -114,31 +114,33 @@ func LoginQR(
 		signedIn = true
 		return nil
 	})
-	if err := finishQRLogin(ctx, apiID, apiHash, cfg, userID, sess, runErr, scanned.Load(), signedIn, mismatch); err != nil {
+	if err := finishLogin(ctx, "qr login", apiID, apiHash, cfg, userID, sess, runErr, scanned.Load(), signedIn, mismatch); err != nil {
 		return 0, "", "", err
 	}
 	return telegramUserID, displayName, username, nil
 }
 
-// finishQRLogin settles a LoginQR run (settleQRLogin) and, when the run
-// failed after the code was scanned, logs out the authorization its auth key
-// may now carry. That happens when the flow is cancelled or superseded just
-// as the scan lands: nothing is written, but without the logout the user is
-// left with a device nobody holds in Active Sessions (#919). A mismatched
-// account was already logged out by the account check.
-func finishQRLogin(ctx context.Context, apiID int, apiHash string, cfg LoginConfig, userID int64, sess *deferredSession, runErr error, scanned, signedIn, mismatch bool) error {
-	err := settleQRLogin(ctx, sess, runErr, signedIn, mismatch, cfg.HoldSession)
-	if err == nil || !scanned {
+// finishLogin settles a Login or LoginQR run (settleLogin) and, when the run
+// failed after the auth key may have been signed in (authorized: the QR code
+// was scanned, or a login code was submitted), logs out the authorization the
+// key may now carry. That happens when the flow is cancelled or superseded
+// just as the sign-in lands, or when the session cannot be written: nothing
+// is stored, but without the logout the user is left with a device nobody
+// holds in Active Sessions (#919, #913). A mismatched account was already
+// logged out by the account check. label prefixes the errors ("qr login").
+func finishLogin(ctx context.Context, label string, apiID int, apiHash string, cfg LoginConfig, userID int64, sess *deferredSession, runErr error, authorized, signedIn, mismatch bool) error {
+	err := settleLogin(ctx, label, sess, runErr, signedIn, mismatch, cfg.HoldSession)
+	if err == nil || !authorized {
 		return err
 	}
 	if data := sess.take(); data != nil {
 		logOutCtx, cancel := DetachedLogOutContext(ctx)
 		defer cancel()
 		if lErr := logOutSessionFn(logOutCtx, apiID, apiHash, data, cfg); lErr != nil {
-			slog.WarnContext(ctx, "telegram qr login: logout of an unfinished authorization failed",
+			slog.WarnContext(ctx, "telegram "+label+": logout of an unfinished authorization failed",
 				"user_id", userID, "err", lErr)
 		} else {
-			slog.InfoContext(ctx, "telegram qr login: logged out an unfinished authorization", "user_id", userID)
+			slog.InfoContext(ctx, "telegram "+label+": logged out an unfinished authorization", "user_id", userID)
 		}
 	}
 	return err
@@ -205,7 +207,7 @@ func acceptQRAuth(ctx context.Context, api authLogOuter, cfg LoginConfig, userID
 	return user, logOutIfMismatch(ctx, api, userID, cfg.WantTelegramID, user.ID), nil
 }
 
-// settleQRLogin decides what LoginQR's run leaves in the database. Only a
+// settleLogin decides what a Login or LoginQR run leaves in the database. Only a
 // run whose callback signed in and passed the account check may write, and
 // it writes the buffered session once (none on a mismatch). Any other run
 // drops the buffer: by then gotd has already buffered the fresh auth key of
@@ -215,22 +217,24 @@ func acceptQRAuth(ctx context.Context, api authLogOuter, cfg LoginConfig, userID
 // gotd returns when a connection fails under the callback.
 //
 // A context.Canceled after sign-in completed is client shutdown noise and
-// does not fail the login.
-func settleQRLogin(ctx context.Context, sess *deferredSession, runErr error, signedIn, mismatch bool, hold func([]byte)) error {
+// does not fail the login. Neither does any run error after a mismatch: the account check
+// already logged the new authorization out, so the buffer is dropped and the
+// caller still learns it was the wrong account, not a generic failure.
+func settleLogin(ctx context.Context, label string, sess *deferredSession, runErr error, signedIn, mismatch bool, hold func([]byte)) error {
 	if !signedIn {
 		if runErr == nil {
-			runErr = errors.New("qr login ended before sign-in completed")
+			runErr = errors.New(label + " ended before sign-in completed")
 		}
 		return runErr
 	}
-	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+	if runErr != nil && !mismatch && !errors.Is(runErr, context.Canceled) {
 		return runErr
 	}
 	if hold != nil && !mismatch {
 		// The caller writes the bytes itself, with the account metadata.
 		data := sess.take()
 		if data == nil {
-			return errors.New("qr login: login completed but no session bytes were persisted")
+			return errors.New(label + ": login completed but no session bytes were persisted")
 		}
 		hold(data)
 		return nil
@@ -238,7 +242,7 @@ func settleQRLogin(ctx context.Context, sess *deferredSession, runErr error, sig
 	// The only write of this login's session to the database, and only for
 	// the expected account.
 	if err := sess.settle(ctx, mismatch); err != nil {
-		return fmt.Errorf("qr login: %w", err)
+		return fmt.Errorf("%s: %w", label, err)
 	}
 	return nil
 }
