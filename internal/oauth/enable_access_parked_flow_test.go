@@ -31,14 +31,14 @@ func TestStartLoginFlow_NewAttemptSupersedesParkedFlowForSameUID(t *testing.T) {
 	srv, _ := newEnableTestServer(t, nil, func(c *Config) { c.CodeTTL = 10 * time.Second })
 	srv.loginFn = stubLoginParksAtCode()
 
-	a := srv.startLoginFlow(1, 500100101, "+14155551234", false, time.Now())
+	a := srv.startLoginFlow(1, 500100101, srv.phoneLogin("+14155551234"), false, time.Now())
 	select {
 	case <-a.needCode:
 	case <-time.After(2 * time.Second):
 		t.Fatal("flow A never parked in askCode")
 	}
 
-	b := srv.startLoginFlow(1, 500100101, "+14155551234", false, time.Now())
+	b := srv.startLoginFlow(1, 500100101, srv.phoneLogin("+14155551234"), false, time.Now())
 
 	select {
 	case <-a.done:
@@ -100,7 +100,7 @@ func TestStartLoginFlow_CancelledWhileQueuedNeverCallsLogin(t *testing.T) {
 	ul := srv.uidLoginMutex(1)
 	ul.Lock()
 
-	lf := srv.startLoginFlow(1, 500100101, "+14155551234", false, time.Now())
+	lf := srv.startLoginFlow(1, 500100101, srv.phoneLogin("+14155551234"), false, time.Now())
 	select {
 	case <-parked:
 	case <-time.After(2 * time.Second):
@@ -206,7 +206,7 @@ func TestStartLoginFlow_CodeTTLWhileQueuedLogsWarnNotError(t *testing.T) {
 	srv.loginFlowParked = sync.OnceFunc(func() { close(parked) })
 	ul := srv.uidLoginMutex(1)
 	ul.Lock()
-	lf := srv.startLoginFlow(1, 500100101, "+14155551234", false, time.Now())
+	lf := srv.startLoginFlow(1, 500100101, srv.phoneLogin("+14155551234"), false, time.Now())
 	select {
 	case <-parked:
 	case <-time.After(2 * time.Second):

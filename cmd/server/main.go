@@ -1050,6 +1050,8 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		DemoReviewerUsername:         cfg.DemoReviewerUsername,
 		DemoReviewerPassword:         cfg.DemoReviewerPassword,
 		DemoReviewerTGID:             cfg.DemoReviewerTGID,
+		EnableAccessQREnabled:        cfg.EnableAccessQREnabled,
+		TelegramAppName:              cfg.TelegramAppName,
 	}, store)
 	if err != nil {
 		return nil, err
@@ -1126,6 +1128,7 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 		"preregistered_clients", len(cfg.OAUTHPreregisteredClients),
 		"dcr_redirect_uris", len(cfg.OAUTHDCRRedirectURIs),
 		"demo_reviewer", cfg.DemoReviewerEnabled,
+		"enable_access_qr", cfg.EnableAccessQREnabled,
 	)
 	if cfg.DemoReviewerEnabled {
 		slog.Warn("DEMO_REVIEWER_ENABLED is on — /oauth/authorize exposes a password-gated reviewer login; disable after the review",

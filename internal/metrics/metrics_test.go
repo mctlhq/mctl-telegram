@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 )
@@ -31,6 +32,8 @@ var expectedMetricNames = []string{
 	"mctl_oauth_client_registrations_total",
 	"mctl_login_phone_step_total",
 	"mctl_login_phone_to_code_duration_seconds",
+	"mctl_login_flow_total",
+	"mctl_login_flow_seconds",
 	"mctl_sessions_connected_total",
 	"mctl_sessions_revoked_total",
 	"mctl_sessions_active",
@@ -70,6 +73,8 @@ func TestNew_RegistersAllMetrics(t *testing.T) {
 	reg.OAuthClientRegistrationsTotal.WithLabelValues("accepted", "ok").Add(0)
 	reg.LoginPhoneStepTotal.WithLabelValues("ok").Add(0)
 	reg.LoginPhoneToCodeDuration.Observe(0)
+	reg.LoginFlowTotal.WithLabelValues("qr", "ok").Add(0)
+	reg.LoginFlowDuration.WithLabelValues("qr").Observe(0)
 	reg.SessionsConnectedTotal.Add(0)
 	reg.SessionsRevokedTotal.WithLabelValues("disconnect").Add(0)
 	reg.SessionsActiveGauge.Set(0)
@@ -128,6 +133,35 @@ func TestSessionsBorrowTotal_AllLabelValues(t *testing.T) {
 	}
 	if got := len(found.GetMetric()); got != len(results) {
 		t.Errorf("expected %d metric series, got %d", len(results), got)
+	}
+}
+
+// TestObserveLoginFlow verifies that every outcome is counted per method and
+// that only successful flows land in the duration histogram.
+func TestObserveLoginFlow(t *testing.T) {
+	reg := New()
+	reg.ObserveLoginFlow("qr", "ok", 40)
+	reg.ObserveLoginFlow("qr", "expired", 300)
+	reg.ObserveLoginFlow("code", "ok", 60)
+
+	if got := testutil.ToFloat64(reg.LoginFlowTotal.WithLabelValues("qr", "ok")); got != 1 {
+		t.Errorf("qr ok = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(reg.LoginFlowTotal.WithLabelValues("qr", "expired")); got != 1 {
+		t.Errorf("qr expired = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(reg.LoginFlowTotal.WithLabelValues("code", "ok")); got != 1 {
+		t.Errorf("code ok = %v, want 1", got)
+	}
+	if got := testutil.CollectAndCount(reg.LoginFlowDuration); got != 2 {
+		t.Errorf("duration series = %d, want 2 (one per method, ok only)", got)
+	}
+	var h dto.Metric
+	if err := reg.LoginFlowDuration.WithLabelValues("qr").(prometheus.Histogram).Write(&h); err != nil {
+		t.Fatal(err)
+	}
+	if n := h.GetHistogram().GetSampleCount(); n != 1 {
+		t.Errorf("qr duration samples = %d, want 1 (the expired flow must not count)", n)
 	}
 }
 
