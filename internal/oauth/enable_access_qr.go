@@ -46,18 +46,22 @@ const (
 	enableQRBusyRefresh = 1
 )
 
-// qrLogin is the QR method: telegram.LoginQR, with the newest exported URL
-// kept on the flow for the status page.
-func (s *Server) qrLogin() loginMethod {
+// qrLogin is the QR method: telegram.LoginQR waiting up to wait for a scan,
+// with the newest exported URL kept on the flow for the status page.
+func (s *Server) qrLogin(wait time.Duration) loginMethod {
 	return loginMethod{
 		name:      methodQR,
 		firstStep: "qr_requested",
+		qrWait:    wait,
 		run: func(ctx context.Context, uid int64, lf *loginFlow, _, askPassword func(context.Context) (string, error), cfg telegram.LoginConfig) (int64, string, string, error) {
 			show := func(_ context.Context, url, _ string) error {
 				lf.qrURL.Store(&url)
 				lf.step = "qr_shown"
 				return nil
 			}
+			// Off qr_shown once the scan is accepted: a stall in the work
+			// after it is ours or Telegram's, not a user who walked away.
+			cfg.OnQRAccepted = func() { lf.step = "qr_accepted" }
 			return s.qrLoginFn(ctx, s.cfg.TGAPIID, s.cfg.TGAPIHash, s.store, uid, show, askPassword, cfg)
 		},
 	}
@@ -148,10 +152,33 @@ func (s *Server) handleEnableQRStart(w http.ResponseWriter, r *http.Request) {
 		es.flow.cancel()
 	}
 	es.sendOptIn = sendOptIn
-	es.flow = s.startLoginFlow(es.uid, es.tgID, s.qrLogin(), sendOptIn, es.oc.SignInStartedAt)
+	es.qrWait = s.enableQRWaitFor(es)
+	es.flow = s.startLoginFlow(es.uid, es.tgID, s.qrLogin(es.qrWait), sendOptIn, es.oc.SignInStartedAt)
 	es.step = stepQR
 	s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:qr_started", Status: "ok", Reason: methodQR})
 	s.redirectToQRStatus(w, r, esTok)
+}
+
+// enableQRWaitFor is the scan wait for a QR flow started now on es:
+// enableQRWait, or less when the enable session expires sooner, so the code
+// on screen never outlives the session that has to finish the sign-in.
+func (s *Server) enableQRWaitFor(es *enableSession) time.Duration {
+	left := s.cfg.CodeTTL - s.clock().Sub(es.createdAt)
+	// A zero QRWait would mean no limit at all.
+	return max(min(enableQRWait, left), time.Second)
+}
+
+// qrWaitText is wait as the status page states it, rounded down so the
+// code never stops sooner than the page says.
+func qrWaitText(wait time.Duration) string {
+	switch m := int(wait / time.Minute); m {
+	case 0:
+		return "less than a minute"
+	case 1:
+		return "1 minute"
+	default:
+		return strconv.Itoa(m) + " minutes"
+	}
 }
 
 // redirectToQRStatus hands the "es" token to the status page in its cookie
@@ -258,7 +285,7 @@ func (s *Server) handleEnableQRStatus(w http.ResponseWriter, r *http.Request) {
 		Host:        issuerHost(s.cfg.Issuer),
 		Username:    es.oc.Username,
 		AppName:     s.cfg.TelegramAppName,
-		Minutes:     int(enableQRWait / time.Minute),
+		Stops:       qrWaitText(es.qrWait),
 		WizardMode:  es.isWizardMode(),
 	})
 }

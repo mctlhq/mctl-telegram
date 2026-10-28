@@ -44,6 +44,10 @@ type LoginConfig struct {
 	// before it gives up with ErrQRLoginExpired. A 2FA password asked after
 	// the scan is not part of that wait. Login ignores it.
 	QRWait time.Duration
+	// OnQRAccepted, when non-nil, is called by LoginQR on its own goroutine
+	// once Telegram has accepted the scan (and the 2FA password, if any),
+	// before the account check and the session write. Login ignores it.
+	OnQRAccepted func()
 }
 
 // loginClientOptions is the gotd configuration shared by the phone and QR

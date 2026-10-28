@@ -62,7 +62,9 @@ func LoginQR(
 	opts := loginClientOptions(sess, cfg)
 	opts.UpdateHandler = dispatcher
 	client := gotdtelegram.NewClient(apiID, apiHash, opts)
-	mismatch := false
+	// signedIn is set only once the callback got through sign-in and the
+	// account check; mismatch tells which way that check went.
+	signedIn, mismatch := false, false
 
 	runErr := client.Run(ctx, func(ctx context.Context) error {
 		qr := qrlogin.NewQR(client.API(), apiID, apiHash, qrlogin.Options{
@@ -88,6 +90,9 @@ func LoginQR(
 				return fmt.Errorf("qr auth: %w", err)
 			}
 		}
+		if cfg.OnQRAccepted != nil {
+			cfg.OnQRAccepted()
+		}
 		user, ok := authz.User.(*tg.User)
 		if !ok {
 			return fmt.Errorf("unexpected auth user type %T", authz.User)
@@ -99,22 +104,47 @@ func LoginQR(
 		}
 		username = user.Username
 		if logOutIfMismatch(ctx, client.API(), userID, cfg.WantTelegramID, user.ID) {
-			mismatch = true
+			signedIn, mismatch = true, true
 			return nil
 		}
 		// Trigger a session flush so SessionStorage sees the post-auth bytes.
 		_, _ = client.API().HelpGetConfig(ctx)
+		signedIn = true
 		return nil
 	})
+	if err := settleQRLogin(ctx, sess, runErr, signedIn, mismatch); err != nil {
+		return 0, "", "", err
+	}
+	return telegramUserID, displayName, username, nil
+}
+
+// settleQRLogin decides what LoginQR's run leaves in the database. Only a
+// run whose callback signed in and passed the account check may write, and
+// it writes the buffered session once (none on a mismatch). Any other run
+// drops the buffer: by then gotd has already buffered the fresh auth key of
+// the initial key exchange, which is signed in to nothing, and writing it
+// would replace the user's working session with a dead one. That includes
+// a context.Canceled from inside client.Run while ctx is still live, which
+// gotd returns when a connection fails under the callback.
+//
+// A context.Canceled after sign-in completed is client shutdown noise and
+// does not fail the login.
+func settleQRLogin(ctx context.Context, sess *deferredSession, runErr error, signedIn, mismatch bool) error {
+	if !signedIn {
+		if runErr == nil {
+			runErr = errors.New("qr login ended before sign-in completed")
+		}
+		return runErr
+	}
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
-		return 0, "", "", runErr
+		return runErr
 	}
 	// The only write of this login's session to the database, and only for
 	// the expected account.
 	if err := sess.settle(ctx, mismatch); err != nil {
-		return 0, "", "", fmt.Errorf("qr login: %w", err)
+		return fmt.Errorf("qr login: %w", err)
 	}
-	return telegramUserID, displayName, username, nil
+	return nil
 }
 
 // ErrQRLoginExpired is returned by LoginQR when LoginConfig.QRWait ran out

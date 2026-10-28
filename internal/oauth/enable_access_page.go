@@ -66,8 +66,9 @@ type enableQRPage struct {
 	// so they scan with the same account.
 	Username string
 	// AppName is the Telegram app name the login confirmation will show.
-	AppName    string
-	Minutes    int
+	AppName string
+	// Stops is how long the code is shown, e.g. "5 minutes".
+	Stops      string
 	WizardMode bool
 }
 
@@ -311,7 +312,7 @@ var enableQRTemplate = template.Must(template.New("enableQR").Parse(enableRefres
        Telegram will ask you to confirm a login{{if .AppName}} to <strong>{{.AppName}}</strong>;
        if it names anything else, cancel{{end}}. You can end this session at any time in
        Telegram &#8594; Settings &#8594; Devices.</div>
-    <p class="meta">The code refreshes automatically. It stops after {{.Minutes}} minutes.</p>
+    <p class="meta">The code refreshes automatically. It stops after {{.Stops}}.</p>
     <form method="POST" action="/oauth/telegram/enable_access/qr/cancel" autocomplete="off">
       <input type="hidden" name="es" value="{{.EnableToken}}">
       <button type="submit" class="secondary">Use your phone number instead</button>

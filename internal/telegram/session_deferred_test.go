@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -108,6 +109,61 @@ func TestDeferredSession_StartsFromAFreshKey(t *testing.T) {
 	got, err := sess.LoadSession(ctx)
 	if err != nil || !bytes.Equal(got, []byte("new-auth-key")) {
 		t.Errorf("load after store = %q, %v; want the buffered bytes", got, err)
+	}
+}
+
+// TestSettleQRLogin_UnfinishedRunWritesNothing: a run that never signed in
+// leaves the user's row alone, whatever it ended with. The buffered bytes
+// stand in for the unauthorized auth key gotd saves on connect. The
+// cancelled case is the one gotd returns for a connection failure under
+// the callback while the caller's ctx is still live.
+func TestSettleQRLogin_UnfinishedRunWritesNothing(t *testing.T) {
+	for name, runErr := range map[string]error{
+		"cancelled under a live ctx": fmt.Errorf("qr auth: %w", context.Canceled),
+		"no error and no sign-in":    nil,
+		"expired":                    fmt.Errorf("qr auth: %w", ErrQRLoginExpired),
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			target := &recordingStorage{row: []byte("existing-good-session")}
+			sess := &deferredSession{target: target}
+			_ = sess.StoreSession(ctx, []byte("unauthorized-auth-key"))
+
+			if err := settleQRLogin(ctx, sess, runErr, false, false); err == nil {
+				t.Error("settleQRLogin = nil, want an error for a run that never signed in")
+			}
+			if len(target.writes) != 0 {
+				t.Errorf("store writes = %d, want 0", len(target.writes))
+			}
+		})
+	}
+}
+
+// TestSettleQRLogin_SignedIn: a completed sign-in writes once, even when the
+// client's shutdown reports context.Canceled, and a mismatch writes nothing.
+func TestSettleQRLogin_SignedIn(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name       string
+		runErr     error
+		mismatch   bool
+		wantWrites int
+	}{
+		{"clean", nil, false, 1},
+		{"cancelled on shutdown", context.Canceled, false, 1},
+		{"mismatch", nil, true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := &recordingStorage{}
+			sess := &deferredSession{target: target}
+			_ = sess.StoreSession(ctx, []byte("signed-in-session"))
+			if err := settleQRLogin(ctx, sess, tc.runErr, true, tc.mismatch); err != nil {
+				t.Fatalf("settleQRLogin: %v", err)
+			}
+			if len(target.writes) != tc.wantWrites {
+				t.Errorf("store writes = %d, want %d", len(target.writes), tc.wantWrites)
+			}
+		})
 	}
 }
 

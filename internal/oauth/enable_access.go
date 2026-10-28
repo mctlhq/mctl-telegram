@@ -101,6 +101,9 @@ type enableSession struct {
 	// a desktop one, where the code is scanned with the phone. Fixed at the
 	// callback. It only decides the button; the QR routes check the flag.
 	qrOffered bool
+	// qrWait is how long the current QR flow waits for a scan, fixed when
+	// it starts; the status page states it.
+	qrWait time.Duration
 }
 
 // loginFlow couples an HTTP handler to the background goroutine running
@@ -178,7 +181,9 @@ type loginMethod struct {
 	// session in memory and writes nothing for a mismatched account; revoking
 	// after it would end the user's existing session instead (#913).
 	persistsBeforeCheck bool
-	run                 func(ctx context.Context, uid int64, lf *loginFlow, askCode, askPassword func(context.Context) (string, error), cfg telegram.LoginConfig) (int64, string, string, error)
+	// qrWait is LoginConfig.QRWait for this flow; zero for the phone method.
+	qrWait time.Duration
+	run    func(ctx context.Context, uid int64, lf *loginFlow, askCode, askPassword func(context.Context) (string, error), cfg telegram.LoginConfig) (int64, string, string, error)
 }
 
 // phoneLogin is the phone-number-and-code method for phone.
@@ -214,9 +219,10 @@ func isUserWaitStep(step string) bool {
 	return false
 }
 
-// enableQRWait is how long a QR code stays on screen before the flow stops
-// waiting for a scan (#901). The 2FA password asked after a scan is not part
-// of it. A var only so tests can shorten it.
+// enableQRWait is the longest a QR code stays on screen before the flow stops
+// waiting for a scan (#901); enableQRWaitFor shortens it to what is left of
+// the enable session. The 2FA password asked after a scan is not part of it.
+// A var only so tests can shorten it.
 var enableQRWait = 5 * time.Minute
 
 // loginFlowResult is the result label mctl_login_flow_total records for a
@@ -254,10 +260,6 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 	}
 	bgCtx, cancel := context.WithTimeout(context.Background(), s.cfg.CodeTTL)
 	lf.cancel = cancel
-	// Read here, not on the goroutine, which can start long after this call
-	// once it gets the uid mutex.
-	qrWait := enableQRWait
-
 	// Supersede the uid's previous flow whatever enable session it belongs
 	// to. handleEnableStart only cancels es.flow, the attempt made from the
 	// same wizard token; an attempt from a fresh tab has a fresh token and
@@ -433,7 +435,7 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 		// account with a live device (#899).
 		loginCfg := s.loginCfg
 		loginCfg.WantTelegramID = wantTgID
-		loginCfg.QRWait = qrWait
+		loginCfg.QRWait = m.qrWait
 		tgID, displayName, username, err := m.run(bgCtx, uid, lf, askCode, askPassword, loginCfg)
 		if err != nil {
 			lf.err = err

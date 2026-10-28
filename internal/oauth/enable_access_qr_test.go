@@ -3,6 +3,7 @@ package oauth
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -39,6 +40,11 @@ type qrStub struct {
 	needPw bool
 	// err, when set, is returned right after the scan instead of a login.
 	err error
+	// stall, when set, makes the work after an accepted scan hang until the
+	// flow's context ends, the way a stalled HelpGetConfig or write would.
+	stall bool
+	// gotWait is the LoginConfig.QRWait of the latest call.
+	gotWait atomic.Int64
 
 	calls   atomic.Int32
 	writes  atomic.Int32
@@ -64,6 +70,7 @@ func (q *qrStub) fn() QRLoginFunc {
 			return 0, "", "", err
 		}
 		waitCtx := ctx
+		q.gotWait.Store(int64(cfg.QRWait))
 		if cfg.QRWait > 0 {
 			var cancel context.CancelFunc
 			waitCtx, cancel = context.WithTimeout(ctx, cfg.QRWait)
@@ -84,6 +91,13 @@ func (q *qrStub) fn() QRLoginFunc {
 			if _, err := askPassword(ctx); err != nil {
 				return 0, "", "", err
 			}
+		}
+		if cfg.OnQRAccepted != nil {
+			cfg.OnQRAccepted()
+		}
+		if q.stall {
+			<-ctx.Done()
+			return 0, "", "", fmt.Errorf("qr login: %w", ctx.Err())
 		}
 		if cfg.WantTelegramID != 0 && q.tgID != cfg.WantTelegramID {
 			q.logOuts.Add(1)
@@ -146,11 +160,14 @@ func (m *flowMetrics) snapshot() []string {
 	return append([]string(nil), m.results...)
 }
 
-func newQRTestServer(t *testing.T, q *qrStub, enabled bool) (*Server, *chi.Mux) {
+func newQRTestServer(t *testing.T, q *qrStub, enabled bool, opts ...func(*Config)) (*Server, *chi.Mux) {
 	t.Helper()
 	srv, mux := newEnableTestServer(t, stubLogin(false, nil), func(c *Config) {
 		c.EnableAccessQREnabled = enabled
 		c.TelegramAppName = "Example App"
+		for _, o := range opts {
+			o(c)
+		}
 	})
 	srv.qrLoginFn = q.fn()
 	return srv, mux
@@ -478,6 +495,54 @@ func TestEnableQR_ExpiredCodeIsAbandonment(t *testing.T) {
 	}
 	if got := m.snapshot(); len(got) != 1 || got[0] != "qr/expired" {
 		t.Errorf("login flow metrics = %v, want [qr/expired]", got)
+	}
+}
+
+// TestEnableQR_WaitEndsWithTheSession: the scan wait never outlives the
+// enable session, and the page states the wait the flow really has. Here the
+// session has just under three minutes left, less than enableQRWait.
+func TestEnableQR_WaitEndsWithTheSession(t *testing.T) {
+	q := newQRStub(500100101)
+	_, mux := newQRTestServer(t, q, true, func(c *Config) { c.CodeTTL = 3 * time.Minute })
+	es, _ := driveToPhoneAs(t, mux, desktopUA)
+	c := startQR(t, mux, es)
+
+	rec := pollQRStatus(t, mux, c, "<svg")
+	if !strings.Contains(rec.Body.String(), "It stops after 2 minutes.") {
+		t.Errorf("the page does not state the session-bounded wait:\n%s", rec.Body.String())
+	}
+	if got := time.Duration(q.gotWait.Load()); got <= 2*time.Minute || got > 3*time.Minute {
+		t.Errorf("QRWait = %v, want what is left of the 3m session", got)
+	}
+	close(q.scan)
+	pollQRStatus(t, mux, c, "linked")
+}
+
+// TestEnableQR_StallAfterScanIsAnError: once the scan is accepted the user
+// has done their part, so a deadline in the work after it is a stall on our
+// side or Telegram's, logged at ERROR, not a user who walked away.
+func TestEnableQR_StallAfterScanIsAnError(t *testing.T) {
+	logs := captureQRLog(t)
+	q := newQRStub(500100101)
+	q.stall = true
+	srv, _ := newQRTestServer(t, q, true, func(c *Config) { c.CodeTTL = 100 * time.Millisecond })
+	m := &flowMetrics{}
+	srv.WithMetrics(m)
+
+	lf := srv.startLoginFlow(1, 500100101, srv.qrLogin(time.Minute), false, time.Now())
+	close(q.scan)
+	waitForFlowDone(t, lf, 2*time.Second)
+
+	out := logs.String()
+	// lf.step is safe to read once done is closed.
+	if lf.step != "qr_accepted" {
+		t.Errorf("step = %q, want qr_accepted", lf.step)
+	}
+	if strings.Contains(out, "onboarding abandoned") || !strings.Contains(out, "level=ERROR") {
+		t.Errorf("want the ERROR arm, not an abandonment, got:\n%s", out)
+	}
+	if got := m.snapshot(); len(got) != 1 || got[0] != "qr/error" {
+		t.Errorf("login flow metrics = %v, want [qr/error]", got)
 	}
 }
 
