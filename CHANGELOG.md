@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.104.0](https://github.com/mctlhq/mctl-telegram/compare/0.103.0...0.104.0) (2026-10-28)
+
+
+### Features
+
+* **connect:** tell users to turn on Allow messages at sign-in ([beee770](https://github.com/mctlhq/mctl-telegram/commit/beee770425fcd3dd8b1560da600d1d8c63609f15))
+* **connect:** tell users to turn on Allow messages at sign-in ([8890212](https://github.com/mctlhq/mctl-telegram/commit/88902124945617ecbdff83bf2e178e39b01b4677)), closes [#922](https://github.com/mctlhq/mctl-telegram/issues/922)
+* **oauth:** experiment with a Telegram app link for phones ([507ed98](https://github.com/mctlhq/mctl-telegram/commit/507ed9844e0d48e3e0de51805d77cf57e3a82182))
+* **oauth:** experiment with a Telegram app link for phones ([6e9d45c](https://github.com/mctlhq/mctl-telegram/commit/6e9d45c2be2b7b232edfaa879e934f1459e2b87c))
+* **oauth:** offer the QR code on the login code step ([20b53eb](https://github.com/mctlhq/mctl-telegram/commit/20b53ebfc2c64874d0721e96cde4df7b5811134a))
+* **oauth:** offer the QR code on the login code step ([33a3e8f](https://github.com/mctlhq/mctl-telegram/commit/33a3e8fb33c321ff6752aa5fa5923f89369794f0)), closes [#901](https://github.com/mctlhq/mctl-telegram/issues/901)
+
 ## [0.103.0](https://github.com/mctlhq/mctl-telegram/compare/0.102.0...0.103.0) (2026-10-28)
 
 
