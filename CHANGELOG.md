@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.99.0](https://github.com/mctlhq/mctl-telegram/compare/0.98.2...0.99.0) (2026-10-28)
+
+
+### Features
+
+* **agents:** issue-902-reduce-one-day-drop-off-phone-step-chann ([33c8588](https://github.com/mctlhq/mctl-telegram/commit/33c8588c253ec623523805e14afa88d55d441b44))
+* **agents:** issue-902-reduce-one-day-drop-off-phone-step-chann ([850d920](https://github.com/mctlhq/mctl-telegram/commit/850d920b5517ed85e5cb04245631a958ffb379a5))
+
 ## [0.98.2](https://github.com/mctlhq/mctl-telegram/compare/0.98.1...0.98.2) (2026-10-28)
 
 
