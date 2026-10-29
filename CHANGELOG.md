@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.105.0](https://github.com/mctlhq/mctl-telegram/compare/0.104.1...0.105.0) (2026-10-29)
+
+
+### Features
+
+* **agent:** let the account owner opt out of the AI disclosure line ([00a9613](https://github.com/mctlhq/mctl-telegram/commit/00a9613a6ee4fd1a7abb603dee1159d65fb2526a))
+* **agent:** let the account owner opt out of the AI disclosure line ([5e922c8](https://github.com/mctlhq/mctl-telegram/commit/5e922c82d002203e10d88a027dbac5e2e991298a))
+
+
+### Bug Fixes
+
+* **agent:** deny a draft that is only the stripped disclosure line ([55c85e4](https://github.com/mctlhq/mctl-telegram/commit/55c85e4658207551f3b4a8c179b3cb9ef73ac336))
+
 ## [0.104.1](https://github.com/mctlhq/mctl-telegram/compare/0.104.0...0.104.1) (2026-10-28)
 
 
