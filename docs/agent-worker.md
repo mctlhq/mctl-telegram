@@ -197,6 +197,18 @@ for anyone deploying from the standard template. `AGENT_HEALTH_ADDR`
 remains operator-configurable if a future deployment wants to pair a
 loopback bind with `exec` probes instead — just not as the default.
 
+## AI disclosure line
+
+The executor, not the worker, appends the profile's `disclosure_text` to every
+reply it sends, and the policy engine denies a reply when that text is blank.
+The account owner can turn the line off explicitly with `disclosure_disabled`
+through the admin-only `PUT /api/admin/agent/profile`. The worker's own aud=agent
+token cannot reach that route. With the opt-out set, nothing is appended, a
+trailing copy of the stored line that the model imitated from earlier replies is
+dropped, and the length budget no longer counts it. A blank `disclosure_text`
+without the opt-out is still denied, so a misconfigured profile never sends
+replies without the line.
+
 ## Deployment note
 
 This binary requires the `claude` CLI itself (and its own Anthropic

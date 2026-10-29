@@ -471,3 +471,53 @@ func TestUpsertAgentProfileKeysMatchStructTags(t *testing.T) {
 		t.Fatalf("key list %v drifted from json tags %v", got, tags)
 	}
 }
+
+func TestAdminAgentProfileHandler_DisclosureDisabledRoundTrips(t *testing.T) {
+	store := newProfileTestStore(t)
+	if _, err := store.EnsureUserByTelegramID(context.Background(), 777, "reviewer", "Reviewer"); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	h := NewAdminAgentProfileHandler(store)
+	decode := func(rec *httptest.ResponseRecorder) agentProfileResponse {
+		t.Helper()
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+		}
+		var resp agentProfileResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return resp
+	}
+	if resp := decode(doProfileReq(h, adminIdentity(), `{"telegram_id":777,"disclosure_text":"— AI"}`)); resp.DisclosureDisabled {
+		t.Fatalf("disclosure_disabled = true on a new profile, want default false")
+	}
+	if resp := decode(doProfileReq(h, adminIdentity(), `{"telegram_id":777,"disclosure_disabled":true}`)); !resp.DisclosureDisabled || resp.DisclosureText != "— AI" {
+		t.Fatalf("after opt-out: %+v, want disabled with the text kept", resp)
+	}
+	if resp := decode(doProfileReq(h, adminIdentity(), `{"telegram_id":777,"max_reply_chars":900}`)); !resp.DisclosureDisabled {
+		t.Fatalf("an unrelated partial update reset disclosure_disabled")
+	}
+	if resp := decode(doProfileReq(h, adminIdentity(), `{"telegram_id":777,"disclosure_disabled":false}`)); resp.DisclosureDisabled {
+		t.Fatalf("disclosure_disabled still true after explicit false")
+	}
+}
+
+// An agent worker token carries aud=agent and no scopes, so it never holds
+// admin:users and cannot switch off its own disclosure.
+func TestAdminAgentProfileHandler_DisclosureDisabledNeedsAdmin(t *testing.T) {
+	store := newProfileTestStore(t)
+	uid, err := store.EnsureUserByTelegramID(context.Background(), 777, "reviewer", "Reviewer")
+	if err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	h := NewAdminAgentProfileHandler(store)
+	worker := &auth.Identity{UserID: uid, TelegramID: 777}
+	rec := doProfileReq(h, worker, `{"telegram_id":777,"disclosure_disabled":true}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403, body=%s", rec.Code, rec.Body.String())
+	}
+	if p, err := store.GetAgentProfile(context.Background(), uid); err == nil && p.DisclosureDisabled {
+		t.Fatalf("disclosure_disabled was written by a non-admin identity")
+	}
+}

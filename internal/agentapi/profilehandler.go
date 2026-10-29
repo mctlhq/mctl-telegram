@@ -16,11 +16,14 @@ import (
 type upsertAgentProfileRequest struct {
 	// TelegramID is the account whose profile is being created or updated —
 	// same "target, not caller" shape as mintAgentTokenRequest.
-	TelegramID         int64   `json:"telegram_id"`
-	Mode               string  `json:"mode,omitempty"`
-	AutopilotPaused    *bool   `json:"autopilot_paused,omitempty"`
-	ListenerEnabled    *bool   `json:"listener_enabled,omitempty"`
-	DisclosureText     *string `json:"disclosure_text,omitempty"`
+	TelegramID      int64   `json:"telegram_id"`
+	Mode            string  `json:"mode,omitempty"`
+	AutopilotPaused *bool   `json:"autopilot_paused,omitempty"`
+	ListenerEnabled *bool   `json:"listener_enabled,omitempty"`
+	DisclosureText  *string `json:"disclosure_text,omitempty"`
+	// DisclosureDisabled is the owner's explicit opt-out of the AI
+	// disclosure line; see db.AgentProfile.DisclosureDisabled.
+	DisclosureDisabled *bool   `json:"disclosure_disabled,omitempty"`
 	MaxAutonomousTurns int     `json:"max_autonomous_turns,omitempty"`
 	MaxMsgsPerMinute   int     `json:"max_msgs_per_minute,omitempty"`
 	MaxReplyChars      int     `json:"max_reply_chars,omitempty"`
@@ -35,7 +38,7 @@ type upsertAgentProfileRequest struct {
 // upsertAgentProfileKeys lists the JSON names of upsertAgentProfileRequest.
 var upsertAgentProfileKeys = [...]string{
 	"telegram_id", "mode", "autopilot_paused", "listener_enabled",
-	"disclosure_text", "max_autonomous_turns", "max_msgs_per_minute",
+	"disclosure_text", "disclosure_disabled", "max_autonomous_turns", "max_msgs_per_minute",
 	"max_reply_chars", "intent_allowlist", "blocked_senders",
 	"sender_allowlist", "owner_profile",
 }
@@ -46,6 +49,7 @@ type agentProfileResponse struct {
 	AutopilotPaused    bool   `json:"autopilot_paused"`
 	ListenerEnabled    bool   `json:"listener_enabled"`
 	DisclosureText     string `json:"disclosure_text"`
+	DisclosureDisabled bool   `json:"disclosure_disabled"`
 	MaxAutonomousTurns int    `json:"max_autonomous_turns"`
 	MaxMsgsPerMinute   int    `json:"max_msgs_per_minute"`
 	MaxReplyChars      int    `json:"max_reply_chars"`
@@ -159,12 +163,13 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 		}
 
 		update := db.AgentProfileUpdate{
-			AutopilotPaused: req.AutopilotPaused,
-			ListenerEnabled: req.ListenerEnabled,
-			DisclosureText:  req.DisclosureText,
-			IntentAllowlist: req.IntentAllowlist,
-			BlockedSenders:  req.BlockedSenders,
-			SenderAllowlist: req.SenderAllowlist,
+			AutopilotPaused:    req.AutopilotPaused,
+			ListenerEnabled:    req.ListenerEnabled,
+			DisclosureText:     req.DisclosureText,
+			DisclosureDisabled: req.DisclosureDisabled,
+			IntentAllowlist:    req.IntentAllowlist,
+			BlockedSenders:     req.BlockedSenders,
+			SenderAllowlist:    req.SenderAllowlist,
 		}
 		if clearOwnerProfile {
 			empty := []byte(nil)
@@ -214,7 +219,8 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 		store.LogToolCall(ctx, db.ToolCall{UserID: id.UserID, Tool: "admin.agent_profile.upsert", Status: "ok"})
 		slog.Info("agent profile upserted",
 			"admin_user_id", id.UserID, "target_tg_id", req.TelegramID, "target_user_id", targetUserID,
-			"mode", p.Mode, "listener_enabled", p.ListenerEnabled, "autopilot_paused", p.AutopilotPaused)
+			"mode", p.Mode, "listener_enabled", p.ListenerEnabled, "autopilot_paused", p.AutopilotPaused,
+			"disclosure_disabled", p.DisclosureDisabled)
 
 		writeJSON(w, http.StatusOK, agentProfileResponse{
 			TelegramID:             req.TelegramID,
@@ -222,6 +228,7 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			AutopilotPaused:        p.AutopilotPaused,
 			ListenerEnabled:        p.ListenerEnabled,
 			DisclosureText:         p.DisclosureText,
+			DisclosureDisabled:     p.DisclosureDisabled,
 			MaxAutonomousTurns:     p.MaxAutonomousTurns,
 			MaxMsgsPerMinute:       p.MaxMsgsPerMinute,
 			MaxReplyChars:          p.MaxReplyChars,

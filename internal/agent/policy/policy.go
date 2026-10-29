@@ -34,6 +34,17 @@ const (
 // disclosure to an outgoing reply. The reply-length policy counts it.
 const DisclosureSep = "\n"
 
+// EffectiveDisclosure is the disclosure line the executor appends to a reply
+// for this profile: the configured text, or "" when the account owner has
+// explicitly opted out with DisclosureDisabled. Evaluate's length budget and
+// the executor's append both go through it so they can never disagree.
+func EffectiveDisclosure(p db.AgentProfile) string {
+	if p.DisclosureDisabled {
+		return ""
+	}
+	return p.DisclosureText
+}
+
 // Action is a proposed agent action associated with a DB conversation.
 type Action struct {
 	Type     string
@@ -413,7 +424,10 @@ func Evaluate(in Input) Result {
 	if in.Action.PeerTGID != 0 && in.Action.PeerTGID != in.Conversation.PeerTGID {
 		return deny(DenyPeerMismatch, "reply peer does not match conversation")
 	}
-	if strings.TrimSpace(in.Profile.DisclosureText) == "" {
+	// A blank disclosure fails closed unless the owner opted out explicitly:
+	// an empty text on its own is treated as misconfiguration, never as
+	// consent to send replies without the line.
+	if !in.Profile.DisclosureDisabled && strings.TrimSpace(in.Profile.DisclosureText) == "" {
 		return deny(DenyNoDisclosure, "no disclosure text configured")
 	}
 	text := in.Action.Text
@@ -434,7 +448,11 @@ func Evaluate(in Input) Result {
 		// delivered.
 		maxChars = telegramMaxMessageLen
 	}
-	if len([]rune(text))+len([]rune(DisclosureSep))+len([]rune(in.Profile.DisclosureText)) > maxChars {
+	replyLen := len([]rune(text))
+	if disclosure := EffectiveDisclosure(in.Profile); disclosure != "" {
+		replyLen += len([]rune(DisclosureSep)) + len([]rune(disclosure))
+	}
+	if replyLen > maxChars {
 		return deny(DenyReplyTooLong, "reply exceeds max length once the disclosure is appended")
 	}
 	if containsURL(text) {
