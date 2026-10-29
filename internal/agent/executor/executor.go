@@ -325,6 +325,15 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 	text := appendDisclosure(action.Payload, policy.EffectiveDisclosure(*profile))
 	if profile.DisclosureDisabled {
 		text = stripDisclosure(text, profile.DisclosureText)
+		if strings.TrimSpace(text) == "" {
+			// The draft was only the imitated disclosure. Sending "" fails
+			// with MESSAGE_EMPTY on every retry, so terminalize it before the
+			// send reservation instead.
+			if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
+				return fmt.Errorf("deny empty payload: %w", err)
+			}
+			return fmt.Errorf("draft is empty once the disclosure is stripped")
+		}
 	}
 	reason, blocked, err := e.restrictedFieldBlocks(ctx, action, text)
 	if err != nil {
@@ -728,25 +737,6 @@ func defaultRandomID() (int64, error) {
 //     whitespace-only disclosure would silently suppress the append for all
 //     messages. policy.Evaluate already denies such a profile before this is
 //     reached, so this is a guard against a future caller, not a live path.
-//
-// stripDisclosure removes a trailing own-line copy of the stored disclosure
-// from a draft. It runs only for a profile whose owner opted out of the
-// disclosure: replies sent before the opt-out still end with the line, the
-// model imitates them (see appendDisclosure), and the owner asked for no
-// signature at all, so the imitated copy is dropped rather than sent. The
-// match rules are appendDisclosure's: the line must stand on its own.
-func stripDisclosure(payload, disclosure string) string {
-	want := strings.TrimSpace(disclosure)
-	if want == "" {
-		return payload
-	}
-	trimmed := strings.TrimRightFunc(payload, unicode.IsSpace)
-	if !strings.HasSuffix(trimmed, policy.DisclosureSep+want) {
-		return payload
-	}
-	return strings.TrimRightFunc(strings.TrimSuffix(trimmed, policy.DisclosureSep+want), unicode.IsSpace)
-}
-
 func appendDisclosure(payload, disclosure string) string {
 	want := strings.TrimSpace(disclosure)
 	if want == "" {
@@ -757,4 +747,27 @@ func appendDisclosure(payload, disclosure string) string {
 		return payload
 	}
 	return payload + policy.DisclosureSep + disclosure
+}
+
+// stripDisclosure removes a trailing own-line copy of the stored disclosure
+// from a draft. It runs only for a profile whose owner opted out of the
+// disclosure: replies sent before the opt-out still end with the line, the
+// model imitates them (see appendDisclosure), and the owner asked for no
+// signature at all, so the imitated copy is dropped rather than sent. The
+// match rules are appendDisclosure's: the line must stand on its own, or be
+// the whole draft. A draft that is nothing but the line strips to "", which
+// the caller denies rather than sends: Telegram rejects an empty message.
+func stripDisclosure(payload, disclosure string) string {
+	want := strings.TrimSpace(disclosure)
+	if want == "" {
+		return payload
+	}
+	trimmed := strings.TrimRightFunc(payload, unicode.IsSpace)
+	if strings.TrimSpace(trimmed) == want {
+		return ""
+	}
+	if !strings.HasSuffix(trimmed, policy.DisclosureSep+want) {
+		return payload
+	}
+	return strings.TrimRightFunc(strings.TrimSuffix(trimmed, policy.DisclosureSep+want), unicode.IsSpace)
 }

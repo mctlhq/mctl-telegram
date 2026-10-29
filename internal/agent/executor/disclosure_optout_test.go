@@ -50,3 +50,33 @@ func TestExecutor_DisclosureOptOutStripsImitatedLine(t *testing.T) {
 		t.Fatalf("sent %q, want mid-text mention kept", got)
 	}
 }
+
+// A draft that is only the imitated line strips to nothing. Telegram rejects
+// an empty message, so the action is denied before anything is sent instead
+// of failing MESSAGE_EMPTY on every retry.
+func TestExecutor_DisclosureOptOutDeniesDraftThatIsOnlyTheLine(t *testing.T) {
+	for _, draft := range []string{"— ИИ-ассистент", "\n— ИИ-ассистент\n"} {
+		exec, sender, store, uid, conv := newTestExecutor(t)
+		ctx := context.Background()
+		if err := store.UpsertAgentProfile(ctx, db.AgentProfile{
+			UserID: uid, Mode: db.AgentModeGuarded, DisclosureText: "— ИИ-ассистент",
+			DisclosureDisabled: true,
+		}); err != nil {
+			t.Fatalf("seed profile: %v", err)
+		}
+		actionID, code := seedPendingApproval(t, store, uid, conv.ID, draft)
+		if err := exec.Approve(ctx, uid, code); err == nil {
+			t.Fatalf("draft %q: approve succeeded, want an error", draft)
+		}
+		if len(sender.calls) != 0 {
+			t.Fatalf("draft %q: sent %d messages, want none", draft, len(sender.calls))
+		}
+		got, err := store.GetAgentAction(ctx, uid, actionID)
+		if err != nil {
+			t.Fatalf("load action: %v", err)
+		}
+		if got.Status != db.ActionDenied {
+			t.Fatalf("draft %q: status = %q, want denied", draft, got.Status)
+		}
+	}
+}
