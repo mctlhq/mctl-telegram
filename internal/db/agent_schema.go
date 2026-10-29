@@ -124,6 +124,14 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 		"BYTEA", "BLOB"); err != nil {
 		return err
 	}
+	// agent_profiles.disclosure_disabled: the account owner's explicit
+	// opt-out of the AI disclosure line on agent replies. FALSE keeps the
+	// historical fail-closed rule that a blank disclosure_text denies every
+	// reply; only TRUE lets a reply go out without the line.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "disclosure_disabled",
+		"BOOLEAN NOT NULL DEFAULT FALSE", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	// Durable one-time import marker. It remains set when an administrator
 	// clears the document, preventing a still-mounted legacy YAML file from
 	// silently restoring data on the next process restart.
@@ -301,6 +309,7 @@ func agentSchemaSQLite() []string {
 			autopilot_paused INTEGER NOT NULL DEFAULT 0,
 			listener_enabled INTEGER NOT NULL DEFAULT 0,
 			disclosure_text TEXT NOT NULL DEFAULT '',
+			disclosure_disabled INTEGER NOT NULL DEFAULT 0,
 			max_autonomous_turns INTEGER NOT NULL DEFAULT 6,
 			max_msgs_per_minute INTEGER NOT NULL DEFAULT 2,
 			max_reply_chars INTEGER NOT NULL DEFAULT 1200,
@@ -628,6 +637,7 @@ func agentSchemaPG() []string {
 			autopilot_paused BOOLEAN NOT NULL DEFAULT FALSE,
 			listener_enabled BOOLEAN NOT NULL DEFAULT FALSE,
 			disclosure_text TEXT NOT NULL DEFAULT '',
+			disclosure_disabled BOOLEAN NOT NULL DEFAULT FALSE,
 			max_autonomous_turns INT NOT NULL DEFAULT 6,
 			max_msgs_per_minute INT NOT NULL DEFAULT 2,
 			max_reply_chars INT NOT NULL DEFAULT 1200,

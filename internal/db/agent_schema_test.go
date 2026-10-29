@@ -47,6 +47,17 @@ func TestMigrate_UpgradesPreExistingProfilesWithoutSenderAllowlist(t *testing.T)
 	if allowlist != "" {
 		t.Fatalf("sender_allowlist = %q, want empty compatibility default", allowlist)
 	}
+	// An existing profile must keep the fail-closed disclosure rule after the
+	// upgrade: the opt-out column arrives as false, never as an opt-out.
+	var disclosureDisabled bool
+	if err := conn.QueryRowContext(ctx,
+		`SELECT disclosure_disabled FROM agent_profiles WHERE user_id=7`,
+	).Scan(&disclosureDisabled); err != nil {
+		t.Fatalf("read upgraded disclosure_disabled: %v", err)
+	}
+	if disclosureDisabled {
+		t.Fatal("disclosure_disabled = true after upgrade, want false")
+	}
 	if err := conn.QueryRowContext(ctx,
 		`SELECT count(*) FROM pragma_table_info('agent_profiles') WHERE name = 'owner_profile_encrypted'`,
 	).Scan(&ownerProfileColumnCount); err != nil {
