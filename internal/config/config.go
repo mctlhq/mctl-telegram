@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/canaryguard"
 	"github.com/mctlhq/mctl-telegram/internal/oauth/cimd"
 	"github.com/mctlhq/mctl-telegram/internal/toolprofile"
 )
@@ -262,6 +263,12 @@ type Config struct {
 	// except to DemoReviewerWritePeers (internal/mcp/reviewer.go). Off by
 	// default; enabled only during review and disabled again after approval.
 	// See internal/oauth.
+	// CanaryTelegramIDs is CANARY_TELEGRAM_IDS: the Telegram accounts the
+	// monitoring canary runs as. Disconnect, delete and revoke of a listed
+	// account need an explicit confirmation (internal/canaryguard). Empty by
+	// default; a malformed value is a startup error, because a typo would
+	// leave the canary unguarded.
+	CanaryTelegramIDs    canaryguard.Set
 	DemoReviewerEnabled  bool   // DEMO_REVIEWER_ENABLED
 	DemoReviewerUsername string // DEMO_REVIEWER_USERNAME
 	DemoReviewerPassword string // DEMO_REVIEWER_PASSWORD; compared in constant time, never logged
@@ -541,6 +548,11 @@ func Load() (*Config, error) {
 	c.DemoVideoURL = envOr("DEMO_VIDEO_URL", "")
 	c.EnableAccessQREnabled = envBool("ENABLE_ACCESS_QR_ENABLED", false)
 	c.TelegramAppName = strings.TrimSpace(os.Getenv("TELEGRAM_APP_NAME"))
+	canaryIDs, err := canaryguard.Parse(os.Getenv("CANARY_TELEGRAM_IDS"))
+	if err != nil {
+		return nil, fmt.Errorf("CANARY_TELEGRAM_IDS: %w", err)
+	}
+	c.CanaryTelegramIDs = canaryIDs
 	c.DemoReviewerEnabled = envBool("DEMO_REVIEWER_ENABLED", false)
 	c.DemoReviewerUsername = os.Getenv("DEMO_REVIEWER_USERNAME")
 	c.DemoReviewerPassword = os.Getenv("DEMO_REVIEWER_PASSWORD")

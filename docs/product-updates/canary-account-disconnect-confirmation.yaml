@@ -1,0 +1,31 @@
+schema: mctl-telegram.product-update/v1
+id: canary-account-disconnect-confirmation
+kind: changed_behavior
+title: Ending the monitoring canary account's session now asks for confirmation
+summary: >-
+  disconnect_telegram_account, delete_telegram_account,
+  revoke_telegram_session and set_telegram_access take an optional
+  confirm_canary flag. It matters only on a deployment that lists its
+  monitoring canary accounts in CANARY_TELEGRAM_IDS: for such an account the
+  call is refused unless confirm_canary is true (for set_telegram_access,
+  only when the tier is "none"), and the manage page asks a second time
+  before disconnecting it. Every other account behaves exactly as before.
+  A confirmed override is recorded in the audit log.
+locale: en
+delivery: docs_only
+high_value: false
+tools: [disconnect_telegram_account, delete_telegram_account, revoke_telegram_session, set_telegram_access]
+evidence:
+  from: 0.107.0
+  changes:
+    - {tool: disconnect_telegram_account, change: schema}
+    - {tool: delete_telegram_account, change: schema}
+    - {tool: revoke_telegram_session, change: schema}
+    - {tool: set_telegram_access, change: schema}
+status: approved
+provenance:
+  author: mashkovd
+  assisted_by: claude-opus-5-5
+  reviewed_by: mashkovd
+created_at: "2026-10-30"
+reviewed_at: "2026-10-30"

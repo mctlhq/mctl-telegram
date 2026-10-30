@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/canaryguard"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/notify"
 	"github.com/mctlhq/mctl-telegram/internal/ui"
@@ -33,6 +34,16 @@ type ManageServer struct {
 	loginBotUsername string
 	// connectClient is oauth.ConnectClientID; see canDisconnectFromManagePage.
 	connectClient string
+	// canary is CANARY_TELEGRAM_IDS; see WithCanaryGuard.
+	canary canaryguard.Set
+}
+
+// WithCanaryGuard sets the monitoring canary's accounts. Disconnecting one of
+// them from this page takes a second confirmation that names it as the
+// canary (issue #961).
+func (s *ManageServer) WithCanaryGuard(ids canaryguard.Set) *ManageServer {
+	s.canary = ids
+	return s
 }
 
 // NewManageServer constructs a ManageServer. loginBotUsername is the validated
@@ -161,6 +172,7 @@ func (s *ManageServer) HandleManage(w http.ResponseWriter, r *http.Request) {
 		SendEnabled:   info.SendEnabled,
 		CanDisconnect: canDisconnectFromManagePage(id, s.connectClient),
 		CanManage:     canManageAccount(id),
+		IsCanary:      s.canary.Contains(id.TelegramID),
 		// The browser sign-in token without account:manage may only turn
 		// notifications off; see HandleSetNotifications.
 		NotificationsReduceOnly: !canManageAccount(id) && isBrowserSignIn(id, s.connectClient),
@@ -209,6 +221,16 @@ func (s *ManageServer) HandleDisconnect(w http.ResponseWriter, r *http.Request) 
 		renderManage(w, http.StatusForbidden, manageErrorTemplate, manageErrorData{Message: msgManageCannotDisconnect})
 		return
 	}
+	tool := "POST /telegram/connect/manage/disconnect"
+	if s.canary.Contains(id.TelegramID) {
+		// The first submission only asks again; nothing is revoked until the
+		// confirmation form comes back with confirm_canary set.
+		if r.PostFormValue("confirm_canary") != "1" {
+			renderManage(w, http.StatusOK, manageCanaryConfirmTemplate, nil)
+			return
+		}
+		tool += canaryguard.OverrideSuffix
+	}
 	var err error
 	if s.pool != nil {
 		err = s.pool.RemoveAtomic(id.UserID, func() error {
@@ -221,7 +243,7 @@ func (s *ManageServer) HandleDisconnect(w http.ResponseWriter, r *http.Request) 
 	// Audited on both outcomes, like POST /api/account/disconnect, so the
 	// audit log shows the disconnect that ended the session and not only
 	// the refused ones.
-	s.auditManage(r, id, "POST /telegram/connect/manage/disconnect", err)
+	s.auditManage(r, id, tool, err)
 	if err != nil {
 		slog.Warn("manage: disconnect", "err", err)
 		renderManageError(w, "Disconnect failed. Please try again.")
@@ -280,6 +302,8 @@ type managePageData struct {
 	// the page never offers a control the server would refuse.
 	CanDisconnect bool
 	CanManage     bool
+	// IsCanary marks the monitoring canary's account (CANARY_TELEGRAM_IDS).
+	IsCanary bool
 	// NotificationsReduceOnly shows the notification form to a browser
 	// sign-in without account:manage, with every currently-off category
 	// disabled, so it submits only what HandleSetNotifications accepts.
@@ -355,6 +379,7 @@ var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `  
     {{if .CanManage}}<form method="POST" action="/telegram/connect/manage/toggle-send" style="display:inline">
       <button type="submit" class="btn-secondary">{{if .SendEnabled}}Disable send{{else}}Enable send{{end}}</button>
     </form>{{else}}<p class="meta" id="send-unavailable">` + msgManageCannotChangeSend + `</p>{{end}}
+    {{if .IsCanary}}<p class="meta" id="canary-account"><strong>This is the monitoring canary account.</strong> Disconnecting it makes the canary fail until the account is re-linked.</p>{{end}}
     {{if .CanDisconnect}}<form method="POST" action="/telegram/connect/manage/disconnect" style="display:inline">
       <button type="submit" class="btn-danger">Disconnect</button>
     </form>{{else}}<p class="meta" id="disconnect-unavailable">` + msgManageCannotDisconnect + `</p>{{end}}
@@ -391,6 +416,18 @@ var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `  
     </form>{{else}}<p class="meta" id="notifications-unavailable">` + msgManageCannotChangeNotifications + `</p>{{end}}
     {{end}}
     <p class="meta"><a href="{{.Issuer}}/telegram/connect">Reconnect</a></p>
+` + manageFoot))
+
+// manageCanaryConfirmTemplate is the second confirmation before a canary
+// account is disconnected (issue #961). Cancel is a plain link back, so the
+// destructive form is the only way to proceed.
+var manageCanaryConfirmTemplate = template.Must(template.New("manageCanaryConfirm").Parse(manageHead + `    <h1>Disconnect the monitoring canary?</h1>
+    <div class="error" id="canary-confirm">This Telegram account is the monitoring canary. If you disconnect it, the canary fails and alerts until the account is re-linked.</div>
+    <form method="POST" action="/telegram/connect/manage/disconnect" style="display:inline">
+      <input type="hidden" name="confirm_canary" value="1">
+      <button type="submit" class="btn-danger">Disconnect the canary account</button>
+    </form>
+    <p class="meta"><a href="/telegram/connect/manage">Cancel</a></p>
 ` + manageFoot))
 
 var manageErrorTemplate = template.Must(template.New("manageError").Parse(manageHead + `    <h1>Error</h1>

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/canaryguard"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
@@ -47,6 +48,9 @@ type AccountHandlers struct {
 	// delete transaction cannot reach (mcp.Server.EvictDeletedAccount). nil
 	// leaves a connected Local Bridge daemon up until it disconnects.
 	Evictor AccountEvictor
+	// Canary is CANARY_TELEGRAM_IDS. Disconnect and delete of a listed
+	// account need ?confirm_canary=true (issue #961); nil guards nothing.
+	Canary canaryguard.Set
 }
 
 // AccountEvictor drops a deleted account's live connections.
@@ -121,6 +125,29 @@ func auditScopeDenied(r *http.Request, store *db.Store, id *auth.Identity, tool 
 	store.LogToolCall(ctx, db.ToolCall{UserID: id.UserID, Tool: tool, Status: "error", ErrMsg: "identity missing scope " + accountManageScope, Reason: reasonScopeDenied})
 }
 
+// reasonRefused matches mcp.ReasonRefused.
+const reasonRefused = "refused"
+
+// canaryGate refuses, with 409 and an audit row, a disconnect or delete of a
+// monitoring canary account that lacks ?confirm_canary=true (issue #961). It
+// returns the tool name to audit the action under -- with
+// canaryguard.OverrideSuffix when the guard was overridden -- and whether the
+// handler may proceed.
+func (h *AccountHandlers) canaryGate(w http.ResponseWriter, r *http.Request, id *auth.Identity, tool string) (string, bool) {
+	if !h.Canary.Contains(id.TelegramID) {
+		return tool, true
+	}
+	if r.URL.Query().Get("confirm_canary") == "true" {
+		return tool + canaryguard.OverrideSuffix, true
+	}
+	msg := canaryguard.Refusal("?confirm_canary=true")
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	defer cancel()
+	h.Store.LogToolCall(ctx, db.ToolCall{UserID: id.UserID, Tool: tool, Status: "error", ErrMsg: msg, Reason: reasonRefused})
+	writeAccountErr(w, http.StatusConflict, msg)
+	return tool, false
+}
+
 // Register binds the account endpoints onto a router. Paths are
 // relative — when mounted at "/api/account" the resulting routes are
 // "/api/account", "/api/account/disconnect", DELETE "/api/account", and
@@ -168,6 +195,10 @@ func (h *AccountHandlers) disconnect(w http.ResponseWriter, r *http.Request) {
 		writeAccountErr(w, http.StatusForbidden, msgDisconnectNeedsManage)
 		return
 	}
+	tool, ok := h.canaryGate(w, r, id, "POST /api/account/disconnect")
+	if !ok {
+		return
+	}
 	// Pool eviction and DB revoke share the pool mutex via RemoveAtomic
 	// so a concurrent Borrow() cannot race between them. See
 	// telegram.ClientPool.RemoveAtomic for the full rationale.
@@ -182,7 +213,7 @@ func (h *AccountHandlers) disconnect(w http.ResponseWriter, r *http.Request) {
 	} else {
 		had, err = h.Store.RevokeActiveSession(r.Context(), id.UserID, "disconnect")
 	}
-	h.audit(r, id, "POST /api/account/disconnect", err)
+	h.audit(r, id, tool, err)
 	if err != nil {
 		slog.Warn("account.disconnect", "err", err)
 		writeAccountErr(w, http.StatusInternalServerError, "disconnect failed")
@@ -205,6 +236,10 @@ func (h *AccountHandlers) delete(w http.ResponseWriter, r *http.Request) {
 		writeAccountErr(w, http.StatusForbidden, msgDeleteNeedsManage)
 		return
 	}
+	tool, ok := h.canaryGate(w, r, id, "DELETE /api/account")
+	if !ok {
+		return
+	}
 	var rows int64
 	var err error
 	if h.Pool != nil {
@@ -216,7 +251,7 @@ func (h *AccountHandlers) delete(w http.ResponseWriter, r *http.Request) {
 	} else {
 		rows, err = h.Store.HardDeleteAccount(r.Context(), id.UserID)
 	}
-	h.audit(r, id, "DELETE /api/account", err)
+	h.audit(r, id, tool, err)
 	if err != nil {
 		slog.Warn("account.delete", "err", err)
 		writeAccountErr(w, http.StatusInternalServerError, "delete failed")
