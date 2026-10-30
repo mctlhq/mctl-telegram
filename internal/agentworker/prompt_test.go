@@ -85,3 +85,30 @@ func TestDeployedPrompt_CarriesLeadIDContract(t *testing.T) {
 		t.Error("deployed prompt still says later calls upsert")
 	}
 }
+
+// TestDeployedPrompt_CarriesOwnerChannelContract: nothing the owner writes
+// in Saved Messages reaches the agent, and nothing tracks a promise made in
+// a reply (#952). Without these clauses the model asks the owner to "tell
+// me what to say" and promises follow-ups "shortly" on the owner's behalf.
+func TestDeployedPrompt_CarriesOwnerChannelContract(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/agent-worker/system-prompt.txt")
+	if err != nil {
+		t.Fatalf("read prompt: %v", err)
+	}
+	text := strings.Join(strings.Fields(string(raw)), " ")
+	for _, clause := range []string{
+		"No promises on the owner's behalf",
+		`Never promise a time ("shortly"`,
+		"never promise that anything will be sent later",
+		"The owner cannot reply to you.",
+		"never ask the owner to send you answers, to tell you what to say",
+		"write to the sender in the chat themselves, which stops you in that chat",
+	} {
+		if !strings.Contains(text, clause) {
+			t.Errorf("deployed prompt: missing %q", clause)
+		}
+	}
+	if strings.Contains(text, " he cannot") {
+		t.Error("deployed prompt assumes the owner's pronouns")
+	}
+}
