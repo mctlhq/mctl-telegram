@@ -67,6 +67,9 @@ type Server struct {
 	// used unchanged.
 	useDB   bool
 	metrics metricsIface
+	// funnel records every authorization_code grant for the connect
+	// first-call funnel (issue #960). nil records nothing.
+	funnel connectGrantRecorder
 	// dcrRedirectURIs is cfg.DCRRedirectURIs as a set, built once in New and
 	// read-only afterwards, so it needs no lock.
 	dcrRedirectURIs map[string]struct{}
@@ -230,6 +233,21 @@ type metricsIface interface {
 // Returns the receiver for chaining.
 func (s *Server) WithMetrics(m metricsIface) *Server {
 	s.metrics = m
+	return s
+}
+
+// connectGrantRecorder is the slice of *connectfunnel.Tracker oauth.Server
+// uses: it records that a grant happened and never fails it.
+type connectGrantRecorder interface {
+	Granted(ctx context.Context, userID int64, clientID, redirectURI string)
+}
+
+// WithConnectFunnel wires the connect first-call funnel (issue #960), which
+// is told about every successful authorization_code grant. Self-connect
+// (ExchangeConnect) is deliberately not recorded: it is the browser's own
+// sign-in, not a connector that should follow up with an MCP call.
+func (s *Server) WithConnectFunnel(f connectGrantRecorder) *Server {
+	s.funnel = f
 	return s
 }
 
@@ -2467,6 +2485,11 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeTokenError(w, "server_error", "could not issue refresh token", http.StatusInternalServerError)
 		return
+	}
+	if s.funnel != nil {
+		// Before the response, so the client's first call, which may follow
+		// it within milliseconds, finds the row already written.
+		s.funnel.Granted(context.WithoutCancel(r.Context()), uid, clientID, entry.RedirectURI)
 	}
 	writeTokenJSON(w, tok, refreshTok, int(s.cfg.AccessTokenTTL.Seconds()), scopes)
 }
