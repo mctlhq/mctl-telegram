@@ -36,6 +36,10 @@ type config struct {
 	timeout     time.Duration
 	mcpPath     string
 	probeUnread bool
+	// loginPath enables the connector login-path probes (loginpath.go).
+	loginPath bool
+	// oidcHost is the host /oauth/authorize must redirect to.
+	oidcHost    string
 	pushgateway string
 	metricsAddr string
 	// renew is nil when the caller built a config by hand (tests); run()
@@ -51,7 +55,10 @@ type canaryMetrics struct {
 	// tokenExpiresIn is created in newCanaryMetrics but registered in run(),
 	// once there is a real deadline to report — see the rationale there.
 	tokenExpiresIn prometheus.Gauge
-	registry       *prometheus.Registry
+	// loginPathSuccess is registered in main() only when the login-path
+	// probes are enabled, for the same reason as tokenExpiresIn.
+	loginPathSuccess prometheus.Gauge
+	registry         *prometheus.Registry
 }
 
 // loadConfig reads and validates environment variables. It returns an error
@@ -91,6 +98,12 @@ func loadConfig() (*config, error) {
 	}
 
 	cfg.probeUnread = os.Getenv("CANARY_PROBE_UNREAD") == "true"
+
+	cfg.loginPath = os.Getenv("CANARY_LOGIN_PATH") == "true"
+	cfg.oidcHost = os.Getenv("CANARY_TELEGRAM_OIDC_HOST")
+	if cfg.oidcHost == "" {
+		cfg.oidcHost = "oauth.telegram.org"
+	}
 
 	cfg.pushgateway = os.Getenv("PUSHGATEWAY_URL")
 
@@ -143,11 +156,12 @@ func newCanaryMetrics() *canaryMetrics {
 	reg.MustRegister(success, duration, stepFailures)
 
 	return &canaryMetrics{
-		success:        success,
-		duration:       duration,
-		stepFailures:   stepFailures,
-		tokenExpiresIn: tokenExpiresIn,
-		registry:       reg,
+		success:          success,
+		duration:         duration,
+		stepFailures:     stepFailures,
+		tokenExpiresIn:   tokenExpiresIn,
+		loginPathSuccess: newLoginPathSuccessGauge(),
+		registry:         reg,
 	}
 }
 
@@ -570,6 +584,16 @@ func main() {
 	ctx := context.Background()
 
 	ok := run(ctx, cfg, met)
+
+	// The login-path probes run after, and independently of, the tool path:
+	// a broken connected account must not hide a broken login path, nor the
+	// reverse. Their result is reported only through metrics and does not
+	// change the exit code, so a login-path regression alerts through
+	// mctl_telegram_canary_login_path_success instead of failing the Job.
+	if cfg.loginPath {
+		met.registry.MustRegister(met.loginPathSuccess)
+		runLoginPath(ctx, cfg, met)
+	}
 
 	if cfg.pushgateway != "" {
 		pusher := push.New(cfg.pushgateway, "mctl_telegram_canary").Gatherer(met.registry)
