@@ -327,6 +327,32 @@ one chat, and a recruiter comes back weeks later with a new client.
   (`SELECT conversation_id, count(*) FROM job_leads WHERE created_at >= <server rollout>
   GROUP BY 1 HAVING count(*) > 1`) and merge or delete the duplicates.
 
+## Owner channel and promises (#952)
+
+Owner summaries and `request_owner_approval` reach the owner's Saved
+Messages one way: nothing the owner writes there comes back to the agent.
+The only owner actions are `/mctl approve|reject <code>` on a draft that
+awaits approval, the other `/mctl` commands, and writing to the sender in
+the chat directly, which marks the conversation taken over and stops the
+agent there.
+
+- The prompt tells the model that the owner cannot reply to it, so it must
+  not ask the owner to send answers or "tell me what to say", and that it
+  must not promise anything on the owner's behalf: no time ("shortly",
+  "by Friday") and no later delivery of links, profiles, CV, contact
+  details or "full answers". An untimed "the owner will get back to you" is
+  the most it may promise.
+- An "Owner input requested" notice ends with a fixed line saying the agent
+  cannot read a reply there, that the owner acts by writing to the named
+  peer in that chat, and `/mctl show <id>` for details. The line is
+  reserved before truncation, so a long request cannot cut it off.
+- The `request_owner_approval` and `send_owner_summary` tool descriptions
+  say the same; the former no longer claims an approve/reject step it does
+  not have.
+
+An owner-to-agent instruction path (for example `/mctl say <id> <text>`)
+would be new policy surface and is not part of this change.
+
 ## Attachments in inbound messages (#948)
 
 An inbound message with media is a message even when it has no caption: it

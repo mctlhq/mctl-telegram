@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -362,6 +363,54 @@ func TestNotifier_DeliverPending_OwnerApprovalRequestFormattedAsRequest(t *testi
 	}
 	if !strings.Contains(text, "May I offer to schedule a call for Thursday?") {
 		t.Fatalf("body missing the request text: %q", text)
+	}
+}
+
+// TestNotifier_DeliverPending_OwnerInputSaysHowToAct: the owner cannot
+// answer the agent (#952), so an owner-input notice must say what they can
+// do instead, name the peer and the conversation, and keep that footer even
+// when the agent's text alone fills a Telegram message.
+func TestNotifier_DeliverPending_OwnerInputSaysHowToAct(t *testing.T) {
+	_, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	conv, err := store.EnsureConversation(ctx, uid, 555, "alice", "Alice")
+	if err != nil {
+		t.Fatalf("conversation: %v", err)
+	}
+	for _, payload := range []string{
+		"Alice asks whether you would consider a contract role.",
+		strings.Repeat("x", maxTelegramMessageLen+500),
+	} {
+		actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+			UserID: uid, ConversationID: conv.ID, ActionType: db.ActionTypeOwnerApproval,
+			Payload: payload, PolicyDecision: db.PolicyAllow, Status: db.ActionExecuted,
+		})
+		if err != nil {
+			t.Fatalf("seed action: %v", err)
+		}
+		if _, err := store.InsertOwnerNotification(ctx, db.OwnerNotification{
+			UserID: uid, Kind: db.NotificationApproval, ActionID: actionID, Body: "ignored",
+		}); err != nil {
+			t.Fatalf("seed notification: %v", err)
+		}
+	}
+	if _, _, err := NewNotifier(store, sender).DeliverPending(ctx); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if len(sender.sent) != 2 {
+		t.Fatalf("sent = %d, want 2", len(sender.sent))
+	}
+	wantTail := fmt.Sprintf("write to Alice in that chat yourself (the agent then stops replying there). Details: /mctl show %d", conv.ID)
+	for i, text := range sender.sent {
+		if !strings.Contains(text, "The agent cannot read a reply here.") || !strings.HasSuffix(text, wantTail) {
+			t.Errorf("notice %d does not say how to act: %q", i, text[max(0, len(text)-300):])
+		}
+		if n := len([]rune(text)); n > maxTelegramMessageLen {
+			t.Errorf("notice %d is %d runes, over the Telegram limit", i, n)
+		}
+	}
+	if !strings.Contains(sender.sent[0], "Alice asks whether you would consider a contract role.") {
+		t.Errorf("request text missing: %q", sender.sent[0])
 	}
 }
 

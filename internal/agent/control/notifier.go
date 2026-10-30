@@ -280,7 +280,18 @@ func (n *Notifier) format(ctx context.Context, notif db.OwnerNotification) (stri
 		// approve/reject code. Formatting this as "Draft reply (already
 		// resolved)" below would be actively misleading: there was never an
 		// approve/reject mechanism to resolve in the first place.
-		return truncateForTelegram(fmt.Sprintf("Owner input requested:\n\n%s", action.Payload)), nil
+		//
+		// Nothing the owner writes in Saved Messages reaches the agent, so
+		// the notice says what the owner can actually do (#952): the model's
+		// text alone used to invite a "tell me what to say" reply that went
+		// nowhere. The footer is reserved before truncation, like the
+		// approve/reject lines below.
+		who, convID := n.peerLabel(ctx, action)
+		footer := "\n\nThe agent cannot read a reply here. To act on this, write to the sender in that chat yourself (the agent then stops replying there)."
+		if convID != 0 {
+			footer = fmt.Sprintf("\n\nThe agent cannot read a reply here. To act on this, write to %s in that chat yourself (the agent then stops replying there). Details: /mctl show %d", who, convID)
+		}
+		return reserveTail("Owner input requested:\n\n", action.Payload, footer), nil
 	}
 	if action.ApprovalCode == "" {
 		// Already decided (approved/rejected/expired) between insert and
@@ -306,19 +317,40 @@ func (n *Notifier) format(ctx context.Context, notif db.OwnerNotification) (stri
 	// prefix rather than failing the whole notification, since the
 	// approve/reject codes are still the load-bearing part of this message.
 	prefix := "Draft reply awaiting approval:\n\n"
-	if conv, cerr := n.Store.GetConversation(ctx, action.UserID, action.ConversationID); cerr == nil {
-		who := conv.PeerDisplayName
-		if who == "" {
-			who = conv.PeerUsername
-		}
-		if who == "" {
-			who = fmt.Sprintf("peer %d", conv.PeerTGID)
-		}
-		prefix = fmt.Sprintf("Draft reply awaiting approval (to %s, conv #%d):\n\n", who, conv.ID)
+	if who, convID := n.peerLabel(ctx, action); convID != 0 {
+		prefix = fmt.Sprintf("Draft reply awaiting approval (to %s, conv #%d):\n\n", who, convID)
 	}
+	return reserveTail(prefix, action.Payload, instructions), nil
+}
+
+// peerLabel names the action's conversation peer for an owner notice. A
+// failed lookup (e.g. the conversation row was since deleted) returns
+// convID 0 so callers fall back to an un-identified wording.
+func (n *Notifier) peerLabel(ctx context.Context, action *db.AgentAction) (who string, convID int64) {
+	if action.ConversationID == 0 {
+		return "", 0
+	}
+	conv, err := n.Store.GetConversation(ctx, action.UserID, action.ConversationID)
+	if err != nil {
+		return "", 0
+	}
+	who = conv.PeerDisplayName
+	if who == "" {
+		who = conv.PeerUsername
+	}
+	if who == "" {
+		who = fmt.Sprintf("peer %d", conv.PeerTGID)
+	}
+	return who, conv.ID
+}
+
+// reserveTail composes prefix+payload+tail within maxTelegramMessageLen,
+// truncating only the payload so the tail (commands the owner acts on)
+// always survives intact.
+func reserveTail(prefix, body, tail string) string {
 	marker := "[truncated]"
-	budget := maxTelegramMessageLen - len([]rune(prefix)) - len([]rune(instructions))
-	payload := []rune(action.Payload)
+	budget := maxTelegramMessageLen - len([]rune(prefix)) - len([]rune(tail))
+	payload := []rune(body)
 	if budget < 0 {
 		budget = 0
 	}
@@ -329,5 +361,5 @@ func (n *Notifier) format(ctx context.Context, notif db.OwnerNotification) (stri
 		}
 		payload = append(payload[:cut], []rune(marker)...)
 	}
-	return prefix + string(payload) + instructions, nil
+	return prefix + string(payload) + tail
 }
