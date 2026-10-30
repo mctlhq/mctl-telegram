@@ -27,7 +27,7 @@ var ErrConversationNotFound = errors.New("conversation not found")
 // engine on every proposed action; the agent process itself never enforces it.
 const (
 	AgentModeObserve = "observe" // never auto-send; every reply requires owner approval
-	AgentModeGuarded = "guarded" // allowlisted discovery intents may auto-send
+	AgentModeGuarded = "guarded" // allowlisted intents may auto-send
 	AgentModeOff     = "off"     // deny everything
 )
 

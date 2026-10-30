@@ -536,3 +536,26 @@ func TestEvaluate_SourceSupersededOutranksAutopilotPause(t *testing.T) {
 		t.Fatalf("owner summary for a superseded job = %s, want allow", got.Decision)
 	}
 }
+
+// TestEvaluate_AllowReasonNamesTheMatchedIntent: the audit reason of an
+// auto-sent reply names the allowlist entry that matched (#954), not a
+// fixed "discovery", and takes the operator's spelling rather than the
+// model's free-form intent string.
+func TestEvaluate_AllowReasonNamesTheMatchedIntent(t *testing.T) {
+	for _, tc := range []struct{ allowlist, intent, want string }{
+		{"discovery, schedule", "schedule", "guarded: allowlisted schedule intent"},
+		{"discovery, schedule", "discovery", "guarded: allowlisted discovery intent"},
+		{"discovery,Schedule", " SCHEDULE ", "guarded: allowlisted Schedule intent"},
+	} {
+		in := baseInput()
+		in.Profile.IntentAllowlist = tc.allowlist
+		in.Action.Intent = tc.intent
+		got := Evaluate(in)
+		if got.Decision != Allow {
+			t.Fatalf("%q in %q: decision = %s (%v), want allow", tc.intent, tc.allowlist, got.Decision, got.Reasons)
+		}
+		if len(got.Reasons) != 1 || got.Reasons[0] != tc.want {
+			t.Errorf("%q in %q: reasons = %v, want [%q]", tc.intent, tc.allowlist, got.Reasons, tc.want)
+		}
+	}
+}

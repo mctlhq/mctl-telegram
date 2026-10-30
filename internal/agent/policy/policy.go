@@ -506,7 +506,8 @@ func Evaluate(in Input) Result {
 	if in.Conversation.AutonomousTurns >= maxTurns {
 		reasons = append(reasons, "autonomous turn budget exhausted")
 	}
-	if !intentAllowed(in.Profile.IntentAllowlist, in.Action.Intent) {
+	allowed, ok := allowlistEntry(in.Profile.IntentAllowlist, in.Action.Intent)
+	if !ok {
 		reasons = append(reasons, "intent not in allowlist")
 	}
 	if overRate(in.RecentAgentSends, in.Profile.MaxMsgsPerMinute, in.Now) {
@@ -518,21 +519,27 @@ func Evaluate(in Input) Result {
 	if len(reasons) > 0 {
 		return Result{Decision: RequireApproval, Reasons: reasons}
 	}
-	return Result{Decision: Allow, Reasons: []string{"guarded: allowlisted discovery intent"}}
+	// Name the allowlist entry that matched, so the audit shows which
+	// intent auto-sent (#954). The entry is the operator's configuration;
+	// the model's own intent string never goes into the reason.
+	return Result{Decision: Allow, Reasons: []string{"guarded: allowlisted " + allowed + " intent"}}
 }
 
 func isBlocked(csv string, peerID int64) bool { return containsID(csv, peerID) }
 
-func intentAllowed(csv, intent string) bool {
-	if strings.TrimSpace(intent) == "" {
-		return false
+// allowlistEntry returns the allowlist entry matching intent
+// (case-insensitively, ignoring surrounding spaces), as configured.
+func allowlistEntry(csv, intent string) (string, bool) {
+	intent = strings.TrimSpace(intent)
+	if intent == "" {
+		return "", false
 	}
 	for _, part := range strings.Split(csv, ",") {
-		if strings.EqualFold(strings.TrimSpace(part), strings.TrimSpace(intent)) {
-			return true
+		if part = strings.TrimSpace(part); strings.EqualFold(part, intent) {
+			return part, true
 		}
 	}
-	return false
+	return "", false
 }
 
 func overRate(sends []time.Time, maxPerMin int, now time.Time) bool {
