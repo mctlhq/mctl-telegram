@@ -301,6 +301,17 @@ func (s *c1EvalState) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		if !s.validateBinding(w, body) {
 			return
 		}
+		// Mirror the server (#953): a manipulation alert's text is replaced
+		// by a fixed notice, so the model's own wording is never output, and
+		// the alert sits beside the job's normal handling rather than being
+		// its classification.
+		if intent, _ := body["intent"].(string); strings.EqualFold(intent, "assistant_manipulation") {
+			s.mu.Lock()
+			s.durable = true
+			s.mu.Unlock()
+			writeEvalJSON(w, OwnerFacingResult{ActionID: 1, NotificationID: 1, Decision: "allow"})
+			return
+		}
 		s.record("summary", body, true)
 		writeEvalJSON(w, OwnerFacingResult{ActionID: 1, NotificationID: 1, Decision: "allow"})
 	case r.Method == http.MethodPost && r.URL.Path == "/autopilot/pause":

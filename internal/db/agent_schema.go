@@ -100,6 +100,13 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	if err := addColumnIfMissing(ctx, dbConn, pg, "conversations", "peer_access_hash", "BIGINT DEFAULT 0", "INTEGER DEFAULT 0"); err != nil {
 		return err
 	}
+	// conversations.owner_engaged_at (#953): the last owner engagement
+	// event. NULL on every pre-existing row, i.e. not engaged: owner_profile
+	// fields marked after_owner_engaged stay hidden until a real event, so
+	// the migration never makes a profile more public than before.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "conversations", "owner_engaged_at", "TIMESTAMPTZ", "DATETIME"); err != nil {
+		return err
+	}
 	// owner_notifications.random_id: added in a later A-PR7 review round —
 	// see Store.ClaimOwnerNotification's doc comment for why notification
 	// delivery needs the executor's persisted-random-id pattern to be

@@ -631,7 +631,8 @@ is a non-deployed mirror kept only so this section's anchor is checked by
   `conversation_taken_over` for one or more accounts under an active guard —
   check whether this coincides with a deliberate pause or takeover.
 - **A new or runaway denial reason**: `global_kill`,
-  `reply_contains_credentials`, `reply_contains_url`, or a spike of `unknown`
+  `reply_contains_credentials`, `reply_contains_url`,
+  `reply_contains_never_field`, or a spike of `unknown`
   (the `policy.DenyUnknown` fallback, which by construction means a code path
   went unmapped) each indicate something worth investigating rather than
   routine guarding.
@@ -676,7 +677,7 @@ LIMIT 50;
    intentional and no action is needed beyond noting it.
 3. If the reason is `global_kill`, `unknown`, `action_type_unrecognized`, or a
    content-safety denial (`reply_contains_credentials`,
-   `reply_contains_url`), treat it as a defect signal: inspect the
+   `reply_contains_url`, `reply_contains_never_field`), treat it as a defect signal: inspect the
    `agent_actions` rows above and, if the pattern is a redelivery loop against
    one account, pause that account's autopilot and investigate the retry
    source.

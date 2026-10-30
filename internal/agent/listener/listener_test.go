@@ -258,6 +258,10 @@ func TestPersist_OwnerOutgoingTakesOverConversation(t *testing.T) {
 	if conv.State != db.ConversationTakenOver {
 		t.Fatalf("state = %q", conv.State)
 	}
+	// The owner typing to the peer is also an engagement event (#953).
+	if !conv.OwnerEngaged(time.Now()) {
+		t.Fatalf("owner outgoing did not engage the conversation (owner_engaged_at=%v)", conv.OwnerEngagedAt)
+	}
 	if err := l.persist(ctx, acct, ex); err != nil {
 		t.Fatalf("duplicate owner event: %v", err)
 	}

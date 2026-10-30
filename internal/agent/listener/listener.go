@@ -350,6 +350,13 @@ func (l *Listener) persist(ctx context.Context, acct *account, ex Extracted) err
 			if err := l.Store.SetConversationState(ctx, acct.userID, conv.ID, db.ConversationTakenOver); err != nil {
 				return fmt.Errorf("set taken over: %w", err)
 			}
+			// The owner typing to this peer is an engagement event (#953):
+			// it releases after_owner_engaged profile fields for the next
+			// OwnerEngagementWindow. Idempotent, so a redelivery after a
+			// failure here only re-stamps.
+			if err := l.Store.MarkConversationOwnerEngaged(ctx, acct.userID, ex.Event.ChatTGID, time.Now()); err != nil {
+				return fmt.Errorf("mark owner engaged: %w", err)
+			}
 			// control.Router.handleTakeover (the explicit /mctl takeover
 			// command) has always denied pending actions in the same breath
 			// as the state transition — this automatically-detected

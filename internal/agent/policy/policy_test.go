@@ -134,6 +134,7 @@ func TestEvaluate_DenyCodes(t *testing.T) {
 		{"too long", func(in *Input) { in.Action.Text = repeatRune(1201) }, DenyReplyTooLong},
 		{"url scheme", func(in *Input) { in.Action.Text = "see https://evil.example/x" }, DenyReplyURL},
 		{"card", func(in *Input) { in.Action.Text = "my card is 4111 1111 1111 1111" }, DenyReplyCredentials},
+		{"never field", func(in *Input) { in.ProtectedField = &ProtectedField{Key: "identity.company", Never: true} }, DenyReplyNeverField},
 	}
 
 	seen := map[DenyCode]bool{}
@@ -160,7 +161,7 @@ func TestEvaluate_DenyCodes(t *testing.T) {
 		DenyAutopilotPaused, DenyConvTakenOver, DenyConvClosed, DenyConvPaused,
 		DenyConvStateUnknown, DenySenderBlocked, DenyActionTypeUnknown,
 		DenyPeerMismatch, DenyNoDisclosure, DenyEmptyReply, DenyReplyTooLong,
-		DenyReplyURL, DenyReplyCredentials,
+		DenyReplyURL, DenyReplyCredentials, DenyReplyNeverField,
 	}
 	for _, c := range allCodes {
 		if !seen[c] {

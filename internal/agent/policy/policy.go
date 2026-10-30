@@ -61,6 +61,20 @@ type Input struct {
 	RecentAgentSends []time.Time
 	GlobalKill       bool
 	Now              time.Time
+	// ProtectedField is the owner_profile disclosure match for Action.Text
+	// (#953), computed by the caller because the profile document is
+	// encrypted per tenant and this package stays free of storage. Nil means
+	// the text echoes no field the agent may not disclose right now.
+	ProtectedField *ProtectedField
+}
+
+// ProtectedField names an owner_profile field whose value a reply echoes
+// although the agent may not disclose it: a never field, or an
+// after_owner_engaged one before the owner engaged with the peer. Key is the
+// field path; the value itself never enters policy reasons or audit rows.
+type ProtectedField struct {
+	Key   string
+	Never bool
 }
 
 // DenyCode is a stable, closed-set machine identifier for a denial, safe to
@@ -87,6 +101,7 @@ const (
 	DenyReplyTooLong      DenyCode = "reply_too_long"
 	DenyReplyURL          DenyCode = "reply_contains_url"
 	DenyReplyCredentials  DenyCode = "reply_contains_credentials"
+	DenyReplyNeverField   DenyCode = "reply_contains_never_field"
 	DenyUnknown           DenyCode = "unknown" // fallback only
 )
 
@@ -461,6 +476,12 @@ func Evaluate(in Input) Result {
 	if containsCredentialLike(text) {
 		return deny(DenyReplyCredentials, "reply contains credentials-like content")
 	}
+	// A never field cannot be unblocked by approval, so it is a denial; an
+	// after_owner_engaged field before engagement is only an approval gate,
+	// and the owner's approval of this exact action is what releases it.
+	if in.ProtectedField != nil && in.ProtectedField.Never {
+		return deny(DenyReplyNeverField, "reply echoes owner_profile field "+strconv.Quote(in.ProtectedField.Key)+" marked never")
+	}
 
 	var reasons []string
 	if in.Profile.Mode == db.AgentModeObserve {
@@ -478,6 +499,9 @@ func Evaluate(in Input) Result {
 	}
 	if overRate(in.RecentAgentSends, in.Profile.MaxMsgsPerMinute, in.Now) {
 		reasons = append(reasons, "rate limit exceeded")
+	}
+	if in.ProtectedField != nil {
+		reasons = append(reasons, "reply echoes owner_profile field "+strconv.Quote(in.ProtectedField.Key)+" before the owner engaged")
 	}
 	if len(reasons) > 0 {
 		return Result{Decision: RequireApproval, Reasons: reasons}

@@ -62,7 +62,7 @@ func TestLoad_PublicProfile_OmitsRestricted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	out, err := p.PublicProfile(555)
+	out, err := p.PublicProfile(true)
 	if err != nil {
 		t.Fatalf("public profile: %v", err)
 	}
@@ -141,11 +141,11 @@ func TestTenantProvider_IsolatesPublicAndRestrictedData(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	alice, err := provider.PublicProfile(ctx, aliceID, 555)
+	alice, err := provider.PublicProfile(ctx, aliceID, false)
 	if err != nil {
 		t.Fatalf("alice public profile: %v", err)
 	}
-	bob, err := provider.PublicProfile(ctx, bobID, 555)
+	bob, err := provider.PublicProfile(ctx, bobID, false)
 	if err != nil {
 		t.Fatalf("bob public profile: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestTenantProvider_IsolatesPublicAndRestrictedData(t *testing.T) {
 	if matched {
 		t.Fatal("Alice restricted value matched in Bob's tenant")
 	}
-	if _, err := provider.PublicProfile(ctx, 999, 555); !errors.Is(err, errTenantProfileMissing) {
+	if _, err := provider.PublicProfile(ctx, 999, false); !errors.Is(err, errTenantProfileMissing) {
 		t.Fatalf("missing tenant err = %v", err)
 	}
 }
@@ -225,7 +225,7 @@ func TestPublicProfile_EmptySectionsOmitted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	out, err := p.PublicProfile(0)
+	out, err := p.PublicProfile(true)
 	if err != nil {
 		t.Fatalf("public profile: %v", err)
 	}
@@ -268,7 +268,7 @@ preferences:
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	out, err := p.PublicProfile(0)
+	out, err := p.PublicProfile(true)
 	if err != nil {
 		t.Fatalf("public profile: %v", err)
 	}
@@ -476,7 +476,7 @@ func TestReload_PicksUpChangedFile(t *testing.T) {
 	if err := p.Reload(); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	out, err := p.PublicProfile(0)
+	out, err := p.PublicProfile(true)
 	if err != nil {
 		t.Fatalf("public profile: %v", err)
 	}

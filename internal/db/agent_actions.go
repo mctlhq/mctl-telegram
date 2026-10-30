@@ -695,6 +695,26 @@ func (s *Store) RecordAgentActionSent(ctx context.Context, userID, actionID, con
 	); err != nil {
 		return false, fmt.Errorf("record last agent reply: %w", err)
 	}
+	// An owner-approved reply that reached Telegram is an owner engagement
+	// event (#953). Only the executed transition counts, and it commits
+	// with it: an approval whose send fails never engages the conversation.
+	var decision string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT policy_decision FROM agent_actions WHERE id = $1 AND user_id = $2`,
+		actionID, userID,
+	).Scan(&decision); err != nil {
+		return false, fmt.Errorf("read executed action decision: %w", err)
+	}
+	if decision == PolicyRequireApproval {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE conversations SET owner_engaged_at = $1
+			  WHERE id = $2 AND user_id = $3
+			    AND (owner_engaged_at IS NULL OR owner_engaged_at < $1)`,
+			now, conversationID, userID,
+		); err != nil {
+			return false, fmt.Errorf("record owner engagement: %w", err)
+		}
+	}
 
 	var body []byte
 	if sentText != "" {
@@ -1453,4 +1473,35 @@ func nullableInt(v int64) any {
 		return nil
 	}
 	return v
+}
+
+// HasExecutedOwnerSummarySince reports whether userID already has an
+// executed send_owner_summary action with intent for conversationID (0 means
+// one with no conversation) created at or after since. It throttles
+// assistant-manipulation alerts (#953); suppressed alerts are never inserted
+// as actions, so only alerts the owner was actually sent count.
+func (s *Store) HasExecutedOwnerSummarySince(ctx context.Context, userID, conversationID int64, intent string, since time.Time) (bool, error) {
+	if userID <= 0 {
+		return false, errors.New("user id required")
+	}
+	convCond := `conversation_id = $5`
+	args := []any{userID, ActionTypeOwnerSummary, intent, since.UTC(), conversationID, ActionExecuted}
+	if conversationID == 0 {
+		convCond = `conversation_id IS NULL AND $5 = 0`
+	}
+	var one int
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT 1 FROM agent_actions
+		  WHERE user_id = $1 AND action_type = $2 AND intent = $3 AND created_at >= $4
+		    AND `+convCond+` AND status = $6
+		  LIMIT 1`,
+		args...,
+	).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("has executed owner summary since: %w", err)
+	}
+	return true, nil
 }
