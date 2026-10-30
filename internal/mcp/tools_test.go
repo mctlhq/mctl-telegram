@@ -122,7 +122,7 @@ func TestEvaluateSendGate_AllChecksPass(t *testing.T) {
 // re-enables send_enabled and a client can auto-execute the send tool, so only
 // the reviewer-identity check bounds what the demo account can deliver.
 func TestEvaluateSendGate_ReviewerRefusedUnlessCleared(t *testing.T) {
-	const reviewerTGID int64 = 8745115872
+	const reviewerTGID = guardReviewerTGID
 	ctx := context.Background()
 	s := newToolsTestStore(t)
 	uid, err := s.EnsureUser(ctx, "reviewer", "", "test")
@@ -212,7 +212,11 @@ func latestAudit(t *testing.T, store *db.Store, uid int64) (tool, status, errMsg
 	return tool, status, errMsg
 }
 
-const guardReviewerTGID int64 = 8745115872
+// guardReviewerTGID is the reviewer/demo identity in these tests: Dana, the
+// synthetic persona (CLAUDE.md), standing in for whatever DEMO_REVIEWER_TGID a
+// deployment configures. The guards key on the configured id, never on a
+// particular value, so any synthetic id exercises them.
+const guardReviewerTGID int64 = 500100303
 
 // TestToolDisconnect_DemoReviewerBlocked proves the demo/reviewer identity is
 // refused when it tries to disconnect its own account even with
