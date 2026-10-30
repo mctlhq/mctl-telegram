@@ -462,21 +462,24 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 }
 
 type saveLeadRequest struct {
-	ConversationID int64  `json:"conversation_id"`
-	JobID          int64  `json:"job_id,omitempty"`
-	Attempt        int    `json:"attempt,omitempty"`
-	Company        string `json:"company"`
-	Role           string `json:"role"`
-	RecruiterName  string `json:"recruiter_name"`
-	RecruiterTGID  int64  `json:"recruiter_tg_id"`
-	Compensation   string `json:"compensation"`
-	Status         string `json:"status"`
-	Detail         string `json:"detail"`
+	ConversationID int64 `json:"conversation_id"`
+	// LeadID selects the lead to update (#951). Zero creates a new lead; a
+	// conversation can hold several. The lead must belong to ConversationID.
+	LeadID        int64  `json:"lead_id,omitempty"`
+	JobID         int64  `json:"job_id,omitempty"`
+	Attempt       int    `json:"attempt,omitempty"`
+	Company       string `json:"company"`
+	Role          string `json:"role"`
+	RecruiterName string `json:"recruiter_name"`
+	RecruiterTGID int64  `json:"recruiter_tg_id"`
+	Compensation  string `json:"compensation"`
+	Status        string `json:"status"`
+	Detail        string `json:"detail"`
 }
 
-// handleSaveLead is POST /leads (save_job_lead). Upserts — the agent can save
-// a partial extraction on every turn without erasing earlier answers, see
-// UpsertJobLead's doc comment.
+// handleSaveLead is POST /leads (save_job_lead). Without lead_id it creates a
+// new lead; with lead_id it updates that lead of this conversation, merging
+// partial data without erasing earlier answers (#951, see UpsertJobLead).
 func (s *Server) handleSaveLead(w http.ResponseWriter, r *http.Request) {
 	id, ok := identity(w, r)
 	if !ok {
@@ -498,6 +501,7 @@ func (s *Server) handleSaveLead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	leadID, err := s.Store.UpsertJobLead(r.Context(), db.JobLead{
+		ID:     req.LeadID,
 		UserID: id.UserID, ConversationID: req.ConversationID, JobID: req.JobID, Attempt: req.Attempt,
 		Company: req.Company, Role: req.Role,
 		RecruiterName: req.RecruiterName, RecruiterTGID: req.RecruiterTGID, Compensation: req.Compensation,
@@ -505,6 +509,10 @@ func (s *Server) handleSaveLead(w http.ResponseWriter, r *http.Request) {
 	})
 	if errors.Is(err, db.ErrConversationNotFound) {
 		writeJSONError(w, http.StatusNotFound, "conversation not found")
+		return
+	}
+	if errors.Is(err, db.ErrJobLeadNotFound) {
+		writeJSONError(w, http.StatusNotFound, "lead not found in this conversation")
 		return
 	}
 	if errors.Is(err, db.ErrAgentJobNotFound) {

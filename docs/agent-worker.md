@@ -297,6 +297,31 @@ No separate notification is sent. The denied action keeps the reason in
 enqueues its own job, which answers the current text; carrying the rest of a
 coalesced turn into that job is tracked in #962.
 
+## Several leads per conversation (#951)
+
+A conversation holds any number of leads: an agency pitches several roles in
+one chat, and a recruiter comes back weeks later with a new client.
+
+- `save_job_lead` without `lead_id` creates a new lead. With `lead_id` it
+  updates that lead; empty fields keep their saved values. A `lead_id` that
+  does not belong to the job's own conversation is refused with 404 and
+  changes nothing.
+- `get_conversation_context` returns `leads`, every lead of the
+  conversation newest first (at most 10), and still returns `lead`, the
+  newest one, for workers and prompts that predate `leads`. `get_lead`
+  returns `{"leads": [...]}`.
+- The job's recorded result is the last lead it saved, the same id the
+  worker passes to `complete_agent_job`.
+- `/mctl show <id>` lists every lead of the conversation; `/mctl leads`
+  prints one line per lead.
+- The migration drops the old unique index on `job_leads(conversation_id)`.
+  Rolling back to a binary that predates #951 fails at startup once any
+  conversation has a second lead, because that binary recreates the unique
+  index; remove the extra leads first.
+- Rollout order: server first, then the worker. The worker sends `lead_id`
+  only when it is set, so a new worker that only creates leads still works
+  against an old server, but an update would be rejected there.
+
 ## Attachments in inbound messages (#948)
 
 An inbound message with media is a message even when it has no caption: it

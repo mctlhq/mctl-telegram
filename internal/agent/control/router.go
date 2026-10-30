@@ -313,10 +313,16 @@ func (r *Router) handleShow(ctx context.Context, userID int64, arg string) error
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Conversation #%d — %s\nState: %s | Autonomous turns: %d\n",
 		conv.ID, orDash(conv.PeerDisplayName), conv.State, conv.AutonomousTurns)
-	if lead, err := r.Store.GetJobLeadByConversation(ctx, userID, convID); err == nil {
-		fmt.Fprintf(&sb, "\nLead: %s / %s (%s)\n", orDash(lead.Company), orDash(lead.Role), lead.Status)
-	} else if !errors.Is(err, db.ErrJobLeadNotFound) {
-		return fmt.Errorf("load lead: %w", err)
+	// A conversation can hold several leads (#951); list them newest first.
+	leads, err := r.Store.ListJobLeadsByConversation(ctx, userID, convID, 10)
+	if err != nil {
+		return fmt.Errorf("load leads: %w", err)
+	}
+	if len(leads) > 0 {
+		sb.WriteString("\nLeads:\n")
+		for _, lead := range leads {
+			fmt.Fprintf(&sb, "- %s / %s (%s)\n", orDash(lead.Company), orDash(lead.Role), lead.Status)
+		}
 	}
 	// A draft withdrawn because the sender edited or deleted its source
 	// message sends no notification of its own (#949, #950); this line is

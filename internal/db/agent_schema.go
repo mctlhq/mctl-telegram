@@ -472,7 +472,13 @@ func agentSchemaSQLite() []string {
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_job_leads_conversation ON job_leads(conversation_id)`,
+		// A conversation holds any number of leads (#951): agencies pitch
+		// several roles in one chat and recruiters come back with new
+		// clients. The one-lead-per-conversation unique index is dropped on
+		// every boot; this is not rollback-compatible once a conversation has
+		// a second lead, because the old binary recreates the unique index.
+		`DROP INDEX IF EXISTS idx_job_leads_conversation`,
+		`CREATE INDEX IF NOT EXISTS idx_job_leads_conversation_updated ON job_leads(conversation_id, updated_at)`,
 		`CREATE TABLE IF NOT EXISTS owner_notifications (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -793,7 +799,13 @@ func agentSchemaPG() []string {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_job_leads_conversation ON job_leads(conversation_id)`,
+		// A conversation holds any number of leads (#951): agencies pitch
+		// several roles in one chat and recruiters come back with new
+		// clients. The one-lead-per-conversation unique index is dropped on
+		// every boot; this is not rollback-compatible once a conversation has
+		// a second lead, because the old binary recreates the unique index.
+		`DROP INDEX IF EXISTS idx_job_leads_conversation`,
+		`CREATE INDEX IF NOT EXISTS idx_job_leads_conversation_updated ON job_leads(conversation_id, updated_at)`,
 		`CREATE TABLE IF NOT EXISTS owner_notifications (
 			id BIGSERIAL PRIMARY KEY,
 			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
