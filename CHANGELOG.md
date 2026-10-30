@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.109.0](https://github.com/mctlhq/mctl-telegram/compare/0.108.0...0.109.0) (2026-10-30)
+
+
+### Features
+
+* **metrics:** count callback rejections, bare-origin MCP and login starts ([bafe703](https://github.com/mctlhq/mctl-telegram/commit/bafe7039eb70555610dd430ea7ee68635231d9ed))
+* **metrics:** count callback rejections, bare-origin MCP and login starts ([b1ae64c](https://github.com/mctlhq/mctl-telegram/commit/b1ae64c3bade66d1bc71c5f4087aa0581e4b07e0)), closes [#960](https://github.com/mctlhq/mctl-telegram/issues/960)
+
+
+### Bug Fixes
+
+* **agent:** drop hidden edits so live locations do not flood jobs ([ac179a5](https://github.com/mctlhq/mctl-telegram/commit/ac179a5a72f0f981a57d85011807731e6c09950a))
+* **agent:** record inbound media so the agent sees attachments ([05636bc](https://github.com/mctlhq/mctl-telegram/commit/05636bc611ca30b91b41842d1bb350dc1b826169))
+* **agent:** record inbound media so the agent sees attachments ([dc77557](https://github.com/mctlhq/mctl-telegram/commit/dc775572e654579ee71eefac3030fb301e94530e)), closes [#948](https://github.com/mctlhq/mctl-telegram/issues/948)
+* **metrics:** prime mctl_login_flow_total for every method and result ([cef0f2c](https://github.com/mctlhq/mctl-telegram/commit/cef0f2c5c5e4782b43b4f8012d56e83bfe112c5b)), closes [#960](https://github.com/mctlhq/mctl-telegram/issues/960)
+
 ## [0.108.0](https://github.com/mctlhq/mctl-telegram/compare/0.107.0...0.108.0) (2026-10-30)
 
 
