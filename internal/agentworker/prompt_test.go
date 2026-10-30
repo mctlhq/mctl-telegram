@@ -39,3 +39,24 @@ func TestSystemPrompts_CarryDisclosureContract(t *testing.T) {
 		}
 	}
 }
+
+// TestDeployedPrompt_CarriesAttachmentContract: the listener now records
+// attachments in an event's meta (#948), and the model only uses that if
+// the prompt tells it where to look and not to deny that a file arrived.
+func TestDeployedPrompt_CarriesAttachmentContract(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/agent-worker/system-prompt.txt")
+	if err != nil {
+		t.Fatalf("read prompt: %v", err)
+	}
+	text := strings.Join(strings.Fields(string(raw)), " ")
+	for _, clause := range []string{
+		`meta returned by get_event has an "attachment"`,
+		"never say it did not arrive",
+		"A message with an attachment and no text is still a message",
+		"call send_owner_summary naming the kind and file name",
+	} {
+		if !strings.Contains(text, clause) {
+			t.Errorf("deployed prompt: missing %q", clause)
+		}
+	}
+}

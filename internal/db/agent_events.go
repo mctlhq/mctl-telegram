@@ -43,8 +43,12 @@ type IncomingEvent struct {
 	SenderTGID int64
 	MessageID  int64
 	Body       string
-	Meta       string // JSON: sender username/display name, edit ts, flags. No message text.
-	CreatedAt  time.Time
+	// Meta is plaintext JSON: sender username/display name, flags, and an
+	// attachment's kind, mime type, size and file name (#948). It carries no
+	// message text, but a file name is sender-chosen and can be as revealing
+	// as a display name; only Body is sealed.
+	Meta      string
+	CreatedAt time.Time
 }
 
 // InsertIncomingEvent persists an event if its EventID has not been seen

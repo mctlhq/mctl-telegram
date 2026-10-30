@@ -63,8 +63,8 @@ func isMCTLCommand(text string) bool {
 
 // ExtractMessage maps one *tg.Message (from a new or edit update) to an
 // IncomingEvent for the given account. ok=false means the message is not
-// agent-relevant (non-user peer, empty inbound/service message, a bot sender,
-// etc.). Owner outgoing messages are kept even without text: a photo, sticker,
+// agent-relevant (non-user peer, inbound message with neither text nor an
+// attachment, a bot sender, etc.). Owner outgoing messages are kept even without text: a photo, sticker,
 // voice note, or other media-only reply is still a human takeover signal.
 func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Entities, isEdit bool) (Extracted, bool) {
 	if msg == nil {
@@ -115,7 +115,14 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 		return Extracted{Event: ev, SentAt: sentAt}, true
 	}
 
-	if text == "" {
+	// Media counts as content (#948): a file, photo or voice note with no
+	// caption is still a message the sender expects someone to see.
+	media, _ := msg.GetMedia()
+	attachment := attachmentOf(media)
+	if isEdit && hiddenEdit(msg, media) {
+		return Extracted{}, false
+	}
+	if text == "" && attachment == nil {
 		return Extracted{}, false
 	}
 	peerUser, ok := msg.PeerID.(*tg.PeerUser)
@@ -136,16 +143,30 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 		kind = db.EventKindMessageEdit
 	}
 	ev := db.IncomingEvent{
-		EventID:    eventIDForMessage(selfTGID, peerUser.UserID, int64(msg.ID), editDate(msg, isEdit), msg.Message),
+		EventID: eventIDForMessage(selfTGID, peerUser.UserID, int64(msg.ID), editDate(msg, isEdit),
+			msg.Message+attachmentFingerprint(media)),
 		UserID:     accountUserID,
 		Kind:       kind,
 		ChatTGID:   peerUser.UserID,
 		SenderTGID: senderID,
 		MessageID:  int64(msg.ID),
 		Body:       msg.Message,
-		Meta:       senderMeta(senderUser),
+		Meta:       messageMeta(senderUser, attachment),
 	}
 	return Extracted{Event: ev, SenderAccessHash: senderAccessHash(senderUser, hasSenderUser)}, true
+}
+
+// hiddenEdit reports an edit Telegram made without the sender editing
+// anything: edit_hide marks updates the client must not show as "edited",
+// and every position refresh of a live location arrives that way. Turning
+// those into message_edit events would deny the conversation's pending
+// drafts and queue a job on each refresh (#948 review).
+func hiddenEdit(msg *tg.Message, media tg.MessageMediaClass) bool {
+	if msg.EditHide {
+		return true
+	}
+	_, live := media.(*tg.MessageMediaGeoLive)
+	return live
 }
 
 func isSelfPeer(peer tg.PeerClass, selfTGID int64) bool {
@@ -243,24 +264,34 @@ func editDate(msg *tg.Message, isEdit bool) int {
 }
 
 type senderMetadata struct {
-	Username    string `json:"username,omitempty"`
-	DisplayName string `json:"display_name,omitempty"`
-	IsContact   bool   `json:"is_contact,omitempty"`
-	IsBot       bool   `json:"is_bot,omitempty"`
+	Username    string              `json:"username,omitempty"`
+	DisplayName string              `json:"display_name,omitempty"`
+	IsContact   bool                `json:"is_contact,omitempty"`
+	IsBot       bool                `json:"is_bot,omitempty"`
+	Attachment  *attachmentMetadata `json:"attachment,omitempty"`
 }
 
 // senderMeta builds strict JSON. strconv.Quote is intentionally not used:
 // it may emit Go-only escapes such as \xNN that json.Unmarshal rejects.
 func senderMeta(u *tg.User) string {
-	if u == nil {
+	return messageMeta(u, nil)
+}
+
+// messageMeta is senderMeta plus what the message carried besides its text
+// (#948). The worker's get_event returns it verbatim, which is how the agent
+// learns that a file arrived.
+func messageMeta(u *tg.User, attachment *attachmentMetadata) string {
+	m := senderMetadata{Attachment: attachment}
+	if u != nil {
+		m.Username = u.Username
+		m.DisplayName = strings.TrimSpace(u.FirstName + " " + u.LastName)
+		m.IsContact = u.Contact
+		m.IsBot = u.Bot
+	}
+	if m == (senderMetadata{}) {
 		return "{}"
 	}
-	b, err := json.Marshal(senderMetadata{
-		Username:    u.Username,
-		DisplayName: strings.TrimSpace(u.FirstName + " " + u.LastName),
-		IsContact:   u.Contact,
-		IsBot:       u.Bot,
-	})
+	b, err := json.Marshal(m)
 	if err != nil {
 		return "{}"
 	}
