@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.109.2](https://github.com/mctlhq/mctl-telegram/compare/0.109.1...0.109.2) (2026-10-30)
+
+
+### Bug Fixes
+
+* **policy:** name the matched intent in the guarded allow reason ([331d290](https://github.com/mctlhq/mctl-telegram/commit/331d2900cf801ae33f51d9675c7e3505fa745899))
+
 ## [0.109.1](https://github.com/mctlhq/mctl-telegram/compare/0.109.0...0.109.1) (2026-10-30)
 
 
