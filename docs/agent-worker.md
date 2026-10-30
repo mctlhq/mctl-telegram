@@ -232,7 +232,10 @@ leave a field at its default.
 only: the owner's own outgoing message in the chat, and a reply that the
 owner approved (`require_approval`) and that the executor actually sent. An
 approved but unsent reply, a failed send, an auto-approved send and
-`/mctl continue` do not engage. The window is 30 days from the last event
+`/mctl continue` do not engage. An owner message counts from when it was
+sent (its Telegram date; an edit keeps the original date), so replaying an
+old message after downtime cannot open a fresh window, and a message with
+no date engages nothing. The window is 30 days from the last event
 and every new event extends it; it is stored durably, so restarts do not
 reset it. An account-scoped token always gets the cold view of the profile;
 only a job-bound token gets the view for its conversation.

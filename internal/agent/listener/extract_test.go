@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/tg"
 
@@ -80,10 +81,20 @@ func TestExtractMessage_SavedCommandAndOwnerTakeover(t *testing.T) {
 	if _, ok := ExtractMessage(ownerUID, selfTG, ordinary, ents(), false); ok {
 		t.Fatal("ordinary Saved Messages note must not be retained")
 	}
-	out := &tg.Message{ID: 12, Out: true, PeerID: &tg.PeerUser{UserID: recruit}, Message: "I'll take it"}
+	out := &tg.Message{ID: 12, Out: true, PeerID: &tg.PeerUser{UserID: recruit}, Message: "I'll take it", Date: 1000}
 	got, ok = ExtractMessage(ownerUID, selfTG, out, ents(), false)
 	if !ok || got.Event.Kind != db.EventKindOwnerOutgoing || got.SavedCommandText != "" {
 		t.Fatalf("owner outgoing = %#v, ok=%v", got, ok)
+	}
+	if !got.SentAt.Equal(time.Unix(1000, 0)) {
+		t.Fatalf("owner outgoing SentAt = %v, want the message date", got.SentAt)
+	}
+	// An edit of that message keeps the original send time (#953): editing
+	// an old message is not fresh engagement.
+	out.EditDate = 5000
+	out.SetFlags()
+	if got, ok := ExtractMessage(ownerUID, selfTG, out, ents(), true); !ok || !got.SentAt.Equal(time.Unix(1000, 0)) {
+		t.Fatalf("edited owner outgoing SentAt = %v, ok=%v, want the original date", got.SentAt, ok)
 	}
 }
 

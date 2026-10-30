@@ -654,6 +654,10 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 	if actionType == db.ActionTypeOwnerSummary && strings.EqualFold(strings.TrimSpace(req.Intent), IntentAssistantManipulation) {
 		req.Intent = IntentAssistantManipulation
 		req.Text = manipulationAlertBody(conv)
+		// Check-then-insert is not atomic. Accepted: ClaimAgentJobs already
+		// serializes jobs per conversation, so two alerts can only race
+		// after a lease expiry, and the worst case is one duplicate
+		// neutral notice.
 		recent, err := s.Store.HasExecutedOwnerSummarySince(ctx, id.UserID, req.ConversationID,
 			IntentAssistantManipulation, time.Now().UTC().Add(-manipulationAlertWindow))
 		if err != nil {

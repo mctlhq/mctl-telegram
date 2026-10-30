@@ -247,7 +247,7 @@ func TestPersist_OwnerOutgoingTakesOverConversation(t *testing.T) {
 		EventID: "evt:v1:100:555:100", UserID: acct.userID,
 		Kind: db.EventKindOwnerOutgoing, ChatTGID: recruit,
 		SenderTGID: acct.tgID, MessageID: 100, Body: "I'll handle this",
-	}}
+	}, SentAt: time.Now().Add(-time.Minute)}
 	if err := l.persist(ctx, acct, ex); err != nil {
 		t.Fatalf("persist owner outgoing: %v", err)
 	}
@@ -617,5 +617,48 @@ func TestPersist_MessageEditLeavesExecutingActionAlone(t *testing.T) {
 	}
 	if action.Status != db.ActionExecuting {
 		t.Fatalf("action status = %q, want still executing (in-flight sends are not recalled)", action.Status)
+	}
+}
+
+// TestPersist_OwnerOutgoingEngagementUsesSendTime covers the #955 review: the
+// engagement window runs from when the owner sent the message. A replayed
+// message older than the window, or one with no send time, must not engage.
+func TestPersist_OwnerOutgoingEngagementUsesSendTime(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name    string
+		sentAt  time.Time
+		engaged bool
+	}{
+		{"recent message", time.Now().Add(-time.Hour), true},
+		{"message older than the window", time.Now().Add(-db.OwnerEngagementWindow - time.Hour), false},
+		{"no send time", time.Time{}, false},
+		{"future send time", time.Now().Add(time.Hour), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l, store, acct := newTestListener(t, nil)
+			conv, err := store.EnsureConversation(ctx, acct.userID, recruit, "alice", "Alice")
+			if err != nil {
+				t.Fatalf("ensure conversation: %v", err)
+			}
+			ex := Extracted{Event: db.IncomingEvent{
+				EventID: "evt:v1:100:555:101", UserID: acct.userID,
+				Kind: db.EventKindOwnerOutgoing, ChatTGID: recruit,
+				SenderTGID: acct.tgID, MessageID: 101, Body: "Hi",
+			}, SentAt: tc.sentAt}
+			if err := l.persist(ctx, acct, ex); err != nil {
+				t.Fatalf("persist: %v", err)
+			}
+			got, err := store.GetConversation(ctx, acct.userID, conv.ID)
+			if err != nil {
+				t.Fatalf("get conversation: %v", err)
+			}
+			if got.OwnerEngaged(time.Now()) != tc.engaged {
+				t.Fatalf("engaged = %v (owner_engaged_at=%v), want %v", !tc.engaged, got.OwnerEngagedAt, tc.engaged)
+			}
+			if got.OwnerEngagedAt.After(time.Now()) {
+				t.Fatalf("owner_engaged_at %v is in the future", got.OwnerEngagedAt)
+			}
+		})
 	}
 }

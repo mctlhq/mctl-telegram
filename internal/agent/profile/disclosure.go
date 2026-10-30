@@ -35,8 +35,8 @@ const skillsPath = "skills"
 const minProtectedNeedleRunes = 4
 
 // defaultPublicPaths are the fields a profile without an explicit disclosure
-// entry shows to a cold sender: enough to answer "who is this and what does
-// he do", nothing about where he works, lives or wants to go next.
+// entry shows to a cold sender: enough to answer "who is this and what do
+// they do", nothing about where they work, live or want to go next.
 var defaultPublicPaths = map[string]bool{
 	"identity.name": true,
 	"identity.role": true,

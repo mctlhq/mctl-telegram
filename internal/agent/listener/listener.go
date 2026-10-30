@@ -352,10 +352,14 @@ func (l *Listener) persist(ctx context.Context, acct *account, ex Extracted) err
 			}
 			// The owner typing to this peer is an engagement event (#953):
 			// it releases after_owner_engaged profile fields for the next
-			// OwnerEngagementWindow. Idempotent, so a redelivery after a
-			// failure here only re-stamps.
-			if err := l.Store.MarkConversationOwnerEngaged(ctx, acct.userID, ex.Event.ChatTGID, time.Now()); err != nil {
-				return fmt.Errorf("mark owner engaged: %w", err)
+			// OwnerEngagementWindow, counted from when the message was
+			// sent, not from when it reached us, so a backlog replay of an
+			// old message cannot open a fresh window. Idempotent, so a
+			// redelivery after a failure here only re-stamps.
+			if at, ok := ownerEngagementTime(ex.SentAt, time.Now()); ok {
+				if err := l.Store.MarkConversationOwnerEngaged(ctx, acct.userID, ex.Event.ChatTGID, at); err != nil {
+					return fmt.Errorf("mark owner engaged: %w", err)
+				}
 			}
 			// control.Router.handleTakeover (the explicit /mctl takeover
 			// command) has always denied pending actions in the same breath
@@ -419,4 +423,18 @@ func (l *Listener) insertAuditEvent(ctx context.Context, ev db.IncomingEvent) er
 		l.Metrics.AgentEventsReceivedTotal.WithLabelValues(ev.Kind).Inc()
 	}
 	return nil
+}
+
+// ownerEngagementTime is the engagement stamp for an owner message sent at
+// sentAt. An unknown send time engages nothing: the window must never be
+// opened on a guess. A send time in the future (clock skew) is clamped to
+// now so it cannot stretch the window.
+func ownerEngagementTime(sentAt, now time.Time) (time.Time, bool) {
+	if sentAt.IsZero() {
+		return time.Time{}, false
+	}
+	if sentAt.After(now) {
+		return now, true
+	}
+	return sentAt, true
 }
