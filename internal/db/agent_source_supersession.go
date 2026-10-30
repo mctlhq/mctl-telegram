@@ -267,8 +267,11 @@ func (s *Store) recordMessageDeleteInChat(ctx context.Context, userID, selfTGID,
 	}
 	out.DeniedActions, _ = res.RowsAffected()
 
-	// A pending job has no coalesced members yet (members are attached when
-	// the head is claimed), so closing it drops exactly the deleted message.
+	// A first-time pending job has no coalesced members (they are attached
+	// when the head is claimed). A head that went back to pending through a
+	// retry or a stale requeue keeps its frozen members, and closing it here
+	// closes their messages too. Running it would end the same way: the
+	// propose check supersedes the whole turn (#962).
 	res, err = tx.ExecContext(ctx,
 		`UPDATE agent_jobs
 		    SET status = $1, last_error = $2, updated_at = $3

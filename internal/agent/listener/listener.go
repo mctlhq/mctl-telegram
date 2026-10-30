@@ -347,7 +347,7 @@ func (l *Listener) persist(ctx context.Context, acct *account, ex Extracted) err
 			// as an error here: a message edit racing an in-flight send is
 			// expected, not exceptional.
 			if _, err := l.Store.DenyPendingActionsForSourceMessage(ctx, acct.userID, conv.ID,
-				ex.Event.MessageID, "source message edited"); err != nil {
+				ex.Event.MessageID, db.ReasonSourceEdited); err != nil {
 				return fmt.Errorf("deny actions for edited message: %w", err)
 			}
 		}
