@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"context"
 	"os"
 	"regexp"
 	"strings"
@@ -64,7 +65,7 @@ func TestNew_RegistersAllMetrics(t *testing.T) {
 	reg.HTTPRequestsTotal.WithLabelValues("GET", "/healthz", "200").Add(0)
 	reg.AuthFailuresTotal.WithLabelValues("other", "local-dev").Add(0)
 	reg.RateLimitEventsTotal.WithLabelValues("anon").Add(0)
-	reg.ToolInvocationsTotal.WithLabelValues("list_dialogs", "ok").Add(0)
+	reg.ToolInvocationsTotal.WithLabelValues("list_dialogs", "ok", "user").Add(0)
 	reg.ToolInvocationDuration.WithLabelValues("list_dialogs").Observe(0)
 	reg.ToolCallErrorsTotal.WithLabelValues("search_messages", "scope_denied").Add(0)
 	reg.TelegramClientPoolSize.Set(0)
@@ -81,7 +82,7 @@ func TestNew_RegistersAllMetrics(t *testing.T) {
 	reg.SessionsConnectedTotal.Add(0)
 	reg.SessionsRevokedTotal.WithLabelValues("disconnect").Add(0)
 	reg.SessionsActiveGauge.Set(0)
-	reg.SessionsBorrowTotal.WithLabelValues("ok").Add(0)
+	reg.SessionsBorrowTotal.WithLabelValues("ok", "user").Add(0)
 	reg.TelegramReplicaID.WithLabelValues("pod-0").Set(1)
 	reg.BridgeActiveDaemons.Set(0)
 	reg.BridgeCallsTotal.WithLabelValues("list_dialogs", "ok").Add(0)
@@ -115,9 +116,9 @@ func TestNew_RegistersAllMetrics(t *testing.T) {
 // produces an independent series in the gathered output.
 func TestSessionsBorrowTotal_AllLabelValues(t *testing.T) {
 	reg := New()
-	results := []string{"ok", "expired_idle", "expired_absolute", "flood_wait", "call_error", "error"}
+	results := []string{"ok", "expired_idle", "expired_absolute", "no_session", "flood_wait", "call_error", "error"}
 	for _, r := range results {
-		reg.SessionsBorrowTotal.WithLabelValues(r).Inc()
+		reg.SessionsBorrowTotal.WithLabelValues(r, "user").Inc()
 	}
 
 	mfs, err := reg.Prometheus.Gather()
@@ -664,5 +665,21 @@ func TestNew_LoginSignalsZeroBaseline(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(reg.LoginCallbackRejectedTotal.WithLabelValues("connect_done", "unknown_state")); got != 0 {
 		t.Errorf("rejected{connect_done,unknown_state} = %v, want 0", got)
+	}
+}
+
+// TestTrafficClass pins the closed traffic set: anything that is not
+// explicitly the canary is user traffic, including a missing class and an
+// unknown value, so a call the server cannot place stays inside the SLI.
+func TestTrafficClass(t *testing.T) {
+	ctx := context.Background()
+	if got := TrafficFrom(ctx); got != TrafficUser {
+		t.Errorf("TrafficFrom(empty ctx) = %q, want user", got)
+	}
+	if got := TrafficFrom(WithTraffic(ctx, TrafficCanary)); got != TrafficCanary {
+		t.Errorf("TrafficFrom(canary) = %q, want canary", got)
+	}
+	if got := TrafficFrom(WithTraffic(ctx, "probe")); got != TrafficUser {
+		t.Errorf("TrafficFrom(unknown) = %q, want user", got)
 	}
 }

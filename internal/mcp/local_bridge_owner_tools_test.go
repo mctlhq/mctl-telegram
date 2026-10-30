@@ -245,7 +245,7 @@ func TestToolRevokeLocalBridgeDevice_GetDeviceDriverFailureIsNotARefusal(t *test
 	// with the pool closed LogToolCall gives up at BeginTx — but writeAuditRow
 	// still increments the metrics, so routing this through auditRefusal (the
 	// regression this guards) would leave the error sample at 0.
-	if got := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues("revoke_local_bridge_device", "error")); got != 1 {
+	if got := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues("revoke_local_bridge_device", "error", "user")); got != 1 {
 		t.Fatalf("ToolInvocationsTotal{revoke_local_bridge_device,error} = %v, want 1 (a driver failure must feed the availability SLO)", got)
 	}
 	if got := testutil.ToFloat64(reg.ToolCallErrorsTotal.WithLabelValues("revoke_local_bridge_device", ReasonStoreError)); got != 1 {

@@ -166,7 +166,7 @@ func TestRecordToolCall_ScopeDenied(t *testing.T) {
 	// ToolInvocationsTotal would inflate mctl_tool_availability's error
 	// numerator on every scope-denied/invalid-argument call, which can
 	// false-page an on-call via MctlToolAvailabilityFastBurn.
-	if got := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues("search_messages", "error")); got != 0 {
+	if got := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues("search_messages", "error", "user")); got != 0 {
 		t.Fatalf("ToolInvocationsTotal{search_messages,error} = %v, want 0 (Rule 2 records must not feed the availability SLO)", got)
 	}
 	if got := histogramSampleCount(t, reg, "search_messages"); got != 0 {
@@ -375,7 +375,7 @@ func TestFlushRecordedCall_KeepsCompletedActionRow(t *testing.T) {
 		t.Fatalf("ToolCallErrorsTotal{encode_boom,encode_failed} = %v, want 1", n)
 	}
 	// The appended record is synthesized; only the staged ok record feeds the SLO.
-	if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues("encode_boom", "error")); n != 0 {
+	if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues("encode_boom", "error", "user")); n != 0 {
 		t.Fatalf("ToolInvocationsTotal{encode_boom,error} = %v, want 0", n)
 	}
 }
@@ -426,7 +426,7 @@ func TestRecordToolCall_SuccessPathUnchanged(t *testing.T) {
 	if got := testutil.ToFloat64(reg.ToolCallErrorsTotal.WithLabelValues("get_user_audit_log", ReasonUnknown)); got != 0 {
 		t.Fatalf("ToolCallErrorsTotal must stay at 0 on success, got %v", got)
 	}
-	if got := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues("get_user_audit_log", "ok")); got != 1 {
+	if got := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues("get_user_audit_log", "ok", "user")); got != 1 {
 		t.Fatalf("ToolInvocationsTotal{get_user_audit_log,ok} = %v, want 1", got)
 	}
 }
@@ -654,7 +654,7 @@ func TestFlushRecordedCall_SynthesizesOKRowOnUnauditedSuccess(t *testing.T) {
 		t.Fatalf("ToolCallErrorsTotal must stay at 0 on success, got %v", got)
 	}
 	// A Rule 3 record is synthesized, so it never feeds the SLO pair.
-	if got := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues("quiet_success", "ok")); got != 0 {
+	if got := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues("quiet_success", "ok", "user")); got != 0 {
 		t.Fatalf("ToolInvocationsTotal{quiet_success,ok} = %v, want 0 (synthesized records never feed the SLO)", got)
 	}
 }
@@ -819,7 +819,7 @@ func TestRefusalPaths_AuditOneErrorRow(t *testing.T) {
 	assertNoSLOSample := func(t *testing.T, tool string) {
 		t.Helper()
 		for _, status := range []string{"ok", "error"} {
-			if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues(tool, status)); n != 0 {
+			if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues(tool, status, "user")); n != 0 {
 				t.Fatalf("ToolInvocationsTotal{%s,%s} = %v, want 0", tool, status, n)
 			}
 		}
@@ -961,7 +961,7 @@ func TestFeedsSLO_SynthesizedNeverFeedsSLO(t *testing.T) {
 	} {
 		callTool(t, ctx, hintTestServer(t, srv, tc.name, tc.h), tc.name, map[string]any{})
 		for _, st := range []string{"ok", "error"} {
-			if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues(tc.name, st)); n != 0 {
+			if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues(tc.name, st, "user")); n != 0 {
 				t.Fatalf("%s: ToolInvocationsTotal{%s} = %v, want 0", tc.name, st, n)
 			}
 		}
@@ -975,7 +975,7 @@ func TestFeedsSLO_SynthesizedNeverFeedsSLO(t *testing.T) {
 		return jsonResult(1)
 	})
 	callTool(t, ctx, m, "t_staged", map[string]any{})
-	if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues("t_staged", "ok")); n != 1 {
+	if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues("t_staged", "ok", "user")); n != 1 {
 		t.Fatalf("staged record: ToolInvocationsTotal = %v, want 1", n)
 	}
 }
@@ -1113,7 +1113,7 @@ func TestToolInvocations_CallerErrorLeavesTheSLI(t *testing.T) {
 				if st == tc.want {
 					want = 1
 				}
-				if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues(tc.name, st)); n != want {
+				if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues(tc.name, st, "user")); n != want {
 					t.Fatalf("ToolInvocationsTotal{%s,%s} = %v, want %v", tc.name, st, n, want)
 				}
 			}
@@ -1148,7 +1148,7 @@ func TestToolInvocations_SynthesizedRefusalCarriesNoSLOStatus(t *testing.T) {
 		t.Fatalf("synthesized refusal logged slo_status: %s", buf.String())
 	}
 	for _, st := range []string{"ok", "error", statusCallerError} {
-		if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues(tool, st)); n != 0 {
+		if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues(tool, st, "user")); n != 0 {
 			t.Fatalf("ToolInvocationsTotal{%s,%s} = %v, want 0", tool, st, n)
 		}
 	}
@@ -1196,10 +1196,10 @@ func TestToolInvocations_ServerFaultAfterStagedRefusalBurnsTheSLI(t *testing.T) 
 			if strings.Contains(buf.String(), `"slo_status"`) {
 				t.Fatalf("server fault logged slo_status: %s", buf.String())
 			}
-			if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues(tc.name, "error")); n != 1 {
+			if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues(tc.name, "error", "user")); n != 1 {
 				t.Fatalf("ToolInvocationsTotal{%s,error} = %v, want 1", tc.name, n)
 			}
-			if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues(tc.name, statusCallerError)); n != 0 {
+			if n := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues(tc.name, statusCallerError, "user")); n != 0 {
 				t.Fatalf("ToolInvocationsTotal{%s,caller_error} = %v, want 0", tc.name, n)
 			}
 		})
