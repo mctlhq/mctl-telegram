@@ -36,7 +36,8 @@ type fakeAPI struct {
 
 	// leadToReturn is served back on GetConversationContext's Lead field —
 	// getLead resolves through that call now, not a standalone GetLead API.
-	leadToReturn *LeadDTO
+	leadToReturn  *LeadDTO
+	leadsToReturn []LeadDTO
 
 	// summaryResult, when set, replaces SendOwnerSummary's default result,
 	// e.g. to model a manipulation alert the server suppressed (ActionID 0).
@@ -69,7 +70,7 @@ func (f *fakeAPI) GetConversationContext(ctx context.Context, conversationID int
 	if f.err != nil {
 		return nil, f.err
 	}
-	return &ConversationContext{Conversation: ConversationDTO{ID: conversationID}, Lead: f.leadToReturn}, nil
+	return &ConversationContext{Conversation: ConversationDTO{ID: conversationID}, Lead: f.leadToReturn, Leads: f.leadsToReturn}, nil
 }
 
 func (f *fakeAPI) GetRecruiterProfile(ctx context.Context, peerTGID int64) (map[string]any, error) {

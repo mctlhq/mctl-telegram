@@ -285,7 +285,7 @@ func TestCompleteAgentJobWithResult_PreservesLeadAssociationAcrossUpserts(t *tes
 		t.Fatalf("claim second: jobs=%+v err=%v", claimed, err)
 	}
 	secondLeadID, err := s.UpsertJobLead(ctx, JobLead{
-		UserID: uid, ConversationID: conv.ID, JobID: second, Attempt: claimed[0].Attempts, Role: "Staff",
+		ID: leadID, UserID: uid, ConversationID: conv.ID, JobID: second, Attempt: claimed[0].Attempts, Role: "Staff",
 	})
 	if err != nil {
 		t.Fatalf("save second lead: %v", err)

@@ -472,9 +472,10 @@ func TestUpsertJobLead_PartialMerge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upsert 1: %v", err)
 	}
-	// Second partial save fills company but omits role — role must survive.
+	// Second partial save of the same lead fills company but omits role —
+	// role must survive.
 	id2, err := s.UpsertJobLead(ctx, JobLead{
-		UserID: uid, ConversationID: conv.ID, Company: "Acme",
+		ID: id1, UserID: uid, ConversationID: conv.ID, Company: "Acme",
 		Detail: `{"stack":["python","django"]}`,
 	})
 	if err != nil {
@@ -524,10 +525,11 @@ func TestUpsertJobLead_FencesActiveJobAttempt(t *testing.T) {
 	if err != nil || len(first) != 1 {
 		t.Fatalf("first claim: jobs=%+v err=%v", first, err)
 	}
-	if _, err := s.UpsertJobLead(ctx, JobLead{
+	leadID, err := s.UpsertJobLead(ctx, JobLead{
 		UserID: uid, ConversationID: conv.ID, JobID: jobID, Attempt: first[0].Attempts,
 		Company: "Original",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("first save: %v", err)
 	}
 
@@ -544,11 +546,13 @@ func TestUpsertJobLead_FencesActiveJobAttempt(t *testing.T) {
 		t.Fatalf("second claim: jobs=%+v err=%v", second, err)
 	}
 
-	if _, err := s.UpsertJobLead(ctx, JobLead{
-		UserID: uid, ConversationID: conv.ID, JobID: jobID, Attempt: first[0].Attempts,
-		Company: "Stale overwrite",
-	}); err != ErrAgentJobNotFound {
-		t.Fatalf("stale save err=%v, want ErrAgentJobNotFound", err)
+	for _, id := range []int64{0, leadID} {
+		if _, err := s.UpsertJobLead(ctx, JobLead{
+			ID: id, UserID: uid, ConversationID: conv.ID, JobID: jobID, Attempt: first[0].Attempts,
+			Company: "Stale overwrite",
+		}); err != ErrAgentJobNotFound {
+			t.Fatalf("stale save (lead id %d) err=%v, want ErrAgentJobNotFound", id, err)
+		}
 	}
 	got, err := s.GetJobLeadByConversation(ctx, uid, conv.ID)
 	if err != nil {
@@ -559,7 +563,7 @@ func TestUpsertJobLead_FencesActiveJobAttempt(t *testing.T) {
 	}
 
 	if _, err := s.UpsertJobLead(ctx, JobLead{
-		UserID: uid, ConversationID: conv.ID, JobID: jobID, Attempt: second[0].Attempts,
+		ID: leadID, UserID: uid, ConversationID: conv.ID, JobID: jobID, Attempt: second[0].Attempts,
 		Company: "Fresh",
 	}); err != nil {
 		t.Fatalf("fresh save: %v", err)
@@ -580,7 +584,8 @@ func TestUpsertJobLead_StatusPreservedOnMetadataOnlySave(t *testing.T) {
 	}
 
 	// Empty status on first insert defaults to "new".
-	if _, err := s.UpsertJobLead(ctx, JobLead{UserID: uid, ConversationID: conv.ID}); err != nil {
+	leadID, err := s.UpsertJobLead(ctx, JobLead{UserID: uid, ConversationID: conv.ID})
+	if err != nil {
 		t.Fatalf("upsert 1: %v", err)
 	}
 	got, _ := s.GetJobLeadByConversation(ctx, uid, conv.ID)
@@ -590,12 +595,12 @@ func TestUpsertJobLead_StatusPreservedOnMetadataOnlySave(t *testing.T) {
 
 	// Progress the lead, then perform a metadata-only save (empty status).
 	if _, err := s.UpsertJobLead(ctx, JobLead{
-		UserID: uid, ConversationID: conv.ID, Status: "contacted",
+		ID: leadID, UserID: uid, ConversationID: conv.ID, Status: "contacted",
 	}); err != nil {
 		t.Fatalf("upsert 2: %v", err)
 	}
 	if _, err := s.UpsertJobLead(ctx, JobLead{
-		UserID: uid, ConversationID: conv.ID, Company: "Acme",
+		ID: leadID, UserID: uid, ConversationID: conv.ID, Company: "Acme",
 	}); err != nil {
 		t.Fatalf("upsert 3: %v", err)
 	}

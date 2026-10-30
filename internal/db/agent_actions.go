@@ -1033,21 +1033,27 @@ type JobLead struct {
 	UpdatedAt      time.Time
 }
 
-// UpsertJobLead inserts or updates the lead for a conversation and returns its
-// id. Only non-empty incoming fields overwrite existing values so the agent
-// can save partial extractions incrementally without erasing earlier answers —
-// including Status: an empty status means "leave as is" ("new" on first
-// insert), so a metadata-only save can never reset a progressed lead.
+// UpsertJobLead creates a lead or updates one and returns its id. A
+// conversation holds any number of leads (#951): l.ID == 0 always inserts a
+// new lead, and l.ID > 0 updates that lead, which must belong to l.UserID
+// and to l.ConversationID (ErrJobLeadNotFound otherwise, so a caller can
+// never write into a lead of another conversation or user). On an update
+// only non-empty incoming fields overwrite existing values, so the agent can
+// save partial extractions incrementally without erasing earlier answers —
+// including Status: an empty status means "leave as is" ("new" on insert),
+// so a metadata-only save can never reset a progressed lead.
 //
-// The conversation must belong to l.UserID (verified upfront, and belt-and-
-// braces re-checked by the DO UPDATE's WHERE guard) so a caller can never
-// write into another user's lead row via a foreign conversation id.
+// With l.JobID set, the job must be the caller's currently claimed attempt
+// for this conversation (ErrAgentJobNotFound otherwise).
 func (s *Store) UpsertJobLead(ctx context.Context, l JobLead) (int64, error) {
 	if l.UserID <= 0 {
 		return 0, errors.New("user id required")
 	}
 	if l.ConversationID <= 0 {
 		return 0, errors.New("conversation id required")
+	}
+	if l.ID < 0 {
+		return 0, ErrJobLeadNotFound
 	}
 	if _, err := s.GetConversation(ctx, l.UserID, l.ConversationID); err != nil {
 		return 0, err
@@ -1059,60 +1065,19 @@ func (s *Store) UpsertJobLead(ctx context.Context, l JobLead) (int64, error) {
 		id  int64
 		err error
 	)
-	const insertLead = `INSERT INTO job_leads
-	   (user_id, conversation_id, job_id, company, role, recruiter_name, recruiter_tg_id,
-	    compensation, status, detail, updated_at)
-	`
-	const mergeLead = `
-		 ON CONFLICT (conversation_id) DO UPDATE SET
-		   job_id = CASE WHEN EXCLUDED.job_id IS NOT NULL THEN EXCLUDED.job_id ELSE job_leads.job_id END,
-		   company = CASE WHEN EXCLUDED.company IS NOT NULL THEN EXCLUDED.company ELSE job_leads.company END,
-		   role = CASE WHEN EXCLUDED.role IS NOT NULL THEN EXCLUDED.role ELSE job_leads.role END,
-		   recruiter_name = CASE WHEN EXCLUDED.recruiter_name IS NOT NULL THEN EXCLUDED.recruiter_name ELSE job_leads.recruiter_name END,
-		   recruiter_tg_id = CASE WHEN EXCLUDED.recruiter_tg_id IS NOT NULL THEN EXCLUDED.recruiter_tg_id ELSE job_leads.recruiter_tg_id END,
-		   compensation = CASE WHEN EXCLUDED.compensation IS NOT NULL THEN EXCLUDED.compensation ELSE job_leads.compensation END,
-		   status = COALESCE($9, job_leads.status),
-		   detail = CASE WHEN EXCLUDED.detail <> '{}' THEN EXCLUDED.detail ELSE job_leads.detail END,
-		   updated_at = EXCLUDED.updated_at
-		 WHERE job_leads.user_id = EXCLUDED.user_id
-		 RETURNING id`
-	args := []any{
-		l.UserID, l.ConversationID, nullableInt(l.JobID), nullable(l.Company), nullable(l.Role),
-		nullable(l.RecruiterName), nullableInt(l.RecruiterTGID),
-		nullable(l.Compensation), nullable(l.Status), l.Detail, time.Now().UTC(),
-	}
-	if l.JobID != 0 {
-		lock := ""
-		if s.isPostgres(ctx) {
-			lock = " FOR SHARE"
-		}
-		err = s.DB.QueryRowContext(ctx,
-			insertLead+`
-			 SELECT $1,$2,j.id,$4,$5,$6,$7,$8,COALESCE($9,'new'),$10,$11
-			   FROM agent_jobs j
-			  WHERE j.id=$3 AND j.user_id=$1 AND j.conversation_id=$2
-			    AND j.status=$12 AND j.attempts=$13`+lock+mergeLead,
-			append(args, JobProcessing, l.Attempt)...,
-		).Scan(&id)
+	if l.ID == 0 {
+		id, err = s.insertJobLead(ctx, l)
 	} else {
-		err = s.DB.QueryRowContext(ctx,
-			insertLead+` VALUES($1,$2,NULL,$4,$5,$6,$7,$8,COALESCE($9,'new'),$10,$11)`+mergeLead,
-			args...,
-		).Scan(&id)
-	}
-	if errors.Is(err, sql.ErrNoRows) {
-		if l.JobID != 0 {
-			return 0, ErrAgentJobNotFound
-		}
-		return 0, ErrJobLeadNotFound
+		id, err = s.updateJobLead(ctx, l)
 	}
 	if err != nil {
-		return 0, fmt.Errorf("upsert job lead: %w", err)
+		return 0, err
 	}
 	if l.JobID != 0 {
-		// job_leads is one mutable row per conversation. Preserve an
-		// immutable per-job association so a later upsert for the same
-		// conversation cannot rewrite the historical result of this job.
+		// Preserve an immutable per-job association so a later save for
+		// the same conversation cannot rewrite the historical result of
+		// this job. A job that saves several leads keeps the last one, the
+		// same lead the worker reports as the job's result.
 		if _, err := s.DB.ExecContext(ctx,
 			`INSERT INTO agent_job_lead_results(job_id, user_id, lead_id)
 			 VALUES($1,$2,$3)
@@ -1126,14 +1091,134 @@ func (s *Store) UpsertJobLead(ctx context.Context, l JobLead) (int64, error) {
 	return id, nil
 }
 
+func (s *Store) insertJobLead(ctx context.Context, l JobLead) (int64, error) {
+	const insertLead = `INSERT INTO job_leads
+	   (user_id, conversation_id, job_id, company, role, recruiter_name, recruiter_tg_id,
+	    compensation, status, detail, updated_at)
+	`
+	args := []any{
+		l.UserID, l.ConversationID, nullableInt(l.JobID), nullable(l.Company), nullable(l.Role),
+		nullable(l.RecruiterName), nullableInt(l.RecruiterTGID),
+		nullable(l.Compensation), nullable(l.Status), l.Detail, time.Now().UTC(),
+	}
+	var (
+		id  int64
+		err error
+	)
+	if l.JobID != 0 {
+		lock, lockErr := s.leadJobLock(ctx)
+		if lockErr != nil {
+			return 0, lockErr
+		}
+		err = s.DB.QueryRowContext(ctx,
+			insertLead+`
+			 SELECT $1,$2,j.id,$4,$5,$6,$7,$8,COALESCE($9,'new'),$10,$11
+			   FROM agent_jobs j
+			  WHERE j.id=$3 AND j.user_id=$1 AND j.conversation_id=$2
+			    AND j.status=$12 AND j.attempts=$13`+lock+`
+			 RETURNING id`,
+			append(args, JobProcessing, l.Attempt)...,
+		).Scan(&id)
+	} else {
+		err = s.DB.QueryRowContext(ctx,
+			insertLead+` VALUES($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,'new'),$10,$11) RETURNING id`,
+			args...,
+		).Scan(&id)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrAgentJobNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("insert job lead: %w", err)
+	}
+	return id, nil
+}
+
+func (s *Store) updateJobLead(ctx context.Context, l JobLead) (int64, error) {
+	// Resolve the lock before BeginTx: an uncached dialect probe goes through
+	// s.DB, and on SQLite (one connection) it would wait on this transaction.
+	var lock string
+	if l.JobID != 0 {
+		var err error
+		if lock, err = s.leadJobLock(ctx); err != nil {
+			return 0, err
+		}
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin lead update: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if l.JobID != 0 {
+		var one int
+		err := tx.QueryRowContext(ctx,
+			`SELECT 1 FROM agent_jobs
+			  WHERE id=$1 AND user_id=$2 AND conversation_id=$3
+			    AND status=$4 AND attempts=$5`+lock,
+			l.JobID, l.UserID, l.ConversationID, JobProcessing, l.Attempt,
+		).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrAgentJobNotFound
+		}
+		if err != nil {
+			return 0, fmt.Errorf("check lead job: %w", err)
+		}
+	}
+	var id int64
+	err = tx.QueryRowContext(ctx,
+		`UPDATE job_leads SET
+		   job_id = COALESCE($4, job_id),
+		   company = COALESCE($5, company),
+		   role = COALESCE($6, role),
+		   recruiter_name = COALESCE($7, recruiter_name),
+		   recruiter_tg_id = COALESCE($8, recruiter_tg_id),
+		   compensation = COALESCE($9, compensation),
+		   status = COALESCE($10, status),
+		   detail = CASE WHEN $11 <> '{}' THEN $11 ELSE detail END,
+		   updated_at = $12
+		 WHERE id = $1 AND user_id = $2 AND conversation_id = $3
+		 RETURNING id`,
+		l.ID, l.UserID, l.ConversationID, nullableInt(l.JobID), nullable(l.Company), nullable(l.Role),
+		nullable(l.RecruiterName), nullableInt(l.RecruiterTGID), nullable(l.Compensation),
+		nullable(l.Status), l.Detail, time.Now().UTC(),
+	).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrJobLeadNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("update job lead: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit lead update: %w", err)
+	}
+	return id, nil
+}
+
+// leadJobLock is the row lock a lead save takes on its job on Postgres, so
+// the job cannot finish between the check and the write. SQLite serializes
+// writers and has no FOR SHARE. An inconclusive dialect probe is an error,
+// not "SQLite": that would silently drop the lock on a live Postgres.
+func (s *Store) leadJobLock(ctx context.Context) (string, error) {
+	pg, err := s.postgresDialect(ctx)
+	if err != nil {
+		return "", fmt.Errorf("lead job lock: %w", err)
+	}
+	if pg {
+		return " FOR SHARE", nil
+	}
+	return "", nil
+}
+
 // GetJobLead returns a lead by id, scoped to the owning user.
 func (s *Store) GetJobLead(ctx context.Context, userID, id int64) (*JobLead, error) {
 	return s.getJobLead(ctx, `id = $1 AND user_id = $2`, id, userID)
 }
 
-// GetJobLeadByConversation returns the lead for a conversation, if any.
+// GetJobLeadByConversation returns the conversation's most recently updated
+// lead, if any. A conversation can hold several (#951); see
+// ListJobLeadsByConversation for all of them.
 func (s *Store) GetJobLeadByConversation(ctx context.Context, userID, conversationID int64) (*JobLead, error) {
-	return s.getJobLead(ctx, `conversation_id = $1 AND user_id = $2`, conversationID, userID)
+	return s.getJobLead(ctx, `conversation_id = $1 AND user_id = $2 ORDER BY updated_at DESC, id DESC LIMIT 1`, conversationID, userID)
 }
 
 func (s *Store) getJobLead(ctx context.Context, where string, args ...any) (*JobLead, error) {
@@ -1169,12 +1254,26 @@ func (s *Store) ListJobLeads(ctx context.Context, userID int64, limit int) ([]Jo
 	if limit <= 0 {
 		limit = 20
 	}
+	return s.listJobLeads(ctx, `user_id = $1 ORDER BY updated_at DESC, id DESC LIMIT $2`, userID, limit)
+}
+
+// ListJobLeadsByConversation returns a conversation's leads, most recently
+// updated first (#951).
+func (s *Store) ListJobLeadsByConversation(ctx context.Context, userID, conversationID int64, limit int) ([]JobLead, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	return s.listJobLeads(ctx,
+		`user_id = $1 AND conversation_id = $2 ORDER BY updated_at DESC, id DESC LIMIT $3`,
+		userID, conversationID, limit)
+}
+
+func (s *Store) listJobLeads(ctx context.Context, where string, args ...any) ([]JobLead, error) {
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT id, user_id, conversation_id, company, role, recruiter_name, recruiter_tg_id,
 		        compensation, status, detail, created_at, updated_at
-		   FROM job_leads WHERE user_id = $1
-		  ORDER BY updated_at DESC LIMIT $2`,
-		userID, limit,
+		   FROM job_leads WHERE `+where,
+		args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list job leads: %w", err)
