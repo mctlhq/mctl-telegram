@@ -1035,6 +1035,25 @@ func sqliteSchema() []string {
 			mode TEXT NOT NULL CHECK (mode IN ('production', 'test')),
 			stamped_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
+		// Connect first-call funnel (issue #960): one row per
+		// authorization_code grant, closed by the first successful MCP call
+		// from the same user and client or classified by the reconciler once
+		// its window is over. client_id is stored only to match the call to
+		// the grant; metrics carry the bounded client label. See
+		// connect_first_call.go.
+		`CREATE TABLE IF NOT EXISTS connect_first_call (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			client_id TEXT NOT NULL,
+			client TEXT NOT NULL,
+			granted_at DATETIME NOT NULL,
+			outcome TEXT,
+			reason TEXT NOT NULL DEFAULT '',
+			classified_at DATETIME
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_connect_first_call_open ON connect_first_call(user_id, client_id, granted_at) WHERE outcome IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_connect_first_call_granted ON connect_first_call(granted_at) WHERE outcome IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_connect_first_call_classified ON connect_first_call(classified_at) WHERE outcome IS NOT NULL`,
 	}
 }
 
@@ -1313,5 +1332,20 @@ func pgSchema() []string {
 			mode TEXT NOT NULL CHECK (mode IN ('production', 'test')),
 			stamped_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		// Connect first-call funnel (issue #960) -- see the sqliteSchema
+		// comment on this table.
+		`CREATE TABLE IF NOT EXISTS connect_first_call (
+			id BIGSERIAL PRIMARY KEY,
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			client_id TEXT NOT NULL,
+			client TEXT NOT NULL,
+			granted_at TIMESTAMPTZ NOT NULL,
+			outcome TEXT,
+			reason TEXT NOT NULL DEFAULT '',
+			classified_at TIMESTAMPTZ
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_connect_first_call_open ON connect_first_call(user_id, client_id, granted_at) WHERE outcome IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_connect_first_call_granted ON connect_first_call(granted_at) WHERE outcome IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_connect_first_call_classified ON connect_first_call(classified_at) WHERE outcome IS NOT NULL`,
 	}
 }

@@ -36,6 +36,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
 	"github.com/mctlhq/mctl-telegram/internal/broadcast"
 	"github.com/mctlhq/mctl-telegram/internal/config"
+	"github.com/mctlhq/mctl-telegram/internal/connectfunnel"
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/digest"
@@ -146,6 +147,11 @@ func main() {
 
 	store := db.NewStore(rawDB, cryp).WithMetrics(m).
 		WithAbsoluteTTLExempt(cfg.SessionTTLExemptTGIDs)
+	// Connect first-call funnel (issue #960): the OAuth token endpoint
+	// records each authorization_code grant, the MCP server closes it on the
+	// client's first successful call, and Run classifies the rest. Created
+	// this early so its process-start boundary predates any request.
+	funnel := connectfunnel.New(store, m)
 	// Before any client exists: a pool pointed at the wrong Telegram DCs
 	// would revoke every stored session it touched (issue #854).
 	if err := store.EnsureDCMode(ctx, db.DCModeFor(cfg.TGTestDC)); err != nil {
@@ -406,6 +412,9 @@ func main() {
 	// OAuth refresh-token cleanup: deletes rows past their absolute expiry so
 	// the table stays bounded. LookupRefreshToken is the authoritative gate.
 	go sweeper.RefreshTokens(ctx, store)
+	// Connect first-call reconciler: classifies grants whose window is over
+	// and deletes classified rows after connectfunnel.Retention.
+	go funnel.Run(ctx)
 	// Communication-agent message retention: deletes stored incoming_events /
 	// conversation_messages older than AGENT_RETENTION_DAYS (default 30).
 	// Privacy control, not just hygiene — these rows carry third-party
@@ -541,6 +550,7 @@ func main() {
 			slog.Error("oauth init failed; refusing to start", "err", err)
 			os.Exit(1)
 		}
+		oauthSrv.WithConnectFunnel(funnel)
 		// Share the api_id-wide limiter with the interactive login client so a
 		// first-time connect (auth.sendCode) — the most flood-sensitive call on
 		// the shared TG_API_ID — throttles against the same budget as the pool.
@@ -609,7 +619,7 @@ func main() {
 	accountHandlers.Register(accountMux)
 	mux.Mount("/api/account", auth.Middleware(provider, true, m, resourceMeta)(accountMux))
 
-	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithVersion(version).WithLimiter(limiter).WithMetrics(m).WithPeerCache(peerCache).WithToolFilter(cfg.ToolFilter).WithAppsEnabled(cfg.AppsEnabled).WithBroadcastContent(cfg.BroadcastContentEnabled)
+	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithVersion(version).WithLimiter(limiter).WithMetrics(m).WithPeerCache(peerCache).WithToolFilter(cfg.ToolFilter).WithAppsEnabled(cfg.AppsEnabled).WithBroadcastContent(cfg.BroadcastContentEnabled).WithConnectFunnel(funnel)
 	// Broadcast operator tools (issue-439): prepare/list/get/cancel over MCP.
 	// Approval lives only on the web page registered with the manage routes.
 	mcpSrv.WithBroadcast(broadcastSvc, strings.TrimRight(cfg.PublicBaseURL, "/")+"/telegram/connect/broadcasts")

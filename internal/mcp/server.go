@@ -46,6 +46,10 @@ type Server struct {
 	// Hub routes MCP tool calls to Local Bridge daemons. When nil, all
 	// tools fall back to Pool.Borrow (hosted mode only).
 	Hub *bridge.Hub
+	// FirstCall is told about every successful tools/list and tools/call so
+	// the connect first-call funnel can close the caller's open grant
+	// (issue #960). nil records nothing; see WithConnectFunnel.
+	FirstCall FirstCallRecorder
 	// Metrics is optional; when non-nil, tool invocation counters and
 	// duration histograms are recorded.
 	Metrics *metrics.Registry
@@ -362,7 +366,7 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 		// Also inside recordToolCall: the reviewer identity's refused
 		// writes are recorded like any other refusal (reviewer.go).
 		mcpserver.WithToolHandlerMiddleware(s.reviewerWriteGuard),
-		mcpserver.WithHooks(s.jsonrpcHooks(&registered)),
+		mcpserver.WithHooks(s.firstCallHooks(s.jsonrpcHooks(&registered))),
 		// Discovery and invocation follow the caller's scopes: mcp-go
 		// applies this filter on tools/list and again on tools/call, so a
 		// tool the identity may not use is neither shown nor callable. The
