@@ -969,7 +969,8 @@ and calls outside an MCP tool (background executor, agent listener). To find
 the account and method behind a spike:
 
 ```sh
-kubectl -n labs logs deploy/labs-mctl-telegram-base-service --since=1h \
+kubectl -n labs logs -l app.kubernetes.io/instance=labs-mctl-telegram \
+    --since=1h --max-log-requests=10 \
   | grep '"telegram flood wait"' | jq -r '[.user_id, .method, .peer_kind] | @tsv' \
   | sort | uniq -c | sort -rn | head -20
 ```
