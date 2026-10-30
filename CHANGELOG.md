@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.106.0](https://github.com/mctlhq/mctl-telegram/compare/0.105.0...0.106.0) (2026-10-30)
+
+
+### Features
+
+* **agent:** gate owner-profile disclosure on owner engagement ([fc27825](https://github.com/mctlhq/mctl-telegram/commit/fc278251ea9b4066a3c382aaa42b4093b29b3b9b))
+* **agent:** gate owner-profile disclosure on owner engagement ([2e4b8a7](https://github.com/mctlhq/mctl-telegram/commit/2e4b8a7174182d1dd5e080687bd6be87885aa0dd)), closes [#953](https://github.com/mctlhq/mctl-telegram/issues/953)
+
+
+### Bug Fixes
+
+* **agent:** count owner engagement from the message send time ([69f594e](https://github.com/mctlhq/mctl-telegram/commit/69f594ef4e077a953578a34d053d7af1b5a17a39))
+* **agent:** separate manipulation from security alerts in the prompt ([fe33aa4](https://github.com/mctlhq/mctl-telegram/commit/fe33aa41a40c1e0ee3097faffd656d8bb6bfe366))
+* **agent:** separate manipulation from security alerts in the prompt ([c535b62](https://github.com/mctlhq/mctl-telegram/commit/c535b62c2c7885e1800b6fd3ca58a90140364077)), closes [#953](https://github.com/mctlhq/mctl-telegram/issues/953)
+* **web:** serve MCP on the bare origin as well as /mcp ([f0ae169](https://github.com/mctlhq/mctl-telegram/commit/f0ae169ff327c3daf7ac43e420ec429573de4ec8))
+* **web:** serve MCP on the bare origin as well as /mcp ([1441e08](https://github.com/mctlhq/mctl-telegram/commit/1441e08673edfed68a5d748bac30297917feefdf))
+
 ## [0.105.0](https://github.com/mctlhq/mctl-telegram/compare/0.104.1...0.105.0) (2026-10-29)
 
 

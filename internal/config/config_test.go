@@ -548,7 +548,7 @@ func TestLoadToolFilter(t *testing.T) {
 // TestLoad_RejectsRootMCPPath confirms MCP_PATH that trims to the empty
 // string under strings.Trim(v, "/") — "/" or "//" — or that lacks a leading
 // slash ("mcp") makes Load return an error naming MCP_PATH: a root path would
-// shadow the landing page and the POST / hint route, and a relative one
+// shadow the landing page and the root MCP alias, and a relative one
 // panics chi's Mount at startup. Unset, "/mcp" and "/v1/mcp" behave exactly
 // as before.
 func TestLoad_RejectsRootMCPPath(t *testing.T) {

@@ -4,7 +4,6 @@ package web
 
 import (
 	_ "embed"
-	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -105,33 +104,35 @@ func BrowserRedirect(next http.Handler, landingPath string) http.Handler {
 	})
 }
 
-// RootPostHint answers a POST / with a JSON-RPC 2.0 error object naming the
-// real MCP endpoint, instead of chi's default bare 405 with an empty body —
-// the response an MCP client sees when it is misconfigured with the bare
-// origin instead of mcpPath. Status stays 405 (a client keying on the status
-// alone is unaffected); only the body changes from empty to informative.
-// GET / is untouched — this handler is registered only for POST.
-func RootPostHint(mcpPath string) http.HandlerFunc {
-	mcpPath = "/" + strings.TrimLeft(mcpPath, "/")
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		// RFC 9110 15.5.6: a 405 must list the methods the target resource
-		// supports. POST / is registered alongside GET / (cmd/server/main.go),
-		// so chi's own 405 for PUT/DELETE/HEAD lists both — this handler must
-		// agree. Listing POST while answering 405 to POST is intentional: the
-		// method is routed, this handler just refuses it with a hint.
-		w.Header().Set("Allow", "GET, POST")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"jsonrpc": "2.0",
-			"id":      nil,
-			"error": map[string]any{
-				"code":    -32600,
-				"message": "This is not the MCP endpoint. Use " + mcpPath + " instead.",
-			},
-		})
-	}
+// RootMCP serves the bare origin both to people and to MCP clients that were
+// configured with the origin instead of mcpPath ("https://tg.mctl.ai" rather
+// than ".../mcp"). Such a client completes OAuth anyway, because discovery
+// lives at the origin, and then fails on its first JSON-RPC call; ChatGPT
+// reports that as "Authentication succeeded, action discovery failed". POST
+// and DELETE, and a GET that asks for an event stream, go to the MCP handler;
+// every other GET gets the landing page.
+//
+// mcp must be the same handler instance that serves mcpPath, so a session
+// opened on one path stays valid on the other. The 401 challenge and the
+// protected-resource metadata are already path-aware (auth.ResourceMetadata,
+// protectedResource in cmd/server), so a client on the origin is told the
+// resource is the origin and its token is accepted on both paths.
+func RootMCP(landing, mcp http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && !wantsEventStream(r.Header.Get("Accept")) {
+			landing.ServeHTTP(w, r)
+			return
+		}
+		mcp.ServeHTTP(w, r)
+	})
+}
+
+// wantsEventStream reports whether a GET is an MCP client opening its
+// Streamable-HTTP SSE stream rather than a page load: it accepts
+// text/event-stream and does not ask for HTML.
+func wantsEventStream(accept string) bool {
+	a := strings.ToLower(accept)
+	return strings.Contains(a, "text/event-stream") && !strings.Contains(a, "text/html")
 }
 
 func isBrowserGet(accept string) bool {

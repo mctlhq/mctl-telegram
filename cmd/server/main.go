@@ -476,14 +476,8 @@ func main() {
 	mux.Get("/favicon.svg", web.Favicon())
 	mux.Get("/favicon.ico", web.Favicon())
 	mux.Get("/og.png", web.OGImage())
-	mux.Get("/", web.Landing(cfg.PublicBaseURL, cfg.MCPPath, authServer, showManage))
-	// Belt-and-braces alongside config.Load's own MCP_PATH validation: a
-	// Config built directly (bypassing Load, e.g. in a test or another
-	// binary) must not be able to reintroduce the "/" shadow between this
-	// route, the MCP mount, and the landing page.
-	if strings.Trim(cfg.MCPPath, "/") != "" {
-		mux.Post("/", web.RootPostHint(cfg.MCPPath))
-	}
+	// "/" itself is registered after the MCP mount below: it serves the
+	// landing page and, for a client configured with the bare origin, MCP.
 	mux.Get("/security", web.Security(cfg.PublicBaseURL, showManage))
 	mux.Get("/privacy", web.Privacy(cfg.PublicBaseURL, showManage))
 	mux.Get("/terms", web.Terms(cfg.PublicBaseURL, showManage))
@@ -778,6 +772,18 @@ func main() {
 	// the instructions page.
 	guarded := web.OriginGuard(mcpHandler, cfg.AllowedOrigins)
 	mux.Mount(cfg.MCPPath, web.BrowserRedirect(guarded, "/"))
+	// The bare origin is the most common connector misconfiguration: OAuth
+	// still succeeds (discovery is served at the origin) and the client then
+	// fails on its first call. Serve MCP at "/" too, with the same handler so
+	// sessions carry across. Belt-and-braces alongside config.Load's own
+	// MCP_PATH validation: a Config built directly must not be able to put
+	// the MCP mount itself on "/".
+	root := web.RootMCP(web.Landing(cfg.PublicBaseURL, cfg.MCPPath, authServer, showManage), guarded)
+	mux.Get("/", root.ServeHTTP)
+	if strings.Trim(cfg.MCPPath, "/") != "" {
+		mux.Post("/", root.ServeHTTP)
+		mux.Delete("/", root.ServeHTTP)
+	}
 
 	// The bot-start bridge (issue-679) is the production path for a client's
 	// /start: the login bot's webhook belongs to mctl-agent, which forwards
