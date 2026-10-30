@@ -34,6 +34,9 @@ var expectedMetricNames = []string{
 	"mctl_login_phone_to_code_duration_seconds",
 	"mctl_login_flow_total",
 	"mctl_login_flow_seconds",
+	"mctl_login_flow_started_total",
+	"mctl_login_callback_rejected_total",
+	"mctl_root_mcp_requests_total",
 	"mctl_sessions_connected_total",
 	"mctl_sessions_revoked_total",
 	"mctl_sessions_active",
@@ -636,5 +639,30 @@ func TestCountLoginLogOut(t *testing.T) {
 		if got := testutil.ToFloat64(reg.LoginLogOutTotal.WithLabelValues(l[0], l[1])); got != 1 {
 			t.Errorf("%s/%s = %v, want 1", l[0], l[1], got)
 		}
+	}
+}
+
+// TestNew_LoginSignalsZeroBaseline pins the series count of the #960
+// login-path counters on a fresh registry: every closed label combination
+// exists at 0, so increase() sees the first rejection or root request.
+func TestNew_LoginSignalsZeroBaseline(t *testing.T) {
+	reg := New()
+	checks := []struct {
+		name string
+		c    prometheus.Collector
+		want int
+	}{
+		{"mctl_login_flow_started_total", reg.LoginFlowStartedTotal, len(loginFlowMethods)},
+		{"mctl_login_flow_total", reg.LoginFlowTotal, len(loginFlowMethods) * len(loginFlowResults)},
+		{"mctl_login_callback_rejected_total", reg.LoginCallbackRejectedTotal, len(loginCallbackRoutes) * len(loginCallbackReasons)},
+		{"mctl_root_mcp_requests_total", reg.RootMCPRequestsTotal, len(rootMCPMethods) * len(rootMCPUAFamilies)},
+	}
+	for _, c := range checks {
+		if got := testutil.CollectAndCount(c.c); got != c.want {
+			t.Errorf("%s series = %d, want %d", c.name, got, c.want)
+		}
+	}
+	if got := testutil.ToFloat64(reg.LoginCallbackRejectedTotal.WithLabelValues("connect_done", "unknown_state")); got != 0 {
+		t.Errorf("rejected{connect_done,unknown_state} = %v, want 0", got)
 	}
 }

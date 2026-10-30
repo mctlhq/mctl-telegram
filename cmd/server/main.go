@@ -577,6 +577,7 @@ func main() {
 			Identifier:           provider,
 			LoginBotUsername:     cfg.TelegramLoginBotUsername,
 			BotAccessRequested:   botAccessOn,
+			Metrics:              m,
 		})
 		mux.Get("/telegram/connect", connectSrv.HandleConnect)
 		mux.Get("/telegram/connect/done", connectSrv.HandleConnectDone)
@@ -789,7 +790,7 @@ func main() {
 	// sessions carry across. Belt-and-braces alongside config.Load's own
 	// MCP_PATH validation: a Config built directly must not be able to put
 	// the MCP mount itself on "/".
-	root := web.RootMCP(web.Landing(cfg.PublicBaseURL, cfg.MCPPath, authServer, showManage), guarded)
+	root := web.RootMCP(web.Landing(cfg.PublicBaseURL, cfg.MCPPath, authServer, showManage), guarded, m.CountRootMCPRequest)
 	mux.Get("/", root.ServeHTTP)
 	if strings.Trim(cfg.MCPPath, "/") != "" {
 		mux.Post("/", root.ServeHTTP)
