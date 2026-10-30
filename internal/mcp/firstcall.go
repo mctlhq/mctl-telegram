@@ -27,7 +27,9 @@ func (s *Server) WithConnectFunnel(f FirstCallRecorder) *Server {
 // with the token it was just issued. A tools/call that reached a handler and
 // came back IsError does not count; it says nothing about whether the
 // connector works, only that the tool refused. JSON-RPC-level failures never
-// reach the after-hooks.
+// reach the after-hooks. recordToolCall already turns a handler's Go error or
+// panic into an IsError result, but anything that is not a CallToolResult
+// does not count either: only a result known to be good closes a grant.
 func (s *Server) firstCallHooks(hooks *mcpserver.Hooks) *mcpserver.Hooks {
 	if s.FirstCall == nil {
 		return hooks
@@ -36,7 +38,7 @@ func (s *Server) firstCallHooks(hooks *mcpserver.Hooks) *mcpserver.Hooks {
 		s.recordFirstCall(ctx)
 	})
 	hooks.AddAfterCallTool(func(ctx context.Context, _ any, _ *mcplib.CallToolRequest, result any) {
-		if r, ok := result.(*mcplib.CallToolResult); ok && r != nil && r.IsError {
+		if r, ok := result.(*mcplib.CallToolResult); !ok || r == nil || r.IsError {
 			return
 		}
 		s.recordFirstCall(ctx)

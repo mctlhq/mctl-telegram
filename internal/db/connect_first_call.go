@@ -84,10 +84,11 @@ func (s *Store) classifyConnectRows(ctx context.Context, query string, args ...a
 // SweepConnectGrants deletes rows classified before cutoff and returns how
 // many it removed. Open rows are never deleted here, since they still owe the
 // counter an outcome: their classified_at is NULL, which no comparison
-// matches.
+// matches. The outcome predicate is still spelled out so the planner can use
+// the partial idx_connect_first_call_classified index.
 func (s *Store) SweepConnectGrants(ctx context.Context, cutoff time.Time) (int64, error) {
 	res, err := s.DB.ExecContext(ctx,
-		`DELETE FROM connect_first_call WHERE classified_at < $1`,
+		`DELETE FROM connect_first_call WHERE outcome IS NOT NULL AND classified_at < $1`,
 		cutoff.UTC(),
 	)
 	if err != nil {

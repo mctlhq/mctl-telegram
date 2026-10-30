@@ -79,25 +79,35 @@ type faultStore struct {
 	failSweep    bool
 	beforeClose  func()
 	closes       int
+	hangClose    bool
+	hangInsert   bool
 }
 
 func (f *faultStore) InsertConnectGrant(ctx context.Context, userID int64, clientID, client string, grantedAt time.Time) error {
 	f.mu.Lock()
-	fail := f.failInsert
+	fail, hang := f.failInsert, f.hangInsert
 	f.mu.Unlock()
 	if fail {
 		return errors.New("injected insert failure")
+	}
+	if hang {
+		<-ctx.Done()
+		return ctx.Err()
 	}
 	return f.Store.InsertConnectGrant(ctx, userID, clientID, client, grantedAt)
 }
 
 func (f *faultStore) CloseConnectGrants(ctx context.Context, userID int64, clientID string, callAt time.Time, window time.Duration, now time.Time) ([]string, error) {
 	f.mu.Lock()
-	fail, hook := f.failClose, f.beforeClose
+	fail, hook, hang := f.failClose, f.beforeClose, f.hangClose
 	f.closes++
 	f.mu.Unlock()
 	if fail {
 		return nil, errors.New("injected close failure")
+	}
+	if hang {
+		<-ctx.Done()
+		return nil, ctx.Err()
 	}
 	clients, err := f.Store.CloseConnectGrants(ctx, userID, clientID, callAt, window, now)
 	if hook != nil {
@@ -409,6 +419,38 @@ func TestCloseErrorMakesWindowUnknownNotNone(t *testing.T) {
 	f.clock.advance(pastJudgement)
 	tr.Reconcile(ctx)
 	assertCounts(t, f.m, map[string]int{"claude/unknown/close_error": 1, "claude/none_within_window/": 1})
+}
+
+// A close that hangs is cut off by CloseTimeout, and the timeout is a failed
+// close: the row becomes unknown/close_error, not none_within_window. A
+// hanging insert is cut off by InsertTimeout the same way.
+func TestHangingStoreCallsAreBounded(t *testing.T) {
+	if CloseTimeout >= Grace {
+		t.Fatalf("CloseTimeout %v must be shorter than Grace %v", CloseTimeout, Grace)
+	}
+	f := newFixture(t)
+	tr := f.tracker()
+	if tr.closeTimeout != CloseTimeout || tr.insertTimeout != InsertTimeout {
+		t.Fatalf("tracker timeouts = (%v, %v), want (%v, %v)", tr.closeTimeout, tr.insertTimeout, CloseTimeout, InsertTimeout)
+	}
+	tr.closeTimeout, tr.insertTimeout = 50*time.Millisecond, 50*time.Millisecond
+	ctx := context.Background()
+
+	tr.Granted(ctx, f.alice, claudeClient, claudeRedir)
+	f.store.hangClose = true
+	start := time.Now()
+	tr.Called(ctx, f.alice, claudeClient)
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("close ran %v, want it cut off by the timeout", d)
+	}
+	f.store.hangClose = false
+	f.clock.advance(pastJudgement)
+	tr.Reconcile(ctx)
+	assertCounts(t, f.m, map[string]int{"claude/unknown/close_error": 1})
+
+	f.store.hangInsert = true
+	tr.Granted(ctx, f.bob, claudeClient, claudeRedir)
+	assertCounts(t, f.m, map[string]int{"claude/unknown/close_error": 1, "claude/unknown/insert_error": 1})
 }
 
 // A close failure concerns only grants made up to the failed call: a grant

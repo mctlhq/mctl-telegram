@@ -15,6 +15,12 @@
 // "none_within_window": a grant whose row could not be written, a window that
 // straddles a process start (close failures in the previous process are
 // gone), and a window during which a close failed in this one.
+//
+// The tracker assumes one server process at a time, as the OAuth server's
+// in-memory code store already does (mctl-telegram runs one replica with the
+// Recreate strategy). Its negative cache and its record of failed closes are
+// per process; a second concurrent replica would need both moved into the
+// store.
 package connectfunnel
 
 import (
@@ -41,6 +47,14 @@ const (
 	Retention = 7 * 24 * time.Hour
 	// ReconcileInterval is how often Run classifies and sweeps.
 	ReconcileInterval = time.Minute
+	// CloseTimeout bounds a close. The reconciler's judgement relies on a
+	// close finishing within Grace of its call (see Reconcile): a close that
+	// is still running when its rows are judged would be lost, so it is cut
+	// off well before, and a timeout is a failed close like any other.
+	CloseTimeout = Grace / 2
+	// InsertTimeout bounds the grant insert, which runs on the token
+	// response path.
+	InsertTimeout = 5 * time.Second
 )
 
 // Bounded client labels. A raw client_id never reaches a metric.
@@ -120,6 +134,9 @@ type Tracker struct {
 	metrics Metrics
 	now     func() time.Time
 	started time.Time
+	// closeTimeout and insertTimeout are CloseTimeout and InsertTimeout,
+	// held per tracker so a test need not wait them out.
+	closeTimeout, insertTimeout time.Duration
 
 	mu    sync.Mutex
 	pairs map[pairKey]*pairState
@@ -141,6 +158,9 @@ func newTracker(store Store, metrics Metrics, now func() time.Time) *Tracker {
 		now:     now,
 		started: now().UTC(),
 		pairs:   map[pairKey]*pairState{},
+
+		closeTimeout:  CloseTimeout,
+		insertTimeout: InsertTimeout,
 	}
 }
 
@@ -180,6 +200,8 @@ func (t *Tracker) Granted(ctx context.Context, userID int64, clientID, redirectU
 		return
 	}
 	client := ClientLabel(redirectURI)
+	ctx, cancel := context.WithTimeout(ctx, t.insertTimeout)
+	defer cancel()
 	if err := t.store.InsertConnectGrant(ctx, userID, clientID, client, t.now().UTC()); err != nil {
 		slog.Warn("connect funnel: could not record grant", "client", client, "err", err)
 		t.countError(OpInsert)
@@ -212,7 +234,9 @@ func (t *Tracker) Called(ctx context.Context, userID int64, clientID string) {
 	t.mu.Unlock()
 
 	callAt := t.now().UTC()
-	clients, err := t.store.CloseConnectGrants(ctx, userID, clientID, callAt, Window, callAt)
+	closeCtx, cancel := context.WithTimeout(ctx, t.closeTimeout)
+	clients, err := t.store.CloseConnectGrants(closeCtx, userID, clientID, callAt, Window, callAt)
+	cancel()
 	if err != nil {
 		slog.Warn("connect funnel: could not close grant", "err", err)
 		t.countError(OpClose)
@@ -290,8 +314,9 @@ func (t *Tracker) Reconcile(ctx context.Context) {
 
 	// Every open row up to judgeTo that a failure could concern is decided
 	// by now. A failure recorded after the snapshot above was for a call
-	// made after now-Grace (callAt is taken before the store is asked), so
-	// it concerns rows granted after judgeTo, which this pass leaves alone.
+	// made after now-Grace (callAt is taken before the store is asked, and
+	// CloseTimeout keeps the close shorter than Grace), so it concerns rows
+	// granted after judgeTo, which this pass leaves alone.
 	if !t.classify(ctx, time.Time{}, judgeTo, db.ConnectOutcomeNone, "", now) {
 		return
 	}

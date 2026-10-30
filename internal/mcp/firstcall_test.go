@@ -2,10 +2,12 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
+	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 )
@@ -76,6 +78,30 @@ func TestFirstCallHooks(t *testing.T) {
 	}
 	if n := rec.count(); n != 2 {
 		t.Fatalf("anonymous tools/list reached the funnel (%d calls)", n)
+	}
+}
+
+// Only a non-error CallToolResult counts: a nil result, a result of another
+// type or an IsError one does not, whatever produced it.
+func TestFirstCallHooksCountOnlyGoodResults(t *testing.T) {
+	rec := &firstCallRecorder{}
+	s := (&Server{}).WithConnectFunnel(rec)
+	hooks := s.firstCallHooks(&mcpserver.Hooks{})
+	ctx := auth.With(context.Background(), &auth.Identity{UserID: 1, ClientID: "claude.ai"})
+	var nilResult *mcplib.CallToolResult
+	for _, result := range []any{nil, nilResult, errors.New("boom"), &mcplib.CallToolResult{IsError: true}} {
+		for _, h := range hooks.OnAfterCallTool {
+			h(ctx, 1, &mcplib.CallToolRequest{}, result)
+		}
+	}
+	if n := rec.count(); n != 0 {
+		t.Fatalf("bad results reached the funnel (%d calls)", n)
+	}
+	for _, h := range hooks.OnAfterCallTool {
+		h(ctx, 1, &mcplib.CallToolRequest{}, &mcplib.CallToolResult{})
+	}
+	if n := rec.count(); n != 1 {
+		t.Fatalf("good result: funnel calls = %d, want 1", n)
 	}
 }
 
