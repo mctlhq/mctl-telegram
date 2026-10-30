@@ -50,6 +50,9 @@ func turnContextCases(t *testing.T, setup func(t *testing.T) (*Store, int64)) {
 		{"context edited after claim withdraws the draft", assertContextEditAfterClaim},
 		{"context deleted after claim supersedes the job", assertContextDeleteAfterClaim},
 		{"re-claim recomputes the context", assertReclaimRecomputes},
+		{"turn answered by an earlier edit job adds no context", assertAnsweredByEditJob},
+		{"turn answered by an edit job stays answered after a later edit", assertAnsweredThenEdited},
+		{"context delete outranks an edit of the own message", assertContextDeleteOutranksOwnEdit},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -255,5 +258,60 @@ func TestTurnContext_CoalescingClaim(t *testing.T) {
 	}
 	if want := first + "," + edit; sourceList(next[0].SourceEventIDs) != want {
 		t.Fatalf("edit job sources = %v, want %s", next[0].SourceEventIDs, want)
+	}
+}
+
+// markSent records an executed reply for job.
+func (f *supersessionFixture) markSent(t *testing.T, job AgentJob) {
+	t.Helper()
+	a := f.action(t, job, PolicyAllow, ActionApproved)
+	if _, err := f.s.DB.Exec(`UPDATE agent_actions SET status = $1 WHERE id = $2`, ActionExecuted, a.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Alice edits 231 and then 230 before either edit job runs. The first edit
+// job answers the whole turn; the second must get only its own edit.
+func assertAnsweredByEditJob(t *testing.T, f *supersessionFixture) {
+	head, _ := coalescedTurn(t, f)
+	edit231 := f.ingest(t, 231, editSuffix)
+	edit230 := f.ingest(t, 230, ":e200:bb")
+	f.finish(t, head.ID)
+	first := f.claimEdit(t, edit231)
+	if got := sourceList(first.SourceEventIDs); got != sourceList([]string{edit230, edit231}) {
+		t.Fatalf("first edit job sources = %s", got)
+	}
+	f.markSent(t, first)
+	f.finish(t, first.ID)
+	second := f.claimEdit(t, edit230)
+	if got := sourceList(second.SourceEventIDs); got != edit230 {
+		t.Fatalf("second edit job sources = %s, want only %s", got, edit230)
+	}
+}
+
+// The first edit job's reply went out before 230 was edited.
+func assertAnsweredThenEdited(t *testing.T, f *supersessionFixture) {
+	head, _ := coalescedTurn(t, f)
+	edit231 := f.ingest(t, 231, editSuffix)
+	f.finish(t, head.ID)
+	first := f.claimEdit(t, edit231)
+	f.markSent(t, first)
+	f.finish(t, first.ID)
+	edit230 := f.ingest(t, 230, ":e200:bb")
+	second := f.claimEdit(t, edit230)
+	if got := sourceList(second.SourceEventIDs); got != edit230 {
+		t.Fatalf("second edit job sources = %s, want only %s", got, edit230)
+	}
+}
+
+func assertContextDeleteOutranksOwnEdit(t *testing.T, f *supersessionFixture) {
+	head, _ := coalescedTurn(t, f)
+	edit := f.ingest(t, 231, editSuffix)
+	f.finish(t, head.ID)
+	job := f.claimEdit(t, edit)
+	f.ingest(t, 231, ":e300:cc")
+	f.recordDelete(t, 230)
+	if got := f.superseded(t, job.ID); got != SourceDeleted {
+		t.Fatalf("own edit + context delete: %q, want %q", got, SourceDeleted)
 	}
 }

@@ -308,8 +308,11 @@ corrected line:
 - The events are ordered by when the original messages arrived, so the
   edited message keeps its place. `get_event` returns them in `events[]`;
   the top-level fields stay those of the edit.
-- If the turn's reply was already sent (`executing` or `executed`), the edit
-  job gets only the edit: the rest was answered.
+- If the turn was already answered, the edit job gets only the edit. That
+  covers the turn's own reply (`executing` or `executed`) and the reply of an
+  earlier edit job that carried the turn as context: after two quick edits,
+  the first edit job answers the whole turn and the second answers only its
+  own message.
 - The list is computed when the job is claimed and stored in
   `agent_jobs.turn_context`. The job token can read exactly those events.
   A retried attempt recomputes it.

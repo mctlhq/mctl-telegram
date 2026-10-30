@@ -90,15 +90,16 @@ func latestVersion(ctx context.Context, q rowQueryer, userID int64, src eventRef
 }
 
 // unsentTurnSources returns the source events of the turn that first carried
-// the given message, when that turn's reply was never sent. Otherwise it
+// the given message, when no reply covering that turn was sent: neither the
+// turn's own nor one of a later job that carried it as context. Otherwise it
 // returns nil. A one-message turn yields only the edited message itself,
 // which the caller already has, so it adds nothing.
 func unsentTurnSources(ctx context.Context, q queryer, userID int64, original eventRef) ([]eventRef, error) {
-	var jobID, coalescedInto sql.NullInt64
+	var jobID, coalescedInto, convID sql.NullInt64
 	err := q.QueryRowContext(ctx,
-		`SELECT id, coalesced_into FROM agent_jobs WHERE user_id = $1 AND event_id = $2`,
+		`SELECT id, coalesced_into, conversation_id FROM agent_jobs WHERE user_id = $1 AND event_id = $2`,
 		userID, original.eventID,
-	).Scan(&jobID, &coalescedInto)
+	).Scan(&jobID, &coalescedInto, &convID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -141,7 +142,73 @@ func unsentTurnSources(ctx context.Context, q queryer, userID int64, original ev
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	_ = rows.Close()
+	answered, err := answeredThroughContext(ctx, q, userID, convID.Int64, head, out)
+	if err != nil || answered {
+		return nil, err
+	}
+	return out, nil
+}
+
+// answeredThroughContext reports whether a later job that carried messages of
+// the turn as turn context already sent its reply. #950 withdraws the head's
+// draft on an edit, so after the first edit job answers the whole turn the
+// head still shows no sent reply; without this check a second edit would be
+// handed the turn again and answer it twice.
+func answeredThroughContext(ctx context.Context, q queryer, userID, convID, head int64, turnSources []eventRef) (bool, error) {
+	if convID == 0 {
+		return false, nil
+	}
+	rows, err := q.QueryContext(ctx,
+		`SELECT j.turn_context FROM agent_jobs j
+		  WHERE j.user_id = $1 AND j.conversation_id = $2 AND j.id > $3
+		    AND j.turn_context IS NOT NULL
+		    AND EXISTS (
+		        SELECT 1 FROM agent_actions a
+		         WHERE a.user_id = j.user_id AND a.job_id = j.id
+		           AND a.action_type = $4 AND a.status IN ($5, $6)
+		    )`,
+		userID, convID, head, ActionTypeReply, ActionExecuting, ActionExecuted)
+	if err != nil {
+		return false, fmt.Errorf("load answered turn contexts: %w", err)
+	}
+	var stored []string
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			_ = rows.Close()
+			return false, fmt.Errorf("scan turn context: %w", err)
+		}
+		stored = append(stored, raw)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return false, err
+	}
+	_ = rows.Close()
+	inTurn := map[messageKey]bool{}
+	for _, src := range turnSources {
+		inTurn[messageKey{src.chatTGID, src.messageID}] = true
+	}
+	for _, raw := range stored {
+		var ids []string
+		if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+			return false, fmt.Errorf("decode turn context: %w", err)
+		}
+		for _, id := range ids {
+			r, ok, err := loadEventRef(ctx, q, userID, id)
+			if err != nil {
+				return false, err
+			}
+			if ok && inTurn[messageKey{r.chatTGID, r.messageID}] {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 type messageKey struct{ chat, msg int64 }
