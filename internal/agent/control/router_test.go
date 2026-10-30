@@ -849,3 +849,42 @@ func TestRouter_Continue_DoesNotEngageOwner(t *testing.T) {
 		t.Fatalf("owner_engaged_at = %v after /mctl continue, want unset", got.OwnerEngagedAt)
 	}
 }
+
+// TestRouter_ShowAndLeads_ListEveryLeadOfAConversation: a conversation can
+// hold several leads (#951). /mctl show lists all of them, newest first,
+// and /mctl leads has a line for each.
+func TestRouter_ShowAndLeads_ListEveryLeadOfAConversation(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	conv, err := store.EnsureConversation(ctx, uid, 555, "alice", "Alice")
+	if err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	for _, role := range []string{"Senior Go Engineer", "Site Reliability Engineer"} {
+		if _, err := store.UpsertJobLead(ctx, db.JobLead{
+			UserID: uid, ConversationID: conv.ID, Company: "Halcyon Talent", Role: role,
+		}); err != nil {
+			t.Fatalf("seed lead %q: %v", role, err)
+		}
+	}
+	reply := func(cmd string) string {
+		t.Helper()
+		sender.sent = nil
+		if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, cmd); err != nil {
+			t.Fatalf("%s: %v", cmd, err)
+		}
+		if len(sender.sent) != 1 {
+			t.Fatalf("%s: replies = %d, want 1", cmd, len(sender.sent))
+		}
+		return sender.sent[0]
+	}
+	show := reply("/mctl show " + strconv.FormatInt(conv.ID, 10))
+	sre, goRole := strings.Index(show, "Site Reliability Engineer"), strings.Index(show, "Senior Go Engineer")
+	if !strings.Contains(show, "Leads:") || sre < 0 || goRole < 0 || sre > goRole {
+		t.Fatalf("show = %q, want both leads, newest first", show)
+	}
+	leads := reply("/mctl leads")
+	if strings.Count(leads, "Conv #"+strconv.FormatInt(conv.ID, 10)) != 2 {
+		t.Fatalf("leads = %q, want one line per lead", leads)
+	}
+}

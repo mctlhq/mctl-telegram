@@ -240,6 +240,7 @@ type ConversationContext struct {
 	Conversation ConversationDTO          `json:"conversation"`
 	Messages     []ConversationMessageDTO `json:"messages"`
 	Lead         *LeadDTO                 `json:"lead"`
+	Leads        []LeadDTO                `json:"leads"`
 }
 
 func (c *Client) GetConversationContext(ctx context.Context, conversationID int64, limit int) (*ConversationContext, error) {
@@ -315,15 +316,17 @@ func (c *Client) ProposeReply(ctx context.Context, conversationID, jobID int64, 
 
 type SaveLeadRequest struct {
 	ConversationID int64
-	JobID          int64
-	Attempt        int
-	Company        string
-	Role           string
-	RecruiterName  string
-	RecruiterTGID  int64
-	Compensation   string
-	Status         string
-	Detail         string
+	// LeadID updates that lead; zero creates a new one (#951).
+	LeadID        int64
+	JobID         int64
+	Attempt       int
+	Company       string
+	Role          string
+	RecruiterName string
+	RecruiterTGID int64
+	Compensation  string
+	Status        string
+	Detail        string
 }
 
 func (c *Client) SaveLead(ctx context.Context, req SaveLeadRequest) (int64, error) {
@@ -340,6 +343,11 @@ func (c *Client) SaveLead(ctx context.Context, req SaveLeadRequest) (int64, erro
 	if req.JobID != 0 {
 		body["job_id"] = req.JobID
 		body["attempt"] = req.Attempt
+	}
+	// Sent only when set: a server that predates #951 rejects unknown
+	// fields, and a create needs none.
+	if req.LeadID != 0 {
+		body["lead_id"] = req.LeadID
 	}
 	var out struct {
 		LeadID int64 `json:"lead_id"`

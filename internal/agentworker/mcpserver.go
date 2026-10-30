@@ -203,17 +203,22 @@ func (b *toolBuilder) getRecruiterProfile() (mcplib.Tool, mcpserver.ToolHandlerF
 // other pinned fields.
 func (b *toolBuilder) getLead() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("get_lead",
-		mcplib.WithDescription("Fetch the job lead saved for this job's own conversation, if one exists. Equivalent to get_conversation_context's lead field, offered separately for a quick standalone lookup."),
+		mcplib.WithDescription("Fetch the job leads saved for this job's own conversation, newest first, if any. Equivalent to get_conversation_context's leads field, offered separately for a quick standalone lookup."),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		convCtx, err := b.api.GetConversationContext(ctx, b.job.ConversationID, 0)
 		if err != nil {
 			return toolErr(err), nil
 		}
-		if convCtx.Lead == nil {
+		leads := convCtx.Leads
+		if len(leads) == 0 && convCtx.Lead != nil {
+			// A server that predates #951 returns only the single lead.
+			leads = []LeadDTO{*convCtx.Lead}
+		}
+		if len(leads) == 0 {
 			return mcplib.NewToolResultError("no lead saved yet for this conversation"), nil
 		}
-		return jsonResult(convCtx.Lead)
+		return jsonResult(map[string]any{"leads": leads})
 	}
 	return tool, handler
 }
@@ -259,7 +264,8 @@ func (b *toolBuilder) proposeReply() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 
 func (b *toolBuilder) saveJobLead() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("save_job_lead",
-		mcplib.WithDescription("Save or update the job-opportunity details extracted from this conversation so far. Safe to call repeatedly with partial data as the conversation progresses — later calls upsert, they do not erase earlier answers."),
+		mcplib.WithDescription("Save a job opportunity from this conversation. Without lead_id it creates a new lead: one per distinct role, so two roles in one message are two calls. With lead_id (from get_conversation_context's leads) it updates that lead; empty fields keep their saved values, so partial data is safe."),
+		mcplib.WithNumber("lead_id", mcplib.Description("Id of an existing lead of this conversation to update. Omit to create a new lead.")),
 		mcplib.WithString("company", mcplib.Description("Company name, if known.")),
 		mcplib.WithString("role", mcplib.Description("Role/title, if known.")),
 		mcplib.WithString("recruiter_name", mcplib.Description("Recruiter's name, if known.")),
@@ -273,6 +279,7 @@ func (b *toolBuilder) saveJobLead() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 			args := req.GetArguments()
 			lead := SaveLeadRequest{
 				ConversationID: b.job.ConversationID,
+				LeadID:         int64(intArg(args, "lead_id", 0)),
 				JobID:          b.job.JobID,
 				Attempt:        b.job.Attempt,
 				Company:        stringArg(args, "company", ""),

@@ -26,6 +26,9 @@ type conversationDTO struct {
 	AutonomousTurns int    `json:"autonomous_turns"`
 }
 
+// maxContextLeads caps the leads get_conversation_context returns.
+const maxContextLeads = 10
+
 type leadDTO struct {
 	ID            int64  `json:"id"`
 	Company       string `json:"company,omitempty"`
@@ -97,14 +100,22 @@ func (s *Server) handleConversationContext(w http.ResponseWriter, r *http.Reques
 			Direction: m.Direction, Body: m.Body, CreatedAt: m.CreatedAt.UTC().Format(time.RFC3339),
 		})
 	}
-	var lead *leadDTO
-	if l, err := s.Store.GetJobLeadByConversation(ctx, id.UserID, convID); err == nil {
-		dto := toLeadDTO(l)
-		lead = &dto
-	} else if !errors.Is(err, db.ErrJobLeadNotFound) {
+	// leads lists every lead of the conversation, newest first (#951), so
+	// the agent can pass the right lead_id to save_job_lead. lead is the
+	// newest of them, kept for workers and prompts that predate leads.
+	rows, err := s.Store.ListJobLeadsByConversation(ctx, id.UserID, convID, maxContextLeads)
+	if err != nil {
 		logHandlerErr("get_conversation_context", err)
 		writeJSONError(w, http.StatusInternalServerError, "lookup failed")
 		return
+	}
+	leads := make([]leadDTO, 0, len(rows))
+	for i := range rows {
+		leads = append(leads, toLeadDTO(&rows[i]))
+	}
+	var lead *leadDTO
+	if len(leads) > 0 {
+		lead = &leads[0]
 	}
 
 	s.audit(ctx, id.UserID, "get_conversation_context", "ok", "")
@@ -115,6 +126,7 @@ func (s *Server) handleConversationContext(w http.ResponseWriter, r *http.Reques
 		},
 		"messages": msgDTOs,
 		"lead":     lead,
+		"leads":    leads,
 	})
 }
 
