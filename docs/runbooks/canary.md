@@ -138,6 +138,55 @@ failure pushes `0` and increments
   investigation, set the suspend in mctl-gitops instead. Unsuspend after the
   underlying issue is resolved.
 
+## Login-path probes
+
+With `CANARY_LOGIN_PATH=true` the same run also walks the path a **new**
+connector takes, up to the Telegram boundary (mctl-telegram#959). These
+steps make no Telegram API call and log nobody in. They publish
+`mctl_telegram_canary_login_path_success`, separately from
+`mctl_telegram_canary_success`, and never change the Job's exit code. A
+broken login path therefore alerts on its own metric and does not mark the
+CronJob failed. The gauge is absent, not 0, when the probes are disabled.
+Every step runs even when an earlier one failed, so one run names every
+broken hop.
+
+| Step | Request | Passes only when |
+| --- | --- | --- |
+| `prm_root` | `GET /.well-known/oauth-protected-resource` | 200, `resource` = origin, `authorization_servers` non-empty |
+| `prm_mcp` | `GET /.well-known/oauth-protected-resource/mcp` | 200, `resource` = origin + `/mcp` |
+| `connect_page` | `GET /telegram/connect` | 200 with a link to this issuer's `/oauth/authorize` for `mctl_self_connect` |
+| `authorize_redirect` | `GET /oauth/authorize` for `mctl_self_connect` (not followed) | 302 to `https://oauth.telegram.org` (`CANARY_TELEGRAM_OIDC_HOST`) with `client_id`, `redirect_uri` = origin + `/oauth/telegram/callback`, `response_type=code`, S256 PKCE, `state` |
+| `callback_unknown_state` | `GET /oauth/telegram/callback` with a random state | 200 "link already used" page |
+| `mcp_root` | unauthenticated `POST /` initialize | the app's 401: `Bearer realm="mctl-telegram"` naming the origin's protected-resource document |
+| `edge_connector_ua` | unauthenticated `POST /mcp` as `Claude-User`, `ChatGPT-User`, `Perplexity-User` | the app's 401 for every one |
+
+Likely causes:
+
+- **`edge_connector_ua`**: Cloudflare is blocking a connector User-Agent
+  again (the 2026-10-29 incident, mctl-gitops#2261). The log names which
+  UA and what came back; a 403 with `server: cloudflare` is the edge, not
+  the app. Check the zone's WAF and bot rules for tg.mctl.ai.
+- **`mcp_root`**: MCP is no longer served on the bare origin (the
+  2026-10-30 incident, mctl-telegram#957). Connectors configured with
+  `https://tg.mctl.ai` complete OAuth and then fail with "action discovery
+  failed". A 405 means the `/` routes lost POST.
+- **`authorize_redirect`**: OIDC client config (`TELEGRAM_OIDC_*`) or the
+  self-connect client changed. A 200 instead of the 302 usually means the
+  reviewer chooser (`DEMO_REVIEWER_ENABLED`) is on.
+- **`callback_unknown_state`** returning 5xx: the pending-auth store is
+  failing. Look for `consume pending_auth failed` in the server log.
+- **`prm_*` / `connect_page`**: a routing or `PUBLIC_BASE_URL` change; the
+  error names the value that came back.
+
+Each run leaves one abandoned pending authorization, which expires with the
+code TTL, and logs one `oauth: callback request rejected
+reason=unknown_state`. That log line carries no User-Agent, so the canary
+marks its callback with a `state` starting `canary-`; funnel metrics and
+alerts on callback rejections must count those apart from real users
+(mctl-telegram#960). Every other login-path request sends
+`User-Agent: mctl-telegram-canary/<version>`, except the
+`edge_connector_ua` requests, which must look like the connectors.
+
 ## Escalation
 
 If the alert persists for more than 30 minutes and the failing step
