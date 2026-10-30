@@ -245,9 +245,7 @@ func (p *ClientPool) WithPeerFloodHook(fn func(userID int64)) *ClientPool {
 // the user is active.
 func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx context.Context, c *telegram.Client) error) error {
 	if p.APIID == 0 || p.APIHash == "" {
-		if p.metrics != nil {
-			p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
-		}
+		p.countBorrow(ctx, "error")
 		return fmt.Errorf("telegram api credentials not configured (TG_API_ID / TG_API_HASH)")
 	}
 
@@ -256,22 +254,19 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 			if errors.Is(err, db.ErrSessionExpired) {
 				switch reason {
 				case db.ReasonIdle:
-					if p.metrics != nil {
-						p.metrics.SessionsBorrowTotal.WithLabelValues("expired_idle").Inc()
-					}
+					p.countBorrow(ctx, "expired_idle")
 				case db.ReasonAbsolute:
-					if p.metrics != nil {
-						p.metrics.SessionsBorrowTotal.WithLabelValues("expired_absolute").Inc()
-					}
+					p.countBorrow(ctx, "expired_absolute")
 				default:
-					if p.metrics != nil {
-						p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
-					}
+					p.countBorrow(ctx, "error")
 				}
+			} else if errors.Is(err, db.ErrNoActiveSession) {
+				// No connected account: the user never connected or has
+				// disconnected. Telegram is never called, so this says
+				// nothing about the service (mctl-telegram#974).
+				p.countBorrow(ctx, "no_session")
 			} else {
-				if p.metrics != nil {
-					p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
-				}
+				p.countBorrow(ctx, "error")
 			}
 			return err
 		}
@@ -279,9 +274,7 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 
 	e, err := p.acquire(userID)
 	if err != nil {
-		if p.metrics != nil {
-			p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
-		}
+		p.countBorrow(ctx, "error")
 		return err
 	}
 
@@ -295,9 +288,7 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 				revoked, rErr := p.revokeRejected(ctx, userID, e, e.runErr)
 				if rErr != nil {
 					slog.Error("telegram session rejected at startup, revoke failed", "user_id", userID, "err", rErr)
-					if p.metrics != nil {
-						p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
-					}
+					p.countBorrow(ctx, "error")
 					// Wrap ErrSessionRevokePersistFailed, NOT sentinel: the
 					// revoke never completed, so the caller must not be told
 					// "reconnect and you're set" (sessionErrText's message
@@ -308,26 +299,26 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 				}
 				if !revoked {
 					slog.Warn("telegram session rejected at startup on a row no longer active", "user_id", userID, "err", e.runErr)
-					if p.metrics != nil {
-						p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
-					}
+					p.countBorrow(ctx, "error")
 					return fmt.Errorf("%w: %v", ErrStaleSession, e.runErr)
 				}
 				slog.Warn("telegram session rejected at startup, revoked", "user_id", userID, "err", e.runErr)
-				if p.metrics != nil {
-					p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
-				}
+				p.countBorrow(ctx, "error")
 				return fmt.Errorf("%w: %v", sentinel, e.runErr)
 			}
-			if p.metrics != nil {
-				p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
+			if errors.Is(e.runErr, db.ErrNoActiveSession) {
+				// The row was revoked between CheckSessionValid and the
+				// client's LoadSession (a disconnect racing this call). The
+				// session load fails before any connection to Telegram, so
+				// it is the same user-side state as the pre-flight branch.
+				p.countBorrow(ctx, "no_session")
+			} else {
+				p.countBorrow(ctx, "error")
 			}
 			return fmt.Errorf("telegram client failed: %w", e.runErr)
 		}
 	case <-ctx.Done():
-		if p.metrics != nil {
-			p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
-		}
+		p.countBorrow(ctx, "error")
 		return ctx.Err()
 	}
 
@@ -349,9 +340,7 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 		revoked, rErr := p.revokeRejected(ctx, userID, e, callErr)
 		if rErr != nil {
 			slog.Error("telegram session rejected, revoke failed", "user_id", userID, "err", rErr)
-			if p.metrics != nil {
-				p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
-			}
+			p.countBorrow(ctx, "error")
 			// Wrap ErrSessionRevokePersistFailed, NOT sentinel — see the
 			// matching comment in the startup-path branch above. This still
 			// marks the failure as call-wide (isSystemicPoolErr) — a
@@ -362,27 +351,29 @@ func (p *ClientPool) Borrow(ctx context.Context, userID int64, fn func(ctx conte
 		}
 		if !revoked {
 			slog.Warn("telegram session rejected on a row no longer active", "user_id", userID, "err", callErr)
-			if p.metrics != nil {
-				p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
-			}
+			p.countBorrow(ctx, "error")
 			return fmt.Errorf("%w: %v", ErrStaleSession, callErr)
 		}
 		slog.Warn("telegram session rejected, revoked", "user_id", userID, "err", callErr)
-		if p.metrics != nil {
-			p.metrics.SessionsBorrowTotal.WithLabelValues("error").Inc()
-		}
+		p.countBorrow(ctx, "error")
 		return fmt.Errorf("%w: %v", sentinel, callErr)
 	}
 	if callErr != nil {
-		if p.metrics != nil {
-			p.metrics.SessionsBorrowTotal.WithLabelValues(borrowCallResult(callErr)).Inc()
-		}
+		p.countBorrow(ctx, borrowCallResult(callErr))
 		return callErr
 	}
-	if p.metrics != nil {
-		p.metrics.SessionsBorrowTotal.WithLabelValues("ok").Inc()
-	}
+	p.countBorrow(ctx, "ok")
 	return nil
+}
+
+// countBorrow records one Pool.Borrow() exit in mctl_sessions_borrow_total,
+// with the traffic class ctx carries (metrics.TrafficFrom: user unless the
+// MCP layer marked the call as the monitoring canary's).
+func (p *ClientPool) countBorrow(ctx context.Context, result string) {
+	if p.metrics == nil {
+		return
+	}
+	p.metrics.SessionsBorrowTotal.WithLabelValues(result, metrics.TrafficFrom(ctx)).Inc()
 }
 
 // borrowCallResult picks the mctl_sessions_borrow_total result label for an

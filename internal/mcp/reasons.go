@@ -57,6 +57,11 @@ const (
 	// pool exhaustion, a broken/expired session, or an tgerr.Error the
 	// catalog in errorcatalog.go already classifies.
 	ReasonTelegramError = "telegram_error"
+	// ReasonNoSession is raised when the caller has no connected Telegram
+	// account (db.ErrNoActiveSession: never connected, or disconnected).
+	// Telegram is never called, so it is not a telegram_error
+	// (mctl-telegram#974).
+	ReasonNoSession = "no_session"
 	// ReasonBridgeError is raised when a Local Bridge daemon call
 	// (bridgeResultErr) fails.
 	ReasonBridgeError = "bridge_error"
@@ -183,12 +188,17 @@ func classifyToolResultReason(res *mcplib.CallToolResult) string {
 	case strings.Contains(text, "Telegram setup is incomplete"),
 		strings.Contains(text, "Your Telegram session is no longer valid"),
 		strings.Contains(text, "Your Telegram session has expired"),
-		strings.Contains(text, "No Telegram account is connected"),
 		strings.Contains(text, "server at session capacity"),
 		strings.Contains(text, `"error":"flood_wait"`),
 		strings.Contains(text, `"error":"slowmode_wait"`),
 		strings.Contains(text, `"error":"RISK_GATED"`):
 		return ReasonTelegramError
+	}
+
+	// sessionErrText's db.ErrNoActiveSession message: no account connected,
+	// Telegram never called.
+	if strings.Contains(text, "No Telegram account is connected") {
+		return ReasonNoSession
 	}
 
 	// The PEER_FLOOD write pause is Telegram's verdict, not this server's

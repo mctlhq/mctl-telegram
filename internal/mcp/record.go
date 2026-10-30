@@ -15,6 +15,7 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/edgectx"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
 // callRecord is one Server.audit outcome, either staged for a later flush
@@ -45,7 +46,8 @@ type callRecord struct {
 	// mctl_tool_invocations_total in place of status. It is set only to
 	// statusCallerError, for a failure that proves the service works: Telegram
 	// refused the request as the caller's mistake, or a handler-named
-	// argument/scope refusal (mctl-telegram#757). audit_logs, the slog
+	// argument/scope refusal (mctl-telegram#757); or to statusNoSession, for
+	// a caller with no connected Telegram account (mctl-telegram#974). audit_logs, the slog
 	// "status" attribute and the span keep status ("error"), so user-visible
 	// audit output and the Loki dashboards are unchanged.
 	sloStatus string
@@ -57,12 +59,37 @@ type callRecord struct {
 // excludes it from both sides of its ratio.
 const statusCallerError = "caller_error"
 
+// statusNoSession is the mctl_tool_invocations_total status for a call that
+// failed with db.ErrNoActiveSession: the caller never connected a Telegram
+// account or has disconnected it, so Telegram was never called. Like
+// caller_error it is user-side state, not a service failure, and the
+// tool-availability SLI (status=~"ok|error") leaves it out of both sides.
+// Session-borrow records the same exit as result="no_session".
+//
+// It has a blind spot of the caller_error kind: a server bug that wrongly
+// revokes sessions would move calls here instead of burning the SLI. That
+// is caught where it starts -- mctl_sessions_revoked_total{reason} and the
+// canary, whose probe fails on no_session -- rather than by counting every
+// disconnected user as an outage.
+const statusNoSession = "no_session"
+
 // metricStatus is the status label for mctl_tool_invocations_total.
 func (r callRecord) metricStatus() string {
 	if r.sloStatus != "" {
 		return r.sloStatus
 	}
 	return r.status
+}
+
+// trafficClass is the `traffic` label for a call made as id: canary for one
+// of the monitoring canary's accounts (CANARY_TELEGRAM_IDS), user for anyone
+// else, including a call with no identity. It is derived from server-side
+// config only, never from the request.
+func (s *Server) trafficClass(id *auth.Identity) string {
+	if id != nil && s.CanaryTelegramIDs.Contains(id.TelegramID) {
+		return metrics.TrafficCanary
+	}
+	return metrics.TrafficUser
 }
 
 // feedsSLO reports whether this record may sample the two series the
@@ -223,6 +250,9 @@ func (s *Server) recordToolCall(next mcpserver.ToolHandlerFunc) mcpserver.ToolHa
 		startedAt := time.Now()
 		rec := &callRecorder{}
 		ctx = withRecorder(ctx, rec)
+		// Every Pool.Borrow made while serving this call records its
+		// traffic class from ctx (mctl-telegram#974).
+		ctx = metrics.WithTraffic(ctx, s.trafficClass(auth.From(ctx)))
 
 		var explicitReason string
 		defer func() {

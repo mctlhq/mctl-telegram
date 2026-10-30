@@ -2347,7 +2347,12 @@ func sessionErrText(err error) string {
 // otherwise the generic "<tool>: <err>" form.
 func borrowErrResult(ctx context.Context, tool string, err error) *mcplib.CallToolResult {
 	if friendly := sessionErrText(err); friendly != "" {
-		hintReason(ctx, ReasonTelegramError)
+		if errors.Is(err, db.ErrNoActiveSession) {
+			// No account connected: Telegram was never called.
+			hintReason(ctx, ReasonNoSession)
+		} else {
+			hintReason(ctx, ReasonTelegramError)
+		}
 		return mcplib.NewToolResultError(friendly)
 	}
 	if errors.Is(err, telegram.ErrPoolFull) {
@@ -2691,6 +2696,9 @@ func (s *Server) audit(ctx context.Context, id *auth.Identity, tool, peer string
 	if telegram.IsCallerRefusal(err) {
 		rec.sloStatus = statusCallerError
 	}
+	if errors.Is(err, db.ErrNoActiveSession) {
+		rec.sloStatus = statusNoSession
+	}
 	if !startedAt.IsZero() {
 		rec.elapsed = time.Since(startedAt)
 		rec.hasElapsed = true
@@ -2748,7 +2756,7 @@ func (s *Server) writeAuditRow(ctx context.Context, rec callRecord) {
 	s.Store.LogToolCall(ctx, db.ToolCall{UserID: uid, Tool: rec.tool, PeerRedacted: rec.peer, Status: rec.status, ErrMsg: rec.errMsg, CallPath: rec.callPath, Reason: rec.reason})
 	if s.Metrics != nil && rec.hasElapsed && rec.feedsSLO() {
 		s.Metrics.ToolInvocationDuration.WithLabelValues(rec.tool).Observe(rec.elapsed.Seconds())
-		s.Metrics.ToolInvocationsTotal.WithLabelValues(rec.tool, rec.metricStatus()).Inc()
+		s.Metrics.ToolInvocationsTotal.WithLabelValues(rec.tool, rec.metricStatus(), s.trafficClass(rec.id)).Inc()
 	}
 
 	// Mirror the outcome to slog so tool-call activity and failures are
