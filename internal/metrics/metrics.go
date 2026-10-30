@@ -415,6 +415,7 @@ var (
 	// for issue #960 signals 2-4. They mirror internal/oauth and internal/web,
 	// whose tests hold them to the same values.
 	loginFlowMethods     = []string{"code", "qr"}
+	loginFlowResults     = []string{"ok", "error", "mismatch", "expired", "stalled", "abandoned", "superseded"}
 	loginCallbackRoutes  = []string{"oauth_callback", "connect_done"}
 	loginCallbackReasons = []string{
 		"missing_state", "missing_code", "oidc_error", "unknown_state",
@@ -958,10 +959,16 @@ func New() *Registry {
 		r.ConnectFirstCallErrorsTotal.WithLabelValues(op).Add(0)
 	}
 	// issue #960 signals 2-4: the same reasoning for the login-path counters
-	// an alert reads through increase(). 2 started + 2x7 rejections + 4x5
-	// root requests = 36 series, all compile-time constants.
+	// an alert reads through increase(). 2 started + 2x7 finished + 2x7
+	// rejections + 4x5 root requests = 50 series, all compile-time
+	// constants. The finished side matters as much as the started side: the
+	// runbook's "started minus finished" query is a vector subtraction, which
+	// drops a method that has no finished series instead of reading it as 0.
 	for _, method := range loginFlowMethods {
 		r.LoginFlowStartedTotal.WithLabelValues(method).Add(0)
+		for _, result := range loginFlowResults {
+			r.LoginFlowTotal.WithLabelValues(method, result).Add(0)
+		}
 	}
 	for _, route := range loginCallbackRoutes {
 		for _, reason := range loginCallbackReasons {

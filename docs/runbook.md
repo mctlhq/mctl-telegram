@@ -1275,7 +1275,8 @@ keeping them working.
 counts enable_access login flows launched (`code` for phone, `qr`), next to
 the existing `mctl_login_flow_total{method,result}`. Every launched flow
 finishes exactly once, so the difference over a window is flows a restart cut
-off. `mctl_login_flow_total` now reports a QR login that Telegram confirmed
+off. Both counters are primed at 0 for every method and result, so the
+subtraction below keeps a method that had no finished flow in the window. `mctl_login_flow_total` now reports a QR login that Telegram confirmed
 but whose session connect did not finish in time as `result="stalled"`
 (previously folded into `error`). Together with
 `mctl_login_phone_step_total{result="timeout"}` for the phone side, this

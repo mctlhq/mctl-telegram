@@ -653,6 +653,7 @@ func TestNew_LoginSignalsZeroBaseline(t *testing.T) {
 		want int
 	}{
 		{"mctl_login_flow_started_total", reg.LoginFlowStartedTotal, len(loginFlowMethods)},
+		{"mctl_login_flow_total", reg.LoginFlowTotal, len(loginFlowMethods) * len(loginFlowResults)},
 		{"mctl_login_callback_rejected_total", reg.LoginCallbackRejectedTotal, len(loginCallbackRoutes) * len(loginCallbackReasons)},
 		{"mctl_root_mcp_requests_total", reg.RootMCPRequestsTotal, len(rootMCPMethods) * len(rootMCPUAFamilies)},
 	}

@@ -121,6 +121,13 @@ func TestLoginSignalLabelsArePrimed(t *testing.T) {
 		if !hasSeries(t, reg.LoginFlowStartedTotal, map[string]string{"method": method}) {
 			t.Errorf("mctl_login_flow_started_total{method=%q} is not primed", method)
 		}
+		// Every value loginFlowResult can return, so the runbook's
+		// started-minus-finished subtraction never loses a method.
+		for _, result := range []string{"ok", "error", "mismatch", "expired", "stalled", "abandoned", "superseded"} {
+			if !hasSeries(t, reg.LoginFlowTotal, map[string]string{"method": method, "result": result}) {
+				t.Errorf("mctl_login_flow_total{method=%q,result=%q} is not primed", method, result)
+			}
+		}
 	}
 }
 
