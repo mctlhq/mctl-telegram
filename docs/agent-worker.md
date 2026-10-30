@@ -116,7 +116,7 @@ exactly one file. It carries:
 - `mctl_agent_credential_domain{domain_id=...}` — the info gauge described
   above.
 - `mctl_agent_jobs_total` (6 children) and `mctl_agent_policy_denials_total`
-  (114 children), all at a **constant zero**. These are server-side families:
+  (120 children), all at a **constant zero**. These are server-side families:
   `AgentJobsTotal` is incremented only in `internal/agent/queue`, and
   `CountPolicyDenial` only in `internal/agentapi` and `internal/agent/executor`
   — none of which run in this process. They appear here because `metrics.New()`
@@ -138,7 +138,7 @@ the first — and possibly only — occurrence they exist for (issue #591).
 it is the denominator of `MctlAgentJobCostHigh` and a lazy denominator makes the
 first completed job after a restart read as zero completions.
 `mctl_agent_policy_denials_total` is pre-created too, across its full
-19 x 6 = 114 label space. It was originally left lazy on the grounds that
+20 x 6 = 120 label space. It was originally left lazy on the grounds that
 `MctlAgentPolicyDenialRateHigh`'s `> 4` floor means one first denial cannot
 fire it — true, and beside the point: if the first *five* denials for one
 reason land between two scrapes, the series is first observed at 5, every later
@@ -270,6 +270,32 @@ copy the file to the worker host and record the installed hash:
 ```sh
 shasum -a 256 ~/agent-worker/system-prompt.txt
 ```
+
+## Edited and deleted source messages (#949, #950)
+
+A draft answers the text the sender wrote when the job read it. If the sender
+edits or deletes any message the turn was built from, including a message
+that was coalesced into another job's turn, the draft is withdrawn and never
+sent:
+
+- The listener records deletes as `message_delete` events (no body, no job)
+  and edits as `message_edit` events, as before. On a delete it also denies
+  the turn's open drafts and closes a still-queued job for that message as
+  `ignored`. A redelivered delete changes nothing.
+- `propose_reply` stores a draft for a superseded turn as denied
+  (`source_message_superseded`).
+- The send reservation checks again under the conversation lock, as the
+  last step before the action becomes `executing`. This covers a draft the
+  owner already approved: `/mctl approve` then answers that the sender edited
+  or deleted the message.
+- An action that is already `executing` is sent. The window that remains is
+  the one between that transition and the Telegram RPC.
+
+No separate notification is sent. The denied action keeps the reason in
+`policy_reasons` (`source message edited` or `source message deleted`), and
+`/mctl show` prints the last withdrawn draft's reason and time. An edit still
+enqueues its own job, which answers the current text; carrying the rest of a
+coalesced turn into that job is tracked in #962.
 
 ## Deployment note
 

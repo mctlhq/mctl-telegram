@@ -135,6 +135,8 @@ func TestEvaluate_DenyCodes(t *testing.T) {
 		{"url scheme", func(in *Input) { in.Action.Text = "see https://evil.example/x" }, DenyReplyURL},
 		{"card", func(in *Input) { in.Action.Text = "my card is 4111 1111 1111 1111" }, DenyReplyCredentials},
 		{"never field", func(in *Input) { in.ProtectedField = &ProtectedField{Key: "identity.company", Never: true} }, DenyReplyNeverField},
+		{"source edited", func(in *Input) { in.SourceSuperseded = db.SourceEdited }, DenySourceSuperseded},
+		{"source deleted", func(in *Input) { in.SourceSuperseded = db.SourceDeleted }, DenySourceSuperseded},
 	}
 
 	seen := map[DenyCode]bool{}
@@ -161,7 +163,7 @@ func TestEvaluate_DenyCodes(t *testing.T) {
 		DenyAutopilotPaused, DenyConvTakenOver, DenyConvClosed, DenyConvPaused,
 		DenyConvStateUnknown, DenySenderBlocked, DenyActionTypeUnknown,
 		DenyPeerMismatch, DenyNoDisclosure, DenyEmptyReply, DenyReplyTooLong,
-		DenyReplyURL, DenyReplyCredentials, DenyReplyNeverField,
+		DenyReplyURL, DenyReplyCredentials, DenyReplyNeverField, DenySourceSuperseded,
 	}
 	for _, c := range allCodes {
 		if !seen[c] {
@@ -513,4 +515,24 @@ func repeatRune(n int) string {
 		r[i] = 'a'
 	}
 	return string(r)
+}
+
+// TestEvaluate_SourceSupersededOutranksAutopilotPause: a withdrawn draft must
+// not surface as a pause denial, which would queue an owner alert about a
+// reply that was never going to be sent (#949, #950).
+func TestEvaluate_SourceSupersededOutranksAutopilotPause(t *testing.T) {
+	in := baseInput()
+	in.Profile.AutopilotPaused = true
+	in.SourceSuperseded = db.SourceDeleted
+	got := Evaluate(in)
+	if got.Code != DenySourceSuperseded {
+		t.Fatalf("code = %s, want %s", got.Code, DenySourceSuperseded)
+	}
+	if len(got.Reasons) != 1 || got.Reasons[0] != db.ReasonSourceDeleted {
+		t.Fatalf("reasons = %v, want [%q]", got.Reasons, db.ReasonSourceDeleted)
+	}
+	in.Action.Type = db.ActionTypeOwnerSummary
+	if got := Evaluate(in); got.Decision != Allow {
+		t.Fatalf("owner summary for a superseded job = %s, want allow", got.Decision)
+	}
 }

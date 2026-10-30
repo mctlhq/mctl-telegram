@@ -662,3 +662,77 @@ func TestPersist_OwnerOutgoingEngagementUsesSendTime(t *testing.T) {
 		})
 	}
 }
+
+// TestDispatcher_DeleteMessagesWithdrawsDraft drives an UpdateDeleteMessages
+// through the account's dispatcher: the draft for the deleted message is
+// denied, a queued job for it is closed, and an unknown id is ignored
+// (#949).
+func TestDispatcher_DeleteMessagesWithdrawsDraft(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+	entities := ents(&tg.User{ID: recruit, Username: "alice", FirstName: "Alice"})
+	for _, m := range []*tg.Message{
+		{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "What is the owner's salary?", Date: 1000},
+		{ID: 43, PeerID: &tg.PeerUser{UserID: recruit}, Message: "And the notice period?", Date: 1001},
+	} {
+		if err := l.onMessage(ctx, acct, entities, m, false); err != nil {
+			t.Fatalf("onMessage %d: %v", m.ID, err)
+		}
+	}
+	conv, err := store.GetConversationByPeer(ctx, acct.userID, recruit)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	jobFor := func(msgID int, body string) int64 {
+		var id int64
+		if err := store.DB.QueryRowContext(ctx, `SELECT id FROM agent_jobs WHERE event_id=$1`,
+			eventIDForMessage(acct.tgID, recruit, int64(msgID), 0, body)).Scan(&id); err != nil {
+			t.Fatalf("job for %d: %v", msgID, err)
+		}
+		return id
+	}
+	job42 := jobFor(42, "What is the owner's salary?")
+	job43 := jobFor(43, "And the notice period?")
+	attempt := claimAttemptForJob(t, store, acct.userID, job42)
+	actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		JobID: job42, Attempt: attempt, ConversationID: conv.ID, UserID: acct.userID,
+		ActionType: db.ActionTypeReply, Payload: "I'd rather not share that.",
+		PolicyDecision: db.PolicyAllow, Status: db.ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("seed draft: %v", err)
+	}
+
+	d := l.dispatcherFor(acct)
+	if err := d.Handle(ctx, &tg.Updates{Updates: []tg.UpdateClass{
+		&tg.UpdateDeleteMessages{Messages: []int{42, 4242}},
+	}}); err != nil {
+		t.Fatalf("dispatch delete: %v", err)
+	}
+
+	action, err := store.GetAgentAction(ctx, acct.userID, actionID)
+	if err != nil {
+		t.Fatalf("get action: %v", err)
+	}
+	if action.Status != db.ActionDenied || action.PolicyReasons != db.ReasonSourceDeleted {
+		t.Fatalf("draft = %s %q, want denied %q", action.Status, action.PolicyReasons, db.ReasonSourceDeleted)
+	}
+	if kind, err := store.JobSourceSuperseded(ctx, acct.userID, job42); err != nil || kind != db.SourceDeleted {
+		t.Fatalf("job 42 supersession = %q err=%v, want deleted", kind, err)
+	}
+	var st string
+	if err := store.DB.QueryRowContext(ctx, `SELECT status FROM agent_jobs WHERE id=$1`, job43).Scan(&st); err != nil {
+		t.Fatal(err)
+	}
+	if st != db.JobPending {
+		t.Fatalf("job for the surviving message = %s, want pending", st)
+	}
+	var deletes int
+	if err := store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM incoming_events WHERE user_id=$1 AND kind=$2`,
+		acct.userID, db.EventKindMessageDelete).Scan(&deletes); err != nil {
+		t.Fatal(err)
+	}
+	if deletes != 1 {
+		t.Fatalf("delete events = %d, want 1 (unknown id 4242 ignored)", deletes)
+	}
+}

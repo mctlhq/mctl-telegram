@@ -250,6 +250,15 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A draft for a turn whose source message the sender has since edited
+	// or deleted is stored as denied rather than queued (#949, #950). The
+	// send reservation repeats the check for edits that land later.
+	superseded, err := s.Store.JobSourceSuperseded(ctx, id.UserID, req.JobID)
+	if err != nil {
+		logHandlerErr("propose_reply", err)
+		writeJSONError(w, http.StatusInternalServerError, "lookup failed")
+		return
+	}
 	sends, err := s.recentAgentSends(ctx, id.UserID, req.ConversationID, time.Now().UTC().Add(-time.Minute))
 	if err != nil {
 		logHandlerErr("propose_reply", err)
@@ -273,6 +282,7 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		GlobalKill:       s.globalKill(),
 		Now:              time.Now(),
 		ProtectedField:   protected,
+		SourceSuperseded: superseded,
 	})
 	// Counted from THIS evaluation, deliberately unlike the notification and
 	// response handling below, which read the persisted row so a redelivered

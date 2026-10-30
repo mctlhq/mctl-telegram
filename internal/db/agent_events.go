@@ -20,6 +20,10 @@ const (
 	EventKindMessageEdit    = "message_edit"    // edit of an incoming DM
 	EventKindOwnerOutgoing  = "owner_outgoing"  // owner sent a message in some dialog (takeover signal)
 	EventKindSavedCommand   = "saved_command"   // owner message in Saved Messages that parses as /mctl ...
+	// EventKindMessageDelete records the sender deleting an incoming DM
+	// (#949). It carries no body and enqueues no job; it exists so a draft
+	// built from the deleted text is never sent (JobSourceSuperseded).
+	EventKindMessageDelete = "message_delete"
 )
 
 // IncomingEvent is a durable record of one Telegram update relevant to the

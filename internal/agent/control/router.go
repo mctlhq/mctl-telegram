@@ -318,6 +318,14 @@ func (r *Router) handleShow(ctx context.Context, userID int64, arg string) error
 	} else if !errors.Is(err, db.ErrJobLeadNotFound) {
 		return fmt.Errorf("load lead: %w", err)
 	}
+	// A draft withdrawn because the sender edited or deleted its source
+	// message sends no notification of its own (#949, #950); this line is
+	// where the owner can see why a message got no reply.
+	if reason, at, ok, err := r.Store.LastWithdrawnDraft(ctx, userID, convID); err != nil {
+		return fmt.Errorf("load withdrawn draft: %w", err)
+	} else if ok {
+		fmt.Fprintf(&sb, "\nLast withdrawn draft: %s (%s UTC)\n", reason, at.Format("2006-01-02 15:04"))
+	}
 	return r.Notifier.Reply(ctx, userID, sb.String())
 }
 
@@ -429,6 +437,8 @@ func approverErrText(err error) string {
 		return "this draft expired before it was approved — too old to send now"
 	case errors.Is(err, executor.ErrLostRace):
 		return "already resolved (approved, rejected, or expired) by the time this was processed"
+	case errors.Is(err, executor.ErrSourceSuperseded):
+		return "the sender edited or deleted the message this draft answers, so it was not sent"
 	default:
 		return "an internal error occurred"
 	}

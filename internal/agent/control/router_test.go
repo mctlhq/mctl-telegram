@@ -189,6 +189,20 @@ func TestRouter_Approve_QueuedRetryIsNotReportedAsFailure(t *testing.T) {
 	}
 }
 
+// TestRouter_Approve_SupersededSourceExplainsWhy: approving a draft whose
+// source message the sender edited or deleted tells the owner why nothing
+// went out, not "an internal error occurred" (#949, #950).
+func TestRouter_Approve_SupersededSourceExplainsWhy(t *testing.T) {
+	router, approver, sender, _, uid := newTestRouter(t)
+	approver.approveErr = fmt.Errorf("%w: source message deleted", executor.ErrSourceSuperseded)
+	if err := router.HandleSavedText(context.Background(), SavedMeta{UserID: uid}, "/mctl approve AB12CD"); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(sender.sent) != 1 || !strings.Contains(sender.sent[0], "edited or deleted") {
+		t.Fatalf("replies = %q, want one explaining the edited or deleted source", sender.sent)
+	}
+}
+
 func TestRouter_Reject_DelegatesToExecutorWithCode(t *testing.T) {
 	router, approver, _, _, uid := newTestRouter(t)
 	if err := router.HandleSavedText(context.Background(), SavedMeta{UserID: uid}, "/mctl reject XY9988"); err != nil {
@@ -601,6 +615,51 @@ func TestRouter_Show_ResolvesPeerReference(t *testing.T) {
 	}
 	if len(sender.sent) != 2 || !strings.Contains(sender.sent[1], wantMarker) {
 		t.Fatalf("show @anna_hr reply = %v, want it to contain %q", sender.sent, wantMarker)
+	}
+}
+
+// TestRouter_Show_ReportsWithdrawnDraft: a draft withdrawn because its source
+// message was deleted is visible in /mctl show by reason and time only, never
+// by its text (#949, #950). Other denials do not produce the line.
+func TestRouter_Show_ReportsWithdrawnDraft(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	conv, err := store.EnsureConversation(ctx, uid, 555, "alice", "Alice")
+	if err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	show := func() string {
+		t.Helper()
+		sender.sent = nil
+		if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl show "+strconv.FormatInt(conv.ID, 10)); err != nil {
+			t.Fatalf("handle: %v", err)
+		}
+		if len(sender.sent) != 1 {
+			t.Fatalf("replies = %d, want 1", len(sender.sent))
+		}
+		return sender.sent[0]
+	}
+	seed := func(reason string) {
+		t.Helper()
+		if _, err := store.InsertAgentAction(ctx, db.AgentAction{
+			ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply,
+			Payload: "Thursday works for me.", PolicyDecision: db.PolicyDeny,
+			PolicyReasons: reason, Status: db.ActionDenied,
+		}); err != nil {
+			t.Fatalf("seed action: %v", err)
+		}
+	}
+	seed("reply contains a URL")
+	if got := show(); strings.Contains(got, "withdrawn") {
+		t.Fatalf("show reports an unrelated denial as withdrawn: %q", got)
+	}
+	seed(db.ReasonSourceDeleted)
+	got := show()
+	if !strings.Contains(got, "Last withdrawn draft: "+db.ReasonSourceDeleted) {
+		t.Fatalf("show = %q, want the withdrawn-draft line", got)
+	}
+	if strings.Contains(got, "Thursday") {
+		t.Fatalf("show leaks draft text: %q", got)
 	}
 }
 

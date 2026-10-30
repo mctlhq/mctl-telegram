@@ -53,6 +53,11 @@ var ErrApprovalExpired = errors.New("approval code expired")
 // recovery sweep's grace window.
 var ErrSendQueuedForRetry = errors.New("send failed transiently, queued for automatic retry")
 
+// ErrSourceSuperseded means the draft was denied at send time because a
+// message its turn was built from has since been edited or deleted by the
+// sender (#949, #950). Terminal: the action is denied, nothing was sent.
+var ErrSourceSuperseded = errors.New("source message edited or deleted, draft withdrawn")
+
 // Sender is the narrow interface the executor needs to actually deliver a
 // reply. Implemented in cmd/server/agentwiring.go over telegram.ClientPool +
 // telegram.SendToInputPeerWithRandomID; kept as an interface here so this
@@ -384,6 +389,15 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		time.Now().UTC().Add(-time.Minute),
 		action.PolicyDecision == db.PolicyAllow,
 	)
+	// Source supersession (#949, #950) is checked only here, inside the
+	// reservation under the conversation lock, so there is exactly one
+	// authoritative read and no window between it and the executing
+	// transition.
+	var supersededErr *db.SourceSupersededError
+	if errors.As(err, &supersededErr) {
+		e.m.CountPolicyDenial(string(policy.DenySourceSuperseded), metrics.PolicySurfaceExecutorSend)
+		return e.denySuperseded(ctx, action, supersededErr.Kind)
+	}
 	if errors.Is(err, db.ErrAgentSendBudgetExhausted) {
 		if _, denyErr := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); denyErr != nil {
 			return fmt.Errorf("deny action after atomic budget check: %w", denyErr)
@@ -808,4 +822,15 @@ func stripDisclosure(payload, disclosure string) string {
 		return payload
 	}
 	return strings.TrimRightFunc(strings.TrimSuffix(trimmed, policy.DisclosureSep+want), unicode.IsSpace)
+}
+
+// denySuperseded withdraws an approved draft whose source message was edited
+// or deleted, recording why in policy_reasons. No owner notification is sent:
+// the audit row and /mctl show carry the explanation.
+func (e *Executor) denySuperseded(ctx context.Context, action db.AgentAction, kind string) error {
+	reason := db.SourceSupersededReason(kind)
+	if _, err := e.Store.DenyAgentActionWithReason(ctx, action.UserID, action.ID, db.ActionApproved, reason); err != nil {
+		return fmt.Errorf("deny superseded draft: %w", err)
+	}
+	return fmt.Errorf("%w: %s", ErrSourceSuperseded, reason)
 }
