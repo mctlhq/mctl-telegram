@@ -174,6 +174,12 @@ func TestRunLoginPathGreen(t *testing.T) {
 	if got := testutil.ToFloat64(met.loginPathSuccess); got != 1 {
 		t.Errorf("login_path_success = %v, want 1", got)
 	}
+	// Counted before anything below touches the vector: every step must be
+	// published at 0, not omitted, so per-step alerts over a window see an
+	// explicit pass.
+	if got := testutil.CollectAndCount(met.stepFailures); got != len(loginPathSteps) {
+		t.Errorf("step_failure series = %d, want %d (one per login-path step)", got, len(loginPathSteps))
+	}
 	for _, step := range loginPathSteps {
 		if got := testutil.ToFloat64(met.stepFailures.WithLabelValues(step)); got != 0 {
 			t.Errorf("step %s failure = %v, want 0", step, got)

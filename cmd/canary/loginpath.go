@@ -368,6 +368,15 @@ func runLoginPath(ctx context.Context, cfg *config, met *canaryMetrics) bool {
 		"edge_connector_ua":      func(c context.Context) error { return probeEdgeConnectorUA(c, client, base, cfg.mcpPath) },
 	}
 
+	// Publish every step on every run, 0 when it passed. A step that only
+	// appears when it fails vanishes from the Pushgateway group on the next
+	// green push, so a per-step alert over a window could not tell "passed"
+	// from "missing"; an explicit 0 makes min_over_time a correct test for
+	// "failed on every run in the window".
+	for _, step := range loginPathSteps {
+		met.stepFailures.WithLabelValues(step)
+	}
+
 	ok := true
 	for _, step := range loginPathSteps {
 		stepCtx, cancel := context.WithTimeout(ctx, cfg.timeout)

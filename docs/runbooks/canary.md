@@ -146,7 +146,9 @@ steps make no Telegram API call and log nobody in. They publish
 `mctl_telegram_canary_login_path_success`, separately from
 `mctl_telegram_canary_success`, and never change the Job's exit code. A
 broken login path therefore alerts on its own metric and does not mark the
-CronJob failed. The gauge is absent, not 0, when the probes are disabled.
+CronJob failed. Every login-path step is published on every run,
+`mctl_telegram_canary_step_failure_total{step=...}` = 0 when it passed, so a
+per-step alert can use `min_over_time` over a window. The gauge is absent, not 0, when the probes are disabled.
 Every step runs even when an earlier one failed, so one run names every
 broken hop.
 
