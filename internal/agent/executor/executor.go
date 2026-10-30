@@ -92,6 +92,11 @@ type RestrictedFieldChecker interface {
 	// MatchRestricted reports the strongest restricted field (if any) whose
 	// value appears verbatim in text for this action's tenant.
 	MatchRestricted(ctx context.Context, userID int64, text string) (key string, neverAutoSend, approvalRequired, matched bool, err error)
+	// MatchProtected reports the strongest owner_profile field the agent
+	// may not disclose to this peer right now (#953) whose value appears in
+	// text: never is true for a field the owner marked never, false for an
+	// after_owner_engaged field while engaged is false.
+	MatchProtected(ctx context.Context, userID int64, text string, engaged bool) (key string, never, matched bool, err error)
 }
 
 // Executor holds the dependencies every method needs.
@@ -280,6 +285,13 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 	if err != nil {
 		return fmt.Errorf("%w: load recent sends: %w", ErrSendQueuedForRetry, err)
 	}
+	// The disclosure check runs again here, not only at propose time: the
+	// owner may have marked a field never, or the engagement window may have
+	// lapsed, while the draft waited.
+	protected, err := e.protectedField(ctx, action, *conv)
+	if err != nil {
+		return fmt.Errorf("%w: check protected profile fields: %w", ErrSendQueuedForRetry, err)
+	}
 	result := policy.Evaluate(policy.Input{
 		Profile:      *profile,
 		Conversation: *conv,
@@ -289,6 +301,7 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		RecentAgentSends: recentSends,
 		GlobalKill:       e.GlobalKill(),
 		Now:              time.Now(),
+		ProtectedField:   protected,
 	})
 	if result.Decision == policy.Deny {
 		e.m.CountPolicyDenial(string(result.DenyCode()), metrics.PolicySurfaceExecutorSend)
@@ -573,6 +586,10 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 	if policyConversation.AutonomousTurns > 0 {
 		policyConversation.AutonomousTurns--
 	}
+	protected, err := e.protectedField(ctx, action, *conv)
+	if err != nil {
+		return fmt.Errorf("check protected profile fields during recovery: %w", err)
+	}
 	result := policy.Evaluate(policy.Input{
 		Profile:      *profile,
 		Conversation: policyConversation,
@@ -582,6 +599,7 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 		RecentAgentSends: recentSends,
 		GlobalKill:       e.GlobalKill(),
 		Now:              time.Now(),
+		ProtectedField:   protected,
 	})
 	if result.Decision == policy.Deny {
 		// Deliberately NOT counted for the requireApprovalBypassesUnreviewedAllow
@@ -691,6 +709,26 @@ func (e *Executor) restrictedFieldBlocks(ctx context.Context, action db.AgentAct
 		return fmt.Sprintf("payload echoes approval_required restricted field %q without owner review", key), true, nil
 	}
 	return "", false, nil
+}
+
+// protectedField runs the owner_profile disclosure match (#953) on the
+// action's draft against the conversation's engagement state now. Nil means
+// no match, no Profile, or no owner profile for this tenant.
+func (e *Executor) protectedField(ctx context.Context, action db.AgentAction, conv db.Conversation) (*policy.ProtectedField, error) {
+	if e.Profile == nil || action.ActionType != db.ActionTypeReply {
+		return nil, nil
+	}
+	key, never, matched, err := e.Profile.MatchProtected(ctx, action.UserID, action.Payload, conv.OwnerEngaged(time.Now()))
+	if errors.Is(err, db.ErrAgentOwnerProfileNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load tenant owner profile: %w", err)
+	}
+	if !matched {
+		return nil, nil
+	}
+	return &policy.ProtectedField{Key: key, Never: never}, nil
 }
 
 // defaultRandomID draws a fresh Telegram RPC random_id from crypto/rand.

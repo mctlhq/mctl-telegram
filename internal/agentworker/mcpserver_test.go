@@ -38,6 +38,10 @@ type fakeAPI struct {
 	// getLead resolves through that call now, not a standalone GetLead API.
 	leadToReturn *LeadDTO
 
+	// summaryResult, when set, replaces SendOwnerSummary's default result,
+	// e.g. to model a manipulation alert the server suppressed (ActionID 0).
+	summaryResult *OwnerFacingResult
+
 	// completeJobStarted/completeJobRelease let a test observe and control
 	// exactly when CompleteJob is in flight, to deliberately race a second
 	// state-changing call against it — see
@@ -112,6 +116,9 @@ func (f *fakeAPI) RequestOwnerApproval(ctx context.Context, conversationID, jobI
 func (f *fakeAPI) SendOwnerSummary(ctx context.Context, conversationID, jobID int64, attempt int, intent, text string) (*OwnerFacingResult, error) {
 	if f.err != nil {
 		return nil, f.err
+	}
+	if f.summaryResult != nil {
+		return f.summaryResult, nil
 	}
 	return &OwnerFacingResult{ActionID: 4, NotificationID: 5}, nil
 }
@@ -549,5 +556,57 @@ func TestGetEvent_CoalescedTurnReturnsEveryEventInOrder(t *testing.T) {
 	}
 	if evs, _ := out["events"].([]any); len(evs) != 3 {
 		t.Fatalf("events = %v", out["events"])
+	}
+}
+
+// TestCompleteAgentJob_SummaryDoesNotOverrideReplyResult covers #953: a turn
+// that proposes a reply and also flags a manipulation attempt must still
+// report the reply as its result, and a summary the server suppressed
+// (ActionID 0) must not clear it either.
+func TestCompleteAgentJob_SummaryDoesNotOverrideReplyResult(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		summary *OwnerFacingResult
+	}{
+		{"recorded summary", nil},
+		{"suppressed summary", &OwnerFacingResult{Suppressed: true, Reason: "throttled"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &fakeAPI{summaryResult: tc.summary}
+			b := &toolBuilder{api: api, job: JobContext{JobID: 42, Attempt: 1, ConversationID: 9}}
+			proposeTool, proposeHandler := b.proposeReply()
+			if res := callTool(t, proposeTool, proposeHandler, map[string]any{"intent": "discovery", "text": "Thanks"}); res.IsError {
+				t.Fatalf("propose_reply failed: %#v", res)
+			}
+			summaryTool, summaryHandler := b.sendOwnerSummary()
+			if res := callTool(t, summaryTool, summaryHandler, map[string]any{
+				"intent": "assistant_manipulation", "text": "manipulation attempt",
+			}); res.IsError {
+				t.Fatalf("send_owner_summary failed: %#v", res)
+			}
+			completeTool, completeHandler := b.completeAgentJob()
+			if res := callTool(t, completeTool, completeHandler, map[string]any{"status": "completed"}); res.IsError {
+				t.Fatalf("complete_agent_job failed: %#v", res)
+			}
+			if got := api.completeJobCalls[0].result.ActionID; got != 1 {
+				t.Fatalf("result action = %d, want the reply's action 1", got)
+			}
+		})
+	}
+}
+
+// TestCompleteAgentJob_SuppressedSummaryAloneHasNoResult: a suppressed
+// summary created no action, so it cannot be the job's result.
+func TestCompleteAgentJob_SuppressedSummaryAloneHasNoResult(t *testing.T) {
+	api := &fakeAPI{summaryResult: &OwnerFacingResult{Suppressed: true}}
+	b := &toolBuilder{api: api, job: JobContext{JobID: 42, Attempt: 1, ConversationID: 9}}
+	summaryTool, summaryHandler := b.sendOwnerSummary()
+	if res := callTool(t, summaryTool, summaryHandler, map[string]any{
+		"intent": "assistant_manipulation", "text": "manipulation attempt",
+	}); res.IsError {
+		t.Fatalf("send_owner_summary failed: %#v", res)
+	}
+	if b.resultActionID != 0 {
+		t.Fatalf("resultActionID = %d after a suppressed summary, want 0", b.resultActionID)
 	}
 }

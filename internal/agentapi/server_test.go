@@ -1145,7 +1145,11 @@ type fakeOwnerProfileProvider struct {
 	err       error
 }
 
-func (f *fakeOwnerProfileProvider) PublicProfile(_ context.Context, userID, _ int64) (map[string]any, error) {
+func (f *fakeOwnerProfileProvider) MatchProtected(context.Context, int64, string, bool) (string, bool, bool, error) {
+	return "", false, false, f.err
+}
+
+func (f *fakeOwnerProfileProvider) PublicProfile(_ context.Context, userID int64, _ bool) (map[string]any, error) {
 	f.gotUserID = userID
 	if f.err != nil {
 		return nil, f.err

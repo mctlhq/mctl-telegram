@@ -626,6 +626,12 @@ func (f *fakeRestrictedChecker) MatchRestricted(_ context.Context, userID int64,
 	return f.key, f.neverAutoSend, f.approvalRequired, f.matched, nil
 }
 
+// MatchProtected never matches: these tests exercise the restricted section
+// only. Disclosure-level tests use the real profile.TenantProvider.
+func (f *fakeRestrictedChecker) MatchProtected(context.Context, int64, string, bool) (string, bool, bool, error) {
+	return "", false, false, nil
+}
+
 // TestExecutor_Approve_RecordsConversationHistory guards against the P1
 // found in review: a successful send never called InsertConversationMessage,
 // so recentAgentSends (the rate-limit input in internal/agentapi) always saw

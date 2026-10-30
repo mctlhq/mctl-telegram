@@ -6,7 +6,9 @@
 // The restricted section (current compensation, references, anything the
 // owner marked approval_required or never_auto_send) is parsed so the
 // control/executor layer can consult it, but PublicProfile — the only
-// method the agent-facing HTTP API calls — never returns it. This is the
+// method the agent-facing HTTP API calls — never returns it. The other
+// sections pass through a per-field disclosure filter (disclosure.go,
+// #953) that depends on whether the owner has engaged with the peer. This is the
 // enforcement point for "restricted fields are NEVER returned on the agent
 // surface": the omission happens here, once, rather than relying on every
 // caller to remember to filter.
@@ -46,6 +48,10 @@ type Data struct {
 	Skills        []string                   `json:"skills,omitempty" yaml:"skills"`
 	Preferences   map[string]any             `json:"preferences,omitempty" yaml:"preferences"`
 	Restricted    map[string]RestrictedField `json:"restricted,omitempty" yaml:"restricted"`
+	// Disclosure maps a field path (identity.<k>, public_profile.<k>,
+	// preferences.<k> or skills) to who may see it (#953). Fields without an
+	// entry get defaultLevel; see disclosure.go.
+	Disclosure map[string]DisclosureLevel `json:"disclosure,omitempty" yaml:"disclosure"`
 }
 
 // Provider reads the legacy YAML format. Runtime callers use TenantProvider;
@@ -112,6 +118,9 @@ func ParseYAML(raw []byte) (Data, error) {
 		return Data{}, fmt.Errorf("profile must contain exactly one YAML document")
 	}
 	normalizeData(&d)
+	if err := validateDisclosure(d); err != nil {
+		return Data{}, err
+	}
 	return d, nil
 }
 
@@ -146,11 +155,14 @@ func ParseJSON(raw []byte) (Data, error) {
 		return Data{}, err
 	}
 	normalizeData(&d)
+	if err := validateDisclosure(d); err != nil {
+		return Data{}, err
+	}
 	return d, nil
 }
 
 var (
-	dataKeys            = []string{"identity", "public_profile", "skills", "preferences", "restricted"}
+	dataKeys            = []string{"identity", "public_profile", "skills", "preferences", "restricted", "disclosure"}
 	restrictedFieldKeys = []string{"value", "approval_required", "never_auto_send"}
 )
 
@@ -327,33 +339,12 @@ func matchRestricted(data Data, text string) (key string, neverAutoSend, approva
 	return key, neverAutoSend, approvalRequired, matched
 }
 
-// PublicProfile implements agentapi.OwnerProfileProvider. peerTGID is
-// accepted but currently unused — kept in the interface (see #296's
-// OwnerProfileProvider doc comment) for a future per-recruiter variant
-// (e.g. hiding preferences from a recruiter at a company on a do-not-engage
-// list) without another interface break.
-func (p *Provider) PublicProfile(peerTGID int64) (map[string]any, error) {
+// PublicProfile returns the fields the agent may see in a conversation whose
+// owner-engagement state is engaged; see agentProfile.
+func (p *Provider) PublicProfile(engaged bool) (map[string]any, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return publicProfile(p.data), nil
-}
-
-func publicProfile(data Data) map[string]any {
-	out := make(map[string]any, 4)
-	if len(data.Identity) > 0 {
-		out["identity"] = data.Identity
-	}
-	if len(data.PublicProfile) > 0 {
-		out["public_profile"] = data.PublicProfile
-	}
-	if len(data.Skills) > 0 {
-		out["skills"] = data.Skills
-	}
-	if len(data.Preferences) > 0 {
-		out["preferences"] = data.Preferences
-	}
-	// data.Restricted is deliberately never added to out.
-	return out
+	return agentProfile(p.data, engaged), nil
 }
 
 // RestrictedField returns the named restricted-section entry, for the
@@ -404,13 +395,30 @@ func (p *TenantProvider) load(ctx context.Context, userID int64) (Data, error) {
 	return d, nil
 }
 
-// PublicProfile returns only safe fields for the authenticated tenant.
-func (p *TenantProvider) PublicProfile(ctx context.Context, userID, peerTGID int64) (map[string]any, error) {
+// PublicProfile returns the fields the authenticated tenant's agent may see
+// in a conversation whose owner-engagement state is engaged: never fields
+// and the restricted section are always stripped, after_owner_engaged
+// fields unless engaged.
+func (p *TenantProvider) PublicProfile(ctx context.Context, userID int64, engaged bool) (map[string]any, error) {
 	d, err := p.load(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-	return publicProfile(d), nil
+	return agentProfile(d, engaged), nil
+}
+
+// MatchProtected reports the strongest disclosure-protected field whose
+// value appears in text for the tenant's profile: a never field (never is
+// true), or an after_owner_engaged field when engaged is false. Only the
+// field path is returned, never the value. See matchProtected for what
+// literal matching does not catch.
+func (p *TenantProvider) MatchProtected(ctx context.Context, userID int64, text string, engaged bool) (key string, never, matched bool, err error) {
+	d, err := p.load(ctx, userID)
+	if err != nil {
+		return "", false, false, err
+	}
+	key, level, matched := matchProtected(d, text, engaged)
+	return key, level == DisclosureNever, matched, nil
 }
 
 // MatchRestricted evaluates restricted values for the action's tenant. A

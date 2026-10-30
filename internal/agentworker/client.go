@@ -355,6 +355,10 @@ type OwnerFacingResult struct {
 	NotificationID int64    `json:"notification_id,omitempty"`
 	Decision       string   `json:"decision,omitempty"`
 	Reasons        []string `json:"reasons,omitempty"`
+	// Suppressed is set when the server dropped a repeated
+	// assistant_manipulation alert (#953); ActionID is then 0.
+	Suppressed bool   `json:"suppressed,omitempty"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 func (c *Client) ownerFacing(ctx context.Context, path string, conversationID, jobID int64, attempt int, intent, text string) (*OwnerFacingResult, error) {

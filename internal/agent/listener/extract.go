@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gotd/td/tg"
 
@@ -34,6 +35,11 @@ type Extracted struct {
 	// working InputPeerUser later: messages.* RPCs reject a zero-access-hash
 	// peer with PEER_ID_INVALID.
 	SenderAccessHash int64
+	// SentAt is when Telegram says the owner sent this message (msg.Date),
+	// set only for EventKindOwnerOutgoing. An edit keeps the original send
+	// time, so editing an old message is not fresh engagement (#953). Zero
+	// when Telegram gave no date.
+	SentAt time.Time
 }
 
 // eventIDForMessage builds the deterministic dedup key for a message-bearing
@@ -102,7 +108,11 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 			MessageID:  int64(msg.ID),
 			Body:       msg.Message,
 		}
-		return Extracted{Event: ev}, true
+		var sentAt time.Time
+		if msg.Date > 0 {
+			sentAt = time.Unix(int64(msg.Date), 0).UTC()
+		}
+		return Extracted{Event: ev, SentAt: sentAt}, true
 	}
 
 	if text == "" {

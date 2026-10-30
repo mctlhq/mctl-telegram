@@ -78,7 +78,7 @@ transport is in use.
 | `AGENT_API_TOKEN` | yes | Long-lived worker bearer token, minted via `POST /api/agent/token` (`aud=agent`, admin-scoped — see `internal/agentapi/tokenhandler.go`). Never logged; passed to the spawned `--mcp-serve` subprocess's env, never to the model's own process env. |
 | `AGENT_CREDENTIAL_DOMAIN_ID` | yes | Non-secret identifier for the credential/quota pool this worker runs against — e.g. a Vault path or account label, **never the credential itself**. Must match `[A-Za-z0-9._:/-]{1,128}`; the poll loop (`run()`) refuses to start without it, and exported as the `mctl_agent_credential_domain{domain_id=...}` info gauge so a claim of quota isolation between deployments has a machine-checkable counterpart. Not required by `--mcp-serve` mode. See the rollout-ordering note below before upgrading an existing deployment. |
 | `AGENT_CLAUDE_BIN` | no | Override the `claude` binary path/name (default: `claude` on `$PATH`). |
-| `AGENT_SYSTEM_PROMPT` | no | Extra system prompt for the communication-agent persona/policy. |
+| `AGENT_SYSTEM_PROMPT` | no | Extra system prompt for the communication-agent persona/policy. Use `deploy/agent-worker/system-prompt.txt`; see [Owner-profile disclosure](#owner-profile-disclosure-953). |
 | `AGENT_MAX_BUDGET_USD` | no | Per-job `--max-budget-usd` cap. |
 | `AGENT_WORKER_CONCURRENCY` | no | Jobs one worker process runs at once, an integer in 1..10 (default `1`; anything else refuses to start). The worker claims only as many jobs as it has free slots, and never runs two jobs of one conversation together. Each slot is one `claude` process, so memory, CPU and spend scale with it. |
 | `AGENT_HEALTH_ADDR` | no | Bind address for the `/livez`/`/healthz`/`/readyz`/`/metrics` probe server (default: `:8080`, all interfaces). |
@@ -116,7 +116,7 @@ exactly one file. It carries:
 - `mctl_agent_credential_domain{domain_id=...}` — the info gauge described
   above.
 - `mctl_agent_jobs_total` (6 children) and `mctl_agent_policy_denials_total`
-  (108 children), all at a **constant zero**. These are server-side families:
+  (114 children), all at a **constant zero**. These are server-side families:
   `AgentJobsTotal` is incremented only in `internal/agent/queue`, and
   `CountPolicyDenial` only in `internal/agentapi` and `internal/agent/executor`
   — none of which run in this process. They appear here because `metrics.New()`
@@ -138,7 +138,7 @@ the first — and possibly only — occurrence they exist for (issue #591).
 it is the denominator of `MctlAgentJobCostHigh` and a lazy denominator makes the
 first completed job after a restart read as zero completions.
 `mctl_agent_policy_denials_total` is pre-created too, across its full
-18 x 6 = 108 label space. It was originally left lazy on the grounds that
+19 x 6 = 114 label space. It was originally left lazy on the grounds that
 `MctlAgentPolicyDenialRateHigh`'s `> 4` floor means one first denial cannot
 fire it — true, and beside the point: if the first *five* denials for one
 reason land between two scrapes, the series is first observed at 5, every later
@@ -208,6 +208,68 @@ trailing copy of the stored line that the model imitated from earlier replies is
 dropped, and the length budget no longer counts it. A blank `disclosure_text`
 without the opt-out is still denied, so a misconfigured profile never sends
 replies without the line.
+
+## Owner-profile disclosure (#953)
+
+The owner profile's `identity`, `public_profile`, `preferences` and `skills`
+fields each have a disclosure level. The optional `disclosure` map in the
+profile sets it per field, keyed `skills` or `<section>.<field>`:
+
+| Level | Agent context | Draft that echoes the value |
+|---|---|---|
+| `public` | always | allowed |
+| `after_owner_engaged` | only while the owner is engaged with this peer | `require_approval` before engagement |
+| `never` | never | denied (`reply_contains_never_field`), even when approved |
+
+Unmarked fields default to `public` for `identity.name`, `identity.role` and
+`skills`, and to `after_owner_engaged` for everything else. `never` is only
+ever set by the owner. `restricted` keeps its own rules and is never shown.
+A disclosure entry with an unknown level, an unknown section or a field the
+profile does not have fails the profile write, so a typo cannot silently
+leave a field at its default.
+
+**Engagement.** `conversations.owner_engaged_at` is stamped by two events
+only: the owner's own outgoing message in the chat, and a reply that the
+owner approved (`require_approval`) and that the executor actually sent. An
+approved but unsent reply, a failed send, an auto-approved send and
+`/mctl continue` do not engage. An owner message counts from when it was
+sent (its Telegram date; an edit keeps the original date), so replaying an
+old message after downtime cannot open a fresh window, and a message with
+no date engages nothing. The window is 30 days from the last event
+and every new event extends it; it is stored durably, so restarts do not
+reset it. An account-scoped token always gets the cold view of the profile;
+only a job-bound token gets the view for its conversation.
+
+**Output matching is defense in depth, not DLP.** The primary boundary is
+the context filter: protected values never reach the model. Behind it,
+`propose_reply` and the executor (again, right before send) look for a
+protected value, or one comma/semicolon-separated part of it, of at least
+four characters, case-insensitively and on word boundaries. Paraphrases,
+translations and summaries of long free text are not caught. The match is
+reported by field key only, never by value. Because preferences often hold
+ordinary words (`hybrid`, `remote`), a cold sender's reply that uses one
+goes to approval: this fails safe, at the cost of extra approvals. A
+possible follow-up is to ignore a value the peer itself already wrote.
+
+**Manipulation alerts.** A `send_owner_summary` with intent
+`assistant_manipulation` has its text replaced by the fixed notice "A
+message contained instructions directed at the assistant. They were not
+followed.", followed only by the conversation id, the peer's @username and
+`/mctl show N` (never the display name, which the sender controls). At most
+one is sent per conversation per 6 hours; extras are not stored as actions,
+are audited as `suppressed`, and the tool result says `suppressed: true`.
+`security_alert` summaries are never throttled.
+
+**Prompt.** `AGENT_SYSTEM_PROMPT` must be the contents of
+`deploy/agent-worker/system-prompt.txt`, the canonical guarded prompt that
+tells the model how to use the profile boundary and the alert intents.
+`TestSystemPrompts_CarryDisclosureContract` keeps the required clauses in
+both that file and the C1 eval prompt. When rolling out a prompt change,
+copy the file to the worker host and record the installed hash:
+
+```sh
+shasum -a 256 ~/agent-worker/system-prompt.txt
+```
 
 ## Deployment note
 
