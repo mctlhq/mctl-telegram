@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.107.0](https://github.com/mctlhq/mctl-telegram/compare/0.106.0...0.107.0) (2026-10-30)
+
+
+### Features
+
+* **canary:** probe the connector login path up to Telegram ([2ed91e9](https://github.com/mctlhq/mctl-telegram/commit/2ed91e9770dad74ef0806e95268782980ed3a8e0))
+* **oauth:** count grants that never reach a successful MCP call ([4aab5e9](https://github.com/mctlhq/mctl-telegram/commit/4aab5e9362bc8cd11e383ed52ff520f18c0de054))
+* **oauth:** count grants that never reach a successful MCP call ([740bb1f](https://github.com/mctlhq/mctl-telegram/commit/740bb1f1bc0c858ce8b1e123d6684144603a145f)), closes [#960](https://github.com/mctlhq/mctl-telegram/issues/960)
+
+
+### Bug Fixes
+
+* **canary:** give each connector UA its own timeout ([220ae60](https://github.com/mctlhq/mctl-telegram/commit/220ae60d8a8af48433b83a9e84aa0492965644c5))
+* **canary:** publish every login-path step on every run ([32362dc](https://github.com/mctlhq/mctl-telegram/commit/32362dc1de71c570f9f36ee8e82ba68efeac3cfe))
+* **connectfunnel:** bound store calls and count only good tool results ([0195cff](https://github.com/mctlhq/mctl-telegram/commit/0195cff82d158edfaa42e662ac3611dbe7ca971f)), closes [#960](https://github.com/mctlhq/mctl-telegram/issues/960)
+
 ## [0.106.0](https://github.com/mctlhq/mctl-telegram/compare/0.105.0...0.106.0) (2026-10-30)
 
 
