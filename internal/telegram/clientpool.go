@@ -222,6 +222,7 @@ func (p *ClientPool) clientOptions(store *SessionStore) telegram.Options {
 	if p.globalMW != nil {
 		opts.Middlewares = []telegram.Middleware{p.globalMW}
 	}
+	opts.Middlewares = append(opts.Middlewares, floodWaitObserver(store.UserID, p.metrics))
 	return opts
 }
 
