@@ -320,7 +320,12 @@ one chat, and a recruiter comes back weeks later with a new client.
   index; remove the extra leads first.
 - Rollout order: server first, then the worker. The worker sends `lead_id`
   only when it is set, so a new worker that only creates leads still works
-  against an old server, but an update would be rejected there.
+  against an old server, but an update would be rejected there. Keep the
+  gap short: between the two, an old worker never sends `lead_id`, so each
+  of its saves creates a lead instead of merging. After the worker is out,
+  list the conversations that got more than one lead in that window
+  (`SELECT conversation_id, count(*) FROM job_leads WHERE created_at >= <server rollout>
+  GROUP BY 1 HAVING count(*) > 1`) and merge or delete the duplicates.
 
 ## Attachments in inbound messages (#948)
 

@@ -1106,12 +1106,16 @@ func (s *Store) insertJobLead(ctx context.Context, l JobLead) (int64, error) {
 		err error
 	)
 	if l.JobID != 0 {
+		lock, lockErr := s.leadJobLock(ctx)
+		if lockErr != nil {
+			return 0, lockErr
+		}
 		err = s.DB.QueryRowContext(ctx,
 			insertLead+`
 			 SELECT $1,$2,j.id,$4,$5,$6,$7,$8,COALESCE($9,'new'),$10,$11
 			   FROM agent_jobs j
 			  WHERE j.id=$3 AND j.user_id=$1 AND j.conversation_id=$2
-			    AND j.status=$12 AND j.attempts=$13`+s.forShare(ctx)+`
+			    AND j.status=$12 AND j.attempts=$13`+lock+`
 			 RETURNING id`,
 			append(args, JobProcessing, l.Attempt)...,
 		).Scan(&id)
@@ -1131,6 +1135,15 @@ func (s *Store) insertJobLead(ctx context.Context, l JobLead) (int64, error) {
 }
 
 func (s *Store) updateJobLead(ctx context.Context, l JobLead) (int64, error) {
+	// Resolve the lock before BeginTx: an uncached dialect probe goes through
+	// s.DB, and on SQLite (one connection) it would wait on this transaction.
+	var lock string
+	if l.JobID != 0 {
+		var err error
+		if lock, err = s.leadJobLock(ctx); err != nil {
+			return 0, err
+		}
+	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin lead update: %w", err)
@@ -1141,7 +1154,7 @@ func (s *Store) updateJobLead(ctx context.Context, l JobLead) (int64, error) {
 		err := tx.QueryRowContext(ctx,
 			`SELECT 1 FROM agent_jobs
 			  WHERE id=$1 AND user_id=$2 AND conversation_id=$3
-			    AND status=$4 AND attempts=$5`+s.forShare(ctx),
+			    AND status=$4 AND attempts=$5`+lock,
 			l.JobID, l.UserID, l.ConversationID, JobProcessing, l.Attempt,
 		).Scan(&one)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1181,14 +1194,19 @@ func (s *Store) updateJobLead(ctx context.Context, l JobLead) (int64, error) {
 	return id, nil
 }
 
-// forShare is the row lock a lead save takes on its job on Postgres, so the
-// job cannot finish between the check and the write. SQLite serializes
-// writers and has no FOR SHARE.
-func (s *Store) forShare(ctx context.Context) string {
-	if s.isPostgres(ctx) {
-		return " FOR SHARE"
+// leadJobLock is the row lock a lead save takes on its job on Postgres, so
+// the job cannot finish between the check and the write. SQLite serializes
+// writers and has no FOR SHARE. An inconclusive dialect probe is an error,
+// not "SQLite": that would silently drop the lock on a live Postgres.
+func (s *Store) leadJobLock(ctx context.Context) (string, error) {
+	pg, err := s.postgresDialect(ctx)
+	if err != nil {
+		return "", fmt.Errorf("lead job lock: %w", err)
 	}
-	return ""
+	if pg {
+		return " FOR SHARE", nil
+	}
+	return "", nil
 }
 
 // GetJobLead returns a lead by id, scoped to the owning user.

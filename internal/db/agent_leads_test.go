@@ -248,3 +248,75 @@ func TestJobLeads_MigrationDropsLegacyUniqueIndex(t *testing.T) {
 		}
 	}
 }
+
+// TestJobLeads_JobBoundUpdateResolvesDialectOutsideTx: SQLite runs on one
+// connection, so a dialect probe issued while the update's transaction holds
+// that connection waits forever. With the dialect not yet cached (a fresh
+// process), a job-bound update must still complete.
+func TestJobLeads_JobBoundUpdateResolvesDialectOutsideTx(t *testing.T) {
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	conv, jobID, attempt, leadID := seedJobBoundLead(t, s, uid)
+
+	s.pgMu.Lock()
+	s.pgResolved = false
+	s.pgMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := s.UpsertJobLead(ctx, JobLead{ID: leadID, UserID: uid, ConversationID: conv, JobID: jobID, Attempt: attempt, Company: "Halcyon Talent"})
+	if err != nil || got != leadID {
+		t.Fatalf("job-bound update with an uncached dialect: id=%d err=%v", got, err)
+	}
+}
+
+// TestJobLeads_InconclusiveDialectFailsJobBoundSave: whether to take FOR
+// SHARE depends on the dialect, so an inconclusive probe must fail the save
+// instead of writing without the lock.
+func TestJobLeads_InconclusiveDialectFailsJobBoundSave(t *testing.T) {
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	conv, jobID, attempt, leadID := seedJobBoundLead(t, s, uid)
+
+	s.pgMu.Lock()
+	s.pgResolved = false
+	s.pgMu.Unlock()
+	s.probeFail = func() error { return errors.New("driver: bad connection") }
+	defer func() { s.probeFail = nil }()
+
+	ctx := context.Background()
+	if _, err := s.UpsertJobLead(ctx, JobLead{ID: leadID, UserID: uid, ConversationID: conv, JobID: jobID, Attempt: attempt, Company: "Stale"}); err == nil {
+		t.Fatal("job-bound update ran without knowing whether to lock")
+	}
+	if _, err := s.UpsertJobLead(ctx, JobLead{UserID: uid, ConversationID: conv, JobID: jobID, Attempt: attempt, Role: "SRE"}); err == nil {
+		t.Fatal("job-bound insert ran without knowing whether to lock")
+	}
+	if l, err := s.GetJobLead(ctx, uid, leadID); err != nil || l.Company == "Stale" {
+		t.Fatalf("lead after refused update: %+v err=%v", l, err)
+	}
+}
+
+// seedJobBoundLead claims a job in a fresh conversation and saves one lead
+// under it.
+func seedJobBoundLead(t *testing.T, s *Store, uid int64) (convID, jobID int64, attempt int, leadID int64) {
+	t.Helper()
+	ctx := context.Background()
+	conv, err := s.EnsureConversation(ctx, uid, 555, "alice", "Alice")
+	if err != nil {
+		t.Fatalf("conversation: %v", err)
+	}
+	jobID = seedJob(t, s, uid, fmt.Sprintf("evt:v1:1:555:lock-%d", time.Now().UnixNano()))
+	if _, err := s.DB.ExecContext(ctx, `UPDATE agent_jobs SET conversation_id=$1 WHERE id=$2`, conv.ID, jobID); err != nil {
+		t.Fatalf("bind job: %v", err)
+	}
+	claimed, err := s.ClaimAgentJobs(ctx, "worker", uid, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: %+v err=%v", claimed, err)
+	}
+	attempt = claimed[0].Attempts
+	leadID, err = s.UpsertJobLead(ctx, JobLead{UserID: uid, ConversationID: conv.ID, JobID: jobID, Attempt: attempt, Role: "Senior Go Engineer"})
+	if err != nil {
+		t.Fatalf("save lead: %v", err)
+	}
+	return conv.ID, jobID, attempt, leadID
+}
