@@ -397,7 +397,7 @@ func TestNew_AgentCounterZeroBaseline(t *testing.T) {
 	}
 }
 
-// TestNew_PolicyDenialsZeroBaseline pins the full 114-series baseline for
+// TestNew_PolicyDenialsZeroBaseline pins the full 120-series baseline for
 // AgentPolicyDenialsTotal. This counter was originally left lazy because
 // MctlAgentPolicyDenialRateHigh carries a "> 4" floor that a single first
 // denial could not clear. That is true and beside the point: if the first FIVE
@@ -424,8 +424,8 @@ func TestNew_PolicyDenialsZeroBaseline(t *testing.T) {
 	}
 
 	want := len(policyDenyReasons) * len(policySurfaces)
-	if want != 114 {
-		t.Fatalf("label space is %d x %d = %d, want the documented 114 — update the bound in the struct comment and the rule comments if this is deliberate",
+	if want != 120 {
+		t.Fatalf("label space is %d x %d = %d, want the documented 120 — update the bound in the struct comment and the rule comments if this is deliberate",
 			len(policyDenyReasons), len(policySurfaces), want)
 	}
 	if got := len(mf.GetMetric()); got != want {

@@ -588,6 +588,21 @@ func (s *Store) ReserveAgentActionSend(
 		}
 	}
 
+	// Checked under the conversation lock, as the last step before the row
+	// becomes executing: a source message edited or deleted at any point up
+	// to here withdraws the draft, including one the owner approved (#949,
+	// #950). Once the row is executing the send goes out; the window that
+	// remains is the one between this commit and the Telegram RPC.
+	if action.JobID != 0 {
+		kind, err := jobSourceSuperseded(ctx, tx, action.UserID, action.JobID)
+		if err != nil {
+			return false, err
+		}
+		if kind != "" {
+			return false, &SourceSupersededError{Kind: kind}
+		}
+	}
+
 	now := time.Now().UTC()
 	res, err := tx.ExecContext(ctx,
 		`UPDATE agent_actions
@@ -893,7 +908,9 @@ func (s *Store) DenyPendingActionsForConversation(ctx context.Context, userID, c
 // DenyPendingActionsForSourceMessage invalidates only drafts derived from a
 // particular Telegram message (including drafts produced from earlier edits
 // of that same message id). Other messages in the conversation may have
-// independent, still-current drafts and must not be cancelled.
+// independent, still-current drafts and must not be cancelled. A message
+// coalesced into another job's turn denies the head job's drafts, since
+// actions are written under the head (#950).
 func (s *Store) DenyPendingActionsForSourceMessage(ctx context.Context, userID, conversationID, sourceMessageID int64, reason string) (int64, error) {
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE agent_actions
@@ -902,7 +919,7 @@ func (s *Store) DenyPendingActionsForSourceMessage(ctx context.Context, userID, 
 		  WHERE user_id = $4 AND conversation_id = $5
 		    AND status IN ($6, $7, $8)
 		    AND job_id IN (
-		        SELECT j.id
+		        SELECT `+jobHeadExpr+`
 		          FROM agent_jobs j
 		          JOIN incoming_events e
 		            ON e.event_id = j.event_id AND e.user_id = j.user_id

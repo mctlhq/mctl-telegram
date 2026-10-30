@@ -346,6 +346,9 @@ func agentSchemaSQLite() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_incoming_events_event_id ON incoming_events(event_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_incoming_events_created_at ON incoming_events(created_at)`,
+		// Serves source-message lookups by Telegram message id: edit/delete
+		// supersession at propose and send time, and delete recording (#949).
+		`CREATE INDEX IF NOT EXISTS idx_incoming_events_message ON incoming_events(user_id, message_id)`,
 		// event_outbox: reference-only mctl.events/v1 envelopes written in the
 		// same transaction as incoming_events and published to Valkey after
 		// commit (internal/events). No message text is ever stored here.
@@ -674,6 +677,9 @@ func agentSchemaPG() []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_incoming_events_event_id ON incoming_events(event_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_incoming_events_created_at ON incoming_events(created_at)`,
+		// Serves source-message lookups by Telegram message id: edit/delete
+		// supersession at propose and send time, and delete recording (#949).
+		`CREATE INDEX IF NOT EXISTS idx_incoming_events_message ON incoming_events(user_id, message_id)`,
 		`CREATE TABLE IF NOT EXISTS event_outbox (
 			id BIGSERIAL PRIMARY KEY,
 			event_id TEXT NOT NULL,

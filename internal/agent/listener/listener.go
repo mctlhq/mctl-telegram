@@ -228,7 +228,33 @@ func (l *Listener) dispatcherFor(acct *account) tg.UpdateDispatcher {
 	d.OnEditMessage(func(ctx context.Context, e tg.Entities, u *tg.UpdateEditMessage) error {
 		return l.onMessage(ctx, acct, e, u.Message, true)
 	})
+	d.OnDeleteMessages(func(ctx context.Context, _ tg.Entities, u *tg.UpdateDeleteMessages) error {
+		return l.onDelete(ctx, acct, u.Messages)
+	})
 	return d
+}
+
+// onDelete records deletions of incoming private messages (#949) so a draft
+// built from a deleted message is never sent. UpdateDeleteMessages covers the
+// account's private chats and basic groups; ids that match no ingested DM are
+// a no-op in the store. Errors are returned to updates.Manager for the same
+// reason as in onMessage: acknowledging a delete we failed to record would
+// lose it for good.
+func (l *Listener) onDelete(ctx context.Context, acct *account, ids []int) error {
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		res, err := l.Store.RecordMessageDelete(ctx, acct.userID, acct.tgID, int64(id))
+		if err != nil {
+			return fmt.Errorf("record message delete: %w", err)
+		}
+		if res.Recorded > 0 {
+			slog.Info("agent listener: source message deleted",
+				"user_id", acct.userID, "denied_actions", res.DeniedActions, "ignored_jobs", res.IgnoredJobs)
+		}
+	}
+	return nil
 }
 
 // onMessage returns persistence failures to updates.Manager. A nil return tells
@@ -321,7 +347,7 @@ func (l *Listener) persist(ctx context.Context, acct *account, ex Extracted) err
 			// as an error here: a message edit racing an in-flight send is
 			// expected, not exceptional.
 			if _, err := l.Store.DenyPendingActionsForSourceMessage(ctx, acct.userID, conv.ID,
-				ex.Event.MessageID, "source message edited"); err != nil {
+				ex.Event.MessageID, db.ReasonSourceEdited); err != nil {
 				return fmt.Errorf("deny actions for edited message: %w", err)
 			}
 		}

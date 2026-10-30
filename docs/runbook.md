@@ -631,6 +631,10 @@ is a non-deployed mirror kept only so this section's anchor is checked by
 - **Expected, system-working-as-designed denials**: `autopilot_paused` or
   `conversation_taken_over` for one or more accounts under an active guard —
   check whether this coincides with a deliberate pause or takeover.
+  `source_message_superseded` is expected too: the sender edited or deleted a
+  message after the agent started on it, and the draft was withdrawn (#949,
+  #950). A sustained burst from one surface is worth a look, since it can mean
+  edits or deletes are being misattributed.
 - **A new or runaway denial reason**: `global_kill`,
   `reply_contains_credentials`, `reply_contains_url`,
   `reply_contains_never_field`, or a spike of `unknown`

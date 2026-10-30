@@ -39,8 +39,8 @@ type Envelope struct {
 }
 
 // eventTypes maps the listener's event kinds onto envelope types. Kinds that
-// are not listed (owner_outgoing, saved_command) are control-plane signals for
-// the communication agent and are not published.
+// are not listed (owner_outgoing, saved_command, message_delete) are
+// control-plane signals for the communication agent and are not published.
 var eventTypes = map[string]string{
 	db.EventKindPrivateMessage: "telegram.message.created",
 	db.EventKindMessageEdit:    "telegram.message.edited",

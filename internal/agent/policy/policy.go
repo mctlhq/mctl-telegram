@@ -66,6 +66,11 @@ type Input struct {
 	// encrypted per tenant and this package stays free of storage. Nil means
 	// the text echoes no field the agent may not disclose right now.
 	ProtectedField *ProtectedField
+	// SourceSuperseded is db.SourceEdited or db.SourceDeleted when a message
+	// the action's job was built from has since been edited or deleted by its
+	// sender (#949, #950), computed by the caller from the event log. "" means
+	// the source is current or the action is not tied to a job.
+	SourceSuperseded string
 }
 
 // ProtectedField names an owner_profile field whose value a reply echoes
@@ -102,6 +107,7 @@ const (
 	DenyReplyURL          DenyCode = "reply_contains_url"
 	DenyReplyCredentials  DenyCode = "reply_contains_credentials"
 	DenyReplyNeverField   DenyCode = "reply_contains_never_field"
+	DenySourceSuperseded  DenyCode = "source_message_superseded"
 	DenyUnknown           DenyCode = "unknown" // fallback only
 )
 
@@ -415,6 +421,12 @@ func Evaluate(in Input) Result {
 	}
 	if isBlocked(in.Profile.BlockedSenders, in.Conversation.PeerTGID) {
 		return deny(DenySenderBlocked, "sender is blocked")
+	}
+	// A draft answering text the sender has since edited or deleted is
+	// withdrawn silently: the audit row and /mctl show explain it, and like
+	// the conversation gates above it must not trigger the pause alert.
+	if in.SourceSuperseded != "" {
+		return deny(DenySourceSuperseded, db.SourceSupersededReason(in.SourceSuperseded))
 	}
 	// Checked AFTER the per-conversation gates and the blocklist, not before
 	// them, even though pause is an account-wide state. A denial that
