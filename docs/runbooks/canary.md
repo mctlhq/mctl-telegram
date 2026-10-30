@@ -118,6 +118,23 @@ failure pushes `0` and increments
   then mint a fresh token and patch it into the Secret as above. See
   [Revoking a leaked worker token](../runbook.md#revokingaleakedworkertoken)
   in the main runbook for the full mechanics and the propagation-delay bound.
+- **The canary account was disconnected** (`list_dialogs` fails while
+  `mcp_init` passes, and the server logs a revoked session for the canary's
+  user). The account has to be re-linked: sign in at
+  `/telegram/connect` as that account and finish the Telegram login, then
+  mint a fresh worker token as above if the old one was revoked with it.
+  `CANARY_TELEGRAM_IDS` on the server makes this hard to do by accident:
+  for a listed account the manage-page Disconnect asks a second time and
+  names the account as the canary, `POST /api/account/disconnect` and
+  `DELETE /api/account` answer 409 unless `?confirm_canary=true` is given,
+  and `disconnect_telegram_account`, `delete_telegram_account`,
+  `revoke_telegram_session` and `set_telegram_access` with tier `none`
+  refuse unless `confirm_canary: true` is passed. A confirmed override is in
+  the audit log as the tool name with `:canary_override` appended, so
+  `tool_name LIKE '%:canary_override'` finds who did it and when.
+  Keep `CANARY_TELEGRAM_IDS` in step with the account the canary's token
+  belongs to: after moving the canary to another account, update both in
+  the same gitops change.
 - **Telegram FLOOD_WAIT** — back off; the canary will recover on its
   own once Telegram lifts the rate limit. If it keeps recurring, widen the
   `schedule` in mctl-gitops — and resize the alert windows in the same change,
