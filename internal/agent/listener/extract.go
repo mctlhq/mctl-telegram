@@ -119,6 +119,9 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 	// caption is still a message the sender expects someone to see.
 	media, _ := msg.GetMedia()
 	attachment := attachmentOf(media)
+	if isEdit && hiddenEdit(msg, media) {
+		return Extracted{}, false
+	}
 	if text == "" && attachment == nil {
 		return Extracted{}, false
 	}
@@ -151,6 +154,19 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 		Meta:       messageMeta(senderUser, attachment),
 	}
 	return Extracted{Event: ev, SenderAccessHash: senderAccessHash(senderUser, hasSenderUser)}, true
+}
+
+// hiddenEdit reports an edit Telegram made without the sender editing
+// anything: edit_hide marks updates the client must not show as "edited",
+// and every position refresh of a live location arrives that way. Turning
+// those into message_edit events would deny the conversation's pending
+// drafts and queue a job on each refresh (#948 review).
+func hiddenEdit(msg *tg.Message, media tg.MessageMediaClass) bool {
+	if msg.EditHide {
+		return true
+	}
+	_, live := media.(*tg.MessageMediaGeoLive)
+	return live
 }
 
 func isSelfPeer(peer tg.PeerClass, selfTGID int64) bool {

@@ -221,3 +221,38 @@ func TestOnMessage_UncaptionedDocumentQueuesJob(t *testing.T) {
 		t.Fatalf("jobs = %d, want 1", jobs)
 	}
 }
+
+// TestExtractMessage_HiddenEditsAreDropped: a live location is refreshed
+// through edits with edit_hide set. The first share is a message; the
+// refreshes must not become message_edit events, which would deny pending
+// drafts and queue a job each time.
+func TestExtractMessage_HiddenEditsAreDropped(t *testing.T) {
+	live := func() tg.MessageMediaClass {
+		return &tg.MessageMediaGeoLive{Geo: &tg.GeoPoint{Lat: 1, Long: 2}, Period: 3600}
+	}
+	if _, ok := ExtractMessage(ownerUID, selfTG, inboundMedia(42, "", live()), ents(alice()), false); !ok {
+		t.Fatal("initial live location share was dropped")
+	}
+	refresh := inboundMedia(42, "", live())
+	refresh.SetEditDate(2000)
+	refresh.SetEditHide(true)
+	if _, ok := ExtractMessage(ownerUID, selfTG, refresh, ents(alice()), true); ok {
+		t.Fatal("hidden live-location refresh became an edit event")
+	}
+	unflagged := inboundMedia(42, "", live())
+	unflagged.SetEditDate(2001)
+	if _, ok := ExtractMessage(ownerUID, selfTG, unflagged, ents(alice()), true); ok {
+		t.Fatal("live-location edit without edit_hide became an edit event")
+	}
+	hiddenText := &tg.Message{ID: 43, PeerID: &tg.PeerUser{UserID: recruit}, Message: "same text", Date: 1000}
+	hiddenText.SetEditDate(2002)
+	hiddenText.SetEditHide(true)
+	if _, ok := ExtractMessage(ownerUID, selfTG, hiddenText, ents(alice()), true); ok {
+		t.Fatal("hidden text edit became an edit event")
+	}
+	visible := &tg.Message{ID: 43, PeerID: &tg.PeerUser{UserID: recruit}, Message: "fixed text", Date: 1000}
+	visible.SetEditDate(2003)
+	if _, ok := ExtractMessage(ownerUID, selfTG, visible, ents(alice()), true); !ok {
+		t.Fatal("a visible edit must still be recorded")
+	}
+}

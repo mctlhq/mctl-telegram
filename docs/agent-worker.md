@@ -316,6 +316,12 @@ possibly empty; the attachment is described in the event meta, which
   200 characters.
 - Contacts and locations carry the kind only. The phone number, vCard and
   coordinates are never stored.
+- Edits Telegram flags `edit_hide`, and every live-location refresh, are
+  not recorded: they are not something the sender edited, and a
+  `message_edit` event would deny pending drafts and queue a job each time.
+  The first live-location share is a message like any other.
+- `meta` is plaintext; only the body is sealed. A file name is
+  sender-chosen text, comparable to the display name already stored there.
 - A link preview is not an attachment: it renders a URL already in the text,
   and a message with only a preview and no text is still dropped.
 - The worker cannot open attachments. The deployed prompt tells the model
