@@ -226,6 +226,12 @@ type metricsIface interface {
 	// no longer wants: reason is "unsaved" or "superseded", outcome "ok" or
 	// "error".
 	CountLoginLogOut(reason, outcome string)
+	// CountLoginFlowStarted counts one launched enable_access login flow;
+	// method is "code" or "qr".
+	CountLoginFlowStarted(method string)
+	// CountLoginCallbackRejected counts one rejected OIDC browser return:
+	// route is callbackRoute here, reason one of the reason* constants.
+	CountLoginCallbackRejected(route, reason string)
 }
 
 // WithMetrics wires a metrics registry so oauth.Server can update the
@@ -1706,6 +1712,18 @@ const (
 	reasonPrefetchRefused = "prefetch_refused"
 )
 
+// callbackRoute is the route label mctl_login_callback_rejected_total carries
+// for /oauth/telegram/callback.
+const callbackRoute = "oauth_callback"
+
+// countCallbackReject counts one rejected callback. No-op when no metrics
+// registry is wired.
+func (s *Server) countCallbackReject(reason string) {
+	if s.metrics != nil {
+		s.metrics.CountLoginCallbackRejected(callbackRoute, reason)
+	}
+}
+
 // isPrefetch reports whether r looks like a browser or crawler prefetch
 // rather than a real navigation, per the Sec-Purpose / legacy Purpose
 // request headers. See internal/web/connect.go's identical helper.
@@ -1725,8 +1743,9 @@ func isPrefetch(r *http.Request) bool {
 // prefetch boolean — never code, state, or a cookie value. prefetch is always
 // false here — the guard above returns 204 before any reject path — and is
 // retained deliberately so one prefetch= query matches every line both
-// routes emit.
-func logCallbackReject(r *http.Request, reason string) {
+// routes emit. It also counts the rejection.
+func (s *Server) logCallbackReject(r *http.Request, reason string) {
+	s.countCallbackReject(reason)
 	slog.Warn("oauth: callback request rejected",
 		"route", "/oauth/telegram/callback",
 		"reason", reason,
@@ -1744,6 +1763,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	// single-use URL must not consume any pending state a real click still
 	// needs.
 	if isPrefetch(r) {
+		s.countCallbackReject(reasonPrefetchRefused)
 		slog.Info("oauth: callback request rejected",
 			"route", "/oauth/telegram/callback",
 			"reason", reasonPrefetchRefused,
@@ -1757,7 +1777,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	q := r.URL.Query()
 	serverState := q.Get("state")
 	if serverState == "" {
-		logCallbackReject(r, reasonMissingState)
+		s.logCallbackReject(r, reasonMissingState)
 		http.Error(w, "missing state", http.StatusBadRequest)
 		return
 	}
@@ -1807,12 +1827,12 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	if s.useDB {
 		dbPA, err := s.store.ConsumeOAuthPending(r.Context(), serverState, s.cfg.CodeTTL)
 		if errors.Is(err, db.ErrOAuthExpired) {
-			logCallbackReject(r, reasonExpiredState)
+			s.logCallbackReject(r, reasonExpiredState)
 			renderEnableReused(w, "That sign-in link was already used or has expired. Close this page and start connecting again from your MCP client.")
 			return
 		}
 		if errors.Is(err, db.ErrOAuthNotFound) {
-			logCallbackReject(r, reasonUnknownState)
+			s.logCallbackReject(r, reasonUnknownState)
 			renderEnableReused(w, "That sign-in link was already used or has expired. Close this page and start connecting again from your MCP client.")
 			return
 		}
@@ -1839,7 +1859,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		delete(s.pending, serverState)
 		s.mu.Unlock()
 		if !ok {
-			logCallbackReject(r, reasonUnknownState)
+			s.logCallbackReject(r, reasonUnknownState)
 			renderEnableReused(w, "That sign-in link was already used or has expired. Close this page and start connecting again from your MCP client.")
 			return
 		}
@@ -1848,7 +1868,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		// sweep tick would still be served if we only relied on map presence.
 		// CodeTTL bounds how long we trust serverState; reject if exceeded.
 		if s.clock().Sub(pending.CreatedAt) > s.cfg.CodeTTL {
-			logCallbackReject(r, reasonExpiredState)
+			s.logCallbackReject(r, reasonExpiredState)
 			renderEnableReused(w, "That sign-in link was already used or has expired. Close this page and start connecting again from your MCP client.")
 			return
 		}
@@ -1858,13 +1878,13 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	// request. The pending entry is already consumed above; show a friendly
 	// page rather than a 500 or a blank screen.
 	if oidcErr := q.Get("error"); oidcErr != "" {
-		logCallbackReject(r, reasonOIDCError)
+		s.logCallbackReject(r, reasonOIDCError)
 		renderEnableError(w, "Telegram sign-in was not completed ("+sanitizeOIDCError(oidcErr)+"). Close this page and try connecting again from your MCP client.")
 		return
 	}
 	code := q.Get("code")
 	if code == "" {
-		logCallbackReject(r, reasonMissingCode)
+		s.logCallbackReject(r, reasonMissingCode)
 		renderEnableError(w, "Telegram sign-in did not return an authorization code. Close this page and try again.")
 		return
 	}
@@ -1877,6 +1897,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		// The raw error may embed Telegram's token-endpoint response body
 		// (oauth2.RetrieveError), which can carry a Telegram user id — log it
 		// server-side, return an opaque message to the browser.
+		s.countCallbackReject(reasonExchangeFailed)
 		slog.Error("telegram OIDC token exchange failed",
 			"route", "/oauth/telegram/callback",
 			"reason", reasonExchangeFailed,

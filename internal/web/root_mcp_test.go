@@ -24,7 +24,7 @@ func namedHandler(name string) http.Handler {
 // page load must keep getting the landing page, and every MCP transport
 // request (POST, DELETE, the SSE GET) must not.
 func TestRootMCP_Dispatch(t *testing.T) {
-	h := RootMCP(namedHandler("landing"), namedHandler("mcp"))
+	h := RootMCP(namedHandler("landing"), namedHandler("mcp"), nil)
 	cases := []struct {
 		name, method, accept, want string
 	}{
@@ -66,7 +66,7 @@ func TestRootMCP_SharesSessionWithMCPPath(t *testing.T) {
 
 	r := chi.NewRouter()
 	r.Mount("/mcp", BrowserRedirect(mcpHandler, "/"))
-	root := RootMCP(Landing("https://tg.example", "/mcp", "https://tg.example", true), mcpHandler)
+	root := RootMCP(Landing("https://tg.example", "/mcp", "https://tg.example", true), mcpHandler, nil)
 	r.Get("/", root.ServeHTTP)
 	r.Post("/", root.ServeHTTP)
 	r.Delete("/", root.ServeHTTP)

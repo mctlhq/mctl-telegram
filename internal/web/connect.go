@@ -59,6 +59,19 @@ const (
 	reasonRecoveredRedirect = "recovered_redirect"
 )
 
+// connectDoneRoute is the route label mctl_login_callback_rejected_total
+// carries for /telegram/connect/done.
+const connectDoneRoute = "connect_done"
+
+// ConnectMetrics is the slice of metrics.Registry ConnectServer uses. Defined
+// here so this package need not import internal/metrics.
+type ConnectMetrics interface {
+	// CountLoginCallbackRejected counts one rejected OIDC browser return:
+	// route is connectDoneRoute here, reason one of the reason* constants
+	// above except reasonRecoveredRedirect, which is not a rejection.
+	CountLoginCallbackRejected(route, reason string)
+}
+
 // isPrefetch reports whether r looks like a browser or crawler prefetch
 // rather than a real navigation, per the Sec-Purpose / legacy Purpose
 // request headers. Sec-Purpose is a structured list so it is matched by
@@ -80,12 +93,21 @@ func isPrefetch(r *http.Request) bool {
 // prefetch boolean — never code, state, or a cookie value. prefetch is always
 // false here — the guard above returns 204 before any reject path — and is
 // retained deliberately so one prefetch= query matches every line both
-// routes emit.
-func logConnectReject(r *http.Request, reason string) {
+// routes emit. It also counts the rejection.
+func (s *ConnectServer) logConnectReject(r *http.Request, reason string) {
+	s.countReject(reason)
 	slog.Warn("connect: request rejected",
 		"route", "/telegram/connect/done",
 		"reason", reason,
 		"prefetch", isPrefetch(r))
+}
+
+// countReject counts one rejected /telegram/connect/done request. No-op when
+// no metrics registry is wired.
+func (s *ConnectServer) countReject(reason string) {
+	if s.metrics != nil {
+		s.metrics.CountLoginCallbackRejected(connectDoneRoute, reason)
+	}
 }
 
 // ConnectConfig holds the construction parameters for ConnectServer.
@@ -111,6 +133,9 @@ type ConnectConfig struct {
 	// BotAccessRequested is true while the telegram:bot_access sign-in scope
 	// is requested; it only adds a neutral sentence to the pre-login page.
 	BotAccessRequested bool
+	// Metrics, when set, counts rejected /telegram/connect/done requests
+	// (mctl_login_callback_rejected_total). Nil disables counting.
+	Metrics ConnectMetrics
 	// MCPPath is the path component of the MCP URL shown on the success page.
 	// Defaults to "/mcp" when empty.
 	MCPPath string
@@ -150,6 +175,7 @@ type ConnectServer struct {
 	clock       func() time.Time
 
 	botAccessRequested bool
+	metrics            ConnectMetrics
 
 	mu       sync.Mutex
 	sessions map[string]*connectSession // keyed by state token
@@ -182,6 +208,7 @@ func NewConnectServer(cfg ConnectConfig) *ConnectServer {
 		identifier:         cfg.Identifier,
 		loginBot:           cfg.LoginBotUsername,
 		botAccessRequested: cfg.BotAccessRequested,
+		metrics:            cfg.Metrics,
 		clock:              clk,
 		sessions:           map[string]*connectSession{},
 	}
@@ -262,6 +289,7 @@ func (s *ConnectServer) HandleConnectDone(w http.ResponseWriter, r *http.Request
 	// browser or crawler prefetch of this single-use URL must not consume the
 	// pending state the user's own click still needs.
 	if isPrefetch(r) {
+		s.countReject(reasonPrefetchRefused)
 		slog.Info("connect: request rejected",
 			"route", "/telegram/connect/done",
 			"reason", reasonPrefetchRefused,
@@ -276,7 +304,7 @@ func (s *ConnectServer) HandleConnectDone(w http.ResponseWriter, r *http.Request
 
 	// Surface Telegram OIDC errors (e.g. user cancelled at oauth.telegram.org).
 	if oidcErr := q.Get("error"); oidcErr != "" {
-		logConnectReject(r, reasonOIDCError)
+		s.logConnectReject(r, reasonOIDCError)
 		renderConnectError(w, "Telegram sign-in was not completed. Please try again.", s.issuer+"/telegram/connect")
 		return
 	}
@@ -288,7 +316,7 @@ func (s *ConnectServer) HandleConnectDone(w http.ResponseWriter, r *http.Request
 		if state != "" {
 			reason = reasonMissingCode
 		}
-		logConnectReject(r, reason)
+		s.logConnectReject(r, reason)
 		renderConnectError(w, "Missing authorization code or state. Please start again.", s.issuer+"/telegram/connect")
 		return
 	}
@@ -317,13 +345,14 @@ func (s *ConnectServer) HandleConnectDone(w http.ResponseWriter, r *http.Request
 		if ok {
 			reason = reasonExpiredState
 		}
-		logConnectReject(r, reason)
+		s.logConnectReject(r, reason)
 		renderConnectReused(w, s.issuer+"/telegram/connect")
 		return
 	}
 
 	tok, err := s.oauthSrv.ExchangeConnect(r.Context(), code, sess.verifier, s.clientID, s.redirectURI)
 	if err != nil {
+		s.countReject(reasonExchangeFailed)
 		slog.Error("connect: request rejected",
 			"route", "/telegram/connect/done",
 			"reason", reasonExchangeFailed,

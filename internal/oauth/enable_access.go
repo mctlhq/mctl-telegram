@@ -238,6 +238,8 @@ func loginFlowResult(lf *loginFlow) string {
 		return "superseded"
 	case errors.Is(lf.err, telegram.ErrQRLoginExpired):
 		return "expired"
+	case errors.Is(lf.err, errQRConnectStalled):
+		return "stalled"
 	case isAbandonment(lf.err) && (isUserWaitStep(lf.step) || lf.step == "queued"):
 		return "abandoned"
 	case shortReason(lf.err) == "identity_mismatch":
@@ -329,6 +331,11 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 		// dial failure, RPC hang surfacing as the bgCtx deadline), so log the
 		// final outcome here regardless of whether a handler is still waiting.
 		started := time.Now()
+		// Counted here, next to the deferred finish below, so every started
+		// flow has exactly one matching mctl_login_flow_total increment.
+		if s.metrics != nil {
+			s.metrics.CountLoginFlowStarted(m.name)
+		}
 		defer func() {
 			if s.metrics != nil {
 				s.metrics.ObserveLoginFlow(m.name, loginFlowResult(lf), time.Since(started).Seconds())
