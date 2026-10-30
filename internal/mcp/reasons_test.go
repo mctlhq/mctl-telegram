@@ -73,7 +73,7 @@ func TestClassifyToolResultReason_MatchesHandlerLiterals(t *testing.T) {
 		{"2fa incomplete", "Telegram setup is incomplete — the two-step-verification (2FA) step was not finished. Reconnect the connector and complete phone number → SMS code → 2FA password without closing the page.", ReasonTelegramError},
 		{"session revoked", "Your Telegram session is no longer valid — it was signed out from another device, or the account is unavailable. Reconnect the connector to sign in again.", ReasonTelegramError},
 		{"session expired", "Your Telegram session has expired. Reconnect the connector to sign in again.", ReasonTelegramError},
-		{"no active session", "No Telegram account is connected. Reconnect the connector and complete the in-browser setup (phone → SMS → 2FA).", ReasonTelegramError},
+		{"no active session", "No Telegram account is connected. Reconnect the connector and complete the in-browser setup (phone → SMS → 2FA).", ReasonNoSession},
 		{"pool full", "server at session capacity — try again later", ReasonTelegramError},
 		{"flood wait envelope", `{"error":"flood_wait","message":"Telegram rate limit reached. Wait 5 seconds before retrying.","retry_after_seconds":5,"action":"Wait 5 seconds, then retry the same tool call."}`, ReasonTelegramError},
 

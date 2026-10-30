@@ -26,7 +26,9 @@ type Registry struct {
 	// Rate limiter — labeled by identity_kind ("user" or "anon").
 	RateLimitEventsTotal *prometheus.CounterVec
 
-	// MCP tool layer — labeled by tool and status ("ok" or "error").
+	// MCP tool layer — labeled by tool, status ("ok", "error",
+	// "caller_error" or "no_session") and traffic ("user" or "canary"; see
+	// traffic.go).
 	ToolInvocationsTotal   *prometheus.CounterVec
 	ToolInvocationDuration *prometheus.HistogramVec
 	// ToolCallErrorsTotal counts MCP tools/call failures, labeled by tool and
@@ -74,12 +76,14 @@ type Registry struct {
 	// SessionsActiveGauge is refreshed by a background sampler in main().
 	SessionsActiveGauge prometheus.Gauge
 	// SessionsBorrowTotal counts every Pool.Borrow() call exit, labeled by
-	// result: ok, expired_idle, expired_absolute, flood_wait, call_error,
-	// error.
+	// result: ok, expired_idle, expired_absolute, no_session, flood_wait,
+	// call_error, error; and by traffic: user or canary (traffic.go).
 	// expired_idle and expired_absolute are expected user-side TTL expirations.
+	// no_session is a user with no connected Telegram account (never
+	// connected, or disconnected): Telegram is never called.
 	// flood_wait and call_error are fn errors that Telegram returned over a
 	// working session (a rate limit, or a 400/403 for the caller's request).
-	// All four are excluded from the session-borrow availability SLI, whose
+	// All five are excluded from the session-borrow availability SLI, whose
 	// denominator is ok|error.
 	SessionsBorrowTotal *prometheus.CounterVec
 
@@ -615,8 +619,8 @@ func New() *Registry {
 
 	r.ToolInvocationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_tool_invocations_total",
-		Help: "Total MCP tool invocations, labeled by tool name and status (ok, error, or caller_error; caller_error is a request Telegram or argument/scope validation refused as the caller's mistake and is excluded from the availability SLI).",
-	}, []string{"tool", "status"})
+		Help: "Total MCP tool invocations, labeled by tool name, status (ok, error, caller_error or no_session; caller_error is a request Telegram or argument/scope validation refused as the caller's mistake, no_session a call by a user with no connected Telegram account, and both are excluded from the availability SLI) and traffic (user or canary; canary is the monitoring probe's account, excluded from the user-facing SLI).",
+	}, []string{"tool", "status", "traffic"})
 
 	r.ToolInvocationDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "mctl_tool_invocation_duration_seconds",
@@ -746,10 +750,12 @@ func New() *Registry {
 		Name: "mctl_sessions_borrow_total",
 		Help: "Total Pool.Borrow() calls, labeled by outcome. " +
 			"expired_idle and expired_absolute are expected user-side TTL expirations; " +
+			"no_session is a user with no connected Telegram account (Telegram is never called); " +
 			"flood_wait and call_error are Telegram replies over a working session " +
 			"(a rate limit, or a 400/403 for the caller's request). " +
-			"Exclude all four from the availability SLI denominator.",
-	}, []string{"result"})
+			"Exclude all five from the availability SLI denominator. " +
+			"traffic is user or canary; canary is the monitoring probe's account, excluded from the user-facing SLI.",
+	}, []string{"result", "traffic"})
 
 	r.BridgeActiveDaemons = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "mctl_bridge_active_daemons",

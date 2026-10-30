@@ -342,11 +342,11 @@ func TestBorrow_SessionsBorrowCounter(t *testing.T) {
 		p := NewClientPool(0, "", time.Minute, nil)
 		p.WithMetrics(met)
 		_ = p.Borrow(ctx, 1, nil)
-		if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues("error")); got != 1 {
+		if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues("error", "user")); got != 1 {
 			t.Errorf("expected error counter=1, got %v", got)
 		}
 		for _, r := range []string{"ok", "expired_idle", "expired_absolute"} {
-			if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues(r)); got != 0 {
+			if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues(r, "user")); got != 0 {
 				t.Errorf("expected %s counter=0, got %v", r, got)
 			}
 		}
@@ -373,11 +373,11 @@ func TestBorrow_SessionsBorrowCounter(t *testing.T) {
 		if !errors.Is(borErr, db.ErrSessionExpired) {
 			t.Fatalf("expected ErrSessionExpired, got %v", borErr)
 		}
-		if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues("expired_idle")); got != 1 {
+		if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues("expired_idle", "user")); got != 1 {
 			t.Errorf("expected expired_idle counter=1, got %v", got)
 		}
 		for _, r := range []string{"ok", "expired_absolute", "error"} {
-			if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues(r)); got != 0 {
+			if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues(r, "user")); got != 0 {
 				t.Errorf("expected %s counter=0, got %v", r, got)
 			}
 		}
@@ -404,13 +404,80 @@ func TestBorrow_SessionsBorrowCounter(t *testing.T) {
 		if !errors.Is(borErr, db.ErrSessionExpired) {
 			t.Fatalf("expected ErrSessionExpired, got %v", borErr)
 		}
-		if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues("expired_absolute")); got != 1 {
+		if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues("expired_absolute", "user")); got != 1 {
 			t.Errorf("expected expired_absolute counter=1, got %v", got)
 		}
 		for _, r := range []string{"ok", "expired_idle", "error"} {
-			if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues(r)); got != 0 {
+			if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues(r, "user")); got != 0 {
 				t.Errorf("expected %s counter=0, got %v", r, got)
 			}
+		}
+	})
+
+	// mctl-telegram#974: a user with no connected account is user-side
+	// state, like a TTL expiry. Telegram is never called, so it must not
+	// count as a failed borrow.
+	t.Run("no_session", func(t *testing.T) {
+		store := newBorrowTestStore(t)
+		uid, err := store.EnsureUser(ctx, "no-session-user", "", "test")
+		if err != nil {
+			t.Fatalf("EnsureUser: %v", err)
+		}
+		met := metrics.New()
+		p := NewClientPool(1, "hash", time.Minute, store)
+		p.WithMetrics(met)
+		borErr := p.Borrow(ctx, uid, nil)
+		if !errors.Is(borErr, db.ErrNoActiveSession) {
+			t.Fatalf("expected ErrNoActiveSession, got %v", borErr)
+		}
+		if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues("no_session", "user")); got != 1 {
+			t.Errorf("expected no_session counter=1, got %v", got)
+		}
+		for _, r := range []string{"ok", "error", "expired_idle", "expired_absolute"} {
+			if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues(r, "user")); got != 0 {
+				t.Errorf("expected %s counter=0, got %v", r, got)
+			}
+		}
+	})
+
+	// The other direction: a session check that could not be made (the
+	// store is unreachable) is not "no session". It stays an error and
+	// keeps burning the SLI.
+	t.Run("error/store_unreachable", func(t *testing.T) {
+		store := newBorrowTestStore(t)
+		uid, err := store.EnsureUser(ctx, "store-down-user", "", "test")
+		if err != nil {
+			t.Fatalf("EnsureUser: %v", err)
+		}
+		_ = store.DB.Close()
+		met := metrics.New()
+		p := NewClientPool(1, "hash", time.Minute, store)
+		p.WithMetrics(met)
+		borErr := p.Borrow(ctx, uid, nil)
+		if borErr == nil || errors.Is(borErr, db.ErrNoActiveSession) {
+			t.Fatalf("expected a non-sentinel store error, got %v", borErr)
+		}
+		if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues("error", "user")); got != 1 {
+			t.Errorf("expected error counter=1, got %v", got)
+		}
+		if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues("no_session", "user")); got != 0 {
+			t.Errorf("expected no_session counter=0, got %v", got)
+		}
+	})
+
+	// The traffic label comes from ctx, set by the MCP layer for the
+	// canary's account; without it a borrow is user traffic.
+	t.Run("traffic/canary_from_ctx", func(t *testing.T) {
+		met := metrics.New()
+		p := NewClientPool(0, "", time.Minute, nil)
+		p.WithMetrics(met)
+		_ = p.Borrow(metrics.WithTraffic(ctx, metrics.TrafficCanary), 1, nil)
+		_ = p.Borrow(ctx, 1, nil)
+		if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues("error", "canary")); got != 1 {
+			t.Errorf("expected error{canary}=1, got %v", got)
+		}
+		if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues("error", "user")); got != 1 {
+			t.Errorf("expected error{user}=1, got %v", got)
 		}
 	})
 
@@ -429,11 +496,11 @@ func TestBorrow_SessionsBorrowCounter(t *testing.T) {
 		if !errors.Is(borErr, ErrPoolFull) {
 			t.Fatalf("expected ErrPoolFull, got %v", borErr)
 		}
-		if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues("error")); got != 1 {
+		if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues("error", "user")); got != 1 {
 			t.Errorf("expected error counter=1, got %v", got)
 		}
 		for _, r := range []string{"ok", "expired_idle", "expired_absolute"} {
-			if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues(r)); got != 0 {
+			if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues(r, "user")); got != 0 {
 				t.Errorf("expected %s counter=0, got %v", r, got)
 			}
 		}
@@ -624,7 +691,7 @@ func TestBorrow_FnErrorResultLabel(t *testing.T) {
 				if r == tc.want {
 					want = 1
 				}
-				if v := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues(r)); v != want {
+				if v := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues(r, "user")); v != want {
 					t.Errorf("result=%q: got %v, want %v", r, v, want)
 				}
 			}
@@ -643,7 +710,7 @@ func TestBorrow_FnErrorResultLabel(t *testing.T) {
 		if err := p.Borrow(ctx, 7, func(context.Context, *telegram.Client) error { return nil }); err != nil {
 			t.Fatalf("Borrow: %v", err)
 		}
-		if v := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues("ok")); v != 1 {
+		if v := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues("ok", "user")); v != 1 {
 			t.Errorf("ok counter = %v, want 1", v)
 		}
 	})

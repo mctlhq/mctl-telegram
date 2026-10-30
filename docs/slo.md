@@ -35,18 +35,24 @@ That file is **not deployed by anything** — see the header comment in it.
 ### MCP tool availability
 
 Fraction of MCP tool invocations that complete with `status="ok"`, excluding
-requests refused as the caller's mistake (see [Exclusions](#caller-errors)):
+requests refused as the caller's mistake (see [Exclusions](#caller-errors)),
+calls by a user with no connected account (see
+[No active session](#no-active-session)) and the monitoring canary's own
+calls (see [Canary traffic](#canary-traffic)):
 
 ```promql
-sum(rate(mctl_tool_invocations_total{status="ok"}[28d]))
+sum(rate(mctl_tool_invocations_total{status="ok",traffic!="canary"}[28d]))
 /
-sum(rate(mctl_tool_invocations_total{status=~"ok|error"}[28d]))
+sum(rate(mctl_tool_invocations_total{status=~"ok|error",traffic!="canary"}[28d]))
 ```
 
-Counter: `mctl_tool_invocations_total{tool,status}` — label values for
-`status`: ok, error, caller_error. The SLI selects `ok|error` by name, so
-these values are a contract: a new one stays outside the SLI until it is
-added here and to the rules deliberately.
+Counter: `mctl_tool_invocations_total{tool,status,traffic}` — label values
+for `status`: ok, error, caller_error, no_session; for `traffic`: user,
+canary. The SLI selects `ok|error` by name, so these values are a contract:
+a new one stays outside the SLI until it is added here and to the rules
+deliberately. `traffic!="canary"` rather than `traffic="user"` so that a
+series from a release before the label existed still counts as user
+traffic.
 
 ### MCP tool latency — read tools (p95 and p99)
 
@@ -90,16 +96,18 @@ return a non-5xx response:
 ### Session borrow success rate
 
 Fraction of `Pool.Borrow()` calls that succeed, excluding expected TTL
-expirations (see [Exclusions](#exclusions)):
+expirations, users with no connected account and the canary's own borrows
+(see [Exclusions](#exclusions)):
 
 ```promql
-sum(rate(mctl_sessions_borrow_total{result="ok"}[28d]))
+sum(rate(mctl_sessions_borrow_total{result="ok",traffic!="canary"}[28d]))
 /
-sum(rate(mctl_sessions_borrow_total{result=~"ok|error"}[28d]))
+sum(rate(mctl_sessions_borrow_total{result=~"ok|error",traffic!="canary"}[28d]))
 ```
 
-Counter: `mctl_sessions_borrow_total{result}` — label values: ok,
-expired_idle, expired_absolute, flood_wait, call_error, error.
+Counter: `mctl_sessions_borrow_total{result,traffic}` — label values for
+`result`: ok, expired_idle, expired_absolute, no_session, flood_wait,
+call_error, error; for `traffic`: user, canary.
 
 ---
 
@@ -239,6 +247,48 @@ over 30 days), not a service failure. The SLI denominator is:
 ```promql
 sum(rate(mctl_sessions_borrow_total{result=~"ok|error"}[28d]))
 ```
+
+### No active session
+
+A call by a user who has no connected Telegram account — never connected,
+or disconnected — fails with `db.ErrNoActiveSession` before Telegram is
+called. `Pool.Borrow()` records it as
+`mctl_sessions_borrow_total{result="no_session"}` and the tool layer as
+`mctl_tool_invocations_total{status="no_session"}`, with
+`reason="no_session"` on `mctl_tool_call_errors_total` and in the audit
+row (it was `telegram_error`, which was wrong: Telegram was never asked).
+Both are **excluded from both SLIs**, like a TTL expiry: it is user-side
+state, not a service failure. The `audit_logs` row and the log line keep
+`status=error`; the log line gains `slo_status=no_session`.
+
+A session check that could not be made (the store is unreachable) is not
+`no_session`: it stays `error` and counts against the SLI.
+
+Blind spot: a server bug that wrongly revokes sessions would move calls to
+`no_session` instead of burning the SLI. That is caught where it starts —
+`mctl_sessions_revoked_total{reason}` and the canary, which fails on
+`no_session` — rather than by counting every disconnected user as an
+outage.
+
+Before mctl-telegram#974 these were `error`. Two disconnects of the
+canary's own account (2026-10-23 and 2026-10-28/30) produced about 91% of
+the 28-day tool errors and 83% of the borrow errors, and pulled the ratios
+to 0.950 and 0.947.
+
+### Canary traffic
+
+The monitoring canary (`mctl-telegram-canary`, every 10 minutes) runs as the
+accounts listed in `CANARY_TELEGRAM_IDS`. Every tool call and borrow made as
+one of them carries `traffic="canary"`; everything else, including
+background work and any call the server cannot place, is `traffic="user"`.
+The label is derived from server config, never from the request, so it
+cannot be used to move a call out of the SLI.
+
+Canary traffic is **excluded from both SLIs**. It has its own success metric
+and alert (`MctlTelegramCanaryFailing`); counted in the SLI as well, one
+canary outage paged three ways, and because the canary was about a third of
+the 28-day denominator its successes also flattered the SLI when real
+traffic was degraded.
 
 ### Telegram replies over a working session
 
