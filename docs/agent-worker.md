@@ -297,6 +297,34 @@ No separate notification is sent. The denied action keeps the reason in
 enqueues its own job, which answers the current text; carrying the rest of a
 coalesced turn into that job is tracked in #962.
 
+## Attachments in inbound messages (#948)
+
+An inbound message with media is a message even when it has no caption: it
+produces an event and a job like any text. The event body is the caption,
+possibly empty; the attachment is described in the event meta, which
+`get_event` returns as is:
+
+```json
+{"username":"alice","display_name":"Alice",
+ "attachment":{"kind":"document","file_name":"jd.pdf","mime_type":"application/pdf","size":48213}}
+```
+
+- `kind` is one of `document`, `photo`, `video`, `animation`, `voice`,
+  `audio`, `video_note`, `sticker`, `contact`, `location`, `poll`, `other`.
+- Documents add `file_name`, `mime_type` and `size`; stickers add `emoji`.
+  File names have control and format characters removed and are capped at
+  200 characters.
+- Contacts and locations carry the kind only. The phone number, vCard and
+  coordinates are never stored.
+- A link preview is not an attachment: it renders a URL already in the text,
+  and a message with only a preview and no text is still dropped.
+- The worker cannot open attachments. The deployed prompt tells the model
+  to acknowledge the file without describing it, ask for the key points as
+  text when it matters, and name it in the owner summary.
+
+Uncaptioned stickers and other small media now start a job too, which costs
+one model call each; the model usually completes it as `ignored`.
+
 ## Deployment note
 
 This binary requires the `claude` CLI itself (and its own Anthropic
