@@ -134,6 +134,17 @@ type Registry struct {
 	// outcome ("ok", "error"). An error leaves an orphaned device in the
 	// user's Active Sessions.
 	LoginLogOutTotal *prometheus.CounterVec
+	// ConnectFirstCallTotal counts authorization_code grants by whether the
+	// same user and client made a successful MCP call within five minutes
+	// (issue #960): outcome "ok", "none_within_window" or "unknown", the last
+	// with a reason saying what could not be observed (insert_error, restart,
+	// close_error); reason is empty otherwise. client is the bounded label
+	// claude, chatgpt or other. Incremented once per grant, when internal/
+	// connectfunnel decides its outcome.
+	ConnectFirstCallTotal *prometheus.CounterVec
+	// ConnectFirstCallErrorsTotal counts store errors in the connect funnel
+	// by op (insert, close, classify, sweep).
+	ConnectFirstCallErrorsTotal *prometheus.CounterVec
 
 	// TelegramReplicaID is an info-type gauge (constant value 1) labeled by
 	// replica_id. Operators use it to verify that a given user_id consistently
@@ -371,6 +382,13 @@ var (
 	// the tools that acquire the media admission gate (issue #705). Unexported
 	// like its siblings above — nothing outside this package consumes it.
 	mediaGateTools = []string{"get_messages", "get_unread_messages", "get_media"}
+	// connectFirstCall* are the closed label sets of the connect funnel
+	// counters (issue #960). They mirror internal/connectfunnel, which cannot
+	// be imported here (it imports internal/db, which imports this package);
+	// connectfunnel's tests hold the two to the same values.
+	connectFirstCallClients        = []string{"claude", "chatgpt", "other"}
+	connectFirstCallUnknownReasons = []string{"insert_error", "restart", "close_error"}
+	connectFirstCallOps            = []string{"insert", "close", "classify", "sweep"}
 	// workContextRoutes and friends are the closed label sets for
 	// WorkContextRequestsTotal/WorkContextBindingsTotal (issue-443), primed
 	// below for the same reason as the two lists above — see #591.
@@ -477,6 +495,18 @@ func (r *Registry) SetOAuthPendingAuthSize(n float64) {
 // from a client-supplied string.
 func (r *Registry) CountOAuthClientRegistration(outcome, reason string) {
 	r.OAuthClientRegistrationsTotal.WithLabelValues(outcome, reason).Inc()
+}
+
+// CountConnectFirstCall records the decided outcome of one authorization_code
+// grant. Satisfies connectfunnel.Metrics.
+func (r *Registry) CountConnectFirstCall(client, outcome, reason string) {
+	r.ConnectFirstCallTotal.WithLabelValues(client, outcome, reason).Inc()
+}
+
+// CountConnectFirstCallError records one connect funnel store error.
+// Satisfies connectfunnel.Metrics.
+func (r *Registry) CountConnectFirstCallError(op string) {
+	r.ConnectFirstCallErrorsTotal.WithLabelValues(op).Inc()
 }
 
 // ObserveLoginPhoneStep records the outcome and latency of one enable_access
@@ -607,6 +637,16 @@ func New() *Registry {
 		Name: "mctl_login_logout_total",
 		Help: "Total enable_access logouts of sessions nobody holds any more, labeled by reason (unsaved, superseded) and outcome (ok, error).",
 	}, []string{"reason", "outcome"})
+
+	r.ConnectFirstCallTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_connect_first_call_total",
+		Help: "Total authorization_code grants by whether the same user and client made a successful MCP call within five minutes: outcome ok, none_within_window or unknown (reason insert_error, restart, close_error). client is claude, chatgpt or other.",
+	}, []string{"client", "outcome", "reason"})
+
+	r.ConnectFirstCallErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_connect_first_call_errors_total",
+		Help: "Total store errors in the connect first-call funnel, labeled by op: insert, close, classify, sweep.",
+	}, []string{"op"})
 
 	r.TelegramReplicaID = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "mctl_telegram_replica_id",
@@ -787,6 +827,8 @@ func New() *Registry {
 		r.LoginFlowTotal,
 		r.LoginLogOutTotal,
 		r.LoginFlowDuration,
+		r.ConnectFirstCallTotal,
+		r.ConnectFirstCallErrorsTotal,
 		r.SessionsBorrowTotal,
 		r.TelegramReplicaID,
 		r.BridgeActiveDaemons,
@@ -830,6 +872,20 @@ func New() *Registry {
 	// in increase() and the family must read 0, not "no data", before it.
 	for _, tool := range mediaGateTools {
 		r.MediaGateRejectionsTotal.WithLabelValues(tool).Add(0)
+	}
+	// issue #960: the connect funnel alert reads increase() of every
+	// outcome, and the first stuck connector is exactly the sample a lazily
+	// created child would swallow. 3 clients x (ok, none, 3 unknown
+	// reasons) = 15 series, plus 4 error ops.
+	for _, client := range connectFirstCallClients {
+		r.ConnectFirstCallTotal.WithLabelValues(client, "ok", "").Add(0)
+		r.ConnectFirstCallTotal.WithLabelValues(client, "none_within_window", "").Add(0)
+		for _, reason := range connectFirstCallUnknownReasons {
+			r.ConnectFirstCallTotal.WithLabelValues(client, "unknown", reason).Add(0)
+		}
+	}
+	for _, op := range connectFirstCallOps {
+		r.ConnectFirstCallErrorsTotal.WithLabelValues(op).Add(0)
 	}
 	for _, result := range jobCostResults {
 		r.AgentJobCostUSDTotal.WithLabelValues(result).Add(0)

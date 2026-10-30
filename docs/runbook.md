@@ -27,6 +27,7 @@ to do about it), see [docs/troubleshooting.md](troubleshooting.md) instead.
 - [MctlTelegramFloodWaitSpike — Telegram flood-wait rate spike](#mctltelegramfloodwaitspike)
 - [MctlTelegramOAuthPendingStuck — OAuth pending authorizations stuck](#mctltelegramoauthpendingstuck)
 - [Rejected dynamic client registrations (issue-668)](#oauthclientregistrations)
+- [Connect first-call funnel (issue #960)](#connectfirstcall)
 - [OAuth refresh re-authorization after scope changes](#oauth-refresh-reauthorization)
 - [Lookup-admin tier and TG_LOGIN_LOOKUP_ADMINS](#lookup-admin-tier-and-tg_login_lookup_admins)
 - [Client tool profiles and MCP_CLIENT_PROFILES](#client-tool-profiles)
@@ -1163,6 +1164,63 @@ policy. A regression in `validateRedirectURIShape`/`validateImplicitRedirectURI`
 that starts refusing every client would show up as `accepted` dropping to
 near zero while `rejected` climbs — that is the case this counter exists to
 catch quickly.
+
+---
+
+<a id="connectfirstcall"></a>
+## Connect first-call funnel (issue #960)
+
+`mctl_connect_first_call_total{client,outcome,reason}` answers, for every
+OAuth `authorization_code` grant, whether the same user and client then made
+a successful MCP call: a `tools/list` answered, or a `tools/call` that did
+not come back `isError`. A connector that is granted a token and never uses
+it is the shape of the 2026-10-30 "action discovery failed" failure, where
+ChatGPT got a token and then posted to `/` instead of `/mcp`.
+
+- `client` is `claude`, `chatgpt` or `other`, from the redirect URI host.
+  No client id or user id is ever a label.
+- `outcome="ok"`: a successful call within 5 minutes of the grant.
+- `outcome="none_within_window"`: none within 5 minutes. A call that
+  comes later does not change it.
+- `outcome="unknown"`: the process could not observe the answer, and
+  `reason` says why. `insert_error` means the grant's row could not be
+  written. `restart` means it was granted before the current process
+  started: a close that failed in the previous process left no trace.
+  `close_error` means a close failed while the row's window was open.
+  `unknown` is never folded into `none_within_window`.
+
+Each grant is a row in `connect_first_call`, so the correlation survives a
+restart. The first successful call closes it with
+`UPDATE ... WHERE outcome IS NULL RETURNING`, so a concurrent call or a retry
+cannot count twice. A reconciler inside the server runs every minute. It
+classifies rows whose window ended more than a minute ago (the grace for a
+close still in flight) and deletes classified rows after 7 days. The counter
+is incremented once per row, when its outcome is decided. Rows left open
+while the pod was down are classified on the next start, as
+`unknown/restart`. Self-connect (`/telegram/connect`) is not recorded: it is
+the browser's own sign-in, not a connector.
+
+`mctl_connect_first_call_errors_total{op}` (`insert`, `close`, `classify`,
+`sweep`) counts store errors. A non-zero `classify` rate means outcomes are
+waiting, not lost: open rows stay open until a pass succeeds.
+
+```promql
+# Share of grants with no successful call within 5 minutes, per client
+sum by (client) (increase(mctl_connect_first_call_total{outcome="none_within_window"}[1h]))
+/
+sum by (client) (increase(mctl_connect_first_call_total{outcome=~"ok|none_within_window"}[1h]))
+```
+
+Unknown outcomes stay out of both sides of that ratio. Watch them separately:
+a sustained `unknown` share says the funnel is blind, not that clients are
+healthy. To find the grants behind a spike, read the table, not the logs:
+
+```sql
+SELECT client, outcome, reason, granted_at, classified_at
+FROM connect_first_call
+WHERE granted_at > now() - interval '1 hour'
+ORDER BY granted_at DESC;
+```
 
 ---
 
