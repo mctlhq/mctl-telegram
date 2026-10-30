@@ -240,8 +240,11 @@ func probeAuthorizeRedirect(ctx context.Context, client *http.Client, baseURL, o
 
 // probeCallbackUnknownState sends a callback for a state the server never
 // issued and expects the "link already used" page, not a 5xx or a blank
-// response. It logs one unknown_state rejection server-side per run; the
-// canary User-Agent tells those apart from real users.
+// response. It logs one unknown_state rejection server-side per run. That
+// log line carries neither the User-Agent nor the state, so nothing tells it
+// apart from a real user's today; the "canary-" state prefix below exists so
+// that #960 can count it separately once the server records something that
+// identifies it.
 func probeCallbackUnknownState(ctx context.Context, client *http.Client, baseURL string) error {
 	state, err := randomState()
 	if err != nil {
@@ -379,7 +382,14 @@ func runLoginPath(ctx context.Context, cfg *config, met *canaryMetrics) bool {
 
 	ok := true
 	for _, step := range loginPathSteps {
-		stepCtx, cancel := context.WithTimeout(ctx, cfg.timeout)
+		// edge_connector_ua makes one request per User-Agent; each gets the
+		// full per-request timeout, so a slow first answer cannot starve the
+		// later ones into a deadline error that blames the wrong UA.
+		budget := cfg.timeout
+		if step == "edge_connector_ua" {
+			budget = cfg.timeout * time.Duration(len(edgeConnectorUserAgents))
+		}
+		stepCtx, cancel := context.WithTimeout(ctx, budget)
 		err := probes[step](stepCtx)
 		cancel()
 		if err != nil {

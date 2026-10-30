@@ -25,7 +25,8 @@ type loginPathFake struct {
 	authorizeNo302  bool
 	authorizeHost   string
 	callback500     bool
-	callbackBlank   bool // 200 with an empty page
+	mcpDelay        time.Duration // a slow edge or app on POST /mcp
+	callbackBlank   bool          // 200 with an empty page
 	prmNoAS         bool
 	prmMCPStale     bool
 	connectOtherCID bool
@@ -123,6 +124,7 @@ func (f *loginPathFake) server(t *testing.T) *httptest.Server {
 		challenge(w, "/.well-known/oauth-protected-resource")
 	})
 	mux.HandleFunc("POST /mcp", func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(f.mcpDelay)
 		if f.edgeBlockUA != "" && r.Header.Get("User-Agent") == f.edgeBlockUA {
 			w.Header().Set("Server", "cloudflare")
 			w.WriteHeader(http.StatusForbidden)
@@ -274,5 +276,23 @@ func TestLoginPathGaugeAbsentWhenDisabled(t *testing.T) {
 		if strings.Contains(mf.GetName(), "login_path") {
 			t.Fatalf("metric %s is registered while the login path is disabled", mf.GetName())
 		}
+	}
+}
+
+// TestEdgeConnectorUABudget: each connector User-Agent gets the full
+// per-request timeout. With a step budget of a single timeout, a slow edge on
+// the first UA would leave the later ones a deadline error instead of their
+// real answer.
+func TestEdgeConnectorUABudget(t *testing.T) {
+	srv := (&loginPathFake{mcpDelay: 600 * time.Millisecond}).server(t)
+	defer srv.Close()
+
+	cfg := loginPathConfig(srv.URL)
+	cfg.timeout = time.Second
+	met := newCanaryMetrics()
+	met.registry.MustRegister(met.loginPathSuccess)
+	runLoginPath(t.Context(), cfg, met)
+	if got := testutil.ToFloat64(met.stepFailures.WithLabelValues("edge_connector_ua")); got != 0 {
+		t.Fatalf("edge_connector_ua failed with three 600ms answers under a 1s per-request timeout")
 	}
 }

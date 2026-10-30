@@ -182,10 +182,11 @@ Likely causes:
 
 Each run leaves one abandoned pending authorization, which expires with the
 code TTL, and logs one `oauth: callback request rejected
-reason=unknown_state`. That log line carries no User-Agent, so the canary
-marks its callback with a `state` starting `canary-`; funnel metrics and
-alerts on callback rejections must count those apart from real users
-(mctl-telegram#960). Every other login-path request sends
+reason=unknown_state`. That log line carries neither the User-Agent nor the
+state, so today nothing tells it apart from a real user's. The canary marks
+its callback with a `state` starting `canary-` so that the funnel metrics in
+mctl-telegram#960 can count it separately once the server records
+something that identifies it. Every other login-path request sends
 `User-Agent: mctl-telegram-canary/<version>`, except the
 `edge_connector_ua` requests, which must look like the connectors.
 
