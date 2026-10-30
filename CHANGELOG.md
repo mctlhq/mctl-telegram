@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.108.0](https://github.com/mctlhq/mctl-telegram/compare/0.107.0...0.108.0) (2026-10-30)
+
+
+### Features
+
+* guard the monitoring canary account against accidental disconnect ([54eeab2](https://github.com/mctlhq/mctl-telegram/commit/54eeab2a89f53babb3d341db2f865d691d01fdaa))
+* guard the monitoring canary account against accidental disconnect ([97a2ab1](https://github.com/mctlhq/mctl-telegram/commit/97a2ab1d237efad16456ddc8f7fde4485d00870b)), closes [#961](https://github.com/mctlhq/mctl-telegram/issues/961)
+
+
+### Bug Fixes
+
+* **agent:** withdraw drafts whose source message was edited or deleted ([ed80273](https://github.com/mctlhq/mctl-telegram/commit/ed802738de224e322cd9e835e86275a1b2a96daa))
+
 ## [0.107.0](https://github.com/mctlhq/mctl-telegram/compare/0.106.0...0.107.0) (2026-10-30)
 
 

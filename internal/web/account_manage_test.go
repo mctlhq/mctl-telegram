@@ -20,6 +20,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/auth/telegramoidc"
+	"github.com/mctlhq/mctl-telegram/internal/canaryguard"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/oauth"
 	"github.com/mctlhq/mctl-telegram/internal/workertoken"
@@ -35,6 +36,9 @@ import (
 const (
 	accountManageSecret = "account-manage-test-secret-32-bytes!"
 	accountManageIssuer = "https://tg.test"
+	// accountManageCanaryTGID is the fixture's CANARY_TELEGRAM_IDS. Only a
+	// fixture built for this id exercises the canary guard (issue #961).
+	accountManageCanaryTGID int64 = 7700190
 )
 
 type accountManageFixture struct {
@@ -113,8 +117,10 @@ func newAccountManageFixture(t *testing.T, tgID int64) *accountManageFixture {
 	evictor := &recordingEvictor{}
 	accountHandlers := NewAccountHandlers(store, nil)
 	accountHandlers.Evictor = evictor
+	accountHandlers.Canary = canaryguard.Set{accountManageCanaryTGID: {}}
 	accountHandlers.Register(router)
-	manageSrv := NewManageServer(store, nil, accountManageIssuer, "", oauth.ConnectClientID)
+	manageSrv := NewManageServer(store, nil, accountManageIssuer, "", oauth.ConnectClientID).
+		WithCanaryGuard(canaryguard.Set{accountManageCanaryTGID: {}})
 	withAuth := auth.MiddlewareWithHTML(provider, true, nil, rm, manageSrv.WriteUnauthorized)
 
 	return &accountManageFixture{
@@ -274,6 +280,9 @@ func (f *accountManageFixture) call(method, path, bearer, cookie string) *httpte
 	switch path {
 	case "manage":
 		h, target = f.manage, "/telegram/connect/manage/disconnect"
+	case "manage-confirm-canary":
+		h, target = f.manage, "/telegram/connect/manage/disconnect"
+		body, contentType = strings.NewReader("confirm_canary=1"), "application/x-www-form-urlencoded"
 	case "manage-page":
 		h, target = f.managePage, "/telegram/connect/manage"
 	case "toggle-send":

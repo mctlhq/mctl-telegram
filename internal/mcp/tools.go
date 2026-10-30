@@ -18,6 +18,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
+	"github.com/mctlhq/mctl-telegram/internal/canaryguard"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/edgectx"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
@@ -843,9 +844,16 @@ Marks your active session as revoked and immediately closes the in-memory MTProt
 
 This tool is part of self-service controls — you do not need an operator to disconnect. It requires the account:manage scope; read-only and device credentials are refused, and on deployments with the Telegram manage page enabled, the owner can also disconnect there after signing in with Telegram.
 
-No inputs. Returns: {"disconnected": true|false, "had_active_session": true|false}.`),
+If the account is the server's monitoring canary, the call is refused unless confirm_canary is true: the canary fails until the account is re-linked.
+
+Inputs:
+  confirm_canary — bool, optional. Required to disconnect the monitoring canary account.
+
+Returns: {"disconnected": true|false, "had_active_session": true|false}.`),
+		mcplib.WithBoolean("confirm_canary",
+			mcplib.Description("Set true to disconnect the monitoring canary account; ignored for any other account.")),
 	)
-	handler := func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
 		id := auth.From(ctx)
 		if err := requireScope(id, "account:manage"); err != nil {
@@ -860,6 +868,10 @@ No inputs. Returns: {"disconnected": true|false, "had_active_session": true|fals
 			s.auditRefusal(ctx, id, "disconnect_telegram_account", "", errors.New(demoReviewerAccountMgmtRefusal), startedAt, ReasonRefused)
 			return mcplib.NewToolResultError(demoReviewerAccountMgmtRefusal), nil
 		}
+		auditTool, refused := s.canaryGate(ctx, "disconnect_telegram_account", id.TelegramID, req, startedAt)
+		if refused != nil {
+			return refused, nil
+		}
 		// Pool eviction and DB revoke happen under the same mutex that
 		// acquire() takes. A concurrent Borrow() blocks until both are
 		// committed, so it cannot observe the doomed pool entry AND it
@@ -873,7 +885,7 @@ No inputs. Returns: {"disconnected": true|false, "had_active_session": true|fals
 			had, e = s.Store.RevokeActiveSession(ctx, id.UserID, "disconnect")
 			return e
 		})
-		s.audit(ctx, id, "disconnect_telegram_account", "", err, startedAt)
+		s.audit(ctx, id, auditTool, "", err, startedAt)
 		if err != nil {
 			return s.storeErr(ctx, "disconnect", err), nil
 		}
@@ -898,9 +910,16 @@ Removes the encrypted session blob and all per-account metadata, and revokes eve
 
 For a softer alternative that keeps the row but disables it, use disconnect_telegram_account. Requires the account:manage scope.
 
-No inputs. Returns: {"deleted": true, "rows_removed": <int>}.`),
+If the account is the server's monitoring canary, the call is refused unless confirm_canary is true: the canary fails until the account is re-linked.
+
+Inputs:
+  confirm_canary — bool, optional. Required to delete the monitoring canary account.
+
+Returns: {"deleted": true, "rows_removed": <int>}.`),
+		mcplib.WithBoolean("confirm_canary",
+			mcplib.Description("Set true to delete the monitoring canary account; ignored for any other account.")),
 	)
-	handler := func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
 		id := auth.From(ctx)
 		if err := requireScope(id, "account:manage"); err != nil {
@@ -915,6 +934,10 @@ No inputs. Returns: {"deleted": true, "rows_removed": <int>}.`),
 			s.auditRefusal(ctx, id, "delete_telegram_account", "", errors.New(demoReviewerAccountMgmtRefusal), startedAt, ReasonRefused)
 			return mcplib.NewToolResultError(demoReviewerAccountMgmtRefusal), nil
 		}
+		auditTool, refused := s.canaryGate(ctx, "delete_telegram_account", id.TelegramID, req, startedAt)
+		if refused != nil {
+			return refused, nil
+		}
 		// RemoveAtomic for the same reason as disconnect — eviction and
 		// DB delete must commit under one lock so a concurrent Borrow()
 		// cannot allocate a fresh client against a still-existing row.
@@ -924,7 +947,7 @@ No inputs. Returns: {"deleted": true, "rows_removed": <int>}.`),
 			rows, e = s.Store.HardDeleteAccount(ctx, id.UserID)
 			return e
 		})
-		s.audit(ctx, id, "delete_telegram_account", "", err, startedAt)
+		s.audit(ctx, id, auditTool, "", err, startedAt)
 		if err != nil {
 			return s.storeErr(ctx, "delete", err), nil
 		}
@@ -1236,6 +1259,7 @@ func (s *Server) toolSetAccess() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 Inputs:
   telegram_id — int, required. The Telegram user id (see list_telegram_identities).
   tier        — string, required. "client" grants telegram:* scopes for that user's own account; "none" revokes them.
+  confirm_canary — bool, optional. Required with tier "none" when telegram_id is the server's monitoring canary account; without it the call is refused, because the canary fails once it loses access.
 
 The user must have signed in via the Login Widget at least once (so a users row exists) before a tier can be set. The change takes effect on the user's next token issuance — they reconnect the connector to pick it up.`),
 		mcplib.WithNumber("telegram_id",
@@ -1244,6 +1268,8 @@ The user must have signed in via the Login Widget at least once (so a users row 
 		mcplib.WithString("tier",
 			mcplib.Required(),
 			mcplib.Description(`"client" or "none" (required).`)),
+		mcplib.WithBoolean("confirm_canary",
+			mcplib.Description(`Set true to set tier "none" on the monitoring canary account; ignored otherwise.`)),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
@@ -1260,8 +1286,17 @@ The user must have signed in via the Login Widget at least once (so a users row 
 		if tier != db.TierClient && tier != db.TierNone {
 			return mcplib.NewToolResultError(`tier must be "client" or "none"`), nil
 		}
+		// Taking the canary's access away breaks it like a disconnect does;
+		// granting it is harmless and is not gated.
+		auditTool := "set_telegram_access"
+		if tier == db.TierNone {
+			var refused *mcplib.CallToolResult
+			if auditTool, refused = s.canaryGate(ctx, auditTool, tgID, req, startedAt); refused != nil {
+				return refused, nil
+			}
+		}
 		err := s.Store.SetAccessTier(ctx, tgID, tier)
-		s.audit(ctx, id, "set_telegram_access", "", err, startedAt)
+		s.audit(ctx, id, auditTool, "", err, startedAt)
 		if err != nil {
 			return s.storeErr(ctx, "set_telegram_access", err), nil
 		}
@@ -1835,11 +1870,14 @@ func (s *Server) toolRevokeSession() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 
 Inputs:
   telegram_id — int, required. The Telegram user id (see list_telegram_identities).
+  confirm_canary — bool, optional. Required when telegram_id is the server's monitoring canary account; without it the call is refused, because the canary fails until the account is re-linked.
 
 Output: JSON {telegram_id, revoked}. revoked is false when the user had no active session.`),
 		mcplib.WithNumber("telegram_id",
 			mcplib.Required(),
 			mcplib.Description("Telegram user id whose session to revoke (required).")),
+		mcplib.WithBoolean("confirm_canary",
+			mcplib.Description("Set true to revoke the monitoring canary account's session; ignored for any other account.")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
@@ -1851,6 +1889,10 @@ Output: JSON {telegram_id, revoked}. revoked is false when the user had no activ
 		tgID := int64(intArg(args, "telegram_id", 0))
 		if tgID <= 0 {
 			return mcplib.NewToolResultError("telegram_id is required and must be a positive integer"), nil
+		}
+		auditTool, refused := s.canaryGate(ctx, "revoke_telegram_session", tgID, req, startedAt)
+		if refused != nil {
+			return refused, nil
 		}
 		targetUID, err := s.Store.UserIDByTelegramID(ctx, tgID)
 		if err != nil {
@@ -1869,7 +1911,7 @@ Output: JSON {telegram_id, revoked}. revoked is false when the user had no activ
 			revoked, e = s.Store.RevokeActiveSession(ctx, targetUID, "disconnect")
 			return e
 		})
-		s.audit(ctx, id, "revoke_telegram_session", "", err, startedAt)
+		s.audit(ctx, id, auditTool, "", err, startedAt)
 		if err != nil {
 			return s.storeErr(ctx, "revoke_telegram_session", err), nil
 		}
@@ -2005,6 +2047,25 @@ Output: JSON {jti, telegram_id, revoked, hub_evicted}.`),
 // it bricks the login for the next reviewer and is expensive to recover (needs
 // an operator-driven in-pod re-login on the demo account).
 const demoReviewerAccountMgmtRefusal = "This demo reviewer account cannot be disconnected or deleted during review."
+
+// canaryGate guards a tool that ends the session of Telegram account
+// targetTGID against hitting the monitoring canary by accident (issue #961).
+// For an account outside CanaryTelegramIDs it returns tool unchanged and no
+// result. For a canary account without confirm_canary=true it audits the
+// refusal and returns the refusal result, before the pool or DB is touched.
+// With confirm_canary=true it returns tool with canaryguard.OverrideSuffix, so
+// the audit row of the action itself records that the guard was overridden.
+func (s *Server) canaryGate(ctx context.Context, tool string, targetTGID int64, req mcplib.CallToolRequest, startedAt time.Time) (string, *mcplib.CallToolResult) {
+	if !s.CanaryTelegramIDs.Contains(targetTGID) {
+		return tool, nil
+	}
+	if boolArg(req.GetArguments(), "confirm_canary", false) {
+		return tool + canaryguard.OverrideSuffix, nil
+	}
+	msg := canaryguard.Refusal("confirm_canary: true")
+	s.auditRefusal(ctx, auth.From(ctx), tool, "", errors.New(msg), startedAt, ReasonRefused)
+	return tool, mcplib.NewToolResultError(msg)
+}
 
 // isDemoReviewer reports whether the authenticated identity is the pinned
 // demo/reviewer account. Centralises the identity check shared by the send gate

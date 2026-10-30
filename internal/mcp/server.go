@@ -14,6 +14,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
 	"github.com/mctlhq/mctl-telegram/internal/broadcast"
+	"github.com/mctlhq/mctl-telegram/internal/canaryguard"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/edgectx"
 	"github.com/mctlhq/mctl-telegram/internal/mcpui"
@@ -65,6 +66,13 @@ type Server struct {
 	// the send tool, so neither is a dependable guarantee on its own. See
 	// reviewer.go.
 	DemoReviewerTGID int64
+	// CanaryTelegramIDs are the monitoring canary's accounts
+	// (CANARY_TELEGRAM_IDS). disconnect_telegram_account,
+	// delete_telegram_account, revoke_telegram_session and
+	// set_telegram_access with tier "none" refuse to act on such an account
+	// unless confirm_canary is true. Nil guards nothing. See WithCanaryGuard
+	// and internal/canaryguard.
+	CanaryTelegramIDs canaryguard.Set
 	// DemoReviewerWritePeers is the reviewer's write allowlist, keyed by
 	// canonical "user:<id>" / "chat:<id>" / "channel:<id>". Empty or nil
 	// allows nothing.
@@ -222,6 +230,13 @@ func (s *Server) WithPeerCache(pc *telegram.PeerCache) *Server {
 func (s *Server) WithDemoReviewer(tgID int64, writePeers []string) *Server {
 	s.DemoReviewerTGID = tgID
 	s.DemoReviewerWritePeers = reviewerWritePeerSet(writePeers)
+	return s
+}
+
+// WithCanaryGuard sets the monitoring canary's accounts; see
+// CanaryTelegramIDs.
+func (s *Server) WithCanaryGuard(ids canaryguard.Set) *Server {
+	s.CanaryTelegramIDs = ids
 	return s
 }
 

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/canaryguard"
 	"github.com/mctlhq/mctl-telegram/internal/oauth/cimd"
 	"github.com/mctlhq/mctl-telegram/internal/toolprofile"
 )
@@ -253,6 +254,13 @@ type Config struct {
 	// when it asks the user to confirm a QR login. The QR page names it so
 	// the user can tell a genuine prompt from a phishing one. Optional.
 	TelegramAppName string // TELEGRAM_APP_NAME
+	// CanaryTelegramIDs is CANARY_TELEGRAM_IDS: the Telegram accounts the
+	// monitoring canary runs as. Disconnect, delete, revoke_telegram_session
+	// and set_telegram_access tier "none" on a listed account need an
+	// explicit confirmation (internal/canaryguard). Empty by default; a
+	// malformed value is a startup error, because a typo would leave the
+	// canary unguarded.
+	CanaryTelegramIDs canaryguard.Set
 	// Reviewer/demo auth-mode for the ChatGPT App Directory review. When
 	// DemoReviewerEnabled is true the /oauth/authorize page offers a
 	// password-gated "reviewer access" path that authenticates as a single
@@ -541,6 +549,11 @@ func Load() (*Config, error) {
 	c.DemoVideoURL = envOr("DEMO_VIDEO_URL", "")
 	c.EnableAccessQREnabled = envBool("ENABLE_ACCESS_QR_ENABLED", false)
 	c.TelegramAppName = strings.TrimSpace(os.Getenv("TELEGRAM_APP_NAME"))
+	canaryIDs, err := canaryguard.Parse(os.Getenv("CANARY_TELEGRAM_IDS"))
+	if err != nil {
+		return nil, fmt.Errorf("CANARY_TELEGRAM_IDS: %w", err)
+	}
+	c.CanaryTelegramIDs = canaryIDs
 	c.DemoReviewerEnabled = envBool("DEMO_REVIEWER_ENABLED", false)
 	c.DemoReviewerUsername = os.Getenv("DEMO_REVIEWER_USERNAME")
 	c.DemoReviewerPassword = os.Getenv("DEMO_REVIEWER_PASSWORD")
