@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.109.1](https://github.com/mctlhq/mctl-telegram/compare/0.109.0...0.109.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* **agent:** keep several leads per conversation with explicit lead_id ([dfb7406](https://github.com/mctlhq/mctl-telegram/commit/dfb7406df27e50293f02af5022d4a31ada92e2db))
+* **agent:** stop inviting owner replies and promising follow-ups ([136784b](https://github.com/mctlhq/mctl-telegram/commit/136784b93c4b59808909c96a22cf26c1f7570ba1))
+* **agent:** stop inviting owner replies and promising follow-ups ([7768c4e](https://github.com/mctlhq/mctl-telegram/commit/7768c4ea07711a798c0d83dd96b9a4869c3a1183)), closes [#952](https://github.com/mctlhq/mctl-telegram/issues/952)
+* **slo:** keep no-session and canary calls out of the SLIs ([674c628](https://github.com/mctlhq/mctl-telegram/commit/674c6280f6a6c1e97acb2550127930e133f3f4b8))
+* **slo:** keep no-session and canary calls out of the SLIs ([d3d9630](https://github.com/mctlhq/mctl-telegram/commit/d3d9630756003221fd1737a87ff618ecfdf24561)), closes [#974](https://github.com/mctlhq/mctl-telegram/issues/974)
+
 ## [0.109.0](https://github.com/mctlhq/mctl-telegram/compare/0.108.0...0.109.0) (2026-10-30)
 
 
