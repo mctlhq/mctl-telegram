@@ -199,11 +199,38 @@ func captureQRLog(t *testing.T) *lockedBuffer {
 	return buf
 }
 
-// flowMetrics records ObserveLoginFlow calls.
+// flowMetrics records ObserveLoginFlow, CountLoginFlowStarted and
+// CountLoginCallbackRejected calls.
 type flowMetrics struct {
-	mu      sync.Mutex
-	results []string
-	logOuts []string
+	mu       sync.Mutex
+	results  []string
+	logOuts  []string
+	started  []string
+	rejected []string
+}
+
+func (m *flowMetrics) CountLoginFlowStarted(method string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.started = append(m.started, method)
+}
+
+func (m *flowMetrics) CountLoginCallbackRejected(route, reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rejected = append(m.rejected, route+"/"+reason)
+}
+
+func (m *flowMetrics) startedSnapshot() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.started...)
+}
+
+func (m *flowMetrics) rejectedSnapshot() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.rejected...)
 }
 
 func (m *flowMetrics) SetOAuthPendingAuthSize(float64)             {}
@@ -1111,7 +1138,7 @@ func TestEnableQR_ConnectingPageAfterScan(t *testing.T) {
 // TestEnableQR_StalledConnectFails (#931): the connecting page must not
 // become an endless spinner. Work after a confirmed scan that does not
 // finish within the stall bound fails the flow with a message that says so,
-// counted as an error, not an abandonment.
+// counted as stalled (#960), neither a generic error nor an abandonment.
 func TestEnableQR_StalledConnectFails(t *testing.T) {
 	q := newQRStub(500100101)
 	q.afterScan = make(chan struct{}) // never closed
@@ -1128,8 +1155,11 @@ func TestEnableQR_StalledConnectFails(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "Sign in with a QR code") {
 		t.Error("the failure page offers no new QR code")
 	}
-	if got := m.snapshot(); len(got) != 1 || got[0] != "qr/error" {
-		t.Errorf("login flow metrics = %v, want [qr/error]", got)
+	if got := m.snapshot(); len(got) != 1 || got[0] != "qr/stalled" {
+		t.Errorf("login flow metrics = %v, want [qr/stalled]", got)
+	}
+	if got := m.startedSnapshot(); len(got) != 1 || got[0] != methodQR {
+		t.Errorf("started flows = %v, want [qr]", got)
 	}
 	audit := strings.Join(auditRows(t, srv), "\n")
 	if !strings.Contains(audit, "connect:failed:qr_connect_stalled|qr|") {

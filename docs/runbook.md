@@ -1224,6 +1224,70 @@ ORDER BY granted_at DESC;
 
 ---
 
+<a id="loginpathsignals"></a>
+## Login-path signals (issue #960, signals 2-4)
+
+Three counters make the rest of a real user's login path visible without a
+synthetic login. Every label is a closed set, primed at 0 on start, so the
+first occurrence registers in `increase()`.
+
+**Rejected OIDC returns.**
+`mctl_login_callback_rejected_total{route,reason}` counts the browser coming
+back from Telegram and being turned away. `route` is `oauth_callback`
+(`/oauth/telegram/callback`, connectors and enable_access) or `connect_done`
+(`/telegram/connect/done`, self-connect). `reason` is the same value the
+`oauth: callback request rejected` and `connect: request rejected` log lines
+carry: `missing_state`, `missing_code`, `oidc_error` (the user cancelled or
+Telegram refused), `unknown_state` (a reused or never-issued link),
+`expired_state`, `exchange_failed` (the server-side token exchange with
+Telegram failed) and `prefetch_refused` (a browser or crawler prefetch,
+answered 204 and harmless). A self-connect link reopened in a browser that is
+already connected is redirected to `/telegram/connect/manage`; that is not a
+rejection and is not counted.
+
+```promql
+sum by (route, reason) (increase(mctl_login_callback_rejected_total{reason!="prefetch_refused"}[1h]))
+```
+
+The canary's `callback_unknown_state` probe sends one never-issued state to
+`/oauth/telegram/callback` on every run, so `oauth_callback/unknown_state`
+has a floor of one per canary run (six an hour at `*/10`); read it above that
+floor. A rise in `exchange_failed` points at Telegram's token endpoint or our
+JWKS fetch. A rise in `unknown_state` beyond the canary floor, with no
+matching rise in grants, is users reopening old sign-in links.
+
+**MCP on the bare origin.** `mctl_root_mcp_requests_total{method,ua_family}`
+counts requests on `/` that are served as MCP rather than as the landing page:
+a client configured with `https://<host>` instead of `https://<host>/mcp`
+(mctl-telegram#957). `method` is `GET` (the SSE stream), `POST`, `DELETE` or
+`other`; `ua_family` is `claude`, `chatgpt`, `perplexity`, `canary` or
+`other`, matched on the User-Agent and never trusted for anything else. The
+canary's `mcp_root` probe makes one `POST/canary` per run, so exclude it:
+
+```promql
+sum by (ua_family) (increase(mctl_root_mcp_requests_total{ua_family!="canary"}[24h]))
+```
+
+Non-zero means real connectors still use the bare origin; the alias is
+keeping them working.
+
+**Login flows started and finished.** `mctl_login_flow_started_total{method}`
+counts enable_access login flows launched (`code` for phone, `qr`), next to
+the existing `mctl_login_flow_total{method,result}`. Every launched flow
+finishes exactly once, so the difference over a window is flows a restart cut
+off. `mctl_login_flow_total` now reports a QR login that Telegram confirmed
+but whose session connect did not finish in time as `result="stalled"`
+(previously folded into `error`). Together with
+`mctl_login_phone_step_total{result="timeout"}` for the phone side, this
+covers started, succeeded (`ok`), stalled and abandoned for both methods.
+
+```promql
+sum by (method) (increase(mctl_login_flow_started_total[1h]))
+- sum by (method) (increase(mctl_login_flow_total[1h]))
+```
+
+---
+
 <a id="jwtfailures"></a>
 ## JwtFailures — authentication failure spike
 

@@ -908,6 +908,14 @@ func TestEnableAccess_ReLoginLogsOutTheSupersededKey(t *testing.T) {
 	if len(m.logOuts) != 1 || m.logOuts[0] != "superseded/ok" {
 		t.Errorf("logout metrics = %v, want [superseded/ok]", m.logOuts)
 	}
+	// #960: one launched phone flow, counted once at launch and once at
+	// its finish.
+	if len(m.started) != 1 || m.started[0] != methodCode {
+		t.Errorf("started flows = %v, want [code]", m.started)
+	}
+	if len(m.results) != 1 || m.results[0] != "code/ok" {
+		t.Errorf("finished flows = %v, want [code/ok]", m.results)
+	}
 }
 
 // TestEnableAccess_ReLoginEvictsThePooledClientFirst: a pooled client still

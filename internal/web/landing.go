@@ -117,14 +117,62 @@ func BrowserRedirect(next http.Handler, landingPath string) http.Handler {
 // protected-resource metadata are already path-aware (auth.ResourceMetadata,
 // protectedResource in cmd/server), so a client on the origin is told the
 // resource is the origin and its token is accepted on both paths.
-func RootMCP(landing, mcp http.Handler) http.Handler {
+//
+// count, when non-nil, is called once for every request served as MCP, with
+// a bounded method (rootMCPMethod) and User-Agent family (UAFamily), so the
+// alias's use is measurable (mctl_root_mcp_requests_total). Landing-page
+// loads are not counted.
+func RootMCP(landing, mcp http.Handler, count func(method, uaFamily string)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && !wantsEventStream(r.Header.Get("Accept")) {
 			landing.ServeHTTP(w, r)
 			return
 		}
+		if count != nil {
+			count(rootMCPMethod(r.Method), UAFamily(r.UserAgent()))
+		}
 		mcp.ServeHTTP(w, r)
 	})
+}
+
+// rootMCPMethod bounds the method label of mctl_root_mcp_requests_total to
+// GET, POST, DELETE and other.
+func rootMCPMethod(m string) string {
+	switch m {
+	case http.MethodGet, http.MethodPost, http.MethodDelete:
+		return m
+	}
+	return "other"
+}
+
+// UA family labels, the closed ua_family set of mctl_root_mcp_requests_total.
+const (
+	UAFamilyClaude     = "claude"
+	UAFamilyChatGPT    = "chatgpt"
+	UAFamilyPerplexity = "perplexity"
+	UAFamilyCanary     = "canary"
+	UAFamilyOther      = "other"
+)
+
+// UAFamily maps a User-Agent to a bounded family label. Matching is a
+// case-insensitive substring test on tokens the connectors send (Claude-User,
+// ChatGPT-User, openai-mcp, Perplexity-User) and on the canary's own
+// mctl-telegram-canary/<version>; anything else, including an empty or
+// spoofed value, is "other". It is a label for counting, never a trust
+// decision.
+func UAFamily(ua string) string {
+	u := strings.ToLower(ua)
+	switch {
+	case strings.Contains(u, "mctl-telegram-canary"):
+		return UAFamilyCanary
+	case strings.Contains(u, "claude"), strings.Contains(u, "anthropic"):
+		return UAFamilyClaude
+	case strings.Contains(u, "chatgpt"), strings.Contains(u, "openai"):
+		return UAFamilyChatGPT
+	case strings.Contains(u, "perplexity"):
+		return UAFamilyPerplexity
+	}
+	return UAFamilyOther
 }
 
 // wantsEventStream reports whether a GET is an MCP client opening its

@@ -121,10 +121,31 @@ type Registry struct {
 	// ("code" for phone + login code, "qr" for the web QR login, #901) and
 	// result: "ok", "error", "mismatch" (another Telegram account signed in
 	// and was refused), "expired" (a QR code nobody scanned in time),
-	// "abandoned" (the flow ran out of time waiting for the user) or
-	// "superseded" (the user started over). Unlike LoginPhoneStepTotal it
-	// covers the whole flow, so method=code and method=qr compare end to end.
+	// "stalled" (Telegram confirmed a QR scan but connecting the session did
+	// not finish in time), "abandoned" (the flow ran out of time waiting for
+	// the user) or "superseded" (the user started over). Unlike
+	// LoginPhoneStepTotal it covers the whole flow, so method=code and
+	// method=qr compare end to end.
 	LoginFlowTotal *prometheus.CounterVec
+	// LoginFlowStartedTotal counts enable_access login flows launched, by
+	// method (issue #960). Every launched flow ends in exactly one
+	// LoginFlowTotal increment, so started minus finished over a window is
+	// the flows a pod restart cut off before they could report.
+	LoginFlowStartedTotal *prometheus.CounterVec
+	// LoginCallbackRejectedTotal counts rejected browser returns from
+	// Telegram's OIDC leg (issue #960), labeled by route ("oauth_callback" for
+	// /oauth/telegram/callback, "connect_done" for /telegram/connect/done)
+	// and reason, the same closed vocabulary the "callback request rejected"
+	// and "connect: request rejected" log lines carry: missing_state,
+	// missing_code, oidc_error, unknown_state, expired_state,
+	// exchange_failed, prefetch_refused.
+	LoginCallbackRejectedTotal *prometheus.CounterVec
+	// RootMCPRequestsTotal counts requests on the bare origin "/" that are
+	// served as MCP rather than as the landing page (issue #960, the
+	// mctl-telegram#957 alias), labeled by method (GET, POST, DELETE, other)
+	// and ua_family (claude, chatgpt, perplexity, canary, other). A client
+	// still configured with the bare origin shows up here.
+	RootMCPRequestsTotal *prometheus.CounterVec
 	// LoginFlowDuration measures a successful flow from launch to session
 	// saved, in seconds, by method.
 	LoginFlowDuration *prometheus.HistogramVec
@@ -389,6 +410,18 @@ var (
 	connectFirstCallClients        = []string{"claude", "chatgpt", "other"}
 	connectFirstCallUnknownReasons = []string{"insert_error", "restart", "close_error"}
 	connectFirstCallOps            = []string{"insert", "close", "classify", "sweep"}
+	// loginFlowMethods, loginCallbackRoutes/Reasons and rootMCPMethods/
+	// UAFamilies are the closed label sets of the login-path counters added
+	// for issue #960 signals 2-4. They mirror internal/oauth and internal/web,
+	// whose tests hold them to the same values.
+	loginFlowMethods     = []string{"code", "qr"}
+	loginCallbackRoutes  = []string{"oauth_callback", "connect_done"}
+	loginCallbackReasons = []string{
+		"missing_state", "missing_code", "oidc_error", "unknown_state",
+		"expired_state", "exchange_failed", "prefetch_refused",
+	}
+	rootMCPMethods    = []string{"GET", "POST", "DELETE", "other"}
+	rootMCPUAFamilies = []string{"claude", "chatgpt", "perplexity", "canary", "other"}
 	// workContextRoutes and friends are the closed label sets for
 	// WorkContextRequestsTotal/WorkContextBindingsTotal (issue-443), primed
 	// below for the same reason as the two lists above — see #591.
@@ -531,6 +564,25 @@ func (r *Registry) ObserveLoginFlow(method, result string, seconds float64) {
 	}
 }
 
+// CountLoginFlowStarted counts one launched enable_access login flow.
+// Satisfies oauth.metricsIface.
+func (r *Registry) CountLoginFlowStarted(method string) {
+	r.LoginFlowStartedTotal.WithLabelValues(method).Inc()
+}
+
+// CountLoginCallbackRejected counts one rejected OIDC browser return.
+// Satisfies oauth.metricsIface and web.ConnectMetrics; route and reason come
+// from closed sets in those packages.
+func (r *Registry) CountLoginCallbackRejected(route, reason string) {
+	r.LoginCallbackRejectedTotal.WithLabelValues(route, reason).Inc()
+}
+
+// CountRootMCPRequest counts one MCP request served on the bare origin. The
+// arguments come from web.RootMCP, which bounds both.
+func (r *Registry) CountRootMCPRequest(method, uaFamily string) {
+	r.RootMCPRequestsTotal.WithLabelValues(method, uaFamily).Inc()
+}
+
 // CountLoginLogOut counts one enable_access logout of a session nobody holds
 // any more. Satisfies oauth.metricsIface. reason and outcome come from closed
 // sets in internal/oauth.
@@ -624,8 +676,23 @@ func New() *Registry {
 
 	r.LoginFlowTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_login_flow_total",
-		Help: "Total finished enable_access login flows, labeled by method (code, qr) and result: ok, error, mismatch, expired, abandoned, superseded.",
+		Help: "Total finished enable_access login flows, labeled by method (code, qr) and result: ok, error, mismatch, expired, stalled, abandoned, superseded.",
 	}, []string{"method", "result"})
+
+	r.LoginFlowStartedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_login_flow_started_total",
+		Help: "Total enable_access login flows launched, labeled by method (code, qr). Started minus mctl_login_flow_total is the flows cut off by a restart.",
+	}, []string{"method"})
+
+	r.LoginCallbackRejectedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_login_callback_rejected_total",
+		Help: "Total rejected Telegram OIDC browser returns, labeled by route (oauth_callback, connect_done) and reason (missing_state, missing_code, oidc_error, unknown_state, expired_state, exchange_failed, prefetch_refused).",
+	}, []string{"route", "reason"})
+
+	r.RootMCPRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_root_mcp_requests_total",
+		Help: "Total requests on the bare origin / served as MCP, labeled by method (GET, POST, DELETE, other) and ua_family (claude, chatgpt, perplexity, canary, other).",
+	}, []string{"method", "ua_family"})
 
 	r.LoginFlowDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "mctl_login_flow_seconds",
@@ -825,6 +892,9 @@ func New() *Registry {
 		r.LoginPhoneStepTotal,
 		r.LoginPhoneToCodeDuration,
 		r.LoginFlowTotal,
+		r.LoginFlowStartedTotal,
+		r.LoginCallbackRejectedTotal,
+		r.RootMCPRequestsTotal,
 		r.LoginLogOutTotal,
 		r.LoginFlowDuration,
 		r.ConnectFirstCallTotal,
@@ -886,6 +956,22 @@ func New() *Registry {
 	}
 	for _, op := range connectFirstCallOps {
 		r.ConnectFirstCallErrorsTotal.WithLabelValues(op).Add(0)
+	}
+	// issue #960 signals 2-4: the same reasoning for the login-path counters
+	// an alert reads through increase(). 2 started + 2x7 rejections + 4x5
+	// root requests = 36 series, all compile-time constants.
+	for _, method := range loginFlowMethods {
+		r.LoginFlowStartedTotal.WithLabelValues(method).Add(0)
+	}
+	for _, route := range loginCallbackRoutes {
+		for _, reason := range loginCallbackReasons {
+			r.LoginCallbackRejectedTotal.WithLabelValues(route, reason).Add(0)
+		}
+	}
+	for _, method := range rootMCPMethods {
+		for _, family := range rootMCPUAFamilies {
+			r.RootMCPRequestsTotal.WithLabelValues(method, family).Add(0)
+		}
 	}
 	for _, result := range jobCostResults {
 		r.AgentJobCostUSDTotal.WithLabelValues(result).Add(0)
