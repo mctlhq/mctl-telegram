@@ -294,8 +294,28 @@ sent:
 No separate notification is sent. The denied action keeps the reason in
 `policy_reasons` (`source message edited` or `source message deleted`), and
 `/mctl show` prints the last withdrawn draft's reason and time. An edit still
-enqueues its own job, which answers the current text; carrying the rest of a
-coalesced turn into that job is tracked in #962.
+enqueues its own job, which answers the current text.
+
+### Edit of a coalesced message (#962)
+
+When the edited message was part of a turn with several messages and that
+turn's reply was never sent, the edit job also gets the turn's other
+messages, so the answer covers everything the sender said and not only the
+corrected line:
+
+- Each other message is given at its latest version (its newest edit). A
+  message the sender deleted is left out.
+- The events are ordered by when the original messages arrived, so the
+  edited message keeps its place. `get_event` returns them in `events[]`;
+  the top-level fields stay those of the edit.
+- If the turn's reply was already sent (`executing` or `executed`), the edit
+  job gets only the edit: the rest was answered.
+- The list is computed when the job is claimed and stored in
+  `agent_jobs.turn_context`. The job token can read exactly those events.
+  A retried attempt recomputes it.
+- If any of those messages is edited or deleted after the claim, the edit
+  job's draft is withdrawn like any superseded draft; the newer edit has its
+  own job.
 
 ## Several leads per conversation (#951)
 

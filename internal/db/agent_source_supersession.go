@@ -89,7 +89,9 @@ func jobSourceSuperseded(ctx context.Context, q rowQueryer, userID, jobID int64)
 		userID, jobID, EventKindMessageEdit, EventKindMessageDelete,
 	).Scan(&kind)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
+		// The turn's own messages are current; the messages an edit job
+		// read as turn context (#962) must be too.
+		return turnContextSuperseded(ctx, q, userID, jobID)
 	}
 	if err != nil {
 		return "", fmt.Errorf("check job source supersession: %w", err)

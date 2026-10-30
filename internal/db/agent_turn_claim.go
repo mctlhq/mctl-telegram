@@ -147,6 +147,9 @@ func (s *Store) claimCoalesced(ctx context.Context, replicaID string, userID int
 		if err := s.fillSourceEvents(ctx, tx, claimed); err != nil {
 			return nil, err
 		}
+		if err := storeTurnContext(ctx, tx, &claimed[0]); err != nil {
+			return nil, err
+		}
 		jobs = append(jobs, claimed[0])
 	}
 	sort.SliceStable(jobs, func(i, k int) bool {

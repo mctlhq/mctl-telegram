@@ -37,7 +37,9 @@ type jobEnvelope struct {
 	JobToken string `json:"job_token,omitempty"`
 	// TurnID and SourceEventIDs are set when the job is a coalesced turn:
 	// every event of the turn in arrival order, head first. EventID stays the
-	// head's event so older workers keep working.
+	// head's event so older workers keep working. An edit job that carries
+	// the rest of an unsent turn (#962) lists those events as well, ordered
+	// by the original messages' arrival, so EventID need not come first.
 	TurnID         string   `json:"turn_id,omitempty"`
 	SourceEventIDs []string `json:"source_event_ids,omitempty"`
 }
