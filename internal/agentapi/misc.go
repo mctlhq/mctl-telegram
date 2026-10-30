@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -44,12 +45,13 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleRecruiterProfile is GET /recruiters/{peer} — the owner's public
-// profile (restricted fields already stripped by the OwnerProfileProvider
-// implementation), so the model can answer "what's your background" without
-// ever seeing the owner's restricted section. peer is the recruiter's
-// Telegram id; validated but otherwise unused until a future
-// OwnerProfileProvider wants to vary the response per-recruiter.
+// handleRecruiterProfile is GET /recruiters/{peer} — the owner's profile as
+// the agent may see it in this conversation: restricted and never fields are
+// always stripped, after_owner_engaged fields unless the owner has engaged
+// with the peer (#953). This filter is the primary disclosure boundary; the
+// propose and send checks are defense in depth behind it. A credential not
+// bound to a job has no conversation to judge engagement by and gets the
+// cold-sender view.
 func (s *Server) handleRecruiterProfile(w http.ResponseWriter, r *http.Request) {
 	id, ok := identity(w, r)
 	if !ok {
@@ -60,6 +62,7 @@ func (s *Server) handleRecruiterProfile(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusBadRequest, "invalid peer id")
 		return
 	}
+	engaged := false
 	if jobBound(id) {
 		// A job credential may only read the profile for its own
 		// conversation's peer.
@@ -68,12 +71,13 @@ func (s *Server) handleRecruiterProfile(w http.ResponseWriter, r *http.Request) 
 			s.denyBinding(w, r, id, "get_recruiter_profile", fmt.Sprintf("peer %d is not the peer of conv=%d", peerTGID, id.ConversationID))
 			return
 		}
+		engaged = conv.OwnerEngaged(time.Now())
 	}
 	if s.Profile == nil {
 		writeJSONError(w, http.StatusNotImplemented, "owner profile not configured")
 		return
 	}
-	profile, err := s.Profile.PublicProfile(r.Context(), id.UserID, peerTGID)
+	profile, err := s.Profile.PublicProfile(r.Context(), id.UserID, engaged)
 	if errors.Is(err, db.ErrAgentOwnerProfileNotFound) {
 		writeJSONError(w, http.StatusNotFound, "owner profile not configured for this account")
 		return

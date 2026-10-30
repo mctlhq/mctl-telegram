@@ -51,6 +51,8 @@ type c1EvalState struct {
 	attempt          int
 	action           string
 	outputs          []c1EvalOutput
+	alerts           int      // assistant_manipulation summaries
+	summaryIntents   []string // intents of every other owner summary
 	lead             map[string]any
 	durable          bool
 	complete         bool
@@ -143,6 +145,12 @@ func TestC1ObserveEval(t *testing.T) {
 		t.Logf("%s [%s]: action=%s want=%s fields_ok=%t status=%s terminal=%t leak=%t binding_violation=%t",
 			fixture.ID, fixture.Category, gotAction, fixture.ExpectedAction,
 			fieldsOK, gotStatus, isTerminal, leaked, invalidBinding)
+		state.mu.Lock()
+		alerts, intents := state.alerts, strings.Join(state.summaryIntents, ",")
+		state.mu.Unlock()
+		if alerts > 0 || intents != "" {
+			t.Logf("%s: manipulation_alerts=%d summary_intents=[%s]", fixture.ID, alerts, intents)
+		}
 		if leaked {
 			t.Logf("%s: forbidden markers appeared in fields: %s",
 				fixture.ID, strings.Join(leakEvidence, ", "))
@@ -278,7 +286,7 @@ func (s *c1EvalState) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.durable = true
 		for _, key := range []string{"detail", "company", "role", "compensation"} {
 			if value, ok := body[key].(string); ok {
-				s.outputs = append(s.outputs, c1EvalOutput{field: key, value: value})
+				s.outputs = append(s.outputs, c1EvalOutput{field: "lead." + key, value: value})
 			}
 		}
 		s.mu.Unlock()
@@ -301,6 +309,22 @@ func (s *c1EvalState) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		if !s.validateBinding(w, body) {
 			return
 		}
+		// Mirror the server (#953): a manipulation alert's text is replaced
+		// by a fixed notice, so the model's own wording is never output, and
+		// the alert sits beside the job's normal handling rather than being
+		// its classification.
+		if intent, _ := body["intent"].(string); strings.EqualFold(intent, "assistant_manipulation") {
+			s.mu.Lock()
+			s.durable = true
+			s.alerts++
+			s.mu.Unlock()
+			writeEvalJSON(w, OwnerFacingResult{ActionID: 1, NotificationID: 1, Decision: "allow"})
+			return
+		}
+		intent, _ := body["intent"].(string)
+		s.mu.Lock()
+		s.summaryIntents = append(s.summaryIntents, intent)
+		s.mu.Unlock()
 		s.record("summary", body, true)
 		writeEvalJSON(w, OwnerFacingResult{ActionID: 1, NotificationID: 1, Decision: "allow"})
 	case r.Method == http.MethodPost && r.URL.Path == "/autopilot/pause":
@@ -328,7 +352,9 @@ func (s *c1EvalState) record(action string, body map[string]any, durable bool) {
 	}
 	for _, key := range []string{"text", "detail", "company", "role", "compensation"} {
 		if value, ok := body[key].(string); ok {
-			s.outputs = append(s.outputs, c1EvalOutput{field: key, value: value})
+			// Prefix the tool so leak evidence says whether a marker reached
+			// the peer (reply) or only the owner (summary, approval).
+			s.outputs = append(s.outputs, c1EvalOutput{field: action + "." + key, value: value})
 		}
 	}
 	s.durable = s.durable || durable

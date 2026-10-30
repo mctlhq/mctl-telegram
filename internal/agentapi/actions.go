@@ -164,6 +164,27 @@ func hasReason(joined, want string) bool {
 	return false
 }
 
+// protectedField runs the owner_profile disclosure match (#953) on a draft
+// reply against the conversation's engagement state. Nil means no match, no
+// provider, or no owner profile for this tenant; the executor runs the same
+// check again before sending.
+func (s *Server) protectedField(ctx context.Context, userID int64, conv db.Conversation, text string) (*policy.ProtectedField, error) {
+	if s.Profile == nil {
+		return nil, nil
+	}
+	key, never, matched, err := s.Profile.MatchProtected(ctx, userID, text, conv.OwnerEngaged(time.Now()))
+	if errors.Is(err, db.ErrAgentOwnerProfileNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("match protected profile fields: %w", err)
+	}
+	if !matched {
+		return nil, nil
+	}
+	return &policy.ProtectedField{Key: key, Never: never}, nil
+}
+
 // handleProposeReply is POST /actions/propose_reply. There is deliberately no
 // peer parameter in the request: the peer is derived server-side from the
 // conversation row, so a caller can never direct a send anywhere the
@@ -236,6 +257,12 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	protected, err := s.protectedField(ctx, id.UserID, *conv, req.Text)
+	if err != nil {
+		logHandlerErr("propose_reply", err)
+		writeJSONError(w, http.StatusInternalServerError, "profile lookup failed")
+		return
+	}
 	result := policy.Evaluate(policy.Input{
 		Profile:      *profile,
 		Conversation: *conv,
@@ -245,6 +272,7 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		RecentAgentSends: sends,
 		GlobalKill:       s.globalKill(),
 		Now:              time.Now(),
+		ProtectedField:   protected,
 	})
 	// Counted from THIS evaluation, deliberately unlike the notification and
 	// response handling below, which read the persisted row so a redelivered
@@ -528,6 +556,55 @@ func policySurfaceForOwnerTool(tool string) string {
 	}
 }
 
+// IntentAssistantManipulation marks a send_owner_summary that reports a
+// message trying to instruct the assistant (prompt injection, jailbreak,
+// requests for its instructions). The server owns the wording and the rate
+// of these alerts (#953): see manipulationAlertBody and
+// manipulationAlertWindow. Other intents, including OTP or credential
+// phishing alerts, are delivered as the agent wrote them and never
+// throttled.
+const IntentAssistantManipulation = "assistant_manipulation"
+
+// manipulationAlertWindow bounds assistant-manipulation alerts to one per
+// conversation per window. A sender probing the assistant tends to send
+// many such messages; the owner needs to know once, not each time.
+const manipulationAlertWindow = 6 * time.Hour
+
+// ManipulationAlertText is the whole substance of an assistant-manipulation
+// alert. It never quotes or paraphrases the sender's text: an alert that
+// carries the attacker's words delivers the injection to the owner's Saved
+// Messages, where another assistant with access to them may read it.
+const ManipulationAlertText = "A message contained instructions directed at the assistant. They were not followed."
+
+// manipulationAlertBody replaces whatever text the agent sent with the
+// canonical alert. Only the conversation id and the peer's @username are
+// added, for the owner to find the chat: a username is limited to
+// [A-Za-z0-9_], while a display name is free text the sender controls and is
+// deliberately left out.
+func manipulationAlertBody(conv db.Conversation) string {
+	if conv.ID == 0 {
+		return ManipulationAlertText
+	}
+	who := ""
+	if u := strings.TrimSpace(conv.PeerUsername); u != "" && validUsername(u) {
+		who = " (@" + u + ")"
+	}
+	return fmt.Sprintf("Conversation %d%s: %s\n\n/mctl show %d", conv.ID, who, ManipulationAlertText, conv.ID)
+}
+
+// validUsername reports whether u has only the characters a Telegram
+// username can, so a stored value can never smuggle text into the alert.
+func validUsername(u string) bool {
+	for _, r := range u {
+		switch {
+		case r == '_', r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actionType, notificationKind, tool string) {
 	id, ok := identity(w, r)
 	if !ok {
@@ -572,6 +649,32 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 			return
 		}
 		conv = *c
+	}
+
+	if actionType == db.ActionTypeOwnerSummary && strings.EqualFold(strings.TrimSpace(req.Intent), IntentAssistantManipulation) {
+		req.Intent = IntentAssistantManipulation
+		req.Text = manipulationAlertBody(conv)
+		// Check-then-insert is not atomic. Accepted: ClaimAgentJobs already
+		// serializes jobs per conversation, so two alerts can only race
+		// after a lease expiry, and the worst case is one duplicate
+		// neutral notice.
+		recent, err := s.Store.HasExecutedOwnerSummarySince(ctx, id.UserID, req.ConversationID,
+			IntentAssistantManipulation, time.Now().UTC().Add(-manipulationAlertWindow))
+		if err != nil {
+			logHandlerErr(tool, err)
+			writeJSONError(w, http.StatusInternalServerError, "request failed")
+			return
+		}
+		if recent {
+			// Not inserted as an action: the (job_id, action_type) key
+			// allows one summary per job, and a suppressed row would
+			// swallow a security alert the same job sends next. The tool
+			// call log is the audit record.
+			reason := "assistant_manipulation alert already sent for this conversation within 6 hours"
+			s.audit(ctx, id.UserID, tool, "suppressed", reason)
+			writeJSON(w, http.StatusOK, map[string]any{"suppressed": true, "reason": reason})
+			return
+		}
 	}
 
 	result := policy.Evaluate(policy.Input{

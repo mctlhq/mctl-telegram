@@ -24,20 +24,21 @@ import (
 // loop is cut off by us, not by the framework returning a bare 503.
 const defaultLongPollTimeout = 20 * time.Second
 
-// OwnerProfileProvider supplies the owner's public profile for GET
-// /recruiters/{peer}. It is a narrow interface (rather than a concrete type)
-// so this package does not depend on internal/agent/profile, which is not
-// part of this PR (see A-PR7, mctlhq/mctl-telegram#297) — Server works with a
-// nil provider today and returns 501 for that one endpoint until #297 wires a
-// real implementation in.
+// OwnerProfileProvider supplies the owner's profile for GET
+// /recruiters/{peer} and the disclosure check on propose_reply (#953). It is
+// a narrow interface so this package does not depend on
+// internal/agent/profile; Server works with a nil provider and returns 501
+// for that endpoint.
 type OwnerProfileProvider interface {
-	// PublicProfile returns the fields safe to hand to the agent — the
-	// implementation is responsible for stripping anything marked
-	// restricted/approval_required in the source profile. The peerTGID of
-	// the requesting recruiter is passed through in case a future
-	// implementation wants to vary the response per-peer; today's callers
-	// can ignore it.
-	PublicProfile(ctx context.Context, userID, peerTGID int64) (map[string]any, error)
+	// PublicProfile returns the fields the agent may see in a conversation
+	// whose owner-engagement state is engaged. The implementation strips
+	// the restricted section, never fields, and after_owner_engaged fields
+	// unless engaged.
+	PublicProfile(ctx context.Context, userID int64, engaged bool) (map[string]any, error)
+	// MatchProtected reports the strongest field the agent may not disclose
+	// right now whose value appears in text; never is true for a field the
+	// owner marked never. Only the field path is returned.
+	MatchProtected(ctx context.Context, userID int64, text string, engaged bool) (key string, never, matched bool, err error)
 }
 
 // Server holds the dependencies every handler needs. Construct with New,

@@ -508,8 +508,26 @@ type Conversation struct {
 	AutonomousTurns  int
 	LastIncomingAt   time.Time // zero value ⇒ never
 	LastAgentReplyAt time.Time // zero value ⇒ never
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	// OwnerEngagedAt is the last owner engagement event: an outgoing message
+	// the owner typed to this peer, or a successfully executed agent reply
+	// the owner approved. Zero ⇒ never. See OwnerEngaged.
+	OwnerEngagedAt time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+// OwnerEngagementWindow is how long one owner engagement event keeps a
+// conversation engaged (#953). Each new event restarts the window.
+const OwnerEngagementWindow = 30 * 24 * time.Hour
+
+// OwnerEngaged reports whether the owner engaged with this peer within
+// OwnerEngagementWindow before now. Profile fields marked
+// after_owner_engaged are released to the agent only while this holds.
+func (c Conversation) OwnerEngaged(now time.Time) bool {
+	if c.OwnerEngagedAt.IsZero() {
+		return false
+	}
+	return now.Sub(c.OwnerEngagedAt) <= OwnerEngagementWindow
 }
 
 // EnsureConversation returns the conversation for (userID, peerTGID),
@@ -579,7 +597,7 @@ func (s *Store) ListConversations(ctx context.Context, userID int64, limit int) 
 	}
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT id, user_id, peer_tg_id, peer_username, peer_display_name, peer_access_hash, state,
-		        autonomous_turns, last_incoming_at, last_agent_reply_at, created_at, updated_at
+		        autonomous_turns, last_incoming_at, last_agent_reply_at, owner_engaged_at, created_at, updated_at
 		   FROM conversations WHERE user_id = $1
 		  ORDER BY updated_at DESC LIMIT $2`,
 		userID, limit,
@@ -594,9 +612,10 @@ func (s *Store) ListConversations(ctx context.Context, userID int64, limit int) 
 			c                 Conversation
 			username, display sql.NullString
 			lastIn, lastOut   sql.NullTime
+			engagedAt         sql.NullTime
 		)
 		if err := rows.Scan(&c.ID, &c.UserID, &c.PeerTGID, &username, &display, &c.PeerAccessHash, &c.State,
-			&c.AutonomousTurns, &lastIn, &lastOut, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			&c.AutonomousTurns, &lastIn, &lastOut, &engagedAt, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan conversation: %w", err)
 		}
 		c.PeerUsername = username.String
@@ -606,6 +625,9 @@ func (s *Store) ListConversations(ctx context.Context, userID int64, limit int) 
 		}
 		if lastOut.Valid {
 			c.LastAgentReplyAt = lastOut.Time
+		}
+		if engagedAt.Valid {
+			c.OwnerEngagedAt = engagedAt.Time
 		}
 		out = append(out, c)
 	}
@@ -621,14 +643,15 @@ func (s *Store) getConversation(ctx context.Context, cond string, args ...any) (
 		c                 Conversation
 		username, display sql.NullString
 		lastIn, lastOut   sql.NullTime
+		engagedAt         sql.NullTime
 	)
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT id, user_id, peer_tg_id, peer_username, peer_display_name, peer_access_hash, state,
-		        autonomous_turns, last_incoming_at, last_agent_reply_at, created_at, updated_at
+		        autonomous_turns, last_incoming_at, last_agent_reply_at, owner_engaged_at, created_at, updated_at
 		   FROM conversations WHERE `+cond,
 		args...,
 	).Scan(&c.ID, &c.UserID, &c.PeerTGID, &username, &display, &c.PeerAccessHash, &c.State,
-		&c.AutonomousTurns, &lastIn, &lastOut, &c.CreatedAt, &c.UpdatedAt)
+		&c.AutonomousTurns, &lastIn, &lastOut, &engagedAt, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrConversationNotFound
 	}
@@ -643,7 +666,27 @@ func (s *Store) getConversation(ctx context.Context, cond string, args ...any) (
 	if lastOut.Valid {
 		c.LastAgentReplyAt = lastOut.Time
 	}
+	if engagedAt.Valid {
+		c.OwnerEngagedAt = engagedAt.Time
+	}
 	return &c, nil
+}
+
+// MarkConversationOwnerEngaged records an owner engagement event (#953) for
+// the conversation with peerTGID: the owner typed a message to that peer.
+// It never creates a conversation; a peer the agent has no row for has
+// nothing to release. at must be the event time; a stamp never moves
+// backwards, so a replayed older event cannot shorten the window.
+func (s *Store) MarkConversationOwnerEngaged(ctx context.Context, userID, peerTGID int64, at time.Time) error {
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE conversations SET owner_engaged_at = $1
+		  WHERE user_id = $2 AND peer_tg_id = $3
+		    AND (owner_engaged_at IS NULL OR owner_engaged_at < $1)`,
+		at.UTC(), userID, peerTGID,
+	); err != nil {
+		return fmt.Errorf("mark conversation owner engaged: %w", err)
+	}
+	return nil
 }
 
 // SetConversationPeerAccessHash persists the MTProto access_hash Telegram

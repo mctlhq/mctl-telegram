@@ -764,3 +764,29 @@ func TestRouter_Continue_ResetsStateAndTurns(t *testing.T) {
 		t.Fatalf("state = %q, want active", got.State)
 	}
 }
+
+// TestRouter_Continue_DoesNotEngageOwner pins a #953 design decision:
+// /mctl continue hands the chat back to the agent, which is not the owner
+// talking to the peer, so it must neither create nor extend the owner
+// engagement window that unlocks after_owner_engaged profile fields.
+func TestRouter_Continue_DoesNotEngageOwner(t *testing.T) {
+	router, _, _, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	conv, err := store.EnsureConversation(ctx, uid, 556, "peer", "Peer")
+	if err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	if err := store.SetConversationState(ctx, uid, conv.ID, db.ConversationTakenOver); err != nil {
+		t.Fatalf("take over: %v", err)
+	}
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl continue "+strconv.FormatInt(conv.ID, 10)); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	got, err := store.GetConversation(ctx, uid, conv.ID)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if !got.OwnerEngagedAt.IsZero() {
+		t.Fatalf("owner_engaged_at = %v after /mctl continue, want unset", got.OwnerEngagedAt)
+	}
+}
