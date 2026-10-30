@@ -68,9 +68,10 @@ type Server struct {
 	DemoReviewerTGID int64
 	// CanaryTelegramIDs are the monitoring canary's accounts
 	// (CANARY_TELEGRAM_IDS). disconnect_telegram_account,
-	// delete_telegram_account and revoke_telegram_session refuse to end such
-	// an account's session unless confirm_canary is true. Nil guards
-	// nothing. See WithCanaryGuard and internal/canaryguard.
+	// delete_telegram_account, revoke_telegram_session and
+	// set_telegram_access with tier "none" refuse to act on such an account
+	// unless confirm_canary is true. Nil guards nothing. See WithCanaryGuard
+	// and internal/canaryguard.
 	CanaryTelegramIDs canaryguard.Set
 	// DemoReviewerWritePeers is the reviewer's write allowlist, keyed by
 	// canonical "user:<id>" / "chat:<id>" / "channel:<id>". Empty or nil
