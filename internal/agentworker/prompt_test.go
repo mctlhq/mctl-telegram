@@ -137,3 +137,30 @@ func TestDeployedPrompt_CarriesPronounContract(t *testing.T) {
 		}
 	}
 }
+
+// TestSystemPrompts_CarryOwnerVoiceContract: drafts voiced preferences the
+// profile does not hold as the owner's own ("Video would be my preference",
+// #998). Policy has no value to match there, so the prompt is the only
+// guard, in the deployed prompt and the C1 eval prompt alike.
+func TestSystemPrompts_CarryOwnerVoiceContract(t *testing.T) {
+	for _, path := range []string{
+		"../../deploy/agent-worker/system-prompt.txt",
+		"testdata/c1-system-prompt.txt",
+	} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		text := strings.Join(strings.Fields(string(raw)), " ")
+		for _, clause := range []string{
+			`Speak about the owner in the third person, by name or as "the owner", never as "I".`,
+			"Never state a preference, choice or availability as the owner's",
+			`("my preference", "I prefer", "works for me", "I'll confirm")`,
+			"unless get_recruiter_profile holds it",
+		} {
+			if !strings.Contains(text, clause) {
+				t.Errorf("%s: missing %q", path, clause)
+			}
+		}
+	}
+}

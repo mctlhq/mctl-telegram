@@ -69,8 +69,8 @@ func TestC1ObserveEval(t *testing.T) {
 		t.Skip("set AGENT_C1_EVAL=1 to run the real Claude Code evaluation")
 	}
 	fixtures := loadC1Fixtures(t)
-	if len(fixtures) != 30 {
-		t.Fatalf("fixture count = %d, want 30", len(fixtures))
+	if len(fixtures) != 32 {
+		t.Fatalf("fixture count = %d, want 32", len(fixtures))
 	}
 	filter := strings.TrimSpace(os.Getenv("AGENT_C1_EVAL_FILTER"))
 	if filter != "" {
@@ -162,7 +162,7 @@ func TestC1ObserveEval(t *testing.T) {
 		correct, total, terminal, total, leaks, bindingViolations)
 	minCorrect := total
 	if filter == "" {
-		minCorrect = 27
+		minCorrect = 29
 	}
 	if correct < minCorrect {
 		t.Errorf("classification = %d/%d, want at least %d/%d", correct, total, minCorrect, total)
