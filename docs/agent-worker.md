@@ -296,6 +296,22 @@ No separate notification is sent. The denied action keeps the reason in
 `/mctl show` prints the last withdrawn draft's reason and time. An edit still
 enqueues its own job, which answers the current text.
 
+### Delete that arrives before its message (#985)
+
+When the listener catches up on missed updates, gotd hands it the deletes of
+a batch before the new messages. A message sent and deleted within a second
+or so can therefore have its delete processed first, when there is nothing
+to delete yet. Such a delete is kept in `agent_pending_deletes` (user,
+message id, time; no body). When the message, or an edit of it, is ingested
+later, the delete is applied in the same transaction: a `message_delete`
+event is recorded after the message's own event and the new job is closed as
+`ignored` (`source message deleted`). An edit that arrives after that is
+ignored as well.
+
+Deletes of messages the agent never ingests (the owner's own messages, other
+chats) wait in that table and do nothing. Rows older than seven days are
+swept the next time a delete is kept, and account deletion purges them.
+
 ### Edit of a coalesced message (#962)
 
 When the edited message was part of a turn with several messages and that
