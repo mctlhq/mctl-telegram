@@ -396,7 +396,10 @@ carries the text and no path, so it is complete without the repository.
   for migration and rollback only: it serves a profile that pins no digest
   yet, or pins exactly the embedded entry's digest (`hr-recruiter@0.1.0`).
   A pinned digest with neither a stored definition nor a matching embedded
-  entry fails the claim (`500`), leaving the jobs queued.
+  entry fails the claim (`500`), leaving the jobs queued. The one
+  exception is hr-recruiter@0.1.0's digest in the scheme used before P3.2,
+  which installs made between P3.1 and P3.2 carry: a migration clears that
+  exact value, so those accounts take the embedded catalog.
 - **Staleness (P3.4).** Every 5 minutes the server reads the lifecycle of
   each stored definition a profile pins and records it with the time of the
   read. A `404 assistant_not_found` for a pinned version is an answer and is

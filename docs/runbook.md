@@ -3178,3 +3178,11 @@ SELECT digest, name, version, lifecycle, lifecycle_checked_at
 
 Rollback: turning the flag off stops the refresh and the lifecycle gate;
 claims keep rendering from the stored definitions.
+
+Legacy digest: installs made while main carried #1023 but not yet #1025
+pinned hr-recruiter@0.1.0 under the earlier digest scheme
+(`sha256:715ac8851f4c7a0600d74a1a8acfdaa1c58bec3dcb90608034006828a231ae29`).
+The schema migration clears exactly that value on startup, so those
+accounts use the embedded catalog like an account that never pinned a
+digest. A claim that answers `500 assistant instructions unavailable` for
+any other pinned digest without a stored definition needs a reinstall.

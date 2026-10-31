@@ -470,3 +470,54 @@ func TestRegistryBridge_EmbeddedCatalog(t *testing.T) {
 	}
 	rh.jobPending(jobID)
 }
+
+// An install made on main between #1023 and #1025 pinned hr-recruiter's
+// digest in the scheme #1025 replaced. The migration clears exactly that
+// value, so the account falls back to the embedded catalog; any other
+// unbacked digest still fails the claim.
+func TestRegistryBridge_MigratesLegacyDigest(t *testing.T) {
+	rh := newRegistryHarness(t)
+	ctx := context.Background()
+	hr, _ := embeddedCatalog(t).Lookup("hr-recruiter", "0.1.0")
+	if err := rh.store.EnsureAgentProfile(ctx, rh.userID); err != nil {
+		t.Fatal(err)
+	}
+	legacy := "sha256:715ac8851f4c7a0600d74a1a8acfdaa1c58bec3dcb90608034006828a231ae29"
+	if err := rh.store.UpdateAgentProfileFields(ctx, rh.userID, db.AgentProfileUpdate{AssistantDigest: &legacy}); err != nil {
+		t.Fatal(err)
+	}
+	jobID := rh.newJob()
+	if code, _ := claimOne(t, rh.testHarness); code != http.StatusInternalServerError {
+		t.Fatalf("legacy digest before the migration: claim = %d, want 500", code)
+	}
+	rh.jobPending(jobID)
+
+	for range 2 {
+		if err := db.MigrateCached(ctx, rh.store.DB); err != nil {
+			t.Fatalf("migrate: %v", err)
+		}
+	}
+	if a, err := rh.store.GetAgentAssistant(ctx, rh.userID); err != nil || a.Digest != "" {
+		t.Fatalf("digest after the migration = %+v, err=%v, want cleared", a, err)
+	}
+	code, jobs := claimOne(t, rh.testHarness)
+	if code != http.StatusOK || len(jobs) != 1 || jobs[0].Instructions != deployedPrompt(t) || jobs[0].AssistantDigest != hr.Digest {
+		t.Fatalf("claim after the migration = %d %+v", code, jobs)
+	}
+
+	other := "sha256:" + strings.Repeat("2", 64)
+	if err := rh.store.UpdateAgentProfileFields(ctx, rh.userID, db.AgentProfileUpdate{AssistantDigest: &other}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MigrateCached(ctx, rh.store.DB); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if a, _ := rh.store.GetAgentAssistant(ctx, rh.userID); a.Digest != other {
+		t.Fatalf("the migration cleared an unrelated digest: %q", a.Digest)
+	}
+	jobID = rh.newJob()
+	if code, _ := claimOne(t, rh.testHarness); code != http.StatusInternalServerError {
+		t.Fatalf("unbacked digest after the migration: claim = %d, want 500", code)
+	}
+	rh.jobPending(jobID)
+}
