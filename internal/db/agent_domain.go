@@ -68,11 +68,17 @@ type AgentProfile struct {
 	IntentDenylist     string // csv of intents never sent, even with approval
 	// WorkingHours is the owner's working hours in schedule's stored form;
 	// inside them every reply needs approval. Empty means no such hours.
-	WorkingHours    string
-	BlockedSenders  string // csv of telegram user ids the agent must ignore
-	SenderAllowlist string // csv of telegram user ids allowed into the listener; empty allows all
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	WorkingHours string
+	// AudienceExcludes is a CSV of the audience classes the assistant
+	// leaves out (contacts, non_contacts, new_chats, existing_chats).
+	AudienceExcludes string
+	// AssistantInstalledAt is when the current assistant was first
+	// installed: the moment "new chat" is judged against. Zero if never.
+	AssistantInstalledAt time.Time
+	BlockedSenders       string // csv of telegram user ids the agent must ignore
+	SenderAllowlist      string // csv of telegram user ids allowed into the listener; empty allows all
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 }
 
 // UpsertAgentProfile inserts or fully replaces the user's agent profile.
@@ -101,8 +107,8 @@ func (s *Store) UpsertAgentProfile(ctx context.Context, p AgentProfile) error {
 		   (user_id, mode, autopilot_paused, listener_enabled, disclosure_text,
 		    max_autonomous_turns, max_msgs_per_minute, max_reply_chars,
 		    intent_allowlist, blocked_senders, sender_allowlist, updated_at,
-		    disclosure_disabled, intent_denylist, working_hours)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+		    disclosure_disabled, intent_denylist, working_hours, audience_excludes)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 		 ON CONFLICT (user_id) DO UPDATE SET
 		   mode = EXCLUDED.mode,
 		   autopilot_paused = EXCLUDED.autopilot_paused,
@@ -115,13 +121,14 @@ func (s *Store) UpsertAgentProfile(ctx context.Context, p AgentProfile) error {
 		   intent_allowlist = EXCLUDED.intent_allowlist,
 		   intent_denylist = EXCLUDED.intent_denylist,
 		   working_hours = EXCLUDED.working_hours,
+		   audience_excludes = EXCLUDED.audience_excludes,
 		   blocked_senders = EXCLUDED.blocked_senders,
 		   sender_allowlist = EXCLUDED.sender_allowlist,
 		   updated_at = EXCLUDED.updated_at`,
 		p.UserID, p.Mode, p.AutopilotPaused, p.ListenerEnabled, p.DisclosureText,
 		p.MaxAutonomousTurns, p.MaxMsgsPerMinute, p.MaxReplyChars,
 		p.IntentAllowlist, p.BlockedSenders, p.SenderAllowlist, time.Now().UTC(),
-		p.DisclosureDisabled, p.IntentDenylist, p.WorkingHours,
+		p.DisclosureDisabled, p.IntentDenylist, p.WorkingHours, p.AudienceExcludes,
 	); err != nil {
 		return fmt.Errorf("upsert agent profile: %w", err)
 	}
@@ -131,23 +138,25 @@ func (s *Store) UpsertAgentProfile(ctx context.Context, p AgentProfile) error {
 // GetAgentProfile returns the user's agent profile or ErrAgentProfileNotFound.
 func (s *Store) GetAgentProfile(ctx context.Context, userID int64) (*AgentProfile, error) {
 	var p AgentProfile
+	var installedAt sql.NullTime
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT user_id, mode, autopilot_paused, listener_enabled, disclosure_text,
 		        max_autonomous_turns, max_msgs_per_minute, max_reply_chars,
 		        intent_allowlist, blocked_senders, sender_allowlist, created_at, updated_at,
-		        disclosure_disabled, intent_denylist, working_hours
+		        disclosure_disabled, intent_denylist, working_hours, audience_excludes, assistant_installed_at
 		   FROM agent_profiles WHERE user_id = $1`,
 		userID,
 	).Scan(&p.UserID, &p.Mode, &p.AutopilotPaused, &p.ListenerEnabled, &p.DisclosureText,
 		&p.MaxAutonomousTurns, &p.MaxMsgsPerMinute, &p.MaxReplyChars,
 		&p.IntentAllowlist, &p.BlockedSenders, &p.SenderAllowlist, &p.CreatedAt, &p.UpdatedAt,
-		&p.DisclosureDisabled, &p.IntentDenylist, &p.WorkingHours)
+		&p.DisclosureDisabled, &p.IntentDenylist, &p.WorkingHours, &p.AudienceExcludes, &installedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrAgentProfileNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get agent profile: %w", err)
 	}
+	p.AssistantInstalledAt = installedAt.Time
 	return &p, nil
 }
 
@@ -350,8 +359,13 @@ type AgentProfileUpdate struct {
 	IntentAllowlist    *string
 	IntentDenylist     *string
 	WorkingHours       *string
-	BlockedSenders     *string
-	SenderAllowlist    *string
+	AudienceExcludes   *string
+	// MarkInstalledAt stamps assistant_installed_at with this time unless
+	// it is already set, so a reinstall of the same assistant keeps the
+	// moment new chats are judged against.
+	MarkInstalledAt *time.Time
+	BlockedSenders  *string
+	SenderAllowlist *string
 	// AssistantName and AssistantVersion select the catalog assistant.
 	AssistantName    *string
 	AssistantVersion *string
@@ -419,6 +433,13 @@ func (s *Store) UpdateAgentProfileFields(ctx context.Context, userID int64, u Ag
 	}
 	if u.WorkingHours != nil {
 		set("working_hours", *u.WorkingHours)
+	}
+	if u.AudienceExcludes != nil {
+		set("audience_excludes", *u.AudienceExcludes)
+	}
+	if u.MarkInstalledAt != nil {
+		args = append(args, u.MarkInstalledAt.UTC())
+		sets = append(sets, fmt.Sprintf("assistant_installed_at = COALESCE(assistant_installed_at, $%d)", len(args)))
 	}
 	if u.BlockedSenders != nil {
 		set("blocked_senders", *u.BlockedSenders)
@@ -577,7 +598,7 @@ func (s *Store) ListListenerEnabledProfiles(ctx context.Context) ([]AgentProfile
 		`SELECT user_id, mode, autopilot_paused, listener_enabled, disclosure_text,
 		        max_autonomous_turns, max_msgs_per_minute, max_reply_chars,
 		        intent_allowlist, blocked_senders, sender_allowlist, created_at, updated_at,
-		        disclosure_disabled, intent_denylist, working_hours
+		        disclosure_disabled, intent_denylist, working_hours, audience_excludes, assistant_installed_at
 		   FROM agent_profiles WHERE listener_enabled = $1`,
 		true,
 	)
@@ -588,12 +609,14 @@ func (s *Store) ListListenerEnabledProfiles(ctx context.Context) ([]AgentProfile
 	var out []AgentProfile
 	for rows.Next() {
 		var p AgentProfile
+		var installedAt sql.NullTime
 		if err := rows.Scan(&p.UserID, &p.Mode, &p.AutopilotPaused, &p.ListenerEnabled, &p.DisclosureText,
 			&p.MaxAutonomousTurns, &p.MaxMsgsPerMinute, &p.MaxReplyChars,
 			&p.IntentAllowlist, &p.BlockedSenders, &p.SenderAllowlist, &p.CreatedAt, &p.UpdatedAt,
-			&p.DisclosureDisabled, &p.IntentDenylist, &p.WorkingHours); err != nil {
+			&p.DisclosureDisabled, &p.IntentDenylist, &p.WorkingHours, &p.AudienceExcludes, &installedAt); err != nil {
 			return nil, fmt.Errorf("scan listener profile: %w", err)
 		}
+		p.AssistantInstalledAt = installedAt.Time
 		out = append(out, p)
 	}
 	return out, rows.Err()
@@ -622,8 +645,11 @@ type Conversation struct {
 	// the owner typed to this peer, or a successfully executed agent reply
 	// the owner approved. Zero ⇒ never. See OwnerEngaged.
 	OwnerEngagedAt time.Time
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	// PeerContact is PeerContactYes or PeerContactNo as of the latest
+	// inbound message, or "" when Telegram never said.
+	PeerContact string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // OwnerEngagementWindow is how long one owner engagement event keeps a
@@ -664,6 +690,32 @@ func (s *Store) EnsureConversation(ctx context.Context, userID, peerTGID int64, 
 		return nil, fmt.Errorf("ensure conversation: %w", err)
 	}
 	return s.GetConversationByPeer(ctx, userID, peerTGID)
+}
+
+// Values of Conversation.PeerContact.
+const (
+	PeerContactYes = "contact"
+	PeerContactNo  = "non_contact"
+)
+
+// SetConversationPeerContact records whether the peer is in the owner's
+// contacts, as Telegram reported on an inbound message. An empty state
+// (Telegram sent no user entity) leaves the stored value alone.
+func (s *Store) SetConversationPeerContact(ctx context.Context, userID, peerTGID int64, state string) error {
+	switch state {
+	case "":
+		return nil
+	case PeerContactYes, PeerContactNo:
+	default:
+		return fmt.Errorf("peer contact state %q", state)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE conversations SET peer_contact = $1 WHERE user_id = $2 AND peer_tg_id = $3`,
+		state, userID, peerTGID,
+	); err != nil {
+		return fmt.Errorf("set conversation peer contact: %w", err)
+	}
+	return nil
 }
 
 // GetConversation returns a conversation by id, scoped to the owning user.
@@ -707,7 +759,7 @@ func (s *Store) ListConversations(ctx context.Context, userID int64, limit int) 
 	}
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT id, user_id, peer_tg_id, peer_username, peer_display_name, peer_access_hash, state,
-		        autonomous_turns, last_incoming_at, last_agent_reply_at, owner_engaged_at, created_at, updated_at
+		        autonomous_turns, last_incoming_at, last_agent_reply_at, owner_engaged_at, created_at, updated_at, peer_contact
 		   FROM conversations WHERE user_id = $1
 		  ORDER BY updated_at DESC LIMIT $2`,
 		userID, limit,
@@ -725,7 +777,7 @@ func (s *Store) ListConversations(ctx context.Context, userID int64, limit int) 
 			engagedAt         sql.NullTime
 		)
 		if err := rows.Scan(&c.ID, &c.UserID, &c.PeerTGID, &username, &display, &c.PeerAccessHash, &c.State,
-			&c.AutonomousTurns, &lastIn, &lastOut, &engagedAt, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			&c.AutonomousTurns, &lastIn, &lastOut, &engagedAt, &c.CreatedAt, &c.UpdatedAt, &c.PeerContact); err != nil {
 			return nil, fmt.Errorf("scan conversation: %w", err)
 		}
 		c.PeerUsername = username.String
@@ -757,11 +809,11 @@ func (s *Store) getConversation(ctx context.Context, cond string, args ...any) (
 	)
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT id, user_id, peer_tg_id, peer_username, peer_display_name, peer_access_hash, state,
-		        autonomous_turns, last_incoming_at, last_agent_reply_at, owner_engaged_at, created_at, updated_at
+		        autonomous_turns, last_incoming_at, last_agent_reply_at, owner_engaged_at, created_at, updated_at, peer_contact
 		   FROM conversations WHERE `+cond,
 		args...,
 	).Scan(&c.ID, &c.UserID, &c.PeerTGID, &username, &display, &c.PeerAccessHash, &c.State,
-		&c.AutonomousTurns, &lastIn, &lastOut, &engagedAt, &c.CreatedAt, &c.UpdatedAt)
+		&c.AutonomousTurns, &lastIn, &lastOut, &engagedAt, &c.CreatedAt, &c.UpdatedAt, &c.PeerContact)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrConversationNotFound
 	}

@@ -35,6 +35,9 @@ type Extracted struct {
 	// working InputPeerUser later: messages.* RPCs reject a zero-access-hash
 	// peer with PEER_ID_INVALID.
 	SenderAccessHash int64
+	// SenderContact is db.PeerContactYes or db.PeerContactNo when the
+	// update carried the sender's user entity, "" otherwise.
+	SenderContact string
 	// SentAt is when Telegram says the owner sent this message (msg.Date),
 	// set only for EventKindOwnerOutgoing. An edit keeps the original send
 	// time, so editing an old message is not fresh engagement (#953). Zero
@@ -161,7 +164,14 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 		Body:       msg.Message,
 		Meta:       messageMeta(senderUser, attachment),
 	}
-	return Extracted{Event: ev, SenderAccessHash: senderAccessHash(senderUser, hasSenderUser)}, true
+	contact := ""
+	if hasSenderUser && senderUser != nil {
+		contact = db.PeerContactNo
+		if senderUser.Contact {
+			contact = db.PeerContactYes
+		}
+	}
+	return Extracted{Event: ev, SenderAccessHash: senderAccessHash(senderUser, hasSenderUser), SenderContact: contact}, true
 }
 
 // hiddenEdit reports an edit Telegram made without the sender editing

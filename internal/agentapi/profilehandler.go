@@ -7,7 +7,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 
+	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
 	agentprofile "github.com/mctlhq/mctl-telegram/internal/agent/profile"
 	"github.com/mctlhq/mctl-telegram/internal/agent/schedule"
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -31,6 +33,7 @@ type upsertAgentProfileRequest struct {
 	IntentAllowlist    *string `json:"intent_allowlist,omitempty"`
 	IntentDenylist     *string `json:"intent_denylist,omitempty"`
 	WorkingHours       *string `json:"working_hours,omitempty"`
+	AudienceExcludes   *string `json:"audience_excludes,omitempty"`
 	BlockedSenders     *string `json:"blocked_senders,omitempty"`
 	SenderAllowlist    *string `json:"sender_allowlist,omitempty"`
 	// OwnerProfile is a strict JSON document matching profile.Data. Omitted
@@ -42,7 +45,7 @@ type upsertAgentProfileRequest struct {
 var upsertAgentProfileKeys = [...]string{
 	"telegram_id", "mode", "autopilot_paused", "listener_enabled",
 	"disclosure_text", "disclosure_disabled", "max_autonomous_turns", "max_msgs_per_minute",
-	"max_reply_chars", "intent_allowlist", "intent_denylist", "working_hours", "blocked_senders",
+	"max_reply_chars", "intent_allowlist", "intent_denylist", "working_hours", "audience_excludes", "blocked_senders",
 	"sender_allowlist", "owner_profile",
 }
 
@@ -59,6 +62,7 @@ type agentProfileResponse struct {
 	IntentAllowlist    string `json:"intent_allowlist"`
 	IntentDenylist     string `json:"intent_denylist"`
 	WorkingHours       string `json:"working_hours"`
+	AudienceExcludes   string `json:"audience_excludes"`
 	BlockedSenders     string `json:"blocked_senders"`
 	SenderAllowlist    string `json:"sender_allowlist"`
 	// The profile contents are deliberately never echoed from this
@@ -130,6 +134,18 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "mode must be observe, guarded, or off")
 			return
 		}
+		// Policy excludes everyone on a class it does not know; refuse to
+		// store one rather than discover it then.
+		if req.AudienceExcludes != nil {
+			for _, class := range strings.Split(*req.AudienceExcludes, ",") {
+				switch strings.TrimSpace(class) {
+				case "", policy.AudienceContacts, policy.AudienceNonContacts, policy.AudienceNewChats, policy.AudienceExistingChats:
+				default:
+					writeJSONError(w, http.StatusBadRequest, "invalid audience_excludes")
+					return
+				}
+			}
+		}
 		// Policy holds every reply on a value it cannot parse; refuse to
 		// store one rather than discover it then.
 		if req.WorkingHours != nil && *req.WorkingHours != "" {
@@ -187,6 +203,7 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			IntentAllowlist:    req.IntentAllowlist,
 			IntentDenylist:     req.IntentDenylist,
 			WorkingHours:       req.WorkingHours,
+			AudienceExcludes:   req.AudienceExcludes,
 			BlockedSenders:     req.BlockedSenders,
 			SenderAllowlist:    req.SenderAllowlist,
 		}
@@ -254,6 +271,7 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			IntentAllowlist:        p.IntentAllowlist,
 			IntentDenylist:         p.IntentDenylist,
 			WorkingHours:           p.WorkingHours,
+			AudienceExcludes:       p.AudienceExcludes,
 			BlockedSenders:         p.BlockedSenders,
 			SenderAllowlist:        p.SenderAllowlist,
 			OwnerProfileConfigured: ownerProfileConfigured,

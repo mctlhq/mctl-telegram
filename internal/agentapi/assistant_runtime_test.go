@@ -354,3 +354,35 @@ func TestAdminAgentProfileHandler_RejectsBadWorkingHours(t *testing.T) {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestAdminAgentInstallHandler_AudienceAndInstallTime stores the audience
+// scope as excluded classes and stamps the install time once: a reinstall
+// of the same assistant keeps the moment new chats are judged against.
+func TestAdminAgentInstallHandler_AudienceAndInstallTime(t *testing.T) {
+	store := newProfileTestStore(t)
+	ctx := context.Background()
+	uid, err := store.EnsureUserByTelegramID(ctx, 777, "reviewer", "Reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewAdminAgentInstallHandler(store, embeddedCatalog(t))
+	scope := map[string]any{"scope": map[string]any{"newChats": false}}
+	if rec := doInstall(t, h, 777, hrInstallJSON(t, map[string]any{"audience": scope})); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	p, err := store.GetAgentProfile(ctx, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.AudienceExcludes != "new_chats" || p.AssistantInstalledAt.IsZero() {
+		t.Fatalf("audience = %q, installed at %v", p.AudienceExcludes, p.AssistantInstalledAt)
+	}
+	first := p.AssistantInstalledAt
+
+	if rec := doInstall(t, h, 777, hrInstallJSON(t, nil)); rec.Code != http.StatusOK {
+		t.Fatalf("reinstall status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if p, _ = store.GetAgentProfile(ctx, uid); p.AudienceExcludes != "" || !p.AssistantInstalledAt.Equal(first) {
+		t.Fatalf("after reinstall: audience = %q, installed at %v, want \"\" and %v", p.AudienceExcludes, p.AssistantInstalledAt, first)
+	}
+}

@@ -137,6 +137,26 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// agent_profiles.audience_excludes: a CSV of audience classes an
+	// assistant install leaves out (contacts, non_contacts, new_chats,
+	// existing_chats). Empty answers everyone.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "audience_excludes",
+		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	// agent_profiles.assistant_installed_at: when the account's current
+	// assistant was first installed. It is the fixed moment "new chat" is
+	// judged against and does not move on a reinstall of the same assistant.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "assistant_installed_at", "TIMESTAMPTZ", "DATETIME"); err != nil {
+		return err
+	}
+	// conversations.peer_contact: whether the peer was in the owner's
+	// contacts on the latest inbound message: 'contact', 'non_contact', or
+	// '' when Telegram did not say.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "conversations", "peer_contact",
+		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	// agent_profiles.owner_profile_encrypted holds the account-specific
 	// identity, public biography, skills, preferences, and restricted fields.
 	// Keeping it on the tenant row removes the process-wide mounted-profile

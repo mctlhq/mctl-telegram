@@ -109,6 +109,7 @@ const (
 	DenyReplyCredentials  DenyCode = "reply_contains_credentials"
 	DenyReplyNeverField   DenyCode = "reply_contains_never_field"
 	DenyIntentNever       DenyCode = "intent_never"
+	DenyAudienceExcluded  DenyCode = "audience_excluded"
 	DenySourceSuperseded  DenyCode = "source_message_superseded"
 	DenyUnknown           DenyCode = "unknown" // fallback only
 )
@@ -424,6 +425,9 @@ func Evaluate(in Input) Result {
 	if isBlocked(in.Profile.BlockedSenders, in.Conversation.PeerTGID) {
 		return deny(DenySenderBlocked, "sender is blocked")
 	}
+	if reason, out := AudienceExcluded(in.Profile, in.Conversation); out {
+		return deny(DenyAudienceExcluded, reason)
+	}
 	// A draft answering text the sender has since edited or deleted is
 	// withdrawn silently: the audit row and /mctl show explain it, and like
 	// the conversation gates above it must not trigger the pause alert.
@@ -636,4 +640,70 @@ func containsID(csv string, id int64) bool {
 		}
 	}
 	return false
+}
+
+// Audience classes an assistant install may leave out.
+const (
+	AudienceContacts      = "contacts"
+	AudienceNonContacts   = "non_contacts"
+	AudienceNewChats      = "new_chats"
+	AudienceExistingChats = "existing_chats"
+)
+
+// AudienceExcluded reports whether the conversation falls in an audience
+// class the profile leaves out, with the reason. The listener calls it
+// before a message becomes a job, and Evaluate again for every proposal and
+// send, so a peer that drops out of the audience mid-conversation gets no
+// further replies.
+//
+// A chat is existing when its conversation began before the assistant was
+// installed, or the peer is a contact; every other chat is new. Anything
+// the decision needs but cannot see excludes rather than admits: an
+// unknown contact status, no install time, or an unrecognised class.
+func AudienceExcluded(p db.AgentProfile, c db.Conversation) (string, bool) {
+	ex := map[string]bool{}
+	for _, part := range strings.Split(p.AudienceExcludes, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			ex[part] = true
+		}
+	}
+	if len(ex) == 0 {
+		return "", false
+	}
+	for class := range ex {
+		switch class {
+		case AudienceContacts, AudienceNonContacts, AudienceNewChats, AudienceExistingChats:
+		default:
+			return "audience setting unreadable", true
+		}
+	}
+	known := c.PeerContact == db.PeerContactYes || c.PeerContact == db.PeerContactNo
+	contact := c.PeerContact == db.PeerContactYes
+	if ex[AudienceContacts] || ex[AudienceNonContacts] {
+		switch {
+		case !known:
+			return "audience: contact status unknown", true
+		case contact && ex[AudienceContacts]:
+			return "audience: contacts are excluded", true
+		case !contact && ex[AudienceNonContacts]:
+			return "audience: non-contacts are excluded", true
+		}
+	}
+	if ex[AudienceNewChats] || ex[AudienceExistingChats] {
+		if p.AssistantInstalledAt.IsZero() {
+			return "audience: no install time to judge new chats against", true
+		}
+		existing := contact || (!c.CreatedAt.IsZero() && c.CreatedAt.Before(p.AssistantInstalledAt))
+		switch {
+		case existing && ex[AudienceExistingChats]:
+			return "audience: existing chats are excluded", true
+		case !existing && !known:
+			// Only a contact makes a chat begun after the install existing;
+			// without the contact status the class cannot be told.
+			return "audience: contact status unknown", true
+		case !existing && ex[AudienceNewChats]:
+			return "audience: new chats are excluded", true
+		}
+	}
+	return "", false
 }

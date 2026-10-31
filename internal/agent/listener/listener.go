@@ -15,6 +15,7 @@ import (
 	"github.com/gotd/td/tg"
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/control"
+	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
 	"github.com/mctlhq/mctl-telegram/internal/agent/queue"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
@@ -338,6 +339,25 @@ func (l *Listener) persist(ctx context.Context, acct *account, ex Extracted) err
 		// exchange even for a conversation that predates this fix.
 		if err := l.Store.SetConversationPeerAccessHash(ctx, acct.userID, ex.Event.ChatTGID, ex.SenderAccessHash); err != nil {
 			return fmt.Errorf("set conversation peer access hash: %w", err)
+		}
+		if err := l.Store.SetConversationPeerContact(ctx, acct.userID, ex.Event.ChatTGID, ex.SenderContact); err != nil {
+			return fmt.Errorf("set conversation peer contact: %w", err)
+		}
+		if ex.SenderContact != "" {
+			conv.PeerContact = ex.SenderContact
+		}
+		// A chat outside the assistant's audience never becomes a job: no
+		// body is stored and no model run is spent on it. Policy checks the
+		// same rule again before every proposal and send.
+		profile, err := l.Store.GetAgentProfile(ctx, acct.userID)
+		if err != nil && !errors.Is(err, db.ErrAgentProfileNotFound) {
+			return fmt.Errorf("load profile for audience: %w", err)
+		}
+		if err == nil {
+			if reason, out := policy.AudienceExcluded(*profile, *conv); out {
+				slog.Debug("agent listener: outside the assistant's audience", "user_id", acct.userID, "conversation_id", conv.ID, "reason", reason)
+				return nil
+			}
 		}
 		if ex.Event.Kind == db.EventKindMessageEdit {
 			// gotd delivers updates at least once — the SAME edit can arrive

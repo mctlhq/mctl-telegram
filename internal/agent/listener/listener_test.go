@@ -736,3 +736,50 @@ func TestDispatcher_DeleteMessagesWithdrawsDraft(t *testing.T) {
 		t.Fatalf("delete events = %d, want 1 (unknown id 4242 ignored)", deletes)
 	}
 }
+
+// TestOnMessage_AudienceExcludedBeforeJob pins the listener half of the
+// audience scope: a chat outside it keeps its conversation row and contact
+// status (so the class stays decidable) but stores no event and no job.
+func TestOnMessage_AudienceExcludedBeforeJob(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+	if err := store.UpsertAgentProfile(ctx, db.AgentProfile{
+		UserID: acct.userID, AudienceExcludes: "contacts",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	msg := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Hello"}
+	contact := ents(&tg.User{ID: recruit, Username: "alice", FirstName: "Alice", Contact: true})
+	if err := l.onMessage(ctx, acct, contact, msg, false); err != nil {
+		t.Fatalf("onMessage: %v", err)
+	}
+	var events, jobs int
+	var peerContact string
+	if err := store.DB.QueryRowContext(ctx, `SELECT count(*) FROM incoming_events`).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB.QueryRowContext(ctx, `SELECT count(*) FROM agent_jobs`).Scan(&jobs); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT peer_contact FROM conversations WHERE user_id=$1 AND peer_tg_id=$2`, acct.userID, recruit,
+	).Scan(&peerContact); err != nil {
+		t.Fatal(err)
+	}
+	if events != 0 || jobs != 0 || peerContact != db.PeerContactYes {
+		t.Fatalf("excluded contact: events/jobs = %d/%d, peer_contact = %q", events, jobs, peerContact)
+	}
+
+	// The same peer, no longer a contact, is inside the audience.
+	stranger := ents(&tg.User{ID: recruit, Username: "alice", FirstName: "Alice"})
+	msg2 := &tg.Message{ID: 43, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Hello again"}
+	if err := l.onMessage(ctx, acct, stranger, msg2, false); err != nil {
+		t.Fatalf("onMessage: %v", err)
+	}
+	if err := store.DB.QueryRowContext(ctx, `SELECT count(*) FROM agent_jobs`).Scan(&jobs); err != nil {
+		t.Fatal(err)
+	}
+	if jobs != 1 {
+		t.Fatalf("non-contact jobs = %d, want 1", jobs)
+	}
+}
