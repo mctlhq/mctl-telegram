@@ -549,6 +549,18 @@ AGENT_C1_EVAL_FILTER=adversarial-01,adversarial-02 \
 go test ./internal/agentworker -run TestC1ObserveEval -count=1 -v
 ```
 
+By default the eval uses its own observe-mode prompt,
+`internal/agentworker/testdata/c1-system-prompt.txt`, as the worker's fallback
+prompt. `AGENT_C1_EVAL_PROMPT=catalog` instead renders `hr-recruiter` from the
+compiled-in catalog for its example install, the way the claim handler does,
+and delivers it as the job's `instructions` with no fallback. Use it to check a
+change to the catalog prompt or to the rendering:
+
+```bash
+AGENT_C1_EVAL=1 AGENT_C1_EVAL_PROMPT=catalog \
+go test ./internal/agentworker -run TestC1ObserveEval -count=1 -v
+```
+
 `Dockerfile.agent-worker` also includes the compiled opt-in test binary at
 `/usr/local/bin/mctl-telegram-agent-eval.test` so C1 can run the identical
 harness inside a one-shot Kubernetes Job with the worker's dedicated Claude
