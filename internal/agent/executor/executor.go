@@ -497,6 +497,13 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		return ErrLostRace
 	}
 	tgMessageID, err := e.Sender.SendWithRandomID(ctx, action.UserID, conv.PeerTGID, conv.PeerAccessHash, randomID, text)
+	if errors.Is(err, ErrAlreadyDelivered) {
+		// Unlikely on a fresh random_id (a transport-level resend of this
+		// same RPC), but it means delivered all the same: record it now
+		// rather than leave it for recovery and tell the owner it was only
+		// queued.
+		tgMessageID, err = e.locateDelivered(ctx, action, *conv, text), nil
+	}
 	if err != nil {
 		// Leave the row in executing with its random_id intact — RecoverStuck
 		// will retry the identical send once the grace window elapses. Do NOT

@@ -197,3 +197,22 @@ func TestExecutor_RecoverStuck_RestrictedBlockAfterAttemptIsDeliveryUnknown(t *t
 		t.Fatalf("status = %q, want delivery_unknown", a.Status)
 	}
 }
+
+// TestExecutor_Approve_DuplicateOnFirstAttemptIsDelivered: a duplicate on
+// the first attempt (a transport-level resend of the same RPC) is a
+// delivery, recorded at once rather than reported as queued for retry.
+func TestExecutor_Approve_DuplicateOnFirstAttemptIsDelivered(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	actionID, code := seedPendingApproval(t, store, uid, conv.ID, "hi")
+	exec.NewRandomID = func() (int64, error) { return 656565, nil }
+	sender.delivered = map[int64]bool{656565: true}
+	sender.locateID = 5151
+
+	if err := exec.Approve(ctx, uid, code); err != nil {
+		t.Fatalf("approve: %v, want a recorded delivery", err)
+	}
+	if a := mustAction(t, store, uid, actionID); a.Status != db.ActionExecuted || a.ExecutedTGMessageID != 5151 {
+		t.Fatalf("status=%q id=%d, want executed with 5151", a.Status, a.ExecutedTGMessageID)
+	}
+}
