@@ -331,6 +331,26 @@ func newBorrowTestStore(t *testing.T) *db.Store {
 	return &db.Store{DB: conn, Crypt: crypt}
 }
 
+// disconnectInAcquire revokes the user's active row from HandlerFor, the way
+// a disconnect does. acquire() asks for the handler before it builds and
+// starts the client, so the revoke lands after Borrow's CheckSessionValid and
+// before the client's LoadSession: the window a disconnect racing a call hits.
+type disconnectInAcquire struct {
+	store   *db.Store
+	revoked bool
+}
+
+func (d *disconnectInAcquire) HandlerFor(userID int64) telegram.UpdateHandler {
+	ok, err := d.store.RevokeActiveSession(context.Background(), userID, "disconnect")
+	d.revoked = err == nil && ok
+	return nil
+}
+
+func (*disconnectInAcquire) RunFor(ctx context.Context, _ int64, _ *telegram.Client) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
 // TestBorrow_SessionsBorrowCounter verifies that Pool.Borrow increments
 // mctl_sessions_borrow_total with the correct result label on each early-exit
 // path that can be exercised without a live Telegram connection.
@@ -427,6 +447,48 @@ func TestBorrow_SessionsBorrowCounter(t *testing.T) {
 		p := NewClientPool(1, "hash", time.Minute, store)
 		p.WithMetrics(met)
 		borErr := p.Borrow(ctx, uid, nil)
+		if !errors.Is(borErr, db.ErrNoActiveSession) {
+			t.Fatalf("expected ErrNoActiveSession, got %v", borErr)
+		}
+		if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues("no_session", "user")); got != 1 {
+			t.Errorf("expected no_session counter=1, got %v", got)
+		}
+		for _, r := range []string{"ok", "error", "expired_idle", "expired_absolute"} {
+			if got := testutil.ToFloat64(met.SessionsBorrowTotal.WithLabelValues(r, "user")); got != 0 {
+				t.Errorf("expected %s counter=0, got %v", r, got)
+			}
+		}
+	})
+
+	// The same state reached at client startup: the row was active when
+	// CheckSessionValid read it, and a disconnect revoked it before the
+	// client's LoadSession. The real client stops before dialling Telegram,
+	// with ErrNoActiveSession inside gotd's wrapping, so this also fails if
+	// that chain stops unwrapping (#974).
+	t.Run("no_session/revoked_before_client_start", func(t *testing.T) {
+		store := newBorrowTestStore(t)
+		uid, err := store.EnsureUser(ctx, "raced-disconnect-user", "", "test")
+		if err != nil {
+			t.Fatalf("EnsureUser: %v", err)
+		}
+		if err := store.SaveSession(ctx, uid, []byte("blob"), 555, "", ""); err != nil {
+			t.Fatalf("seed session: %v", err)
+		}
+		disconnect := &disconnectInAcquire{store: store}
+		met := metrics.New()
+		p := NewClientPool(1, "hash", time.Minute, store).WithAgentRuntime(disconnect)
+		p.WithMetrics(met)
+		// Bounded, so a client that got past LoadSession fails the test
+		// instead of hanging it.
+		bctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		borErr := p.Borrow(bctx, uid, func(context.Context, *telegram.Client) error {
+			t.Error("fn ran on a client whose row was revoked before it started")
+			return nil
+		})
+		if !disconnect.revoked {
+			t.Fatal("the disconnect did not land between CheckSessionValid and the client start")
+		}
 		if !errors.Is(borErr, db.ErrNoActiveSession) {
 			t.Fatalf("expected ErrNoActiveSession, got %v", borErr)
 		}
