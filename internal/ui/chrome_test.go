@@ -337,4 +337,7 @@ func TestNoIndexRobotsTag(t *testing.T) {
 	if strings.Contains(withoutNoIndex, `noindex`) {
 		t.Error("page with NoIndex: false must not emit noindex robots tag")
 	}
+	if !strings.Contains(withoutNoIndex, `<meta name="robots" content="max-image-preview:large, max-snippet:-1, max-video-preview:-1">`) {
+		t.Error("page with NoIndex: false must emit discover robots tag")
+	}
 }
