@@ -360,3 +360,17 @@ Acceptance:
       #296/#297 closed 2026-07-31 with evidence linked; #624 was already
       closed; C2 gate tracked as
       [#347](https://github.com/mctlhq/mctl-telegram/issues/347).
+
+### 2026-10-31 — assistant catalog prompt (#1002 P1 acceptance)
+
+- Since 0.112.0 (#1005) the worker takes its prompt from the claim envelope:
+  the server renders the account's catalog assistant and sends it as
+  `instructions`. The eval gained `AGENT_C1_EVAL_PROMPT=catalog`, which
+  renders `hr-recruiter@0.1.0` for its example install exactly as the claim
+  handler does and passes it as `JobEnvelope.Instructions`, with no fallback
+  `SystemPrompt`. This exercises `deploy/agent-worker/system-prompt.txt`, the
+  prompt production uses, rather than the eval's own observe-mode prompt.
+- Run on main `479e76c` with Claude Code 2.1.316, catalog digest
+  `sha256:715ac8851f4c7a0600d74a1a8acfdaa1c58bec3dcb90608034006828a231ae29`:
+  32/32 correct classifications, 32/32 same-attempt terminal jobs, zero
+  restricted/adversarial output leaks, zero wrong binding writes, 564 s.

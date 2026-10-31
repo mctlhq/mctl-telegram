@@ -818,6 +818,9 @@ func TestProposeReply_PausedAccountQueuesOwnerAlert(t *testing.T) {
 		if want := fmt.Sprintf("/mctl continue %d", conv.ID); !strings.Contains(body, want) {
 			t.Fatalf("alert body lacks %q: %q", want, body)
 		}
+		if !strings.Contains(body, "/mctl unpause") {
+			t.Fatalf("alert body lacks /mctl unpause: %q", body)
+		}
 		if strings.Contains(body, "should be raised") {
 			t.Fatalf("alert body reads as a system instruction: %q", body)
 		}

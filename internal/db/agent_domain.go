@@ -267,6 +267,35 @@ type AgentAssistant struct {
 	Install []byte
 }
 
+// AgentAssistantRef is the catalog assistant an account runs and whether
+// it was configured through an install, without the install itself.
+type AgentAssistantRef struct {
+	Name, Version string
+	Installed     bool
+}
+
+// GetAgentAssistantRef reads the assistant reference without decrypting the
+// install, for callers that only show which assistant runs; a missing or
+// unreadable key does not stop them. ErrAgentProfileNotFound if no row.
+func (s *Store) GetAgentAssistantRef(ctx context.Context, userID int64) (*AgentAssistantRef, error) {
+	var a AgentAssistantRef
+	var installed int
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT assistant_name, assistant_version,
+		        CASE WHEN install_encrypted IS NULL THEN 0 ELSE 1 END
+		   FROM agent_profiles WHERE user_id = $1`,
+		userID,
+	).Scan(&a.Name, &a.Version, &installed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrAgentProfileNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get agent assistant ref: %w", err)
+	}
+	a.Installed = installed == 1
+	return &a, nil
+}
+
 // GetAgentAssistant returns the account's assistant reference and decrypted
 // install, or ErrAgentProfileNotFound.
 func (s *Store) GetAgentAssistant(ctx context.Context, userID int64) (*AgentAssistant, error) {

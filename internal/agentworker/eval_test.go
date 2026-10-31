@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +18,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	mctltelegram "github.com/mctlhq/mctl-telegram"
+	"github.com/mctlhq/mctl-telegram/internal/assistant"
 )
 
 //go:embed testdata/c1-fixtures.jsonl
@@ -32,6 +36,11 @@ var c1SystemPrompt string
 //	AGENT_C1_EVAL=1 go test ./internal/agentworker -run TestC1ObserveEval -count=1 -v
 //
 // The normal test suite skips it so CI never consumes model quota.
+//
+// AGENT_C1_EVAL_PROMPT=catalog runs the same fixtures with the prompt the
+// server hands out on claim: the hr-recruiter catalog entry rendered for its
+// example install, delivered as JobEnvelope.Instructions with no fallback
+// SystemPrompt. That is the P1 acceptance run for the assistant catalog.
 type c1Fixture struct {
 	ID              string            `json:"id"`
 	Category        string            `json:"category"`
@@ -91,7 +100,10 @@ func TestC1ObserveEval(t *testing.T) {
 	}
 
 	workerBin := buildEvalWorker(t)
-	systemPrompt := c1SystemPrompt
+	systemPrompt, instructions := c1SystemPrompt, ""
+	if os.Getenv("AGENT_C1_EVAL_PROMPT") == "catalog" {
+		instructions, systemPrompt = c1CatalogInstructions(t), ""
+	}
 	claudeBin := os.Getenv("AGENT_CLAUDE_BIN")
 	if claudeBin == "" {
 		claudeBin = "claude"
@@ -112,7 +124,7 @@ func TestC1ObserveEval(t *testing.T) {
 		api := httptest.NewServer(http.HandlerFunc(state.serveHTTP))
 		job := JobEnvelope{
 			JobID: state.jobID, EventID: "eval-" + fixture.ID,
-			ConversationID: 1, Attempt: 1,
+			ConversationID: 1, Attempt: 1, Instructions: instructions,
 			Deadline: time.Now().Add(3 * time.Minute).Format(time.RFC3339),
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -176,6 +188,30 @@ func TestC1ObserveEval(t *testing.T) {
 	if bindingViolations != 0 {
 		t.Errorf("wrong-job/conversation/attempt writes = %d, want 0", bindingViolations)
 	}
+}
+
+// c1CatalogInstructions renders hr-recruiter the way the claim handler does.
+func c1CatalogInstructions(t *testing.T) string {
+	t.Helper()
+	catalog, err := assistant.LoadCatalog(mctltelegram.Catalog)
+	if err != nil {
+		t.Fatalf("load catalog: %v", err)
+	}
+	raw, err := fs.ReadFile(mctltelegram.Catalog, "assistants/hr-recruiter/install.example.yaml")
+	if err != nil {
+		t.Fatalf("read example install: %v", err)
+	}
+	install, err := assistant.ParseInstall(raw)
+	if err != nil {
+		t.Fatalf("parse example install: %v", err)
+	}
+	entry, ok := catalog.Lookup(install.Spec.Assistant.Name, install.Spec.Assistant.Version)
+	if !ok {
+		t.Fatalf("catalog has no %s@%s", install.Spec.Assistant.Name, install.Spec.Assistant.Version)
+	}
+	t.Logf("C1 prompt: catalog %s@%s digest=%s", entry.Definition.Metadata.Name,
+		entry.Definition.Metadata.Version, entry.Digest)
+	return assistant.Render(entry, install)
 }
 
 func loadC1Fixtures(t *testing.T) []c1Fixture {

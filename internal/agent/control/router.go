@@ -414,12 +414,12 @@ func (r *Router) handleAssistant(ctx context.Context, userID int64) error {
 	if err != nil {
 		return fmt.Errorf("load profile: %w", err)
 	}
-	a, err := r.Store.GetAgentAssistant(ctx, userID)
+	a, err := r.Store.GetAgentAssistantRef(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("load assistant: %w", err)
 	}
 	installed := "no (settings were written directly, not from an install)"
-	if len(a.Install) > 0 {
+	if a.Installed {
 		installed = "yes"
 	}
 	disclosure := "on"
