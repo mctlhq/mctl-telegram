@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/mctlhq/mctl-telegram/internal/agent/tools"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
@@ -72,22 +73,22 @@ func promptTempFile(prompt string) (path string, cleanup func(), err error) {
 	return f.Name(), cleanup, nil
 }
 
-// allowedTools is the exact and complete set of MCP tools a spawned `claude`
-// invocation may use — no Bash, Read, Write, WebFetch, or any other
-// built-in tool is ever allowed, so the model's only way to affect anything
-// is through this package's 11 API-proxying tools. See NewMCPServer's doc
-// comment for why job identity is pinned server-side rather than accepted
-// as a tool argument.
-var allowedTools = []string{
-	"get_event", "get_conversation_context", "get_recruiter_profile", "get_lead", "get_policy",
-	"propose_reply", "save_job_lead", "request_owner_approval", "send_owner_summary",
-	"pause_autopilot", "complete_agent_job",
+// jobTools is the exact and complete set of MCP tools a spawned `claude`
+// invocation may use, under the names the job's assistant gives them — no
+// Bash, Read, Write, WebFetch, or any other built-in tool is ever allowed, so
+// the model's only way to affect anything is through this package's 11
+// API-proxying tools. A job from a server without a catalog carries no
+// names and gets the canonical ones. See NewMCPServer's doc comment for why
+// job identity is pinned server-side rather than accepted as a tool
+// argument.
+func jobTools(job JobEnvelope) ([]tools.Binding, error) {
+	return tools.ForJob(job.Tools)
 }
 
-func qualifiedToolNames() []string {
-	out := make([]string, len(allowedTools))
-	for i, name := range allowedTools {
-		out[i] = fmt.Sprintf("mcp__%s__%s", ServerName, name)
+func qualifiedToolNames(bindings []tools.Binding) []string {
+	out := make([]string, len(bindings))
+	for i, b := range bindings {
+		out[i] = fmt.Sprintf("mcp__%s__%s", ServerName, b.Name)
 	}
 	return out
 }
@@ -170,6 +171,10 @@ func (c *ClaudeInvoker) buildMCPConfig(job JobEnvelope) mcpConfig {
 		// Event ids contain no commas, so a plain join is unambiguous.
 		env["AGENT_JOB_SOURCE_EVENT_IDS"] = strings.Join(job.SourceEventIDs, ",")
 	}
+	if len(job.Tools) > 0 {
+		// Tool names contain no commas either.
+		env["AGENT_JOB_TOOLS"] = strings.Join(job.Tools, ",")
+	}
 	return mcpConfig{MCPServers: map[string]mcpServerConfig{
 		ServerName: {
 			Command: c.Self,
@@ -191,6 +196,10 @@ func (c *ClaudeInvoker) buildMCPConfig(job JobEnvelope) mcpConfig {
 // only when both the CLI result is successful and the API confirms that this
 // exact claimed attempt reached a terminal state.
 func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
+	bindings, err := jobTools(job)
+	if err != nil {
+		return fmt.Errorf("job tools: %w", err)
+	}
 	cfg := c.buildMCPConfig(job)
 	cfgPath, cleanup, err := mcpConfigTempFile(cfg)
 	if err != nil {
@@ -209,7 +218,7 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 		// this package exposes — the restriction allowedTools's own doc
 		// comment already claimed but didn't actually enforce.
 		"--tools", "",
-		"--allowedTools", strings.Join(qualifiedToolNames(), ","),
+		"--allowedTools", strings.Join(qualifiedToolNames(bindings), ","),
 		"--output-format", "json",
 		// The transcript for every job otherwise contains plaintext Telegram
 		// message bodies and history (from get_event/get_conversation_context

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	agentprofile "github.com/mctlhq/mctl-telegram/internal/agent/profile"
 	"github.com/mctlhq/mctl-telegram/internal/assistant"
@@ -144,6 +145,7 @@ func NewAdminAgentInstallHandler(store *db.Store, catalog *assistant.Catalog) ht
 			writeJSONError(w, http.StatusConflict, "account runs "+current.Name+"; switching assistants is not supported yet")
 			return
 		}
+		installedAt := time.Now()
 		update := db.AgentProfileUpdate{
 			Mode:                 &resolved.Mode,
 			AutopilotPaused:      &resolved.AutopilotPaused,
@@ -156,6 +158,8 @@ func NewAdminAgentInstallHandler(store *db.Store, catalog *assistant.Catalog) ht
 			IntentAllowlist:      &resolved.IntentAllowlist,
 			IntentDenylist:       &resolved.IntentDenylist,
 			WorkingHours:         &resolved.WorkingHours,
+			AudienceExcludes:     &resolved.AudienceExcludes,
+			MarkInstalledAt:      &installedAt,
 			BlockedSenders:       &resolved.BlockedSenders,
 			SenderAllowlist:      &resolved.SenderAllowlist,
 			AssistantName:        &name,
@@ -197,6 +201,7 @@ func NewAdminAgentInstallHandler(store *db.Store, catalog *assistant.Catalog) ht
 				IntentAllowlist:        p.IntentAllowlist,
 				IntentDenylist:         p.IntentDenylist,
 				WorkingHours:           p.WorkingHours,
+				AudienceExcludes:       p.AudienceExcludes,
 				BlockedSenders:         p.BlockedSenders,
 				SenderAllowlist:        p.SenderAllowlist,
 				OwnerProfileConfigured: true,

@@ -92,6 +92,7 @@ func TestHRInstallMatchesTodaysProfile(t *testing.T) {
 		"intent_allowlist":     "discovery,schedule",
 		"intent_denylist":      "",
 		"working_hours":        "",
+		"audience_excludes":    "",
 		"blocked_senders":      "",
 		"sender_allowlist":     "",
 	}
@@ -192,7 +193,8 @@ func TestInstallRejected(t *testing.T) {
 		"schedule without hours": {pairs: []string{"  limits:\n", "  schedule:\n    mode: outside_hours\n    timezone: Europe/Zurich\n  limits:\n"}},
 		"schedule bad zone":      {pairs: []string{"  limits:\n", "  schedule:\n    mode: outside_hours\n    timezone: Mars/Olympus\n    hours: [mon-fri 09:00-18:00]\n  limits:\n"}},
 		"hours with always":      {pairs: []string{"  limits:\n", "  schedule:\n    mode: always\n    hours: [mon-fri 09:00-18:00]\n  limits:\n"}},
-		"narrow scope":           {pairs: []string{"  limits:\n", "  audience:\n    scope:\n      contacts: false\n  limits:\n"}, unsupported: true},
+		"nobody by contact":      {pairs: []string{"  limits:\n", "  audience:\n    scope:\n      contacts: false\n      nonContacts: false\n  limits:\n"}},
+		"nobody by chat age":     {pairs: []string{"  limits:\n", "  audience:\n    scope:\n      newChats: false\n      existingChats: false\n  limits:\n"}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -218,6 +220,7 @@ func TestInstallAccepted(t *testing.T) {
 		"never tier":      {"  limits:\n", "  intentTiers:\n    discovery: never\n    decline: never\n  limits:\n"},
 		"stricter level":  {"  limits:\n", "  disclosureLevels:\n    skills: never\n  limits:\n"},
 		"schedule always": {"  limits:\n", "  schedule:\n    mode: always\n  limits:\n"},
+		"narrow scope":    {"  limits:\n", "  audience:\n    scope:\n      existingChats: false\n      contacts: false\n  limits:\n"},
 		"outside hours":   {"  limits:\n", "  schedule:\n    mode: outside_hours\n    timezone: Europe/Zurich\n    hours: [mon-fri 09:00-18:00, sat 22:00-02:00]\n  limits:\n"},
 		"owner notes":     {"  limits:\n", "  ownerNotes: Keep replies under three sentences.\n  limits:\n"},
 		// Alice and Bob ids from internal/mcp/canary_guard_test.go.
@@ -238,6 +241,10 @@ func TestInstallAccepted(t *testing.T) {
 			case "tighten tier":
 				if got["intent_allowlist"] != "schedule" {
 					t.Fatalf("intent_allowlist = %v", got["intent_allowlist"])
+				}
+			case "narrow scope":
+				if got["audience_excludes"] != "contacts,existing_chats" {
+					t.Fatalf("audience_excludes = %v", got["audience_excludes"])
 				}
 			case "outside hours":
 				if want := "Europe/Zurich;mon-fri 09:00-18:00;sat 22:00-02:00"; got["working_hours"] != want {
@@ -361,5 +368,26 @@ func TestExecutionSettingsUnsupported(t *testing.T) {
 				t.Fatalf("err = %v, want ErrUnsupported", err)
 			}
 		})
+	}
+}
+
+// A definition may call tools by their generic aliases, but must still name
+// every tool, and may not name one tool twice.
+func TestDefinitionToolAliases(t *testing.T) {
+	base := readFile(t, "assistant.yaml")
+	renamed := editYAML(t, base,
+		"    - get_recruiter_profile\n", "    - get_owner_profile\n",
+		"    - get_lead\n", "    - get_record\n",
+		"    - save_job_lead\n", "    - save_record\n")
+	def, err := ParseDefinition(renamed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ProfileRequest(def, hrInstall(t), danaID); err != nil {
+		t.Fatalf("aliased definition: %v", err)
+	}
+	both := editYAML(t, base, "    - save_job_lead\n", "    - save_job_lead\n    - save_record\n")
+	if _, err := ParseDefinition(both); err == nil {
+		t.Fatal("a tool named twice was accepted")
 	}
 }
