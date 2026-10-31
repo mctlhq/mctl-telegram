@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tg.mctl.ai/schemas/assistant-install.schema.json",
+  "title": "AssistantInstall",
+  "description": "One Telegram account's install of a catalog assistant: the user's values and overrides. See docs/assistants/spec.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "spec"],
+  "properties": {
+    "apiVersion": { "const": "assistants.mctl.ai/v1alpha1" },
+    "kind": { "const": "AssistantInstall" },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assistant", "mode"],
+      "properties": {
+        "assistant": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version"],
+          "properties": {
+            "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+            "version": {
+              "description": "Exact definition version; upgrading is an explicit change of the install.",
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+            }
+          }
+        },
+        "mode": { "enum": ["observe", "guarded", "off"] },
+        "paused": { "type": "boolean", "default": false },
+        "listening": {
+          "description": "Whether incoming messages reach the assistant at all.",
+          "type": "boolean",
+          "default": true
+        },
+        "values": {
+          "description": "Values for the definition's variables, keyed by variable name.",
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              { "type": "string" },
+              { "type": "number" },
+              { "type": "boolean" },
+              { "type": "array", "items": { "type": "string" } }
+            ]
+          }
+        },
+        "disclosureLevels": {
+          "description": "Per-variable disclosure overrides (only towards stricter levels).",
+          "type": "object",
+          "additionalProperties": { "enum": ["public", "after_owner_engaged", "never"] }
+        },
+        "intentTiers": {
+          "description": "Per-intent tier overrides, within the definition's userOverride.",
+          "type": "object",
+          "additionalProperties": { "enum": ["auto", "approve", "never"] }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxAutonomousTurns": { "type": "integer", "minimum": 1 },
+            "maxMsgsPerMinute": { "type": "integer", "minimum": 1 },
+            "maxReplyChars": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "audience": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "scope": {
+              "description": "Which chats the assistant handles, following Telegram's chat-automation recipients model.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "contacts": { "type": "boolean", "default": true },
+                "nonContacts": { "type": "boolean", "default": true },
+                "newChats": { "type": "boolean", "default": true },
+                "existingChats": { "type": "boolean", "default": true }
+              }
+            },
+            "onlySenders": {
+              "description": "If non-empty, only these Telegram user ids are handled.",
+              "type": "array",
+              "items": { "type": "integer", "minimum": 1 },
+              "uniqueItems": true
+            },
+            "blockedSenders": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 1 },
+              "uniqueItems": true
+            }
+          }
+        },
+        "disclosure": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "text": { "type": "string", "minLength": 1, "maxLength": 200 }
+          }
+        },
+        "schedule": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": {
+            "mode": { "enum": ["always", "outside_hours"] },
+            "timezone": { "type": "string" },
+            "hours": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^(mon|tue|wed|thu|fri|sat|sun)(-(mon|tue|wed|thu|fri|sat|sun))? [0-2][0-9]:[0-5][0-9]-[0-2][0-9]:[0-5][0-9]$" }
+            }
+          }
+        },
+        "ownerNotes": {
+          "description": "The owner's own instructions, appended after the definition's and below the platform rules.",
+          "type": "string",
+          "maxLength": 2000
+        }
+      }
+    }
+  }
+}

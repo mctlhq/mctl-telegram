@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tg.mctl.ai/schemas/assistant.schema.json",
+  "title": "TelegramAssistant",
+  "description": "Catalog definition of an installable Telegram assistant. Written by the assistant's author, immutable once a version is published. See docs/assistants/spec.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": { "const": "assistants.mctl.ai/v1alpha1" },
+    "kind": { "const": "TelegramAssistant" },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "title", "description", "version", "owner", "visibility", "status"],
+      "properties": {
+        "name": { "$ref": "#/$defs/slug" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "version": { "$ref": "#/$defs/semver" },
+        "owner": { "type": "string", "minLength": 1 },
+        "visibility": { "enum": ["public", "tenant", "admin"] },
+        "status": { "enum": ["draft", "active", "deprecated"] },
+        "tags": { "type": "array", "items": { "$ref": "#/$defs/slug" }, "uniqueItems": true },
+        "examples": {
+          "description": "Sample inbound messages the assistant is built for, shown in the catalog.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "maxItems": 10
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instructions", "intents", "tools", "records", "defaults", "execution"],
+      "properties": {
+        "instructions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path"],
+          "properties": {
+            "path": {
+              "description": "System prompt file, relative to the definition's directory.",
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "variables": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/variable" }
+        },
+        "intents": {
+          "description": "Reply intents the assistant may propose. Owner-alert intents (assistant_manipulation, security_alert) are platform-defined and not listed here.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "tier"],
+            "properties": {
+              "name": { "$ref": "#/$defs/slug" },
+              "description": { "type": "string" },
+              "tier": { "$ref": "#/$defs/tier" },
+              "userOverride": {
+                "description": "How an install may change the tier: none, tighten (towards never) or any.",
+                "enum": ["none", "tighten", "any"],
+                "default": "tighten"
+              }
+            }
+          }
+        },
+        "tools": {
+          "description": "Platform tools the assistant's model may call.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "get_event", "get_conversation_context", "get_recruiter_profile", "get_lead",
+              "get_policy", "propose_reply", "save_job_lead", "request_owner_approval",
+              "send_owner_summary", "pause_autopilot", "complete_agent_job"
+            ]
+          }
+        },
+        "records": {
+          "description": "What the assistant saves from a conversation.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": { "enum": ["none", "job_lead"] }
+          }
+        },
+        "escalation": {
+          "description": "Named situations in which the assistant hands over to the owner. Descriptive in v1alpha1: the behaviour lives in the instructions.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "when", "action"],
+            "properties": {
+              "name": { "$ref": "#/$defs/slug" },
+              "when": { "type": "string", "minLength": 1 },
+              "action": { "enum": ["owner_summary", "owner_approval", "pause_autopilot"] }
+            }
+          }
+        },
+        "defaults": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "limits", "ceilings", "disclosure"],
+          "properties": {
+            "mode": { "$ref": "#/$defs/mode" },
+            "limits": { "$ref": "#/$defs/limits" },
+            "ceilings": { "$ref": "#/$defs/limits" },
+            "disclosure": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["policy", "text"],
+              "properties": {
+                "policy": {
+                  "description": "required: every reply carries the disclosure line. optional: the install may turn it off.",
+                  "enum": ["required", "optional"]
+                },
+                "text": { "type": "string", "minLength": 1, "maxLength": 200 }
+              }
+            }
+          }
+        },
+        "execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["budgetUsd", "timeoutSeconds"],
+          "properties": {
+            "model": { "type": "string" },
+            "budgetUsd": { "type": "number", "exclusiveMinimum": 0, "maximum": 5 },
+            "timeoutSeconds": { "type": "integer", "minimum": 30, "maximum": 900 }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "slug": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+    "semver": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$" },
+    "tier": { "enum": ["auto", "approve", "never"] },
+    "mode": { "enum": ["observe", "guarded", "off"] },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxAutonomousTurns", "maxMsgsPerMinute", "maxReplyChars"],
+      "properties": {
+        "maxAutonomousTurns": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "maxMsgsPerMinute": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "maxReplyChars": { "type": "integer", "minimum": 1, "maximum": 4096 }
+      }
+    },
+    "variable": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "profilePath"],
+      "properties": {
+        "name": { "$ref": "#/$defs/slug" },
+        "description": { "type": "string" },
+        "type": { "enum": ["string", "number", "boolean", "string_list"] },
+        "required": { "type": "boolean", "default": false },
+        "choices": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "profilePath": {
+          "description": "Where the value lands in the owner profile: identity.<key>, public_profile.<key>, preferences.<key>, restricted.<key> or skills.",
+          "type": "string",
+          "pattern": "^((identity|public_profile|preferences|restricted)\\.[a-z0-9_]+|skills)$"
+        },
+        "disclosure": {
+          "description": "Default disclosure level for a non-restricted field; the install may tighten it.",
+          "enum": ["public", "after_owner_engaged", "never"]
+        },
+        "send": {
+          "description": "For restricted.* fields only: approval needs the owner's approval to send; never may not be sent by the assistant at all.",
+          "enum": ["approval", "never"]
+        }
+      }
+    }
+  }
+}
