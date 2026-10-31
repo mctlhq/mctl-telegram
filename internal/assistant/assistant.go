@@ -3,8 +3,7 @@
 // install onto the agent profile the runtime uses today.
 //
 // The mapping is deliberately lossless or nothing: a setting the current
-// runtime cannot enforce (schedules, audience scopes, a restricted tool set)
-// fails with ErrUnsupported instead of being
+// runtime cannot enforce (audience scopes, a restricted tool set) fails with ErrUnsupported instead of being
 // dropped, so an install never looks applied while part of it is ignored.
 package assistant
 
@@ -25,6 +24,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/assistants"
 	"github.com/mctlhq/mctl-telegram/internal/agent/profile"
+	"github.com/mctlhq/mctl-telegram/internal/agent/schedule"
 )
 
 // ErrUnsupported marks an install setting the current runtime cannot enforce.
@@ -315,6 +315,9 @@ type Profile struct {
 	// are the CSVs the profile row stores.
 	IntentAllowlist string
 	IntentDenylist  string
+	// WorkingHours is the outside_hours schedule in schedule's stored
+	// form; empty for always.
+	WorkingHours    string
 	BlockedSenders  string
 	SenderAllowlist string
 	// OwnerProfile is the owner profile document, already accepted by
@@ -342,6 +345,7 @@ func ProfileRequest(def *Definition, in *Install, telegramID int64) (map[string]
 		"max_reply_chars":      p.MaxReplyChars,
 		"intent_allowlist":     p.IntentAllowlist,
 		"intent_denylist":      p.IntentDenylist,
+		"working_hours":        p.WorkingHours,
 		"blocked_senders":      p.BlockedSenders,
 		"sender_allowlist":     p.SenderAllowlist,
 		"owner_profile":        p.OwnerProfile,
@@ -366,6 +370,10 @@ func Resolve(def *Definition, in *Install) (*Profile, error) {
 	}
 
 	allow, never, err := intentTiers(def, s.IntentTiers)
+	if err != nil {
+		return nil, err
+	}
+	workingHours, err := resolveSchedule(in)
 	if err != nil {
 		return nil, err
 	}
@@ -437,6 +445,7 @@ func Resolve(def *Definition, in *Install) (*Profile, error) {
 		MaxReplyChars:      limits.MaxReplyChars,
 		IntentAllowlist:    strings.Join(allow, ","),
 		IntentDenylist:     strings.Join(never, ","),
+		WorkingHours:       workingHours,
 		BlockedSenders:     idList(blocked),
 		SenderAllowlist:    idList(only),
 		OwnerProfile:       owner,
@@ -461,9 +470,6 @@ func supported(def *Definition, in *Install) error {
 	if def.Spec.Records.Kind != "job_lead" {
 		return fmt.Errorf("records: kind %q is %w", def.Spec.Records.Kind, ErrUnsupported)
 	}
-	if sch := s.Schedule; sch != nil && sch.Mode != "always" {
-		return fmt.Errorf("schedule: mode %q is %w", sch.Mode, ErrUnsupported)
-	}
 	if a := s.Audience; a != nil && a.Scope != nil {
 		for _, b := range []*bool{a.Scope.Contacts, a.Scope.NonContacts, a.Scope.NewChats, a.Scope.ExistingChats} {
 			if b != nil && !*b {
@@ -472,6 +478,30 @@ func supported(def *Definition, in *Install) error {
 		}
 	}
 	return nil
+}
+
+// resolveSchedule returns the working hours an outside_hours schedule sets.
+// always, or no schedule, means none; a timezone or hours given with always
+// would be silently ignored, so they are rejected instead.
+func resolveSchedule(in *Install) (string, error) {
+	sch := in.Spec.Schedule
+	if sch == nil {
+		return "", nil
+	}
+	switch sch.Mode {
+	case "always":
+		if sch.Timezone != "" || len(sch.Hours) > 0 {
+			return "", errors.New("schedule: timezone and hours apply only to mode outside_hours")
+		}
+		return "", nil
+	case "outside_hours":
+		h, err := schedule.Parse(sch.Timezone, sch.Hours)
+		if err != nil {
+			return "", err
+		}
+		return h.String(), nil
+	}
+	return "", fmt.Errorf("schedule: unknown mode %q", sch.Mode)
 }
 
 // intentTiers resolves each intent's tier and returns the auto and the never

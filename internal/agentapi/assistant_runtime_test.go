@@ -299,3 +299,58 @@ func TestClaim_NoProfileRowIsAnEmptyClaim(t *testing.T) {
 		t.Fatalf("claim = %d %+v, want 200 with no jobs", code, jobs)
 	}
 }
+
+// TestAdminAgentInstallHandler_OutsideHours stores an outside_hours schedule
+// as working hours, and a reinstall with mode always clears them.
+func TestAdminAgentInstallHandler_OutsideHours(t *testing.T) {
+	store := newProfileTestStore(t)
+	ctx := context.Background()
+	uid, err := store.EnsureUserByTelegramID(ctx, 777, "reviewer", "Reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewAdminAgentInstallHandler(store, embeddedCatalog(t))
+	rec := doInstall(t, h, 777, hrInstallJSON(t, map[string]any{"schedule": map[string]any{
+		"mode": "outside_hours", "timezone": "Europe/Zurich", "hours": []string{"mon-fri 09:00-18:00"},
+	}}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	p, err := store.GetAgentProfile(ctx, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.WorkingHours != "Europe/Zurich;mon-fri 09:00-18:00" {
+		t.Fatalf("working hours = %q", p.WorkingHours)
+	}
+
+	rec = doInstall(t, h, 777, hrInstallJSON(t, map[string]any{"schedule": map[string]any{"mode": "always"}}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if p, _ = store.GetAgentProfile(ctx, uid); p.WorkingHours != "" {
+		t.Fatalf("working hours after mode always = %q", p.WorkingHours)
+	}
+
+	rec = doInstall(t, h, 777, hrInstallJSON(t, map[string]any{"schedule": map[string]any{
+		"mode": "outside_hours", "timezone": "Mars/Olympus", "hours": []string{"mon-fri 09:00-18:00"},
+	}}))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad zone status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminAgentProfileHandler_RejectsBadWorkingHours(t *testing.T) {
+	store := newProfileTestStore(t)
+	if _, err := store.EnsureUserByTelegramID(context.Background(), 777, "reviewer", "Reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	h := NewAdminAgentProfileHandler(store)
+	if rec := doProfileReq(h, adminIdentity(), `{"telegram_id":777,"working_hours":"UTC;someday"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	rec := doProfileReq(h, adminIdentity(), `{"telegram_id":777,"working_hours":"UTC; MON-FRI 09:00-18:00"}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"working_hours":"UTC;mon-fri 09:00-18:00"`) {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+}

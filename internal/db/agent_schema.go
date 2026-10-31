@@ -130,6 +130,13 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// agent_profiles.working_hours: the owner's working hours from an
+	// assistant install's outside_hours schedule, in internal/agent/schedule's
+	// stored form. Empty means the assistant may act at any time.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "working_hours",
+		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	// agent_profiles.owner_profile_encrypted holds the account-specific
 	// identity, public biography, skills, preferences, and restricted fields.
 	// Keeping it on the tenant row removes the process-wide mounted-profile

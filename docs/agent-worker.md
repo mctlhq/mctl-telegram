@@ -427,8 +427,9 @@ decided on 2026-10-31 not to build it before production (#889).
   recipient: "Held because ...". The reasons are the policy's
   (`policy_reasons`), rewritten by `policy.OwnerHoldReasons` for the owner:
   observe mode, the reply budget, an intent outside the auto-send list, the
-  per-minute limit, or a profile field repeated before the owner was in
-  touch. A reason the mapping does not know is shown as stored. The model's
+  per-minute limit, a profile field repeated before the owner was in
+  touch, or the owner's working hours (or working hours that could not be
+  read). A reason the mapping does not know is shown as stored. The model's
   text never goes into this line.
 - The alert for a reply withheld because autopilot is paused names the
   conversation's own `/mctl continue <id>` and the account-wide

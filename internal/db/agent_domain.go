@@ -66,10 +66,13 @@ type AgentProfile struct {
 	MaxReplyChars      int
 	IntentAllowlist    string // csv of intents allowed to auto-send in guarded mode
 	IntentDenylist     string // csv of intents never sent, even with approval
-	BlockedSenders     string // csv of telegram user ids the agent must ignore
-	SenderAllowlist    string // csv of telegram user ids allowed into the listener; empty allows all
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	// WorkingHours is the owner's working hours in schedule's stored form;
+	// inside them every reply needs approval. Empty means no such hours.
+	WorkingHours    string
+	BlockedSenders  string // csv of telegram user ids the agent must ignore
+	SenderAllowlist string // csv of telegram user ids allowed into the listener; empty allows all
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // UpsertAgentProfile inserts or fully replaces the user's agent profile.
@@ -98,8 +101,8 @@ func (s *Store) UpsertAgentProfile(ctx context.Context, p AgentProfile) error {
 		   (user_id, mode, autopilot_paused, listener_enabled, disclosure_text,
 		    max_autonomous_turns, max_msgs_per_minute, max_reply_chars,
 		    intent_allowlist, blocked_senders, sender_allowlist, updated_at,
-		    disclosure_disabled, intent_denylist)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		    disclosure_disabled, intent_denylist, working_hours)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 		 ON CONFLICT (user_id) DO UPDATE SET
 		   mode = EXCLUDED.mode,
 		   autopilot_paused = EXCLUDED.autopilot_paused,
@@ -111,13 +114,14 @@ func (s *Store) UpsertAgentProfile(ctx context.Context, p AgentProfile) error {
 		   max_reply_chars = EXCLUDED.max_reply_chars,
 		   intent_allowlist = EXCLUDED.intent_allowlist,
 		   intent_denylist = EXCLUDED.intent_denylist,
+		   working_hours = EXCLUDED.working_hours,
 		   blocked_senders = EXCLUDED.blocked_senders,
 		   sender_allowlist = EXCLUDED.sender_allowlist,
 		   updated_at = EXCLUDED.updated_at`,
 		p.UserID, p.Mode, p.AutopilotPaused, p.ListenerEnabled, p.DisclosureText,
 		p.MaxAutonomousTurns, p.MaxMsgsPerMinute, p.MaxReplyChars,
 		p.IntentAllowlist, p.BlockedSenders, p.SenderAllowlist, time.Now().UTC(),
-		p.DisclosureDisabled, p.IntentDenylist,
+		p.DisclosureDisabled, p.IntentDenylist, p.WorkingHours,
 	); err != nil {
 		return fmt.Errorf("upsert agent profile: %w", err)
 	}
@@ -131,13 +135,13 @@ func (s *Store) GetAgentProfile(ctx context.Context, userID int64) (*AgentProfil
 		`SELECT user_id, mode, autopilot_paused, listener_enabled, disclosure_text,
 		        max_autonomous_turns, max_msgs_per_minute, max_reply_chars,
 		        intent_allowlist, blocked_senders, sender_allowlist, created_at, updated_at,
-		        disclosure_disabled, intent_denylist
+		        disclosure_disabled, intent_denylist, working_hours
 		   FROM agent_profiles WHERE user_id = $1`,
 		userID,
 	).Scan(&p.UserID, &p.Mode, &p.AutopilotPaused, &p.ListenerEnabled, &p.DisclosureText,
 		&p.MaxAutonomousTurns, &p.MaxMsgsPerMinute, &p.MaxReplyChars,
 		&p.IntentAllowlist, &p.BlockedSenders, &p.SenderAllowlist, &p.CreatedAt, &p.UpdatedAt,
-		&p.DisclosureDisabled, &p.IntentDenylist)
+		&p.DisclosureDisabled, &p.IntentDenylist, &p.WorkingHours)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrAgentProfileNotFound
 	}
@@ -345,6 +349,7 @@ type AgentProfileUpdate struct {
 	MaxReplyChars      *int
 	IntentAllowlist    *string
 	IntentDenylist     *string
+	WorkingHours       *string
 	BlockedSenders     *string
 	SenderAllowlist    *string
 	// AssistantName and AssistantVersion select the catalog assistant.
@@ -411,6 +416,9 @@ func (s *Store) UpdateAgentProfileFields(ctx context.Context, userID int64, u Ag
 	}
 	if u.IntentDenylist != nil {
 		set("intent_denylist", *u.IntentDenylist)
+	}
+	if u.WorkingHours != nil {
+		set("working_hours", *u.WorkingHours)
 	}
 	if u.BlockedSenders != nil {
 		set("blocked_senders", *u.BlockedSenders)
@@ -569,7 +577,7 @@ func (s *Store) ListListenerEnabledProfiles(ctx context.Context) ([]AgentProfile
 		`SELECT user_id, mode, autopilot_paused, listener_enabled, disclosure_text,
 		        max_autonomous_turns, max_msgs_per_minute, max_reply_chars,
 		        intent_allowlist, blocked_senders, sender_allowlist, created_at, updated_at,
-		        disclosure_disabled, intent_denylist
+		        disclosure_disabled, intent_denylist, working_hours
 		   FROM agent_profiles WHERE listener_enabled = $1`,
 		true,
 	)
@@ -583,7 +591,7 @@ func (s *Store) ListListenerEnabledProfiles(ctx context.Context) ([]AgentProfile
 		if err := rows.Scan(&p.UserID, &p.Mode, &p.AutopilotPaused, &p.ListenerEnabled, &p.DisclosureText,
 			&p.MaxAutonomousTurns, &p.MaxMsgsPerMinute, &p.MaxReplyChars,
 			&p.IntentAllowlist, &p.BlockedSenders, &p.SenderAllowlist, &p.CreatedAt, &p.UpdatedAt,
-			&p.DisclosureDisabled, &p.IntentDenylist); err != nil {
+			&p.DisclosureDisabled, &p.IntentDenylist, &p.WorkingHours); err != nil {
 			return nil, fmt.Errorf("scan listener profile: %w", err)
 		}
 		out = append(out, p)

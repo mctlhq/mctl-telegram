@@ -24,6 +24,12 @@ func TestOwnerHoldReasons_EveryHoldReasonIsRewritten(t *testing.T) {
 			now := in.Now
 			in.RecentAgentSends = []time.Time{now.Add(-10 * time.Second), now.Add(-20 * time.Second), now.Add(-30 * time.Second)}
 		}, "most replies allowed per minute"},
+		{"working hours", func(in *Input) {
+			in.Profile.WorkingHours = "UTC;mon-sun 00:00-24:00"
+		}, "within your working hours"},
+		{"working hours unreadable", func(in *Input) {
+			in.Profile.WorkingHours = "Mars/Olympus;mon 09:00-10:00"
+		}, "could not be read"},
 		{"protected field", func(in *Input) {
 			in.ProtectedField = &ProtectedField{Key: "public_profile.open_to"}
 		}, `it repeats your profile field "public_profile.open_to" to someone you have not been in touch with yet`},

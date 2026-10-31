@@ -3,7 +3,8 @@
 Status: draft (P2 in progress). The server compiles the catalog in, an
 account's install is applied through `PUT /api/admin/agent/install`, and
 every claimed job carries its assistant's instructions. Of the P2 policy
-settings, policy enforces the `never` tier so far; see [What the runtime enforces](#what-the-runtime-enforces) and
+settings, policy enforces the `never` tier and `outside_hours` schedules so
+far; see [What the runtime enforces](#what-the-runtime-enforces) and
 [Phases](#phases).
 
 The communication agent that answers recruiters is the first of a family of
@@ -197,6 +198,7 @@ profile equals the configuration the agent runs with today.
 | `max_autonomous_turns`, `max_msgs_per_minute`, `max_reply_chars` | install `limits` within definition `ceilings` |
 | `intent_allowlist` (CSV) | intents whose resolved tier is `auto` |
 | `intent_denylist` (CSV) | intents whose resolved tier is `never` |
+| `working_hours` | install `schedule` with mode `outside_hours` |
 | `sender_allowlist`, `blocked_senders` | install `audience.onlySenders`, `audience.blockedSenders` |
 | owner profile document | install `values` placed by each variable's `profilePath` |
 | owner profile `disclosure` map | variable `disclosure`, install `disclosureLevels` |
@@ -205,14 +207,47 @@ profile equals the configuration the agent runs with today.
 | worker model and budget env | definition `execution` (reserved, rejected if set) |
 
 Settings the runtime cannot enforce yet fail with `ErrUnsupported` instead of
-being dropped: a narrowed audience scope, a schedule other
-than `always`, a tool subset, record kinds other than `job_lead`, and any
+being dropped: a narrowed audience scope, a tool subset, record kinds other than `job_lead`, and any
 `execution` setting. An install is applied entirely or not at all.
 
 The guarantee is about this mapping: every setting either reaches the
 profile or the install fails. It does not extend to the definition's
 descriptive parts (`escalation`, `examples`), which document behaviour the
 instructions produce and are not enforced on their own.
+
+## Schedules
+
+`schedule.mode: outside_hours` names the owner's working hours, when the
+owner answers messages personally:
+
+```yaml
+schedule:
+  mode: outside_hours
+  timezone: Europe/Zurich          # IANA zone, required
+  hours: [mon-fri 09:00-18:00, sat 22:00-02:00]
+```
+
+Inside those hours every reply the assistant proposes waits for the owner's
+approval, whatever its intent tier; outside them the usual rules apply.
+Policy checks this when a reply is proposed and again at send time, so a
+reply allowed at 17:55 and still queued at 18:05 is not sent on its own:
+the executor refuses an automatically allowed reply that now needs
+approval. Messages that arrive inside working hours are therefore never
+held and replayed in a burst when the hours end; each becomes a draft for
+the owner.
+
+- The windows follow the zone's wall clock, so they move with DST.
+- A window whose end is not after its start runs past midnight and belongs
+  to the day it starts on: `sat 22:00-02:00` covers Saturday night and the
+  first two hours of Sunday. Day ranges may wrap (`fri-mon`); `24:00` is
+  allowed as an end.
+- Changing the zone or the hours is a reinstall; the next evaluation uses
+  the new value.
+- `always`, or no schedule, means no working hours. A `timezone` or `hours`
+  given with `always` is rejected rather than ignored.
+- A stored value that fails to parse holds every reply for approval
+  instead of letting the assistant act at any time; the admin endpoints
+  refuse to store one.
 
 ## Customization tiers
 
@@ -236,7 +271,7 @@ instructions produce and are not enforced on their own.
 - **P2:** tiers including `never` (done: a reply whose intent is on the
   profile's `intent_denylist` is denied when proposed and again at send
   time, and no approval releases it), the audience scope and schedules in
-  `policy.go`; `/mctl` gets unpause and shows the install (done:
+  `policy.go` (schedules done: see [Schedules](#schedules)); `/mctl` gets unpause and shows the install (done:
   `/mctl unpause`, `/mctl assistant`); recruiter-specific
   tool names get generic aliases (`save_record`, `get_owner_profile`).
 - **P3:** definitions published to the mctl-api agent registry, a
@@ -292,7 +327,8 @@ features they touch go live. None is a known defect today.
    means everyone; "new chat" is defined against a fixed moment.
 8. Schedules across midnight and DST, and a change of timezone; messages
    that arrive outside the window are skipped, queued or escalated by an
-   explicit rule, never replayed in a burst.
+   explicit rule, never replayed in a burst. (Covered since P2: the rule is
+   escalate, see [Schedules](#schedules).)
 9. Account-level limits: a spend budget, concurrency, owner-notification
    rate and a circuit breaker for bot-to-bot loops, beyond per-conversation
    limits.

@@ -593,3 +593,42 @@ func TestEvaluate_IntentDenylist(t *testing.T) {
 		t.Fatalf("empty intent matched the denylist: %v", got.Reasons)
 	}
 }
+
+// TestEvaluate_WorkingHours pins the outside_hours schedule: inside the
+// owner's hours an allowlisted guarded reply waits for approval, outside
+// them it is allowed, and an unreadable value holds it. Denials still win.
+func TestEvaluate_WorkingHours(t *testing.T) {
+	// 2026-11-02 is a Monday.
+	monNoon := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	monNight := time.Date(2026, 11, 2, 21, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name  string
+		hours string
+		now   time.Time
+		want  Decision
+	}{
+		{"no hours", "", monNoon, Allow},
+		{"inside", "UTC;mon-fri 09:00-18:00", monNoon, RequireApproval},
+		{"outside", "UTC;mon-fri 09:00-18:00", monNight, Allow},
+		{"unreadable", "UTC", monNight, RequireApproval},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := baseInput()
+			in.Profile.WorkingHours = tc.hours
+			in.Now = tc.now
+			in.RecentAgentSends = nil
+			got := Evaluate(in)
+			if got.Decision != tc.want {
+				t.Fatalf("decision = %s %v, want %s", got.Decision, got.Reasons, tc.want)
+			}
+		})
+	}
+	in := baseInput()
+	in.Profile.WorkingHours = "UTC;mon-fri 09:00-18:00"
+	in.Now = monNoon
+	in.Profile.IntentDenylist = in.Action.Intent
+	if got := Evaluate(in); got.Decision != Deny {
+		t.Fatalf("never intent inside working hours: %s, want deny", got.Decision)
+	}
+}
