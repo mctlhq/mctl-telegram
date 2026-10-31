@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.114.0](https://github.com/mctlhq/mctl-telegram/compare/0.113.0...0.114.0) (2026-10-31)
+
+
+### Features
+
+* **agent:** fence assistant work by install revision ([cb4c901](https://github.com/mctlhq/mctl-telegram/commit/cb4c9014d33a3b8a7c89b21b2434bfee0bfed1b1))
+* **agent:** fence assistant work by install revision ([5b43140](https://github.com/mctlhq/mctl-telegram/commit/5b431404aa4c09929878aea401ad32b83acc60f0)), closes [#1018](https://github.com/mctlhq/mctl-telegram/issues/1018)
+* **agent:** materialized registry form for catalog assistants ([75c0fc6](https://github.com/mctlhq/mctl-telegram/commit/75c0fc6922cf6d2fffd762d55c877f31c3f06522))
+* **agent:** materialized registry form for catalog assistants ([3ae648a](https://github.com/mctlhq/mctl-telegram/commit/3ae648af984ee9f8e8bd38e0f6f276cc9ea0e09b)), closes [#1019](https://github.com/mctlhq/mctl-telegram/issues/1019)
+* **agent:** one install service with a revision compare-and-set ([c3df35d](https://github.com/mctlhq/mctl-telegram/commit/c3df35d5faed59cc638667d54d89d7e5f497b502)), closes [#1021](https://github.com/mctlhq/mctl-telegram/issues/1021)
+* **agent:** publish hr-recruiter as a public, active assistant ([1328f4e](https://github.com/mctlhq/mctl-telegram/commit/1328f4e0646b23ec81abeadfa889e9015bac4c39))
+* **agent:** registry-backed assistant definitions with a DB snapshot ([ae8126e](https://github.com/mctlhq/mctl-telegram/commit/ae8126ec11e81c82b014d6111177cfd070af3bd0))
+* **agent:** registry-backed assistant definitions with a DB snapshot ([38ea277](https://github.com/mctlhq/mctl-telegram/commit/38ea27740f406d7fb70a99879fe7870b4a4292a6)), closes [#1020](https://github.com/mctlhq/mctl-telegram/issues/1020)
+* **mcp:** assistant install tools on one install service ([336deac](https://github.com/mctlhq/mctl-telegram/commit/336deac8ef86c20c865c7ada53ca3d01a4e04000))
+* **mcp:** list_assistants, install_assistant and update_install ([72fa12b](https://github.com/mctlhq/mctl-telegram/commit/72fa12b3fd5c3cb3ae6cd1a79ce6f41109debf0a)), closes [#1021](https://github.com/mctlhq/mctl-telegram/issues/1021)
+* **web:** assistant catalog page and manage-page install section ([308d8a1](https://github.com/mctlhq/mctl-telegram/commit/308d8a1a57b3016a5ea20dff5b6d004fe45626ef))
+* **web:** assistant catalog page and manage-page install section ([9c02941](https://github.com/mctlhq/mctl-telegram/commit/9c02941cfd069bdb6d26f9851634358e7fdf54e2)), closes [#1022](https://github.com/mctlhq/mctl-telegram/issues/1022)
+
+
+### Bug Fixes
+
+* **agent:** address review nits on the registry snapshot ([4a6d5a6](https://github.com/mctlhq/mctl-telegram/commit/4a6d5a6abbb45363bb4d5232a620eeefe156482b))
+* **agent:** canonical JSON keeps &lt;, &gt; and & literal ([6273a72](https://github.com/mctlhq/mctl-telegram/commit/6273a72d1c3a76e7a18737ed08eab86c8eb27a8e))
+* **agent:** clear the pre-P3.2 hr-recruiter digest on migrate ([c28ea81](https://github.com/mctlhq/mctl-telegram/commit/c28ea81ae3105feea2b9d8ae8d0c0a8e199a841e))
+* **agent:** compare-and-set every install; fresh accounts report rev 1 ([cc454c4](https://github.com/mctlhq/mctl-telegram/commit/cc454c4cfe69450a73262de33b0c8e8750c01f33))
+* **agent:** keep install-fence refusals explainable ([305b156](https://github.com/mctlhq/mctl-telegram/commit/305b1567e1a6cde5ef402ad1555e3dc6d10c2f6d))
+* **web:** refuse non-finite numbers; choices select only for strings ([9f2a565](https://github.com/mctlhq/mctl-telegram/commit/9f2a565fd5055a310463af7165d79cbedc9a4067)), closes [#1022](https://github.com/mctlhq/mctl-telegram/issues/1022)
+
 ## [0.113.0](https://github.com/mctlhq/mctl-telegram/compare/0.112.0...0.113.0) (2026-10-31)
 
 
