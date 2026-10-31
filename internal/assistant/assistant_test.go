@@ -91,6 +91,7 @@ func TestHRInstallMatchesTodaysProfile(t *testing.T) {
 		"max_reply_chars":      1200,
 		"intent_allowlist":     "discovery,schedule",
 		"intent_denylist":      "",
+		"working_hours":        "",
 		"blocked_senders":      "",
 		"sender_allowlist":     "",
 	}
@@ -186,10 +187,12 @@ func TestInstallRejected(t *testing.T) {
 			"  limits:\n", "  disclosureLevels:\n    relocation: public\n  limits:\n"}},
 		"level on restricted": {pairs: []string{"  limits:\n",
 			"  disclosureLevels:\n    salary_floor: never\n  limits:\n"}},
-		"unknown key":  {pairs: []string{"  paused: false\n", "  paused: false\n  autopilot: true\n"}},
-		"bad mode":     {pairs: []string{"mode: guarded", "mode: yolo"}},
-		"schedule":     {pairs: []string{"  limits:\n", "  schedule:\n    mode: outside_hours\n  limits:\n"}, unsupported: true},
-		"narrow scope": {pairs: []string{"  limits:\n", "  audience:\n    scope:\n      contacts: false\n  limits:\n"}, unsupported: true},
+		"unknown key":            {pairs: []string{"  paused: false\n", "  paused: false\n  autopilot: true\n"}},
+		"bad mode":               {pairs: []string{"mode: guarded", "mode: yolo"}},
+		"schedule without hours": {pairs: []string{"  limits:\n", "  schedule:\n    mode: outside_hours\n    timezone: Europe/Zurich\n  limits:\n"}},
+		"schedule bad zone":      {pairs: []string{"  limits:\n", "  schedule:\n    mode: outside_hours\n    timezone: Mars/Olympus\n    hours: [mon-fri 09:00-18:00]\n  limits:\n"}},
+		"hours with always":      {pairs: []string{"  limits:\n", "  schedule:\n    mode: always\n    hours: [mon-fri 09:00-18:00]\n  limits:\n"}},
+		"narrow scope":           {pairs: []string{"  limits:\n", "  audience:\n    scope:\n      contacts: false\n  limits:\n"}, unsupported: true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -215,6 +218,7 @@ func TestInstallAccepted(t *testing.T) {
 		"never tier":      {"  limits:\n", "  intentTiers:\n    discovery: never\n    decline: never\n  limits:\n"},
 		"stricter level":  {"  limits:\n", "  disclosureLevels:\n    skills: never\n  limits:\n"},
 		"schedule always": {"  limits:\n", "  schedule:\n    mode: always\n  limits:\n"},
+		"outside hours":   {"  limits:\n", "  schedule:\n    mode: outside_hours\n    timezone: Europe/Zurich\n    hours: [mon-fri 09:00-18:00, sat 22:00-02:00]\n  limits:\n"},
 		"owner notes":     {"  limits:\n", "  ownerNotes: Keep replies under three sentences.\n  limits:\n"},
 		// Alice and Bob ids from internal/mcp/canary_guard_test.go.
 		"blocked and only":   {"  limits:\n", "  audience:\n    onlySenders: [500100101]\n    blockedSenders: [500100202]\n  limits:\n"},
@@ -234,6 +238,10 @@ func TestInstallAccepted(t *testing.T) {
 			case "tighten tier":
 				if got["intent_allowlist"] != "schedule" {
 					t.Fatalf("intent_allowlist = %v", got["intent_allowlist"])
+				}
+			case "outside hours":
+				if want := "Europe/Zurich;mon-fri 09:00-18:00;sat 22:00-02:00"; got["working_hours"] != want {
+					t.Fatalf("working_hours = %v, want %q", got["working_hours"], want)
 				}
 			case "never tier":
 				if got["intent_allowlist"] != "schedule" || got["intent_denylist"] != "decline,discovery" {

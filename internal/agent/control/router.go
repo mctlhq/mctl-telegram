@@ -434,9 +434,19 @@ func (r *Router) handleAssistant(ctx context.Context, userID int64) error {
 		profile.MaxAutonomousTurns, profile.MaxMsgsPerMinute, profile.MaxReplyChars)
 	fmt.Fprintf(&sb, "Sent without approval: %s\nNever sent: %s\n",
 		orDash(csvList(profile.IntentAllowlist)), orDash(csvList(profile.IntentDenylist)))
+	fmt.Fprintf(&sb, "Your working hours (replies wait for you): %s\n", workingHours(profile.WorkingHours))
 	fmt.Fprintf(&sb, "Only these senders: %s\nBlocked senders: %s",
 		senderCount(profile.SenderAllowlist, "everyone"), senderCount(profile.BlockedSenders, "none"))
 	return r.Notifier.Reply(ctx, userID, sb.String())
+}
+
+// workingHours renders the stored schedule for the owner.
+func workingHours(stored string) string {
+	if stored == "" {
+		return "none, the assistant may act at any time"
+	}
+	zone, windows, _ := strings.Cut(stored, ";")
+	return strings.ReplaceAll(windows, ";", ", ") + " (" + zone + ")"
 }
 
 func yesNo(b bool) string {

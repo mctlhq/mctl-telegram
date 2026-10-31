@@ -13,6 +13,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/mctlhq/mctl-telegram/internal/agent/schedule"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
@@ -522,6 +523,18 @@ func Evaluate(in Input) Result {
 	if overRate(in.RecentAgentSends, in.Profile.MaxMsgsPerMinute, in.Now) {
 		reasons = append(reasons, ReasonRateLimit)
 	}
+	if hours := in.Profile.WorkingHours; hours != "" {
+		// Inside the owner's working hours the owner answers personally, so
+		// a reply waits for them. A stored value that no longer parses holds
+		// every reply rather than letting the assistant act at any time.
+		h, err := schedule.ParseStored(hours)
+		switch {
+		case err != nil:
+			reasons = append(reasons, ReasonScheduleUnreadable)
+		case h.Contains(in.Now):
+			reasons = append(reasons, ReasonWorkingHours)
+		}
+	}
 	if in.ProtectedField != nil {
 		reasons = append(reasons, protectedFieldReasonPrefix+strconv.Quote(in.ProtectedField.Key)+protectedFieldReasonSuffix)
 	}
@@ -542,6 +555,9 @@ const (
 	ReasonTurnBudget       = "autonomous turn budget exhausted"
 	ReasonIntentNotAllowed = "intent not in allowlist"
 	ReasonRateLimit        = "rate limit exceeded"
+	ReasonWorkingHours     = "within the owner's working hours"
+	// ReasonScheduleUnreadable means the stored working hours did not parse.
+	ReasonScheduleUnreadable = "working hours unreadable"
 
 	protectedFieldReasonPrefix = "reply echoes owner_profile field "
 	protectedFieldReasonSuffix = " before the owner engaged"
@@ -564,6 +580,10 @@ func OwnerHoldReasons(stored string) []string {
 			out = append(out, "this kind of reply is not on your auto-send list")
 		case r == ReasonRateLimit:
 			out = append(out, "the agent already sent the most replies allowed per minute")
+		case r == ReasonWorkingHours:
+			out = append(out, "it is within your working hours, when you answer yourself")
+		case r == ReasonScheduleUnreadable:
+			out = append(out, "your working hours could not be read, so every reply waits for you")
 		case strings.HasPrefix(r, protectedFieldReasonPrefix) && strings.HasSuffix(r, protectedFieldReasonSuffix):
 			key := strings.TrimSuffix(strings.TrimPrefix(r, protectedFieldReasonPrefix), protectedFieldReasonSuffix)
 			out = append(out, "it repeats your profile field "+key+" to someone you have not been in touch with yet")

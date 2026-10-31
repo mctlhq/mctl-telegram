@@ -40,7 +40,7 @@ func TestUpsertAgentProfile_DefaultsAndUpdate(t *testing.T) {
 		DisclosureText: "AI assistant", MaxAutonomousTurns: 3,
 		MaxMsgsPerMinute: 1, MaxReplyChars: 500,
 		IntentAllowlist: "greet,request_company", BlockedSenders: "42",
-		SenderAllowlist: "555,777", IntentDenylist: "decline",
+		SenderAllowlist: "555,777", IntentDenylist: "decline", WorkingHours: "UTC;mon 09:00-10:00",
 	}); err != nil {
 		t.Fatalf("upsert 2: %v", err)
 	}
@@ -53,6 +53,9 @@ func TestUpsertAgentProfile_DefaultsAndUpdate(t *testing.T) {
 	}
 	if p.SenderAllowlist != "555,777" {
 		t.Fatalf("sender allowlist = %q, want 555,777", p.SenderAllowlist)
+	}
+	if p.WorkingHours != "UTC;mon 09:00-10:00" {
+		t.Fatalf("working hours = %q", p.WorkingHours)
 	}
 	if p.IntentDenylist != "decline" {
 		t.Fatalf("intent denylist = %q, want decline", p.IntentDenylist)
