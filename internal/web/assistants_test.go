@@ -32,8 +32,10 @@ func TestAssistantsPage_EmbeddedCatalogWithoutInstructions(t *testing.T) {
 		"hr-recruiter@0.1.0", "Recruiter assistant", "recruiting",
 		"Senior Go role at Acme", // an example
 		"<code>salary_floor</code>", "<code>work_mode</code>", "remote, hybrid, office",
-		"<code>discovery</code>", "<td>approve</td>",
-		"<code>observe</code>", "6 autonomous turns, 2 messages a minute, 1200 characters a reply",
+		"<code>discovery</code>", `<span class="badge pill-write">approve</span>`,
+		`<span class="badge pill-read">auto</span>`, `<span class="badge ok">published</span>`,
+		`<ul class="chat-examples">`,
+		"<code>observe</code>", "6 autonomous turns, 2 messages per minute, 1,200 characters per reply",
 		"added unless you turn it off",
 	} {
 		if !strings.Contains(body, want) {
@@ -124,5 +126,13 @@ func TestAssistantsPage_ListsEveryVersion(t *testing.T) {
 	}
 	if !strings.Contains(body[newer:older], "<code>compensation</code>") || strings.Contains(body[older:], "<code>compensation</code>") {
 		t.Fatal("the compensation intent is not shown under 0.1.1 alone")
+	}
+}
+
+func TestGroupThousands(t *testing.T) {
+	for n, want := range map[int]string{0: "0", 2: "2", 999: "999", 1200: "1,200", 4096: "4,096", 1234567: "1,234,567", -1200: "-1,200"} {
+		if got := groupThousands(n); got != want {
+			t.Errorf("groupThousands(%d) = %q, want %q", n, got, want)
+		}
 	}
 }

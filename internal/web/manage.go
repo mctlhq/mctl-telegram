@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"github.com/mctlhq/mctl-telegram/internal/assistantinstall"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
@@ -123,6 +124,7 @@ func (s *ManageServer) WriteUnauthorized(w http.ResponseWriter, r *http.Request,
 		LocalBridgeDocsURL:     s.issuer + "/docs/local-bridge",
 		LocalBridgeActivateURL: s.issuer + "/local-bridge/activate",
 		InvalidSession:         msg == auth.MsgInvalidCredentials,
+		Assistants:             s.assistants != nil,
 	})
 }
 
@@ -348,6 +350,8 @@ const (
 )
 
 const manageExtraCSS = `
+  body { min-height: 100dvh; display: flex; flex-direction: column; }
+  body > .mctl-site-container { flex: 1 0 auto; width: 100%; }
   .field-row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
   .field-row:last-of-type { border-bottom: none; }
   .field-label { color: var(--text-dim); }
@@ -372,6 +376,52 @@ const manageExtraCSS = `
   .assistant-install summary { cursor: pointer; font-weight: 500; }
 `
 
+// manageNav is the site navigation of the shared ui_topbar, without the
+// theme toggle: these pages run under a CSP with no script, and the CSS-only
+// menu (a checkbox and its label) needs none. The Assistants link follows
+// the same rule as the shared chrome: it is shown only where /assistants is
+// mounted, which is exactly when an install service is wired in.
+const manageNav = `
+    <input type="checkbox" id="site-nav-toggle" class="nav-toggle" aria-label="Open menu" aria-controls="site-nav">
+    <label for="site-nav-toggle" class="nav-burger" title="Menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></label>
+    <nav class="site-nav" id="site-nav" aria-label="Main">
+      <a href="/docs">Docs</a>
+      <a href="/platforms">Platforms</a>
+      {{if manageAssistantsMounted}}<a href="/assistants">Assistants</a>{{end}}
+      <a href="/demo">Demo</a>
+      <a href="/telegram/connect/manage" class="nav-manage active" aria-current="page">Manage</a>
+      <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener" aria-label="GitHub" title="GitHub" class="gh-link"><svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
+    </nav>`
+
+// manageTopbarClose is where the lite topbar's inner box ends; the nav goes
+// just before it so it sits beside the wordmark as on every other page.
+const manageTopbarClose = "\n    </div>\n  </header>"
+
+// manageTopbar is ui.TopbarLite with manageNav added. It panics at init if
+// the lite topbar no longer ends the way manageTopbarClose expects, so a
+// change there cannot silently drop the navigation.
+var manageTopbar = func() string {
+	if strings.Count(ui.TopbarLite, manageTopbarClose) != 1 || !strings.HasSuffix(ui.TopbarLite, manageTopbarClose) {
+		panic("web: ui.TopbarLite changed shape; update manageTopbar")
+	}
+	return strings.TrimSuffix(ui.TopbarLite, manageTopbarClose) + manageNav + manageTopbarClose
+}()
+
+// manageAssistantsMounted backs the nav's Assistants link, mirroring ui's
+// assistantsMounted: set once at startup, read at render time.
+var manageAssistantsMounted atomic.Bool
+
+// SetAssistantsMounted tells the manage pages' header whether /assistants
+// is served. main sets it beside ui.SetAssistantsMounted.
+func SetAssistantsMounted(on bool) { manageAssistantsMounted.Store(on) }
+
+// newManageTemplate parses one manage page with the nav's template func.
+func newManageTemplate(name, body string) *template.Template {
+	return template.Must(template.New(name).Funcs(template.FuncMap{
+		"manageAssistantsMounted": manageAssistantsMounted.Load,
+	}).Parse(body))
+}
+
 var manageHead = `<!doctype html>
 <html lang="en">
 <head>
@@ -382,7 +432,7 @@ var manageHead = `<!doctype html>
   <style>` + ui.TokensCSS + ui.ComponentsCSS + ui.AuthCSS + manageExtraCSS + `</style>
 </head>
 <body>
-` + ui.TopbarLite + `
+` + manageTopbar + `
   <div class="mctl-site-container">
   <main class="auth-main">
     <div class="card">
@@ -395,7 +445,7 @@ var manageFoot = `    </div>
 </body>
 </html>`
 
-var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `    <h1>Manage your Telegram session</h1>
+var manageTemplate = newManageTemplate("manage", manageHead+`    <h1>Manage your Telegram session</h1>
     {{if .Onboarding}}{{if .NotChosen}}<p id="onboarding"><strong>One more step: choose your notifications.</strong> Connecting your account did not subscribe you to anything; product updates stay off until you save your choice. <a href="#notifications">Choose notifications</a></p>{{else if .Chosen}}<p id="onboarding" class="meta">Your notification choices are saved. <a href="#notifications">Review them</a></p>{{else}}<p id="onboarding" class="meta">We could not load your notification choices right now.</p>{{end}}{{end}}
     {{if .Connected}}
     <div class="field-row"><span class="field-label">Account</span><span class="field-value">{{if .DisplayName}}{{.DisplayName}}{{else}}(unknown){{end}}{{if .Username}} (@{{.Username}}){{end}}</span></div>
@@ -403,11 +453,11 @@ var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `  
     <div class="field-row"><span class="field-label">Send messages</span><span class="field-value">{{if .SendEnabled}}Enabled{{else}}Disabled{{end}}</span></div>
     {{if .CanManage}}<form method="POST" action="/telegram/connect/manage/toggle-send" style="display:inline">
       <button type="submit" class="btn-secondary">{{if .SendEnabled}}Disable send{{else}}Enable send{{end}}</button>
-    </form>{{else}}<p class="meta" id="send-unavailable">` + msgManageCannotChangeSend + `</p>{{end}}
+    </form>{{else}}<p class="meta" id="send-unavailable">`+msgManageCannotChangeSend+`</p>{{end}}
     {{if .IsCanary}}<p class="meta" id="canary-account"><strong>This is the monitoring canary account.</strong> Disconnecting it makes the canary fail until the account is re-linked.</p>{{end}}
     {{if .CanDisconnect}}<form method="POST" action="/telegram/connect/manage/disconnect" style="display:inline">
       <button type="submit" class="btn-danger">Disconnect</button>
-    </form>{{else}}<p class="meta" id="disconnect-unavailable">` + msgManageCannotDisconnect + `</p>{{end}}
+    </form>{{else}}<p class="meta" id="disconnect-unavailable">`+msgManageCannotDisconnect+`</p>{{end}}
     {{else}}
     <p>No active Telegram session found.</p>
     {{end}}
@@ -422,7 +472,7 @@ var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `  
     <h2 class="notif-heading" id="notifications">Notifications</h2>
     {{if .NotChosen}}<p class="meta"><strong>You have not chosen yet.</strong> Product updates stay off until you save.</p>{{end}}
     <p class="meta">Choose which categories the login bot may send you. Saving records the time and that the choice was made here.</p>
-    {{if .NotificationsReduceOnly}}<p class="meta" id="notifications-reduce-only">` + msgManageNotificationsReduceOnly + `</p>{{end}}
+    {{if .NotificationsReduceOnly}}<p class="meta" id="notifications-reduce-only">`+msgManageNotificationsReduceOnly+`</p>{{end}}
     {{if or .CanManage .NotificationsReduceOnly}}<form method="POST" action="/telegram/connect/manage/notifications">
       <input type="hidden" name="submitted" value="notifications">
       {{range .Notifications}}
@@ -438,28 +488,28 @@ var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `  
       </div>
       {{end}}
       <button type="submit" class="btn-secondary">Save notification preferences</button>
-    </form>{{else}}<p class="meta" id="notifications-unavailable">` + msgManageCannotChangeNotifications + `</p>{{end}}
+    </form>{{else}}<p class="meta" id="notifications-unavailable">`+msgManageCannotChangeNotifications+`</p>{{end}}
     {{end}}
-    {{with .Assistant}}` + manageAssistantSection + `{{end}}
+    {{with .Assistant}}`+manageAssistantSection+`{{end}}
     <p class="meta"><a href="{{.Issuer}}/telegram/connect">Reconnect</a></p>
-` + manageFoot))
+`+manageFoot)
 
 // manageCanaryConfirmTemplate is the second confirmation before a canary
 // account is disconnected (issue #961). Cancel is a plain link back, so the
 // destructive form is the only way to proceed.
-var manageCanaryConfirmTemplate = template.Must(template.New("manageCanaryConfirm").Parse(manageHead + `    <h1>Disconnect the monitoring canary?</h1>
+var manageCanaryConfirmTemplate = newManageTemplate("manageCanaryConfirm", manageHead+`    <h1>Disconnect the monitoring canary?</h1>
     <div class="error" id="canary-confirm">This Telegram account is the monitoring canary. If you disconnect it, the canary fails and alerts until the account is re-linked.</div>
     <form method="POST" action="/telegram/connect/manage/disconnect" style="display:inline">
       <input type="hidden" name="confirm_canary" value="1">
       <button type="submit" class="btn-danger">Disconnect the canary account</button>
     </form>
     <p class="meta"><a href="/telegram/connect/manage">Cancel</a></p>
-` + manageFoot))
+`+manageFoot)
 
-var manageErrorTemplate = template.Must(template.New("manageError").Parse(manageHead + `    <h1>Error</h1>
+var manageErrorTemplate = newManageTemplate("manageError", manageHead+`    <h1>Error</h1>
     <div class="error">{{.Message}}</div>
     <p class="meta"><a href="/telegram/connect/manage">Back</a></p>
-` + manageFoot))
+`+manageFoot)
 
 type manageErrorData struct {
 	Message string
@@ -470,18 +520,21 @@ type manageNeedAuthData struct {
 	LocalBridgeDocsURL     string
 	LocalBridgeActivateURL string
 	InvalidSession         bool
+	// Assistants mentions the assistant section, which only a deployment
+	// with an install service shows.
+	Assistants bool
 }
 
-var manageNeedAuthTemplate = template.Must(template.New("manageNeedAuth").Parse(manageHead + `    <h1>Sign in to manage your session</h1>
+var manageNeedAuthTemplate = newManageTemplate("manageNeedAuth", manageHead+`    <h1>Manage your Telegram connection</h1>
     {{if .InvalidSession}}
-    <p>Your connect session is missing, expired, or invalid, so it was rejected. Sign in again to manage send permissions and disconnect.</p>
+    <p>Your connect session is missing, expired, or invalid, so it was rejected. Sign in with Telegram again to configure send permissions{{if .Assistants}}, manage assistants,{{end}} or revoke access.</p>
     {{else}}
-    <p>You need to connect a Telegram account before you can manage this session.</p>
+    <p>Sign in with Telegram to configure send permissions{{if .Assistants}}, manage assistants,{{end}} or revoke access.</p>
     {{end}}
     <a class="btn" href="{{.ConnectURL}}">Connect with Telegram</a>
     <p class="meta">Using Local Bridge? <a href="{{.LocalBridgeDocsURL}}">Setup guide</a>
        &#183; <a href="{{.LocalBridgeActivateURL}}">Activate a device</a></p>
-` + manageFoot))
+`+manageFoot)
 
 func renderManageNeedAuth(w http.ResponseWriter, status int, data manageNeedAuthData) {
 	renderManage(w, status, manageNeedAuthTemplate, data)

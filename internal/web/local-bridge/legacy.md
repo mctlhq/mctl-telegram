@@ -61,7 +61,7 @@ long-lived and announces nothing as it approaches expiry: the first
 symptom is the daemon reconnecting in a loop.
 
 An operator revokes it by `jti` — the identifier recorded when the
-token was minted — or, if that was not written down, by Telegram id,
+token was minted — or, if that was not written down, by Telegram ID,
 which kills every token issued for the account up to that moment and
 drops a connected daemon along with it.
 
