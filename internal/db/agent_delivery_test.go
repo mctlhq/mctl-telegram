@@ -2,6 +2,8 @@ package db
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"testing"
 	"time"
 )
@@ -44,10 +46,8 @@ func countRows(t *testing.T, s *Store, query string, args ...any) int {
 	return n
 }
 
-func TestNoteAgentActionSendAttempt_CountsOnlyWhileExecuting(t *testing.T) {
+func caseNoteAgentActionSendAttempt_CountsOnlyWhileExecuting(t *testing.T, s *Store, uid int64) {
 	ctx := context.Background()
-	s := newTestStoreCrypted(t)
-	uid := seedAgentUser(t, s, "attempts-owner")
 	id, conv := executingSend(t, s, uid, 701, "hello Bob")
 
 	for want := 1; want <= 2; want++ {
@@ -67,10 +67,8 @@ func TestNoteAgentActionSendAttempt_CountsOnlyWhileExecuting(t *testing.T) {
 // TestMarkAgentActionDeliveryUnknown_AlertsOnce: the transition is the
 // alert's dedup, so a second caller racing on the same row neither moves it
 // nor queues a second alert.
-func TestMarkAgentActionDeliveryUnknown_AlertsOnce(t *testing.T) {
+func caseMarkAgentActionDeliveryUnknown_AlertsOnce(t *testing.T, s *Store, uid int64) {
 	ctx := context.Background()
-	s := newTestStoreCrypted(t)
-	uid := seedAgentUser(t, s, "unknown-owner")
 	id, _ := executingSend(t, s, uid, 702, "hello Bob")
 
 	for i, want := range []bool{true, false} {
@@ -94,10 +92,8 @@ func TestMarkAgentActionDeliveryUnknown_AlertsOnce(t *testing.T) {
 // TestMarkAgentActionDeliveryUnknown_AlertNotSwallowedByApprovalRequest: an
 // approved action already owns the per-action_id notification slot with its
 // approval request; the delivery-unknown alert must still be queued.
-func TestMarkAgentActionDeliveryUnknown_AlertNotSwallowedByApprovalRequest(t *testing.T) {
+func caseMarkAgentActionDeliveryUnknown_AlertNotSwallowedByApprovalRequest(t *testing.T, s *Store, uid int64) {
 	ctx := context.Background()
-	s := newTestStoreCrypted(t)
-	uid := seedAgentUser(t, s, "unknown-approval-owner")
 	id, _ := executingSend(t, s, uid, 703, "hello Bob")
 	if _, err := s.InsertOwnerNotification(ctx, OwnerNotification{
 		UserID: uid, Kind: NotificationApproval, ActionID: id, Body: "approve?",
@@ -115,10 +111,8 @@ func TestMarkAgentActionDeliveryUnknown_AlertNotSwallowedByApprovalRequest(t *te
 // TestMatchUnconfirmedAgentSend_ExecutingNotesIDForCompletion: an echo seen
 // while the send is still executing is the agent's, and the id it carries
 // is what RecordAgentActionSent records when the retry itself learns none.
-func TestMatchUnconfirmedAgentSend_ExecutingNotesIDForCompletion(t *testing.T) {
+func caseMatchUnconfirmedAgentSend_ExecutingNotesIDForCompletion(t *testing.T, s *Store, uid int64) {
 	ctx := context.Background()
-	s := newTestStoreCrypted(t)
-	uid := seedAgentUser(t, s, "echo-executing-owner")
 	id, conv := executingSend(t, s, uid, 704, "hello Bob\n\n- AI")
 	since := time.Now().Add(-time.Hour)
 
@@ -149,10 +143,8 @@ func TestMatchUnconfirmedAgentSend_ExecutingNotesIDForCompletion(t *testing.T) {
 // TestMatchUnconfirmedAgentSend_ProvesDeliveryUnknownDelivered: the echo
 // of a delivery_unknown send is proof of delivery, so the action moves to
 // executed with that id and a history row.
-func TestMatchUnconfirmedAgentSend_ProvesDeliveryUnknownDelivered(t *testing.T) {
+func caseMatchUnconfirmedAgentSend_ProvesDeliveryUnknownDelivered(t *testing.T, s *Store, uid int64) {
 	ctx := context.Background()
-	s := newTestStoreCrypted(t)
-	uid := seedAgentUser(t, s, "echo-unknown-owner")
 	id, conv := executingSend(t, s, uid, 705, "hello Bob")
 	if ok, err := s.MarkAgentActionDeliveryUnknown(ctx, uid, id, "delivery unknown: test", "check the chat"); err != nil || !ok {
 		t.Fatalf("mark: ok=%v err=%v", ok, err)
@@ -174,10 +166,8 @@ func TestMatchUnconfirmedAgentSend_ProvesDeliveryUnknownDelivered(t *testing.T) 
 
 // TestMatchUnconfirmedAgentSend_FillsExecutedUnknownID covers the echo that
 // arrives after recovery already recorded the send with an unknown id.
-func TestMatchUnconfirmedAgentSend_FillsExecutedUnknownID(t *testing.T) {
+func caseMatchUnconfirmedAgentSend_FillsExecutedUnknownID(t *testing.T, s *Store, uid int64) {
 	ctx := context.Background()
-	s := newTestStoreCrypted(t)
-	uid := seedAgentUser(t, s, "echo-executed-owner")
 	id, conv := executingSend(t, s, uid, 706, "hello Bob")
 	if ok, err := s.RecordAgentActionSent(ctx, uid, id, conv.ID, 0, "hello Bob"); err != nil || !ok {
 		t.Fatalf("record sent: ok=%v err=%v", ok, err)
@@ -201,10 +191,8 @@ func TestMatchUnconfirmedAgentSend_FillsExecutedUnknownID(t *testing.T) {
 // TestReserveAgentActionSend_CountsDeliveryUnknownAgainstRate: a send that
 // may have been delivered counts toward the per-minute limit, like an
 // executing reservation does.
-func TestReserveAgentActionSend_CountsDeliveryUnknownAgainstRate(t *testing.T) {
+func caseReserveAgentActionSend_CountsDeliveryUnknownAgainstRate(t *testing.T, s *Store, uid int64) {
 	ctx := context.Background()
-	s := newTestStoreCrypted(t)
-	uid := seedAgentUser(t, s, "rate-owner")
 	id, conv := executingSend(t, s, uid, 707, "hello Bob")
 	if ok, err := s.MarkAgentActionDeliveryUnknown(ctx, uid, id, "delivery unknown: test", ""); err != nil || !ok {
 		t.Fatalf("mark: ok=%v err=%v", ok, err)
@@ -228,10 +216,8 @@ func TestReserveAgentActionSend_CountsDeliveryUnknownAgainstRate(t *testing.T) {
 
 // TestListRecentAgentOutgoing_IncludesDeliveryUnknown: the recovery-side
 // rate window counts a send that may have been delivered.
-func TestListRecentAgentOutgoing_IncludesDeliveryUnknown(t *testing.T) {
+func caseListRecentAgentOutgoing_IncludesDeliveryUnknown(t *testing.T, s *Store, uid int64) {
 	ctx := context.Background()
-	s := newTestStoreCrypted(t)
-	uid := seedAgentUser(t, s, "recent-owner")
 	id, conv := executingSend(t, s, uid, 709, "hello Bob")
 	if ok, err := s.MarkAgentActionDeliveryUnknown(ctx, uid, id, "delivery unknown: test", ""); err != nil || !ok {
 		t.Fatalf("mark: ok=%v err=%v", ok, err)
@@ -247,10 +233,8 @@ func TestListRecentAgentOutgoing_IncludesDeliveryUnknown(t *testing.T) {
 
 // TestSweepAgentMessageBodies_ClearsDeliveryUnknownBody: the send body kept
 // for echo matching still expires with retention.
-func TestSweepAgentMessageBodies_ClearsDeliveryUnknownBody(t *testing.T) {
+func caseSweepAgentMessageBodies_ClearsDeliveryUnknownBody(t *testing.T, s *Store, uid int64) {
 	ctx := context.Background()
-	s := newTestStoreCrypted(t)
-	uid := seedAgentUser(t, s, "sweep-owner")
 	id, _ := executingSend(t, s, uid, 710, "hello Bob")
 	if ok, err := s.MarkAgentActionDeliveryUnknown(ctx, uid, id, "delivery unknown: test", ""); err != nil || !ok {
 		t.Fatalf("mark: ok=%v err=%v", ok, err)
@@ -265,4 +249,40 @@ func TestSweepAgentMessageBodies_ClearsDeliveryUnknownBody(t *testing.T) {
 	if n := countRows(t, s, `SELECT COUNT(*) FROM agent_actions WHERE id = $1 AND send_body_encrypted IS NOT NULL`, id); n != 0 {
 		t.Fatal("delivery_unknown send body survived the retention sweep")
 	}
+}
+
+// deliveryCases runs every #1029 store case against one dialect. Postgres
+// keeps state between runs, so each case gets its own user.
+func deliveryCases(t *testing.T, s *Store, prefix string) {
+	cases := []struct {
+		name string
+		run  func(t *testing.T, s *Store, uid int64)
+	}{
+		{"NoteAgentActionSendAttempt_CountsOnlyWhileExecuting", caseNoteAgentActionSendAttempt_CountsOnlyWhileExecuting},
+		{"MarkAgentActionDeliveryUnknown_AlertsOnce", caseMarkAgentActionDeliveryUnknown_AlertsOnce},
+		{"MarkAgentActionDeliveryUnknown_AlertNotSwallowedByApprovalRequest", caseMarkAgentActionDeliveryUnknown_AlertNotSwallowedByApprovalRequest},
+		{"MatchUnconfirmedAgentSend_ExecutingNotesIDForCompletion", caseMatchUnconfirmedAgentSend_ExecutingNotesIDForCompletion},
+		{"MatchUnconfirmedAgentSend_ProvesDeliveryUnknownDelivered", caseMatchUnconfirmedAgentSend_ProvesDeliveryUnknownDelivered},
+		{"MatchUnconfirmedAgentSend_FillsExecutedUnknownID", caseMatchUnconfirmedAgentSend_FillsExecutedUnknownID},
+		{"ReserveAgentActionSend_CountsDeliveryUnknownAgainstRate", caseReserveAgentActionSend_CountsDeliveryUnknownAgainstRate},
+		{"ListRecentAgentOutgoing_IncludesDeliveryUnknown", caseListRecentAgentOutgoing_IncludesDeliveryUnknown},
+		{"SweepAgentMessageBodies_ClearsDeliveryUnknownBody", caseSweepAgentMessageBodies_ClearsDeliveryUnknownBody},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.run(t, s, seedAgentUser(t, s, fmt.Sprintf("%s-%s-%d", prefix, tc.name, time.Now().UnixNano())))
+		})
+	}
+}
+
+func TestDelivery_SQLite(t *testing.T) {
+	deliveryCases(t, newTestStoreCrypted(t), "sqlite")
+}
+
+func TestDelivery_Postgres(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	deliveryCases(t, newPostgresTestStore(t, dsn), "pg")
 }
