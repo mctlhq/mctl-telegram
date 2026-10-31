@@ -181,6 +181,8 @@ func TestInstallRejected(t *testing.T) {
 		"unknown intent":      {pairs: []string{"  limits:\n", "  intentTiers:\n    flirt: auto\n  limits:\n"}},
 		"looser disclosure": {pairs: []string{"  limits:\n",
 			"  disclosureLevels:\n    work_mode: public\n  limits:\n"}},
+		"looser disclosure, value omitted": {pairs: []string{"    relocation: Not planning to relocate\n", "",
+			"  limits:\n", "  disclosureLevels:\n    relocation: public\n  limits:\n"}},
 		"level on restricted": {pairs: []string{"  limits:\n",
 			"  disclosureLevels:\n    salary_floor: never\n  limits:\n"}},
 		"unknown key":  {pairs: []string{"  paused: false\n", "  paused: false\n  autopilot: true\n"}},

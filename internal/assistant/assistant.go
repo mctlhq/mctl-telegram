@@ -475,13 +475,18 @@ func ownerProfile(def *Definition, in *Install) (json.RawMessage, error) {
 			return nil, fmt.Errorf("values: unknown variable %q", name)
 		}
 	}
-	for name := range in.Spec.DisclosureLevels {
+	for name, o := range in.Spec.DisclosureLevels {
 		v, ok := vars[name]
 		if !ok {
 			return nil, fmt.Errorf("disclosureLevels: unknown variable %q", name)
 		}
 		if v.Send != "" {
 			return nil, fmt.Errorf("disclosureLevels: %q is restricted and has no disclosure level", name)
+		}
+		// Checked here, not when the value is placed, so an override for an
+		// optional variable the install leaves empty is still validated.
+		if floor := disclosureFloor(v); disclosureRank[o] < disclosureRank[floor] {
+			return nil, fmt.Errorf("disclosureLevels: %q can only be made stricter than %s", name, floor)
 		}
 	}
 
@@ -520,15 +525,6 @@ func ownerProfile(def *Definition, in *Install) (json.RawMessage, error) {
 		}
 		level := v.Disclosure
 		if o, ok := in.Spec.DisclosureLevels[v.Name]; ok {
-			// A variable the author left unmarked has the runtime's default
-			// level, not no level, so that is the floor an override is held to.
-			floor := level
-			if floor == "" {
-				floor = profile.DefaultLevel(v.ProfilePath)
-			}
-			if disclosureRank[o] < disclosureRank[floor] {
-				return nil, fmt.Errorf("disclosureLevels: %q can only be made stricter than %s", v.Name, floor)
-			}
 			level = o
 		}
 		if level != "" {
@@ -546,6 +542,15 @@ func ownerProfile(def *Definition, in *Install) (json.RawMessage, error) {
 		return nil, fmt.Errorf("owner profile: %w", err)
 	}
 	return raw, nil
+}
+
+// disclosureFloor is the level an install may only make stricter. A variable
+// the author left unmarked has the runtime's default level, not no level.
+func disclosureFloor(v Variable) profile.DisclosureLevel {
+	if v.Disclosure != "" {
+		return v.Disclosure
+	}
+	return profile.DefaultLevel(v.ProfilePath)
 }
 
 func checkType(v Variable, val any) error {
