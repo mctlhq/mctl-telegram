@@ -18,7 +18,7 @@ func puEntry(id, from string) productupdate.Entry {
 		Tools:      []string{"send_message"},
 		Evidence:   productupdate.Evidence{From: from, Changes: []productupdate.Claim{{Tool: "send_message", Change: productupdate.ClaimAdded}}},
 		Status:     productupdate.StatusApproved,
-		Provenance: productupdate.Provenance{Author: "alice", ReviewedBy: "alice", AssistedBy: "a-super-secret-model-codename"},
+		Provenance: productupdate.Provenance{Author: "secret-author", ReviewedBy: "secret-reviewer", AssistedBy: "a-super-secret-model-codename"},
 		CreatedAt:  "2026-09-24", ReviewedAt: "2026-09-24",
 	}
 }
@@ -54,7 +54,7 @@ func TestProductUpdatesPage_ListsGroupsAndOmitsProvenance(t *testing.T) {
 	if strings.Contains(body, "unreviewed") {
 		t.Fatal("a draft (unreviewed) entry was rendered")
 	}
-	if strings.Contains(body, "a-super-secret-model-codename") || strings.Contains(body, "alice") {
+	if strings.Contains(body, "a-super-secret-model-codename") || strings.Contains(body, "secret-author") || strings.Contains(body, "secret-reviewer") {
 		t.Fatal("provenance (author/reviewer/assisted_by) leaked onto the page")
 	}
 	// Newest release first: 0.70.0's heading appears before 0.69.0's.
