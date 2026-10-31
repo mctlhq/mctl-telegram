@@ -1,0 +1,59 @@
+name: live-telegram
+
+# Message-tool round trip against real Telegram (issue #854): send, edit,
+# forward and delete in the CI account's own Saved Messages, through the same
+# client pool and peer resolution the server uses.
+#
+# Deliberately not on pull_request and not on a schedule. It runs as one real
+# account (the one the production canary also uses), so every run spends that
+# account's flood budget; it is started by hand or by release-please after a
+# release is cut. A FLOOD_WAIT here can make the canary wait too, so keep it
+# rare.
+#
+# The secrets live in the live-telegram environment, which only main and
+# release tags may deploy to. As repository secrets they would be readable by
+# a workflow on any pushed branch.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-telegram
+  cancel-in-progress: false
+
+jobs:
+  roundtrip:
+    runs-on: ubuntu-latest
+    environment: live-telegram
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.10"
+      - name: message tools round trip
+        env:
+          TG_LIVE_API_ID: ${{ secrets.TG_LIVE_API_ID }}
+          TG_LIVE_API_HASH: ${{ secrets.TG_LIVE_API_HASH }}
+          TG_LIVE_SESSION: ${{ secrets.TG_LIVE_SESSION }}
+        run: |
+          set -euo pipefail
+          go test -tags livetg -run TestLive -count=1 -v ./internal/telegram/ > /tmp/live.log 2>&1 || {
+            cat /tmp/live.log
+            exit 1
+          }
+          cat /tmp/live.log
+          # The test skips when a secret is missing, and a skip is green. A
+          # run that tested nothing must not look like a pass.
+          if grep -Eq "^[[:space:]]*--- SKIP" /tmp/live.log; then
+            echo "::error::the live test skipped -- are the live-telegram environment secrets set?"
+            exit 1
+          fi
+          if ! grep -q "^--- PASS: TestLive_MessageToolsRoundTrip" /tmp/live.log; then
+            echo "::error::TestLive_MessageToolsRoundTrip did not run"
+            exit 1
+          fi
