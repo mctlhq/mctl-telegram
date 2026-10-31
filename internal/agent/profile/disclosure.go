@@ -59,6 +59,10 @@ func defaultLevel(path string) DisclosureLevel {
 	return DisclosureAfterOwnerEngaged
 }
 
+// DefaultLevel is the level a field at path has when the profile does not
+// mark it.
+func DefaultLevel(path string) DisclosureLevel { return defaultLevel(path) }
+
 // level is the effective level of path in data.
 func (d Data) level(path string) DisclosureLevel {
 	if l, ok := d.Disclosure[path]; ok {

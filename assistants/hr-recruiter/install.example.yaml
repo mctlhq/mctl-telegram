@@ -1,0 +1,27 @@
+# Example install of hr-recruiter for the synthetic persona Dana. The
+# settings match the configuration the HR agent runs with today: guarded mode,
+# discovery and schedule sent without approval, 50 turns, 2 messages a
+# minute, and the disclosure line turned off by the owner.
+apiVersion: assistants.mctl.ai/v1alpha1
+kind: AssistantInstall
+spec:
+  assistant:
+    name: hr-recruiter
+    version: 0.1.0
+  mode: guarded
+  paused: false
+  listening: true
+  values:
+    name: Dana
+    role: Backend engineer
+    skills: [Go, Kubernetes, PostgreSQL]
+    headline: Backend engineer building messaging infrastructure.
+    work_mode: remote
+    relocation: Not planning to relocate
+    salary_floor: "150000"
+  limits:
+    maxAutonomousTurns: 50
+    maxMsgsPerMinute: 2
+    maxReplyChars: 1200
+  disclosure:
+    enabled: false
