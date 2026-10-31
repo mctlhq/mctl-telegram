@@ -74,8 +74,10 @@ type AgentJob struct {
 	// CoalescedInto is the head job id of a coalesced member, else 0.
 	CoalescedInto int64
 	// SourceEventIDs lists the event ids of the turn, head first, in arrival
-	// order. Filled by ClaimAgentJobs (coalescing on) and GetAgentJob; for a
-	// job with no members it is just the job's own event.
+	// order. Filled by ClaimAgentJobs and GetAgentJob; for a job with no
+	// members it is just the job's own event. An edit job that carries turn
+	// context (#962) lists those events too, in the arrival order of the
+	// original messages, so its own event need not come first.
 	SourceEventIDs []string
 }
 
@@ -397,6 +399,9 @@ func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, userID int
 		); err != nil {
 			return nil, fmt.Errorf("insert job attempt: %w", err)
 		}
+		if err := storeTurnContext(ctx, tx, &jobs[i]); err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit claim tx: %w", err)
@@ -463,6 +468,13 @@ func (s *Store) GetAgentJob(ctx context.Context, userID, id int64) (*AgentJob, e
 	}
 	if err := s.fillSourceEvents(ctx, s.DB, jobs[:1]); err != nil {
 		return nil, err
+	}
+	stored, err := loadTurnContext(ctx, s.DB, userID, id)
+	if err != nil {
+		return nil, err
+	}
+	if stored != nil {
+		jobs[0].SourceEventIDs = stored
 	}
 	return &jobs[0], nil
 }

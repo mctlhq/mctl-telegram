@@ -180,6 +180,11 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_jobs", "body_bytes", "INTEGER", "INTEGER"); err != nil {
 		return err
 	}
+	// Turn context (#962): a JSON array of the event ids an edit job was
+	// handed at claim, when it adds the rest of an unsent turn. NULL otherwise.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_jobs", "turn_context", "TEXT", "TEXT"); err != nil {
+		return err
+	}
 	coalescedIdx := `CREATE INDEX IF NOT EXISTS idx_agent_jobs_coalesced_into ON agent_jobs(coalesced_into) WHERE coalesced_into IS NOT NULL`
 	if _, err := dbConn.ExecContext(ctx, coalescedIdx); err != nil {
 		return fmt.Errorf("migrate agent: %w\nstmt: %s", err, coalescedIdx)
@@ -379,6 +384,16 @@ func agentSchemaSQLite() []string {
 			PRIMARY KEY(user_id, tg_message_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_sent_messages_created ON agent_sent_messages(created_at)`,
+		// agent_pending_deletes (#985): a delete that arrived before the
+		// message it deletes, kept until the message is ingested.
+		`CREATE TABLE IF NOT EXISTS agent_pending_deletes (
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			message_id INTEGER NOT NULL,
+			self_tg_id INTEGER NOT NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY(user_id, message_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_pending_deletes_created ON agent_pending_deletes(created_at)`,
 		`CREATE TABLE IF NOT EXISTS conversations (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -712,6 +727,16 @@ func agentSchemaPG() []string {
 			PRIMARY KEY(user_id, tg_message_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_sent_messages_created ON agent_sent_messages(created_at)`,
+		// agent_pending_deletes (#985): a delete that arrived before the
+		// message it deletes, kept until the message is ingested.
+		`CREATE TABLE IF NOT EXISTS agent_pending_deletes (
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			message_id BIGINT NOT NULL,
+			self_tg_id BIGINT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY(user_id, message_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_pending_deletes_created ON agent_pending_deletes(created_at)`,
 		`CREATE TABLE IF NOT EXISTS conversations (
 			id BIGSERIAL PRIMARY KEY,
 			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

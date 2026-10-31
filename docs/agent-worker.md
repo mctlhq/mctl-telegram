@@ -294,8 +294,47 @@ sent:
 No separate notification is sent. The denied action keeps the reason in
 `policy_reasons` (`source message edited` or `source message deleted`), and
 `/mctl show` prints the last withdrawn draft's reason and time. An edit still
-enqueues its own job, which answers the current text; carrying the rest of a
-coalesced turn into that job is tracked in #962.
+enqueues its own job, which answers the current text.
+
+### Delete that arrives before its message (#985)
+
+When the listener catches up on missed updates, gotd hands it the deletes of
+a batch before the new messages. A message sent and deleted within a second
+or so can therefore have its delete processed first, when there is nothing
+to delete yet. Such a delete is kept in `agent_pending_deletes` (user,
+message id, time; no body). When the message, or an edit of it, is ingested
+later, the delete is applied in the same transaction: a `message_delete`
+event is recorded after the message's own event and the new job is closed as
+`ignored` (`source message deleted`). An edit that arrives after that is
+ignored as well.
+
+Deletes of messages the agent never ingests (the owner's own messages, other
+chats) wait in that table and do nothing. Rows older than seven days are
+swept the next time a delete is kept, and account deletion purges them.
+
+### Edit of a coalesced message (#962)
+
+When the edited message was part of a turn with several messages and that
+turn's reply was never sent, the edit job also gets the turn's other
+messages, so the answer covers everything the sender said and not only the
+corrected line:
+
+- Each other message is given at its latest version (its newest edit). A
+  message the sender deleted is left out.
+- The events are ordered by when the original messages arrived, so the
+  edited message keeps its place. `get_event` returns them in `events[]`;
+  the top-level fields stay those of the edit.
+- If the turn was already answered, the edit job gets only the edit. That
+  covers the turn's own reply (`executing` or `executed`) and the reply of an
+  earlier edit job that carried the turn as context: after two quick edits,
+  the first edit job answers the whole turn and the second answers only its
+  own message.
+- The list is computed when the job is claimed and stored in
+  `agent_jobs.turn_context`. The job token can read exactly those events.
+  A retried attempt recomputes it.
+- If any of those messages is edited or deleted after the claim, the edit
+  job's draft is withdrawn like any superseded draft; the newer edit has its
+  own job.
 
 ## Several leads per conversation (#951)
 

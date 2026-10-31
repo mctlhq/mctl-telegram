@@ -74,6 +74,10 @@ func (s *Store) InsertEventEnqueueJobAndTouch(ctx context.Context, ev IncomingEv
 		return 0, false, fmt.Errorf("enqueue agent job: %w", err)
 	}
 
+	if err := applyPendingDeleteTx(ctx, tx, ev, jobID); err != nil {
+		return 0, false, err
+	}
+
 	now := time.Now().UTC()
 	// With operator routing on, an event the worker will handle is not
 	// published here; routeJobEventTx forwards it only if the job fails or is
@@ -107,4 +111,58 @@ func (s *Store) InsertEventEnqueueJobAndTouch(ctx context.Context, ev IncomingEv
 		s.outboxNotify()
 	}
 	return jobID, true, nil
+}
+
+// applyPendingDeleteTx applies a delete that arrived before this message
+// (#985). gotd dispatches a difference's deletes before its new messages, so
+// RecordMessageDelete may have found nothing to delete and kept the delete in
+// agent_pending_deletes. Taking it here records the message_delete event
+// after the message's own event, so supersession sees the delete as later.
+// The new job is then closed as ignored whenever the message has a recorded
+// delete, the same as a delete of a message still queued. That also covers an
+// edit ingested after the delete was applied: its event is newer than the
+// delete, so supersession alone would treat it as current text.
+func applyPendingDeleteTx(ctx context.Context, tx *sql.Tx, ev IncomingEvent, jobID int64) error {
+	if ev.Kind != EventKindPrivateMessage && ev.Kind != EventKindMessageEdit {
+		return nil
+	}
+	var selfTGID int64
+	err := tx.QueryRowContext(ctx,
+		`DELETE FROM agent_pending_deletes
+		  WHERE user_id = $1 AND message_id = $2 AND created_at >= $3
+		  RETURNING self_tg_id`,
+		ev.UserID, ev.MessageID, time.Now().UTC().Add(-pendingDeleteTTL),
+	).Scan(&selfTGID)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return fmt.Errorf("take pending delete: %w", err)
+	default:
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO incoming_events
+			   (event_id, user_id, kind, chat_tg_id, sender_tg_id, message_id, body_encrypted, meta)
+			 VALUES($1,$2,$3,$4,$4,$5,NULL,'{}')
+			 ON CONFLICT (event_id) DO NOTHING`,
+			deleteEventID(selfTGID, ev.ChatTGID, ev.MessageID), ev.UserID, EventKindMessageDelete,
+			ev.ChatTGID, ev.MessageID,
+		); err != nil {
+			return fmt.Errorf("record pending delete: %w", err)
+		}
+	}
+	if jobID == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE agent_jobs SET status = $1, last_error = $2, updated_at = $3
+		  WHERE id = $4 AND status = $5
+		    AND EXISTS (
+		        SELECT 1 FROM incoming_events
+		         WHERE user_id = $6 AND chat_tg_id = $7 AND message_id = $8 AND kind = $9
+		    )`,
+		JobIgnored, ReasonSourceDeleted, time.Now().UTC(), jobID, JobPending,
+		ev.UserID, ev.ChatTGID, ev.MessageID, EventKindMessageDelete,
+	); err != nil {
+		return fmt.Errorf("ignore job for deleted message: %w", err)
+	}
+	return nil
 }

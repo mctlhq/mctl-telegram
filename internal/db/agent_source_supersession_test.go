@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -143,7 +144,11 @@ func supersessionCases(t *testing.T, setup func(t *testing.T) (*Store, int64)) {
 		{"deleted coalesced member supersedes and denies the head", assertCoalescedMemberDelete},
 		{"redelivered delete is a no-op", assertRedeliveredDelete},
 		{"pending job for a deleted message is ignored", assertPendingJobIgnored},
-		{"delete of an unknown message is a no-op", assertUnknownDelete},
+		{"delete of an unknown message is kept, not applied", assertUnknownDelete},
+		{"delete before its message ignores the message's job", assertDeleteBeforeMessage},
+		{"delete before message and edit ignores both jobs", assertDeleteBeforeMessageAndEdit},
+		{"delete before a lone edit ignores the edit's job", assertDeleteBeforeLoneEdit},
+		{"expired pending delete is not applied and is swept", assertPendingDeleteExpired},
 		{"job-less action is never superseded", assertJoblessNotSuperseded},
 	}
 	for _, tc := range cases {
@@ -372,12 +377,141 @@ func assertPendingJobIgnored(t *testing.T, f *supersessionFixture) {
 }
 
 func assertUnknownDelete(t *testing.T, f *supersessionFixture) {
-	f.ingest(t, 10, "")
+	kept := f.ingest(t, 10, "")
 	if _, _, ok, err := f.s.LastWithdrawnDraft(context.Background(), f.uid, f.convID); err != nil || ok {
 		t.Fatalf("LastWithdrawnDraft on a clean conversation: ok=%v err=%v", ok, err)
 	}
-	if res := f.recordDelete(t, 99); res != (MessageDeleteResult{}) {
-		t.Fatalf("unknown delete = %+v, want no-op", res)
+	if res := f.recordDelete(t, 99); res != (MessageDeleteResult{Pending: 1}) {
+		t.Fatalf("unknown delete = %+v, want kept pending only", res)
+	}
+	// A redelivery keeps one row.
+	if res := f.recordDelete(t, 99); res != (MessageDeleteResult{Pending: 1}) {
+		t.Fatalf("redelivered unknown delete = %+v", res)
+	}
+	if n := f.pendingDeletes(t); n != 1 {
+		t.Fatalf("pending deletes = %d, want 1", n)
+	}
+	if n := f.deleteEvents(t); n != 0 {
+		t.Fatalf("delete events = %d, want 0", n)
+	}
+	// Another message is untouched by the kept delete.
+	if got := f.claim(t); got.EventID != kept {
+		t.Fatalf("claimed %s, want %s", got.EventID, kept)
+	}
+}
+
+func (f *supersessionFixture) pendingDeletes(t *testing.T) int {
+	t.Helper()
+	var n int
+	if err := f.s.DB.QueryRow(`SELECT COUNT(*) FROM agent_pending_deletes WHERE user_id = $1`, f.uid).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func (f *supersessionFixture) deleteEvents(t *testing.T) int {
+	t.Helper()
+	var n int
+	if err := f.s.DB.QueryRow(`SELECT COUNT(*) FROM incoming_events WHERE user_id = $1 AND kind = $2`,
+		f.uid, EventKindMessageDelete).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func (f *supersessionFixture) jobState(t *testing.T, eventID string) (status, note string) {
+	t.Helper()
+	var n sql.NullString
+	if err := f.s.DB.QueryRow(`SELECT status, last_error FROM agent_jobs WHERE event_id = $1`, eventID).Scan(&status, &n); err != nil {
+		t.Fatal(err)
+	}
+	return status, n.String
+}
+
+// assertDeleteBeforeMessage is #985: gotd dispatches a difference's delete
+// before the new message it deletes.
+func assertDeleteBeforeMessage(t *testing.T, f *supersessionFixture) {
+	if res := f.recordDelete(t, 20); res.Pending != 1 {
+		t.Fatalf("early delete = %+v, want pending", res)
+	}
+	msg := f.ingest(t, 20, "")
+	if st, note := f.jobState(t, msg); st != JobIgnored || note != ReasonSourceDeleted {
+		t.Fatalf("job of the deleted message = %s %q, want ignored", st, note)
+	}
+	if n := f.pendingDeletes(t); n != 0 {
+		t.Fatalf("pending deletes after ingest = %d, want 0", n)
+	}
+	var msgRow, delRow int64
+	if err := f.s.DB.QueryRow(`SELECT id FROM incoming_events WHERE event_id = $1`, msg).Scan(&msgRow); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.s.DB.QueryRow(`SELECT id FROM incoming_events WHERE event_id = $1`, f.eventID(20, ":d")).Scan(&delRow); err != nil {
+		t.Fatalf("delete event not recorded: %v", err)
+	}
+	if delRow <= msgRow {
+		t.Fatalf("delete event %d not after message event %d", delRow, msgRow)
+	}
+	if got := f.superseded(t, f.jobID(t, msg)); got != SourceDeleted {
+		t.Fatalf("superseded = %q, want deleted", got)
+	}
+	// The late delivery of the same delete changes nothing.
+	if res := f.recordDelete(t, 20); res != (MessageDeleteResult{}) {
+		t.Fatalf("redelivered delete = %+v, want no-op", res)
+	}
+	jobs, err := f.s.ClaimAgentJobs(context.Background(), "r", f.uid, 1)
+	if err != nil || len(jobs) != 0 {
+		t.Fatalf("claimed %d jobs err=%v, want none", len(jobs), err)
+	}
+}
+
+func assertDeleteBeforeMessageAndEdit(t *testing.T, f *supersessionFixture) {
+	f.recordDelete(t, 21)
+	msg := f.ingest(t, 21, "")
+	edit := f.ingest(t, 21, ":e1")
+	if st, _ := f.jobState(t, msg); st != JobIgnored {
+		t.Fatalf("message job = %s, want ignored", st)
+	}
+	if st, note := f.jobState(t, edit); st != JobIgnored || note != ReasonSourceDeleted {
+		t.Fatalf("edit job = %s %q, want ignored", st, note)
+	}
+	jobs, err := f.s.ClaimAgentJobs(context.Background(), "r", f.uid, 1)
+	if err != nil || len(jobs) != 0 {
+		t.Fatalf("claimed %d jobs err=%v, want none", len(jobs), err)
+	}
+}
+
+func assertDeleteBeforeLoneEdit(t *testing.T, f *supersessionFixture) {
+	f.recordDelete(t, 22)
+	edit := f.ingest(t, 22, ":e1")
+	if st, note := f.jobState(t, edit); st != JobIgnored || note != ReasonSourceDeleted {
+		t.Fatalf("edit job = %s %q, want ignored", st, note)
+	}
+	if n := f.deleteEvents(t); n != 1 {
+		t.Fatalf("delete events = %d, want 1", n)
+	}
+}
+
+func assertPendingDeleteExpired(t *testing.T, f *supersessionFixture) {
+	old := time.Now().UTC().Add(-pendingDeleteTTL - time.Hour)
+	if _, err := f.s.DB.Exec(`INSERT INTO agent_pending_deletes(user_id, message_id, self_tg_id, created_at)
+		VALUES($1, 23, 1, $2), ($1, 24, 1, $2)`, f.uid, old); err != nil {
+		t.Fatal(err)
+	}
+	msg := f.ingest(t, 23, "")
+	if st, _ := f.jobState(t, msg); st != JobPending {
+		t.Fatalf("job after an expired delete = %s, want pending", st)
+	}
+	if n := f.deleteEvents(t); n != 0 {
+		t.Fatalf("delete events = %d, want 0", n)
+	}
+	// The next kept delete sweeps the expired rows.
+	f.recordDelete(t, 99)
+	var n int
+	if err := f.s.DB.QueryRow(`SELECT COUNT(*) FROM agent_pending_deletes WHERE user_id = $1 AND message_id <> 99`, f.uid).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("expired pending deletes left = %d", n)
 	}
 }
 
