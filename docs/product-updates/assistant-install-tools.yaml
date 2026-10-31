@@ -1,0 +1,32 @@
+schema: mctl-telegram.product-update/v1
+id: assistant-install-tools
+kind: new_tool
+title: Choose and configure your Telegram assistant from your MCP client
+summary: >-
+  Three new tools manage the assistant that answers on your Telegram
+  account. list_assistants shows the assistants you can install, with the
+  values each one asks for and its defaults, and which one your account runs
+  now. install_assistant installs one by its exact version; a new install
+  starts paused and not listening, so going live is always your explicit
+  choice. update_install changes one or more settings with a small patch, so
+  you never have to read your stored values back, and refuses the change if
+  your install moved on in the meantime. None of them ever returns your
+  stored values or notes. Changing the install needs the account
+  management permission; listing does not.
+locale: en
+delivery: next_digest
+high_value: false
+tools: [list_assistants, install_assistant, update_install]
+evidence:
+  from: 0.113.0
+  changes:
+    - {tool: list_assistants, change: added}
+    - {tool: install_assistant, change: added}
+    - {tool: update_install, change: added}
+status: approved
+provenance:
+  author: mashkovd
+  assisted_by: claude-opus-5-5
+  reviewed_by: mashkovd
+created_at: "2026-10-31"
+reviewed_at: "2026-10-31"

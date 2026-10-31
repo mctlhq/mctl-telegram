@@ -277,6 +277,30 @@
       "reason": "Lets the caller change one or more of their OWN notification preferences only; there is no telegram_id argument and no scope is conferred. Gated on the account:manage scope."
     },
     {
+      "name": "list_assistants",
+      "enabled": true,
+      "upstream_gates": [
+        "self-only"
+      ],
+      "reason": "Lists the installable assistant catalog (public metadata only) and the caller's OWN assistant name, version and install revision; never install values, owner notes or instructions, and no telegram_id argument."
+    },
+    {
+      "name": "install_assistant",
+      "enabled": true,
+      "upstream_gates": [
+        "account:manage"
+      ],
+      "reason": "Installs a catalog assistant on the caller's OWN account only; there is no telegram_id argument. A new install starts paused and not listening; the output reports resolved settings, never values or notes. Gated on the account:manage scope."
+    },
+    {
+      "name": "update_install",
+      "enabled": true,
+      "upstream_gates": [
+        "account:manage"
+      ],
+      "reason": "Patches the caller's OWN assistant install with a compare-and-set on its install revision; there is no telegram_id argument and the output never echoes values or notes. Gated on the account:manage scope."
+    },
+    {
       "name": "set_telegram_access",
       "enabled": true,
       "upstream_gates": [

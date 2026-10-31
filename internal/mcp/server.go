@@ -10,6 +10,7 @@ import (
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/mctlhq/mctl-telegram/internal/assistantinstall"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
@@ -129,6 +130,10 @@ type Server struct {
 	// sponsoredViews de-duplicates sponsored view reports per user (issue
 	// #906). New sets it; nil reports every returned item.
 	sponsoredViews *telegram.SponsoredViews
+	// Assistants is the install service behind list_assistants,
+	// install_assistant and update_install (#1021); nil makes them refuse.
+	// See WithAssistants.
+	Assistants *assistantinstall.Service
 	// Replies holds draft_reply confirmations for send_reply (core-reply
 	// profile). nil makes both tools refuse.
 	Replies *ReplyStore
@@ -497,6 +502,12 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 	}
 	{
 		t, h := s.toolSetMyNotificationPreferences()
+		s.addTool(srv, t, h)
+	}
+	for _, reg := range []func() (mcplib.Tool, mcpserver.ToolHandlerFunc){
+		s.toolListAssistants, s.toolInstallAssistant, s.toolUpdateInstall,
+	} {
+		t, h := reg()
 		s.addTool(srv, t, h)
 	}
 	{

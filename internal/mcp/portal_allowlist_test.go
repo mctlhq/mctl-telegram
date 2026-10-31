@@ -98,6 +98,7 @@ var selfOnlyTools = map[string]string{
 	"get_my_identity":    "returns the caller's own identity row",
 	"get_my_send_status": "reports the caller's own send gate without acting on it (see reportsGateTools)",
 	"get_my_audit_log":   "reads the caller's own audit rows, peers redacted",
+	"list_assistants":    "lists the public catalog and the caller's own assistant reference, never install values or notes",
 }
 
 // gateSelfOnly and gateSend are the two non-scope tokens upstream_gates may
@@ -284,7 +285,7 @@ func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 	// could only be enabled via selfOnlyTools, but the honest failure is here.
 	// apps.go registers prepare_send_message (only reachable with
 	// AppsEnabled=true above), so it must be scanned too.
-	fset, parsed := parseSources(t, "tools.go", "media_tools.go", "apps.go", "broadcast_tools.go", "reply_tools.go")
+	fset, parsed := parseSources(t, "tools.go", "media_tools.go", "apps.go", "broadcast_tools.go", "reply_tools.go", "assistant_tools.go")
 	fromSource, err := gatesFromSource(fset, parsed...)
 	if err != nil {
 		t.Fatal(err)

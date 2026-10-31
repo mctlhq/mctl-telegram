@@ -420,6 +420,76 @@ carries the text and no path, so it is complete without the repository.
   publish immutable `TelegramAssistant` versions from this repository is a
   follow-up.
 
+## MCP tools
+
+P3.5 (#1021) lets the account owner manage their own install from an MCP
+client. The three tools and `PUT /api/admin/agent/install` call one service,
+`internal/assistantinstall`, so resolving the definition, the lifecycle
+gate, the snapshot and the revision move happen in one place; the web page
+(P3.6) will call it too. Every tool acts on the caller's own account and has
+no `telegram_id` argument. They refuse when `AGENT_ENABLED` is off.
+
+- **`list_assistants`** (any signed-in connection) returns `source`
+  (`registry` with `ASSISTANT_REGISTRY_ENABLED`, read from
+  `GET /api/v1/assistant-catalog`; else `embedded`, the public, non-draft
+  entries of the built-in catalog), `assistants` (name, version, title,
+  description, tags, lifecycle, variables with name, type, required,
+  choices, description and, from the registry, a non-secret default;
+  intents with their default tier; defaults: mode, limits, disclosure
+  policy) and `mine`: `{assistant, version, install_revision, installed}`.
+  It never returns stored values, owner notes, instructions, tools or
+  profile paths.
+- **`install_assistant`** (`account:manage`) takes the exact `name` and
+  `version` (no "latest": the schema requires `MAJOR.MINOR.PATCH`),
+  `values`, any of the install settings (`mode`, `paused`, `listening`,
+  `limits`, `intentTiers`, `disclosureLevels`, `audience`, `disclosure`,
+  `schedule`, `ownerNotes`) and an optional `expected_revision`. It builds a
+  whole AssistantInstall from them, leaving omitted settings omitted, so a
+  new install starts paused and not listening as [Install](#install) says.
+- **`update_install`** (`account:manage`) takes a `patch`, an RFC 7396 JSON
+  merge patch over the stored install's `spec`, and a required
+  `expected_revision`. The server decrypts the stored install, applies the
+  patch, validates the result as a whole install against its definition and
+  saves it. Patching `assistant.name` or `assistant.version` switches or
+  upgrades through the same path as an install. The client never reads
+  private values back to change one setting.
+
+Every install, the admin route's included, is a compare-and-set: the
+profile UPDATE carries `install_revision = expected` in its `WHERE`, inside
+the same transaction as the definition snapshot, and a miss changes nothing.
+`expected` is the caller's `expected_revision` or, without one, the
+revision the service read when it decided the lifecycle and visibility
+gates, so a concurrent install cannot slip under them. An account with no
+agent profile yet reports `install_revision` 1, the revision its profile
+starts at. They
+answer `{assistant, version, install_revision, settings}`, where `settings`
+is what the install resolved to (mode, paused, listening, disclosure,
+limits, auto and never intents, working hours, audience exclusions, sender
+list sizes), never the values or notes. A successful write moves the
+revision, so work queued under the earlier one is fenced as in
+[Install revisions](#install-revisions).
+
+Self-service installs are limited to what `list_assistants` offers: a
+`public`, non-draft definition. The one exception is the name@version the
+account already runs, which its owner may keep reconfiguring, the same rule
+that keeps a `deprecated` version installable for its existing accounts. The
+admin route has no such limit.
+
+Errors are a JSON envelope `{error, message, retryable, current_revision?}`:
+
+| `error` | When |
+|---|---|
+| `invalid_install` | the install, or the patched one, does not validate; a schema failure names the location and rule, never the value |
+| `assistant_not_found` | no such name@version for this caller |
+| `lifecycle_refused` | `disabled`, or `deprecated` for an account not already running it |
+| `revision_conflict` | the install is no longer at `expected_revision`; carries `current_revision` |
+| `no_install` | `update_install` on an account with no stored install |
+| `registry_unavailable` | the registry could not be read; `retryable: true`, nothing changed |
+| `registry_invalid` | the registry answered a definition or catalog that failed its checks |
+| `internal_error` | a database or encryption fault |
+
+Audit rows record the error kind only, never the message.
+
 ## Customization tiers
 
 | Tier | The user | Gate |

@@ -10,7 +10,7 @@
 - [Security & Trust Model](https://tg.mctl.ai/security): Data minimization and session encryption details.
 - [Tool descriptors](https://github.com/mctlhq/mctl-telegram/blob/main/docs/tool-descriptors.json): the generated, authoritative list of every MCP tool with its schema and annotations.
 
-## Tools Summary (37 MCP tools)
+## Tools Summary (40 MCP tools)
 
 The full list with schemas is `docs/tool-descriptors.json`. Highlights:
 
@@ -20,3 +20,4 @@ The full list with schemas is `docs/tool-descriptors.json`. Highlights:
 - `prepare_pin_message` & `pin_message`: Confirmed pinning with dry-run protection.
 - `get_my_audit_log`: Cryptographic tamper-evident hash-chain audit log.
 - `disconnect_telegram_account` & `delete_telegram_account`: Account revocation and data deletion.
+- `list_assistants`, `install_assistant` & `update_install`: Choose and configure the assistant that answers on your own account; installs start paused, updates are merge patches checked against an install revision, and no output carries your stored values or notes.

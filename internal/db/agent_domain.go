@@ -280,6 +280,9 @@ type AgentAssistant struct {
 	// Digest is the definition digest the current install pinned, "" when
 	// the account was never installed with one.
 	Digest string
+	// InstallRevision is the revision Install was read at, in the same
+	// row read, so a compare-and-set on it covers exactly this install.
+	InstallRevision int64
 }
 
 // AgentAssistantRef is the catalog assistant an account runs and whether
@@ -287,6 +290,8 @@ type AgentAssistant struct {
 type AgentAssistantRef struct {
 	Name, Version string
 	Installed     bool
+	// InstallRevision is the profile's install revision (#1018).
+	InstallRevision int64
 }
 
 // GetAgentAssistantRef reads the assistant reference without decrypting the
@@ -297,10 +302,10 @@ func (s *Store) GetAgentAssistantRef(ctx context.Context, userID int64) (*AgentA
 	var installed int
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT assistant_name, assistant_version,
-		        CASE WHEN install_encrypted IS NULL THEN 0 ELSE 1 END
+		        CASE WHEN install_encrypted IS NULL THEN 0 ELSE 1 END, install_revision
 		   FROM agent_profiles WHERE user_id = $1`,
 		userID,
-	).Scan(&a.Name, &a.Version, &installed)
+	).Scan(&a.Name, &a.Version, &installed, &a.InstallRevision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrAgentProfileNotFound
 	}
@@ -320,10 +325,10 @@ func (s *Store) GetAgentAssistant(ctx context.Context, userID int64) (*AgentAssi
 	var a AgentAssistant
 	var encrypted []byte
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT assistant_name, assistant_version, install_encrypted, assistant_definition_digest
+		`SELECT assistant_name, assistant_version, install_encrypted, assistant_definition_digest, install_revision
 		   FROM agent_profiles WHERE user_id = $1`,
 		userID,
-	).Scan(&a.Name, &a.Version, &encrypted, &a.Digest)
+	).Scan(&a.Name, &a.Version, &encrypted, &a.Digest, &a.InstallRevision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrAgentProfileNotFound
 	}
@@ -375,6 +380,10 @@ type AgentProfileUpdate struct {
 	ResetInstalledAt *time.Time
 	// BumpInstallRevision increments install_revision in the same UPDATE.
 	BumpInstallRevision bool
+	// ExpectedInstallRevision makes the UPDATE a compare-and-set: it
+	// applies only while install_revision still equals this value, and
+	// otherwise changes nothing and returns an *InstallRevisionConflict.
+	ExpectedInstallRevision *int64
 	// AssistantDigest is the digest of the definition being installed.
 	AssistantDigest *string
 	BlockedSenders  *string
@@ -517,16 +526,61 @@ func (s *Store) updateAgentProfileFields(ctx context.Context, ex execer, userID 
 	}
 	set("updated_at", time.Now().UTC())
 	args = append(args, userID)
-	query := fmt.Sprintf(`UPDATE agent_profiles SET %s WHERE user_id = $%d`,
-		strings.Join(sets, ", "), len(args))
+	where := fmt.Sprintf("user_id = $%d", len(args))
+	if u.ExpectedInstallRevision != nil {
+		args = append(args, *u.ExpectedInstallRevision)
+		where += fmt.Sprintf(" AND install_revision = $%d", len(args))
+	}
+	query := fmt.Sprintf(`UPDATE agent_profiles SET %s WHERE %s`, strings.Join(sets, ", "), where)
 	res, err := ex.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("update agent profile fields: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrAgentProfileNotFound
+		if u.ExpectedInstallRevision == nil {
+			return ErrAgentProfileNotFound
+		}
+		return installRevisionMiss(ctx, ex, userID)
 	}
 	return nil
+}
+
+// ErrInstallRevisionConflict is what an *InstallRevisionConflict matches
+// with errors.Is.
+var ErrInstallRevisionConflict = errors.New("install revision conflict")
+
+// InstallRevisionConflict means a compare-and-set update found the profile
+// at another install revision than the caller expected, and changed
+// nothing.
+type InstallRevisionConflict struct {
+	Current int64
+}
+
+func (e *InstallRevisionConflict) Error() string {
+	return fmt.Sprintf("install revision conflict: the install is at revision %d", e.Current)
+}
+
+func (e *InstallRevisionConflict) Is(target error) bool { return target == ErrInstallRevisionConflict }
+
+// installRevisionMiss explains a compare-and-set UPDATE that matched no
+// row: the profile is missing, or it is at another revision. It reads on
+// ex, so inside a transaction it sees the same state the UPDATE did.
+func installRevisionMiss(ctx context.Context, ex execer, userID int64) error {
+	q, ok := ex.(interface {
+		QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	})
+	if !ok {
+		return errors.New("install revision check needs a queryable connection")
+	}
+	var current int64
+	err := q.QueryRowContext(ctx, `SELECT install_revision FROM agent_profiles WHERE user_id = $1`, userID).Scan(&current)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrAgentProfileNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("read install revision: %w", err)
+	}
+	return &InstallRevisionConflict{Current: current}
 }
 
 // SetAgentAutopilotPaused flips the per-account pause flag. Used by the

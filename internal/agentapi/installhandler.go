@@ -7,11 +7,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"time"
 
-	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
 	agentprofile "github.com/mctlhq/mctl-telegram/internal/agent/profile"
 	"github.com/mctlhq/mctl-telegram/internal/assistant"
+	"github.com/mctlhq/mctl-telegram/internal/assistantinstall"
 	"github.com/mctlhq/mctl-telegram/internal/assistantregistry"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/jsonstrict"
@@ -53,6 +52,7 @@ type installAgentResponse struct {
 // Admin-scoped and mounted like NewAdminAgentProfileHandler; an agent's own
 // token must never reach it.
 func NewAdminAgentInstallHandler(store *db.Store, catalog *assistant.Catalog, registry *assistantregistry.Client) http.HandlerFunc {
+	svc := assistantinstall.New(store, catalog, registry)
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, ok := identity(w, r)
 		if !ok {
@@ -92,67 +92,11 @@ func NewAdminAgentInstallHandler(store *db.Store, catalog *assistant.Catalog, re
 		// The validation messages name variables and rules, and go back
 		// only to the administrator who sent the document; they are never
 		// logged, since a schema message can quote a submitted value.
-		in, err := assistant.ParseInstall(req.Install)
+		prepared, err := svc.Prepare(r.Context(), req.Install)
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid install: "+err.Error())
+			writeInstallError(w, err, registry != nil)
 			return
 		}
-		reqRef := in.Spec.Assistant.Name + "@" + in.Spec.Assistant.Version
-		var entry *assistant.Entry
-		lifecycle := ""
-		if registry == nil {
-			e, ok := catalog.Lookup(in.Spec.Assistant.Name, in.Spec.Assistant.Version)
-			if !ok {
-				writeJSONError(w, http.StatusBadRequest, "unknown assistant "+reqRef)
-				return
-			}
-			entry = e
-		} else {
-			fetched, err := registry.Fetch(r.Context(), in.Spec.Assistant.Name, in.Spec.Assistant.Version)
-			switch {
-			case errors.Is(err, assistantregistry.ErrNotFound):
-				writeJSONError(w, http.StatusNotFound, "unknown assistant "+reqRef)
-				return
-			case errors.Is(err, assistantregistry.ErrDigestMismatch):
-				logHandlerErr("admin.agent_install", err)
-				writeJSONError(w, http.StatusBadGateway, "assistant registry digest mismatch: install refused")
-				return
-			case errors.Is(err, assistantregistry.ErrInvalid):
-				logHandlerErr("admin.agent_install", err)
-				writeJSONError(w, http.StatusBadGateway, "assistant registry returned an invalid definition: install refused")
-				return
-			case err != nil:
-				logHandlerErr("admin.agent_install", err)
-				writeJSONError(w, http.StatusServiceUnavailable, "assistant registry unavailable")
-				return
-			}
-			entry, lifecycle = fetched.Entry, fetched.Lifecycle
-			if lifecycle == db.AssistantLifecycleDisabled {
-				writeJSONError(w, http.StatusConflict, "assistant "+reqRef+" is disabled")
-				return
-			}
-		}
-		resolved, err := assistant.Resolve(entry.Definition, in)
-		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid install: "+err.Error())
-			return
-		}
-		parsed, err := agentprofile.ParseJSON(resolved.OwnerProfile)
-		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid install: owner profile")
-			return
-		}
-		ownerProfile, err := json.Marshal(parsed)
-		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid install: owner profile")
-			return
-		}
-		var installDoc bytes.Buffer
-		if err := json.Compact(&installDoc, req.Install); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid install")
-			return
-		}
-		installBytes := installDoc.Bytes()
 
 		ctx := r.Context()
 		targetUserID, err := store.UserIDByTelegramID(ctx, req.TelegramID)
@@ -165,93 +109,20 @@ func NewAdminAgentInstallHandler(store *db.Store, catalog *assistant.Catalog, re
 			writeJSONError(w, http.StatusInternalServerError, "failed to resolve telegram_id")
 			return
 		}
-		if err := store.EnsureAgentProfile(ctx, targetUserID); err != nil {
-			logHandlerErr("admin.agent_install", err)
-			writeJSONError(w, http.StatusInternalServerError, "failed to initialize agent profile")
-			return
-		}
-
-		name, version := entry.Definition.Metadata.Name, entry.Definition.Metadata.Version
-		// Every install, including a switch to another assistant, moves the
-		// install revision in the same UPDATE as the settings. Work created
-		// under an earlier revision is refused at propose, approve and send
-		// (#1018), so no queued job or pending approval of the old install
-		// can act; denying its proposed and approved actions below is only
-		// cleanup (drafts awaiting approval are refused at /mctl approve,
-		// which tells the owner why).
-		// Conversation transcripts stay as account history.
-		current, err := store.GetAgentAssistantRef(ctx, targetUserID)
+		res, err := svc.Commit(ctx, targetUserID, prepared, assistantinstall.CommitOptions{})
 		if err != nil {
-			logHandlerErr("admin.agent_install", err)
-			writeJSONError(w, http.StatusInternalServerError, "failed to load current assistant")
+			var ie *assistantinstall.Error
+			if errors.As(err, &ie) && ie.Kind == assistantinstall.KindInternal && ie.Msg == assistantinstall.MsgSaveFailed {
+				store.LogToolCall(ctx, db.ToolCall{UserID: id.UserID, Tool: "admin.agent_install", Status: "error", ErrMsg: ie.Err.Error()})
+			}
+			writeInstallError(w, err, registry != nil)
 			return
 		}
-		switching := current.Name != name
-		// A deprecated version stays with the accounts that installed it;
-		// it is not offered to new ones. A never-installed profile names
-		// hr-recruiter@0.1.0 only through the column defaults, which is not
-		// an install of it.
-		if lifecycle == db.AssistantLifecycleDeprecated && (!current.Installed || switching || current.Version != version) {
-			writeJSONError(w, http.StatusConflict, "assistant "+reqRef+" is deprecated: only an account already running it may reinstall it")
-			return
+		if res.CleanupErr != nil {
+			logHandlerErr("admin.agent_install", res.CleanupErr)
 		}
-		installedAt := time.Now()
-		digest := entry.Digest
-		update := db.AgentProfileUpdate{
-			Mode:                 &resolved.Mode,
-			AutopilotPaused:      &resolved.AutopilotPaused,
-			ListenerEnabled:      &resolved.ListenerEnabled,
-			DisclosureText:       &resolved.DisclosureText,
-			DisclosureDisabled:   &resolved.DisclosureDisabled,
-			MaxAutonomousTurns:   &resolved.MaxAutonomousTurns,
-			MaxMsgsPerMinute:     &resolved.MaxMsgsPerMinute,
-			MaxReplyChars:        &resolved.MaxReplyChars,
-			IntentAllowlist:      &resolved.IntentAllowlist,
-			IntentDenylist:       &resolved.IntentDenylist,
-			WorkingHours:         &resolved.WorkingHours,
-			AudienceExcludes:     &resolved.AudienceExcludes,
-			BumpInstallRevision:  true,
-			AssistantDigest:      &digest,
-			BlockedSenders:       &resolved.BlockedSenders,
-			SenderAllowlist:      &resolved.SenderAllowlist,
-			AssistantName:        &name,
-			AssistantVersion:     &version,
-			InstallDocument:      &installBytes,
-			OwnerProfileDocument: &ownerProfile,
-		}
-		// A new assistant's new chats start at the switch; a reinstall of
-		// the same one keeps its first install moment.
-		if switching {
-			update.ResetInstalledAt = &installedAt
-		} else {
-			update.MarkInstalledAt = &installedAt
-		}
-		var saveErr error
-		if registry != nil {
-			saveErr = store.InstallAgentAssistant(ctx, targetUserID, db.AssistantDefinition{
-				Digest: digest, Name: name, Version: version,
-				Document: entry.Materialized, Lifecycle: lifecycle,
-			}, update)
-		} else {
-			saveErr = store.UpdateAgentProfileFields(ctx, targetUserID, update)
-		}
-		if err := saveErr; err != nil {
-			logHandlerErr("admin.agent_install", err)
-			store.LogToolCall(ctx, db.ToolCall{UserID: id.UserID, Tool: "admin.agent_install", Status: "error", ErrMsg: err.Error()})
-			writeJSONError(w, http.StatusInternalServerError, "failed to save agent install")
-			return
-		}
-		if _, err := store.DenyActionsFromEarlierInstalls(ctx, targetUserID, policy.ReasonInstallChanged); err != nil {
-			// Cleanup only: the revision check already keeps these from
-			// acting, so the install stands.
-			logHandlerErr("admin.agent_install", err)
-		}
-		p, err := store.GetAgentProfile(ctx, targetUserID)
-		if err != nil {
-			logHandlerErr("admin.agent_install", err)
-			writeJSONError(w, http.StatusInternalServerError, "failed to load saved profile")
-			return
-		}
+		p := res.Profile
+		name, version := res.Name, res.Version
 
 		store.LogToolCall(ctx, db.ToolCall{UserID: id.UserID, Tool: "admin.agent_install", Status: "ok"})
 		slog.Info("agent assistant installed",
@@ -282,5 +153,40 @@ func NewAdminAgentInstallHandler(store *db.Store, catalog *assistant.Catalog, re
 			Assistant:        name,
 			AssistantVersion: version,
 		})
+	}
+}
+
+// writeInstallError answers an assistantinstall error with the status the
+// admin route has always used for it. The full validator message goes
+// back to the administrator who sent the document; nothing of it is
+// logged. An unknown assistant is 404 from the registry and, as before it,
+// 400 from the embedded catalog.
+func writeInstallError(w http.ResponseWriter, err error, fromRegistry bool) {
+	var ie *assistantinstall.Error
+	if !errors.As(err, &ie) {
+		logHandlerErr("admin.agent_install", err)
+		writeJSONError(w, http.StatusInternalServerError, "failed to save agent install")
+		return
+	}
+	switch ie.Kind {
+	case assistantinstall.KindInvalid:
+		writeJSONError(w, http.StatusBadRequest, ie.Full())
+	case assistantinstall.KindNotFound:
+		status := http.StatusBadRequest
+		if fromRegistry {
+			status = http.StatusNotFound
+		}
+		writeJSONError(w, status, ie.Msg)
+	case assistantinstall.KindLifecycle, assistantinstall.KindRevisionConflict, assistantinstall.KindNoInstall:
+		writeJSONError(w, http.StatusConflict, ie.Msg)
+	case assistantinstall.KindUpstream:
+		logHandlerErr("admin.agent_install", ie.Err)
+		writeJSONError(w, http.StatusBadGateway, ie.Msg)
+	case assistantinstall.KindUnavailable:
+		logHandlerErr("admin.agent_install", ie.Err)
+		writeJSONError(w, http.StatusServiceUnavailable, ie.Msg)
+	default:
+		logHandlerErr("admin.agent_install", ie.Err)
+		writeJSONError(w, http.StatusInternalServerError, ie.Msg)
 	}
 }
