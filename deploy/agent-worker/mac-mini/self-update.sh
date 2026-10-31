@@ -39,8 +39,11 @@ die() { log "ERROR: $*"; exit 1; }
 lock="$BASE/.update.lock"
 if ! mkdir "$lock" 2>/dev/null; then
   owner="$(cat "$lock/pid" 2>/dev/null || true)"
-  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null &&
-    [ -z "$(find "$lock" -maxdepth 0 -mmin +60 2>/dev/null)" ]; then
+  # An empty owner is a run between its mkdir and its pid write: live
+  # unless the lock is more than a minute old.
+  if { [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null &&
+    [ -z "$(find "$lock" -maxdepth 0 -mmin +60 2>/dev/null)" ]; } ||
+    { [ -z "$owner" ] && [ -z "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; }; then
     log "run $owner holds $lock; skipping"
     exit 0
   fi
@@ -119,9 +122,11 @@ cp -p agent-worker agent-worker.prev 2>/dev/null || true
 cp -p system-prompt.txt system-prompt.txt.prev 2>/dev/null || true
 prev_version="${have_version:-unknown}"
 if [ "$binary" != "$BASE/agent-worker" ]; then
-  install -m 755 "$binary" agent-worker.new && mv agent-worker.new agent-worker
+  install -m 755 "$binary" agent-worker.new || die "cannot stage the new binary"
+  mv agent-worker.new agent-worker || die "cannot install the new binary"
 fi
-install -m 644 "$work/system-prompt.txt" system-prompt.txt.new && mv system-prompt.txt.new system-prompt.txt
+install -m 644 "$work/system-prompt.txt" system-prompt.txt.new || die "cannot stage the new prompt"
+mv system-prompt.txt.new system-prompt.txt || die "cannot install the new prompt"
 
 worker_pid() { launchctl list "$LABEL" 2>/dev/null | awk -F' = ' '/"PID"/{gsub(/;/,"",$2);print $2}'; }
 ready() { [ "$(curl -s -o /dev/null -w '%{http_code}' "$READY_URL" || true)" = 200 ]; }
