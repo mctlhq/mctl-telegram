@@ -188,7 +188,6 @@ func TestInstallRejected(t *testing.T) {
 		"unknown key":  {pairs: []string{"  paused: false\n", "  paused: false\n  autopilot: true\n"}},
 		"bad mode":     {pairs: []string{"mode: guarded", "mode: yolo"}},
 		"never tier":   {pairs: []string{"  limits:\n", "  intentTiers:\n    decline: never\n  limits:\n"}, unsupported: true},
-		"owner notes":  {pairs: []string{"  limits:\n", "  ownerNotes: Be brief.\n  limits:\n"}, unsupported: true},
 		"schedule":     {pairs: []string{"  limits:\n", "  schedule:\n    mode: outside_hours\n  limits:\n"}, unsupported: true},
 		"narrow scope": {pairs: []string{"  limits:\n", "  audience:\n    scope:\n      contacts: false\n  limits:\n"}, unsupported: true},
 	}
@@ -215,6 +214,7 @@ func TestInstallAccepted(t *testing.T) {
 		"tighten tier":    {"  limits:\n", "  intentTiers:\n    discovery: approve\n  limits:\n"},
 		"stricter level":  {"  limits:\n", "  disclosureLevels:\n    skills: never\n  limits:\n"},
 		"schedule always": {"  limits:\n", "  schedule:\n    mode: always\n  limits:\n"},
+		"owner notes":     {"  limits:\n", "  ownerNotes: Keep replies under three sentences.\n  limits:\n"},
 		// Alice and Bob ids from internal/mcp/canary_guard_test.go.
 		"blocked and only":   {"  limits:\n", "  audience:\n    onlySenders: [500100101]\n    blockedSenders: [500100202]\n  limits:\n"},
 		"no optional values": {"    headline: Backend engineer building messaging infrastructure.\n", ""},
@@ -328,5 +328,25 @@ spec:
 	}
 	if got["max_autonomous_turns"] != 6 || got["disclosure_disabled"] != false {
 		t.Fatalf("defaults not applied: %v", got)
+	}
+}
+
+// The worker's model, budget and timeout come from its environment, so a
+// definition that sets them must not install as if they applied.
+func TestExecutionSettingsUnsupported(t *testing.T) {
+	for name, block := range map[string]string{
+		"budget":  "  execution:\n    budgetUsd: 0.5\n",
+		"timeout": "  execution:\n    timeoutSeconds: 300\n",
+		"model":   "  execution:\n    model: some-model\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			def, err := ParseDefinition(append(readFile(t, "assistant.yaml"), block...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ProfileRequest(def, hrInstall(t), danaID); !errors.Is(err, ErrUnsupported) {
+				t.Fatalf("err = %v, want ErrUnsupported", err)
+			}
+		})
 	}
 }

@@ -43,6 +43,33 @@ func mcpConfigTempFile(cfg mcpConfig) (path string, cleanup func(), err error) {
 	return f.Name(), cleanup, nil
 }
 
+// promptTempFile writes a system prompt to a private temp file for
+// --system-prompt-file. The prompt can carry the account owner's notes, so it
+// is kept out of argv, which /proc/<pid>/cmdline and `ps auxww` expose to
+// every process on the host, as the API token is.
+func promptTempFile(prompt string) (path string, cleanup func(), err error) {
+	f, err := os.CreateTemp("", "agent-worker-prompt-*.txt")
+	if err != nil {
+		return "", nil, fmt.Errorf("create prompt temp file: %w", err)
+	}
+	cleanup = func() { _ = os.Remove(f.Name()) }
+	if err := f.Chmod(0o600); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("chmod prompt temp file: %w", err)
+	}
+	_, writeErr := f.WriteString(prompt)
+	closeErr := f.Close()
+	if writeErr != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("write prompt temp file: %w", writeErr)
+	}
+	if closeErr != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("close prompt temp file: %w", closeErr)
+	}
+	return f.Name(), cleanup, nil
+}
+
 // allowedTools is the exact and complete set of MCP tools a spawned `claude`
 // invocation may use — no Bash, Read, Write, WebFetch, or any other
 // built-in tool is ever allowed, so the model's only way to affect anything
@@ -115,6 +142,18 @@ func (c *ClaudeInvoker) mcpToken(job JobEnvelope) string {
 	return c.APIToken
 }
 
+// systemPrompt is the prompt for job: the instructions the server rendered
+// for the account's assistant, or the worker's own AGENT_SYSTEM_PROMPT when
+// the server sent none (a server without a catalog). The server's copy wins
+// because it is per account; the env prompt is one text for every account
+// the worker serves.
+func (c *ClaudeInvoker) systemPrompt(job JobEnvelope) string {
+	if job.Instructions != "" {
+		return job.Instructions
+	}
+	return c.SystemPrompt
+}
+
 // buildMCPConfig returns the mcp-config for one job's `claude -p` run.
 func (c *ClaudeInvoker) buildMCPConfig(job JobEnvelope) mcpConfig {
 	env := map[string]string{
@@ -178,8 +217,13 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 		// for --print mode) stops that write.
 		"--no-session-persistence",
 	}
-	if c.SystemPrompt != "" {
-		args = append(args, "--system-prompt", c.SystemPrompt)
+	if prompt := c.systemPrompt(job); prompt != "" {
+		promptPath, cleanupPrompt, err := promptTempFile(prompt)
+		if err != nil {
+			return fmt.Errorf("write system prompt: %w", err)
+		}
+		defer cleanupPrompt()
+		args = append(args, "--system-prompt-file", promptPath)
 	}
 	if c.MaxBudgetUSD > 0 {
 		args = append(args, "--max-budget-usd", fmt.Sprintf("%.2f", c.MaxBudgetUSD))

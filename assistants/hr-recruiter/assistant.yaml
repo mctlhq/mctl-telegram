@@ -113,6 +113,3 @@ spec:
     disclosure:
       policy: optional
       text: "(sent by an AI assistant on the owner's behalf)"
-  execution:
-    budgetUsd: 0.5
-    timeoutSeconds: 300

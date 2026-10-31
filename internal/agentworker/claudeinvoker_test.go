@@ -40,7 +40,9 @@ func jobStatusServer(t *testing.T, jobID int64, status string, attempt int) *htt
 // assert on exact flags/values), and — because Run deletes the file it
 // passes via --mcp-config as soon as it returns — captures that file's
 // content into mcpConfigCopy and its permission bits into mcpConfigPerm
-// before the script exits, so the test can inspect both after the fact. GNU
+// before the script exits, so the test can inspect both after the fact.
+// The --system-prompt-file it is given is captured the same way, into
+// prompt-copy.txt and prompt-perm.txt next to argvFile. GNU
 // stat (Linux CI) and BSD stat (local macOS dev) use different flags, hence
 // trying both.
 func fakeClaudeScript(t *testing.T, stdout string, exitCode int) (bin, argvFile, mcpConfigCopy, mcpConfigPerm string) {
@@ -57,6 +59,10 @@ func fakeClaudeScript(t *testing.T, stdout string, exitCode int) (bin, argvFile,
 		"  if [ \"$prev\" = \"--mcp-config\" ]; then\n" +
 		"    cp \"$a\" " + mcpConfigCopy + "\n" +
 		"    (stat -c %a \"$a\" 2>/dev/null || stat -f %Lp \"$a\") > " + mcpConfigPerm + "\n" +
+		"  fi\n" +
+		"  if [ \"$prev\" = \"--system-prompt-file\" ]; then\n" +
+		"    cp \"$a\" " + filepath.Join(dir, "prompt-copy.txt") + "\n" +
+		"    (stat -c %a \"$a\" 2>/dev/null || stat -f %Lp \"$a\") > " + filepath.Join(dir, "prompt-perm.txt") + "\n" +
 		"  fi\n" +
 		"  prev=\"$a\"\n" +
 		"done\n" +
@@ -545,4 +551,67 @@ func gatheredCounter(t *testing.T, m *metrics.Registry, family, label, value str
 		}
 	}
 	return 0, false
+}
+
+// promptCapture returns what fakeClaudeScript captured of the prompt file:
+// its content and permission bits, or ok=false when no prompt file was
+// passed.
+func promptCapture(t *testing.T, argvFile string) (content, perm string, ok bool) {
+	t.Helper()
+	dir := filepath.Dir(argvFile)
+	b, err := os.ReadFile(filepath.Join(dir, "prompt-copy.txt"))
+	if os.IsNotExist(err) {
+		return "", "", false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := os.ReadFile(filepath.Join(dir, "prompt-perm.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b), strings.TrimSpace(string(p)), true
+}
+
+func TestClaudeInvoker_Run_SystemPromptSource(t *testing.T) {
+	stdout := `{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"ok"}`
+	cases := map[string]struct {
+		env, instructions, want string
+	}{
+		"server instructions win":       {env: "Env prompt.", instructions: "Rules.\n<owner_notes>\nBe brief.\n</owner_notes>\n", want: "Rules.\n<owner_notes>\nBe brief.\n</owner_notes>\n"},
+		"env when the server sent none": {env: "Env prompt.", want: "Env prompt."},
+		"no prompt at all":              {},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			bin, argvFile, _, _ := fakeClaudeScript(t, stdout, 0)
+			statusSrv := jobStatusServer(t, 42, "completed", 1)
+			inv := &ClaudeInvoker{ClaudeBin: bin, Self: "/usr/local/bin/agent-worker",
+				APIBaseURL: statusSrv.URL, APIToken: "super-secret-token", SystemPrompt: tc.env}
+			job := JobEnvelope{JobID: 42, EventID: "evt:v1:1:2:3", Attempt: 1, Instructions: tc.instructions}
+			if err := inv.Run(context.Background(), job); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			argv := strings.Join(readArgv(t, argvFile), "\x00")
+			if strings.Contains(argv, "--system-prompt\x00") {
+				t.Fatal("prompt passed inline in argv")
+			}
+			if tc.want != "" && strings.Contains(argv, tc.want) {
+				t.Fatal("prompt text leaked into argv")
+			}
+			got, perm, ok := promptCapture(t, argvFile)
+			if tc.want == "" {
+				if ok {
+					t.Fatalf("prompt file passed with no prompt: %q", got)
+				}
+				return
+			}
+			if !ok || got != tc.want {
+				t.Fatalf("prompt file = %q (passed %v), want %q", got, ok, tc.want)
+			}
+			if perm != "600" {
+				t.Fatalf("prompt file mode = %s, want 600", perm)
+			}
+		})
+	}
 }

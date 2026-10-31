@@ -78,7 +78,7 @@ transport is in use.
 | `AGENT_API_TOKEN` | yes | Long-lived worker bearer token, minted via `POST /api/agent/token` (`aud=agent`, admin-scoped — see `internal/agentapi/tokenhandler.go`). Never logged; passed to the spawned `--mcp-serve` subprocess's env, never to the model's own process env. |
 | `AGENT_CREDENTIAL_DOMAIN_ID` | yes | Non-secret identifier for the credential/quota pool this worker runs against — e.g. a Vault path or account label, **never the credential itself**. Must match `[A-Za-z0-9._:/-]{1,128}`; the poll loop (`run()`) refuses to start without it, and exported as the `mctl_agent_credential_domain{domain_id=...}` info gauge so a claim of quota isolation between deployments has a machine-checkable counterpart. Not required by `--mcp-serve` mode. See the rollout-ordering note below before upgrading an existing deployment. |
 | `AGENT_CLAUDE_BIN` | no | Override the `claude` binary path/name (default: `claude` on `$PATH`). |
-| `AGENT_SYSTEM_PROMPT` | no | Extra system prompt for the communication-agent persona/policy. Use `deploy/agent-worker/system-prompt.txt`; see [Owner-profile disclosure](#owner-profile-disclosure-953). |
+| `AGENT_SYSTEM_PROMPT` | no | Fallback system prompt, used only when the server's claim response carries no `instructions` (a server without the assistant catalog). Use `deploy/agent-worker/system-prompt.txt`; see [Owner-profile disclosure](#owner-profile-disclosure-953) and [docs/assistants/spec.md](assistants/spec.md). |
 | `AGENT_MAX_BUDGET_USD` | no | Per-job `--max-budget-usd` cap. |
 | `AGENT_WORKER_CONCURRENCY` | no | Jobs one worker process runs at once, an integer in 1..10 (default `1`; anything else refuses to start). The worker claims only as many jobs as it has free slots, and never runs two jobs of one conversation together. Each slot is one `claude` process, so memory, CPU and spend scale with it. |
 | `AGENT_HEALTH_ADDR` | no | Bind address for the `/livez`/`/healthz`/`/readyz`/`/metrics` probe server (default: `:8080`, all interfaces). |
@@ -268,8 +268,13 @@ one is sent per conversation per 6 hours; extras are not stored as actions,
 are audited as `suppressed`, and the tool result says `suppressed: true`.
 `security_alert` summaries are never throttled.
 
-**Prompt.** `AGENT_SYSTEM_PROMPT` must be the contents of
-`deploy/agent-worker/system-prompt.txt`, the canonical guarded prompt that
+**Prompt.** Each claimed job carries its account's assistant instructions
+(`instructions`, with `assistant` and `assistant_digest`), rendered by the
+server from the compiled-in catalog; for the recruiter agent that is
+`deploy/agent-worker/system-prompt.txt` plus the owner's notes. A prompt
+change therefore ships with the server release. `AGENT_SYSTEM_PROMPT` is the
+fallback for a server without the catalog and should still be the contents
+of `deploy/agent-worker/system-prompt.txt`, the canonical guarded prompt that
 tells the model how to use the profile boundary and the alert intents.
 `TestSystemPrompts_CarryDisclosureContract` keeps the required clauses in
 both that file and the C1 eval prompt. When rolling out a prompt change,

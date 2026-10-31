@@ -300,10 +300,55 @@ func withinCeilings(l, c Limits) error {
 	return nil
 }
 
+// Profile is every agent setting an install resolves to: the definition's
+// defaults with the install's values and overrides applied.
+type Profile struct {
+	Mode               string
+	AutopilotPaused    bool
+	ListenerEnabled    bool
+	DisclosureText     string
+	DisclosureDisabled bool
+	MaxAutonomousTurns int
+	MaxMsgsPerMinute   int
+	MaxReplyChars      int
+	// IntentAllowlist, BlockedSenders and SenderAllowlist are the CSVs the
+	// profile row stores.
+	IntentAllowlist string
+	BlockedSenders  string
+	SenderAllowlist string
+	// OwnerProfile is the owner profile document, already accepted by
+	// profile.ParseJSON.
+	OwnerProfile json.RawMessage
+}
+
 // ProfileRequest maps an install of def onto the body of
 // PUT /api/admin/agent/profile for telegramID. Every field of that body is
 // set, so applying it fully replaces the account's agent settings.
 func ProfileRequest(def *Definition, in *Install, telegramID int64) (map[string]any, error) {
+	p, err := Resolve(def, in)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"telegram_id":          telegramID,
+		"mode":                 p.Mode,
+		"autopilot_paused":     p.AutopilotPaused,
+		"listener_enabled":     p.ListenerEnabled,
+		"disclosure_text":      p.DisclosureText,
+		"disclosure_disabled":  p.DisclosureDisabled,
+		"max_autonomous_turns": p.MaxAutonomousTurns,
+		"max_msgs_per_minute":  p.MaxMsgsPerMinute,
+		"max_reply_chars":      p.MaxReplyChars,
+		"intent_allowlist":     p.IntentAllowlist,
+		"blocked_senders":      p.BlockedSenders,
+		"sender_allowlist":     p.SenderAllowlist,
+		"owner_profile":        p.OwnerProfile,
+	}, nil
+}
+
+// Resolve checks an install against def and returns the settings it
+// resolves to.
+func Resolve(def *Definition, in *Install) (*Profile, error) {
 	s := in.Spec
 	if s.Assistant.Name != def.Metadata.Name || s.Assistant.Version != def.Metadata.Version {
 		return nil, fmt.Errorf("install is for %s@%s, definition is %s@%s",
@@ -379,20 +424,19 @@ func ProfileRequest(def *Definition, in *Install, telegramID int64) (map[string]
 		only, blocked = a.OnlySenders, a.BlockedSenders
 	}
 
-	return map[string]any{
-		"telegram_id":          telegramID,
-		"mode":                 mode,
-		"autopilot_paused":     paused,
-		"listener_enabled":     listening,
-		"disclosure_text":      disclosureText,
-		"disclosure_disabled":  !disclosureOn,
-		"max_autonomous_turns": limits.MaxAutonomousTurns,
-		"max_msgs_per_minute":  limits.MaxMsgsPerMinute,
-		"max_reply_chars":      limits.MaxReplyChars,
-		"intent_allowlist":     strings.Join(allow, ","),
-		"blocked_senders":      idList(blocked),
-		"sender_allowlist":     idList(only),
-		"owner_profile":        owner,
+	return &Profile{
+		Mode:               mode,
+		AutopilotPaused:    paused,
+		ListenerEnabled:    listening,
+		DisclosureText:     disclosureText,
+		DisclosureDisabled: !disclosureOn,
+		MaxAutonomousTurns: limits.MaxAutonomousTurns,
+		MaxMsgsPerMinute:   limits.MaxMsgsPerMinute,
+		MaxReplyChars:      limits.MaxReplyChars,
+		IntentAllowlist:    strings.Join(allow, ","),
+		BlockedSenders:     idList(blocked),
+		SenderAllowlist:    idList(only),
+		OwnerProfile:       owner,
 	}, nil
 }
 
@@ -406,11 +450,13 @@ func supported(def *Definition, in *Install) error {
 	if !slices.Equal(tools, want) {
 		return fmt.Errorf("tools: a restricted tool set is %w", ErrUnsupported)
 	}
+	// The worker's model, budget and timeout come from its own environment;
+	// a definition that sets them would look enforced while being ignored.
+	if x := def.Spec.Execution; x.Model != "" || x.BudgetUSD != 0 || x.TimeoutSeconds != 0 {
+		return fmt.Errorf("execution: %w", ErrUnsupported)
+	}
 	if def.Spec.Records.Kind != "job_lead" {
 		return fmt.Errorf("records: kind %q is %w", def.Spec.Records.Kind, ErrUnsupported)
-	}
-	if strings.TrimSpace(s.OwnerNotes) != "" {
-		return fmt.Errorf("ownerNotes: %w", ErrUnsupported)
 	}
 	if sch := s.Schedule; sch != nil && sch.Mode != "always" {
 		return fmt.Errorf("schedule: mode %q is %w", sch.Mode, ErrUnsupported)
