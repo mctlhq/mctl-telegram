@@ -628,7 +628,7 @@ func (f *fakeRestrictedChecker) MatchRestricted(_ context.Context, userID int64,
 
 // MatchProtected never matches: these tests exercise the restricted section
 // only. Disclosure-level tests use the real profile.TenantProvider.
-func (f *fakeRestrictedChecker) MatchProtected(context.Context, int64, string, bool) (string, bool, bool, error) {
+func (f *fakeRestrictedChecker) MatchProtected(context.Context, int64, string, string, bool) (string, bool, bool, error) {
 	return "", false, false, nil
 }
 

@@ -37,8 +37,9 @@ type OwnerProfileProvider interface {
 	PublicProfile(ctx context.Context, userID int64, engaged bool) (map[string]any, error)
 	// MatchProtected reports the strongest field the agent may not disclose
 	// right now whose value appears in text; never is true for a field the
-	// owner marked never. Only the field path is returned.
-	MatchProtected(ctx context.Context, userID int64, text string, engaged bool) (key string, never, matched bool, err error)
+	// owner marked never. Only the field path is returned. inbound is the
+	// peer's text in the turn being answered (#992).
+	MatchProtected(ctx context.Context, userID int64, text, inbound string, engaged bool) (key string, never, matched bool, err error)
 }
 
 // Server holds the dependencies every handler needs. Construct with New,

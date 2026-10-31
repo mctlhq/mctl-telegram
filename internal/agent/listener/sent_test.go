@@ -99,3 +99,34 @@ func TestOnMessage_UnmarkedOwnerOutgoingStillTriggersTakeover(t *testing.T) {
 		t.Fatalf("human outgoing left state at %q", conv.State)
 	}
 }
+
+// #993: a send through the listener's own session gets no echo, so its marker
+// is still live when the owner edits that agent reply by hand. The edit is an
+// owner intervention and must take the conversation over.
+func TestOnMessage_OwnerEditOfAgentSendTriggersTakeover(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+	if _, err := store.EnsureConversation(ctx, acct.userID, recruit, "carol_hr", "Carol"); err != nil {
+		t.Fatalf("ensure conversation: %v", err)
+	}
+
+	l.MarkSent(acct.userID, 780)
+	edit := &tg.Message{
+		ID:       780,
+		Out:      true,
+		PeerID:   &tg.PeerUser{UserID: recruit},
+		Message:  "agent reply, corrected by the owner",
+		EditDate: 1_700_000_000,
+	}
+	if err := l.onMessage(ctx, acct, ents(), edit, true); err != nil {
+		t.Fatalf("owner edit: %v", err)
+	}
+
+	conv, err := store.GetConversationByPeer(ctx, acct.userID, recruit)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if conv.State != db.ConversationTakenOver {
+		t.Fatalf("owner edit of an agent send left state at %q", conv.State)
+	}
+}
