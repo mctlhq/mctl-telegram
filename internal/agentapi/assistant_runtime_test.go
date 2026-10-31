@@ -349,7 +349,7 @@ func TestAdminAgentProfileHandler_RejectsBadWorkingHours(t *testing.T) {
 	if rec := doProfileReq(h, adminIdentity(), `{"telegram_id":777,"working_hours":"UTC;someday"}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
-	rec := doProfileReq(h, adminIdentity(), `{"telegram_id":777,"working_hours":"UTC;mon-fri 09:00-18:00"}`)
+	rec := doProfileReq(h, adminIdentity(), `{"telegram_id":777,"working_hours":"UTC; MON-FRI 09:00-18:00"}`)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"working_hours":"UTC;mon-fri 09:00-18:00"`) {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}

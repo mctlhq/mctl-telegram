@@ -133,10 +133,14 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 		// Policy holds every reply on a value it cannot parse; refuse to
 		// store one rather than discover it then.
 		if req.WorkingHours != nil && *req.WorkingHours != "" {
-			if _, err := schedule.ParseStored(*req.WorkingHours); err != nil {
+			h, err := schedule.ParseStored(*req.WorkingHours)
+			if err != nil {
 				writeJSONError(w, http.StatusBadRequest, "invalid working_hours")
 				return
 			}
+			// Store the canonical form the install path writes.
+			canonical := h.String()
+			req.WorkingHours = &canonical
 		}
 		var ownerProfileDocument []byte
 		clearOwnerProfile := false

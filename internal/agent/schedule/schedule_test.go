@@ -87,6 +87,10 @@ func TestParseRejects(t *testing.T) {
 		"24:00 start":  {"UTC", []string{"mon 24:00-10:00"}},
 		"empty window": {"UTC", []string{"mon 10:00-10:00"}},
 		"no times":     {"UTC", []string{"mon"}},
+		"negative end": {"UTC", []string{"fri 09:00--1:00"}},
+		"negative min": {"UTC", []string{"fri 09:00-18:-5"}},
+		"signed hour":  {"UTC", []string{"fri +9:00-18:00"}},
+		"local zone":   {"Local", []string{"mon 09:00-10:00"}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

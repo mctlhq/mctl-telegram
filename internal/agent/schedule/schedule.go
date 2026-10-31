@@ -44,6 +44,11 @@ func Parse(timezone string, hours []string) (*Hours, error) {
 	if strings.TrimSpace(timezone) == "" {
 		return nil, errors.New("schedule: timezone is required")
 	}
+	// "Local" would make the windows follow the server's zone, not one the
+	// owner chose.
+	if timezone == "Local" {
+		return nil, errors.New("schedule: timezone must be an IANA zone name, not Local")
+	}
 	loc, err := time.LoadLocation(timezone)
 	if err != nil {
 		return nil, fmt.Errorf("schedule: unknown timezone %q", timezone)
@@ -105,7 +110,8 @@ func parseWindow(raw string) (window, error) {
 // clock parses HH:MM into minutes after midnight; 24:00 only as an end.
 func clock(s string, end bool) (int, error) {
 	hh, mm, ok := strings.Cut(s, ":")
-	if !ok || len(hh) != 2 || len(mm) != 2 {
+	// Two ASCII digits each: strconv.Atoi alone would also take "-1" or "+9".
+	if !ok || !twoDigits(hh) || !twoDigits(mm) {
 		return 0, fmt.Errorf("bad time %q", s)
 	}
 	h, err1 := strconv.Atoi(hh)
@@ -120,6 +126,10 @@ func clock(s string, end bool) (int, error) {
 		return 0, fmt.Errorf("bad time %q", s)
 	}
 	return h*60 + m, nil
+}
+
+func twoDigits(s string) bool {
+	return len(s) == 2 && s[0] >= '0' && s[0] <= '9' && s[1] >= '0' && s[1] <= '9'
 }
 
 // Contains reports whether t falls in a working-hours window, judged by
