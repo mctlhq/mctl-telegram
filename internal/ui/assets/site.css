@@ -163,38 +163,40 @@
   }
 }
 
+/* :is() is forgiving: a browser without :has() (old Android WebViews, where
+   Telegram Mini Apps run) drops only that branch and keeps --stacked, where a
+   plain selector list would drop the whole rule. */
 /* Stacked hero: one centred column at every width, the visual under the text.
    The title gets the full text width, the lede keeps the reading width so a
    centred paragraph does not run 1400px wide. --mctl-site-hero-text-width
    sizes the text column the way --mctl-site-narrow-width sizes a narrow
    block. */
-.mctl-site-hero--stacked,
-.mctl-site-hero:not(:has(.mctl-site-hero__visual)) {
+.mctl-site-hero:is(.mctl-site-hero--stacked, :not(:has(.mctl-site-hero__visual))) {
   grid-template-columns: minmax(0, 1fr);
   justify-items: center;
   text-align: center;
 }
 
-.mctl-site-hero--stacked .mctl-site-hero__text,
-.mctl-site-hero:not(:has(.mctl-site-hero__visual)) .mctl-site-hero__text {
+.mctl-site-hero:is(.mctl-site-hero--stacked, :not(:has(.mctl-site-hero__visual)))
+  .mctl-site-hero__text {
   width: 100%;
   max-width: var(--mctl-site-hero-text-width, 960px);
   justify-items: center;
 }
 
 /* A centred title wrapping to one short last word reads as a mistake. */
-.mctl-site-hero--stacked .mctl-site-hero__title,
-.mctl-site-hero:not(:has(.mctl-site-hero__visual)) .mctl-site-hero__title {
+.mctl-site-hero:is(.mctl-site-hero--stacked, :not(:has(.mctl-site-hero__visual)))
+  .mctl-site-hero__title {
   text-wrap: balance;
 }
 
-.mctl-site-hero--stacked .mctl-site-hero__lede,
-.mctl-site-hero:not(:has(.mctl-site-hero__visual)) .mctl-site-hero__lede {
+.mctl-site-hero:is(.mctl-site-hero--stacked, :not(:has(.mctl-site-hero__visual)))
+  .mctl-site-hero__lede {
   max-width: var(--mctl-layout-prose-width);
 }
 
-.mctl-site-hero--stacked .mctl-site-hero__actions,
-.mctl-site-hero:not(:has(.mctl-site-hero__visual)) .mctl-site-hero__actions {
+.mctl-site-hero:is(.mctl-site-hero--stacked, :not(:has(.mctl-site-hero__visual)))
+  .mctl-site-hero__actions {
   justify-content: center;
 }
 
