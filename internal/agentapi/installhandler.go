@@ -187,9 +187,11 @@ func NewAdminAgentInstallHandler(store *db.Store, catalog *assistant.Catalog, re
 			return
 		}
 		switching := current.Name != name
-		// A deprecated version stays with the accounts that run it; it is
-		// not offered to new ones.
-		if lifecycle == db.AssistantLifecycleDeprecated && (switching || current.Version != version) {
+		// A deprecated version stays with the accounts that installed it;
+		// it is not offered to new ones. A never-installed profile names
+		// hr-recruiter@0.1.0 only through the column defaults, which is not
+		// an install of it.
+		if lifecycle == db.AssistantLifecycleDeprecated && (!current.Installed || switching || current.Version != version) {
 			writeJSONError(w, http.StatusConflict, "assistant "+reqRef+" is deprecated: only an account already running it may reinstall it")
 			return
 		}

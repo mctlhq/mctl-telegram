@@ -7,6 +7,11 @@ import (
 	"time"
 )
 
+// legacyHRRecruiterDigest is hr-recruiter@0.1.0's digest as #1023 computed
+// it (over the authored YAML and the instructions file), before #1025
+// moved digests to the materialized form.
+const legacyHRRecruiterDigest = "sha256:715ac8851f4c7a0600d74a1a8acfdaa1c58bec3dcb90608034006828a231ae29"
+
 // Agent domain schema (communication agent, M6). These tables back the
 // autonomous communication agent: incoming Telegram updates become durable
 // incoming_events rows, the agent's proposed actions and their approval
@@ -20,11 +25,6 @@ import (
 // tg_update_state / tg_channel_state persist gotd's updates.Manager pts/qts
 // watermark so a restarted listener can recover missed updates via
 // getDifference instead of silently dropping them.
-// legacyHRRecruiterDigest is hr-recruiter@0.1.0's digest as #1023 computed
-// it (over the authored YAML and the instructions file), before #1025
-// moved digests to the materialized form.
-const legacyHRRecruiterDigest = "sha256:715ac8851f4c7a0600d74a1a8acfdaa1c58bec3dcb90608034006828a231ae29"
-
 func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	var stmts []string
 	if pg {

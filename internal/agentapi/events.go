@@ -97,7 +97,7 @@ func (s *Server) accountInstructions(r *http.Request, userID int64) (instruction
 		return "", "", "", nil, err
 	}
 	ref = a.Name + "@" + a.Version
-	entry, err := s.resolveAssistant(r.Context(), userID, a)
+	entry, err := s.resolveAssistant(r.Context(), a)
 	if err != nil {
 		return "", "", "", nil, err
 	}
@@ -115,10 +115,10 @@ func (s *Server) accountInstructions(r *http.Request, userID int64) (instruction
 // snapshot stored with the install (#1020) is the source; the embedded
 // catalog is only the migration and rollback bridge, used for a profile
 // that pins no digest yet or pins exactly the embedded entry's digest. It
-// never calls the registry. With the registry enabled, a snapshot whose
-// lifecycle is disabled or unknown refuses, and an unknown one queues the
-// owner's notice (once per outage).
-func (s *Server) resolveAssistant(ctx context.Context, userID int64, a *db.AgentAssistant) (*assistant.Entry, error) {
+// never calls the registry and writes nothing. With the registry enabled,
+// a snapshot whose lifecycle is disabled or unknown refuses; the owner's
+// notice for an unknown one is the refresher's job.
+func (s *Server) resolveAssistant(ctx context.Context, a *db.AgentAssistant) (*assistant.Entry, error) {
 	ref := a.Name + "@" + a.Version
 	embedded, inCatalog := s.catalog.Lookup(a.Name, a.Version)
 	if a.Digest == "" {
@@ -145,7 +145,6 @@ func (s *Server) resolveAssistant(ctx context.Context, userID int64, a *db.Agent
 		case assistantregistry.GateDisabled:
 			return nil, fmt.Errorf("%w: %s", errAssistantDisabled, ref)
 		case assistantregistry.GateUnknown:
-			assistantregistry.NotifyUserUnreachable(ctx, s.Store, userID, def)
 			return nil, fmt.Errorf("%w: %s last checked %s", errAssistantLifecycleUnknown, ref, def.LifecycleCheckedAt.UTC().Format(time.RFC3339))
 		}
 	}

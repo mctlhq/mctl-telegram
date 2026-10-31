@@ -56,7 +56,9 @@ type fakeRegistry struct {
 	srv *httptest.Server
 	mu  sync.Mutex
 	// mode: "" serves entries; "down" answers 500; "bare404" a 404
-	// without the registry's code; "mismatch" reports a wrong contentHash.
+	// without the registry's code; "mismatch" reports a wrong contentHash;
+	// "big5xx" answers 502 with a body over the client's size cap, as a
+	// proxy error page might.
 	mode    string
 	entries map[string]*fakeEntry
 	calls   int
@@ -120,6 +122,10 @@ func (f *fakeRegistry) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	case "bare404":
 		http.NotFound(w, r)
+		return
+	case "big5xx":
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(strings.Repeat("x", 2<<20)))
 		return
 	}
 	if len(parts) != 4 || parts[1] != "versions" || parts[3] != "definition" {
@@ -290,6 +296,7 @@ func TestRegistryInstall_Refusals(t *testing.T) {
 		{"not found", func(rh *registryHarness) {}, "9.9.9", http.StatusNotFound},
 		{"registry down", func(rh *registryHarness) { rh.reg.set("down") }, "0.2.0", http.StatusServiceUnavailable},
 		{"bare 404 is not an answer", func(rh *registryHarness) { rh.reg.set("bare404") }, "0.2.0", http.StatusServiceUnavailable},
+		{"oversized error page is unavailable", func(rh *registryHarness) { rh.reg.set("big5xx") }, "0.2.0", http.StatusServiceUnavailable},
 		{"registry unreachable", func(rh *registryHarness) { rh.reg.srv.Close() }, "0.2.0", http.StatusServiceUnavailable},
 		{"disabled", func(rh *registryHarness) { rh.reg.setLifecycle("other-assistant@0.2.0", db.AssistantLifecycleDisabled) }, "0.2.0", http.StatusConflict},
 		{"deprecated for a new install", func(rh *registryHarness) {
@@ -317,6 +324,24 @@ func TestRegistryInstall_Refusals(t *testing.T) {
 				t.Fatalf("a refused install stored a snapshot: %v", err)
 			}
 		})
+	}
+}
+
+// A never-installed profile names hr-recruiter@0.1.0 only through its
+// column defaults; that is not an install, so a deprecated hr-recruiter@0.1.0
+// is refused for it like for any new account.
+func TestRegistryInstall_DeprecatedRefusedWithoutInstall(t *testing.T) {
+	rh := newRegistryHarness(t)
+	ctx := context.Background()
+	rh.reg.add("hr-recruiter", "0.1.0", "Deprecated recruiter rules.", db.AssistantLifecycleDeprecated)
+	if err := rh.store.EnsureAgentProfile(ctx, rh.userID); err != nil {
+		t.Fatal(err)
+	}
+	if ref, err := rh.store.GetAgentAssistantRef(ctx, rh.userID); err != nil || ref.Name != "hr-recruiter" || ref.Version != "0.1.0" || ref.Installed {
+		t.Fatalf("default profile = %+v, err=%v", ref, err)
+	}
+	if rec := doInstall(t, rh.install, 500100101, hrInstallJSON(t, nil)); rec.Code != http.StatusConflict {
+		t.Fatalf("deprecated install on a never-installed profile = %d %s, want 409", rec.Code, rec.Body.String())
 	}
 }
 
@@ -397,10 +422,19 @@ func TestRegistryLifecycle_GatesClaims(t *testing.T) {
 		t.Fatalf("alerts before 24h = %d", n)
 	}
 
-	// Past 24h the lifecycle is unknown: no jobs, and exactly one notice
-	// however often the claim and the refresh run into it.
+	// Past 24h the lifecycle is unknown: no jobs. The claim stays read-only
+	// and queues no notice; the refresh queues exactly one, however often
+	// it runs into the same outage.
 	rh.advance(2 * time.Hour)
 	staleJob := rh.newJob()
+	for range 2 {
+		if code, _ := claimOne(t, rh.testHarness); code != http.StatusServiceUnavailable {
+			t.Fatalf("claim past 24h = %d", code)
+		}
+	}
+	if n := rh.alerts(); n != 0 {
+		t.Fatalf("alerts queued by claims = %d, want 0", n)
+	}
 	for range 3 {
 		if code, _ := claimOne(t, rh.testHarness); code != http.StatusServiceUnavailable {
 			t.Fatalf("claim past 24h = %d", code)

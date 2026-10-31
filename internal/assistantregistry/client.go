@@ -104,11 +104,13 @@ func (c *Client) Fetch(ctx context.Context, name, version string) (*Definition, 
 	if err != nil {
 		return nil, fmt.Errorf("%w: read response: %v", ErrUnavailable, err)
 	}
-	if len(body) > maxResponseBytes {
-		return nil, fmt.Errorf("%w: response exceeds %d bytes", ErrInvalid, maxResponseBytes)
-	}
 	switch resp.StatusCode {
 	case http.StatusOK:
+		// Only a 200 is held to the size of a definition; an oversized
+		// error page from a proxy is still just an unavailable registry.
+		if len(body) > maxResponseBytes {
+			return nil, fmt.Errorf("%w: response exceeds %d bytes", ErrInvalid, maxResponseBytes)
+		}
 	case http.StatusNotFound:
 		// Only the registry's own answer is an observation. A bare 404
 		// (route not deployed, a proxy in between) is a failed read.
