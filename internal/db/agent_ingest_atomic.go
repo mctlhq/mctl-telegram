@@ -77,6 +77,9 @@ func (s *Store) InsertEventEnqueueJobAndTouch(ctx context.Context, ev IncomingEv
 	if err := applyPendingDeleteTx(ctx, tx, ev, jobID); err != nil {
 		return 0, false, err
 	}
+	if err := ignoreInactiveConversationJobTx(ctx, tx, ev.UserID, conversationID, jobID); err != nil {
+		return 0, false, err
+	}
 
 	now := time.Now().UTC()
 	// With operator routing on, an event the worker will handle is not
@@ -111,6 +114,39 @@ func (s *Store) InsertEventEnqueueJobAndTouch(ctx context.Context, ev IncomingEv
 		s.outboxNotify()
 	}
 	return jobID, true, nil
+}
+
+// ReasonConversationNotActive closes a job at ingest when its conversation is
+// taken over, closed or paused (#601). Policy denies every reply in those
+// states, so invoking the model could only end in a forced "ignored" at full
+// cost; the event itself is still recorded for audit and for /mctl continue.
+const ReasonConversationNotActive = "conversation not active: agent not invoked"
+
+// ignoreInactiveConversationJobTx closes the new job as ignored when its
+// conversation is not active. The state is read inside the ingest
+// transaction, so a takeover committed before this event is always seen.
+// Owner summaries are skipped with the reply: in a conversation the owner is
+// handling, the owner reads the messages directly.
+// With operator routing on, the event is not published to the operator
+// stream either (the ingest outbox row is skipped because the job exists):
+// the owner is handling the conversation, the same as a run ending ignored.
+func ignoreInactiveConversationJobTx(ctx context.Context, tx *sql.Tx, userID, conversationID, jobID int64) error {
+	if jobID == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE agent_jobs SET status = $1, last_error = $2, updated_at = $3
+		  WHERE id = $4 AND status = $5
+		    AND EXISTS (
+		        SELECT 1 FROM conversations
+		         WHERE id = $6 AND user_id = $7 AND state <> $8
+		    )`,
+		JobIgnored, ReasonConversationNotActive, time.Now().UTC(), jobID, JobPending,
+		conversationID, userID, ConversationActive,
+	); err != nil {
+		return fmt.Errorf("ignore job for inactive conversation: %w", err)
+	}
+	return nil
 }
 
 // applyPendingDeleteTx applies a delete that arrived before this message
