@@ -13,5 +13,10 @@ jobs:
       contents: read
       pull-requests: write
     with:
+      # medium, not the shared default high: on large diffs in this repo
+      # high ran out of output tokens ("exceeded the output token limit",
+      # run 41240271008) and posted no verdict. The model tier is
+      # reconciled to the effort by the reusable workflow.
+      effort: medium
       conventions: |
         Focus on: Go MTProto/gotd concurrency and session handling safety, OAuth 2.1 JWT token lifecycle & refresh token rotation, encryption-at-rest of Telegram session blobs, strict enforcement of `ALLOW_SEND` send-gate invariants, DNS-rebinding protection on `/mcp` endpoints, database migration and query safety (pgx/sqlite), and missing test coverage for changed behavior.
