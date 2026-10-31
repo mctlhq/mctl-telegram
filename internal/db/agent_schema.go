@@ -180,6 +180,11 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_jobs", "body_bytes", "INTEGER", "INTEGER"); err != nil {
 		return err
 	}
+	// Turn context (#962): a JSON array of the event ids an edit job was
+	// handed at claim, when it adds the rest of an unsent turn. NULL otherwise.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_jobs", "turn_context", "TEXT", "TEXT"); err != nil {
+		return err
+	}
 	coalescedIdx := `CREATE INDEX IF NOT EXISTS idx_agent_jobs_coalesced_into ON agent_jobs(coalesced_into) WHERE coalesced_into IS NOT NULL`
 	if _, err := dbConn.ExecContext(ctx, coalescedIdx); err != nil {
 		return fmt.Errorf("migrate agent: %w\nstmt: %s", err, coalescedIdx)

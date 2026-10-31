@@ -89,15 +89,26 @@ func jobSourceSuperseded(ctx context.Context, q rowQueryer, userID, jobID int64)
 		userID, jobID, EventKindMessageEdit, EventKindMessageDelete,
 	).Scan(&kind)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	if err != nil {
+		kind = ""
+	} else if err != nil {
 		return "", fmt.Errorf("check job source supersession: %w", err)
 	}
 	if kind == EventKindMessageDelete {
 		return SourceDeleted, nil
 	}
-	return SourceEdited, nil
+	// The messages an edit job read as turn context (#962) must be current
+	// too. A delete there outranks an edit of the job's own message.
+	ctxKind, err := turnContextSuperseded(ctx, q, userID, jobID)
+	if err != nil {
+		return "", err
+	}
+	if ctxKind != "" {
+		return ctxKind, nil
+	}
+	if kind != "" {
+		return SourceEdited, nil
+	}
+	return "", nil
 }
 
 // JobSourceSuperseded reports whether a message the job's turn was built from
