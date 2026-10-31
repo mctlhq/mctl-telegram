@@ -437,6 +437,17 @@ decided on 2026-10-31 not to build it before production (#889).
   the throttle: this alert is not repeated for 6 hours. Owner summaries are
   not throttled by it (#994).
 
+## Senders in the owner's contacts
+
+The agent is for cold contacts. A private message from a sender in the
+owner's Telegram contacts, an edit of one, and the owner's own message to a
+contact are dropped by the listener: no event is stored, no job is created
+and the model never sees them. Contact status comes from the `contact` flag
+on the user entity in the update. When an update carries no entity for the
+sender, the status is unknown and the message is processed as before. A
+recruiter the owner has saved to contacts is skipped too; remove them from
+contacts for the agent to handle the chat.
+
 ## Attachments in inbound messages (#948)
 
 An inbound message with media is a message even when it has no caption: it
