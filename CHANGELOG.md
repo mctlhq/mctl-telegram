@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.113.0](https://github.com/mctlhq/mctl-telegram/compare/0.112.0...0.113.0) (2026-10-31)
+
+
+### Features
+
+* **agent:** add /mctl unpause and /mctl assistant ([7d3c2cd](https://github.com/mctlhq/mctl-telegram/commit/7d3c2cddaf35eaeebee9c28dcfd09cb03dd82877))
+* **agent:** add /mctl unpause and /mctl assistant ([862b493](https://github.com/mctlhq/mctl-telegram/commit/862b49330ac8a5d0b2c1205634cc3bb141a6e68a)), closes [#1002](https://github.com/mctlhq/mctl-telegram/issues/1002)
+* **agent:** enforce outside_hours assistant schedules ([7f000d2](https://github.com/mctlhq/mctl-telegram/commit/7f000d296a33b73b7a11aca702e93003a58e551c))
+* **agent:** enforce outside_hours assistant schedules ([f56796c](https://github.com/mctlhq/mctl-telegram/commit/f56796cfeead7993d051a2f50dccc625767b117b)), closes [#1002](https://github.com/mctlhq/mctl-telegram/issues/1002)
+* **agent:** enforce the never tier of assistant intents ([b33ddd3](https://github.com/mctlhq/mctl-telegram/commit/b33ddd3f958946c98b98f2d8e40f763e5ad4224d))
+* **agent:** enforce the never tier of assistant intents ([35c062d](https://github.com/mctlhq/mctl-telegram/commit/35c062dec7207aefd8368b4b8203b1883c8c7557)), closes [#1002](https://github.com/mctlhq/mctl-telegram/issues/1002)
+
+
+### Bug Fixes
+
+* **agent:** reject signed and Local schedule values ([34cb5f8](https://github.com/mctlhq/mctl-telegram/commit/34cb5f87fbb0b3ac371a6c0d3640005877176e68))
+* **agent:** show the assistant without decrypting its install ([d3723ca](https://github.com/mctlhq/mctl-telegram/commit/d3723cab75d7db23f7106f0869b06fc63ececa81))
+
 ## [0.112.0](https://github.com/mctlhq/mctl-telegram/compare/0.111.0...0.112.0) (2026-10-31)
 
 
