@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,6 +29,9 @@ type fakeSender struct {
 	calls     []sendCall
 	failNext  int // fail this many upcoming calls, then succeed
 	nextMsgID int64
+	// delivered holds random_ids Telegram already has; a send reusing one
+	// is refused the way RANDOM_ID_DUPLICATE is (#1029).
+	delivered map[int64]bool
 }
 
 type sendCall struct {
@@ -39,6 +43,9 @@ func (f *fakeSender) SendWithRandomID(_ context.Context, userID, peerTGID, peerA
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, sendCall{userID, peerTGID, peerAccessHash, randomID, text})
+	if f.delivered[randomID] {
+		return 0, fmt.Errorf("fake send: %w", ErrAlreadyDelivered)
+	}
 	if f.failNext > 0 {
 		f.failNext--
 		return 0, errSendFailed
@@ -1503,5 +1510,53 @@ func TestExecutor_Send_RefusesEarlierInstallRevision(t *testing.T) {
 	}
 	if action.Status != db.ActionDenied || len(sender.calls) != 0 {
 		t.Fatalf("status = %q, sends = %d, want denied and none", action.Status, len(sender.calls))
+	}
+}
+
+// TestExecutor_RecoverStuck_DuplicateRandomIDEndsExecuted is the #1029
+// regression: the first attempt reached Telegram but the process lost the
+// answer, so the recovery retry with the same random_id is refused as a
+// duplicate. The action must end executed (message id unknown, stored as
+// NULL) with one outgoing history row, and a second sweep must not send
+// again. With the ErrAlreadyDelivered branch in recoverOne removed, the row
+// stays executing and every sweep retries it.
+func TestExecutor_RecoverStuck_DuplicateRandomIDEndsExecuted(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	actionID, _ := seedPendingApproval(t, store, uid, conv.ID, "hi")
+	if ok, err := store.UpdateAgentActionStatus(ctx, uid, actionID, db.ActionPendingApproval, db.ActionApproved); err != nil || !ok {
+		t.Fatalf("approve transition: ok=%v err=%v", ok, err)
+	}
+	reserveActionForRecovery(t, store, uid, actionID, 515151, "hi"+policy.DisclosureSep+"I'm an AI assistant.")
+	sender.delivered = map[int64]bool{515151: true}
+
+	if n, err := exec.RecoverStuck(ctx); err != nil || n != 1 {
+		t.Fatalf("first sweep: n=%d err=%v", n, err)
+	}
+	action, err := store.GetAgentAction(ctx, uid, actionID)
+	if err != nil {
+		t.Fatalf("get action: %v", err)
+	}
+	if action.Status != db.ActionExecuted {
+		t.Fatalf("status = %q, want executed after a duplicate random_id", action.Status)
+	}
+	if action.ExecutedTGMessageID != 0 {
+		t.Fatalf("executed message id = %d, want unknown (0/NULL)", action.ExecutedTGMessageID)
+	}
+	if n, err := exec.RecoverStuck(ctx); err != nil || n != 0 {
+		t.Fatalf("second sweep: n=%d err=%v, want nothing left stuck", n, err)
+	}
+	if len(sender.calls) != 1 {
+		t.Fatalf("send calls = %d, want exactly 1", len(sender.calls))
+	}
+	var rows int
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = $1 AND direction = $2 AND tg_message_id IS NULL`,
+		conv.ID, db.DirectionAgentOutgoing,
+	).Scan(&rows); err != nil {
+		t.Fatalf("count history: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("outgoing history rows with unknown id = %d, want 1", rows)
 	}
 }

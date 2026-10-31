@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	gotdtelegram "github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
 
+	"github.com/mctlhq/mctl-telegram/internal/agent/executor"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
@@ -52,9 +54,18 @@ func (s *poolSender) SendWithRandomID(ctx context.Context, userID, peerTGID, pee
 		return nil
 	})
 	if err != nil {
-		return 0, fmt.Errorf("send via pool: %w", err)
+		return 0, mapPoolSendError(err)
 	}
 	return int64(messageID), nil
+}
+
+// mapPoolSendError translates telegram.ErrRandomIDDuplicate into the
+// executor's ErrAlreadyDelivered, the contract executor.Sender documents.
+func mapPoolSendError(err error) error {
+	if errors.Is(err, telegram.ErrRandomIDDuplicate) {
+		return fmt.Errorf("send via pool: %w: %w", executor.ErrAlreadyDelivered, err)
+	}
+	return fmt.Errorf("send via pool: %w", err)
 }
 
 // poolSelfSender adapts telegram.ClientPool to control.SelfSender: posts

@@ -698,6 +698,9 @@ func (s *Store) SetAgentActionExecuted(ctx context.Context, userID, id, tgMessag
 // claim can observe neither the executing reservation nor the completed
 // history row.
 func (s *Store) RecordAgentActionSent(ctx context.Context, userID, actionID, conversationID, tgMessageID int64, sentText string) (bool, error) {
+	// tgMessageID 0 means delivered with an unknown message id (a recovery
+	// retry answered RANDOM_ID_DUPLICATE, #1029). Store NULL, never a fake 0.
+	msgID := sql.NullInt64{Int64: tgMessageID, Valid: tgMessageID != 0}
 	pg := s.isPostgres(ctx)
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -724,7 +727,7 @@ func (s *Store) RecordAgentActionSent(ctx context.Context, userID, actionID, con
 		        approval_code_hash = NULL, approval_code_encrypted = NULL,
 		        send_body_encrypted = NULL, updated_at = $3
 		  WHERE id = $4 AND user_id = $5 AND status = $6`,
-		ActionExecuted, tgMessageID, time.Now().UTC(), actionID, userID, ActionExecuting,
+		ActionExecuted, msgID, time.Now().UTC(), actionID, userID, ActionExecuting,
 	)
 	if err != nil {
 		return false, fmt.Errorf("set action executed: %w", err)
@@ -773,7 +776,7 @@ func (s *Store) RecordAgentActionSent(ctx context.Context, userID, actionID, con
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO conversation_messages(conversation_id, direction, tg_message_id, body_encrypted)
 		 VALUES($1,$2,$3,$4)`,
-		conversationID, DirectionAgentOutgoing, tgMessageID, body,
+		conversationID, DirectionAgentOutgoing, msgID, body,
 	); err != nil {
 		return false, fmt.Errorf("insert conversation message: %w", err)
 	}
