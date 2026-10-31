@@ -19,7 +19,7 @@ const claimCandidateScan = 100
 const agentJobCols = `id, event_id, user_id, conversation_id, status, attempts,
            max_attempts, next_run_at, claimed_by, claimed_at, last_error,
            result_action_id, result_lead_id, cost_usd, created_at, updated_at,
-           turn_id, coalesced_into`
+           turn_id, coalesced_into, install_revision`
 
 // WithTurnCoalescing turns on claim-time turn coalescing with cfg. A nil cfg or
 // one with QuietMS <= 0 leaves it off (one job per event, today's claim).
@@ -111,7 +111,8 @@ func (s *Store) claimCoalesced(ctx context.Context, replicaID string, userID int
 		rows, err := tx.QueryContext(ctx,
 			`UPDATE agent_jobs
 			    SET status = $1, attempts = attempts + 1,
-			        claimed_by = $2, claimed_at = $3, updated_at = $3, turn_id = $4
+			        claimed_by = $2, claimed_at = $3, updated_at = $3, turn_id = $4,
+			        install_revision = COALESCE((SELECT install_revision FROM agent_profiles WHERE user_id = agent_jobs.user_id), 1)
 			  WHERE id = $5 AND status = $6
 			 RETURNING `+agentJobCols,
 			JobProcessing, replicaID, now, tid, c.id, JobPending)

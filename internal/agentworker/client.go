@@ -128,6 +128,9 @@ type JobEnvelope struct {
 	// Tools names the job's MCP tools as the assistant calls them, each a
 	// canonical name or a generic alias; empty means the canonical names.
 	Tools []string `json:"tools,omitempty"`
+	// InstallRevision is the account's install revision for this claim,
+	// for the worker's logs.
+	InstallRevision int64 `json:"install_revision,omitempty"`
 }
 
 // JobStatus is the minimal durable postcondition returned by GET /jobs/{id}.

@@ -75,10 +75,13 @@ type AgentProfile struct {
 	// AssistantInstalledAt is when the current assistant was first
 	// installed: the moment "new chat" is judged against. Zero if never.
 	AssistantInstalledAt time.Time
-	BlockedSenders       string // csv of telegram user ids the agent must ignore
-	SenderAllowlist      string // csv of telegram user ids allowed into the listener; empty allows all
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+	// InstallRevision moves on every assistant install or switch (#1018).
+	// Work created under an older revision is refused.
+	InstallRevision int64
+	BlockedSenders  string // csv of telegram user ids the agent must ignore
+	SenderAllowlist string // csv of telegram user ids allowed into the listener; empty allows all
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // UpsertAgentProfile inserts or fully replaces the user's agent profile.
@@ -143,13 +146,13 @@ func (s *Store) GetAgentProfile(ctx context.Context, userID int64) (*AgentProfil
 		`SELECT user_id, mode, autopilot_paused, listener_enabled, disclosure_text,
 		        max_autonomous_turns, max_msgs_per_minute, max_reply_chars,
 		        intent_allowlist, blocked_senders, sender_allowlist, created_at, updated_at,
-		        disclosure_disabled, intent_denylist, working_hours, audience_excludes, assistant_installed_at
+		        disclosure_disabled, intent_denylist, working_hours, audience_excludes, assistant_installed_at, install_revision
 		   FROM agent_profiles WHERE user_id = $1`,
 		userID,
 	).Scan(&p.UserID, &p.Mode, &p.AutopilotPaused, &p.ListenerEnabled, &p.DisclosureText,
 		&p.MaxAutonomousTurns, &p.MaxMsgsPerMinute, &p.MaxReplyChars,
 		&p.IntentAllowlist, &p.BlockedSenders, &p.SenderAllowlist, &p.CreatedAt, &p.UpdatedAt,
-		&p.DisclosureDisabled, &p.IntentDenylist, &p.WorkingHours, &p.AudienceExcludes, &installedAt)
+		&p.DisclosureDisabled, &p.IntentDenylist, &p.WorkingHours, &p.AudienceExcludes, &installedAt, &p.InstallRevision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrAgentProfileNotFound
 	}
@@ -364,6 +367,13 @@ type AgentProfileUpdate struct {
 	// it is already set, so a reinstall of the same assistant keeps the
 	// moment new chats are judged against.
 	MarkInstalledAt *time.Time
+	// ResetInstalledAt sets assistant_installed_at unconditionally, for a
+	// switch to another assistant, whose new chats start now.
+	ResetInstalledAt *time.Time
+	// BumpInstallRevision increments install_revision in the same UPDATE.
+	BumpInstallRevision bool
+	// AssistantDigest is the digest of the definition being installed.
+	AssistantDigest *string
 	BlockedSenders  *string
 	SenderAllowlist *string
 	// AssistantName and AssistantVersion select the catalog assistant.
@@ -436,6 +446,15 @@ func (s *Store) UpdateAgentProfileFields(ctx context.Context, userID int64, u Ag
 	}
 	if u.AudienceExcludes != nil {
 		set("audience_excludes", *u.AudienceExcludes)
+	}
+	if u.ResetInstalledAt != nil {
+		set("assistant_installed_at", u.ResetInstalledAt.UTC())
+	}
+	if u.AssistantDigest != nil {
+		set("assistant_definition_digest", *u.AssistantDigest)
+	}
+	if u.BumpInstallRevision {
+		sets = append(sets, "install_revision = install_revision + 1")
 	}
 	if u.MarkInstalledAt != nil {
 		args = append(args, u.MarkInstalledAt.UTC())
@@ -598,7 +617,7 @@ func (s *Store) ListListenerEnabledProfiles(ctx context.Context) ([]AgentProfile
 		`SELECT user_id, mode, autopilot_paused, listener_enabled, disclosure_text,
 		        max_autonomous_turns, max_msgs_per_minute, max_reply_chars,
 		        intent_allowlist, blocked_senders, sender_allowlist, created_at, updated_at,
-		        disclosure_disabled, intent_denylist, working_hours, audience_excludes, assistant_installed_at
+		        disclosure_disabled, intent_denylist, working_hours, audience_excludes, assistant_installed_at, install_revision
 		   FROM agent_profiles WHERE listener_enabled = $1`,
 		true,
 	)
@@ -613,7 +632,7 @@ func (s *Store) ListListenerEnabledProfiles(ctx context.Context) ([]AgentProfile
 		if err := rows.Scan(&p.UserID, &p.Mode, &p.AutopilotPaused, &p.ListenerEnabled, &p.DisclosureText,
 			&p.MaxAutonomousTurns, &p.MaxMsgsPerMinute, &p.MaxReplyChars,
 			&p.IntentAllowlist, &p.BlockedSenders, &p.SenderAllowlist, &p.CreatedAt, &p.UpdatedAt,
-			&p.DisclosureDisabled, &p.IntentDenylist, &p.WorkingHours, &p.AudienceExcludes, &installedAt); err != nil {
+			&p.DisclosureDisabled, &p.IntentDenylist, &p.WorkingHours, &p.AudienceExcludes, &installedAt, &p.InstallRevision); err != nil {
 			return nil, fmt.Errorf("scan listener profile: %w", err)
 		}
 		p.AssistantInstalledAt = installedAt.Time

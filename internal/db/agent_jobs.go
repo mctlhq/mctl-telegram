@@ -48,19 +48,22 @@ const (
 
 // AgentJob is one queued unit of agent work, keyed 1:1 to an incoming event.
 type AgentJob struct {
-	ID             int64
-	EventID        string
-	UserID         int64
-	ConversationID int64 // 0 ⇒ not associated yet
-	Status         string
-	Attempts       int
-	MaxAttempts    int
-	NextRunAt      time.Time
-	ClaimedBy      string
-	ClaimedAt      time.Time // zero value ⇒ never claimed
-	LastError      string
-	ResultActionID int64
-	ResultLeadID   int64
+	// InstallRevision is the account's install revision when the job was
+	// last claimed (#1018); its actions inherit it.
+	InstallRevision int64
+	ID              int64
+	EventID         string
+	UserID          int64
+	ConversationID  int64 // 0 ⇒ not associated yet
+	Status          string
+	Attempts        int
+	MaxAttempts     int
+	NextRunAt       time.Time
+	ClaimedBy       string
+	ClaimedAt       time.Time // zero value ⇒ never claimed
+	LastError       string
+	ResultActionID  int64
+	ResultLeadID    int64
 	// CostUSD is the last-reported Claude spend for this job (see
 	// RecordAgentJobCost). sql.NullFloat64, not float64: an unreported job
 	// must read as SQL NULL, never a false 0 that would understate spend —
@@ -357,7 +360,8 @@ func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, userID int
 	rows, err := tx.QueryContext(ctx,
 		`UPDATE agent_jobs
 		    SET status = $1, attempts = attempts + 1,
-		        claimed_by = $2, claimed_at = $3, updated_at = $3
+		        claimed_by = $2, claimed_at = $3, updated_at = $3,
+		        install_revision = COALESCE((SELECT install_revision FROM agent_profiles WHERE user_id = agent_jobs.user_id), 1)
 		  WHERE status = $4 AND id IN (
 		        SELECT j.id FROM agent_jobs j
 		         WHERE j.status = $4 AND j.next_run_at <= $3 AND j.user_id = $6
@@ -372,7 +376,7 @@ func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, userID int
 		 RETURNING id, event_id, user_id, conversation_id, status, attempts,
 		           max_attempts, next_run_at, claimed_by, claimed_at, last_error,
 		           result_action_id, result_lead_id, cost_usd, created_at, updated_at,
-		           turn_id, coalesced_into`,
+		           turn_id, coalesced_into, install_revision`,
 		JobProcessing, replicaID, now, JobPending, limit, userID,
 	)
 	if err != nil {
@@ -427,7 +431,7 @@ func scanAgentJobs(rows *sql.Rows) ([]AgentJob, error) {
 		if err := rows.Scan(&j.ID, &j.EventID, &j.UserID, &convID, &j.Status, &j.Attempts,
 			&j.MaxAttempts, &j.NextRunAt, &claimedBy, &claimedAt, &lastErr,
 			&resultActionID, &resultLeadID, &costUSD, &j.CreatedAt, &j.UpdatedAt,
-			&turnID, &coalescedInto); err != nil {
+			&turnID, &coalescedInto, &j.InstallRevision); err != nil {
 			return nil, fmt.Errorf("scan agent job: %w", err)
 		}
 		j.ConversationID = convID.Int64
@@ -452,7 +456,7 @@ func (s *Store) GetAgentJob(ctx context.Context, userID, id int64) (*AgentJob, e
 		`SELECT id, event_id, user_id, conversation_id, status, attempts,
 		        max_attempts, next_run_at, claimed_by, claimed_at, last_error,
 		        result_action_id, result_lead_id, cost_usd, created_at, updated_at,
-		        turn_id, coalesced_into
+		        turn_id, coalesced_into, install_revision
 		   FROM agent_jobs WHERE id = $1 AND user_id = $2`,
 		id, userID,
 	)

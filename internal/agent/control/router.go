@@ -558,6 +558,8 @@ func approverErrText(err error) string {
 		return "this draft expired before it was approved — too old to send now"
 	case errors.Is(err, executor.ErrLostRace):
 		return "already resolved (approved, rejected, or expired) by the time this was processed"
+	case errors.Is(err, executor.ErrInstallChanged):
+		return "the assistant or its settings changed since this draft was written, so it was not sent"
 	case errors.Is(err, executor.ErrSourceSuperseded):
 		return "the sender edited or deleted the message this draft answers, so it was not sent"
 	default:

@@ -642,6 +642,9 @@ is a non-deployed mirror kept only so this section's anchor is checked by
   and the install disagree about what the assistant may say. `audience_excluded`
   is expected too: a reply in a chat the install's audience scope leaves
   out, most often a peer removed from or added to contacts mid-conversation.
+  `install_changed` follows an assistant install or switch: work claimed
+  before it was refused. A burst right after an install is expected; a
+  steady stream means installs are being applied repeatedly.
 - **A new or runaway denial reason**: `global_kill`,
   `reply_contains_credentials`, `reply_contains_url`,
   `reply_contains_never_field`, or a spike of `unknown`

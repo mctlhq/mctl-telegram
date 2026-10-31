@@ -1451,3 +1451,57 @@ func runCrashAfterReserveHelper(t *testing.T) {
 	err = execr.Approve(ctx, uid, code)
 	t.Fatalf("helper: Approve returned instead of os.Exit(137) firing: err=%v sender_calls=%d", err, len(sender.calls))
 }
+
+// TestExecutor_Approve_RefusesEarlierInstallRevision: a draft written under
+// an earlier install revision is refused at /mctl approve and denied, not
+// sent (#1018).
+func TestExecutor_Approve_RefusesEarlierInstallRevision(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	actionID, code := seedPendingApproval(t, store, uid, conv.ID, "Thanks for reaching out!")
+	if err := store.UpdateAgentProfileFields(ctx, uid, db.AgentProfileUpdate{BumpInstallRevision: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Approve(ctx, uid, code); !errors.Is(err, ErrInstallChanged) {
+		t.Fatalf("approve err = %v, want ErrInstallChanged", err)
+	}
+	action, err := store.GetAgentAction(ctx, uid, actionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action.Status != db.ActionDenied || len(sender.calls) != 0 {
+		t.Fatalf("status = %q, sends = %d, want denied and none", action.Status, len(sender.calls))
+	}
+	if action.PolicyReasons != policy.ReasonInstallChanged {
+		t.Fatalf("policy_reasons = %q, want %q", action.PolicyReasons, policy.ReasonInstallChanged)
+	}
+}
+
+// TestExecutor_Send_RefusesEarlierInstallRevision: an action already
+// approved under an earlier revision is denied at send time, the fence the
+// approve check and the cleanup sweep stand in front of (#1018).
+func TestExecutor_Send_RefusesEarlierInstallRevision(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply,
+		Payload: "Thanks for reaching out!", PolicyDecision: db.PolicyRequireApproval,
+		Status: db.ActionApproved,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateAgentProfileFields(ctx, uid, db.AgentProfileUpdate{BumpInstallRevision: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exec.ProcessApproved(ctx); err != nil {
+		t.Fatalf("process approved: %v", err)
+	}
+	action, err := store.GetAgentAction(ctx, uid, actionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action.Status != db.ActionDenied || len(sender.calls) != 0 {
+		t.Fatalf("status = %q, sends = %d, want denied and none", action.Status, len(sender.calls))
+	}
+}

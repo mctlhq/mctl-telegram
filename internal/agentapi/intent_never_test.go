@@ -89,3 +89,89 @@ func TestHandlePolicy_ShowsWorkingHours(t *testing.T) {
 		t.Fatalf("get_policy working_hours = %q", pol.WorkingHours)
 	}
 }
+
+// TestInstallRevisionFencesStaleJob: a job claimed under one install
+// revision cannot propose once the revision moves (#1018), and a fresh
+// claim stamps the new revision.
+func TestInstallRevisionFencesStaleJob(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	if err := h.store.UpsertAgentProfile(ctx, db.AgentProfile{
+		UserID: h.userID, Mode: db.AgentModeGuarded, DisclosureText: "I'm an AI assistant.", IntentAllowlist: "discovery",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	conv := h.seedConversation(555)
+	jobID := h.seedJob("evt:rev:1", conv.ID)
+	claimed, err := h.store.ClaimAgentJobs(ctx, "test-replica", h.userID, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: %v %v", claimed, err)
+	}
+	if claimed[0].InstallRevision != 1 {
+		t.Fatalf("claimed revision = %d, want 1", claimed[0].InstallRevision)
+	}
+	if err := h.store.UpdateAgentProfileFields(ctx, h.userID, db.AgentProfileUpdate{BumpInstallRevision: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := h.do("POST", "/actions/propose_reply", proposeReplyRequest{
+		ConversationID: conv.ID, JobID: jobID, Attempt: claimed[0].Attempts, Intent: "discovery", Text: "Could you share the team size?",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp actionResponse
+	decodeBody(t, rec, &resp)
+	if resp.Decision != string(policy.Deny) || len(resp.Reasons) != 1 || resp.Reasons[0] != policy.ReasonInstallChanged {
+		t.Fatalf("stale job proposal = %+v, want denied as install changed", resp)
+	}
+
+	// A job claimed after the change carries the new revision and acts.
+	if err := h.store.CompleteAgentJob(ctx, jobID, claimed[0].Attempts, db.JobIgnored, "test"); err != nil {
+		t.Fatal(err)
+	}
+	fresh := h.seedJob("evt:rev:2", conv.ID)
+	claimed, err = h.store.ClaimAgentJobs(ctx, "test-replica", h.userID, 1)
+	if err != nil || len(claimed) != 1 || claimed[0].ID != fresh {
+		t.Fatalf("claim fresh: %v %v", claimed, err)
+	}
+	if claimed[0].InstallRevision != 2 {
+		t.Fatalf("fresh claim revision = %d, want 2", claimed[0].InstallRevision)
+	}
+	rec = h.do("POST", "/actions/propose_reply", proposeReplyRequest{
+		ConversationID: conv.ID, JobID: fresh, Attempt: claimed[0].Attempts, Intent: "discovery", Text: "Could you share the team size?",
+	})
+	var ok actionResponse
+	decodeBody(t, rec, &ok)
+	if ok.Decision != string(policy.Allow) {
+		t.Fatalf("fresh job proposal = %+v, want allow", ok)
+	}
+}
+
+// An owner summary from a job claimed before an install change is refused
+// like a reply (#1018).
+func TestInstallRevisionFencesOwnerSummary(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.seedProfile(db.AgentModeGuarded)
+	conv := h.seedConversation(555)
+	jobID := h.seedJob("evt:rev:sum", conv.ID)
+	claimed, err := h.store.ClaimAgentJobs(ctx, "test-replica", h.userID, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: %v %v", claimed, err)
+	}
+	if err := h.store.UpdateAgentProfileFields(ctx, h.userID, db.AgentProfileUpdate{BumpInstallRevision: true}); err != nil {
+		t.Fatal(err)
+	}
+	rec := h.do("POST", "/notify/summary", ownerNotifyRequest{
+		ConversationID: conv.ID, JobID: jobID, Attempt: claimed[0].Attempts, Intent: "lead", Text: "A recruiter wrote about a Go role.",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp actionResponse
+	decodeBody(t, rec, &resp)
+	if resp.Decision != string(policy.Deny) || len(resp.Reasons) != 1 || resp.Reasons[0] != policy.ReasonInstallChanged {
+		t.Fatalf("stale summary = %+v, want denied as install changed", resp)
+	}
+}

@@ -11,8 +11,10 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	mctltelegram "github.com/mctlhq/mctl-telegram"
+	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
 	"github.com/mctlhq/mctl-telegram/internal/assistant"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -162,7 +164,11 @@ func TestAdminAgentInstallHandler_Rejects(t *testing.T) {
 
 // Switching an account to another assistant has no lifecycle for its jobs
 // and approvals yet, so it is refused rather than half-done.
-func TestAdminAgentInstallHandler_RefusesAssistantSwitch(t *testing.T) {
+// TestAdminAgentInstallHandler_SwitchesAssistant switches an account to
+// another assistant (#1018): the install revision moves, the new install
+// time replaces the old one, the definition digest is stored, and a draft
+// pending from the earlier revision is denied as cleanup.
+func TestAdminAgentInstallHandler_SwitchesAssistant(t *testing.T) {
 	def, err := os.ReadFile("../../assistants/hr-recruiter/assistant.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -182,14 +188,61 @@ func TestAdminAgentInstallHandler_RefusesAssistantSwitch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	install := hrInstallJSON(t, map[string]any{"assistant": map[string]any{"name": "other-assistant", "version": "0.1.0"}})
-	rec := doInstall(t, NewAdminAgentInstallHandler(store, catalog), 777, install)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409, body=%s", rec.Code, rec.Body.String())
+	hr := NewAdminAgentInstallHandler(store, embeddedCatalog(t))
+	if rec := doInstall(t, hr, 777, hrInstallJSON(t, nil)); rec.Code != http.StatusOK {
+		t.Fatalf("hr install status = %d, body=%s", rec.Code, rec.Body.String())
 	}
-	a, err := store.GetAgentAssistant(ctx, uid)
-	if err != nil || a.Name != "hr-recruiter" || a.Install != nil {
-		t.Fatalf("assistant after refusal = %+v, err=%v", a, err)
+	before, err := store.GetAgentProfile(ctx, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conv, err := store.EnsureConversation(ctx, uid, 555, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply, Payload: "draft",
+		PolicyDecision: db.PolicyRequireApproval, Status: db.ActionPendingApproval, ApprovalCode: "PEND01",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply, Payload: "approved draft",
+		PolicyDecision: db.PolicyRequireApproval, Status: db.ActionApproved,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	install := hrInstallJSON(t, map[string]any{"assistant": map[string]any{"name": "other-assistant", "version": "0.1.0"}})
+	if rec := doInstall(t, NewAdminAgentInstallHandler(store, catalog), 777, install); rec.Code != http.StatusOK {
+		t.Fatalf("switch status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	after, err := store.GetAgentProfile(ctx, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.InstallRevision != before.InstallRevision+1 {
+		t.Fatalf("revision %d -> %d, want +1", before.InstallRevision, after.InstallRevision)
+	}
+	if !after.AssistantInstalledAt.After(before.AssistantInstalledAt) {
+		t.Fatalf("install time %v -> %v, want reset on switch", before.AssistantInstalledAt, after.AssistantInstalledAt)
+	}
+	a, err := store.GetAgentAssistantRef(ctx, uid)
+	if err != nil || a.Name != "other-assistant" {
+		t.Fatalf("assistant after switch = %+v, err=%v", a, err)
+	}
+	// The cleanup sweep denies the approved action; the draft awaiting
+	// approval keeps its code so /mctl approve can say the assistant
+	// changed rather than "code not found".
+	action, err := store.GetAgentAction(ctx, uid, approved)
+	if err != nil || action.Status != db.ActionDenied || action.PolicyReasons != policy.ReasonInstallChanged {
+		t.Fatalf("earlier-revision approved action = %+v, err=%v, want denied as install changed", action, err)
+	}
+	if byCode, err := store.GetAgentActionByCode(ctx, uid, "PEND01"); err != nil || byCode.ID != pending || byCode.Status != db.ActionPendingApproval {
+		t.Fatalf("pending draft by code = %+v, err=%v, want still pending", byCode, err)
 	}
 }
 

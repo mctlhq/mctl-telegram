@@ -57,6 +57,9 @@ type jobEnvelope struct {
 	// canonical name or a generic alias (internal/agent/tools). Omitted
 	// without a catalog; the worker then uses the canonical names.
 	Tools []string `json:"tools,omitempty"`
+	// InstallRevision is the account's install revision this claim was
+	// made under (#1018); the job's work is refused once it moves.
+	InstallRevision int64 `json:"install_revision,omitempty"`
 }
 
 // errAssistantNotInCatalog means the account's profile names an assistant
@@ -212,6 +215,7 @@ func (s *Server) handleClaimJobs(w http.ResponseWriter, r *http.Request) {
 					Assistant:       assistantRef,
 					AssistantDigest: assistantDigest,
 					Tools:           toolNames,
+					InstallRevision: j.InstallRevision,
 				})
 			}
 			s.audit(ctx, id.UserID, "get_events", "ok", "")
