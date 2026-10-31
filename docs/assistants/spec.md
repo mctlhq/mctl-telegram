@@ -453,25 +453,121 @@ carries the text and no path, so it is complete without the repository.
 
 ## How this compares
 
-Formats that informed this one, and where it differs:
+The product is not "AI that answers Telegram messages"; Telegram itself now
+offers that. It is a governed delegation runtime: the author defines an
+envelope, the owner configures inside it and may only tighten, the runtime
+enforces rules neither can relax, and every action is checked against the
+current install revision before it is sent. The comparison is split by what
+each product is to that thesis. Facts were checked against public,
+preferably first-party documentation on 2026-10-31; a cell reads "not
+verified" when documentation does not settle it, never "no".
+
+### Telegram Chat Automation (official)
+
+Since 2026-05-07 every Telegram user can connect a bot to their profile to
+answer messages on their behalf (Settings > Chat Automation; Telegram blog
+"AI bot revolution"), and since Bot API 10.0 (2026-05-08) a business bot does
+not need Telegram Premium. It is a real personal-account delegation
+primitive, with a narrower envelope than this runtime's MTProto path:
+
+| Dimension | Chat Automation | Source |
+|---|---|---|
+| Acts in the owner's personal account with third parties | yes: private chats, `can_reply` covers chats "that had incoming messages in the last 24 hours" | Bot API `BusinessBotRights` |
+| Audience | yes: the owner picks the chats at connection time, e.g. excluding contacts or only new chats | Telegram blog, 2026-05-07 |
+| Tell the bot's own sends apart | yes: `Message.sender_business_bot` on outgoing messages sent by the bot | Bot API `Message` |
+| Owner takeover | not verified: documentation does not say whether the owner's own manual messages reach the bot as `business_message` | spike in #1026 |
+| History, groups, channels, global search | no: managed private chats only | Bot API, Bot Features |
+| Bot-to-bot | yes, opt-in; Telegram requires loop safeguards (dedup, rate limits, maximum depth or timeouts) | Bot Features, "Bot-to-Bot Communication" |
+| Versioned definitions, tighten-only installs, per-intent tiers, revision fence | no: the platform provides the connection; any policy is the bot's own | |
+
+Its risk profile differs from MTProto: an official API with no user session
+held by the operator, so materially lower platform and account risk, while a
+bot remains subject to Telegram's platform rules and Bot Developer Terms
+(section 5.4 for business bots). Whether it can serve as a transport for
+these assistants without weakening the guarantees above is the subject of
+the spike tracked in #1026, outside P3.
+
+### Direct alternatives: delegating a Telegram identity
+
+All three are self-hosted, MIT-licensed open-source projects. SmarTel
+(github.com/AliZakaee/SmarTel; its README also names ITheEqualizer/SmarTel)
+and tg-secretary (github.com/sepehr071/tg-secretary) connect as business
+bots; Iva (github.com/smixs/iva-agent) runs an MTProto userbot. Sources are
+each project's README and docs as of 2026-10-31.
+
+| Dimension | MCTL | Chat Automation | SmarTel | tg-secretary | Iva |
+|---|---|---|---|---|---|
+| Transport | MTProto, server-held session | business bot | business bot | business bot | MTProto userbot, self-hosted |
+| Replies to third parties autonomously | yes | yes (the bot's logic) | yes, opt-in | yes | not verified (sends found only in owner-started or scheduled turns) |
+| History, groups, channels, search | yes | no | no | no | yes |
+| Versioned assistant definition with digest | yes | no | not verified | not verified | not verified |
+| Author envelope, installer may only tighten | yes | no | not verified | not verified | not verified |
+| Approval before send | per intent: `auto` / `approve` / `never` | no | global mode; sensitive topics forced to approval | global mode; close-contact gate | global read-only switch |
+| Owner takeover | yes | not verified (see above) | yes, 30 min pause | yes, cooldown and re-check before send | not verified |
+| Approval bound to the install revision | yes (#1023, not yet released) | no | not verified | not verified | not verified |
+| Per-field disclosure of owner details | yes | no | not verified | not verified | not verified |
+| AI disclosure line to the counterparty | yes, required or optional per assistant | no | not verified | no, by design | not verified |
+| Audience scope | yes | yes | partial (Telegram chat selection) | partial (chat selection, relationship tags) | not verified |
+| Working hours | yes | no | not verified | yes | not verified |
+| Conversation limits | turns and rate per conversation | no | 20 messages per customer per hour | delays and a spend cap | anti-flood pacing only |
+
+In the Chat Automation column, "no" means the platform does not provide it;
+a connected bot may implement it itself, as the next two projects do.
+
+The two business-bot projects implement a takeover pause, which suggests the
+owner's activity is observable through the business connection; the spike
+in #1026 confirms that against Telegram itself before the official column
+changes.
+
+### Benchmarks for packaging and isolation
+
+OpenClaw with its ClawHub registry (docs.openclaw.ai) and NanoClaw
+(github.com/nanocoai/nanoclaw) are not substitutes for delegating a
+Telegram identity; both connect to Telegram as an ordinary bot. They set the
+bar for distributing and running agent packages:
+
+| Dimension | ClawHub / OpenClaw | NanoClaw |
+|---|---|---|
+| Versioned, immutable releases | yes (semver, changelogs, compatibility metadata) | partial (templates, no registry) |
+| Integrity digest | partial (plugins) | not verified |
+| Security scan, moderation | yes (scan state shown before install) | not verified |
+| Publisher provenance | partial (GitHub account-age gate) | not verified |
+| Update that respects local changes | yes (lockfile, pins, refuses over modified files) | yes (dry-run plan flags customized files) |
+| Permission or authority diff on update | not verified | partial (per-surface plan, not framed as authority) |
+| Runtime isolation | partial (sandbox off by default) | yes (container per agent) |
+| Credentials kept out of the agent | partial | yes (injected by a gateway at request time) |
+
+What this runtime takes from them for P3 and later: immutable versions with
+a digest (done in P3.2), scan and provenance before third-party publishers,
+and an update that shows how authority changes rather than a text diff.
+
+### Design precedents
+
+Formats and products that informed this one; they are not competitors for
+delegating a person's own account:
 
 | Product | What we took | What it lacks for this use |
 |---|---|---|
 | Microsoft 365 declarative agents | instructions + capabilities + disclaimer; user overrides that can only remove | runs in the user's own chat, not on their behalf with third parties |
 | Claude subagents, Agent Skills | markdown instructions with frontmatter, tool lists | no owner, counterparty or disclosure model |
 | OpenAI GPT Actions, Lindy, Relevance, n8n | per-tool approval: auto, approve, never | approval is per tool, not per reply intent |
-| Telegram Business chat automation (Bot API 10.0) | recipients model: contacts, non-contacts, new and existing chats, include and exclude | 24 h reply window, one bot, private chats only, no view of the owner's own replies |
 | Voiceflow, Respond.io, Wati | exit conditions, handoff with a summary | business inboxes, not a person's account |
 | MCP `server.json`, Oracle Agent Spec, Letta `.af` | typed variables, secrets kept out of the definition | no catalog-to-account install step |
 | A2A agent card | public listing: name, version, examples | describes an agent to other agents, not to an owner |
 
-Among the products above, as far as their public documentation shows
-(October 2026), none combines what this runtime already does for one
-person's account: the assistant stops in a chat when the owner replies
-there, a disclosure line goes to the counterparty, limits apply per
-conversation, and the owner's details are disclosed per field depending on
-whether the owner has engaged. This is a comparison with those products'
-documented features, not a claim about the whole market.
+### What the combination is
+
+Among the products reviewed here, we did not find another documented system
+combining all of: delegation through a personal account; an author-defined
+authority envelope; owner-side tightening only; platform rules neither can
+override; per-intent `auto` / `approve` / `never`; per-field disclosure of the
+owner's details; owner takeover; refusal of work from an older install
+revision (#1023, merged, not yet released); and a policy re-check at send
+time. This compares documented features of the products named here, not the
+whole market. Known limits stay as stated above: protected values are
+guarded by context filtering and an exact-value match, which does not catch
+paraphrase or translation, and a reply mixing intents is judged by the
+model's single label (#602).
 
 ## Acceptance scenarios for later phases
 
