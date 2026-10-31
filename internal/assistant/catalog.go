@@ -30,6 +30,10 @@ type Entry struct {
 	// It is computed from the materialized form, not the authored file, so
 	// a copy fetched from the registry can be checked against it.
 	Digest string
+	// Source is the repository path of the authored assistant.yaml, set
+	// for a catalog entry only. A publish records it as the version's
+	// source manifest path.
+	Source string
 }
 
 // ErrInvalidUTF8 marks a document or instructions file that is not valid
@@ -183,7 +187,7 @@ func LoadCatalog(fsys fs.FS) (*Catalog, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", file, err)
 		}
-		c.entries[key] = &Entry{Definition: def, Instructions: string(text), Materialized: m, Digest: contentDigest(m)}
+		c.entries[key] = &Entry{Definition: def, Instructions: string(text), Materialized: m, Digest: contentDigest(m), Source: file}
 	}
 	return c, nil
 }
