@@ -32,6 +32,14 @@ That file is **not deployed by anything** — see the header comment in it.
 
 ## SLI definitions
 
+Each snippet below defines its ratio. The deployed 28-day compliance rules
+compute these ratios, and the 1h and 6h error ratios the burn-rate alerts
+read share their denominators, so a selector change here needs the same
+change there. The rules aggregate with `sum by (job, namespace)` rather than
+a bare `sum`, and fill an empty numerator with `0 *` the denominator, so a
+window in which nothing matched the numerator records 0 instead of no value;
+the comments in the rules file say why.
+
 ### MCP tool availability
 
 Fraction of MCP tool invocations that complete with `status="ok"`, excluding
@@ -80,24 +88,36 @@ histogram_quantile(0.95, sum by(le)(
 ))
 ```
 
+Histogram: `mctl_tool_invocation_duration_seconds{tool}`. It has no
+`traffic` label, so both latency SLOs include the canary's calls (see
+[Canary traffic](#canary-traffic)).
+
 ### OAuth token-endpoint availability
 
 Fraction of requests to `/oauth/token` and `/oauth/telegram/callback` that
 return a non-5xx response:
 
 ```promql
-1 - (
-  sum(rate(mctl_http_requests_total{route=~"/oauth/token|/oauth/telegram/callback",status_code=~"5.."}[28d]))
-  /
-  sum(rate(mctl_http_requests_total{route=~"/oauth/token|/oauth/telegram/callback"}[28d]))
-)
+sum(rate(mctl_http_requests_total{route=~"/oauth/token|/oauth/telegram/callback",status_code!~"5.."}[28d]))
+/
+sum(rate(mctl_http_requests_total{route=~"/oauth/token|/oauth/telegram/callback"}[28d]))
 ```
+
+The numerator counts the non-5xx responses directly. The equivalent-looking
+`1 - (5xx / total)` has no value when there were no 5xx at all, because a
+selector that matches no series gives an empty result rather than zero: the
+SLI would disappear exactly when OAuth is perfect.
+
+Counter: `mctl_http_requests_total{method,route,status_code}`. It has no
+`traffic` label, so this SLI includes the canary's requests (see
+[Canary traffic](#canary-traffic)).
 
 ### Session borrow success rate
 
 Fraction of `Pool.Borrow()` calls that succeed, excluding expected TTL
-expirations, users with no connected account and the canary's own borrows
-(see [Exclusions](#exclusions)):
+expirations, users with no connected account, Telegram replies over a
+working session and the canary's own borrows (see
+[Exclusions](#exclusions)):
 
 ```promql
 sum(rate(mctl_sessions_borrow_total{result="ok",traffic!="canary"}[28d]))
@@ -245,8 +265,13 @@ TTL expiry is expected user-side state (the user has not used the service in
 over 30 days), not a service failure. The SLI denominator is:
 
 ```promql
-sum(rate(mctl_sessions_borrow_total{result=~"ok|error"}[28d]))
+sum(rate(mctl_sessions_borrow_total{result=~"ok|error",traffic!="canary"}[28d]))
 ```
+
+Selecting `ok|error` by name leaves out more than the TTL expirations:
+`no_session`, `flood_wait` and `call_error` are outside it too (see below).
+`traffic!="canary"` leaves out the canary's own borrows, for the reasons in
+[Canary traffic](#canary-traffic).
 
 ### No active session
 
@@ -260,6 +285,11 @@ row (it was `telegram_error`, which was wrong: Telegram was never asked).
 Both are **excluded from both SLIs**, like a TTL expiry: it is user-side
 state, not a service failure. The `audit_logs` row and the log line keep
 `status=error`; the log line gains `slo_status=no_session`.
+
+A disconnect that lands after `Pool.Borrow()` checked the session but
+before the client loaded it counts the same way: the client fails with
+`db.ErrNoActiveSession` before it connects to Telegram, and the borrow is
+`no_session`.
 
 A session check that could not be made (the store is unreachable) is not
 `no_session`: it stays `error` and counts against the SLI.
@@ -284,11 +314,22 @@ background work and any call the server cannot place, is `traffic="user"`.
 The label is derived from server config, never from the request, so it
 cannot be used to move a call out of the SLI.
 
-Canary traffic is **excluded from both SLIs**. It has its own success metric
-and alert (`MctlTelegramCanaryFailing`); counted in the SLI as well, one
-canary outage paged three ways, and because the canary was about a third of
-the 28-day denominator its successes also flattered the SLI when real
-traffic was degraded.
+Canary traffic is **excluded from the tool-availability and session-borrow
+SLIs**: every SLI selector on `mctl_tool_invocations_total` and
+`mctl_sessions_borrow_total`, in this document and in the SLO rules file,
+carries `traffic!="canary"`. The canary has its own success metric and alert
+(`MctlTelegramCanaryFailing`); counted in the SLI as well, one canary outage
+paged three ways, and because the canary was about a third of the 28-day
+denominator its successes also flattered the SLI when real traffic was
+degraded.
+
+The OAuth SLI and the latency SLOs include the canary.
+`mctl_http_requests_total` and `mctl_tool_invocation_duration_seconds` have
+no `traffic` label, so there is nothing to select it out by. For OAuth that
+is one request per canary run: the login-path probe's
+`callback_unknown_state` step calls `/oauth/telegram/callback` with a state
+the server never issued, gets the expected 200 and counts as a success. The
+canary does not call `/oauth/token`.
 
 ### Telegram replies over a working session
 
