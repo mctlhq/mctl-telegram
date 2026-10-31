@@ -52,6 +52,11 @@ type Registry struct {
 	// tool name. Incremented each time borrowWithRetry observes a FloodWait
 	// error (whether or not the subsequent retry succeeds).
 	TelegramFloodWaitEventsTotal *prometheus.CounterVec
+	// TelegramFloodWaitSeconds observes the wait every FLOOD_WAIT_X asks for,
+	// labeled by the TL method that drew it (e.g. "messages.getHistory").
+	// Recorded by the pooled clients' middleware, so it also covers calls
+	// made outside an MCP tool (background executor, agent listener).
+	TelegramFloodWaitSeconds *prometheus.HistogramVec
 	// TelegramSponsoredTotal counts sponsored-message events on
 	// get_messages/get_unread_messages, labeled by tool and outcome:
 	// "returned" (an item included in a result), "unavailable" (a channel
@@ -653,6 +658,12 @@ func New() *Registry {
 		Help: "Total Telegram FLOOD_WAIT_X errors observed, labeled by MCP tool name. Incremented on each FloodWait event whether or not the retry succeeds.",
 	}, []string{"tool"})
 
+	r.TelegramFloodWaitSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "mctl_telegram_flood_wait_seconds",
+		Help:    "Wait requested by each Telegram FLOOD_WAIT_X error on a pooled client, labeled by TL method.",
+		Buckets: []float64{1, 2, 5, 10, 15, 30, 60, 120, 300, 900, 3600},
+	}, []string{"method"})
+
 	r.TelegramSponsoredTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_telegram_sponsored_messages_total",
 		Help: "Sponsored-message events on broadcast channel reads, labeled by MCP tool and outcome (returned, unavailable, viewed, view_failed, view_deduplicated).",
@@ -889,6 +900,7 @@ func New() *Registry {
 		r.TelegramClientErrorsTotal,
 		r.TelegramPoolCapacity,
 		r.TelegramFloodWaitEventsTotal,
+		r.TelegramFloodWaitSeconds,
 		r.TelegramSponsoredTotal,
 		r.SessionsConnectedTotal,
 		r.SessionsRevokedTotal,

@@ -954,23 +954,30 @@ Correlate with tool invocation rate to find the offending tool:
 sum(rate(mctl_tool_invocations_total[5m])) by (tool)
 ```
 
-To identify the offending user, search structured slog logs (JSON) for
-`flood_wait` events with the `user_id` field:
+Which TL method draws the waits, and how long Telegram asks for:
 
-```sh
-kubectl -n mctl-telegram logs -l app=mctl-telegram --since=10m \
-  | grep -i flood_wait | jq -r '.user_id' | sort | uniq -c | sort -rn | head -20
+```promql
+sum by (method) (increase(mctl_telegram_flood_wait_seconds_count[1h]))
+histogram_quantile(0.95, sum by (method, le) (rate(mctl_telegram_flood_wait_seconds_bucket[1h])))
 ```
 
-> **Caveat — logs are incomplete for warning-level spikes.** The
-> `mctl_telegram_flood_wait_events_total` metric is incremented on *every*
-> `FLOOD_WAIT` inside `borrowWithRetry()`, but `borrowWithRetry()` itself emits
-> no log line — a `flood_wait`-bearing entry only appears when retries are
-> exhausted and the tool returns an error. Warning-level spikes that self-retry
-> successfully therefore produce little or no log output. Use the metric (with
-> its `tool` label) as the authoritative detection and per-tool signal; treat
-> the log grep above as best-effort per-user attribution for error-level
-> (exhausted-retry) events only.
+Every FLOOD_WAIT on a pooled client is also logged at WARN as
+`telegram flood wait`, with `user_id`, `method`, `peer_kind`
+(`user`/`chat`/`channel`/`self`/`other`/`none`, never the peer id) and
+`wait_seconds`. That covers waits the retry absorbed, not only exhausted ones,
+and calls outside an MCP tool (background executor, agent listener). To find
+the account and method behind a spike:
+
+```sh
+kubectl -n labs logs -l app.kubernetes.io/instance=labs-mctl-telegram \
+    --since=1h --max-log-requests=10 \
+  | grep '"telegram flood wait"' | jq -r '[.user_id, .method, .peer_kind] | @tsv' \
+  | sort | uniq -c | sort -rn | head -20
+```
+
+A FLOOD_WAIT that `borrowWithRetry` waits out also shows up as tool latency:
+`get_messages` p95 above 5s (`HighToolLatency`) with the same hours here is
+Telegram's rate limit, not slowness in this service.
 
 ### Mitigation
 
