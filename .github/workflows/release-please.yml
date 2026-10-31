@@ -147,7 +147,9 @@ jobs:
   # GITHUB_TOKEN is one of the events that token is allowed to start.
   live-telegram:
     needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    # !cancelled(): needs alone implies success(), and a failed binary build
+    # would skip this job. Outputs of the steps that already ran survive it.
+    if: ${{ !cancelled() && needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       actions: write
