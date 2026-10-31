@@ -52,6 +52,11 @@ func TestFullChrome(t *testing.T) {
 		"#e25a3c",
 		// Self-hosted Umami page-view counter on public content pages.
 		AnalyticsScript,
+		// Ecosystem cross-links and Schema.org metadata.
+		`<a href="https://mctl.ai" target="_blank" rel="noopener">Platform</a>`,
+		`<a href="https://alice.mctl.ai" target="_blank" rel="noopener">Alice MCP</a>`,
+		`type="application/ld+json"`,
+		`"https://mctl.ai/#organization"`,
 	} {
 		if !strings.Contains(out, s) {
 			t.Errorf("full page missing %q", s)

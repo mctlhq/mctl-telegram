@@ -229,6 +229,11 @@ type Registry struct {
 	// single persistently-failing retry from inflating this past the actual
 	// number of distinct restart episodes (Codex finding on #307).
 	AgentExecutorRestartsTotal prometheus.Counter
+	// AgentDeliveryUnknownTotal counts actions the executor moved to
+	// delivery_unknown: sends whose outcome it could not observe and will
+	// not retry (#1029). Each one is also an owner alert; any increase is
+	// worth a look.
+	AgentDeliveryUnknownTotal prometheus.Counter
 
 	// AgentPolicyDenialsTotal counts hard policy denials, labeled by the
 	// closed-set denial code (policy.DenyCode, never the free-text reason —
@@ -825,6 +830,11 @@ func New() *Registry {
 		Help: "Actions observed stuck in executing for the first time (not counted again on later sweeps while still stuck).",
 	})
 
+	r.AgentDeliveryUnknownTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "mctl_agent_delivery_unknown_total",
+		Help: "Communication-agent sends moved to delivery_unknown: outcome not observable, not retried, owner alerted.",
+	})
+
 	r.AgentPolicyDenialsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_agent_policy_denials_total",
 		Help: "Total hard policy denials, labeled by a closed-set denial reason code (bounded: 24 values, see policy.DenyCode) and the consuming surface (bounded: 7 values, see PolicySurface* constants). Never labeled by account, conversation, or peer.",
@@ -938,6 +948,7 @@ func New() *Registry {
 		r.AgentActionsExecutingStuck,
 		r.AgentApprovalLatencySeconds,
 		r.AgentExecutorRestartsTotal,
+		r.AgentDeliveryUnknownTotal,
 		r.AgentPolicyDenialsTotal,
 		r.AgentJobCostUSDTotal,
 		r.AgentClaudeResultErrorsTotal,
