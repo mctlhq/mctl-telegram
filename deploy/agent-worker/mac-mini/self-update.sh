@@ -11,7 +11,8 @@
 #
 # Hold or roll back: write a commit into $BASE/PIN and the timer installs
 # that commit instead of tg-preview's; delete the file to follow tg-preview
-# again.
+# again. A commit that fails its readiness check is recorded in $BASE/FAILED
+# and skipped until the target changes.
 #
 # Usage: self-update.sh [--dry-run]
 set -euo pipefail
@@ -32,11 +33,25 @@ dry_run=0
 log() { printf '%s [self-update] %s\n' "$(date -u +%FT%TZ)" "$*"; }
 die() { log "ERROR: $*"; exit 1; }
 
+# The lock records its owner. A run killed before its EXIT trap (reboot,
+# SIGKILL, power loss) leaves the lock behind; a lock whose owner is gone, or
+# one older than an hour, is reclaimed instead of blocking updates for good.
 lock="$BASE/.update.lock"
-mkdir "$lock" 2>/dev/null || { log "another run holds $lock; skipping"; exit 0; }
+if ! mkdir "$lock" 2>/dev/null; then
+  owner="$(cat "$lock/pid" 2>/dev/null || true)"
+  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null &&
+    [ -z "$(find "$lock" -maxdepth 0 -mmin +60 2>/dev/null)" ]; then
+    log "run $owner holds $lock; skipping"
+    exit 0
+  fi
+  log "reclaiming stale lock (owner ${owner:-unknown})"
+  rm -rf "$lock"
+  mkdir "$lock" || die "cannot take $lock"
+fi
+echo $$ > "$lock/pid"
 work=""
 cleanup() {
-  rmdir "$lock" 2>/dev/null || true
+  rm -rf "$lock"
   if [ -n "$work" ]; then rm -rf "$work"; fi
 }
 trap cleanup EXIT
@@ -72,6 +87,13 @@ have_prompt_sha="$(shasum -a 256 "$BASE/system-prompt.txt" 2>/dev/null | cut -d'
 if [ "$have_version" = "$short" ] && [ "$have_prompt_sha" = "$want_prompt_sha" ]; then
   exit 0
 fi
+# A commit that already failed its readiness check is not retried until the
+# target changes; otherwise every run would bounce the worker through the same
+# failed install and rollback.
+if [ "$(cat "$BASE/FAILED" 2>/dev/null || true)" = "$short" ]; then
+  log "target $short failed before; staying on ${have_version:-none} until the target changes (rm $BASE/FAILED to retry)"
+  exit 1
+fi
 log "target $short ($source_desc); installed ${have_version:-none}, prompt ${have_prompt_sha:0:12} -> ${want_prompt_sha:0:12}"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/agent-worker-build.XXXXXX")"
@@ -101,24 +123,38 @@ if [ "$binary" != "$BASE/agent-worker" ]; then
 fi
 install -m 644 "$work/system-prompt.txt" system-prompt.txt.new && mv system-prompt.txt.new system-prompt.txt
 
-restart() { launchctl kickstart -k "gui/$(id -u)/$LABEL"; }
-wait_ready() {
-  # The first claim is a ~20s long-poll, so readiness can take a while.
-  for _ in $(seq 1 18); do
-    [ "$(curl -s -o /dev/null -w '%{http_code}' "$READY_URL" || true)" = 200 ] && return 0
+worker_pid() { launchctl list "$LABEL" 2>/dev/null | awk -F' = ' '/"PID"/{gsub(/;/,"",$2);print $2}'; }
+ready() { [ "$(curl -s -o /dev/null -w '%{http_code}' "$READY_URL" || true)" = 200 ]; }
+# restart replaces the worker process and succeeds only once a process other
+# than the one it replaced is ready and still the same process 30s later. A
+# 200 from the old process while it shuts down, or a new one that crashes
+# during its first long-poll claim, is a failure.
+restart() {
+  local old new
+  old="$(worker_pid)"
+  launchctl kickstart -k "gui/$(id -u)/$LABEL" || return 1
+  for _ in $(seq 1 24); do
     sleep 5
+    new="$(worker_pid)"
+    if [ -n "$new" ] && [ "$new" != "$old" ] && ready; then
+      sleep 30
+      [ "$(worker_pid)" = "$new" ] && ready && return 0
+      return 1
+    fi
   done
   return 1
 }
 
-restart
-if wait_ready; then
+if restart; then
+  rm -f "$BASE/FAILED"
   echo "$short" > VERSION
   log "ready on $short (previous $prev_version), prompt sha256 $want_prompt_sha"
   # Take this script from the same commit for the next run, if it parses.
-  if new_self="$(git -C "$SRC" show "$full:$SELF_PATH" 2>/dev/null)" && [ -n "$new_self" ]; then
+  # Not while pinned: an older commit's script may not know about PIN.
+  if [ ! -s "$BASE/PIN" ] && new_self="$(git -C "$SRC" show "$full:$SELF_PATH" 2>/dev/null)" && [ -n "$new_self" ]; then
     printf '%s\n' "$new_self" > "$BASE/self-update.sh.new"
     if bash -n "$BASE/self-update.sh.new"; then
+      chmod 755 "$BASE/self-update.sh.new"
       mv "$BASE/self-update.sh.new" "$BASE/self-update.sh"
     else
       rm -f "$BASE/self-update.sh.new"
@@ -129,9 +165,13 @@ if wait_ready; then
 fi
 
 log "not ready on $short; rolling back to $prev_version"
+echo "$short" > "$BASE/FAILED"
 tail -5 "$HOME/Library/Logs/$LABEL.log" 2>/dev/null || true
 [ -f agent-worker.prev ] && mv agent-worker.prev agent-worker
 [ -f system-prompt.txt.prev ] && mv system-prompt.txt.prev system-prompt.txt
-restart
-wait_ready && log "rolled back; ready on $prev_version"
+if restart; then
+  log "rolled back; ready on $prev_version"
+else
+  log "ERROR: rollback to $prev_version is not ready either"
+fi
 exit 1

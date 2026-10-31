@@ -15,10 +15,15 @@ it every 10 minutes:
    prompt's sha256 differ from that commit, build the worker at that commit
    and install the binary and `deploy/agent-worker/system-prompt.txt` from
    the same commit.
-3. Restart the worker and wait for `/readyz`. If it does not answer 200,
-   restore both the previous binary and prompt.
+3. Restart the worker and wait until a new process (a launchd PID other
+   than the old one) answers `/readyz` and is still the same process 30 s
+   later. Otherwise restore both the previous binary and prompt, record the
+   commit in `~/agent-worker/FAILED`, and skip it until the target changes.
 4. On success, take `self-update.sh` itself from the same commit for the
-   next run.
+   next run (not while a `PIN` is set).
+
+A lock in `~/agent-worker/.update.lock` records its owner's PID; a lock
+whose owner is gone, or one older than an hour, is reclaimed.
 
 A prompt edited by hand on the host is replaced by the commit's version on
 the next run: the prompt is canonical in this repository.
@@ -33,6 +38,7 @@ the next run: the prompt is canonical in this repository.
 | Run once now | `bash ~/agent-worker/self-update.sh` (add `--dry-run` to build only) |
 | Hold or roll back to a commit | `echo <sha> > ~/agent-worker/PIN` (the next run installs it) |
 | Follow tg-preview again | `rm ~/agent-worker/PIN` |
+| Retry a commit that failed | `rm ~/agent-worker/FAILED` |
 | Stop updating | `launchctl bootout gui/$(id -u)/com.mctl.agent-worker-update` |
 
 Prerequisites: git, curl and Go at `~/.local/go` (the official darwin

@@ -17,8 +17,10 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 [ -d "$BASE" ] || { echo "$BASE does not exist; set up the worker first" >&2; exit 1; }
-[ -x "$HOME/.local/go/bin/go" ] || { echo "Go not found at $HOME/.local/go" >&2; exit 1; }
+GO="${AGENT_WORKER_GO:-$HOME/.local/go/bin/go}"
+[ -x "$GO" ] || { echo "Go not found at $GO" >&2; exit 1; }
 bash -n "$HERE/self-update.sh"
+mkdir -p "$(dirname "$PLIST")" "$HOME/Library/Logs"
 install -m 755 "$HERE/self-update.sh" "$BASE/self-update.sh"
 
 cat > "$PLIST" <<PLIST
@@ -28,7 +30,11 @@ cat > "$PLIST" <<PLIST
 <dict>
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key><array><string>/bin/bash</string><string>$BASE/self-update.sh</string></array>
-  <key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin</string>
+    <key>AGENT_WORKER_BASE</key><string>$BASE</string>
+    <key>AGENT_WORKER_GO</key><string>$GO</string>
+  </dict>
   <key>StartInterval</key><integer>600</integer>
   <key>RunAtLoad</key><true/>
   <key>StandardOutPath</key><string>$HOME/Library/Logs/$LABEL.log</string>
