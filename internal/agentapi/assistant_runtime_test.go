@@ -285,3 +285,14 @@ func TestClaim_UnknownAssistantFailsBeforeClaiming(t *testing.T) {
 		t.Fatalf("job after failed claim = %+v, want pending attempt 0", st)
 	}
 }
+
+// An enrolled worker for an account that has no profile row yet keeps
+// getting empty claims, not a 500 on every poll.
+func TestClaim_NoProfileRowIsAnEmptyClaim(t *testing.T) {
+	h := newHarness(t)
+	h.srv.WithCatalog(embeddedCatalog(t))
+	code, jobs := claimOne(t, h)
+	if code != http.StatusOK || len(jobs) != 0 {
+		t.Fatalf("claim = %d %+v, want 200 with no jobs", code, jobs)
+	}
+}

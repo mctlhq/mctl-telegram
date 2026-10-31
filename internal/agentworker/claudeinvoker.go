@@ -26,6 +26,7 @@ func mcpConfigTempFile(cfg mcpConfig) (path string, cleanup func(), err error) {
 	}
 	cleanup = func() { _ = os.Remove(f.Name()) }
 	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
 		cleanup()
 		return "", nil, fmt.Errorf("chmod mcp config temp file: %w", err)
 	}
@@ -54,6 +55,7 @@ func promptTempFile(prompt string) (path string, cleanup func(), err error) {
 	}
 	cleanup = func() { _ = os.Remove(f.Name()) }
 	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
 		cleanup()
 		return "", nil, fmt.Errorf("chmod prompt temp file: %w", err)
 	}

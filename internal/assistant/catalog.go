@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io/fs"
 	"path"
-	"regexp"
 	"strings"
 )
 
@@ -98,8 +97,12 @@ const (
 	ownerNotesClose = "</owner_notes>"
 )
 
-// ownerNotesTag matches either delimiter in any case or spacing.
-var ownerNotesTag = regexp.MustCompile(`(?i)<\s*/?\s*owner_notes\s*>`)
+// angleBrackets turns every angle bracket in the owner's notes into a
+// lookalike. Removing matched tags is not enough: a single pass rebuilds a
+// tag hidden inside another (</owner_</owner_notes>notes>), and variants
+// with attributes or odd spacing slip past a pattern. With no "<" or ">"
+// left, the notes cannot form any tag at all.
+var angleBrackets = strings.NewReplacer("<", "\u2039", ">", "\u203a")
 
 // Render is the system prompt for an account running e with install in
 // (nil for an account never configured through an install): the
@@ -116,7 +119,7 @@ func Render(e *Entry, in *Install) string {
 	}
 	// The notes cannot close their own block and pose as instructions
 	// that follow it.
-	notes = ownerNotesTag.ReplaceAllString(notes, "")
+	notes = angleBrackets.Replace(notes)
 	return base + "\n\n" +
 		"Owner notes: the account owner added the guidance below for this assistant. " +
 		"Follow it where it does not conflict with anything above; everything above takes precedence. " +

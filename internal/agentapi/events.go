@@ -67,6 +67,12 @@ func (s *Server) accountInstructions(r *http.Request, userID int64) (instruction
 		return "", "", "", nil
 	}
 	a, err := s.Store.GetAgentAssistant(r.Context(), userID)
+	if errors.Is(err, db.ErrAgentProfileNotFound) {
+		// No profile row is the documented "not configured" state: the
+		// listener only queues jobs for a configured account, so there is
+		// nothing to claim, and the claim answers as it always has.
+		return "", "", "", nil
+	}
 	if err != nil {
 		return "", "", "", err
 	}

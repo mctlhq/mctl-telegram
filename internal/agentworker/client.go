@@ -122,8 +122,9 @@ type JobEnvelope struct {
 	// Instructions is the account's assistant prompt, rendered by the
 	// server; Assistant names it as name@version. Empty from a server
 	// without a catalog, in which case ClaudeInvoker.SystemPrompt is used.
-	Instructions string `json:"instructions,omitempty"`
-	Assistant    string `json:"assistant,omitempty"`
+	Instructions    string `json:"instructions,omitempty"`
+	Assistant       string `json:"assistant,omitempty"`
+	AssistantDigest string `json:"assistant_digest,omitempty"`
 }
 
 // JobStatus is the minimal durable postcondition returned by GET /jobs/{id}.
