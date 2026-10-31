@@ -121,7 +121,7 @@ var defs = `
   "name": "MCTL Assistant",
   "applicationCategory": "DeveloperApplication",
   "operatingSystem": "Cloud",
-  "url": "https://tg.mctl.ai",
+  "url": "{{.PublicBaseURL}}",
   "description": "Connect Telegram to Claude, ChatGPT, or any AI assistant via MCP",
   "provider": {
     "@type": "Organization",
