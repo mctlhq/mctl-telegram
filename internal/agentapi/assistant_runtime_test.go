@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -224,6 +225,11 @@ func TestClaim_CarriesDefaultAssistantInstructions(t *testing.T) {
 	}
 	if j.Assistant != "hr-recruiter@0.1.0" || !strings.HasPrefix(j.AssistantDigest, "sha256:") {
 		t.Fatalf("assistant = %q digest = %q", j.Assistant, j.AssistantDigest)
+	}
+	// The HR definition keeps the canonical names; the envelope carries them
+	// as the definition lists them.
+	if len(j.Tools) != 11 || !slices.Contains(j.Tools, "save_job_lead") {
+		t.Fatalf("tools = %v", j.Tools)
 	}
 }
 

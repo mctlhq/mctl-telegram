@@ -25,6 +25,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/assistants"
 	"github.com/mctlhq/mctl-telegram/internal/agent/profile"
 	"github.com/mctlhq/mctl-telegram/internal/agent/schedule"
+	"github.com/mctlhq/mctl-telegram/internal/agent/tools"
 )
 
 // ErrUnsupported marks an install setting the current runtime cannot enforce.
@@ -48,13 +49,10 @@ var disclosureRank = map[profile.DisclosureLevel]int{
 	profile.DisclosureNever:             2,
 }
 
-// RuntimeTools is every tool the worker exposes today. Until the runtime can
-// restrict tools per assistant, a definition must list all of them.
-var RuntimeTools = []string{
-	"get_event", "get_conversation_context", "get_recruiter_profile", "get_lead",
-	"get_policy", "propose_reply", "save_job_lead", "request_owner_approval",
-	"send_owner_summary", "pause_autopilot", "complete_agent_job",
-}
+// RuntimeTools is every tool the worker implements, by canonical name. A
+// definition must name all of them, each by that name or a generic alias
+// (internal/agent/tools).
+var RuntimeTools = tools.Canonical
 
 // Limits are the per-conversation limits of an assistant.
 type Limits struct {
@@ -276,6 +274,9 @@ func ParseDefinition(raw []byte) (*Definition, error) {
 	if err := withinCeilings(d.Spec.Defaults.Limits, d.Spec.Defaults.Ceilings); err != nil {
 		return nil, fmt.Errorf("defaults: %w", err)
 	}
+	if _, err := tools.Resolve(d.Spec.Tools); err != nil {
+		return nil, fmt.Errorf("tools: %w", err)
+	}
 	return &d, nil
 }
 
@@ -462,11 +463,14 @@ func Resolve(def *Definition, in *Install) (*Profile, error) {
 
 // supported rejects what the runtime cannot enforce yet.
 func supported(def *Definition, in *Install) error {
-	tools := slices.Clone(def.Spec.Tools)
-	sort.Strings(tools)
-	want := slices.Clone(RuntimeTools)
-	sort.Strings(want)
-	if !slices.Equal(tools, want) {
+	// Each tool may be named by its canonical name or a generic alias, but
+	// all of them must be there: the agent API does not check which tools a
+	// job may call, so a subset would look enforced while it is not.
+	bindings, err := tools.Resolve(def.Spec.Tools)
+	if err != nil {
+		return fmt.Errorf("tools: %w", err)
+	}
+	if !tools.Complete(bindings) {
 		return fmt.Errorf("tools: a restricted tool set is %w", ErrUnsupported)
 	}
 	// The worker's model, budget and timeout come from its own environment;

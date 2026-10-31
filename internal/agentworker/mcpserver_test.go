@@ -9,6 +9,8 @@ import (
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
+
+	"github.com/mctlhq/mctl-telegram/internal/agent/tools"
 )
 
 // fakeAPI records every call it receives and returns canned/erroring
@@ -338,17 +340,60 @@ func TestAPIErrorSurfacesAsToolError(t *testing.T) {
 }
 
 func TestNewMCPServer_RegistersAllElevenTools(t *testing.T) {
-	srv := NewMCPServer(&fakeAPI{}, JobContext{JobID: 1, ConversationID: 2, EventID: "evt:1"})
-	if srv == nil {
-		t.Fatal("expected non-nil server")
+	srv, err := NewMCPServer(&fakeAPI{}, JobContext{JobID: 1, ConversationID: 2, EventID: "evt:1"})
+	if err != nil {
+		t.Fatal(err)
 	}
 	got := srv.ListTools()
 	if len(got) != 11 {
 		t.Fatalf("registered %d tools, want 11: %v", len(got), toolNames(got))
 	}
-	for _, name := range allowedTools {
+	for _, name := range tools.Canonical {
 		if _, ok := got[name]; !ok {
 			t.Fatalf("tool %q not registered: %v", name, toolNames(got))
+		}
+	}
+}
+
+// TestNewMCPServer_RegistersAliases registers each tool under the name the
+// job gives it, and a generic alias reaches the same implementation.
+func TestNewMCPServer_RegistersAliases(t *testing.T) {
+	names := []string{
+		"get_event", "get_conversation_context", "get_owner_profile", "get_record", "get_policy",
+		"propose_reply", "save_record", "request_owner_approval", "send_owner_summary",
+		"pause_autopilot", "complete_agent_job",
+	}
+	api := &fakeAPI{leadToReturn: &LeadDTO{ID: 7, Company: "Acme"}}
+	srv, err := NewMCPServer(api, JobContext{JobID: 1, ConversationID: 2, EventID: "evt:1", Tools: names})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := srv.ListTools()
+	if len(got) != 11 {
+		t.Fatalf("registered %d tools: %v", len(got), toolNames(got))
+	}
+	for _, name := range names {
+		if _, ok := got[name]; !ok {
+			t.Fatalf("tool %q not registered: %v", name, toolNames(got))
+		}
+	}
+	for _, old := range []string{"get_recruiter_profile", "get_lead", "save_job_lead"} {
+		if _, ok := got[old]; ok {
+			t.Fatalf("canonical name %q registered next to its alias", old)
+		}
+	}
+	res, err := got["get_record"].Handler(context.Background(), mcplib.CallToolRequest{})
+	if err != nil || res.IsError {
+		t.Fatalf("get_record: res=%+v err=%v", res, err)
+	}
+
+	for name, bad := range map[string][]string{
+		"subset":    names[:10],
+		"duplicate": append(append([]string{}, names...), "save_job_lead"),
+		"unknown":   append(append([]string{}, names[:10]...), "send_email"),
+	} {
+		if _, err := NewMCPServer(api, JobContext{JobID: 1, Tools: bad}); err == nil {
+			t.Errorf("%s: accepted %v", name, bad)
 		}
 	}
 }

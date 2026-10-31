@@ -1,6 +1,6 @@
 # Assistant definitions (assistants.mctl.ai/v1alpha1)
 
-Status: draft (P2 in progress). The server compiles the catalog in, an
+Status: draft (P2 done, pending release). The server compiles the catalog in, an
 account's install is applied through `PUT /api/admin/agent/install`, and
 every claimed job carries its assistant's instructions. Of the P2 policy
 settings, policy enforces the `never` tier, `outside_hours` schedules and
@@ -203,7 +203,7 @@ profile equals the configuration the agent runs with today.
 | `audience_excludes` (CSV) | install `audience.scope` classes set to `false` |
 | owner profile document | install `values` placed by each variable's `profilePath` |
 | owner profile `disclosure` map | variable `disclosure`, install `disclosureLevels` |
-| fixed MCP tool set | definition `tools` |
+| fixed MCP tool set | definition `tools`, by canonical name or alias |
 | `job_leads` table | definition `records.kind` |
 | worker model and budget env | definition `execution` (reserved, rejected if set) |
 
@@ -281,6 +281,28 @@ audience:
   nobody and is rejected.
 - `blockedSenders` always wins; an empty `onlySenders` means everyone.
 
+## Tool names
+
+The worker implements eleven tools. Three carry recruiter-specific names,
+and a definition may call them by a generic alias instead:
+
+| Canonical | Alias |
+|---|---|
+| `get_recruiter_profile` | `get_owner_profile` |
+| `get_lead` | `get_record` |
+| `save_job_lead` | `save_record` |
+
+Each claimed job carries the definition's tool names (`tools` in the
+envelope). The worker allows exactly those names on the `claude` command
+line and registers each tool under its name in the job's MCP server; the
+implementation behind an alias is the same tool. A job from a server
+without a catalog carries no names and gets the canonical ones.
+
+A definition must still name every tool, each once: naming both a tool and
+its alias is an error, and a subset is `ErrUnsupported`. The agent API does
+not check which tools a job may call, so a subset would look enforced while
+it is not; tool restriction needs that server-side check first.
+
 ## Customization tiers
 
 | Tier | The user | Gate |
@@ -306,7 +328,7 @@ audience:
   `policy.go` (both done: see [Schedules](#schedules) and
   [Audience](#audience)); `/mctl` gets unpause and shows the install (done:
   `/mctl unpause`, `/mctl assistant`); recruiter-specific
-  tool names get generic aliases (`save_record`, `get_owner_profile`).
+  tool names get generic aliases (done: see [Tool names](#tool-names)).
 - **P3:** definitions published to the mctl-api agent registry, a
   per-account install binding, MCP tools `list_assistants`,
   `install_assistant`, `update_install`, and a page on tg.mctl.ai.

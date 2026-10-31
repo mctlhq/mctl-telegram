@@ -615,3 +615,34 @@ func TestClaudeInvoker_Run_SystemPromptSource(t *testing.T) {
 		})
 	}
 }
+
+// TestClaudeInvoker_Run_ToolNamesFromJob allows the tools under the names
+// the job carries and hands the same names to the MCP server process; a job
+// that names only some tools is refused before claude starts.
+func TestClaudeInvoker_Run_ToolNamesFromJob(t *testing.T) {
+	stdout := `{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"handled it"}`
+	bin, argvFile, _, _ := fakeClaudeScript(t, stdout, 0)
+	statusSrv := jobStatusServer(t, 42, "completed", 1)
+	inv := &ClaudeInvoker{ClaudeBin: bin, Self: "/usr/local/bin/agent-worker", APIBaseURL: statusSrv.URL, APIToken: "super-secret-token"}
+	names := []string{
+		"get_event", "get_conversation_context", "get_owner_profile", "get_record", "get_policy",
+		"propose_reply", "save_record", "request_owner_approval", "send_owner_summary",
+		"pause_autopilot", "complete_agent_job",
+	}
+	job := JobEnvelope{JobID: 42, EventID: "evt:1", ConversationID: 9, Attempt: 1, Tools: names}
+	if err := inv.Run(context.Background(), job); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	joined := strings.Join(readArgv(t, argvFile), "\x00")
+	if !strings.Contains(joined, "mcp__"+ServerName+"__save_record") || strings.Contains(joined, "save_job_lead") {
+		t.Fatalf("allowed tools do not follow the job's names: %q", joined)
+	}
+	if env := inv.buildMCPConfig(job).MCPServers[ServerName].Env["AGENT_JOB_TOOLS"]; env != strings.Join(names, ",") {
+		t.Fatalf("AGENT_JOB_TOOLS = %q", env)
+	}
+
+	job.Tools = names[:10]
+	if err := inv.Run(context.Background(), job); err == nil || !strings.Contains(err.Error(), "job tools") {
+		t.Fatalf("partial tool list: err = %v", err)
+	}
+}

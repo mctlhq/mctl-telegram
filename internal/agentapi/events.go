@@ -53,6 +53,10 @@ type jobEnvelope struct {
 	// AssistantDigest pins the definition and instructions the job ran
 	// with (assistant.Entry.Digest), for the worker's logs.
 	AssistantDigest string `json:"assistant_digest,omitempty"`
+	// Tools names the job's MCP tools as the definition calls them, each a
+	// canonical name or a generic alias (internal/agent/tools). Omitted
+	// without a catalog; the worker then uses the canonical names.
+	Tools []string `json:"tools,omitempty"`
 }
 
 // errAssistantNotInCatalog means the account's profile names an assistant
@@ -62,33 +66,33 @@ var errAssistantNotInCatalog = errors.New("assistant not in catalog")
 // accountInstructions renders the system prompt for userID's jobs. It fails
 // rather than falling back: running an account's jobs with another
 // assistant's instructions would be worse than not running them.
-func (s *Server) accountInstructions(r *http.Request, userID int64) (instructions, ref, digest string, err error) {
+func (s *Server) accountInstructions(r *http.Request, userID int64) (instructions, ref, digest string, toolNames []string, err error) {
 	if s.catalog == nil {
-		return "", "", "", nil
+		return "", "", "", nil, nil
 	}
 	a, err := s.Store.GetAgentAssistant(r.Context(), userID)
 	if errors.Is(err, db.ErrAgentProfileNotFound) {
 		// No profile row is the documented "not configured" state: the
 		// listener only queues jobs for a configured account, so there is
 		// nothing to claim, and the claim answers as it always has.
-		return "", "", "", nil
+		return "", "", "", nil, nil
 	}
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", nil, err
 	}
 	ref = a.Name + "@" + a.Version
 	entry, ok := s.catalog.Lookup(a.Name, a.Version)
 	if !ok {
-		return "", "", "", fmt.Errorf("%w: %s", errAssistantNotInCatalog, ref)
+		return "", "", "", nil, fmt.Errorf("%w: %s", errAssistantNotInCatalog, ref)
 	}
 	var in *assistant.Install
 	if len(a.Install) > 0 {
 		if in, err = assistant.ParseInstall(a.Install); err != nil {
 			// The error text can quote a stored value; keep it out.
-			return "", "", "", fmt.Errorf("stored install for %s no longer parses", ref)
+			return "", "", "", nil, fmt.Errorf("stored install for %s no longer parses", ref)
 		}
 	}
-	return assistant.Render(entry, in), ref, entry.Digest, nil
+	return assistant.Render(entry, in), ref, entry.Digest, entry.Definition.Spec.Tools, nil
 }
 
 // jobTokenAudience is the aud of the per-job credential.
@@ -164,7 +168,7 @@ func (s *Server) handleClaimJobs(w http.ResponseWriter, r *http.Request) {
 
 	// Rendered before anything is claimed, so a failure leaves every job
 	// queued instead of claimed by a request that cannot run it.
-	instructions, assistantRef, assistantDigest, err := s.accountInstructions(r, id.UserID)
+	instructions, assistantRef, assistantDigest, toolNames, err := s.accountInstructions(r, id.UserID)
 	if err != nil {
 		logHandlerErr("get_events", err)
 		writeJSONError(w, http.StatusInternalServerError, "assistant instructions unavailable")
@@ -207,6 +211,7 @@ func (s *Server) handleClaimJobs(w http.ResponseWriter, r *http.Request) {
 					Instructions:    instructions,
 					Assistant:       assistantRef,
 					AssistantDigest: assistantDigest,
+					Tools:           toolNames,
 				})
 			}
 			s.audit(ctx, id.UserID, "get_events", "ok", "")

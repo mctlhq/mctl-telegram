@@ -125,6 +125,9 @@ type JobEnvelope struct {
 	Instructions    string `json:"instructions,omitempty"`
 	Assistant       string `json:"assistant,omitempty"`
 	AssistantDigest string `json:"assistant_digest,omitempty"`
+	// Tools names the job's MCP tools as the assistant calls them, each a
+	// canonical name or a generic alias; empty means the canonical names.
+	Tools []string `json:"tools,omitempty"`
 }
 
 // JobStatus is the minimal durable postcondition returned by GET /jobs/{id}.

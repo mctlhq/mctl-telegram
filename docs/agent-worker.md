@@ -271,7 +271,11 @@ are audited as `suppressed`, and the tool result says `suppressed: true`.
 **Prompt.** Each claimed job carries its account's assistant instructions
 (`instructions`, with `assistant` and `assistant_digest`), rendered by the
 server from the compiled-in catalog; for the recruiter agent that is
-`deploy/agent-worker/system-prompt.txt` plus the owner's notes. A prompt
+`deploy/agent-worker/system-prompt.txt` plus the owner's notes. The job also
+carries `tools`, the definition's tool names (a canonical name or a generic
+alias for each tool, see `docs/assistants/spec.md`); the worker passes them
+to the MCP server as `AGENT_JOB_TOOLS` and allows exactly those names. A job
+whose names do not cover every tool fails before `claude` starts. A prompt
 change therefore ships with the server release. `AGENT_SYSTEM_PROMPT` is the
 fallback for a server without the catalog and should still be the contents
 of `deploy/agent-worker/system-prompt.txt`, the canonical guarded prompt that

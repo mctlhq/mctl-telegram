@@ -370,3 +370,24 @@ func TestExecutionSettingsUnsupported(t *testing.T) {
 		})
 	}
 }
+
+// A definition may call tools by their generic aliases, but must still name
+// every tool, and may not name one tool twice.
+func TestDefinitionToolAliases(t *testing.T) {
+	base := readFile(t, "assistant.yaml")
+	renamed := editYAML(t, base,
+		"    - get_recruiter_profile\n", "    - get_owner_profile\n",
+		"    - get_lead\n", "    - get_record\n",
+		"    - save_job_lead\n", "    - save_record\n")
+	def, err := ParseDefinition(renamed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ProfileRequest(def, hrInstall(t), danaID); err != nil {
+		t.Fatalf("aliased definition: %v", err)
+	}
+	both := editYAML(t, base, "    - save_job_lead\n", "    - save_job_lead\n    - save_record\n")
+	if _, err := ParseDefinition(both); err == nil {
+		t.Fatal("a tool named twice was accepted")
+	}
+}
