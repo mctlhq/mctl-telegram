@@ -7,7 +7,8 @@
 //
 //	TG_LIVE_API_ID=... TG_LIVE_API_HASH=... \
 //	  go run ./cmd/ci-anchor send -state DIR -phone +15550100000
-//	go run ./cmd/ci-anchor resend -state DIR   # optional: next delivery method, e.g. SMS
+//	TG_LIVE_API_ID=... TG_LIVE_API_HASH=... \
+//	  go run ./cmd/ci-anchor resend -state DIR   # optional: next delivery method, e.g. SMS
 //	TG_LIVE_API_ID=... TG_LIVE_API_HASH=... \
 //	  go run ./cmd/ci-anchor confirm -state DIR -code 12345
 //
