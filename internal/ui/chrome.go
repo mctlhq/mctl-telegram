@@ -99,6 +99,7 @@ var defs = `
 {{define "ui_head"}}<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {{if .NoIndex}}<meta name="robots" content="noindex, follow">
+{{else}}<meta name="robots" content="max-image-preview:large, max-snippet:-1, max-video-preview:-1">
 {{end}}<title>{{.Title}}</title>
 <meta name="description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarize unread chats, draft replies, and search your history — no extra apps.{{end}}">
 {{if .CanonicalPath}}<link rel="canonical" href="{{.PublicBaseURL}}{{.CanonicalPath}}">
