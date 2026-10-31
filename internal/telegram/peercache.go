@@ -17,6 +17,11 @@ type PeerCache struct {
 	m   map[peerCacheKey]*peerCacheEntry
 	ttl time.Duration
 	now func() time.Time
+
+	// dialogs holds per-account getDialogs snapshots for peer lookups; see
+	// dialogs_snapshot.go.
+	dialogs    dialogsSnapshots
+	dialogsTTL time.Duration
 }
 
 type peerCacheKey struct {
@@ -34,9 +39,10 @@ const defaultPeerCacheTTL = 10 * time.Minute
 // NewPeerCache returns a PeerCache with the default 10-minute TTL.
 func NewPeerCache() *PeerCache {
 	return &PeerCache{
-		m:   make(map[peerCacheKey]*peerCacheEntry),
-		ttl: defaultPeerCacheTTL,
-		now: time.Now,
+		m:          make(map[peerCacheKey]*peerCacheEntry),
+		ttl:        defaultPeerCacheTTL,
+		now:        time.Now,
+		dialogsTTL: defaultDialogsSnapshotTTL,
 	}
 }
 
@@ -85,14 +91,16 @@ func (pc *PeerCache) Evict(userID int64, peerSpec string) {
 	delete(pc.m, peerCacheKey{userID: userID, peerSpec: peerSpec})
 }
 
-// Sweep removes all expired entries. Call periodically to bound memory usage.
+// Sweep removes all expired entries, dialog snapshots included. Call
+// periodically to bound memory usage.
 func (pc *PeerCache) Sweep() {
 	pc.mu.Lock()
-	defer pc.mu.Unlock()
 	now := pc.now()
 	for k, v := range pc.m {
 		if now.After(v.expiresAt) {
 			delete(pc.m, k)
 		}
 	}
+	pc.mu.Unlock()
+	pc.sweepDialogs(now)
 }
