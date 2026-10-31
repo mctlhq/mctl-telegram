@@ -154,3 +154,91 @@ func (c *Client) Fetch(ctx context.Context, name, version string) (*Definition, 
 	}
 	return &Definition{Lifecycle: r.Lifecycle, Entry: entry}, nil
 }
+
+// CatalogEntry is one version the registry's public catalog offers
+// (GET /api/v1/assistant-catalog). The registry projects it from an
+// allowlist: no instructions, tools, owner or provenance, and no default
+// for a secret variable.
+type CatalogEntry struct {
+	Name        string            `json:"name"`
+	Version     string            `json:"version"`
+	Title       string            `json:"title"`
+	Description string            `json:"description"`
+	Tags        []string          `json:"tags"`
+	Lifecycle   string            `json:"lifecycle"`
+	Variables   []CatalogVariable `json:"variables"`
+	Intents     []CatalogIntent   `json:"intents"`
+	Defaults    CatalogDefaults   `json:"defaults"`
+}
+
+// CatalogVariable is one variable of a catalog entry.
+type CatalogVariable struct {
+	Name        string          `json:"name"`
+	Type        string          `json:"type"`
+	Required    bool            `json:"required"`
+	Default     json.RawMessage `json:"default,omitempty"`
+	Choices     []string        `json:"choices,omitempty"`
+	Description string          `json:"description"`
+}
+
+// CatalogIntent is one reply intent of a catalog entry and its default tier.
+type CatalogIntent struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Tier        string `json:"tier"`
+}
+
+// CatalogDefaults are a catalog entry's install defaults.
+type CatalogDefaults struct {
+	Mode       string            `json:"mode"`
+	Limits     *assistant.Limits `json:"limits,omitempty"`
+	Disclosure struct {
+		Policy string `json:"policy"`
+	} `json:"disclosure"`
+}
+
+// ListCatalog reads the registry's public catalog: every published, public,
+// non-draft version. The route is public, so no credential is sent. A
+// response that cannot be read in full is ErrUnavailable or ErrInvalid,
+// never an empty catalog: a catalog that failed to load must not read as
+// one with nothing in it.
+func (c *Client) ListCatalog(ctx context.Context) ([]CatalogEntry, error) {
+	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v1/assistant-catalog", nil)
+	if err != nil {
+		return nil, fmt.Errorf("%w: build request: %v", ErrUnavailable, err)
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("%w: read response: %v", ErrUnavailable, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%w: status %d", ErrUnavailable, resp.StatusCode)
+	}
+	if len(body) > maxResponseBytes {
+		return nil, fmt.Errorf("%w: response exceeds %d bytes", ErrInvalid, maxResponseBytes)
+	}
+	var r struct {
+		Items *[]CatalogEntry `json:"items"`
+		Count *int            `json:"count"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return nil, fmt.Errorf("%w: decode catalog", ErrInvalid)
+	}
+	if r.Items == nil || r.Count == nil || *r.Count != len(*r.Items) {
+		return nil, fmt.Errorf("%w: catalog without a consistent items list", ErrInvalid)
+	}
+	for _, e := range *r.Items {
+		if e.Name == "" || e.Version == "" {
+			return nil, fmt.Errorf("%w: catalog entry without name or version", ErrInvalid)
+		}
+	}
+	return *r.Items, nil
+}
