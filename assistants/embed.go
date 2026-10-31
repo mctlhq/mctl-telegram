@@ -5,8 +5,9 @@ package assistants
 
 import "embed"
 
-// Schemas holds schemas/assistant.schema.json and
-// schemas/assistant-install.schema.json.
+// Schemas holds schemas/assistant.schema.json,
+// schemas/assistant-install.schema.json and the eval suite and fixture
+// schemas, schemas/assistant-eval-*.schema.json.
 //
 //go:embed schemas/*.json
 var Schemas embed.FS

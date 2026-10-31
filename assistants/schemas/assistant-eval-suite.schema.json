@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tg.mctl.ai/schemas/assistant-eval-suite.schema.json",
+  "title": "AssistantEvalSuite",
+  "description": "The baseline eval suite of one catalog assistant version: the base it belongs to, the classification threshold and the install values runs render with. The fixtures live beside it in fixtures.jsonl (assistant-eval-fixture.schema.json). See docs/assistants/adr-forks.md, Promotion.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "base", "thresholds", "values"],
+  "properties": {
+    "apiVersion": { "const": "assistants.mctl.ai/v1alpha1" },
+    "kind": { "const": "AssistantEvalSuite" },
+    "base": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "digest"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+        "version": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$" },
+        "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minClassification"],
+      "properties": {
+        "minClassification": { "description": "Fixtures that must classify correctly in a full run.", "type": "integer", "minimum": 1 }
+      }
+    },
+    "values": {
+      "description": "Install values, as an AssistantInstall's spec.values.",
+      "type": "object"
+    }
+  }
+}

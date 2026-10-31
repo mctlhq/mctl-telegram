@@ -79,6 +79,13 @@ type Input struct {
 	// e.g. a proposal without a job, which is judged under the current
 	// install anyway (#1018).
 	InstallRevision int64
+	// ForkPromoted reports that the private fork the profile runs is
+	// promoted for guarded mode (P4.3, #1044). Until the promotion step
+	// exists, no production caller sets it, so guarded on a fork stays
+	// observe; internal/agenteval's guarded dry run sets it to measure what
+	// a fork would auto-send once promoted. It means nothing for a catalog
+	// assistant.
+	ForkPromoted bool
 }
 
 // ProtectedField names an owner_profile field whose value a reply echoes
@@ -532,11 +539,11 @@ func Evaluate(in Input) Result {
 	}
 
 	var reasons []string
-	// A private fork runs in observe mode until it is promoted (#1043), and
-	// nothing promotes one yet, so guarded on a fork is observe here too:
-	// the mode column alone cannot make a fork auto-send.
+	// A private fork runs in observe mode until it is promoted (#1043,
+	// #1044), so guarded on an unpromoted fork is observe here too: the mode
+	// column alone cannot make a fork auto-send.
 	if in.Profile.Mode == db.AgentModeObserve ||
-		(in.Profile.Mode == db.AgentModeGuarded && db.IsForkAssistant(in.Profile.AssistantName)) {
+		(in.Profile.Mode == db.AgentModeGuarded && db.IsForkAssistant(in.Profile.AssistantName) && !in.ForkPromoted) {
 		reasons = append(reasons, ReasonObserveMode)
 	}
 	maxTurns := in.Profile.MaxAutonomousTurns
