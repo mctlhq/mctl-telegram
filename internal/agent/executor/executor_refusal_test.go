@@ -278,3 +278,45 @@ func TestExecutor_RecoverStuck_FloodWaitPastTTL(t *testing.T) {
 		})
 	}
 }
+
+// TestExecutor_DenyOnADecidedRowReportsTheRace sweeps the discarded-ok
+// class: a deny whose compare-and-set finds the row already decided must
+// report that, not the denial it did not make. Fresh send: the gate check
+// runs while the owner rejects the draft. Recovery: the kill switch flips
+// while the row is decided elsewhere.
+func TestExecutor_DenyOnADecidedRowReportsTheRace(t *testing.T) {
+	exec, _, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	actionID, code := seedPendingApproval(t, store, uid, conv.ID, "hi")
+	exec.SendGate = func(context.Context, int64, int64) error {
+		if ok, err := store.UpdateAgentActionStatus(ctx, uid, actionID, db.ActionApproved, db.ActionDenied); err != nil || !ok {
+			t.Errorf("decide elsewhere: ok=%v err=%v", ok, err)
+		}
+		return errGateDenied
+	}
+	if err := exec.Approve(ctx, uid, code); !errors.Is(err, ErrLostRace) {
+		t.Fatalf("approve: err=%v, want ErrLostRace", err)
+	}
+
+	exec.SendGate = nil
+	recID := approvedForRecovery(t, store, uid, conv.ID, 777001)
+	exec.GlobalKill = func() bool {
+		if ok, err := store.UpdateAgentActionStatus(ctx, uid, recID, db.ActionExecuting, db.ActionDenied); err != nil || !ok {
+			t.Errorf("decide elsewhere: ok=%v err=%v", ok, err)
+		}
+		return true
+	}
+	stuck, err := store.ListStuckExecutingActions(ctx, 0)
+	if err != nil {
+		t.Fatalf("list stuck: %v", err)
+	}
+	for _, a := range stuck {
+		if a.ID == recID {
+			if err := exec.recoverOne(ctx, a); err != nil {
+				t.Fatalf("recoverOne: %v, want nil for a row decided elsewhere", err)
+			}
+			return
+		}
+	}
+	t.Fatal("reserved row not listed as stuck")
+}

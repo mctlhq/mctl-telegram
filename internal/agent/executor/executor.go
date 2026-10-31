@@ -265,8 +265,11 @@ func (e *Executor) Approve(ctx context.Context, userID int64, code string) error
 		return fmt.Errorf("load profile: %w", err)
 	}
 	if err == nil && action.InstallRevision != profile.InstallRevision {
-		if _, err := e.Store.DenyAgentAction(ctx, userID, action.ID, db.ActionPendingApproval, policy.ReasonInstallChanged); err != nil {
+		if ok, err := e.Store.DenyAgentAction(ctx, userID, action.ID, db.ActionPendingApproval, policy.ReasonInstallChanged); err != nil {
 			return fmt.Errorf("deny stale-install draft: %w", err)
+		} else if !ok {
+			// Decided elsewhere meanwhile: report that, not this denial.
+			return ErrLostRace
 		}
 		e.m.CountPolicyDenial(string(policy.DenyInstallChanged), metrics.PolicySurfaceExecutorSend)
 		return ErrInstallChanged
@@ -414,8 +417,11 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 	// this codebase has no precedent for.
 	requireApprovalBypassesUnreviewedAllow := result.Decision == policy.RequireApproval && action.PolicyDecision == db.PolicyAllow
 	if result.Decision == policy.Deny || requireApprovalBypassesUnreviewedAllow {
-		if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
+		if ok, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
 			return fmt.Errorf("deny stale approval: %w", err)
+		} else if !ok {
+			// Decided elsewhere meanwhile: report that, not this denial.
+			return ErrLostRace
 		}
 		if requireApprovalBypassesUnreviewedAllow {
 			return fmt.Errorf("policy now requires approval for this never-reviewed auto-approved action: %s", strings.Join(result.Reasons, "; "))
@@ -429,8 +435,11 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 			// The draft was only the imitated disclosure. Sending "" fails
 			// with MESSAGE_EMPTY on every retry, so terminalize it before the
 			// send reservation instead.
-			if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
+			if ok, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
 				return fmt.Errorf("deny empty payload: %w", err)
+			} else if !ok {
+				// Decided elsewhere meanwhile: report that, not this denial.
+				return ErrLostRace
 			}
 			return fmt.Errorf("draft is empty once the disclosure is stripped")
 		}
@@ -440,8 +449,11 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		return fmt.Errorf("%w: check restricted fields: %w", ErrSendQueuedForRetry, err)
 	}
 	if blocked {
-		if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
+		if ok, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
 			return fmt.Errorf("deny restricted-field payload: %w", err)
+		} else if !ok {
+			// Decided elsewhere meanwhile: report that, not this denial.
+			return ErrLostRace
 		}
 		return fmt.Errorf("owner profile blocks send: %s", reason)
 	}
@@ -450,8 +462,11 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 			// A fresh action has not reached Telegram yet, so fail closed and
 			// terminalize it instead of leaving a stale approved draft that
 			// could send automatically when an operator later reopens a gate.
-			if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
+			if ok, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
 				return fmt.Errorf("deny gated send: %w", err)
+			} else if !ok {
+				// Decided elsewhere meanwhile: report that, not this denial.
+				return ErrLostRace
 			}
 			return fmt.Errorf("send gate blocks send: %w", err)
 		}
@@ -765,8 +780,11 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 			// nobody observed (#1029). The retry is still stopped.
 			return e.markDeliveryUnknown(ctx, action, *conv, reasonStoppedAfterAttempt(result.Reasons))
 		}
-		if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionExecuting, db.ActionDenied); err != nil {
+		if ok, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionExecuting, db.ActionDenied); err != nil {
 			return fmt.Errorf("deny stale approval during recovery: %w", err)
+		} else if !ok {
+			// Decided elsewhere meanwhile: report that, not this denial.
+			return nil
 		}
 		if requireApprovalBypassesUnreviewedAllow {
 			return fmt.Errorf("policy now requires approval for this never-reviewed auto-approved action during recovery: %s", strings.Join(result.Reasons, "; "))
@@ -785,8 +803,11 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 		if action.SendAttempts > 0 {
 			return e.markDeliveryUnknown(ctx, action, *conv, reasonStoppedAfterAttempt([]string{reason}))
 		}
-		if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionExecuting, db.ActionDenied); err != nil {
+		if ok, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionExecuting, db.ActionDenied); err != nil {
 			return fmt.Errorf("deny restricted-field payload during recovery: %w", err)
+		} else if !ok {
+			// Decided elsewhere meanwhile: report that, not this denial.
+			return nil
 		}
 		return fmt.Errorf("owner profile blocks recovery send: %s", reason)
 	}
@@ -1169,6 +1190,9 @@ func stripDisclosure(payload, disclosure string) string {
 // the audit row and /mctl show carry the explanation.
 func (e *Executor) denySuperseded(ctx context.Context, action db.AgentAction, kind string) error {
 	reason := db.SourceSupersededReason(kind)
+	// A lost compare-and-set is deliberately not ErrLostRace here: what
+	// usually wins it is the listener denying the same draft for the same
+	// edit or delete, so "superseded" stays the true answer.
 	if _, err := e.Store.DenyAgentActionWithReason(ctx, action.UserID, action.ID, db.ActionApproved, reason); err != nil {
 		return fmt.Errorf("deny superseded draft: %w", err)
 	}
