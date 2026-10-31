@@ -304,6 +304,22 @@ func caseHumanInputUnknownMessageIDStoresNull(t *testing.T, s *Store, uid int64)
 	}
 }
 
+// caseMatchUnconfirmedAgentSend_WindowFollowsTheSend: a draft proposed
+// long ago but approved and sent just now still has its echo matched; the
+// window is keyed on the send, not on the draft's creation.
+func caseMatchUnconfirmedAgentSend_WindowFollowsTheSend(t *testing.T, s *Store, uid int64) {
+	ctx := context.Background()
+	id, _ := executingSend(t, s, uid, 711, "hello Bob")
+	attempted(t, s, uid, id)
+	if _, err := s.DB.ExecContext(ctx, `UPDATE agent_actions SET created_at = $1 WHERE id = $2`,
+		time.Now().UTC().Add(-48*time.Hour), id); err != nil {
+		t.Fatalf("backdate draft: %v", err)
+	}
+	if ok, err := s.MatchUnconfirmedAgentSend(ctx, uid, bobTGID, 8400, "hello Bob", time.Now().Add(-24*time.Hour)); err != nil || !ok {
+		t.Fatalf("echo of an old draft sent now: ok=%v err=%v, want match", ok, err)
+	}
+}
+
 // deliveryCases runs every #1029 store case against one dialect. Postgres
 // keeps state between runs, so each case gets its own user.
 func deliveryCases(t *testing.T, s *Store, prefix string) {
@@ -321,6 +337,7 @@ func deliveryCases(t *testing.T, s *Store, prefix string) {
 		{"ListRecentAgentOutgoing_IncludesDeliveryUnknown", caseListRecentAgentOutgoing_IncludesDeliveryUnknown},
 		{"SweepAgentMessageBodies_ClearsDeliveryUnknownBody", caseSweepAgentMessageBodies_ClearsDeliveryUnknownBody},
 		{"HumanInputUnknownMessageIDStoresNull", caseHumanInputUnknownMessageIDStoresNull},
+		{"MatchUnconfirmedAgentSend_WindowFollowsTheSend", caseMatchUnconfirmedAgentSend_WindowFollowsTheSend},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -795,7 +795,13 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 	}
 	if err != nil {
 		if attempts >= e.maxSendAttempts() {
-			if derr := e.markDeliveryUnknown(ctx, action, *conv, reasonAttemptsExhausted(attempts)); !errors.Is(derr, ErrDeliveryUnknown) {
+			derr := e.markDeliveryUnknown(ctx, action, *conv, reasonAttemptsExhausted(attempts))
+			if derr == nil {
+				// Lost the compare-and-set: decided elsewhere, or an echo
+				// noted the id meanwhile and the next sweep records it.
+				return fmt.Errorf("retry send: %w", err)
+			}
+			if !errors.Is(derr, ErrDeliveryUnknown) {
 				return fmt.Errorf("retry send: %w; record delivery unknown: %w", err, derr)
 			}
 			return fmt.Errorf("%w: last retry: %w", ErrDeliveryUnknown, err)

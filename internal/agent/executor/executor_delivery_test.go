@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -246,5 +247,44 @@ func TestExecutor_RecoverStuck_NotedEchoIsRecordedDespiteDeny(t *testing.T) {
 	}
 	if got := deliveryUnknownAlerts(t, store, uid); got != 0 {
 		t.Fatalf("delivery-unknown alerts = %d, want 0", got)
+	}
+}
+
+// TestExecutor_RecoverStuck_EchoDuringLastRetryIsRecordedNextSweep: the
+// listener notes the echo while the last allowed retry is failing, so the
+// delivery_unknown compare-and-set loses. The error says so cleanly (no
+// wrapped nil), no alert is queued, and the next sweep records the proven
+// delivery without another RPC.
+func TestExecutor_RecoverStuck_EchoDuringLastRetryIsRecordedNextSweep(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	exec.MaxSendAttempts = 1
+	actionID := approvedForRecovery(t, store, uid, conv.ID, 676767)
+	sender.failNext = 1
+	sender.onSend = func() {
+		if ok, err := store.MatchUnconfirmedAgentSend(ctx, uid, conv.PeerTGID, 7171, recoveryBody, time.Now().Add(-time.Hour)); err != nil || !ok {
+			t.Errorf("echo match: ok=%v err=%v", ok, err)
+		}
+	}
+	stuck, err := store.ListStuckExecutingActions(ctx, 0)
+	if err != nil || len(stuck) != 1 {
+		t.Fatalf("list stuck: n=%d err=%v", len(stuck), err)
+	}
+	err = exec.recoverOne(ctx, stuck[0])
+	if err == nil || errors.Is(err, ErrDeliveryUnknown) || strings.Contains(err.Error(), "%!") {
+		t.Fatalf("recoverOne err = %v, want a plain retry error", err)
+	}
+	if got := deliveryUnknownAlerts(t, store, uid); got != 0 {
+		t.Fatalf("delivery-unknown alerts = %d, want 0", got)
+	}
+	sender.onSend = nil
+	if _, err := exec.RecoverStuck(ctx); err != nil {
+		t.Fatalf("next sweep: %v", err)
+	}
+	if a := mustAction(t, store, uid, actionID); a.Status != db.ActionExecuted || a.ExecutedTGMessageID != 7171 {
+		t.Fatalf("status=%q id=%d, want executed with 7171", a.Status, a.ExecutedTGMessageID)
+	}
+	if len(sender.calls) != 1 {
+		t.Fatalf("send RPCs = %d, want 1", len(sender.calls))
 	}
 }

@@ -111,7 +111,10 @@ func (s *Store) MarkAgentActionDeliveryUnknown(ctx context.Context, userID, id i
 // message and must not be read as the owner taking over the chat.
 //
 // The match is on the exact send body (whitespace-trimmed, as Telegram trims
-// it) in the same conversation, among actions created since `since`. Only
+// it) in the same conversation, among actions whose last transition (the
+// reservation, the delivery_unknown mark, or the executed record) is not
+// older than `since`. Not created_at: a draft can wait for approval for
+// as long as the approval TTL allows, and the echo follows the send. Only
 // the account's own outgoing messages reach this check, so a peer cannot
 // trigger it. On a match the message id is filled in where it was unknown:
 // an executing row notes it for RecordAgentActionSent to pick up, a
@@ -135,7 +138,7 @@ func (s *Store) MatchUnconfirmedAgentSend(ctx context.Context, userID, peerTGID,
 	}
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT id, status, send_body_encrypted FROM agent_actions
-		  WHERE user_id = $1 AND conversation_id = $2 AND created_at >= $3
+		  WHERE user_id = $1 AND conversation_id = $2 AND updated_at >= $3
 		    AND send_random_id IS NOT NULL AND send_body_encrypted IS NOT NULL
 		    AND executed_tg_message_id IS NULL
 		    AND ((status IN ($4, $5) AND send_attempts > 0) OR status = $6)

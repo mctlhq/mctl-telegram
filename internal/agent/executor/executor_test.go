@@ -39,6 +39,9 @@ type fakeSender struct {
 	// the history lookup found no single match.
 	locateID    int64
 	locateCalls int
+	// onSend runs inside every send call, before its outcome, without the
+	// lock held: a hook for what other components do meanwhile.
+	onSend func()
 }
 
 type sendCall struct {
@@ -47,6 +50,9 @@ type sendCall struct {
 }
 
 func (f *fakeSender) SendWithRandomID(_ context.Context, userID, peerTGID, peerAccessHash, randomID int64, text string) (int64, error) {
+	if f.onSend != nil {
+		f.onSend()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, sendCall{userID, peerTGID, peerAccessHash, randomID, text})
