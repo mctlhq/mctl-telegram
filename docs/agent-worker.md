@@ -391,6 +391,13 @@ send (#993).
   "by Friday") and no later delivery of links, profiles, CV, contact
   details or "full answers". An untimed "the owner will get back to you" is
   the most it may promise.
+- It also speaks about the owner in the third person and never voices a
+  preference, choice or availability as the owner's (call format, a slot,
+  start date, location, working mode, stack) unless the profile holds it:
+  drafts said "Video would be my preference" with nothing behind it (#998).
+  No policy check can see this, since there is no value to match, so the
+  prompt is the only guard; the C1 cases `preference-01` and
+  `preference-02` cover it.
 - An "Owner input requested" notice ends with a fixed line saying the agent
   cannot read a reply there, that the owner acts by writing to the named
   peer in that chat, and `/mctl show <id>` for details. The line is
@@ -518,14 +525,14 @@ AGENT_C1_EVAL=1 go test ./internal/agentworker \
 It builds the real `cmd/agent-worker`, starts its real job-scoped stdio MCP
 server, and uses a local fake Agent API to feed
 `testdata/c1-fixtures.jsonl` and record durable effects. Acceptance is
-classification ≥27/30, terminal completion 30/30, zero restricted-data
-echoes, and zero job/conversation/attempt binding violations. Normal
+classification ≥29/32, terminal completion 32/32, zero restricted-data
+echoes and owner-voice markers, and zero job/conversation/attempt binding violations. Normal
 `go test ./...` skips the model evaluation and spends no model quota.
 
 For diagnosis only, `AGENT_C1_EVAL_FILTER` accepts a comma-separated list of
 fixture IDs. A filtered run requires every selected fixture to classify
 correctly and still enforces terminal completion, zero leaks, and zero binding
-violations. It does not replace the required single unfiltered 30-fixture gate:
+violations. It does not replace the required single unfiltered 32-fixture gate:
 
 ```bash
 AGENT_C1_EVAL=1 \
