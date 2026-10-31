@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/mctlhq/mctl-telegram/internal/assistantinstall"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/canaryguard"
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -36,6 +37,9 @@ type ManageServer struct {
 	connectClient string
 	// canary is CANARY_TELEGRAM_IDS; see WithCanaryGuard.
 	canary canaryguard.Set
+	// assistants is the install service behind the assistant section; see
+	// WithAssistants in manage_assistant.go.
+	assistants *assistantinstall.Service
 }
 
 // WithCanaryGuard sets the monitoring canary's accounts. Disconnecting one of
@@ -129,6 +133,18 @@ func (s *ManageServer) HandleManage(w http.ResponseWriter, r *http.Request) {
 		s.WriteUnauthorized(w, r, http.StatusUnauthorized, auth.MsgAuthRequired)
 		return
 	}
+	var notice *assistantNotice
+	if r.URL.Query().Get("assistant") == "saved" {
+		notice = &assistantNotice{msg: "Your assistant install was saved.", ok: true}
+	}
+	s.serveManage(w, r, id, http.StatusOK, notice)
+}
+
+// serveManage renders the dashboard for id with status. notice, when set,
+// is the outcome of an assistant form shown in that section; a refused
+// assistant change re-renders the page through here so the owner sees the
+// current install beside the reason.
+func (s *ManageServer) serveManage(w http.ResponseWriter, r *http.Request, id *auth.Identity, status int, notice *assistantNotice) {
 	info, err := s.store.GetActiveAccount(r.Context(), id.UserID)
 	if err != nil {
 		slog.Warn("manage: get account", "err", err)
@@ -164,7 +180,7 @@ func (s *ManageServer) HandleManage(w http.ResponseWriter, r *http.Request) {
 	} else {
 		botView = buildBotReachabilityView(reach, s.loginBotUsername)
 	}
-	renderManagePage(w, managePageData{
+	renderManage(w, status, manageTemplate, managePageData{
 		Connected:     info.Connected,
 		DisplayName:   info.DisplayName,
 		Username:      info.Username,
@@ -186,6 +202,7 @@ func (s *ManageServer) HandleManage(w http.ResponseWriter, r *http.Request) {
 		// connected client: the explicit category choice is put first. It
 		// only changes presentation; consent is still written by the form.
 		Onboarding: r.URL.Query().Get("onboarding") == "1",
+		Assistant:  s.buildAssistantSection(r, id, notice),
 	})
 }
 
@@ -316,6 +333,9 @@ type managePageData struct {
 	Chosen        bool
 	ChoiceUnknown bool
 	Onboarding    bool
+	// Assistant is the assistant section; nil hides it (no install
+	// service on this deployment).
+	Assistant *assistantSectionView
 }
 
 // choiceState is whether the client has explicitly chosen product_updates.
@@ -345,6 +365,11 @@ const manageExtraCSS = `
   .notif-label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
   .notif-name { font-weight: 500; color: var(--text); }
   .notif-desc { color: var(--text-dim); font-size: 13px; margin-top: 2px; margin-left: 24px; }
+  .assistant-form { margin-top: 12px; font-size: 14px; }
+  .assistant-form label { display: block; margin-top: 10px; color: var(--text); }
+  .assistant-form input, .assistant-form select, .assistant-form textarea { display: block; width: 100%; margin-top: 4px; font: inherit; }
+  .assistant-install { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 8px; }
+  .assistant-install summary { cursor: pointer; font-weight: 500; }
 `
 
 var manageHead = `<!doctype html>
@@ -415,6 +440,7 @@ var manageTemplate = template.Must(template.New("manage").Parse(manageHead + `  
       <button type="submit" class="btn-secondary">Save notification preferences</button>
     </form>{{else}}<p class="meta" id="notifications-unavailable">` + msgManageCannotChangeNotifications + `</p>{{end}}
     {{end}}
+    {{with .Assistant}}` + manageAssistantSection + `{{end}}
     <p class="meta"><a href="{{.Issuer}}/telegram/connect">Reconnect</a></p>
 ` + manageFoot))
 
@@ -459,10 +485,6 @@ var manageNeedAuthTemplate = template.Must(template.New("manageNeedAuth").Parse(
 
 func renderManageNeedAuth(w http.ResponseWriter, status int, data manageNeedAuthData) {
 	renderManage(w, status, manageNeedAuthTemplate, data)
-}
-
-func renderManagePage(w http.ResponseWriter, data managePageData) {
-	renderManage(w, http.StatusOK, manageTemplate, data)
 }
 
 func renderManageError(w http.ResponseWriter, msg string) {

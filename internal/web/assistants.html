@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+{{template "ui_head" .}}
+</head>
+<body>
+
+{{template "ui_topbar" .}}
+
+<main class="mctl-site-container page">
+<div class="mctl-site-prose">
+
+  <section class="hero" style="margin-top: 0;">
+    <div class="eyebrow">
+      <span class="status-dot" aria-hidden="true"></span>
+      <span>Assistant catalog</span>
+    </div>
+    <h1>Telegram <span class="accent">assistants</span></h1>
+    <p class="lead">
+      Assistants you can install on your own Telegram account. Each one answers a kind of conversation for you,
+      inside limits you set, and asks you before anything that needs your decision.
+    </p>
+    <p class="muted">
+      A new install starts paused and not listening: going live is always your own explicit choice.
+      Install and change yours {{if .ShowManage}}on the <a href="/telegram/connect/manage#assistant">manage page</a>, or {{end}}from your
+      MCP client with <code>list_assistants</code>, <code>install_assistant</code> and <code>update_install</code>.
+    </p>
+  </section>
+
+  {{if .Unavailable}}
+  <section id="catalog-unavailable">
+    <div class="section-head"><h2>Catalog unavailable</h2></div>
+    <p>The assistant catalog could not be read right now, so nothing is listed. This is not an empty catalog;
+      try again in a minute.</p>
+  </section>
+  {{else if not .Entries}}
+  <section id="catalog-empty">
+    <p class="muted">No assistants are available to install yet.</p>
+  </section>
+  {{else}}
+  {{range .Entries}}
+  <section class="assistant-entry" id="{{.Name}}-{{.Version}}">
+    <div class="section-head">
+      <h2>{{if .Title}}{{.Title}}{{else}}{{.Name}}{{end}}</h2>
+    </div>
+    <p class="muted"><code>{{.Name}}@{{.Version}}</code> · <span class="pill pill-read">{{.Lifecycle}}</span>{{range .Tags}} · {{.}}{{end}}</p>
+    {{if .Description}}<p>{{.Description}}</p>{{end}}
+    {{if .Examples}}
+    <h3>Messages it handles</h3>
+    <ul>{{range .Examples}}<li>{{.}}</li>{{end}}</ul>
+    {{end}}
+
+    <h3>Values it asks for</h3>
+    {{if .Variables}}
+    <div class="table-scroll">
+    <table class="tbl">
+      <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+      <tbody>
+      {{range .Variables}}
+        <tr>
+          <td><code>{{.Name}}</code></td>
+          <td>{{.Type}}{{if .Choices}}: {{range $i, $c := .Choices}}{{if $i}}, {{end}}{{$c}}{{end}}{{end}}</td>
+          <td>{{if .Required}}yes{{else}}no{{end}}</td>
+          <td>{{.Description}}{{if .Default}} <span class="muted">Default: {{.Default}}.</span>{{end}}</td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+    </div>
+    {{else}}
+    <p class="muted">None.</p>
+    {{end}}
+
+    <h3>What it may do on its own</h3>
+    {{if .Intents}}
+    <div class="table-scroll">
+    <table class="tbl">
+      <thead><tr><th>Intent</th><th>Default tier</th><th>Description</th></tr></thead>
+      <tbody>
+      {{range .Intents}}
+        <tr><td><code>{{.Name}}</code></td><td>{{.Tier}}</td><td>{{.Description}}</td></tr>
+      {{end}}
+      </tbody>
+    </table>
+    </div>
+    <p class="muted"><code>auto</code> replies on its own within the limits; <code>approve</code> waits for you; <code>never</code> is refused.</p>
+    {{else}}
+    <p class="muted">None.</p>
+    {{end}}
+
+    <h3>Defaults</h3>
+    <ul>
+      <li>Mode: <code>{{.Mode}}</code></li>
+      {{if .Limits}}<li>Limits: {{.Limits}}</li>{{end}}
+      <li>Disclosure line: {{if eq .DisclosurePolicy "required"}}always added{{else if eq .DisclosurePolicy "optional"}}added unless you turn it off{{else}}{{.DisclosurePolicy}}{{end}}</li>
+    </ul>
+  </section>
+  {{end}}
+  {{end}}
+
+</div>
+</main>
+
+{{template "ui_footer" .}}
+
+{{template "ui_script" .}}
+</body>
+</html>

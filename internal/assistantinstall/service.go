@@ -439,6 +439,7 @@ type CatalogEntry struct {
 	Title       string            `json:"title"`
 	Description string            `json:"description"`
 	Tags        []string          `json:"tags"`
+	Examples    []string          `json:"examples"`
 	Lifecycle   string            `json:"lifecycle"`
 	Variables   []CatalogVariable `json:"variables"`
 	Intents     []CatalogIntent   `json:"intents"`
@@ -513,6 +514,7 @@ func embeddedEntry(d *assistant.Definition) CatalogEntry {
 		Name: d.Metadata.Name, Version: d.Metadata.Version,
 		Title: d.Metadata.Title, Description: d.Metadata.Description,
 		Tags:      nonNil(d.Metadata.Tags),
+		Examples:  nonNil(d.Metadata.Examples),
 		Lifecycle: db.AssistantLifecyclePublished,
 		Variables: make([]CatalogVariable, 0, len(d.Spec.Variables)),
 		Intents:   make([]CatalogIntent, 0, len(d.Spec.Intents)),
@@ -538,7 +540,7 @@ func embeddedEntry(d *assistant.Definition) CatalogEntry {
 func registryEntry(it assistantregistry.CatalogEntry) CatalogEntry {
 	e := CatalogEntry{
 		Name: it.Name, Version: it.Version, Title: it.Title, Description: it.Description,
-		Tags: nonNil(it.Tags), Lifecycle: it.Lifecycle,
+		Tags: nonNil(it.Tags), Examples: nonNil(it.Examples), Lifecycle: it.Lifecycle,
 		Variables: make([]CatalogVariable, 0, len(it.Variables)),
 		Intents:   make([]CatalogIntent, 0, len(it.Intents)),
 		Defaults: CatalogDefaults{
@@ -612,6 +614,86 @@ type Installed struct {
 // firstInstallRevision is the revision a new agent profile starts at
 // (the install_revision column default).
 const firstInstallRevision = 1
+
+// Settings is what an install resolved to: the settings the agent runs
+// with, never the values or notes they were derived from. The MCP tools
+// answer it and the manage page shows it.
+type Settings struct {
+	Mode                string   `json:"mode"`
+	Paused              bool     `json:"paused"`
+	Listening           bool     `json:"listening"`
+	DisclosureEnabled   bool     `json:"disclosure_enabled"`
+	DisclosureText      string   `json:"disclosure_text"`
+	MaxAutonomousTurns  int      `json:"max_autonomous_turns"`
+	MaxMsgsPerMinute    int      `json:"max_msgs_per_minute"`
+	MaxReplyChars       int      `json:"max_reply_chars"`
+	AutoIntents         []string `json:"auto_intents"`
+	NeverIntents        []string `json:"never_intents"`
+	WorkingHours        string   `json:"working_hours"`
+	AudienceExcludes    []string `json:"audience_excludes"`
+	OnlySendersCount    int      `json:"only_senders_count"`
+	BlockedSendersCount int      `json:"blocked_senders_count"`
+}
+
+// SettingsOf summarizes a saved profile.
+func SettingsOf(p *db.AgentProfile) Settings {
+	return Settings{
+		Mode: p.Mode, Paused: p.AutopilotPaused, Listening: p.ListenerEnabled,
+		DisclosureEnabled: !p.DisclosureDisabled, DisclosureText: p.DisclosureText,
+		MaxAutonomousTurns: p.MaxAutonomousTurns, MaxMsgsPerMinute: p.MaxMsgsPerMinute,
+		MaxReplyChars: p.MaxReplyChars,
+		AutoIntents:   csvList(p.IntentAllowlist), NeverIntents: csvList(p.IntentDenylist),
+		WorkingHours: p.WorkingHours, AudienceExcludes: csvList(p.AudienceExcludes),
+		OnlySendersCount: len(csvList(p.SenderAllowlist)), BlockedSendersCount: len(csvList(p.BlockedSenders)),
+	}
+}
+
+func csvList(s string) []string {
+	if s == "" {
+		return []string{}
+	}
+	return strings.Split(s, ",")
+}
+
+// CurrentSettings reads the settings userID's profile resolved to, or nil
+// when the account has no agent profile.
+func (s *Service) CurrentSettings(ctx context.Context, userID int64) (*Settings, error) {
+	p, err := s.Store.GetAgentProfile(ctx, userID)
+	if errors.Is(err, db.ErrAgentProfileNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, internal("failed to load agent profile", fmt.Errorf("agent profile: %w", err))
+	}
+	st := SettingsOf(p)
+	return &st, nil
+}
+
+// AuditText is the audit text of a failed call: the error kind, never the
+// message, which for a validation error names variables.
+func AuditText(err error) string {
+	var ie *Error
+	if !errors.As(err, &ie) {
+		return "internal error"
+	}
+	switch ie.Kind {
+	case KindInvalid:
+		return "invalid install"
+	case KindNotFound:
+		return "assistant not found"
+	case KindLifecycle:
+		return "lifecycle refused"
+	case KindRevisionConflict:
+		return "install revision conflict"
+	case KindNoInstall:
+		return "no install"
+	case KindUpstream:
+		return "registry returned an invalid answer"
+	case KindUnavailable:
+		return "registry unavailable"
+	}
+	return "internal error"
+}
 
 // Current reads what userID runs. An account with no agent profile has
 // nothing installed and reports the revision its profile will start at, so

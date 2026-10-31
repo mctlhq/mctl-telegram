@@ -61,24 +61,9 @@ type listAssistantsResult struct {
 	Mine       assistantInstalled              `json:"mine"`
 }
 
-// installSettings is what an install resolved to: the settings the agent
-// runs with, never the values or notes they were derived from.
-type installSettings struct {
-	Mode                string   `json:"mode"`
-	Paused              bool     `json:"paused"`
-	Listening           bool     `json:"listening"`
-	DisclosureEnabled   bool     `json:"disclosure_enabled"`
-	DisclosureText      string   `json:"disclosure_text"`
-	MaxAutonomousTurns  int      `json:"max_autonomous_turns"`
-	MaxMsgsPerMinute    int      `json:"max_msgs_per_minute"`
-	MaxReplyChars       int      `json:"max_reply_chars"`
-	AutoIntents         []string `json:"auto_intents"`
-	NeverIntents        []string `json:"never_intents"`
-	WorkingHours        string   `json:"working_hours"`
-	AudienceExcludes    []string `json:"audience_excludes"`
-	OnlySendersCount    int      `json:"only_senders_count"`
-	BlockedSendersCount int      `json:"blocked_senders_count"`
-}
+// installSettings is what an install resolved to; see
+// assistantinstall.Settings.
+type installSettings = assistantinstall.Settings
 
 type installAssistantResult struct {
 	Assistant       string          `json:"assistant"`
@@ -87,26 +72,10 @@ type installAssistantResult struct {
 	Settings        installSettings `json:"settings"`
 }
 
-func csvList(s string) []string {
-	if s == "" {
-		return []string{}
-	}
-	return strings.Split(s, ",")
-}
-
 func installResult(res *assistantinstall.Result) installAssistantResult {
-	p := res.Profile
 	return installAssistantResult{
-		Assistant: res.Name, Version: res.Version, InstallRevision: p.InstallRevision,
-		Settings: installSettings{
-			Mode: p.Mode, Paused: p.AutopilotPaused, Listening: p.ListenerEnabled,
-			DisclosureEnabled: !p.DisclosureDisabled, DisclosureText: p.DisclosureText,
-			MaxAutonomousTurns: p.MaxAutonomousTurns, MaxMsgsPerMinute: p.MaxMsgsPerMinute,
-			MaxReplyChars: p.MaxReplyChars,
-			AutoIntents:   csvList(p.IntentAllowlist), NeverIntents: csvList(p.IntentDenylist),
-			WorkingHours: p.WorkingHours, AudienceExcludes: csvList(p.AudienceExcludes),
-			OnlySendersCount: len(csvList(p.SenderAllowlist)), BlockedSendersCount: len(csvList(p.BlockedSenders)),
-		},
+		Assistant: res.Name, Version: res.Version, InstallRevision: res.Profile.InstallRevision,
+		Settings: assistantinstall.SettingsOf(res.Profile),
 	}
 }
 
@@ -176,7 +145,7 @@ func (s *Server) toolListAssistants() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 
 Output: {source, assistants, mine}.
   source — "registry" (the mctl assistant registry) or "embedded" (the catalog built into this server).
-  assistants — [{name, version, title, description, tags, lifecycle, variables: [{name, type, required, default?, choices?, description}], intents: [{name, description, tier}], defaults: {mode, limits: {maxAutonomousTurns, maxMsgsPerMinute, maxReplyChars}, disclosure_policy}}], by name, highest version first.
+  assistants — [{name, version, title, description, tags, examples, lifecycle, variables: [{name, type, required, default?, choices?, description}], intents: [{name, description, tier}], defaults: {mode, limits: {maxAutonomousTurns, maxMsgsPerMinute, maxReplyChars}, disclosure_policy}}], by name, highest version first.
   mine — {assistant, version, install_revision, installed}. installed=false means the account was never configured through an install. Pass install_revision as expected_revision to update_install.
 
 Never returns your stored values, owner notes or an assistant's instructions. If the registry cannot be read, the call fails with error "registry_unavailable" (retryable) rather than returning an empty list.`),
@@ -215,29 +184,7 @@ Never returns your stored values, owner notes or an assistant's instructions. If
 
 // assistantErrCode is the audit text of a failed call: the error kind,
 // never the message, which for a validation error names variables.
-func assistantErrCode(err error) string {
-	var ie *assistantinstall.Error
-	if !errors.As(err, &ie) {
-		return "internal error"
-	}
-	switch ie.Kind {
-	case assistantinstall.KindInvalid:
-		return "invalid install"
-	case assistantinstall.KindNotFound:
-		return "assistant not found"
-	case assistantinstall.KindLifecycle:
-		return "lifecycle refused"
-	case assistantinstall.KindRevisionConflict:
-		return "install revision conflict"
-	case assistantinstall.KindNoInstall:
-		return "no install"
-	case assistantinstall.KindUpstream:
-		return "registry returned an invalid answer"
-	case assistantinstall.KindUnavailable:
-		return "registry unavailable"
-	}
-	return "internal error"
-}
+func assistantErrCode(err error) string { return assistantinstall.AuditText(err) }
 
 // expectedRevisionArg reads expected_revision: absent is (nil, true); a
 // non-integer or a value below 1 is (nil, false).
