@@ -46,6 +46,26 @@ func TestEvaluate_GuardedForkIsObserve(t *testing.T) {
 	}
 }
 
+// A promoted fork in guarded mode is judged like a catalog assistant (#1044);
+// promotion does not lift observe mode or any other gate.
+func TestEvaluate_PromotedForkIsGuarded(t *testing.T) {
+	in := baseInput()
+	in.Profile.AssistantName = "hr-recruiter~abcdefgh23~careful"
+	in.ForkPromoted = true
+	if got := Evaluate(in); got.Decision != Allow {
+		t.Fatalf("decision = %s (%v), want allow", got.Decision, got.Reasons)
+	}
+	in.Profile.Mode = db.AgentModeObserve
+	if got := Evaluate(in); got.Decision != RequireApproval {
+		t.Fatalf("observe decision = %s (%v), want require_approval", got.Decision, got.Reasons)
+	}
+	in.Profile.Mode = db.AgentModeGuarded
+	in.Action.Intent = "share_details"
+	if got := Evaluate(in); got.Decision != RequireApproval {
+		t.Fatalf("non-allowlisted decision = %s (%v), want require_approval", got.Decision, got.Reasons)
+	}
+}
+
 func TestEvaluate_DenyRules(t *testing.T) {
 	cases := []struct {
 		name   string
