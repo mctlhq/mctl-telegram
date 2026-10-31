@@ -221,6 +221,33 @@ func TestExtractMessage_SkipsUnsupportedMessages(t *testing.T) {
 	}
 }
 
+// TestExtractMessage_SkipsContacts: a message, or an edit of one, from a
+// sender in the owner's contacts never becomes an event; a non-contact and a
+// sender whose entity is missing are still extracted.
+func TestExtractMessage_SkipsContacts(t *testing.T) {
+	msg := &tg.Message{ID: 1, PeerID: &tg.PeerUser{UserID: recruit}, Message: "hi"}
+	if _, ok := ExtractMessage(ownerUID, selfTG, msg, ents(&tg.User{ID: recruit, Contact: true}), false); ok {
+		t.Fatal("message from a contact should be skipped")
+	}
+	edited := &tg.Message{ID: 1, PeerID: &tg.PeerUser{UserID: recruit}, Message: "hi again", EditDate: 1700000000}
+	if _, ok := ExtractMessage(ownerUID, selfTG, edited, ents(&tg.User{ID: recruit, Contact: true}), true); ok {
+		t.Fatal("edit from a contact should be skipped")
+	}
+	if _, ok := ExtractMessage(ownerUID, selfTG, msg, ents(&tg.User{ID: recruit}), false); !ok {
+		t.Fatal("message from a non-contact should be extracted")
+	}
+	if _, ok := ExtractMessage(ownerUID, selfTG, msg, ents(), false); !ok {
+		t.Fatal("message with no sender entity should be extracted")
+	}
+	out := &tg.Message{ID: 2, Out: true, PeerID: &tg.PeerUser{UserID: recruit}, Message: "see you"}
+	if _, ok := ExtractMessage(ownerUID, selfTG, out, ents(&tg.User{ID: recruit, Contact: true}), false); ok {
+		t.Fatal("owner message to a contact should be skipped")
+	}
+	if ex, ok := ExtractMessage(ownerUID, selfTG, out, ents(&tg.User{ID: recruit}), false); !ok || ex.Event.Kind != db.EventKindOwnerOutgoing {
+		t.Fatalf("owner message to a non-contact: ok=%v kind=%q", ok, ex.Event.Kind)
+	}
+}
+
 // TestExtractMessage_CapturesSenderAccessHash guards against the P1 found
 // in round-4 review: the executor's send path needs a real access_hash to
 // build a working InputPeerUser, and the only place that hash is ever

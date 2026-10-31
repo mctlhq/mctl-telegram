@@ -64,7 +64,8 @@ func isMCTLCommand(text string) bool {
 // ExtractMessage maps one *tg.Message (from a new or edit update) to an
 // IncomingEvent for the given account. ok=false means the message is not
 // agent-relevant (non-user peer, inbound message with neither text nor an
-// attachment, a bot sender, etc.). Owner outgoing messages are kept even without text: a photo, sticker,
+// attachment, a bot sender, a sender or recipient in the owner's contacts,
+// etc.). Owner outgoing messages are kept even without text: a photo, sticker,
 // voice note, or other media-only reply is still a human takeover signal.
 func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Entities, isEdit bool) (Extracted, bool) {
 	if msg == nil {
@@ -105,6 +106,12 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 		if media, _ := msg.GetMedia(); isEdit && hiddenEdit(msg, media) {
 			return Extracted{}, false
 		}
+		// The owner writing to a contact is private correspondence the agent
+		// never handles (inbound from contacts is skipped below), so it is
+		// not recorded either.
+		if u, ok := ents.Users[peerUser.UserID]; ok && u.Contact {
+			return Extracted{}, false
+		}
 		// Do not require text here: any visible owner intervention in a private
 		// chat (including media without caption) must stop autonomous replies.
 		ev := db.IncomingEvent{
@@ -143,6 +150,14 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 	}
 	senderUser, hasSenderUser := ents.Users[senderID]
 	if hasSenderUser && senderUser.Bot {
+		return Extracted{}, false
+	}
+	// A sender in the owner's contacts is someone the owner already knows,
+	// not a cold contact the agent is for: their messages are never stored or
+	// shown to the model. Telegram sets contact on the user entity. When the
+	// update carries no entity for the sender, the status is unknown and the
+	// message is processed as before.
+	if hasSenderUser && senderUser.Contact {
 		return Extracted{}, false
 	}
 
