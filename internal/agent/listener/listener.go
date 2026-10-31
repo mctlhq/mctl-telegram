@@ -241,6 +241,10 @@ func (l *Listener) dispatcherFor(acct *account) tg.UpdateDispatcher {
 // reason as in onMessage: acknowledging a delete we failed to record would
 // lose it for good.
 func (l *Listener) onDelete(ctx context.Context, acct *account, ids []int) error {
+	if err := l.Store.SweepExpiredPendingDeletes(ctx); err != nil {
+		return err
+	}
+	kept := 0
 	for _, id := range ids {
 		if id <= 0 {
 			continue
@@ -253,9 +257,12 @@ func (l *Listener) onDelete(ctx context.Context, acct *account, ids []int) error
 			slog.Info("agent listener: source message deleted",
 				"user_id", acct.userID, "denied_actions", res.DeniedActions, "ignored_jobs", res.IgnoredJobs)
 		}
-		if res.Pending > 0 {
-			slog.Info("agent listener: delete kept for a message not yet ingested", "user_id", acct.userID)
-		}
+		kept += res.Pending
+	}
+	// Most kept deletes are the owner's own messages, which are never
+	// ingested; clearing a chat history yields many, so one Debug line.
+	if kept > 0 {
+		slog.Debug("agent listener: deletes kept for messages not yet ingested", "user_id", acct.userID, "count", kept)
 	}
 	return nil
 }

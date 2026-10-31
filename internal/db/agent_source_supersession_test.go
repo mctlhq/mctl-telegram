@@ -504,8 +504,10 @@ func assertPendingDeleteExpired(t *testing.T, f *supersessionFixture) {
 	if n := f.deleteEvents(t); n != 0 {
 		t.Fatalf("delete events = %d, want 0", n)
 	}
-	// The next kept delete sweeps the expired rows.
 	f.recordDelete(t, 99)
+	if err := f.s.SweepExpiredPendingDeletes(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	var n int
 	if err := f.s.DB.QueryRow(`SELECT COUNT(*) FROM agent_pending_deletes WHERE user_id = $1 AND message_id <> 99`, f.uid).Scan(&n); err != nil {
 		t.Fatal(err)
