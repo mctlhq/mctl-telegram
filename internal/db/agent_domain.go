@@ -646,6 +646,14 @@ func (c Conversation) OwnerEngaged(now time.Time) bool {
 // Uses the same INSERT ... ON CONFLICT + SELECT shape as EnsureUserByTelegramID
 // for race safety.
 func (s *Store) EnsureConversation(ctx context.Context, userID, peerTGID int64, username, displayName string) (*Conversation, error) {
+	return s.EnsureConversationWithState(ctx, userID, peerTGID, username, displayName, ConversationActive)
+}
+
+// EnsureConversationWithState is EnsureConversation with the state a newly
+// created row starts in. An existing row keeps its state: the initial state
+// is decided once, in the same statement that creates the row, so a crash
+// cannot leave a new conversation active when it was meant to start closed.
+func (s *Store) EnsureConversationWithState(ctx context.Context, userID, peerTGID int64, username, displayName, initialState string) (*Conversation, error) {
 	if userID <= 0 || peerTGID == 0 {
 		return nil, errors.New("user id and peer id required")
 	}
@@ -653,13 +661,13 @@ func (s *Store) EnsureConversation(ctx context.Context, userID, peerTGID int64, 
 	// with empty metadata (e.g. the listener saw only a numeric peer): a
 	// later richer update fills them, but an emptier one must not erase them.
 	if _, err := s.DB.ExecContext(ctx,
-		`INSERT INTO conversations(user_id, peer_tg_id, peer_username, peer_display_name)
-		 VALUES($1,$2,$3,$4)
+		`INSERT INTO conversations(user_id, peer_tg_id, peer_username, peer_display_name, state)
+		 VALUES($1,$2,$3,$4,$6)
 		 ON CONFLICT (user_id, peer_tg_id) DO UPDATE SET
 		   peer_username = COALESCE(EXCLUDED.peer_username, conversations.peer_username),
 		   peer_display_name = COALESCE(EXCLUDED.peer_display_name, conversations.peer_display_name),
 		   updated_at = $5`,
-		userID, peerTGID, nullable(username), nullable(displayName), time.Now().UTC(),
+		userID, peerTGID, nullable(username), nullable(displayName), time.Now().UTC(), initialState,
 	); err != nil {
 		return nil, fmt.Errorf("ensure conversation: %w", err)
 	}

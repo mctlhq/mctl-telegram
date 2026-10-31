@@ -34,6 +34,9 @@ type account struct {
 	senderAllowlist map[int64]struct{}
 	mgr             *updates.Manager
 	savedCommandMu  sync.Mutex
+	// history is the account's live client API, set while it runs; guarded
+	// by Listener.mu. nil before the first run.
+	history savedHistoryAPI
 }
 
 type sentMessageKey struct {
@@ -50,6 +53,12 @@ type Listener struct {
 	Queue   *queue.Queue
 	Router  CommandRouter
 	Metrics *metrics.Registry
+	// NewChatsOnly (AGENT_NEW_CHATS_ONLY) limits the agent to first contacts.
+	// A conversation is created closed when the Telegram history holds any
+	// message before its first ingested one, or when that history cannot be
+	// read: an unreadable history is not an empty one. /mctl continue opens
+	// such a chat by hand.
+	NewChatsOnly bool
 
 	mu       sync.Mutex
 	accounts map[int64]*account
@@ -193,6 +202,67 @@ func (l *Listener) RunFor(ctx context.Context, userID int64, c *gotdtelegram.Cli
 	})
 }
 
+// initialConversationState decides the state a conversation starts in when
+// this event would create it. Only NewChatsOnly changes it: a chat whose
+// Telegram history holds a message older than this one is not a first
+// contact, and neither is one whose history cannot be read.
+func (l *Listener) initialConversationState(ctx context.Context, acct *account, ex Extracted) (string, error) {
+	if !l.NewChatsOnly {
+		return db.ConversationActive, nil
+	}
+	if _, err := l.Store.GetConversationByPeer(ctx, acct.userID, ex.Event.ChatTGID); err == nil {
+		return db.ConversationActive, nil // exists: EnsureConversation keeps its state
+	} else if !errors.Is(err, db.ErrConversationNotFound) {
+		return "", fmt.Errorf("lookup conversation: %w", err)
+	}
+	l.mu.Lock()
+	api := acct.history
+	l.mu.Unlock()
+	if api == nil {
+		slog.Warn("agent listener: no history client, new chat stored closed", "user_id", acct.userID)
+		return db.ConversationClosed, nil
+	}
+	older, err := hasEarlierMessages(ctx, api, ex.Event.ChatTGID, ex.SenderAccessHash, ex.Event.MessageID)
+	if err != nil {
+		slog.Warn("agent listener: chat history unreadable, new chat stored closed", "user_id", acct.userID, "err", err)
+		return db.ConversationClosed, nil
+	}
+	if older {
+		return db.ConversationClosed, nil
+	}
+	return db.ConversationActive, nil
+}
+
+// hasEarlierMessages reports whether the private chat with peer holds any
+// message, service messages included, older than messageID.
+func hasEarlierMessages(ctx context.Context, api savedHistoryAPI, peer, accessHash, messageID int64) (bool, error) {
+	res, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+		Peer:     &tg.InputPeerUser{UserID: peer, AccessHash: accessHash},
+		OffsetID: int(messageID),
+		Limit:    1,
+	})
+	if err != nil {
+		return false, fmt.Errorf("get chat history: %w", err)
+	}
+	var msgs []tg.MessageClass
+	switch h := res.(type) {
+	case *tg.MessagesMessages:
+		msgs = h.Messages
+	case *tg.MessagesMessagesSlice:
+		msgs = h.Messages
+	case *tg.MessagesChannelMessages:
+		msgs = h.Messages
+	default:
+		return false, fmt.Errorf("unexpected history type %T", res)
+	}
+	for _, m := range msgs {
+		if _, empty := m.(*tg.MessageEmpty); !empty && int64(m.GetID()) < messageID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // runWithPoller runs the update loop alongside the Saved Messages poller.
 // When the poller reports that Telegram rejected the auth key, the update
 // loop is cancelled and that error is returned, so the pool's client exits
@@ -200,6 +270,9 @@ func (l *Listener) RunFor(ctx context.Context, userID int64, c *gotdtelegram.Cli
 // every savedHistoryInterval until something else noticed (about 49k
 // rejected calls over three days on preview, 2026-10-24..26).
 func (l *Listener) runWithPoller(ctx context.Context, a *account, api savedHistoryAPI, run func(context.Context) error) error {
+	l.mu.Lock()
+	a.history = api
+	l.mu.Unlock()
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 	pollCtx, cancelPoll := context.WithCancel(ctx)
@@ -328,7 +401,11 @@ func (l *Listener) persist(ctx context.Context, acct *account, ex Extracted) err
 	switch ex.Event.Kind {
 	case db.EventKindPrivateMessage, db.EventKindMessageEdit:
 		username, displayName := senderIdentityFromMeta(ex.Event.Meta)
-		conv, err := l.Store.EnsureConversation(ctx, acct.userID, ex.Event.ChatTGID, username, displayName)
+		initialState, err := l.initialConversationState(ctx, acct, ex)
+		if err != nil {
+			return err
+		}
+		conv, err := l.Store.EnsureConversationWithState(ctx, acct.userID, ex.Event.ChatTGID, username, displayName, initialState)
 		if err != nil {
 			return fmt.Errorf("ensure conversation: %w", err)
 		}

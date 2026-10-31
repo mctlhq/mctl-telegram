@@ -409,6 +409,11 @@ type Config struct {
 	// how long a never-claimed job may stay pending before it is routed to
 	// the operator. Only used while EventsOperatorRouting is on.
 	AgentUnclaimedRouteAfter time.Duration
+	// AgentNewChatsOnly (AGENT_NEW_CHATS_ONLY, default false) limits the agent
+	// to first contacts: when a private chat the agent has never seen sends
+	// its first message, the listener checks the Telegram history, and a chat
+	// with any earlier message is stored closed, so no job runs the model.
+	AgentNewChatsOnly bool
 	// AgentProfilePath is the deprecated mounted-YAML migration source. At
 	// startup it is imported into the target tenant's encrypted DB profile
 	// only when that document is still missing; it is never consulted on
@@ -503,6 +508,7 @@ func Load() (*Config, error) {
 		AgentTurnMaxMsgs:              envInt("AGENT_TURN_MAX_MSGS", 10),
 		AgentTurnMaxBytes:             envInt("AGENT_TURN_MAX_BYTES", 16384),
 		AgentUnclaimedRouteAfter:      envDuration("AGENT_UNCLAIMED_ROUTE_AFTER", 5*time.Minute),
+		AgentNewChatsOnly:             envBool("AGENT_NEW_CHATS_ONLY", false),
 		AgentProfilePath:              os.Getenv("AGENT_PROFILE_PATH"),
 		AgentProfileOwnerTGID:         envInt64("AGENT_PROFILE_OWNER_TG_ID", 0),
 		AgentTestCrashAfterReserve:    envBool("AGENT_TEST_CRASH_AFTER_RESERVE", false),

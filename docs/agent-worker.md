@@ -459,6 +459,20 @@ also publishes nothing. Before this change such a message reached the
 operator only in the rare case where the model proposed a reply and policy
 denied it. With routing off, ingest publishes the event as before.
 
+## First contacts only (`AGENT_NEW_CHATS_ONLY`)
+
+With `AGENT_NEW_CHATS_ONLY=true` the agent handles only chats that start
+with a message from the sender: a recruiter writing for the first time, not
+someone the owner has corresponded with before. When an inbound message
+would create a conversation, the listener asks Telegram for one message
+before it. If one exists (a service message such as a call counts), or the
+history cannot be read, the conversation is created `closed` in the same
+statement that creates the row, so its jobs are ignored at ingest and the
+model never runs. An unreadable history is treated as "not a first contact"
+rather than as an empty one; `/mctl continue <id>` opens a chat closed by
+mistake. Conversations that already exist keep their state, and the check
+runs once per chat.
+
 ## Attachments in inbound messages (#948)
 
 An inbound message with media is a message even when it has no caption: it

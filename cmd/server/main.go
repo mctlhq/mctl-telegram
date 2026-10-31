@@ -200,6 +200,7 @@ func main() {
 	}
 	agentQueue := queue.New(store, cfg.ReplicaID, m)
 	agentListener := listener.New(store, agentQueue, nil, m)
+	agentListener.NewChatsOnly = cfg.AgentNewChatsOnly
 	limiter := audit.NewRateLimiter(cfg.RateLimitPerUser).WithMetrics(m)
 	peerCache := telegram.NewPeerCache()
 	go func() {
