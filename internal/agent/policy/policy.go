@@ -74,6 +74,11 @@ type Input struct {
 	// sender (#949, #950), computed by the caller from the event log. "" means
 	// the source is current or the action is not tied to a job.
 	SourceSuperseded string
+	// InstallRevision is the install revision the action's work was created
+	// under (its job's, or the stored action's). 0 means not applicable,
+	// e.g. a proposal without a job, which is judged under the current
+	// install anyway (#1018).
+	InstallRevision int64
 }
 
 // ProtectedField names an owner_profile field whose value a reply echoes
@@ -112,6 +117,7 @@ const (
 	DenyReplyNeverField   DenyCode = "reply_contains_never_field"
 	DenyIntentNever       DenyCode = "intent_never"
 	DenyAudienceExcluded  DenyCode = "audience_excluded"
+	DenyInstallChanged    DenyCode = "install_changed"
 	DenySourceSuperseded  DenyCode = "source_message_superseded"
 	DenyUnknown           DenyCode = "unknown" // fallback only
 )
@@ -124,6 +130,10 @@ const (
 // the caller compares whole elements of it rather than the joined string,
 // so appending a second reason to this denial does not break the match.
 const ReasonAutopilotPaused = "autopilot paused for this account"
+
+// ReasonInstallChanged is the reason an install-revision denial carries.
+// Exported so the executor and /mctl approve can recognise it.
+const ReasonInstallChanged = "the assistant install changed since this work began"
 
 // Result contains the policy decision and user-facing/audit reasons.
 type Result struct {
@@ -386,6 +396,12 @@ func Evaluate(in Input) Result {
 	if in.Action.Type == db.ActionTypeReply &&
 		(in.Profile.UserID == 0 || in.Conversation.UserID == 0 || in.Profile.UserID != in.Conversation.UserID) {
 		return deny(DenyUserMismatch, "profile and conversation belong to different users")
+	}
+	// Work from an earlier install revision ran under another assistant or
+	// other settings; nothing it produced may act (#1018). Checked before
+	// every other rule so no approval can release it.
+	if in.InstallRevision != 0 && in.InstallRevision != in.Profile.InstallRevision {
+		return deny(DenyInstallChanged, ReasonInstallChanged)
 	}
 	switch in.Profile.Mode {
 	case db.AgentModeObserve, db.AgentModeGuarded:

@@ -177,9 +177,36 @@ uses the server's instructions and falls back to its own
 prompt reaches `claude` through `--system-prompt-file` (a 0600 temp file),
 not argv, since it can carry the owner's notes.
 
-Switching an account to a different assistant is refused (409) until there
-is a lifecycle for its queued jobs, pending approvals and saved records.
-Re-installing the same assistant, at the same or another version, is allowed.
+### Install revisions
+
+Every install, whether it reconfigures, re-versions or switches the
+assistant, moves `agent_profiles.install_revision` in the same UPDATE as the
+settings and records the definition's digest. A job takes the revision
+current when it is claimed (the claim envelope carries it as
+`install_revision`), and an action copies its job's revision, or the
+profile's when it has no job. Work behind the current revision is refused:
+
+- at propose (`propose_reply`, `request_owner_approval`,
+  `send_owner_summary`), as the policy denial `install_changed`;
+- at `/mctl approve`, which denies the draft and tells the owner the
+  assistant or its settings changed since it was written;
+- at send and at crash recovery, as the same policy denial.
+
+The revision check is the source of truth. After an install the server
+also denies proposed and approved actions from earlier revisions, but that
+is cleanup: a race with it cannot let stale work act. Drafts awaiting the
+owner's approval are left for `/mctl approve` to refuse, so the owner is
+told the assistant changed rather than that the code was not found;
+approval expiry clears the ones never approved. A job that is claimed
+again after the change takes the new revision and runs with the new
+assistant.
+
+Switching to another assistant is therefore allowed. Its install time is
+reset to the switch, so its new chats start then; a reinstall of the same
+assistant keeps the first install time. Conversation transcripts stay as
+account history: the new assistant can read earlier messages through
+`get_conversation_context`, and nothing claims otherwise. Saved records
+stay as they are; only `job_lead` exists today.
 
 ### Mapping
 
@@ -370,8 +397,9 @@ features they touch go live. None is a known defect today.
 3. `after_owner_engaged` after a takeover and resume: the scope and lifetime
    of engagement are defined, per conversation and per assistant.
 4. Switching assistants: an atomic revision change, cancellation of
-   incompatible jobs, and rules for carrying history over (refused until
-   then).
+   incompatible jobs, and rules for carrying history over. (Covered since
+   P3.1, see [Install revisions](#install-revisions): stale work is fenced
+   by revision, open actions are denied as cleanup, history stays.)
 5. A reply that mixes intents ("thanks, Tuesday works, €X is fine"): the
    strictest applicable tier wins; a model-chosen intent is not evidence of
    safe content; an unknown intent is never sent automatically.

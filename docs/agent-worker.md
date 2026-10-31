@@ -116,7 +116,7 @@ exactly one file. It carries:
 - `mctl_agent_credential_domain{domain_id=...}` — the info gauge described
   above.
 - `mctl_agent_jobs_total` (6 children) and `mctl_agent_policy_denials_total`
-  (132 children), all at a **constant zero**. These are server-side families:
+  (138 children), all at a **constant zero**. These are server-side families:
   `AgentJobsTotal` is incremented only in `internal/agent/queue`, and
   `CountPolicyDenial` only in `internal/agentapi` and `internal/agent/executor`
   — none of which run in this process. They appear here because `metrics.New()`
@@ -138,7 +138,7 @@ the first — and possibly only — occurrence they exist for (issue #591).
 it is the denominator of `MctlAgentJobCostHigh` and a lazy denominator makes the
 first completed job after a restart read as zero completions.
 `mctl_agent_policy_denials_total` is pre-created too, across its full
-22 x 6 = 132 label space. It was originally left lazy on the grounds that
+23 x 6 = 138 label space. It was originally left lazy on the grounds that
 `MctlAgentPolicyDenialRateHigh`'s `> 4` floor means one first denial cannot
 fire it — true, and beside the point: if the first *five* denials for one
 reason land between two scrapes, the series is first observed at 5, every later
@@ -272,7 +272,9 @@ are audited as `suppressed`, and the tool result says `suppressed: true`.
 (`instructions`, with `assistant` and `assistant_digest`), rendered by the
 server from the compiled-in catalog; for the recruiter agent that is
 `deploy/agent-worker/system-prompt.txt` plus the owner's notes. The job also
-carries `tools`, the definition's tool names (a canonical name or a generic
+carries `install_revision`, the account's install revision at claim time
+(logged with the assistant and digest; see `docs/assistants/spec.md`), and
+`tools`, the definition's tool names (a canonical name or a generic
 alias for each tool, see `docs/assistants/spec.md`); the worker passes them
 to the MCP server as `AGENT_JOB_TOOLS` and allows exactly those names. A job
 whose names do not cover every tool fails before `claude` starts. A prompt
