@@ -603,53 +603,27 @@ func getMessagesWith(ctx context.Context, api *tg.Client, resolve, reResolve fun
 	limit = clampLimit(limit)
 	sp := &Sponsored{}
 
-	dlgRes, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
-		Limit:      200,
-		OffsetPeer: &tg.InputPeerEmpty{},
-	})
-	if err != nil {
-		return nil, nil, 0, nil, fmt.Errorf("MessagesGetDialogs: %w", err)
-	}
-	users, chats, dialogs := decodeDialogsResult(dlgRes)
-	// Seed the shared peer cache so a later get_messages/send_message for any of
-	// these peers resolves with a valid access_hash even if it misses the live
-	// dialog scan below.
-	seedPeerCache(cache, userID, users, chats)
-
-	for _, dc := range dialogs {
-		d, ok := dc.(*tg.Dialog)
-		if !ok {
-			continue
-		}
-		hint := dialogFromPeer(d, users, chats)
-		if hint == nil {
-			continue
-		}
-		if hint.ID != peerSpec && !matchUsername(hint.Username, peerSpec) {
-			continue
-		}
-		broadcast := isBroadcastChannel(d.Peer, chats)
-		if broadcast && !bool(bc) {
-			return nil, nil, 0, nil, &broadcastContentError{peer: peerSpec}
-		}
-		input := inputPeerFromPeer(d.Peer, users, chats)
-		if input == nil {
-			return nil, nil, 0, nil, fmt.Errorf("cannot build InputPeer for %q", peerSpec)
-		}
-		hist, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
-			Peer:     input,
-			Limit:    limit,
-			OffsetID: beforeID,
-		})
+	// The dialog list comes from a short-lived per-account snapshot, so a
+	// burst of parallel reads costs one getDialogs instead of one each. A
+	// peer missing from a snapshot gets one live re-fetch before the direct
+	// resolution below, so a dialog opened since the snapshot is still found.
+	var dlgRes tg.MessagesDialogsClass
+	for fresh := false; ; fresh = true {
+		res, cached, err := cache.recentDialogs(ctx, api, userID, fresh)
 		if err != nil {
-			return nil, nil, 0, nil, fmt.Errorf("MessagesGetHistory: %w", err)
+			return nil, nil, 0, nil, err
 		}
-		decoded, raw := decodeMessagesRaw(hist, hint, users, chats, limit)
-		if ch, ok := input.(*tg.InputPeerChannel); ok && broadcast && len(decoded) > 0 {
-			fetchSponsored(ctx, api, ch.ChannelID, input, len(decoded), sp)
+		dlgRes = res
+		msgs, raw, cursor, sp, found, err := getMessagesFromDialogs(ctx, api, dlgRes, peerSpec, limit, beforeID, cache, userID, bc, sp)
+		if found || err != nil {
+			return msgs, raw, cursor, sp, err
 		}
-		return decoded, raw, historyCursor(hist), sp, nil
+		if !cached {
+			break
+		}
 	}
+	// The fallback decodes senders against the same users and chats.
+	users, chats, _ := decodeDialogsResult(dlgRes)
 
 	// Fallback: peer not in dialog list — resolve directly.
 	slog.Debug("peer not in dialog list, falling back to direct resolution", "peer_redacted", RedactPeer(peerSpec))
@@ -729,4 +703,52 @@ func matchUsername(have, want string) bool {
 	have = strings.TrimPrefix(strings.ToLower(have), "@")
 	want = strings.TrimPrefix(strings.ToLower(want), "@")
 	return have != "" && have == want
+}
+
+// getMessagesFromDialogs reads peerSpec's history when the peer is in the
+// dialog list dlgRes. found is false, with no error, when it is not; the
+// caller then decides between a live re-fetch and direct resolution.
+func getMessagesFromDialogs(ctx context.Context, api *tg.Client, dlgRes tg.MessagesDialogsClass, peerSpec string, limit, beforeID int, cache *PeerCache, userID int64, bc BroadcastContent, sp *Sponsored) ([]Message, []*tg.Message, int, *Sponsored, bool, error) {
+	users, chats, dialogs := decodeDialogsResult(dlgRes)
+	// Seed the shared peer cache so a later get_messages/send_message for any of
+	// these peers resolves with a valid access_hash even if it misses the
+	// dialog scan below.
+	seedPeerCache(cache, userID, users, chats)
+
+	for _, dc := range dialogs {
+		d, ok := dc.(*tg.Dialog)
+		if !ok {
+			continue
+		}
+		hint := dialogFromPeer(d, users, chats)
+		if hint == nil {
+			continue
+		}
+		if hint.ID != peerSpec && !matchUsername(hint.Username, peerSpec) {
+			continue
+		}
+		broadcast := isBroadcastChannel(d.Peer, chats)
+		if broadcast && !bool(bc) {
+			return nil, nil, 0, nil, true, &broadcastContentError{peer: peerSpec}
+		}
+		input := inputPeerFromPeer(d.Peer, users, chats)
+		if input == nil {
+			return nil, nil, 0, nil, true, fmt.Errorf("cannot build InputPeer for %q", peerSpec)
+		}
+		hist, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+			Peer:     input,
+			Limit:    limit,
+			OffsetID: beforeID,
+		})
+		if err != nil {
+			return nil, nil, 0, nil, true, fmt.Errorf("MessagesGetHistory: %w", err)
+		}
+		decoded, raw := decodeMessagesRaw(hist, hint, users, chats, limit)
+		if ch, ok := input.(*tg.InputPeerChannel); ok && broadcast && len(decoded) > 0 {
+			fetchSponsored(ctx, api, ch.ChannelID, input, len(decoded), sp)
+		}
+		return decoded, raw, historyCursor(hist), sp, true, nil
+	}
+
+	return nil, nil, 0, nil, false, nil
 }
