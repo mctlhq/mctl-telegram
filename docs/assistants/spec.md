@@ -425,15 +425,15 @@ carries the text and no path, so it is complete without the repository.
 P3.5 (#1021) lets the account owner manage their own install from an MCP
 client. The three tools and `PUT /api/admin/agent/install` call one service,
 `internal/assistantinstall`, so resolving the definition, the lifecycle
-gate, the snapshot and the revision move happen in one place; the web page
-(P3.6) will call it too. Every tool acts on the caller's own account and has
+gate, the snapshot and the revision move happen in one place; the web pages
+(P3.6, see [Web pages](#web-pages)) call it too. Every tool acts on the caller's own account and has
 no `telegram_id` argument. They refuse when `AGENT_ENABLED` is off.
 
 - **`list_assistants`** (any signed-in connection) returns `source`
   (`registry` with `ASSISTANT_REGISTRY_ENABLED`, read from
   `GET /api/v1/assistant-catalog`; else `embedded`, the public, non-draft
   entries of the built-in catalog), `assistants` (name, version, title,
-  description, tags, lifecycle, variables with name, type, required,
+  description, tags, examples, lifecycle, variables with name, type, required,
   choices, description and, from the registry, a non-secret default;
   intents with their default tier; defaults: mode, limits, disclosure
   policy) and `mine`: `{assistant, version, install_revision, installed}`.
@@ -489,6 +489,47 @@ Errors are a JSON envelope `{error, message, retryable, current_revision?}`:
 | `internal_error` | a database or encryption fault |
 
 Audit rows record the error kind only, never the message.
+
+## Web pages
+
+P3.6 (#1022) puts the same catalog and install on tg.mctl.ai. Both pages
+exist only with `AGENT_ENABLED`, and both call `internal/assistantinstall`,
+so they have no semantics the MCP tools do not have.
+
+- **`/assistants`** is public and read-only. It lists exactly what
+  `list_assistants` lists, from the same `ListCatalog` call: per entry the
+  title, description, `name@version`, tags, examples, lifecycle, the
+  variables (name, type, choices, required, description, and a registry
+  default where the registry gives one; it gives none for a secret
+  variable), the intents with their default tier, and the defaults (mode,
+  limits, disclosure policy). It is server-rendered and needs no
+  JavaScript. A registry that cannot be read answers `503` with an explicit
+  "catalog unavailable" section, never an empty catalog.
+- **The assistant section of `/telegram/connect/manage`** (local-jwt only,
+  like the rest of the page) shows the caller's install: `name@version`,
+  install revision, mode, paused, listening and the same settings summary
+  the MCP tools answer. It never shows values, owner notes or
+  instructions, and a failed read shows neither an install nor "none
+  installed". With `account:manage`, exactly as the MCP write tools
+  require (the browser sign-in exception that lets disconnect through does
+  not apply), it offers HTML form posts:
+  - `POST /telegram/connect/manage/assistant/install`: one form per catalog
+    version, with an empty input per variable (never prefilled). It is
+    `Apply` with `SelfService`, building the install the way
+    `install_assistant` does, with `paused` and `listening` left out so the
+    install starts paused and not listening.
+  - `POST /telegram/connect/manage/assistant/update`: pause or unpause,
+    listening on or off, and mode. Each is `Patch` with a one-member merge
+    patch (`{"paused": false}`, `{"listening": true}`, `{"mode":
+    "guarded"}`); anything else is refused with `400`.
+
+  Every form carries the revision the page was rendered at as
+  `expected_revision`. A conflict re-renders the page with `409`, the
+  current install and a message that nothing changed; other refusals
+  re-render it with the service's message (never `Detail`) and a matching
+  status. Cross-site submission is refused by the `SameSite=Lax`
+  connect-session cookie, as for the other manage forms. Each submission
+  writes an audit row with the error kind only.
 
 ## Customization tiers
 

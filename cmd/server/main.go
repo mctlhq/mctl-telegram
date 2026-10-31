@@ -592,11 +592,43 @@ func main() {
 	// web approval page below. Disabled when BROADCAST_OPERATORS is empty.
 	broadcastSvc := newBroadcastService(store, cfg)
 
+	// The assistant catalog and install service (#1020-#1022), behind the
+	// MCP tools, the admin install route, /assistants and the manage page's
+	// assistant section. Only with AGENT_ENABLED, like the agent itself.
+	var (
+		catalog      *assistant.Catalog
+		registry     *assistantregistry.Client
+		assistantSvc *assistantinstall.Service
+	)
+	if cfg.AgentEnabled {
+		// The catalog is compiled in and covered by tests, so a load
+		// failure is a broken build: refuse to start rather than run jobs
+		// without their assistant's instructions.
+		catalog, err = assistant.LoadCatalog(mctltelegram.Catalog)
+		if err != nil {
+			slog.Error("agent: assistant catalog failed to load", "err", err)
+			os.Exit(1)
+		}
+		// The assistant registry (#1020): off by default. With it on,
+		// installs fetch from mctl-api and store a snapshot, a refresh keeps
+		// pinned lifecycles current, and claims stop for a disabled or
+		// unknown one. Claims never call the registry.
+		if cfg.AssistantRegistryEnabled {
+			registry = assistantregistry.NewClient(cfg.MCTLAPIBaseURL, cfg.MCTLSurfaceTelegramToken, nil)
+			refresher := &assistantregistry.Refresher{Store: store, Client: registry}
+			go refresher.Run(ctx, assistantregistry.RefreshInterval)
+		}
+		slog.Info("assistant registry", "enabled", cfg.AssistantRegistryEnabled, "mctl_api_base_url", cfg.MCTLAPIBaseURL)
+		assistantSvc = assistantinstall.New(store, catalog, registry)
+		// The public catalog page: the same entries as list_assistants.
+		mux.Get("/assistants", web.Assistants(assistantSvc, cfg.PublicBaseURL, showManage))
+	}
+
 	// Session management dashboard — only mounted in local-jwt mode alongside
 	// the self-connect wizard. Requires auth so only the session owner can
 	// manage their own session.
 	if strings.EqualFold(cfg.AuthMode, "local-jwt") {
-		manageSrv := web.NewManageServer(store, pool, strings.TrimRight(cfg.PublicBaseURL, "/"), cfg.TelegramLoginBotUsername, oauth.ConnectClientID).WithCanaryGuard(cfg.CanaryTelegramIDs)
+		manageSrv := web.NewManageServer(store, pool, strings.TrimRight(cfg.PublicBaseURL, "/"), cfg.TelegramLoginBotUsername, oauth.ConnectClientID).WithCanaryGuard(cfg.CanaryTelegramIDs).WithAssistants(assistantSvc)
 		// Browser navigations get an HTML sign-in page; API clients keep JSON 401.
 		// Auth is still required — only the unauthenticated presentation changes.
 		manageAuth := auth.MiddlewareWithHTML(provider, true, m, resourceMeta, manageSrv.WriteUnauthorized)
@@ -604,6 +636,10 @@ func main() {
 		mux.With(manageAuth).Post("/telegram/connect/manage/disconnect", manageSrv.HandleDisconnect)
 		mux.With(manageAuth).Post("/telegram/connect/manage/toggle-send", manageSrv.HandleToggleSend)
 		mux.With(manageAuth).Post("/telegram/connect/manage/notifications", manageSrv.HandleSetNotifications)
+		if assistantSvc != nil {
+			mux.With(manageAuth).Post("/telegram/connect/manage/assistant/install", manageSrv.HandleAssistantInstall)
+			mux.With(manageAuth).Post("/telegram/connect/manage/assistant/update", manageSrv.HandleAssistantUpdate)
+		}
 		// Broadcast approval (issue-439). Under /telegram/connect so the
 		// connect-session cookie reaches it; the handler itself requires a
 		// token issued to the self-connect client, so an MCP token can
@@ -741,30 +777,11 @@ func main() {
 		// production onboarding.
 		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Put("/api/admin/agent/profile",
 			agentapi.NewAdminAgentProfileHandler(store))
-		// The catalog is compiled in and covered by tests, so a load
-		// failure is a broken build: refuse to start rather than run jobs
-		// without their assistant's instructions.
-		catalog, err := assistant.LoadCatalog(mctltelegram.Catalog)
-		if err != nil {
-			slog.Error("agent: assistant catalog failed to load", "err", err)
-			os.Exit(1)
-		}
-		// The assistant registry (#1020): off by default. With it on,
-		// installs fetch from mctl-api and store a snapshot, a refresh keeps
-		// pinned lifecycles current, and claims stop for a disabled or
-		// unknown one. Claims never call the registry.
-		var registry *assistantregistry.Client
-		if cfg.AssistantRegistryEnabled {
-			registry = assistantregistry.NewClient(cfg.MCTLAPIBaseURL, cfg.MCTLSurfaceTelegramToken, nil)
-			refresher := &assistantregistry.Refresher{Store: store, Client: registry}
-			go refresher.Run(ctx, assistantregistry.RefreshInterval)
-		}
-		slog.Info("assistant registry", "enabled", cfg.AssistantRegistryEnabled, "mctl_api_base_url", cfg.MCTLAPIBaseURL)
 		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Put("/api/admin/agent/install",
 			agentapi.NewAdminAgentInstallHandler(store, catalog, registry))
 		// The same install service behind the owner's own MCP tools
 		// (list_assistants, install_assistant, update_install).
-		mcpSrv.WithAssistants(assistantinstall.New(store, catalog, registry))
+		mcpSrv.WithAssistants(assistantSvc)
 		agentProvider := selectAgentProvider(cfg, store, workerTokenRevocationCache)
 		if jobProvider := selectAgentJobProvider(cfg, store, workerTokenRevocationCache); jobProvider != nil {
 			agentProvider = chainProvider{agentProvider, jobProvider}
