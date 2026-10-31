@@ -187,7 +187,7 @@ func TestMaterializedRejects(t *testing.T) {
 	e, _ := c.Lookup("hr-recruiter", "0.1.0")
 	m := string(e.Materialized)
 	cases := map[string]string{
-		"tenant visibility": strings.Replace(m, `"visibility":"admin"`, `"visibility":"tenant"`, 1),
+		"tenant visibility": strings.Replace(m, `"visibility":"public"`, `"visibility":"tenant"`, 1),
 		"path not text":     strings.Replace(m, `"instructions":{"text":`, `"instructions":{"path":"x.txt","text":`, 1),
 		"blank text":        regexpText.ReplaceAllString(m, `"instructions":{"text":"   "}`),
 	}
@@ -199,7 +199,7 @@ func TestMaterializedRejects(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	tenant := strings.Replace(string(readFile(t, "assistant.yaml")), "visibility: admin", "visibility: tenant", 1)
+	tenant := strings.Replace(string(readFile(t, "assistant.yaml")), "visibility: public", "visibility: tenant", 1)
 	if _, err := LoadCatalog(fstest.MapFS{
 		"assistants/hr-recruiter/assistant.yaml": {Data: []byte(strings.Replace(tenant, "path: ../../deploy/agent-worker/system-prompt.txt", "path: p.txt", 1))},
 		"assistants/hr-recruiter/p.txt":          {Data: []byte("Rules.")},
@@ -209,3 +209,33 @@ func TestMaterializedRejects(t *testing.T) {
 }
 
 var regexpText = regexp.MustCompile(`"instructions":\{"text":"(?:[^"\\]|\\.)*"\}`)
+
+// activeDigests pins the content of every active catalog version. An active
+// version is what installs pin and what the registry holds, so its
+// definition and instructions may not change under the same version: a
+// change to either, including deploy/agent-worker/system-prompt.txt for
+// hr-recruiter, needs a new version (and a new line here), not an edit.
+var activeDigests = map[string]string{
+	"hr-recruiter@0.1.0": "sha256:875d7b3225a81ed9f1b9d8624cacd8aea182260fc8b5f8cbc38f6b6638fb8bc1",
+}
+
+func TestActiveVersionsAreImmutable(t *testing.T) {
+	c, err := LoadCatalog(mctltelegram.Catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range c.Entries() {
+		if e.Definition.Metadata.Status != "active" {
+			continue
+		}
+		key := e.Definition.Metadata.Name + "@" + e.Definition.Metadata.Version
+		want, ok := activeDigests[key]
+		if !ok {
+			t.Errorf("%s is active but its digest is not pinned: add %q to activeDigests", key, e.Digest)
+			continue
+		}
+		if e.Digest != want {
+			t.Errorf("%s changed under the same version (digest %s, pinned %s): release the change as a new version", key, e.Digest, want)
+		}
+	}
+}

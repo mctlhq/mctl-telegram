@@ -15,8 +15,8 @@ metadata:
     you have not shared.
   version: 0.1.0
   owner: mctlhq
-  visibility: admin
-  status: draft
+  visibility: public
+  status: active
   tags: [recruiting, job-search]
   examples:
     - "Hi! We have a Senior Go role at Acme, fully remote. Open to a chat?"

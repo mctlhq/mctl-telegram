@@ -364,6 +364,13 @@ carries the text and no path, so it is complete without the repository.
   `metadata.status` (not `draft`); the registry lifecycle then decides
   whether it can be installed (`published`), kept by an existing pin
   (`deprecated`), or must stop (`disabled`).
+- **Active versions are immutable.** A `draft` may change under its
+  version; an `active` one may not, since installs pin it and the registry
+  holds it. `TestActiveVersionsAreImmutable` pins every active version's
+  digest, so editing an active definition or its instructions (for
+  `hr-recruiter`, `deploy/agent-worker/system-prompt.txt`) fails CI until the
+  change ships as a new version. `hr-recruiter@0.1.0` is `public` and
+  `active` since P3.2.
 - **Staleness (P3.4).** An installed definition is kept in the database
   with its install revision, so a restart works without the registry. Its
   lifecycle is refreshed every 5 minutes; `disabled` stops new jobs within
