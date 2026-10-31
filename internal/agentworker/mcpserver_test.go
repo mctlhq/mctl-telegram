@@ -44,6 +44,7 @@ type fakeAPI struct {
 	leadToReturn              *LeadDTO
 	leadsToReturn             []LeadDTO
 	leadsRouteMissing         bool
+	leadsConvMissing          bool
 	getConversationLeadsCalls []int64
 
 	// summaryResult, when set, replaces SendOwnerSummary's default result,
@@ -87,6 +88,9 @@ func (f *fakeAPI) GetConversationLeads(ctx context.Context, conversationID int64
 	}
 	if f.leadsRouteMissing {
 		return nil, &APIError{StatusCode: http.StatusNotFound, Message: "404 page not found"}
+	}
+	if f.leadsConvMissing {
+		return nil, &APIError{StatusCode: http.StatusNotFound, Message: "conversation not found"}
 	}
 	return f.leadsToReturn, nil
 }
@@ -462,6 +466,20 @@ func TestGetLead_ScopedToJobsOwnConversation(t *testing.T) {
 	}
 	if len(api.getConversationContextCalls) != 0 {
 		t.Fatalf("get_lead read the conversation context: %#v", api.getConversationContextCalls)
+	}
+}
+
+// The leads route's own "conversation not found" is an answer, not a
+// missing route: get_lead does not fall back to the context route.
+func TestGetLead_MissingConversationDoesNotFallBack(t *testing.T) {
+	api := &fakeAPI{leadsConvMissing: true}
+	b := &toolBuilder{api: api, job: JobContext{ConversationID: 9}}
+	tool, handler := b.getLead()
+	if res := callTool(t, tool, handler, map[string]any{}); !res.IsError {
+		t.Fatal("expected a tool error for a missing conversation")
+	}
+	if len(api.getConversationContextCalls) != 0 {
+		t.Fatalf("fell back to the context route: %#v", api.getConversationContextCalls)
 	}
 }
 

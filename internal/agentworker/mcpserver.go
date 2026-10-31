@@ -227,16 +227,19 @@ func (b *toolBuilder) getRecruiterProfile() (mcplib.Tool, mcpserver.ToolHandlerF
 //
 // It reads GET /conversations/{id}/leads, which returns the leads and no
 // messages, so get_lead does not grant what get_conversation_context does
-// (#1043). Only a server without that route (404) is read through the
-// context route, as before.
+// (#1043). Only a server without that route (a 404 that is not the
+// route's own "conversation not found") is read through the context route,
+// as before.
 func (b *toolBuilder) getLead() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("get_lead",
 		mcplib.WithDescription("Fetch the job leads saved for this job's own conversation, newest first, if any. Equivalent to get_conversation_context's leads field, offered separately for a quick standalone lookup."),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		leads, err := b.api.GetConversationLeads(ctx, b.job.ConversationID)
+		// The route answers "conversation not found" itself; any other 404
+		// is a server without the route.
 		var apiErr *APIError
-		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound && apiErr.Message != "conversation not found" {
 			convCtx, cerr := b.api.GetConversationContext(ctx, b.job.ConversationID, 0)
 			if cerr != nil {
 				return toolErr(cerr), nil

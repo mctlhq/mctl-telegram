@@ -395,8 +395,9 @@ func (s *Service) DeleteFork(ctx context.Context, userID int64, name, version st
 	return n, nil
 }
 
-// ListForks returns userID's own forks, never anyone else's. A disabled
-// server lists none rather than failing, so list_assistants still works.
+// ListForks returns userID's own forks, never anyone else's. It lists them
+// whether or not forks are enabled, so an owner can always see and delete
+// their own data.
 func (s *Service) ListForks(ctx context.Context, userID int64) ([]ForkSummary, error) {
 	rows, err := s.Store.ListAssistantForks(ctx, userID)
 	if err != nil {

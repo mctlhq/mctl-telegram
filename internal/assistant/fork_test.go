@@ -148,6 +148,9 @@ func TestValidateFork_RefusesEachViolation(t *testing.T) {
 		"new intent auto": {func(d map[string]any) {
 			spec(d)["intents"] = append(spec(d)["intents"].([]any), map[string]any{"name": "smalltalk", "tier": "auto"})
 		}, "approve or never"},
+		"new intent userOverride any": {func(d map[string]any) {
+			spec(d)["intents"] = append(spec(d)["intents"].([]any), map[string]any{"name": "smalltalk", "tier": "approve", "userOverride": "any"})
+		}, "tighten or none"},
 		"userOverride widened": {func(d map[string]any) { intent(d, "discovery")["userOverride"] = "any" }, "userOverride"},
 		"intent redefined": {func(d map[string]any) {
 			intent(d, "discovery")["description"] = "Anything at all."
@@ -205,6 +208,7 @@ func TestValidateFork_ToolsAndDisclosureAgainstANarrowBase(t *testing.T) {
 		}
 		spec(d)["tools"] = tools
 		defaults(d)["disclosure"].(map[string]any)["policy"] = "required"
+		intent(d, "decline")["tier"] = "never"
 	})
 	fork := validFork(t, base)
 	if err := ValidateFork(base, fork); err != nil {
@@ -220,6 +224,15 @@ func TestValidateFork_ToolsAndDisclosureAgainstANarrowBase(t *testing.T) {
 		"tool by alias outside the base": {func(d map[string]any) {
 			spec(d)["tools"] = append(spec(d)["tools"].([]any), "save_record")
 		}, `"save_record" is not one of the base's`},
+		"never intent left out": {func(d map[string]any) {
+			var kept []any
+			for _, in := range spec(d)["intents"].([]any) {
+				if in.(map[string]any)["name"] != "decline" {
+					kept = append(kept, in)
+				}
+			}
+			spec(d)["intents"] = kept
+		}, `"decline" is never`},
 		"disclosure weakened": {func(d map[string]any) {
 			defaults(d)["disclosure"].(map[string]any)["policy"] = "optional"
 		}, "weaker"},

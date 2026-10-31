@@ -498,7 +498,7 @@ base, on top of the checks every definition passes:
 | Part | A fork may |
 |---|---|
 | instructions | replace them; at most 16 KiB of UTF-8, without the `owner_notes` markers. `ownerNotes` are still appended below. |
-| intents | leave one out; make a tier stricter (`auto` → `approve` → `never`) and `userOverride` narrower (`any` → `tighten` → `none`); add one at `approve` or `never`, never `auto`. An intent the base has keeps its description. |
+| intents | leave one out, except one the base has at `never` (left out, it would leave the denylist and go to approval); make a tier stricter (`auto` → `approve` → `never`) and `userOverride` narrower (`any` → `tighten` → `none`); add one at `approve` or `never`, never `auto`, with `userOverride` `tighten` or `none`, so no install can raise it to `auto`. An intent the base has keeps its description. |
 | tools | name a subset of the base's, by canonical name or alias, still with `get_event` and `complete_agent_job`. The tool gate enforces it. |
 | limits, ceilings | lower them: each at most the base's ceiling. |
 | disclosure | make the policy `required`; never `optional` where the base requires it. The text is the base's. |

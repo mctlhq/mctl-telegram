@@ -267,11 +267,18 @@ func ValidateFork(base, fork *Entry) error {
 	for _, in := range b.Spec.Intents {
 		baseIntents[in.Name] = in
 	}
+	forkIntents := map[string]bool{}
 	for _, in := range f.Spec.Intents {
+		forkIntents[in.Name] = true
 		was, ok := baseIntents[in.Name]
 		if !ok {
 			if in.Tier == TierAuto {
 				return fmt.Errorf("fork: new intent %q may only be approve or never", in.Name)
+			}
+			// userOverride any would let an install's intentTiers raise
+			// it to auto, the user-defined auto intent the ADR forbids.
+			if overrideRank(in.UserOverride) < userOverrideRank["tighten"] {
+				return fmt.Errorf("fork: new intent %q: userOverride may only be tighten or none", in.Name)
 			}
 			continue
 		}
@@ -285,6 +292,15 @@ func ValidateFork(base, fork *Entry) error {
 		// on that meaning.
 		if in.Description != was.Description {
 			return fmt.Errorf("fork: intent %q keeps the base's description", in.Name)
+		}
+	}
+
+	// Leaving an intent out makes it unknown, and an unknown intent never
+	// auto-sends, but it is not refused either: a reply labelled with a
+	// left-out never intent would go to owner approval, never → approve.
+	for _, in := range b.Spec.Intents {
+		if in.Tier == TierNever && !forkIntents[in.Name] {
+			return fmt.Errorf("fork: intent %q is never in the base and cannot be left out", in.Name)
 		}
 	}
 
