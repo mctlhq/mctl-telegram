@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
 	agentprofile "github.com/mctlhq/mctl-telegram/internal/agent/profile"
@@ -136,16 +135,6 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 		}
 		// Policy excludes everyone on a class it does not know; refuse to
 		// store one rather than discover it then.
-		if req.AudienceExcludes != nil {
-			for _, class := range strings.Split(*req.AudienceExcludes, ",") {
-				switch strings.TrimSpace(class) {
-				case "", policy.AudienceContacts, policy.AudienceNonContacts, policy.AudienceNewChats, policy.AudienceExistingChats:
-				default:
-					writeJSONError(w, http.StatusBadRequest, "invalid audience_excludes")
-					return
-				}
-			}
-		}
 		// Policy holds every reply on a value it cannot parse; refuse to
 		// store one rather than discover it then.
 		if req.WorkingHours != nil && *req.WorkingHours != "" {
@@ -193,6 +182,21 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			logHandlerErr("admin.agent_profile.upsert", err)
 			writeJSONError(w, http.StatusInternalServerError, "failed to initialize agent profile")
 			return
+		}
+		// Policy excludes everyone on a value it cannot use; refuse to store
+		// one rather than discover it then. Chat-age classes need the install
+		// time only the install handler stamps.
+		if req.AudienceExcludes != nil {
+			current, err := store.GetAgentProfile(ctx, targetUserID)
+			if err != nil {
+				logHandlerErr("admin.agent_profile.upsert", err)
+				writeJSONError(w, http.StatusInternalServerError, "failed to load agent profile")
+				return
+			}
+			if err := policy.ValidAudienceExcludes(*req.AudienceExcludes, !current.AssistantInstalledAt.IsZero()); err != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid audience_excludes: "+err.Error())
+				return
+			}
 		}
 
 		update := db.AgentProfileUpdate{

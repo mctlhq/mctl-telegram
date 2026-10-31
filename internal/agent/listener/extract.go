@@ -36,7 +36,8 @@ type Extracted struct {
 	// peer with PEER_ID_INVALID.
 	SenderAccessHash int64
 	// SenderContact is db.PeerContactYes or db.PeerContactNo when the
-	// update carried the sender's user entity, "" otherwise.
+	// update carried the sender's full user entity, "" otherwise (none, or
+	// a min entity).
 	SenderContact string
 	// SentAt is when Telegram says the owner sent this message (msg.Date),
 	// set only for EventKindOwnerOutgoing. An edit keeps the original send
@@ -164,8 +165,10 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 		Body:       msg.Message,
 		Meta:       messageMeta(senderUser, attachment),
 	}
+	// A min user entity does not carry per-account flags reliably, so it
+	// says nothing about contact status (as senderAccessHash treats it).
 	contact := ""
-	if hasSenderUser && senderUser != nil {
+	if hasSenderUser && senderUser != nil && !senderUser.Min {
 		contact = db.PeerContactNo
 		if senderUser.Contact {
 			contact = db.PeerContactYes

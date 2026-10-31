@@ -47,3 +47,21 @@ func TestAudienceExcluded(t *testing.T) {
 		})
 	}
 }
+
+func TestValidAudienceExcludes(t *testing.T) {
+	for csv, installed := range map[string]bool{"": false, "contacts": false, "non_contacts,new_chats": true} {
+		if err := ValidAudienceExcludes(csv, installed); err != nil {
+			t.Errorf("%q (installed=%v): %v", csv, installed, err)
+		}
+	}
+	for csv, installed := range map[string]bool{
+		"vips":                     true,
+		"contacts,non_contacts":    true,
+		"new_chats,existing_chats": true,
+		"new_chats":                false,
+	} {
+		if err := ValidAudienceExcludes(csv, installed); err == nil {
+			t.Errorf("%q (installed=%v) accepted", csv, installed)
+		}
+	}
+}
