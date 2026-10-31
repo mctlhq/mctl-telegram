@@ -107,6 +107,7 @@ const (
 	DenyReplyURL          DenyCode = "reply_contains_url"
 	DenyReplyCredentials  DenyCode = "reply_contains_credentials"
 	DenyReplyNeverField   DenyCode = "reply_contains_never_field"
+	DenyIntentNever       DenyCode = "intent_never"
 	DenySourceSuperseded  DenyCode = "source_message_superseded"
 	DenyUnknown           DenyCode = "unknown" // fallback only
 )
@@ -447,6 +448,14 @@ func Evaluate(in Input) Result {
 		return deny(DenyActionTypeUnknown, "unrecognized action type "+strconv.Quote(in.Action.Type))
 	}
 
+	// The never tier of the assistant catalog: no mode, budget or owner
+	// approval releases an intent on the denylist. The intent is the
+	// model's label, so this only removes what the model declares; the
+	// content checks below still apply to everything else.
+	if denied, ok := allowlistEntry(in.Profile.IntentDenylist, in.Action.Intent); ok {
+		return deny(DenyIntentNever, "intent "+strconv.Quote(denied)+" is never sent")
+	}
+
 	// Zero means the caller did not echo a peer; the executor uses the DB peer.
 	if in.Action.PeerTGID != 0 && in.Action.PeerTGID != in.Conversation.PeerTGID {
 		return deny(DenyPeerMismatch, "reply peer does not match conversation")
@@ -567,7 +576,7 @@ func OwnerHoldReasons(stored string) []string {
 
 func isBlocked(csv string, peerID int64) bool { return containsID(csv, peerID) }
 
-// allowlistEntry returns the allowlist entry matching intent
+// allowlistEntry returns the allowlist (or denylist) entry matching intent
 // (case-insensitively, ignoring surrounding spaces), as configured.
 func allowlistEntry(csv, intent string) (string, bool) {
 	intent = strings.TrimSpace(intent)

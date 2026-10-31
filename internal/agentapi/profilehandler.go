@@ -28,6 +28,7 @@ type upsertAgentProfileRequest struct {
 	MaxMsgsPerMinute   int     `json:"max_msgs_per_minute,omitempty"`
 	MaxReplyChars      int     `json:"max_reply_chars,omitempty"`
 	IntentAllowlist    *string `json:"intent_allowlist,omitempty"`
+	IntentDenylist     *string `json:"intent_denylist,omitempty"`
 	BlockedSenders     *string `json:"blocked_senders,omitempty"`
 	SenderAllowlist    *string `json:"sender_allowlist,omitempty"`
 	// OwnerProfile is a strict JSON document matching profile.Data. Omitted
@@ -39,7 +40,7 @@ type upsertAgentProfileRequest struct {
 var upsertAgentProfileKeys = [...]string{
 	"telegram_id", "mode", "autopilot_paused", "listener_enabled",
 	"disclosure_text", "disclosure_disabled", "max_autonomous_turns", "max_msgs_per_minute",
-	"max_reply_chars", "intent_allowlist", "blocked_senders",
+	"max_reply_chars", "intent_allowlist", "intent_denylist", "blocked_senders",
 	"sender_allowlist", "owner_profile",
 }
 
@@ -54,6 +55,7 @@ type agentProfileResponse struct {
 	MaxMsgsPerMinute   int    `json:"max_msgs_per_minute"`
 	MaxReplyChars      int    `json:"max_reply_chars"`
 	IntentAllowlist    string `json:"intent_allowlist"`
+	IntentDenylist     string `json:"intent_denylist"`
 	BlockedSenders     string `json:"blocked_senders"`
 	SenderAllowlist    string `json:"sender_allowlist"`
 	// The profile contents are deliberately never echoed from this
@@ -168,6 +170,7 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			DisclosureText:     req.DisclosureText,
 			DisclosureDisabled: req.DisclosureDisabled,
 			IntentAllowlist:    req.IntentAllowlist,
+			IntentDenylist:     req.IntentDenylist,
 			BlockedSenders:     req.BlockedSenders,
 			SenderAllowlist:    req.SenderAllowlist,
 		}
@@ -233,6 +236,7 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			MaxMsgsPerMinute:       p.MaxMsgsPerMinute,
 			MaxReplyChars:          p.MaxReplyChars,
 			IntentAllowlist:        p.IntentAllowlist,
+			IntentDenylist:         p.IntentDenylist,
 			BlockedSenders:         p.BlockedSenders,
 			SenderAllowlist:        p.SenderAllowlist,
 			OwnerProfileConfigured: ownerProfileConfigured,

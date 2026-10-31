@@ -90,6 +90,7 @@ func TestHRInstallMatchesTodaysProfile(t *testing.T) {
 		"max_msgs_per_minute":  2,
 		"max_reply_chars":      1200,
 		"intent_allowlist":     "discovery,schedule",
+		"intent_denylist":      "",
 		"blocked_senders":      "",
 		"sender_allowlist":     "",
 	}
@@ -187,7 +188,6 @@ func TestInstallRejected(t *testing.T) {
 			"  disclosureLevels:\n    salary_floor: never\n  limits:\n"}},
 		"unknown key":  {pairs: []string{"  paused: false\n", "  paused: false\n  autopilot: true\n"}},
 		"bad mode":     {pairs: []string{"mode: guarded", "mode: yolo"}},
-		"never tier":   {pairs: []string{"  limits:\n", "  intentTiers:\n    decline: never\n  limits:\n"}, unsupported: true},
 		"schedule":     {pairs: []string{"  limits:\n", "  schedule:\n    mode: outside_hours\n  limits:\n"}, unsupported: true},
 		"narrow scope": {pairs: []string{"  limits:\n", "  audience:\n    scope:\n      contacts: false\n  limits:\n"}, unsupported: true},
 	}
@@ -212,6 +212,7 @@ func TestInstallAccepted(t *testing.T) {
 	base := readFile(t, "install.example.yaml")
 	cases := map[string][]string{
 		"tighten tier":    {"  limits:\n", "  intentTiers:\n    discovery: approve\n  limits:\n"},
+		"never tier":      {"  limits:\n", "  intentTiers:\n    discovery: never\n    decline: never\n  limits:\n"},
 		"stricter level":  {"  limits:\n", "  disclosureLevels:\n    skills: never\n  limits:\n"},
 		"schedule always": {"  limits:\n", "  schedule:\n    mode: always\n  limits:\n"},
 		"owner notes":     {"  limits:\n", "  ownerNotes: Keep replies under three sentences.\n  limits:\n"},
@@ -233,6 +234,10 @@ func TestInstallAccepted(t *testing.T) {
 			case "tighten tier":
 				if got["intent_allowlist"] != "schedule" {
 					t.Fatalf("intent_allowlist = %v", got["intent_allowlist"])
+				}
+			case "never tier":
+				if got["intent_allowlist"] != "schedule" || got["intent_denylist"] != "decline,discovery" {
+					t.Fatalf("intent lists = %v / %v", got["intent_allowlist"], got["intent_denylist"])
 				}
 			case "blocked and only":
 				if got["sender_allowlist"] != "500100101" || got["blocked_senders"] != "500100202" {

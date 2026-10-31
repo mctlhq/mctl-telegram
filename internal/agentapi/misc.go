@@ -19,6 +19,7 @@ type policyResponse struct {
 	MaxMsgsPerMinute   int    `json:"max_msgs_per_minute"`
 	MaxReplyChars      int    `json:"max_reply_chars"`
 	IntentAllowlist    string `json:"intent_allowlist"`
+	IntentDenylist     string `json:"intent_denylist"`
 	GlobalKill         bool   `json:"global_kill"`
 }
 
@@ -41,7 +42,7 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, policyResponse{
 		Mode: p.Mode, AutopilotPaused: p.AutopilotPaused, MaxAutonomousTurns: p.MaxAutonomousTurns,
 		MaxMsgsPerMinute: p.MaxMsgsPerMinute, MaxReplyChars: p.MaxReplyChars,
-		IntentAllowlist: p.IntentAllowlist, GlobalKill: s.globalKill(),
+		IntentAllowlist: p.IntentAllowlist, IntentDenylist: p.IntentDenylist, GlobalKill: s.globalKill(),
 	})
 }
 

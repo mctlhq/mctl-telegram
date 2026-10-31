@@ -123,6 +123,13 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// agent_profiles.intent_denylist: a CSV of reply intents the agent may
+	// never send, not even with the owner's approval (the assistant
+	// catalog's never tier). Empty denies nothing beyond the policy floor.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "intent_denylist",
+		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	// agent_profiles.owner_profile_encrypted holds the account-specific
 	// identity, public biography, skills, preferences, and restricted fields.
 	// Keeping it on the tenant row removes the process-wide mounted-profile

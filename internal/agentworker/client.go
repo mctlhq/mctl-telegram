@@ -279,6 +279,7 @@ type PolicyDTO struct {
 	MaxMsgsPerMinute   int    `json:"max_msgs_per_minute"`
 	MaxReplyChars      int    `json:"max_reply_chars"`
 	IntentAllowlist    string `json:"intent_allowlist"`
+	IntentDenylist     string `json:"intent_denylist"`
 	GlobalKill         bool   `json:"global_kill"`
 }
 

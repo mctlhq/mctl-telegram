@@ -634,7 +634,10 @@ is a non-deployed mirror kept only so this section's anchor is checked by
   `source_message_superseded` is expected too: the sender edited or deleted a
   message after the agent started on it, and the draft was withdrawn (#949,
   #950). A sustained burst from one surface is worth a look, since it can mean
-  edits or deletes are being misattributed.
+  edits or deletes are being misattributed. `intent_never` is expected as
+  well: the model proposed a reply with an intent the account's assistant
+  install puts in the never tier. A steady stream of them means the prompt
+  and the install disagree about what the assistant may say.
 - **A new or runaway denial reason**: `global_kill`,
   `reply_contains_credentials`, `reply_contains_url`,
   `reply_contains_never_field`, or a spike of `unknown`

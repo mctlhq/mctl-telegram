@@ -236,8 +236,8 @@ type Registry struct {
 	// otherwise make label cardinality unbounded) and the call site that
 	// consumed the decision (one of PolicySurface*). Deliberately NOT
 	// labeled by account, conversation or peer: those become cardinality
-	// and, for peers, personal data. Bound: 20 codes (19 + "unknown") x 6
-	// surfaces = 120 series, all compile-time fixed and all pre-created at
+	// and, for peers, personal data. Bound: 21 codes (20 + "unknown") x 6
+	// surfaces = 126 series, all compile-time fixed and all pre-created at
 	// zero by New() — see issue #591 and the comment on the pre-init loops.
 	AgentPolicyDenialsTotal *prometheus.CounterVec // {reason, surface}
 
@@ -350,6 +350,7 @@ var (
 		"reply_contains_credentials",
 		"reply_contains_never_field",
 		"source_message_superseded",
+		"intent_never",
 		"unknown",
 	}
 )
@@ -949,7 +950,7 @@ func New() *Registry {
 	// sample becomes the baseline, and the alert misses the first, and
 	// possibly only, occurrence it exists for. See issue #591.
 	//
-	// Four families, 4 + 6 + 120 = 130 series, every one of them a
+	// Four families, 4 + 6 + 126 = 136 series, every one of them a
 	// compile-time-fixed label set. The per-loop comments below say what
 	// each one costs and what breaks without it.
 	for _, class := range claudeResultClasses {
@@ -1010,14 +1011,14 @@ func New() *Registry {
 	for _, status := range jobStatuses {
 		r.AgentJobsTotal.WithLabelValues(status).Add(0)
 	}
-	// AgentPolicyDenialsTotal too, all 120 combinations. This was originally
+	// AgentPolicyDenialsTotal too, all 126 combinations. This was originally
 	// left lazy on the grounds that MctlAgentPolicyDenialRateHigh's "> 4"
 	// floor means a single first denial could not fire it anyway. True, and
 	// beside the point: if the first FIVE denials for one reason land between
 	// two scrapes, Prometheus first observes the series at 5, every later
 	// sample reads 5, and increase() over the window is 0 — so the rule
 	// misses its own documented "at least 5 denials" case, in the burst
-	// scenario ("worker hammering a paused account") it exists for. 120 zero
+	// scenario ("worker hammering a paused account") it exists for. 126 zero
 	// series is a cheap price for the floor meaning what it says.
 	for _, reason := range policyDenyReasons {
 		for _, surface := range policySurfaces {

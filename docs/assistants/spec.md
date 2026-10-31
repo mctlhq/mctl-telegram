@@ -1,9 +1,9 @@
 # Assistant definitions (assistants.mctl.ai/v1alpha1)
 
-Status: draft (P1). The server compiles the catalog in, an account's
-install is applied through `PUT /api/admin/agent/install`, and every claimed
-job carries its assistant's instructions. Policy still knows only today's
-settings; see [What the runtime enforces](#what-the-runtime-enforces) and
+Status: draft (P2 in progress). The server compiles the catalog in, an
+account's install is applied through `PUT /api/admin/agent/install`, and
+every claimed job carries its assistant's instructions. Of the P2 policy
+settings, policy enforces the `never` tier so far; see [What the runtime enforces](#what-the-runtime-enforces) and
 [Phases](#phases).
 
 The communication agent that answers recruiters is the first of a family of
@@ -89,7 +89,7 @@ what happens to a reply with that intent:
 |---|---|---|
 | `auto` | sent without the owner (guarded mode) | `intent_allowlist` |
 | `approve` | waits for the owner's approval | every intent not in the allowlist |
-| `never` | the assistant may not send it at all | not expressible yet (P2) |
+| `never` | the assistant may not send it at all, not even with the owner's approval | `intent_denylist` |
 
 `userOverride` limits what the install may change: `none`, `tighten`
 (default: only towards approve/never) or `any`. The install changes settings
@@ -196,6 +196,7 @@ profile equals the configuration the agent runs with today.
 | `disclosure_text`, `disclosure_disabled` | install `disclosure` within definition `defaults.disclosure` |
 | `max_autonomous_turns`, `max_msgs_per_minute`, `max_reply_chars` | install `limits` within definition `ceilings` |
 | `intent_allowlist` (CSV) | intents whose resolved tier is `auto` |
+| `intent_denylist` (CSV) | intents whose resolved tier is `never` |
 | `sender_allowlist`, `blocked_senders` | install `audience.onlySenders`, `audience.blockedSenders` |
 | owner profile document | install `values` placed by each variable's `profilePath` |
 | owner profile `disclosure` map | variable `disclosure`, install `disclosureLevels` |
@@ -204,7 +205,7 @@ profile equals the configuration the agent runs with today.
 | worker model and budget env | definition `execution` (reserved, rejected if set) |
 
 Settings the runtime cannot enforce yet fail with `ErrUnsupported` instead of
-being dropped: the `never` tier, a narrowed audience scope, a schedule other
+being dropped: a narrowed audience scope, a schedule other
 than `always`, a tool subset, record kinds other than `job_lead`, and any
 `execution` setting. An install is applied entirely or not at all.
 
@@ -227,12 +228,14 @@ instructions produce and are not enforced on their own.
 
 - **P0 (done, #1003):** format, schemas, HR example, validation and mapping
   tests, this document.
-- **P1 (this change):** the profile row gets `assistant_name`,
+- **P1 (done, #1005, 0.112.0):** the profile row gets `assistant_name`,
   `assistant_version` and an encrypted install; `PUT /api/admin/agent/install`;
   the claim response carries the rendered instructions (definition +
   `ownerNotes`, never variable values) and a content digest; existing
   profiles default to `hr-recruiter@0.1.0`.
-- **P2:** tiers including `never`, the audience scope and schedules in
+- **P2:** tiers including `never` (done: a reply whose intent is on the
+  profile's `intent_denylist` is denied when proposed and again at send
+  time, and no approval releases it), the audience scope and schedules in
   `policy.go`; `/mctl` gets unpause and shows the install; recruiter-specific
   tool names get generic aliases (`save_record`, `get_owner_profile`).
 - **P3:** definitions published to the mctl-api agent registry, a

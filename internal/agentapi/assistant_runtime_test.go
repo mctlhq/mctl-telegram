@@ -83,7 +83,9 @@ func TestAdminAgentInstallHandler_AppliesInstall(t *testing.T) {
 	}
 	h := NewAdminAgentInstallHandler(store, embeddedCatalog(t))
 	notes := "Keep replies under three sentences."
-	rec := doInstall(t, h, 777, hrInstallJSON(t, map[string]any{"ownerNotes": notes}))
+	rec := doInstall(t, h, 777, hrInstallJSON(t, map[string]any{
+		"ownerNotes": notes, "intentTiers": map[string]any{"decline": "never"},
+	}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -96,7 +98,8 @@ func TestAdminAgentInstallHandler_AppliesInstall(t *testing.T) {
 		t.Fatal(err)
 	}
 	if p.Mode != "guarded" || p.AutopilotPaused || !p.ListenerEnabled || !p.DisclosureDisabled ||
-		p.MaxAutonomousTurns != 50 || p.IntentAllowlist != "discovery,schedule" {
+		p.MaxAutonomousTurns != 50 || p.IntentAllowlist != "discovery,schedule" ||
+		p.IntentDenylist != "decline" {
 		t.Fatalf("profile = %+v", p)
 	}
 	a, err := store.GetAgentAssistant(ctx, uid)

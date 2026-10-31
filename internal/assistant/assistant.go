@@ -3,8 +3,8 @@
 // install onto the agent profile the runtime uses today.
 //
 // The mapping is deliberately lossless or nothing: a setting the current
-// runtime cannot enforce (owner notes, schedules, audience scopes, the never
-// tier, a restricted tool set) fails with ErrUnsupported instead of being
+// runtime cannot enforce (schedules, audience scopes, a restricted tool set)
+// fails with ErrUnsupported instead of being
 // dropped, so an install never looks applied while part of it is ignored.
 package assistant
 
@@ -311,9 +311,10 @@ type Profile struct {
 	MaxAutonomousTurns int
 	MaxMsgsPerMinute   int
 	MaxReplyChars      int
-	// IntentAllowlist, BlockedSenders and SenderAllowlist are the CSVs the
-	// profile row stores.
+	// IntentAllowlist, IntentDenylist, BlockedSenders and SenderAllowlist
+	// are the CSVs the profile row stores.
 	IntentAllowlist string
+	IntentDenylist  string
 	BlockedSenders  string
 	SenderAllowlist string
 	// OwnerProfile is the owner profile document, already accepted by
@@ -340,6 +341,7 @@ func ProfileRequest(def *Definition, in *Install, telegramID int64) (map[string]
 		"max_msgs_per_minute":  p.MaxMsgsPerMinute,
 		"max_reply_chars":      p.MaxReplyChars,
 		"intent_allowlist":     p.IntentAllowlist,
+		"intent_denylist":      p.IntentDenylist,
 		"blocked_senders":      p.BlockedSenders,
 		"sender_allowlist":     p.SenderAllowlist,
 		"owner_profile":        p.OwnerProfile,
@@ -363,7 +365,7 @@ func Resolve(def *Definition, in *Install) (*Profile, error) {
 		return nil, err
 	}
 
-	allow, err := autoIntents(def, s.IntentTiers)
+	allow, never, err := intentTiers(def, s.IntentTiers)
 	if err != nil {
 		return nil, err
 	}
@@ -434,6 +436,7 @@ func Resolve(def *Definition, in *Install) (*Profile, error) {
 		MaxMsgsPerMinute:   limits.MaxMsgsPerMinute,
 		MaxReplyChars:      limits.MaxReplyChars,
 		IntentAllowlist:    strings.Join(allow, ","),
+		IntentDenylist:     strings.Join(never, ","),
 		BlockedSenders:     idList(blocked),
 		SenderAllowlist:    idList(only),
 		OwnerProfile:       owner,
@@ -471,18 +474,18 @@ func supported(def *Definition, in *Install) error {
 	return nil
 }
 
-// autoIntents resolves each intent's tier and returns the auto ones, sorted.
-func autoIntents(def *Definition, overrides map[string]Tier) ([]string, error) {
+// intentTiers resolves each intent's tier and returns the auto and the never
+// ones, each sorted.
+func intentTiers(def *Definition, overrides map[string]Tier) (allow, never []string, err error) {
 	known := map[string]Intent{}
 	for _, in := range def.Spec.Intents {
 		known[in.Name] = in
 	}
 	for name := range overrides {
 		if _, ok := known[name]; !ok {
-			return nil, fmt.Errorf("intentTiers: unknown intent %q", name)
+			return nil, nil, fmt.Errorf("intentTiers: unknown intent %q", name)
 		}
 	}
-	var allow []string
 	for _, in := range def.Spec.Intents {
 		tier := in.Tier
 		if t, ok := overrides[in.Name]; ok && t != tier {
@@ -492,21 +495,22 @@ func autoIntents(def *Definition, overrides map[string]Tier) ([]string, error) {
 			}
 			switch {
 			case mode == "none":
-				return nil, fmt.Errorf("intentTiers: %q cannot be changed", in.Name)
+				return nil, nil, fmt.Errorf("intentTiers: %q cannot be changed", in.Name)
 			case mode == "tighten" && tierRank[t] < tierRank[tier]:
-				return nil, fmt.Errorf("intentTiers: %q can only be tightened from %s", in.Name, tier)
+				return nil, nil, fmt.Errorf("intentTiers: %q can only be tightened from %s", in.Name, tier)
 			}
 			tier = t
 		}
 		switch tier {
 		case TierNever:
-			return nil, fmt.Errorf("intent %q: the never tier is %w", in.Name, ErrUnsupported)
+			never = append(never, in.Name)
 		case TierAuto:
 			allow = append(allow, in.Name)
 		}
 	}
 	sort.Strings(allow)
-	return allow, nil
+	sort.Strings(never)
+	return allow, never, nil
 }
 
 // ownerProfile builds the owner profile document from the install's values,

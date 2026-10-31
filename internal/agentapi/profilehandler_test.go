@@ -236,7 +236,7 @@ func TestAdminAgentProfileHandler_ExplicitEmptyStringClearsField(t *testing.T) {
 	}
 	h := NewAdminAgentProfileHandler(store)
 
-	first := doProfileReq(h, adminIdentity(), `{"telegram_id":777,"blocked_senders":"111,222","sender_allowlist":"555","disclosure_text":"I'm an AI."}`)
+	first := doProfileReq(h, adminIdentity(), `{"telegram_id":777,"blocked_senders":"111,222","sender_allowlist":"555","disclosure_text":"I'm an AI.","intent_denylist":"decline"}`)
 	if first.Code != http.StatusOK {
 		t.Fatalf("first call status = %d, want 200, body=%s", first.Code, first.Body.String())
 	}
@@ -257,6 +257,21 @@ func TestAdminAgentProfileHandler_ExplicitEmptyStringClearsField(t *testing.T) {
 	}
 	if resp.DisclosureText != "I'm an AI." {
 		t.Errorf("disclosure_text = %q, want unchanged (field omitted from second request)", resp.DisclosureText)
+	}
+	if resp.IntentDenylist != "decline" {
+		t.Errorf("intent_denylist = %q, want unchanged (field omitted from second request)", resp.IntentDenylist)
+	}
+
+	third := doProfileReq(h, adminIdentity(), `{"telegram_id":777,"intent_denylist":""}`)
+	if third.Code != http.StatusOK {
+		t.Fatalf("third call status = %d, want 200, body=%s", third.Code, third.Body.String())
+	}
+	resp = agentProfileResponse{}
+	if err := json.NewDecoder(third.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.IntentDenylist != "" {
+		t.Errorf("intent_denylist = %q, want cleared to empty by explicit \"\"", resp.IntentDenylist)
 	}
 }
 
