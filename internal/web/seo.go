@@ -27,7 +27,7 @@ func RobotsTxt(publicBaseURL string) http.HandlerFunc {
 		"Allow: /\n" +
 		"Disallow: /api/\n" +
 		"Disallow: /oauth/\n" +
-		"Disallow: /telegram/connect/\n" +
+		"Disallow: /telegram/connect\n" +
 		"Disallow: /auth/\n" +
 		"Disallow: /metrics\n" +
 		"Disallow: /healthz\n" +

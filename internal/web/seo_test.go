@@ -34,8 +34,8 @@ func TestRobotsTxt(t *testing.T) {
 	if !strings.Contains(body, "Disallow: /oauth/") {
 		t.Error("robots.txt must disallow /oauth/")
 	}
-	if !strings.Contains(body, "Disallow: /telegram/connect/") {
-		t.Error("robots.txt must disallow /telegram/connect/")
+	if !strings.Contains(body, "Disallow: /telegram/connect\n") {
+		t.Error("robots.txt must disallow /telegram/connect")
 	}
 	if !strings.Contains(body, "Sitemap: https://tg.mctl.ai/sitemap.xml") {
 		t.Error("robots.txt must reference sitemap.xml")

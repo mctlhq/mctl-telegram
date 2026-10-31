@@ -129,16 +129,25 @@ type Catalog struct {
 
 func catalogKey(name, version string) string { return name + "@" + version }
 
-// LoadCatalog reads assistants/*/assistant.yaml from fsys, which is rooted
-// at the repository root (mctltelegram.Catalog). Each definition's
-// instructions.path is resolved relative to its assistant.yaml and must stay
-// inside fsys. Any invalid definition fails the whole load: a catalog that
-// silently drops an assistant would leave its accounts with no instructions.
+// LoadCatalog reads every catalog version from fsys, which is rooted at the
+// repository root (mctltelegram.Catalog): assistants/<name>/assistant.yaml,
+// the layout of an assistant's first version, and
+// assistants/<name>/versions/<version>/assistant.yaml for each later one, so
+// that adding a version never touches the files of an active one. Each
+// definition's instructions.path is resolved relative to its assistant.yaml
+// and must stay inside fsys. Any invalid definition fails the whole load: a
+// catalog that silently drops an assistant would leave its accounts with no
+// instructions.
 func LoadCatalog(fsys fs.FS) (*Catalog, error) {
 	files, err := fs.Glob(fsys, "assistants/*/assistant.yaml")
 	if err != nil {
 		return nil, fmt.Errorf("list catalog: %w", err)
 	}
+	versioned, err := fs.Glob(fsys, "assistants/*/versions/*/assistant.yaml")
+	if err != nil {
+		return nil, fmt.Errorf("list catalog versions: %w", err)
+	}
+	files = append(files, versioned...)
 	if len(files) == 0 {
 		return nil, fmt.Errorf("catalog has no assistants")
 	}
@@ -152,8 +161,8 @@ func LoadCatalog(fsys fs.FS) (*Catalog, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", file, err)
 		}
-		if dir := path.Base(path.Dir(file)); dir != def.Metadata.Name {
-			return nil, fmt.Errorf("%s: name %q does not match its directory", file, def.Metadata.Name)
+		if err := checkCatalogPath(file, def); err != nil {
+			return nil, err
 		}
 		if def.Spec.Instructions.Path == "" {
 			return nil, fmt.Errorf("%s: an authored definition names its instructions by path", file)
@@ -186,6 +195,24 @@ func LoadCatalog(fsys fs.FS) (*Catalog, error) {
 		c.entries[key] = &Entry{Definition: def, Instructions: string(text), Materialized: m, Digest: contentDigest(m)}
 	}
 	return c, nil
+}
+
+// checkCatalogPath holds a definition to the directory it was read from:
+// assistants/<name>/assistant.yaml names <name>, and
+// assistants/<name>/versions/<version>/assistant.yaml names both.
+func checkCatalogPath(file string, def *Definition) error {
+	dir := path.Dir(file)
+	name := path.Base(dir)
+	if path.Base(path.Dir(dir)) == "versions" {
+		if v := path.Base(dir); v != def.Metadata.Version {
+			return fmt.Errorf("%s: version %q does not match its directory %q", file, def.Metadata.Version, v)
+		}
+		name = path.Base(path.Dir(path.Dir(dir)))
+	}
+	if name != def.Metadata.Name {
+		return fmt.Errorf("%s: name %q does not match its directory", file, def.Metadata.Name)
+	}
+	return nil
 }
 
 // Entries returns every catalog entry, in no particular order.
