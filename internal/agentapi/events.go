@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/mctlhq/mctl-telegram/internal/agent/tools"
 	"github.com/mctlhq/mctl-telegram/internal/assistant"
 	"github.com/mctlhq/mctl-telegram/internal/assistantregistry"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
@@ -119,36 +120,50 @@ func (s *Server) accountInstructions(r *http.Request, userID int64) (instruction
 // a snapshot whose lifecycle is disabled or unknown refuses; the owner's
 // notice for an unknown one is the refresher's job.
 func (s *Server) resolveAssistant(ctx context.Context, a *db.AgentAssistant) (*assistant.Entry, error) {
+	entry, def, err := s.lookupAssistant(ctx, a)
+	if err != nil || def == nil || !s.registryGate {
+		return entry, err
+	}
+	ref := a.Name + "@" + a.Version
+	switch assistantregistry.LifecycleGate(def, s.clock()) {
+	case assistantregistry.GateDisabled:
+		return nil, fmt.Errorf("%w: %s", errAssistantDisabled, ref)
+	case assistantregistry.GateUnknown:
+		return nil, fmt.Errorf("%w: %s last checked %s", errAssistantLifecycleUnknown, ref, def.LifecycleCheckedAt.UTC().Format(time.RFC3339))
+	}
+	return entry, nil
+}
+
+// lookupAssistant finds the definition a's install pinned, as
+// resolveAssistant does, without the lifecycle gate. def is the stored
+// registry definition, nil when the embedded catalog served the entry.
+func (s *Server) lookupAssistant(ctx context.Context, a *db.AgentAssistant) (*assistant.Entry, *db.AssistantDefinition, error) {
 	ref := a.Name + "@" + a.Version
 	embedded, inCatalog := s.catalog.Lookup(a.Name, a.Version)
 	if a.Digest == "" {
 		if !inCatalog {
-			return nil, fmt.Errorf("%w: %s", errAssistantNotInCatalog, ref)
+			return nil, nil, fmt.Errorf("%w: %s", errAssistantNotInCatalog, ref)
 		}
-		return embedded, nil
+		return embedded, nil, nil
 	}
 	def, err := s.Store.GetAssistantDefinition(ctx, a.Digest)
 	if errors.Is(err, db.ErrAssistantDefinitionNotFound) {
 		if inCatalog && embedded.Digest == a.Digest {
-			return embedded, nil
+			return embedded, nil, nil
 		}
-		return nil, fmt.Errorf("%w: %s pins %s, which is not stored", errAssistantNotInCatalog, ref, a.Digest)
+		return nil, nil, fmt.Errorf("%w: %s pins %s, which is not stored", errAssistantNotInCatalog, ref, a.Digest)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if def.Name != a.Name || def.Version != a.Version {
-		return nil, fmt.Errorf("stored definition %s is %s@%s, profile names %s", def.Digest, def.Name, def.Version, ref)
+		return nil, nil, fmt.Errorf("stored definition %s is %s@%s, profile names %s", def.Digest, def.Name, def.Version, ref)
 	}
-	if s.registryGate {
-		switch assistantregistry.LifecycleGate(def, s.clock()) {
-		case assistantregistry.GateDisabled:
-			return nil, fmt.Errorf("%w: %s", errAssistantDisabled, ref)
-		case assistantregistry.GateUnknown:
-			return nil, fmt.Errorf("%w: %s last checked %s", errAssistantLifecycleUnknown, ref, def.LifecycleCheckedAt.UTC().Format(time.RFC3339))
-		}
+	entry, err := s.snapshotEntry(def)
+	if err != nil {
+		return nil, nil, err
 	}
-	return s.snapshotEntry(def)
+	return entry, def, nil
 }
 
 // snapshotEntry parses a stored definition, caching it by digest: the
@@ -178,11 +193,12 @@ func (s *Server) snapshotEntry(def *db.AssistantDefinition) (*assistant.Entry, e
 const jobTokenAudience = "agent-job"
 
 // mintJobToken signs the job credential for a freshly claimed job. The TTL
-// ends at the claim deadline. The parent's jti and origin are inherited so
+// ends at the claim deadline. jobTools, the job's canonical tool set, is
+// signed into it (job_tools) so the worker cannot widen it. The parent's jti and origin are inherited so
 // revoking the worker token revokes its job tokens. Returns "" when no signer
 // is configured or signing fails (the worker then falls back to its own
 // token, as before).
-func (s *Server) mintJobToken(parent *auth.Identity, j db.AgentJob) string {
+func (s *Server) mintJobToken(parent *auth.Identity, j db.AgentJob, jobTools []string) string {
 	// A parent without a Telegram id (shared-hmac) cannot be re-resolved to a
 	// user by the job-token verifier; keep the account token for it.
 	if s.jobTokenSigner == nil || parent.TelegramID == 0 {
@@ -202,6 +218,7 @@ func (s *Server) mintJobToken(parent *auth.Identity, j db.AgentJob) string {
 		JobID:            j.ID,
 		JobAttempt:       j.Attempts,
 		ConversationID:   j.ConversationID,
+		JobTools:         jobTools,
 	}, ttl)
 	if err != nil {
 		logHandlerErr("mint_job_token", err)
@@ -262,6 +279,15 @@ func (s *Server) handleClaimJobs(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "assistant instructions unavailable")
 		return
 	}
+	// The tool set the job tokens carry: the definition's tools by canonical
+	// name, or every tool without a catalog.
+	bindings, err := tools.ForJob(toolNames)
+	if err != nil {
+		logHandlerErr("get_events", err)
+		writeJSONError(w, http.StatusInternalServerError, "assistant instructions unavailable")
+		return
+	}
+	jobTools := tools.CanonicalNames(bindings)
 
 	ctx := r.Context()
 	deadline := time.Now().Add(s.longPollTimeout)
@@ -293,7 +319,7 @@ func (s *Server) handleClaimJobs(w http.ResponseWriter, r *http.Request) {
 					ConversationID:  j.ConversationID,
 					Attempt:         j.Attempts,
 					Deadline:        j.ClaimedAt.Add(s.jobVisibility).UTC().Format(time.RFC3339),
-					JobToken:        s.mintJobToken(id, j),
+					JobToken:        s.mintJobToken(id, j, jobTools),
 					TurnID:          j.TurnID,
 					SourceEventIDs:  j.SourceEventIDs,
 					Instructions:    instructions,
