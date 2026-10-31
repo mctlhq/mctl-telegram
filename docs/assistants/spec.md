@@ -399,6 +399,8 @@ carries the text and no path, so it is complete without the repository.
   tenant-binding model that does not exist yet, so a tenant-visible
   definition is refused when the catalog loads and when a materialized
   document is parsed.
+  Account-private forks (P4) are not registry entries; see
+  [adr-forks.md](adr-forks.md).
 - **Status and lifecycle.** The registry's own lifecycle has three states
   (`published`, `deprecated`, `disabled`), and a new version is always
   `published`. Whether the public catalog offers an assistant is decided by
@@ -574,7 +576,7 @@ so they have no semantics the MCP tools do not have.
 |---|---|---|
 | T0 Install | picks a catalog assistant, fills the required values | schema validation |
 | T1 Tune | mode, tiers (tighten), limits, audience, schedule, disclosure, `ownerNotes` | schema and definition checks |
-| T2 Fork | own instructions, intents and records on a catalog base; tools from the registry | private visibility; observe mode first |
+| T2 Fork | own instructions, stricter intents, a tool subset and lower limits on a catalog base; records inherited ([adr-forks.md](adr-forks.md)) | private visibility; observe mode first |
 | T3 Connectors | adds MCP servers (calendar, CRM), each tool with a tier, approve by default | admin review |
 | T4 Own runtime | runs their own worker against the agent job API (claim, propose, complete) | account-scoped token; policy enforced server-side |
 
@@ -598,6 +600,9 @@ so they have no semantics the MCP tools do not have.
   per-account install binding, MCP tools `list_assistants`,
   `install_assistant`, `update_install`, and a page on tg.mctl.ai.
 - **P4:** forks, user connectors with review, own-runtime documentation.
+  The fork model and the storage of private definitions (in mctl-telegram,
+  encrypted per account) are decided in [adr-forks.md](adr-forks.md)
+  (P4.1, #1042; accepted 2026-10-31).
 
 ## How this compares
 
