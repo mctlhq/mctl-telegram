@@ -19,7 +19,11 @@
           "additionalProperties": false,
           "required": ["name", "version"],
           "properties": {
-            "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+            "name": {
+              "description": "A catalog name, or the full name of one of the account's own forks (<base>~<owner-scope>~<slug>).",
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,62}(~[a-z2-7]{10}~[a-z0-9][a-z0-9_-]{0,31})?$"
+            },
             "version": {
               "description": "Exact definition version; upgrading is an explicit change of the install.",
               "type": "string",
