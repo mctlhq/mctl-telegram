@@ -783,3 +783,27 @@ func TestOnMessage_AudienceExcludedBeforeJob(t *testing.T) {
 		t.Fatalf("non-contact jobs = %d, want 1", jobs)
 	}
 }
+
+// An owner's outgoing message never touches the peer's contact flag: only
+// inbound messages carry the peer's user entity (agy finding on #1013).
+func TestOnMessage_OwnerOutgoingKeepsPeerContact(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+	in := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Hello"}
+	if err := l.onMessage(ctx, acct, ents(&tg.User{ID: recruit, FirstName: "Alice", Contact: true}), in, false); err != nil {
+		t.Fatalf("inbound: %v", err)
+	}
+	out := &tg.Message{ID: 43, Out: true, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Hi Alice", Date: int(time.Now().Unix())}
+	if err := l.onMessage(ctx, acct, ents(&tg.User{ID: selfTG, FirstName: "Dana", Self: true}), out, false); err != nil {
+		t.Fatalf("outgoing: %v", err)
+	}
+	var peerContact string
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT peer_contact FROM conversations WHERE user_id=$1 AND peer_tg_id=$2`, acct.userID, recruit,
+	).Scan(&peerContact); err != nil {
+		t.Fatal(err)
+	}
+	if peerContact != db.PeerContactYes {
+		t.Fatalf("peer_contact after owner message = %q, want %q", peerContact, db.PeerContactYes)
+	}
+}
