@@ -75,8 +75,21 @@ func TestManagePageUnauthenticatedHTML(t *testing.T) {
 	if strings.Contains(body, `{"error"`) {
 		t.Fatalf("browser navigation must not see raw JSON; body=%s", body)
 	}
-	if !strings.Contains(body, "Sign in to manage your session") {
+	if !strings.Contains(body, "<h1>Manage your Telegram connection</h1>") {
 		t.Errorf("missing sign-in heading; body=%s", body)
+	}
+	// The page keeps the site navigation (CSS-only menu, no script) and,
+	// with no install service, does not mention assistants.
+	for _, want := range []string{`<nav class="site-nav"`, `href="/docs"`, `href="/platforms"`, `href="/demo"`, `class="nav-manage active"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("header nav lacks %q", want)
+		}
+	}
+	if strings.Contains(body, "<script") {
+		t.Error("manage sign-in page renders a script")
+	}
+	if strings.Contains(body, "manage assistants") || strings.Contains(body, `href="/assistants"`) {
+		t.Error("assistants mentioned on a deployment without them")
 	}
 	if !strings.Contains(body, "https://tg.test/telegram/connect") {
 		t.Errorf("missing hosted connect CTA; body=%s", body)
@@ -408,7 +421,7 @@ func TestManageUnauthorizedReasonSelectsCopy(t *testing.T) {
 	if body := render(auth.MsgInvalidCredentials); !strings.Contains(body, "expired, or invalid") {
 		t.Fatalf("MsgInvalidCredentials rendered the wrong copy: %s", body)
 	}
-	if body := render(auth.MsgAuthRequired); !strings.Contains(body, "need to connect a Telegram account") {
+	if body := render(auth.MsgAuthRequired); !strings.Contains(body, "Sign in with Telegram to configure send permissions or revoke access.") {
 		t.Fatalf("MsgAuthRequired rendered the wrong copy: %s", body)
 	}
 }
@@ -453,5 +466,31 @@ func TestManageUnauthorizedIsNoStore(t *testing.T) {
 		if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
 			t.Fatalf("Accept %q: Cache-Control = %q, want no-store", accept, cc)
 		}
+	}
+}
+
+// The manage header links Assistants only where /assistants is mounted.
+func TestManageNavAssistantsLinkFollowsMount(t *testing.T) {
+	render := func() string {
+		rec := httptest.NewRecorder()
+		renderManageNeedAuth(rec, http.StatusUnauthorized, manageNeedAuthData{ConnectURL: "https://tg.test/telegram/connect"})
+		return rec.Body.String()
+	}
+	t.Cleanup(func() { SetAssistantsMounted(false) })
+	SetAssistantsMounted(true)
+	if !strings.Contains(render(), `<a href="/assistants">Assistants</a>`) {
+		t.Error("mounted /assistants not linked")
+	}
+	SetAssistantsMounted(false)
+	if strings.Contains(render(), `href="/assistants"`) {
+		t.Error("unmounted /assistants linked")
+	}
+}
+
+func TestManageNeedAuthMentionsAssistantsWhenWired(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderManageNeedAuth(rec, http.StatusUnauthorized, manageNeedAuthData{Assistants: true})
+	if !strings.Contains(rec.Body.String(), "configure send permissions, manage assistants, or revoke access.") {
+		t.Errorf("copy with assistants missing: %s", rec.Body.String())
 	}
 }

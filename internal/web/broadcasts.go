@@ -25,7 +25,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"html/template"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -495,7 +494,7 @@ const broadcastExtraCSS = `
   .bc .meta { color: var(--text-dim); font-size: 13px; }
 `
 
-var broadcastTemplate = template.Must(template.New("broadcasts").Parse(strings.Replace(manageHead, "<title>Manage Telegram session</title>", "<title>Client broadcasts</title>", 1) + `<style>` + broadcastExtraCSS + `</style>
+var broadcastTemplate = newManageTemplate("broadcasts", strings.Replace(manageHead, "<title>Manage Telegram session</title>", "<title>Client broadcasts</title>", 1)+`<style>`+broadcastExtraCSS+`</style>
     <h1>Client broadcasts</h1>
     {{if .Notice}}<p class="meta">Done: {{.Notice}}.</p>{{end}}
     <p class="meta">Approving releases the exact text below to the audience the server resolves <strong>at send time</strong>. Consent is re-checked for every recipient just before their message. An approval is single-use and bound to this text and selector.</p>
@@ -550,9 +549,9 @@ var broadcastTemplate = template.Must(template.New("broadcasts").Parse(strings.R
     <p class="meta">No recent campaigns.</p>
     {{end}}
     <p class="meta">"Delivered" means Telegram accepted the message; it is not a read receipt.</p>
-` + manageFoot))
+`+manageFoot)
 
-var broadcastErrorTemplate = template.Must(template.New("broadcastError").Parse(manageHead + `    <h1>Not done</h1>
+var broadcastErrorTemplate = newManageTemplate("broadcastError", manageHead+`    <h1>Not done</h1>
     <div class="error">{{.Message}}</div>
     <p class="meta"><a href="/telegram/connect/broadcasts">Back to broadcasts</a></p>
-` + manageFoot))
+`+manageFoot)

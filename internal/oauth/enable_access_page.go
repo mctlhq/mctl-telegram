@@ -188,7 +188,7 @@ var enableFoot = `    </div>
 </html>`
 
 var enablePhoneTemplate = template.Must(template.New("enablePhone").Parse(enableHead + `    {{if .WizardMode}}<ol class="flow-steps">
-      <li>Sign in with Telegram</li>
+      <li>Sign in</li>
       <li>Permissions</li>
       <li{{if eq .WizardStep 3}} class="active"{{end}}>Phone number</li>
       <li>Done</li>
@@ -239,7 +239,7 @@ var enablePhoneTemplate = template.Must(template.New("enablePhone").Parse(enable
 ` + enableFoot))
 
 var enableCodeTemplate = template.Must(template.New("enableCode").Parse(enableHead + `    {{if .WizardMode}}<ol class="flow-steps">
-      <li>Sign in with Telegram</li>
+      <li>Sign in</li>
       <li>Permissions</li>
       <li{{if eq .WizardStep 3}} class="active"{{end}}>Phone number</li>
       <li{{if eq .WizardStep 4}} class="active"{{end}}>Done</li>
@@ -269,7 +269,7 @@ var enableCodeTemplate = template.Must(template.New("enableCode").Parse(enableHe
 ` + enableFoot))
 
 var enablePasswordTemplate = template.Must(template.New("enablePassword").Parse(enableHead + `    {{if .WizardMode}}<ol class="flow-steps">
-      <li>Sign in with Telegram</li>
+      <li>Sign in</li>
       <li>Permissions</li>
       <li{{if eq .WizardStep 3}} class="active"{{end}}>Phone number</li>
       <li{{if eq .WizardStep 4}} class="active"{{end}}>Done</li>
@@ -346,7 +346,7 @@ var enableRefreshHead = strings.Replace(enableHead,
   <meta http-equiv="refresh" content="{{.Refresh}}">`, 1)
 
 var enableQRTemplate = template.Must(template.New("enableQR").Parse(enableRefreshHead + `    {{with .Page}}{{if .WizardMode}}<ol class="flow-steps">
-      <li>Sign in with Telegram</li>
+      <li>Sign in</li>
       <li>Permissions</li>
       <li class="active">Phone number</li>
       <li>Done</li>
@@ -370,7 +370,7 @@ var enableQRTemplate = template.Must(template.New("enableQR").Parse(enableRefres
 ` + enableFoot))
 
 var enableQRConnectingTemplate = template.Must(template.New("enableQRConnecting").Parse(enableRefreshHead + `    {{if .WizardMode}}<ol class="flow-steps">
-      <li>Sign in with Telegram</li>
+      <li>Sign in</li>
       <li>Permissions</li>
       <li class="active">Phone number</li>
       <li>Done</li>
@@ -388,7 +388,7 @@ var enableQRBusyTemplate = template.Must(template.New("enableQRBusy").Parse(enab
 ` + enableFoot))
 
 var enablePermissionsTemplate = template.Must(template.New("enablePermissions").Parse(enableHead + `    <ol class="flow-steps">
-      <li>Sign in with Telegram</li>
+      <li>Sign in</li>
       <li class="active">Permissions</li>
       <li>Phone number</li>
       <li>Done</li>

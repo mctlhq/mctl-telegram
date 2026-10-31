@@ -48,3 +48,13 @@ func TestMapPoolSendError_DefinitiveRefusalsAndFloodWait(t *testing.T) {
 		}
 	}
 }
+
+// Without an access hash there is nothing safe to look up with: the lookup
+// reports not found without borrowing a client.
+func TestPoolSenderLocateDelivered_ZeroAccessHash(t *testing.T) {
+	s := &poolSender{}
+	id, found, err := s.LocateDelivered(t.Context(), 1, 500100202, 0, "hello Bob", time.Now())
+	if id != 0 || found || err != nil {
+		t.Fatalf("got id=%d found=%v err=%v, want 0/false/nil", id, found, err)
+	}
+}

@@ -358,6 +358,23 @@ func caseUnnoteAgentActionSendAttempt_FloodWaitHidesRowUntilDue(t *testing.T, s 
 	}
 }
 
+// caseMatchUnconfirmedAgentSend_ExecutingMatchesWhateverItsAge: a retry
+// can go out long after the reservation, which stays the row's updated_at
+// while it is executing, so an executing send's echo is matched however
+// old the reservation is.
+func caseMatchUnconfirmedAgentSend_ExecutingMatchesWhateverItsAge(t *testing.T, s *Store, uid int64) {
+	ctx := context.Background()
+	id, _ := executingSend(t, s, uid, 713, "hello Bob")
+	attempted(t, s, uid, id)
+	if _, err := s.DB.ExecContext(ctx, `UPDATE agent_actions SET created_at = $1, updated_at = $1 WHERE id = $2`,
+		time.Now().UTC().Add(-48*time.Hour), id); err != nil {
+		t.Fatalf("backdate reservation: %v", err)
+	}
+	if ok, err := s.MatchUnconfirmedAgentSend(ctx, uid, bobTGID, 8500, "hello Bob", time.Now().Add(-24*time.Hour)); err != nil || !ok {
+		t.Fatalf("echo of a late retry: ok=%v err=%v, want match", ok, err)
+	}
+}
+
 // deliveryCases runs every #1029 store case against one dialect. Postgres
 // keeps state between runs, so each case gets its own user.
 func deliveryCases(t *testing.T, s *Store, prefix string) {
@@ -377,6 +394,7 @@ func deliveryCases(t *testing.T, s *Store, prefix string) {
 		{"HumanInputUnknownMessageIDStoresNull", caseHumanInputUnknownMessageIDStoresNull},
 		{"MatchUnconfirmedAgentSend_WindowFollowsTheSend", caseMatchUnconfirmedAgentSend_WindowFollowsTheSend},
 		{"UnnoteAgentActionSendAttempt_FloodWaitHidesRowUntilDue", caseUnnoteAgentActionSendAttempt_FloodWaitHidesRowUntilDue},
+		{"MatchUnconfirmedAgentSend_ExecutingMatchesWhateverItsAge", caseMatchUnconfirmedAgentSend_ExecutingMatchesWhateverItsAge},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

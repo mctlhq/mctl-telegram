@@ -288,3 +288,26 @@ func TestExecutor_RecoverStuck_EchoDuringLastRetryIsRecordedNextSweep(t *testing
 		t.Fatalf("send RPCs = %d, want 1", len(sender.calls))
 	}
 }
+
+// TestExecutor_LocateDelivered_SearchesFromTheReservation: the history
+// lookup after a duplicate starts at the reservation, not at the draft's
+// creation, so an identical message sent while the draft waited for
+// approval cannot make it ambiguous.
+func TestExecutor_LocateDelivered_SearchesFromTheReservation(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	actionID := approvedForRecovery(t, store, uid, conv.ID, 686868)
+	if _, err := store.DB.ExecContext(ctx, `UPDATE agent_actions SET created_at = $1 WHERE id = $2`,
+		time.Now().UTC().Add(-20*time.Hour), actionID); err != nil {
+		t.Fatalf("backdate draft: %v", err)
+	}
+	sender.delivered = map[int64]bool{686868: true}
+	sender.locateID = 8686
+
+	if _, err := exec.RecoverStuck(ctx); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if sender.locateCalls != 1 || time.Since(sender.locateSince) > time.Hour {
+		t.Fatalf("lookup calls=%d since=%v, want one lookup from the reservation", sender.locateCalls, sender.locateSince)
+	}
+}

@@ -139,7 +139,10 @@ func (s *Store) MarkAgentActionDeliveryUnknown(ctx context.Context, userID, id i
 // it) in the same conversation, among actions whose last transition (the
 // reservation, the delivery_unknown mark, or the executed record) is not
 // older than `since`. Not created_at: a draft can wait for approval for
-// as long as the approval TTL allows, and the echo follows the send. Only
+// as long as the approval TTL allows, and the echo follows the send. A
+// still-executing send is matched whatever its age: recovery retries keep
+// the reservation time as updated_at, and a retry can go out long after it
+// (a flood wait, a gate that reopens), so its echo follows that retry. Only
 // the account's own outgoing messages reach this check, so a peer cannot
 // trigger it. On a match the message id is filled in where it was unknown:
 // an executing row notes it for RecordAgentActionSent to pick up, a
@@ -163,7 +166,8 @@ func (s *Store) MatchUnconfirmedAgentSend(ctx context.Context, userID, peerTGID,
 	}
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT id, status, send_body_encrypted FROM agent_actions
-		  WHERE user_id = $1 AND conversation_id = $2 AND updated_at >= $3
+		  WHERE user_id = $1 AND conversation_id = $2
+		    AND (status = $4 OR updated_at >= $3)
 		    AND send_random_id IS NOT NULL AND send_body_encrypted IS NOT NULL
 		    AND executed_tg_message_id IS NULL
 		    AND ((status IN ($4, $5) AND send_attempts > 0) OR status = $6)
