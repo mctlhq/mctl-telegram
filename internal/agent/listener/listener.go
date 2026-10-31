@@ -253,6 +253,9 @@ func (l *Listener) onDelete(ctx context.Context, acct *account, ids []int) error
 			slog.Info("agent listener: source message deleted",
 				"user_id", acct.userID, "denied_actions", res.DeniedActions, "ignored_jobs", res.IgnoredJobs)
 		}
+		if res.Pending > 0 {
+			slog.Info("agent listener: delete kept for a message not yet ingested", "user_id", acct.userID)
+		}
 	}
 	return nil
 }

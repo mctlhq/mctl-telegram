@@ -154,6 +154,20 @@ type MessageDeleteResult struct {
 	DeniedActions int64
 	// IgnoredJobs counts queued jobs closed before any worker claimed them.
 	IgnoredJobs int64
+	// Pending is 1 when no ingested message matched and the delete was kept
+	// for a message that may still arrive (#985).
+	Pending int
+}
+
+// pendingDeleteTTL bounds how long a delete waits for its message. gotd hands
+// a difference's other updates (deletes) to the handler before its new
+// messages, so the message normally follows within the same batch.
+const pendingDeleteTTL = 7 * 24 * time.Hour
+
+// deleteEventID is the event id of a recorded message_delete.
+func deleteEventID(selfTGID, chatTGID, messageID int64) string {
+	return "evt:v1:" + strconv.FormatInt(selfTGID, 10) + ":" +
+		strconv.FormatInt(chatTGID, 10) + ":" + strconv.FormatInt(messageID, 10) + ":d"
 }
 
 // RecordMessageDelete handles the sender deleting an incoming private message
@@ -171,8 +185,12 @@ type MessageDeleteResult struct {
 //     no worker spends an invocation answering it.
 //
 // A redelivered delete collides with the existing event id and changes
-// nothing. Deletes of messages the agent never ingested (the owner's own
-// messages, other chats) match no event and are a no-op.
+// nothing. A delete that matches no ingested event is kept in
+// agent_pending_deletes (#985): when gotd applies a difference it dispatches
+// the delete before the new message, so the message may still be on its way.
+// InsertEventEnqueueJobAndTouch applies it when that message is ingested.
+// Deletes of messages the agent never ingests (the owner's own messages,
+// other chats) wait there until pendingDeleteTTL and do nothing.
 func (s *Store) RecordMessageDelete(ctx context.Context, userID, selfTGID, messageID int64) (MessageDeleteResult, error) {
 	var out MessageDeleteResult
 	if userID <= 0 || messageID <= 0 {
@@ -200,6 +218,26 @@ func (s *Store) RecordMessageDelete(ctx context.Context, userID, selfTGID, messa
 		return out, fmt.Errorf("find deleted message chats: %w", err)
 	}
 	_ = rows.Close()
+
+	if len(chats) == 0 {
+		now := time.Now().UTC()
+		if _, err := s.DB.ExecContext(ctx,
+			`DELETE FROM agent_pending_deletes WHERE created_at < $1`,
+			now.Add(-pendingDeleteTTL),
+		); err != nil {
+			return out, fmt.Errorf("sweep pending deletes: %w", err)
+		}
+		if _, err := s.DB.ExecContext(ctx,
+			`INSERT INTO agent_pending_deletes(user_id, message_id, self_tg_id, created_at)
+			 VALUES($1,$2,$3,$4)
+			 ON CONFLICT(user_id, message_id) DO NOTHING`,
+			userID, messageID, selfTGID, now,
+		); err != nil {
+			return out, fmt.Errorf("keep pending delete: %w", err)
+		}
+		out.Pending = 1
+		return out, nil
+	}
 
 	for _, chat := range chats {
 		res, err := s.recordMessageDeleteInChat(ctx, userID, selfTGID, chat, messageID)
@@ -237,8 +275,7 @@ func (s *Store) recordMessageDeleteInChat(ctx context.Context, userID, selfTGID,
 		}
 	}
 
-	eventID := "evt:v1:" + strconv.FormatInt(selfTGID, 10) + ":" +
-		strconv.FormatInt(chatTGID, 10) + ":" + strconv.FormatInt(messageID, 10) + ":d"
+	eventID := deleteEventID(selfTGID, chatTGID, messageID)
 	var eventRowID int64
 	err = tx.QueryRowContext(ctx,
 		`INSERT INTO incoming_events
