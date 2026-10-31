@@ -388,12 +388,30 @@ func TestNewMCPServer_RegistersAliases(t *testing.T) {
 	}
 
 	for name, bad := range map[string][]string{
-		"subset":    names[:10],
-		"duplicate": append(append([]string{}, names...), "save_job_lead"),
-		"unknown":   append(append([]string{}, names[:10]...), "send_email"),
+		"no complete_agent_job": names[:10],
+		"duplicate":             append(append([]string{}, names...), "save_job_lead"),
+		"unknown":               append(append([]string{}, names[:10]...), "send_email"),
 	} {
 		if _, err := NewMCPServer(api, JobContext{JobID: 1, Tools: bad}); err == nil {
 			t.Errorf("%s: accepted %v", name, bad)
+		}
+	}
+}
+
+// A job whose definition names a subset registers exactly that subset.
+func TestNewMCPServer_RegistersSubset(t *testing.T) {
+	names := []string{"get_event", "get_policy", "propose_reply", "complete_agent_job"}
+	srv, err := NewMCPServer(&fakeAPI{}, JobContext{JobID: 1, ConversationID: 2, EventID: "evt:1", Tools: names})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := srv.ListTools()
+	if len(got) != len(names) {
+		t.Fatalf("registered %v, want %v", toolNames(got), names)
+	}
+	for _, name := range names {
+		if _, ok := got[name]; !ok {
+			t.Fatalf("tool %q not registered: %v", name, toolNames(got))
 		}
 	}
 }

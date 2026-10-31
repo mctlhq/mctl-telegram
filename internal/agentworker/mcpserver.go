@@ -62,7 +62,9 @@ const ServerName = "agent"
 //
 // Each tool is registered under the name the job's assistant uses for it,
 // a canonical name or a generic alias; the implementation is the same. The
-// names must cover every tool, as jobTools requires on the invoking side.
+// names may be a subset that includes the mandatory tools (tools.ForJob, as
+// jobTools on the invoking side); a tool left out is not registered, and the
+// agent API refuses its routes for this job regardless.
 func NewMCPServer(api agentAPI, job JobContext) (*mcpserver.MCPServer, error) {
 	bindings, err := tools.ForJob(job.Tools)
 	if err != nil {

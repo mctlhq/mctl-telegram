@@ -92,6 +92,14 @@ type Claims struct {
 	JobID          int64 `json:"job_id,omitempty"`
 	JobAttempt     int   `json:"job_attempt,omitempty"`
 	ConversationID int64 `json:"conv_id,omitempty"`
+	// JobTools is the canonical tool set of the job an "agent-job"
+	// credential was minted for (internal/agent/tools), resolved from the
+	// account's assistant definition at claim. Signed with the rest of the
+	// token, so a worker cannot widen it; the agent API refuses a request to
+	// a tool outside it. Empty on every other credential and on job tokens
+	// minted before the claim existed, which the agent API resolves from
+	// the account instead.
+	JobTools []string `json:"job_tools,omitempty"`
 }
 
 // Issuer signs Claims into compact JWTs. Construct with NewIssuer.
@@ -362,6 +370,7 @@ func (p *Provider) Authenticate(r *http.Request) (*auth.Identity, error) {
 		JobID:            c.JobID,
 		JobAttempt:       c.JobAttempt,
 		ConversationID:   c.ConversationID,
+		JobTools:         c.JobTools,
 	}, nil
 }
 

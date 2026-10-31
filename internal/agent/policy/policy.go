@@ -119,7 +119,11 @@ const (
 	DenyAudienceExcluded  DenyCode = "audience_excluded"
 	DenyInstallChanged    DenyCode = "install_changed"
 	DenySourceSuperseded  DenyCode = "source_message_superseded"
-	DenyUnknown           DenyCode = "unknown" // fallback only
+	// DenyToolNotAllowed is not returned by Evaluate: the agent API's tool
+	// gate counts it when a request reaches a tool outside the caller's
+	// tool set (internal/agent/tools.Endpoints).
+	DenyToolNotAllowed DenyCode = "tool_not_allowed"
+	DenyUnknown        DenyCode = "unknown" // fallback only
 )
 
 // ReasonAutopilotPaused is the exact reason string a pause denial carries.

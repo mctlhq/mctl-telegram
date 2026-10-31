@@ -645,6 +645,13 @@ is a non-deployed mirror kept only so this section's anchor is checked by
   `install_changed` follows an assistant install or switch: work claimed
   before it was refused. A burst right after an install is expected; a
   steady stream means installs are being applied repeatedly.
+  `tool_not_allowed` (surface `tool_gate`) is a request to an agent API
+  route serving a tool the job's assistant definition leaves out (#1041).
+  The worker only registers the definition's tools, so even one means a
+  worker or model reached a route outside them: a modified worker, a forged
+  MCP config, or a worker older than the definition. Check the audit rows
+  (`status = 'denied'`, `error = 'tool gate: tool_not_allowed'`) for the
+  account and tool.
 - **A new or runaway denial reason**: `global_kill`,
   `reply_contains_credentials`, `reply_contains_url`,
   `reply_contains_never_field`, or a spike of `unknown`
