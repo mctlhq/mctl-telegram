@@ -239,3 +239,25 @@ func TestActiveVersionsAreImmutable(t *testing.T) {
 		}
 	}
 }
+
+// The canonical form leaves <, > and & literal, as non-Go JSON encoders do,
+// so another implementation can reproduce the digest.
+func TestCanonicalJSONKeepsHTMLCharacters(t *testing.T) {
+	got, err := canonicalJSON([]byte(`{"b": "x < y && z > w", "a": 1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"a":1,"b":"x < y && z > w"}`; string(got) != want {
+		t.Fatalf("canonicalJSON = %s, want %s", got, want)
+	}
+}
+
+// An authored definition must name its instructions by path; inline text
+// is the materialized form only.
+func TestCatalogRejectsInlineInstructions(t *testing.T) {
+	def := strings.Replace(string(readFile(t, "assistant.yaml")),
+		"path: ../../deploy/agent-worker/system-prompt.txt", "text: Inline rules.", 1)
+	if _, err := LoadCatalog(fstest.MapFS{"assistants/hr-recruiter/assistant.yaml": {Data: []byte(def)}}); err == nil {
+		t.Fatal("catalog accepted inline instructions in an authored definition")
+	}
+}

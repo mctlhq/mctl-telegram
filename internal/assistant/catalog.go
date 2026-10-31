@@ -1,6 +1,7 @@
 package assistant
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -31,18 +32,21 @@ type Entry struct {
 }
 
 // canonicalJSON re-encodes a YAML or JSON document as JSON with sorted
-// object keys and no insignificant whitespace, so the same document always
-// has the same bytes whichever form it arrived in.
+// object keys, no insignificant whitespace and no HTML escaping (<, > and &
+// stay literal, as any JSON encoder writes them by default outside Go), so
+// the same document always has the same bytes whichever form it arrived in.
 func canonicalJSON(raw []byte) ([]byte, error) {
 	var doc any
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
 		return nil, fmt.Errorf("parse document: %w", err)
 	}
-	out, err := json.Marshal(doc)
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(doc); err != nil {
 		return nil, fmt.Errorf("encode document: %w", err)
 	}
-	return out, nil
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
 // materialize returns the registry form of an authored definition: its

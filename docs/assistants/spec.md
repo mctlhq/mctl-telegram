@@ -335,8 +335,11 @@ it is not; tool restriction needs that server-side check first.
 
 The registry (mctl-api, P3) stores an assistant in its **materialized**
 form: the definition document with `spec.instructions.path` replaced by
-`spec.instructions.text`, the full system prompt, encoded as canonical JSON
-(sorted object keys, no insignificant whitespace). An authored definition
+`spec.instructions.text`, the full system prompt, encoded as canonical JSON:
+object keys sorted by byte order, no whitespace between tokens, strings
+escaped only where JSON requires it (`"`, `\`, control characters; `<`, `>`
+and `&` stay literal), integers without a fraction, UTF-8, no trailing
+newline. An authored definition
 in this repository names its instructions by path; a materialized one
 carries the text and no path, so it is complete without the repository.
 
