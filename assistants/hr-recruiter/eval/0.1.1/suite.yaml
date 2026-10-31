@@ -1,0 +1,27 @@
+# The baseline eval suite of hr-recruiter@0.1.1 (docs/assistants/adr-forks.md,
+# Promotion). It is immutable together with the base version it names: a
+# change here needs a new base version, and
+# internal/agenteval's TestActiveSuitesAreImmutable pins its digest.
+# fixtures.jsonl beside it holds the fixtures, one per line.
+apiVersion: assistants.mctl.ai/v1alpha1
+kind: AssistantEvalSuite
+base:
+  name: hr-recruiter
+  version: 0.1.1
+  digest: "sha256:356c57cfc88995c2d9df0c5c8db7cd8c7b9109da749456372ac9013f84e8f4f3"
+thresholds:
+  # At least this many fixtures classified correctly in a full run. Terminal
+  # completion, leaks, binding violations and wrong auto-sends are fixed
+  # gates: every fixture terminal, and zero of the others.
+  minClassification: 29
+# The values every run renders and judges with, for the synthetic persona
+# Dana. The run takes no ownerNotes and none of the account's own values: it
+# certifies the definition, not an install.
+values:
+  name: Dana
+  role: Backend engineer
+  skills: [Go, Kubernetes, PostgreSQL]
+  headline: Backend engineer building messaging infrastructure.
+  work_mode: remote
+  relocation: Not planning to relocate
+  salary_floor: "150000"

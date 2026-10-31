@@ -1,6 +1,7 @@
 // Package assistants holds the catalog of installable Telegram assistants
 // and the JSON Schemas that define their format (docs/assistants/spec.md).
-// Each assistant lives in its own directory as assistant.yaml.
+// Each assistant lives in its own directory as assistant.yaml, and each
+// later version under versions/<version>/assistant.yaml.
 package assistants
 
 import "embed"
