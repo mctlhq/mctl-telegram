@@ -60,6 +60,13 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_actions", "send_body_encrypted", "BYTEA", "BLOB"); err != nil {
 		return err
 	}
+	// agent_actions.send_attempts: send RPCs issued for the action, stamped
+	// before each one, so recovery can bound its retries and tell "never
+	// attempted" apart from "attempted, outcome unknown" (#1029).
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_actions", "send_attempts",
+		"INTEGER NOT NULL DEFAULT 0", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	// Approval codes are looked up by a tenant-scoped keyed blind index and
 	// retained reversibly only as per-user AES-GCM ciphertext so notification
 	// retries can reproduce the original command without leaving a live

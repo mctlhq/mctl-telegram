@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	gotdtelegram "github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
@@ -57,6 +58,33 @@ func (s *poolSender) SendWithRandomID(ctx context.Context, userID, peerTGID, pee
 		return 0, mapPoolSendError(err)
 	}
 	return int64(messageID), nil
+}
+
+// The executor only looks the id up when its Sender has this capability.
+var _ executor.DeliveryLocator = (*poolSender)(nil)
+
+// LocateDelivered implements executor.DeliveryLocator over the account's
+// recent history with the peer (#1029). It does not recover a missing access
+// hash: a send that reached Telegram was built with a working peer, so a
+// zero hash here means there is nothing safe to look up with.
+func (s *poolSender) LocateDelivered(ctx context.Context, userID, peerTGID, peerAccessHash int64, text string, since time.Time) (int64, bool, error) {
+	if peerAccessHash == 0 {
+		return 0, false, nil
+	}
+	var (
+		messageID int
+		found     bool
+	)
+	err := s.pool.Borrow(ctx, userID, func(ctx context.Context, c *gotdtelegram.Client) error {
+		var err error
+		messageID, found, err = telegram.LocateOwnOutgoing(ctx, c, userID,
+			&tg.InputPeerUser{UserID: peerTGID, AccessHash: peerAccessHash}, text, since)
+		return err
+	})
+	if err != nil {
+		return 0, false, fmt.Errorf("locate delivered via pool: %w", err)
+	}
+	return int64(messageID), found, nil
 }
 
 // mapPoolSendError translates telegram.ErrRandomIDDuplicate into the

@@ -46,6 +46,8 @@ func turnContextCases(t *testing.T, setup func(t *testing.T) (*Store, int64)) {
 		{"context message is shown at its latest version", assertContextLatestVersion},
 		{"deleted context message is left out", assertContextDeletedSkipped},
 		{"turn whose reply was sent adds no context", assertSentTurnNoContext},
+		{"turn whose reply may have been sent adds no context", assertDeliveryUnknownTurnNoContext},
+		{"turn answered by an edit job whose reply may have been sent adds no context", assertAnsweredByDeliveryUnknownEditJob},
 		{"single-message turn adds no context", assertSingleMessageNoContext},
 		{"context edited after claim withdraws the draft", assertContextEditAfterClaim},
 		{"context deleted after claim supersedes the job", assertContextDeleteAfterClaim},
@@ -158,6 +160,38 @@ func assertSentTurnNoContext(t *testing.T, f *supersessionFixture) {
 	job := f.claimEdit(t, edit)
 	if got := sourceList(job.SourceEventIDs); got != edit {
 		t.Fatalf("edit job sources = %s, want only %s", got, edit)
+	}
+}
+
+// A reply in delivery_unknown may have reached the peer (#1029), so the turn
+// counts as answered: handing it out again risks answering it twice.
+func assertDeliveryUnknownTurnNoContext(t *testing.T, f *supersessionFixture) {
+	head, draft := coalescedTurn(t, f)
+	if _, err := f.s.DB.Exec(`UPDATE agent_actions SET status = $1 WHERE id = $2`, ActionDeliveryUnknown, draft.ID); err != nil {
+		t.Fatal(err)
+	}
+	edit := f.ingest(t, 231, editSuffix)
+	f.finish(t, head.ID)
+	job := f.claimEdit(t, edit)
+	if got := sourceList(job.SourceEventIDs); got != edit {
+		t.Fatalf("edit job sources = %s, want only %s", got, edit)
+	}
+}
+
+func assertAnsweredByDeliveryUnknownEditJob(t *testing.T, f *supersessionFixture) {
+	head, _ := coalescedTurn(t, f)
+	edit231 := f.ingest(t, 231, editSuffix)
+	edit230 := f.ingest(t, 230, ":e200:bb")
+	f.finish(t, head.ID)
+	first := f.claimEdit(t, edit231)
+	a := f.action(t, first, PolicyAllow, ActionApproved)
+	if _, err := f.s.DB.Exec(`UPDATE agent_actions SET status = $1 WHERE id = $2`, ActionDeliveryUnknown, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.finish(t, first.ID)
+	second := f.claimEdit(t, edit230)
+	if got := sourceList(second.SourceEventIDs); got != edit230 {
+		t.Fatalf("second edit job sources = %s, want only %s", got, edit230)
 	}
 }
 

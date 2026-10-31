@@ -6,6 +6,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
@@ -92,4 +94,60 @@ func SendToSelf(ctx context.Context, c *telegram.Client, userID int64, text stri
 // SendToInputPeerWithRandomID's identical rationale for executor sends.
 func SendToSelfWithRandomID(ctx context.Context, c *telegram.Client, userID, randomID int64, text string) (int, error) {
 	return SendToInputPeerWithRandomID(ctx, c, userID, &tg.InputPeerSelf{}, text, randomID)
+}
+
+// locateHistoryLimit is how far back LocateOwnOutgoing looks in the chat.
+// The send it looks for was reserved minutes earlier, so it is near the top
+// unless the chat has been unusually busy since, in which case the id simply
+// stays unknown.
+const locateHistoryLimit = 50
+
+// LocateOwnOutgoing finds the id of a message this account already sent to
+// peer but whose send result was lost: Telegram refused a resend with
+// RANDOM_ID_DUPLICATE, which carries no message (#1029). Messages do not
+// expose random_id, so the match is on content: exactly one outgoing message
+// with this text (whitespace-trimmed) dated at or after since. None or
+// several is "not found". A found id is marked as an agent send, like a
+// normal send's, so its echo is not read as the owner taking over.
+func LocateOwnOutgoing(ctx context.Context, c *telegram.Client, userID int64, peer tg.InputPeerClass, text string, since time.Time) (int, bool, error) {
+	hist, err := c.API().MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+		Peer:  peer,
+		Limit: locateHistoryLimit,
+	})
+	if err != nil {
+		return 0, false, fmt.Errorf("get history: %w", err)
+	}
+	modified, ok := hist.AsModified()
+	if !ok {
+		return 0, false, nil
+	}
+	id, found := uniqueOutgoingMatch(modified.GetMessages(), text, since)
+	if found {
+		notifyAgentSent(userID, int64(id))
+	}
+	return id, found, nil
+}
+
+// uniqueOutgoingMatch returns the id of the single outgoing message in msgs
+// whose text equals text (both trimmed) and whose date is not before since.
+// A second match makes the answer ambiguous, so it reports not found.
+func uniqueOutgoingMatch(msgs []tg.MessageClass, text string, since time.Time) (int, bool) {
+	want := strings.TrimSpace(text)
+	if want == "" {
+		return 0, false
+	}
+	// Telegram dates are whole seconds; the reservation time is not.
+	floor := since.Truncate(time.Second).Unix()
+	id, n := 0, 0
+	for _, raw := range msgs {
+		m, ok := raw.(*tg.Message)
+		if !ok || !m.Out || int64(m.Date) < floor {
+			continue
+		}
+		if strings.TrimSpace(m.Message) != want {
+			continue
+		}
+		id, n = m.ID, n+1
+	}
+	return id, n == 1
 }

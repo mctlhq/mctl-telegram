@@ -70,6 +70,12 @@ var ErrSourceSuperseded = errors.New("source message edited or deleted, draft wi
 // original message, so its id stays unknown.
 var ErrAlreadyDelivered = errors.New("telegram already has a message with this random_id")
 
+// ErrDeliveryUnknown is returned by the recovery path when it moved an
+// action to delivery_unknown (#1029): an RPC for it may have reached
+// Telegram, and it will not be retried. Neither success nor failure; the
+// owner has been alerted.
+var ErrDeliveryUnknown = errors.New("delivery outcome unknown, not retried")
+
 // Sender is the narrow interface the executor needs to actually deliver a
 // reply. Implemented in cmd/server/agentwiring.go over telegram.ClientPool +
 // telegram.SendToInputPeerWithRandomID; kept as an interface here so this
@@ -88,6 +94,24 @@ type Sender interface {
 	// refusal must be returned wrapped in ErrAlreadyDelivered.
 	SendWithRandomID(ctx context.Context, userID, peerTGID, peerAccessHash, randomID int64, text string) (int64, error)
 }
+
+// DeliveryLocator is an optional Sender capability: find the id of a message
+// Telegram already has but whose send result was lost (#1029). A
+// RANDOM_ID_DUPLICATE refusal carries no message, and MTProto offers no
+// lookup by random_id (messages do not expose it), so the only evidence is
+// the account's recent outgoing history in that chat. found is true only
+// for exactly one outgoing message with this text sent at or after since;
+// none, several, or a failed read are all "unknown", never a guess. A
+// locator that finds the id should also mark it as an agent send, so its
+// echo is not read as an owner takeover.
+type DeliveryLocator interface {
+	LocateDelivered(ctx context.Context, userID, peerTGID, peerAccessHash int64, text string, since time.Time) (messageID int64, found bool, err error)
+}
+
+// DefaultMaxSendAttempts bounds the send RPCs one action may issue, the
+// first attempt included, before recovery gives up and records
+// delivery_unknown (#1029).
+const DefaultMaxSendAttempts = 5
 
 // SendGate applies the deployment-wide send boundary immediately before an
 // executor RPC: ALLOW_SEND, owner scope/tier, per-account send_enabled, and
@@ -150,7 +174,12 @@ type Executor struct {
 	// config.Config.AgentTestCrashAfterReserve's doc comment. Must be false
 	// outside a deliberate drill.
 	CrashAfterReserve bool
-	m                 *metrics.Registry
+	// MaxSendAttempts bounds the send RPCs per action, the first attempt
+	// included. Once reached, recovery stops retrying and the action ends in
+	// delivery_unknown with one owner alert (#1029). Zero or less means
+	// DefaultMaxSendAttempts; there is no unbounded setting.
+	MaxSendAttempts int
+	m               *metrics.Registry
 
 	// stuckMu guards stuckSeen, the set of action IDs RecoverStuck has
 	// already counted toward AgentExecutorRestartsTotal — see
@@ -458,6 +487,15 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		os.Exit(137)
 	}
 
+	// Count the attempt before the RPC, so a crash or a lost answer below
+	// leaves a row that says an RPC may have gone out (#1029). A failure to
+	// count sends nothing: the row stays executing with zero attempts, which
+	// recovery correctly reads as never attempted.
+	if _, ok, err := e.Store.NoteAgentActionSendAttempt(ctx, action.UserID, action.ID); err != nil {
+		return fmt.Errorf("%w: note send attempt: %w", ErrSendQueuedForRetry, err)
+	} else if !ok {
+		return ErrLostRace
+	}
 	tgMessageID, err := e.Sender.SendWithRandomID(ctx, action.UserID, conv.PeerTGID, conv.PeerAccessHash, randomID, text)
 	if err != nil {
 		// Leave the row in executing with its random_id intact — RecoverStuck
@@ -552,7 +590,10 @@ func (e *Executor) RecoverStuck(ctx context.Context) (int, error) {
 	}
 	slog.Warn("executor: recovering stuck executing actions", "count", len(stuck))
 	for _, a := range stuck {
-		if err := e.recoverOne(ctx, a); err != nil {
+		if err := e.recoverOne(ctx, a); errors.Is(err, ErrDeliveryUnknown) {
+			slog.Warn("executor: recovery gave up, delivery outcome unknown",
+				"action_id", a.ID, "user_id", a.UserID, "err", err)
+		} else if err != nil {
 			slog.Warn("executor: recovery send failed, will retry next sweep",
 				"action_id", a.ID, "user_id", a.UserID, "err", err)
 		}
@@ -602,6 +643,12 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 	profile, err := e.Store.GetAgentProfile(ctx, action.UserID)
 	if err != nil {
 		return fmt.Errorf("load profile: %w", err)
+	}
+	if action.SendAttempts >= e.maxSendAttempts() {
+		// The attempt budget was spent by earlier sweeps (or a crash right
+		// after the last attempt was counted). Stop here, before policy can
+		// turn an outcome nobody observed into a plain denial.
+		return e.markDeliveryUnknown(ctx, action, *conv, reasonAttemptsExhausted(action.SendAttempts))
 	}
 	// Re-check policy and the restricted-field gate before retrying, exactly
 	// like send() does before its first attempt — the crash that left this
@@ -668,6 +715,12 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 	// through send() would have caught.
 	requireApprovalBypassesUnreviewedAllow := result.Decision == policy.RequireApproval && action.PolicyDecision == db.PolicyAllow
 	if result.Decision == policy.Deny || requireApprovalBypassesUnreviewedAllow {
+		if action.SendAttempts > 0 {
+			// An earlier RPC for this action may already have reached the
+			// peer, so "denied" (nothing was sent) would claim something
+			// nobody observed (#1029). The retry is still stopped.
+			return e.markDeliveryUnknown(ctx, action, *conv, reasonStoppedAfterAttempt(result.Reasons))
+		}
 		if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionExecuting, db.ActionDenied); err != nil {
 			return fmt.Errorf("deny stale approval during recovery: %w", err)
 		}
@@ -685,6 +738,9 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 		return fmt.Errorf("check restricted fields during recovery: %w", err)
 	}
 	if blocked {
+		if action.SendAttempts > 0 {
+			return e.markDeliveryUnknown(ctx, action, *conv, reasonStoppedAfterAttempt([]string{reason}))
+		}
 		if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionExecuting, db.ActionDenied); err != nil {
 			return fmt.Errorf("deny restricted-field payload during recovery: %w", err)
 		}
@@ -697,21 +753,36 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 			return fmt.Errorf("send gate denied recovery retry: %w", err)
 		}
 	}
+	attempts, ok, err := e.Store.NoteAgentActionSendAttempt(ctx, action.UserID, action.ID)
+	if err != nil {
+		return fmt.Errorf("note send attempt: %w", err)
+	}
+	if !ok {
+		// Decided elsewhere since the sweep listed it.
+		return nil
+	}
 	tgMessageID, err := e.Sender.SendWithRandomID(ctx, action.UserID, conv.PeerTGID, conv.PeerAccessHash, action.SendRandomID, text)
 	if errors.Is(err, ErrAlreadyDelivered) {
 		// An earlier attempt with this random_id reached Telegram, so the
 		// reply was delivered. Retrying can never succeed (Telegram answers
 		// every reuse the same way), and leaving the row in executing would
-		// retry it on every sweep forever (#1029). Record it as sent with an
-		// unknown message id (stored as NULL).
+		// retry it on every sweep forever (#1029). Record it as sent; the
+		// message id is looked up in the chat history and stays unknown
+		// (stored as NULL) when that finds no single match.
 		slog.Warn("executor: recovery retry found the send already delivered",
 			"action_id", action.ID, "user_id", action.UserID)
-		tgMessageID, err = 0, nil
+		tgMessageID, err = e.locateDelivered(ctx, action, *conv, text), nil
 	}
 	if err != nil {
+		if attempts >= e.maxSendAttempts() {
+			if derr := e.markDeliveryUnknown(ctx, action, *conv, reasonAttemptsExhausted(attempts)); !errors.Is(derr, ErrDeliveryUnknown) {
+				return fmt.Errorf("retry send: %w; record delivery unknown: %w", err, derr)
+			}
+			return fmt.Errorf("%w: last retry: %w", ErrDeliveryUnknown, err)
+		}
 		return fmt.Errorf("retry send: %w", err)
 	}
-	ok, err := e.Store.RecordAgentActionSent(ctx, action.UserID, action.ID, action.ConversationID, tgMessageID, text)
+	ok, err = e.Store.RecordAgentActionSent(ctx, action.UserID, action.ID, action.ConversationID, tgMessageID, text)
 	if err != nil {
 		return fmt.Errorf("record executed: %w", err)
 	}
@@ -734,6 +805,68 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 		e.m.AgentApprovalLatencySeconds.Observe(time.Since(action.UpdatedAt).Seconds())
 	}
 	return nil
+}
+
+func (e *Executor) maxSendAttempts() int {
+	if e.MaxSendAttempts > 0 {
+		return e.MaxSendAttempts
+	}
+	return DefaultMaxSendAttempts
+}
+
+// locateDelivered asks the Sender, when it can, for the id of a send
+// Telegram reported as a duplicate. Any failure leaves the id unknown (0):
+// the delivery itself is already proven by the duplicate refusal.
+func (e *Executor) locateDelivered(ctx context.Context, action db.AgentAction, conv db.Conversation, text string) int64 {
+	locator, ok := e.Sender.(DeliveryLocator)
+	if !ok {
+		return 0
+	}
+	id, found, err := locator.LocateDelivered(ctx, action.UserID, conv.PeerTGID, conv.PeerAccessHash, text, action.CreatedAt)
+	if err != nil {
+		slog.Warn("executor: could not look up the delivered message id",
+			"action_id", action.ID, "user_id", action.UserID, "err", err)
+		return 0
+	}
+	if !found {
+		return 0
+	}
+	return id
+}
+
+func reasonAttemptsExhausted(attempts int) string {
+	return fmt.Sprintf("delivery unknown: Telegram did not confirm the send after %d attempts", attempts)
+}
+
+func reasonStoppedAfterAttempt(reasons []string) string {
+	return "delivery unknown: retry stopped after an attempt that may have been delivered: " + strings.Join(reasons, "; ")
+}
+
+// markDeliveryUnknown ends an executing action in delivery_unknown and
+// queues one owner alert in the same transaction (#1029). It returns
+// ErrDeliveryUnknown when it made the transition, nil when another sweep or
+// send already decided the row, and any other error unchanged. The alert
+// names the chat, never the message body.
+func (e *Executor) markDeliveryUnknown(ctx context.Context, action db.AgentAction, conv db.Conversation, reason string) error {
+	peerLabel := "a conversation"
+	switch {
+	case strings.TrimSpace(conv.PeerDisplayName) != "":
+		peerLabel = conv.PeerDisplayName
+	case strings.TrimSpace(conv.PeerUsername) != "":
+		peerLabel = "@" + conv.PeerUsername
+	}
+	alert := fmt.Sprintf("The assistant could not confirm whether its reply to %s was delivered, and it will not try again. Check that chat before you reply yourself, so the reply is not sent twice.", peerLabel)
+	ok, err := e.Store.MarkAgentActionDeliveryUnknown(ctx, action.UserID, action.ID, reason, alert)
+	if err != nil {
+		return fmt.Errorf("record delivery unknown: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	if e.m != nil {
+		e.m.AgentDeliveryUnknownTotal.Inc()
+	}
+	return fmt.Errorf("%w: %s", ErrDeliveryUnknown, reason)
 }
 
 // restrictedFieldBlocks reports whether finalText must be blocked by
