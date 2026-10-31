@@ -40,7 +40,7 @@ func TestUpsertAgentProfile_DefaultsAndUpdate(t *testing.T) {
 		DisclosureText: "AI assistant", MaxAutonomousTurns: 3,
 		MaxMsgsPerMinute: 1, MaxReplyChars: 500,
 		IntentAllowlist: "greet,request_company", BlockedSenders: "42",
-		SenderAllowlist: "555,777",
+		SenderAllowlist: "555,777", IntentDenylist: "decline",
 	}); err != nil {
 		t.Fatalf("upsert 2: %v", err)
 	}
@@ -53,6 +53,16 @@ func TestUpsertAgentProfile_DefaultsAndUpdate(t *testing.T) {
 	}
 	if p.SenderAllowlist != "555,777" {
 		t.Fatalf("sender allowlist = %q, want 555,777", p.SenderAllowlist)
+	}
+	if p.IntentDenylist != "decline" {
+		t.Fatalf("intent denylist = %q, want decline", p.IntentDenylist)
+	}
+	deny := "decline,share_details"
+	if err := s.UpdateAgentProfileFields(ctx, uid, AgentProfileUpdate{IntentDenylist: &deny}); err != nil {
+		t.Fatalf("update denylist: %v", err)
+	}
+	if p, _ = s.GetAgentProfile(ctx, uid); p.IntentDenylist != deny {
+		t.Fatalf("updated intent denylist = %q, want %q", p.IntentDenylist, deny)
 	}
 
 	// Pause flag flips independently.

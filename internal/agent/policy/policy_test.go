@@ -137,6 +137,7 @@ func TestEvaluate_DenyCodes(t *testing.T) {
 		{"never field", func(in *Input) { in.ProtectedField = &ProtectedField{Key: "identity.company", Never: true} }, DenyReplyNeverField},
 		{"source edited", func(in *Input) { in.SourceSuperseded = db.SourceEdited }, DenySourceSuperseded},
 		{"source deleted", func(in *Input) { in.SourceSuperseded = db.SourceDeleted }, DenySourceSuperseded},
+		{"never intent wins over the allowlist", func(in *Input) { in.Profile.IntentDenylist = "decline, Request_Company" }, DenyIntentNever},
 	}
 
 	seen := map[DenyCode]bool{}
@@ -164,6 +165,7 @@ func TestEvaluate_DenyCodes(t *testing.T) {
 		DenyConvStateUnknown, DenySenderBlocked, DenyActionTypeUnknown,
 		DenyPeerMismatch, DenyNoDisclosure, DenyEmptyReply, DenyReplyTooLong,
 		DenyReplyURL, DenyReplyCredentials, DenyReplyNeverField, DenySourceSuperseded,
+		DenyIntentNever,
 	}
 	for _, c := range allCodes {
 		if !seen[c] {
@@ -557,5 +559,37 @@ func TestEvaluate_AllowReasonNamesTheMatchedIntent(t *testing.T) {
 		if len(got.Reasons) != 1 || got.Reasons[0] != tc.want {
 			t.Errorf("%q in %q: reasons = %v, want [%q]", tc.intent, tc.allowlist, got.Reasons, tc.want)
 		}
+	}
+}
+
+// TestEvaluate_IntentDenylist pins the never tier: it denies in every mode,
+// even where approval would otherwise be the outcome, and names the
+// configured entry rather than the model's spelling of the intent.
+func TestEvaluate_IntentDenylist(t *testing.T) {
+	for _, mode := range []string{db.AgentModeObserve, db.AgentModeGuarded} {
+		in := baseInput()
+		in.Profile.Mode = mode
+		in.Profile.IntentDenylist = "share_details"
+		in.Action.Intent = " SHARE_DETAILS "
+		got := Evaluate(in)
+		if got.Decision != Deny || got.DenyCode() != DenyIntentNever {
+			t.Fatalf("%s: got %s/%s (%v), want deny/%s", mode, got.Decision, got.DenyCode(), got.Reasons, DenyIntentNever)
+		}
+		if want := `intent "share_details" is never sent`; len(got.Reasons) != 1 || got.Reasons[0] != want {
+			t.Fatalf("%s: reasons = %q, want [%q]", mode, got.Reasons, want)
+		}
+	}
+
+	// An intent off the denylist is unaffected, and an empty intent never
+	// matches an entry.
+	in := baseInput()
+	in.Profile.IntentDenylist = "share_details"
+	if got := Evaluate(in); got.Decision == Deny {
+		t.Fatalf("intent off the denylist denied: %v", got.Reasons)
+	}
+	in.Action.Intent = ""
+	in.Profile.IntentDenylist = "share_details,"
+	if got := Evaluate(in); got.DenyCode() == DenyIntentNever && got.Decision == Deny {
+		t.Fatalf("empty intent matched the denylist: %v", got.Reasons)
 	}
 }

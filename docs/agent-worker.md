@@ -116,7 +116,7 @@ exactly one file. It carries:
 - `mctl_agent_credential_domain{domain_id=...}` — the info gauge described
   above.
 - `mctl_agent_jobs_total` (6 children) and `mctl_agent_policy_denials_total`
-  (120 children), all at a **constant zero**. These are server-side families:
+  (126 children), all at a **constant zero**. These are server-side families:
   `AgentJobsTotal` is incremented only in `internal/agent/queue`, and
   `CountPolicyDenial` only in `internal/agentapi` and `internal/agent/executor`
   — none of which run in this process. They appear here because `metrics.New()`
@@ -138,7 +138,7 @@ the first — and possibly only — occurrence they exist for (issue #591).
 it is the denominator of `MctlAgentJobCostHigh` and a lazy denominator makes the
 first completed job after a restart read as zero completions.
 `mctl_agent_policy_denials_total` is pre-created too, across its full
-20 x 6 = 120 label space. It was originally left lazy on the grounds that
+21 x 6 = 126 label space. It was originally left lazy on the grounds that
 `MctlAgentPolicyDenialRateHigh`'s `> 4` floor means one first denial cannot
 fire it — true, and beside the point: if the first *five* denials for one
 reason land between two scrapes, the series is first observed at 5, every later
