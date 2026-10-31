@@ -22,6 +22,10 @@ const recentDialogsLimit = 200
 // the list close to live.
 const defaultDialogsSnapshotTTL = 45 * time.Second
 
+// maxDialogsFetchAttempts bounds how often a caller re-joins the group after
+// the fetch it was waiting on was cancelled by the call that started it.
+const maxDialogsFetchAttempts = 3
+
 // dialogsSnapshots holds one recent getDialogs answer per account and
 // collapses concurrent fetches for the same account into a single call.
 // Snapshots are used only to find a peer and its access hash; anything that
@@ -62,48 +66,51 @@ func (pc *PeerCache) recentDialogs(ctx context.Context, api *tg.Client, userID i
 		return res, false, err
 	}
 	s := &pc.dialogs
-	if !fresh {
-		s.mu.Lock()
-		snap, ok := s.m[userID]
-		if ok && pc.now().Sub(snap.fetchedAt) < pc.dialogsTTL {
-			s.mu.Unlock()
-			return snap.res, true, nil
-		}
-		s.mu.Unlock()
-	}
-
-	ch := s.group.DoChan(strconv.FormatInt(userID, 10), func() (any, error) {
-		r, err := fetchRecentDialogs(ctx, api)
-		if err != nil {
-			return nil, err
-		}
-		s.mu.Lock()
-		if s.m == nil {
-			s.m = make(map[int64]*dialogsSnapshot)
-		}
-		s.m[userID] = &dialogsSnapshot{res: r, fetchedAt: pc.now()}
-		s.mu.Unlock()
-		return r, nil
-	})
-	select {
-	case <-ctx.Done():
-		return nil, false, ctx.Err()
-	case out := <-ch:
-		if out.Err != nil {
-			// The shared fetch ran under the context of whichever call
-			// started it. If that call was cancelled while ours is still
-			// live, its cancellation is not our failure: fetch once more
-			// ourselves rather than report it.
-			if out.Shared && ctx.Err() == nil &&
-				(errors.Is(out.Err, context.Canceled) || errors.Is(out.Err, context.DeadlineExceeded)) {
-				res, err = fetchRecentDialogs(ctx, api)
-				return res, false, err
+	for attempt := 1; ; attempt++ {
+		if !fresh {
+			s.mu.Lock()
+			snap, ok := s.m[userID]
+			if ok && pc.now().Sub(snap.fetchedAt) < pc.dialogsTTL {
+				s.mu.Unlock()
+				return snap.res, true, nil
 			}
-			return nil, false, out.Err
+			s.mu.Unlock()
 		}
-		// A fetch joined while in flight is at least as new as any snapshot,
-		// so it counts as fresh.
-		return out.Val.(tg.MessagesDialogsClass), false, nil
+
+		ch := s.group.DoChan(strconv.FormatInt(userID, 10), func() (any, error) {
+			r, err := fetchRecentDialogs(ctx, api)
+			if err != nil {
+				return nil, err
+			}
+			s.mu.Lock()
+			if s.m == nil {
+				s.m = make(map[int64]*dialogsSnapshot)
+			}
+			s.m[userID] = &dialogsSnapshot{res: r, fetchedAt: pc.now()}
+			s.mu.Unlock()
+			return r, nil
+		})
+		var out singleflight.Result
+		select {
+		case <-ctx.Done():
+			return nil, false, ctx.Err()
+		case out = <-ch:
+		}
+		if out.Err == nil {
+			// A fetch joined while in flight is at least as new as any
+			// snapshot, so it counts as fresh.
+			return out.Val.(tg.MessagesDialogsClass), false, nil
+		}
+		// The shared fetch ran under the context of whichever call started
+		// it. If that call was cancelled while ours is still live, its
+		// cancellation is not our failure. Go back through the group rather
+		// than fetch alone, so the callers that were waiting on it elect one
+		// new fetch between them instead of each sending their own.
+		if out.Shared && ctx.Err() == nil && attempt < maxDialogsFetchAttempts &&
+			(errors.Is(out.Err, context.Canceled) || errors.Is(out.Err, context.DeadlineExceeded)) {
+			continue
+		}
+		return nil, false, out.Err
 	}
 }
 

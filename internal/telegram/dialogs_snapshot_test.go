@@ -210,9 +210,10 @@ func TestRecentDialogs_ErrorIsNotCached(t *testing.T) {
 	}
 }
 
-// A caller that joined a fetch started by another call must not inherit
-// that call's cancellation.
-func TestRecentDialogs_LeaderCancelDoesNotFailFollower(t *testing.T) {
+// Callers that joined a fetch started by another call must not inherit that
+// call's cancellation, and must not each fetch alone either: they elect one
+// new fetch between them, and its answer becomes the snapshot.
+func TestRecentDialogs_LeaderCancelDoesNotFailFollowers(t *testing.T) {
 	g := newGated()
 	api := tg.NewClient(g)
 	cache := NewPeerCache()
@@ -225,19 +226,32 @@ func TestRecentDialogs_LeaderCancelDoesNotFailFollower(t *testing.T) {
 	}()
 	<-g.started
 
-	followerDone := make(chan error, 1)
-	go func() {
-		_, _, err := cache.recentDialogs(context.Background(), api, snapUserID, false)
-		followerDone <- err
-	}()
+	const followers = 5
+	followerDone := make(chan error, followers)
+	for i := 0; i < followers; i++ {
+		go func() {
+			_, _, err := cache.recentDialogs(context.Background(), api, snapUserID, false)
+			followerDone <- err
+		}()
+	}
 	time.Sleep(50 * time.Millisecond)
 	cancelLeader()
 	if err := <-leaderDone; !errors.Is(err, context.Canceled) {
 		t.Fatalf("leader err = %v, want context.Canceled", err)
 	}
+	// Let the followers re-join the group before the new fetch returns.
+	time.Sleep(50 * time.Millisecond)
 	close(g.release)
-	if err := <-followerDone; err != nil {
-		t.Fatalf("follower err = %v, want its own successful fetch", err)
+	for i := 0; i < followers; i++ {
+		if err := <-followerDone; err != nil {
+			t.Fatalf("follower err = %v, want a successful shared re-fetch", err)
+		}
+	}
+	if got := g.calls.Load(); got != 2 {
+		t.Fatalf("getDialogs calls = %d, want 2 (the cancelled fetch, then one shared re-fetch)", got)
+	}
+	if _, cached, err := cache.recentDialogs(context.Background(), api, snapUserID, false); err != nil || !cached {
+		t.Fatalf("after the re-fetch: cached=%v err=%v, want the snapshot it stored", cached, err)
 	}
 }
 
