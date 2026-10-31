@@ -262,3 +262,69 @@ func TestRestrictedToolSetUnsupported(t *testing.T) {
 		t.Fatalf("err = %v, want ErrUnsupported", err)
 	}
 }
+
+// An unmarked variable is held to the runtime's default level, so an install
+// cannot open relocation (after_owner_engaged by default) to everyone.
+func TestUnmarkedVariableCannotBeLoosened(t *testing.T) {
+	raw := editYAML(t, readFile(t, "assistant.yaml"),
+		"      profilePath: preferences.relocation\n      disclosure: after_owner_engaged\n",
+		"      profilePath: preferences.relocation\n")
+	def, err := ParseDefinition(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := readFile(t, "install.example.yaml")
+	loose, err := ParseInstall(editYAML(t, base, "  limits:\n", "  disclosureLevels:\n    relocation: public\n  limits:\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ProfileRequest(def, loose, danaID); err == nil {
+		t.Fatal("unmarked relocation opened to public")
+	}
+	strict, err := ParseInstall(editYAML(t, base, "  limits:\n", "  disclosureLevels:\n    relocation: never\n  limits:\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ProfileRequest(def, strict, danaID); err != nil {
+		t.Fatalf("stricter level rejected: %v", err)
+	}
+}
+
+func TestRequiredDisclosureTextCannotBeReplaced(t *testing.T) {
+	def, err := ParseDefinition(editYAML(t, readFile(t, "assistant.yaml"), "policy: optional", "policy: required"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := ParseInstall(editYAML(t, readFile(t, "install.example.yaml"),
+		"disclosure:\n    enabled: false\n", "disclosure:\n    text: \".\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ProfileRequest(def, in, danaID); err == nil {
+		t.Fatal("required disclosure text replaced")
+	}
+}
+
+// A minimal install starts like a new account: default mode, paused, not
+// listening.
+func TestMinimalInstallStartsSafe(t *testing.T) {
+	in, err := ParseInstall([]byte(`apiVersion: assistants.mctl.ai/v1alpha1
+kind: AssistantInstall
+spec:
+  assistant: {name: hr-recruiter, version: 0.1.0}
+  values: {name: Dana, role: Backend engineer}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ProfileRequest(hrDefinition(t), in, danaID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["mode"] != "observe" || got["autopilot_paused"] != true || got["listener_enabled"] != false {
+		t.Fatalf("mode/paused/listening = %v/%v/%v", got["mode"], got["autopilot_paused"], got["listener_enabled"])
+	}
+	if got["max_autonomous_turns"] != 6 || got["disclosure_disabled"] != false {
+		t.Fatalf("defaults not applied: %v", got)
+	}
+}

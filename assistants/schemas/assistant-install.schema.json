@@ -12,7 +12,7 @@
     "spec": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["assistant", "mode"],
+      "required": ["assistant"],
       "properties": {
         "assistant": {
           "type": "object",
@@ -27,12 +27,19 @@
             }
           }
         },
-        "mode": { "enum": ["observe", "guarded", "off"] },
-        "paused": { "type": "boolean", "default": false },
-        "listening": {
-          "description": "Whether incoming messages reach the assistant at all.",
+        "mode": {
+          "description": "Defaults to the definition's defaults.mode.",
+          "enum": ["observe", "guarded", "off"]
+        },
+        "paused": {
+          "description": "Defaults to true: a new install starts paused, as a new account does.",
           "type": "boolean",
           "default": true
+        },
+        "listening": {
+          "description": "Whether incoming messages reach the assistant at all. Defaults to false, as for a new account.",
+          "type": "boolean",
+          "default": false
         },
         "values": {
           "description": "Values for the definition's variables, keyed by variable name.",
@@ -98,7 +105,10 @@
           "additionalProperties": false,
           "properties": {
             "enabled": { "type": "boolean" },
-            "text": { "type": "string", "minLength": 1, "maxLength": 200 }
+            "text": {
+              "description": "Replaces the definition's text; allowed only when its disclosure policy is optional.",
+              "type": "string", "minLength": 1, "maxLength": 200
+            }
           }
         },
         "schedule": {

@@ -140,7 +140,7 @@ type Install struct {
 			Version string `json:"version"`
 		} `json:"assistant"`
 		Mode             string                             `json:"mode"`
-		Paused           bool                               `json:"paused"`
+		Paused           *bool                              `json:"paused"`
 		Listening        *bool                              `json:"listening"`
 		Values           map[string]any                     `json:"values"`
 		DisclosureLevels map[string]profile.DisclosureLevel `json:"disclosureLevels"`
@@ -345,6 +345,11 @@ func ProfileRequest(def *Definition, in *Install, telegramID int64) (map[string]
 			disclosureOn = *d.Enabled
 		}
 		if d.Text != "" {
+			// Under a required policy the author's wording is the guarantee;
+			// a replacement such as "." would keep the line but disclose nothing.
+			if def.Spec.Defaults.Disclosure.Policy == "required" {
+				return nil, errors.New("disclosure: this assistant's disclosure text cannot be changed")
+			}
 			disclosureText = d.Text
 		}
 	}
@@ -355,7 +360,17 @@ func ProfileRequest(def *Definition, in *Install, telegramID int64) (map[string]
 		disclosureText = ""
 	}
 
-	listening := true
+	// Omitted settings fall back to the same safe start EnsureAgentProfile
+	// gives a new account: the definition's mode, paused, listener off.
+	mode := def.Spec.Defaults.Mode
+	if s.Mode != "" {
+		mode = s.Mode
+	}
+	paused := true
+	if s.Paused != nil {
+		paused = *s.Paused
+	}
+	listening := false
 	if s.Listening != nil {
 		listening = *s.Listening
 	}
@@ -366,8 +381,8 @@ func ProfileRequest(def *Definition, in *Install, telegramID int64) (map[string]
 
 	return map[string]any{
 		"telegram_id":          telegramID,
-		"mode":                 s.Mode,
-		"autopilot_paused":     s.Paused,
+		"mode":                 mode,
+		"autopilot_paused":     paused,
 		"listener_enabled":     listening,
 		"disclosure_text":      disclosureText,
 		"disclosure_disabled":  !disclosureOn,
@@ -505,8 +520,14 @@ func ownerProfile(def *Definition, in *Install) (json.RawMessage, error) {
 		}
 		level := v.Disclosure
 		if o, ok := in.Spec.DisclosureLevels[v.Name]; ok {
-			if level != "" && disclosureRank[o] < disclosureRank[level] {
-				return nil, fmt.Errorf("disclosureLevels: %q can only be made stricter than %s", v.Name, level)
+			// A variable the author left unmarked has the runtime's default
+			// level, not no level, so that is the floor an override is held to.
+			floor := level
+			if floor == "" {
+				floor = profile.DefaultLevel(v.ProfilePath)
+			}
+			if disclosureRank[o] < disclosureRank[floor] {
+				return nil, fmt.Errorf("disclosureLevels: %q can only be made stricter than %s", v.Name, floor)
 			}
 			level = o
 		}

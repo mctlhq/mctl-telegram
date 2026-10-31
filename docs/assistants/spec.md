@@ -62,6 +62,10 @@ number, boolean, string_list), `required`, optional `choices`, and a
 (`approval` or `never`): the value is never sent automatically and is used to
 block a reply that would reveal it.
 
+A variable without a `disclosure` gets the runtime's default level
+(public for `identity.name`, `identity.role` and `skills`,
+after_owner_engaged otherwise), and an install may only make it stricter.
+
 **intents** are the controlled vocabulary of reply intents. `tier` says
 what happens to a reply with that intent:
 
@@ -85,9 +89,9 @@ apiVersion: assistants.mctl.ai/v1alpha1
 kind: AssistantInstall
 spec:
   assistant: {name: hr-recruiter, version: 0.1.0}
-  mode: guarded            # observe | guarded | off
-  paused: false
-  listening: true
+  mode: guarded            # observe | guarded | off; default: the definition's
+  paused: false            # default: true
+  listening: true          # default: false
   values: {...}            # variable values
   disclosureLevels: {...}  # per variable, stricter only
   intentTiers: {...}       # per intent, within userOverride
@@ -101,6 +105,11 @@ spec:
   ownerNotes: "..."        # the user's own instructions, max 2000 chars
 ```
 
+An install that leaves out `mode`, `paused` or `listening` starts the way a
+new account does today: in the definition's default mode, paused, and not
+listening. Going live is an explicit change, never a side effect of a
+minimal install.
+
 ## Who controls what
 
 | Setting | Author (definition) | User (install) | Platform (never relaxable) |
@@ -110,7 +119,7 @@ spec:
 | Reply intents | intents, default tiers, `userOverride` | tiers within `userOverride` | URL, credential, phone and code deny; injection handling |
 | Tools | subset of the registry | — | tool registry, server-side validation |
 | Limits | defaults and ceilings | up to the ceilings | 60 s rate window, fallbacks |
-| Disclosure line | `required` or `optional`, default text | text; off only if optional | — |
+| Disclosure line | `required` or `optional`, default text | text and off switch, only if optional | — |
 | Who it answers | — | audience scope, only/blocked senders | private chats only; groups and channels never |
 | When it answers | — | schedule | takeover when the owner replies |
 | Model and budget | `execution` | — | per-job budget cap |
