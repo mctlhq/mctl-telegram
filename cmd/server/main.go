@@ -55,6 +55,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/productupdate"
 	"github.com/mctlhq/mctl-telegram/internal/sweeper"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
+	"github.com/mctlhq/mctl-telegram/internal/ui"
 	"github.com/mctlhq/mctl-telegram/internal/web"
 	"github.com/mctlhq/mctl-telegram/internal/workctx"
 	"github.com/mctlhq/mctl-telegram/internal/workertoken"
@@ -620,8 +621,11 @@ func main() {
 		}
 		slog.Info("assistant registry", "enabled", cfg.AssistantRegistryEnabled, "mctl_api_base_url", cfg.MCTLAPIBaseURL)
 		assistantSvc = assistantinstall.New(store, catalog, registry)
+		assistantSvc.ForksEnabled = cfg.AssistantForksEnabled
+		slog.Info("assistant forks", "enabled", cfg.AssistantForksEnabled)
 		// The public catalog page: the same entries as list_assistants.
 		mux.Get("/assistants", web.Assistants(assistantSvc, cfg.PublicBaseURL, showManage))
+		ui.SetAssistantsMounted(true)
 	}
 
 	// Session management dashboard — only mounted in local-jwt mode alongside
@@ -793,6 +797,9 @@ func main() {
 		agentSrv.WithCatalog(catalog)
 		if cfg.AssistantRegistryEnabled {
 			agentSrv.WithRegistryLifecycle()
+		}
+		if cfg.AssistantForksEnabled {
+			agentSrv.WithForks()
 		}
 		if cfg.OAUTHJWTSecret != "" {
 			jobSigner, err := localjwt.NewIssuer([]byte(cfg.OAUTHJWTSecret), strings.TrimRight(cfg.PublicBaseURL, "/"))

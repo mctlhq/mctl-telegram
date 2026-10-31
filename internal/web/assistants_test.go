@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/mctlhq/mctl-telegram/internal/ui"
 )
 
 func getAssistantsPage(t *testing.T, h http.HandlerFunc) *httptest.ResponseRecorder {
@@ -77,5 +79,36 @@ func TestAssistantsPage_RegistryCatalogAndFailure(t *testing.T) {
 	if !strings.Contains(body, `id="catalog-unavailable"`) || strings.Contains(body, `id="catalog-empty"`) ||
 		strings.Contains(body, "registry-only") {
 		t.Fatalf("unavailable catalog not stated explicitly: %s", body)
+	}
+}
+
+// The header and footer link to /assistants only where the server mounted
+// it (AGENT_ENABLED): a link on a deployment without the page is a 404 in
+// the main nav. With it mounted, the catalog page marks its own link active.
+func TestAssistantsNavLinkFollowsMount(t *testing.T) {
+	const active = `<a href="/assistants" class="active">Assistants</a>`
+	const footer = `<a href="/assistants">Assistants</a>`
+	f := newManageAssistantFixture(t, nil)
+	render := func() string {
+		return getAssistantsPage(t, Assistants(f.svc, "https://tg.test", true)).Body.String()
+	}
+	t.Cleanup(func() { ui.SetAssistantsMounted(false) })
+
+	ui.SetAssistantsMounted(false)
+	if body := render(); strings.Contains(body, `href="/assistants"`) {
+		t.Fatal("nav links to /assistants although it is not mounted")
+	}
+
+	ui.SetAssistantsMounted(true)
+	body := render()
+	for _, want := range []string{active, footer} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	rec := httptest.NewRecorder()
+	Platforms("https://tg.test", "/mcp", "https://tg.test", true, testPlatformFacts()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/platforms", nil))
+	if b := rec.Body.String(); !strings.Contains(b, `<a href="/assistants">Assistants</a>`) || strings.Contains(b, active) {
+		t.Error("/platforms must link to /assistants without marking it active")
 	}
 }

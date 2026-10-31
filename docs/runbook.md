@@ -3193,3 +3193,26 @@ The schema migration clears exactly that value on startup, so those
 accounts use the embedded catalog like an account that never pinned a
 digest. A claim that answers `500 assistant instructions unavailable` for
 any other pinned digest without a stored definition needs a reinstall.
+
+## Assistant forks (issue #1043)
+
+Flag: `ASSISTANT_FORKS_ENABLED` (default `false`). The startup log line
+`assistant forks` shows whether it is on. Turning it off is the global kill
+switch for private forks: `fork_assistant`, `update_fork` and installs of a
+fork answer `forks_disabled`, and the claim of every account that runs a
+fork answers `503 assistant fork may not run: forks are off, or the mode is
+guarded` with its jobs left queued. `delete_fork` keeps working, so owners
+can still remove their data. There is no per-fork admin switch: to stop the
+forks of one catalog version, disable that version in the registry; every
+fork of it stops within one refresh, as a pinned catalog version does.
+
+The same `503` for one account with forks on means its profile's mode is
+`guarded`. No fork version runs guarded before P4.3 promotion; set the mode
+to `observe` (the policy engine already treats it as observe).
+
+A fork lives in `assistant_forks`, sealed with the owner's key; the
+instructions are never in a log, an audit row or a tool result. An audit
+row of a fork write names `fork:<name>@<version> <digest>`. A claim that
+answers `500 assistant instructions unavailable` for a fork account means
+the pinned fork version or its base snapshot is missing: the owner
+reinstalls a version that exists (`list_assistants` shows them).

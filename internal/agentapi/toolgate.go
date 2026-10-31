@@ -91,7 +91,7 @@ func (s *Server) accountTools(ctx context.Context, userID int64) ([]string, erro
 	if err != nil {
 		return nil, err
 	}
-	entry, _, err := s.lookupAssistant(ctx, a)
+	entry, _, err := s.lookupAssistant(ctx, userID, a)
 	if err != nil {
 		return nil, err
 	}

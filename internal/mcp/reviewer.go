@@ -96,6 +96,11 @@ var reviewerWriteRules = map[string]reviewerWriteRule{
 	// reviewer account, so it is not part of a review either.
 	"install_assistant": reviewerRefused,
 	"update_install":    reviewerRefused,
+	// A fork is what an install would run, so it is not part of a review
+	// either.
+	"fork_assistant": reviewerRefused,
+	"update_fork":    reviewerRefused,
+	"delete_fork":    reviewerRefused,
 
 	// Device, operator and broadcast tools: none is part of a review.
 	"revoke_local_bridge_device": reviewerRefused,

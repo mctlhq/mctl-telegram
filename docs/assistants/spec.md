@@ -341,7 +341,8 @@ is mapped to its tools (`internal/agent/tools.Endpoints`):
 | Route | Tools |
 |---|---|
 | `GET /event/{eventID}` | `get_event` |
-| `GET /conversations/{id}/context` | `get_conversation_context`, `get_lead` |
+| `GET /conversations/{id}/context` | `get_conversation_context` |
+| `GET /conversations/{id}/leads` | `get_lead` |
 | `GET /leads/{id}` | `get_lead`, `get_conversation_context` |
 | `GET /recruiters/{peer}` | `get_recruiter_profile` |
 | `GET /policy` | `get_policy` |
@@ -351,6 +352,14 @@ is mapped to its tools (`internal/agent/tools.Endpoints`):
 | `POST /notify/summary` | `send_owner_summary` |
 | `POST /autopilot/pause` | `pause_autopilot` |
 | `POST /jobs/{id}/complete` | `complete_agent_job` |
+
+`get_lead` reads `GET /conversations/{id}/leads`, bound to the job's own
+conversation, which returns the conversation's leads and no messages
+(#1043). A tool set with `get_lead` but without `get_conversation_context`
+therefore reads leads and nothing of the conversation; the context route,
+which returns the leads too, serves `get_conversation_context` alone. A
+worker that meets a server without the leads route falls back to the
+context route, which the gate still decides on.
 
 A request to a route none of whose tools is in the caller's set is refused
 with 403 `{"error":"tool_not_allowed","tool":"<canonical name>"}`, audited as
@@ -399,6 +408,8 @@ carries the text and no path, so it is complete without the repository.
   tenant-binding model that does not exist yet, so a tenant-visible
   definition is refused when the catalog loads and when a materialized
   document is parsed.
+  Account-private forks (P4) are not registry entries; see
+  [adr-forks.md](adr-forks.md).
 - **Status and lifecycle.** The registry's own lifecycle has three states
   (`published`, `deprecated`, `disabled`), and a new version is always
   `published`. Whether the public catalog offers an assistant is decided by
@@ -457,6 +468,90 @@ carries the text and no path, so it is complete without the repository.
   publish immutable `TelegramAssistant` versions from this repository is a
   follow-up.
 
+## Forks
+
+P4.2 (#1043) lets an account owner make a **private fork** of a catalog
+assistant: their own instructions, fewer tools, stricter intents, lower
+limits. The model and its reasons are in [adr-forks.md](adr-forks.md); this
+section is what the code does. Everything here is off unless
+`ASSISTANT_FORKS_ENABLED` is set, and turning it off also stops the jobs of
+every account that runs a fork; `delete_fork` keeps working.
+
+**Document.** A fork version is a complete `TelegramAssistant` in
+materialized form, so it parses, canonicalizes and hashes with the same
+functions as a catalog version (`assistant.ParseMaterialized`). It is the
+base's document with the fork's changes applied and:
+
+- `metadata.name` `<base>~<owner-scope>~<slug>`. The owner scope is 10
+  characters of lowercase base32 of the server's keyed HMAC of the account
+  id; the slug is the user's, `^[a-z0-9][a-z0-9_-]{0,31}$`. A catalog name
+  cannot hold `~`.
+- `metadata.owner` `acct:<owner-scope>`, `visibility: private`,
+  `status: active`, and `metadata.fork.base` `{name, version, digest}`, the
+  catalog version it narrows. The parser accepts a `~` name only with
+  `metadata.fork` and `private`, and refuses either without the other; the
+  catalog refuses to load a fork.
+
+**Rules.** `assistant.ValidateFork(base, fork)` holds every version to its
+base, on top of the checks every definition passes:
+
+| Part | A fork may |
+|---|---|
+| instructions | replace them; at most 16 KiB of UTF-8, without the `owner_notes` markers. `ownerNotes` are still appended below. |
+| intents | leave one out, except one the base has at `never` (left out, it would leave the denylist and go to approval); make a tier stricter (`auto` → `approve` → `never`) and `userOverride` narrower (`any` → `tighten` → `none`); add one at `approve` or `never`, never `auto`, with `userOverride` `tighten` or `none`, so no install can raise it to `auto`. An intent the base has keeps its description. |
+| tools | name a subset of the base's, by canonical name or alias, still with `get_event` and `complete_agent_job`. The tool gate enforces it. |
+| limits, ceilings | lower them: each at most the base's ceiling. |
+| disclosure | make the policy `required`; never `optional` where the base requires it. The text is the base's. |
+| variables | make a variable's default disclosure stricter; nothing else. |
+| everything else | nothing: records, escalation, tags, examples, `defaults.mode` and the reserved `execution` are the base's. |
+
+**Versions.** A fork version is immutable and numbered by the server: a new
+fork is `0.1.0`; an edit is a **patch** when only the instructions changed
+and a **minor** when anything else did (the authority diff). An edit that
+changes nothing is refused.
+
+**Storage.** `assistant_forks` holds one row per version: `user_id`, name,
+version, digest, the base's name, version and digest, the document sealed
+with the owner's per-user key, `promotion` (`observe`) and `created_at`. It
+is read only by `(user_id, digest)` or `(user_id, name)`, never across
+accounts, and the account purge deletes it. Writes take a lock on the
+account, under which the quotas hold: at most **10 forks** per account and
+**50 versions** per fork. A write past either is refused with `fork_limit`
+and changes nothing.
+
+**Install.** `install_assistant` and `update_install` name a fork by its
+full name and version, through the same `assistantinstall` service. Only
+the owner can install it: the service resolves forks only for the calling
+account, the admin route (which installs for another account) never
+resolves one, and the store checks the fork row under the account lock in
+the install transaction, so a concurrent delete cannot leave the pin
+pointing at nothing. The base's lifecycle is read as for a catalog install
+(the registry with `ASSISTANT_REGISTRY_ENABLED`, else the embedded
+catalog), and the base's snapshot is stored with the install. The profile
+pins the fork's name, version and digest and moves `install_revision` as
+for any install.
+
+**Observe only.** A fork version starts in `observe`, and in P4.2 nothing
+promotes one: promotion to `guarded` is P4.3 (#1044) and a human step, not
+an MCP tool. An install or `update_install` that resolves a fork to
+`guarded` is refused. The claim refuses a fork account whose mode column is
+`guarded` (503, jobs stay queued), and the policy engine evaluates `guarded`
+on a fork as `observe`, so no write path to the mode column can make a fork
+auto-send.
+
+**Claim.** The claim resolves a fork from `assistant_forks` by
+`(user_id, digest)`, decrypts it with the owner's key (forks are not
+cached), checks its digest and that it still narrows its base, and renders
+it with `ownerNotes` as usual. The fork's lifecycle is its base's: with the
+registry on, the refresh reads the base of every pinned fork and the claim
+gates on the base's stored lifecycle, so disabling the base stops every
+fork of it within one refresh. The job token binds the fork's tool subset.
+
+**Notices and audit.** Every fork write queues an owner alert in the bot
+chat in the same transaction, naming the fork, version and digest, and is
+audited with the same reference. No output, log line, audit row or notice
+carries the instructions.
+
 ## MCP tools
 
 P3.5 (#1021) lets the account owner manage their own install from an MCP
@@ -473,9 +568,11 @@ no `telegram_id` argument. They refuse when `AGENT_ENABLED` is off.
   description, tags, examples, lifecycle, variables with name, type, required,
   choices, description and, from the registry, a non-secret default;
   intents with their default tier; defaults: mode, limits, disclosure
-  policy) and `mine`: `{assistant, version, install_revision, installed}`.
-  It never returns stored values, owner notes, instructions, tools or
-  profile paths.
+  policy), `mine`: `{assistant, version, install_revision, installed}`, and
+  `forks`: the caller's own forks, never anyone else's, each
+  `{name, base, latest, versions: [{name, version, digest, base,
+  promotion}]}`. It never returns stored values, owner notes, instructions,
+  tools or profile paths.
 - **`install_assistant`** (`account:manage`) takes the exact `name` and
   `version` (no "latest": the schema requires `MAJOR.MINOR.PATCH`),
   `values`, any of the install settings (`mode`, `paused`, `listening`,
@@ -483,6 +580,8 @@ no `telegram_id` argument. They refuse when `AGENT_ENABLED` is off.
   `schedule`, `ownerNotes`) and an optional `expected_revision`. It builds a
   whole AssistantInstall from them, leaving omitted settings omitted, so a
   new install starts paused and not listening as [Install](#install) says.
+  `name` may be the full name of one of the caller's forks; see
+  [Forks](#forks).
 - **`update_install`** (`account:manage`) takes a `patch`, an RFC 7396 JSON
   merge patch over the stored install's `spec`, and a required
   `expected_revision`. The server decrypts the stored install, applies the
@@ -526,6 +625,37 @@ Errors are a JSON envelope `{error, message, retryable, current_revision?}`:
 | `internal_error` | a database or encryption fault |
 
 Audit rows record the error kind only, never the message.
+
+The fork tools (P4.2, #1043) are self-only and need `account:manage` too.
+They refuse with `forks_disabled` while `ASSISTANT_FORKS_ENABLED` is off,
+except `delete_fork`. None returns a fork's instructions.
+
+- **`fork_assistant`** takes `base` and `base_version` (resolved as an
+  install would: the registry's lifecycle, `published`, or `deprecated` only
+  for the version the account runs), `slug`, and the changes:
+  `instructions`, `intents`, `tools` (each list replaced as a whole),
+  `limits` and `ceilings` (complete objects) and `disclosure_policy`. It
+  answers `{name, version, digest, base: {name, version, digest},
+  promotion}`.
+- **`update_fork`** takes the fork's full `name` and the same changes, and
+  writes the next version on top of the latest one, numbered as in
+  [Forks](#forks). It answers the same with `bump` (`patch` or `minor`). It
+  does not move the install: the owner installs the new version.
+- **`delete_fork`** takes `name` and an optional `version` (without it,
+  every version) and answers `{name, version?, deleted_versions}`. The
+  version the install pins is never deleted.
+
+Their errors use the same envelope, with four more codes:
+
+| `error` | When |
+|---|---|
+| `fork_limit` | 10 forks per account or 50 versions per fork; nothing changed |
+| `fork_conflict` | `fork_assistant` on a name that exists, or the fork moved while `update_fork` was prepared; `retryable: true` |
+| `fork_in_use` | `delete_fork` of the version the install pins; nothing deleted |
+| `forks_disabled` | `ASSISTANT_FORKS_ENABLED` is off |
+
+A fork rule broken is `invalid_install`, whose message names the rule. The
+audit row of a successful write names `fork:<name>@<version> <digest>`.
 
 ## Web pages
 
@@ -574,7 +704,7 @@ so they have no semantics the MCP tools do not have.
 |---|---|---|
 | T0 Install | picks a catalog assistant, fills the required values | schema validation |
 | T1 Tune | mode, tiers (tighten), limits, audience, schedule, disclosure, `ownerNotes` | schema and definition checks |
-| T2 Fork | own instructions, intents and records on a catalog base; tools from the registry | private visibility; observe mode first |
+| T2 Fork | own instructions, stricter intents, a tool subset and lower limits on a catalog base (P4.2, see [Forks](#forks)); records inherited ([adr-forks.md](adr-forks.md)) | private visibility; observe mode only until P4.3 promotion |
 | T3 Connectors | adds MCP servers (calendar, CRM), each tool with a tier, approve by default | admin review |
 | T4 Own runtime | runs their own worker against the agent job API (claim, propose, complete) | account-scoped token; policy enforced server-side |
 
@@ -598,6 +728,10 @@ so they have no semantics the MCP tools do not have.
   per-account install binding, MCP tools `list_assistants`,
   `install_assistant`, `update_install`, and a page on tg.mctl.ai.
 - **P4:** forks, user connectors with review, own-runtime documentation.
+  The fork model and the storage of private definitions (in mctl-telegram,
+  encrypted per account) are decided in [adr-forks.md](adr-forks.md)
+  (P4.1, #1042; accepted 2026-10-31). Forks are implemented (P4.2, #1043:
+  see [Forks](#forks)); promotion to guarded is P4.3 (#1044).
 
 ## How this compares
 
