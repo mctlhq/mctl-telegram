@@ -130,7 +130,7 @@
 /* A small mono label above the title. Neutral: the title carries the
    accent, and a second accented line above it would compete. */
 .mctl-site-hero__eyebrow {
-  margin: 0 0 var(--mctl-layout-hero-eyebrow-gap);
+  margin: 0;
   font-family: var(--font-mono);
   font-size: var(--text-marker-size);
   font-weight: var(--text-marker-weight);
@@ -141,7 +141,12 @@
 }
 
 /* The rhythm, item by item. Two classes, so it outranks each item's own
-   margin: 0 and a site's `.mctl-site-hero__text > *` reset. */
+   margin: 0 and a site's `.mctl-site-hero__text > *` reset. Each gap sits
+   on the lower item's top margin. */
+.mctl-site-hero__eyebrow + .mctl-site-hero__title {
+  margin-top: var(--mctl-layout-hero-eyebrow-gap);
+}
+
 .mctl-site-hero__title + .mctl-site-hero__lede {
   margin-top: var(--mctl-layout-hero-title-gap);
 }
@@ -150,7 +155,7 @@
   margin-top: var(--mctl-layout-hero-actions-gap);
 }
 
-.mctl-site-hero__actions + * {
+.mctl-site-hero__text > .mctl-site-hero__actions + * {
   margin-top: var(--mctl-layout-hero-meta-gap);
 }
 
