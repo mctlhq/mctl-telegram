@@ -360,7 +360,9 @@ func newFakeWebRegistry(t *testing.T) *fakeWebRegistry {
 		_, _ = w.Write([]byte(`{"count":1,"items":[{"name":"registry-only","version":"2.0.0","title":"From the registry",
 			"description":"Answers for you.","tags":["x"],"examples":["Hello from a recruiter"],"lifecycle":"published",
 			"variables":[{"name":"company","type":"string","required":false,"default":"Acme","description":"c"},
-			             {"name":"floor","type":"string","required":false,"description":"never sent"}],
+			             {"name":"floor","type":"string","required":false,"description":"never sent"},
+			             {"name":"langs","type":"string_list","required":false,"choices":["en","ru"],"description":"l"},
+			             {"name":"region","type":"string","required":false,"choices":["eu","us"],"description":"r"}],
 			"intents":[{"name":"discovery","description":"d","tier":"auto"}],
 			"defaults":{"mode":"guarded","limits":{"maxAutonomousTurns":3,"maxMsgsPerMinute":1,"maxReplyChars":500},"disclosure":{"policy":"required"}}}]}`))
 	}))
@@ -391,5 +393,36 @@ func TestManageAssistant_CatalogUnavailableIsNotEmpty(t *testing.T) {
 	// The install section itself still renders: nothing is installed.
 	if !strings.Contains(body, `id="assistant-none"`) {
 		t.Fatal("install state missing")
+	}
+}
+
+// Choices become a single select only for a string variable; a string_list
+// keeps its list input, so more than one item can be given.
+func TestManageAssistant_ChoicesSelectOnlyForStrings(t *testing.T) {
+	reg := newFakeWebRegistry(t)
+	f := newManageAssistantFixture(t, reg.client())
+	body := f.get(f.identity(accountManageScope)).Body.String()
+	if !strings.Contains(body, `<select name="value.region">`) {
+		t.Error("string variable with choices is not a select")
+	}
+	if strings.Contains(body, `<select name="value.langs">`) || !strings.Contains(body, `<textarea name="value.langs"`) {
+		t.Error("string_list variable with choices is not a list input")
+	}
+}
+
+// A non-finite number is refused naming the variable, never sent on to
+// become a generic encoding failure.
+func TestAssistantValuesFromForm_RefusesNonFiniteNumbers(t *testing.T) {
+	vars := []assistantinstall.CatalogVariable{{Name: "years", Type: "number"}}
+	for _, raw := range []string{"NaN", "Inf", "-Inf", "+Inf", "abc"} {
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(url.Values{"value.years": {raw}}.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if err := req.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		values, msg := assistantValuesFromForm(req, vars)
+		if values != nil || !strings.Contains(msg, "years must be a number") {
+			t.Errorf("%q: values %v, message %q", raw, values, msg)
+		}
 	}
 }

@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -276,8 +277,10 @@ func assistantValuesFromForm(r *http.Request, vars []assistantinstall.CatalogVar
 				values[v.Name] = items
 			}
 		case "number":
+			// ParseFloat accepts NaN and Inf, which no install can carry
+			// (json.Marshal refuses them).
 			n, err := strconv.ParseFloat(raw, 64)
-			if err != nil {
+			if err != nil || math.IsNaN(n) || math.IsInf(n, 0) {
 				return nil, "The value for " + v.Name + " must be a number. Nothing was changed."
 			}
 			values[v.Name] = n
@@ -390,7 +393,10 @@ func (s *ManageServer) assistantFailure(w http.ResponseWriter, r *http.Request, 
 
 // manageAssistantSection is the assistant section of manageTemplate,
 // rendered with an *assistantSectionView as dot. Every form carries the
-// revision it was rendered at as expected_revision.
+// revision it was rendered at as expected_revision. Choices become a
+// select only for a string variable: they are what assistant.checkType
+// enforces, and it enforces them on strings alone, so any other type keeps
+// its own input.
 const manageAssistantSection = `
     <h2 class="notif-heading" id="assistant">Assistant</h2>
     {{if .Notice}}<div class="{{if .NoticeOK}}meta{{else}}error{{end}}" id="assistant-notice">{{.Notice}}</div>{{end}}
@@ -455,7 +461,7 @@ const manageAssistantSection = `
         <input type="hidden" name="version" value="{{.Version}}">
         {{range .Variables}}
         <label>{{.Name}}{{if .Required}} (required){{end}}{{if .Description}} <span class="meta">{{.Description}}</span>{{end}}
-          {{if .Choices}}<select name="{{.Field}}"><option value=""></option>{{range .Choices}}<option value="{{.}}">{{.}}</option>{{end}}</select>
+          {{if and .Choices (eq .Type "string")}}<select name="{{.Field}}"><option value=""></option>{{range .Choices}}<option value="{{.}}">{{.}}</option>{{end}}</select>
           {{else if eq .Type "boolean"}}<select name="{{.Field}}"><option value=""></option><option value="true">yes</option><option value="false">no</option></select>
           {{else if eq .Type "string_list"}}<textarea name="{{.Field}}" rows="2" placeholder="One per line or comma-separated"></textarea>
           {{else if eq .Type "number"}}<input type="number" step="any" name="{{.Field}}">
