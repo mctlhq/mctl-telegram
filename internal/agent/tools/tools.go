@@ -63,6 +63,23 @@ func Complete(bindings []Binding) bool {
 	return len(bindings) == len(Canonical)
 }
 
+// ForJob returns the bindings a job's tool names stand for: the canonical
+// names when the job carries none (a server without a catalog), otherwise
+// the names resolved, which must cover every tool.
+func ForJob(names []string) ([]Binding, error) {
+	if len(names) == 0 {
+		return Default(), nil
+	}
+	b, err := Resolve(names)
+	if err != nil {
+		return nil, err
+	}
+	if !Complete(b) {
+		return nil, fmt.Errorf("job names %d of %d tools", len(b), len(Canonical))
+	}
+	return b, nil
+}
+
 // Default is every canonical tool under its own name.
 func Default() []Binding {
 	out := make([]Binding, len(Canonical))

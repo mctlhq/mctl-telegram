@@ -64,15 +64,9 @@ const ServerName = "agent"
 // a canonical name or a generic alias; the implementation is the same. The
 // names must cover every tool, as jobTools requires on the invoking side.
 func NewMCPServer(api agentAPI, job JobContext) (*mcpserver.MCPServer, error) {
-	bindings := tools.Default()
-	if len(job.Tools) > 0 {
-		var err error
-		if bindings, err = tools.Resolve(job.Tools); err != nil {
-			return nil, err
-		}
-		if !tools.Complete(bindings) {
-			return nil, fmt.Errorf("job names %d of %d tools", len(bindings), len(tools.Canonical))
-		}
+	bindings, err := tools.ForJob(job.Tools)
+	if err != nil {
+		return nil, err
 	}
 	b := &toolBuilder{api: api, job: job}
 	build := map[string]func() (mcplib.Tool, mcpserver.ToolHandlerFunc){

@@ -52,7 +52,7 @@ var disclosureRank = map[profile.DisclosureLevel]int{
 // RuntimeTools is every tool the worker implements, by canonical name. A
 // definition must name all of them, each by that name or a generic alias
 // (internal/agent/tools).
-var RuntimeTools = tools.Canonical
+var RuntimeTools = slices.Clone(tools.Canonical)
 
 // Limits are the per-conversation limits of an assistant.
 type Limits struct {

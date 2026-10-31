@@ -82,17 +82,7 @@ func promptTempFile(prompt string) (path string, cleanup func(), err error) {
 // job identity is pinned server-side rather than accepted as a tool
 // argument.
 func jobTools(job JobEnvelope) ([]tools.Binding, error) {
-	if len(job.Tools) == 0 {
-		return tools.Default(), nil
-	}
-	b, err := tools.Resolve(job.Tools)
-	if err != nil {
-		return nil, err
-	}
-	if !tools.Complete(b) {
-		return nil, fmt.Errorf("job names %d of %d tools", len(b), len(tools.Canonical))
-	}
-	return b, nil
+	return tools.ForJob(job.Tools)
 }
 
 func qualifiedToolNames(bindings []tools.Binding) []string {

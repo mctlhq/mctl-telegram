@@ -31,4 +31,10 @@ func TestResolve(t *testing.T) {
 	if !Complete(Default()) {
 		t.Fatal("Default is not complete")
 	}
+	if b, err := ForJob(nil); err != nil || len(b) != len(Canonical) {
+		t.Fatalf("ForJob(nil) = %v, %v", b, err)
+	}
+	if _, err := ForJob([]string{"get_event"}); err == nil {
+		t.Fatal("ForJob accepted a partial list")
+	}
 }
