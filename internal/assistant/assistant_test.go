@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -274,14 +275,30 @@ func TestRequiredDisclosureCannotBeDisabled(t *testing.T) {
 	}
 }
 
-func TestRestrictedToolSetUnsupported(t *testing.T) {
-	raw := editYAML(t, readFile(t, "assistant.yaml"), "    - pause_autopilot\n", "")
+// A definition may leave tools out; the agent API enforces the subset. It
+// may not leave out a mandatory tool, since a job could not finish.
+func TestRestrictedToolSet(t *testing.T) {
+	raw := editYAML(t, readFile(t, "assistant.yaml"), "    - pause_autopilot\n", "", "    - save_job_lead\n", "")
 	def, err := ParseDefinition(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ProfileRequest(def, hrInstall(t), danaID); !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("err = %v, want ErrUnsupported", err)
+	if _, err := ProfileRequest(def, hrInstall(t), danaID); err != nil {
+		t.Fatalf("subset refused: %v", err)
+	}
+	for _, mandatory := range []string{"get_event", "complete_agent_job"} {
+		t.Run("without "+mandatory, func(t *testing.T) {
+			raw := editYAML(t, readFile(t, "assistant.yaml"), "    - "+mandatory+"\n", "")
+			if _, err := ParseDefinition(raw); err == nil || !strings.Contains(err.Error(), mandatory) {
+				t.Fatalf("err = %v, want a refusal naming %s", err, mandatory)
+			}
+			// supported() refuses it too, for a definition built in code.
+			def := hrDefinition(t)
+			def.Spec.Tools = slices.DeleteFunc(slices.Clone(def.Spec.Tools), func(n string) bool { return n == mandatory })
+			if _, err := ProfileRequest(def, hrInstall(t), danaID); err == nil {
+				t.Fatal("ProfileRequest accepted a definition without a mandatory tool")
+			}
+		})
 	}
 }
 
@@ -371,8 +388,8 @@ func TestExecutionSettingsUnsupported(t *testing.T) {
 	}
 }
 
-// A definition may call tools by their generic aliases, but must still name
-// every tool, and may not name one tool twice.
+// A definition may call tools by their generic aliases, and may not name one
+// tool twice.
 func TestDefinitionToolAliases(t *testing.T) {
 	base := readFile(t, "assistant.yaml")
 	renamed := editYAML(t, base,

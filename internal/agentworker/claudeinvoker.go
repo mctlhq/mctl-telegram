@@ -73,12 +73,14 @@ func promptTempFile(prompt string) (path string, cleanup func(), err error) {
 	return f.Name(), cleanup, nil
 }
 
-// jobTools is the exact and complete set of MCP tools a spawned `claude`
-// invocation may use, under the names the job's assistant gives them — no
-// Bash, Read, Write, WebFetch, or any other built-in tool is ever allowed, so
-// the model's only way to affect anything is through this package's 11
-// API-proxying tools. A job from a server without a catalog carries no
-// names and gets the canonical ones. See NewMCPServer's doc comment for why
+// jobTools is the exact set of MCP tools a spawned `claude` invocation may
+// use, under the names the job's assistant gives them — no Bash, Read,
+// Write, WebFetch, or any other built-in tool is ever allowed, so the
+// model's only way to affect anything is through this package's
+// API-proxying tools. The set may be a subset of the tools that includes
+// the mandatory ones; the agent API enforces it from the job token. A job
+// from a server without a catalog carries no names and gets the canonical
+// ones. See NewMCPServer's doc comment for why
 // job identity is pinned server-side rather than accepted as a tool
 // argument.
 func jobTools(job JobEnvelope) ([]tools.Binding, error) {

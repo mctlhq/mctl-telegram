@@ -236,8 +236,8 @@ profile equals the configuration the agent runs with today.
 | worker model and budget env | definition `execution` (reserved, rejected if set) |
 
 Settings the runtime cannot enforce yet fail with `ErrUnsupported` instead of
-being dropped: a tool subset, record kinds other than `job_lead`, and any
-`execution` setting. An install is applied entirely or not at all.
+being dropped: record kinds other than `job_lead` and any `execution`
+setting. A tool subset is enforced (see [Tool names](#tool-names)). An install is applied entirely or not at all.
 
 The guarantee is about this mapping: every setting either reaches the
 profile or the install fails. It does not extend to the definition's
@@ -326,10 +326,47 @@ line and registers each tool under its name in the job's MCP server; the
 implementation behind an alias is the same tool. A job from a server
 without a catalog carries no names and gets the canonical ones.
 
-A definition must still name every tool, each once: naming both a tool and
-its alias is an error, and a subset is `ErrUnsupported`. The agent API does
-not check which tools a job may call, so a subset would look enforced while
-it is not; tool restriction needs that server-side check first.
+A definition names each tool at most once: naming both a tool and its alias
+is an error, and so is an unknown name. It may name a **subset** of the
+tools, which must include `get_event` and `complete_agent_job`: a job cannot
+read its message without the first or finish without the second, so a
+definition that leaves either out is refused when it is parsed.
+
+A subset is enforced server-side, not only by what the model is shown
+(#1041). The claim resolves the definition's tool set to canonical names and
+signs it into the job token as the claim `job_tools`, so a worker cannot
+widen it without breaking the signature. Each agent API route a tool calls
+is mapped to its tools (`internal/agent/tools.Endpoints`):
+
+| Route | Tools |
+|---|---|
+| `GET /event/{eventID}` | `get_event` |
+| `GET /conversations/{id}/context` | `get_conversation_context`, `get_lead` |
+| `GET /leads/{id}` | `get_lead`, `get_conversation_context` |
+| `GET /recruiters/{peer}` | `get_recruiter_profile` |
+| `GET /policy` | `get_policy` |
+| `POST /actions/propose_reply` | `propose_reply` |
+| `POST /leads` | `save_job_lead` |
+| `POST /actions/request_owner_approval` | `request_owner_approval` |
+| `POST /notify/summary` | `send_owner_summary` |
+| `POST /autopilot/pause` | `pause_autopilot` |
+| `POST /jobs/{id}/complete` | `complete_agent_job` |
+
+A request to a route none of whose tools is in the caller's set is refused
+with 403 `{"error":"tool_not_allowed","tool":"<canonical name>"}`, audited as
+denied, and counted as the policy denial `tool_not_allowed` on surface
+`tool_gate`. A forged MCP config, or a direct request with the job's own
+token, reaches no further than the definition allows. Routes that serve no
+tool (`POST /jobs/claim`, `GET /events`, `GET /jobs/{id}`,
+`POST /jobs/{id}/cost`) and the routes of the mandatory tools are not gated.
+
+An account-wide worker token carries no tool set. For it, and for a job
+token minted before `job_tools` existed, the set is resolved on each request
+from the account's installed definition, the same one a claim would bind
+(without the registry lifecycle gate, which decides whether jobs start, not
+what they may call). An account with no configured assistant, or a server
+without a catalog, has every tool. A definition that cannot be resolved
+refuses the gated routes with 503 rather than allowing every tool.
 
 ## Registry form
 
