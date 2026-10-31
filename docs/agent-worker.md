@@ -437,6 +437,28 @@ decided on 2026-10-31 not to build it before production (#889).
   the throttle: this alert is not repeated for 6 hours. Owner summaries are
   not throttled by it (#994).
 
+## Conversations the owner is handling (#601)
+
+A message in a conversation that is taken over, closed or paused is recorded
+as an event, but its job is closed at ingest as `ignored` with the reason
+`conversation not active: agent not invoked`, and the worker never claims
+it. Policy denies every reply in those states, so the model run could only
+end in a forced `ignored`; before this change those runs were most of the
+agent's model spend. Nothing else is produced either: no lead update and no
+owner summary, because the owner is reading that chat directly. The state is
+read inside the ingest transaction, so a takeover committed before the
+message is always seen. After `/mctl continue <id>` the next message is
+handled normally; messages that arrived while the owner was handling the
+chat are not replayed.
+
+With operator routing on (`EVENTS_OPERATOR_ROUTING`), these messages are
+not forwarded to the operator stream either, by design. Routing forwards
+what the worker could not handle; a conversation the owner is handling is
+handled. It is the same outcome as a worker run that ends `ignored`, which
+also publishes nothing. Before this change such a message reached the
+operator only in the rare case where the model proposed a reply and policy
+denied it. With routing off, ingest publishes the event as before.
+
 ## Attachments in inbound messages (#948)
 
 An inbound message with media is a message even when it has no caption: it
