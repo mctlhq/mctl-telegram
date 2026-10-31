@@ -190,8 +190,9 @@ func (k *Task) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		k.mu.Lock()
 		k.lead = body
 		k.durable = true
-		for _, key := range []string{"detail", "company", "role", "compensation"} {
-			if value, ok := body[key].(string); ok {
+		// Every string the lead keeps is output: leads() serves them back.
+		for key, v := range body {
+			if value, ok := v.(string); ok {
 				k.outputs = append(k.outputs, output{field: "lead." + key, value: value})
 			}
 		}

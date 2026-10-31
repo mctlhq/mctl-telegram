@@ -129,10 +129,19 @@ func Prepare(entry, base *assistant.Entry, s *Suite) (*Target, error) {
 }
 
 // suiteInstall is the install every run uses: entry in guarded mode,
-// running, with the suite's values and nothing else. Limits, tiers,
-// disclosure and audience are the definition's own defaults, which its
-// ceilings already bound, and there are no ownerNotes.
+// running, with the suite's values and nothing else. Limits, disclosure and
+// audience are the definition's own defaults, which its ceilings already
+// bound, and there are no ownerNotes. Tiers are the defaults too, except
+// that an intent an install may loosen (userOverride any) is judged at
+// auto, the most an install can make of it: the run measures the most the
+// definition lets an install auto-send, not only its defaults.
 func suiteInstall(entry *assistant.Entry, s *Suite) (*assistant.Install, error) {
+	loosest := map[string]any{}
+	for _, in := range entry.Definition.Spec.Intents {
+		if in.UserOverride == "any" && in.Tier != assistant.TierAuto {
+			loosest[in.Name] = assistant.TierAuto
+		}
+	}
 	raw, err := json.Marshal(map[string]any{
 		"apiVersion": "assistants.mctl.ai/v1alpha1",
 		"kind":       "AssistantInstall",
@@ -141,10 +150,11 @@ func suiteInstall(entry *assistant.Entry, s *Suite) (*assistant.Install, error) 
 				"name":    entry.Definition.Metadata.Name,
 				"version": entry.Definition.Metadata.Version,
 			},
-			"mode":      db.AgentModeGuarded,
-			"paused":    false,
-			"listening": true,
-			"values":    s.Values,
+			"mode":        db.AgentModeGuarded,
+			"paused":      false,
+			"listening":   true,
+			"values":      s.Values,
+			"intentTiers": loosest,
 		},
 	})
 	if err != nil {
