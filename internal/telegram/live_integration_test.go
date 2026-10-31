@@ -92,8 +92,9 @@ func newLiveStore(t *testing.T, creds liveCreds) (*db.Store, int64) {
 func TestLive_MessageToolsRoundTrip(t *testing.T) {
 	creds := liveCredsFromEnv(t)
 	// The repository is public and so are its Actions logs. The pool and the
-	// gotd client log user and peer ids, so their output is dropped here; a
-	// failure is reported through t.Fatal with message ids only.
+	// gotd client log user and peer ids, so their output is dropped here, and
+	// a failure is reported with message ids only: results print just the
+	// fields under test, and the account's @username is masked in errors.
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer slog.SetDefault(prev)
@@ -121,12 +122,12 @@ func TestLive_MessageToolsRoundTrip(t *testing.T) {
 		if err := pool.Borrow(cctx, uid, func(ctx context.Context, c *gotdtelegram.Client) error {
 			for _, id := range created {
 				if _, err := DeleteMessages(ctx, c, peer, []int{id}, cache, uid); err != nil {
-					t.Logf("cleanup: message %d: %v", id, err)
+					t.Logf("cleanup: message %d: %s", id, maskPeer(err.Error(), peer))
 				}
 			}
 			return nil
 		}); err != nil {
-			t.Errorf("cleanup: could not borrow a client to delete messages %v: %v", created, err)
+			t.Errorf("cleanup: could not borrow a client to delete messages %v: %s", created, maskPeer(err.Error(), peer))
 		}
 	}()
 
@@ -145,7 +146,7 @@ func TestLive_MessageToolsRoundTrip(t *testing.T) {
 			return fmt.Errorf("send: %w", err)
 		}
 		if !sent.Sent || sent.MessageID == 0 {
-			return fmt.Errorf("send: got %+v, want a real send with a message id", sent)
+			return fmt.Errorf("send: sent=%v message_id=%d, want a real send with a message id", sent.Sent, sent.MessageID)
 		}
 		created = append(created, sent.MessageID)
 		if got, err := messageText(ctx, c, peer, sent.MessageID, cache, uid); err != nil || got != text {
@@ -165,7 +166,7 @@ func TestLive_MessageToolsRoundTrip(t *testing.T) {
 			return fmt.Errorf("forward: %w", err)
 		}
 		if !fwd.Forwarded || fwd.Count != 1 {
-			return fmt.Errorf("forward: got %+v, want one forwarded message", fwd)
+			return fmt.Errorf("forward: forwarded=%v count=%d, want one forwarded message", fwd.Forwarded, fwd.Count)
 		}
 		msgs, _, _, err := GetMessages(ctx, c, peer, 10, 0, cache, uid, BroadcastContentRefused)
 		if err != nil {
@@ -191,7 +192,7 @@ func TestLive_MessageToolsRoundTrip(t *testing.T) {
 			return fmt.Errorf("delete: %w", err)
 		}
 		if !del.Deleted {
-			return fmt.Errorf("delete: got %+v", del)
+			return fmt.Errorf("delete: deleted=%v count=%d, want both messages deleted", del.Deleted, del.Count)
 		}
 		msgs, _, _, err = GetMessages(ctx, c, peer, 10, 0, cache, uid, BroadcastContentRefused)
 		if err != nil {
@@ -206,8 +207,17 @@ func TestLive_MessageToolsRoundTrip(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal(maskPeer(err.Error(), peer))
 	}
+}
+
+// maskPeer hides the account's own @username in s. Wrapped resolve and gotd
+// errors can echo the peer spec, and the Actions log is public.
+func maskPeer(s, peer string) string {
+	if peer == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, strings.TrimPrefix(peer, "@"), "<self>")
 }
 
 // messageText returns the text of message id in peer, from the newest page.

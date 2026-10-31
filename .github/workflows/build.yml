@@ -68,6 +68,11 @@ jobs:
             go-race-${{ runner.os }}-${{ hashFiles('go.sum') }}-
             go-race-${{ runner.os }}-
       - run: go vet ./...
+      # The live Telegram test (live_integration_test.go) only builds under
+      # -tags livetg, which nothing else here passes; without this a signature
+      # change would surface only at the next release's live run. Compiles,
+      # runs nothing, needs no secrets.
+      - run: go vet -tags livetg ./internal/telegram/
       - run: go build ./...
       # -race is not optional here: internal/bridge is a Hub of goroutines and
       # channels, and #495 was a send-on-closed-channel that plain `go test`

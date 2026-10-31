@@ -9,7 +9,10 @@
 //	  go run ./cmd/ci-anchor send -state DIR -phone +15550100000
 //	go run ./cmd/ci-anchor resend -state DIR   # optional: next delivery method, e.g. SMS
 //	TG_LIVE_API_ID=... TG_LIVE_API_HASH=... \
-//	  go run ./cmd/ci-anchor confirm -state DIR -code 12345 [-password ...]
+//	  go run ./cmd/ci-anchor confirm -state DIR -code 12345
+//
+// If the account has a cloud password, put it in TG_LIVE_PASSWORD for
+// confirm; it is not a flag, so it stays out of shell history and ps.
 //
 // It talks to the production DCs: Telegram's test DCs no longer provision
 // accounts. Use it only for the one service account CI runs as, never for a
@@ -54,7 +57,6 @@ func main() {
 	state := fs.String("state", "", "directory for the auth key, pending code hash and resulting session (required)")
 	phone := fs.String("phone", "", "phone number in international format (send)")
 	code := fs.String("code", "", "login code Telegram sent (confirm)")
-	password := fs.String("password", "", "cloud password, only if the account has one (confirm)")
 	_ = fs.Parse(args)
 	if *state == "" {
 		usage()
@@ -157,10 +159,11 @@ func main() {
 			case errors.As(err, &signUp):
 				return errors.New("number is not registered; refusing to create an account")
 			case errors.Is(err, auth.ErrPasswordAuthNeeded):
-				if *password == "" {
-					return errors.New("this account has a cloud password; pass -password")
+				password := os.Getenv("TG_LIVE_PASSWORD")
+				if password == "" {
+					return errors.New("this account has a cloud password; set TG_LIVE_PASSWORD")
 				}
-				_, err = a.Password(ctx, *password)
+				_, err = a.Password(ctx, password)
 			}
 			if err != nil {
 				return fmt.Errorf("sign in: %w", err)
@@ -184,7 +187,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: ci-anchor send -state DIR -phone NUMBER | resend -state DIR | confirm -state DIR -code CODE [-password PW]")
+	fmt.Fprintln(os.Stderr, "usage: ci-anchor send -state DIR -phone NUMBER | resend -state DIR | confirm -state DIR -code CODE")
 	os.Exit(2)
 }
 
