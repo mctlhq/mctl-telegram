@@ -9,6 +9,7 @@ import (
 	gotdtelegram "github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
 
+	"github.com/mctlhq/mctl-telegram/internal/agent/control"
 	"github.com/mctlhq/mctl-telegram/internal/agent/executor"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
@@ -129,7 +130,38 @@ func (s *poolSelfSender) SendToSelfWithRandomID(ctx context.Context, userID, ran
 		return nil
 	})
 	if err != nil {
-		return 0, fmt.Errorf("send to self via pool: %w", err)
+		return 0, mapPoolSelfSendError(err)
 	}
 	return int64(messageID), nil
+}
+
+// mapPoolSelfSendError is mapPoolSendError for owner notifications: a
+// RANDOM_ID_DUPLICATE on a notification retry means it is already in
+// Saved Messages (#1029).
+func mapPoolSelfSendError(err error) error {
+	if errors.Is(err, telegram.ErrRandomIDDuplicate) {
+		return fmt.Errorf("send to self via pool: %w: %w", executor.ErrAlreadyDelivered, err)
+	}
+	return fmt.Errorf("send to self via pool: %w", err)
+}
+
+// The notifier only looks the id up when its SelfSender has this capability.
+var _ control.SelfDeliveryLocator = (*poolSelfSender)(nil)
+
+// LocateSelfDelivered implements control.SelfDeliveryLocator over the
+// owner's Saved Messages.
+func (s *poolSelfSender) LocateSelfDelivered(ctx context.Context, userID int64, text string, since time.Time) (int64, bool, error) {
+	var (
+		messageID int
+		found     bool
+	)
+	err := s.pool.Borrow(ctx, userID, func(ctx context.Context, c *gotdtelegram.Client) error {
+		var err error
+		messageID, found, err = telegram.LocateOwnSaved(ctx, c, userID, text, since)
+		return err
+	})
+	if err != nil {
+		return 0, false, fmt.Errorf("locate delivered notification via pool: %w", err)
+	}
+	return int64(messageID), found, nil
 }

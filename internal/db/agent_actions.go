@@ -1633,10 +1633,13 @@ func (s *Store) ClaimOwnerNotification(ctx context.Context, userID, id, candidat
 // concurrent attempt already marked it sent or failed, so a late/duplicate
 // call can never overwrite a terminal delivery state.
 func (s *Store) MarkOwnerNotificationSent(ctx context.Context, userID, id, tgMessageID int64) error {
+	// 0 means delivered with an unknown message id (a retry answered
+	// RANDOM_ID_DUPLICATE, #1029). Store NULL, never a fake 0.
+	msgID := sql.NullInt64{Int64: tgMessageID, Valid: tgMessageID != 0}
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE owner_notifications SET status = $1, tg_message_id = $2, sent_at = $3
 		  WHERE id = $4 AND user_id = $5 AND status = $6`,
-		NotificationSent, tgMessageID, time.Now().UTC(), id, userID, NotificationPending,
+		NotificationSent, msgID, time.Now().UTC(), id, userID, NotificationPending,
 	)
 	if err != nil {
 		return fmt.Errorf("mark notification sent: %w", err)

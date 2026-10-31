@@ -651,6 +651,19 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 	if err != nil {
 		return fmt.Errorf("load profile: %w", err)
 	}
+	if action.ExecutedTGMessageID != 0 && action.SendAttempts > 0 {
+		// The listener already matched this send's echo and noted its id
+		// (MatchUnconfirmedAgentSend): delivery is proven. Record it with no
+		// policy check and no RPC; a refusal now could only turn a known
+		// delivery into delivery_unknown and a false owner alert.
+		if action.SendBody == "" {
+			return fmt.Errorf("action %d is executing with no persisted send body", action.ID)
+		}
+		if _, err := e.Store.RecordAgentActionSent(ctx, action.UserID, action.ID, action.ConversationID, action.ExecutedTGMessageID, action.SendBody); err != nil {
+			return fmt.Errorf("record echoed delivery: %w", err)
+		}
+		return nil
+	}
 	if action.SendAttempts >= e.maxSendAttempts() {
 		// The attempt budget was spent by earlier sweeps (or a crash right
 		// after the last attempt was counted). Stop here, before policy can

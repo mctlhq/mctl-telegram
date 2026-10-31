@@ -46,6 +46,10 @@ func (s *Store) NoteAgentActionSendAttempt(ctx context.Context, userID, id int64
 // delivery_unknown, records reason as its policy_reasons, and queues
 // alertBody for the owner, all in one transaction (#1029).
 //
+// The compare-and-set also requires no noted message id: an echo the
+// listener matched in the meantime proves delivery, and the next recovery
+// sweep records it executed instead.
+//
 // The compare-and-set on executing is the notification's dedup: only the
 // caller that wins the transition queues the alert, so the owner hears about
 // each action exactly once however many recovery sweeps or replicas race on
@@ -75,7 +79,7 @@ func (s *Store) MarkAgentActionDeliveryUnknown(ctx context.Context, userID, id i
 		`UPDATE agent_actions
 		    SET status = $1, policy_reasons = $2, approval_code = NULL,
 		        approval_code_hash = NULL, approval_code_encrypted = NULL, updated_at = $3
-		  WHERE id = $4 AND user_id = $5 AND status = $6`,
+		  WHERE id = $4 AND user_id = $5 AND status = $6 AND executed_tg_message_id IS NULL`,
 		ActionDeliveryUnknown, reason, time.Now().UTC(), id, userID, ActionExecuting,
 	)
 	if err != nil {
@@ -114,7 +118,9 @@ func (s *Store) MarkAgentActionDeliveryUnknown(ctx context.Context, userID, id i
 // delivery_unknown row is proven delivered and moves to executed, and an
 // executed row gets its id. Owner text that happens to equal a pending agent
 // send byte for byte is indistinguishable from the echo and is treated as
-// one; nothing is sent because of the match.
+// one; nothing is sent because of the match. The window is kept narrow: a
+// send with no attempt stamped yet cannot have an echo, and a send whose id
+// is already known has had its echo, so neither matches.
 func (s *Store) MatchUnconfirmedAgentSend(ctx context.Context, userID, peerTGID, messageID int64, text string, since time.Time) (bool, error) {
 	want := strings.TrimSpace(text)
 	if userID <= 0 || messageID <= 0 || want == "" {
@@ -131,7 +137,8 @@ func (s *Store) MatchUnconfirmedAgentSend(ctx context.Context, userID, peerTGID,
 		`SELECT id, status, send_body_encrypted FROM agent_actions
 		  WHERE user_id = $1 AND conversation_id = $2 AND created_at >= $3
 		    AND send_random_id IS NOT NULL AND send_body_encrypted IS NOT NULL
-		    AND (status IN ($4, $5) OR (status = $6 AND executed_tg_message_id IS NULL))
+		    AND executed_tg_message_id IS NULL
+		    AND ((status IN ($4, $5) AND send_attempts > 0) OR status = $6)
 		  ORDER BY id`,
 		userID, conv.ID, since.UTC(), ActionExecuting, ActionDeliveryUnknown, ActionExecuted,
 	)

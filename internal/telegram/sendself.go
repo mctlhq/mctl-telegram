@@ -102,6 +102,10 @@ func SendToSelfWithRandomID(ctx context.Context, c *telegram.Client, userID, ran
 // stays unknown.
 const locateHistoryLimit = 50
 
+// locateClockSlack widens the "sent at or after" floor for clock skew
+// between this server and Telegram.
+const locateClockSlack = 30 * time.Second
+
 // LocateOwnOutgoing finds the id of a message this account already sent to
 // peer but whose send result was lost: Telegram refused a resend with
 // RANDOM_ID_DUPLICATE, which carries no message (#1029). Messages do not
@@ -121,27 +125,39 @@ func LocateOwnOutgoing(ctx context.Context, c *telegram.Client, userID int64, pe
 	if !ok {
 		return 0, false, nil
 	}
-	id, found := uniqueOutgoingMatch(modified.GetMessages(), text, since)
+	_, self := peer.(*tg.InputPeerSelf)
+	id, found := uniqueOutgoingMatch(modified.GetMessages(), text, since, !self)
 	if found {
 		notifyAgentSent(userID, int64(id))
 	}
 	return id, found, nil
 }
 
-// uniqueOutgoingMatch returns the id of the single outgoing message in msgs
-// whose text equals text (both trimmed) and whose date is not before since.
-// A second match makes the answer ambiguous, so it reports not found.
-func uniqueOutgoingMatch(msgs []tg.MessageClass, text string, since time.Time) (int, bool) {
+// LocateOwnSaved is LocateOwnOutgoing for the owner's Saved Messages, where
+// owner notifications go. Every message there is the account's own, and
+// messages.getHistory on InputPeerSelf does not reliably set Out (see the
+// listener's Saved Messages history reader), so Out is not required.
+func LocateOwnSaved(ctx context.Context, c *telegram.Client, userID int64, text string, since time.Time) (int, bool, error) {
+	return LocateOwnOutgoing(ctx, c, userID, &tg.InputPeerSelf{}, text, since)
+}
+
+// uniqueOutgoingMatch returns the id of the single message in msgs whose
+// text equals text (both trimmed), whose date is not before since, and, when
+// requireOut is set, that is outgoing. A second match makes the answer
+// ambiguous, so it reports not found.
+func uniqueOutgoingMatch(msgs []tg.MessageClass, text string, since time.Time, requireOut bool) (int, bool) {
 	want := strings.TrimSpace(text)
 	if want == "" {
 		return 0, false
 	}
-	// Telegram dates are whole seconds; the reservation time is not.
-	floor := since.Truncate(time.Second).Unix()
+	// Telegram dates are whole seconds and come from Telegram's clock, since
+	// from ours; allow some skew. Exact text and a single match still guard
+	// against a false hit.
+	floor := since.Add(-locateClockSlack).Truncate(time.Second).Unix()
 	id, n := 0, 0
 	for _, raw := range msgs {
 		m, ok := raw.(*tg.Message)
-		if !ok || !m.Out || int64(m.Date) < floor {
+		if !ok || (requireOut && !m.Out) || int64(m.Date) < floor {
 			continue
 		}
 		if strings.TrimSpace(m.Message) != want {

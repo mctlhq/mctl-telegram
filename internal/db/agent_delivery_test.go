@@ -37,6 +37,14 @@ func executingSend(t *testing.T, s *Store, uid int64, randomID int64, body strin
 	return actionID, conv
 }
 
+// attempted stamps one send attempt, as send() does before its RPC.
+func attempted(t *testing.T, s *Store, uid, id int64) {
+	t.Helper()
+	if _, ok, err := s.NoteAgentActionSendAttempt(context.Background(), uid, id); err != nil || !ok {
+		t.Fatalf("note attempt: ok=%v err=%v", ok, err)
+	}
+}
+
 func countRows(t *testing.T, s *Store, query string, args ...any) int {
 	t.Helper()
 	var n int
@@ -115,6 +123,11 @@ func caseMatchUnconfirmedAgentSend_ExecutingNotesIDForCompletion(t *testing.T, s
 	ctx := context.Background()
 	id, conv := executingSend(t, s, uid, 704, "hello Bob\n\n- AI")
 	since := time.Now().Add(-time.Hour)
+	// No attempt stamped yet: nothing can have been sent, so no echo.
+	if ok, err := s.MatchUnconfirmedAgentSend(ctx, uid, bobTGID, 8099, "hello Bob\n\n- AI", since); err != nil || ok {
+		t.Fatalf("before any attempt: ok=%v err=%v, want no match", ok, err)
+	}
+	attempted(t, s, uid, id)
 
 	if ok, err := s.MatchUnconfirmedAgentSend(ctx, uid, bobTGID, 8100, "someone else's words", since); err != nil || ok {
 		t.Fatalf("different text: ok=%v err=%v, want no match", ok, err)
@@ -124,6 +137,14 @@ func caseMatchUnconfirmedAgentSend_ExecutingNotesIDForCompletion(t *testing.T, s
 	}
 	if ok, err := s.MatchUnconfirmedAgentSend(ctx, uid, bobTGID, 8100, "  hello Bob\n\n- AI ", since); err != nil || !ok {
 		t.Fatalf("echo: ok=%v err=%v, want match", ok, err)
+	}
+	// One echo per send: a later identical message is the owner's.
+	if ok, err := s.MatchUnconfirmedAgentSend(ctx, uid, bobTGID, 8101, "hello Bob\n\n- AI", since); err != nil || ok {
+		t.Fatalf("second identical message: ok=%v err=%v, want no match", ok, err)
+	}
+	// A noted id proves delivery, so the send cannot end delivery_unknown.
+	if ok, err := s.MarkAgentActionDeliveryUnknown(ctx, uid, id, "delivery unknown: test", "check the chat"); err != nil || ok {
+		t.Fatalf("mark after a noted echo: ok=%v err=%v, want refused", ok, err)
 	}
 	if ok, err := s.RecordAgentActionSent(ctx, uid, id, conv.ID, 0, "hello Bob\n\n- AI"); err != nil || !ok {
 		t.Fatalf("record sent: ok=%v err=%v", ok, err)
@@ -146,6 +167,7 @@ func caseMatchUnconfirmedAgentSend_ExecutingNotesIDForCompletion(t *testing.T, s
 func caseMatchUnconfirmedAgentSend_ProvesDeliveryUnknownDelivered(t *testing.T, s *Store, uid int64) {
 	ctx := context.Background()
 	id, conv := executingSend(t, s, uid, 705, "hello Bob")
+	attempted(t, s, uid, id)
 	if ok, err := s.MarkAgentActionDeliveryUnknown(ctx, uid, id, "delivery unknown: test", "check the chat"); err != nil || !ok {
 		t.Fatalf("mark: ok=%v err=%v", ok, err)
 	}
@@ -251,6 +273,37 @@ func caseSweepAgentMessageBodies_ClearsDeliveryUnknownBody(t *testing.T, s *Stor
 	}
 }
 
+// caseHumanInputUnknownMessageIDStoresNull: a human-input notification
+// proven delivered by a duplicate, with no located id, records its message
+// id as unknown (NULL) on both the notification and the delivery row.
+func caseHumanInputUnknownMessageIDStoresNull(t *testing.T, s *Store, uid int64) {
+	ctx := context.Background()
+	code := fmt.Sprintf("U%05d", uid%100000)
+	if _, _, err := s.UpsertHumanInputDeliveryTx(ctx, HumanInputDelivery{
+		UserID: uid, RequestID: fmt.Sprintf("hi_dup_%d", uid), RequestHash: "h", RequestVersion: 1,
+		WorkItemID: "wi_dup", Kind: "single_choice", AnswerCode: code,
+		OptionDigests: []string{"0123456789abcdef"},
+	}, "question for Dana"); err != nil {
+		t.Fatalf("upsert delivery: %v", err)
+	}
+	d, err := s.GetHumanInputDeliveryByCode(ctx, uid, code)
+	if err != nil {
+		t.Fatalf("get delivery: %v", err)
+	}
+	if err := s.MarkOwnerNotificationSent(ctx, uid, d.NotificationID, 0); err != nil {
+		t.Fatalf("mark sent: %v", err)
+	}
+	if _, found, err := s.SetHumanInputDeliveryMessageID(ctx, d.NotificationID, 0); err != nil || !found {
+		t.Fatalf("set message id: found=%v err=%v", found, err)
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM owner_notifications WHERE id = $1 AND tg_message_id IS NULL`, d.NotificationID); n != 1 {
+		t.Fatal("notification message id stored as a value, want NULL")
+	}
+	if n := countRows(t, s, `SELECT COUNT(*) FROM human_input_deliveries WHERE notification_id = $1 AND tg_message_id IS NULL`, d.NotificationID); n != 1 {
+		t.Fatal("delivery message id stored as a value, want NULL")
+	}
+}
+
 // deliveryCases runs every #1029 store case against one dialect. Postgres
 // keeps state between runs, so each case gets its own user.
 func deliveryCases(t *testing.T, s *Store, prefix string) {
@@ -267,6 +320,7 @@ func deliveryCases(t *testing.T, s *Store, prefix string) {
 		{"ReserveAgentActionSend_CountsDeliveryUnknownAgainstRate", caseReserveAgentActionSend_CountsDeliveryUnknownAgainstRate},
 		{"ListRecentAgentOutgoing_IncludesDeliveryUnknown", caseListRecentAgentOutgoing_IncludesDeliveryUnknown},
 		{"SweepAgentMessageBodies_ClearsDeliveryUnknownBody", caseSweepAgentMessageBodies_ClearsDeliveryUnknownBody},
+		{"HumanInputUnknownMessageIDStoresNull", caseHumanInputUnknownMessageIDStoresNull},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

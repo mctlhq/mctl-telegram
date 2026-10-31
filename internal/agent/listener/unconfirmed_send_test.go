@@ -33,6 +33,9 @@ func seedUnconfirmedSend(t *testing.T, store *db.Store, uid int64, body string) 
 	if ok, err := store.ReserveAgentActionSend(ctx, *action, 919191, body, 0, 0, time.Time{}, false); err != nil || !ok {
 		t.Fatalf("reserve: ok=%v err=%v", ok, err)
 	}
+	if _, ok, err := store.NoteAgentActionSendAttempt(ctx, uid, id); err != nil || !ok {
+		t.Fatalf("note attempt: ok=%v err=%v", ok, err)
+	}
 	return id
 }
 

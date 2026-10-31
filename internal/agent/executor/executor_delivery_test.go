@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -214,5 +215,36 @@ func TestExecutor_Approve_DuplicateOnFirstAttemptIsDelivered(t *testing.T) {
 	}
 	if a := mustAction(t, store, uid, actionID); a.Status != db.ActionExecuted || a.ExecutedTGMessageID != 5151 {
 		t.Fatalf("status=%q id=%d, want executed with 5151", a.Status, a.ExecutedTGMessageID)
+	}
+}
+
+// TestExecutor_RecoverStuck_NotedEchoIsRecordedDespiteDeny: the listener
+// matched the echo of a send whose answer was lost and noted its id, so
+// delivery is proven. A policy refusal at recovery (here a takeover) must
+// not turn that into delivery_unknown and a false alert, and no RPC is
+// needed.
+func TestExecutor_RecoverStuck_NotedEchoIsRecordedDespiteDeny(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	actionID := approvedForRecovery(t, store, uid, conv.ID, 666666)
+	setSendAttempts(t, store, uid, actionID, 1)
+	if ok, err := store.MatchUnconfirmedAgentSend(ctx, uid, conv.PeerTGID, 7070, recoveryBody, time.Now().Add(-time.Hour)); err != nil || !ok {
+		t.Fatalf("echo match: ok=%v err=%v", ok, err)
+	}
+	if err := store.SetConversationState(ctx, uid, conv.ID, db.ConversationTakenOver); err != nil {
+		t.Fatalf("take over: %v", err)
+	}
+
+	if _, err := exec.RecoverStuck(ctx); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if len(sender.calls) != 0 {
+		t.Fatalf("send RPCs = %d, want 0", len(sender.calls))
+	}
+	if a := mustAction(t, store, uid, actionID); a.Status != db.ActionExecuted || a.ExecutedTGMessageID != 7070 {
+		t.Fatalf("status=%q id=%d, want executed with the echoed 7070", a.Status, a.ExecutedTGMessageID)
+	}
+	if got := deliveryUnknownAlerts(t, store, uid); got != 0 {
+		t.Fatalf("delivery-unknown alerts = %d, want 0", got)
 	}
 }

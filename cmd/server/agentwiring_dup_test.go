@@ -18,3 +18,13 @@ func TestMapPoolSendError_Duplicate(t *testing.T) {
 		t.Fatalf("plain error mapped to ErrAlreadyDelivered: %v", err)
 	}
 }
+
+func TestMapPoolSelfSendError_Duplicate(t *testing.T) {
+	err := mapPoolSelfSendError(fmt.Errorf("borrow: %w", telegram.ErrRandomIDDuplicate))
+	if !errors.Is(err, executor.ErrAlreadyDelivered) {
+		t.Fatalf("duplicate not mapped to ErrAlreadyDelivered: %v", err)
+	}
+	if err := mapPoolSelfSendError(errors.New("timeout")); errors.Is(err, executor.ErrAlreadyDelivered) {
+		t.Fatalf("plain error mapped to ErrAlreadyDelivered: %v", err)
+	}
+}
