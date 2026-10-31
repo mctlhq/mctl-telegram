@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.113.0](https://github.com/mctlhq/mctl-telegram/compare/0.112.0...0.113.0) (2026-10-31)
+
+
+### Features
+
+* **agent:** add /mctl unpause and /mctl assistant ([7d3c2cd](https://github.com/mctlhq/mctl-telegram/commit/7d3c2cddaf35eaeebee9c28dcfd09cb03dd82877))
+* **agent:** add /mctl unpause and /mctl assistant ([862b493](https://github.com/mctlhq/mctl-telegram/commit/862b49330ac8a5d0b2c1205634cc3bb141a6e68a)), closes [#1002](https://github.com/mctlhq/mctl-telegram/issues/1002)
+* **agent:** enforce outside_hours assistant schedules ([7f000d2](https://github.com/mctlhq/mctl-telegram/commit/7f000d296a33b73b7a11aca702e93003a58e551c))
+* **agent:** enforce outside_hours assistant schedules ([f56796c](https://github.com/mctlhq/mctl-telegram/commit/f56796cfeead7993d051a2f50dccc625767b117b)), closes [#1002](https://github.com/mctlhq/mctl-telegram/issues/1002)
+* **agent:** enforce the audience scope of assistant installs ([d854518](https://github.com/mctlhq/mctl-telegram/commit/d8545188c50fd0d44f238c158e65b527cbee7c67)), closes [#1002](https://github.com/mctlhq/mctl-telegram/issues/1002)
+* **agent:** enforce the never tier of assistant intents ([b33ddd3](https://github.com/mctlhq/mctl-telegram/commit/b33ddd3f958946c98b98f2d8e40f763e5ad4224d))
+* **agent:** enforce the never tier of assistant intents ([35c062d](https://github.com/mctlhq/mctl-telegram/commit/35c062dec7207aefd8368b4b8203b1883c8c7557)), closes [#1002](https://github.com/mctlhq/mctl-telegram/issues/1002)
+* **agent:** let assistants name tools by generic aliases ([fc09eb6](https://github.com/mctlhq/mctl-telegram/commit/fc09eb61e40634d26ae228ab62b05536bd0e97a8))
+* **agent:** let assistants name tools by generic aliases ([6f84070](https://github.com/mctlhq/mctl-telegram/commit/6f84070f169d85cd76d5198b351be9f8cce2facd)), closes [#1002](https://github.com/mctlhq/mctl-telegram/issues/1002)
+
+
+### Bug Fixes
+
+* **agent:** ignore min user entities for the contact flag ([9bd0219](https://github.com/mctlhq/mctl-telegram/commit/9bd02199df955429fc4bf3c18d61195b74884cc7))
+* **agent:** reject signed and Local schedule values ([34cb5f8](https://github.com/mctlhq/mctl-telegram/commit/34cb5f87fbb0b3ac371a6c0d3640005877176e68))
+* **agent:** show the assistant without decrypting its install ([d3723ca](https://github.com/mctlhq/mctl-telegram/commit/d3723cab75d7db23f7106f0869b06fc63ececa81))
+* **agent:** skip the model for conversations the owner handles ([fbb2d35](https://github.com/mctlhq/mctl-telegram/commit/fbb2d35fc657100a54a9201d139a6bee7ef984b9))
+* **agent:** skip the model for conversations the owner handles ([f6b77bc](https://github.com/mctlhq/mctl-telegram/commit/f6b77bc829d1a643d99cd4665b565d256162bd82)), closes [#601](https://github.com/mctlhq/mctl-telegram/issues/601)
+
 ## [0.112.0](https://github.com/mctlhq/mctl-telegram/compare/0.111.0...0.112.0) (2026-10-31)
 
 
