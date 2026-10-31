@@ -148,8 +148,17 @@ func agentProfile(data Data, engaged bool) map[string]any {
 // Berlin" still matches Berlin, but "a German bank" does not), a translation
 // or a summary of long free text is not caught. Keys are returned, never
 // values, so callers can log and audit the result.
-func matchProtected(data Data, text string, engaged bool) (key string, level DisclosureLevel, matched bool) {
+//
+// inbound is what the peer wrote in the turn being answered. A fragment of
+// an after_owner_engaged field that the peer used first is not counted:
+// repeating a recruiter's own "remote" or "Kubernetes" back discloses
+// nothing, and counting it held almost every first reply about a vacancy
+// (#992). The agent does not see such fields before the owner engages, so
+// it cannot confirm them from the profile either. never fields get no such
+// exemption.
+func matchProtected(data Data, text, inbound string, engaged bool) (key string, level DisclosureLevel, matched bool) {
 	lowered := strings.ToLower(text)
+	loweredInbound := strings.ToLower(inbound)
 	bestRank := 0
 	consider := func(path string, value any) {
 		l := data.level(path)
@@ -164,6 +173,9 @@ func matchProtected(data Data, text string, engaged bool) (key string, level Dis
 			return
 		}
 		for _, n := range needles(value) {
+			if rank == 1 && containsWord(loweredInbound, n) {
+				continue
+			}
 			if containsWord(lowered, n) {
 				key, level, matched, bestRank = path, l, true, rank
 				return

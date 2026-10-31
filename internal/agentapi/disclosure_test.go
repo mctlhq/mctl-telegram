@@ -125,6 +125,46 @@ func TestProposeReply_ProtectedValueBeforeEngagementRequiresApproval(t *testing.
 	}
 }
 
+// TestProposeReply_SenderWordsAreNotDisclosure pins #992 at the handler: the
+// propose-time match reads the turn's inbound text from the job, so a reply
+// that repeats the recruiter's own "hybrid" is allowed, while the same reply
+// with no job behind it still needs approval.
+func TestProposeReply_SenderWordsAreNotDisclosure(t *testing.T) {
+	h, conv := newDisclosureHarness(t)
+	ctx := context.Background()
+	const eventID = "evt:v1:1:930001:sender-words"
+	if _, _, err := h.store.InsertIncomingEvent(ctx, db.IncomingEvent{
+		EventID: eventID, UserID: h.userID, Kind: db.EventKindPrivateMessage,
+		ChatTGID: conv.PeerTGID, SenderTGID: conv.PeerTGID, MessageID: 41,
+		Body: "Hi, the Go role is hybrid. Interested?",
+	}); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+	jobID, enqueued, err := h.store.EnqueueAgentJob(ctx, eventID, h.userID, conv.ID)
+	if err != nil || !enqueued {
+		t.Fatalf("enqueue: id=%d enqueued=%v err=%v", jobID, enqueued, err)
+	}
+	claimed, err := h.store.ClaimAgentJobs(ctx, "test-replica", h.userID, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+	}
+	const reply = "Thanks Carol, a hybrid Go role sounds interesting."
+	rec := h.do("POST", "/actions/propose_reply", proposeReplyRequest{
+		ConversationID: conv.ID, JobID: jobID, Attempt: claimed[0].Attempts, Intent: "discovery", Text: reply,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	var resp actionResponse
+	decodeBody(t, rec, &resp)
+	if resp.Decision != "allow" {
+		t.Fatalf("decision = %s %v, want allow for the sender's own word", resp.Decision, resp.Reasons)
+	}
+	if resp := h.propose(conv, reply); resp.Decision != "require_approval" {
+		t.Fatalf("decision without a turn = %s %v, want require_approval", resp.Decision, resp.Reasons)
+	}
+}
+
 func TestProposeReply_ProtectedValueAfterEngagementAllowed(t *testing.T) {
 	h, conv := newDisclosureHarness(t)
 	if err := h.store.MarkConversationOwnerEngaged(context.Background(), h.userID, conv.PeerTGID, time.Now()); err != nil {

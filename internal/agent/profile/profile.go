@@ -410,14 +410,15 @@ func (p *TenantProvider) PublicProfile(ctx context.Context, userID int64, engage
 // MatchProtected reports the strongest disclosure-protected field whose
 // value appears in text for the tenant's profile: a never field (never is
 // true), or an after_owner_engaged field when engaged is false. Only the
-// field path is returned, never the value. See matchProtected for what
-// literal matching does not catch.
-func (p *TenantProvider) MatchProtected(ctx context.Context, userID int64, text string, engaged bool) (key string, never, matched bool, err error) {
+// field path is returned, never the value. inbound is the peer's text in
+// the turn being answered; see matchProtected for how it is used and for
+// what literal matching does not catch.
+func (p *TenantProvider) MatchProtected(ctx context.Context, userID int64, text, inbound string, engaged bool) (key string, never, matched bool, err error) {
 	d, err := p.load(ctx, userID)
 	if err != nil {
 		return "", false, false, err
 	}
-	key, level, matched := matchProtected(d, text, engaged)
+	key, level, matched := matchProtected(d, text, inbound, engaged)
 	return key, level == DisclosureNever, matched, nil
 }
 
