@@ -42,6 +42,8 @@ type fakeSender struct {
 	// onSend runs inside every send call, before its outcome, without the
 	// lock held: a hook for what other components do meanwhile.
 	onSend func()
+	// errs is returned, one per call, before any other behaviour.
+	errs []error
 }
 
 type sendCall struct {
@@ -56,6 +58,11 @@ func (f *fakeSender) SendWithRandomID(_ context.Context, userID, peerTGID, peerA
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, sendCall{userID, peerTGID, peerAccessHash, randomID, text})
+	if len(f.errs) > 0 {
+		err := f.errs[0]
+		f.errs = f.errs[1:]
+		return 0, err
+	}
 	if f.delivered[randomID] {
 		return 0, fmt.Errorf("fake send: %w", ErrAlreadyDelivered)
 	}

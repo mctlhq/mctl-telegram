@@ -67,6 +67,11 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 		"INTEGER NOT NULL DEFAULT 0", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	// agent_actions.retry_not_before: the earliest time recovery may retry
+	// the send, set from a FLOOD_WAIT (#1055). NULL means no wait.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_actions", "retry_not_before", "TIMESTAMPTZ", "DATETIME"); err != nil {
+		return err
+	}
 	// Approval codes are looked up by a tenant-scoped keyed blind index and
 	// retained reversibly only as per-user AES-GCM ciphertext so notification
 	// retries can reproduce the original command without leaving a live

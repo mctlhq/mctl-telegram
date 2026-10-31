@@ -8,6 +8,7 @@ import (
 
 	gotdtelegram "github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/control"
 	"github.com/mctlhq/mctl-telegram/internal/agent/executor"
@@ -93,6 +94,14 @@ func (s *poolSender) LocateDelivered(ctx context.Context, userID, peerTGID, peer
 func mapPoolSendError(err error) error {
 	if errors.Is(err, telegram.ErrRandomIDDuplicate) {
 		return fmt.Errorf("send via pool: %w: %w", executor.ErrAlreadyDelivered, err)
+	}
+	// Errors that prove nothing was sent (#1055): a flood wait and the
+	// closed list of refusals. Everything else stays ambiguous.
+	if wait, ok := tgerr.AsFloodWait(err); ok {
+		return fmt.Errorf("send via pool: %w: %w", &executor.FloodWaitError{Wait: wait}, err)
+	}
+	if class, ok := telegram.RefusalClass(err); ok {
+		return fmt.Errorf("send via pool: %w: %w", &executor.SendRefusedError{Class: class}, err)
 	}
 	return fmt.Errorf("send via pool: %w", err)
 }

@@ -42,6 +42,31 @@ func (s *Store) NoteAgentActionSendAttempt(ctx context.Context, userID, id int64
 	return attempts, true, nil
 }
 
+// UnnoteAgentActionSendAttempt takes back the attempt stamped for an RPC
+// that provably sent nothing: a FLOOD_WAIT, or a refusal on the closed list
+// (#1055). It returns the attempts still counted, i.e. the RPCs that may
+// have reached Telegram. notBefore, when set, keeps recovery from listing
+// the row before then (a flood wait); zero clears it. ok is false when the
+// row is no longer executing.
+func (s *Store) UnnoteAgentActionSendAttempt(ctx context.Context, userID, id int64, notBefore time.Time) (attempts int, ok bool, err error) {
+	nb := sql.NullTime{Time: notBefore.UTC(), Valid: !notBefore.IsZero()}
+	err = s.DB.QueryRowContext(ctx,
+		`UPDATE agent_actions
+		    SET send_attempts = CASE WHEN send_attempts > 0 THEN send_attempts - 1 ELSE 0 END,
+		        retry_not_before = $1
+		  WHERE id = $2 AND user_id = $3 AND status = $4
+		  RETURNING send_attempts`,
+		nb, id, userID, ActionExecuting,
+	).Scan(&attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("undo send attempt: %w", err)
+	}
+	return attempts, true, nil
+}
+
 // MarkAgentActionDeliveryUnknown moves an executing action to
 // delivery_unknown, records reason as its policy_reasons, and queues
 // alertBody for the owner, all in one transaction (#1029).

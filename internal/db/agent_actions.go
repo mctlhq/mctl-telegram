@@ -906,8 +906,9 @@ func (s *Store) ListStuckExecutingActions(ctx context.Context, grace time.Durati
 		        payload_encrypted, policy_decision, policy_reasons, status,
 		        executed_tg_message_id, send_random_id, send_body_encrypted, created_at, updated_at, install_revision,
 		        send_attempts
-		   FROM agent_actions WHERE status = $1 AND updated_at < $2`,
-		ActionExecuting, cutoff,
+		   FROM agent_actions WHERE status = $1 AND updated_at < $2
+		    AND (retry_not_before IS NULL OR retry_not_before <= $3)`,
+		ActionExecuting, cutoff, time.Now().UTC(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list stuck executing actions: %w", err)

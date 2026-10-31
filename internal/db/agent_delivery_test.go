@@ -320,6 +320,44 @@ func caseMatchUnconfirmedAgentSend_WindowFollowsTheSend(t *testing.T, s *Store, 
 	}
 }
 
+// caseUnnoteAgentActionSendAttempt_FloodWaitHidesRowUntilDue: taking back
+// an attempt returns what is still counted, and a not-before time keeps
+// the row out of the stuck list until it is due (#1055).
+func caseUnnoteAgentActionSendAttempt_FloodWaitHidesRowUntilDue(t *testing.T, s *Store, uid int64) {
+	ctx := context.Background()
+	id, _ := executingSend(t, s, uid, 712, "hello Bob")
+	attempted(t, s, uid, id)
+	attempted(t, s, uid, id)
+	listed := func() bool {
+		stuck, err := s.ListStuckExecutingActions(ctx, 0)
+		if err != nil {
+			t.Fatalf("list stuck: %v", err)
+		}
+		for _, a := range stuck {
+			if a.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+	got, ok, err := s.UnnoteAgentActionSendAttempt(ctx, uid, id, time.Now().Add(time.Hour))
+	if err != nil || !ok || got != 1 {
+		t.Fatalf("unnote: attempts=%d ok=%v err=%v, want 1 left", got, ok, err)
+	}
+	if listed() {
+		t.Fatal("row listed as stuck inside its flood wait")
+	}
+	if _, _, err := s.UnnoteAgentActionSendAttempt(ctx, uid, id, time.Time{}); err != nil {
+		t.Fatalf("unnote again: %v", err)
+	}
+	if !listed() {
+		t.Fatal("row not listed once the wait is cleared")
+	}
+	if got, _, _ := s.UnnoteAgentActionSendAttempt(ctx, uid, id, time.Time{}); got != 0 {
+		t.Fatalf("attempts = %d after taking back more than were counted, want 0", got)
+	}
+}
+
 // deliveryCases runs every #1029 store case against one dialect. Postgres
 // keeps state between runs, so each case gets its own user.
 func deliveryCases(t *testing.T, s *Store, prefix string) {
@@ -338,6 +376,7 @@ func deliveryCases(t *testing.T, s *Store, prefix string) {
 		{"SweepAgentMessageBodies_ClearsDeliveryUnknownBody", caseSweepAgentMessageBodies_ClearsDeliveryUnknownBody},
 		{"HumanInputUnknownMessageIDStoresNull", caseHumanInputUnknownMessageIDStoresNull},
 		{"MatchUnconfirmedAgentSend_WindowFollowsTheSend", caseMatchUnconfirmedAgentSend_WindowFollowsTheSend},
+		{"UnnoteAgentActionSendAttempt_FloodWaitHidesRowUntilDue", caseUnnoteAgentActionSendAttempt_FloodWaitHidesRowUntilDue},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

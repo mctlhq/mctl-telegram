@@ -70,6 +70,27 @@ var ErrSourceSuperseded = errors.New("source message edited or deleted, draft wi
 // original message, so its id stays unknown.
 var ErrAlreadyDelivered = errors.New("telegram already has a message with this random_id")
 
+// ErrSendRefused is returned when Telegram refused the send with an error
+// that proves nothing was delivered (SendRefusedError) and no earlier
+// attempt could have landed: the action is denied with the error class as
+// its reason (#1055).
+var ErrSendRefused = errors.New("telegram refused the send")
+
+// SendRefusedError is what a Sender must return (wrapped) for an RPC error
+// on the closed list of refusals that prove the message was not delivered,
+// such as USER_IS_BLOCKED or PEER_ID_INVALID (#1055). Class is the RPC
+// error type. Any error not on the list stays ambiguous.
+type SendRefusedError struct{ Class string }
+
+func (e *SendRefusedError) Error() string { return "telegram refused the send: " + e.Class }
+
+// FloodWaitError is what a Sender must return (wrapped) for FLOOD_WAIT_X:
+// Telegram refused before sending anything and asked to wait (#1055). Such
+// an RPC is not counted as an attempt, and recovery waits Wait first.
+type FloodWaitError struct{ Wait time.Duration }
+
+func (e *FloodWaitError) Error() string { return fmt.Sprintf("telegram flood wait %s", e.Wait) }
+
 // ErrDeliveryUnknown is returned by the recovery path when it moved an
 // action to delivery_unknown (#1029): an RPC for it may have reached
 // Telegram, and it will not be retried. Neither success nor failure; the
@@ -504,6 +525,9 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		// queued.
 		tgMessageID, err = e.locateDelivered(ctx, action, *conv, text), nil
 	}
+	if handled, herr := e.settleRefusal(ctx, action, *conv, err); handled {
+		return herr
+	}
 	if err != nil {
 		// Leave the row in executing with its random_id intact — RecoverStuck
 		// will retry the identical send once the grace window elapses. Do NOT
@@ -769,7 +793,20 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 	if e.SendGate != nil {
 		if err := e.SendGate(ctx, action.UserID, conv.PeerTGID); err != nil {
 			// Keep the durable reservation intact. The gate may be reopened,
-			// and the first RPC may already have reached Telegram.
+			// and the first RPC may already have reached Telegram. But not
+			// forever (#1055): past the approval TTL, counted from the
+			// reservation, the retry ends. With no attempt made nothing was
+			// sent, so it is denied; after an attempt the outcome is unknown.
+			if e.ApprovalTTL > 0 && time.Since(action.UpdatedAt) > e.ApprovalTTL {
+				if action.SendAttempts == 0 {
+					if _, derr := e.Store.DenyAgentAction(ctx, action.UserID, action.ID, db.ActionExecuting, ReasonSendGateClosed); derr != nil {
+						return fmt.Errorf("deny gate-held retry: %w", derr)
+					}
+					return fmt.Errorf("send gate closed past the approval TTL, denied: %w", err)
+				}
+				return e.markDeliveryUnknown(ctx, action, *conv,
+					"delivery unknown: send gate stayed closed past the approval TTL after an attempt that may have been delivered")
+			}
 			return fmt.Errorf("send gate denied recovery retry: %w", err)
 		}
 	}
@@ -792,6 +829,9 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 		slog.Warn("executor: recovery retry found the send already delivered",
 			"action_id", action.ID, "user_id", action.UserID)
 		tgMessageID, err = e.locateDelivered(ctx, action, *conv, text), nil
+	}
+	if handled, herr := e.settleRefusal(ctx, action, *conv, err); handled {
+		return herr
 	}
 	if err != nil {
 		if attempts >= e.maxSendAttempts() {
@@ -831,6 +871,56 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 		e.m.AgentApprovalLatencySeconds.Observe(time.Since(action.UpdatedAt).Seconds())
 	}
 	return nil
+}
+
+// ReasonSendGateClosed is the denial reason of a recovery retry the send
+// gate held past the approval TTL with no attempt made (#1055).
+const ReasonSendGateClosed = "send gate closed"
+
+// settleRefusal handles a send error that is not ambiguous (#1055) and
+// reports whether it did. Both kinds prove this RPC sent nothing, so its
+// attempt stamp is taken back first:
+//
+//   - FloodWaitError: the row stays executing and recovery waits as
+//     Telegram asked before trying again.
+//   - SendRefusedError: retrying cannot help. If no earlier attempt could
+//     have landed (none left counted), the action is denied with the error
+//     class as its reason. Otherwise an earlier attempt may have been
+//     delivered, and it ends delivery_unknown.
+//
+// Any other error, nil included, is left to the caller.
+func (e *Executor) settleRefusal(ctx context.Context, action db.AgentAction, conv db.Conversation, sendErr error) (bool, error) {
+	var (
+		flood   *FloodWaitError
+		refused *SendRefusedError
+	)
+	switch {
+	case errors.As(sendErr, &flood):
+		if _, _, err := e.Store.UnnoteAgentActionSendAttempt(ctx, action.UserID, action.ID, time.Now().UTC().Add(flood.Wait)); err != nil {
+			// The attempt stays counted, which errs toward the bound.
+			return true, fmt.Errorf("%w: flood wait, undo attempt: %w: %w", ErrSendQueuedForRetry, err, sendErr)
+		}
+		return true, fmt.Errorf("%w: %w", ErrSendQueuedForRetry, sendErr)
+	case errors.As(sendErr, &refused):
+		attempts, ok, err := e.Store.UnnoteAgentActionSendAttempt(ctx, action.UserID, action.ID, time.Time{})
+		if err != nil {
+			// Left executing with the attempt counted; the next retry is
+			// refused the same way and settles it then.
+			return true, fmt.Errorf("undo refused attempt: %w: %w", err, sendErr)
+		}
+		if !ok {
+			return true, ErrLostRace
+		}
+		if attempts > 0 {
+			return true, e.markDeliveryUnknown(ctx, action, conv,
+				"delivery unknown: Telegram refused a retry ("+refused.Class+") after an attempt that may have been delivered")
+		}
+		if _, err := e.Store.DenyAgentAction(ctx, action.UserID, action.ID, db.ActionExecuting, "send refused by Telegram: "+refused.Class); err != nil {
+			return true, fmt.Errorf("deny refused send: %w", err)
+		}
+		return true, fmt.Errorf("%w: %s", ErrSendRefused, refused.Class)
+	}
+	return false, nil
 }
 
 func (e *Executor) maxSendAttempts() int {
