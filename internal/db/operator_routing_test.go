@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -193,4 +194,36 @@ func TestOperatorRouting_OffPublishesAtIngestOnly(t *testing.T) { // T4e (store 
 		t.Fatal(err)
 	}
 	wantReasons(t, f.reasons(t), "")
+}
+
+// TestOperatorRouting_InactiveConversationPublishesNothing pins the #601
+// decision: with routing on, a message in a conversation the owner is
+// handling is not forwarded to the operator. The job is closed at ingest as
+// ignored, the same outcome as a worker run that ends ignored. With routing
+// off, ingest still publishes it like any other event.
+func TestOperatorRouting_InactiveConversationPublishesNothing(t *testing.T) {
+	for _, routing := range []bool{true, false} {
+		t.Run(fmt.Sprintf("routing=%v", routing), func(t *testing.T) {
+			ctx := context.Background()
+			s := newTestStoreCrypted(t).WithEventOutbox(reasonBuilder).WithOperatorRouting(routing)
+			uid := seedAgentUser(t, s, "owner")
+			conv, err := s.EnsureConversation(ctx, uid, 555, "peer", "Peer")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SetConversationState(ctx, uid, conv.ID, ConversationTakenOver); err != nil {
+				t.Fatal(err)
+			}
+			if ok, err := ingestForOutbox(t, s, uid, "evt:v1:1:555:42", "x"); err != nil || !ok {
+				t.Fatal(ok, err)
+			}
+			want := map[bool]int{true: 0, false: 1}[routing]
+			if n := outboxCount(t, s); n != want {
+				t.Fatalf("outbox rows = %d, want %d", n, want)
+			}
+			if jobs, err := s.ClaimAgentJobs(ctx, "r", uid, 1); err != nil || len(jobs) != 0 {
+				t.Fatalf("claimed %d jobs, err=%v", len(jobs), err)
+			}
+		})
+	}
 }
