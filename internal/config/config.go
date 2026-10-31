@@ -448,6 +448,15 @@ type Config struct {
 	// sensitiveKeys so it can never reach a log line. Set via
 	// MCTL_SURFACE_TELEGRAM_TOKEN.
 	MCTLSurfaceTelegramToken string
+	// AssistantRegistryEnabled makes assistant installs fetch their
+	// definition from the mctl-api registry (MCTL_API_BASE_URL, as the
+	// surface:telegram principal with MCTL_SURFACE_TELEGRAM_TOKEN), store it
+	// as a database snapshot with the install, refresh every pinned
+	// version's lifecycle every 5 minutes, and stop claims for a disabled or
+	// unknown one (#1020). Off by default: installs then use the embedded
+	// catalog and no registry call is made. Set via
+	// ASSISTANT_REGISTRY_ENABLED.
+	AssistantRegistryEnabled bool
 	// WorkItemTenant is the single configured mctl-api tenant every
 	// Telegram-originated work item belongs to (see requirements.md's Open
 	// questions — this repository's own "tenant" concept is a different
@@ -532,6 +541,7 @@ func Load() (*Config, error) {
 		BroadcastRecipientLimit:       envInt("BROADCAST_RECIPIENT_LIMIT", 1000),
 		BroadcastApprovalTTL:          envDuration("BROADCAST_APPROVAL_TTL", 30*time.Minute),
 		WorkContextEnabled:            envBool("WORK_CONTEXT_ENABLED", false),
+		AssistantRegistryEnabled:      envBool("ASSISTANT_REGISTRY_ENABLED", false),
 		MCTLAPIBaseURL:                envOr("MCTL_API_BASE_URL", "https://api.mctl.ai"),
 		MCTLSurfaceTelegramToken:      os.Getenv("MCTL_SURFACE_TELEGRAM_TOKEN"),
 		WorkItemTenant:                os.Getenv("MCTL_WORK_ITEM_TENANT"),
@@ -609,6 +619,9 @@ func Load() (*Config, error) {
 		if c.MCTLSurfaceTelegramToken == "" || c.WorkItemTenant == "" {
 			return nil, fmt.Errorf("WORK_CONTEXT_ENABLED requires MCTL_SURFACE_TELEGRAM_TOKEN and MCTL_WORK_ITEM_TENANT")
 		}
+	}
+	if c.AssistantRegistryEnabled && c.MCTLSurfaceTelegramToken == "" {
+		return nil, fmt.Errorf("ASSISTANT_REGISTRY_ENABLED requires MCTL_SURFACE_TELEGRAM_TOKEN")
 	}
 	if c.HumanInputEnabled {
 		if !c.WorkContextEnabled {

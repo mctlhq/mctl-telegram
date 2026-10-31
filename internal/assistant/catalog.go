@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"path"
 	"strings"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -31,11 +32,21 @@ type Entry struct {
 	Digest string
 }
 
+// ErrInvalidUTF8 marks a document or instructions file that is not valid
+// UTF-8. It is refused rather than repaired: Go's JSON encoder would replace
+// each bad byte with U+FFFD, so the digest would cover text nobody wrote.
+var ErrInvalidUTF8 = errors.New("not valid UTF-8")
+
 // canonicalJSON re-encodes a YAML or JSON document as JSON with sorted
 // object keys, no insignificant whitespace and no HTML escaping (<, > and &
 // stay literal, as any JSON encoder writes them by default outside Go), so
 // the same document always has the same bytes whichever form it arrived in.
+// U+2028 and U+2029 are written as \u2028 and \u2029, as Go's encoder always
+// does. Input that is not valid UTF-8 is refused.
 func canonicalJSON(raw []byte) ([]byte, error) {
+	if !utf8.Valid(raw) {
+		return nil, fmt.Errorf("document is %w", ErrInvalidUTF8)
+	}
 	var doc any
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
 		return nil, fmt.Errorf("parse document: %w", err)
@@ -52,6 +63,9 @@ func canonicalJSON(raw []byte) ([]byte, error) {
 // materialize returns the registry form of an authored definition: its
 // instructions file inlined as instructions.text, canonical JSON.
 func materialize(defRaw, text []byte) ([]byte, error) {
+	if !utf8.Valid(text) {
+		return nil, fmt.Errorf("instructions are %w", ErrInvalidUTF8)
+	}
 	var doc map[string]any
 	if err := yaml.Unmarshal(defRaw, &doc); err != nil {
 		return nil, fmt.Errorf("parse definition: %w", err)

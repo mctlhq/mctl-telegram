@@ -2,6 +2,7 @@ package assistant
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"regexp"
 	"strings"
@@ -259,5 +260,38 @@ func TestCatalogRejectsInlineInstructions(t *testing.T) {
 		"path: ../../deploy/agent-worker/system-prompt.txt", "text: Inline rules.", 1)
 	if _, err := LoadCatalog(fstest.MapFS{"assistants/hr-recruiter/assistant.yaml": {Data: []byte(def)}}); err == nil {
 		t.Fatal("catalog accepted inline instructions in an authored definition")
+	}
+}
+
+// Bytes that are not UTF-8 are refused, not replaced with U+FFFD, both in a
+// materialized document and in an authored instructions file; U+2028 and
+// U+2029 are escaped, which the spec states as part of the canonical form.
+func TestCanonicalJSONRefusesInvalidUTF8(t *testing.T) {
+	if _, err := canonicalJSON([]byte("{\"a\":\"x\xff\"}")); !errors.Is(err, ErrInvalidUTF8) {
+		t.Fatalf("invalid document: err = %v, want ErrInvalidUTF8", err)
+	}
+	c, err := LoadCatalog(mctltelegram.Catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, _ := c.Lookup("hr-recruiter", "0.1.0")
+	bad := strings.Replace(string(e.Materialized), `"text":"`, "\"text\":\"\xc3", 1)
+	if _, err := ParseMaterialized([]byte(bad)); !errors.Is(err, ErrInvalidUTF8) {
+		t.Fatalf("materialized: err = %v, want ErrInvalidUTF8", err)
+	}
+	def := strings.Replace(string(readFile(t, "assistant.yaml")),
+		"path: ../../deploy/agent-worker/system-prompt.txt", "path: p.txt", 1)
+	if _, err := LoadCatalog(fstest.MapFS{
+		"assistants/hr-recruiter/assistant.yaml": {Data: []byte(def)},
+		"assistants/hr-recruiter/p.txt":          {Data: []byte("Rules \xff.")},
+	}); !errors.Is(err, ErrInvalidUTF8) {
+		t.Fatalf("instructions file: err = %v, want ErrInvalidUTF8", err)
+	}
+	got, err := canonicalJSON([]byte("{\"a\":\"x y \"}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "{\"a\":\"x\\u2028y\\u2029\"}"; string(got) != want {
+		t.Fatalf("canonicalJSON = %s, want %s", got, want)
 	}
 }

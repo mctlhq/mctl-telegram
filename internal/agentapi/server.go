@@ -11,6 +11,7 @@ package agentapi
 import (
 	"context"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/queue"
@@ -67,6 +68,15 @@ type Server struct {
 	// catalog resolves an account's assistant to the instructions returned
 	// by POST /jobs/claim. Nil leaves instructions out of the response.
 	catalog *assistant.Catalog
+	// registryGate applies registry lifecycles to claims (#1020): a pinned
+	// definition that is disabled, or whose lifecycle is unknown, takes no
+	// new jobs. Set by WithRegistryLifecycle when ASSISTANT_REGISTRY_ENABLED.
+	registryGate bool
+	// now is the clock for the lifecycle gate; nil is time.Now.
+	now func() time.Time
+	// snapshots caches parsed registry definitions by digest.
+	snapshotMu sync.Mutex
+	snapshots  map[string]*assistant.Entry
 
 	longPollTimeout time.Duration
 	jobVisibility   time.Duration
@@ -111,6 +121,21 @@ func (s *Server) WithJobTokenSigner(i *localjwt.Issuer) *Server {
 func (s *Server) WithCatalog(c *assistant.Catalog) *Server {
 	s.catalog = c
 	return s
+}
+
+// WithRegistryLifecycle makes claims honor the registry lifecycle of each
+// account's pinned definition (assistantregistry.LifecycleGate). Returns s
+// for chaining.
+func (s *Server) WithRegistryLifecycle() *Server {
+	s.registryGate = true
+	return s
+}
+
+func (s *Server) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 // WithLongPollTimeout overrides the job-claim hold time. Returns s for

@@ -1,6 +1,7 @@
 package agentapi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-telegram/internal/assistant"
+	"github.com/mctlhq/mctl-telegram/internal/assistantregistry"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -63,8 +65,19 @@ type jobEnvelope struct {
 }
 
 // errAssistantNotInCatalog means the account's profile names an assistant
-// this server's catalog does not have.
+// this server can resolve neither from a stored registry definition nor
+// from its embedded catalog.
 var errAssistantNotInCatalog = errors.New("assistant not in catalog")
+
+// errAssistantDisabled and errAssistantLifecycleUnknown mean the account's
+// pinned registry definition may not take new jobs (#1020): the registry
+// disabled it, or its lifecycle has not been confirmed within
+// assistantregistry.StaleAfter. The claim refuses before claiming, so the
+// jobs stay queued.
+var (
+	errAssistantDisabled         = errors.New("assistant disabled in the registry")
+	errAssistantLifecycleUnknown = errors.New("assistant lifecycle unknown: registry not reached")
+)
 
 // accountInstructions renders the system prompt for userID's jobs. It fails
 // rather than falling back: running an account's jobs with another
@@ -84,9 +97,9 @@ func (s *Server) accountInstructions(r *http.Request, userID int64) (instruction
 		return "", "", "", nil, err
 	}
 	ref = a.Name + "@" + a.Version
-	entry, ok := s.catalog.Lookup(a.Name, a.Version)
-	if !ok {
-		return "", "", "", nil, fmt.Errorf("%w: %s", errAssistantNotInCatalog, ref)
+	entry, err := s.resolveAssistant(r.Context(), userID, a)
+	if err != nil {
+		return "", "", "", nil, err
 	}
 	var in *assistant.Install
 	if len(a.Install) > 0 {
@@ -96,6 +109,70 @@ func (s *Server) accountInstructions(r *http.Request, userID int64) (instruction
 		}
 	}
 	return assistant.Render(entry, in), ref, entry.Digest, entry.Definition.Spec.Tools, nil
+}
+
+// resolveAssistant finds the definition a's install pinned. The registry
+// snapshot stored with the install (#1020) is the source; the embedded
+// catalog is only the migration and rollback bridge, used for a profile
+// that pins no digest yet or pins exactly the embedded entry's digest. It
+// never calls the registry. With the registry enabled, a snapshot whose
+// lifecycle is disabled or unknown refuses, and an unknown one queues the
+// owner's notice (once per outage).
+func (s *Server) resolveAssistant(ctx context.Context, userID int64, a *db.AgentAssistant) (*assistant.Entry, error) {
+	ref := a.Name + "@" + a.Version
+	embedded, inCatalog := s.catalog.Lookup(a.Name, a.Version)
+	if a.Digest == "" {
+		if !inCatalog {
+			return nil, fmt.Errorf("%w: %s", errAssistantNotInCatalog, ref)
+		}
+		return embedded, nil
+	}
+	def, err := s.Store.GetAssistantDefinition(ctx, a.Digest)
+	if errors.Is(err, db.ErrAssistantDefinitionNotFound) {
+		if inCatalog && embedded.Digest == a.Digest {
+			return embedded, nil
+		}
+		return nil, fmt.Errorf("%w: %s pins %s, which is not stored", errAssistantNotInCatalog, ref, a.Digest)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if def.Name != a.Name || def.Version != a.Version {
+		return nil, fmt.Errorf("stored definition %s is %s@%s, profile names %s", def.Digest, def.Name, def.Version, ref)
+	}
+	if s.registryGate {
+		switch assistantregistry.LifecycleGate(def, s.clock()) {
+		case assistantregistry.GateDisabled:
+			return nil, fmt.Errorf("%w: %s", errAssistantDisabled, ref)
+		case assistantregistry.GateUnknown:
+			assistantregistry.NotifyUserUnreachable(ctx, s.Store, userID, def)
+			return nil, fmt.Errorf("%w: %s last checked %s", errAssistantLifecycleUnknown, ref, def.LifecycleCheckedAt.UTC().Format(time.RFC3339))
+		}
+	}
+	return s.snapshotEntry(def)
+}
+
+// snapshotEntry parses a stored definition, caching it by digest: the
+// document under a digest never changes.
+func (s *Server) snapshotEntry(def *db.AssistantDefinition) (*assistant.Entry, error) {
+	s.snapshotMu.Lock()
+	defer s.snapshotMu.Unlock()
+	if e, ok := s.snapshots[def.Digest]; ok {
+		return e, nil
+	}
+	e, err := assistant.ParseMaterialized(def.Document)
+	if err != nil {
+		// The parse error can quote document content.
+		return nil, fmt.Errorf("stored definition %s no longer parses", def.Digest)
+	}
+	if e.Digest != def.Digest {
+		return nil, fmt.Errorf("stored definition %s hashes to %s", def.Digest, e.Digest)
+	}
+	if s.snapshots == nil {
+		s.snapshots = map[string]*assistant.Entry{}
+	}
+	s.snapshots[def.Digest] = e
+	return e, nil
 }
 
 // jobTokenAudience is the aud of the per-job credential.
@@ -172,7 +249,16 @@ func (s *Server) handleClaimJobs(w http.ResponseWriter, r *http.Request) {
 	// Rendered before anything is claimed, so a failure leaves every job
 	// queued instead of claimed by a request that cannot run it.
 	instructions, assistantRef, assistantDigest, toolNames, err := s.accountInstructions(r, id.UserID)
-	if err != nil {
+	switch {
+	case errors.Is(err, errAssistantDisabled):
+		logHandlerErr("get_events", err)
+		writeJSONError(w, http.StatusServiceUnavailable, "assistant disabled in the registry")
+		return
+	case errors.Is(err, errAssistantLifecycleUnknown):
+		logHandlerErr("get_events", err)
+		writeJSONError(w, http.StatusServiceUnavailable, "assistant registry unreachable, lifecycle unknown")
+		return
+	case err != nil:
 		logHandlerErr("get_events", err)
 		writeJSONError(w, http.StatusInternalServerError, "assistant instructions unavailable")
 		return

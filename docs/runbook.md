@@ -3137,3 +3137,44 @@ A request missing from one successful list is not closed on that basis: the poll
 Logs carry only `request_id`, `work_item_id`, `delivery_id`, `tg_message_id`, `outcome` and `correlation_id` (a per-call id this side generates and sends as `X-Request-Id`; mctl-api does not log it, so join with mctl-api's logs on `request_id`); question text, reason text, option labels and answers are never logged (`question`, `options`, `answer`, `value` are also in the slog redaction list; `reason` deliberately is not, because it is an ordinary operational key elsewhere, and `TestLogsCarryNoContent` holds the invariant for it).
 
 Rollback: set `HUMAN_INPUT_ENABLED=false` and restart. Queued but unsent messages can be retired with `UPDATE owner_notifications SET status = 'failed' WHERE kind = 'human_input' AND status = 'pending'`. The `human_input_deliveries` and `human_input_actors` tables are additive and can stay.
+
+## Assistant registry (issue #1020)
+
+Flag: `ASSISTANT_REGISTRY_ENABLED` (default `false`; requires
+`MCTL_SURFACE_TELEGRAM_TOKEN`, refused at startup otherwise). It reuses
+`MCTL_API_BASE_URL`. The startup log line `assistant registry` shows whether
+it is on. With it off, `PUT /api/admin/agent/install` uses the compiled-in
+catalog and nothing calls mctl-api.
+
+With it on:
+
+- An install fetches the definition from mctl-api, checks its digest
+  against the registry's `contentHash`, and stores it in
+  `assistant_definitions` in the same transaction as the install revision.
+  `503 assistant registry unavailable` means mctl-api could not be read:
+  check its health and the surface token, then retry. `502 ... digest
+  mismatch` means the registry holds a document whose content is not the
+  digest it reports: do not retry, republish the version from the CI
+  `assistants-materialized` artifact.
+- Claims render from the stored definition and never call mctl-api; a
+  restart while mctl-api is down changes nothing for installed accounts.
+- A refresh reads every pinned version's lifecycle every 5 minutes; failures
+  are logged as `assistant registry: lifecycle refresh failed`. A claim that
+  answers `503 assistant disabled in the registry` is a version disabled in
+  mctl-api: reinstall the account on another version.
+- After 24 hours without a successful read, the lifecycle is unknown and the
+  account's claims answer `503 assistant registry unreachable, lifecycle
+  unknown`. The owner gets one alert per outage ("Your assistant
+  name@version has stopped taking new messages ..."), logged as
+  `assistant registry: lifecycle unknown, owner notified`. Jobs stay queued
+  and run once a read succeeds; nothing else is needed.
+
+To see what is stored:
+
+```sql
+SELECT digest, name, version, lifecycle, lifecycle_checked_at
+  FROM assistant_definitions ORDER BY name, version;
+```
+
+Rollback: turning the flag off stops the refresh and the lifecycle gate;
+claims keep rendering from the stored definitions.

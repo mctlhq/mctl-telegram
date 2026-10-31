@@ -178,6 +178,14 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// agent_profiles.assistant_registry_notice_for: which stale registry
+	// check (pinned digest and the time of its last successful lifecycle
+	// check) the owner was last told about, so the "registry could not be
+	// reached" notice goes out once per outage, not once per claim (#1020).
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "assistant_registry_notice_for",
+		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	// agent_profiles.owner_profile_encrypted holds the account-specific
 	// identity, public biography, skills, preferences, and restricted fields.
 	// Keeping it on the tenant row removes the process-wide mounted-profile
@@ -733,6 +741,20 @@ func agentSchemaSQLite() []string {
 			last_error TEXT NOT NULL DEFAULT '',
 			updated_at DATETIME NOT NULL
 		)`,
+		// Registry definitions an install pinned (#1020), by digest: the
+		// materialized document as fetched and checked, so claims render
+		// from here and a restart never needs mctl-api. lifecycle is the
+		// registry's last observed lifecycle for name@version, and
+		// lifecycle_checked_at the last time it was read successfully.
+		`CREATE TABLE IF NOT EXISTS assistant_definitions (
+			digest TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			version TEXT NOT NULL,
+			document TEXT NOT NULL,
+			lifecycle TEXT NOT NULL,
+			fetched_at DATETIME NOT NULL,
+			lifecycle_checked_at DATETIME NOT NULL
+		)`,
 	}
 }
 
@@ -1045,6 +1067,20 @@ func agentSchemaPG() []string {
 			fail_count BIGINT NOT NULL DEFAULT 0,
 			last_error TEXT NOT NULL DEFAULT '',
 			updated_at TIMESTAMPTZ NOT NULL
+		)`,
+		// Registry definitions an install pinned (#1020), by digest: the
+		// materialized document as fetched and checked, so claims render
+		// from here and a restart never needs mctl-api. lifecycle is the
+		// registry's last observed lifecycle for name@version, and
+		// lifecycle_checked_at the last time it was read successfully.
+		`CREATE TABLE IF NOT EXISTS assistant_definitions (
+			digest TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			version TEXT NOT NULL,
+			document TEXT NOT NULL,
+			lifecycle TEXT NOT NULL,
+			fetched_at TIMESTAMPTZ NOT NULL,
+			lifecycle_checked_at TIMESTAMPTZ NOT NULL
 		)`,
 	}
 }

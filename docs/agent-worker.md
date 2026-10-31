@@ -270,7 +270,10 @@ are audited as `suppressed`, and the tool result says `suppressed: true`.
 
 **Prompt.** Each claimed job carries its account's assistant instructions
 (`instructions`, with `assistant` and `assistant_digest`), rendered by the
-server from the compiled-in catalog; for the recruiter agent that is
+server from the definition the account's install pinned: the registry
+snapshot stored with the install when `ASSISTANT_REGISTRY_ENABLED` is on
+(see `docs/assistants/spec.md`, "Registry form"), otherwise the
+compiled-in catalog; for the recruiter agent that is
 `deploy/agent-worker/system-prompt.txt` plus the owner's notes. The job also
 carries `install_revision`, the account's install revision at claim time
 (logged with the assistant and digest; see `docs/assistants/spec.md`), and
