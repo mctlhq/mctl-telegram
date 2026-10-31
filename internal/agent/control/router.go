@@ -71,7 +71,7 @@ func NewRouter(store *db.Store, executor Approver, notifier *Notifier) *Router {
 	return &Router{Store: store, Executor: executor, Notifier: notifier}
 }
 
-const unknownCommandReply = "Unknown command. Try:\n/mctl status\n/mctl leads\n/mctl conversations [count|filter]\n/mctl show <id>\n/mctl continue <id>\n/mctl pause\n/mctl takeover <id>\n/mctl approve <code>\n/mctl reject <code>"
+const unknownCommandReply = "Unknown command. Try:\n/mctl status\n/mctl leads\n/mctl conversations [count|filter]\n/mctl show <id>\n/mctl continue <id>\n/mctl pause\n/mctl unpause\n/mctl assistant\n/mctl takeover <id>\n/mctl approve <code>\n/mctl reject <code>"
 
 // HandleSavedText implements listener.CommandRouter. The listener has
 // already confirmed text starts with /mctl (isMCTLCommand) before ever
@@ -107,6 +107,10 @@ func (r *Router) HandleSavedText(ctx context.Context, meta SavedMeta, text strin
 		return r.handleContinue(ctx, userID, cmd.Arg)
 	case CmdPause:
 		return r.handlePause(ctx, userID)
+	case CmdUnpause:
+		return r.handleUnpause(ctx, userID)
+	case CmdAssistant:
+		return r.handleAssistant(ctx, userID)
 	case CmdTakeover:
 		return r.handleTakeover(ctx, userID, cmd.Arg)
 	case CmdApprove:
@@ -368,7 +372,107 @@ func (r *Router) handlePause(ctx context.Context, userID int64) error {
 		}
 		return fmt.Errorf("pause autopilot: %w", err)
 	}
-	return r.Notifier.Reply(ctx, userID, "Autopilot paused. /mctl continue <id> resumes a specific conversation once you're ready — autopilot itself stays paused until you re-enable it via the agent API.")
+	return r.Notifier.Reply(ctx, userID, "Autopilot paused. /mctl unpause lifts the pause for the whole account; /mctl continue <id> resumes one conversation.")
+}
+
+// handleUnpause clears the account-wide pause, whoever set it: the owner's
+// /mctl pause, the agent's pause_autopilot, or the install. Only the owner
+// reaches this, since the listener routes Saved Messages commands from the
+// account itself. It changes nothing else: observe mode still holds every
+// reply for approval, and a conversation the owner took over stays silent
+// until /mctl continue.
+func (r *Router) handleUnpause(ctx context.Context, userID int64) error {
+	if err := r.Store.SetAgentAutopilotPaused(ctx, userID, false); err != nil {
+		if errors.Is(err, db.ErrAgentProfileNotFound) {
+			return r.Notifier.Reply(ctx, userID, "No agent profile configured for this account.")
+		}
+		return fmt.Errorf("unpause autopilot: %w", err)
+	}
+	profile, err := r.Store.GetAgentProfile(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("load profile: %w", err)
+	}
+	msg := "Autopilot resumed for the whole account. Conversations you took over stay with you until /mctl continue <id>."
+	switch profile.Mode {
+	case db.AgentModeObserve:
+		msg += " Mode is observe, so every reply still waits for your approval."
+	case db.AgentModeOff:
+		msg += " Mode is off, so the agent still sends nothing."
+	}
+	return r.Notifier.Reply(ctx, userID, msg)
+}
+
+// handleAssistant shows which assistant runs the account and the settings
+// policy enforces for it. Install values and owner notes are deliberately
+// not printed: the reply is stored as an owner notification, and the
+// install's contents only ever live encrypted.
+func (r *Router) handleAssistant(ctx context.Context, userID int64) error {
+	profile, err := r.Store.GetAgentProfile(ctx, userID)
+	if errors.Is(err, db.ErrAgentProfileNotFound) {
+		return r.Notifier.Reply(ctx, userID, "No agent profile configured for this account.")
+	}
+	if err != nil {
+		return fmt.Errorf("load profile: %w", err)
+	}
+	a, err := r.Store.GetAgentAssistant(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("load assistant: %w", err)
+	}
+	installed := "no (settings were written directly, not from an install)"
+	if len(a.Install) > 0 {
+		installed = "yes"
+	}
+	disclosure := "on"
+	if profile.DisclosureDisabled {
+		disclosure = "off"
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Assistant: %s@%s\nFrom an install: %s\n", a.Name, a.Version, installed)
+	fmt.Fprintf(&sb, "Mode: %s\nAutopilot paused: %s\nListening: %s\nAI disclosure line: %s\n",
+		profile.Mode, yesNo(profile.AutopilotPaused), yesNo(profile.ListenerEnabled), disclosure)
+	fmt.Fprintf(&sb, "Limits: %d autonomous turns, %d messages/min, %d characters\n",
+		profile.MaxAutonomousTurns, profile.MaxMsgsPerMinute, profile.MaxReplyChars)
+	fmt.Fprintf(&sb, "Sent without approval: %s\nNever sent: %s\n",
+		orDash(csvList(profile.IntentAllowlist)), orDash(csvList(profile.IntentDenylist)))
+	fmt.Fprintf(&sb, "Only these senders: %s\nBlocked senders: %s",
+		senderCount(profile.SenderAllowlist, "everyone"), senderCount(profile.BlockedSenders, "none"))
+	return r.Notifier.Reply(ctx, userID, sb.String())
+}
+
+func yesNo(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
+}
+
+// csvList normalizes a stored CSV for display: trimmed, empty parts dropped.
+func csvList(csv string) string {
+	var parts []string
+	for _, p := range strings.Split(csv, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			parts = append(parts, p)
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// senderCount reports how many ids a sender CSV holds, not the ids
+// themselves.
+func senderCount(csv, none string) string {
+	n := 0
+	for _, p := range strings.Split(csv, ",") {
+		if strings.TrimSpace(p) != "" {
+			n++
+		}
+	}
+	if n == 0 {
+		return none
+	}
+	if n == 1 {
+		return "1 account"
+	}
+	return fmt.Sprintf("%d accounts", n)
 }
 
 func (r *Router) handleTakeover(ctx context.Context, userID int64, arg string) error {

@@ -19,6 +19,8 @@ func TestParseCommand_Table(t *testing.T) {
 		{"conversations count", "/mctl conversations 50", Command{Type: CmdConversations, Arg: "50"}, nil},
 		{"conversations filter", "/mctl conversations @anna_hr", Command{Type: CmdConversations, Arg: "@anna_hr"}, nil},
 		{"pause", "/mctl pause", Command{Type: CmdPause}, nil},
+		{"unpause", "/mctl Unpause", Command{Type: CmdUnpause}, nil},
+		{"assistant", "/mctl assistant", Command{Type: CmdAssistant}, nil},
 		{"show with id", "/mctl show 42", Command{Type: CmdShow, Arg: "42"}, nil},
 		{"continue with id", "/mctl continue 7", Command{Type: CmdContinue, Arg: "7"}, nil},
 		{"takeover with id", "/mctl takeover 7", Command{Type: CmdTakeover, Arg: "7"}, nil},

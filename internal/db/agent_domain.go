@@ -444,7 +444,7 @@ func (s *Store) UpdateAgentProfileFields(ctx context.Context, userID int64, u Ag
 }
 
 // SetAgentAutopilotPaused flips the per-account pause flag. Used by the
-// pause_autopilot agent tool and the /mctl pause | continue owner commands.
+// pause_autopilot agent tool and the /mctl pause | unpause owner commands.
 func (s *Store) SetAgentAutopilotPaused(ctx context.Context, userID int64, paused bool) error {
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE agent_profiles SET autopilot_paused = $1, updated_at = $2 WHERE user_id = $3`,

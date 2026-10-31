@@ -888,3 +888,79 @@ func TestRouter_ShowAndLeads_ListEveryLeadOfAConversation(t *testing.T) {
 		t.Fatalf("leads = %q, want one line per lead", leads)
 	}
 }
+
+func TestRouter_Unpause_ClearsAutopilotPaused(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	if err := store.SetAgentAutopilotPaused(ctx, uid, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl unpause"); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	profile, err := store.GetAgentProfile(ctx, uid)
+	if err != nil {
+		t.Fatalf("get profile: %v", err)
+	}
+	if profile.AutopilotPaused {
+		t.Fatal("autopilot_paused = true, want false")
+	}
+	// The seeded profile is in observe mode: the reply must not suggest
+	// replies now go out on their own.
+	if len(sender.sent) != 1 || !strings.Contains(sender.sent[0], "every reply still waits for your approval") {
+		t.Fatalf("replies = %q, want the observe-mode caveat", sender.sent)
+	}
+}
+
+func TestRouter_Unpause_NoProfile(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	if _, err := store.DB.ExecContext(ctx, `DELETE FROM agent_profiles WHERE user_id = $1`, uid); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl unpause"); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(sender.sent) != 1 || sender.sent[0] != "No agent profile configured for this account." {
+		t.Fatalf("replies = %q", sender.sent)
+	}
+}
+
+// TestRouter_Assistant_ShowsSettingsNotValues pins what /mctl assistant
+// prints: the assistant reference and the enforced settings, sender counts
+// instead of ids, and nothing from the install document itself.
+func TestRouter_Assistant_ShowsSettingsNotValues(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	allow, deny := "discovery, schedule", "decline"
+	// Alice and Bob ids from internal/mcp/canary_guard_test.go.
+	only, blocked := "500100101", "500100202,500100303"
+	install := []byte(`{"spec":{"values":{"name":"Dana"},"ownerNotes":"Keep it short."}}`)
+	if err := store.UpdateAgentProfileFields(ctx, uid, db.AgentProfileUpdate{
+		IntentAllowlist: &allow, IntentDenylist: &deny,
+		SenderAllowlist: &only, BlockedSenders: &blocked, InstallDocument: &install,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl assistant"); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("replies = %q", sender.sent)
+	}
+	got := sender.sent[0]
+	for _, want := range []string{
+		"Assistant: hr-recruiter@0.1.0", "From an install: yes", "Mode: observe",
+		"Sent without approval: discovery, schedule", "Never sent: decline",
+		"Only these senders: 1 account", "Blocked senders: 2 accounts",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("reply lacks %q:\n%s", want, got)
+		}
+	}
+	for _, leak := range []string{"Dana", "Keep it short", "500100101", "500100202"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("reply leaks %q:\n%s", leak, got)
+		}
+	}
+}
