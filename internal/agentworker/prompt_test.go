@@ -112,3 +112,28 @@ func TestDeployedPrompt_CarriesOwnerChannelContract(t *testing.T) {
 		t.Error("deployed prompt assumes the owner's pronouns")
 	}
 }
+
+// TestDeployedPrompt_CarriesPronounContract: owner summaries assumed the
+// sender's gender ("answer him in the chat", #988), copied from the prompt's
+// own example. The prompt must name people or use "they" and must not model
+// a gendered pronoun itself.
+func TestDeployedPrompt_CarriesPronounContract(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/agent-worker/system-prompt.txt")
+	if err != nil {
+		t.Fatalf("read prompt: %v", err)
+	}
+	text := strings.Join(strings.Fields(string(raw)), " ")
+	for _, clause := range []string{
+		`Refer to the sender and anyone else by name or as "they"`,
+		"never write he, him, she or her about a person unless they stated their pronouns",
+	} {
+		if !strings.Contains(text, clause) {
+			t.Errorf("deployed prompt: missing %q", clause)
+		}
+	}
+	for _, phrase := range []string{"answer him", "answer her", "ask him", "ask her", "tell him", "tell her"} {
+		if strings.Contains(text, phrase) {
+			t.Errorf("deployed prompt models a gendered pronoun: %q", phrase)
+		}
+	}
+}
