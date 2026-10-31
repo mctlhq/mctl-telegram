@@ -62,6 +62,7 @@ var reviewerWriteRules = map[string]reviewerWriteRule{
 	"get_my_audit_log":                reviewerRead,
 	"get_my_send_status":              reviewerRead,
 	"get_my_notification_preferences": reviewerRead,
+	"list_assistants":                 reviewerRead,
 	// draft_reply stores a draft and sends nothing; send_reply decides.
 	"draft_reply": reviewerRead,
 
@@ -90,6 +91,11 @@ var reviewerWriteRules = map[string]reviewerWriteRule{
 	// The reviewer may prepare only what it may confirm. prepare_pin_message
 	// also debits the per-peer send budget the allowlisted send needs.
 	"prepare_pin_message": reviewerRefused,
+
+	// An install decides whether the agent answers in Telegram as the
+	// reviewer account, so it is not part of a review either.
+	"install_assistant": reviewerRefused,
+	"update_install":    reviewerRefused,
 
 	// Device, operator and broadcast tools: none is part of a review.
 	"revoke_local_bridge_device": reviewerRefused,

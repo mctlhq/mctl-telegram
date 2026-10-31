@@ -58,6 +58,9 @@ func TestToolAnnotations(t *testing.T) {
 		{"set_reaction", first(s.toolSetReaction()), false, true, true},
 		{"get_my_notification_preferences", first(s.toolGetMyNotificationPreferences()), true, false, false},
 		{"set_my_notification_preferences", first(s.toolSetMyNotificationPreferences()), false, true, false},
+		{"list_assistants", first(s.toolListAssistants()), true, false, false},
+		{"install_assistant", first(s.toolInstallAssistant()), false, true, false},
+		{"update_install", first(s.toolUpdateInstall()), false, true, false},
 	}
 
 	// Every registered tool must have a row here: a tool without one would

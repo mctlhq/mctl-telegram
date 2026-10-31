@@ -55,6 +55,9 @@ var toolScopes = map[string][]string{
 	"get_my_identity":    {},
 	"get_my_audit_log":   {},
 	"get_my_send_status": {},
+	// The installable catalog and the caller's own assistant reference;
+	// never install values or notes (#1021).
+	"list_assistants": {},
 
 	// The caller's own account, changed. All require account:manage.
 	//
@@ -88,6 +91,9 @@ var toolScopes = map[string][]string{
 	"set_my_notification_preferences": {"account:manage"},
 	"set_send_consent":                {"account:manage"},
 	"revoke_local_bridge_device":      {"account:manage"},
+	// The caller's own assistant install (#1021).
+	"install_assistant": {"account:manage"},
+	"update_install":    {"account:manage"},
 
 	// Operator lookups: the lookup tier's admin:users:read is accepted here
 	// and nowhere else (see requireAnyScope).

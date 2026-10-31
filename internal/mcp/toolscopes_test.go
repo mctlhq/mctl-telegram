@@ -86,10 +86,10 @@ var (
 // The visible sets are spelled out rather than derived from toolScopes, so a
 // wrong entry in the table fails here instead of agreeing with itself.
 var (
-	selfTools     = []string{"get_my_audit_log", "get_my_identity", "get_my_send_status"}
+	selfTools     = []string{"get_my_audit_log", "get_my_identity", "get_my_send_status", "list_assistants"}
 	readTools     = []string{"get_media", "get_messages", "get_unread_messages", "list_dialogs", "prepare_get_media", "search_messages"}
 	writeTools    = []string{"delete_messages", "edit_message", "forward_messages", "pin_message", "prepare_pin_message", "prepare_send_message", "send_media", "send_message", "set_reaction"}
-	accountTools  = []string{"delete_telegram_account", "disconnect_telegram_account", "get_my_notification_preferences", "revoke_local_bridge_device", "set_my_notification_preferences", "set_send_consent"}
+	accountTools  = []string{"delete_telegram_account", "disconnect_telegram_account", "get_my_notification_preferences", "install_assistant", "revoke_local_bridge_device", "set_my_notification_preferences", "set_send_consent", "update_install"}
 	lookupTools   = []string{"get_user_audit_log", "list_telegram_identities"}
 	adminWrites   = []string{"mint_worker_token", "provision_local_account", "revoke_telegram_session", "revoke_worker_token", "set_account_mode", "set_account_send", "set_telegram_access"}
 	broadcastOnly = []string{"cancel_broadcast", "get_broadcast", "list_broadcasts", "prepare_broadcast"}

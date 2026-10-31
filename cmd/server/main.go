@@ -29,6 +29,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/agent/turn"
 	"github.com/mctlhq/mctl-telegram/internal/agentapi"
 	"github.com/mctlhq/mctl-telegram/internal/assistant"
+	"github.com/mctlhq/mctl-telegram/internal/assistantinstall"
 	"github.com/mctlhq/mctl-telegram/internal/assistantregistry"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
@@ -761,6 +762,9 @@ func main() {
 		slog.Info("assistant registry", "enabled", cfg.AssistantRegistryEnabled, "mctl_api_base_url", cfg.MCTLAPIBaseURL)
 		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Put("/api/admin/agent/install",
 			agentapi.NewAdminAgentInstallHandler(store, catalog, registry))
+		// The same install service behind the owner's own MCP tools
+		// (list_assistants, install_assistant, update_install).
+		mcpSrv.WithAssistants(assistantinstall.New(store, catalog, registry))
 		agentProvider := selectAgentProvider(cfg, store, workerTokenRevocationCache)
 		if jobProvider := selectAgentJobProvider(cfg, store, workerTokenRevocationCache); jobProvider != nil {
 			agentProvider = chainProvider{agentProvider, jobProvider}
