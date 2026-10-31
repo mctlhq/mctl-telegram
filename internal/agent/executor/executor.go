@@ -848,7 +848,10 @@ func (e *Executor) locateDelivered(ctx context.Context, action db.AgentAction, c
 	if !ok {
 		return 0
 	}
-	id, found, err := locator.LocateDelivered(ctx, action.UserID, conv.PeerTGID, conv.PeerAccessHash, text, action.CreatedAt)
+	// From the reservation (or approval), not the draft's creation: a draft
+	// can wait for approval for hours, and an identical message sent in
+	// that time would make the lookup ambiguous.
+	id, found, err := locator.LocateDelivered(ctx, action.UserID, conv.PeerTGID, conv.PeerAccessHash, text, action.UpdatedAt)
 	if err != nil {
 		slog.Warn("executor: could not look up the delivered message id",
 			"action_id", action.ID, "user_id", action.UserID, "err", err)
