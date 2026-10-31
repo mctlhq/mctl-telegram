@@ -62,9 +62,10 @@ leave the repository. The recruiter agent's points at
 `deploy/agent-worker/system-prompt.txt`, the file the Mac mini worker's
 self-update also installs, so there is one copy of that prompt. Because a
 `draft` definition's instructions can change under the same version, the
-catalog computes a digest of the definition file and its instructions; the
-claim response reports it next to `name@version`, so a job's behaviour is
-traceable to exact content, not only to a version.
+catalog computes a digest of the definition with its instructions (see
+[Registry form](#registry-form)); the claim response reports it next to
+`name@version`, so a job's behaviour is traceable to exact content, not
+only to a version.
 
 **execution** is reserved: the worker's model, budget and timeout still come
 from its own environment. A definition that sets any of them cannot be
@@ -329,6 +330,61 @@ A definition must still name every tool, each once: naming both a tool and
 its alias is an error, and a subset is `ErrUnsupported`. The agent API does
 not check which tools a job may call, so a subset would look enforced while
 it is not; tool restriction needs that server-side check first.
+
+## Registry form
+
+The registry (mctl-api, P3) stores an assistant in its **materialized**
+form: the definition document with `spec.instructions.path` replaced by
+`spec.instructions.text`, the full system prompt, encoded as canonical JSON:
+object keys sorted by byte order, no whitespace between tokens, strings
+escaped only where JSON requires it (`"`, `\`, control characters; `<`, `>`
+and `&` stay literal), integers without a fraction, UTF-8, no trailing
+newline. An authored definition
+in this repository names its instructions by path; a materialized one
+carries the text and no path, so it is complete without the repository.
+
+- **Digest.** `sha256:` and the hex SHA-256 of the canonical materialized
+  JSON. Re-encoding any copy of the document (pretty-printed, keys in
+  another order) gives the same bytes and the same digest, so mctl-telegram
+  recomputes it from a fetched copy instead of trusting a stored value. The
+  claim's `assistant_digest` and the profile's
+  `assistant_definition_digest` use this form. (Before P3.2 the digest was
+  taken over the authored YAML and the instructions file; the value for
+  `hr-recruiter@0.1.0` changed once with that switch.)
+- **Building.** `go run ./cmd/assistant-materialize -out dist/assistants`
+  writes `<name>-<version>.json` for every catalog assistant and prints its
+  digest, after checking that each document parses back
+  (`assistant.ParseMaterialized`) to the same digest. CI runs it on every
+  build and keeps the output as the `assistants-materialized` artifact.
+- **Visibility.** P3 serves `public` and `admin` only. `tenant` needs a
+  tenant-binding model that does not exist yet, so a tenant-visible
+  definition is refused when the catalog loads and when a materialized
+  document is parsed.
+- **Status and lifecycle.** The registry's own lifecycle has three states
+  (`published`, `deprecated`, `disabled`), and a new version is always
+  `published`. Whether the public catalog offers an assistant is decided by
+  the definition's `metadata.visibility` (only `public`) and
+  `metadata.status` (not `draft`); the registry lifecycle then decides
+  whether it can be installed (`published`), kept by an existing pin
+  (`deprecated`), or must stop (`disabled`).
+- **Active versions are immutable.** A `draft` may change under its
+  version; an `active` one may not, since installs pin it and the registry
+  holds it. `TestActiveVersionsAreImmutable` pins every active version's
+  digest, so editing an active definition or its instructions (for
+  `hr-recruiter`, `deploy/agent-worker/system-prompt.txt`) fails CI until the
+  change ships as a new version. `hr-recruiter@0.1.0` is `public` and
+  `active` since P3.2.
+- **Staleness (P3.4).** An installed definition is kept in the database
+  with its install revision, so a restart works without the registry. Its
+  lifecycle is refreshed every 5 minutes; `disabled` stops new jobs within
+  that interval. If the registry cannot be read, the last known lifecycle
+  stands for 24 hours, after which it is unknown, unknown is not
+  `published`, new jobs stop and the owner is told.
+- **Publishing.** In P3 it is manual and transitional: the owner publishes
+  the CI artifact through the human-admin mctl-api tool, with the digest as
+  the version's `contentHash`. A narrow publisher principal that may only
+  publish immutable `TelegramAssistant` versions from this repository is a
+  follow-up.
 
 ## Customization tiers
 

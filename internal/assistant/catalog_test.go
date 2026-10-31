@@ -1,7 +1,9 @@
 package assistant
 
 import (
+	"encoding/json"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -133,5 +135,129 @@ func TestDigestPinsInstructions(t *testing.T) {
 	}
 	if a != load("Rules A.") {
 		t.Fatal("digest not deterministic")
+	}
+}
+
+// The registry form round-trips: parsing an entry's materialized document,
+// in any formatting, gives the same digest, instructions and definition,
+// so a copy fetched from the registry can be checked against an install.
+func TestMaterializedRoundTrip(t *testing.T) {
+	c, err := LoadCatalog(mctltelegram.Catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, _ := c.Lookup("hr-recruiter", "0.1.0")
+	if !strings.HasPrefix(e.Digest, "sha256:") || !strings.Contains(string(e.Materialized), `"text":`) ||
+		strings.Contains(string(e.Materialized), `"path":`) {
+		t.Fatalf("materialized form: digest %q, doc %.200s", e.Digest, e.Materialized)
+	}
+	var doc any
+	if err := json.Unmarshal(e.Materialized, &doc); err != nil {
+		t.Fatal(err)
+	}
+	pretty, err := json.MarshalIndent(doc, "", "    ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, raw := range map[string][]byte{"as built": e.Materialized, "reformatted": pretty} {
+		got, err := ParseMaterialized(raw)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got.Digest != e.Digest || got.Instructions != e.Instructions ||
+			got.Definition.Metadata.Version != e.Definition.Metadata.Version {
+			t.Fatalf("%s: digest %s vs %s", name, got.Digest, e.Digest)
+		}
+		if Render(got, nil) != Render(e, nil) {
+			t.Fatalf("%s: rendered prompt differs", name)
+		}
+	}
+	// A changed instruction is a different digest.
+	edited := strings.Replace(string(e.Materialized), `"text":"`, `"text":"X`, 1)
+	if got, err := ParseMaterialized([]byte(edited)); err != nil || got.Digest == e.Digest {
+		t.Fatalf("edited instructions: digest %v, err %v", got, err)
+	}
+}
+
+func TestMaterializedRejects(t *testing.T) {
+	c, err := LoadCatalog(mctltelegram.Catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, _ := c.Lookup("hr-recruiter", "0.1.0")
+	m := string(e.Materialized)
+	cases := map[string]string{
+		"tenant visibility": strings.Replace(m, `"visibility":"public"`, `"visibility":"tenant"`, 1),
+		"path not text":     strings.Replace(m, `"instructions":{"text":`, `"instructions":{"path":"x.txt","text":`, 1),
+		"blank text":        regexpText.ReplaceAllString(m, `"instructions":{"text":"   "}`),
+	}
+	for name, raw := range cases {
+		if raw == m {
+			t.Fatalf("%s: edit did not apply", name)
+		}
+		if _, err := ParseMaterialized([]byte(raw)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	tenant := strings.Replace(string(readFile(t, "assistant.yaml")), "visibility: public", "visibility: tenant", 1)
+	if _, err := LoadCatalog(fstest.MapFS{
+		"assistants/hr-recruiter/assistant.yaml": {Data: []byte(strings.Replace(tenant, "path: ../../deploy/agent-worker/system-prompt.txt", "path: p.txt", 1))},
+		"assistants/hr-recruiter/p.txt":          {Data: []byte("Rules.")},
+	}); err == nil {
+		t.Fatal("catalog accepted a tenant-visible assistant")
+	}
+}
+
+var regexpText = regexp.MustCompile(`"instructions":\{"text":"(?:[^"\\]|\\.)*"\}`)
+
+// activeDigests pins the content of every active catalog version. An active
+// version is what installs pin and what the registry holds, so its
+// definition and instructions may not change under the same version: a
+// change to either, including deploy/agent-worker/system-prompt.txt for
+// hr-recruiter, needs a new version (and a new line here), not an edit.
+var activeDigests = map[string]string{
+	"hr-recruiter@0.1.0": "sha256:875d7b3225a81ed9f1b9d8624cacd8aea182260fc8b5f8cbc38f6b6638fb8bc1",
+}
+
+func TestActiveVersionsAreImmutable(t *testing.T) {
+	c, err := LoadCatalog(mctltelegram.Catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range c.Entries() {
+		if e.Definition.Metadata.Status != "active" {
+			continue
+		}
+		key := e.Definition.Metadata.Name + "@" + e.Definition.Metadata.Version
+		want, ok := activeDigests[key]
+		if !ok {
+			t.Errorf("%s is active but its digest is not pinned: add %q to activeDigests", key, e.Digest)
+			continue
+		}
+		if e.Digest != want {
+			t.Errorf("%s changed under the same version (digest %s, pinned %s): release the change as a new version", key, e.Digest, want)
+		}
+	}
+}
+
+// The canonical form leaves <, > and & literal, as non-Go JSON encoders do,
+// so another implementation can reproduce the digest.
+func TestCanonicalJSONKeepsHTMLCharacters(t *testing.T) {
+	got, err := canonicalJSON([]byte(`{"b": "x < y && z > w", "a": 1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"a":1,"b":"x < y && z > w"}`; string(got) != want {
+		t.Fatalf("canonicalJSON = %s, want %s", got, want)
+	}
+}
+
+// An authored definition must name its instructions by path; inline text
+// is the materialized form only.
+func TestCatalogRejectsInlineInstructions(t *testing.T) {
+	def := strings.Replace(string(readFile(t, "assistant.yaml")),
+		"path: ../../deploy/agent-worker/system-prompt.txt", "text: Inline rules.", 1)
+	if _, err := LoadCatalog(fstest.MapFS{"assistants/hr-recruiter/assistant.yaml": {Data: []byte(def)}}); err == nil {
+		t.Fatal("catalog accepted inline instructions in an authored definition")
 	}
 }

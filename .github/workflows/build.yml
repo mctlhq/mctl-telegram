@@ -219,6 +219,24 @@ jobs:
           go-version: "1.26.10"
       - run: go run ./cmd/productupdates gate
 
+  # The registry form of every catalog assistant (#1019): materialized
+  # canonical JSON with instructions inlined, checked to parse back to the
+  # same digest. Publishing it to the mctl-api registry is a human-admin
+  # step that takes this artifact as input.
+  assistant-materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.10"
+      - run: go run ./cmd/assistant-materialize -out dist/assistants
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: assistants-materialized
+          path: dist/assistants/
+          if-no-files-found: error
+
   govulncheck:
     runs-on: ubuntu-latest
     steps:
