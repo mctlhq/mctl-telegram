@@ -404,7 +404,7 @@ func (p *TenantProvider) PublicProfile(ctx context.Context, userID int64, engage
 	if err != nil {
 		return nil, err
 	}
-	return agentProfile(d, engaged), nil
+	return d.AgentView(engaged), nil
 }
 
 // MatchProtected reports the strongest disclosure-protected field whose
@@ -418,8 +418,27 @@ func (p *TenantProvider) MatchProtected(ctx context.Context, userID int64, text,
 	if err != nil {
 		return "", false, false, err
 	}
+	key, never, matched = d.MatchProtected(text, inbound, engaged)
+	return key, never, matched, nil
+}
+
+// AgentView is the view of d an agent may see in a conversation whose
+// owner-engagement state is engaged, as TenantProvider.PublicProfile returns
+// it for a stored profile. internal/agenteval serves it from the suite's
+// profile, which is never stored.
+func (d Data) AgentView(engaged bool) map[string]any { return agentProfile(d, engaged) }
+
+// MatchProtected is TenantProvider.MatchProtected on a profile already in
+// hand: the strongest disclosure-protected field of d whose value appears in
+// text, and whether it is a never field.
+func (d Data) MatchProtected(text, inbound string, engaged bool) (key string, never, matched bool) {
 	key, level, matched := matchProtected(d, text, inbound, engaged)
-	return key, level == DisclosureNever, matched, nil
+	return key, level == DisclosureNever, matched
+}
+
+// MatchRestricted is Provider.MatchRestricted on a profile already in hand.
+func (d Data) MatchRestricted(text string) (key string, neverAutoSend, approvalRequired, matched bool) {
+	return matchRestricted(d, text)
 }
 
 // MatchRestricted evaluates restricted values for the action's tenant. A
