@@ -114,6 +114,23 @@ var defs = `
 <meta name="twitter:title" content="{{.Title}}">
 <meta name="twitter:description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarize unread chats, draft replies, and search your history — no extra apps.{{end}}">
 <meta name="twitter:image" content="{{.PublicBaseURL}}/og.png">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "MCTL Assistant",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Cloud",
+  "url": "https://tg.mctl.ai",
+  "description": "Connect Telegram to Claude, ChatGPT, or any AI assistant via MCP",
+  "provider": {
+    "@type": "Organization",
+    "@id": "https://mctl.ai/#organization",
+    "name": "MCTL",
+    "url": "https://mctl.ai"
+  }
+}
+</script>
 <style>` + tokensCSS + siteCSS + `</style>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -149,6 +166,8 @@ var defs = `
     <div class="mctl-site-container mctl-site-footer__inner">
     <a class="brand" href="/" aria-label="MCTL home">` + wordmark + `</a>
     <nav class="mctl-site-footer__links" aria-label="Footer">
+      <a href="https://mctl.ai" target="_blank" rel="noopener">Platform</a>
+      <a href="https://alice.mctl.ai" target="_blank" rel="noopener">Alice MCP</a>
       <a href="/">Home</a>
       <a href="/docs">Docs</a>
       <a href="/platforms">Platforms</a>
