@@ -454,9 +454,14 @@ no `telegram_id` argument. They refuse when `AGENT_ENABLED` is off.
   upgrades through the same path as an install. The client never reads
   private values back to change one setting.
 
-Both writes are compare-and-set when a revision is given: the profile
-UPDATE carries `install_revision = expected` in its `WHERE`, inside the same
-transaction as the definition snapshot, and a miss changes nothing. They
+Every install, the admin route's included, is a compare-and-set: the
+profile UPDATE carries `install_revision = expected` in its `WHERE`, inside
+the same transaction as the definition snapshot, and a miss changes nothing.
+`expected` is the caller's `expected_revision` or, without one, the
+revision the service read when it decided the lifecycle and visibility
+gates, so a concurrent install cannot slip under them. An account with no
+agent profile yet reports `install_revision` 1, the revision its profile
+starts at. They
 answer `{assistant, version, install_revision, settings}`, where `settings`
 is what the install resolved to (mode, paused, listening, disclosure,
 limits, auto and never intents, working hours, audience exclusions, sender

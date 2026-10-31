@@ -182,11 +182,14 @@ func TestListAssistants_EmbeddedCatalogWithoutValuesOrNotes(t *testing.T) {
 	}
 	var before listAssistantsResult
 	decodeToolJSON(t, res, &before)
-	if before.Source != assistantinstall.SourceEmbedded || before.Mine.Installed || before.Mine.Assistant != "" {
+	if before.Source != assistantinstall.SourceEmbedded || before.Mine.Installed || before.Mine.Assistant != "" ||
+		before.Mine.InstallRevision != 1 {
 		t.Fatalf("before install: %+v", before)
 	}
 
-	inst := f.install(map[string]any{"ownerNotes": markNotes})
+	// A fresh account's reported revision is one install_assistant
+	// accepts as expected_revision, as the description says to pass it.
+	inst := f.install(map[string]any{"ownerNotes": markNotes, "expected_revision": before.Mine.InstallRevision})
 	res, text = f.call(f.ctx, f.list, "list_assistants", nil)
 	if res.IsError {
 		t.Fatalf("list refused: %s", text)

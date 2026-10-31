@@ -96,6 +96,9 @@ type Service struct {
 	Registry *assistantregistry.Client
 	// Now is the clock for install times; nil means time.Now.
 	Now func() time.Time
+	// beforeWrite, when set, runs between the read of the current install
+	// and the UPDATE; tests use it to race a concurrent install.
+	beforeWrite func()
 }
 
 // New returns a Service. registry may be nil.
@@ -212,8 +215,9 @@ func invalid(err error) *Error {
 
 // CommitOptions qualify one commit.
 type CommitOptions struct {
-	// ExpectedRevision, when set, makes the commit a compare-and-set on
-	// the account's install revision.
+	// ExpectedRevision is the install revision the caller read. Every
+	// commit is a compare-and-set; without this, it is against the
+	// revision Commit itself reads.
 	ExpectedRevision *int64
 	// SelfService is set when the account's owner installs for themselves
 	// (MCP, web): only public, non-draft definitions are offered, except
@@ -252,6 +256,15 @@ func (s *Service) Commit(ctx context.Context, userID int64, p *Prepared, opts Co
 	if opts.ExpectedRevision != nil && current.InstallRevision != *opts.ExpectedRevision {
 		return nil, conflict(current.InstallRevision)
 	}
+	// The gates below are decided from current, so the UPDATE must find
+	// the install exactly as read: without a caller's revision the one
+	// just read is the compare-and-set, and a concurrent install in
+	// between answers a conflict instead of reinstalling a deprecated or
+	// private version the account no longer runs.
+	cas := current.InstallRevision
+	if opts.ExpectedRevision != nil {
+		cas = *opts.ExpectedRevision
+	}
 	switching := current.Name != name
 	keeps := current.Installed && !switching && current.Version == version
 	if opts.SelfService && !keeps {
@@ -286,7 +299,7 @@ func (s *Service) Commit(ctx context.Context, userID int64, p *Prepared, opts Co
 		WorkingHours:            &r.WorkingHours,
 		AudienceExcludes:        &r.AudienceExcludes,
 		BumpInstallRevision:     true,
-		ExpectedInstallRevision: opts.ExpectedRevision,
+		ExpectedInstallRevision: &cas,
 		AssistantDigest:         &digest,
 		BlockedSenders:          &r.BlockedSenders,
 		SenderAllowlist:         &r.SenderAllowlist,
@@ -301,6 +314,9 @@ func (s *Service) Commit(ctx context.Context, userID int64, p *Prepared, opts Co
 		update.ResetInstalledAt = &installedAt
 	} else {
 		update.MarkInstalledAt = &installedAt
+	}
+	if s.beforeWrite != nil {
+		s.beforeWrite()
 	}
 	if s.Registry != nil {
 		err = s.Store.InstallAgentAssistant(ctx, userID, db.AssistantDefinition{
@@ -593,12 +609,17 @@ type Installed struct {
 	Installed bool
 }
 
+// firstInstallRevision is the revision a new agent profile starts at
+// (the install_revision column default).
+const firstInstallRevision = 1
+
 // Current reads what userID runs. An account with no agent profile has
-// nothing installed.
+// nothing installed and reports the revision its profile will start at, so
+// a client that passes it back as expected_revision succeeds.
 func (s *Service) Current(ctx context.Context, userID int64) (*Installed, error) {
 	ref, err := s.Store.GetAgentAssistantRef(ctx, userID)
 	if errors.Is(err, db.ErrAgentProfileNotFound) {
-		return &Installed{}, nil
+		return &Installed{InstallRevision: firstInstallRevision}, nil
 	}
 	if err != nil {
 		return nil, internal("failed to load current assistant", fmt.Errorf("current assistant: %w", err))
