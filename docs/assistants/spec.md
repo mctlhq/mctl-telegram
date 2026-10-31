@@ -408,6 +408,8 @@ carries the text and no path, so it is complete without the repository.
   tenant-binding model that does not exist yet, so a tenant-visible
   definition is refused when the catalog loads and when a materialized
   document is parsed.
+  Account-private forks (P4) are not registry entries; see
+  [adr-forks.md](adr-forks.md).
 - **Status and lifecycle.** The registry's own lifecycle has three states
   (`published`, `deprecated`, `disabled`), and a new version is always
   `published`. Whether the public catalog offers an assistant is decided by
@@ -702,7 +704,7 @@ so they have no semantics the MCP tools do not have.
 |---|---|---|
 | T0 Install | picks a catalog assistant, fills the required values | schema validation |
 | T1 Tune | mode, tiers (tighten), limits, audience, schedule, disclosure, `ownerNotes` | schema and definition checks |
-| T2 Fork | own instructions, stricter intents, fewer tools, lower limits on a catalog base (P4.2, see [Forks](#forks)); records are the base's until P4.4 | private visibility; observe mode only until P4.3 promotion |
+| T2 Fork | own instructions, stricter intents, a tool subset and lower limits on a catalog base (P4.2, see [Forks](#forks)); records inherited ([adr-forks.md](adr-forks.md)) | private visibility; observe mode only until P4.3 promotion |
 | T3 Connectors | adds MCP servers (calendar, CRM), each tool with a tier, approve by default | admin review |
 | T4 Own runtime | runs their own worker against the agent job API (claim, propose, complete) | account-scoped token; policy enforced server-side |
 
@@ -725,8 +727,11 @@ so they have no semantics the MCP tools do not have.
 - **P3:** definitions published to the mctl-api agent registry, a
   per-account install binding, MCP tools `list_assistants`,
   `install_assistant`, `update_install`, and a page on tg.mctl.ai.
-- **P4:** forks (P4.2 done, #1043: see [Forks](#forks); promotion is P4.3,
-  #1044), user connectors with review, own-runtime documentation.
+- **P4:** forks, user connectors with review, own-runtime documentation.
+  The fork model and the storage of private definitions (in mctl-telegram,
+  encrypted per account) are decided in [adr-forks.md](adr-forks.md)
+  (P4.1, #1042; accepted 2026-10-31). Forks are implemented (P4.2, #1043:
+  see [Forks](#forks)); promotion to guarded is P4.3 (#1044).
 
 ## How this compares
 

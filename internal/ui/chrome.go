@@ -33,6 +33,7 @@ package ui
 import (
 	_ "embed"
 	"html/template"
+	"sync/atomic"
 )
 
 //go:embed assets/tokens.css
@@ -61,7 +62,7 @@ var toggleJS string
 type Data struct {
 	Title         string // <title> text
 	Description   string // social-share / meta description; falls back to a default when empty
-	NavActive     string // "home" | "docs" | "platforms" | "security" | "privacy" | "terms" | "demo" | "manage" | ""
+	NavActive     string // "home" | "docs" | "platforms" | "assistants" | "security" | "privacy" | "terms" | "demo" | "manage" | ""
 	PublicBaseURL string // shown in the footer, and used as the og:url / og:image origin
 	ShowManage    bool   // set true only when /telegram/connect/manage is mounted (local-jwt auth mode)
 	CanonicalPath string // when set, emits <link rel="canonical"> at PublicBaseURL+CanonicalPath
@@ -85,7 +86,7 @@ const AnalyticsScript = `<script defer src="https://stats.mctl.ai/insights.js" d
 // tokens.css mirrors the same version's values and site.css is mirrored
 // verbatim, for the strict-CSP pages and as a fallback when the CDN is
 // unreachable.
-const DesignVersion = "0.15.0"
+const DesignVersion = "0.18.0"
 
 // wordmark is the MCTL brand mark: accent "M" + "CTL", as LogoDefault.vue
 // (mctl.ai) and BrandMark.vue (docs.mctl.ai) draw it.
@@ -131,6 +132,7 @@ var defs = `
       <a href="/"{{if eq .NavActive "home"}} class="active"{{end}}>Home</a>
       <a href="/docs"{{if eq .NavActive "docs"}} class="active"{{end}}>Docs</a>
       <a href="/platforms"{{if eq .NavActive "platforms"}} class="active"{{end}}>Platforms</a>
+      {{if assistantsMounted}}<a href="/assistants"{{if eq .NavActive "assistants"}} class="active"{{end}}>Assistants</a>{{end}}
       <a href="/demo"{{if eq .NavActive "demo"}} class="active"{{end}}>Demo</a>
       <a href="/security"{{if eq .NavActive "security"}} class="active"{{end}}>Security</a>
       <a href="/privacy"{{if eq .NavActive "privacy"}} class="active"{{end}}>Privacy</a>
@@ -152,7 +154,8 @@ var defs = `
       <a href="/">Home</a>
       <a href="/docs">Docs</a>
       <a href="/platforms">Platforms</a>
-      <a href="/demo">Demo</a>
+      {{if assistantsMounted}}<a href="/assistants">Assistants</a>
+      {{end}}<a href="/demo">Demo</a>
       <a href="/security">Security</a>
       <a href="/privacy">Privacy</a>
       <a href="/terms">Terms</a>
@@ -246,8 +249,19 @@ const AuthCSS = `
   .url { font-family: var(--font-mono); font-size: 13px; word-break: break-all; color: var(--accent-highlight); }
 `
 
+// assistantsMounted records whether the server mounted /assistants (it only
+// does with AGENT_ENABLED), so the header and footer link to it only where it
+// exists. It is set once at startup, before any page renders, and read at
+// render time, so every page picks it up without each handler carrying it.
+var assistantsMounted atomic.Bool
+
+// SetAssistantsMounted tells the shared chrome whether /assistants is served.
+func SetAssistantsMounted(on bool) { assistantsMounted.Store(on) }
+
 // base carries the shared defines; pages clone it and add their own body.
-var base = template.Must(template.New("ui").Parse(defs))
+var base = template.Must(template.New("ui").Funcs(template.FuncMap{
+	"assistantsMounted": assistantsMounted.Load,
+}).Parse(defs))
 
 // New returns a template named name whose body is page and which can reference
 // the shared {{template "ui_*"}} defines. Execute it with ExecuteTemplate(w, name, data).
