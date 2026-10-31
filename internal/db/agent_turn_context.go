@@ -113,9 +113,9 @@ func unsentTurnSources(ctx context.Context, q queryer, userID int64, original ev
 	var sent int
 	err = q.QueryRowContext(ctx,
 		`SELECT 1 FROM agent_actions
-		  WHERE user_id = $1 AND job_id = $2 AND action_type = $3 AND status IN ($4, $5)
+		  WHERE user_id = $1 AND job_id = $2 AND action_type = $3 AND status IN ($4, $5, $6)
 		  LIMIT 1`,
-		userID, head, ActionTypeReply, ActionExecuting, ActionExecuted,
+		userID, head, ActionTypeReply, ActionExecuting, ActionExecuted, ActionDeliveryUnknown,
 	).Scan(&sent)
 	if err == nil {
 		return nil, nil
@@ -169,9 +169,9 @@ func answeredThroughContext(ctx context.Context, q queryer, userID, convID, head
 		    AND EXISTS (
 		        SELECT 1 FROM agent_actions a
 		         WHERE a.user_id = j.user_id AND a.job_id = j.id
-		           AND a.action_type = $4 AND a.status IN ($5, $6)
+		           AND a.action_type = $4 AND a.status IN ($5, $6, $7)
 		    )`,
-		userID, convID, head, ActionTypeReply, ActionExecuting, ActionExecuted)
+		userID, convID, head, ActionTypeReply, ActionExecuting, ActionExecuted, ActionDeliveryUnknown)
 	if err != nil {
 		return false, fmt.Errorf("load answered turn contexts: %w", err)
 	}

@@ -32,6 +32,17 @@ type fakeSender struct {
 	// delivered holds random_ids Telegram already has; a send reusing one
 	// is refused the way RANDOM_ID_DUPLICATE is (#1029).
 	delivered map[int64]bool
+	// landThenFail delivers this many upcoming calls but answers each with
+	// a transport error, the way a timed-out RPC that reached Telegram looks.
+	landThenFail int
+	// locateID is what LocateDelivered reports for a duplicate; 0 means
+	// the history lookup found no single match.
+	locateID    int64
+	locateCalls int
+	locateSince time.Time
+	// onSend runs inside every send call, before its outcome, without the
+	// lock held: a hook for what other components do meanwhile.
+	onSend func()
 }
 
 type sendCall struct {
@@ -40,11 +51,22 @@ type sendCall struct {
 }
 
 func (f *fakeSender) SendWithRandomID(_ context.Context, userID, peerTGID, peerAccessHash, randomID int64, text string) (int64, error) {
+	if f.onSend != nil {
+		f.onSend()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, sendCall{userID, peerTGID, peerAccessHash, randomID, text})
 	if f.delivered[randomID] {
 		return 0, fmt.Errorf("fake send: %w", ErrAlreadyDelivered)
+	}
+	if f.landThenFail > 0 {
+		f.landThenFail--
+		if f.delivered == nil {
+			f.delivered = map[int64]bool{}
+		}
+		f.delivered[randomID] = true
+		return 0, errSendFailed
 	}
 	if f.failNext > 0 {
 		f.failNext--
@@ -52,6 +74,14 @@ func (f *fakeSender) SendWithRandomID(_ context.Context, userID, peerTGID, peerA
 	}
 	f.nextMsgID++
 	return f.nextMsgID, nil
+}
+
+func (f *fakeSender) LocateDelivered(_ context.Context, _, _, _ int64, _ string, since time.Time) (int64, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.locateCalls++
+	f.locateSince = since
+	return f.locateID, f.locateID != 0, nil
 }
 
 var errSendFailed = &sendErr{"send failed"}
