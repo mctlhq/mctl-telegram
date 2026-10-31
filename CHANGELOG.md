@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.112.0](https://github.com/mctlhq/mctl-telegram/compare/0.111.0...0.112.0) (2026-10-31)
+
+
+### Features
+
+* **agent:** run each account's assistant from the catalog ([03e50f1](https://github.com/mctlhq/mctl-telegram/commit/03e50f1e95578715db61a01532b6ce6e9297b6f2))
+* **agent:** run each account's assistant from the catalog ([b5e5124](https://github.com/mctlhq/mctl-telegram/commit/b5e51248e63760c22899abf8f561f800ffc4c5af))
+
+
+### Bug Fixes
+
+* **agent:** neutralise owner-note brackets, keep empty claims for new accounts ([2b50077](https://github.com/mctlhq/mctl-telegram/commit/2b50077fbdab2c4c48bb5c861f017c8c94bf14ed))
+* **agent:** never voice owner preferences in the first person ([c28ec05](https://github.com/mctlhq/mctl-telegram/commit/c28ec05cedec311530def3d5a5c0bb9d96da84ae))
+* **agent:** never voice owner preferences in the first person ([aa17d9d](https://github.com/mctlhq/mctl-telegram/commit/aa17d9d58ba088b4346b698e10dfb9fb49320371)), closes [#998](https://github.com/mctlhq/mctl-telegram/issues/998)
+* **assistants:** hold installs to runtime defaults and required wording ([e77f0c0](https://github.com/mctlhq/mctl-telegram/commit/e77f0c0b15f03c4deb82b48bad127a22c231b40f))
+* **assistants:** validate disclosure overrides of omitted variables ([7b9eb49](https://github.com/mctlhq/mctl-telegram/commit/7b9eb49ce9edbcdc01c5310d6fabef42d40b2c29))
+* **listener:** owner edit of an agent reply delivered as a new message ([08143d4](https://github.com/mctlhq/mctl-telegram/commit/08143d4f691c66cf0e03df9b8cdd03058798bd44))
+* **listener:** owner edit of an agent reply delivered as a new message ([d25e36c](https://github.com/mctlhq/mctl-telegram/commit/d25e36cc73fb14e4d420f9b37a1f829c7d928d8a))
+
 ## [0.111.0](https://github.com/mctlhq/mctl-telegram/compare/0.110.0...0.111.0) (2026-10-31)
 
 
