@@ -62,6 +62,14 @@ var ErrSendQueuedForRetry = errors.New("send failed transiently, queued for auto
 // sender (#949, #950). Terminal: the action is denied, nothing was sent.
 var ErrSourceSuperseded = errors.New("source message edited or deleted, draft withdrawn")
 
+// ErrAlreadyDelivered is what a Sender must wrap when Telegram refuses a send
+// because its random_id was already used (RANDOM_ID_DUPLICATE). The executor
+// only ever reuses a random_id for the same action, so the refusal means an
+// earlier attempt for this action reached Telegram: the message was
+// delivered and must not be retried (#1029). The server does not return the
+// original message, so its id stays unknown.
+var ErrAlreadyDelivered = errors.New("telegram already has a message with this random_id")
+
 // Sender is the narrow interface the executor needs to actually deliver a
 // reply. Implemented in cmd/server/agentwiring.go over telegram.ClientPool +
 // telegram.SendToInputPeerWithRandomID; kept as an interface here so this
@@ -76,7 +84,8 @@ type Sender interface {
 	// with PEER_ID_INVALID, so a Sender implementation must build the peer
 	// directly from this value rather than re-resolving the bare peerTGID
 	// through a lookup that has no way to recover a hash it was never given.
-	// Returns the server-assigned Telegram message id.
+	// Returns the server-assigned Telegram message id. A RANDOM_ID_DUPLICATE
+	// refusal must be returned wrapped in ErrAlreadyDelivered.
 	SendWithRandomID(ctx context.Context, userID, peerTGID, peerAccessHash, randomID int64, text string) (int64, error)
 }
 
@@ -689,6 +698,16 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 		}
 	}
 	tgMessageID, err := e.Sender.SendWithRandomID(ctx, action.UserID, conv.PeerTGID, conv.PeerAccessHash, action.SendRandomID, text)
+	if errors.Is(err, ErrAlreadyDelivered) {
+		// An earlier attempt with this random_id reached Telegram, so the
+		// reply was delivered. Retrying can never succeed (Telegram answers
+		// every reuse the same way), and leaving the row in executing would
+		// retry it on every sweep forever (#1029). Record it as sent with an
+		// unknown message id (stored as NULL).
+		slog.Warn("executor: recovery retry found the send already delivered",
+			"action_id", action.ID, "user_id", action.UserID)
+		tgMessageID, err = 0, nil
+	}
 	if err != nil {
 		return fmt.Errorf("retry send: %w", err)
 	}
