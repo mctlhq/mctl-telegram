@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 // SendToInputPeer sends a plain text message to an already-resolved peer and
@@ -46,7 +48,7 @@ func SendToInputPeerWithRandomID(ctx context.Context, c *telegram.Client, userID
 		NoWebpage: true,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("send: %w", err)
+		return 0, classifySendError(err)
 	}
 	messageID := extractMessageID(updates)
 	// Mark the server-assigned id before returning, matching SendMessage in
@@ -55,6 +57,20 @@ func SendToInputPeerWithRandomID(ctx context.Context, c *telegram.Client, userID
 	// through this path is not misread as a manual owner takeover.
 	notifyAgentSent(userID, int64(messageID))
 	return messageID, nil
+}
+
+// ErrRandomIDDuplicate marks a send Telegram refused because its random_id
+// was already used: an earlier send with that id was delivered (#1029).
+var ErrRandomIDDuplicate = errors.New("random_id already used")
+
+// classifySendError wraps a messages.sendMessage failure, tagging
+// RANDOM_ID_DUPLICATE with ErrRandomIDDuplicate so callers can tell "already
+// delivered" apart from a failed send.
+func classifySendError(err error) error {
+	if tgerr.Is(err, "RANDOM_ID_DUPLICATE") {
+		return fmt.Errorf("send: %w: %w", ErrRandomIDDuplicate, err)
+	}
+	return fmt.Errorf("send: %w", err)
 }
 
 // SendToSelf sends a message to the account's own Saved Messages. This is the
