@@ -246,10 +246,18 @@ the context filter: protected values never reach the model. Behind it,
 protected value, or one comma/semicolon-separated part of it, of at least
 four characters, case-insensitively and on word boundaries. Paraphrases,
 translations and summaries of long free text are not caught. The match is
-reported by field key only, never by value. Because preferences often hold
-ordinary words (`hybrid`, `remote`), a cold sender's reply that uses one
-goes to approval: this fails safe, at the cost of extra approvals. A
-possible follow-up is to ignore a value the peer itself already wrote.
+reported by field key only, never by value. Preferences often hold
+ordinary words (`hybrid`, `remote`), so a part of an `after_owner_engaged`
+value that the peer itself wrote in the turn being answered (any message
+coalesced into it) is not counted (#992): repeating a recruiter's own words
+discloses nothing, and the model has not seen those fields before
+engagement, so it cannot confirm them from the profile either. Parts the
+peer did not write still count, and `never` fields get no such exemption.
+The inbound text is read from the action's job; a draft without a job, or a
+turn whose bodies were already cleared by retention, gets no exemption, and
+a failed read fails the check rather than skipping it. The accepted residual
+risk is a sender asking "are you open to X?" and the agent answering "X"
+without the profile behind it.
 
 **Manipulation alerts.** A `send_owner_summary` with intent
 `assistant_manipulation` has its text replaced by the fixed notice "A
@@ -373,7 +381,9 @@ Messages one way: nothing the owner writes there comes back to the agent.
 The only owner actions are `/mctl approve|reject <code>` on a draft that
 awaits approval, the other `/mctl` commands, and writing to the sender in
 the chat directly, which marks the conversation taken over and stops the
-agent there.
+agent there. Editing one of the agent's own replies in the chat counts as
+writing to the sender: an edit is never treated as the echo of an agent
+send (#993).
 
 - The prompt tells the model that the owner cannot reply to it, so it must
   not ask the owner to send answers or "tell me what to say", and that it
@@ -393,7 +403,7 @@ An owner-to-agent instruction path (for example `/mctl say <id> <text>`)
 would be new policy surface and is not part of this change. The owner
 decided on 2026-10-31 not to build it before production (#889).
 
-### Wording of owner notices (#988, #989)
+### Wording of owner notices (#988, #989, #994)
 
 - The prompt has the model refer to the sender and anyone else by name or as
   "they". A name does not tell the agent anyone's pronouns, so summaries and
@@ -405,6 +415,10 @@ decided on 2026-10-31 not to build it before production (#889).
   per-minute limit, or a profile field repeated before the owner was in
   touch. A reason the mapping does not know is shown as stored. The model's
   text never goes into this line.
+- The alert for a reply withheld because autopilot is paused names the
+  conversation's own `/mctl continue <id>` and says only what is true of
+  the throttle: this alert is not repeated for 6 hours. Owner summaries are
+  not throttled by it (#994).
 
 ## Attachments in inbound messages (#948)
 

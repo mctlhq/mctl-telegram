@@ -100,8 +100,10 @@ type RestrictedFieldChecker interface {
 	// MatchProtected reports the strongest owner_profile field the agent
 	// may not disclose to this peer right now (#953) whose value appears in
 	// text: never is true for a field the owner marked never, false for an
-	// after_owner_engaged field while engaged is false.
-	MatchProtected(ctx context.Context, userID int64, text string, engaged bool) (key string, never, matched bool, err error)
+	// after_owner_engaged field while engaged is false. A fragment of an
+	// after_owner_engaged field that also appears in inbound, the peer's
+	// text in the turn being answered, is not a match (#992).
+	MatchProtected(ctx context.Context, userID int64, text, inbound string, engaged bool) (key string, never, matched bool, err error)
 }
 
 // Executor holds the dependencies every method needs.
@@ -732,7 +734,11 @@ func (e *Executor) protectedField(ctx context.Context, action db.AgentAction, co
 	if e.Profile == nil || action.ActionType != db.ActionTypeReply {
 		return nil, nil
 	}
-	key, never, matched, err := e.Profile.MatchProtected(ctx, action.UserID, action.Payload, conv.OwnerEngaged(time.Now()))
+	inbound, err := e.Store.TurnInboundText(ctx, action.UserID, action.JobID)
+	if err != nil {
+		return nil, fmt.Errorf("load turn inbound text: %w", err)
+	}
+	key, never, matched, err := e.Profile.MatchProtected(ctx, action.UserID, action.Payload, inbound, conv.OwnerEngaged(time.Now()))
 	if errors.Is(err, db.ErrAgentOwnerProfileNotFound) {
 		return nil, nil
 	}

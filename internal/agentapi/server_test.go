@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -812,6 +813,14 @@ func TestProposeReply_PausedAccountQueuesOwnerAlert(t *testing.T) {
 		if strings.Contains(body, "415") || strings.Contains(body, "5551212") {
 			t.Fatalf("alert body contains phone-like content: %q", body)
 		}
+		// #994: the copy names the owner's own action for this conversation
+		// and does not read as an instruction to the system.
+		if want := fmt.Sprintf("/mctl continue %d", conv.ID); !strings.Contains(body, want) {
+			t.Fatalf("alert body lacks %q: %q", want, body)
+		}
+		if strings.Contains(body, "should be raised") {
+			t.Fatalf("alert body reads as a system instruction: %q", body)
+		}
 		return matches[0].ID
 	}
 	firstID := assertOneAlert()
@@ -1145,7 +1154,7 @@ type fakeOwnerProfileProvider struct {
 	err       error
 }
 
-func (f *fakeOwnerProfileProvider) MatchProtected(context.Context, int64, string, bool) (string, bool, bool, error) {
+func (f *fakeOwnerProfileProvider) MatchProtected(context.Context, int64, string, string, bool) (string, bool, bool, error) {
 	return "", false, false, f.err
 }
 

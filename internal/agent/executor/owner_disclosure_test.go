@@ -104,6 +104,41 @@ func TestExecutor_Disclosure_EngagedConversationSendsProtectedValue(t *testing.T
 	}
 }
 
+// TestExecutor_Disclosure_SenderWordsSendBeforeEngagement pins #992 at send
+// time: the executor's re-check reads the turn's inbound text from the
+// action's job, so a draft repeating the peer's own words is not stopped.
+func TestExecutor_Disclosure_SenderWordsSendBeforeEngagement(t *testing.T) {
+	exec, sender, store, uid, conv := newDisclosureExecutor(t)
+	ctx := context.Background()
+	if _, ok, err := store.InsertEventEnqueueJobAndTouch(ctx, db.IncomingEvent{
+		EventID: "evt:v1:1:555:20", UserID: uid, Kind: db.EventKindPrivateMessage,
+		ChatTGID: 555, SenderTGID: 555, MessageID: 20, Body: "Hi, I hire for Nordbank GmbH. Open to a chat?",
+	}, conv.ID); err != nil || !ok {
+		t.Fatalf("ingest: ok=%v err=%v", ok, err)
+	}
+	jobs, err := store.ClaimAgentJobs(ctx, "r", uid, 1)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("claim: %d jobs, err=%v", len(jobs), err)
+	}
+	id, err := store.InsertAgentAction(ctx, db.AgentAction{
+		JobID: jobs[0].ID, Attempt: jobs[0].Attempts, ConversationID: conv.ID, UserID: uid,
+		ActionType: db.ActionTypeReply, Intent: "discovery", Payload: "Happy to hear more about Nordbank GmbH.",
+		PolicyDecision: db.PolicyAllow, Status: db.ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("insert action: %v", err)
+	}
+	if _, err := exec.ProcessApproved(ctx); err != nil {
+		t.Fatalf("process approved: %v", err)
+	}
+	if len(sender.calls) != 1 {
+		t.Fatalf("send calls = %d, want 1 for the sender's own words", len(sender.calls))
+	}
+	if got := actionStatus(t, store, uid, id); got != db.ActionExecuted {
+		t.Fatalf("status = %q, want executed", got)
+	}
+}
+
 // TestExecutor_Disclosure_LapsedEngagementBlocksAgain: engagement older than
 // the window no longer releases the field.
 func TestExecutor_Disclosure_LapsedEngagementBlocksAgain(t *testing.T) {

@@ -168,11 +168,15 @@ func hasReason(joined, want string) bool {
 // reply against the conversation's engagement state. Nil means no match, no
 // provider, or no owner profile for this tenant; the executor runs the same
 // check again before sending.
-func (s *Server) protectedField(ctx context.Context, userID int64, conv db.Conversation, text string) (*policy.ProtectedField, error) {
+func (s *Server) protectedField(ctx context.Context, userID int64, conv db.Conversation, jobID int64, text string) (*policy.ProtectedField, error) {
 	if s.Profile == nil {
 		return nil, nil
 	}
-	key, never, matched, err := s.Profile.MatchProtected(ctx, userID, text, conv.OwnerEngaged(time.Now()))
+	inbound, err := s.Store.TurnInboundText(ctx, userID, jobID)
+	if err != nil {
+		return nil, fmt.Errorf("load turn inbound text: %w", err)
+	}
+	key, never, matched, err := s.Profile.MatchProtected(ctx, userID, text, inbound, conv.OwnerEngaged(time.Now()))
 	if errors.Is(err, db.ErrAgentOwnerProfileNotFound) {
 		return nil, nil
 	}
@@ -266,7 +270,7 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	protected, err := s.protectedField(ctx, id.UserID, *conv, req.Text)
+	protected, err := s.protectedField(ctx, id.UserID, *conv, req.JobID, req.Text)
 	if err != nil {
 		logHandlerErr("propose_reply", err)
 		writeJSONError(w, http.StatusInternalServerError, "profile lookup failed")
@@ -442,7 +446,10 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 			// and autopilot stays paused until re-enabled through the agent
 			// API. Naming an action the owner cannot take is the opposite of
 			// the actionability this issue exists to add.
-			alertBody := fmt.Sprintf("Autopilot is paused for this account, so a reply to %s was withheld. /mctl continue <id> releases one conversation; lifting the account-wide pause is an operator action through the agent API. To keep this from repeating, no further alert of any kind should be raised for this account for %s.", peerLabel, pauseAlertWindowText)
+			// Addressed to the owner and accurate about the throttle: only
+			// this alert is held back for the window, owner summaries are
+			// not (#994).
+			alertBody := fmt.Sprintf("Autopilot is paused, so the agent did not reply to %s. /mctl continue %d lets it reply in that conversation. Lifting the pause for the whole account is done through the agent API. You will not get this alert again for %s.", peerLabel, conv.ID, pauseAlertWindowText)
 			if _, nerr := s.Store.InsertOwnerNotification(ctx, db.OwnerNotification{
 				UserID: id.UserID, Kind: db.NotificationAlert, ActionID: actionID, Body: alertBody,
 			}); nerr != nil {
