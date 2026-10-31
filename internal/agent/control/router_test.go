@@ -936,11 +936,12 @@ func TestRouter_Assistant_ShowsSettingsNotValues(t *testing.T) {
 	// Alice and Bob ids from internal/mcp/canary_guard_test.go.
 	only, blocked := "500100101", "500100202,500100303"
 	hours := "Europe/Zurich;mon-fri 09:00-18:00;sat 22:00-02:00"
+	audience := "contacts,new_chats"
 	install := []byte(`{"spec":{"values":{"name":"Dana"},"ownerNotes":"Keep it short."}}`)
 	if err := store.UpdateAgentProfileFields(ctx, uid, db.AgentProfileUpdate{
 		IntentAllowlist: &allow, IntentDenylist: &deny,
 		SenderAllowlist: &only, BlockedSenders: &blocked, InstallDocument: &install,
-		WorkingHours: &hours,
+		WorkingHours: &hours, AudienceExcludes: &audience,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -956,6 +957,7 @@ func TestRouter_Assistant_ShowsSettingsNotValues(t *testing.T) {
 		"Sent without approval: discovery, schedule", "Never sent: decline",
 		"Only these senders: 1 account", "Blocked senders: 2 accounts",
 		"Your working hours (replies wait for you): mon-fri 09:00-18:00, sat 22:00-02:00 (Europe/Zurich)",
+		"Audience left out: contacts, new chats",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("reply lacks %q:\n%s", want, got)

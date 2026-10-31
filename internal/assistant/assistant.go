@@ -3,7 +3,7 @@
 // install onto the agent profile the runtime uses today.
 //
 // The mapping is deliberately lossless or nothing: a setting the current
-// runtime cannot enforce (audience scopes, a restricted tool set) fails with ErrUnsupported instead of being
+// runtime cannot enforce (a restricted tool set, other record kinds) fails with ErrUnsupported instead of being
 // dropped, so an install never looks applied while part of it is ignored.
 package assistant
 
@@ -317,9 +317,11 @@ type Profile struct {
 	IntentDenylist  string
 	// WorkingHours is the outside_hours schedule in schedule's stored
 	// form; empty for always.
-	WorkingHours    string
-	BlockedSenders  string
-	SenderAllowlist string
+	WorkingHours string
+	// AudienceExcludes is the CSV of audience classes the scope turns off.
+	AudienceExcludes string
+	BlockedSenders   string
+	SenderAllowlist  string
 	// OwnerProfile is the owner profile document, already accepted by
 	// profile.ParseJSON.
 	OwnerProfile json.RawMessage
@@ -346,6 +348,7 @@ func ProfileRequest(def *Definition, in *Install, telegramID int64) (map[string]
 		"intent_allowlist":     p.IntentAllowlist,
 		"intent_denylist":      p.IntentDenylist,
 		"working_hours":        p.WorkingHours,
+		"audience_excludes":    p.AudienceExcludes,
 		"blocked_senders":      p.BlockedSenders,
 		"sender_allowlist":     p.SenderAllowlist,
 		"owner_profile":        p.OwnerProfile,
@@ -433,6 +436,10 @@ func Resolve(def *Definition, in *Install) (*Profile, error) {
 	if a := s.Audience; a != nil {
 		only, blocked = a.OnlySenders, a.BlockedSenders
 	}
+	excludes, err := audienceExcludes(in)
+	if err != nil {
+		return nil, err
+	}
 
 	return &Profile{
 		Mode:               mode,
@@ -446,6 +453,7 @@ func Resolve(def *Definition, in *Install) (*Profile, error) {
 		IntentAllowlist:    strings.Join(allow, ","),
 		IntentDenylist:     strings.Join(never, ","),
 		WorkingHours:       workingHours,
+		AudienceExcludes:   excludes,
 		BlockedSenders:     idList(blocked),
 		SenderAllowlist:    idList(only),
 		OwnerProfile:       owner,
@@ -454,7 +462,6 @@ func Resolve(def *Definition, in *Install) (*Profile, error) {
 
 // supported rejects what the runtime cannot enforce yet.
 func supported(def *Definition, in *Install) error {
-	s := in.Spec
 	tools := slices.Clone(def.Spec.Tools)
 	sort.Strings(tools)
 	want := slices.Clone(RuntimeTools)
@@ -470,14 +477,38 @@ func supported(def *Definition, in *Install) error {
 	if def.Spec.Records.Kind != "job_lead" {
 		return fmt.Errorf("records: kind %q is %w", def.Spec.Records.Kind, ErrUnsupported)
 	}
-	if a := s.Audience; a != nil && a.Scope != nil {
-		for _, b := range []*bool{a.Scope.Contacts, a.Scope.NonContacts, a.Scope.NewChats, a.Scope.ExistingChats} {
-			if b != nil && !*b {
-				return fmt.Errorf("audience: narrowing the scope is %w", ErrUnsupported)
-			}
+	return nil
+}
+
+// audienceExcludes turns the install's audience scope into the CSV of
+// classes the profile leaves out, in a fixed order. A scope that leaves out
+// both halves of a pair answers nobody and is rejected as a mistake.
+func audienceExcludes(in *Install) (string, error) {
+	a := in.Spec.Audience
+	if a == nil || a.Scope == nil {
+		return "", nil
+	}
+	off := func(b *bool) bool { return b != nil && !*b }
+	sc := a.Scope
+	if off(sc.Contacts) && off(sc.NonContacts) {
+		return "", errors.New("audience: contacts and nonContacts are both off, so the assistant would answer nobody")
+	}
+	if off(sc.NewChats) && off(sc.ExistingChats) {
+		return "", errors.New("audience: newChats and existingChats are both off, so the assistant would answer nobody")
+	}
+	var out []string
+	for _, c := range []struct {
+		b     *bool
+		class string
+	}{
+		{sc.Contacts, "contacts"}, {sc.NonContacts, "non_contacts"},
+		{sc.NewChats, "new_chats"}, {sc.ExistingChats, "existing_chats"},
+	} {
+		if off(c.b) {
+			out = append(out, c.class)
 		}
 	}
-	return nil
+	return strings.Join(out, ","), nil
 }
 
 // resolveSchedule returns the working hours an outside_hours schedule sets.
