@@ -18,7 +18,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gotd/contrib/middleware/ratelimit"
+
 	gotdtelegram "github.com/gotd/td/telegram"
+	mctltelegram "github.com/mctlhq/mctl-telegram"
 	"github.com/mctlhq/mctl-telegram/internal/agent/control"
 	"github.com/mctlhq/mctl-telegram/internal/agent/executor"
 	"github.com/mctlhq/mctl-telegram/internal/agent/listener"
@@ -26,6 +28,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/agent/queue"
 	"github.com/mctlhq/mctl-telegram/internal/agent/turn"
 	"github.com/mctlhq/mctl-telegram/internal/agentapi"
+	"github.com/mctlhq/mctl-telegram/internal/assistant"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localdev"
@@ -736,6 +739,16 @@ func main() {
 		// production onboarding.
 		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Put("/api/admin/agent/profile",
 			agentapi.NewAdminAgentProfileHandler(store))
+		// The catalog is compiled in and covered by tests, so a load
+		// failure is a broken build: refuse to start rather than run jobs
+		// without their assistant's instructions.
+		catalog, err := assistant.LoadCatalog(mctltelegram.Catalog)
+		if err != nil {
+			slog.Error("agent: assistant catalog failed to load", "err", err)
+			os.Exit(1)
+		}
+		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Put("/api/admin/agent/install",
+			agentapi.NewAdminAgentInstallHandler(store, catalog))
 		agentProvider := selectAgentProvider(cfg, store, workerTokenRevocationCache)
 		if jobProvider := selectAgentJobProvider(cfg, store, workerTokenRevocationCache); jobProvider != nil {
 			agentProvider = chainProvider{agentProvider, jobProvider}
@@ -744,6 +757,7 @@ func main() {
 		agentSrv.GlobalKill = cfg.AgentKillSwitch
 		agentSrv.AllowLegacyJobCompletion = cfg.AgentAllowLegacyCompletion
 		agentSrv.WithProfile(agentProfileProvider)
+		agentSrv.WithCatalog(catalog)
 		if cfg.OAUTHJWTSecret != "" {
 			jobSigner, err := localjwt.NewIssuer([]byte(cfg.OAUTHJWTSecret), strings.TrimRight(cfg.PublicBaseURL, "/"))
 			if err != nil {

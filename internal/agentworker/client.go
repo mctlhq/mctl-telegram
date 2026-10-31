@@ -119,6 +119,12 @@ type JobEnvelope struct {
 	// job answers, in arrival order, head first. Empty for a single-event job.
 	TurnID         string   `json:"turn_id,omitempty"`
 	SourceEventIDs []string `json:"source_event_ids,omitempty"`
+	// Instructions is the account's assistant prompt, rendered by the
+	// server; Assistant names it as name@version. Empty from a server
+	// without a catalog, in which case ClaudeInvoker.SystemPrompt is used.
+	Instructions    string `json:"instructions,omitempty"`
+	Assistant       string `json:"assistant,omitempty"`
+	AssistantDigest string `json:"assistant_digest,omitempty"`
 }
 
 // JobStatus is the minimal durable postcondition returned by GET /jobs/{id}.

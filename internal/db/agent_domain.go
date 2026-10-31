@@ -251,6 +251,46 @@ func (s *Store) GetAgentOwnerProfile(ctx context.Context, userID int64) ([]byte,
 	return document, nil
 }
 
+// AgentAssistant is the catalog assistant an account runs and the install
+// it was configured with.
+type AgentAssistant struct {
+	Name    string
+	Version string
+	// Install is the decrypted AssistantInstall JSON, nil when the account
+	// was never configured through an install.
+	Install []byte
+}
+
+// GetAgentAssistant returns the account's assistant reference and decrypted
+// install, or ErrAgentProfileNotFound.
+func (s *Store) GetAgentAssistant(ctx context.Context, userID int64) (*AgentAssistant, error) {
+	if userID <= 0 {
+		return nil, errors.New("user id required")
+	}
+	var a AgentAssistant
+	var encrypted []byte
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT assistant_name, assistant_version, install_encrypted
+		   FROM agent_profiles WHERE user_id = $1`,
+		userID,
+	).Scan(&a.Name, &a.Version, &encrypted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrAgentProfileNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get agent assistant: %w", err)
+	}
+	if len(encrypted) > 0 {
+		if s.Crypt == nil {
+			return nil, errors.New("install encryption is not configured")
+		}
+		if a.Install, err = s.Crypt.OpenForUser(encrypted, userID); err != nil {
+			return nil, fmt.Errorf("decrypt agent install: %w", err)
+		}
+	}
+	return &a, nil
+}
+
 // ClearAgentOwnerProfile removes the profile document without changing the
 // account's policy/listener settings.
 func (s *Store) ClearAgentOwnerProfile(ctx context.Context, userID int64) error {
@@ -275,6 +315,12 @@ type AgentProfileUpdate struct {
 	IntentAllowlist    *string
 	BlockedSenders     *string
 	SenderAllowlist    *string
+	// AssistantName and AssistantVersion select the catalog assistant.
+	AssistantName    *string
+	AssistantVersion *string
+	// InstallDocument is the plaintext AssistantInstall JSON, encrypted
+	// here like OwnerProfileDocument; a pointer to an empty slice clears it.
+	InstallDocument *[]byte
 	// OwnerProfileDocument is plaintext canonical JSON at this boundary.
 	// nil leaves it unchanged; a pointer to an empty slice clears it; a
 	// non-empty document is tenant-key encrypted in the same UPDATE as all
@@ -336,6 +382,26 @@ func (s *Store) UpdateAgentProfileFields(ctx context.Context, userID int64, u Ag
 	}
 	if u.SenderAllowlist != nil {
 		set("sender_allowlist", *u.SenderAllowlist)
+	}
+	if u.AssistantName != nil {
+		set("assistant_name", *u.AssistantName)
+	}
+	if u.AssistantVersion != nil {
+		set("assistant_version", *u.AssistantVersion)
+	}
+	if u.InstallDocument != nil {
+		if len(*u.InstallDocument) == 0 {
+			set("install_encrypted", nil)
+		} else {
+			if s.Crypt == nil {
+				return errors.New("install encryption is not configured")
+			}
+			encrypted, err := s.Crypt.SealForUser(*u.InstallDocument, userID)
+			if err != nil {
+				return fmt.Errorf("encrypt agent install: %w", err)
+			}
+			set("install_encrypted", encrypted)
+		}
 	}
 	if u.OwnerProfileDocument != nil {
 		if len(*u.OwnerProfileDocument) == 0 {

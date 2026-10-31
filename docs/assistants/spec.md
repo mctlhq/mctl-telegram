@@ -1,7 +1,10 @@
 # Assistant definitions (assistants.mctl.ai/v1alpha1)
 
-Status: draft (P0). The format is defined and validated, and the HR agent is
-expressed in it. The runtime does not read it yet; see [Phases](#phases).
+Status: draft (P1). The server compiles the catalog in, an account's
+install is applied through `PUT /api/admin/agent/install`, and every claimed
+job carries its assistant's instructions. Policy still knows only today's
+settings; see [What the runtime enforces](#what-the-runtime-enforces) and
+[Phases](#phases).
 
 The communication agent that answers recruiters is the first of a family of
 assistants a person can install into their own Telegram account. Today its
@@ -23,7 +26,7 @@ assistant is two documents:
 
 | Document | Kind | Who writes it | Lifecycle |
 |---|---|---|---|
-| Definition | `TelegramAssistant` | assistant author | versioned (semver), immutable once published |
+| Definition | `TelegramAssistant` | assistant author | versioned (semver); a `draft` may still change under its version, an `active` one may not |
 | Install | `AssistantInstall` | the account owner | one per account, pins an exact definition version |
 
 Schemas: [`assistants/schemas/assistant.schema.json`](../../assistants/schemas/assistant.schema.json)
@@ -50,8 +53,21 @@ spec:
   records: {kind: job_lead}  # what the assistant saves
   escalation: [...]          # when the owner is pulled in
   defaults: {mode, limits, ceilings, disclosure}
-  execution: {model, budgetUsd, timeoutSeconds}
+  execution: {model, budgetUsd, timeoutSeconds}  # reserved, see below
 ```
+
+**instructions.path** is relative to the definition's directory and may not
+leave the repository. The recruiter agent's points at
+`deploy/agent-worker/system-prompt.txt`, the file the Mac mini worker's
+self-update also installs, so there is one copy of that prompt. Because a
+`draft` definition's instructions can change under the same version, the
+catalog computes a digest of the definition file and its instructions; the
+claim response reports it next to `name@version`, so a job's behaviour is
+traceable to exact content, not only to a version.
+
+**execution** is reserved: the worker's model, budget and timeout still come
+from its own environment. A definition that sets any of them cannot be
+installed (`ErrUnsupported`), so nothing looks enforced that is not.
 
 **variables** generalise the owner profile. Each has a `type` (string,
 number, boolean, string_list), `required`, optional `choices`, and a
@@ -76,7 +92,10 @@ what happens to a reply with that intent:
 | `never` | the assistant may not send it at all | not expressible yet (P2) |
 
 `userOverride` limits what the install may change: `none`, `tighten`
-(default: only towards approve/never) or `any`.
+(default: only towards approve/never) or `any`. The install changes settings
+inside the envelope the author set and the platform enforces; it is not
+always a tightening. `any` lets it loosen a tier, and a limit can rise from
+its default up to the ceiling.
 
 **defaults.ceilings** cap what an install may set; an install cannot raise a
 limit above them. **defaults.disclosure.policy** is `required` (the user
@@ -105,6 +124,15 @@ spec:
   ownerNotes: "..."        # the user's own instructions, max 2000 chars
 ```
 
+`ownerNotes` are appended after the definition's instructions in a delimited
+block, introduced as lower priority than everything before them; the notes
+cannot close that block early. Variable values are never rendered into the
+prompt: the model sees the owner's details only through
+`get_recruiter_profile`, which returns what the current conversation may be
+told. The owner's notes are the owner's own words and are rendered as
+written, so they should not hold anything the owner would not want the model
+to read.
+
 An install that leaves out `mode`, `paused` or `listening` starts the way a
 new account does today: in the definition's default mode, paused, and not
 listening. Going live is an explicit change, never a side effect of a
@@ -114,26 +142,54 @@ minimal install.
 
 | Setting | Author (definition) | User (install) | Platform (never relaxable) |
 |---|---|---|---|
-| Persona and workflow | `instructions` | `ownerNotes` appended below (P1) | safety rules prepended, override both |
-| Owner facts | which variables, default disclosure | values; disclosure only stricter | restricted values never auto-sent |
+| Persona and workflow | `instructions` | `ownerNotes`, appended below them | policy checks every proposed reply on the server, whatever the prompt says |
+| Owner facts | which variables, default disclosure | values; disclosure only stricter | the model only sees fields the conversation may be told; a reply quoting a protected value verbatim is blocked |
 | Reply intents | intents, default tiers, `userOverride` | tiers within `userOverride` | URL, credential, phone and code deny; injection handling |
 | Tools | subset of the registry | — | tool registry, server-side validation |
-| Limits | defaults and ceilings | up to the ceilings | 60 s rate window, fallbacks |
+| Limits | defaults and ceilings | any value up to the ceilings | 60 s rate window, fallbacks |
 | Disclosure line | `required` or `optional`, default text | text and off switch, only if optional | — |
 | Who it answers | — | audience scope, only/blocked senders | private chats only; groups and channels never |
 | When it answers | — | schedule | takeover when the owner replies |
-| Model and budget | `execution` | — | per-job budget cap |
+| Model and budget | `execution` (reserved) | — | the worker's per-job budget cap |
 
-## Mapping to today's runtime
+## What the runtime enforces
 
-`assistant.ProfileRequest` turns an install into the body of
-`PUT /api/admin/agent/profile`. A test applies the HR example through the
-real handler and checks the stored profile equals the configuration the agent
-runs with today.
+`PUT /api/admin/agent/install` (admin scope) takes
+`{"telegram_id": ..., "install": {...}}`, validates the install against its
+catalog definition, and writes in one UPDATE every profile setting it
+resolves to, the owner profile, the assistant reference and the install
+itself (tenant-key encrypted, like the owner profile). It replaces all of
+them; `PUT /api/admin/agent/profile` remains for single-field changes.
+
+Accounts that existed before the catalog are migrated by the column defaults:
+`assistant_name` = `hr-recruiter`, `assistant_version` = `0.1.0`, no stored
+install. Their jobs run exactly the prompt the worker used to read from
+`AGENT_SYSTEM_PROMPT`.
+
+`POST /jobs/claim` returns, per job, `instructions` (the rendered prompt),
+`assistant` (`name@version`) and `assistant_digest`. They are resolved
+before anything is claimed: if the account's assistant is missing from the
+catalog or its stored install no longer parses, the claim fails and the jobs
+stay queued, rather than running with another assistant's prompt. The worker
+uses the server's instructions and falls back to its own
+`AGENT_SYSTEM_PROMPT` only when a server without a catalog sends none. The
+prompt reaches `claude` through `--system-prompt-file` (a 0600 temp file),
+not argv, since it can carry the owner's notes.
+
+Switching an account to a different assistant is refused (409) until there
+is a lifecycle for its queued jobs, pending approvals and saved records.
+Re-installing the same assistant, at the same or another version, is allowed.
+
+### Mapping
+
+`assistant.Resolve` turns an install into profile settings, and
+`assistant.ProfileRequest` into the body of `PUT /api/admin/agent/profile`.
+A test applies the HR example through the real handler and checks the stored
+profile equals the configuration the agent runs with today.
 
 | Today | New field |
 |---|---|
-| `AGENT_SYSTEM_PROMPT` (global env) | definition `instructions` |
+| `AGENT_SYSTEM_PROMPT` (global env) | definition `instructions` + install `ownerNotes`, per account, via the claim |
 | `mode` | install `mode` |
 | `autopilot_paused` | install `paused` |
 | `listener_enabled` | install `listening` |
@@ -145,12 +201,17 @@ runs with today.
 | owner profile `disclosure` map | variable `disclosure`, install `disclosureLevels` |
 | fixed MCP tool set | definition `tools` |
 | `job_leads` table | definition `records.kind` |
-| worker model and budget env | definition `execution` |
+| worker model and budget env | definition `execution` (reserved, rejected if set) |
 
 Settings the runtime cannot enforce yet fail with `ErrUnsupported` instead of
-being dropped: `ownerNotes`, the `never` tier, a narrowed audience scope, a
-schedule other than `always`, a tool subset and record kinds other than
-`job_lead`. An install is applied entirely or not at all.
+being dropped: the `never` tier, a narrowed audience scope, a schedule other
+than `always`, a tool subset, record kinds other than `job_lead`, and any
+`execution` setting. An install is applied entirely or not at all.
+
+The guarantee is about this mapping: every setting either reaches the
+profile or the install fails. It does not extend to the definition's
+descriptive parts (`escalation`, `examples`), which document behaviour the
+instructions produce and are not enforced on their own.
 
 ## Customization tiers
 
@@ -164,12 +225,13 @@ schedule other than `always`, a tool subset and record kinds other than
 
 ## Phases
 
-- **P0 (this change):** format, schemas, HR example, validation and mapping
+- **P0 (done, #1003):** format, schemas, HR example, validation and mapping
   tests, this document.
-- **P1:** the profile row gets `assistant_ref` and `install_json`; the claim
-  response carries the rendered instructions (definition + values +
-  `ownerNotes`), so the worker no longer needs a global prompt; existing
-  profiles are migrated to an HR install.
+- **P1 (this change):** the profile row gets `assistant_name`,
+  `assistant_version` and an encrypted install; `PUT /api/admin/agent/install`;
+  the claim response carries the rendered instructions (definition +
+  `ownerNotes`, never variable values) and a content digest; existing
+  profiles default to `hr-recruiter@0.1.0`.
 - **P2:** tiers including `never`, the audience scope and schedules in
   `policy.go`; `/mctl` gets unpause and shows the install; recruiter-specific
   tool names get generic aliases (`save_record`, `get_owner_profile`).
@@ -192,7 +254,45 @@ Formats that informed this one, and where it differs:
 | MCP `server.json`, Oracle Agent Spec, Letta `.af` | typed variables, secrets kept out of the definition | no catalog-to-account install step |
 | A2A agent card | public listing: name, version, examples | describes an agent to other agents, not to an owner |
 
-What none of them covers and this runtime already has: automatic takeover
-when the owner replies in a chat, a disclosure line to the counterparty,
-per-conversation rate limits, and per-field disclosure of the owner's
-details depending on whether the owner has engaged.
+Among the products above, as far as their public documentation shows
+(October 2026), none combines what this runtime already does for one
+person's account: the assistant stops in a chat when the owner replies
+there, a disclosure line goes to the counterparty, limits apply per
+conversation, and the owner's details are disclosed per field depending on
+whether the owner has engaged. This is a comparison with those products'
+documented features, not a claim about the whole market.
+
+## Acceptance scenarios for later phases
+
+These cases come from review of the format and must have tests before the
+features they touch go live. None is a known defect today.
+
+1. The owner replies while a reply is being prepared or sent: takeover is
+   checked again at send time, and pending drafts and approvals for that
+   chat are invalidated. A message Telegram has already accepted cannot be
+   recalled.
+2. A stale approval: an approval binds to account, peer, payload, install
+   revision and an expiry; policy is evaluated again at send time.
+3. `after_owner_engaged` after a takeover and resume: the scope and lifetime
+   of engagement are defined, per conversation and per assistant.
+4. Switching assistants: an atomic revision change, cancellation of
+   incompatible jobs, and rules for carrying history over (refused until
+   then).
+5. A reply that mixes intents ("thanks, Tuesday works, €X is fine"): the
+   strictest applicable tier wins; a model-chosen intent is not evidence of
+   safe content; an unknown intent is never sent automatically.
+6. A retried job after an ambiguous send result: a stable action id and an
+   "outcome unknown" state, never a second message.
+7. Audience changes mid-flight (blocked, removed contact, outside hours):
+   eligibility is checked at send time; blocked wins; empty `onlySenders`
+   means everyone; "new chat" is defined against a fixed moment.
+8. Schedules across midnight and DST, and a change of timezone; messages
+   that arrive outside the window are skipped, queued or escalated by an
+   explicit rule, never replayed in a burst.
+9. Account-level limits: a spend budget, concurrency, owner-notification
+   rate and a circuit breaker for bot-to-bot loops, beyond per-conversation
+   limits.
+10. Protected facts already present in history, records or summaries: the
+    verbatim matcher does not catch paraphrase or translation, so promises
+    about disclosure are scoped to what the matcher and context filtering
+    actually cover.

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/queue"
+	"github.com/mctlhq/mctl-telegram/internal/assistant"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
@@ -63,6 +64,9 @@ type Server struct {
 	// jobTokenSigner mints the per-job "agent-job" credential returned by
 	// POST /jobs/claim. Nil leaves job_token out of the response.
 	jobTokenSigner *localjwt.Issuer
+	// catalog resolves an account's assistant to the instructions returned
+	// by POST /jobs/claim. Nil leaves instructions out of the response.
+	catalog *assistant.Catalog
 
 	longPollTimeout time.Duration
 	jobVisibility   time.Duration
@@ -99,6 +103,13 @@ func (s *Server) WithProfile(p OwnerProfileProvider) *Server {
 // for chaining.
 func (s *Server) WithJobTokenSigner(i *localjwt.Issuer) *Server {
 	s.jobTokenSigner = i
+	return s
+}
+
+// WithCatalog makes POST /jobs/claim return each job's assistant
+// instructions from c. Returns s for chaining.
+func (s *Server) WithCatalog(c *assistant.Catalog) *Server {
+	s.catalog = c
 	return s
 }
 

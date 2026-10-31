@@ -35,3 +35,6 @@ docs
 # ...except the product-update feed, which the runtime image carries.
 !docs/product-updates
 *.md
+# ...and the assistant catalog, which the server embeds (catalog.go):
+# instructions files may be markdown.
+!assistants/**/*.md

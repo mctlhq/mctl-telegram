@@ -33,7 +33,7 @@
     "spec": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["instructions", "intents", "tools", "records", "defaults", "execution"],
+      "required": ["instructions", "intents", "tools", "records", "defaults"],
       "properties": {
         "instructions": {
           "type": "object",
@@ -130,9 +130,9 @@
           }
         },
         "execution": {
+          "description": "Reserved. The worker's model, budget and timeout still come from its environment, so an install of a definition that sets any of these is rejected as unsupported.",
           "type": "object",
           "additionalProperties": false,
-          "required": ["budgetUsd", "timeoutSeconds"],
           "properties": {
             "model": { "type": "string" },
             "budgetUsd": { "type": "number", "exclusiveMinimum": 0, "maximum": 5 },
