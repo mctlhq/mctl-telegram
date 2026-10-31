@@ -1,0 +1,31 @@
+schema: mctl-telegram.product-update/v1
+id: assistant-private-forks
+kind: new_tool
+title: Make a private version of a catalog assistant
+summary: >-
+  You can now make your own private version, a fork, of a catalog assistant
+  from your MCP client. fork_assistant creates one with your own
+  instructions, fewer tools, stricter reply rules or lower limits; a fork can
+  only narrow what the original allows, never widen it. update_fork saves a
+  new version of it, and delete_fork removes versions you no longer use.
+  Nobody else can see or install your fork, list_assistants shows it next to
+  the catalog, and you install it like any assistant. Every fork version
+  answers in observe mode only, so each reply waits for your approval, and
+  you are told in the bot chat whenever a fork is saved. Changing forks needs
+  the account management permission.
+locale: en
+delivery: next_digest
+high_value: false
+tools: [fork_assistant, update_fork, delete_fork, list_assistants]
+evidence:
+  from: 0.114.0
+  changes:
+    - {tool: fork_assistant, change: added}
+    - {tool: update_fork, change: added}
+    - {tool: delete_fork, change: added}
+    - {tool: list_assistants, change: schema}
+status: draft
+provenance:
+  author: mashkovd
+  assisted_by: claude-opus-5-5
+created_at: "2026-10-31"
