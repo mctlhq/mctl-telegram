@@ -8,7 +8,7 @@
   p { color: var(--text-dim); line-height: 1.6; }
   p strong { color: var(--text); }
 
-  /* Responsive 16:9 video frame for iframe / <video> embeds. display:block
+  /* Responsive 16:9 video frame for iframe embeds. display:block
      plus absolutely positioned media leaves no empty band under the video. */
   .video-frame {
     display: block; position: relative; width: 100%; margin: 0 0 8px;
@@ -20,6 +20,11 @@
   .video-frame iframe, .video-frame video {
     position: absolute; inset: 0; width: 100%; height: 100%; border: 0;
   }
+  /* A self-hosted file sizes the frame from its own ratio: the walkthrough
+     is 1280x534 (about 2.4:1), so a 16:9 box left dark bands above and
+     below it. Embeds (iframes) have no intrinsic ratio and keep 16:9. */
+  .video-frame--file { aspect-ratio: auto; }
+  .video-frame--file video { position: static; display: block; height: auto; }
 
   /* Placeholder shown until DEMO_VIDEO_URL is configured. */
   .video-placeholder {
@@ -86,7 +91,7 @@
     <iframe src="{{.EmbedURL}}" title="MCTL demo" loading="lazy" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>
   </div>
   {{else if eq .VideoKind "file"}}
-  <div class="video-frame">
+  <div class="video-frame video-frame--file">
     <video controls preload="metadata" src="{{.EmbedURL}}">Your browser does not support the video tag. <a href="{{.EmbedURL}}">Open the video</a>.</video>
   </div>
   {{else if eq .VideoKind "link"}}
