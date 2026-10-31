@@ -63,8 +63,12 @@ func TestInstallNeverTier_DeniesProposal(t *testing.T) {
 	rec = h.do("POST", "/actions/propose_reply", proposeReplyRequest{
 		ConversationID: other.ID, Intent: "discovery", Text: "Could you share the team size?",
 	})
-	decodeBody(t, rec, &resp)
-	if resp.Decision == string(policy.Deny) {
-		t.Fatalf("discovery denied: %+v", resp)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("discovery status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var ok actionResponse
+	decodeBody(t, rec, &ok)
+	if ok.Decision != string(policy.Allow) {
+		t.Fatalf("discovery: %+v, want allow", ok)
 	}
 }
