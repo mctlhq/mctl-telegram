@@ -1667,21 +1667,22 @@ means 6x — the 30-day budget is exhausted in about 5 days (30d / 6).
   and JWT failures (see [JwtFailures](#jwtfailures)).
 - **MctlTelegramSessionBorrowFastBurn/SlowBurn**: Session store errors, database
   connectivity failures, or session corruption. TTL expirations
-  (`expired_idle`, `expired_absolute`) and Telegram replies over a working
-  session (`flood_wait`, `call_error`) are excluded from the SLI
-  denominator.
+  (`expired_idle`, `expired_absolute`), calls with no connected account
+  (`no_session`), Telegram replies over a working session (`flood_wait`,
+  `call_error`) and the canary's own borrows (`traffic="canary"`) are
+  excluded from the SLI denominator.
 
 ### Diagnostic queries
 
 MCP tool availability error rate (1h window), the same ratio the alert
-evaluates. `caller_error` calls are outside it (see `docs/slo.md`, "Caller
-errors"); dividing by the bare counter reads lower than the alert whenever
-callers are sending bad requests:
+evaluates. `caller_error` and `no_session` calls and the canary's own calls
+are outside it (see `docs/slo.md`, "Exclusions"), so a query without these
+filters reads something other than what the alert reads:
 
 ```promql
-sum(rate(mctl_tool_invocations_total{status="error"}[1h]))
+sum(rate(mctl_tool_invocations_total{status="error",traffic!="canary"}[1h]))
 /
-sum(rate(mctl_tool_invocations_total{status=~"ok|error"}[1h]))
+sum(rate(mctl_tool_invocations_total{status=~"ok|error",traffic!="canary"}[1h]))
 ```
 
 Caller errors by tool, to tell a confused client from a broken service:
@@ -1747,10 +1748,11 @@ occurrence.
 `mctl_tool_call_errors_total` counts every `tools/call` failure, including
 client faults and the JSON-RPC rejections that never resolve a handler.
 `mctl_tool_invocations_total{status="error"}` (the availability SLO input;
-`status` is `ok`, `error` or `caller_error`, and only the first two enter the
-SLI) counts only records staged by a handler's own `Server.audit` call, and
-of those not the ones Telegram refused as the caller's mistake, which are
-`caller_error`. Records
+`status` is `ok`, `error`, `caller_error` or `no_session`, and only the first
+two enter the SLI) counts only records staged by a handler's own
+`Server.audit` call, and of those not the ones Telegram refused as the
+caller's mistake, which are `caller_error`, nor calls by a user with no
+connected account, which are `no_session`. Records
 synthesized by `flushRecordedCall` — every Rule 1 appended error record, every
 Rule 2 record (a failure that never reached `Server.audit`) and every Rule 3
 record (an unaudited success) — never feed the SLO pair, whatever their
@@ -1801,12 +1803,14 @@ sum(rate(mctl_http_requests_total{route=~"/oauth/token|/oauth/telegram/callback"
 sum(rate(mctl_http_requests_total{route=~"/oauth/token|/oauth/telegram/callback"}[1h]))
 ```
 
-Session borrow error rate (1h window, excluding TTL expirations):
+Session borrow error rate (1h window), the same ratio the alert evaluates:
+TTL expirations, `no_session`, `flood_wait`, `call_error` and the canary's
+own borrows are outside it:
 
 ```promql
-sum(rate(mctl_sessions_borrow_total{result="error"}[1h]))
+sum(rate(mctl_sessions_borrow_total{result="error",traffic!="canary"}[1h]))
 /
-sum(rate(mctl_sessions_borrow_total{result=~"ok|error"}[1h]))
+sum(rate(mctl_sessions_borrow_total{result=~"ok|error",traffic!="canary"}[1h]))
 ```
 
 Current sessions active:
