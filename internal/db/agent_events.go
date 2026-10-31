@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -124,6 +125,38 @@ func (s *Store) GetIncomingEvent(ctx context.Context, userID int64, eventID stri
 		ev.Body = string(pt)
 	}
 	return &ev, nil
+}
+
+// TurnInboundText returns the text the peer sent in the turn that job
+// answers: the bodies of the job's source events (its own event and any
+// coalesced into it) that are incoming messages or edits, joined by
+// newlines. The owner_profile disclosure match uses it to tell a draft that
+// repeats the sender's own words from one that volunteers the owner's
+// (#992). jobID 0 has no turn and returns "". A body already cleared by the
+// retention sweep contributes nothing, which only makes the match stricter.
+// A failed read is returned as an error, never as empty text.
+func (s *Store) TurnInboundText(ctx context.Context, userID, jobID int64) (string, error) {
+	if jobID == 0 {
+		return "", nil
+	}
+	job, err := s.GetAgentJob(ctx, userID, jobID)
+	if err != nil {
+		return "", fmt.Errorf("load turn job: %w", err)
+	}
+	var parts []string
+	for _, id := range job.SourceEventIDs {
+		ev, err := s.GetIncomingEvent(ctx, userID, id)
+		if err != nil {
+			return "", fmt.Errorf("load turn event: %w", err)
+		}
+		if ev.Kind != EventKindPrivateMessage && ev.Kind != EventKindMessageEdit {
+			continue
+		}
+		if ev.Body != "" {
+			parts = append(parts, ev.Body)
+		}
+	}
+	return strings.Join(parts, "\n"), nil
 }
 
 // SweepAgentMessageBodies removes aged (encrypted) third-party message

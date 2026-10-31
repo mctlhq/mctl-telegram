@@ -281,8 +281,24 @@ func (l *Listener) onMessage(ctx context.Context, acct *account, ents tg.Entitie
 	// Programmatic sends made through telegram.SendMessage are echoed back as
 	// ordinary Out messages on the same user session. Consume their marker before
 	// extraction so only a genuinely human outgoing message triggers takeover.
-	if msg.Out && l.consumeSent(ctx, acct.userID, int64(msg.ID)) {
-		return nil
+	// Only a new message can be such an echo: SendMessage never edits, so an
+	// edit of an agent-sent message is the owner's own hand (#993). The marker
+	// is not consumed on that path either, because a send made through the
+	// listener's own session gets no echo and its marker would otherwise
+	// swallow the owner's first edit within the marker TTL.
+	//
+	// A new message can still carry an edit: with no echo of the send, the
+	// owner's edit from another session can reach this session through gap
+	// recovery as the agent's message itself, delivered once as new with
+	// edit_date and the edited text and no separate edit update (seen live on
+	// preview, #993). An agent-sent message with an edit date was therefore
+	// edited after the send, and the agent never edits, so it is handled as
+	// the owner's edit. A hidden edit (edit_hide) is still Telegram's own.
+	if msg.Out && !isEdit && l.consumeSent(ctx, acct.userID, int64(msg.ID)) {
+		if msg.EditDate == 0 || msg.EditHide {
+			return nil
+		}
+		isEdit = true
 	}
 	ex, ok := ExtractMessage(acct.userID, acct.tgID, msg, ents, isEdit)
 	if !ok {

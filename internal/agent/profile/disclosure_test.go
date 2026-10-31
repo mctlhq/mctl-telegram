@@ -133,7 +133,7 @@ func TestMatchProtected_Levels(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			key, level, matched := matchProtected(d, tc.text, tc.engaged)
+			key, level, matched := matchProtected(d, tc.text, "", tc.engaged)
 			if !matched || key != tc.wantKey || level != tc.wantLevel {
 				t.Fatalf("matchProtected(%q, engaged=%v) = %q %q %v, want %q %q", tc.text, tc.engaged, key, level, matched, tc.wantKey, tc.wantLevel)
 			}
@@ -143,12 +143,41 @@ func TestMatchProtected_Levels(t *testing.T) {
 	for _, text := range []string{
 		"I'm Alice Example, a Backend Engineer working with Go and Kubernetes.",
 	} {
-		if key, _, matched := matchProtected(d, text, false); matched {
+		if key, _, matched := matchProtected(d, text, "", false); matched {
 			t.Fatalf("public text %q matched %q", text, key)
 		}
 	}
-	if key, _, matched := matchProtected(d, "I work at Nordbank GmbH in Lisbon.", true); matched {
+	if key, _, matched := matchProtected(d, "I work at Nordbank GmbH in Lisbon.", "", true); matched {
 		t.Fatalf("after_owner_engaged value matched while engaged: %q", key)
+	}
+}
+
+// TestMatchProtected_SenderWordsExempt pins #992: a fragment of an
+// after_owner_engaged field the peer wrote first in the turn is not a
+// disclosure, every other fragment still is, and never fields get no
+// exemption.
+func TestMatchProtected_SenderWordsExempt(t *testing.T) {
+	d := withDisclosure(t, `{"identity.education":"never"}`)
+	const reply = "Happy to talk about the Lisbon role."
+	if key, _, matched := matchProtected(d, reply, "Hi, we are hiring for an office in Lisbon.", false); matched {
+		t.Fatalf("sender's own word matched %q", key)
+	}
+	if _, _, matched := matchProtected(d, reply, "", false); !matched {
+		t.Fatal("without inbound text the same reply did not match")
+	}
+	// Only a whole-word use by the sender exempts a fragment.
+	if _, _, matched := matchProtected(d, reply, "Our Lisbonia office is hiring.", false); !matched {
+		t.Fatal("a longer word in the inbound text exempted the fragment")
+	}
+	// A fragment the sender never used still counts.
+	key, level, matched := matchProtected(d, "Lisbon works; I am at Nordbank GmbH.", "The role is in Lisbon.", false)
+	if !matched || key != "identity.company" || level != DisclosureAfterOwnerEngaged {
+		t.Fatalf("unused fragment: %q %q %v, want identity.company", key, level, matched)
+	}
+	// never fields are matched even when the sender wrote the value.
+	key, level, matched = matchProtected(d, "Example University, sure.", "Did you study at Example University?", false)
+	if !matched || key != "identity.education" || level != DisclosureNever {
+		t.Fatalf("never field: %q %q %v, want identity.education never", key, level, matched)
 	}
 }
 
@@ -166,15 +195,15 @@ func TestMatchProtected_FalsePositives(t *testing.T) {
 		"EU timezone works",         // "EU" likewise
 		"Happy to talk.",
 	} {
-		if key, _, matched := matchProtected(d, text, false); matched {
+		if key, _, matched := matchProtected(d, text, "", false); matched {
 			t.Fatalf("%q matched %q", text, key)
 		}
 	}
-	if _, _, matched := matchProtected(d, "I live in Rome.", false); !matched {
+	if _, _, matched := matchProtected(d, "I live in Rome.", "", false); !matched {
 		t.Fatal("whole-word Rome not matched")
 	}
 	// The whole value is still a needle even when its parts are short.
-	if _, _, matched := matchProtected(d, "Rome, UK is home", false); !matched {
+	if _, _, matched := matchProtected(d, "Rome, UK is home", "", false); !matched {
 		t.Fatal("whole value not matched")
 	}
 }
@@ -190,11 +219,11 @@ func TestTenantProvider_DisclosureByEngagement(t *testing.T) {
 	if _, ok := cold["preferences"]; ok {
 		t.Fatalf("cold profile has preferences: %+v", cold)
 	}
-	key, never, matched, err := provider.MatchProtected(ctx, aliceID, "hybrid works for me", false)
+	key, never, matched, err := provider.MatchProtected(ctx, aliceID, "hybrid works for me", "", false)
 	if err != nil || !matched || key != "preferences.work_mode" || never {
 		t.Fatalf("MatchProtected = %q never=%v matched=%v err=%v", key, never, matched, err)
 	}
-	if _, _, _, err := provider.MatchProtected(ctx, 999, "x", false); err == nil {
+	if _, _, _, err := provider.MatchProtected(ctx, 999, "x", "", false); err == nil {
 		t.Fatal("missing tenant profile did not error")
 	}
 }
