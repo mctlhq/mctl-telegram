@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.110.0](https://github.com/mctlhq/mctl-telegram/compare/0.109.2...0.110.0) (2026-10-30)
+
+
+### Features
+
+* **telegram:** log and measure every FLOOD_WAIT by TL method ([06582b8](https://github.com/mctlhq/mctl-telegram/commit/06582b8cefe6e6bf4875e17f8c39dea4655b5850))
+* **telegram:** log and measure every FLOOD_WAIT by TL method ([57a7b15](https://github.com/mctlhq/mctl-telegram/commit/57a7b150c6082d9f6de0ff568feac684acd62a46))
+
 ## [0.109.2](https://github.com/mctlhq/mctl-telegram/compare/0.109.1...0.109.2) (2026-10-30)
 
 
