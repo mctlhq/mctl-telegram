@@ -30,10 +30,10 @@ func TestFullChrome(t *testing.T) {
 		`<footer class="mctl-site-footer">`,
 		`<div class="mctl-site-container mctl-site-footer__inner">`,
 		`<nav class="mctl-site-footer__links"`,
-		"ui.mctl.ai/0.18.0/mctl.css",
+		"ui.mctl.ai/0.19.0/mctl.css",
 		// global.css and site.css are pinned as a set with mctl.css.
-		"ui.mctl.ai/0.18.0/global.css",
-		"ui.mctl.ai/0.18.0/site.css",
+		"ui.mctl.ai/0.19.0/global.css",
+		"ui.mctl.ai/0.19.0/site.css",
 		"family=Onest:wght@300;400;500;600;700;800",
 		"Instrument+Serif",
 		"JetBrains+Mono",
@@ -160,8 +160,60 @@ func TestButtonsUseAccentFg(t *testing.T) {
 			t.Errorf("%s CSS hard-codes #0a0b0d; use var(--accent-fg)", name)
 		}
 	}
-	if !strings.Contains(componentsCSS, ".btn, .cta-btn { background: var(--accent); color: var(--accent-fg); }") {
+	if !strings.Contains(componentsCSS, ".btn, .cta-btn { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }") {
 		t.Error("shared primary button must use --accent-fg")
+	}
+}
+
+// Accent discipline (@mctlhq/css 0.19.0): the accent is for the primary
+// button and the h1 highlight. Inline code, secondary buttons, step numbers,
+// table keys and the active nav link must not take it.
+func TestAccentKeptForPrimaryAction(t *testing.T) {
+	rule := func(sel string) string {
+		i := strings.Index(componentsCSS, sel+" {")
+		if i < 0 {
+			t.Fatalf("rule %q not found", sel)
+		}
+		return componentsCSS[i : i+strings.Index(componentsCSS[i:], "}")]
+	}
+	for _, sel := range []string{
+		"  code",
+		"  .btn-secondary",
+		"  .btn-secondary:hover",
+		"  ol.steps > li::before",
+		"  .tbl td:first-child code",
+		"  .site-nav a.active",
+		"  .pill-read",
+		"  .badge.mcp",
+	} {
+		if r := rule(sel); strings.Contains(r, "var(--accent") {
+			t.Errorf("%s must be neutral, got:\n%s", strings.TrimSpace(sel), r)
+		}
+	}
+	for _, tok := range []string{"--code-fg: var(--surface-fg);", "--marker-fg:", "--link-underline:"} {
+		if !strings.Contains(tokensCSS, tok) {
+			t.Errorf("inline tokens must define %s for the strict-CSP pages", tok)
+		}
+	}
+}
+
+// The header lists the product pages only; the legal pages move to the
+// landing hero's meta row and the footer, which must keep them.
+func TestHeaderOmitsLegalLinksFooterKeepsThem(t *testing.T) {
+	render := func(name string) string {
+		return render(t, "page_"+name, `{{template "`+name+`" .}}`, Data{ShowManage: true, NavActive: "manage"})
+	}
+	head, foot := render("ui_topbar"), render("ui_footer")
+	for _, href := range []string{`href="/security"`, `href="/privacy"`, `href="/terms"`} {
+		if strings.Contains(head, href) {
+			t.Errorf("header must not link %s", href)
+		}
+		if !strings.Contains(foot, href) {
+			t.Errorf("footer must still link %s", href)
+		}
+	}
+	if !strings.Contains(head, `class="nav-manage active"`) {
+		t.Error("Manage must render as the nav-manage chip, active on its page")
 	}
 }
 
@@ -216,7 +268,7 @@ func TestNavToggleHiddenOnDesktop(t *testing.T) {
 	if !strings.Contains(componentsCSS, "  .nav-toggle { display: none; }") {
 		t.Fatal(".nav-toggle must be display:none outside the mobile query")
 	}
-	m := strings.Index(componentsCSS, "@media (max-width: 1023px)")
+	m := strings.Index(componentsCSS, "@media (max-width: 767px)")
 	if m < 0 || !strings.Contains(componentsCSS[m:], ".nav-toggle {\n      display: block;") {
 		t.Fatal(".nav-toggle must be re-enabled (visually hidden) inside the mobile query")
 	}

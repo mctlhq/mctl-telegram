@@ -50,7 +50,7 @@ func TestPlatforms_ServesHTML(t *testing.T) {
 		"The tool list follows the grant.",
 		"request it if users should be able to leave from inside your platform",
 		"Local Bridge",
-		"every client's refresh tokens for that user, every worker token issued for the user's Telegram id, and every Local Bridge device",
+		"every client's refresh tokens for that user, every worker token issued for the user's Telegram ID, and every Local Bridge device",
 		"only if your client calls <code>/oauth/revoke</code>",
 		`<link rel="canonical" href="https://tg.example.test/platforms">`,
 		`<a href="/platforms" class="active">Platforms</a>`,

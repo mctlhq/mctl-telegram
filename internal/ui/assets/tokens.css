@@ -5,7 +5,7 @@
    * loads it is sourced AFTER this block and overrides every token (equal
    * specificity, later wins). Accent is terracotta; there is no accent picker.
    *
-   * Mirrors @mctlhq/css 0.18.0 (token values unchanged since 0.15.0), which is what chrome.go pins. This is a hand-
+   * Mirrors @mctlhq/css 0.19.0 (adds the measure, hero rhythm and accent-discipline roles), which is what chrome.go pins. This is a hand-
    * picked subset, not a copy of the whole sheet: only the tokens these pages
    * actually read, so it stays small enough to inline on the strict-CSP pages.
    * Values are the resolved semantic ones (e.g. --surface-fg-subtle is the AA
@@ -67,6 +67,12 @@
     --mctl-layout-prose-width: 720px;
     --mctl-layout-section-padding: clamp(72px, 9vw, 132px);
     --mctl-layout-stack: 24px;
+    --mctl-layout-measure-lede: 58ch;
+    --mctl-layout-measure-prose: 65ch;
+    --mctl-layout-hero-eyebrow-gap: 20px;
+    --mctl-layout-hero-title-gap: 24px;
+    --mctl-layout-hero-actions-gap: 40px;
+    --mctl-layout-hero-meta-gap: 32px;
 
     /* Public type roles. */
     --text-hero-size: clamp(35.2px, 4.5vw, 68px);
@@ -91,6 +97,11 @@
     --text-body-leading: 1.6;
     --text-label-size: 15.2px;
     --text-caption-size: 13px;
+    --text-marker-size: 13px;
+    --text-marker-weight: 500;
+    --text-marker-leading: 1.4;
+    --text-marker-tracking: 0.12em;
+    --text-prose-leading: 1.75;
   }
   [data-theme='light'] {
     color-scheme: light;
@@ -110,6 +121,11 @@
     --status-warn-soft: color-mix(in srgb, var(--status-warn) 10%, transparent);
     --status-bad-soft: color-mix(in srgb, var(--status-bad) 10%, transparent);
     --accent-border: color-mix(in srgb, var(--accent) 40%, transparent);
+    /* Accent discipline (0.19.0): neutral code and markers, accent underline. */
+    --code-fg: var(--surface-fg);
+    --code-bg: color-mix(in srgb, var(--surface-fg) 6.5%, transparent);
+    --marker-fg: var(--surface-fg-subtle);
+    --link-underline: color-mix(in srgb, var(--accent) 45%, transparent);
     --site-grid-line: color-mix(in srgb, var(--surface-fg) 2%, transparent);
     --site-header-bg: color-mix(in srgb, var(--surface-bg) 80%, transparent);
     --site-header-border: var(--surface-line);

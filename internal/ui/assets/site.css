@@ -1,4 +1,4 @@
-/* @mctlhq/css 0.18.0 — site.css. */
+/* @mctlhq/css 0.19.0 — site.css. */
 /*
  * Public-site layout: the one shell mctl.ai, docs.mctl.ai and tg.mctl.ai
  * share. theme.css already carries the tokens (page width, gutter, header,
@@ -31,6 +31,13 @@
  *     default and still centres a __narrow block;
  *   - long-form reading text is capped at --mctl-layout-prose-width, in a
  *     centred column; the text inside it stays start-aligned;
+ *   - from 0.19.0 ledes are capped in characters, not pixels: a hero lede at
+ *     --mctl-layout-measure-lede, a section lede at
+ *     --mctl-layout-measure-prose; the hero stack (eyebrow, title, lede,
+ *     actions, meta) is spaced by the --mctl-layout-hero-*-gap rhythm, which
+ *     grows down the stack;
+ *   - the accent marks the primary action only: the eyebrow and the footer
+ *     links are neutral;
  *   - footer: full-bleed, centred.
  */
 
@@ -110,12 +117,41 @@
 }
 
 /* Without a visual the text still keeps the left column's width rather than
-   stretching across the page, so its line length matches a hero that has one. */
+   stretching across the page, so its line length matches a hero that has one.
+   No grid gap: each item carries its own top margin from the hero rhythm, so
+   the title sits close to its lede and the actions stand apart. */
 .mctl-site-hero__text {
   grid-column: 1;
   display: grid;
-  gap: var(--mctl-layout-stack);
+  gap: 0;
   justify-items: start;
+}
+
+/* A small mono label above the title. Neutral: the title carries the
+   accent, and a second accented line above it would compete. */
+.mctl-site-hero__eyebrow {
+  margin: 0 0 var(--mctl-layout-hero-eyebrow-gap);
+  font-family: var(--font-mono);
+  font-size: var(--text-marker-size);
+  font-weight: var(--text-marker-weight);
+  line-height: var(--text-marker-leading);
+  letter-spacing: var(--text-marker-tracking);
+  text-transform: uppercase;
+  color: var(--marker-fg);
+}
+
+/* The rhythm, item by item. Two classes, so it outranks each item's own
+   margin: 0 and a site's `.mctl-site-hero__text > *` reset. */
+.mctl-site-hero__title + .mctl-site-hero__lede {
+  margin-top: var(--mctl-layout-hero-title-gap);
+}
+
+.mctl-site-hero__text > .mctl-site-hero__actions:not(:first-child) {
+  margin-top: var(--mctl-layout-hero-actions-gap);
+}
+
+.mctl-site-hero__actions + * {
+  margin-top: var(--mctl-layout-hero-meta-gap);
 }
 
 .mctl-site-hero__title {
@@ -135,6 +171,8 @@
   line-height: var(--text-subtitle-leading);
   letter-spacing: var(--text-subtitle-tracking);
   color: var(--surface-fg-muted);
+  max-width: var(--mctl-layout-measure-lede);
+  text-wrap: pretty;
 }
 
 .mctl-site-hero__actions {
@@ -191,11 +229,6 @@
 }
 
 .mctl-site-hero:is(.mctl-site-hero--stacked, :not(:has(.mctl-site-hero__visual)))
-  .mctl-site-hero__lede {
-  max-width: var(--mctl-layout-prose-width);
-}
-
-.mctl-site-hero:is(.mctl-site-hero--stacked, :not(:has(.mctl-site-hero__visual)))
   .mctl-site-hero__actions {
   justify-content: center;
 }
@@ -231,7 +264,7 @@
 .mctl-site-section__lede {
   margin: 0 auto var(--mctl-layout-stack);
   text-align: center;
-  max-width: var(--mctl-layout-prose-width);
+  max-width: var(--mctl-layout-measure-prose);
   font-size: var(--text-body-size);
   line-height: var(--text-body-leading);
   color: var(--surface-fg-muted);
@@ -312,7 +345,7 @@
 }
 
 .mctl-site-footer__links a {
-  color: var(--accent-text);
+  color: var(--surface-fg-muted);
   text-decoration: none;
 }
 

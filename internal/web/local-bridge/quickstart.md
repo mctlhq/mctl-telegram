@@ -10,7 +10,7 @@ Sending is a later, explicit owner step — see
 ## Before you start
 
 **You do not need a hosted login first.** `activate` for a brand-new
-Telegram id provisions the account directly into local mode.
+Telegram ID provisions the account directly into local mode.
 
 **You need a machine that stays on.** When the daemon is not reachable,
 calls fail with `local-bridge daemon not connected` rather than falling
@@ -50,11 +50,11 @@ block does not rot.
 
 `~/mctl-local` is where this guide keeps the binary, the passphrase file
 and the daemon's log. `~/.config/mctl-telegram-local` is where the
-daemon itself keeps its config, device identity and session; it creates
+daemon itself keeps its config, device identity, and session; it creates
 that directory for you.
 
 Builds are published for `darwin/arm64`, `darwin/amd64`, `linux/amd64`,
-`linux/arm64` and `windows/amd64`. An Intel Mac needs `darwin-amd64`.
+`linux/arm64`, and `windows/amd64`. An Intel Mac needs `darwin-amd64`.
 
 **The binaries are not signed.** Downloading with `curl` avoids macOS
 quarantine (attached only to files a browser saved). If you did download
@@ -109,8 +109,8 @@ then your cloud password if you have two-factor enabled. The code
 arrives inside Telegram when the account is signed in somewhere else,
 and by SMS when it is not.
 
-A successful login writes your numeric Telegram id to `config.json`.
-`activate` reads that id, so you do not have to type `--telegram-id`
+A successful login writes your numeric Telegram ID to `config.json`.
+`activate` reads that ID, so you do not have to type `--telegram-id`
 unless you want to override it.
 
 This creates a **second** session on your account, alongside any hosted
@@ -127,7 +127,7 @@ the no-echo prompt does not work under mintty.
 
 `--server` is required the first time (`init` never asks for one) and is
 saved to `config.json` for `daemon`. `--telegram-id <n>` overrides the
-id persisted by `login`. `--label <name>` sets the device's
+ID persisted by `login`. `--label <name>` sets the device's
 human-readable label (defaults to the machine hostname).
 
 `activate`:
@@ -143,11 +143,11 @@ human-readable label (defaults to the machine hostname).
    signature for a worker credential. There is no token to copy.
 
 The command's last line tells you to run `daemon` next. A brand-new
-Telegram id never touches a hosted session: `session_encrypted` for that
+Telegram ID never touches a hosted session: `session_encrypted` for that
 account is `NULL` from the first row.
 
 **Re-running `activate` is safe.** It reuses the same keypair and device
-id. If the credential step already succeeded it reports the device as
+ID. If the credential step already succeeded it reports the device as
 already activated and exits 0. If a previous run was interrupted, re-run
 it rather than deleting the config directory.
 
