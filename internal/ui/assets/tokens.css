@@ -5,7 +5,7 @@
    * loads it is sourced AFTER this block and overrides every token (equal
    * specificity, later wins). Accent is terracotta; there is no accent picker.
    *
-   * Mirrors @mctlhq/css 0.15.0, which is what chrome.go pins. This is a hand-
+   * Mirrors @mctlhq/css 0.18.0 (token values unchanged since 0.15.0), which is what chrome.go pins. This is a hand-
    * picked subset, not a copy of the whole sheet: only the tokens these pages
    * actually read, so it stays small enough to inline on the strict-CSP pages.
    * Values are the resolved semantic ones (e.g. --surface-fg-subtle is the AA
@@ -50,6 +50,9 @@
 
     /* Public site shell (shared with mctl.ai and docs.mctl.ai). */
     --site-header-height: 80px;
+    /* site.css stacks the sticky header with this; without it the open
+       mobile menu drew under the page on the strict-CSP pages. */
+    --mctl-z-index-nav: 200;
     --site-header-blur: 12px;
     --site-content-width: 1400px;
     --site-gutter: 20px;
