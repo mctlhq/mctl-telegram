@@ -78,6 +78,9 @@ type AgentProfile struct {
 	// InstallRevision moves on every assistant install or switch (#1018).
 	// Work created under an older revision is refused.
 	InstallRevision int64
+	// AssistantName is the assistant the account runs; a fork's name
+	// (IsForkAssistant) keeps the account in observe until promotion.
+	AssistantName   string
 	BlockedSenders  string // csv of telegram user ids the agent must ignore
 	SenderAllowlist string // csv of telegram user ids allowed into the listener; empty allows all
 	CreatedAt       time.Time
@@ -146,13 +149,15 @@ func (s *Store) GetAgentProfile(ctx context.Context, userID int64) (*AgentProfil
 		`SELECT user_id, mode, autopilot_paused, listener_enabled, disclosure_text,
 		        max_autonomous_turns, max_msgs_per_minute, max_reply_chars,
 		        intent_allowlist, blocked_senders, sender_allowlist, created_at, updated_at,
-		        disclosure_disabled, intent_denylist, working_hours, audience_excludes, assistant_installed_at, install_revision
+		        disclosure_disabled, intent_denylist, working_hours, audience_excludes, assistant_installed_at, install_revision,
+		        assistant_name
 		   FROM agent_profiles WHERE user_id = $1`,
 		userID,
 	).Scan(&p.UserID, &p.Mode, &p.AutopilotPaused, &p.ListenerEnabled, &p.DisclosureText,
 		&p.MaxAutonomousTurns, &p.MaxMsgsPerMinute, &p.MaxReplyChars,
 		&p.IntentAllowlist, &p.BlockedSenders, &p.SenderAllowlist, &p.CreatedAt, &p.UpdatedAt,
-		&p.DisclosureDisabled, &p.IntentDenylist, &p.WorkingHours, &p.AudienceExcludes, &installedAt, &p.InstallRevision)
+		&p.DisclosureDisabled, &p.IntentDenylist, &p.WorkingHours, &p.AudienceExcludes, &installedAt, &p.InstallRevision,
+		&p.AssistantName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrAgentProfileNotFound
 	}
@@ -283,6 +288,8 @@ type AgentAssistant struct {
 	// InstallRevision is the revision Install was read at, in the same
 	// row read, so a compare-and-set on it covers exactly this install.
 	InstallRevision int64
+	// Mode is the profile's agent mode, read in the same row.
+	Mode string
 }
 
 // AgentAssistantRef is the catalog assistant an account runs and whether
@@ -325,10 +332,10 @@ func (s *Store) GetAgentAssistant(ctx context.Context, userID int64) (*AgentAssi
 	var a AgentAssistant
 	var encrypted []byte
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT assistant_name, assistant_version, install_encrypted, assistant_definition_digest, install_revision
+		`SELECT assistant_name, assistant_version, install_encrypted, assistant_definition_digest, install_revision, mode
 		   FROM agent_profiles WHERE user_id = $1`,
 		userID,
-	).Scan(&a.Name, &a.Version, &encrypted, &a.Digest, &a.InstallRevision)
+	).Scan(&a.Name, &a.Version, &encrypted, &a.Digest, &a.InstallRevision, &a.Mode)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrAgentProfileNotFound
 	}
@@ -641,6 +648,9 @@ func purgeAgentData(ctx context.Context, ex execer, userID int64) error {
 		`DELETE FROM agent_saved_command_cursors WHERE user_id = $1`,
 		`DELETE FROM tg_channel_state WHERE user_id = $1`,
 		`DELETE FROM tg_update_state WHERE user_id = $1`,
+		// Private assistant forks are user data (#1043): their instructions
+		// go with the account, like the install's owner notes.
+		`DELETE FROM assistant_forks WHERE user_id = $1`,
 		`DELETE FROM agent_profiles WHERE user_id = $1`,
 	}
 	for _, q := range stmts {
