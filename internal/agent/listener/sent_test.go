@@ -130,3 +130,35 @@ func TestOnMessage_OwnerEditOfAgentSendTriggersTakeover(t *testing.T) {
 		t.Fatalf("owner edit of an agent send left state at %q", conv.State)
 	}
 }
+
+// A hidden edit Telegram makes itself on an agent reply (edit_hide, e.g. a
+// link preview filling in) is not an owner intervention and must not take
+// the conversation over.
+func TestOnMessage_HiddenEditOfAgentSendDoesNotTakeOver(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+	if _, err := store.EnsureConversation(ctx, acct.userID, recruit, "carol_hr", "Carol"); err != nil {
+		t.Fatalf("ensure conversation: %v", err)
+	}
+
+	l.MarkSent(acct.userID, 781)
+	hidden := &tg.Message{
+		ID:       781,
+		Out:      true,
+		EditHide: true,
+		PeerID:   &tg.PeerUser{UserID: recruit},
+		Message:  "agent reply with a link preview",
+		Date:     1_700_000_000,
+	}
+	if err := l.onMessage(ctx, acct, ents(), hidden, true); err != nil {
+		t.Fatalf("hidden edit: %v", err)
+	}
+
+	conv, err := store.GetConversationByPeer(ctx, acct.userID, recruit)
+	if err != nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if conv.State != db.ConversationActive {
+		t.Fatalf("hidden edit of an agent send changed state to %q", conv.State)
+	}
+}

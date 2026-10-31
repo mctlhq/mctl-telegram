@@ -97,6 +97,14 @@ func ExtractMessage(accountUserID, selfTGID int64, msg *tg.Message, ents tg.Enti
 		if !ok {
 			return Extracted{}, false
 		}
+		// An edit Telegram makes on its own (edit_hide: a link preview
+		// filling in, a live-location refresh) is not the owner's hand.
+		// The listener no longer treats any outgoing edit as an agent echo
+		// (#993), so without this a preview appearing on an agent reply
+		// would take the conversation over.
+		if media, _ := msg.GetMedia(); isEdit && hiddenEdit(msg, media) {
+			return Extracted{}, false
+		}
 		// Do not require text here: any visible owner intervention in a private
 		// chat (including media without caption) must stop autonomous replies.
 		ev := db.IncomingEvent{
