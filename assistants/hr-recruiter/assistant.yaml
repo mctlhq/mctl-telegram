@@ -1,0 +1,115 @@
+# The communication agent that answers recruiters, expressed as a catalog
+# definition. It describes today's agent exactly: the instructions are the
+# prompt the worker runs (deploy/agent-worker/system-prompt.txt), and the
+# tools, records and limits are the ones the runtime has now. See
+# docs/assistants/spec.md.
+apiVersion: assistants.mctl.ai/v1alpha1
+kind: TelegramAssistant
+metadata:
+  name: hr-recruiter
+  title: Recruiter assistant
+  description: >-
+    Answers recruiters who write to you in Telegram: works out the role,
+    saves it as a lead, asks for details and call options, and tells you
+    what needs your decision. Never agrees to a salary, a date or anything
+    you have not shared.
+  version: 0.1.0
+  owner: mctlhq
+  visibility: admin
+  status: draft
+  tags: [recruiting, job-search]
+  examples:
+    - "Hi! We have a Senior Go role at Acme, fully remote. Open to a chat?"
+    - "Could you share your salary expectations and notice period?"
+spec:
+  instructions:
+    path: ../../deploy/agent-worker/system-prompt.txt
+  variables:
+    - name: name
+      description: How the assistant refers to you.
+      type: string
+      required: true
+      profilePath: identity.name
+      disclosure: public
+    - name: role
+      description: Your current title.
+      type: string
+      required: true
+      profilePath: identity.role
+      disclosure: public
+    - name: skills
+      type: string_list
+      profilePath: skills
+      disclosure: public
+    - name: headline
+      description: One line about you that recruiters may read.
+      type: string
+      profilePath: public_profile.headline
+      disclosure: public
+    - name: work_mode
+      type: string
+      choices: [remote, hybrid, office]
+      profilePath: preferences.work_mode
+      disclosure: after_owner_engaged
+    - name: relocation
+      type: string
+      profilePath: preferences.relocation
+      disclosure: after_owner_engaged
+    - name: salary_floor
+      description: Never sent by the assistant; used only to stop a reply that would reveal it.
+      type: string
+      profilePath: restricted.salary_floor
+      send: never
+  intents:
+    - name: discovery
+      description: Ask about the role, the company and the process.
+      tier: auto
+    - name: schedule
+      description: Ask the recruiter for call options; never accept a slot.
+      tier: auto
+    - name: decline
+      description: Turn an opportunity down.
+      tier: approve
+    - name: share_details
+      description: Anything that shares more about you than the profile allows.
+      tier: approve
+  tools:
+    - get_event
+    - get_conversation_context
+    - get_recruiter_profile
+    - get_lead
+    - get_policy
+    - propose_reply
+    - save_job_lead
+    - request_owner_approval
+    - send_owner_summary
+    - pause_autopilot
+    - complete_agent_job
+  records:
+    kind: job_lead
+  escalation:
+    - name: attachment
+      when: The recruiter sent a file the assistant cannot read.
+      action: owner_summary
+    - name: urgent_non_job
+      when: A personal or urgent message that is not about a job.
+      action: owner_summary
+    - name: owner_decision
+      when: The recruiter needs an answer only the owner can give (salary, a date, sharing contacts).
+      action: owner_approval
+    - name: unsafe_conversation
+      when: A job conversation the assistant cannot keep handling safely.
+      action: pause_autopilot
+  defaults:
+    mode: observe
+    limits:
+      maxAutonomousTurns: 6
+      maxMsgsPerMinute: 2
+      maxReplyChars: 1200
+    ceilings:
+      maxAutonomousTurns: 50
+      maxMsgsPerMinute: 5
+      maxReplyChars: 4096
+    disclosure:
+      policy: optional
+      text: "(sent by an AI assistant on the owner's behalf)"

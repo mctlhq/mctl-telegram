@@ -347,7 +347,11 @@ DB: reuse the existing `labs-mctl-telegram` database (no new DB).
 ## Out of scope
 
 WhatsApp/Viber/Gmail, CRM, auto-CV, attachments, link-opening, interview
-scheduling, calendar, Kafka, universal assistant.
+scheduling, calendar, Kafka.
+
+A general assistant was out of scope for this plan. The recruiter agent is now
+the first entry of an assistant catalog; the format and its phases are in
+[docs/assistants/spec.md](../assistants/spec.md).
 
 ## Verification (Part 1)
 

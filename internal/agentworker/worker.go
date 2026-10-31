@@ -279,11 +279,13 @@ func (w *Worker) runJob(ctx context.Context, gate *convGate, job JobEnvelope) {
 			outcome = "model_exited_without_completion"
 		}
 		slog.Warn("agent-worker: job invocation failed",
-			"job_id", job.JobID, "outcome", outcome, "err", err)
+			"job_id", job.JobID, "outcome", outcome, "err", err,
+			"assistant", job.Assistant, "assistant_digest", job.AssistantDigest)
 		return
 	}
 	slog.Info("agent-worker: job invocation finished",
-		"job_id", job.JobID, "outcome", "completed")
+		"job_id", job.JobID, "outcome", "completed",
+		"assistant", job.Assistant, "assistant_digest", job.AssistantDigest)
 }
 
 // isFatalAuthError reports whether err is an APIError carrying a 401 or 403

@@ -139,6 +139,27 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 		"BOOLEAN NOT NULL DEFAULT FALSE", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	// agent_profiles.assistant_name / assistant_version name the catalog
+	// assistant (assistants/<name>/assistant.yaml, docs/assistants/spec.md)
+	// whose instructions the account's jobs run with. The defaults are the
+	// migration: every account that existed before the catalog ran the
+	// recruiter agent, so it keeps doing so without a data rewrite.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "assistant_name",
+		"TEXT NOT NULL DEFAULT 'hr-recruiter'", "TEXT NOT NULL DEFAULT 'hr-recruiter'"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "assistant_version",
+		"TEXT NOT NULL DEFAULT '0.1.0'", "TEXT NOT NULL DEFAULT '0.1.0'"); err != nil {
+		return err
+	}
+	// agent_profiles.install_encrypted is the AssistantInstall document the
+	// account was last configured with. It carries the owner's values and
+	// notes, so it is tenant-key encrypted like owner_profile_encrypted.
+	// NULL means the account was never configured through an install.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "install_encrypted",
+		"BYTEA", "BLOB"); err != nil {
+		return err
+	}
 	// Durable one-time import marker. It remains set when an administrator
 	// clears the document, preventing a still-mounted legacy YAML file from
 	// silently restoring data on the next process restart.
