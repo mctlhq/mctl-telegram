@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.111.0](https://github.com/mctlhq/mctl-telegram/compare/0.110.0...0.111.0) (2026-10-31)
+
+
+### Features
+
+* **agent-worker:** self-update the Mac worker from tg-preview's commit ([a89c0ef](https://github.com/mctlhq/mctl-telegram/commit/a89c0efe49cd83fd190b6a0c9e14560e601378ca))
+* **agent-worker:** self-update the Mac worker from tg-preview's commit ([d87a532](https://github.com/mctlhq/mctl-telegram/commit/d87a53206090599af0221d364ebb6584058b88ef))
+
+
+### Bug Fixes
+
+* **agent-worker:** bound the readiness probe and own the lock strictly ([9dd0de4](https://github.com/mctlhq/mctl-telegram/commit/9dd0de40ddd0cdeca4ee8b0f132bb2865e146c72))
+* **agent-worker:** fail on a failed install and respect a fresh lock ([1f34990](https://github.com/mctlhq/mctl-telegram/commit/1f34990af99ddf4c72b70757036630ef46498407))
+* **agent-worker:** verify the new worker process and survive stale state ([4681215](https://github.com/mctlhq/mctl-telegram/commit/4681215432601540bc7036d74e91160034df71d1))
+* **agent:** do not let the pending-delete sweep block deletes ([3b3d871](https://github.com/mctlhq/mctl-telegram/commit/3b3d8710901bbeba57b4331ba554f48d5dda1b8b))
+* **agent:** give an edit job the rest of its unsent turn ([e4918a3](https://github.com/mctlhq/mctl-telegram/commit/e4918a33f54653322b91b61a813867aad29391d8))
+* **agent:** keep a delete that arrives before its message ([3cca3fa](https://github.com/mctlhq/mctl-telegram/commit/3cca3fae7dfa1b2de044d5f2026207704a5e651c))
+* **agent:** keep a delete that arrives before its message ([3c2cf5c](https://github.com/mctlhq/mctl-telegram/commit/3c2cf5ca084e214959ad01d0e5d37153160d2686)), closes [#985](https://github.com/mctlhq/mctl-telegram/issues/985) [#949](https://github.com/mctlhq/mctl-telegram/issues/949)
+* **agent:** owner edit takeover, pause alert copy, sender-word disclosure ([68d6e7b](https://github.com/mctlhq/mctl-telegram/commit/68d6e7b89a118035610c6987d2a88e75e75321fc))
+* **agent:** owner edit takeover, pause alert copy, sender-word disclosure ([f53458d](https://github.com/mctlhq/mctl-telegram/commit/f53458dcf28b9d46787d1c9c2e6b410da0e75550))
+* **agent:** owner notice wording (pronouns, hold reason) and delete-log noise ([7f93ae1](https://github.com/mctlhq/mctl-telegram/commit/7f93ae1d50bb2c4d3f76f754f624316f08c11dd3))
+* **agent:** say why a draft awaits approval ([1d21391](https://github.com/mctlhq/mctl-telegram/commit/1d21391df5415fe2ad523f75b4c20b7fb7b4ec1f)), closes [#989](https://github.com/mctlhq/mctl-telegram/issues/989)
+* **agent:** stop owner summaries assuming the sender's pronouns ([97a7287](https://github.com/mctlhq/mctl-telegram/commit/97a7287e7c9a699977e3202278215b0d1065ae85)), closes [#988](https://github.com/mctlhq/mctl-telegram/issues/988)
+* **agent:** sweep and log kept deletes once per update ([92dd6ac](https://github.com/mctlhq/mctl-telegram/commit/92dd6ac2c8724e35cfb5b1a72bde25dfc2fadd0d)), closes [#985](https://github.com/mctlhq/mctl-telegram/issues/985)
+* **listener:** ignore hidden outgoing edits after [#993](https://github.com/mctlhq/mctl-telegram/issues/993) ([eb8c0d4](https://github.com/mctlhq/mctl-telegram/commit/eb8c0d42df1e1b19d3adfc975f99ba797f90a9c5))
+* **telegram:** re-join the dialogs fetch after a leader cancel ([1155ba7](https://github.com/mctlhq/mctl-telegram/commit/1155ba71648a5f2b2f7a57d5a056cb4276f015df)), closes [#995](https://github.com/mctlhq/mctl-telegram/issues/995)
+
+
+### Performance Improvements
+
+* **telegram:** share one getDialogs snapshot per account in get_messages ([6798290](https://github.com/mctlhq/mctl-telegram/commit/67982904472814fa4bc17f5e287fd2d6cb6f60e2))
+* **telegram:** share one getDialogs snapshot per account in get_messages ([e51d2cc](https://github.com/mctlhq/mctl-telegram/commit/e51d2ccd360255ad1e9ba77f25d6cf455d02e0f9)), closes [#995](https://github.com/mctlhq/mctl-telegram/issues/995)
+
 ## [0.110.0](https://github.com/mctlhq/mctl-telegram/compare/0.109.2...0.110.0) (2026-10-30)
 
 
