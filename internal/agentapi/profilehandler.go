@@ -133,8 +133,6 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "mode must be observe, guarded, or off")
 			return
 		}
-		// Policy excludes everyone on a class it does not know; refuse to
-		// store one rather than discover it then.
 		// Policy holds every reply on a value it cannot parse; refuse to
 		// store one rather than discover it then.
 		if req.WorkingHours != nil && *req.WorkingHours != "" {
