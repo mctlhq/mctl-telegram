@@ -333,4 +333,3 @@ func TestNoIndexRobotsTag(t *testing.T) {
 		t.Error("page with NoIndex: false must not emit noindex robots tag")
 	}
 }
-

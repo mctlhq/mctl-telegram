@@ -163,6 +163,7 @@ func TestTerms_ServesHTML(t *testing.T) {
 		"must not use it to train or fine-tune AI models",
 		"your own",
 		"read-only by default",
+		`<meta name="robots" content="noindex, follow">`,
 		"spam",
 		"without warranties of any kind",
 		"support@mctl.ai",
