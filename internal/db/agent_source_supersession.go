@@ -170,6 +170,19 @@ func deleteEventID(selfTGID, chatTGID, messageID int64) string {
 		strconv.FormatInt(chatTGID, 10) + ":" + strconv.FormatInt(messageID, 10) + ":d"
 }
 
+// SweepExpiredPendingDeletes drops kept deletes older than pendingDeleteTTL.
+// The listener calls it once per delete update rather than once per id, so
+// clearing a long chat history costs one sweep.
+func (s *Store) SweepExpiredPendingDeletes(ctx context.Context) error {
+	if _, err := s.DB.ExecContext(ctx,
+		`DELETE FROM agent_pending_deletes WHERE created_at < $1`,
+		time.Now().UTC().Add(-pendingDeleteTTL),
+	); err != nil {
+		return fmt.Errorf("sweep pending deletes: %w", err)
+	}
+	return nil
+}
+
 // RecordMessageDelete handles the sender deleting an incoming private message
 // (#949). Telegram's UpdateDeleteMessages carries only message ids, which are
 // unique per account mailbox for private chats, so the chat is recovered from
@@ -190,7 +203,8 @@ func deleteEventID(selfTGID, chatTGID, messageID int64) string {
 // the delete before the new message, so the message may still be on its way.
 // InsertEventEnqueueJobAndTouch applies it when that message is ingested.
 // Deletes of messages the agent never ingests (the owner's own messages,
-// other chats) wait there until pendingDeleteTTL and do nothing.
+// other chats) wait there until SweepExpiredPendingDeletes drops them after
+// pendingDeleteTTL, and do nothing.
 func (s *Store) RecordMessageDelete(ctx context.Context, userID, selfTGID, messageID int64) (MessageDeleteResult, error) {
 	var out MessageDeleteResult
 	if userID <= 0 || messageID <= 0 {
@@ -221,12 +235,6 @@ func (s *Store) RecordMessageDelete(ctx context.Context, userID, selfTGID, messa
 
 	if len(chats) == 0 {
 		now := time.Now().UTC()
-		if _, err := s.DB.ExecContext(ctx,
-			`DELETE FROM agent_pending_deletes WHERE created_at < $1`,
-			now.Add(-pendingDeleteTTL),
-		); err != nil {
-			return out, fmt.Errorf("sweep pending deletes: %w", err)
-		}
 		if _, err := s.DB.ExecContext(ctx,
 			`INSERT INTO agent_pending_deletes(user_id, message_id, self_tg_id, created_at)
 			 VALUES($1,$2,$3,$4)

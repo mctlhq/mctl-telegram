@@ -12,6 +12,9 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       # release-please has to open the release PR as somebody. The default
       # GITHUB_TOKEN stopped being able to do that on 2026-09-03: the
@@ -136,3 +139,23 @@ jobs:
           TAG: ${{ steps.release.outputs.tag_name }}
         run: gh release upload "$TAG" dist/* --clobber
 
+  # The live round trip against real Telegram (#854) runs once per release,
+  # on the tag just cut, and never on a schedule: it spends the CI account's
+  # flood budget, which the production canary shares. Its own job so that a
+  # failed binary build above cannot stop it, and so actions:write is not
+  # granted to steps that build code from the tag. A workflow_dispatch from
+  # GITHUB_TOKEN is one of the events that token is allowed to start.
+  live-telegram:
+    needs: release-please
+    # !cancelled(): needs alone implies success(), and a failed binary build
+    # would skip this job. Outputs of the steps that already ran survive it.
+    if: ${{ !cancelled() && needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Start the live Telegram round trip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: gh workflow run live-telegram.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
