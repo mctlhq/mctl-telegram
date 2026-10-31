@@ -164,6 +164,7 @@
   }
   .status-dot {
     width: 8px; height: 8px;
+    flex-shrink: 0; /* a wrapping eyebrow squeezed it into an oval on phones */
     border-radius: 50%;
     background: var(--accent-2);
     box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-2) 60%, transparent);

@@ -66,6 +66,7 @@ type Data struct {
 	PublicBaseURL string // shown in the footer, and used as the og:url / og:image origin
 	ShowManage    bool   // set true only when /telegram/connect/manage is mounted (local-jwt auth mode)
 	CanonicalPath string // when set, emits <link rel="canonical"> at PublicBaseURL+CanonicalPath
+	NoIndex       bool   // when set, emits <meta name="robots" content="noindex, follow">
 }
 
 // FaviconLink is the shared tab icon pointing at the design-CDN terracotta T
@@ -97,7 +98,8 @@ const wordmark = `<span class="wordmark"><span class="wordmark-m">M</span><span 
 var defs = `
 {{define "ui_head"}}<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{.Title}}</title>
+{{if .NoIndex}}<meta name="robots" content="noindex, follow">
+{{end}}<title>{{.Title}}</title>
 <meta name="description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarize unread chats, draft replies, and search your history — no extra apps.{{end}}">
 {{if .CanonicalPath}}<link rel="canonical" href="{{.PublicBaseURL}}{{.CanonicalPath}}">
 {{end}}` + FaviconLink + `

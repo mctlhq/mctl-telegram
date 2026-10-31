@@ -319,3 +319,17 @@ func TestNoLocalPageWrap(t *testing.T) {
 		t.Error("fallback tokens must carry the 720px prose width site.css reads")
 	}
 }
+
+func TestNoIndexRobotsTag(t *testing.T) {
+	page := `<!doctype html><html lang="en"><head>{{template "ui_head" .}}</head><body></body></html>`
+
+	withNoIndex := render(t, "noindex", page, Data{Title: "T", NoIndex: true})
+	if !strings.Contains(withNoIndex, `<meta name="robots" content="noindex, follow">`) {
+		t.Error("page with NoIndex: true must emit noindex robots tag")
+	}
+
+	withoutNoIndex := render(t, "indexed", page, Data{Title: "T", NoIndex: false})
+	if strings.Contains(withoutNoIndex, `noindex`) {
+		t.Error("page with NoIndex: false must not emit noindex robots tag")
+	}
+}
