@@ -6,8 +6,10 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
@@ -316,10 +318,17 @@ func (n *Notifier) format(ctx context.Context, notif db.OwnerNotification) (stri
 	// conversation row was since deleted) degrades to the un-identified
 	// prefix rather than failing the whole notification, since the
 	// approve/reject codes are still the load-bearing part of this message.
-	prefix := "Draft reply awaiting approval:\n\n"
+	prefix := "Draft reply awaiting approval:\n"
 	if who, convID := n.peerLabel(ctx, action); convID != 0 {
-		prefix = fmt.Sprintf("Draft reply awaiting approval (to %s, conv #%d):\n\n", who, convID)
+		prefix = fmt.Sprintf("Draft reply awaiting approval (to %s, conv #%d):\n", who, convID)
 	}
+	// Say why a reply that looks routine needs the owner (#989). The
+	// reasons are the policy's, rewritten for the owner; the model's text
+	// never goes into them.
+	if reasons := policy.OwnerHoldReasons(action.PolicyReasons); len(reasons) > 0 {
+		prefix += "Held because " + strings.Join(reasons, "; ") + ".\n"
+	}
+	prefix += "\n"
 	return reserveTail(prefix, action.Payload, instructions), nil
 }
 

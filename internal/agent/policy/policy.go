@@ -497,24 +497,24 @@ func Evaluate(in Input) Result {
 
 	var reasons []string
 	if in.Profile.Mode == db.AgentModeObserve {
-		reasons = append(reasons, "observe mode: never auto-send")
+		reasons = append(reasons, ReasonObserveMode)
 	}
 	maxTurns := in.Profile.MaxAutonomousTurns
 	if maxTurns <= 0 {
 		maxTurns = 6
 	}
 	if in.Conversation.AutonomousTurns >= maxTurns {
-		reasons = append(reasons, "autonomous turn budget exhausted")
+		reasons = append(reasons, ReasonTurnBudget)
 	}
 	allowed, ok := allowlistEntry(in.Profile.IntentAllowlist, in.Action.Intent)
 	if !ok {
-		reasons = append(reasons, "intent not in allowlist")
+		reasons = append(reasons, ReasonIntentNotAllowed)
 	}
 	if overRate(in.RecentAgentSends, in.Profile.MaxMsgsPerMinute, in.Now) {
-		reasons = append(reasons, "rate limit exceeded")
+		reasons = append(reasons, ReasonRateLimit)
 	}
 	if in.ProtectedField != nil {
-		reasons = append(reasons, "reply echoes owner_profile field "+strconv.Quote(in.ProtectedField.Key)+" before the owner engaged")
+		reasons = append(reasons, protectedFieldReasonPrefix+strconv.Quote(in.ProtectedField.Key)+protectedFieldReasonSuffix)
 	}
 	if len(reasons) > 0 {
 		return Result{Decision: RequireApproval, Reasons: reasons}
@@ -523,6 +523,46 @@ func Evaluate(in Input) Result {
 	// intent auto-sent (#954). The entry is the operator's configuration;
 	// the model's own intent string never goes into the reason.
 	return Result{Decision: Allow, Reasons: []string{"guarded: allowlisted " + allowed + " intent"}}
+}
+
+// Reasons a guarded reply is held for approval. They are stored joined by
+// "; " in agent_actions.policy_reasons, and OwnerHoldReasons turns them into
+// the owner's wording for the approval request (#989).
+const (
+	ReasonObserveMode      = "observe mode: never auto-send"
+	ReasonTurnBudget       = "autonomous turn budget exhausted"
+	ReasonIntentNotAllowed = "intent not in allowlist"
+	ReasonRateLimit        = "rate limit exceeded"
+
+	protectedFieldReasonPrefix = "reply echoes owner_profile field "
+	protectedFieldReasonSuffix = " before the owner engaged"
+)
+
+// OwnerHoldReasons rewrites stored approval reasons (policy_reasons) for the
+// owner. Every reason comes from this package, never from the model, so an
+// unrecognised one is passed through as stored rather than dropped.
+func OwnerHoldReasons(stored string) []string {
+	var out []string
+	for _, r := range strings.Split(stored, "; ") {
+		r = strings.TrimSpace(r)
+		switch {
+		case r == "":
+		case r == ReasonObserveMode:
+			out = append(out, "observe mode is on, so every reply needs your approval")
+		case r == ReasonTurnBudget:
+			out = append(out, "the agent has used up its reply budget for this chat (/mctl continue resets it)")
+		case r == ReasonIntentNotAllowed:
+			out = append(out, "this kind of reply is not on your auto-send list")
+		case r == ReasonRateLimit:
+			out = append(out, "the agent already sent the most replies allowed per minute")
+		case strings.HasPrefix(r, protectedFieldReasonPrefix) && strings.HasSuffix(r, protectedFieldReasonSuffix):
+			key := strings.TrimSuffix(strings.TrimPrefix(r, protectedFieldReasonPrefix), protectedFieldReasonSuffix)
+			out = append(out, "it repeats your profile field "+key+" to someone you have not been in touch with yet")
+		default:
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func isBlocked(csv string, peerID int64) bool { return containsID(csv, peerID) }
