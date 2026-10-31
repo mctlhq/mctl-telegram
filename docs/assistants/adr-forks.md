@@ -1,7 +1,7 @@
 # Forks and private definitions (P4 decision record)
 
-Status: **proposed**. The owner picks the storage option before P4.2 (#1043)
-starts. Spike: #1042.
+Status: **Accepted (owner, 2026-10-31)**. Option B; the owner's answers are
+under [Decisions](#decisions). Spike: #1042; implemented by P4.2 (#1043).
 
 A fork is an account-private assistant that a user derives from a catalog
 assistant: their own instructions, fewer tools, stricter intents, lower
@@ -77,7 +77,7 @@ snapshot, embedded bridge, and the owner's private forks.
 | **Work in mctl-api** | Visibility `private` + owner subject; a publish route and guard for the surface; owner-scoped `/definition` read; filters on admin listings and MCP tools; hard delete and purge-by-owner; encryption at rest for private rows; docs. | None for P4. |
 | **Work in mctl-telegram** | Fork validation, MCP tools, a publish client, an outbox for purge, plus an owner-aware, encrypted, purgeable snapshot for private rows (that is, B's storage work as well). | Fork validation, MCP tools, the `assistant_forks` store, a third resolution source, refresh of base lifecycles. |
 
-## Decision (recommended): B, as a constrained overlay
+## Decision: B, as a constrained overlay
 
 Keep forks in mctl-telegram, but not as a second registry: a fork is a
 private, owner-scoped derivative of exactly one registry base, which stays
@@ -246,6 +246,9 @@ passes:
 - Installing a fork is self-only: the install service refuses a fork whose
   owner is not the calling account, whatever route it comes through
   (MCP, web or the admin route).
+- **Quotas**: at most 10 forks per account and 50 versions per fork. A
+  write past either limit is refused (`fork_limit`) and changes nothing;
+  the owner frees room by deleting a fork or unpinned versions.
 - **Deletion**: `delete_fork` removes versions the current install does not
   pin and refuses the pinned one (`fork_in_use`), so a pin never points at a
   missing document. Account purge removes all of them with the profile.
@@ -277,7 +280,7 @@ Two things are new:
 
 ## Work slices
 
-### B (recommended), all in mctl-telegram
+### B (accepted), all in mctl-telegram
 
 | Slice | Files |
 |---|---|
@@ -308,16 +311,17 @@ can verify, private-row encryption and deletion. A fork version then moves
 as a copy of its canonical document: same bytes, same digest, so existing
 pins keep matching. Nothing in this record has to be undone.
 
-## Open questions for the owner
+## Decisions
 
-1. **Storage**: B as recommended, or A?
-2. **Intents**: is "equal or stricter, new intents only at approve/never"
-   right, or should a promoted fork be allowed `auto` on a new intent?
-3. **Instruction cap**: 16 KiB, or a different number?
-4. **Version bumps**: patch for instructions only, minor for authority
-   changes; acceptable?
-5. **Admin switch**: is disabling the base plus a global
-   `ASSISTANT_FORKS_ENABLED` enough, or is a per-fork admin kill switch
-   needed? (Under B an admin cannot read fork text without the per-user key.)
-6. **Fork limit**: how many forks and versions per account (proposal: 10
-   forks, 50 versions each; versions not pinned may be deleted)?
+The owner answered the spike's questions on 2026-10-31 (#1053):
+
+1. **Storage**: Option B, a constrained overlay in mctl-telegram:
+   `assistant_forks`, encrypted with the per-user key.
+2. **Intents**: equal to the base's or stricter. A new intent only at
+   `approve` or `never`, never `auto`, and promotion does not change that.
+3. **Instruction cap**: 16 KiB of UTF-8.
+4. **Versions**: patch when only the instructions change, minor when
+   anything in the authority diff changes.
+5. **Kill switch**: disabling the base plus the global
+   `ASSISTANT_FORKS_ENABLED` switch. No per-fork admin switch for now.
+6. **Quotas**: 10 forks per account, 50 versions per fork.

@@ -600,8 +600,9 @@ so they have no semantics the MCP tools do not have.
   per-account install binding, MCP tools `list_assistants`,
   `install_assistant`, `update_install`, and a page on tg.mctl.ai.
 - **P4:** forks, user connectors with review, own-runtime documentation.
-  The fork model and where private definitions are stored are decided in
-  [adr-forks.md](adr-forks.md) (P4.1, #1042).
+  The fork model and the storage of private definitions (in mctl-telegram,
+  encrypted per account) are decided in [adr-forks.md](adr-forks.md)
+  (P4.1, #1042; accepted 2026-10-31).
 
 ## How this compares
 
