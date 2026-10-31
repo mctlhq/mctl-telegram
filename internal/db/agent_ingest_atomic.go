@@ -127,6 +127,9 @@ const ReasonConversationNotActive = "conversation not active: agent not invoked"
 // transaction, so a takeover committed before this event is always seen.
 // Owner summaries are skipped with the reply: in a conversation the owner is
 // handling, the owner reads the messages directly.
+// With operator routing on, the event is not published to the operator
+// stream either (the ingest outbox row is skipped because the job exists):
+// the owner is handling the conversation, the same as a run ending ignored.
 func ignoreInactiveConversationJobTx(ctx context.Context, tx *sql.Tx, userID, conversationID, jobID int64) error {
 	if jobID == 0 {
 		return nil

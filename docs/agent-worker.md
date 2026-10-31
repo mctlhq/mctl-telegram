@@ -450,6 +450,14 @@ message is always seen. After `/mctl continue <id>` the next message is
 handled normally; messages that arrived while the owner was handling the
 chat are not replayed.
 
+With operator routing on (`EVENTS_OPERATOR_ROUTING`), these messages are
+not forwarded to the operator stream either, by design. Routing forwards
+what the worker could not handle; a conversation the owner is handling is
+handled. It is the same outcome as a worker run that ends `ignored`, which
+also publishes nothing. Before this change such a message reached the
+operator only in the rare case where the model proposed a reply and policy
+denied it. With routing off, ingest publishes the event as before.
+
 ## Attachments in inbound messages (#948)
 
 An inbound message with media is a message even when it has no caption: it
