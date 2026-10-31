@@ -78,7 +78,7 @@
           }
         },
         "tools": {
-          "description": "Platform tools the assistant's model may call: every tool, each by its canonical name or a generic alias (get_owner_profile, get_record, save_record).",
+          "description": "Platform tools the assistant's model may call, each by its canonical name or a generic alias (get_owner_profile, get_record, save_record). A subset is enforced by the agent API and must include get_event and complete_agent_job.",
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,

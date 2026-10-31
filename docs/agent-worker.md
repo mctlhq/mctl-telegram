@@ -116,7 +116,7 @@ exactly one file. It carries:
 - `mctl_agent_credential_domain{domain_id=...}` — the info gauge described
   above.
 - `mctl_agent_jobs_total` (6 children) and `mctl_agent_policy_denials_total`
-  (138 children), all at a **constant zero**. These are server-side families:
+  (168 children), all at a **constant zero**. These are server-side families:
   `AgentJobsTotal` is incremented only in `internal/agent/queue`, and
   `CountPolicyDenial` only in `internal/agentapi` and `internal/agent/executor`
   — none of which run in this process. They appear here because `metrics.New()`
@@ -138,7 +138,7 @@ the first — and possibly only — occurrence they exist for (issue #591).
 it is the denominator of `MctlAgentJobCostHigh` and a lazy denominator makes the
 first completed job after a restart read as zero completions.
 `mctl_agent_policy_denials_total` is pre-created too, across its full
-23 x 6 = 138 label space. It was originally left lazy on the grounds that
+24 x 7 = 168 label space. It was originally left lazy on the grounds that
 `MctlAgentPolicyDenialRateHigh`'s `> 4` floor means one first denial cannot
 fire it — true, and beside the point: if the first *five* denials for one
 reason land between two scrapes, the series is first observed at 5, every later
@@ -279,8 +279,11 @@ carries `install_revision`, the account's install revision at claim time
 (logged with the assistant and digest; see `docs/assistants/spec.md`), and
 `tools`, the definition's tool names (a canonical name or a generic
 alias for each tool, see `docs/assistants/spec.md`); the worker passes them
-to the MCP server as `AGENT_JOB_TOOLS` and allows exactly those names. A job
-whose names do not cover every tool fails before `claude` starts. A prompt
+to the MCP server as `AGENT_JOB_TOOLS` and allows exactly those names. The names
+may be a subset; a job whose names leave out `get_event` or
+`complete_agent_job`, name a tool twice or name an unknown tool fails before
+`claude` starts. The agent API enforces the subset itself from the job
+token, so the worker's list is not the boundary. A prompt
 change therefore ships with the server release. `AGENT_SYSTEM_PROMPT` is the
 fallback for a server without the catalog and should still be the contents
 of `deploy/agent-worker/system-prompt.txt`, the canonical guarded prompt that
