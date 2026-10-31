@@ -12,6 +12,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
 	agentprofile "github.com/mctlhq/mctl-telegram/internal/agent/profile"
 	"github.com/mctlhq/mctl-telegram/internal/assistant"
+	"github.com/mctlhq/mctl-telegram/internal/assistantregistry"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/jsonstrict"
 )
@@ -40,9 +41,18 @@ type installAgentResponse struct {
 // this is a full replacement: every setting comes from the install or the
 // definition's defaults.
 //
+// With registry set (ASSISTANT_REGISTRY_ENABLED, #1020) the definition is
+// fetched from the mctl-api registry instead of the embedded catalog, its
+// digest checked against the registry's contentHash, and the materialized
+// document stored as a snapshot in the same transaction as the profile
+// UPDATE, so claims and restarts never need the registry. A new install
+// needs lifecycle published; deprecated is accepted only for the
+// name@version the account already runs. With registry nil the embedded
+// catalog is the source, as before.
+//
 // Admin-scoped and mounted like NewAdminAgentProfileHandler; an agent's own
 // token must never reach it.
-func NewAdminAgentInstallHandler(store *db.Store, catalog *assistant.Catalog) http.HandlerFunc {
+func NewAdminAgentInstallHandler(store *db.Store, catalog *assistant.Catalog, registry *assistantregistry.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, ok := identity(w, r)
 		if !ok {
@@ -87,10 +97,40 @@ func NewAdminAgentInstallHandler(store *db.Store, catalog *assistant.Catalog) ht
 			writeJSONError(w, http.StatusBadRequest, "invalid install: "+err.Error())
 			return
 		}
-		entry, ok := catalog.Lookup(in.Spec.Assistant.Name, in.Spec.Assistant.Version)
-		if !ok {
-			writeJSONError(w, http.StatusBadRequest, "unknown assistant "+in.Spec.Assistant.Name+"@"+in.Spec.Assistant.Version)
-			return
+		reqRef := in.Spec.Assistant.Name + "@" + in.Spec.Assistant.Version
+		var entry *assistant.Entry
+		lifecycle := ""
+		if registry == nil {
+			e, ok := catalog.Lookup(in.Spec.Assistant.Name, in.Spec.Assistant.Version)
+			if !ok {
+				writeJSONError(w, http.StatusBadRequest, "unknown assistant "+reqRef)
+				return
+			}
+			entry = e
+		} else {
+			fetched, err := registry.Fetch(r.Context(), in.Spec.Assistant.Name, in.Spec.Assistant.Version)
+			switch {
+			case errors.Is(err, assistantregistry.ErrNotFound):
+				writeJSONError(w, http.StatusNotFound, "unknown assistant "+reqRef)
+				return
+			case errors.Is(err, assistantregistry.ErrDigestMismatch):
+				logHandlerErr("admin.agent_install", err)
+				writeJSONError(w, http.StatusBadGateway, "assistant registry digest mismatch: install refused")
+				return
+			case errors.Is(err, assistantregistry.ErrInvalid):
+				logHandlerErr("admin.agent_install", err)
+				writeJSONError(w, http.StatusBadGateway, "assistant registry returned an invalid definition: install refused")
+				return
+			case err != nil:
+				logHandlerErr("admin.agent_install", err)
+				writeJSONError(w, http.StatusServiceUnavailable, "assistant registry unavailable")
+				return
+			}
+			entry, lifecycle = fetched.Entry, fetched.Lifecycle
+			if lifecycle == db.AssistantLifecycleDisabled {
+				writeJSONError(w, http.StatusConflict, "assistant "+reqRef+" is disabled")
+				return
+			}
 		}
 		resolved, err := assistant.Resolve(entry.Definition, in)
 		if err != nil {
@@ -147,6 +187,14 @@ func NewAdminAgentInstallHandler(store *db.Store, catalog *assistant.Catalog) ht
 			return
 		}
 		switching := current.Name != name
+		// A deprecated version stays with the accounts that installed it;
+		// it is not offered to new ones. A never-installed profile names
+		// hr-recruiter@0.1.0 only through the column defaults, which is not
+		// an install of it.
+		if lifecycle == db.AssistantLifecycleDeprecated && (!current.Installed || switching || current.Version != version) {
+			writeJSONError(w, http.StatusConflict, "assistant "+reqRef+" is deprecated: only an account already running it may reinstall it")
+			return
+		}
 		installedAt := time.Now()
 		digest := entry.Digest
 		update := db.AgentProfileUpdate{
@@ -178,7 +226,16 @@ func NewAdminAgentInstallHandler(store *db.Store, catalog *assistant.Catalog) ht
 		} else {
 			update.MarkInstalledAt = &installedAt
 		}
-		if err := store.UpdateAgentProfileFields(ctx, targetUserID, update); err != nil {
+		var saveErr error
+		if registry != nil {
+			saveErr = store.InstallAgentAssistant(ctx, targetUserID, db.AssistantDefinition{
+				Digest: digest, Name: name, Version: version,
+				Document: entry.Materialized, Lifecycle: lifecycle,
+			}, update)
+		} else {
+			saveErr = store.UpdateAgentProfileFields(ctx, targetUserID, update)
+		}
+		if err := saveErr; err != nil {
 			logHandlerErr("admin.agent_install", err)
 			store.LogToolCall(ctx, db.ToolCall{UserID: id.UserID, Tool: "admin.agent_install", Status: "error", ErrMsg: err.Error()})
 			writeJSONError(w, http.StatusInternalServerError, "failed to save agent install")

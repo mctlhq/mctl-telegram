@@ -7,6 +7,11 @@ import (
 	"time"
 )
 
+// legacyHRRecruiterDigest is hr-recruiter@0.1.0's digest as #1023 computed
+// it (over the authored YAML and the instructions file), before #1025
+// moved digests to the materialized form.
+const legacyHRRecruiterDigest = "sha256:715ac8851f4c7a0600d74a1a8acfdaa1c58bec3dcb90608034006828a231ae29"
+
 // Agent domain schema (communication agent, M6). These tables back the
 // autonomous communication agent: incoming Telegram updates become durable
 // incoming_events rows, the agent's proposed actions and their approval
@@ -177,6 +182,26 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "assistant_definition_digest",
 		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
+	}
+	// agent_profiles.assistant_registry_notice_for: which stale registry
+	// check (pinned digest and the time of its last successful lifecycle
+	// check) the owner was last told about, so the "registry could not be
+	// reached" notice goes out once per outage, not once per claim (#1020).
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "assistant_registry_notice_for",
+		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	// One-time repair (#1032): between #1023 and #1025 main stamped installs
+	// with hr-recruiter@0.1.0's digest in the scheme #1025 replaced, which
+	// neither the embedded catalog nor any stored definition carries any
+	// more, so those accounts' claims would fail. Clearing exactly that
+	// value sends them to the embedded catalog, as for an account that
+	// never pinned a digest. Any other unbacked digest still fails.
+	// Idempotent: once cleared, nothing matches.
+	if _, err := dbConn.ExecContext(ctx,
+		`UPDATE agent_profiles SET assistant_definition_digest = '' WHERE assistant_definition_digest = $1`,
+		legacyHRRecruiterDigest); err != nil {
+		return fmt.Errorf("migrate agent: clear legacy assistant digest: %w", err)
 	}
 	// agent_profiles.owner_profile_encrypted holds the account-specific
 	// identity, public biography, skills, preferences, and restricted fields.
@@ -733,6 +758,20 @@ func agentSchemaSQLite() []string {
 			last_error TEXT NOT NULL DEFAULT '',
 			updated_at DATETIME NOT NULL
 		)`,
+		// Registry definitions an install pinned (#1020), by digest: the
+		// materialized document as fetched and checked, so claims render
+		// from here and a restart never needs mctl-api. lifecycle is the
+		// registry's last observed lifecycle for name@version, and
+		// lifecycle_checked_at the last time it was read successfully.
+		`CREATE TABLE IF NOT EXISTS assistant_definitions (
+			digest TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			version TEXT NOT NULL,
+			document TEXT NOT NULL,
+			lifecycle TEXT NOT NULL,
+			fetched_at DATETIME NOT NULL,
+			lifecycle_checked_at DATETIME NOT NULL
+		)`,
 	}
 }
 
@@ -1045,6 +1084,20 @@ func agentSchemaPG() []string {
 			fail_count BIGINT NOT NULL DEFAULT 0,
 			last_error TEXT NOT NULL DEFAULT '',
 			updated_at TIMESTAMPTZ NOT NULL
+		)`,
+		// Registry definitions an install pinned (#1020), by digest: the
+		// materialized document as fetched and checked, so claims render
+		// from here and a restart never needs mctl-api. lifecycle is the
+		// registry's last observed lifecycle for name@version, and
+		// lifecycle_checked_at the last time it was read successfully.
+		`CREATE TABLE IF NOT EXISTS assistant_definitions (
+			digest TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			version TEXT NOT NULL,
+			document TEXT NOT NULL,
+			lifecycle TEXT NOT NULL,
+			fetched_at TIMESTAMPTZ NOT NULL,
+			lifecycle_checked_at TIMESTAMPTZ NOT NULL
 		)`,
 	}
 }

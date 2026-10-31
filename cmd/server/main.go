@@ -29,6 +29,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/agent/turn"
 	"github.com/mctlhq/mctl-telegram/internal/agentapi"
 	"github.com/mctlhq/mctl-telegram/internal/assistant"
+	"github.com/mctlhq/mctl-telegram/internal/assistantregistry"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localdev"
@@ -747,8 +748,19 @@ func main() {
 			slog.Error("agent: assistant catalog failed to load", "err", err)
 			os.Exit(1)
 		}
+		// The assistant registry (#1020): off by default. With it on,
+		// installs fetch from mctl-api and store a snapshot, a refresh keeps
+		// pinned lifecycles current, and claims stop for a disabled or
+		// unknown one. Claims never call the registry.
+		var registry *assistantregistry.Client
+		if cfg.AssistantRegistryEnabled {
+			registry = assistantregistry.NewClient(cfg.MCTLAPIBaseURL, cfg.MCTLSurfaceTelegramToken, nil)
+			refresher := &assistantregistry.Refresher{Store: store, Client: registry}
+			go refresher.Run(ctx, assistantregistry.RefreshInterval)
+		}
+		slog.Info("assistant registry", "enabled", cfg.AssistantRegistryEnabled, "mctl_api_base_url", cfg.MCTLAPIBaseURL)
 		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Put("/api/admin/agent/install",
-			agentapi.NewAdminAgentInstallHandler(store, catalog))
+			agentapi.NewAdminAgentInstallHandler(store, catalog, registry))
 		agentProvider := selectAgentProvider(cfg, store, workerTokenRevocationCache)
 		if jobProvider := selectAgentJobProvider(cfg, store, workerTokenRevocationCache); jobProvider != nil {
 			agentProvider = chainProvider{agentProvider, jobProvider}
@@ -758,6 +770,9 @@ func main() {
 		agentSrv.AllowLegacyJobCompletion = cfg.AgentAllowLegacyCompletion
 		agentSrv.WithProfile(agentProfileProvider)
 		agentSrv.WithCatalog(catalog)
+		if cfg.AssistantRegistryEnabled {
+			agentSrv.WithRegistryLifecycle()
+		}
 		if cfg.OAUTHJWTSecret != "" {
 			jobSigner, err := localjwt.NewIssuer([]byte(cfg.OAUTHJWTSecret), strings.TrimRight(cfg.PublicBaseURL, "/"))
 			if err != nil {

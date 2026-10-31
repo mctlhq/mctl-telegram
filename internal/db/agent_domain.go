@@ -277,6 +277,9 @@ type AgentAssistant struct {
 	// Install is the decrypted AssistantInstall JSON, nil when the account
 	// was never configured through an install.
 	Install []byte
+	// Digest is the definition digest the current install pinned, "" when
+	// the account was never installed with one.
+	Digest string
 }
 
 // AgentAssistantRef is the catalog assistant an account runs and whether
@@ -317,10 +320,10 @@ func (s *Store) GetAgentAssistant(ctx context.Context, userID int64) (*AgentAssi
 	var a AgentAssistant
 	var encrypted []byte
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT assistant_name, assistant_version, install_encrypted
+		`SELECT assistant_name, assistant_version, install_encrypted, assistant_definition_digest
 		   FROM agent_profiles WHERE user_id = $1`,
 		userID,
-	).Scan(&a.Name, &a.Version, &encrypted)
+	).Scan(&a.Name, &a.Version, &encrypted, &a.Digest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrAgentProfileNotFound
 	}
@@ -402,6 +405,12 @@ type AgentProfileUpdate struct {
 // call EnsureAgentProfile first. A no-op call (every field nil) is a no-op
 // query too, not an error.
 func (s *Store) UpdateAgentProfileFields(ctx context.Context, userID int64, u AgentProfileUpdate) error {
+	return s.updateAgentProfileFields(ctx, s.DB, userID, u)
+}
+
+// updateAgentProfileFields is UpdateAgentProfileFields on ex, so the same
+// UPDATE can run inside a caller's transaction (InstallAgentAssistant).
+func (s *Store) updateAgentProfileFields(ctx context.Context, ex execer, userID int64, u AgentProfileUpdate) error {
 	if userID <= 0 {
 		return errors.New("user id required")
 	}
@@ -510,7 +519,7 @@ func (s *Store) UpdateAgentProfileFields(ctx context.Context, userID int64, u Ag
 	args = append(args, userID)
 	query := fmt.Sprintf(`UPDATE agent_profiles SET %s WHERE user_id = $%d`,
 		strings.Join(sets, ", "), len(args))
-	res, err := s.DB.ExecContext(ctx, query, args...)
+	res, err := ex.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("update agent profile fields: %w", err)
 	}

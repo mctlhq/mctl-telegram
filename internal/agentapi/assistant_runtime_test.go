@@ -84,7 +84,7 @@ func TestAdminAgentInstallHandler_AppliesInstall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := NewAdminAgentInstallHandler(store, embeddedCatalog(t))
+	h := NewAdminAgentInstallHandler(store, embeddedCatalog(t), nil)
 	notes := "Keep replies under three sentences."
 	rec := doInstall(t, h, 777, hrInstallJSON(t, map[string]any{
 		"ownerNotes": notes, "intentTiers": map[string]any{"decline": "never"},
@@ -131,7 +131,7 @@ func TestAdminAgentInstallHandler_Rejects(t *testing.T) {
 	if _, err := store.EnsureUserByTelegramID(context.Background(), 777, "reviewer", "Reviewer"); err != nil {
 		t.Fatal(err)
 	}
-	h := NewAdminAgentInstallHandler(store, embeddedCatalog(t))
+	h := NewAdminAgentInstallHandler(store, embeddedCatalog(t), nil)
 
 	rec := doProfileReq(h, nil, `{"telegram_id":777}`)
 	if rec.Code != http.StatusUnauthorized {
@@ -188,7 +188,7 @@ func TestAdminAgentInstallHandler_SwitchesAssistant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hr := NewAdminAgentInstallHandler(store, embeddedCatalog(t))
+	hr := NewAdminAgentInstallHandler(store, embeddedCatalog(t), nil)
 	if rec := doInstall(t, hr, 777, hrInstallJSON(t, nil)); rec.Code != http.StatusOK {
 		t.Fatalf("hr install status = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -217,7 +217,7 @@ func TestAdminAgentInstallHandler_SwitchesAssistant(t *testing.T) {
 
 	time.Sleep(10 * time.Millisecond)
 	install := hrInstallJSON(t, map[string]any{"assistant": map[string]any{"name": "other-assistant", "version": "0.1.0"}})
-	if rec := doInstall(t, NewAdminAgentInstallHandler(store, catalog), 777, install); rec.Code != http.StatusOK {
+	if rec := doInstall(t, NewAdminAgentInstallHandler(store, catalog, nil), 777, install); rec.Code != http.StatusOK {
 		t.Fatalf("switch status = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	after, err := store.GetAgentProfile(ctx, uid)
@@ -368,7 +368,7 @@ func TestAdminAgentInstallHandler_OutsideHours(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := NewAdminAgentInstallHandler(store, embeddedCatalog(t))
+	h := NewAdminAgentInstallHandler(store, embeddedCatalog(t), nil)
 	rec := doInstall(t, h, 777, hrInstallJSON(t, map[string]any{"schedule": map[string]any{
 		"mode": "outside_hours", "timezone": "Europe/Zurich", "hours": []string{"mon-fri 09:00-18:00"},
 	}}))
@@ -424,7 +424,7 @@ func TestAdminAgentInstallHandler_AudienceAndInstallTime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := NewAdminAgentInstallHandler(store, embeddedCatalog(t))
+	h := NewAdminAgentInstallHandler(store, embeddedCatalog(t), nil)
 	scope := map[string]any{"scope": map[string]any{"newChats": false}}
 	if rec := doInstall(t, h, 777, hrInstallJSON(t, map[string]any{"audience": scope})); rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())

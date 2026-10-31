@@ -338,8 +338,10 @@ form: the definition document with `spec.instructions.path` replaced by
 `spec.instructions.text`, the full system prompt, encoded as canonical JSON:
 object keys sorted by byte order, no whitespace between tokens, strings
 escaped only where JSON requires it (`"`, `\`, control characters; `<`, `>`
-and `&` stay literal), integers without a fraction, UTF-8, no trailing
-newline. An authored definition
+and `&` stay literal), except U+2028 and U+2029, which are always written
+as `\u2028` and `\u2029`; integers without a fraction, UTF-8, no trailing
+newline. A document or instructions file that is not valid UTF-8 is
+refused, never repaired. An authored definition
 in this repository names its instructions by path; a materialized one
 carries the text and no path, so it is complete without the repository.
 
@@ -374,12 +376,44 @@ carries the text and no path, so it is complete without the repository.
   `hr-recruiter`, `deploy/agent-worker/system-prompt.txt`) fails CI until the
   change ships as a new version. `hr-recruiter@0.1.0` is `public` and
   `active` since P3.2.
-- **Staleness (P3.4).** An installed definition is kept in the database
-  with its install revision, so a restart works without the registry. Its
-  lifecycle is refreshed every 5 minutes; `disabled` stops new jobs within
-  that interval. If the registry cannot be read, the last known lifecycle
-  stands for 24 hours, after which it is unknown, unknown is not
-  `published`, new jobs stop and the owner is told.
+- **Install from the registry (P3.4).** With `ASSISTANT_REGISTRY_ENABLED`
+  on, an install fetches
+  `GET /api/v1/assistant-catalog/{name}/versions/{version}/definition` from
+  mctl-api as the `surface:telegram` principal, canonicalizes the returned
+  definition with `assistant.ParseMaterialized` and refuses it unless the
+  recomputed digest equals the registry's `contentHash`. A new install needs
+  lifecycle `published`; `deprecated` is accepted only for the name@version
+  the account already runs; `disabled` is refused. The definition is stored
+  in `assistant_definitions` (keyed by digest) in the same transaction as
+  the profile UPDATE that moves the install revision and pins the digest.
+  Install answers `404` for an unknown version, `409` for a lifecycle it may
+  not take, `502` for a digest mismatch or an invalid document, and `503
+  assistant registry unavailable` when the registry cannot be read (network
+  error, 5xx, auth failure, or a 404 without `assistant_not_found`).
+- **Claims.** A claim renders from the stored definition whose digest the
+  profile pins and never calls the registry, so a restart with mctl-api
+  down serves every installed assistant. The embedded catalog is a bridge
+  for migration and rollback only: it serves a profile that pins no digest
+  yet, or pins exactly the embedded entry's digest (`hr-recruiter@0.1.0`).
+  A pinned digest with neither a stored definition nor a matching embedded
+  entry fails the claim (`500`), leaving the jobs queued. The one
+  exception is hr-recruiter@0.1.0's digest in the scheme used before P3.2,
+  which installs made between P3.1 and P3.2 carry: a migration clears that
+  exact value, so those accounts take the embedded catalog.
+- **Staleness (P3.4).** Every 5 minutes the server reads the lifecycle of
+  each stored definition a profile pins and records it with the time of the
+  read. A `404 assistant_not_found` for a pinned version is an answer and is
+  recorded as `disabled`; a network error, a timeout, a 5xx or any other
+  answer is a failed read and changes nothing, so a known lifecycle is
+  never replaced by an unknown one. At claim time `disabled` stops new jobs
+  (`503`, jobs stay queued), so a disable takes effect within one refresh.
+  `deprecated` keeps running for pinned installs. If the last successful
+  read is older than 24 hours, the lifecycle is unknown; unknown is not
+  `published`, so new jobs stop the same way and the owner gets one alert
+  per outage saying the registry could not be reached. The lifecycle gate
+  applies only while `ASSISTANT_REGISTRY_ENABLED` is on; with it off,
+  claims still render from stored definitions but no lifecycle is read or
+  enforced.
 - **Publishing.** In P3 it is manual and transitional: the owner publishes
   the CI artifact through the human-admin mctl-api tool, with the digest as
   the version's `contentHash`. A narrow publisher principal that may only
