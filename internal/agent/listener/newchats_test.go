@@ -21,6 +21,15 @@ func TestOnMessage_NewChatsOnly(t *testing.T) {
 		wantState string
 	}{
 		{"first contact", true, &fakeSavedHistoryAPI{}, db.ConversationActive},
+		// Even if Telegram returned the anchor message itself, it is not
+		// earlier history.
+		{"anchor only", true, &fakeSavedHistoryAPI{results: []historyResult{{messages: []tg.MessageClass{
+			&tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Hello, Carol here"},
+		}}}}, db.ConversationActive},
+		{"anchor and earlier", true, &fakeSavedHistoryAPI{results: []historyResult{{messages: []tg.MessageClass{
+			&tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Hello, Carol here"},
+			&tg.Message{ID: 7, PeerID: &tg.PeerUser{UserID: recruit}, Message: "last year"},
+		}}}}, db.ConversationClosed},
 		{"earlier history", true, &fakeSavedHistoryAPI{results: []historyResult{{messages: []tg.MessageClass{
 			&tg.Message{ID: 7, PeerID: &tg.PeerUser{UserID: recruit}, Message: "last year"},
 		}}}}, db.ConversationClosed},
@@ -66,7 +75,7 @@ func TestOnMessage_NewChatsOnly(t *testing.T) {
 				}
 				r := tc.api.requests[0]
 				p, ok := r.Peer.(*tg.InputPeerUser)
-				if !ok || p.UserID != recruit || p.AccessHash != 9 || r.OffsetID != 42 || r.Limit != 1 {
+				if !ok || p.UserID != recruit || p.AccessHash != 9 || r.OffsetID != 42 || r.Limit < 2 {
 					t.Fatalf("history request = %+v peer %+v", r, r.Peer)
 				}
 			}

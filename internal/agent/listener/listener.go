@@ -234,12 +234,16 @@ func (l *Listener) initialConversationState(ctx context.Context, acct *account, 
 }
 
 // hasEarlierMessages reports whether the private chat with peer holds any
-// message, service messages included, older than messageID.
+// message, service messages included, older than messageID. offset_id is
+// exclusive in messages.getHistory, but Limit 2 and the id comparison keep the
+// answer right even if the anchor message itself were returned. A
+// not-modified answer is an error, so the chat starts closed. The explicit
+// switch is kept over historyMessages for that reason.
 func hasEarlierMessages(ctx context.Context, api savedHistoryAPI, peer, accessHash, messageID int64) (bool, error) {
 	res, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
 		Peer:     &tg.InputPeerUser{UserID: peer, AccessHash: accessHash},
 		OffsetID: int(messageID),
-		Limit:    1,
+		Limit:    2,
 	})
 	if err != nil {
 		return false, fmt.Errorf("get chat history: %w", err)
@@ -273,6 +277,13 @@ func (l *Listener) runWithPoller(ctx context.Context, a *account, api savedHisto
 	l.mu.Lock()
 	a.history = api
 	l.mu.Unlock()
+	defer func() {
+		l.mu.Lock()
+		if a.history == api {
+			a.history = nil
+		}
+		l.mu.Unlock()
+	}()
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 	pollCtx, cancelPoll := context.WithCancel(ctx)
