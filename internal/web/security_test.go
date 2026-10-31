@@ -83,6 +83,7 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 		"audit/verify",
 		// Telegram API terms §1.5 and §2.2 (#852)
 		`id="ai-use"`,
+		`<meta name="robots" content="noindex, follow">`,
 		"never uses message content, or anything derived from it, to train",
 		"switch off any setting that lets the provider use your conversations",
 		"MCTL Assistant, an unofficial third-party connector using the Telegram API",
