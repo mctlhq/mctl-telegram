@@ -383,7 +383,10 @@ awaits approval, the other `/mctl` commands, and writing to the sender in
 the chat directly, which marks the conversation taken over and stops the
 agent there. Editing one of the agent's own replies in the chat counts as
 writing to the sender: an edit is never treated as the echo of an agent
-send (#993).
+send (#993). That includes an agent reply that reaches the listener only
+through gap recovery, delivered as a new message that already carries an
+edit date: the agent never edits, so the edit is the owner's. Only hidden
+edits Telegram makes itself (`edit_hide`) are ignored.
 
 - The prompt tells the model that the owner cannot reply to it, so it must
   not ask the owner to send answers or "tell me what to say", and that it
