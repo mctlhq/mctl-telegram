@@ -532,7 +532,11 @@ func Evaluate(in Input) Result {
 	}
 
 	var reasons []string
-	if in.Profile.Mode == db.AgentModeObserve {
+	// A private fork runs in observe mode until it is promoted (#1043), and
+	// nothing promotes one yet, so guarded on a fork is observe here too:
+	// the mode column alone cannot make a fork auto-send.
+	if in.Profile.Mode == db.AgentModeObserve ||
+		(in.Profile.Mode == db.AgentModeGuarded && db.IsForkAssistant(in.Profile.AssistantName)) {
 		reasons = append(reasons, ReasonObserveMode)
 	}
 	maxTurns := in.Profile.MaxAutonomousTurns

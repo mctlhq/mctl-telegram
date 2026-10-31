@@ -457,6 +457,12 @@ type Config struct {
 	// catalog and no registry call is made. Set via
 	// ASSISTANT_REGISTRY_ENABLED.
 	AssistantRegistryEnabled bool
+	// AssistantForksEnabled lets accounts create, change and install
+	// private forks of catalog assistants (#1043,
+	// docs/assistants/adr-forks.md). Off by default; turning it off also
+	// stops the jobs of every account that runs a fork. Deleting a fork
+	// stays possible. Set via ASSISTANT_FORKS_ENABLED.
+	AssistantForksEnabled bool
 	// WorkItemTenant is the single configured mctl-api tenant every
 	// Telegram-originated work item belongs to (see requirements.md's Open
 	// questions — this repository's own "tenant" concept is a different
@@ -542,6 +548,7 @@ func Load() (*Config, error) {
 		BroadcastApprovalTTL:          envDuration("BROADCAST_APPROVAL_TTL", 30*time.Minute),
 		WorkContextEnabled:            envBool("WORK_CONTEXT_ENABLED", false),
 		AssistantRegistryEnabled:      envBool("ASSISTANT_REGISTRY_ENABLED", false),
+		AssistantForksEnabled:         envBool("ASSISTANT_FORKS_ENABLED", false),
 		MCTLAPIBaseURL:                envOr("MCTL_API_BASE_URL", "https://api.mctl.ai"),
 		MCTLSurfaceTelegramToken:      os.Getenv("MCTL_SURFACE_TELEGRAM_TOKEN"),
 		WorkItemTenant:                os.Getenv("MCTL_WORK_ITEM_TENANT"),

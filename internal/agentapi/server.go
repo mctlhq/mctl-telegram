@@ -72,6 +72,9 @@ type Server struct {
 	// definition that is disabled, or whose lifecycle is unknown, takes no
 	// new jobs. Set by WithRegistryLifecycle when ASSISTANT_REGISTRY_ENABLED.
 	registryGate bool
+	// forksEnabled is ASSISTANT_FORKS_ENABLED (#1043): off, an account
+	// that runs a private fork takes no new jobs.
+	forksEnabled bool
 	// now is the clock for the lifecycle gate; nil is time.Now.
 	now func() time.Time
 	// snapshots caches parsed registry definitions by digest.
@@ -128,6 +131,13 @@ func (s *Server) WithCatalog(c *assistant.Catalog) *Server {
 // for chaining.
 func (s *Server) WithRegistryLifecycle() *Server {
 	s.registryGate = true
+	return s
+}
+
+// WithForks lets accounts run their private assistant forks
+// (ASSISTANT_FORKS_ENABLED). Returns s for chaining.
+func (s *Server) WithForks() *Server {
+	s.forksEnabled = true
 	return s
 }
 

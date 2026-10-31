@@ -50,6 +50,17 @@ const (
 	KindUnavailable
 	// KindInternal: a database or encryption fault.
 	KindInternal
+	// KindForkLimit: a fork quota refused the write (fork_limit); nothing
+	// changed.
+	KindForkLimit
+	// KindForkInUse: the delete would remove the fork version the install
+	// pins (fork_in_use); nothing changed.
+	KindForkInUse
+	// KindForkConflict: the fork moved while the write was prepared;
+	// nothing changed.
+	KindForkConflict
+	// KindForksDisabled: ASSISTANT_FORKS_ENABLED is off.
+	KindForksDisabled
 )
 
 // Error is a refused or failed install. Msg is meant for the caller who
@@ -94,6 +105,9 @@ type Service struct {
 	Store    *db.Store
 	Catalog  *assistant.Catalog
 	Registry *assistantregistry.Client
+	// ForksEnabled is ASSISTANT_FORKS_ENABLED: with it off, no fork is
+	// created, changed or installed (#1043).
+	ForksEnabled bool
 	// Now is the clock for install times; nil means time.Now.
 	Now func() time.Time
 	// beforeWrite, when set, runs between the read of the current install
@@ -122,6 +136,16 @@ type Prepared struct {
 	lifecycle    string
 	resolved     *assistant.Profile
 	ownerProfile []byte
+	// fork is set when the install names one of the caller's forks: entry
+	// is then the fork and lifecycle its base's.
+	fork *preparedFork
+}
+
+// preparedFork is the fork side of a Prepared: whose fork it is and the
+// base it narrows, whose snapshot is stored with the install.
+type preparedFork struct {
+	owner int64
+	base  *assistant.Entry
 }
 
 // Name and Version are the definition the install resolved against.
@@ -130,16 +154,36 @@ func (p *Prepared) Version() string { return p.entry.Definition.Metadata.Version
 
 // Prepare parses raw as an AssistantInstall, fetches its definition (from
 // the registry when one is configured, else the embedded catalog) and
-// resolves the install against it. Nothing is written.
+// resolves the install against it. Nothing is written. It installs for no
+// account in particular, so it never resolves a fork: forks are installed
+// only by their owner, through Apply.
 func (s *Service) Prepare(ctx context.Context, raw json.RawMessage) (*Prepared, error) {
+	return s.prepare(ctx, 0, raw)
+}
+
+// prepare is Prepare for userID, whose own forks it also resolves; 0 is no
+// account.
+func (s *Service) prepare(ctx context.Context, userID int64, raw json.RawMessage) (*Prepared, error) {
 	in, err := assistant.ParseInstall(raw)
 	if err != nil {
 		return nil, invalid(err)
 	}
 	ref := in.Spec.Assistant.Name + "@" + in.Spec.Assistant.Version
 	var entry *assistant.Entry
+	var fork *preparedFork
 	lifecycle := ""
-	if s.Registry == nil {
+	if assistant.IsForkName(in.Spec.Assistant.Name) {
+		if userID <= 0 {
+			// The admin route installs for another account; a fork is
+			// installed only by its owner.
+			return nil, fail(KindNotFound, "unknown assistant "+ref)
+		}
+		pf, err := s.prepareFork(ctx, userID, in.Spec.Assistant.Name, in.Spec.Assistant.Version)
+		if err != nil {
+			return nil, err
+		}
+		entry, lifecycle, fork = pf.entry, pf.lifecycle, &preparedFork{owner: userID, base: pf.base}
+	} else if s.Registry == nil {
 		e, ok := s.Catalog.Lookup(in.Spec.Assistant.Name, in.Spec.Assistant.Version)
 		if !ok {
 			return nil, fail(KindNotFound, "unknown assistant "+ref)
@@ -180,7 +224,7 @@ func (s *Service) Prepare(ctx context.Context, raw json.RawMessage) (*Prepared, 
 	}
 	return &Prepared{
 		install: in, document: doc.Bytes(), entry: entry, lifecycle: lifecycle,
-		resolved: resolved, ownerProfile: ownerProfile,
+		resolved: resolved, ownerProfile: ownerProfile, fork: fork,
 	}, nil
 }
 
@@ -267,7 +311,14 @@ func (s *Service) Commit(ctx context.Context, userID int64, p *Prepared, opts Co
 	}
 	switching := current.Name != name
 	keeps := current.Installed && !switching && current.Version == version
-	if opts.SelfService && !keeps {
+	if p.fork != nil {
+		if err := s.checkForkInstall(userID, p); err != nil {
+			return nil, err
+		}
+		// A deprecated base keeps the fork the account runs, in any of
+		// its versions: they all narrow the same base.
+		keeps = current.Installed && !switching
+	} else if opts.SelfService && !keeps {
 		meta := p.entry.Definition.Metadata
 		if meta.Visibility != "public" || meta.Status == "draft" {
 			return nil, fail(KindNotFound, "unknown assistant "+ref)
@@ -318,17 +369,33 @@ func (s *Service) Commit(ctx context.Context, userID int64, p *Prepared, opts Co
 	if s.beforeWrite != nil {
 		s.beforeWrite()
 	}
-	if s.Registry != nil {
+	switch {
+	case p.fork != nil:
+		// The base's snapshot goes with the install, so a claim checks the
+		// base's lifecycle without the registry.
+		var base *db.AssistantDefinition
+		if s.Registry != nil {
+			b := p.fork.base
+			base = &db.AssistantDefinition{
+				Digest: b.Digest, Name: b.Definition.Metadata.Name, Version: b.Definition.Metadata.Version,
+				Document: b.Materialized, Lifecycle: p.lifecycle,
+			}
+		}
+		err = s.Store.InstallAgentFork(ctx, userID, digest, base, update)
+	case s.Registry != nil:
 		err = s.Store.InstallAgentAssistant(ctx, userID, db.AssistantDefinition{
 			Digest: digest, Name: name, Version: version,
 			Document: p.entry.Materialized, Lifecycle: p.lifecycle,
 		}, update)
-	} else {
+	default:
 		err = s.Store.UpdateAgentProfileFields(ctx, userID, update)
 	}
 	var rc *db.InstallRevisionConflict
 	if errors.As(err, &rc) {
 		return nil, conflict(rc.Current)
+	}
+	if errors.Is(err, db.ErrAssistantForkNotFound) {
+		return nil, fail(KindNotFound, "unknown assistant "+ref)
 	}
 	if err != nil {
 		return nil, internal(MsgSaveFailed, err)
@@ -354,9 +421,10 @@ func conflict(current int64) *Error {
 	}
 }
 
-// Apply prepares and commits raw for userID.
+// Apply prepares and commits raw for userID, which may install one of its
+// own forks.
 func (s *Service) Apply(ctx context.Context, userID int64, raw json.RawMessage, opts CommitOptions) (*Result, error) {
-	p, err := s.Prepare(ctx, raw)
+	p, err := s.prepare(ctx, userID, raw)
 	if err != nil {
 		return nil, err
 	}
@@ -691,6 +759,14 @@ func AuditText(err error) string {
 		return "registry returned an invalid answer"
 	case KindUnavailable:
 		return "registry unavailable"
+	case KindForkLimit:
+		return "fork limit"
+	case KindForkInUse:
+		return "fork in use"
+	case KindForkConflict:
+		return "fork conflict"
+	case KindForksDisabled:
+		return "forks disabled"
 	}
 	return "internal error"
 }
