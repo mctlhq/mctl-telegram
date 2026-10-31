@@ -9,7 +9,7 @@
 - **Data Minimization & Encryption**: Message bodies are fetched live for user-requested tool calls and are not persisted for ordinary MCP use (Communication Agent accounts store encrypted content, see `/privacy`). MTProto session blobs are encrypted at rest with AES-256-GCM under per-user HKDF keys.
 - **Archived submission packets** (historical): `docs/archive/chatgpt-submission-package.md`, `docs/archive/claude-connector-submission.md`.
 
-## Tool Surface (37 MCP tools)
+## Tool Surface (40 MCP tools)
 
 The authoritative, generated list with schemas and annotations is `docs/tool-descriptors.json`.
 
@@ -21,6 +21,9 @@ The authoritative, generated list with schemas and annotations is `docs/tool-des
 
 ### Own account (5)
 `set_send_consent`, `set_my_notification_preferences`, `revoke_local_bridge_device`, `disconnect_telegram_account`, `delete_telegram_account`. All require the `account:manage` scope, which worker and device credentials never carry.
+
+### Your assistant (3)
+`list_assistants` (any signed-in connection) lists the installable assistants and which one your account runs, with its `install_revision`. `install_assistant` installs an exact `name`/`version`, starting paused and not listening unless told otherwise; `update_install` takes an RFC 7396 merge `patch` over the install spec and a required `expected_revision`, and refuses with `revision_conflict` (carrying `current_revision`) if the install moved. Both need `account:manage`. No output ever carries install values or owner notes. See `docs/assistants/spec.md`, "MCP tools".
 
 ### Admin, `admin:users` scope (9)
 `list_telegram_identities`, `get_user_audit_log`, `set_telegram_access`, `set_account_send`, `set_account_mode`, `revoke_telegram_session`, `provision_local_account`, `mint_worker_token`, `revoke_worker_token`.
