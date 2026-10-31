@@ -34,9 +34,9 @@ const (
 	aliceTGID  = 500100101
 )
 
-// gateCatalog holds the embedded hr-recruiter definition and
-// restricted-assistant, the same definition without save_job_lead and
-// pause_autopilot.
+// gateCatalog holds the embedded hr-recruiter definition and two
+// narrower copies of it: restricted-assistant, without save_job_lead and
+// pause_autopilot, and lead-only, without get_conversation_context.
 func gateCatalog(t *testing.T) *assistant.Catalog {
 	t.Helper()
 	raw, err := os.ReadFile("../../assistants/hr-recruiter/assistant.yaml")
@@ -44,24 +44,32 @@ func gateCatalog(t *testing.T) *assistant.Catalog {
 		t.Fatal(err)
 	}
 	full := strings.Replace(string(raw), "path: ../../deploy/agent-worker/system-prompt.txt", "path: prompt.txt", 1)
-	def := full
-	for _, cut := range []string{"    - save_job_lead\n", "    - pause_autopilot\n"} {
-		if !strings.Contains(def, cut) {
-			t.Fatalf("definition has no %q", cut)
+	variant := func(name string, cuts ...string) string {
+		def := full
+		for _, cut := range cuts {
+			if !strings.Contains(def, cut) {
+				t.Fatalf("definition has no %q", cut)
+			}
+			def = strings.Replace(def, cut, "", 1)
 		}
-		def = strings.Replace(def, cut, "", 1)
+		return strings.Replace(def, "name: hr-recruiter", "name: "+name, 1)
 	}
-	def = strings.Replace(def, "name: hr-recruiter", "name: restricted-assistant", 1)
 	prompt, err := os.ReadFile("../../deploy/agent-worker/system-prompt.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := assistant.LoadCatalog(fstest.MapFS{
-		"assistants/restricted-assistant/assistant.yaml": {Data: []byte(def)},
-		"assistants/restricted-assistant/prompt.txt":     {Data: prompt},
-		"assistants/hr-recruiter/assistant.yaml":         {Data: []byte(full)},
-		"assistants/hr-recruiter/prompt.txt":             {Data: prompt},
-	})
+	fsys := fstest.MapFS{
+		"assistants/hr-recruiter/assistant.yaml": {Data: []byte(full)},
+		"assistants/hr-recruiter/prompt.txt":     {Data: prompt},
+	}
+	for name, def := range map[string]string{
+		"restricted-assistant": variant("restricted-assistant", "    - save_job_lead\n", "    - pause_autopilot\n"),
+		"lead-only":            variant("lead-only", "    - get_conversation_context\n"),
+	} {
+		fsys["assistants/"+name+"/assistant.yaml"] = &fstest.MapFile{Data: []byte(def)}
+		fsys["assistants/"+name+"/prompt.txt"] = &fstest.MapFile{Data: prompt}
+	}
+	c, err := assistant.LoadCatalog(fsys)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,6 +301,43 @@ func TestToolGate_UnresolvableToolSetFailsClosed(t *testing.T) {
 	// Routes serving no tool are unaffected.
 	if rec := f.h.do("GET", "/jobs/1", nil); rec.Code == http.StatusServiceUnavailable {
 		t.Fatalf("job status refused: %d", rec.Code)
+	}
+}
+
+// get_lead reads through a route that returns the leads and no messages
+// (#1043): a job whose tools keep get_lead but drop get_conversation_context
+// reads its leads and is refused the conversation context. Mapping the
+// context route to get_lead again turns this red.
+func TestToolGate_GetLeadDoesNotGrantConversationContext(t *testing.T) {
+	f := newGateFixture(t, "lead-only")
+	tok, j := f.claimToken(t)
+	id, err := f.authenticate(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(id.JobTools, "get_conversation_context") || !slices.Contains(id.JobTools, "get_lead") {
+		t.Fatalf("token tools = %v", id.JobTools)
+	}
+	if _, err := f.h.store.UpsertJobLead(context.Background(), db.JobLead{
+		UserID: f.h.userID, ConversationID: f.conv.ID, Company: "Acme", Status: "discovery",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	conv := strconv.FormatInt(j.ConversationID, 10)
+	assertToolNotAllowed(t, f.h.doAs(id, "GET", "/conversations/"+conv+"/context", nil), "get_conversation_context")
+
+	rec := f.h.doAs(id, "GET", "/conversations/"+conv+"/leads", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("leads status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]json.RawMessage
+	decodeBody(t, rec, &body)
+	if _, ok := body["messages"]; ok || len(body) != 1 || !strings.Contains(string(body["leads"]), "Acme") {
+		t.Fatalf("leads body = %s, want only the leads", rec.Body.String())
+	}
+	// The route is bound to the job's own conversation.
+	if rec := f.h.doAs(id, "GET", "/conversations/"+strconv.FormatInt(j.ConversationID+1, 10)+"/leads", nil); rec.Code != http.StatusForbidden {
+		t.Fatalf("other conversation's leads = %d, want 403", rec.Code)
 	}
 }
 

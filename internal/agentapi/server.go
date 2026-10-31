@@ -167,6 +167,7 @@ func (s *Server) Register(mux registrar) {
 	get("/events", s.handleLegacyEvents)
 	get("/event/{eventID}", s.handleGetEvent)
 	get("/conversations/{id}/context", s.handleConversationContext)
+	get("/conversations/{id}/leads", s.handleConversationLeads)
 	get("/recruiters/{peer}", s.handleRecruiterProfile)
 	get("/leads/{id}", s.handleGetLead)
 	get("/policy", s.handlePolicy)

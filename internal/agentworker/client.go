@@ -267,6 +267,18 @@ func (c *Client) GetConversationContext(ctx context.Context, conversationID int6
 	return &out, nil
 }
 
+// GetConversationLeads returns the leads saved for one conversation,
+// newest first, through the lead-only route get_lead is mapped to (#1043).
+func (c *Client) GetConversationLeads(ctx context.Context, conversationID int64) ([]LeadDTO, error) {
+	var out struct {
+		Leads []LeadDTO `json:"leads"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/conversations/"+strconv.FormatInt(conversationID, 10)+"/leads", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Leads, nil
+}
+
 // GetRecruiterProfile returns the owner's public profile as a raw map — the
 // field set is caller-defined (internal/agent/profile, see A-PR7) and not
 // something this transport-layer client should assume a fixed shape for.

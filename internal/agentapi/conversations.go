@@ -130,6 +130,46 @@ func (s *Server) handleConversationContext(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// handleConversationLeads is GET /conversations/{id}/leads: the leads of one
+// conversation, newest first, and nothing else. It is get_lead's route
+// (#1043), kept apart from the context route so that get_lead never grants
+// the conversation's messages.
+func (s *Server) handleConversationLeads(w http.ResponseWriter, r *http.Request) {
+	id, ok := identity(w, r)
+	if !ok {
+		return
+	}
+	convID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || convID <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid conversation id")
+		return
+	}
+	if !s.enforceBinding(w, r, id, "get_lead", convID, 0, 0) {
+		return
+	}
+	ctx := r.Context()
+	if _, err := s.Store.GetConversation(ctx, id.UserID, convID); errors.Is(err, db.ErrConversationNotFound) {
+		writeJSONError(w, http.StatusNotFound, "conversation not found")
+		return
+	} else if err != nil {
+		logHandlerErr("get_lead", err)
+		writeJSONError(w, http.StatusInternalServerError, "lookup failed")
+		return
+	}
+	rows, err := s.Store.ListJobLeadsByConversation(ctx, id.UserID, convID, maxContextLeads)
+	if err != nil {
+		logHandlerErr("get_lead", err)
+		writeJSONError(w, http.StatusInternalServerError, "lookup failed")
+		return
+	}
+	leads := make([]leadDTO, 0, len(rows))
+	for i := range rows {
+		leads = append(leads, toLeadDTO(&rows[i]))
+	}
+	s.audit(ctx, id.UserID, "get_lead", "ok", "")
+	writeJSON(w, http.StatusOK, map[string]any{"leads": leads})
+}
+
 // handleGetLead is GET /leads/{id}.
 func (s *Server) handleGetLead(w http.ResponseWriter, r *http.Request) {
 	id, ok := identity(w, r)

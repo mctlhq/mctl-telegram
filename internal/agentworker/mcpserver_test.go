@@ -3,6 +3,7 @@ package agentworker
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -36,10 +37,14 @@ type fakeAPI struct {
 	}
 	pauseAutopilotCalls []bool
 
-	// leadToReturn is served back on GetConversationContext's Lead field —
-	// getLead resolves through that call now, not a standalone GetLead API.
-	leadToReturn  *LeadDTO
-	leadsToReturn []LeadDTO
+	// leadToReturn is served back on GetConversationContext's Lead field,
+	// and leadsToReturn on its Leads field and by GetConversationLeads.
+	// leadsRouteMissing makes GetConversationLeads answer 404, as a server
+	// without that route does.
+	leadToReturn              *LeadDTO
+	leadsToReturn             []LeadDTO
+	leadsRouteMissing         bool
+	getConversationLeadsCalls []int64
 
 	// summaryResult, when set, replaces SendOwnerSummary's default result,
 	// e.g. to model a manipulation alert the server suppressed (ActionID 0).
@@ -73,6 +78,17 @@ func (f *fakeAPI) GetConversationContext(ctx context.Context, conversationID int
 		return nil, f.err
 	}
 	return &ConversationContext{Conversation: ConversationDTO{ID: conversationID}, Lead: f.leadToReturn, Leads: f.leadsToReturn}, nil
+}
+
+func (f *fakeAPI) GetConversationLeads(ctx context.Context, conversationID int64) ([]LeadDTO, error) {
+	f.getConversationLeadsCalls = append(f.getConversationLeadsCalls, conversationID)
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.leadsRouteMissing {
+		return nil, &APIError{StatusCode: http.StatusNotFound, Message: "404 page not found"}
+	}
+	return f.leadsToReturn, nil
 }
 
 func (f *fakeAPI) GetRecruiterProfile(ctx context.Context, peerTGID int64) (map[string]any, error) {
@@ -363,7 +379,7 @@ func TestNewMCPServer_RegistersAliases(t *testing.T) {
 		"propose_reply", "save_record", "request_owner_approval", "send_owner_summary",
 		"pause_autopilot", "complete_agent_job",
 	}
-	api := &fakeAPI{leadToReturn: &LeadDTO{ID: 7, Company: "Acme"}}
+	api := &fakeAPI{leadsToReturn: []LeadDTO{{ID: 7, Company: "Acme"}}}
 	srv, err := NewMCPServer(api, JobContext{JobID: 1, ConversationID: 2, EventID: "evt:1", Tools: names})
 	if err != nil {
 		t.Fatal(err)
@@ -428,9 +444,10 @@ func toolNames(m map[string]*mcpserver.ServerTool) []string {
 // that a model-supplied lead_id let a prompt-injected message fetch a
 // different conversation's lead through this job's own token — get_lead now
 // takes no lead_id argument at all and only ever resolves this job's own
-// conversation, via the same call get_conversation_context uses.
+// conversation, through the lead-only route, never the context route that
+// carries the conversation's messages (#1043).
 func TestGetLead_ScopedToJobsOwnConversation(t *testing.T) {
-	api := &fakeAPI{leadToReturn: &LeadDTO{ID: 7, Company: "Acme"}}
+	api := &fakeAPI{leadsToReturn: []LeadDTO{{ID: 7, Company: "Acme"}}}
 	b := &toolBuilder{api: api, job: JobContext{ConversationID: 9}}
 	tool, handler := b.getLead()
 	// Even if a caller tried to pass a lead_id, the tool schema has no such
@@ -440,8 +457,11 @@ func TestGetLead_ScopedToJobsOwnConversation(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("unexpected tool error: %#v", res)
 	}
-	if len(api.getConversationContextCalls) != 1 || api.getConversationContextCalls[0].convID != 9 {
-		t.Fatalf("getConversationContextCalls = %#v", api.getConversationContextCalls)
+	if len(api.getConversationLeadsCalls) != 1 || api.getConversationLeadsCalls[0] != 9 {
+		t.Fatalf("getConversationLeadsCalls = %#v", api.getConversationLeadsCalls)
+	}
+	if len(api.getConversationContextCalls) != 0 {
+		t.Fatalf("get_lead read the conversation context: %#v", api.getConversationContextCalls)
 	}
 }
 
