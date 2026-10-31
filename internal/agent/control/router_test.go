@@ -964,3 +964,49 @@ func TestRouter_Assistant_ShowsSettingsNotValues(t *testing.T) {
 		}
 	}
 }
+
+func TestRouter_Unpause_OffModeCaveat(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	off := db.AgentModeOff
+	if err := store.UpdateAgentProfileFields(ctx, uid, db.AgentProfileUpdate{Mode: &off}); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl unpause"); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(sender.sent) != 1 || !strings.Contains(sender.sent[0], "Mode is off, so the agent still sends nothing.") {
+		t.Fatalf("replies = %q, want the off-mode caveat", sender.sent)
+	}
+}
+
+func TestRouter_Assistant_NoProfile(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	if _, err := store.DB.ExecContext(ctx, `DELETE FROM agent_profiles WHERE user_id = $1`, uid); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl assistant"); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(sender.sent) != 1 || sender.sent[0] != "No agent profile configured for this account." {
+		t.Fatalf("replies = %q", sender.sent)
+	}
+}
+
+// An install that cannot be decrypted must not stop /mctl assistant, which
+// only reports whether one is stored.
+func TestRouter_Assistant_UndecryptableInstall(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	if _, err := store.DB.ExecContext(ctx,
+		`UPDATE agent_profiles SET install_encrypted = $1 WHERE user_id = $2`, []byte("not a sealed box"), uid); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl assistant"); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(sender.sent) != 1 || !strings.Contains(sender.sent[0], "From an install: yes") {
+		t.Fatalf("replies = %q", sender.sent)
+	}
+}
