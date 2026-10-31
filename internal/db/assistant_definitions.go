@@ -57,8 +57,23 @@ func (s *Store) InstallAgentAssistant(ctx context.Context, userID int64, def Ass
 		return fmt.Errorf("begin install: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := storeAssistantDefinition(ctx, tx, def); err != nil {
+		return err
+	}
+	if err := s.updateAgentProfileFields(ctx, tx, userID, u); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit install: %w", err)
+	}
+	return nil
+}
+
+// storeAssistantDefinition stores def's snapshot on ex, or only refreshes
+// its lifecycle when the digest is already stored.
+func storeAssistantDefinition(ctx context.Context, ex execer, def AssistantDefinition) error {
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	if _, err := tx.ExecContext(ctx,
+	if _, err := ex.ExecContext(ctx,
 		`INSERT INTO assistant_definitions(digest, name, version, document, lifecycle, fetched_at, lifecycle_checked_at)
 		 VALUES($1,$2,$3,$4,$5,$6,$6)
 		 ON CONFLICT (digest) DO UPDATE SET lifecycle = EXCLUDED.lifecycle,
@@ -66,12 +81,6 @@ func (s *Store) InstallAgentAssistant(ctx context.Context, userID int64, def Ass
 		def.Digest, def.Name, def.Version, string(def.Document), def.Lifecycle, now,
 	); err != nil {
 		return fmt.Errorf("store assistant definition: %w", err)
-	}
-	if err := s.updateAgentProfileFields(ctx, tx, userID, u); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit install: %w", err)
 	}
 	return nil
 }
@@ -97,13 +106,17 @@ func (s *Store) GetAssistantDefinition(ctx context.Context, digest string) (*Ass
 }
 
 // ListPinnedAssistantDefinitions returns every stored definition some
-// profile currently pins, without its document: the set the lifecycle
-// refresh reads from the registry.
+// profile currently pins, directly or as the base of the fork it pins,
+// without its document: the set the lifecycle refresh reads from the
+// registry. A fork's lifecycle is its base's (#1043).
 func (s *Store) ListPinnedAssistantDefinitions(ctx context.Context) ([]AssistantDefinition, error) {
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT d.digest, d.name, d.version, d.lifecycle, d.fetched_at, d.lifecycle_checked_at
 		   FROM assistant_definitions d
 		  WHERE EXISTS (SELECT 1 FROM agent_profiles p WHERE p.assistant_definition_digest = d.digest)
+		     OR EXISTS (SELECT 1 FROM assistant_forks f
+		                  JOIN agent_profiles p ON p.user_id = f.user_id AND p.assistant_definition_digest = f.digest
+		                 WHERE f.base_digest = d.digest)
 		  ORDER BY d.name, d.version, d.digest`)
 	if err != nil {
 		return nil, fmt.Errorf("list pinned assistant definitions: %w", err)
@@ -147,11 +160,16 @@ func (s *Store) SetAssistantDefinitionLifecycle(ctx context.Context, digest, lif
 }
 
 // ListListeningUsersPinnedTo returns the accounts with their listener on
-// whose install pins digest: the owners to tell when it can no longer run.
+// whose install pins digest, or a fork of it: the owners to tell when it
+// can no longer run.
 func (s *Store) ListListeningUsersPinnedTo(ctx context.Context, digest string) ([]int64, error) {
 	rows, err := s.DB.QueryContext(ctx,
-		`SELECT user_id FROM agent_profiles
-		  WHERE assistant_definition_digest = $1 AND listener_enabled = $2
+		`SELECT user_id FROM agent_profiles p
+		  WHERE listener_enabled = $2
+		    AND (assistant_definition_digest = $1
+		         OR EXISTS (SELECT 1 FROM assistant_forks f
+		                     WHERE f.user_id = p.user_id AND f.digest = p.assistant_definition_digest
+		                       AND f.base_digest = $1))
 		  ORDER BY user_id`,
 		digest, true)
 	if err != nil {
@@ -199,7 +217,12 @@ func (s *Store) NotifyAssistantRegistryUnreachable(ctx context.Context, userID i
 	defer func() { _ = tx.Rollback() }()
 	res, err := tx.ExecContext(ctx,
 		`UPDATE agent_profiles SET assistant_registry_notice_for = $1
-		  WHERE user_id = $2 AND assistant_definition_digest = $3 AND assistant_registry_notice_for <> $1`,
+		  WHERE user_id = $2 AND assistant_registry_notice_for <> $1
+		    AND (assistant_definition_digest = $3
+		         OR EXISTS (SELECT 1 FROM assistant_forks f
+		                     WHERE f.user_id = agent_profiles.user_id
+		                       AND f.digest = agent_profiles.assistant_definition_digest
+		                       AND f.base_digest = $3))`,
 		key, userID, digest)
 	if err != nil {
 		return false, fmt.Errorf("mark registry notice: %w", err)

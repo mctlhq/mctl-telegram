@@ -80,6 +80,11 @@ var (
 	errAssistantLifecycleUnknown = errors.New("assistant lifecycle unknown: registry not reached")
 )
 
+// errForkNotRunnable means the account runs a private fork (#1043) that may
+// not take new jobs: forks are off on this server, or the profile is in
+// guarded mode, which no fork version runs in before it is promoted.
+var errForkNotRunnable = errors.New("assistant fork may not run")
+
 // accountInstructions renders the system prompt for userID's jobs. It fails
 // rather than falling back: running an account's jobs with another
 // assistant's instructions would be worse than not running them.
@@ -98,7 +103,15 @@ func (s *Server) accountInstructions(r *http.Request, userID int64) (instruction
 		return "", "", "", nil, err
 	}
 	ref = a.Name + "@" + a.Version
-	entry, err := s.resolveAssistant(r.Context(), a)
+	if db.IsForkAssistant(a.Name) {
+		switch {
+		case !s.forksEnabled:
+			return "", "", "", nil, fmt.Errorf("%w: %s: forks are disabled", errForkNotRunnable, ref)
+		case a.Mode == db.AgentModeGuarded:
+			return "", "", "", nil, fmt.Errorf("%w: %s: a fork runs in observe mode until it is promoted", errForkNotRunnable, ref)
+		}
+	}
+	entry, err := s.resolveAssistant(r.Context(), userID, a)
 	if err != nil {
 		return "", "", "", nil, err
 	}
@@ -119,8 +132,8 @@ func (s *Server) accountInstructions(r *http.Request, userID int64) (instruction
 // never calls the registry and writes nothing. With the registry enabled,
 // a snapshot whose lifecycle is disabled or unknown refuses; the owner's
 // notice for an unknown one is the refresher's job.
-func (s *Server) resolveAssistant(ctx context.Context, a *db.AgentAssistant) (*assistant.Entry, error) {
-	entry, def, err := s.lookupAssistant(ctx, a)
+func (s *Server) resolveAssistant(ctx context.Context, userID int64, a *db.AgentAssistant) (*assistant.Entry, error) {
+	entry, def, err := s.lookupAssistant(ctx, userID, a)
 	if err != nil || def == nil || !s.registryGate {
 		return entry, err
 	}
@@ -136,8 +149,12 @@ func (s *Server) resolveAssistant(ctx context.Context, a *db.AgentAssistant) (*a
 
 // lookupAssistant finds the definition a's install pinned, as
 // resolveAssistant does, without the lifecycle gate. def is the stored
-// registry definition, nil when the embedded catalog served the entry.
-func (s *Server) lookupAssistant(ctx context.Context, a *db.AgentAssistant) (*assistant.Entry, *db.AssistantDefinition, error) {
+// registry definition, nil when the embedded catalog served the entry; for
+// a fork it is the fork's base, whose lifecycle is the fork's.
+func (s *Server) lookupAssistant(ctx context.Context, userID int64, a *db.AgentAssistant) (*assistant.Entry, *db.AssistantDefinition, error) {
+	if db.IsForkAssistant(a.Name) {
+		return s.lookupFork(ctx, userID, a)
+	}
 	ref := a.Name + "@" + a.Version
 	embedded, inCatalog := s.catalog.Lookup(a.Name, a.Version)
 	if a.Digest == "" {
@@ -162,6 +179,60 @@ func (s *Server) lookupAssistant(ctx context.Context, a *db.AgentAssistant) (*as
 	entry, err := s.snapshotEntry(def)
 	if err != nil {
 		return nil, nil, err
+	}
+	return entry, def, nil
+}
+
+// lookupFork resolves the private fork a's install pinned (#1043): only
+// userID's own fork version with that digest, decrypted with userID's key,
+// and its base, from the stored snapshot (whose lifecycle gates the fork)
+// or, without a registry, the embedded catalog. Forks are not cached: the
+// instructions are the owner's data and are decrypted per claim.
+func (s *Server) lookupFork(ctx context.Context, userID int64, a *db.AgentAssistant) (*assistant.Entry, *db.AssistantDefinition, error) {
+	ref := a.Name + "@" + a.Version
+	if a.Digest == "" {
+		return nil, nil, fmt.Errorf("%w: fork %s pins no digest", errAssistantNotInCatalog, ref)
+	}
+	row, err := s.Store.GetAssistantForkByDigest(ctx, userID, a.Digest)
+	if errors.Is(err, db.ErrAssistantForkNotFound) {
+		return nil, nil, fmt.Errorf("%w: fork %s pins %s, which is not stored", errAssistantNotInCatalog, ref, a.Digest)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if row.Name != a.Name || row.Version != a.Version {
+		return nil, nil, fmt.Errorf("stored fork %s is %s@%s, profile names %s", row.Digest, row.Name, row.Version, ref)
+	}
+	entry, err := assistant.ParseMaterialized(row.Document)
+	if err != nil {
+		// The parse error can quote the owner's instructions.
+		return nil, nil, fmt.Errorf("stored fork %s no longer parses", row.Digest)
+	}
+	if entry.Digest != row.Digest {
+		return nil, nil, fmt.Errorf("stored fork %s hashes to %s", row.Digest, entry.Digest)
+	}
+	var base *assistant.Entry
+	def, err := s.Store.GetAssistantDefinition(ctx, row.BaseDigest)
+	switch {
+	case err == nil:
+		if base, err = s.snapshotEntry(def); err != nil {
+			return nil, nil, err
+		}
+	case errors.Is(err, db.ErrAssistantDefinitionNotFound) && !s.registryGate:
+		embedded, ok := s.catalog.Lookup(row.BaseName, row.BaseVersion)
+		if !ok || embedded.Digest != row.BaseDigest {
+			return nil, nil, fmt.Errorf("%w: base %s@%s of fork %s is not available", errAssistantNotInCatalog, row.BaseName, row.BaseVersion, ref)
+		}
+		base, def = embedded, nil
+	case errors.Is(err, db.ErrAssistantDefinitionNotFound):
+		// With the registry on, the base's lifecycle comes from its stored
+		// snapshot; without one it is unknown, and unknown does not run.
+		return nil, nil, fmt.Errorf("%w: base %s of fork %s is not stored", errAssistantNotInCatalog, row.BaseDigest, ref)
+	default:
+		return nil, nil, err
+	}
+	if err := assistant.ValidateFork(base, entry); err != nil {
+		return nil, nil, fmt.Errorf("stored fork %s does not narrow its base", row.Digest)
 	}
 	return entry, def, nil
 }
@@ -273,6 +344,10 @@ func (s *Server) handleClaimJobs(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, errAssistantLifecycleUnknown):
 		logHandlerErr("get_events", err)
 		writeJSONError(w, http.StatusServiceUnavailable, "assistant registry unreachable, lifecycle unknown")
+		return
+	case errors.Is(err, errForkNotRunnable):
+		logHandlerErr("get_events", err)
+		writeJSONError(w, http.StatusServiceUnavailable, "assistant fork may not run: forks are off, or the mode is guarded")
 		return
 	case err != nil:
 		logHandlerErr("get_events", err)

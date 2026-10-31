@@ -61,6 +61,9 @@ func TestToolAnnotations(t *testing.T) {
 		{"list_assistants", first(s.toolListAssistants()), true, false, false},
 		{"install_assistant", first(s.toolInstallAssistant()), false, true, false},
 		{"update_install", first(s.toolUpdateInstall()), false, true, false},
+		{"fork_assistant", first(s.toolForkAssistant()), false, false, false},
+		{"update_fork", first(s.toolUpdateFork()), false, false, false},
+		{"delete_fork", first(s.toolDeleteFork()), false, true, false},
 	}
 
 	// Every registered tool must have a row here: a tool without one would

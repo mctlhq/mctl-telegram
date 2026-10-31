@@ -621,6 +621,8 @@ func main() {
 		}
 		slog.Info("assistant registry", "enabled", cfg.AssistantRegistryEnabled, "mctl_api_base_url", cfg.MCTLAPIBaseURL)
 		assistantSvc = assistantinstall.New(store, catalog, registry)
+		assistantSvc.ForksEnabled = cfg.AssistantForksEnabled
+		slog.Info("assistant forks", "enabled", cfg.AssistantForksEnabled)
 		// The public catalog page: the same entries as list_assistants.
 		mux.Get("/assistants", web.Assistants(assistantSvc, cfg.PublicBaseURL, showManage))
 		ui.SetAssistantsMounted(true)
@@ -795,6 +797,9 @@ func main() {
 		agentSrv.WithCatalog(catalog)
 		if cfg.AssistantRegistryEnabled {
 			agentSrv.WithRegistryLifecycle()
+		}
+		if cfg.AssistantForksEnabled {
+			agentSrv.WithForks()
 		}
 		if cfg.OAUTHJWTSecret != "" {
 			jobSigner, err := localjwt.NewIssuer([]byte(cfg.OAUTHJWTSecret), strings.TrimRight(cfg.PublicBaseURL, "/"))

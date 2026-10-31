@@ -73,7 +73,13 @@ func TestGetLead_ReturnsAllLeadsWithLegacyFallback(t *testing.T) {
 		t.Fatalf("get_lead = %s, want both leads", text)
 	}
 
-	// An older server sends only lead.
+	if len(api.getConversationContextCalls) != 0 {
+		t.Fatalf("get_lead read the conversation context on a server with the leads route")
+	}
+
+	// A server without the leads route is read through the context, and
+	// an older one still sends only lead.
+	api.leadsRouteMissing = true
 	api.leadsToReturn = nil
 	text = resultText(t, callTool(t, tool, handler, map[string]any{}))
 	if !strings.Contains(text, `"leads"`) || !strings.Contains(text, "Site Reliability Engineer") {

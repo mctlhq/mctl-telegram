@@ -7,13 +7,16 @@ package tools
 // that serve no tool (claim, job status, cost report) are absent and not
 // gated.
 //
-// A route may serve more than one tool: get_lead reads the leads through
-// the conversation context, so that route serves both. GET /leads/{id} is
-// called by no tool today, but it returns a saved lead, which only the two
-// lead-reading tools may see.
+// A route may serve more than one tool. get_lead reads its conversation's
+// leads through GET /conversations/{id}/leads, which returns no messages,
+// so a tool set with get_lead but without get_conversation_context cannot
+// read the conversation (#1043). The context route returns the leads too,
+// so it serves get_conversation_context alone, and GET /leads/{id}, called
+// by no tool today, returns a saved lead, which either tool may see.
 var Endpoints = map[string][]string{
 	"GET /event/{eventID}":                 {"get_event"},
-	"GET /conversations/{id}/context":      {"get_conversation_context", "get_lead"},
+	"GET /conversations/{id}/context":      {"get_conversation_context"},
+	"GET /conversations/{id}/leads":        {"get_lead"},
 	"GET /recruiters/{peer}":               {"get_recruiter_profile"},
 	"GET /leads/{id}":                      {"get_lead", "get_conversation_context"},
 	"GET /policy":                          {"get_policy"},

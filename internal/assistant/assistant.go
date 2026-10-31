@@ -97,6 +97,9 @@ type Definition struct {
 		Status      string   `json:"status"`
 		Tags        []string `json:"tags"`
 		Examples    []string `json:"examples"`
+		// Fork is set on a private fork only (ParseDefinition holds the two
+		// together with the name and visibility).
+		Fork *ForkRef `json:"fork,omitempty"`
 	} `json:"metadata"`
 	Spec struct {
 		// Instructions point at a file (path, in an authored definition) or
@@ -281,6 +284,9 @@ func ParseDefinition(raw []byte) (*Definition, error) {
 	}
 	if _, err := tools.Validate(d.Spec.Tools); err != nil {
 		return nil, fmt.Errorf("tools: %w", err)
+	}
+	if err := checkForkMetadata(&d); err != nil {
+		return nil, err
 	}
 	return &d, nil
 }

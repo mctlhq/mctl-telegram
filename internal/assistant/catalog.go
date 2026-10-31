@@ -158,6 +158,9 @@ func LoadCatalog(fsys fs.FS) (*Catalog, error) {
 		if def.Spec.Instructions.Path == "" {
 			return nil, fmt.Errorf("%s: an authored definition names its instructions by path", file)
 		}
+		if def.Metadata.Fork != nil {
+			return nil, fmt.Errorf("%s: a fork is private to its owner and never part of the catalog", file)
+		}
 		if err := checkVisibility(def); err != nil {
 			return nil, fmt.Errorf("%s: %w", file, err)
 		}

@@ -223,6 +223,8 @@ type fakeCatalogRegistry struct {
 	down  bool
 	entry *assistant.Entry
 	srv   *httptest.Server
+	// lifecycle is hr-recruiter@0.1.0's; "" is published.
+	lifecycle string
 }
 
 func newFakeCatalogRegistry(t *testing.T) *fakeCatalogRegistry {
@@ -266,8 +268,12 @@ func (f *fakeCatalogRegistry) serve(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		lifecycle := f.lifecycle
+		if lifecycle == "" {
+			lifecycle = "published"
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"name": "hr-recruiter", "version": "0.1.0", "lifecycle": "published",
+			"name": "hr-recruiter", "version": "0.1.0", "lifecycle": lifecycle,
 			"contentHash": f.entry.Digest, "definition": json.RawMessage(f.entry.Materialized),
 		})
 	default:
