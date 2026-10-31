@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
+
+	"github.com/mctlhq/mctl-telegram/internal/agent/tools"
 )
 
 // agentAPI is the subset of *Client every tool needs — narrowed to an
@@ -41,6 +44,9 @@ type JobContext struct {
 	// SourceEventIDs lists every event of a coalesced turn, in arrival
 	// order. Empty or a single id means a one-event job.
 	SourceEventIDs []string
+	// Tools are the names to register the tools under (JobEnvelope.Tools);
+	// empty means the canonical names.
+	Tools []string
 }
 
 // ServerName is the MCP server name every worker-spawned Claude invocation
@@ -53,21 +59,41 @@ const ServerName = "agent"
 // shell, filesystem, or generic HTTP tool in this surface, satisfying A-PR8's
 // restricted-tool-surface requirement by construction (nothing else is ever
 // registered).
-func NewMCPServer(api agentAPI, job JobContext) *mcpserver.MCPServer {
-	srv := mcpserver.NewMCPServer(ServerName, "0.1.0", mcpserver.WithToolCapabilities(false))
+//
+// Each tool is registered under the name the job's assistant uses for it,
+// a canonical name or a generic alias; the implementation is the same. The
+// names must cover every tool, as jobTools requires on the invoking side.
+func NewMCPServer(api agentAPI, job JobContext) (*mcpserver.MCPServer, error) {
+	bindings := tools.Default()
+	if len(job.Tools) > 0 {
+		var err error
+		if bindings, err = tools.Resolve(job.Tools); err != nil {
+			return nil, err
+		}
+		if !tools.Complete(bindings) {
+			return nil, fmt.Errorf("job names %d of %d tools", len(bindings), len(tools.Canonical))
+		}
+	}
 	b := &toolBuilder{api: api, job: job}
-	srv.AddTool(b.getEvent())
-	srv.AddTool(b.getConversationContext())
-	srv.AddTool(b.getRecruiterProfile())
-	srv.AddTool(b.getLead())
-	srv.AddTool(b.getPolicy())
-	srv.AddTool(b.proposeReply())
-	srv.AddTool(b.saveJobLead())
-	srv.AddTool(b.requestOwnerApproval())
-	srv.AddTool(b.sendOwnerSummary())
-	srv.AddTool(b.pauseAutopilot())
-	srv.AddTool(b.completeAgentJob())
-	return srv
+	build := map[string]func() (mcplib.Tool, mcpserver.ToolHandlerFunc){
+		"get_event": b.getEvent, "get_conversation_context": b.getConversationContext,
+		"get_recruiter_profile": b.getRecruiterProfile, "get_lead": b.getLead,
+		"get_policy": b.getPolicy, "propose_reply": b.proposeReply,
+		"save_job_lead": b.saveJobLead, "request_owner_approval": b.requestOwnerApproval,
+		"send_owner_summary": b.sendOwnerSummary, "pause_autopilot": b.pauseAutopilot,
+		"complete_agent_job": b.completeAgentJob,
+	}
+	srv := mcpserver.NewMCPServer(ServerName, "0.1.0", mcpserver.WithToolCapabilities(false))
+	for _, bind := range bindings {
+		f, ok := build[bind.Canonical]
+		if !ok {
+			return nil, fmt.Errorf("no implementation for tool %q", bind.Canonical)
+		}
+		tool, handler := f()
+		tool.Name = bind.Name
+		srv.AddTool(tool, handler)
+	}
+	return srv, nil
 }
 
 type toolBuilder struct {

@@ -1,10 +1,10 @@
 # Assistant definitions (assistants.mctl.ai/v1alpha1)
 
-Status: draft (P2 in progress). The server compiles the catalog in, an
+Status: draft (P2 done, pending release). The server compiles the catalog in, an
 account's install is applied through `PUT /api/admin/agent/install`, and
 every claimed job carries its assistant's instructions. Of the P2 policy
-settings, policy enforces the `never` tier and `outside_hours` schedules so
-far; see [What the runtime enforces](#what-the-runtime-enforces) and
+settings, policy enforces the `never` tier, `outside_hours` schedules and
+the audience scope so far; see [What the runtime enforces](#what-the-runtime-enforces) and
 [Phases](#phases).
 
 The communication agent that answers recruiters is the first of a family of
@@ -200,14 +200,15 @@ profile equals the configuration the agent runs with today.
 | `intent_denylist` (CSV) | intents whose resolved tier is `never` |
 | `working_hours` | install `schedule` with mode `outside_hours` |
 | `sender_allowlist`, `blocked_senders` | install `audience.onlySenders`, `audience.blockedSenders` |
+| `audience_excludes` (CSV) | install `audience.scope` classes set to `false` |
 | owner profile document | install `values` placed by each variable's `profilePath` |
 | owner profile `disclosure` map | variable `disclosure`, install `disclosureLevels` |
-| fixed MCP tool set | definition `tools` |
+| fixed MCP tool set | definition `tools`, by canonical name or alias |
 | `job_leads` table | definition `records.kind` |
 | worker model and budget env | definition `execution` (reserved, rejected if set) |
 
 Settings the runtime cannot enforce yet fail with `ErrUnsupported` instead of
-being dropped: a narrowed audience scope, a tool subset, record kinds other than `job_lead`, and any
+being dropped: a tool subset, record kinds other than `job_lead`, and any
 `execution` setting. An install is applied entirely or not at all.
 
 The guarantee is about this mapping: every setting either reaches the
@@ -249,6 +250,59 @@ the owner.
   instead of letting the assistant act at any time; the admin endpoints
   refuse to store one.
 
+## Audience
+
+`audience.scope` turns classes of chats off; every class is on by default:
+
+```yaml
+audience:
+  scope: {contacts: true, nonContacts: true, newChats: false, existingChats: true}
+```
+
+- **Contacts** are judged by the contact flag Telegram sends with each
+  inbound message and stored on the conversation. Removing someone from
+  contacts takes effect with their next message, not instantly.
+- **Existing chats** are conversations the agent first saw before the
+  assistant was installed, plus any chat with a contact. **New chats** are
+  everything else. The install moment is stamped on the first install and
+  kept on reinstalls of the same assistant, so it does not move.
+- Limitation: a chat that began before the install but that the agent never
+  saw (the listener was off) has no conversation row from before the
+  install and therefore counts as new.
+- A chat outside the scope never becomes a job: the listener keeps its
+  conversation row and contact flag, so the class stays decidable, but
+  stores no message body and spends no model run. Policy checks the scope
+  again before every proposal and send (`audience_excluded`), so a peer who
+  drops out mid-conversation gets no further replies.
+- What the decision needs but cannot see excludes rather than admits: an
+  unknown contact status when contacts matter, a missing install time, or a
+  class the runtime does not know. Turning off both halves of a pair
+  (`contacts` and `nonContacts`, or `newChats` and `existingChats`) answers
+  nobody and is rejected.
+- `blockedSenders` always wins; an empty `onlySenders` means everyone.
+
+## Tool names
+
+The worker implements eleven tools. Three carry recruiter-specific names,
+and a definition may call them by a generic alias instead:
+
+| Canonical | Alias |
+|---|---|
+| `get_recruiter_profile` | `get_owner_profile` |
+| `get_lead` | `get_record` |
+| `save_job_lead` | `save_record` |
+
+Each claimed job carries the definition's tool names (`tools` in the
+envelope). The worker allows exactly those names on the `claude` command
+line and registers each tool under its name in the job's MCP server; the
+implementation behind an alias is the same tool. A job from a server
+without a catalog carries no names and gets the canonical ones.
+
+A definition must still name every tool, each once: naming both a tool and
+its alias is an error, and a subset is `ErrUnsupported`. The agent API does
+not check which tools a job may call, so a subset would look enforced while
+it is not; tool restriction needs that server-side check first.
+
 ## Customization tiers
 
 | Tier | The user | Gate |
@@ -271,9 +325,10 @@ the owner.
 - **P2:** tiers including `never` (done: a reply whose intent is on the
   profile's `intent_denylist` is denied when proposed and again at send
   time, and no approval releases it), the audience scope and schedules in
-  `policy.go` (schedules done: see [Schedules](#schedules)); `/mctl` gets unpause and shows the install (done:
+  `policy.go` (both done: see [Schedules](#schedules) and
+  [Audience](#audience)); `/mctl` gets unpause and shows the install (done:
   `/mctl unpause`, `/mctl assistant`); recruiter-specific
-  tool names get generic aliases (`save_record`, `get_owner_profile`).
+  tool names get generic aliases (done: see [Tool names](#tool-names)).
 - **P3:** definitions published to the mctl-api agent registry, a
   per-account install binding, MCP tools `list_assistants`,
   `install_assistant`, `update_install`, and a page on tg.mctl.ai.
@@ -324,7 +379,8 @@ features they touch go live. None is a known defect today.
    "outcome unknown" state, never a second message.
 7. Audience changes mid-flight (blocked, removed contact, outside hours):
    eligibility is checked at send time; blocked wins; empty `onlySenders`
-   means everyone; "new chat" is defined against a fixed moment.
+   means everyone; "new chat" is defined against a fixed moment. (Covered
+   since P2, see [Audience](#audience).)
 8. Schedules across midnight and DST, and a change of timezone; messages
    that arrive outside the window are skipped, queued or escalated by an
    explicit rule, never replayed in a burst. (Covered since P2: the rule is

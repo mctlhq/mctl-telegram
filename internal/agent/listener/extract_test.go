@@ -279,3 +279,30 @@ func TestSenderIdentityFromMeta_MalformedIsSafe(t *testing.T) {
 		t.Fatalf("malformed meta returned %q/%q", username, display)
 	}
 }
+
+// The contact flag is read only from a full user entity: a min entity, or
+// none, leaves it unknown rather than reporting a non-contact.
+func TestExtractMessage_SenderContact(t *testing.T) {
+	msg := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Hello"}
+	cases := []struct {
+		name string
+		e    tg.Entities
+		want string
+	}{
+		{"contact", ents(&tg.User{ID: recruit, FirstName: "Alice", Contact: true}), db.PeerContactYes},
+		{"non-contact", ents(&tg.User{ID: recruit, FirstName: "Alice"}), db.PeerContactNo},
+		{"min entity", ents(&tg.User{ID: recruit, FirstName: "Alice", Min: true}), ""},
+		{"no entity", ents(), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := ExtractMessage(ownerUID, selfTG, msg, tc.e, false)
+			if !ok {
+				t.Fatal("not extracted")
+			}
+			if got.SenderContact != tc.want {
+				t.Fatalf("SenderContact = %q, want %q", got.SenderContact, tc.want)
+			}
+		})
+	}
+}

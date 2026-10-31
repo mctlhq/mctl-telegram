@@ -137,6 +137,10 @@ func TestEvaluate_DenyCodes(t *testing.T) {
 		{"never field", func(in *Input) { in.ProtectedField = &ProtectedField{Key: "identity.company", Never: true} }, DenyReplyNeverField},
 		{"source edited", func(in *Input) { in.SourceSuperseded = db.SourceEdited }, DenySourceSuperseded},
 		{"source deleted", func(in *Input) { in.SourceSuperseded = db.SourceDeleted }, DenySourceSuperseded},
+		{"audience excluded", func(in *Input) {
+			in.Profile.AudienceExcludes = "non_contacts"
+			in.Conversation.PeerContact = db.PeerContactNo
+		}, DenyAudienceExcluded},
 		{"never intent wins over the allowlist", func(in *Input) { in.Profile.IntentDenylist = "decline, Request_Company" }, DenyIntentNever},
 	}
 
@@ -165,7 +169,7 @@ func TestEvaluate_DenyCodes(t *testing.T) {
 		DenyConvStateUnknown, DenySenderBlocked, DenyActionTypeUnknown,
 		DenyPeerMismatch, DenyNoDisclosure, DenyEmptyReply, DenyReplyTooLong,
 		DenyReplyURL, DenyReplyCredentials, DenyReplyNeverField, DenySourceSuperseded,
-		DenyIntentNever,
+		DenyIntentNever, DenyAudienceExcluded,
 	}
 	for _, c := range allCodes {
 		if !seen[c] {

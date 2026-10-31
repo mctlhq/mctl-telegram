@@ -213,7 +213,13 @@ func runMCPServe() error {
 	if raw := os.Getenv("AGENT_JOB_SOURCE_EVENT_IDS"); raw != "" {
 		job.SourceEventIDs = strings.Split(raw, ",")
 	}
-	srv := agentworker.NewMCPServer(client, job)
+	if raw := os.Getenv("AGENT_JOB_TOOLS"); raw != "" {
+		job.Tools = strings.Split(raw, ",")
+	}
+	srv, err := agentworker.NewMCPServer(client, job)
+	if err != nil {
+		return fmt.Errorf("build mcp server: %w", err)
+	}
 	return mcpserver.ServeStdio(srv)
 }
 

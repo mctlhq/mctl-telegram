@@ -72,3 +72,20 @@ func TestInstallNeverTier_DeniesProposal(t *testing.T) {
 		t.Fatalf("discovery: %+v, want allow", ok)
 	}
 }
+
+// get_policy shows the owner's working hours, so the model knows a reply
+// will wait for approval inside them.
+func TestHandlePolicy_ShowsWorkingHours(t *testing.T) {
+	h := newHarness(t)
+	if err := h.store.UpsertAgentProfile(context.Background(), db.AgentProfile{
+		UserID: h.userID, Mode: db.AgentModeGuarded, DisclosureText: "I'm an AI assistant.",
+		WorkingHours: "UTC;mon-fri 09:00-18:00",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var pol policyResponse
+	decodeBody(t, h.do("GET", "/policy", nil), &pol)
+	if pol.WorkingHours != "UTC;mon-fri 09:00-18:00" {
+		t.Fatalf("get_policy working_hours = %q", pol.WorkingHours)
+	}
+}
