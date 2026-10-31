@@ -48,13 +48,21 @@ if ! mkdir "$lock" 2>/dev/null; then
     exit 0
   fi
   log "reclaiming stale lock (owner ${owner:-unknown})"
+  # An owner still alive after an hour is hung: stop it first, or both runs
+  # would install and restart at once.
+  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+    kill "$owner" 2>/dev/null || true
+    sleep 5
+    kill -9 "$owner" 2>/dev/null || true
+  fi
   rm -rf "$lock"
   mkdir "$lock" || die "cannot take $lock"
 fi
 echo $$ > "$lock/pid"
 work=""
 cleanup() {
-  rm -rf "$lock"
+  # Only the run that owns the lock removes it.
+  if [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$$" ]; then rm -rf "$lock"; fi
   if [ -n "$work" ]; then rm -rf "$work"; fi
 }
 trap cleanup EXIT
@@ -81,9 +89,12 @@ git -C "$SRC" fetch -q origin || die "fetch failed"
 full="$(git -C "$SRC" rev-parse --verify -q "$want^{commit}")" || die "commit $want ($source_desc) not found"
 short="${full:0:7}"
 
-new_prompt="$(git -C "$SRC" show "$full:$PROMPT_PATH")" || die "no $PROMPT_PATH at $short"
-[ -n "$new_prompt" ] || die "empty $PROMPT_PATH at $short"
-want_prompt_sha="$(printf '%s\n' "$new_prompt" | shasum -a 256 | cut -d' ' -f1)"
+# The prompt is streamed to a file, byte for byte, so the installed file's
+# sha256 equals the git blob's.
+work="$(mktemp -d "${TMPDIR:-/tmp}/agent-worker-build.XXXXXX")"
+git -C "$SRC" show "$full:$PROMPT_PATH" > "$work/system-prompt.txt" || die "no $PROMPT_PATH at $short"
+[ -s "$work/system-prompt.txt" ] || die "empty $PROMPT_PATH at $short"
+want_prompt_sha="$(shasum -a 256 "$work/system-prompt.txt" | cut -d' ' -f1)"
 have_version="$(cat "$BASE/VERSION" 2>/dev/null || true)"
 have_prompt_sha="$(shasum -a 256 "$BASE/system-prompt.txt" 2>/dev/null | cut -d' ' -f1 || true)"
 
@@ -99,7 +110,6 @@ if [ "$(cat "$BASE/FAILED" 2>/dev/null || true)" = "$short" ]; then
 fi
 log "target $short ($source_desc); installed ${have_version:-none}, prompt ${have_prompt_sha:0:12} -> ${want_prompt_sha:0:12}"
 
-work="$(mktemp -d "${TMPDIR:-/tmp}/agent-worker-build.XXXXXX")"
 binary="$BASE/agent-worker"
 if [ "$have_version" != "$short" ]; then
   mkdir "$work/src"
@@ -110,7 +120,6 @@ if [ "$have_version" != "$short" ]; then
   binary="$work/agent-worker"
   log "built $short $(shasum -a 256 "$binary" | cut -c1-16)"
 fi
-printf '%s\n' "$new_prompt" > "$work/system-prompt.txt"
 
 if [ "$dry_run" -eq 1 ]; then
   log "dry run: not installing"
@@ -129,7 +138,7 @@ install -m 644 "$work/system-prompt.txt" system-prompt.txt.new || die "cannot st
 mv system-prompt.txt.new system-prompt.txt || die "cannot install the new prompt"
 
 worker_pid() { launchctl list "$LABEL" 2>/dev/null | awk -F' = ' '/"PID"/{gsub(/;/,"",$2);print $2}'; }
-ready() { [ "$(curl -s -o /dev/null -w '%{http_code}' "$READY_URL" || true)" = 200 ]; }
+ready() { [ "$(curl -s --connect-timeout 2 --max-time 5 -o /dev/null -w '%{http_code}' "$READY_URL" || true)" = 200 ]; }
 # restart replaces the worker process and succeeds only once a process other
 # than the one it replaced is ready and still the same process 30s later. A
 # 200 from the old process while it shuts down, or a new one that crashes
@@ -156,8 +165,8 @@ if restart; then
   log "ready on $short (previous $prev_version), prompt sha256 $want_prompt_sha"
   # Take this script from the same commit for the next run, if it parses.
   # Not while pinned: an older commit's script may not know about PIN.
-  if [ ! -s "$BASE/PIN" ] && new_self="$(git -C "$SRC" show "$full:$SELF_PATH" 2>/dev/null)" && [ -n "$new_self" ]; then
-    printf '%s\n' "$new_self" > "$BASE/self-update.sh.new"
+  if [ ! -s "$BASE/PIN" ] && git -C "$SRC" show "$full:$SELF_PATH" > "$BASE/self-update.sh.new" 2>/dev/null &&
+    [ -s "$BASE/self-update.sh.new" ]; then
     if bash -n "$BASE/self-update.sh.new"; then
       chmod 755 "$BASE/self-update.sh.new"
       mv "$BASE/self-update.sh.new" "$BASE/self-update.sh"
@@ -165,6 +174,8 @@ if restart; then
       rm -f "$BASE/self-update.sh.new"
       log "self-update.sh at $short does not parse; keeping the current one"
     fi
+  else
+    rm -f "$BASE/self-update.sh.new"
   fi
   exit 0
 fi
