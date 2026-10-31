@@ -178,3 +178,103 @@ func TestExecutor_RecoverStuck_GateHeldPastTTL(t *testing.T) {
 		})
 	}
 }
+
+// TestExecutor_Approve_FloodWaitIsQueuedForRetry: a FLOOD_WAIT on the first
+// send leaves the row executing, uncounted, with the wait recorded, and the
+// owner is told it is queued.
+func TestExecutor_Approve_FloodWaitIsQueuedForRetry(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	actionID, code := seedPendingApproval(t, store, uid, conv.ID, "hi")
+	sender.errs = []error{floodWait(time.Hour)}
+
+	if err := exec.Approve(ctx, uid, code); !errors.Is(err, ErrSendQueuedForRetry) {
+		t.Fatalf("approve: err=%v, want ErrSendQueuedForRetry", err)
+	}
+	a := mustAction(t, store, uid, actionID)
+	if a.Status != db.ActionExecuting || a.SendAttempts != 0 {
+		t.Fatalf("status=%q attempts=%d, want executing with 0 attempts", a.Status, a.SendAttempts)
+	}
+	var waiting int
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM agent_actions WHERE id = $1 AND retry_not_before > $2`, actionID, time.Now().UTC(),
+	).Scan(&waiting); err != nil || waiting != 1 {
+		t.Fatalf("retry_not_before set: %d err=%v, want 1", waiting, err)
+	}
+}
+
+// TestExecutor_FloodWaitOnADecidedRowIsLostRace: the row was decided
+// elsewhere while the RPC was in flight. A flood wait then must not claim
+// the send is queued (fresh send), and recovery treats it as decided.
+func TestExecutor_FloodWaitOnADecidedRowIsLostRace(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	actionID, code := seedPendingApproval(t, store, uid, conv.ID, "hi")
+	sender.errs = []error{floodWait(time.Hour)}
+	sender.onSend = func() {
+		if ok, err := store.UpdateAgentActionStatus(ctx, uid, actionID, db.ActionExecuting, db.ActionDenied); err != nil || !ok {
+			t.Errorf("decide elsewhere: ok=%v err=%v", ok, err)
+		}
+	}
+	if err := exec.Approve(ctx, uid, code); !errors.Is(err, ErrLostRace) {
+		t.Fatalf("approve: err=%v, want ErrLostRace", err)
+	}
+
+	recID := approvedForRecovery(t, store, uid, conv.ID, 757575)
+	sender.errs = []error{floodWait(time.Hour)}
+	sender.onSend = func() {
+		if ok, err := store.UpdateAgentActionStatus(ctx, uid, recID, db.ActionExecuting, db.ActionDenied); err != nil || !ok {
+			t.Errorf("decide elsewhere: ok=%v err=%v", ok, err)
+		}
+	}
+	stuck, err := store.ListStuckExecutingActions(ctx, 0)
+	if err != nil {
+		t.Fatalf("list stuck: %v", err)
+	}
+	for _, a := range stuck {
+		if a.ID == recID {
+			if err := exec.recoverOne(ctx, a); err != nil {
+				t.Fatalf("recoverOne: %v, want nil for a row decided elsewhere", err)
+			}
+			return
+		}
+	}
+	t.Fatal("reserved row not listed as stuck")
+}
+
+// TestExecutor_RecoverStuck_FloodWaitPastTTL: flood waits are not
+// attempts, so the approval TTL from the reservation is what ends a row
+// Telegram keeps throttling: denied with no attempt that could have
+// landed, delivery_unknown after one.
+func TestExecutor_RecoverStuck_FloodWaitPastTTL(t *testing.T) {
+	cases := []struct {
+		name       string
+		attempts   int
+		wantStatus string
+	}{
+		{"no attempt is denied", 0, db.ActionDenied},
+		{"an earlier attempt is delivery unknown", 1, db.ActionDeliveryUnknown},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			exec, sender, store, uid, conv := newTestExecutor(t)
+			ctx := context.Background()
+			exec.ApprovalTTL = time.Hour
+			actionID := approvedForRecovery(t, store, uid, conv.ID, int64(767670+i))
+			setSendAttempts(t, store, uid, actionID, tc.attempts)
+			backdateReservation(t, store, uid, actionID, 2*time.Hour)
+			sender.errs = []error{floodWait(time.Minute)}
+
+			if _, err := exec.RecoverStuck(ctx); err != nil {
+				t.Fatalf("recover: %v", err)
+			}
+			a := mustAction(t, store, uid, actionID)
+			if a.Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q", a.Status, tc.wantStatus)
+			}
+			if tc.wantStatus == db.ActionDenied && a.PolicyReasons != ReasonFloodWaitOutlasted {
+				t.Fatalf("reasons = %q, want %q", a.PolicyReasons, ReasonFloodWaitOutlasted)
+			}
+		})
+	}
+}

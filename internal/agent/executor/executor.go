@@ -798,14 +798,11 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 			// reservation, the retry ends. With no attempt made nothing was
 			// sent, so it is denied; after an attempt the outcome is unknown.
 			if e.ApprovalTTL > 0 && time.Since(action.UpdatedAt) > e.ApprovalTTL {
-				if action.SendAttempts == 0 {
-					if _, derr := e.Store.DenyAgentAction(ctx, action.UserID, action.ID, db.ActionExecuting, ReasonSendGateClosed); derr != nil {
-						return fmt.Errorf("deny gate-held retry: %w", derr)
-					}
-					return fmt.Errorf("send gate closed past the approval TTL, denied: %w", err)
+				if herr := e.endHeldRetry(ctx, action, *conv, action.SendAttempts, ReasonSendGateClosed,
+					"delivery unknown: send gate stayed closed past the approval TTL after an attempt that may have been delivered"); !errors.Is(herr, ErrLostRace) {
+					return fmt.Errorf("send gate closed past the approval TTL: %w", herr)
 				}
-				return e.markDeliveryUnknown(ctx, action, *conv,
-					"delivery unknown: send gate stayed closed past the approval TTL after an attempt that may have been delivered")
+				return nil
 			}
 			return fmt.Errorf("send gate denied recovery retry: %w", err)
 		}
@@ -831,6 +828,10 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 		tgMessageID, err = e.locateDelivered(ctx, action, *conv, text), nil
 	}
 	if handled, herr := e.settleRefusal(ctx, action, *conv, err); handled {
+		if errors.Is(herr, ErrLostRace) {
+			// Decided elsewhere since the sweep listed it.
+			return nil
+		}
 		return herr
 	}
 	if err != nil {
@@ -873,6 +874,33 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 	return nil
 }
 
+// ReasonFloodWaitOutlasted is the denial reason of a send Telegram kept
+// throttling with FLOOD_WAIT past the approval TTL, with no attempt that
+// could have landed (#1055).
+const ReasonFloodWaitOutlasted = "flood wait outlasted the approval TTL"
+
+// endHeldRetry ends a retry that was held too long without a real attempt
+// (send gate, flood waits): denied with denyReason when no counted attempt
+// could have landed, delivery_unknown with unknownReason otherwise. It
+// returns ErrLostRace when the row was decided elsewhere meanwhile.
+func (e *Executor) endHeldRetry(ctx context.Context, action db.AgentAction, conv db.Conversation, attempts int, denyReason, unknownReason string) error {
+	if attempts > 0 {
+		err := e.markDeliveryUnknown(ctx, action, conv, unknownReason)
+		if err == nil {
+			return ErrLostRace
+		}
+		return err
+	}
+	ok, err := e.Store.DenyAgentAction(ctx, action.UserID, action.ID, db.ActionExecuting, denyReason)
+	if err != nil {
+		return fmt.Errorf("deny held retry: %w", err)
+	}
+	if !ok {
+		return ErrLostRace
+	}
+	return fmt.Errorf("retry denied: %s", denyReason)
+}
+
 // ReasonSendGateClosed is the denial reason of a recovery retry the send
 // gate held past the approval TTL with no attempt made (#1055).
 const ReasonSendGateClosed = "send gate closed"
@@ -896,9 +924,20 @@ func (e *Executor) settleRefusal(ctx context.Context, action db.AgentAction, con
 	)
 	switch {
 	case errors.As(sendErr, &flood):
-		if _, _, err := e.Store.UnnoteAgentActionSendAttempt(ctx, action.UserID, action.ID, time.Now().UTC().Add(flood.Wait)); err != nil {
+		attempts, ok, err := e.Store.UnnoteAgentActionSendAttempt(ctx, action.UserID, action.ID, time.Now().UTC().Add(flood.Wait))
+		if err != nil {
 			// The attempt stays counted, which errs toward the bound.
 			return true, fmt.Errorf("%w: flood wait, undo attempt: %w: %w", ErrSendQueuedForRetry, err, sendErr)
+		}
+		if !ok {
+			return true, ErrLostRace
+		}
+		// A flood wait is not an attempt, so the attempt bound never ends a
+		// row Telegram keeps throttling. The approval TTL, counted from the
+		// reservation like the gate-held bound, does.
+		if e.ApprovalTTL > 0 && time.Since(action.UpdatedAt) > e.ApprovalTTL {
+			return true, e.endHeldRetry(ctx, action, conv, attempts, ReasonFloodWaitOutlasted,
+				"delivery unknown: flood waits outlasted the approval TTL after an attempt that may have been delivered")
 		}
 		return true, fmt.Errorf("%w: %w", ErrSendQueuedForRetry, sendErr)
 	case errors.As(sendErr, &refused):
@@ -915,8 +954,10 @@ func (e *Executor) settleRefusal(ctx context.Context, action db.AgentAction, con
 			return true, e.markDeliveryUnknown(ctx, action, conv,
 				"delivery unknown: Telegram refused a retry ("+refused.Class+") after an attempt that may have been delivered")
 		}
-		if _, err := e.Store.DenyAgentAction(ctx, action.UserID, action.ID, db.ActionExecuting, "send refused by Telegram: "+refused.Class); err != nil {
+		if ok, err := e.Store.DenyAgentAction(ctx, action.UserID, action.ID, db.ActionExecuting, "send refused by Telegram: "+refused.Class); err != nil {
 			return true, fmt.Errorf("deny refused send: %w", err)
+		} else if !ok {
+			return true, ErrLostRace
 		}
 		return true, fmt.Errorf("%w: %s", ErrSendRefused, refused.Class)
 	}
