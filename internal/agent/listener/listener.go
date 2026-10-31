@@ -241,8 +241,10 @@ func (l *Listener) dispatcherFor(acct *account) tg.UpdateDispatcher {
 // reason as in onMessage: acknowledging a delete we failed to record would
 // lose it for good.
 func (l *Listener) onDelete(ctx context.Context, acct *account, ids []int) error {
+	// The sweep is cleanup only: a failure must not hold back recording the
+	// deletes below, which is what withdraws drafts.
 	if err := l.Store.SweepExpiredPendingDeletes(ctx); err != nil {
-		return err
+		slog.Warn("agent listener: sweep of expired pending deletes failed", "user_id", acct.userID, "err", err)
 	}
 	kept := 0
 	for _, id := range ids {
