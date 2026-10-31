@@ -1,7 +1,9 @@
 package assistant
 
 import (
+	"encoding/json"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -135,3 +137,75 @@ func TestDigestPinsInstructions(t *testing.T) {
 		t.Fatal("digest not deterministic")
 	}
 }
+
+// The registry form round-trips: parsing an entry's materialized document,
+// in any formatting, gives the same digest, instructions and definition,
+// so a copy fetched from the registry can be checked against an install.
+func TestMaterializedRoundTrip(t *testing.T) {
+	c, err := LoadCatalog(mctltelegram.Catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, _ := c.Lookup("hr-recruiter", "0.1.0")
+	if !strings.HasPrefix(e.Digest, "sha256:") || !strings.Contains(string(e.Materialized), `"text":`) ||
+		strings.Contains(string(e.Materialized), `"path":`) {
+		t.Fatalf("materialized form: digest %q, doc %.200s", e.Digest, e.Materialized)
+	}
+	var doc any
+	if err := json.Unmarshal(e.Materialized, &doc); err != nil {
+		t.Fatal(err)
+	}
+	pretty, err := json.MarshalIndent(doc, "", "    ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, raw := range map[string][]byte{"as built": e.Materialized, "reformatted": pretty} {
+		got, err := ParseMaterialized(raw)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got.Digest != e.Digest || got.Instructions != e.Instructions ||
+			got.Definition.Metadata.Version != e.Definition.Metadata.Version {
+			t.Fatalf("%s: digest %s vs %s", name, got.Digest, e.Digest)
+		}
+		if Render(got, nil) != Render(e, nil) {
+			t.Fatalf("%s: rendered prompt differs", name)
+		}
+	}
+	// A changed instruction is a different digest.
+	edited := strings.Replace(string(e.Materialized), `"text":"`, `"text":"X`, 1)
+	if got, err := ParseMaterialized([]byte(edited)); err != nil || got.Digest == e.Digest {
+		t.Fatalf("edited instructions: digest %v, err %v", got, err)
+	}
+}
+
+func TestMaterializedRejects(t *testing.T) {
+	c, err := LoadCatalog(mctltelegram.Catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, _ := c.Lookup("hr-recruiter", "0.1.0")
+	m := string(e.Materialized)
+	cases := map[string]string{
+		"tenant visibility": strings.Replace(m, `"visibility":"admin"`, `"visibility":"tenant"`, 1),
+		"path not text":     strings.Replace(m, `"instructions":{"text":`, `"instructions":{"path":"x.txt","text":`, 1),
+		"blank text":        regexpText.ReplaceAllString(m, `"instructions":{"text":"   "}`),
+	}
+	for name, raw := range cases {
+		if raw == m {
+			t.Fatalf("%s: edit did not apply", name)
+		}
+		if _, err := ParseMaterialized([]byte(raw)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	tenant := strings.Replace(string(readFile(t, "assistant.yaml")), "visibility: admin", "visibility: tenant", 1)
+	if _, err := LoadCatalog(fstest.MapFS{
+		"assistants/hr-recruiter/assistant.yaml": {Data: []byte(strings.Replace(tenant, "path: ../../deploy/agent-worker/system-prompt.txt", "path: p.txt", 1))},
+		"assistants/hr-recruiter/p.txt":          {Data: []byte("Rules.")},
+	}); err == nil {
+		t.Fatal("catalog accepted a tenant-visible assistant")
+	}
+}
+
+var regexpText = regexp.MustCompile(`"instructions":\{"text":"(?:[^"\\]|\\.)*"\}`)

@@ -97,8 +97,11 @@ type Definition struct {
 		Examples    []string `json:"examples"`
 	} `json:"metadata"`
 	Spec struct {
+		// Instructions point at a file (path, in an authored definition) or
+		// carry the text (in a materialized one); exactly one is set.
 		Instructions struct {
-			Path string `json:"path"`
+			Path string `json:"path,omitempty"`
+			Text string `json:"text,omitempty"`
 		} `json:"instructions"`
 		Variables []Variable `json:"variables"`
 		Intents   []Intent   `json:"intents"`

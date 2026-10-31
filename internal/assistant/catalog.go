@@ -2,23 +2,105 @@ package assistant
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"path"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Entry is one catalog assistant with its instructions loaded.
 type Entry struct {
 	Definition   *Definition
 	Instructions string
-	// Digest is "sha256:" and the hex SHA-256 of the definition file and
-	// the instructions, each length-prefixed. The version names a
-	// definition; the digest pins what it runs, since a draft definition's
-	// instructions may still change under the same version.
+	// Materialized is the registry form of the definition: the document
+	// as canonical JSON, with instructions.path replaced by
+	// instructions.text. It is what gets published and what an install
+	// pins.
+	Materialized []byte
+	// Digest is "sha256:" and the hex SHA-256 of Materialized. The version
+	// names a definition; the digest pins what it runs, since a draft
+	// definition's instructions may still change under the same version.
+	// It is computed from the materialized form, not the authored file, so
+	// a copy fetched from the registry can be checked against it.
 	Digest string
+}
+
+// canonicalJSON re-encodes a YAML or JSON document as JSON with sorted
+// object keys and no insignificant whitespace, so the same document always
+// has the same bytes whichever form it arrived in.
+func canonicalJSON(raw []byte) ([]byte, error) {
+	var doc any
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("parse document: %w", err)
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("encode document: %w", err)
+	}
+	return out, nil
+}
+
+// materialize returns the registry form of an authored definition: its
+// instructions file inlined as instructions.text, canonical JSON.
+func materialize(defRaw, text []byte) ([]byte, error) {
+	var doc map[string]any
+	if err := yaml.Unmarshal(defRaw, &doc); err != nil {
+		return nil, fmt.Errorf("parse definition: %w", err)
+	}
+	spec, ok := doc["spec"].(map[string]any)
+	if !ok {
+		return nil, errors.New("definition has no spec")
+	}
+	spec["instructions"] = map[string]any{"text": string(text)}
+	js, err := json.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("encode definition: %w", err)
+	}
+	return canonicalJSON(js)
+}
+
+func contentDigest(materialized []byte) string {
+	sum := sha256.Sum256(materialized)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// checkVisibility refuses what P3 cannot serve: a tenant-visible assistant
+// needs a tenant binding model that does not exist yet (#1019).
+func checkVisibility(def *Definition) error {
+	if def.Metadata.Visibility == "tenant" {
+		return fmt.Errorf("visibility tenant is %w", ErrUnsupported)
+	}
+	return nil
+}
+
+// ParseMaterialized checks a materialized definition, such as one fetched
+// from the registry, and returns it as a catalog entry. It must carry its
+// instructions as text, and its digest is recomputed from its canonical
+// form rather than trusted.
+func ParseMaterialized(raw []byte) (*Entry, error) {
+	canon, err := canonicalJSON(raw)
+	if err != nil {
+		return nil, err
+	}
+	def, err := ParseDefinition(canon)
+	if err != nil {
+		return nil, err
+	}
+	if def.Spec.Instructions.Text == "" || def.Spec.Instructions.Path != "" {
+		return nil, errors.New("a materialized definition carries instructions.text and no path")
+	}
+	if strings.TrimSpace(def.Spec.Instructions.Text) == "" {
+		return nil, errors.New("instructions are empty")
+	}
+	if err := checkVisibility(def); err != nil {
+		return nil, err
+	}
+	return &Entry{Definition: def, Instructions: def.Spec.Instructions.Text, Materialized: canon, Digest: contentDigest(canon)}, nil
 }
 
 // Catalog is every assistant definition found in a catalog file system,
@@ -55,6 +137,12 @@ func LoadCatalog(fsys fs.FS) (*Catalog, error) {
 		if dir := path.Base(path.Dir(file)); dir != def.Metadata.Name {
 			return nil, fmt.Errorf("%s: name %q does not match its directory", file, def.Metadata.Name)
 		}
+		if def.Spec.Instructions.Path == "" {
+			return nil, fmt.Errorf("%s: an authored definition names its instructions by path", file)
+		}
+		if err := checkVisibility(def); err != nil {
+			return nil, fmt.Errorf("%s: %w", file, err)
+		}
 		ipath := path.Join(path.Dir(file), def.Spec.Instructions.Path)
 		if !fs.ValidPath(ipath) {
 			return nil, fmt.Errorf("%s: instructions path %q leaves the catalog", file, def.Spec.Instructions.Path)
@@ -70,20 +158,22 @@ func LoadCatalog(fsys fs.FS) (*Catalog, error) {
 		if _, dup := c.entries[key]; dup {
 			return nil, fmt.Errorf("%s: %s defined twice", file, key)
 		}
-		c.entries[key] = &Entry{Definition: def, Instructions: string(text), Digest: digest(raw, text)}
+		m, err := materialize(raw, text)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", file, err)
+		}
+		c.entries[key] = &Entry{Definition: def, Instructions: string(text), Materialized: m, Digest: contentDigest(m)}
 	}
 	return c, nil
 }
 
-func digest(parts ...[]byte) string {
-	h := sha256.New()
-	for _, p := range parts {
-		var n [8]byte
-		binary.BigEndian.PutUint64(n[:], uint64(len(p)))
-		h.Write(n[:])
-		h.Write(p)
+// Entries returns every catalog entry, in no particular order.
+func (c *Catalog) Entries() []*Entry {
+	out := make([]*Entry, 0, len(c.entries))
+	for _, e := range c.entries {
+		out = append(out, e)
 	}
-	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+	return out
 }
 
 // Lookup returns the assistant name@version, if the catalog has it.

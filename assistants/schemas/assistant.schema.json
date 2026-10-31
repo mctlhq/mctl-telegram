@@ -36,16 +36,22 @@
       "required": ["instructions", "intents", "tools", "records", "defaults"],
       "properties": {
         "instructions": {
+          "description": "An authored definition names its system prompt file (path); a materialized one, as published to the registry, carries the text.",
           "type": "object",
           "additionalProperties": false,
-          "required": ["path"],
           "properties": {
             "path": {
               "description": "System prompt file, relative to the definition's directory.",
               "type": "string",
               "minLength": 1
+            },
+            "text": {
+              "description": "The system prompt itself (materialized definitions only).",
+              "type": "string",
+              "minLength": 1
             }
-          }
+          },
+          "oneOf": [{ "required": ["path"] }, { "required": ["text"] }]
         },
         "variables": {
           "type": "array",
