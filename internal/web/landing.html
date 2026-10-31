@@ -8,8 +8,10 @@
 
   /* Layout (hero, section titles, card grid) is site.css: .mctl-site-*. */
 
-  /* Inside the hero text stack the grid gap spaces the items. */
-  .mctl-site-hero__text > * { margin: 0; }
+  /* The hero stack is spaced by site.css's rhythm (eyebrow 20px, title to
+     lede 24px, lede to actions 40px, actions to meta 32px); the meta row
+     only drops its trailing paragraph margin. */
+  .mctl-site-hero__text > p.muted { margin-bottom: 0; }
 
   /* Use-case cards */
   .use-card { padding: 20px; }
@@ -19,10 +21,10 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: var(--accent-soft);
-    border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
     border-radius: var(--mctl-radius-md);
-    color: var(--accent);
+    color: var(--text-dim);
     flex-shrink: 0;
   }
   .use-card .card-icon svg {
@@ -73,7 +75,7 @@
     margin-top: 4px;
   }
   .flow-arrow {
-    color: var(--accent);
+    color: var(--muted);
     padding: 0 4px;
     flex-shrink: 0;
     display: flex;
@@ -151,7 +153,7 @@
     </div>
     <h1 class="mctl-site-hero__title">Your authorized Telegram account,<br><span class="accent">inside Claude</span></h1>
     <p class="mctl-site-hero__lede">
-      Add tg.mctl.ai as a custom connector in Claude — on the web, in the desktop and mobile apps, or in Claude Code — and ask Claude to summarise chats, search messages, and draft replies in the Telegram account you own. ChatGPT can add it by URL too; other MCP clients are not yet tested. New accounts start read-only unless you choose <em>Read + send</em> when you connect.
+      Add tg.mctl.ai as a custom connector in Claude — on the web, in the desktop and mobile apps, or in Claude Code — and ask Claude to summarize chats, search messages, and draft replies in the Telegram account you own. ChatGPT can add it by URL too; other MCP clients are not yet tested. New accounts start read-only unless you choose <em>Read + send</em> when you connect.
     </p>
     <div class="mctl-site-hero__actions">
       <a class="cta-btn" href="#claude">Connect in Claude</a>
@@ -161,8 +163,8 @@
     </div>
     <p class="muted">
       <a href="/privacy">Privacy policy</a> · <a href="/security">Security model</a> ·
-      <a href="mailto:support@mctl.ai">support@mctl.ai</a>
-      · Want the session on your own machine? <a href="/docs/local-bridge">Local Bridge</a>
+      <a href="/terms">Terms</a> · <a href="mailto:support@mctl.ai">support@mctl.ai</a>
+      · Want the session on your own machine? <a class="meta-em" href="/docs/local-bridge">Local Bridge</a>
     </p>
     </div>
   </section>
@@ -173,7 +175,7 @@
     <div class="mctl-site-grid">
       <div class="use-card">
         <span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
-        <h3>Summarise unread chats</h3>
+        <h3>Summarize unread chats</h3>
         <p>Ask Claude what you missed while you were away. Get a digest of any chat, group, or channel without opening Telegram.</p>
       </div>
       <div class="use-card">
@@ -325,7 +327,7 @@
     <dl class="faq-list">
       <div class="faq-item">
         <dt>Which AI assistants does this work with?</dt>
-        <dd>Claude first — claude.ai, the desktop and mobile apps, and Claude Code — and ChatGPT by URL. It is a standard remote MCP server with OAuth, so other clients such as Cursor, VS Code and Windsurf may work, but they are not yet tested against tg.mctl.ai.</dd>
+        <dd>Claude first — claude.ai, the desktop and mobile apps, and Claude Code — and ChatGPT by URL. It is a standard remote MCP server with OAuth, so other clients such as Cursor, VS Code, and Windsurf may work, but they are not yet tested against tg.mctl.ai.</dd>
       </div>
       <div class="faq-item">
         <dt>Is this an official Telegram app?</dt>
