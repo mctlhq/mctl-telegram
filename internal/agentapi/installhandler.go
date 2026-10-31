@@ -136,7 +136,9 @@ func NewAdminAgentInstallHandler(store *db.Store, catalog *assistant.Catalog) ht
 		// install revision in the same UPDATE as the settings. Work created
 		// under an earlier revision is refused at propose, approve and send
 		// (#1018), so no queued job or pending approval of the old install
-		// can act; denying its open actions below is only cleanup.
+		// can act; denying its proposed and approved actions below is only
+		// cleanup (drafts awaiting approval are refused at /mctl approve,
+		// which tells the owner why).
 		// Conversation transcripts stay as account history.
 		current, err := store.GetAgentAssistantRef(ctx, targetUserID)
 		if err != nil {

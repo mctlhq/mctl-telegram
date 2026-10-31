@@ -14,6 +14,7 @@ import (
 	"time"
 
 	mctltelegram "github.com/mctlhq/mctl-telegram"
+	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
 	"github.com/mctlhq/mctl-telegram/internal/assistant"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -206,6 +207,13 @@ func TestAdminAgentInstallHandler_SwitchesAssistant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	approved, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply, Payload: "approved draft",
+		PolicyDecision: db.PolicyRequireApproval, Status: db.ActionApproved,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	time.Sleep(10 * time.Millisecond)
 	install := hrInstallJSON(t, map[string]any{"assistant": map[string]any{"name": "other-assistant", "version": "0.1.0"}})
@@ -226,9 +234,15 @@ func TestAdminAgentInstallHandler_SwitchesAssistant(t *testing.T) {
 	if err != nil || a.Name != "other-assistant" {
 		t.Fatalf("assistant after switch = %+v, err=%v", a, err)
 	}
-	action, err := store.GetAgentAction(ctx, uid, pending)
-	if err != nil || action.Status != db.ActionDenied {
-		t.Fatalf("earlier-revision draft = %+v, err=%v, want denied", action, err)
+	// The cleanup sweep denies the approved action; the draft awaiting
+	// approval keeps its code so /mctl approve can say the assistant
+	// changed rather than "code not found".
+	action, err := store.GetAgentAction(ctx, uid, approved)
+	if err != nil || action.Status != db.ActionDenied || action.PolicyReasons != policy.ReasonInstallChanged {
+		t.Fatalf("earlier-revision approved action = %+v, err=%v, want denied as install changed", action, err)
+	}
+	if byCode, err := store.GetAgentActionByCode(ctx, uid, "PEND01"); err != nil || byCode.ID != pending || byCode.Status != db.ActionPendingApproval {
+		t.Fatalf("pending draft by code = %+v, err=%v, want still pending", byCode, err)
 	}
 }
 

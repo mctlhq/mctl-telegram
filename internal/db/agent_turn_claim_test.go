@@ -574,3 +574,23 @@ func checkTurnColumnsUpgrade(t *testing.T, s *Store, pg bool) {
 		}
 	}
 }
+
+// The coalesced claim stamps the account's current install revision, like
+// the plain claim (#1018); without it every coalesced job claimed after an
+// install would be fenced at propose.
+func TestTurnClaim_StampsInstallRevision(t *testing.T) {
+	f := newTurnFixture(t, &turnCfg)
+	ctx := context.Background()
+	if err := f.s.UpsertAgentProfile(ctx, AgentProfile{UserID: f.uid}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.s.UpdateAgentProfileFields(ctx, f.uid, AgentProfileUpdate{BumpInstallRevision: true}); err != nil {
+		t.Fatal(err)
+	}
+	f.ingest(t, 555, 10, 5, 0)
+	f.now = turnBase.Add(4 * time.Second)
+	got := f.claim(t, 5)
+	if len(got) != 1 || got[0].InstallRevision != 2 {
+		t.Fatalf("claimed %+v, want one job at revision 2", got)
+	}
+}

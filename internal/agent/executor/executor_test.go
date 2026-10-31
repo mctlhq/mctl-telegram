@@ -1472,6 +1472,9 @@ func TestExecutor_Approve_RefusesEarlierInstallRevision(t *testing.T) {
 	if action.Status != db.ActionDenied || len(sender.calls) != 0 {
 		t.Fatalf("status = %q, sends = %d, want denied and none", action.Status, len(sender.calls))
 	}
+	if action.PolicyReasons != policy.ReasonInstallChanged {
+		t.Fatalf("policy_reasons = %q, want %q", action.PolicyReasons, policy.ReasonInstallChanged)
+	}
 }
 
 // TestExecutor_Send_RefusesEarlierInstallRevision: an action already

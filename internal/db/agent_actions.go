@@ -502,6 +502,30 @@ func (s *Store) UpdateAgentActionStatus(ctx context.Context, userID, id int64, f
 	return n > 0, nil
 }
 
+// DenyAgentAction moves an action from `from` to denied and records reason
+// as its policy_reasons, compare-and-set like UpdateAgentActionStatus, so
+// the audit row says why it was refused rather than keeping the reasons it
+// was proposed with.
+func (s *Store) DenyAgentAction(ctx context.Context, userID, id int64, from, reason string) (bool, error) {
+	if tos, ok := allowedActionTransitions[from]; !ok {
+		return false, fmt.Errorf("%w: %s -> %s", ErrInvalidActionTransition, from, ActionDenied)
+	} else if _, ok := tos[ActionDenied]; !ok {
+		return false, fmt.Errorf("%w: %s -> %s", ErrInvalidActionTransition, from, ActionDenied)
+	}
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_actions
+		    SET status = $1, approval_code = NULL, approval_code_hash = NULL,
+		        approval_code_encrypted = NULL, policy_reasons = $2, updated_at = $3
+		  WHERE id = $4 AND user_id = $5 AND status = $6`,
+		ActionDenied, reason, time.Now().UTC(), id, userID, from,
+	)
+	if err != nil {
+		return false, fmt.Errorf("deny action: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // BeginExecutingAgentAction transitions an action from approved to executing
 // and persists the Telegram send_random_id in the SAME atomic UPDATE, before
 // the executor issues the actual send RPC — never after. That ordering is
@@ -1630,21 +1654,25 @@ func (s *Store) HasExecutedOwnerSummarySince(ctx context.Context, userID, conver
 	return true, nil
 }
 
-// DenyActionsFromEarlierInstalls denies every not-yet-executing action of
-// userID created under an install revision older than the account's
+// DenyActionsFromEarlierInstalls denies the proposed and approved actions
+// of userID created under an install revision older than the account's
 // current one (#1018). It is cleanup after an install change: the revision
 // check at propose, approve and send is what keeps such work from acting,
-// so a race with this sweep is harmless.
+// so a race with this sweep is harmless. Drafts awaiting the owner's
+// approval are left alone on purpose: denying them here would release
+// their codes, and /mctl approve would then answer "code not found"
+// instead of saying the assistant changed. The approve-time check denies
+// them with that explanation, and approval expiry clears the rest.
 func (s *Store) DenyActionsFromEarlierInstalls(ctx context.Context, userID int64, reason string) (int64, error) {
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE agent_actions
 		    SET status = $1, approval_code = NULL, approval_code_hash = NULL,
 		        approval_code_encrypted = NULL, policy_reasons = $2, updated_at = $3
 		  WHERE user_id = $4
-		    AND status IN ($5, $6, $7)
+		    AND status IN ($5, $6)
 		    AND install_revision < (SELECT install_revision FROM agent_profiles WHERE user_id = $4)`,
 		ActionDenied, reason, time.Now().UTC(), userID,
-		ActionProposed, ActionPendingApproval, ActionApproved,
+		ActionProposed, ActionApproved,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("deny actions from earlier installs: %w", err)

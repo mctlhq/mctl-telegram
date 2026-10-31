@@ -206,9 +206,10 @@ func (e *Executor) Approve(ctx context.Context, userID int64, code string) error
 		return fmt.Errorf("load profile: %w", err)
 	}
 	if err == nil && action.InstallRevision != profile.InstallRevision {
-		if _, err := e.Store.UpdateAgentActionStatus(ctx, userID, action.ID, db.ActionPendingApproval, db.ActionDenied); err != nil {
+		if _, err := e.Store.DenyAgentAction(ctx, userID, action.ID, db.ActionPendingApproval, policy.ReasonInstallChanged); err != nil {
 			return fmt.Errorf("deny stale-install draft: %w", err)
 		}
+		e.m.CountPolicyDenial(string(policy.DenyInstallChanged), metrics.PolicySurfaceExecutorSend)
 		return ErrInstallChanged
 	}
 	ok, err := e.Store.UpdateAgentActionStatus(ctx, userID, action.ID, db.ActionPendingApproval, db.ActionApproved)

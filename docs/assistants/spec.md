@@ -193,8 +193,11 @@ profile's when it has no job. Work behind the current revision is refused:
 - at send and at crash recovery, as the same policy denial.
 
 The revision check is the source of truth. After an install the server
-also denies the account's open actions from earlier revisions, but that is
-cleanup: a race with it cannot let stale work act. A job that is claimed
+also denies proposed and approved actions from earlier revisions, but that
+is cleanup: a race with it cannot let stale work act. Drafts awaiting the
+owner's approval are left for `/mctl approve` to refuse, so the owner is
+told the assistant changed rather than that the code was not found;
+approval expiry clears the ones never approved. A job that is claimed
 again after the change takes the new revision and runs with the new
 assistant.
 

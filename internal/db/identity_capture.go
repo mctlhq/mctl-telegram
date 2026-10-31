@@ -43,7 +43,7 @@ type TelegramIdentityCapture struct {
 //     "not_supplied" rather than silently holding a display name.
 //
 // It reuses EnsureUserByTelegramID's race-safe INSERT ... ON CONFLICT DO
-// NOTHING + SELECT shape and the COALESCE(NULLIF($1,”), col) refresh
+// NOTHING + SELECT shape and the COALESCE(NULLIF($1,''), col) refresh
 // pattern, and additionally always stamps identity_captured_at,
 // identity_source and last_seen_at (a capture is definitionally an
 // authentication event).

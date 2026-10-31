@@ -727,10 +727,12 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 
 	// Owner-facing action types short-circuit to Allow inside Evaluate, but
 	// ONLY after the global gates (kill switch, mode==off) have already had a
-	// chance to deny — see policy.go's ordering. A Deny here can now only come
-	// from one of those two account-wide gates (never conversation state, the
-	// sender blocklist, or autopilot paused — owner-facing actions are exempt
-	// from the pause gate, issue #581), and it must actually stop the
+	// chance to deny — see policy.go's ordering. A Deny here can only come
+	// from those two account-wide gates or from the install-revision fence
+	// for a job claimed before the install changed (#1018) — never
+	// conversation state, the sender blocklist, or autopilot paused
+	// (owner-facing actions are exempt from the pause gate, issue #581) —
+	// and it must actually stop the
 	// notification from going out: the emergency kill switch exists precisely
 	// to silence every owner-facing message too, not just replies.
 	status := db.ActionExecuted
