@@ -579,3 +579,61 @@ func TestNotifier_DeliverPending_MarksSentAndIsIdempotent(t *testing.T) {
 		}
 	}
 }
+
+// TestNotifier_DeliverPending_ApprovalSaysWhyHeld: the approval request named
+// the recipient and the draft but not why a routine-looking reply needed the
+// owner (#989). The policy's reason is shown in the owner's wording, and a
+// draft with no stored reason gets no "Held because" line.
+func TestNotifier_DeliverPending_ApprovalSaysWhyHeld(t *testing.T) {
+	_, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	conv, err := store.EnsureConversation(ctx, uid, 555, "bob", "Bob")
+	if err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	for _, a := range []struct{ code, reasons string }{
+		{"HELD01", `reply echoes owner_profile field "public_profile.open_to" before the owner engaged`},
+		{"HELD02", ""},
+	} {
+		actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+			ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply,
+			Payload: "Thanks, Bob!", PolicyDecision: db.PolicyRequireApproval, PolicyReasons: a.reasons,
+			Status: db.ActionPendingApproval, ApprovalCode: a.code,
+		})
+		if err != nil {
+			t.Fatalf("seed action: %v", err)
+		}
+		if _, err := store.InsertOwnerNotification(ctx, db.OwnerNotification{
+			UserID: uid, Kind: db.NotificationApproval, ActionID: actionID, Body: "ignored for approval kind",
+		}); err != nil {
+			t.Fatalf("seed notification: %v", err)
+		}
+	}
+	if _, _, err := NewNotifier(store, sender).DeliverPending(ctx); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if len(sender.sent) != 2 {
+		t.Fatalf("sent = %d, want 2", len(sender.sent))
+	}
+	var held, plain string
+	for _, m := range sender.sent {
+		if strings.Contains(m, "HELD01") {
+			held = m
+		} else {
+			plain = m
+		}
+	}
+	want := `Held because it repeats your profile field "public_profile.open_to" to someone you have not been in touch with yet.`
+	if !strings.Contains(held, want) {
+		t.Fatalf("held message = %q, want %q", held, want)
+	}
+	if strings.Contains(held, "owner_profile") {
+		t.Fatalf("held message shows the audit string: %q", held)
+	}
+	if !strings.Contains(held, "/mctl approve HELD01") {
+		t.Fatalf("held message lost the approve command: %q", held)
+	}
+	if strings.Contains(plain, "Held because") {
+		t.Fatalf("message without a stored reason has a hold line: %q", plain)
+	}
+}

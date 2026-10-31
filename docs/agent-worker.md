@@ -310,7 +310,7 @@ ignored as well.
 
 Deletes of messages the agent never ingests (the owner's own messages, other
 chats) wait in that table and do nothing. Rows older than seven days are
-swept the next time a delete is kept, and account deletion purges them.
+swept once per delete update, and account deletion purges them.
 
 ### Edit of a coalesced message (#962)
 
@@ -390,7 +390,21 @@ agent there.
   not have.
 
 An owner-to-agent instruction path (for example `/mctl say <id> <text>`)
-would be new policy surface and is not part of this change.
+would be new policy surface and is not part of this change. The owner
+decided on 2026-10-31 not to build it before production (#889).
+
+### Wording of owner notices (#988, #989)
+
+- The prompt has the model refer to the sender and anyone else by name or as
+  "they". A name does not tell the agent anyone's pronouns, so summaries and
+  replies never use he/him/she/her about a person who did not state theirs.
+- An approval request says why the draft was held, on a line after the
+  recipient: "Held because ...". The reasons are the policy's
+  (`policy_reasons`), rewritten by `policy.OwnerHoldReasons` for the owner:
+  observe mode, the reply budget, an intent outside the auto-send list, the
+  per-minute limit, or a profile field repeated before the owner was in
+  touch. A reason the mapping does not know is shown as stored. The model's
+  text never goes into this line.
 
 ## Attachments in inbound messages (#948)
 
