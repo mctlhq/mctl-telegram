@@ -12,6 +12,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      # Only to start live-telegram.yml on the new tag (last step).
+      actions: write
     steps:
       # release-please has to open the release PR as somebody. The default
       # GITHUB_TOKEN stopped being able to do that on 2026-09-03: the
@@ -136,3 +138,14 @@ jobs:
           TAG: ${{ steps.release.outputs.tag_name }}
         run: gh release upload "$TAG" dist/* --clobber
 
+      # The live round trip against real Telegram (#854) runs once per release,
+      # on the tag just cut, and never on a schedule: it spends the CI
+      # account's flood budget, which the production canary shares. A
+      # workflow_dispatch from GITHUB_TOKEN is one of the events that token is
+      # allowed to start.
+      - name: Start the live Telegram round trip
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: gh workflow run live-telegram.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
