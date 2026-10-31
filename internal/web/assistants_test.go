@@ -112,3 +112,17 @@ func TestAssistantsNavLinkFollowsMount(t *testing.T) {
 		t.Error("/platforms must link to /assistants without marking it active")
 	}
 }
+
+// The catalog holds more than one version of an assistant: each is its own
+// entry, highest version first, and none hides another.
+func TestAssistantsPage_ListsEveryVersion(t *testing.T) {
+	f := newManageAssistantFixture(t, nil)
+	body := getAssistantsPage(t, Assistants(f.svc, "https://tg.test", true)).Body.String()
+	newer, older := strings.Index(body, "hr-recruiter@0.1.1"), strings.Index(body, "hr-recruiter@0.1.0")
+	if newer < 0 || older < 0 || newer > older {
+		t.Fatalf("versions on the page: 0.1.1 at %d, 0.1.0 at %d; want both, newest first", newer, older)
+	}
+	if !strings.Contains(body[newer:older], "<code>compensation</code>") || strings.Contains(body[older:], "<code>compensation</code>") {
+		t.Fatal("the compensation intent is not shown under 0.1.1 alone")
+	}
+}
