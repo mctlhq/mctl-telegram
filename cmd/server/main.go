@@ -55,6 +55,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/productupdate"
 	"github.com/mctlhq/mctl-telegram/internal/sweeper"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
+	"github.com/mctlhq/mctl-telegram/internal/ui"
 	"github.com/mctlhq/mctl-telegram/internal/web"
 	"github.com/mctlhq/mctl-telegram/internal/workctx"
 	"github.com/mctlhq/mctl-telegram/internal/workertoken"
@@ -622,6 +623,7 @@ func main() {
 		assistantSvc = assistantinstall.New(store, catalog, registry)
 		// The public catalog page: the same entries as list_assistants.
 		mux.Get("/assistants", web.Assistants(assistantSvc, cfg.PublicBaseURL, showManage))
+		ui.SetAssistantsMounted(true)
 	}
 
 	// Session management dashboard — only mounted in local-jwt mode alongside

@@ -1,4 +1,4 @@
-/* @mctlhq/css 0.15.0 — site.css. */
+/* @mctlhq/css 0.18.0 — site.css. */
 /*
  * Public-site layout: the one shell mctl.ai, docs.mctl.ai and tg.mctl.ai
  * share. theme.css already carries the tokens (page width, gutter, header,
@@ -17,10 +17,20 @@
  *     --site-gutter on both sides. The container's max-width therefore adds
  *     both gutters back, because under border-box the padding counts inside
  *     max-width (the bug tg.mctl.ai had before 0.15.0: brand one gutter in);
- *   - the header brand, the hero, every section title and the card grid all
- *     start on the content box's left edge;
- *   - hero: text left, optional visual right; one column below 960px;
- *   - long-form reading text is capped at --mctl-layout-prose-width;
+ *   - the header brand, a hero with a visual and the card grid start on the
+ *     content box's left edge;
+ *   - from 0.18.0 everything else is centred on the content box's centre
+ *     line by default: section titles and ledes, a hero without a visual,
+ *     and the reading column. A heading over a full-width grid that sat on
+ *     the left read as off-centre next to the centred cards under it;
+ *   - hero: text left, visual right; one column below 960px. A hero with no
+ *     visual, and the --stacked variant at every width, is one centred
+ *     column: text, then any visual under it;
+ *   - --start opts a section back into the pre-0.18.0 left-aligned title
+ *     and lede (a docs-like page); --center is kept as an alias of the
+ *     default and still centres a __narrow block;
+ *   - long-form reading text is capped at --mctl-layout-prose-width, in a
+ *     centred column; the text inside it stays start-aligned;
  *   - footer: full-bleed, centred.
  */
 
@@ -37,7 +47,7 @@
   box-sizing: border-box;
   position: sticky;
   top: 0;
-  z-index: 50;
+  z-index: var(--mctl-z-index-nav);
   height: var(--site-header-height);
   background: var(--site-header-bg);
   -webkit-backdrop-filter: blur(var(--site-header-blur));
@@ -153,6 +163,47 @@
   }
 }
 
+/* Stacked hero: one centred column at every width, the visual under the text.
+   The title gets the full text width, the lede keeps the reading width so a
+   centred paragraph does not run 1400px wide. --mctl-site-hero-text-width
+   sizes the text column the way --mctl-site-narrow-width sizes a narrow
+   block. */
+.mctl-site-hero--stacked,
+.mctl-site-hero:not(:has(.mctl-site-hero__visual)) {
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: center;
+  text-align: center;
+}
+
+.mctl-site-hero--stacked .mctl-site-hero__text,
+.mctl-site-hero:not(:has(.mctl-site-hero__visual)) .mctl-site-hero__text {
+  width: 100%;
+  max-width: var(--mctl-site-hero-text-width, 960px);
+  justify-items: center;
+}
+
+/* A centred title wrapping to one short last word reads as a mistake. */
+.mctl-site-hero--stacked .mctl-site-hero__title,
+.mctl-site-hero:not(:has(.mctl-site-hero__visual)) .mctl-site-hero__title {
+  text-wrap: balance;
+}
+
+.mctl-site-hero--stacked .mctl-site-hero__lede,
+.mctl-site-hero:not(:has(.mctl-site-hero__visual)) .mctl-site-hero__lede {
+  max-width: var(--mctl-layout-prose-width);
+}
+
+.mctl-site-hero--stacked .mctl-site-hero__actions,
+.mctl-site-hero:not(:has(.mctl-site-hero__visual)) .mctl-site-hero__actions {
+  justify-content: center;
+}
+
+.mctl-site-hero--stacked .mctl-site-hero__visual {
+  grid-column: 1;
+  grid-row: 2;
+  width: 100%;
+}
+
 /* ===== Sections ===== */
 .mctl-site-section {
   padding-block: var(--mctl-layout-section-padding);
@@ -170,15 +221,39 @@
   line-height: var(--text-section-leading);
   letter-spacing: var(--text-section-tracking);
   color: var(--surface-fg);
-  text-align: start;
+  text-align: center;
+  /* A centred title wrapping to one short last word reads as a mistake. */
+  text-wrap: balance;
 }
 
 .mctl-site-section__lede {
-  margin: 0 0 var(--mctl-layout-stack);
+  margin: 0 auto var(--mctl-layout-stack);
+  text-align: center;
   max-width: var(--mctl-layout-prose-width);
   font-size: var(--text-body-size);
   line-height: var(--text-body-leading);
   color: var(--surface-fg-muted);
+}
+
+/* --center is the default from 0.18.0 and stays as an alias, so markup that
+   opted in before keeps working. --start puts a section back on the content
+   box's left edge (a docs-like page that reads as a column of text).
+   --mctl-site-narrow-width sizes a __narrow block (a form, a single plan;
+   a pricing card is narrower than a form) without overriding the class. */
+.mctl-site-section--start .mctl-site-section__title {
+  text-align: start;
+}
+
+.mctl-site-section--start .mctl-site-section__lede {
+  margin-inline: 0;
+  text-align: start;
+}
+
+.mctl-site-section__narrow {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: var(--mctl-site-narrow-width, 600px);
+  margin-inline: auto;
 }
 
 /* ===== Card grid ===== */
@@ -203,6 +278,11 @@
 /* ===== Reading column (security, privacy, terms, articles) ===== */
 .mctl-site-prose {
   max-width: var(--mctl-layout-prose-width);
+  margin-inline: auto;
+}
+
+.mctl-site-section--start .mctl-site-prose {
+  margin-inline: 0;
 }
 
 /* ===== Footer ===== */

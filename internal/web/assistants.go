@@ -96,6 +96,7 @@ func buildAssistantViews(entries []assistantinstall.CatalogEntry) []assistantVie
 func Assistants(svc *assistantinstall.Service, publicBaseURL string, showManage bool) http.HandlerFunc {
 	base := ui.Data{
 		Title:         "MCTL — assistants",
+		NavActive:     "assistants",
 		Description:   "Assistants you can install on your Telegram account: what each one does, the values it asks for and its defaults.",
 		PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
 		ShowManage:    showManage,

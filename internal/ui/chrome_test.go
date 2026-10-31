@@ -30,10 +30,10 @@ func TestFullChrome(t *testing.T) {
 		`<footer class="mctl-site-footer">`,
 		`<div class="mctl-site-container mctl-site-footer__inner">`,
 		`<nav class="mctl-site-footer__links"`,
-		"ui.mctl.ai/0.15.0/mctl.css",
+		"ui.mctl.ai/0.18.0/mctl.css",
 		// global.css and site.css are pinned as a set with mctl.css.
-		"ui.mctl.ai/0.15.0/global.css",
-		"ui.mctl.ai/0.15.0/site.css",
+		"ui.mctl.ai/0.18.0/global.css",
+		"ui.mctl.ai/0.18.0/site.css",
 		"family=Onest:wght@300;400;500;600;700;800",
 		"Instrument+Serif",
 		"JetBrains+Mono",
@@ -216,7 +216,7 @@ func TestNavToggleHiddenOnDesktop(t *testing.T) {
 	if !strings.Contains(componentsCSS, "  .nav-toggle { display: none; }") {
 		t.Fatal(".nav-toggle must be display:none outside the mobile query")
 	}
-	m := strings.Index(componentsCSS, "@media (max-width: 767px)")
+	m := strings.Index(componentsCSS, "@media (max-width: 1023px)")
 	if m < 0 || !strings.Contains(componentsCSS[m:], ".nav-toggle {\n      display: block;") {
 		t.Fatal(".nav-toggle must be re-enabled (visually hidden) inside the mobile query")
 	}
@@ -236,6 +236,18 @@ func TestSiteCSSMirrorMatchesPinnedVersion(t *testing.T) {
 	}
 	if !strings.Contains(ComponentsCSS, siteCSS) {
 		t.Fatal("ComponentsCSS (strict-CSP pages) must carry the site.css mirror")
+	}
+}
+
+// Strict-CSP pages load no CDN sheet, so every token the site.css mirror reads
+// without a fallback must be in the inline subset. 0.18.0 put the header on
+// --mctl-z-index-nav; missing here, the open mobile menu drew under the page.
+func TestSiteCSSTokensInInlineSubset(t *testing.T) {
+	re := regexp.MustCompile(`var\((--[a-z0-9-]+)\)`)
+	for _, m := range re.FindAllStringSubmatch(siteCSS, -1) {
+		if !strings.Contains(tokensCSS, m[1]+":") {
+			t.Errorf("site.css reads %s with no fallback, but tokens.css does not define it", m[1])
+		}
 	}
 }
 

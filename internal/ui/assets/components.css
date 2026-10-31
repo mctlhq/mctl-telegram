@@ -536,8 +536,8 @@
   /* Section anchor offset: clear the sticky header. */
   section, h2[id] { scroll-margin-top: calc(var(--site-header-height) + 16px); }
 
-  /* ===== Mobile header: CSS-only menu below 768px ===== */
-  @media (max-width: 767px) {
+  /* ===== Narrow header: CSS-only menu below 1024px (9 links do not fit) ===== */
+  @media (max-width: 1023px) {
     .mctl-site-header { height: 64px; }
     /* Keep the anchor offset in step with the 64px mobile bar. */
     section, h2[id] { scroll-margin-top: 80px; }
