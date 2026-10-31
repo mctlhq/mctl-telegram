@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	agentprofile "github.com/mctlhq/mctl-telegram/internal/agent/profile"
+	"github.com/mctlhq/mctl-telegram/internal/agent/schedule"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/jsonstrict"
 )
@@ -29,6 +30,7 @@ type upsertAgentProfileRequest struct {
 	MaxReplyChars      int     `json:"max_reply_chars,omitempty"`
 	IntentAllowlist    *string `json:"intent_allowlist,omitempty"`
 	IntentDenylist     *string `json:"intent_denylist,omitempty"`
+	WorkingHours       *string `json:"working_hours,omitempty"`
 	BlockedSenders     *string `json:"blocked_senders,omitempty"`
 	SenderAllowlist    *string `json:"sender_allowlist,omitempty"`
 	// OwnerProfile is a strict JSON document matching profile.Data. Omitted
@@ -40,7 +42,7 @@ type upsertAgentProfileRequest struct {
 var upsertAgentProfileKeys = [...]string{
 	"telegram_id", "mode", "autopilot_paused", "listener_enabled",
 	"disclosure_text", "disclosure_disabled", "max_autonomous_turns", "max_msgs_per_minute",
-	"max_reply_chars", "intent_allowlist", "intent_denylist", "blocked_senders",
+	"max_reply_chars", "intent_allowlist", "intent_denylist", "working_hours", "blocked_senders",
 	"sender_allowlist", "owner_profile",
 }
 
@@ -56,6 +58,7 @@ type agentProfileResponse struct {
 	MaxReplyChars      int    `json:"max_reply_chars"`
 	IntentAllowlist    string `json:"intent_allowlist"`
 	IntentDenylist     string `json:"intent_denylist"`
+	WorkingHours       string `json:"working_hours"`
 	BlockedSenders     string `json:"blocked_senders"`
 	SenderAllowlist    string `json:"sender_allowlist"`
 	// The profile contents are deliberately never echoed from this
@@ -127,6 +130,18 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "mode must be observe, guarded, or off")
 			return
 		}
+		// Policy holds every reply on a value it cannot parse; refuse to
+		// store one rather than discover it then.
+		if req.WorkingHours != nil && *req.WorkingHours != "" {
+			h, err := schedule.ParseStored(*req.WorkingHours)
+			if err != nil {
+				writeJSONError(w, http.StatusBadRequest, "invalid working_hours")
+				return
+			}
+			// Store the canonical form the install path writes.
+			canonical := h.String()
+			req.WorkingHours = &canonical
+		}
 		var ownerProfileDocument []byte
 		clearOwnerProfile := false
 		if len(req.OwnerProfile) > 0 {
@@ -171,6 +186,7 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			DisclosureDisabled: req.DisclosureDisabled,
 			IntentAllowlist:    req.IntentAllowlist,
 			IntentDenylist:     req.IntentDenylist,
+			WorkingHours:       req.WorkingHours,
 			BlockedSenders:     req.BlockedSenders,
 			SenderAllowlist:    req.SenderAllowlist,
 		}
@@ -237,6 +253,7 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			MaxReplyChars:          p.MaxReplyChars,
 			IntentAllowlist:        p.IntentAllowlist,
 			IntentDenylist:         p.IntentDenylist,
+			WorkingHours:           p.WorkingHours,
 			BlockedSenders:         p.BlockedSenders,
 			SenderAllowlist:        p.SenderAllowlist,
 			OwnerProfileConfigured: ownerProfileConfigured,

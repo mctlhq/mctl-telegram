@@ -280,6 +280,7 @@ type PolicyDTO struct {
 	MaxReplyChars      int    `json:"max_reply_chars"`
 	IntentAllowlist    string `json:"intent_allowlist"`
 	IntentDenylist     string `json:"intent_denylist"`
+	WorkingHours       string `json:"working_hours"`
 	GlobalKill         bool   `json:"global_kill"`
 }
 
