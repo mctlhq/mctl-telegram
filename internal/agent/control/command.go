@@ -14,11 +14,15 @@ import (
 type CommandType string
 
 const (
-	CmdStatus        CommandType = "status"
-	CmdLeads         CommandType = "leads"
-	CmdShow          CommandType = "show"
-	CmdContinue      CommandType = "continue"
-	CmdPause         CommandType = "pause"
+	CmdStatus   CommandType = "status"
+	CmdLeads    CommandType = "leads"
+	CmdShow     CommandType = "show"
+	CmdContinue CommandType = "continue"
+	CmdPause    CommandType = "pause"
+	CmdUnpause  CommandType = "unpause"
+	// CmdAssistant shows the account's installed assistant and the settings
+	// it resolved to. It never prints install values or owner notes.
+	CmdAssistant     CommandType = "assistant"
 	CmdTakeover      CommandType = "takeover"
 	CmdApprove       CommandType = "approve"
 	CmdReject        CommandType = "reject"
@@ -100,7 +104,7 @@ func ParseCommand(text string) (Command, error) {
 		arg = strings.Join(fields[2:], " ")
 	}
 	switch sub {
-	case CmdStatus, CmdLeads, CmdPause:
+	case CmdStatus, CmdLeads, CmdPause, CmdUnpause, CmdAssistant:
 		return Command{Type: sub}, nil
 	case CmdConversations:
 		// Optional count or @handle/substring filter. Full paging is not

@@ -440,16 +440,12 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 			case strings.TrimSpace(conv.PeerUsername) != "":
 				peerLabel = "@" + conv.PeerUsername
 			}
-			// Deliberately does NOT say "resume autopilot": no owner-facing
-			// Telegram command clears autopilot_paused. control/router.go
-			// says so explicitly — /mctl continue resumes one conversation
-			// and autopilot stays paused until re-enabled through the agent
-			// API. Naming an action the owner cannot take is the opposite of
-			// the actionability this issue exists to add.
+			// Names both ways out: /mctl continue for this conversation and
+			// /mctl unpause for the whole account.
 			// Addressed to the owner and accurate about the throttle: only
 			// this alert is held back for the window, owner summaries are
 			// not (#994).
-			alertBody := fmt.Sprintf("Autopilot is paused, so the agent did not reply to %s. /mctl continue %d lets it reply in that conversation. Lifting the pause for the whole account is done through the agent API. You will not get this alert again for %s.", peerLabel, conv.ID, pauseAlertWindowText)
+			alertBody := fmt.Sprintf("Autopilot is paused, so the agent did not reply to %s. /mctl continue %d lets it reply in that conversation. /mctl unpause lifts the pause for the whole account. You will not get this alert again for %s.", peerLabel, conv.ID, pauseAlertWindowText)
 			if _, nerr := s.Store.InsertOwnerNotification(ctx, db.OwnerNotification{
 				UserID: id.UserID, Kind: db.NotificationAlert, ActionID: actionID, Body: alertBody,
 			}); nerr != nil {

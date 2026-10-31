@@ -431,7 +431,8 @@ decided on 2026-10-31 not to build it before production (#889).
   touch. A reason the mapping does not know is shown as stored. The model's
   text never goes into this line.
 - The alert for a reply withheld because autopilot is paused names the
-  conversation's own `/mctl continue <id>` and says only what is true of
+  conversation's own `/mctl continue <id>` and the account-wide
+  `/mctl unpause`, and says only what is true of
   the throttle: this alert is not repeated for 6 hours. Owner summaries are
   not throttled by it (#994).
 

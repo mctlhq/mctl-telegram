@@ -236,7 +236,8 @@ instructions produce and are not enforced on their own.
 - **P2:** tiers including `never` (done: a reply whose intent is on the
   profile's `intent_denylist` is denied when proposed and again at send
   time, and no approval releases it), the audience scope and schedules in
-  `policy.go`; `/mctl` gets unpause and shows the install; recruiter-specific
+  `policy.go`; `/mctl` gets unpause and shows the install (done:
+  `/mctl unpause`, `/mctl assistant`); recruiter-specific
   tool names get generic aliases (`save_record`, `get_owner_profile`).
 - **P3:** definitions published to the mctl-api agent registry, a
   per-account install binding, MCP tools `list_assistants`,
