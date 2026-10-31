@@ -218,6 +218,39 @@ var regexpText = regexp.MustCompile(`"instructions":\{"text":"(?:[^"\\]|\\.)*"\}
 // hr-recruiter, needs a new version (and a new line here), not an edit.
 var activeDigests = map[string]string{
 	"hr-recruiter@0.1.0": "sha256:875d7b3225a81ed9f1b9d8624cacd8aea182260fc8b5f8cbc38f6b6638fb8bc1",
+	"hr-recruiter@0.1.1": "sha256:356c57cfc88995c2d9df0c5c8db7cd8c7b9109da749456372ac9013f84e8f4f3",
+}
+
+// A later version lives in versions/<version>/ and must name the version
+// and the assistant of its directories.
+func TestCatalogVersionDirectories(t *testing.T) {
+	c, err := LoadCatalog(mctltelegram.Catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.Lookup("hr-recruiter", "0.1.1"); !ok {
+		t.Fatal("hr-recruiter@0.1.1 is not in the catalog")
+	}
+	def := strings.Replace(string(readFile(t, "assistant.yaml")),
+		"path: ../../deploy/agent-worker/system-prompt.txt", "path: p.txt", 1)
+	for name, file := range map[string]string{
+		"version mismatch": "assistants/hr-recruiter/versions/0.2.0/assistant.yaml",
+		"name mismatch":    "assistants/other/versions/0.1.0/assistant.yaml",
+	} {
+		dir := file[:strings.LastIndex(file, "/")]
+		if _, err := LoadCatalog(fstest.MapFS{
+			file:           {Data: []byte(def)},
+			dir + "/p.txt": {Data: []byte("Rules.")},
+		}); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if _, err := LoadCatalog(fstest.MapFS{
+		"assistants/hr-recruiter/versions/0.1.0/assistant.yaml": {Data: []byte(def)},
+		"assistants/hr-recruiter/versions/0.1.0/p.txt":          {Data: []byte("Rules.")},
+	}); err != nil {
+		t.Fatalf("a matching versioned definition: %v", err)
+	}
 }
 
 func TestActiveVersionsAreImmutable(t *testing.T) {
