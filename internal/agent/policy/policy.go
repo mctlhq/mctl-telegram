@@ -5,6 +5,8 @@
 package policy
 
 import (
+	"errors"
+	"fmt"
 	"net"
 	"regexp"
 	"strconv"
@@ -649,6 +651,34 @@ const (
 	AudienceNewChats      = "new_chats"
 	AudienceExistingChats = "existing_chats"
 )
+
+// ValidAudienceExcludes checks a stored excludes CSV: only known classes,
+// never both halves of a pair (that answers nobody), and chat-age classes
+// only when an install time exists to judge them against.
+func ValidAudienceExcludes(csv string, installed bool) error {
+	ex := map[string]bool{}
+	for _, part := range strings.Split(csv, ",") {
+		part = strings.TrimSpace(part)
+		switch part {
+		case "":
+			continue
+		case AudienceContacts, AudienceNonContacts, AudienceNewChats, AudienceExistingChats:
+			ex[part] = true
+		default:
+			return fmt.Errorf("unknown audience class %q", part)
+		}
+	}
+	if ex[AudienceContacts] && ex[AudienceNonContacts] {
+		return errors.New("contacts and non_contacts are both excluded, so the assistant would answer nobody")
+	}
+	if ex[AudienceNewChats] && ex[AudienceExistingChats] {
+		return errors.New("new_chats and existing_chats are both excluded, so the assistant would answer nobody")
+	}
+	if (ex[AudienceNewChats] || ex[AudienceExistingChats]) && !installed {
+		return errors.New("new_chats and existing_chats need an assistant install to judge chats against")
+	}
+	return nil
+}
 
 // AudienceExcluded reports whether the conversation falls in an audience
 // class the profile leaves out, with the reason. The listener calls it

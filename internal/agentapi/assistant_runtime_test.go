@@ -392,3 +392,19 @@ func TestAdminAgentInstallHandler_AudienceAndInstallTime(t *testing.T) {
 		t.Fatalf("after reinstall: audience = %q, installed at %v, want \"\" and %v", p.AudienceExcludes, p.AssistantInstalledAt, first)
 	}
 }
+
+func TestAdminAgentProfileHandler_AudienceExcludesValidated(t *testing.T) {
+	store := newProfileTestStore(t)
+	if _, err := store.EnsureUserByTelegramID(context.Background(), 777, "reviewer", "Reviewer"); err != nil {
+		t.Fatal(err)
+	}
+	h := NewAdminAgentProfileHandler(store)
+	for _, bad := range []string{"vips", "contacts,non_contacts", "new_chats"} {
+		if rec := doProfileReq(h, adminIdentity(), `{"telegram_id":777,"audience_excludes":"`+bad+`"}`); rec.Code != http.StatusBadRequest {
+			t.Errorf("%q: status = %d, body=%s", bad, rec.Code, rec.Body.String())
+		}
+	}
+	if rec := doProfileReq(h, adminIdentity(), `{"telegram_id":777,"audience_excludes":"contacts"}`); rec.Code != http.StatusOK {
+		t.Fatalf("contacts: status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+}
