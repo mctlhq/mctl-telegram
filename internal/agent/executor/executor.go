@@ -44,6 +44,10 @@ var ErrLostRace = errors.New("action state changed concurrently")
 // cannot simply be left to the async ExpireStaleAgentActions sweeper alone.
 var ErrApprovalExpired = errors.New("approval code expired")
 
+// ErrInstallChanged is returned by Approve for a draft created under an
+// earlier assistant install revision (#1018). The draft is denied.
+var ErrInstallChanged = errors.New("assistant install changed since the draft")
+
 // ErrSendQueuedForRetry is returned by Approve when the initial Telegram
 // send fails with a transient error. The action is deliberately left in
 // `executing` (not reverted) for RecoverStuck to retry with the same
@@ -192,6 +196,21 @@ func (e *Executor) Approve(ctx context.Context, userID int64, code string) error
 		}
 		return ErrApprovalExpired
 	}
+	// A draft from an earlier install revision is refused here, with its
+	// own reply, rather than approved and then denied at send time, where
+	// the owner would only see it vanish (#1018).
+	// Without a profile row there is no revision to compare; the send path
+	// below handles a missing profile as it always has.
+	profile, err := e.Store.GetAgentProfile(ctx, userID)
+	if err != nil && !errors.Is(err, db.ErrAgentProfileNotFound) {
+		return fmt.Errorf("load profile: %w", err)
+	}
+	if err == nil && action.InstallRevision != profile.InstallRevision {
+		if _, err := e.Store.UpdateAgentActionStatus(ctx, userID, action.ID, db.ActionPendingApproval, db.ActionDenied); err != nil {
+			return fmt.Errorf("deny stale-install draft: %w", err)
+		}
+		return ErrInstallChanged
+	}
 	ok, err := e.Store.UpdateAgentActionStatus(ctx, userID, action.ID, db.ActionPendingApproval, db.ActionApproved)
 	if err != nil {
 		return fmt.Errorf("approve action: %w", err)
@@ -309,6 +328,7 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		GlobalKill:       e.GlobalKill(),
 		Now:              time.Now(),
 		ProtectedField:   protected,
+		InstallRevision:  action.InstallRevision,
 	})
 	if result.Decision == policy.Deny {
 		e.m.CountPolicyDenial(string(result.DenyCode()), metrics.PolicySurfaceExecutorSend)
@@ -616,6 +636,7 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 		GlobalKill:       e.GlobalKill(),
 		Now:              time.Now(),
 		ProtectedField:   protected,
+		InstallRevision:  action.InstallRevision,
 	})
 	if result.Decision == policy.Deny {
 		// Deliberately NOT counted for the requireApprovalBypassesUnreviewedAllow

@@ -91,6 +91,9 @@ type AgentAction struct {
 	SendBody            string // exact final outbound body paired with SendRandomID; encrypted at rest
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
+	// InstallRevision is the install revision the action was created under:
+	// its job's, or the profile's for an action without a job (#1018).
+	InstallRevision int64
 }
 
 const approvalCodeBlindIndexPurpose = "agent-approval-code"
@@ -203,8 +206,8 @@ func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, er
 			`INSERT INTO agent_actions
 			   (approval_code_hash, approval_code_encrypted, job_id, conversation_id,
 			    user_id, action_type, intent, payload_encrypted, policy_decision,
-			    policy_reasons, status)
-			 SELECT $1, $2, j.id, $4, $5, $6, $7, $8, $9, $10, $11
+			    policy_reasons, status, install_revision)
+			 SELECT $1, $2, j.id, $4, $5, $6, $7, $8, $9, $10, $11, j.install_revision
 			   FROM agent_jobs j
 			  WHERE j.id = $3 AND j.user_id = $5 AND j.status = $12 AND j.attempts = $13`+lock+`
 			 ON CONFLICT (job_id, action_type) WHERE job_id IS NOT NULL DO NOTHING
@@ -264,8 +267,9 @@ func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, er
 			`INSERT INTO agent_actions
 			   (approval_code_hash, approval_code_encrypted, job_id, conversation_id,
 			    user_id, action_type, intent, payload_encrypted, policy_decision,
-			    policy_reasons, status)
-			 VALUES($1,$2,NULL,$3,$4,$5,$6,$7,$8,$9,$10)
+			    policy_reasons, status, install_revision)
+			 VALUES($1,$2,NULL,$3,$4,$5,$6,$7,$8,$9,$10,
+			        COALESCE((SELECT install_revision FROM agent_profiles WHERE user_id = $4), 1))
 			 RETURNING id`,
 			codeHash, codeEncrypted, convID, a.UserID, a.ActionType, a.Intent,
 			payload, a.PolicyDecision, a.PolicyReasons, a.Status,
@@ -323,8 +327,9 @@ func (s *Store) InsertStandaloneApprovalWithNotification(ctx context.Context, a 
 		`INSERT INTO agent_actions
 		   (approval_code_hash, approval_code_encrypted, job_id, conversation_id,
 		    user_id, action_type, intent, payload_encrypted, policy_decision,
-		    policy_reasons, status)
-		 VALUES($1,$2,NULL,$3,$4,$5,$6,$7,$8,$9,$10)
+		    policy_reasons, status, install_revision)
+		 VALUES($1,$2,NULL,$3,$4,$5,$6,$7,$8,$9,$10,
+		        COALESCE((SELECT install_revision FROM agent_profiles WHERE user_id = $4), 1))
 		 RETURNING id`,
 		codeHash, codeEncrypted, a.ConversationID, a.UserID, a.ActionType, a.Intent,
 		payload, a.PolicyDecision, a.PolicyReasons, a.Status,
@@ -375,12 +380,12 @@ func (s *Store) getAgentAction(ctx context.Context, where string, args ...any) (
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT id, approval_code_encrypted, job_id, conversation_id, user_id, action_type, intent,
 		        payload_encrypted, policy_decision, policy_reasons, status,
-		        executed_tg_message_id, send_random_id, send_body_encrypted, created_at, updated_at
+		        executed_tg_message_id, send_random_id, send_body_encrypted, created_at, updated_at, install_revision
 		   FROM agent_actions WHERE `+where,
 		args...,
 	).Scan(&a.ID, &codeEncrypted, &jobID, &convID, &a.UserID, &a.ActionType, &a.Intent,
 		&payload, &a.PolicyDecision, &a.PolicyReasons, &a.Status,
-		&execMsgID, &sendRandomID, &sendBody, &a.CreatedAt, &a.UpdatedAt)
+		&execMsgID, &sendRandomID, &sendBody, &a.CreatedAt, &a.UpdatedAt, &a.InstallRevision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrAgentActionNotFound
 	}
@@ -436,8 +441,11 @@ func isTerminalActionStatus(s string) bool {
 // is a programming error, reported as ErrInvalidActionTransition rather than
 // silently applied.
 var allowedActionTransitions = map[string]map[string]struct{}{
-	ActionProposed:        {ActionPendingApproval: {}, ActionDenied: {}, ActionApproved: {}},
-	ActionPendingApproval: {ActionApproved: {}, ActionRejected: {}},
+	ActionProposed: {ActionPendingApproval: {}, ActionDenied: {}, ActionApproved: {}},
+	// pending_approval -> denied: a draft written under an earlier install
+	// revision, refused at /mctl approve (#1018). The bulk deny sweeps
+	// (DenyPendingActionsFor*) already move rows along this edge.
+	ActionPendingApproval: {ActionApproved: {}, ActionRejected: {}, ActionDenied: {}},
 	// approved -> denied (added in A-PR7, internal/agent/executor): approval
 	// and send are not atomic, and policy is re-checked immediately before
 	// the send RPC fires (owner takeover, autopilot pause, kill switch flip,
@@ -823,7 +831,7 @@ func (s *Store) ListStuckExecutingActions(ctx context.Context, grace time.Durati
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT id, approval_code_encrypted, job_id, conversation_id, user_id, action_type, intent,
 		        payload_encrypted, policy_decision, policy_reasons, status,
-		        executed_tg_message_id, send_random_id, send_body_encrypted, created_at, updated_at
+		        executed_tg_message_id, send_random_id, send_body_encrypted, created_at, updated_at, install_revision
 		   FROM agent_actions WHERE status = $1 AND updated_at < $2`,
 		ActionExecuting, cutoff,
 	)
@@ -843,7 +851,7 @@ func (s *Store) ListStuckExecutingActions(ctx context.Context, grace time.Durati
 		)
 		if err := rows.Scan(&a.ID, &codeEncrypted, &jobID, &convID, &a.UserID, &a.ActionType, &a.Intent,
 			&payload, &a.PolicyDecision, &a.PolicyReasons, &a.Status,
-			&execMsgID, &sendRandomID, &sendBody, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			&execMsgID, &sendRandomID, &sendBody, &a.CreatedAt, &a.UpdatedAt, &a.InstallRevision); err != nil {
 			return nil, fmt.Errorf("scan stuck action: %w", err)
 		}
 		a.JobID = jobID.Int64
@@ -948,7 +956,7 @@ func (s *Store) ListActionsByStatus(ctx context.Context, status string, limit in
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT id, approval_code_encrypted, job_id, conversation_id, user_id, action_type, intent,
 		        payload_encrypted, policy_decision, policy_reasons, status,
-		        executed_tg_message_id, send_random_id, send_body_encrypted, created_at, updated_at
+		        executed_tg_message_id, send_random_id, send_body_encrypted, created_at, updated_at, install_revision
 		   FROM agent_actions WHERE status = $1 ORDER BY updated_at LIMIT $2`,
 		status, limit,
 	)
@@ -968,7 +976,7 @@ func (s *Store) ListActionsByStatus(ctx context.Context, status string, limit in
 		)
 		if err := rows.Scan(&a.ID, &codeEncrypted, &jobID, &convID, &a.UserID, &a.ActionType, &a.Intent,
 			&payload, &a.PolicyDecision, &a.PolicyReasons, &a.Status,
-			&execMsgID, &sendRandomID, &sendBody, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			&execMsgID, &sendRandomID, &sendBody, &a.CreatedAt, &a.UpdatedAt, &a.InstallRevision); err != nil {
 			return nil, fmt.Errorf("scan action: %w", err)
 		}
 		a.JobID = jobID.Int64
@@ -1620,4 +1628,27 @@ func (s *Store) HasExecutedOwnerSummarySince(ctx context.Context, userID, conver
 		return false, fmt.Errorf("has executed owner summary since: %w", err)
 	}
 	return true, nil
+}
+
+// DenyActionsFromEarlierInstalls denies every not-yet-executing action of
+// userID created under an install revision older than the account's
+// current one (#1018). It is cleanup after an install change: the revision
+// check at propose, approve and send is what keeps such work from acting,
+// so a race with this sweep is harmless.
+func (s *Store) DenyActionsFromEarlierInstalls(ctx context.Context, userID int64, reason string) (int64, error) {
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_actions
+		    SET status = $1, approval_code = NULL, approval_code_hash = NULL,
+		        approval_code_encrypted = NULL, policy_reasons = $2, updated_at = $3
+		  WHERE user_id = $4
+		    AND status IN ($5, $6, $7)
+		    AND install_revision < (SELECT install_revision FROM agent_profiles WHERE user_id = $4)`,
+		ActionDenied, reason, time.Now().UTC(), userID,
+		ActionProposed, ActionPendingApproval, ActionApproved,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("deny actions from earlier installs: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }

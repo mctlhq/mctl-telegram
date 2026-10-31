@@ -233,6 +233,7 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "lookup failed")
 		return
 	}
+	var jobRevision int64
 	if req.JobID != 0 {
 		// The job and the conversation the caller pairs it with must actually
 		// match — otherwise policy evaluates against the wrong conversation's
@@ -253,6 +254,7 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, "job_id does not belong to conversation_id")
 			return
 		}
+		jobRevision = job.InstallRevision
 	}
 	// A draft for a turn whose source message the sender has since edited
 	// or deleted is stored as denied rather than queued (#949, #950). The
@@ -287,6 +289,7 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		Now:              time.Now(),
 		ProtectedField:   protected,
 		SourceSuperseded: superseded,
+		InstallRevision:  jobRevision,
 	})
 	// Counted from THIS evaluation, deliberately unlike the notification and
 	// response handling below, which read the persisted row so a redelivered
@@ -698,10 +701,25 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 		}
 	}
 
+	// A summary or approval request from a job claimed under an earlier
+	// install revision is refused like a reply (#1018).
+	var jobRevision int64
+	if req.JobID != 0 {
+		job, err := s.Store.GetAgentJob(ctx, id.UserID, req.JobID)
+		if err != nil && !errors.Is(err, db.ErrAgentJobNotFound) {
+			logHandlerErr(tool, err)
+			writeJSONError(w, http.StatusInternalServerError, "lookup failed")
+			return
+		}
+		if err == nil {
+			jobRevision = job.InstallRevision
+		}
+	}
 	result := policy.Evaluate(policy.Input{
 		Profile: *profile, Conversation: conv,
 		Action:     policy.Action{Type: actionType, Intent: req.Intent, Text: req.Text},
 		GlobalKill: s.globalKill(), Now: time.Now(),
+		InstallRevision: jobRevision,
 	})
 	if result.Decision == policy.Deny {
 		s.m.CountPolicyDenial(string(result.DenyCode()), policySurfaceForOwnerTool(tool))

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
 	agentprofile "github.com/mctlhq/mctl-telegram/internal/agent/profile"
 	"github.com/mctlhq/mctl-telegram/internal/assistant"
 	"github.com/mctlhq/mctl-telegram/internal/db"
@@ -131,21 +132,21 @@ func NewAdminAgentInstallHandler(store *db.Store, catalog *assistant.Catalog) ht
 		}
 
 		name, version := entry.Definition.Metadata.Name, entry.Definition.Metadata.Version
-		// Switching an account to another assistant needs a lifecycle for
-		// its queued jobs, pending approvals and saved records, which do not
-		// exist yet (#1002); until then an install may only reconfigure or
-		// re-version the assistant the account already runs.
-		current, err := store.GetAgentAssistant(ctx, targetUserID)
+		// Every install, including a switch to another assistant, moves the
+		// install revision in the same UPDATE as the settings. Work created
+		// under an earlier revision is refused at propose, approve and send
+		// (#1018), so no queued job or pending approval of the old install
+		// can act; denying its open actions below is only cleanup.
+		// Conversation transcripts stay as account history.
+		current, err := store.GetAgentAssistantRef(ctx, targetUserID)
 		if err != nil {
 			logHandlerErr("admin.agent_install", err)
 			writeJSONError(w, http.StatusInternalServerError, "failed to load current assistant")
 			return
 		}
-		if current.Name != name {
-			writeJSONError(w, http.StatusConflict, "account runs "+current.Name+"; switching assistants is not supported yet")
-			return
-		}
+		switching := current.Name != name
 		installedAt := time.Now()
+		digest := entry.Digest
 		update := db.AgentProfileUpdate{
 			Mode:                 &resolved.Mode,
 			AutopilotPaused:      &resolved.AutopilotPaused,
@@ -159,7 +160,8 @@ func NewAdminAgentInstallHandler(store *db.Store, catalog *assistant.Catalog) ht
 			IntentDenylist:       &resolved.IntentDenylist,
 			WorkingHours:         &resolved.WorkingHours,
 			AudienceExcludes:     &resolved.AudienceExcludes,
-			MarkInstalledAt:      &installedAt,
+			BumpInstallRevision:  true,
+			AssistantDigest:      &digest,
 			BlockedSenders:       &resolved.BlockedSenders,
 			SenderAllowlist:      &resolved.SenderAllowlist,
 			AssistantName:        &name,
@@ -167,11 +169,23 @@ func NewAdminAgentInstallHandler(store *db.Store, catalog *assistant.Catalog) ht
 			InstallDocument:      &installBytes,
 			OwnerProfileDocument: &ownerProfile,
 		}
+		// A new assistant's new chats start at the switch; a reinstall of
+		// the same one keeps its first install moment.
+		if switching {
+			update.ResetInstalledAt = &installedAt
+		} else {
+			update.MarkInstalledAt = &installedAt
+		}
 		if err := store.UpdateAgentProfileFields(ctx, targetUserID, update); err != nil {
 			logHandlerErr("admin.agent_install", err)
 			store.LogToolCall(ctx, db.ToolCall{UserID: id.UserID, Tool: "admin.agent_install", Status: "error", ErrMsg: err.Error()})
 			writeJSONError(w, http.StatusInternalServerError, "failed to save agent install")
 			return
+		}
+		if _, err := store.DenyActionsFromEarlierInstalls(ctx, targetUserID, policy.ReasonInstallChanged); err != nil {
+			// Cleanup only: the revision check already keeps these from
+			// acting, so the install stands.
+			logHandlerErr("admin.agent_install", err)
 		}
 		p, err := store.GetAgentProfile(ctx, targetUserID)
 		if err != nil {

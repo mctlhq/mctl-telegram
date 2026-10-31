@@ -157,6 +157,27 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// Install revisions (#1018): agent_profiles.install_revision moves on
+	// every assistant install or switch; agent_jobs stamp the revision
+	// current when they are claimed, and agent_actions copy their job's (or,
+	// without a job, the profile's) at insert. Work whose revision is behind
+	// the profile's is refused at propose, approve and send. Existing rows
+	// all start at 1.
+	for _, c := range []struct{ table, col string }{
+		{"agent_profiles", "install_revision"}, {"agent_jobs", "install_revision"}, {"agent_actions", "install_revision"},
+	} {
+		if err := addColumnIfMissing(ctx, dbConn, pg, c.table, c.col,
+			"BIGINT NOT NULL DEFAULT 1", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+			return err
+		}
+	}
+	// agent_profiles.assistant_definition_digest: the digest of the
+	// definition the current revision was installed from ('' before any
+	// install).
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "assistant_definition_digest",
+		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	// agent_profiles.owner_profile_encrypted holds the account-specific
 	// identity, public biography, skills, preferences, and restricted fields.
 	// Keeping it on the tenant row removes the process-wide mounted-profile

@@ -63,6 +63,7 @@ func TestAdminAgentProfileHandler_AcceptsHRAssistantInstall(t *testing.T) {
 		MaxMsgsPerMinute:   2,
 		MaxReplyChars:      1200,
 		IntentAllowlist:    "discovery,schedule",
+		InstallRevision:    1,
 	}
 	got.UserID, got.CreatedAt, got.UpdatedAt = 0, want.CreatedAt, want.UpdatedAt
 	if *got != want {
