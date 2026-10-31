@@ -76,7 +76,7 @@ credential might be compromised. Revoking send consent stops that device
 from sending, but it stays connected and able to read. Revoking the
 device disconnects it and locks it out.
 
-Pass the `device_id` that `activate` printed. A device id belonging to
+Pass the `device_id` that `activate` printed. A device ID belonging to
 someone else is refused without revealing whether it exists. Safe to
 call again on an already-revoked device: it repairs a partial
 revocation.

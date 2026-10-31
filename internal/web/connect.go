@@ -428,13 +428,33 @@ var connectHead = `<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Connect Telegram account</title>
   ` + ui.FaviconLink + `
-  <style>` + ui.TokensCSS + ui.ComponentsCSS + ui.AuthCSS + `</style>
+  <style>` + ui.TokensCSS + ui.ComponentsCSS + ui.AuthCSS + connectExtraCSS + `</style>
 </head>
 <body>
 ` + ui.TopbarLite + `
   <div class="mctl-site-container">
   <main class="auth-main">
     <div class="card">
+`
+
+// connectExtraCSS is the connect pages' own layout on top of AuthCSS: a
+// column body so the footer sits at the bottom of a short page, tighter
+// spacing around the card, and the success page's MCP URL bar (a read-only
+// field joined to its copy button).
+const connectExtraCSS = `
+  body { min-height: 100dvh; display: flex; flex-direction: column; }
+  body > .mctl-site-container { flex: 1 0 auto; width: 100%; }
+  .auth-main { margin: 2.5rem auto; }
+  .url-group { display: flex; align-items: stretch; margin: 8px 0 12px; }
+  .url-group input[type="text"] {
+    flex: 1; min-width: 0; margin: 0;
+    border-radius: var(--mctl-radius-md) 0 0 var(--mctl-radius-md);
+    border-right: 0; text-overflow: ellipsis;
+  }
+  .url-group .btn-secondary {
+    flex: none; padding: 8px 16px;
+    border-radius: 0 var(--mctl-radius-md) var(--mctl-radius-md) 0;
+  }
 `
 
 var connectFoot = `    </div>
@@ -464,7 +484,7 @@ type connectErrorData struct {
 }
 
 var connectLandingTemplate = template.Must(template.New("connectLanding").Parse(connectHead + `    <ol class="flow-steps">
-      <li class="active">Sign in with Telegram</li>
+      <li class="active">Sign in</li>
       <li>Permissions</li>
       <li>Phone number</li>
       <li>Done</li>
@@ -485,7 +505,7 @@ var connectLandingTemplate = template.Must(template.New("connectLanding").Parse(
 // renderConnectSuccess interstitial instead and never see this prompt — see
 // docs/runbook.md's "Login bot /start and onboarding (issue-679)" section.
 var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(connectHead + `    <ol class="flow-steps">
-      <li>Sign in with Telegram</li>
+      <li>Sign in</li>
       <li>Permissions</li>
       <li>Phone number</li>
       <li class="active">Done</li>
@@ -493,13 +513,11 @@ var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(
     <h1>Step 4 of 4 &#8212; Done</h1>
     <p>Your Telegram account is now connected to this MCP connector.</p>
     <h2>Add the connector to your AI client</h2>
-    <p>Use this MCP URL:</p>
-    <p class="url">{{.MCPURL}}</p>
-    <button class="btn-secondary" type="button" id="copy-mcp-url" data-url="{{.MCPURL}}">Copy MCP URL</button>
-    <p class="meta">A new session called &#8220;MCTL Assistant&#8221; will appear in
-       your Telegram&#8217;s <strong>Active Sessions</strong> (Settings &#8594; Privacy and Security
-       &#8594; Active Sessions). This is normal &#8212; it is the session this connector uses to
-       read your messages.</p>
+    <label for="mcp-url">MCP URL</label>
+    <div class="url-group">
+      <input type="text" id="mcp-url" readonly value="{{.MCPURL}}">
+      <button class="btn-secondary" type="button" id="copy-mcp-url" data-url="{{.MCPURL}}" aria-label="Copy MCP URL">Copy</button>
+    </div>
     <ul>
       <li><strong>Claude:</strong> add a custom connector with the MCP URL above and sign in
         with Telegram when asked. <a href="/docs#setup">Claude steps</a></li>
@@ -509,8 +527,12 @@ var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(
         the client handles OAuth. <a href="/docs#other-clients-setup">Generic steps</a></li>
     </ul>
     <p class="meta">Then ask: &#8220;list my recent Telegram chats&#8221;.</p>
+    <p class="note">A new session called &#8220;MCTL Assistant&#8221; will appear in
+       your Telegram&#8217;s <strong>Active Sessions</strong> (Settings &#8594; Privacy and Security
+       &#8594; Active Sessions). This is normal &#8212; it is the session this connector uses to
+       access your account under the permissions you selected.</p>
     <h2>Choose your notifications</h2>
-    <p><a class="btn" href="/telegram/connect/manage?onboarding=1#notifications">Choose which notifications the login bot may send you</a></p>
+    <p><a class="btn-secondary" href="/telegram/connect/manage?onboarding=1#notifications">Configure bot notifications</a></p>
     <p class="meta">Connecting your account does not subscribe you to anything. Product updates stay off until you save your choice.</p>
     {{if .LoginBotStartURL}}<p class="meta"><a href="{{.LoginBotStartURL}}">Start the login bot</a> so it can reach you.</p>{{else}}<p class="meta">To let the login bot reach you, open it in Telegram and press Start.</p>{{end}}
     <p class="meta"><a href="{{.ClaudeURL}}">Go to Claude.ai connector settings</a> &#183;
@@ -521,6 +543,10 @@ var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(
 // connectCopyScript backs the success page's "Copy MCP URL" button. It must
 // stay static (no template actions): the success page CSP allows exactly this
 // script by its sha256, so any change to the text changes the hash with it.
+// It must also carry no comments: html/template strips JS comments when it
+// renders, so a comment here would make the served script differ from the
+// hashed one. Without clipboard access, the button selects the URL in the
+// read-only field beside it so the user can copy it by hand.
 const connectCopyScript = `
 (function () {
   var btn = document.getElementById('copy-mcp-url');
@@ -531,19 +557,21 @@ const connectCopyScript = `
     clearTimeout(timer);
     timer = setTimeout(function () { btn.textContent = label; }, ms);
   };
+  var fallback = function () {
+    var field = document.getElementById('mcp-url');
+    if (field) { field.focus(); field.select(); }
+    btn.textContent = 'Selected';
+    reset(4000);
+  };
   btn.addEventListener('click', function () {
     var url = btn.getAttribute('data-url');
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(url).then(function () {
         btn.textContent = 'Copied!';
         reset(2000);
-      }, function () {
-        btn.textContent = url;
-        reset(4000);
-      });
+      }, fallback);
     } else {
-      btn.textContent = url;
-      reset(4000);
+      fallback();
     }
   });
 })();

@@ -2,6 +2,42 @@
 <html lang="en">
 <head>
 {{template "ui_head" .}}
+<style>
+  /* Each catalog entry is a product card. Values map onto the shared tokens:
+     surface, hairline border, neutral text; only the tier and lifecycle
+     badges carry a status color. */
+  .page section.assistant-entry {
+    margin-top: 32px;
+    padding: 28px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+  }
+  .assistant-entry > :last-child { margin-bottom: 0; }
+  @media (max-width: 640px) { .page section.assistant-entry { padding: 20px; } }
+  .assistant-entry .section-head { margin-bottom: 12px; }
+  .assistant-entry h3 {
+    font-size: 15px; font-weight: 600; color: var(--text);
+    margin: 28px 0 10px;
+  }
+  /* Example messages read as incoming chat bubbles. */
+  ul.chat-examples { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+  ul.chat-examples > li {
+    padding: 8px 14px;
+    background: color-mix(in srgb, var(--surface-fg) 3%, transparent);
+    border-left: 2px solid var(--accent);
+    border-radius: 0 8px 8px 0;
+    color: var(--text);
+    font-size: 14px;
+  }
+  /* Parameter names: neutral monospace, regular weight. */
+  .assistant-entry .tbl td:first-child code { font-weight: 500; color: var(--text); }
+  .pill-never {
+    background: var(--status-bad-soft);
+    color: var(--status-bad-text);
+    border-color: color-mix(in srgb, var(--danger) 30%, transparent);
+  }
+</style>
 </head>
 <body>
 
@@ -17,12 +53,12 @@
     </div>
     <h1>Telegram <span class="accent">assistants</span></h1>
     <p class="lead">
-      Assistants you can install on your own Telegram account. Each one answers a kind of conversation for you,
-      inside limits you set, and asks you before anything that needs your decision.
+      Assistants you can install on your own Telegram account. Each one handles a specific type of conversation for
+      you&#8212;within limits you set&#8212;and asks for your approval before making any commitment.
     </p>
     <p class="muted">
       A new install starts paused and not listening: going live is always your own explicit choice.
-      Install and change yours {{if .ShowManage}}on the <a href="/telegram/connect/manage#assistant">manage page</a>, or {{end}}from your
+      Install and configure yours {{if .ShowManage}}on the <a href="/telegram/connect/manage#assistant">manage page</a>, or {{end}}from your
       MCP client with <code>list_assistants</code>, <code>install_assistant</code> and <code>update_install</code>.
     </p>
   </section>
@@ -43,11 +79,11 @@
     <div class="section-head">
       <h2>{{if .Title}}{{.Title}}{{else}}{{.Name}}{{end}}</h2>
     </div>
-    <p class="muted"><code>{{.Name}}@{{.Version}}</code> · <span class="pill pill-read">{{.Lifecycle}}</span>{{range .Tags}} · {{.}}{{end}}</p>
+    <p class="muted"><code>{{.Name}}@{{.Version}}</code> · <span class="badge {{if eq .Lifecycle "published"}}ok{{else if eq .Lifecycle "disabled"}}pill-never{{else}}pill-read{{end}}">{{.Lifecycle}}</span>{{range .Tags}} · {{.}}{{end}}</p>
     {{if .Description}}<p>{{.Description}}</p>{{end}}
     {{if .Examples}}
     <h3>Messages it handles</h3>
-    <ul>{{range .Examples}}<li>{{.}}</li>{{end}}</ul>
+    <ul class="chat-examples">{{range .Examples}}<li>{{.}}</li>{{end}}</ul>
     {{end}}
 
     <h3>Values it asks for</h3>
@@ -78,12 +114,12 @@
       <thead><tr><th>Intent</th><th>Default tier</th><th>Description</th></tr></thead>
       <tbody>
       {{range .Intents}}
-        <tr><td><code>{{.Name}}</code></td><td>{{.Tier}}</td><td>{{.Description}}</td></tr>
+        <tr><td><code>{{.Name}}</code></td><td><span class="badge {{if eq .Tier "approve"}}pill-write{{else if eq .Tier "never"}}pill-never{{else}}pill-read{{end}}">{{.Tier}}</span></td><td>{{.Description}}</td></tr>
       {{end}}
       </tbody>
     </table>
     </div>
-    <p class="muted"><code>auto</code> replies on its own within the limits; <code>approve</code> waits for you; <code>never</code> is refused.</p>
+    <p class="muted"><code>auto</code> replies on its own within the limits; <code>approve</code> waits for you; actions in the <code>never</code> tier are always blocked.</p>
     {{else}}
     <p class="muted">None.</p>
     {{end}}

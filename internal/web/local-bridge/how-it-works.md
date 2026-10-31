@@ -9,7 +9,7 @@ Owner actions live in [Owner controls](/docs/local-bridge/owner).
 `mctl-telegram-local activate` talks to:
 
 - `POST /api/local-bridge/activate/start` — unauthenticated; the CLI
-  sends your Telegram id, a device registration key, a label, and an
+  sends your Telegram ID, a device registration key, a label, and an
   Ed25519 public key.
 - A browser page at `/local-bridge/activate` — you type the short code,
   sign in with Telegram, and approve.
@@ -17,7 +17,7 @@ Owner actions live in [Owner controls](/docs/local-bridge/owner).
   approve or deny.
 
 Nothing is written to the server database until you approve. A brand-new
-Telegram id is created as `mode=local` with `session_encrypted = NULL`
+Telegram ID is created as `mode=local` with `session_encrypted = NULL`
 and `send_enabled = false`.
 
 ## Proof of possession

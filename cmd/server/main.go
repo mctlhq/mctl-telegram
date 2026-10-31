@@ -626,6 +626,7 @@ func main() {
 		// The public catalog page: the same entries as list_assistants.
 		mux.Get("/assistants", web.Assistants(assistantSvc, cfg.PublicBaseURL, showManage))
 		ui.SetAssistantsMounted(true)
+		web.SetAssistantsMounted(true)
 	}
 
 	// Session management dashboard — only mounted in local-jwt mode alongside
