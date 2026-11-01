@@ -215,7 +215,7 @@
       <div class="stat"><span class="stat__value" data-stat="tool_calls_total">{{fmtCount .Stats.ToolCallsTotal}}</span><span class="stat__label">tool calls</span></div>
       <div class="stat"><span class="stat__value" data-stat="accounts_total">{{fmtCount .Stats.AccountsTotal}}</span><span class="stat__label">connected accounts</span></div>
       <div class="stat"><span class="stat__value" data-stat="active_users_30d">{{fmtCount .Stats.ActiveUsers30d}}</span><span class="stat__label">active last 30 days</span></div>
-      <div class="stat"><span class="stat__value" data-stat="sessions_active">{{fmtCount .Stats.SessionsActive}}</span><span class="stat__label">sessions online now</span></div>
+      <div class="stat"><span class="stat__value" data-stat="sessions_connected">{{fmtCount .Stats.SessionsConnected}}</span><span class="stat__label">connected sessions</span></div>
     </div>
     <p class="stats-note"><span class="live-dot" aria-hidden="true"></span><span>live · since Aug 2026 · updated <time id="stats-updated" datetime="{{.Stats.UpdatedAt.Format "2006-01-02T15:04:05Z07:00"}}">{{.Stats.UpdatedAt.Format "15:04"}} UTC</time></span></p>
     {{end}}
