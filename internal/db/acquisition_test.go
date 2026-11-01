@@ -173,3 +173,29 @@ func TestAcquisitionLabelsAndReport(t *testing.T) {
 		t.Errorf("direct bucket %+v", b)
 	}
 }
+
+// A returning user never gains a row, even when their creation wrote none
+// (nil snapshot then, a real snapshot now). ON CONFLICT DO NOTHING cannot
+// catch this case because there is no row to conflict with; only the
+// RowsAffected()==1 guard does, which is what this test pins.
+func TestEnsureUserByTelegramCapture_ReturningUserWithoutRowGetsNone(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUserByTelegramCapture(ctx, captureFor(77005, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := acqRow(t, s, uid); ok {
+		t.Fatal("nil snapshot must not write a row")
+	}
+	again, err := s.EnsureUserByTelegramCapture(ctx, captureFor(77005, &Acquisition{State: AcquisitionDirect, MCPClient: "claude"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != uid {
+		t.Fatalf("second sign-in resolved to a different user: %d vs %d", again, uid)
+	}
+	if _, ok := acqRow(t, s, uid); ok {
+		t.Fatal("a returning user must not gain an acquisition row")
+	}
+}
