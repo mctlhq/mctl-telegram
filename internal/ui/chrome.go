@@ -169,7 +169,7 @@ var defs = `
     <div class="mctl-site-container mctl-site-footer__inner">
     <a class="brand" href="/" aria-label="MCTL home">` + wordmark + `</a>
     <nav class="mctl-site-footer__links" aria-label="Footer">
-      <a href="https://mctl.ai" target="_blank" rel="noopener">Platform</a>
+      <a href="https://mctl.ai" target="_blank" rel="noopener">MCTL</a>
       <a href="https://alice.mctl.ai" target="_blank" rel="noopener">Alice MCP</a>
       <a href="/">Home</a>
       <a href="/docs">Docs</a>
