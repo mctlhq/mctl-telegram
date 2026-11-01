@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.118.0](https://github.com/mctlhq/mctl-telegram/compare/0.117.0...0.118.0) (2026-11-01)
+
+
+### Features
+
+* **landing:** live usage numbers on the home page and GET /api/stats ([03b62f8](https://github.com/mctlhq/mctl-telegram/commit/03b62f84403c3d649f2526b1da956e0e9e5ee0fb))
+* **landing:** live usage numbers on the home page and GET /api/stats ([dce0249](https://github.com/mctlhq/mctl-telegram/commit/dce024912f37cae90c2197c1fc366db46ccc8326))
+
+
+### Bug Fixes
+
+* **stats:** exclude the canary from accounts and online sessions too ([d3afbae](https://github.com/mctlhq/mctl-telegram/commit/d3afbaef1767074429efd8c24812f567a5b9c7dc))
+
 ## [0.117.0](https://github.com/mctlhq/mctl-telegram/compare/0.116.0...0.117.0) (2026-11-01)
 
 
