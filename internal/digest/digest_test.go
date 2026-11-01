@@ -126,14 +126,14 @@ func TestEffectiveTier(t *testing.T) {
 func TestBuildDigestMessageSrcSuffix(t *testing.T) {
 	rows := []db.IdentityRow{{TelegramID: 1001, Username: "alice"}, {TelegramID: 1002, Username: "bob"}}
 	src := map[int64]string{
-		1001: "news\n‮evil",
+		1001: "news\n\u202e\u200eevil", // newline + RTL override + LRM, written as escapes so the hostile bytes are visible
 		1002: "direct",
 	}
 	msg := buildDigestMessage(rows, 2, false, nil, src)
 	if !strings.Contains(msg, "src=direct") {
 		t.Fatalf("missing src=direct: %q", msg)
 	}
-	if strings.Contains(msg, "‮") || strings.Count(msg, "\n") != 3 {
+	if strings.Contains(msg, "\u202e") || strings.Contains(msg, "\u200e") || strings.Count(msg, "\n") != 3 {
 		t.Fatalf("hostile label not sanitized to one line: %q", msg)
 	}
 	if strings.Contains(buildDigestMessage(rows, 2, false, nil, nil), "src=") {

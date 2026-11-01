@@ -120,10 +120,10 @@ func TestAcquisitionLabelsAndReport(t *testing.T) {
 	bob := mk(77012, &Acquisition{State: AcquisitionAttributed, ReferrerHost: "dir.example"})
 	carol := mk(77013, &Acquisition{State: AcquisitionDirect})
 	dana := mk(77014, &Acquisition{State: AcquisitionUnknown})
-	erin := mk(77015, nil) // not recorded
-	old := mk(77016, nil)
+	notRecorded := mk(77015, nil)
+	preCapture := mk(77016, nil)
 	// A user created before the epoch reports as pre-capture.
-	if _, err := s.DB.Exec(`UPDATE users SET created_at=$1 WHERE id=$2`, time.Now().UTC().Add(-48*time.Hour), old); err != nil {
+	if _, err := s.DB.Exec(`UPDATE users SET created_at=$1 WHERE id=$2`, time.Now().UTC().Add(-48*time.Hour), preCapture); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.Exec(`UPDATE acquisition_capture_epoch SET enabled_at=$1`, time.Now().UTC().Add(-24*time.Hour)); err != nil {
@@ -153,7 +153,7 @@ func TestAcquisitionLabelsAndReport(t *testing.T) {
 	ins(alice, now.Add(-30*time.Hour))
 	ins(bob, now)
 	ins(bob, now.Add(-time.Minute))
-	_, _, _ = carol, dana, erin
+	_, _, _ = carol, dana, notRecorded
 
 	rep, err := s.AcquisitionReport(ctx, now.Add(-7*24*time.Hour))
 	if err != nil {
