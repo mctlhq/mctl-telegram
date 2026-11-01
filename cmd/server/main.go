@@ -459,6 +459,16 @@ func main() {
 			}
 		}
 	}()
+	// Public usage numbers for the landing page and GET /api/stats:
+	// recounted from the database on a timer, served from memory. The
+	// canary accounts are excluded the same way the SLI rules drop
+	// traffic="canary".
+	statsCache := &web.StatsCache{}
+	canaryIDs := make([]int64, 0, len(cfg.CanaryTelegramIDs))
+	for id := range cfg.CanaryTelegramIDs {
+		canaryIDs = append(canaryIDs, id)
+	}
+	web.StartStatsSampler(ctx, store, statsCache, canaryIDs, cfg.PublicStatsRefresh)
 
 	mux := chi.NewRouter()
 	mux.Use(middleware.RequestID)
@@ -506,6 +516,10 @@ func main() {
 	mux.Get("/favicon.svg", web.Favicon())
 	mux.Get("/favicon.ico", web.Favicon())
 	mux.Get("/og.png", web.OGImage())
+	// Deployment-wide usage counts, no auth: the body holds four aggregate
+	// numbers and nothing per user. Served from the sampler's cache, so a
+	// burst of requests never reaches the database.
+	mux.Get("/api/stats", web.StatsJSON(statsCache))
 	// "/" itself is registered after the MCP mount below: it serves the
 	// landing page and, for a client configured with the bare origin, MCP.
 	mux.Get("/security", web.Security(cfg.PublicBaseURL, showManage))
@@ -863,7 +877,7 @@ func main() {
 	// sessions carry across. Belt-and-braces alongside config.Load's own
 	// MCP_PATH validation: a Config built directly must not be able to put
 	// the MCP mount itself on "/".
-	root := web.RootMCP(web.Landing(cfg.PublicBaseURL, cfg.MCPPath, authServer, showManage), guarded, m.CountRootMCPRequest)
+	root := web.RootMCP(web.Landing(cfg.PublicBaseURL, cfg.MCPPath, authServer, showManage, web.WithStats(statsCache)), guarded, m.CountRootMCPRequest)
 	mux.Get("/", root.ServeHTTP)
 	if strings.Trim(cfg.MCPPath, "/") != "" {
 		mux.Post("/", root.ServeHTTP)
