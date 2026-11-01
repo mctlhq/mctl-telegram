@@ -1,8 +1,20 @@
 // Command agent-worker is the production (Option C) headless transport for
 // the communication agent: it long-polls mctl-telegram's
-// /api/agent/v1/events for due jobs and invokes the configured model runner
-// with the same restricted tool surface (internal/agentworker.NewMCPServer
-// for Claude; the shared buildToolSet for OpenAI-compatible models).
+// /api/agent/v1/events for due jobs and, for each one, runs the configured
+// model runner (AGENT_RUNNER: claude, the default, or openai) with the same
+// restricted tool surface: internal/agentworker.NewMCPServer for `claude -p`,
+// the shared buildToolSet in-process for OpenAI-compatible models. See
+// mctlhq/mctl-telegram#298 and the transport decision in the Communication
+// Agent plan for why this replaced the originally-scoped Claude Code Channels
+// bridge as the production path.
+//
+// This binary runs in two modes, selected by --mcp-serve:
+//   - default: the poll loop (see run()). With the claude runner it spawns
+//     `claude` as a subprocess per job; the openai runner stays in-process.
+//   - --mcp-serve: a stdio MCP server exposing the 11 agent tools, scoped to
+//     exactly one job via AGENT_JOB_* env vars. `claude` spawns this mode
+//     itself (as configured by the default mode's --mcp-config), so an
+//     operator never invokes it directly.
 package main
 
 import (
@@ -62,6 +74,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// A worker must never run unattributably against an unknown quota pool —
+	// this is required (not optional) so a claim of quota isolation between
+	// deployments has a machine-checkable counterpart. See docs/agent-worker.md
+	// for the rollout ordering this implies (set the value before rolling
+	// the image).
 	credentialDomainID, err := requireEnv("AGENT_CREDENTIAL_DOMAIN_ID")
 	if err != nil {
 		return err
@@ -136,6 +153,7 @@ func run() error {
 				UserAgent:    "mctl-telegram-agent-worker/" + version,
 			},
 			APIBaseURL:   apiBaseURL,
+			APIToken:     apiToken,
 			SystemPrompt: os.Getenv("AGENT_SYSTEM_PROMPT"),
 			MaxTurns:     maxTurns,
 			MaxBudgetUSD: maxBudgetUSD,
@@ -160,6 +178,12 @@ func run() error {
 	if healthAddr == "" {
 		healthAddr = ":8080"
 	}
+	// Listen synchronously so a bind failure (port already in use, malformed
+	// AGENT_HEALTH_ADDR, slow DNS on a hostname address) surfaces here,
+	// before the poll loop ever starts — a fixed-duration escape (the
+	// previous approach) can't distinguish "still binding" from "bound
+	// fine," so under load or a slow resolve it would start Loop anyway
+	// and leave the pod with no probe socket for its entire lifetime.
 	ln, err := net.Listen("tcp", healthAddr)
 	if err != nil {
 		return fmt.Errorf("start health server: listen on %s: %w", healthAddr, err)
@@ -186,13 +210,24 @@ func run() error {
 		slog.Warn("agent-worker: health server shutdown", "err", err)
 	}
 	if err := <-healthErrCh; err != nil {
+		// The health server is only load-bearing for probes, not for the
+		// poll loop's own correctness — a failure here shouldn't mask
+		// loopErr (the actually meaningful exit reason), just get logged
+		// alongside it.
 		slog.Warn("agent-worker: health server failed", "err", err)
 	}
+	// A fatal-auth stop must reach main() as a nonzero exit — otherwise a
+	// process supervisor watching for failures sees the same clean return as
+	// an ordinary SIGTERM shutdown and never restarts or alerts on an
+	// expired/revoked token, even though Loop already logged the error.
 	return loopErr
 }
 
 // runMCPServe is the stdio MCP server mode. It reads its job-scoped identity
-// entirely from env vars set by the ClaudeInvoker that spawned it.
+// entirely from env vars set by the ClaudeInvoker that spawned it (see
+// claudeinvoker.go's mcpServerConfig.Env) — never from argv or the model,
+// matching JobContext's doc comment on why job identity can't be
+// model-supplied.
 func runMCPServe() error {
 	apiBaseURL, err := requireEnv("AGENT_API_BASE_URL")
 	if err != nil {
@@ -254,8 +289,15 @@ func requireEnv(key string) (string, error) {
 	return v, nil
 }
 
+// domainIDPattern bounds AGENT_CREDENTIAL_DOMAIN_ID to a shape safe for use
+// as a Prometheus label value: no whitespace, no quotes, nothing a pasted
+// credential or a free-text blob would accidentally satisfy.
 var domainIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:/-]{1,128}$`)
 
+// validateDomainID rejects a credential-domain identifier containing
+// characters outside [A-Za-z0-9._:/-] or exceeding 128 characters. This is a
+// non-secret operator-chosen label (e.g. a Vault path or account label),
+// never the credential itself.
 func validateDomainID(id string) error {
 	if !domainIDPattern.MatchString(id) {
 		return errors.New("AGENT_CREDENTIAL_DOMAIN_ID must match [A-Za-z0-9._:/-]{1,128}")
@@ -263,6 +305,9 @@ func validateDomainID(id string) error {
 	return nil
 }
 
+// envConcurrency reads the worker concurrency: unset gives 1, anything other
+// than an integer in 1..agentworker.MaxConcurrency is refused rather than
+// silently clamped.
 func envConcurrency(key string) (int, error) {
 	raw := os.Getenv(key)
 	if raw == "" {
@@ -311,6 +356,10 @@ func requiredEnvFloat(key string) (float64, error) {
 	return f, nil
 }
 
+// envFloat fails loudly on a set-but-unparseable value rather than silently
+// falling back to def — an operator who set AGENT_MAX_BUDGET_USD to enforce
+// a spending cap and mistyped it would otherwise get an uncapped worker with
+// no indication anything was wrong.
 func envFloat(key string, def float64) (float64, error) {
 	raw := os.Getenv(key)
 	if raw == "" {
@@ -320,9 +369,15 @@ func envFloat(key string, def float64) (float64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("parse %s: %w", key, err)
 	}
+	// strconv.ParseFloat accepts "NaN"/"Inf" as valid IEEE754 values — none
+	// of which mean anything as a dollar budget.
 	if math.IsNaN(f) || math.IsInf(f, 0) {
 		return 0, fmt.Errorf("parse %s: %q is not a finite number", key, raw)
 	}
+	// A negative value would silently behave like "unset" — ClaudeInvoker.Run
+	// only adds --max-budget-usd when MaxBudgetUSD > 0 — turning what an
+	// operator intended as a spending cap into an uncapped invocation with
+	// no indication anything was wrong.
 	if f < 0 {
 		return 0, fmt.Errorf("parse %s: %q must not be negative", key, raw)
 	}

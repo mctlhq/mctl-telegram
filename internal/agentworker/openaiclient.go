@@ -79,9 +79,13 @@ type ChatUsage struct {
 }
 
 type ChatResult struct {
-	Message      ChatMessage
-	Usage        ChatUsage
-	FinishReason string
+	Message ChatMessage
+	Usage   ChatUsage
+	// UsageReported is false when the provider omitted "usage" or reported
+	// zero tokens for both directions; a real completion always bills at
+	// least one prompt token, so that shape means "unknown spend", not "free".
+	UsageReported bool
+	FinishReason  string
 }
 
 // ProviderError carries only transport-safe metadata. It deliberately never
@@ -171,7 +175,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []ChatMessage, tools []too
 			Message      ChatMessage `json:"message"`
 			FinishReason string      `json:"finish_reason"`
 		} `json:"choices"`
-		Usage ChatUsage `json:"usage"`
+		Usage *ChatUsage `json:"usage"`
 	}
 	dec := json.NewDecoder(io.LimitReader(resp.Body, 8<<20))
 	if err := dec.Decode(&out); err != nil {
@@ -180,7 +184,12 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []ChatMessage, tools []too
 	if len(out.Choices) == 0 {
 		return nil, fmt.Errorf("decode chat response: no choices")
 	}
-	return &ChatResult{Message: out.Choices[0].Message, Usage: out.Usage, FinishReason: out.Choices[0].FinishReason}, nil
+	res := &ChatResult{Message: out.Choices[0].Message, FinishReason: out.Choices[0].FinishReason}
+	if out.Usage != nil {
+		res.Usage = *out.Usage
+		res.UsageReported = out.Usage.PromptTokens > 0 || out.Usage.CompletionTokens > 0
+	}
+	return res, nil
 }
 
 func parseRetryAfter(raw string, now time.Time) time.Duration {

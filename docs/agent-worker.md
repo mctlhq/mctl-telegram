@@ -107,10 +107,15 @@ through the same `finishRun`: cost report first, then the result check, then
 the durable terminal-state verification. Unset `AGENT_RUNNER` is exactly the
 `claude` behaviour. The `openai` runner needs no Claude account credential.
 
-- **Job token only.** `AGENT_API_TOKEN` is used by the poll loop alone. An
-  `openai` job refuses to run without the claim's narrow `job_token`; every
-  tool call, cost report and completion check for that job uses a client
-  authenticated with it. No job-specific state is shared between jobs; provider pacing state (`AGENT_OPENAI_MIN_INTERVAL`) is shared.
+- **Job token for tools, account token for accounting.** An `openai` job
+  refuses to run without the claim's narrow `job_token`; every
+  model-reachable tool call uses a client authenticated with it. The cost
+  report and the completion check use `AGENT_API_TOKEN`, exactly like the
+  `claude` runner: the job token expires at the claim deadline, the same
+  moment a deadline cancellation fires, so a cost report sent with it would be
+  rejected and the spend lost. The model never sees either token. No
+  job-specific state is shared between jobs; provider pacing state
+  (`AGENT_OPENAI_MIN_INTERVAL`) is shared.
 - **Request.** Non-streaming `POST {AGENT_OPENAI_BASE_URL}/chat/completions`
   with `tool_choice: auto` and the tools' `InputSchema` unchanged. Headers:
   `Authorization`, `cf-aig-authorization` (when a gateway token is set),
@@ -122,8 +127,11 @@ the durable terminal-state verification. Unset `AGENT_RUNNER` is exactly the
   after `AGENT_MAX_TURNS`, or when the computed cost passes
   `AGENT_MAX_BUDGET_USD`. No fixed call order is assumed.
 - **Result subtypes.** `success`, `error_max_turns`, `error_max_budget`,
-  `error_provider`, `error_provider_429`. The last maps to the existing
-  usage-limit error class and metric.
+  `error_provider`, `error_provider_no_usage`, `error_provider_429`. The last
+  maps to the existing usage-limit error class and metric. `no_usage` is
+  returned when `AGENT_MAX_BUDGET_USD` is set and a 2xx response carries no
+  token usage (unknown spend would bypass the cap); without a budget the turn
+  is logged and no cost is reported rather than a fabricated $0.
 - **Provider errors.** A non-2xx response is represented by HTTP status and
   `Retry-After` only. The body is drained but never retained, returned or
   logged, because it can echo message or tool content. 429 and 5xx are retried

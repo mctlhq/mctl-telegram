@@ -3,7 +3,6 @@ package agentworker
 import (
 	"context"
 	_ "embed"
-	"fmt"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -214,5 +213,3 @@ func evalRepoRoot(t *testing.T) string {
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 }
-
-var _ = fmt.Sprintf

@@ -40,6 +40,11 @@ func ScrubText(s string) string {
 // sensitiveKeys is checked case-insensitively against attribute keys.
 // Values for matching keys are replaced with `[redacted len=N]`.
 var sensitiveKeys = map[string]struct{}{
+	// OpenAI-compatible agent-worker runner credentials (env-style names
+	// after lower-casing, plus the AI Gateway header key).
+	"agent_openai_api_key":        {},
+	"agent_gateway_token":         {},
+	"cf-aig-authorization":        {},
 	"text":                        {},
 	"body":                        {},
 	"proposed_text":               {},

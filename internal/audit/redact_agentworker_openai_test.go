@@ -9,7 +9,7 @@ import (
 )
 
 // The OpenAI-compatible runner's credentials are registered in
-// redact_agentworker_openai.go. Dropping an entry must turn this red.
+// sensitiveKeys in redact.go. Dropping an entry must turn this red.
 func TestRedaction_OpenAIRunnerCredentials(t *testing.T) {
 	const secret = "sk-test-do-not-log"
 	for _, key := range []string{"AGENT_OPENAI_API_KEY", "agent_gateway_token", "cf-aig-authorization"} {

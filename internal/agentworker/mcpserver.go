@@ -59,6 +59,12 @@ const ServerName = "agent"
 // restricted-tool-surface requirement by construction (nothing else is ever
 // registered).
 //
+// Each tool is registered under the name the job's assistant uses for it,
+// a canonical name or a generic alias; the implementation is the same. The
+// names may be a subset that includes the mandatory tools (tools.ForJob, as
+// jobTools on the invoking side); a tool left out is not registered, and the
+// agent API refuses its routes for this job regardless.
+//
 // buildToolSet is authoritative for both this MCP surface and OpenAIRunner,
 // so aliases, schemas and handlers cannot drift between the two runners.
 func NewMCPServer(api agentAPI, job JobContext) (*mcpserver.MCPServer, error) {
@@ -316,6 +322,11 @@ func (b *toolBuilder) saveJobLead() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 				Status:         stringArg(args, "status", ""),
 				Detail:         stringArg(args, "detail", ""),
 			}
+			// An all-empty call would still create (or re-bind) a lead row on
+			// the server, which is enough to satisfy complete_agent_job's
+			// "durable result exists" guard — letting a confused or injected
+			// turn close a job with no reply, no real lead data, and no owner
+			// notification. Require at least one real field before forwarding.
 			if lead.Company == "" && lead.Role == "" && lead.RecruiterName == "" && lead.RecruiterTGID == 0 &&
 				lead.Compensation == "" && lead.Status == "" && lead.Detail == "" {
 				return mcplib.NewToolResultError("at least one field is required — nothing to save"), nil
@@ -372,6 +383,9 @@ func (b *toolBuilder) sendOwnerSummary() (mcplib.Tool, mcpserver.ToolHandlerFunc
 			if err != nil {
 				return toolErr(err), nil
 			}
+			// A summary is the job's result only when nothing else is: an
+			// alert sent after a reply must not replace the reply as the
+			// linked result, and a suppressed alert has no action at all.
 			if out.ActionID != 0 && b.resultActionID == 0 {
 				b.resultActionID = out.ActionID
 			}
@@ -384,7 +398,13 @@ func (b *toolBuilder) sendOwnerSummary() (mcplib.Tool, mcpserver.ToolHandlerFunc
 // pauseAutopilot is pause-only by construction — it takes no arguments and
 // always pauses, never resumes. Resuming is a deliberate, standing-down
 // decision only the owner should make, via the authenticated /mctl continue
-// slash-command path (internal/agent/control), not a model call.
+// slash-command path (internal/agent/control), not a model call. An earlier
+// version accepted a paused=false argument: since every action's policy
+// check reads the same AutopilotPaused flag, a prompt-injected incoming
+// message could otherwise call this tool with paused=false and silently
+// clear an owner's own /mctl pause before the worker went on to send a
+// reply — undoing the one safety gate the owner has for "stop the agent
+// from replying on its own."
 func (b *toolBuilder) pauseAutopilot() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("pause_autopilot",
 		mcplib.WithDescription("Pause autonomous replies for this account. Use this if the conversation has become something you should not keep handling on your own. Pause-only — resuming is a deliberate owner decision made via /mctl continue, not something this tool can do."),
@@ -401,9 +421,14 @@ func (b *toolBuilder) pauseAutopilot() (mcplib.Tool, mcpserver.ToolHandlerFunc) 
 	return tool, handler
 }
 
-// completeAgentJob deliberately has no free-text "note" argument. status
-// alone is enough signal for operators and avoids persisting model content in
-// the job's plaintext error/note fields.
+// completeAgentJob deliberately has no free-text "note" argument. An earlier
+// version forwarded a model-supplied note straight to CompleteJob, which
+// the server stores unencrypted in agent_jobs.last_error /
+// agent_job_attempts.error — a plaintext column, unlike message bodies and
+// action payloads elsewhere in this codebase. A field literally described
+// as "note about the outcome" is exactly the kind of thing a confused or
+// prompt-injected turn would fill with quoted Telegram message content,
+// bypassing that encryption. status alone is enough signal for operators.
 func (b *toolBuilder) completeAgentJob() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("complete_agent_job",
 		mcplib.WithDescription("Mark this job as finished. Call this exactly once, as the last thing you do, after you have taken every action this turn warrants (a reply proposal, a lead save, an owner notification) or determined none was needed. status=completed requires that you actually persisted a result via one of the other tools first — it will be rejected otherwise. Use status=ignored if this message genuinely needed no action, or status=failed if you could not process it."),

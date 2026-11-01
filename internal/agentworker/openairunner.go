@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -19,8 +20,17 @@ var errNoJobToken = errors.New("job has no job token")
 const canceledCostReportTimeout = 2 * time.Second
 
 type OpenAIRunner struct {
-	Client       *OpenAIClient
-	APIBaseURL   string // job-token-only client per job
+	Client     *OpenAIClient
+	APIBaseURL string
+	// APIToken is the worker's account token. It is used ONLY for the
+	// worker-side calls that must outlive the job token (cost report and
+	// terminal-state verification), exactly as ClaudeInvoker does. The job
+	// token expires at the claim deadline, which is also when a deadline
+	// cancellation fires, so a /cost write sent with it would be rejected
+	// with 401 and the spend silently dropped. Every model-reachable tool
+	// call keeps using the job token, and the model never sees either token
+	// in this runner. Empty falls back to the job token (older callers).
+	APIToken     string
 	SystemPrompt string // fallback, as in ClaudeInvoker
 	MaxTurns     int    // AGENT_MAX_TURNS, default 12
 	MaxBudgetUSD float64
@@ -40,6 +50,10 @@ func (r *OpenAIRunner) Run(ctx context.Context, job JobEnvelope) error {
 		return errors.New("openai client is required")
 	}
 	api := NewClient(r.APIBaseURL, job.JobToken, nil)
+	workerAPI := api
+	if r.APIToken != "" {
+		workerAPI = NewClient(r.APIBaseURL, r.APIToken, nil)
+	}
 	builder, defs, err := buildToolSet(api, JobContext{
 		JobID: job.JobID, Attempt: job.Attempt, EventID: job.EventID,
 		ConversationID: job.ConversationID, SourceEventIDs: job.SourceEventIDs, Tools: job.Tools,
@@ -77,7 +91,7 @@ func (r *OpenAIRunner) Run(ctx context.Context, job JobEnvelope) error {
 		return res
 	}
 	finish := func(subtype string, isError bool) error {
-		return finishRun(ctx, api, job, result(subtype, isError), r.Metrics)
+		return finishRun(ctx, workerAPI, job, result(subtype, isError), r.Metrics)
 	}
 	reportCanceledCost := func() {
 		if !costObserved {
@@ -89,7 +103,7 @@ func (r *OpenAIRunner) Run(ctx context.Context, job JobEnvelope) error {
 		// because the job deadline fired between turns.
 		reportCtx, cancel := context.WithTimeout(context.Background(), canceledCostReportTimeout)
 		defer cancel()
-		recordRunCost(reportCtx, api, job, result("error_context_canceled", true), r.Metrics)
+		recordRunCost(reportCtx, workerAPI, job, result("error_context_canceled", true), r.Metrics)
 	}
 
 	for turns < maxTurns {
@@ -106,8 +120,20 @@ func (r *OpenAIRunner) Run(ctx context.Context, job JobEnvelope) error {
 			}
 			return finish("error_provider", true)
 		}
-		costObserved = true
-		totalCost += r.Prices.Cost(out.Usage)
+		if !out.UsageReported {
+			// Unknown spend is not zero spend. With a budget configured, a
+			// provider that omits usage would bypass AGENT_MAX_BUDGET_USD on
+			// every turn, so fail closed; without one there is nothing to
+			// bypass, so warn and keep the cost unreported rather than
+			// recording a fabricated $0.
+			if r.MaxBudgetUSD > 0 {
+				return finish("error_provider_no_usage", true)
+			}
+			slog.Warn("agent-worker: provider response carried no usage; cost not recorded for this turn", "job_id", job.JobID)
+		} else {
+			costObserved = true
+			totalCost += r.Prices.Cost(out.Usage)
+		}
 		if r.MaxBudgetUSD > 0 && totalCost > r.MaxBudgetUSD {
 			return finish("error_max_budget", true)
 		}
@@ -176,15 +202,19 @@ func (r *OpenAIRunner) waitForTurn(ctx context.Context) error {
 	if r.MinInterval <= 0 {
 		return nil
 	}
+	// Reserve a slot under the lock, then sleep outside it: a waiter whose
+	// deadline passed or whose worker is shutting down leaves through its own
+	// context instead of queueing behind every sleeper ahead of it. A
+	// cancelled waiter's slot stays consumed, which only spaces later
+	// requests further apart (the safe direction for a provider limit).
 	r.rateMu.Lock()
-	defer r.rateMu.Unlock()
-	if d := time.Until(r.nextRequest); d > 0 {
-		if err := waitContext(ctx, d); err != nil {
-			return err
-		}
+	slot := time.Now()
+	if r.nextRequest.After(slot) {
+		slot = r.nextRequest
 	}
-	r.nextRequest = time.Now().Add(r.MinInterval)
-	return nil
+	r.nextRequest = slot.Add(r.MinInterval)
+	r.rateMu.Unlock()
+	return waitContext(ctx, time.Until(slot))
 }
 
 func waitContext(ctx context.Context, d time.Duration) error {
