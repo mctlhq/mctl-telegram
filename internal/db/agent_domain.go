@@ -83,8 +83,23 @@ type AgentProfile struct {
 	AssistantName   string
 	BlockedSenders  string // csv of telegram user ids the agent must ignore
 	SenderAllowlist string // csv of telegram user ids allowed into the listener; empty allows all
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	// Runtime is "own" or "managed" (ADR 0008); an account that never chose
+	// one is "own".
+	Runtime string
+	// ManagedConsentVersion and ManagedConsentAt record the owner's consent
+	// to the managed data flow. Zero time means never.
+	ManagedConsentVersion string
+	ManagedConsentAt      time.Time
+	// BudgetPausedUntil is unused in this slice.
+	BudgetPausedUntil time.Time
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+// NeedsManagedReconsent reports a managed account whose stored consent is not
+// the current consent version.
+func (p AgentProfile) NeedsManagedReconsent() bool {
+	return p.Runtime == RuntimeManaged && p.ManagedConsentVersion != ManagedConsentCurrent
 }
 
 // UpsertAgentProfile inserts or fully replaces the user's agent profile.
@@ -144,20 +159,20 @@ func (s *Store) UpsertAgentProfile(ctx context.Context, p AgentProfile) error {
 // GetAgentProfile returns the user's agent profile or ErrAgentProfileNotFound.
 func (s *Store) GetAgentProfile(ctx context.Context, userID int64) (*AgentProfile, error) {
 	var p AgentProfile
-	var installedAt sql.NullTime
+	var installedAt, consentAt, pausedUntil sql.NullTime
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT user_id, mode, autopilot_paused, listener_enabled, disclosure_text,
 		        max_autonomous_turns, max_msgs_per_minute, max_reply_chars,
 		        intent_allowlist, blocked_senders, sender_allowlist, created_at, updated_at,
 		        disclosure_disabled, intent_denylist, working_hours, audience_excludes, assistant_installed_at, install_revision,
-		        assistant_name
+		        assistant_name, runtime, managed_consent_version, managed_consent_at, budget_paused_until
 		   FROM agent_profiles WHERE user_id = $1`,
 		userID,
 	).Scan(&p.UserID, &p.Mode, &p.AutopilotPaused, &p.ListenerEnabled, &p.DisclosureText,
 		&p.MaxAutonomousTurns, &p.MaxMsgsPerMinute, &p.MaxReplyChars,
 		&p.IntentAllowlist, &p.BlockedSenders, &p.SenderAllowlist, &p.CreatedAt, &p.UpdatedAt,
 		&p.DisclosureDisabled, &p.IntentDenylist, &p.WorkingHours, &p.AudienceExcludes, &installedAt, &p.InstallRevision,
-		&p.AssistantName)
+		&p.AssistantName, &p.Runtime, &p.ManagedConsentVersion, &consentAt, &pausedUntil)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrAgentProfileNotFound
 	}
@@ -165,6 +180,8 @@ func (s *Store) GetAgentProfile(ctx context.Context, userID int64) (*AgentProfil
 		return nil, fmt.Errorf("get agent profile: %w", err)
 	}
 	p.AssistantInstalledAt = installedAt.Time
+	p.ManagedConsentAt = consentAt.Time
+	p.BudgetPausedUntil = pausedUntil.Time
 	return &p, nil
 }
 
@@ -290,6 +307,9 @@ type AgentAssistant struct {
 	InstallRevision int64
 	// Mode is the profile's agent mode, read in the same row.
 	Mode string
+	// Runtime and ManagedConsentVersion are read in the same row.
+	Runtime               string
+	ManagedConsentVersion string
 }
 
 // AgentAssistantRef is the catalog assistant an account runs and whether
@@ -299,6 +319,10 @@ type AgentAssistantRef struct {
 	Installed     bool
 	// InstallRevision is the profile's install revision (#1018).
 	InstallRevision int64
+	// Runtime and ManagedConsentVersion are read in the same row as
+	// InstallRevision, so a transition decision and the CAS cover one state.
+	Runtime               string
+	ManagedConsentVersion string
 }
 
 // GetAgentAssistantRef reads the assistant reference without decrypting the
@@ -309,10 +333,11 @@ func (s *Store) GetAgentAssistantRef(ctx context.Context, userID int64) (*AgentA
 	var installed int
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT assistant_name, assistant_version,
-		        CASE WHEN install_encrypted IS NULL THEN 0 ELSE 1 END, install_revision
+		        CASE WHEN install_encrypted IS NULL THEN 0 ELSE 1 END, install_revision,
+		        runtime, managed_consent_version
 		   FROM agent_profiles WHERE user_id = $1`,
 		userID,
-	).Scan(&a.Name, &a.Version, &installed, &a.InstallRevision)
+	).Scan(&a.Name, &a.Version, &installed, &a.InstallRevision, &a.Runtime, &a.ManagedConsentVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrAgentProfileNotFound
 	}
@@ -332,10 +357,11 @@ func (s *Store) GetAgentAssistant(ctx context.Context, userID int64) (*AgentAssi
 	var a AgentAssistant
 	var encrypted []byte
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT assistant_name, assistant_version, install_encrypted, assistant_definition_digest, install_revision, mode
+		`SELECT assistant_name, assistant_version, install_encrypted, assistant_definition_digest, install_revision, mode,
+		        runtime, managed_consent_version
 		   FROM agent_profiles WHERE user_id = $1`,
 		userID,
-	).Scan(&a.Name, &a.Version, &encrypted, &a.Digest, &a.InstallRevision, &a.Mode)
+	).Scan(&a.Name, &a.Version, &encrypted, &a.Digest, &a.InstallRevision, &a.Mode, &a.Runtime, &a.ManagedConsentVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrAgentProfileNotFound
 	}
@@ -406,6 +432,33 @@ type AgentProfileUpdate struct {
 	// non-empty document is tenant-key encrypted in the same UPDATE as all
 	// other requested fields.
 	OwnerProfileDocument *[]byte
+	// Runtime, ManagedConsentVersion and ManagedConsentAt set the managed
+	// runtime columns (ADR 0008). The caller decides them; the store only
+	// writes them.
+	Runtime               *string
+	ManagedConsentVersion *string
+	ManagedConsentAt      *time.Time
+	// ManagedQuota, set only for an own -> managed write, makes the UPDATE
+	// apply only while fewer than *ManagedQuota other accounts are managed;
+	// otherwise it changes nothing and returns ErrManagedQuota.
+	ManagedQuota *int
+}
+
+// ErrManagedQuota means an own -> managed write found the managed-account
+// quota exhausted and changed nothing.
+var ErrManagedQuota = errors.New("managed runtime quota exhausted")
+
+// managedLockKey is the Postgres advisory lock key serializing own ->
+// managed writes so the quota count cannot be raced.
+const managedLockKey int64 = 0x6d616e6167656431
+
+// CountManagedAccounts counts the accounts whose runtime is managed.
+func (s *Store) CountManagedAccounts(ctx context.Context) (int, error) {
+	var n int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_profiles WHERE runtime = 'managed'`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count managed accounts: %w", err)
+	}
+	return n, nil
 }
 
 // UpdateAgentProfileFields applies only the non-nil fields in u, leaving
@@ -429,6 +482,32 @@ func (s *Store) UpdateAgentProfileFields(ctx context.Context, userID int64, u Ag
 func (s *Store) updateAgentProfileFields(ctx context.Context, ex execer, userID int64, u AgentProfileUpdate) error {
 	if userID <= 0 {
 		return errors.New("user id required")
+	}
+	if u.ManagedQuota != nil {
+		if db, ok := ex.(*sql.DB); ok {
+			// The quota guard needs a transaction for the advisory lock.
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				return fmt.Errorf("begin managed runtime write: %w", err)
+			}
+			if err := s.updateAgentProfileFields(ctx, tx, userID, u); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("commit managed runtime write: %w", err)
+			}
+			return nil
+		}
+		pg, err := s.postgresDialect(ctx)
+		if err != nil {
+			return err
+		}
+		if pg {
+			if _, err := ex.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, managedLockKey); err != nil {
+				return fmt.Errorf("lock managed runtime: %w", err)
+			}
+		}
 	}
 	var sets []string
 	var args []any
@@ -471,6 +550,15 @@ func (s *Store) updateAgentProfileFields(ctx context.Context, ex execer, userID 
 	}
 	if u.AudienceExcludes != nil {
 		set("audience_excludes", *u.AudienceExcludes)
+	}
+	if u.Runtime != nil {
+		set("runtime", *u.Runtime)
+	}
+	if u.ManagedConsentVersion != nil {
+		set("managed_consent_version", *u.ManagedConsentVersion)
+	}
+	if u.ManagedConsentAt != nil {
+		set("managed_consent_at", u.ManagedConsentAt.UTC())
 	}
 	if u.ResetInstalledAt != nil {
 		set("assistant_installed_at", u.ResetInstalledAt.UTC())
@@ -538,12 +626,30 @@ func (s *Store) updateAgentProfileFields(ctx context.Context, ex execer, userID 
 		args = append(args, *u.ExpectedInstallRevision)
 		where += fmt.Sprintf(" AND install_revision = $%d", len(args))
 	}
+	if u.ManagedQuota != nil {
+		args = append(args, userID, *u.ManagedQuota)
+		where += fmt.Sprintf(" AND (SELECT COUNT(*) FROM agent_profiles o WHERE o.runtime = 'managed' AND o.user_id <> $%d) < $%d",
+			len(args)-1, len(args))
+	}
 	query := fmt.Sprintf(`UPDATE agent_profiles SET %s WHERE %s`, strings.Join(sets, ", "), where)
 	res, err := ex.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("update agent profile fields: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
+		if u.ManagedQuota != nil {
+			if q, ok := ex.(interface {
+				QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+			}); ok {
+				var exists bool
+				var cur int64
+				err := q.QueryRowContext(ctx, `SELECT install_revision FROM agent_profiles WHERE user_id = $1`, userID).Scan(&cur)
+				exists = err == nil
+				if exists && (u.ExpectedInstallRevision == nil || cur == *u.ExpectedInstallRevision) {
+					return ErrManagedQuota
+				}
+			}
+		}
 		if u.ExpectedInstallRevision == nil {
 			return ErrAgentProfileNotFound
 		}

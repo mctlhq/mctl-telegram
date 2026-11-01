@@ -35,6 +35,16 @@
           "description": "Defaults to the definition's defaults.mode.",
           "enum": ["observe", "guarded", "off"]
         },
+        "runtime": {
+          "description": "Which worker runs the assistant's jobs: the owner's own, or the platform's managed one (ADR 0008). Defaults to own. Switching own to managed needs consent.",
+          "enum": ["own", "managed"],
+          "default": "own"
+        },
+        "consent": {
+          "description": "A per-call assertion of the managed data flow consent (ADR 0008). Never stored with the install.",
+          "type": "string",
+          "maxLength": 64
+        },
         "paused": {
           "description": "Defaults to true: a new install starts paused, as a new account does.",
           "type": "boolean",

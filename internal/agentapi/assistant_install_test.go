@@ -65,6 +65,7 @@ func TestAdminAgentProfileHandler_AcceptsHRAssistantInstall(t *testing.T) {
 		IntentAllowlist:    "discovery,schedule",
 		InstallRevision:    1,
 		AssistantName:      "hr-recruiter",
+		Runtime:            "own",
 	}
 	got.UserID, got.CreatedAt, got.UpdatedAt = 0, want.CreatedAt, want.UpdatedAt
 	if *got != want {

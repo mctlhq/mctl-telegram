@@ -83,6 +83,7 @@ func TestHRInstallMatchesTodaysProfile(t *testing.T) {
 	want := map[string]any{
 		"telegram_id":          int64(danaID),
 		"mode":                 "guarded",
+		"runtime":              "own",
 		"autopilot_paused":     false,
 		"listener_enabled":     true,
 		"disclosure_text":      "",
@@ -406,5 +407,34 @@ func TestDefinitionToolAliases(t *testing.T) {
 	both := editYAML(t, base, "    - save_job_lead\n", "    - save_job_lead\n    - save_record\n")
 	if _, err := ParseDefinition(both); err == nil {
 		t.Fatal("a tool named twice was accepted")
+	}
+}
+
+func TestRuntimeDefaultsToOwnAndSchemaChecksIt(t *testing.T) {
+	def := hrDefinition(t)
+	in := hrInstall(t)
+	p, err := Resolve(def, in)
+	if err != nil || p.Runtime != RuntimeOwn {
+		t.Fatalf("Resolve: runtime %q, err %v", p.Runtime, err)
+	}
+	in.Spec.Runtime, in.Spec.Consent = RuntimeManaged, "managed-data-flow/v1"
+	req, err := ProfileRequest(def, in, danaID)
+	if err != nil || req["runtime"] != RuntimeManaged || req["consent"] != "managed-data-flow/v1" {
+		t.Fatalf("ProfileRequest = %v, %v", req, err)
+	}
+	const hdr = `{"apiVersion":"assistants.mctl.ai/v1alpha1","kind":"AssistantInstall","spec":{"assistant":{"name":"hr-recruiter","version":"0.1.0"},`
+	for _, tc := range []struct {
+		raw string
+		ok  bool
+	}{
+		{`"runtime":"own"}}`, true},
+		{`"runtime":"managed","consent":"managed-data-flow/v1"}}`, true},
+		{`"runtime":"remote"}}`, false},
+		{`"runtime":1}}`, false},
+		{`"consent":1}}`, false},
+	} {
+		if _, err := ParseInstall([]byte(hdr + tc.raw)); (err == nil) != tc.ok {
+			t.Errorf("%s: err = %v, want ok=%v", tc.raw, err, tc.ok)
+		}
 	}
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/assistantinstall"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
 // The assistant catalog tools (#1021): list_assistants, install_assistant
@@ -39,7 +40,7 @@ func (s *Server) WithAssistants(svc *assistantinstall.Service) *Server {
 // AssistantInstall spec as they are; their shapes are the schema's
 // (assistants/schemas/assistant-install.schema.json).
 var installArgKeys = []string{
-	"mode", "paused", "listening", "values", "disclosureLevels", "intentTiers",
+	"mode", "runtime", "paused", "listening", "values", "disclosureLevels", "intentTiers",
 	"limits", "audience", "disclosure", "schedule", "ownerNotes",
 }
 
@@ -52,6 +53,10 @@ type assistantInstalled struct {
 	Version         string `json:"version"`
 	InstallRevision int64  `json:"install_revision"`
 	Installed       bool   `json:"installed"`
+	// Runtime is "own" or "managed" (ADR 0008); ManagedReconsentRequired is
+	// true for a managed account that consented to an older consent version.
+	Runtime                  string `json:"runtime"`
+	ManagedReconsentRequired bool   `json:"managed_reconsent_required"`
 }
 
 type listAssistantsResult struct {
@@ -118,6 +123,12 @@ func (s *Server) assistantErrResult(ctx context.Context, tool string, err error)
 			code, reason, retryable = "fork_conflict", ReasonRefused, true
 		case assistantinstall.KindForksDisabled:
 			code, reason = "forks_disabled", ReasonCapabilityDisabled
+		case assistantinstall.KindManagedConsentRequired:
+			code, reason = "managed_consent_required", ReasonRefused
+		case assistantinstall.KindManagedDisabled:
+			code, reason = "managed_disabled", ReasonCapabilityDisabled
+		case assistantinstall.KindManagedQuota:
+			code, reason = "managed_quota", ReasonRefused
 		}
 		if ie.Err != nil {
 			slog.Warn("mcp assistant tool error", "tool", tool, "code", code, "err", ie.Err)
@@ -130,6 +141,9 @@ func (s *Server) assistantErrResult(ctx context.Context, tool string, err error)
 	if current != nil {
 		env["current_revision"] = *current
 		env["action"] = "Nothing changed. Call list_assistants to see the current install, then retry with expected_revision set to current_revision."
+	}
+	if code == "managed_consent_required" {
+		env["action"] = "Nothing changed. Show the user this text: \"" + db.ManagedConsentText + "\" If they agree, retry with consent set to \"" + db.ManagedConsentCurrent + "\"."
 	}
 	b, mErr := json.Marshal(env)
 	if mErr != nil {
@@ -157,7 +171,7 @@ func (s *Server) toolListAssistants() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 Output: {source, assistants, mine, forks}.
   source — "registry" (the mctl assistant registry) or "embedded" (the catalog built into this server).
   assistants — [{name, version, title, description, tags, examples, lifecycle, variables: [{name, type, required, default?, choices?, description}], intents: [{name, description, tier}], defaults: {mode, limits: {maxAutonomousTurns, maxMsgsPerMinute, maxReplyChars}, disclosure_policy}}], by name, highest version first.
-  mine — {assistant, version, install_revision, installed}. installed=false means the account was never configured through an install. Pass install_revision as expected_revision to update_install.
+  mine — {assistant, version, install_revision, installed, runtime, managed_reconsent_required}. installed=false means the account was never configured through an install. runtime is "own" (your own worker runs the jobs) or "managed" (a platform worker does); managed_reconsent_required is true for a managed account that consented to an older consent version. Pass install_revision as expected_revision to update_install.
   forks — your own private forks (fork_assistant), never anyone else's: [{name, base: {name, version, digest}, latest, versions: [{name, version, digest, base, promotion}]}]. Install one with install_assistant by its full name and a version.
 
 Never returns your stored values, owner notes, an assistant's instructions or a fork's instructions. If the registry cannot be read, the call fails with error "registry_unavailable" (retryable) rather than returning an empty list.`),
@@ -193,7 +207,8 @@ Never returns your stored values, owner notes, an assistant's instructions or a 
 		s.audit(ctx, id, "list_assistants", "", nil, startedAt)
 		return jsonResult(listAssistantsResult{
 			Source: source, Assistants: entries,
-			Mine:  assistantInstalled{Assistant: mine.Assistant, Version: mine.Version, InstallRevision: mine.InstallRevision, Installed: mine.Installed},
+			Mine: assistantInstalled{Assistant: mine.Assistant, Version: mine.Version, InstallRevision: mine.InstallRevision, Installed: mine.Installed,
+				Runtime: mine.Runtime, ManagedReconsentRequired: mine.ManagedReconsentRequired},
 			Forks: forks,
 		})
 	}
@@ -270,6 +285,8 @@ Inputs:
   name, version — required. The exact catalog version from list_assistants; there is no "latest". name may also be the full name of one of your own forks (list_assistants' forks), which installs that fork version; a fork runs in observe or off mode only, so mode "guarded" is refused for it.
   values — object: the assistant's variables, keyed by variable name.
   mode — "observe" | "guarded" | "off"; default the assistant's default mode.
+  runtime — "own" (default) or "managed". managed means a platform worker runs the jobs and messages needed for assistant tasks are sent to MCTL's configured third-party AI provider through MCTL's AI gateway (gateway logging and caching are disabled). Switching own to managed needs consent: show the user that text and, if they agree, pass consent "managed-data-flow/v1". Switching managed back to own needs no consent.
+  consent — "managed-data-flow/v1", only with runtime "managed", asserting the user agreed to the text above. It is never stored with the install.
   paused — boolean; default true. listening — boolean; default false. A new install starts paused and not listening: going live is an explicit choice.
   limits — {maxAutonomousTurns, maxMsgsPerMinute, maxReplyChars}, at most the assistant's ceilings.
   intentTiers — {intent: "auto"|"approve"|"never"}, within what the assistant allows. disclosureLevels — {variable: level}, stricter only.
@@ -281,11 +298,13 @@ Inputs:
 
 Output: {assistant, version, install_revision, settings}. settings is what the install resolved to (mode, paused, listening, limits, auto and never intents, schedule, audience); values and ownerNotes are never echoed.
 
-Errors are JSON: {error, message, retryable, current_revision?}. error is one of invalid_install, assistant_not_found, lifecycle_refused (disabled, or deprecated for an account not already running it; for a fork, its base's lifecycle), revision_conflict (with current_revision; nothing changed), forks_disabled, registry_unavailable (retryable; nothing changed), registry_invalid, internal_error. Work queued under the previous install is refused once this one is saved.`),
+Errors are JSON: {error, message, retryable, current_revision?}. error is one of invalid_install, assistant_not_found, lifecycle_refused (disabled, or deprecated for an account not already running it; for a fork, its base's lifecycle), revision_conflict (with current_revision; nothing changed), forks_disabled, registry_unavailable (retryable; nothing changed), registry_invalid, managed_disabled (the managed runtime is not enabled on this server), managed_consent_required (nothing changed; the action names the consent to send), managed_quota (no managed capacity), internal_error. Work queued under the previous install is refused once this one is saved.`),
 		mcplib.WithString("name", mcplib.Required(), mcplib.Description("Assistant name, as list_assistants returns it.")),
 		mcplib.WithString("version", mcplib.Required(), mcplib.Description("Exact assistant version, e.g. 0.1.0.")),
 		mcplib.WithObject("values", mcplib.Description("Variable values keyed by variable name.")),
 		mcplib.WithString("mode", mcplib.Enum("observe", "guarded", "off"), mcplib.Description("Agent mode; default the assistant's.")),
+		mcplib.WithString("runtime", mcplib.Enum("own", "managed"), mcplib.Description("Which worker runs the jobs; default own. managed needs consent.")),
+		mcplib.WithString("consent", mcplib.Description("managed-data-flow/v1, to switch to managed after the user agreed to the data flow text.")),
 		mcplib.WithBoolean("paused", mcplib.Description("Default true.")),
 		mcplib.WithBoolean("listening", mcplib.Description("Default false.")),
 		mcplib.WithObject("limits", mcplib.Description("{maxAutonomousTurns, maxMsgsPerMinute, maxReplyChars}.")),
@@ -308,7 +327,7 @@ Errors are JSON: {error, message, retryable, current_revision?}. error is one of
 			return s.assistantsUnavailable(ctx)
 		}
 		args := req.GetArguments()
-		if extra := unknownArgs(args, append([]string{"name", "version", "expected_revision"}, installArgKeys...)...); len(extra) > 0 {
+		if extra := unknownArgs(args, append([]string{"name", "version", "expected_revision", "consent"}, installArgKeys...)...); len(extra) > 0 {
 			hintReason(ctx, ReasonInvalidArgument)
 			return mcplib.NewToolResultError("unknown arguments: " + strings.Join(extra, ", ")), nil
 		}
@@ -330,6 +349,9 @@ Errors are JSON: {error, message, retryable, current_revision?}. error is one of
 			if v, ok := args[k]; ok && v != nil {
 				spec[k] = v
 			}
+		}
+		if v, ok := args["consent"]; ok && v != nil {
+			spec["consent"] = v
 		}
 		raw, err := json.Marshal(map[string]any{
 			"apiVersion": "assistants.mctl.ai/v1alpha1",
@@ -366,12 +388,14 @@ func (s *Server) toolUpdateInstall() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 
 Inputs:
   patch — object, required. An RFC 7396 JSON merge patch over the install's spec (the same fields install_assistant takes, with assistant as {name, version}): a member replaces the stored one, a nested object merges, null removes a member, an array replaces the whole array. Example: {"paused": false, "values": {"headline": null}, "ownerNotes": "Reply in English."}. Changing assistant.name or assistant.version switches or upgrades the assistant like an install.
+  consent — optional string: "managed-data-flow/v1", to switch runtime to "managed" after the user agreed to the text install_assistant shows. managed back to own needs none. It is never stored.
   expected_revision — integer, required: mine.install_revision from list_assistants. The change applies only if the install is still at that revision.
 
 The server decrypts the stored install, applies the patch, validates the result as a whole install and saves it; if the result is invalid or the revision moved, nothing changes.
 
-Output: same as install_assistant. Errors: same JSON envelope; also no_install when the account has nothing to patch (use install_assistant), and revision_conflict carries current_revision.`),
+Output: same as install_assistant. Errors: same JSON envelope (including managed_disabled, managed_consent_required, managed_quota); also no_install when the account has nothing to patch (use install_assistant), and revision_conflict carries current_revision.`),
 		mcplib.WithObject("patch", mcplib.Required(), mcplib.Description("JSON merge patch over the install spec.")),
+		mcplib.WithString("consent", mcplib.Description("managed-data-flow/v1, to switch to managed after the user agreed to the data flow text.")),
 		mcplib.WithNumber("expected_revision", mcplib.Required(), mcplib.Description("The install revision the patch was written against.")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -385,7 +409,7 @@ Output: same as install_assistant. Errors: same JSON envelope; also no_install w
 			return s.assistantsUnavailable(ctx)
 		}
 		args := req.GetArguments()
-		if extra := unknownArgs(args, "patch", "expected_revision"); len(extra) > 0 {
+		if extra := unknownArgs(args, "patch", "expected_revision", "consent"); len(extra) > 0 {
 			hintReason(ctx, ReasonInvalidArgument)
 			return mcplib.NewToolResultError("unknown arguments: " + strings.Join(extra, ", ")), nil
 		}
@@ -404,7 +428,8 @@ Output: same as install_assistant. Errors: same JSON envelope; also no_install w
 			hintReason(ctx, ReasonInvalidArgument)
 			return mcplib.NewToolResultError("patch does not encode as JSON"), nil
 		}
-		res, err := s.Assistants.Patch(ctx, id.UserID, raw, *expected)
+		consent, _ := args["consent"].(string)
+		res, err := s.Assistants.PatchWithConsent(ctx, id.UserID, raw, *expected, consent)
 		if err != nil {
 			s.audit(ctx, id, "update_install", "", errors.New(assistantErrCode(err)), startedAt)
 			return s.assistantErrResult(ctx, "update_install", err)

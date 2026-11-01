@@ -1015,3 +1015,24 @@ func TestRouter_Assistant_UndecryptableInstall(t *testing.T) {
 		t.Fatalf("replies = %q", sender.sent)
 	}
 }
+
+func TestRouter_Assistant_Runtime(t *testing.T) {
+	router, _, sender, store, uid := newTestRouter(t)
+	ctx := context.Background()
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl assistant"); err != nil {
+		t.Fatal(err)
+	}
+	if got := sender.sent[0]; !strings.Contains(got, "Runtime: own (your worker)") || strings.Contains(got, "renewal") {
+		t.Fatalf("default reply:\n%s", got)
+	}
+	managed, old := db.RuntimeManaged, "managed-data-flow/v0"
+	if err := store.UpdateAgentProfileFields(ctx, uid, db.AgentProfileUpdate{Runtime: &managed, ManagedConsentVersion: &old}); err != nil {
+		t.Fatal(err)
+	}
+	if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl assistant"); err != nil {
+		t.Fatal(err)
+	}
+	if got := sender.sent[1]; !strings.Contains(got, "Runtime: managed (platform worker)") || !strings.Contains(got, "needs renewal") {
+		t.Fatalf("managed reply:\n%s", got)
+	}
+}

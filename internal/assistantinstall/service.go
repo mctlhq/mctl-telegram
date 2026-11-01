@@ -61,6 +61,14 @@ const (
 	KindForkConflict
 	// KindForksDisabled: ASSISTANT_FORKS_ENABLED is off.
 	KindForksDisabled
+	// KindManagedConsentRequired: switching to the managed runtime needs
+	// the current consent (managed_consent_required); nothing changed.
+	KindManagedConsentRequired
+	// KindManagedDisabled: MANAGED_RUNTIME_ENABLED is off (managed_disabled).
+	KindManagedDisabled
+	// KindManagedQuota: the managed-account quota is exhausted
+	// (managed_quota); nothing changed.
+	KindManagedQuota
 )
 
 // Error is a refused or failed install. Msg is meant for the caller who
@@ -108,6 +116,8 @@ type Service struct {
 	// ForksEnabled is ASSISTANT_FORKS_ENABLED: with it off, no fork is
 	// created, changed or installed (#1043).
 	ForksEnabled bool
+	// Managed is the managed-runtime gate (ADR 0008).
+	Managed ManagedRuntime
 	// Now is the clock for install times; nil means time.Now.
 	Now func() time.Time
 	// beforeWrite, when set, runs between the read of the current install
@@ -136,6 +146,9 @@ type Prepared struct {
 	lifecycle    string
 	resolved     *assistant.Profile
 	ownerProfile []byte
+	// consent is spec.consent as asserted by this call. It is stripped from
+	// document, so it is never stored.
+	consent string
 	// fork is set when the install names one of the caller's forks: entry
 	// is then the fork and lifecycle its base's.
 	fork *preparedFork
@@ -222,10 +235,34 @@ func (s *Service) prepare(ctx context.Context, userID int64, raw json.RawMessage
 	if err := json.Compact(&doc, raw); err != nil {
 		return nil, fail(KindInvalid, "invalid install")
 	}
+	document := doc.Bytes()
+	if in.Spec.Consent != "" || bytes.Contains(document, []byte(`"consent"`)) {
+		document, err = stripConsent(document)
+		if err != nil {
+			return nil, fail(KindInvalid, "invalid install")
+		}
+	}
 	return &Prepared{
-		install: in, document: doc.Bytes(), entry: entry, lifecycle: lifecycle,
+		consent: in.Spec.Consent,
+		install: in, document: document, entry: entry, lifecycle: lifecycle,
 		resolved: resolved, ownerProfile: ownerProfile, fork: fork,
 	}, nil
+}
+
+// stripConsent removes spec.consent from an install document, so a consent
+// is an act of one call and is never stored or inherited by a later patch.
+func stripConsent(document []byte) ([]byte, error) {
+	var doc map[string]any
+	if err := json.Unmarshal(document, &doc); err != nil {
+		return nil, err
+	}
+	if spec, ok := doc["spec"].(map[string]any); ok {
+		if _, has := spec["consent"]; !has {
+			return document, nil
+		}
+		delete(spec, "consent")
+	}
+	return json.Marshal(doc)
 }
 
 // invalid turns a parse or resolve error into KindInvalid. A schema error
@@ -366,6 +403,11 @@ func (s *Service) Commit(ctx context.Context, userID int64, p *Prepared, opts Co
 	} else {
 		update.MarkInstalledAt = &installedAt
 	}
+	change, rerr := s.Managed.DecideRuntime(current.Runtime, r.Runtime, p.consent, s.now())
+	if rerr != nil {
+		return nil, rerr
+	}
+	change.Apply(&update)
 	if s.beforeWrite != nil {
 		s.beforeWrite()
 	}
@@ -394,11 +436,17 @@ func (s *Service) Commit(ctx context.Context, userID int64, p *Prepared, opts Co
 	if errors.As(err, &rc) {
 		return nil, conflict(rc.Current)
 	}
+	if errors.Is(err, db.ErrManagedQuota) {
+		return nil, fail(KindManagedQuota, "no managed capacity is available right now")
+	}
 	if errors.Is(err, db.ErrAssistantForkNotFound) {
 		return nil, fail(KindNotFound, "unknown assistant "+ref)
 	}
 	if err != nil {
 		return nil, internal(MsgSaveFailed, err)
+	}
+	if change.Changed || change.Consented {
+		s.AuditRuntime(ctx, userID, change)
 	}
 	// Cleanup only: the revision check already keeps these from acting,
 	// so the install stands if this fails. Drafts awaiting approval are
@@ -411,6 +459,24 @@ func (s *Service) Commit(ctx context.Context, userID int64, p *Prepared, opts Co
 		return nil, internal("failed to load saved profile", err)
 	}
 	return res, nil
+}
+
+// AuditRuntime writes the audit row of a runtime change or consent refresh:
+// the runtimes and the consent version, never message content or install
+// values. Like every audit write it is non-fatal.
+func (s *Service) AuditRuntime(ctx context.Context, userID int64, c RuntimeChange) {
+	consent := "none"
+	if c.ConsentVersion != nil {
+		consent = *c.ConsentVersion
+	}
+	to := c.To
+	if to == "" {
+		to = c.From
+	}
+	s.Store.LogToolCall(ctx, db.ToolCall{
+		UserID: userID, Tool: "assistant.runtime", Status: "ok",
+		Reason: c.From + "->" + to + " consent=" + consent,
+	})
 }
 
 func conflict(current int64) *Error {
@@ -438,6 +504,13 @@ func (s *Service) Apply(ctx context.Context, userID int64, raw json.RawMessage, 
 // patch that leaves an invalid install, or arrives at another revision,
 // changes nothing.
 func (s *Service) Patch(ctx context.Context, userID int64, patch json.RawMessage, expected int64) (*Result, error) {
+	return s.PatchWithConsent(ctx, userID, patch, expected, "")
+}
+
+// PatchWithConsent is Patch with the managed-data-flow consent asserted by
+// this call, outside the merge patch. A consent inside the patch is also
+// honoured; the top-level one wins.
+func (s *Service) PatchWithConsent(ctx context.Context, userID int64, patch json.RawMessage, expected int64, consent string) (*Result, error) {
 	var patchObj map[string]any
 	if err := json.Unmarshal(patch, &patchObj); err != nil || patchObj == nil {
 		return nil, fail(KindInvalid, "patch must be a JSON object")
@@ -463,6 +536,9 @@ func (s *Service) Patch(ctx context.Context, userID int64, patch json.RawMessage
 	merged, _ := mergePatch(spec, patchObj).(map[string]any)
 	if merged == nil {
 		return nil, fail(KindInvalid, "patch must leave a spec object")
+	}
+	if consent != "" {
+		merged["consent"] = consent
 	}
 	doc["spec"] = merged
 	raw, err := json.Marshal(doc)
@@ -677,6 +753,10 @@ type Installed struct {
 	// Installed is false for a profile that only carries the column
 	// defaults and was never configured through an install.
 	Installed bool
+	// Runtime is "own" or "managed"; ManagedReconsentRequired is set for a
+	// managed account whose stored consent is not the current version.
+	Runtime                  string
+	ManagedReconsentRequired bool
 }
 
 // firstInstallRevision is the revision a new agent profile starts at
@@ -701,6 +781,9 @@ type Settings struct {
 	AudienceExcludes    []string `json:"audience_excludes"`
 	OnlySendersCount    int      `json:"only_senders_count"`
 	BlockedSendersCount int      `json:"blocked_senders_count"`
+	Runtime             string   `json:"runtime"`
+	// ManagedReconsentRequired: managed, and consented to an older version.
+	ManagedReconsentRequired bool `json:"managed_reconsent_required"`
 }
 
 // SettingsOf summarizes a saved profile.
@@ -713,7 +796,15 @@ func SettingsOf(p *db.AgentProfile) Settings {
 		AutoIntents:   csvList(p.IntentAllowlist), NeverIntents: csvList(p.IntentDenylist),
 		WorkingHours: p.WorkingHours, AudienceExcludes: csvList(p.AudienceExcludes),
 		OnlySendersCount: len(csvList(p.SenderAllowlist)), BlockedSendersCount: len(csvList(p.BlockedSenders)),
+		Runtime: runtimeOrOwn(p.Runtime), ManagedReconsentRequired: p.NeedsManagedReconsent(),
 	}
+}
+
+func runtimeOrOwn(r string) string {
+	if r == "" {
+		return db.RuntimeOwn
+	}
+	return r
 }
 
 func csvList(s string) []string {
@@ -767,6 +858,12 @@ func AuditText(err error) string {
 		return "fork conflict"
 	case KindForksDisabled:
 		return "forks disabled"
+	case KindManagedConsentRequired:
+		return "managed consent required"
+	case KindManagedDisabled:
+		return "managed disabled"
+	case KindManagedQuota:
+		return "managed quota"
 	}
 	return "internal error"
 }
@@ -782,5 +879,7 @@ func (s *Service) Current(ctx context.Context, userID int64) (*Installed, error)
 	if err != nil {
 		return nil, internal("failed to load current assistant", fmt.Errorf("current assistant: %w", err))
 	}
-	return &Installed{Assistant: ref.Name, Version: ref.Version, InstallRevision: ref.InstallRevision, Installed: ref.Installed}, nil
+	return &Installed{Assistant: ref.Name, Version: ref.Version, InstallRevision: ref.InstallRevision, Installed: ref.Installed,
+		Runtime:                  runtimeOrOwn(ref.Runtime),
+		ManagedReconsentRequired: ref.Runtime == db.RuntimeManaged && ref.ManagedConsentVersion != db.ManagedConsentCurrent}, nil
 }

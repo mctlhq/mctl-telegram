@@ -7,10 +7,12 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
 	agentprofile "github.com/mctlhq/mctl-telegram/internal/agent/profile"
 	"github.com/mctlhq/mctl-telegram/internal/agent/schedule"
+	"github.com/mctlhq/mctl-telegram/internal/assistantinstall"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/jsonstrict"
 )
@@ -18,8 +20,12 @@ import (
 type upsertAgentProfileRequest struct {
 	// TelegramID is the account whose profile is being created or updated —
 	// same "target, not caller" shape as mintAgentTokenRequest.
-	TelegramID      int64   `json:"telegram_id"`
-	Mode            string  `json:"mode,omitempty"`
+	TelegramID int64  `json:"telegram_id"`
+	Mode       string `json:"mode,omitempty"`
+	// Runtime is "own" or "managed" (ADR 0008); omitted leaves it
+	// unchanged. There is deliberately no consent field: consent is given
+	// only by the account owner.
+	Runtime         *string `json:"runtime,omitempty"`
 	AutopilotPaused *bool   `json:"autopilot_paused,omitempty"`
 	ListenerEnabled *bool   `json:"listener_enabled,omitempty"`
 	DisclosureText  *string `json:"disclosure_text,omitempty"`
@@ -42,7 +48,7 @@ type upsertAgentProfileRequest struct {
 
 // upsertAgentProfileKeys lists the JSON names of upsertAgentProfileRequest.
 var upsertAgentProfileKeys = [...]string{
-	"telegram_id", "mode", "autopilot_paused", "listener_enabled",
+	"telegram_id", "mode", "runtime", "autopilot_paused", "listener_enabled",
 	"disclosure_text", "disclosure_disabled", "max_autonomous_turns", "max_msgs_per_minute",
 	"max_reply_chars", "intent_allowlist", "intent_denylist", "working_hours", "audience_excludes", "blocked_senders",
 	"sender_allowlist", "owner_profile",
@@ -51,6 +57,7 @@ var upsertAgentProfileKeys = [...]string{
 type agentProfileResponse struct {
 	TelegramID         int64  `json:"telegram_id"`
 	Mode               string `json:"mode"`
+	Runtime            string `json:"runtime"`
 	AutopilotPaused    bool   `json:"autopilot_paused"`
 	ListenerEnabled    bool   `json:"listener_enabled"`
 	DisclosureText     string `json:"disclosure_text"`
@@ -93,6 +100,13 @@ type agentProfileResponse struct {
 // safe C1 defaults (observe, autopilot paused, listener off) before the
 // request's fields are applied on top.
 func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
+	return NewAdminAgentProfileHandlerWithManaged(store, assistantinstall.ManagedRuntime{})
+}
+
+// NewAdminAgentProfileHandlerWithManaged is NewAdminAgentProfileHandler
+// with the managed-runtime gate (ADR 0008) that a runtime change is
+// checked against.
+func NewAdminAgentProfileHandlerWithManaged(store *db.Store, managed assistantinstall.ManagedRuntime) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, ok := identity(w, r)
 		if !ok {
@@ -125,6 +139,10 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 		}
 		if req.TelegramID <= 0 {
 			writeJSONError(w, http.StatusBadRequest, "telegram_id required")
+			return
+		}
+		if req.Runtime != nil && *req.Runtime != db.RuntimeOwn && *req.Runtime != db.RuntimeManaged {
+			writeJSONError(w, http.StatusBadRequest, "runtime must be own or managed")
 			return
 		}
 		switch req.Mode {
@@ -209,6 +227,33 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			BlockedSenders:     req.BlockedSenders,
 			SenderAllowlist:    req.SenderAllowlist,
 		}
+		var runtimeChange assistantinstall.RuntimeChange
+		if req.Runtime != nil {
+			current, err := store.GetAgentProfile(ctx, targetUserID)
+			if err != nil {
+				logHandlerErr("admin.agent_profile.upsert", err)
+				writeJSONError(w, http.StatusInternalServerError, "failed to load agent profile")
+				return
+			}
+			// The admin never supplies consent: only a consent the owner
+			// already gave, to the current version, counts.
+			stored := ""
+			if current.ManagedConsentVersion == db.ManagedConsentCurrent {
+				stored = current.ManagedConsentVersion
+			}
+			var rerr *assistantinstall.Error
+			runtimeChange, rerr = managed.DecideRuntime(current.Runtime, *req.Runtime, stored, time.Now())
+			if rerr != nil {
+				switch rerr.Kind {
+				case assistantinstall.KindManagedDisabled:
+					writeJSONError(w, http.StatusForbidden, "managed_disabled")
+				default:
+					writeJSONError(w, http.StatusConflict, "managed_consent_required")
+				}
+				return
+			}
+			runtimeChange.Apply(&update)
+		}
 		if clearOwnerProfile {
 			empty := []byte(nil)
 			update.OwnerProfileDocument = &empty
@@ -234,6 +279,11 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 		}
 
 		if err := store.UpdateAgentProfileFields(ctx, targetUserID, update); err != nil {
+			if errors.Is(err, db.ErrManagedQuota) {
+				store.LogToolCall(ctx, db.ToolCall{UserID: id.UserID, Tool: "admin.agent_profile.upsert", Status: "error", ErrMsg: "managed quota"})
+				writeJSONError(w, http.StatusConflict, "managed_quota")
+				return
+			}
 			logHandlerErr("admin.agent_profile.upsert", err)
 			store.LogToolCall(ctx, db.ToolCall{UserID: id.UserID, Tool: "admin.agent_profile.upsert", Status: "error", ErrMsg: err.Error()})
 			writeJSONError(w, http.StatusInternalServerError, "failed to save agent profile")
@@ -254,6 +304,14 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 			return
 		}
 
+		if runtimeChange.Changed {
+			consent := "none"
+			if runtimeChange.ConsentVersion != nil {
+				consent = *runtimeChange.ConsentVersion
+			}
+			store.LogToolCall(ctx, db.ToolCall{UserID: targetUserID, Tool: "assistant.runtime", Status: "ok",
+				Reason: runtimeChange.From + "->" + runtimeChange.To + " consent=" + consent})
+		}
 		store.LogToolCall(ctx, db.ToolCall{UserID: id.UserID, Tool: "admin.agent_profile.upsert", Status: "ok"})
 		slog.Info("agent profile upserted",
 			"admin_user_id", id.UserID, "target_tg_id", req.TelegramID, "target_user_id", targetUserID,
@@ -263,6 +321,7 @@ func NewAdminAgentProfileHandler(store *db.Store) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, agentProfileResponse{
 			TelegramID:             req.TelegramID,
 			Mode:                   p.Mode,
+			Runtime:                p.Runtime,
 			AutopilotPaused:        p.AutopilotPaused,
 			ListenerEnabled:        p.ListenerEnabled,
 			DisclosureText:         p.DisclosureText,

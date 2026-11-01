@@ -428,8 +428,17 @@ func (r *Router) handleAssistant(ctx context.Context, userID int64) error {
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Assistant: %s@%s\nFrom an install: %s\n", a.Name, a.Version, installed)
-	fmt.Fprintf(&sb, "Mode: %s\nAutopilot paused: %s\nListening: %s\nAI disclosure line: %s\n",
-		profile.Mode, yesNo(profile.AutopilotPaused), yesNo(profile.ListenerEnabled), disclosure)
+	fmt.Fprintf(&sb, "Mode: %s\n", profile.Mode)
+	if profile.Runtime == db.RuntimeManaged {
+		sb.WriteString("Runtime: managed (platform worker)\n")
+		if profile.NeedsManagedReconsent() {
+			sb.WriteString("Managed consent: needs renewal (open the manage page)\n")
+		}
+	} else {
+		sb.WriteString("Runtime: own (your worker)\n")
+	}
+	fmt.Fprintf(&sb, "Autopilot paused: %s\nListening: %s\nAI disclosure line: %s\n",
+		yesNo(profile.AutopilotPaused), yesNo(profile.ListenerEnabled), disclosure)
 	fmt.Fprintf(&sb, "Limits: %d autonomous turns, %d messages/min, %d characters\n",
 		profile.MaxAutonomousTurns, profile.MaxMsgsPerMinute, profile.MaxReplyChars)
 	fmt.Fprintf(&sb, "Sent without approval: %s\nNever sent: %s\n",

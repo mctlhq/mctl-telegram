@@ -1,0 +1,31 @@
+schema: mctl-telegram.product-update/v1
+id: assistant-runtime-managed
+kind: changed_behavior
+title: Choose which worker runs your assistant
+summary: >-
+  install_assistant and update_install now take a runtime setting, own or
+  managed, and list_assistants reports it. own, the default, keeps your
+  assistant running on your own worker. managed means a platform worker runs
+  it instead, and messages needed to perform assistant tasks are sent to
+  MCTL's configured third-party AI provider through MCTL's AI gateway;
+  gateway logging and caching are disabled. Switching to managed needs your
+  explicit consent, given by passing consent managed-data-flow/v1 after you
+  have seen that text, and it can be refused when managed runs are not
+  enabled or no managed capacity is left. Switching back to own never needs
+  consent. Nothing changes for an existing assistant, and managed is not
+  available yet.
+locale: en
+delivery: docs_only
+high_value: false
+tools: [install_assistant, update_install, list_assistants]
+evidence:
+  from: 0.114.0
+  changes:
+    - {tool: install_assistant, change: schema}
+    - {tool: update_install, change: schema}
+    - {tool: list_assistants, change: schema}
+status: draft
+provenance:
+  author: mashkovd
+  assisted_by: claude-sonnet-5-5
+created_at: "2026-11-01"

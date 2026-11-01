@@ -210,7 +210,7 @@ func TestListAssistants_EmbeddedCatalogWithoutValuesOrNotes(t *testing.T) {
 		hr.Defaults.Limits == nil || hr.Defaults.Limits.MaxReplyChars != 1200 || len(hr.Variables) != 7 || len(hr.Intents) != 4 {
 		t.Fatalf("entry = %+v", hr)
 	}
-	if out.Mine != (assistantInstalled{Assistant: "hr-recruiter", Version: "0.1.0", InstallRevision: inst.InstallRevision, Installed: true}) {
+	if out.Mine != (assistantInstalled{Assistant: "hr-recruiter", Version: "0.1.0", InstallRevision: inst.InstallRevision, Installed: true, Runtime: "own"}) {
 		t.Fatalf("mine = %+v, install revision %d", out.Mine, inst.InstallRevision)
 	}
 	// Neither the definition's instructions nor its profile paths.
