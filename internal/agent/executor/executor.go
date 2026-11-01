@@ -70,6 +70,27 @@ var ErrSourceSuperseded = errors.New("source message edited or deleted, draft wi
 // original message, so its id stays unknown.
 var ErrAlreadyDelivered = errors.New("telegram already has a message with this random_id")
 
+// ErrSendRefused is returned when Telegram refused the send with an error
+// that proves nothing was delivered (SendRefusedError) and no earlier
+// attempt could have landed: the action is denied with the error class as
+// its reason (#1055).
+var ErrSendRefused = errors.New("telegram refused the send")
+
+// SendRefusedError is what a Sender must return (wrapped) for an RPC error
+// on the closed list of refusals that prove the message was not delivered,
+// such as USER_IS_BLOCKED or PEER_ID_INVALID (#1055). Class is the RPC
+// error type. Any error not on the list stays ambiguous.
+type SendRefusedError struct{ Class string }
+
+func (e *SendRefusedError) Error() string { return "telegram refused the send: " + e.Class }
+
+// FloodWaitError is what a Sender must return (wrapped) for FLOOD_WAIT_X:
+// Telegram refused before sending anything and asked to wait (#1055). Such
+// an RPC is not counted as an attempt, and recovery waits Wait first.
+type FloodWaitError struct{ Wait time.Duration }
+
+func (e *FloodWaitError) Error() string { return fmt.Sprintf("telegram flood wait %s", e.Wait) }
+
 // ErrDeliveryUnknown is returned by the recovery path when it moved an
 // action to delivery_unknown (#1029): an RPC for it may have reached
 // Telegram, and it will not be retried. Neither success nor failure; the
@@ -244,8 +265,11 @@ func (e *Executor) Approve(ctx context.Context, userID int64, code string) error
 		return fmt.Errorf("load profile: %w", err)
 	}
 	if err == nil && action.InstallRevision != profile.InstallRevision {
-		if _, err := e.Store.DenyAgentAction(ctx, userID, action.ID, db.ActionPendingApproval, policy.ReasonInstallChanged); err != nil {
+		if ok, err := e.Store.DenyAgentAction(ctx, userID, action.ID, db.ActionPendingApproval, policy.ReasonInstallChanged); err != nil {
 			return fmt.Errorf("deny stale-install draft: %w", err)
+		} else if !ok {
+			// Decided elsewhere meanwhile: report that, not this denial.
+			return ErrLostRace
 		}
 		e.m.CountPolicyDenial(string(policy.DenyInstallChanged), metrics.PolicySurfaceExecutorSend)
 		return ErrInstallChanged
@@ -393,8 +417,11 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 	// this codebase has no precedent for.
 	requireApprovalBypassesUnreviewedAllow := result.Decision == policy.RequireApproval && action.PolicyDecision == db.PolicyAllow
 	if result.Decision == policy.Deny || requireApprovalBypassesUnreviewedAllow {
-		if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
+		if ok, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
 			return fmt.Errorf("deny stale approval: %w", err)
+		} else if !ok {
+			// Decided elsewhere meanwhile: report that, not this denial.
+			return ErrLostRace
 		}
 		if requireApprovalBypassesUnreviewedAllow {
 			return fmt.Errorf("policy now requires approval for this never-reviewed auto-approved action: %s", strings.Join(result.Reasons, "; "))
@@ -408,8 +435,11 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 			// The draft was only the imitated disclosure. Sending "" fails
 			// with MESSAGE_EMPTY on every retry, so terminalize it before the
 			// send reservation instead.
-			if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
+			if ok, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
 				return fmt.Errorf("deny empty payload: %w", err)
+			} else if !ok {
+				// Decided elsewhere meanwhile: report that, not this denial.
+				return ErrLostRace
 			}
 			return fmt.Errorf("draft is empty once the disclosure is stripped")
 		}
@@ -419,8 +449,11 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		return fmt.Errorf("%w: check restricted fields: %w", ErrSendQueuedForRetry, err)
 	}
 	if blocked {
-		if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
+		if ok, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
 			return fmt.Errorf("deny restricted-field payload: %w", err)
+		} else if !ok {
+			// Decided elsewhere meanwhile: report that, not this denial.
+			return ErrLostRace
 		}
 		return fmt.Errorf("owner profile blocks send: %s", reason)
 	}
@@ -429,8 +462,11 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 			// A fresh action has not reached Telegram yet, so fail closed and
 			// terminalize it instead of leaving a stale approved draft that
 			// could send automatically when an operator later reopens a gate.
-			if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
+			if ok, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
 				return fmt.Errorf("deny gated send: %w", err)
+			} else if !ok {
+				// Decided elsewhere meanwhile: report that, not this denial.
+				return ErrLostRace
 			}
 			return fmt.Errorf("send gate blocks send: %w", err)
 		}
@@ -460,8 +496,11 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		return e.denySuperseded(ctx, action, supersededErr.Kind)
 	}
 	if errors.Is(err, db.ErrAgentSendBudgetExhausted) {
-		if _, denyErr := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); denyErr != nil {
+		if ok, denyErr := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); denyErr != nil {
 			return fmt.Errorf("deny action after atomic budget check: %w", denyErr)
+		} else if !ok {
+			// Decided elsewhere meanwhile: report that, not this denial.
+			return ErrLostRace
 		}
 		return fmt.Errorf("policy budget exhausted before execution claim: %w", err)
 	}
@@ -487,6 +526,10 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		os.Exit(137)
 	}
 
+	// The struct's UpdatedAt is the approval time; the TTL bounds that start
+	// at the reservation measure from here (#1055).
+	reservedAt := time.Now().UTC()
+
 	// Count the attempt before the RPC, so a crash or a lost answer below
 	// leaves a row that says an RPC may have gone out (#1029). A failure to
 	// count sends nothing: the row stays executing with zero attempts, which
@@ -503,6 +546,9 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		// rather than leave it for recovery and tell the owner it was only
 		// queued.
 		tgMessageID, err = e.locateDelivered(ctx, action, *conv, text), nil
+	}
+	if handled, herr := e.settleRefusal(ctx, action, *conv, reservedAt, err); handled {
+		return herr
 	}
 	if err != nil {
 		// Leave the row in executing with its random_id intact — RecoverStuck
@@ -741,8 +787,11 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 			// nobody observed (#1029). The retry is still stopped.
 			return e.markDeliveryUnknown(ctx, action, *conv, reasonStoppedAfterAttempt(result.Reasons))
 		}
-		if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionExecuting, db.ActionDenied); err != nil {
+		if ok, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionExecuting, db.ActionDenied); err != nil {
 			return fmt.Errorf("deny stale approval during recovery: %w", err)
+		} else if !ok {
+			// Decided elsewhere meanwhile: report that, not this denial.
+			return nil
 		}
 		if requireApprovalBypassesUnreviewedAllow {
 			return fmt.Errorf("policy now requires approval for this never-reviewed auto-approved action during recovery: %s", strings.Join(result.Reasons, "; "))
@@ -761,15 +810,28 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 		if action.SendAttempts > 0 {
 			return e.markDeliveryUnknown(ctx, action, *conv, reasonStoppedAfterAttempt([]string{reason}))
 		}
-		if _, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionExecuting, db.ActionDenied); err != nil {
+		if ok, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionExecuting, db.ActionDenied); err != nil {
 			return fmt.Errorf("deny restricted-field payload during recovery: %w", err)
+		} else if !ok {
+			// Decided elsewhere meanwhile: report that, not this denial.
+			return nil
 		}
 		return fmt.Errorf("owner profile blocks recovery send: %s", reason)
 	}
 	if e.SendGate != nil {
 		if err := e.SendGate(ctx, action.UserID, conv.PeerTGID); err != nil {
 			// Keep the durable reservation intact. The gate may be reopened,
-			// and the first RPC may already have reached Telegram.
+			// and the first RPC may already have reached Telegram. But not
+			// forever (#1055): past the approval TTL, counted from the
+			// reservation, the retry ends. With no attempt made nothing was
+			// sent, so it is denied; after an attempt the outcome is unknown.
+			if e.ApprovalTTL > 0 && time.Since(action.UpdatedAt) > e.ApprovalTTL {
+				if herr := e.endHeldRetry(ctx, action, *conv, action.SendAttempts, ReasonSendGateClosed,
+					"delivery unknown: send gate stayed closed past the approval TTL after an attempt that may have been delivered"); !errors.Is(herr, ErrLostRace) {
+					return fmt.Errorf("send gate closed past the approval TTL: %w", herr)
+				}
+				return nil
+			}
 			return fmt.Errorf("send gate denied recovery retry: %w", err)
 		}
 	}
@@ -792,6 +854,15 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 		slog.Warn("executor: recovery retry found the send already delivered",
 			"action_id", action.ID, "user_id", action.UserID)
 		tgMessageID, err = e.locateDelivered(ctx, action, *conv, text), nil
+	}
+	// A listed executing row's updated_at is its reservation time: attempt
+	// stamps and flood waits leave it alone.
+	if handled, herr := e.settleRefusal(ctx, action, *conv, action.UpdatedAt, err); handled {
+		if errors.Is(herr, ErrLostRace) {
+			// Decided elsewhere since the sweep listed it.
+			return nil
+		}
+		return herr
 	}
 	if err != nil {
 		if attempts >= e.maxSendAttempts() {
@@ -831,6 +902,96 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 		e.m.AgentApprovalLatencySeconds.Observe(time.Since(action.UpdatedAt).Seconds())
 	}
 	return nil
+}
+
+// ReasonFloodWaitOutlasted is the denial reason of a send Telegram kept
+// throttling with FLOOD_WAIT past the approval TTL, with no attempt that
+// could have landed (#1055).
+const ReasonFloodWaitOutlasted = "flood wait outlasted the approval TTL"
+
+// endHeldRetry ends a retry that was held too long without a real attempt
+// (send gate, flood waits): denied with denyReason when no counted attempt
+// could have landed, delivery_unknown with unknownReason otherwise. It
+// returns ErrLostRace when the row was decided elsewhere meanwhile.
+func (e *Executor) endHeldRetry(ctx context.Context, action db.AgentAction, conv db.Conversation, attempts int, denyReason, unknownReason string) error {
+	if attempts > 0 {
+		err := e.markDeliveryUnknown(ctx, action, conv, unknownReason)
+		if err == nil {
+			return ErrLostRace
+		}
+		return err
+	}
+	ok, err := e.Store.DenyAgentAction(ctx, action.UserID, action.ID, db.ActionExecuting, denyReason)
+	if err != nil {
+		return fmt.Errorf("deny held retry: %w", err)
+	}
+	if !ok {
+		return ErrLostRace
+	}
+	return fmt.Errorf("retry denied: %s", denyReason)
+}
+
+// ReasonSendGateClosed is the denial reason of a recovery retry the send
+// gate held past the approval TTL with no attempt made (#1055).
+const ReasonSendGateClosed = "send gate closed"
+
+// settleRefusal handles a send error that is not ambiguous (#1055) and
+// reports whether it did. Both kinds prove this RPC sent nothing, so its
+// attempt stamp is taken back first:
+//
+//   - FloodWaitError: the row stays executing and recovery waits as
+//     Telegram asked before trying again.
+//   - SendRefusedError: retrying cannot help. If no earlier attempt could
+//     have landed (none left counted), the action is denied with the error
+//     class as its reason. Otherwise an earlier attempt may have been
+//     delivered, and it ends delivery_unknown.
+//
+// Any other error, nil included, is left to the caller.
+func (e *Executor) settleRefusal(ctx context.Context, action db.AgentAction, conv db.Conversation, reservedAt time.Time, sendErr error) (bool, error) {
+	var (
+		flood   *FloodWaitError
+		refused *SendRefusedError
+	)
+	switch {
+	case errors.As(sendErr, &flood):
+		attempts, ok, err := e.Store.UnnoteAgentActionSendAttempt(ctx, action.UserID, action.ID, time.Now().UTC().Add(flood.Wait))
+		if err != nil {
+			// The attempt stays counted, which errs toward the bound.
+			return true, fmt.Errorf("%w: flood wait, undo attempt: %w: %w", ErrSendQueuedForRetry, err, sendErr)
+		}
+		if !ok {
+			return true, ErrLostRace
+		}
+		// A flood wait is not an attempt, so the attempt bound never ends a
+		// row Telegram keeps throttling. The approval TTL, counted from the
+		// reservation like the gate-held bound, does.
+		if e.ApprovalTTL > 0 && time.Since(reservedAt) > e.ApprovalTTL {
+			return true, e.endHeldRetry(ctx, action, conv, attempts, ReasonFloodWaitOutlasted,
+				"delivery unknown: flood waits outlasted the approval TTL after an attempt that may have been delivered")
+		}
+		return true, fmt.Errorf("%w: %w", ErrSendQueuedForRetry, sendErr)
+	case errors.As(sendErr, &refused):
+		attempts, ok, err := e.Store.UnnoteAgentActionSendAttempt(ctx, action.UserID, action.ID, time.Time{})
+		if err != nil {
+			// Left executing with the attempt counted; the next retry is
+			// refused the same way and settles it then.
+			return true, fmt.Errorf("undo refused attempt: %w: %w", err, sendErr)
+		}
+		if !ok {
+			return true, ErrLostRace
+		}
+		if attempts > 0 {
+			return true, e.markDeliveryUnknown(ctx, action, conv,
+				"delivery unknown: Telegram refused a retry ("+refused.Class+") after an attempt that may have been delivered")
+		}
+		if ok, err := e.Store.DenyAgentAction(ctx, action.UserID, action.ID, db.ActionExecuting, "send refused by Telegram: "+refused.Class); err != nil {
+			return true, fmt.Errorf("deny refused send: %w", err)
+		} else if !ok {
+			return true, ErrLostRace
+		}
+		return true, fmt.Errorf("%w: %s", ErrSendRefused, refused.Class)
+	}
+	return false, nil
 }
 
 func (e *Executor) maxSendAttempts() int {
@@ -1038,6 +1199,9 @@ func stripDisclosure(payload, disclosure string) string {
 // the audit row and /mctl show carry the explanation.
 func (e *Executor) denySuperseded(ctx context.Context, action db.AgentAction, kind string) error {
 	reason := db.SourceSupersededReason(kind)
+	// A lost compare-and-set is deliberately not ErrLostRace here: what
+	// usually wins it is the listener denying the same draft for the same
+	// edit or delete, so "superseded" stays the true answer.
 	if _, err := e.Store.DenyAgentActionWithReason(ctx, action.UserID, action.ID, db.ActionApproved, reason); err != nil {
 		return fmt.Errorf("deny superseded draft: %w", err)
 	}

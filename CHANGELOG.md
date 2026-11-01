@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.117.0](https://github.com/mctlhq/mctl-telegram/compare/0.116.0...0.117.0) (2026-11-01)
+
+
+### Features
+
+* **agent-worker:** let the Mac host worker track production releases ([859b9ea](https://github.com/mctlhq/mctl-telegram/commit/859b9eac9a80e6c471c32a94e20ae3a1621dd2ba))
+* **agent-worker:** let the Mac host worker track production releases ([f2a6f1c](https://github.com/mctlhq/mctl-telegram/commit/f2a6f1cf984869119031b81b2e1da939eb71a979))
+
+## [0.116.0](https://github.com/mctlhq/mctl-telegram/compare/0.115.0...0.116.0) (2026-11-01)
+
+
+### Features
+
+* **seo:** add sitemap, robots.txt, and discover robots directive ([b5c9ec3](https://github.com/mctlhq/mctl-telegram/commit/b5c9ec37258393d5498f0f7a033e344247c3d550))
+
+
+### Bug Fixes
+
+* **agent:** measure the flood-wait bound from the reservation ([b8ec7fc](https://github.com/mctlhq/mctl-telegram/commit/b8ec7fcce5b6fe7ac95ed7a5d9bff068d9af86c7))
+* **agent:** report a lost race instead of a denial it did not make ([186f9d9](https://github.com/mctlhq/mctl-telegram/commit/186f9d931a0a2266f31a74fb492ad55ce1bc64e6))
+* **agent:** settle definitive send refusals and bound gate-held retries ([ae332ea](https://github.com/mctlhq/mctl-telegram/commit/ae332eae40799514d8d0df57ddacd1ec5ab26e92))
+* **agent:** treat a flood wait on a decided row as a lost race ([3c6cfae](https://github.com/mctlhq/mctl-telegram/commit/3c6cfae0105634379300513da8bca210da546d19))
+
 ## [0.115.0](https://github.com/mctlhq/mctl-telegram/compare/0.114.0...0.115.0) (2026-10-31)
 
 

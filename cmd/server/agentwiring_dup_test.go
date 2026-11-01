@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gotd/td/tgerr"
+
 	"github.com/mctlhq/mctl-telegram/internal/agent/executor"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
@@ -27,6 +29,23 @@ func TestMapPoolSelfSendError_Duplicate(t *testing.T) {
 	}
 	if err := mapPoolSelfSendError(errors.New("timeout")); errors.Is(err, executor.ErrAlreadyDelivered) {
 		t.Fatalf("plain error mapped to ErrAlreadyDelivered: %v", err)
+	}
+}
+
+func TestMapPoolSendError_DefinitiveRefusalsAndFloodWait(t *testing.T) {
+	var flood *executor.FloodWaitError
+	if err := mapPoolSendError(fmt.Errorf("borrow: %w", tgerr.New(420, "FLOOD_WAIT_30"))); !errors.As(err, &flood) || flood.Wait != 30*time.Second {
+		t.Fatalf("FLOOD_WAIT_30 = %v, want FloodWaitError of 30s", err)
+	}
+	var refused *executor.SendRefusedError
+	if err := mapPoolSendError(fmt.Errorf("send: %w", tgerr.New(400, "USER_IS_BLOCKED"))); !errors.As(err, &refused) || refused.Class != "USER_IS_BLOCKED" {
+		t.Fatalf("USER_IS_BLOCKED = %v, want SendRefusedError", err)
+	}
+	for _, ambiguous := range []error{errors.New("i/o timeout"), tgerr.New(500, "INTERNAL")} {
+		err := mapPoolSendError(ambiguous)
+		if errors.As(err, &refused) || errors.As(err, &flood) {
+			t.Fatalf("%v classified as definitive", ambiguous)
+		}
 	}
 }
 

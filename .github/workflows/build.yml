@@ -222,7 +222,8 @@ jobs:
   # The registry form of every catalog assistant (#1019): materialized
   # canonical JSON with instructions inlined, checked to parse back to the
   # same digest. Publishing it to the mctl-api registry is a human-admin
-  # step that takes this artifact as input.
+  # step: on main, assistant-publish-prep.yml prepares the command for each
+  # version the registry does not have yet.
   assistant-materialize:
     runs-on: ubuntu-latest
     steps:
@@ -236,6 +237,25 @@ jobs:
           name: assistants-materialized
           path: dist/assistants/
           if-no-files-found: error
+
+  # The owner's publish script, offline: a fake admin tool and a local
+  # catalog fixture stand in for mctl-api, so nothing is published.
+  publish-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.10"
+      - run: bash scripts/publish-assistant_test.sh
+
+  # The Mac host worker's self-update script, offline: target resolution for
+  # the preview and prod tracks against a local repository and fixtures.
+  agent-worker-self-update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - run: bash deploy/agent-worker/mac-mini/self-update_test.sh
 
   govulncheck:
     runs-on: ubuntu-latest

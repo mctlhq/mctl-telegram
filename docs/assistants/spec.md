@@ -35,6 +35,8 @@ and [`assistants/schemas/assistant-install.schema.json`](../../assistants/schema
 (JSON Schema 2020-12). `internal/assistant` validates both, checks the install
 against its definition and maps it onto today's profile.
 
+How the pieces fit together end to end (versions, eval, publishing, runtime) and the manual procedures are in [how-it-works.md](how-it-works.md).
+
 Worked example: [`assistants/hr-recruiter/assistant.yaml`](../../assistants/hr-recruiter/assistant.yaml)
 and [`install.example.yaml`](../../assistants/hr-recruiter/install.example.yaml).
 
@@ -408,10 +410,13 @@ carries the text and no path, so it is complete without the repository.
   taken over the authored YAML and the instructions file; the value for
   `hr-recruiter@0.1.0` changed once with that switch.)
 - **Building.** `go run ./cmd/assistant-materialize -out dist/assistants`
-  writes `<name>-<version>.json` for every catalog assistant and prints its
-  digest, after checking that each document parses back
-  (`assistant.ParseMaterialized`) to the same digest. CI runs it on every
-  build and keeps the output as the `assistants-materialized` artifact.
+  writes `<name>-<version>.json` for every catalog assistant and prints
+  `<name>@<version> <digest> <file> <source path>`, after checking that each
+  document parses back (`assistant.ParseMaterialized`) to the same digest.
+  With `-git-sha <commit>` it also writes `<name>-<version>.request.json`,
+  the publish body for that commit (`assistant.PublishRequest`). CI runs it
+  on every build and keeps the output as the `assistants-materialized`
+  artifact.
 - **Visibility.** P3 serves `public` and `admin` only. `tenant` needs a
   tenant-binding model that does not exist yet, so a tenant-visible
   definition is refused when the catalog loads and when a materialized
@@ -473,11 +478,45 @@ carries the text and no path, so it is complete without the repository.
   applies only while `ASSISTANT_REGISTRY_ENABLED` is on; with it off,
   claims still render from stored definitions but no lifecycle is read or
   enforced.
-- **Publishing.** In P3 it is manual and transitional: the owner publishes
-  the CI artifact through the human-admin mctl-api tool, with the digest as
-  the version's `contentHash`. A narrow publisher principal that may only
-  publish immutable `TelegramAssistant` versions from this repository is a
-  follow-up.
+- **Publishing.** Semi-automatic: CI prepares, the owner publishes.
+  Publishing is a human-admin call by design (`requireAgentRegistryHumanAdmin`
+  in mctl-api), so CI holds no registry credential and never calls it.
+  - *Prepare (CI).* On every push to `main` that touches the catalog,
+    `.github/workflows/assistant-publish-prep.yml` runs
+    `go run ./cmd/assistant-publish-plan`, which looks up each catalog
+    version on the public route
+    `GET /api/v1/assistant-catalog/{name}/versions/{version}` (not the
+    list, which leaves deprecated versions out). `404 assistant_not_found`
+    means not published; a version with the same digest is done. A failed
+    or unreadable read (network error, 5xx, any other status, a 404 without
+    `assistant_not_found`, a body that is not this version's entry) is
+    unknown, never "not published", and a version the registry holds under
+    another digest breaks immutability: either fails the job and no command
+    is prepared for any version. A definition the public catalog never
+    shows (`visibility` other than `public`, or `status: draft`) is
+    reported as not publicly observable and gets no command. For each
+    unpublished version the job uploads the request body (the
+    `assistant-publish-requests` artifact, reference only), writes the
+    command to the job summary and comments it once on the merged PR:
+    `! bash mctl-telegram/scripts/publish-assistant.sh <name> <version> <main sha> <digest>`.
+  - *Publish (owner, from the workspace root).*
+    `scripts/publish-assistant.sh` trusts nothing CI produced: it refuses a
+    commit not on `origin/main`, rebuilds the document at that commit in a
+    temporary worktree, refuses unless the digest is the one given, checks
+    with the admin token (`tools/mctl-token/mctl_token.py`) that the agent
+    row exists (if not, it prints the one-time
+    `POST /api/v1/agents` call and stops; it never creates the row itself)
+    and whether the version is already in the registry (same digest and
+    `published` or `deprecated`: done; `disabled`, or another digest:
+    fail), publishes with the digest as `contentHash` and
+    the authored file as the source path, then checks that the public
+    catalog serves the version as `published` under the same digest. Any
+    other outcome exits non-zero. The body goes to `mctl_token.py`'s
+    `call()` from a file, not on the command line, which caps one argument
+    at 128 KiB on Linux. `scripts/publish-assistant_test.sh` runs it
+    offline in CI against a fake admin tool and a local catalog fixture.
+  - A narrow publisher principal that may only publish immutable
+    `TelegramAssistant` versions from this repository is a follow-up.
 
 ## Forks
 

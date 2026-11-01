@@ -562,6 +562,8 @@ func approverErrText(err error) string {
 		return "the assistant or its settings changed since this draft was written, so it was not sent"
 	case errors.Is(err, executor.ErrSourceSuperseded):
 		return "the sender edited or deleted the message this draft answers, so it was not sent"
+	case errors.Is(err, executor.ErrSendRefused):
+		return "Telegram refused to deliver it (the person may have blocked you or left Telegram), so it was not sent"
 	default:
 		return "an internal error occurred"
 	}
