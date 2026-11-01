@@ -80,6 +80,8 @@ func TestOpenAIRunner_Retry429HonoursRetryAfter(t *testing.T) {
 func TestOpenAIRunner_NoSharedStateAcrossJobs(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/event/e":
+			writeTestJSON(w, map[string]any{"event_id": "e"})
 		case r.Method == http.MethodPost && (r.URL.Path == "/jobs/11/complete" || r.URL.Path == "/jobs/12/complete"):
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodPost && (r.URL.Path == "/jobs/11/cost" || r.URL.Path == "/jobs/12/cost"):
@@ -95,18 +97,24 @@ func TestOpenAIRunner_NoSharedStateAcrossJobs(t *testing.T) {
 	defer api.Close()
 	var calls atomic.Int32
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
+		// Call 2 is job 12's first turn: a non-completing tool call. If
+		// completion state leaked from job 11, the runner would stop right
+		// after it and the provider would see 2 calls instead of 3.
+		if calls.Add(1) == 2 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"ev","type":"function","function":{"name":"get_event","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"done","type":"function","function":{"name":"complete_agent_job","arguments":"{\"status\":\"ignored\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
 	}))
 	defer provider.Close()
 	r := &OpenAIRunner{Client: &OpenAIClient{BaseURL: provider.URL, APIKey: "k", Model: "m", HTTP: provider.Client()}, APIBaseURL: api.URL}
 	for _, id := range []int64{11, 12} {
-		if err := r.Run(context.Background(), JobEnvelope{JobID: id, Attempt: 1, JobToken: "j", Tools: []string{"get_event", "complete_agent_job"}}); err != nil {
+		if err := r.Run(context.Background(), JobEnvelope{JobID: id, EventID: "e", Attempt: 1, JobToken: "j", Tools: []string{"get_event", "complete_agent_job"}}); err != nil {
 			t.Fatalf("job %d: %v", id, err)
 		}
 	}
-	if calls.Load() != 2 {
-		t.Fatalf("provider calls=%d want 2; completion state leaked across jobs", calls.Load())
+	if calls.Load() != 3 {
+		t.Fatalf("provider calls=%d want 3; completion state leaked across jobs", calls.Load())
 	}
 }
 

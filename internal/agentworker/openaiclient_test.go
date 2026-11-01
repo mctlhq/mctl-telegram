@@ -48,6 +48,12 @@ func TestOpenAIClient_GatewayHeadersAndToolSchema(t *testing.T) {
 	if out.Usage.PromptTokens != 10 || out.Usage.CompletionTokens != 2 {
 		t.Fatalf("usage=%+v", out.Usage)
 	}
+	if got["tool_choice"] != "auto" {
+		t.Fatalf("tool_choice=%v want auto", got["tool_choice"])
+	}
+	if got["stream"] != false {
+		t.Fatalf("stream=%v want false", got["stream"])
+	}
 	toolsRaw, ok := got["tools"].([]any)
 	if !ok || len(toolsRaw) != 1 {
 		t.Fatalf("tools=%#v", got["tools"])
