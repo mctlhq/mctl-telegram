@@ -496,8 +496,11 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		return e.denySuperseded(ctx, action, supersededErr.Kind)
 	}
 	if errors.Is(err, db.ErrAgentSendBudgetExhausted) {
-		if _, denyErr := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); denyErr != nil {
+		if ok, denyErr := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); denyErr != nil {
 			return fmt.Errorf("deny action after atomic budget check: %w", denyErr)
+		} else if !ok {
+			// Decided elsewhere meanwhile: report that, not this denial.
+			return ErrLostRace
 		}
 		return fmt.Errorf("policy budget exhausted before execution claim: %w", err)
 	}
@@ -523,6 +526,10 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		os.Exit(137)
 	}
 
+	// The struct's UpdatedAt is the approval time; the TTL bounds that start
+	// at the reservation measure from here (#1055).
+	reservedAt := time.Now().UTC()
+
 	// Count the attempt before the RPC, so a crash or a lost answer below
 	// leaves a row that says an RPC may have gone out (#1029). A failure to
 	// count sends nothing: the row stays executing with zero attempts, which
@@ -540,7 +547,7 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		// queued.
 		tgMessageID, err = e.locateDelivered(ctx, action, *conv, text), nil
 	}
-	if handled, herr := e.settleRefusal(ctx, action, *conv, err); handled {
+	if handled, herr := e.settleRefusal(ctx, action, *conv, reservedAt, err); handled {
 		return herr
 	}
 	if err != nil {
@@ -848,7 +855,9 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 			"action_id", action.ID, "user_id", action.UserID)
 		tgMessageID, err = e.locateDelivered(ctx, action, *conv, text), nil
 	}
-	if handled, herr := e.settleRefusal(ctx, action, *conv, err); handled {
+	// A listed executing row's updated_at is its reservation time: attempt
+	// stamps and flood waits leave it alone.
+	if handled, herr := e.settleRefusal(ctx, action, *conv, action.UpdatedAt, err); handled {
 		if errors.Is(herr, ErrLostRace) {
 			// Decided elsewhere since the sweep listed it.
 			return nil
@@ -938,7 +947,7 @@ const ReasonSendGateClosed = "send gate closed"
 //     delivered, and it ends delivery_unknown.
 //
 // Any other error, nil included, is left to the caller.
-func (e *Executor) settleRefusal(ctx context.Context, action db.AgentAction, conv db.Conversation, sendErr error) (bool, error) {
+func (e *Executor) settleRefusal(ctx context.Context, action db.AgentAction, conv db.Conversation, reservedAt time.Time, sendErr error) (bool, error) {
 	var (
 		flood   *FloodWaitError
 		refused *SendRefusedError
@@ -956,7 +965,7 @@ func (e *Executor) settleRefusal(ctx context.Context, action db.AgentAction, con
 		// A flood wait is not an attempt, so the attempt bound never ends a
 		// row Telegram keeps throttling. The approval TTL, counted from the
 		// reservation like the gate-held bound, does.
-		if e.ApprovalTTL > 0 && time.Since(action.UpdatedAt) > e.ApprovalTTL {
+		if e.ApprovalTTL > 0 && time.Since(reservedAt) > e.ApprovalTTL {
 			return true, e.endHeldRetry(ctx, action, conv, attempts, ReasonFloodWaitOutlasted,
 				"delivery unknown: flood waits outlasted the approval TTL after an attempt that may have been delivered")
 		}

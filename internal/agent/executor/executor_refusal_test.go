@@ -320,3 +320,35 @@ func TestExecutor_DenyOnADecidedRowReportsTheRace(t *testing.T) {
 	}
 	t.Fatal("reserved row not listed as stuck")
 }
+
+// TestExecutor_FreshFloodWaitOfAnOldApprovalIsQueued: the flood-wait TTL
+// runs from the reservation, not from the action's in-memory updated_at.
+// A guarded auto-send whose approved row is older than the TTL and gets
+// FLOOD_WAIT on its first send is queued, not denied.
+func TestExecutor_FreshFloodWaitOfAnOldApprovalIsQueued(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	exec.ApprovalTTL = time.Hour
+	if err := store.UpsertAgentProfile(ctx, db.AgentProfile{
+		UserID: uid, Mode: db.AgentModeGuarded, DisclosureText: "I'm an AI assistant.",
+		IntentAllowlist: "discovery",
+	}); err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+	actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply, Intent: "discovery",
+		Payload: "Happy to chat about the role.", PolicyDecision: db.PolicyAllow, Status: db.ActionApproved,
+	})
+	if err != nil {
+		t.Fatalf("seed approved action: %v", err)
+	}
+	backdateReservation(t, store, uid, actionID, 2*time.Hour)
+	sender.errs = []error{floodWait(time.Minute)}
+
+	if _, err := exec.ProcessApproved(ctx); err != nil {
+		t.Fatalf("process approved: %v", err)
+	}
+	if a := mustAction(t, store, uid, actionID); a.Status != db.ActionExecuting || a.SendAttempts != 0 {
+		t.Fatalf("status=%q attempts=%d, want queued (executing, 0 attempts)", a.Status, a.SendAttempts)
+	}
+}
