@@ -18,7 +18,7 @@ delivery: docs_only
 high_value: false
 tools: [get_acquisition_report]
 evidence:
-  from: 0.117.0
+  from: 0.118.0
   changes:
     - {tool: get_acquisition_report, change: added}
 status: approved
