@@ -110,7 +110,7 @@ the durable terminal-state verification. Unset `AGENT_RUNNER` is exactly the
 - **Job token only.** `AGENT_API_TOKEN` is used by the poll loop alone. An
   `openai` job refuses to run without the claim's narrow `job_token`; every
   tool call, cost report and completion check for that job uses a client
-  authenticated with it. No state is shared between jobs.
+  authenticated with it. No job-specific state is shared between jobs; provider pacing state (`AGENT_OPENAI_MIN_INTERVAL`) is shared.
 - **Request.** Non-streaming `POST {AGENT_OPENAI_BASE_URL}/chat/completions`
   with `tool_choice: auto` and the tools' `InputSchema` unchanged. Headers:
   `Authorization`, `cf-aig-authorization` (when a gateway token is set),

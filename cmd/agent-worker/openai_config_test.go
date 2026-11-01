@@ -55,3 +55,37 @@ func TestRequiredEnvFloatRejectsNegativeAndNonFinite(t *testing.T) {
 		})
 	}
 }
+
+// Each OpenAI setting must fail closed on its own: the valid baseline below
+// is broken one variable at a time and run() must refuse to start, naming it.
+func TestRun_OpenAIFailsClosedPerSetting(t *testing.T) {
+	base := map[string]string{
+		"AGENT_API_BASE_URL": "http://127.0.0.1:1", "AGENT_API_TOKEN": "poll-token",
+		"AGENT_CREDENTIAL_DOMAIN_ID": "test-domain", "AGENT_RUNNER": "openai",
+		"AGENT_MODEL": "m", "AGENT_OPENAI_BASE_URL": "http://127.0.0.1:1", "AGENT_OPENAI_API_KEY": "k",
+		"MODEL_INPUT_USD_PER_MTOK": "1", "MODEL_OUTPUT_USD_PER_MTOK": "2",
+		"AGENT_MAX_TURNS": "12", "AGENT_OPENAI_MIN_INTERVAL": "0s",
+	}
+	cases := []struct{ key, val string }{
+		{"AGENT_OPENAI_BASE_URL", ""},
+		{"AGENT_OPENAI_API_KEY", ""},
+		{"MODEL_INPUT_USD_PER_MTOK", ""},
+		{"MODEL_OUTPUT_USD_PER_MTOK", ""},
+		{"MODEL_INPUT_USD_PER_MTOK", "-1"},
+		{"MODEL_OUTPUT_USD_PER_MTOK", "NaN"},
+		{"AGENT_MAX_TURNS", "0"},
+		{"AGENT_OPENAI_MIN_INTERVAL", "-1s"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key+"="+tc.val, func(t *testing.T) {
+			for k, v := range base {
+				t.Setenv(k, v)
+			}
+			t.Setenv(tc.key, tc.val)
+			err := run()
+			if err == nil || !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("err=%v want an error naming %s", err, tc.key)
+			}
+		})
+	}
+}
