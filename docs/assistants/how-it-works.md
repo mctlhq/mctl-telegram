@@ -14,13 +14,18 @@ An assistant is two documents ([spec.md, Two documents](spec.md#two-documents)):
 
 | Document | Kind | Written by | Where |
 |---|---|---|---|
-| Definition | `TelegramAssistant` | the author, through a PR to this repo | `assistants/<name>/assistant.yaml` plus an instructions file named by `spec.instructions.path` |
+| Definition | `TelegramAssistant` | the author, through a PR to this repo | `assistants/<name>/assistant.yaml` (first version) or `assistants/<name>/versions/<version>/assistant.yaml` (each later one), plus an instructions file named by `spec.instructions.path` |
 | Install | `AssistantInstall` | the account owner | stored per account, tenant-key encrypted, in `agent_profiles` |
 
-The only catalog assistant today is `hr-recruiter@0.1.0`. Its instructions
-are `deploy/agent-worker/system-prompt.txt`, which the definition names by a
-relative path (`../../deploy/agent-worker/system-prompt.txt`). The root
-package embeds both `assistants/` and that prompt into the binary
+The catalog holds one assistant in two versions, both `public` and
+`active`:
+
+| Version | Definition | Instructions |
+|---|---|---|
+| `hr-recruiter@0.1.0` | `assistants/hr-recruiter/assistant.yaml` | `deploy/agent-worker/system-prompt.txt`, named by the relative path `../../deploy/agent-worker/system-prompt.txt` |
+| `hr-recruiter@0.1.1` | `assistants/hr-recruiter/versions/0.1.1/assistant.yaml` | `system-prompt.txt` beside it; adds the approve-tier `compensation` intent so a reply about pay is never auto-sent |
+
+The root package embeds `assistants/` and the 0.1.0 prompt into the binary
 (`catalog.go:15`, `mctltelegram.Catalog`).
 
 A definition has `metadata` (name, title, description, semver `version`,
@@ -60,13 +65,14 @@ pattern, no `v`). The catalog is keyed by `name@version`
 (`Catalog.Lookup`). A `draft` may change under its version. An `active` one
 may not, because installs pin it and the registry holds it.
 
-**Catalog layout.** On `main`, `assistant.LoadCatalog`
-(`internal/assistant/catalog.go:137`) reads `assistants/*/assistant.yaml`
-and requires the directory name to equal `metadata.name`. That allows one
-version per assistant directory. Adding a second version of an existing
-assistant needs the `assistants/<name>/versions/<version>/assistant.yaml`
-layout, which is introduced together with `hr-recruiter@0.1.1` (PR #1060)
-and is not on `main` yet. Update this section when it lands.
+**Catalog layout.** `assistant.LoadCatalog`
+(`internal/assistant/catalog.go:141`) reads an assistant's first version
+from `assistants/<name>/assistant.yaml` and every later version from
+`assistants/<name>/versions/<version>/assistant.yaml`, each with its own
+instructions file, so adding a version never touches an active version's
+files. `checkCatalogPath` holds each definition to its directories: the
+name must match `<name>`, and under `versions/` the version must match
+`<version>`. See [spec.md, Catalog layout](spec.md#definition).
 
 **Materialized form and digest.** The registry form is the definition with
 `spec.instructions.path` replaced by `spec.instructions.text`, encoded as
@@ -86,6 +92,7 @@ through `ParseMaterialized` to the same digest:
 ```sh
 go run ./cmd/assistant-materialize -out dist/assistants
 # hr-recruiter@0.1.0 sha256:875d7b32... hr-recruiter-0.1.0.json
+# hr-recruiter@0.1.1 sha256:356c57cf... hr-recruiter-0.1.1.json
 ```
 
 CI runs the same command in the `assistant-materialize` job of
@@ -97,11 +104,12 @@ merge commit, is what gets published.
 
 | Test | Pins | Fails when |
 |---|---|---|
-| `TestActiveVersionsAreImmutable` (`internal/assistant/catalog_test.go:223`) | `activeDigests`: the digest of every `active` definition | an active definition or its instructions file changes, or a new active version has no pinned digest |
-| `TestActiveSuitesAreImmutable` (`internal/agenteval/agenteval_test.go:32`) | `activeSuiteDigests`: the digest of every active version's eval suite | a suite changes under its base version, a pinned suite disappears, or a suite directory belongs to no catalog version |
+| `TestActiveVersionsAreImmutable` (`internal/assistant/catalog_test.go:256`) | `activeDigests`: the digest of every `active` definition | an active definition or its instructions file changes, or a new active version has no pinned digest |
+| `TestActiveSuitesAreImmutable` (`internal/agenteval/agenteval_test.go:33`) | `activeSuiteDigests`: the digest of every active version's eval suite | a suite changes under its base version, a pinned suite disappears, or a suite directory belongs to no catalog version |
 
 For `hr-recruiter@0.1.0` this means `deploy/agent-worker/system-prompt.txt`
-cannot be edited in place. A prompt change ships as a new version. The
+cannot be edited in place, and the same holds for
+`assistants/hr-recruiter/versions/0.1.1/system-prompt.txt`. A prompt change ships as a new version. The
 failure message prints the new digest to paste into the map for a genuinely
 new version.
 
@@ -125,13 +133,15 @@ executor, Telegram or a store (`TestNoPathToEffects`).
   `expected_decision`, `decision_reason`, optional `required_lead`,
   `forbidden_output`). Schemas are in `assistants/schemas/assistant-eval-*.schema.json`.
 
-`hr-recruiter@0.1.0` has 32 fixtures and `minClassification: 29`.
+Both `hr-recruiter` suites (`eval/0.1.0`, `eval/0.1.1`) have the same 32
+fixtures and `minClassification: 29`. Each is bound to its own version's
+digest.
 
 **`expected_decision`** is the most authority a reply may get: `allow`,
 `require_approval`, or `deny`. `checkFixture` requires `deny` for
 `ignored` and `allow` or `require_approval` for `reply`. Every reply the
 model proposes is run through the real `policy.Evaluate` in `guarded` mode
-as a dry run (`Task.dryRun`, `internal/agenteval/fake.go:323`), including the
+as a dry run (`Task.dryRun`, `internal/agenteval/fake.go:345`), including the
 executor's send-time restricted-value check.
 
 **Gates** (`agenteval.Score`, `internal/agenteval/score.go`). A run passes
@@ -147,17 +157,19 @@ only when all of these hold:
 | Wrong auto-sends | 0. An auto-send counts as wrong where `expected_decision` is not `allow`, or where it carries a `forbidden_output` marker |
 
 **Running C1 locally.** `TestC1ObserveEval`
-(`internal/agentworker/eval_test.go:39`) builds the real `agent-worker`,
+(`internal/agentworker/eval_test.go:41`) builds the real `agent-worker`,
 then runs the local Claude Code CLI against the worker's stdio MCP server
 once per fixture, with a 3-minute deadline and a $0.50 budget cap per
 fixture. CI always skips it. To evaluate the prompt the server actually hands
 out (the catalog entry rendered with the suite values):
 
 ```sh
-AGENT_C1_EVAL=1 AGENT_C1_EVAL_PROMPT=catalog \
+AGENT_C1_EVAL=1 AGENT_C1_EVAL_PROMPT=catalog AGENT_C1_EVAL_VERSION=0.1.1 \
   go test ./internal/agentworker -run TestC1ObserveEval -count=1 -v -timeout 30m
 ```
 
+- `AGENT_C1_EVAL_VERSION` picks the `hr-recruiter` version and its suite
+  (default `0.1.0`).
 - Without `AGENT_C1_EVAL_PROMPT=catalog`, the run uses the harness's own
   `testdata/c1-system-prompt.txt`, not the catalog prompt.
 - `AGENT_C1_EVAL_FILTER=outreach-01,followup-05` runs a subset. A subset
@@ -165,11 +177,9 @@ AGENT_C1_EVAL=1 AGENT_C1_EVAL_PROMPT=catalog \
 - `AGENT_CLAUDE_BIN` overrides the `claude` binary, and
   `AGENT_EVAL_WORKER_BIN` overrides the worker build.
 - It uses your local Claude CLI login and quota. A full 32-fixture run
-  costs about $1 and takes 8 to 9 minutes (measured at $1.00 and 508 s on
-  2026-10-31). Go's default 10-minute test timeout is too close, so keep
+  costs about $1 and takes 8 to 9 minutes (0.1.1 on 2026-10-31: $1.00 and
+  508 s). The log line `C1 cost:` reports the total. Go's default 10-minute test timeout is too close, so keep
   `-timeout 30m`.
-- On `main` the test always evaluates `hr-recruiter@0.1.0`. Selecting
-  another version (`AGENT_C1_EVAL_VERSION`) arrives with PR #1060.
 
 The log ends with `C1 summary: classification=... wrong_auto_sends=...`, and
 every failed gate is a test error.
@@ -210,12 +220,12 @@ object:
 
 ```json
 {
-  "version": "0.1.0",
+  "version": "0.1.1",
   "spec": "{\"apiVersion\":\"assistants.mctl.ai/v1alpha1\",...}",
   "owner": "mctl-telegram",
   "source_manifest": {
     "repo": "mctlhq/mctl-telegram",
-    "path": "assistants/hr-recruiter/assistant.yaml",
+    "path": "assistants/hr-recruiter/versions/0.1.1/assistant.yaml",
     "git_sha": "<merge commit>",
     "content_hash": "sha256:<digest from assistant-materialize>"
   }
@@ -225,12 +235,14 @@ object:
 `profile_range` is optional and unused for assistants. A new version is
 always `published`.
 
-**How 0.1.0 was published (2026-10-31).** The agent row did not exist yet,
-so it was created first with `POST /api/v1/agents` (`{name, description,
-owner}`). Then the definition version was posted through
+**How the versions were published (2026-10-31).** For 0.1.0 the agent row
+did not exist yet, so it was created first with `POST /api/v1/agents`
+(`{name, description, owner}`). Then the definition version was posted through
 `tools/mctl-token/mctl_token.py call`, the workspace helper that signs a
 human in to mctl-api through the same OAuth flow MCP clients use and calls
-the API with that token. The result was verified in the public catalog.
+the API with that token. 0.1.1 needed only the definition version, posted
+the same way. Both were verified in the public catalog with digests equal to
+their pins.
 
 ### Runbook: publish `<name>@<version>`
 
@@ -251,9 +263,9 @@ git -C "$WS/mctl-telegram" worktree add -q --detach "$OUT/src" "$GIT_SHA"
 DIGEST=$(awk -v k="$NAME@$VERSION" '$1==k {print $2}' "$OUT/digests.txt")
 echo "$DIGEST"   # compare with activeDigests before going on
 
-# 2. Build the body. Set SRC_PATH to the definition's path in the repo
-#    (assistants/<name>/assistant.yaml on today's layout).
-SRC_PATH=assistants/$NAME/assistant.yaml
+# 2. Build the body. SRC_PATH is the definition's path in the repo:
+#    assistants/$NAME/assistant.yaml for a first version.
+SRC_PATH=assistants/$NAME/versions/$VERSION/assistant.yaml
 python3 - "$OUT/dist/$NAME-$VERSION.json" "$VERSION" "$GIT_SHA" "$DIGEST" "$SRC_PATH" \
   > "$OUT/body.json" <<'PY'
 import json, sys
@@ -318,7 +330,7 @@ is the only one.
 
 The whole assistant stack (catalog load, install service, `/assistants`,
 the MCP tools, the claim) is wired only with `AGENT_ENABLED`
-(`cmd/server/main.go:604`). A catalog that fails to load stops the server.
+(`cmd/server/main.go:606`). A catalog that fails to load stops the server.
 
 **Install.** All four surfaces call one service,
 `internal/assistantinstall` (`Service.Apply` and `Service.Patch`): the MCP
@@ -415,7 +427,7 @@ server without a catalog sends no instructions.
 
 | Surface | What it does | Code |
 |---|---|---|
-| `/assistants` | Public, server-rendered catalog: the same entries as `list_assistants`. With the registry on it reads `GET /api/v1/assistant-catalog`, and an unreadable registry gives `503` "catalog unavailable", never an empty list. | `internal/web/assistants.go`, mounted at `cmd/server/main.go:627` |
+| `/assistants` | Public, server-rendered catalog: the same entries as `list_assistants`. With the registry on it reads `GET /api/v1/assistant-catalog`, and an unreadable registry gives `503` "catalog unavailable", never an empty list. | `internal/web/assistants.go`, mounted at `cmd/server/main.go:629` |
 | Manage page, assistant section | `/telegram/connect/manage` shows the caller's install (`name@version`, revision, mode, paused, listening, settings summary). With `account:manage`: install form and pause, listening and mode toggles, each carrying `expected_revision`. | `internal/web/manage_assistant.go`, routes `.../manage/assistant/install` and `.../update` |
 | MCP tools | `list_assistants`, `install_assistant`, `update_install` (self only, `account:manage` for writes) | `internal/mcp/assistant_tools.go` |
 | `/mctl assistant` | In Saved Messages: the installed assistant and the settings policy enforces, with sender counts instead of ids | `internal/agent/control/router.go:405` |
@@ -446,10 +458,10 @@ owner notes or instructions.
 
 ## 8. Lifecycle of a new version
 
-1. **Edit.** Never edit an active version. Copy it into a new version (see
-   *Catalog layout* in section 2) with its own instructions file and bump
-   `metadata.version`: patch for a prompt or copy fix, minor for a new
-   intent or variable.
+1. **Edit.** Never edit an active version. Copy the latest one into
+   `assistants/<name>/versions/<new>/` with its own instructions file and
+   bump `metadata.version`: patch for a prompt or copy fix, minor for a new
+   intent or variable. `hr-recruiter@0.1.1` is the worked example.
 2. **Suite.** Add `assistants/<name>/eval/<version>/suite.yaml` and
    `fixtures.jsonl`, with `base.digest` set to the new definition's digest.
    Add fixtures for the behaviour you changed, with the right
@@ -459,7 +471,7 @@ owner notes or instructions.
    to `activeDigests` and `activeSuiteDigests`. Older versions' pins stay
    unchanged.
 4. **C1.** Run the command in section 3 with `AGENT_C1_EVAL_PROMPT=catalog`
-   against the new version, and put the summary (classification, terminal,
+   and `AGENT_C1_EVAL_VERSION=<new>`, and put the summary (classification, terminal,
    leaks, binding, wrong auto-sends, cost, time) in the PR.
 5. **PR and gate.** Normal review gate: CI green (including
    `assistant-materialize`), no open P1 or P2 findings.
