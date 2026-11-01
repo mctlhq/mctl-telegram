@@ -36,6 +36,8 @@ var c1SystemPrompt string
 // server hands out on claim: the hr-recruiter catalog entry rendered with the
 // suite's values, delivered as JobEnvelope.Instructions with no fallback
 // SystemPrompt. That is the P1 acceptance run for the assistant catalog.
+// AGENT_C1_EVAL_VERSION picks the hr-recruiter version and its suite
+// (default 0.1.0).
 func TestC1ObserveEval(t *testing.T) {
 	if os.Getenv("AGENT_C1_EVAL") != "1" {
 		t.Skip("set AGENT_C1_EVAL=1 to run the real Claude Code evaluation")
@@ -44,9 +46,13 @@ func TestC1ObserveEval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load catalog: %v", err)
 	}
-	base, ok := catalog.Lookup("hr-recruiter", "0.1.0")
+	version := os.Getenv("AGENT_C1_EVAL_VERSION")
+	if version == "" {
+		version = "0.1.0"
+	}
+	base, ok := catalog.Lookup("hr-recruiter", version)
 	if !ok {
-		t.Fatal("catalog has no hr-recruiter@0.1.0")
+		t.Fatalf("catalog has no hr-recruiter@%s", version)
 	}
 	suite, err := agenteval.LoadSuite(mctltelegram.Catalog, base)
 	if err != nil {
@@ -112,6 +118,15 @@ func TestC1ObserveEval(t *testing.T) {
 	}
 
 	report := agenteval.Score(suite, target.Adaptation, results, only)
+	var cost float64
+	reported := 0
+	for _, r := range results {
+		if r.CostUSD != nil {
+			cost += *r.CostUSD
+			reported++
+		}
+	}
+	t.Logf("C1 cost: $%.4f reported by %d/%d invocations", cost, reported, len(results))
 	for _, o := range report.Outcomes {
 		f, _ := suite.Fixture(o.ID)
 		t.Logf("%s [%s]: action=%s want=%s correct=%t status=%s terminal=%t leaks=%v binding_violation=%t auto_sends=%d wrong_auto_sends=%d expected_decision=%s",

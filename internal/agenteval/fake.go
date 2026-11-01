@@ -3,6 +3,7 @@ package agenteval
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"regexp"
 	"slices"
@@ -46,6 +47,7 @@ type Task struct {
 	autoSends        []AutoSend
 	sends            []time.Time
 	autonomousTurns  int
+	costUSD          *float64
 }
 
 type output struct {
@@ -85,6 +87,7 @@ var routePatterns = []struct {
 	{http.MethodPost, "POST /notify/summary", regexp.MustCompile(`^/notify/summary$`)},
 	{http.MethodPost, "POST /autopilot/pause", regexp.MustCompile(`^/autopilot/pause$`)},
 	{http.MethodPost, "POST /jobs/{id}/complete", regexp.MustCompile(`^/jobs/[^/]+/complete$`)},
+	{http.MethodPost, "POST /jobs/{id}/cost", regexp.MustCompile(`^/jobs/[^/]+/cost$`)},
 	{http.MethodGet, "GET /jobs/{id}", regexp.MustCompile(`^/jobs/[^/]+$`)},
 }
 
@@ -191,8 +194,9 @@ func (k *Task) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		k.lead = body
 		k.durable = true
 		// Every string the lead keeps is output: leads() serves them back.
-		for key, v := range body {
-			if value, ok := v.(string); ok {
+		// Sorted, so a report lists its leaks in a stable order.
+		for _, key := range slices.Sorted(maps.Keys(body)) {
+			if value, ok := body[key].(string); ok {
 				k.outputs = append(k.outputs, output{field: "lead." + key, value: value})
 			}
 		}
@@ -230,6 +234,24 @@ func (k *Task) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"autopilot_paused": true})
 	case "POST /jobs/{id}/complete":
 		k.completeJob(w, r)
+	case "POST /jobs/{id}/cost":
+		// The worker reports what the model run cost; the run's cost is
+		// the sum over its fixtures. It is not scored.
+		var req struct {
+			CostUSD *float64 `json:"cost_usd"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.CostUSD == nil || *req.CostUSD < 0 {
+			http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+			return
+		}
+		k.mu.Lock()
+		cost := *req.CostUSD
+		if k.costUSD != nil {
+			cost += *k.costUSD
+		}
+		k.costUSD = &cost
+		k.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
 	case "GET /jobs/{id}":
 		if strings.TrimPrefix(r.URL.Path, "/jobs/") != strconv.FormatInt(k.jobID, 10) {
 			http.Error(w, `{"error":"job not found"}`, http.StatusNotFound)
@@ -422,6 +444,9 @@ type FixtureResult struct {
 	AutoSends      []AutoSend
 	Alerts         int
 	SummaryIntents []string
+	// CostUSD is the model cost the worker reported, nil when it reported
+	// none.
+	CostUSD *float64
 }
 
 // Result returns what the fixture's run did so far.
@@ -434,6 +459,10 @@ func (k *Task) Result() FixtureResult {
 		LeadFieldsOK: true, BindingViolation: k.bindingViolation,
 		ToolRefused: slices.Clone(k.toolRefused), Alerts: k.alerts,
 		SummaryIntents: slices.Clone(k.summaryIntents),
+	}
+	if k.costUSD != nil {
+		cost := *k.costUSD
+		res.CostUSD = &cost
 	}
 	for _, o := range k.outputs {
 		for _, m := range markersIn(o.value, k.fixture.ForbiddenOutput) {

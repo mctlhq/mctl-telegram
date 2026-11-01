@@ -488,6 +488,8 @@ func main() {
 	mux.Get("/.well-known/oauth-protected-resource", prmHandler)
 	mux.Get("/.well-known/oauth-protected-resource"+cfg.MCPPath, prmHandler)
 	mux.Get("/.well-known/openai-apps-challenge", web.OpenAIAppsChallenge())
+	mux.Get("/robots.txt", web.RobotsTxt(cfg.PublicBaseURL))
+	mux.Get("/sitemap.xml", web.Sitemap(cfg.PublicBaseURL))
 	mux.Get("/favicon.svg", web.Favicon())
 	mux.Get("/favicon.ico", web.Favicon())
 	mux.Get("/og.png", web.OGImage())
@@ -626,6 +628,7 @@ func main() {
 		// The public catalog page: the same entries as list_assistants.
 		mux.Get("/assistants", web.Assistants(assistantSvc, cfg.PublicBaseURL, showManage))
 		ui.SetAssistantsMounted(true)
+		web.SetAssistantsMounted(true)
 	}
 
 	// Session management dashboard — only mounted in local-jwt mode alongside

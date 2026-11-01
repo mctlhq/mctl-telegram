@@ -301,6 +301,27 @@ func (l *Listener) onMessage(ctx context.Context, acct *account, ents tg.Entitie
 		}
 		isEdit = true
 	}
+	// No marker does not yet make it the owner's message. An agent send
+	// whose RPC answer was lost (a timeout, a crash, a recovery retry
+	// answered RANDOM_ID_DUPLICATE) never learned its message id, so it
+	// never set a marker, yet Telegram may have delivered it and now echoes
+	// it here (#1029). Reading that echo as a takeover would pause the chat
+	// and deny the very action that sent it. The edit rules above apply: an
+	// edited copy is the owner's hand.
+	if msg.Out && !isEdit && (msg.EditDate == 0 || msg.EditHide) {
+		if peer, ok := msg.PeerID.(*tg.PeerUser); ok {
+			matched, err := l.Store.MatchUnconfirmedAgentSend(ctx, acct.userID, peer.UserID, int64(msg.ID),
+				msg.Message, time.Now().Add(-durableSentMarkerTTL))
+			if err != nil {
+				// Could not tell whose message it is. Returning the error
+				// retries the update instead of guessing either way.
+				return fmt.Errorf("match unconfirmed agent send: %w", err)
+			}
+			if matched {
+				return nil
+			}
+		}
+	}
 	ex, ok := ExtractMessage(acct.userID, acct.tgID, msg, ents, isEdit)
 	if !ok {
 		return nil

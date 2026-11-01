@@ -39,6 +39,13 @@ const (
 //	                            ↘ rejected            ↘ (self-heals — see below)
 //	proposed → denied | executed (guarded-mode auto-send)
 //	pending_approval → expired (approval TTL sweep)
+//	executing → delivery_unknown → (executed, once the echo proves delivery)
+//
+// delivery_unknown (#1029) is where a send ends when its outcome cannot be
+// observed: recovery retries ran out, or recovery was refused by policy
+// after at least one RPC had already been attempted. It is neither success
+// nor failure. Nothing retries it, the owner is told once, and the only way
+// out is the listener seeing the send's own echo, which proves delivery.
 //
 // `executing` was originally a permanent crash trap (nothing auto-retried out
 // of it — double-messaging a human seemed worse than not sending). Revised in
@@ -57,6 +64,9 @@ const (
 	ActionRejected        = "rejected"
 	ActionExpired         = "expired"
 	ActionDenied          = "denied"
+	// ActionDeliveryUnknown: the send may or may not have reached Telegram
+	// and will not be retried. See the lifecycle comment above.
+	ActionDeliveryUnknown = "delivery_unknown"
 )
 
 // Policy decisions recorded on an action.
@@ -89,8 +99,13 @@ type AgentAction struct {
 	ExecutedTGMessageID int64
 	SendRandomID        int64  // 0 ⇒ not yet allocated; persisted before the send RPC, see BeginExecutingAgentAction
 	SendBody            string // exact final outbound body paired with SendRandomID; encrypted at rest
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	// SendAttempts counts the send RPCs issued for this action, stamped
+	// before each RPC (#1029). Zero on an executing row means no RPC was
+	// ever attempted, so a refusal at recovery is a plain denial; above zero
+	// the outcome of an earlier attempt is unknown.
+	SendAttempts int
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 	// InstallRevision is the install revision the action was created under:
 	// its job's, or the profile's for an action without a job (#1018).
 	InstallRevision int64
@@ -380,12 +395,14 @@ func (s *Store) getAgentAction(ctx context.Context, where string, args ...any) (
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT id, approval_code_encrypted, job_id, conversation_id, user_id, action_type, intent,
 		        payload_encrypted, policy_decision, policy_reasons, status,
-		        executed_tg_message_id, send_random_id, send_body_encrypted, created_at, updated_at, install_revision
+		        executed_tg_message_id, send_random_id, send_body_encrypted, created_at, updated_at, install_revision,
+		        send_attempts
 		   FROM agent_actions WHERE `+where,
 		args...,
 	).Scan(&a.ID, &codeEncrypted, &jobID, &convID, &a.UserID, &a.ActionType, &a.Intent,
 		&payload, &a.PolicyDecision, &a.PolicyReasons, &a.Status,
-		&execMsgID, &sendRandomID, &sendBody, &a.CreatedAt, &a.UpdatedAt, &a.InstallRevision)
+		&execMsgID, &sendRandomID, &sendBody, &a.CreatedAt, &a.UpdatedAt, &a.InstallRevision,
+		&a.SendAttempts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrAgentActionNotFound
 	}
@@ -426,6 +443,7 @@ func (s *Store) getAgentAction(ctx context.Context, where string, args ...any) (
 // index.
 var terminalActionStatuses = map[string]struct{}{
 	ActionExecuted: {}, ActionRejected: {}, ActionExpired: {}, ActionDenied: {},
+	ActionDeliveryUnknown: {},
 }
 
 func isTerminalActionStatus(s string) bool {
@@ -609,9 +627,9 @@ func (s *Store) ReserveAgentActionSend(
 			   (SELECT COUNT(*) FROM conversation_messages
 			     WHERE conversation_id = $1 AND direction = $2 AND created_at > $3)
 			 + (SELECT COUNT(*) FROM agent_actions
-			     WHERE conversation_id = $1 AND status IN ($4, $5)
+			     WHERE conversation_id = $1 AND status IN ($4, $5, $6)
 			       AND send_random_id IS NOT NULL AND updated_at > $3)`,
-			action.ConversationID, DirectionAgentOutgoing, rateWindowStart, ActionExecuting, ActionDenied,
+			action.ConversationID, DirectionAgentOutgoing, rateWindowStart, ActionExecuting, ActionDenied, ActionDeliveryUnknown,
 		).Scan(&recent); err != nil {
 			return false, fmt.Errorf("count reserved agent sends: %w", err)
 		}
@@ -698,8 +716,18 @@ func (s *Store) SetAgentActionExecuted(ctx context.Context, userID, id, tgMessag
 // claim can observe neither the executing reservation nor the completed
 // history row.
 func (s *Store) RecordAgentActionSent(ctx context.Context, userID, actionID, conversationID, tgMessageID int64, sentText string) (bool, error) {
+	return s.recordAgentActionSent(ctx, ActionExecuting, userID, actionID, conversationID, tgMessageID, sentText)
+}
+
+// recordAgentActionSent is RecordAgentActionSent with the status the action
+// must leave from: executing for a send that returned, delivery_unknown for
+// a send whose echo later proved it was delivered (#1029).
+func (s *Store) recordAgentActionSent(ctx context.Context, from string, userID, actionID, conversationID, tgMessageID int64, sentText string) (bool, error) {
 	// tgMessageID 0 means delivered with an unknown message id (a recovery
 	// retry answered RANDOM_ID_DUPLICATE, #1029). Store NULL, never a fake 0.
+	// The exact send body is then kept: it is the only way the listener can
+	// still recognise the send's echo and fill in the id
+	// (MatchUnconfirmedAgentSend). The retention sweep clears it later.
 	msgID := sql.NullInt64{Int64: tgMessageID, Valid: tgMessageID != 0}
 	pg := s.isPostgres(ctx)
 	tx, err := s.DB.BeginTx(ctx, nil)
@@ -720,14 +748,32 @@ func (s *Store) RecordAgentActionSent(ctx context.Context, userID, actionID, con
 	} else if err != nil {
 		return false, fmt.Errorf("lock conversation for send completion: %w", err)
 	}
+	if !msgID.Valid {
+		// The listener may already have matched the send's echo while the
+		// row was still executing and noted the id there.
+		var noted sql.NullInt64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT executed_tg_message_id FROM agent_actions WHERE id = $1 AND user_id = $2 AND status = $3`,
+			actionID, userID, from,
+		).Scan(&noted); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return false, fmt.Errorf("read noted message id: %w", err)
+		}
+		if noted.Valid && noted.Int64 != 0 {
+			msgID = noted
+		}
+	}
+	clearSendBody := "send_body_encrypted = NULL, "
+	if !msgID.Valid {
+		clearSendBody = ""
+	}
 
 	res, err := tx.ExecContext(ctx,
 		`UPDATE agent_actions
 		    SET status = $1, executed_tg_message_id = $2, approval_code = NULL,
 		        approval_code_hash = NULL, approval_code_encrypted = NULL,
-		        send_body_encrypted = NULL, updated_at = $3
+		        `+clearSendBody+`updated_at = $3
 		  WHERE id = $4 AND user_id = $5 AND status = $6`,
-		ActionExecuted, msgID, time.Now().UTC(), actionID, userID, ActionExecuting,
+		ActionExecuted, msgID, time.Now().UTC(), actionID, userID, from,
 	)
 	if err != nil {
 		return false, fmt.Errorf("set action executed: %w", err)
@@ -858,9 +904,11 @@ func (s *Store) ListStuckExecutingActions(ctx context.Context, grace time.Durati
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT id, approval_code_encrypted, job_id, conversation_id, user_id, action_type, intent,
 		        payload_encrypted, policy_decision, policy_reasons, status,
-		        executed_tg_message_id, send_random_id, send_body_encrypted, created_at, updated_at, install_revision
-		   FROM agent_actions WHERE status = $1 AND updated_at < $2`,
-		ActionExecuting, cutoff,
+		        executed_tg_message_id, send_random_id, send_body_encrypted, created_at, updated_at, install_revision,
+		        send_attempts
+		   FROM agent_actions WHERE status = $1 AND updated_at < $2
+		    AND (retry_not_before IS NULL OR retry_not_before <= $3)`,
+		ActionExecuting, cutoff, time.Now().UTC(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list stuck executing actions: %w", err)
@@ -878,7 +926,8 @@ func (s *Store) ListStuckExecutingActions(ctx context.Context, grace time.Durati
 		)
 		if err := rows.Scan(&a.ID, &codeEncrypted, &jobID, &convID, &a.UserID, &a.ActionType, &a.Intent,
 			&payload, &a.PolicyDecision, &a.PolicyReasons, &a.Status,
-			&execMsgID, &sendRandomID, &sendBody, &a.CreatedAt, &a.UpdatedAt, &a.InstallRevision); err != nil {
+			&execMsgID, &sendRandomID, &sendBody, &a.CreatedAt, &a.UpdatedAt, &a.InstallRevision,
+			&a.SendAttempts); err != nil {
 			return nil, fmt.Errorf("scan stuck action: %w", err)
 		}
 		a.JobID = jobID.Int64
@@ -1585,10 +1634,13 @@ func (s *Store) ClaimOwnerNotification(ctx context.Context, userID, id, candidat
 // concurrent attempt already marked it sent or failed, so a late/duplicate
 // call can never overwrite a terminal delivery state.
 func (s *Store) MarkOwnerNotificationSent(ctx context.Context, userID, id, tgMessageID int64) error {
+	// 0 means delivered with an unknown message id (a retry answered
+	// RANDOM_ID_DUPLICATE, #1029). Store NULL, never a fake 0.
+	msgID := sql.NullInt64{Int64: tgMessageID, Valid: tgMessageID != 0}
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE owner_notifications SET status = $1, tg_message_id = $2, sent_at = $3
 		  WHERE id = $4 AND user_id = $5 AND status = $6`,
-		NotificationSent, tgMessageID, time.Now().UTC(), id, userID, NotificationPending,
+		NotificationSent, msgID, time.Now().UTC(), id, userID, NotificationPending,
 	)
 	if err != nil {
 		return fmt.Errorf("mark notification sent: %w", err)

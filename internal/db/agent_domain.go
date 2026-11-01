@@ -1135,12 +1135,13 @@ func (s *Store) listRecentAgentOutgoingTimestamps(
 		    UNION ALL
 		    SELECT updated_at AS sent_at
 		      FROM agent_actions
-		     WHERE conversation_id = $1 AND status IN ($4, $5)
+		     WHERE conversation_id = $1 AND status IN ($4, $5, $7)
 		       AND send_random_id IS NOT NULL AND updated_at > $3
 		       AND ($6 = 0 OR id <> $6)
 		  ) reserved_and_sent
 		  ORDER BY sent_at`,
 		conversationID, DirectionAgentOutgoing, since, ActionExecuting, ActionDenied, excludeActionID,
+		ActionDeliveryUnknown,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list recent agent outgoing timestamps: %w", err)

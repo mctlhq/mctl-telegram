@@ -68,8 +68,8 @@ func buildAssistantViews(entries []assistantinstall.CatalogEntry) []assistantVie
 		}
 		if l := e.Defaults.Limits; l != nil {
 			v.Limits = strconv.Itoa(l.MaxAutonomousTurns) + " autonomous turns, " +
-				strconv.Itoa(l.MaxMsgsPerMinute) + " messages a minute, " +
-				strconv.Itoa(l.MaxReplyChars) + " characters a reply"
+				groupThousands(l.MaxMsgsPerMinute) + " messages per minute, " +
+				groupThousands(l.MaxReplyChars) + " characters per reply"
 		}
 		for _, cv := range e.Variables {
 			vv := assistantVariableView{
@@ -88,6 +88,27 @@ func buildAssistantViews(entries []assistantinstall.CatalogEntry) []assistantVie
 		out = append(out, v)
 	}
 	return out
+}
+
+// groupThousands renders n with a comma between thousands (1200 -> "1,200"),
+// the US style the page copy uses.
+func groupThousands(n int) string {
+	s := strconv.Itoa(n)
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	var b strings.Builder
+	for i, r := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(r)
+	}
+	if neg {
+		return "-" + b.String()
+	}
+	return b.String()
 }
 
 // Assistants renders /assistants. The catalog is read on every request,

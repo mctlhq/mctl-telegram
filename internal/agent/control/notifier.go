@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/agent/executor"
 	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
@@ -55,7 +57,18 @@ type SelfSender interface {
 	// executor.Sender.SendWithRandomID's identical rationale: persist the
 	// id before the RPC (see Store.ClaimOwnerNotification), retry with the
 	// SAME id after a crash, rely on MTProto's server-side dedup.
+	// A RANDOM_ID_DUPLICATE refusal must be returned wrapped in
+	// executor.ErrAlreadyDelivered: the notification is already there.
 	SendToSelfWithRandomID(ctx context.Context, userID, randomID int64, text string) (int64, error)
+}
+
+// SelfDeliveryLocator is an optional SelfSender capability, the
+// notification counterpart of executor.DeliveryLocator: find the Saved
+// Messages id of a notification Telegram reported as a duplicate. found is
+// true only for exactly one message with this text at or after since;
+// anything else leaves the id unknown (#1029).
+type SelfDeliveryLocator interface {
+	LocateSelfDelivered(ctx context.Context, userID int64, text string, since time.Time) (messageID int64, found bool, err error)
 }
 
 // Notifier delivers owner_notifications rows (queued by the agent API's
@@ -192,6 +205,17 @@ func (n *Notifier) DeliverPending(ctx context.Context) (delivered, failed int, e
 			continue
 		}
 		msgID, serr := n.Sender.SendToSelfWithRandomID(ctx, notif.UserID, randomID, text)
+		if errors.Is(serr, executor.ErrAlreadyDelivered) {
+			// A retry of a claimed notification whose earlier send reached
+			// Telegram but was never marked sent (a crash, or a lost
+			// answer). Telegram refuses every reuse of the random_id the
+			// same way, so treating it as a failure retried it on every
+			// sweep until MaxPendingAge, then marked a delivered
+			// notification failed (#1029). It is delivered; the id is
+			// looked up, and stays unknown (NULL) without a single match.
+			slog.Warn("notifier: retry found the notification already delivered", "notification_id", notif.ID)
+			msgID, serr = n.locateDelivered(ctx, notif, text), nil
+		}
 		if serr != nil {
 			if n.MaxPendingAge > 0 && time.Since(notif.CreatedAt) > n.MaxPendingAge {
 				// Permanently undeliverable (e.g. a revoked owner session) —
@@ -219,6 +243,25 @@ func (n *Notifier) DeliverPending(ctx context.Context) (delivered, failed int, e
 		delivered++
 	}
 	return delivered, failed, nil
+}
+
+// locateDelivered asks the SelfSender, when it can, for the id of a
+// notification Telegram reported as a duplicate. Any failure leaves it 0
+// (unknown): the delivery itself is proven by the duplicate refusal.
+func (n *Notifier) locateDelivered(ctx context.Context, notif db.OwnerNotification, text string) int64 {
+	locator, ok := n.Sender.(SelfDeliveryLocator)
+	if !ok {
+		return 0
+	}
+	id, found, err := locator.LocateSelfDelivered(ctx, notif.UserID, text, notif.CreatedAt)
+	if err != nil {
+		slog.Warn("notifier: could not look up the delivered notification id", "notification_id", notif.ID, "err", err)
+		return 0
+	}
+	if !found {
+		return 0
+	}
+	return id
 }
 
 // recordHumanInputSent writes the Telegram message id back onto the
