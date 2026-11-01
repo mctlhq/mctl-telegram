@@ -79,15 +79,61 @@ transport is in use.
 | `AGENT_CREDENTIAL_DOMAIN_ID` | yes | Non-secret identifier for the credential/quota pool this worker runs against — e.g. a Vault path or account label, **never the credential itself**. Must match `[A-Za-z0-9._:/-]{1,128}`; the poll loop (`run()`) refuses to start without it, and exported as the `mctl_agent_credential_domain{domain_id=...}` info gauge so a claim of quota isolation between deployments has a machine-checkable counterpart. Not required by `--mcp-serve` mode. See the rollout-ordering note below before upgrading an existing deployment. |
 | `AGENT_CLAUDE_BIN` | no | Override the `claude` binary path/name (default: `claude` on `$PATH`). |
 | `AGENT_SYSTEM_PROMPT` | no | Fallback system prompt, used only when the server's claim response carries no `instructions` (a server without the assistant catalog). Use `deploy/agent-worker/system-prompt.txt`; see [Owner-profile disclosure](#owner-profile-disclosure-953) and [docs/assistants/spec.md](assistants/spec.md). |
-| `AGENT_MAX_BUDGET_USD` | no | Per-job `--max-budget-usd` cap. |
+| `AGENT_MAX_BUDGET_USD` | no | Per-job USD cap. `claude` runner: passed as `--max-budget-usd`. `openai` runner: computed from provider token usage and the two configured prices; the job stops with `error_max_budget` once exceeded. |
 | `AGENT_WORKER_CONCURRENCY` | no | Jobs one worker process runs at once, an integer in 1..10 (default `1`; anything else refuses to start). The worker claims only as many jobs as it has free slots, and never runs two jobs of one conversation together. Each slot is one `claude` process, so memory, CPU and spend scale with it. |
 | `AGENT_HEALTH_ADDR` | no | Bind address for the `/livez`/`/healthz`/`/readyz`/`/metrics` probe server (default: `:8080`, all interfaces). |
 | `AGENT_METRICS_ALLOW_CIDR` | no | Optional CIDR allowlist guarding `/metrics` (see below). Unset means open, matching `cmd/server`'s `METRICS_ALLOW_CIDR` default. A malformed value fails closed (every `/metrics` request gets 403), never silently open. |
+| `AGENT_RUNNER` | no | `claude` (default when unset) or `openai`. Anything else refuses to start. See [OpenAI-compatible runner](#openai-compatible-runner-1091). |
+| `AGENT_MODEL` | `openai` only | OpenAI-compatible provider model name. |
+| `AGENT_OPENAI_BASE_URL` | `openai` only | Base URL immediately above `/chat/completions` (normally the Cloudflare AI Gateway compatibility endpoint). |
+| `AGENT_OPENAI_API_KEY` | `openai` only | Provider API key. Sensitive; never logged (redacted by `internal/audit`). |
+| `AGENT_GATEWAY_TOKEN` | no | Cloudflare AI Gateway bearer token, sent as `cf-aig-authorization`. Sensitive; never logged. |
+| `MODEL_INPUT_USD_PER_MTOK` | `openai` only | Input list price in USD per million tokens; finite and non-negative. |
+| `MODEL_OUTPUT_USD_PER_MTOK` | `openai` only | Output list price in USD per million tokens; finite and non-negative. |
+| `AGENT_MAX_TURNS` | no | `openai` runner: maximum provider turns per job (default `12`). |
+| `AGENT_OPENAI_MIN_INTERVAL` | no | `openai` runner: minimum interval between provider requests, as a Go duration such as `2s`. State on the single `OpenAIRunner` instance (shared by all concurrent jobs), not a package global. Hetzner allows about 35 requests per minute per key. |
 
 `AGENT_JOB_ID`, `AGENT_JOB_ATTEMPT`, `AGENT_JOB_EVENT_ID`, `AGENT_JOB_CONV_ID`
 and `AGENT_JOB_SOURCE_EVENT_IDS` (comma-joined, only for a coalesced turn)
 are internal — set only by the parent worker process on the `--mcp-serve`
 subprocess it spawns per job, never configured by an operator.
+
+### OpenAI-compatible runner (#1091)
+
+`AGENT_RUNNER=openai` replaces the `claude` subprocess with an in-process
+tool loop against an OpenAI-compatible `/chat/completions` endpoint. Both
+runners execute the same job-scoped tool handlers (`buildToolSet`) and finish
+through the same `finishRun`: cost report first, then the result check, then
+the durable terminal-state verification. Unset `AGENT_RUNNER` is exactly the
+`claude` behaviour. The `openai` runner needs no Claude account credential.
+
+- **Job token only.** `AGENT_API_TOKEN` is used by the poll loop alone. An
+  `openai` job refuses to run without the claim's narrow `job_token`; every
+  tool call, cost report and completion check for that job uses a client
+  authenticated with it. No state is shared between jobs.
+- **Request.** Non-streaming `POST {AGENT_OPENAI_BASE_URL}/chat/completions`
+  with `tool_choice: auto` and the tools' `InputSchema` unchanged. Headers:
+  `Authorization`, `cf-aig-authorization` (when a gateway token is set),
+  `cf-aig-collect-log: false`, `cf-aig-skip-cache: true`, and an explicit
+  `User-Agent` (`mctl-telegram-agent-worker` when none is configured; the Go
+  default is refused by the Hetzner edge with 403).
+- **Loop.** A turn's tool calls run in order. The loop stops when
+  `complete_agent_job` succeeded, when the model answers without tool calls,
+  after `AGENT_MAX_TURNS`, or when the computed cost passes
+  `AGENT_MAX_BUDGET_USD`. No fixed call order is assumed.
+- **Result subtypes.** `success`, `error_max_turns`, `error_max_budget`,
+  `error_provider`, `error_provider_429`. The last maps to the existing
+  usage-limit error class and metric.
+- **Provider errors.** A non-2xx response is represented by HTTP status and
+  `Retry-After` only. The body is drained but never retained, returned or
+  logged, because it can echo message or tool content. 429 and 5xx are retried
+  with `Retry-After` or bounded exponential backoff; a wait that does not fit
+  in the remaining job deadline is not slept through, the provider error is
+  returned at once. Spend from turns already paid for is still reported when
+  the job context is canceled.
+- **C1 evaluation.** The opt-in harness accepts `AGENT_C1_EVAL_RUNNER=openai`
+  and reads the same provider variables. CI never sets `AGENT_C1_EVAL=1`, so it
+  makes no model calls.
 
 ### Turn coalescing: rollout order
 
