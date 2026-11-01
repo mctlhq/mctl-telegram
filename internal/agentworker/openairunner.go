@@ -16,6 +16,8 @@ import (
 
 var errNoJobToken = errors.New("job has no job token")
 
+const canceledCostReportTimeout = 2 * time.Second
+
 type OpenAIRunner struct {
 	Client       *OpenAIClient
 	APIBaseURL   string // job-token-only client per job
@@ -65,14 +67,29 @@ func (r *OpenAIRunner) Run(ctx context.Context, job JobEnvelope) error {
 	costObserved := false
 	turns := 0
 
-	finish := func(subtype string, isError bool) error {
+	result := func(subtype string, isError bool) *ClaudeResult {
 		res := &ClaudeResult{Type: "result", Subtype: subtype, IsError: isError, NumTurns: turns,
 			DurationMS: time.Since(started).Milliseconds()}
 		if costObserved {
 			cost := totalCost
 			res.TotalCostUSD = &cost
 		}
-		return finishRun(ctx, api, job, res, r.Metrics)
+		return res
+	}
+	finish := func(subtype string, isError bool) error {
+		return finishRun(ctx, api, job, result(subtype, isError), r.Metrics)
+	}
+	reportCanceledCost := func() {
+		if !costObserved {
+			return
+		}
+		// The job context is already canceled, but the provider usage for
+		// completed turns is still real spend. Give the best-effort /cost
+		// write a small independent bound instead of dropping it solely
+		// because the job deadline fired between turns.
+		reportCtx, cancel := context.WithTimeout(context.Background(), canceledCostReportTimeout)
+		defer cancel()
+		recordRunCost(reportCtx, api, job, result("error_context_canceled", true), r.Metrics)
 	}
 
 	for turns < maxTurns {
@@ -80,6 +97,7 @@ func (r *OpenAIRunner) Run(ctx context.Context, job JobEnvelope) error {
 		out, err := r.chatWithRetry(ctx, msgs, defs)
 		if err != nil {
 			if ctx.Err() != nil {
+				reportCanceledCost()
 				return ctx.Err()
 			}
 			var pe *ProviderError
@@ -133,6 +151,15 @@ func (r *OpenAIRunner) chatWithRetry(ctx context.Context, msgs []ChatMessage, de
 			wait = backoff
 			if backoff < 8*time.Second {
 				backoff *= 2
+			}
+		}
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			if remaining <= 0 || wait >= remaining {
+				// Do not turn a known provider refusal into an opaque context
+				// deadline by sleeping through the rest of the job window.
+				// Returning the ProviderError keeps 429 classification intact.
+				return nil, last
 			}
 		}
 		if err := waitContext(ctx, wait); err != nil {
