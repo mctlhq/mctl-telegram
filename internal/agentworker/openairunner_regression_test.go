@@ -26,7 +26,7 @@ func TestOpenAIRunner_BudgetStop(t *testing.T) {
 	}))
 	defer provider.Close()
 	r := &OpenAIRunner{
-		Client: &OpenAIClient{BaseURL: provider.URL, APIKey: "k", Model: "m", HTTP: provider.Client()},
+		Client:     &OpenAIClient{BaseURL: provider.URL, APIKey: "k", Model: "m", HTTP: provider.Client()},
 		APIBaseURL: api.URL, MaxBudgetUSD: 0.0001,
 		Prices: Prices{InputUSDPerMTok: 1, OutputUSDPerMTok: 1},
 	}

@@ -25,7 +25,9 @@ func TestOpenAIRunner_ToolLoopCompletes(t *testing.T) {
 			completed.Store(true)
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodPost && r.URL.Path == "/jobs/42/cost":
-			var body struct{ Cost float64 `json:"cost_usd"` }
+			var body struct {
+				Cost float64 `json:"cost_usd"`
+			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			cost = body.Cost
 			w.WriteHeader(http.StatusNoContent)
@@ -50,7 +52,7 @@ func TestOpenAIRunner_ToolLoopCompletes(t *testing.T) {
 	defer provider.Close()
 
 	r := &OpenAIRunner{
-		Client: &OpenAIClient{BaseURL: provider.URL, APIKey: "provider", Model: "qwen", HTTP: provider.Client()},
+		Client:     &OpenAIClient{BaseURL: provider.URL, APIKey: "provider", Model: "qwen", HTTP: provider.Client()},
 		APIBaseURL: api.URL, MaxTurns: 4,
 		Prices: Prices{InputUSDPerMTok: 1, OutputUSDPerMTok: 2},
 	}
@@ -131,8 +133,11 @@ func TestOpenAIRunner_GivesUpWithinDeadline(t *testing.T) {
 	defer cancel()
 	start := time.Now()
 	err := r.Run(ctx, JobEnvelope{JobID: 1, Attempt: 1, JobToken: "j", Tools: []string{"get_event", "complete_agent_job"}})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err=%v", err)
+	// The 1s retry backoff does not fit the 40ms job window, so the runner
+	// reports the provider failure at once instead of sleeping into an opaque
+	// context deadline.
+	if !errors.Is(err, ErrClaudeReportedError) {
+		t.Fatalf("err=%v want a provider error result", err)
 	}
 	if time.Since(start) > 500*time.Millisecond {
 		t.Fatalf("runner exceeded deadline by too much: %v", time.Since(start))

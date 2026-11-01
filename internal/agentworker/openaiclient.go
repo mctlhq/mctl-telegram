@@ -113,7 +113,7 @@ type openAITool struct {
 type openAIFunction struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
-	Parameters any    `json:"parameters"`
+	Parameters  any    `json:"parameters"`
 }
 
 // Chat performs one non-streaming OpenAI-compatible chat-completions request.

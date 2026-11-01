@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -35,7 +36,7 @@ func TestOpenAIRunner_RetryAfterBeyondDeadlineReturnsProvider429(t *testing.T) {
 	defer provider.Close()
 
 	r := &OpenAIRunner{
-		Client: &OpenAIClient{BaseURL: provider.URL, APIKey: "k", Model: "m", HTTP: provider.Client()},
+		Client:     &OpenAIClient{BaseURL: provider.URL, APIKey: "k", Model: "m", HTTP: provider.Client()},
 		APIBaseURL: "http://127.0.0.1:1",
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -85,14 +86,19 @@ func TestOpenAIRunner_CanceledRunReportsObservedCost(t *testing.T) {
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"get_event","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":100,"completion_tokens":10}}`))
 			return
 		}
+		// Drain the request body first: net/http only watches for the client
+		// disconnect (and so cancels r.Context()) once the body is consumed.
+		// Without this the handler outlives the canceled request and
+		// httptest.Server.Close blocks forever.
+		_, _ = io.Copy(io.Discard, r.Body)
 		<-r.Context().Done()
 	}))
 	defer provider.Close()
 
 	r := &OpenAIRunner{
-		Client: &OpenAIClient{BaseURL: provider.URL, APIKey: "k", Model: "m", HTTP: provider.Client()},
+		Client:     &OpenAIClient{BaseURL: provider.URL, APIKey: "k", Model: "m", HTTP: provider.Client()},
 		APIBaseURL: api.URL,
-		Prices: Prices{InputUSDPerMTok: 1, OutputUSDPerMTok: 2},
+		Prices:     Prices{InputUSDPerMTok: 1, OutputUSDPerMTok: 2},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
 	defer cancel()
