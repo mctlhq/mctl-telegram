@@ -31,8 +31,8 @@ func TestOpenAIRunner_BudgetStop(t *testing.T) {
 		Prices: Prices{InputUSDPerMTok: 1, OutputUSDPerMTok: 1},
 	}
 	err := r.Run(context.Background(), JobEnvelope{JobID: 7, Attempt: 1, JobToken: "j", Tools: []string{"get_event", "complete_agent_job"}})
-	if !errors.Is(err, ErrClaudeReportedError) || err == nil || !isUsageLimitSubtype("error_provider_429") && false {
-		t.Fatalf("err=%v", err)
+	if !errors.Is(err, ErrClaudeReportedError) {
+		t.Fatalf("err=%v want ErrClaudeReportedError", err)
 	}
 	if costReports.Load() != 1 {
 		t.Fatalf("cost reports=%d want 1", costReports.Load())
