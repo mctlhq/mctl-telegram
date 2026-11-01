@@ -60,11 +60,22 @@ body=$tmp/dist/$name-$version.request.json
 [ -s "$body" ] || die "no request body at $body"
 echo "Rebuilt $name@$version at $sha: $got ($(awk '{print $4}' <<<"$line"))"
 
-# call METHOD PATH [BODY]: an admin call through mctl_token.py, which prints
-# "HTTP <status>" and then the response. Sets status and resp.
+# call METHOD PATH [BODY_FILE]: an admin call through mctl_token.py's call(),
+# which prints "HTTP <status>" and then the response. Sets status and resp.
+# The module is loaded rather than run as a CLI so the body is read from a
+# file: on the command line one argument is capped (128 KiB on Linux), and
+# a spec carries the whole system prompt.
 call() {
   local out
-  out=$(python3 "$token_py" call "$@") || die "mctl_token.py call $1 $2 failed"
+  out=$(python3 -c '
+import importlib.util, sys
+token_py, method, path, *rest = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("mctl_token", token_py)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+body = open(rest[0], encoding="utf-8").read() if rest else None
+mod.call(method, path, body)
+' "$token_py" "$@") || die "mctl_token.py call $1 $2 failed"
   status=$(head -n1 <<<"$out" | awk '$1 == "HTTP" {print $2}')
   resp=$(tail -n +2 <<<"$out")
   [ -n "$status" ] || die "mctl_token.py printed no HTTP status for $1 $2"
@@ -88,8 +99,12 @@ EOF
 esac
 
 # 3. The admin list is authoritative (every lifecycle, unlike the public
-#    catalog). An existing version with the same digest is done; with
-#    another digest it is a broken immutability invariant.
+#    catalog). An existing version with another digest is a broken
+#    immutability invariant. With the same digest it is done only if the
+#    public catalog can serve it (published or deprecated); a disabled one
+#    is not something to report as published.
+#    The shape is mctl-api's agentregistry.DefinitionVersion: camelCase
+#    sourceManifest.contentHash, unlike the snake_case publish request.
 call GET "/api/v1/agents/$name/definition-versions"
 [ "$status" = 200 ] || die "GET /api/v1/agents/$name/definition-versions answered HTTP $status: $resp"
 existing=$(python3 -c '
@@ -100,18 +115,26 @@ if not isinstance(items, list):
     sys.exit("items is not a list")
 for it in items:
     if it["version"] == version:
-        print(it["sourceManifest"]["contentHash"], it["lifecycle"])
+        digest, lifecycle = it["sourceManifest"]["contentHash"], it["lifecycle"]
+        if not digest or not lifecycle:
+            sys.exit("version without a digest or lifecycle")
+        print(digest, lifecycle)
 ' "$version" <<<"$resp") || die "unreadable definition-versions response"
 if [ -n "$existing" ]; then
   read -r have lifecycle <<<"$existing"
   [ "$have" = "$want" ] ||
     die "$name@$version is already in the registry with digest $have, not $want: immutability is broken, investigate"
-  echo "$name@$version is already published with digest $have (lifecycle $lifecycle); nothing to do."
-  exit 0
+  case $lifecycle in
+    published | deprecated)
+      echo "$name@$version is already published with digest $have (lifecycle $lifecycle); nothing to do."
+      exit 0
+      ;;
+    *) die "$name@$version is in the registry with digest $have but lifecycle $lifecycle; not publishing, investigate" ;;
+  esac
 fi
 
 # 4. Publish.
-call POST "/api/v1/agents/$name/definition-versions" "$(cat "$body")"
+call POST "/api/v1/agents/$name/definition-versions" "$body"
 [ "$status" = 201 ] || die "publish answered HTTP $status: $resp"
 echo "Published $name@$version."
 

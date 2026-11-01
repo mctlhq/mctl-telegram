@@ -38,7 +38,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Only to find the PR a push merged and comment on it.
+      # Only to find the PR a push merged and comment on it. The comment
+      # goes through the issues comments API; either scope is documented to
+      # allow that on a PR, and both are set so it does not hinge on which.
+      issues: write
       pull-requests: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4

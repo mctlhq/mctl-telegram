@@ -504,11 +504,15 @@ carries the text and no path, so it is complete without the repository.
     with the admin token (`tools/mctl-token/mctl_token.py`) that the agent
     row exists (if not, it prints the one-time
     `POST /api/v1/agents` call and stops; it never creates the row itself)
-    and whether the version is already in the registry (same digest: done;
-    another digest: fail), publishes with the digest as `contentHash` and
+    and whether the version is already in the registry (same digest and
+    `published` or `deprecated`: done; `disabled`, or another digest:
+    fail), publishes with the digest as `contentHash` and
     the authored file as the source path, then checks that the public
     catalog serves the version as `published` under the same digest. Any
-    other outcome exits non-zero.
+    other outcome exits non-zero. The body goes to `mctl_token.py`'s
+    `call()` from a file, not on the command line, which caps one argument
+    at 128 KiB on Linux. `scripts/publish-assistant_test.sh` runs it
+    offline in CI against a fake admin tool and a local catalog fixture.
   - A narrow publisher principal that may only publish immutable
     `TelegramAssistant` versions from this repository is a follow-up.
 
