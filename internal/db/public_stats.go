@@ -24,9 +24,11 @@ type PublicStats struct {
 	// ActiveUsers30d is the number of distinct users with at least one such
 	// invocation in the 30 days before now.
 	ActiveUsers30d int64
-	// SessionsActive is the number of live Telegram sessions used within the
-	// last hour (the same rule as CountActiveSessions).
-	SessionsActive int64
+	// SessionsConnected is the number of live (not revoked) Telegram
+	// sessions. It is deliberately not CountActiveSessions' "used within the
+	// hour" rule: the page shows how many accounts are connected, which is
+	// stable through the day, rather than who happens to be mid-call.
+	SessionsConnected int64
 }
 
 // publicToolFilter selects the audit rows that count as a user-visible tool
@@ -113,19 +115,13 @@ func (s *Store) PublicStatsQuery(ctx context.Context, canaryTelegramIDs []int64)
 		return PublicStats{}, fmt.Errorf("public stats: active users: %w", err)
 	}
 
-	// Same rule as CountActiveSessions (live row, used within the hour or
-	// never), minus the canary's always-on session. Kept as its own
-	// statement rather than changing CountActiveSessions, whose gauge feeds
-	// the SLO rules and must keep counting the canary. The canary clause
-	// comes before the cutoff placeholder, as in the statement above, so the
-	// placeholders appear in the text in argument order on both dialects.
-	cutoff := time.Now().UTC().Add(-time.Hour)
+	// Live sessions, minus the canary's. CountActiveSessions (used within the
+	// hour) stays as it is: its gauge feeds the SLO rules.
 	if err := s.DB.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM telegram_accounts
-		  WHERE revoked_at IS NULL`+notCanary("user_id")+`
-		    AND (last_used_at IS NULL OR last_used_at > `+nextPlaceholder+`)`,
-		withExtra(cutoff)...,
-	).Scan(&out.SessionsActive); err != nil {
+		  WHERE revoked_at IS NULL`+notCanary("user_id"),
+		canaryArgs...,
+	).Scan(&out.SessionsConnected); err != nil {
 		return PublicStats{}, fmt.Errorf("public stats: sessions: %w", err)
 	}
 	return out, nil

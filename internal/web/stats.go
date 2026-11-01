@@ -15,11 +15,11 @@ import (
 // the landing page and served by GET /api/stats. Every field is an aggregate
 // over the whole deployment; nothing in it names a user, a peer or a message.
 type StatsSnapshot struct {
-	AccountsTotal  int64     `json:"accounts_total"`
-	ToolCallsTotal int64     `json:"tool_calls_total"`
-	ActiveUsers30d int64     `json:"active_users_30d"`
-	SessionsActive int64     `json:"sessions_active"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	AccountsTotal     int64     `json:"accounts_total"`
+	ToolCallsTotal    int64     `json:"tool_calls_total"`
+	ActiveUsers30d    int64     `json:"active_users_30d"`
+	SessionsConnected int64     `json:"sessions_connected"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 // StatsCache holds the most recent successful StatsSnapshot. It starts empty
@@ -66,11 +66,11 @@ func SampleStats(ctx context.Context, src StatsSource, cache *StatsCache, canary
 		return err
 	}
 	cache.Set(StatsSnapshot{
-		AccountsTotal:  ps.AccountsTotal,
-		ToolCallsTotal: ps.ToolCallsTotal,
-		ActiveUsers30d: ps.ActiveUsers30d,
-		SessionsActive: ps.SessionsActive,
-		UpdatedAt:      now().UTC(),
+		AccountsTotal:     ps.AccountsTotal,
+		ToolCallsTotal:    ps.ToolCallsTotal,
+		ActiveUsers30d:    ps.ActiveUsers30d,
+		SessionsConnected: ps.SessionsConnected,
+		UpdatedAt:         now().UTC(),
 	})
 	return nil
 }

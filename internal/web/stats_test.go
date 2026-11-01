@@ -55,7 +55,7 @@ func TestStatsJSON_EmptyCacheIs503NotZeros(t *testing.T) {
 func TestStatsJSON_ServesSnapshotCacheable(t *testing.T) {
 	cache := &StatsCache{}
 	at := time.Date(2026, 11, 1, 12, 30, 0, 0, time.UTC)
-	cache.Set(StatsSnapshot{AccountsTotal: 97, ToolCallsTotal: 57339, ActiveUsers30d: 50, SessionsActive: 60, UpdatedAt: at})
+	cache.Set(StatsSnapshot{AccountsTotal: 97, ToolCallsTotal: 57339, ActiveUsers30d: 50, SessionsConnected: 60, UpdatedAt: at})
 	rec := httptest.NewRecorder()
 	StatsJSON(cache).ServeHTTP(rec, httptest.NewRequest("GET", "/api/stats", nil))
 	if rec.Code != 200 {
@@ -68,7 +68,7 @@ func TestStatsJSON_ServesSnapshotCacheable(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("json: %v", err)
 	}
-	for k, want := range map[string]float64{"accounts_total": 97, "tool_calls_total": 57339, "active_users_30d": 50, "sessions_active": 60} {
+	for k, want := range map[string]float64{"accounts_total": 97, "tool_calls_total": 57339, "active_users_30d": 50, "sessions_connected": 60} {
 		if got[k] != want {
 			t.Errorf("%s = %v, want %v", k, got[k], want)
 		}
@@ -83,7 +83,7 @@ func TestStatsJSON_ServesSnapshotCacheable(t *testing.T) {
 
 func TestSampleStats_KeepsPreviousOnError(t *testing.T) {
 	cache := &StatsCache{}
-	src := &fakeStatsSource{stats: db.PublicStats{AccountsTotal: 1, ToolCallsTotal: 2, ActiveUsers30d: 3, SessionsActive: 4}}
+	src := &fakeStatsSource{stats: db.PublicStats{AccountsTotal: 1, ToolCallsTotal: 2, ActiveUsers30d: 3, SessionsConnected: 4}}
 	now := func() time.Time { return time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC) }
 	if err := SampleStats(context.Background(), src, cache, nil, now); err != nil {
 		t.Fatal(err)
@@ -149,7 +149,7 @@ func TestLanding_StatsStripOnlyWhenSampled(t *testing.T) {
 		t.Fatal("strip rendered before any sample exists")
 	}
 
-	cache.Set(StatsSnapshot{AccountsTotal: 97, ToolCallsTotal: 57339, ActiveUsers30d: 50, SessionsActive: 60,
+	cache.Set(StatsSnapshot{AccountsTotal: 97, ToolCallsTotal: 57339, ActiveUsers30d: 50, SessionsConnected: 60,
 		UpdatedAt: time.Date(2026, 11, 1, 12, 30, 0, 0, time.UTC)})
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
@@ -159,7 +159,7 @@ func TestLanding_StatsStripOnlyWhenSampled(t *testing.T) {
 		`data-stat="tool_calls_total">57,339<`,
 		`data-stat="accounts_total">97<`,
 		`data-stat="active_users_30d">50<`,
-		`data-stat="sessions_active">60<`,
+		`data-stat="sessions_connected">60<`,
 		`datetime="2026-11-01T12:30:00Z"`,
 		`12:30 UTC`,
 		`fetch('/api/stats'`,

@@ -97,8 +97,8 @@ func TestPublicStatsQuery_CountsAndExclusions(t *testing.T) {
 	if got.ActiveUsers30d != 1 {
 		t.Errorf("ActiveUsers30d = %d, want 1 (alice; bob is 40 days old, dana is canary)", got.ActiveUsers30d)
 	}
-	if got.SessionsActive != 1 {
-		t.Errorf("SessionsActive = %d, want 1 (alice; bob revoked, carol idle 2h, dana canary)", got.SessionsActive)
+	if got.SessionsConnected != 2 {
+		t.Errorf("SessionsConnected = %d, want 2 (alice live, carol live but idle; bob revoked, dana canary)", got.SessionsConnected)
 	}
 
 	// Without a canary list the canary counts like anyone else in every
@@ -108,9 +108,9 @@ func TestPublicStatsQuery_CountsAndExclusions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PublicStatsQuery(nil): %v", err)
 	}
-	if all.AccountsTotal != 4 || all.ToolCallsTotal != 54 || all.ActiveUsers30d != 2 || all.SessionsActive != 2 {
-		t.Errorf("without canary list: Accounts=%d ToolCalls=%d Active30d=%d Sessions=%d, want 4/54/2/2",
-			all.AccountsTotal, all.ToolCallsTotal, all.ActiveUsers30d, all.SessionsActive)
+	if all.AccountsTotal != 4 || all.ToolCallsTotal != 54 || all.ActiveUsers30d != 2 || all.SessionsConnected != 3 {
+		t.Errorf("without canary list: Accounts=%d ToolCalls=%d Active30d=%d Sessions=%d, want 4/54/2/3",
+			all.AccountsTotal, all.ToolCallsTotal, all.ActiveUsers30d, all.SessionsConnected)
 	}
 }
 
