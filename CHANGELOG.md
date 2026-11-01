@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.121.0](https://github.com/mctlhq/mctl-telegram/compare/0.120.0...0.121.0) (2026-11-01)
+
+
+### Features
+
+* **web:** one card per assistant on /assistants, compact full-width grid ([93a9085](https://github.com/mctlhq/mctl-telegram/commit/93a9085c6038bd3f1e19f6cfac3891b69968f867))
+
 ## [0.120.0](https://github.com/mctlhq/mctl-telegram/compare/0.119.0...0.120.0) (2026-11-01)
 
 
