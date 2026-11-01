@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,15 +15,26 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/ui"
 )
 
+// fakeStatsSource is read by the test while the sampler goroutine calls it,
+// so the call counter is atomic and the result fields are guarded by mu.
 type fakeStatsSource struct {
+	mu    sync.Mutex
 	stats db.PublicStats
 	err   error
-	calls int
+	calls atomic.Int64
 }
 
 func (f *fakeStatsSource) PublicStatsQuery(context.Context, []int64) (db.PublicStats, error) {
-	f.calls++
+	f.calls.Add(1)
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.stats, f.err
+}
+
+func (f *fakeStatsSource) set(stats db.PublicStats, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stats, f.err = stats, err
 }
 
 func TestStatsJSON_EmptyCacheIs503NotZeros(t *testing.T) {
@@ -79,8 +92,7 @@ func TestSampleStats_KeepsPreviousOnError(t *testing.T) {
 	if !ok || first.ToolCallsTotal != 2 {
 		t.Fatalf("first sample not stored: %+v ok=%v", first, ok)
 	}
-	src.err = errors.New("db down")
-	src.stats = db.PublicStats{}
+	src.set(db.PublicStats{}, errors.New("db down"))
 	if err := SampleStats(context.Background(), src, cache, nil, now); err == nil {
 		t.Fatal("expected error from failing source")
 	}
@@ -96,8 +108,8 @@ func TestStartStatsSampler_DisabledAndCancelled(t *testing.T) {
 	src := &fakeStatsSource{stats: db.PublicStats{AccountsTotal: 1}}
 	StartStatsSampler(context.Background(), src, cache, nil, 0)
 	time.Sleep(20 * time.Millisecond)
-	if _, ok := cache.Get(); ok || src.calls != 0 {
-		t.Fatalf("disabled sampler must not sample: ok=%v calls=%d", ok, src.calls)
+	if _, ok := cache.Get(); ok || src.calls.Load() != 0 {
+		t.Fatalf("disabled sampler must not sample: ok=%v calls=%d", ok, src.calls.Load())
 	}
 
 	// Enabled: samples immediately, then stops ticking once ctx is cancelled.
@@ -117,10 +129,10 @@ func TestStartStatsSampler_DisabledAndCancelled(t *testing.T) {
 	}
 	cancel()
 	time.Sleep(30 * time.Millisecond)
-	n := src.calls
+	n := src.calls.Load()
 	time.Sleep(50 * time.Millisecond)
-	if src.calls != n {
-		t.Errorf("sampler kept running after cancel: %d -> %d calls", n, src.calls)
+	if got := src.calls.Load(); got != n {
+		t.Errorf("sampler kept running after cancel: %d -> %d calls", n, got)
 	}
 }
 
