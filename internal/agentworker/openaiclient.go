@@ -152,9 +152,11 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []ChatMessage, tools []too
 	if c.GatewayToken != "" {
 		req.Header.Set("cf-aig-authorization", "Bearer "+c.GatewayToken)
 	}
-	if c.UserAgent != "" {
-		req.Header.Set("User-Agent", c.UserAgent)
+	userAgent := strings.TrimSpace(c.UserAgent)
+	if userAgent == "" {
+		userAgent = "mctl-telegram-agent-worker"
 	}
+	req.Header.Set("User-Agent", userAgent)
 	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("chat request: %w", err)
