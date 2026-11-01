@@ -1,8 +1,11 @@
 // Command assistant-materialize writes the registry form of every assistant
 // in the compiled-in catalog: one canonical JSON document per name@version,
-// with its instructions inlined, and prints each digest. CI runs it on every
-// build and keeps the output as an artifact; publishing a document to the
-// mctl-api registry is a separate, human-admin step (docs/assistants/spec.md).
+// with its instructions inlined, and prints each digest and source path. CI
+// runs it on every build and keeps the output as an artifact; publishing a
+// document to the mctl-api registry is a separate, human-admin step
+// (docs/assistants/spec.md). With -git-sha it also writes the publish
+// request body, <name>-<version>.request.json, for that commit, which is
+// what scripts/publish-assistant.sh sends.
 package main
 
 import (
@@ -18,14 +21,15 @@ import (
 
 func main() {
 	out := flag.String("out", "dist/assistants", "directory to write <name>-<version>.json into")
+	gitSHA := flag.String("git-sha", "", "also write <name>-<version>.request.json, the publish body for this commit")
 	flag.Parse()
-	if err := run(*out); err != nil {
+	if err := run(*out, *gitSHA); err != nil {
 		fmt.Fprintln(os.Stderr, "assistant-materialize:", err)
 		os.Exit(1)
 	}
 }
 
-func run(out string) error {
+func run(out, gitSHA string) error {
 	catalog, err := assistant.LoadCatalog(mctltelegram.Catalog)
 	if err != nil {
 		return err
@@ -56,7 +60,17 @@ func run(out string) error {
 		if err := os.WriteFile(filepath.Join(out, name), e.Materialized, 0o644); err != nil {
 			return err
 		}
-		fmt.Printf("%s@%s %s %s\n", e.Definition.Metadata.Name, e.Definition.Metadata.Version, e.Digest, name)
+		if gitSHA != "" {
+			body, err := assistant.PublishRequest(e, gitSHA)
+			if err != nil {
+				return err
+			}
+			req := fmt.Sprintf("%s-%s.request.json", e.Definition.Metadata.Name, e.Definition.Metadata.Version)
+			if err := os.WriteFile(filepath.Join(out, req), body, 0o644); err != nil {
+				return err
+			}
+		}
+		fmt.Printf("%s@%s %s %s %s\n", e.Definition.Metadata.Name, e.Definition.Metadata.Version, e.Digest, name, e.Source)
 	}
 	return nil
 }

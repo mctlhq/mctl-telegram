@@ -11,7 +11,7 @@ import (
 
 func TestRunWritesParsableDocuments(t *testing.T) {
 	out := t.TempDir()
-	if err := run(out); err != nil {
+	if err := run(out, ""); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(filepath.Join(out, "hr-recruiter-0.1.0.json"))
@@ -30,7 +30,7 @@ func TestRunWritesParsableDocuments(t *testing.T) {
 	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := run(filepath.Join(blocker, "sub")); err == nil {
+	if err := run(filepath.Join(blocker, "sub"), ""); err == nil {
 		t.Fatal("run succeeded with an unusable output directory")
 	}
 }
