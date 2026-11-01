@@ -175,6 +175,13 @@ type Registry struct {
 	// ConnectFirstCallErrorsTotal counts store errors in the connect funnel
 	// by op (insert, close, classify, sweep).
 	ConnectFirstCallErrorsTotal *prometheus.CounterVec
+	// AcquisitionCaptureTotal counts the acquisition snapshot attached at
+	// /oauth/authorize by state (attributed, direct, unknown) and reason
+	// (ok, missing, invalid, expired).
+	AcquisitionCaptureTotal *prometheus.CounterVec
+	// AcquisitionWriteFailuresTotal counts failed user_acquisition inserts at
+	// user creation. The sign-in itself still succeeds.
+	AcquisitionWriteFailuresTotal prometheus.Counter
 
 	// TelegramReplicaID is an info-type gauge (constant value 1) labeled by
 	// replica_id. Operators use it to verify that a given user_id consistently
@@ -560,6 +567,17 @@ func (r *Registry) CountConnectFirstCall(client, outcome, reason string) {
 	r.ConnectFirstCallTotal.WithLabelValues(client, outcome, reason).Inc()
 }
 
+// CountAcquisitionCapture records one acquisition snapshot decision at
+// /oauth/authorize. Both arguments come from closed sets in internal/oauth.
+func (r *Registry) CountAcquisitionCapture(state, reason string) {
+	r.AcquisitionCaptureTotal.WithLabelValues(state, reason).Inc()
+}
+
+// CountAcquisitionWriteFailure records one failed user_acquisition insert.
+func (r *Registry) CountAcquisitionWriteFailure() {
+	r.AcquisitionWriteFailuresTotal.Inc()
+}
+
 // CountConnectFirstCallError records one connect funnel store error.
 // Satisfies connectfunnel.Metrics.
 func (r *Registry) CountConnectFirstCallError(op string) {
@@ -744,6 +762,15 @@ func New() *Registry {
 		Name: "mctl_connect_first_call_errors_total",
 		Help: "Total store errors in the connect first-call funnel, labeled by op: insert, close, classify, sweep.",
 	}, []string{"op"})
+
+	r.AcquisitionCaptureTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_acquisition_capture_total",
+		Help: "Acquisition snapshots attached at /oauth/authorize, by state (attributed, direct, unknown) and reason (ok, missing, invalid, expired).",
+	}, []string{"state", "reason"})
+	r.AcquisitionWriteFailuresTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "mctl_acquisition_write_failures_total",
+		Help: "Failed user_acquisition inserts at user creation; the sign-in still succeeds.",
+	})
 
 	r.TelegramReplicaID = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "mctl_telegram_replica_id",
@@ -937,6 +964,8 @@ func New() *Registry {
 		r.LoginFlowDuration,
 		r.ConnectFirstCallTotal,
 		r.ConnectFirstCallErrorsTotal,
+		r.AcquisitionCaptureTotal,
+		r.AcquisitionWriteFailuresTotal,
 		r.SessionsBorrowTotal,
 		r.TelegramReplicaID,
 		r.BridgeActiveDaemons,

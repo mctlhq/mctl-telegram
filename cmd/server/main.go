@@ -9,6 +9,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -21,6 +22,7 @@ import (
 
 	gotdtelegram "github.com/gotd/td/telegram"
 	mctltelegram "github.com/mctlhq/mctl-telegram"
+	"github.com/mctlhq/mctl-telegram/internal/acquisition"
 	"github.com/mctlhq/mctl-telegram/internal/agent/control"
 	"github.com/mctlhq/mctl-telegram/internal/agent/executor"
 	"github.com/mctlhq/mctl-telegram/internal/agent/listener"
@@ -469,6 +471,17 @@ func main() {
 	mux.Use(middleware.Recoverer)
 	mux.Use(middleware.Timeout(60 * time.Second))
 	mux.Use(web.SecurityHeaders(cfg.PublicBaseURL))
+	// First-touch acquisition cookie (issue-1072) on the public content pages
+	// only; never on /oauth/*, /telegram/connect or /local-bridge/activate.
+	if cfg.OAUTHJWTSecret != "" {
+		selfHost, secureCookie := "", false
+		if u, err := url.Parse(cfg.PublicBaseURL); err == nil {
+			selfHost, secureCookie = u.Hostname(), u.Scheme == "https"
+		}
+		mux.Use(acquisition.Middleware(acquisition.DeriveKey([]byte(cfg.OAUTHJWTSecret)), selfHost, secureCookie,
+			"/", "/docs", "/demo", "/security", "/privacy", "/terms", "/platforms",
+			"/assistants", "/local-bridge", "/docs/product-updates"))
+	}
 
 	// Authorization server URL — for the Telegram-native local-jwt path
 	// (default), this is the same as PublicBaseURL: mctl-telegram is its own

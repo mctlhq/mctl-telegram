@@ -1178,6 +1178,12 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 		return 0, err
 	}
 
+	// The sign-up acquisition record (issue-1072) cascades on users(id), but
+	// the users row survives deletion, so it must be purged explicitly.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM user_acquisition WHERE user_id = $1`, userID); err != nil {
+		return 0, fmt.Errorf("delete account: purge acquisition: %w", err)
+	}
+
 	// Clear the client identity fields (issue-438) tied to the deleted
 	// account, for the same reason as the consent/reachability purge above:
 	// the users identity row survives, so telegram_first_name,

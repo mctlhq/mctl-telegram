@@ -24,6 +24,11 @@ type TelegramIdentityCapture struct {
 	// CapturedAt is stamped into users.identity_captured_at. Callers should
 	// pass time.Now().UTC().
 	CapturedAt time.Time
+	// Acquisition is the sign-up acquisition snapshot. nil means the caller
+	// has no capture and nothing is written, so a caller can never produce a
+	// "direct" row by omission. It is written only when this call creates the
+	// users row.
+	Acquisition *Acquisition
 }
 
 // EnsureUserByTelegramCapture is EnsureUserByTelegramID's sibling for call
@@ -43,7 +48,7 @@ type TelegramIdentityCapture struct {
 //     "not_supplied" rather than silently holding a display name.
 //
 // It reuses EnsureUserByTelegramID's race-safe INSERT ... ON CONFLICT DO
-// NOTHING + SELECT shape and the COALESCE(NULLIF($1,''), col) refresh
+// NOTHING + SELECT shape and the COALESCE(NULLIF($1,”), col) refresh
 // pattern, and additionally always stamps identity_captured_at,
 // identity_source and last_seen_at (a capture is definitionally an
 // authentication event).
@@ -64,7 +69,12 @@ func (s *Store) EnsureUserByTelegramCapture(ctx context.Context, c TelegramIdent
 	// Insert-or-no-op, same ON CONFLICT DO NOTHING shape as
 	// EnsureUserByTelegramID: covers both the telegram_login_id unique
 	// partial index and the legacy github_login UNIQUE constraint.
-	if _, err := s.DB.ExecContext(ctx,
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("insert user by tg_id capture: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO users(
 		     github_login, provider, telegram_login_id, telegram_username, telegram_display_name,
 		     telegram_first_name, telegram_last_name, identity_source, identity_captured_at, last_seen_at
@@ -73,8 +83,18 @@ func (s *Store) EnsureUserByTelegramCapture(ctx context.Context, c TelegramIdent
 		 ON CONFLICT DO NOTHING`,
 		syntheticLogin, "tg-mcp", c.TelegramID, nullable(c.Username), nullable(displayName),
 		nullable(c.FirstName), nullable(c.LastName), c.Source, capturedAt,
-	); err != nil {
+	)
+	if err != nil {
 		return 0, fmt.Errorf("insert user by tg_id capture: %w", err)
+	}
+	// Only the call that created the row writes the acquisition record. The
+	// insert runs under a savepoint so a failure leaves the user row (and the
+	// sign-in) intact with the acquisition row absent.
+	if created, _ := res.RowsAffected(); created == 1 && c.Acquisition != nil {
+		s.insertAcquisitionBestEffort(ctx, tx, syntheticLogin, *c.Acquisition)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("insert user by tg_id capture: commit: %w", err)
 	}
 	var id int64
 	if err := s.DB.QueryRowContext(ctx,

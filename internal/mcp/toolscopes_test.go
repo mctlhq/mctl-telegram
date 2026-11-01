@@ -90,7 +90,7 @@ var (
 	readTools     = []string{"get_media", "get_messages", "get_unread_messages", "list_dialogs", "prepare_get_media", "search_messages"}
 	writeTools    = []string{"delete_messages", "edit_message", "forward_messages", "pin_message", "prepare_pin_message", "prepare_send_message", "send_media", "send_message", "set_reaction"}
 	accountTools  = []string{"delete_fork", "delete_telegram_account", "disconnect_telegram_account", "fork_assistant", "get_my_notification_preferences", "install_assistant", "revoke_local_bridge_device", "set_my_notification_preferences", "set_send_consent", "update_fork", "update_install"}
-	lookupTools   = []string{"get_user_audit_log", "list_telegram_identities"}
+	lookupTools   = []string{"get_acquisition_report", "get_user_audit_log", "list_telegram_identities"}
 	adminWrites   = []string{"mint_worker_token", "provision_local_account", "revoke_telegram_session", "revoke_worker_token", "set_account_mode", "set_account_send", "set_telegram_access"}
 	broadcastOnly = []string{"cancel_broadcast", "get_broadcast", "list_broadcasts", "prepare_broadcast"}
 )

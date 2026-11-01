@@ -98,6 +98,7 @@ func TestLookupAdminScope_ReadsOnly(t *testing.T) {
 	}{
 		{"list_telegram_identities", srv.toolListIdentities, map[string]any{}},
 		{"get_user_audit_log", srv.toolGetUserAuditLog, map[string]any{"telegram_id": float64(42)}},
+		{"get_acquisition_report", srv.toolGetAcquisitionReport, map[string]any{}},
 	}
 	for _, r := range reads {
 		_, handler := r.build()

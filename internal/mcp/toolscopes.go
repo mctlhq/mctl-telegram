@@ -103,6 +103,7 @@ var toolScopes = map[string][]string{
 	// and nowhere else (see requireAnyScope).
 	"list_telegram_identities": {"admin:users", "admin:users:read"},
 	"get_user_audit_log":       {"admin:users", "admin:users:read"},
+	"get_acquisition_report":   {"admin:users", "admin:users:read"},
 
 	// Operator writes.
 	"set_telegram_access":     {"admin:users"},
