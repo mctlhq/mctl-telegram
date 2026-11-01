@@ -44,7 +44,7 @@ const publicToolFilter = `status = 'ok'
 //
 // canaryTelegramIDs lists the Telegram ids of the monitoring canary accounts.
 // A probe that runs every few minutes would otherwise be the largest "user"
-// in the table, and its always-on session would pad the online count. An
+// in the table, and its always-on session would pad the connected-sessions count. An
 // empty list excludes nobody.
 //
 // The ToolCallsTotal and ActiveUsers30d queries scan audit_logs (84k rows,
