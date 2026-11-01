@@ -1,9 +1,11 @@
 # 0008. Managed runtime: one pooled platform worker, OpenAI-compatible models through the AI gateway
 
-Status: Proposed (owner GO with amendments, 2026-11-01). Epic: P5 of #1002
-(epic issue and `roadmap/epics/telegram-managed-runtime.yaml` in mctlhq/.github).
-Spike: `telegram-openai-tool-loop` (mctlhq/.github). Builds on #1046 (P4.5,
-external runtime contract) and [0002](0002-send-gate.md).
+Status: Proposed (owner GO with amendments, 2026-11-01). Epic: #1088 (P5 of
+#1002; manifest `roadmap/epics/telegram-managed-runtime.yaml` in mctlhq/.github).
+Slices: #1089 runtime field and consent, #1090 pool credential and claim path,
+#1091 OpenAI runner, #1092 ledger and caps, #1093 C1 gate, #1094 CI image,
+mctlhq/mctl-gitops#2345 deployment, #1095 docs. Spike: mctlhq/.github#293.
+Builds on #1046 (P4.5, external runtime contract) and [0002](0002-send-gate.md).
 
 Unlike 0001-0007 this record is written before the code. Where it names
 files and symbols it names the code the change will touch; once implemented,
