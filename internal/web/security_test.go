@@ -187,8 +187,9 @@ func TestLanding_HasTransparencySections(t *testing.T) {
 	body := w.Body.String()
 	for _, must := range []string{
 		"inside Claude</span></h1>",
-		"Connect in Claude",
-		"MCTL Assistant · Unofficial third-party connector using the Telegram API",
+		"Connect in a minute",
+		"Unofficial Telegram connector · MCP",
+		"MCTL Assistant is an unofficial third-party connector using the Telegram API. Not affiliated with Telegram, Anthropic or OpenAI.",
 		`id="claude"`,
 		"Customize &#8594; Connectors",
 		"Add custom connector",
@@ -207,12 +208,19 @@ func TestLanding_HasTransparencySections(t *testing.T) {
 		"How it works",
 		`href="/security"`,
 		`href="/privacy"`,
-		"Common questions",
+		"Questions",
 		"What does my AI assistant see?",
 	} {
 		if !strings.Contains(body, must) {
 			t.Fatalf("landing missing %q", must)
 		}
+	}
+	// Telegram API terms 2.2: users must be told the app uses the Telegram API,
+	// prominently and in the intro. The disclosure has to sit in the hero, ahead
+	// of the first content section, not only in the footer.
+	legal := strings.Index(body, "unofficial third-party connector using the Telegram API")
+	if first := strings.Index(body, `id="use-cases"`); legal < 0 || first < 0 || legal > first {
+		t.Fatalf("the Telegram API disclosure must precede the first content section (disclosure at %d, use-cases at %d)", legal, first)
 	}
 	// The connector steps both clients replaced: ChatGPT's Settings -> Apps /
 	// Developer Mode path and Claude's old /customize/connectors URL.
@@ -437,9 +445,11 @@ func TestLanding_UntestedClientsLabelled(t *testing.T) {
 	Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
 	body := w.Body.String()
 	for _, label := range []string{
-		"<strong>Cursor</strong> (not yet tested)",
-		"<strong>VS Code</strong> (not yet tested)",
-		"<strong>Windsurf and others</strong> (not yet tested)",
+		// The Cursor / VS Code snippets sit under one "not yet tested" tag in
+		// the "Other clients" tab; Windsurf is named in the FAQ answer, which
+		// carries the label too (TestUntestedClients_LabelledEverywhere).
+		`<span class="tag-untested">not yet tested</span>`,
+		"Cursor, VS Code, Windsurf) may work but are not yet tested",
 	} {
 		if !strings.Contains(body, label) {
 			t.Errorf("landing missing %q", label)
