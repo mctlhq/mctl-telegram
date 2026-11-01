@@ -13,6 +13,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -37,6 +38,23 @@ type assistantView struct {
 	Mode, DisclosurePolicy                       string
 	// Limits is "" when the entry states none.
 	Limits string
+	// Tiers is the one-line digest of Intents by tier (tierSummary); nil
+	// when the entry has no intents.
+	Tiers []tierLine
+}
+
+// tierLine is one tier of the digest: the tier and its intents, joined.
+type tierLine struct {
+	Tier, Names string
+}
+
+// assistantGroup is one catalog name as the page shows it: a card for the
+// newest version and, folded inside it, every older version the catalog
+// still lists. Nothing installable leaves the page; older versions only
+// stop being cards of their own (#1022, owner feedback 2026-11-01).
+type assistantGroup struct {
+	Latest assistantView
+	Older  []assistantView
 }
 
 type assistantVariableView struct {
@@ -51,7 +69,10 @@ type assistantVariableView struct {
 
 type assistantsData struct {
 	ui.Data
+	// Entries is every installable version, as list_assistants lists it;
+	// Groups is the same set folded by name for the cards.
 	Entries []assistantView
+	Groups  []assistantGroup
 	// Unavailable is set when the catalog could not be read: the page then
 	// says so with an error status instead of showing an empty catalog.
 	Unavailable bool
@@ -71,6 +92,7 @@ func buildAssistantViews(entries []assistantinstall.CatalogEntry) []assistantVie
 				groupThousands(l.MaxMsgsPerMinute) + " messages per minute, " +
 				groupThousands(l.MaxReplyChars) + " characters per reply"
 		}
+		v.Tiers = tierSummary(e.Intents)
 		for _, cv := range e.Variables {
 			vv := assistantVariableView{
 				Name: cv.Name, Type: cv.Type, Description: cv.Description,
@@ -86,6 +108,56 @@ func buildAssistantViews(entries []assistantinstall.CatalogEntry) []assistantVie
 			v.Variables = append(v.Variables, vv)
 		}
 		out = append(out, v)
+	}
+	return out
+}
+
+// groupAssistants folds views by name, in the order the catalog lists them:
+// the first view of a name is the group's newest version (sortCatalog puts
+// versions in descending order), every later one is an older version. The
+// output order is the input order of first appearance, so the page keeps the
+// catalog's by-name ordering, and no view is dropped or reordered within a
+// name.
+func groupAssistants(views []assistantView) []assistantGroup {
+	var out []assistantGroup
+	index := map[string]int{}
+	for _, v := range views {
+		if i, ok := index[v.Name]; ok {
+			out[i].Older = append(out[i].Older, v)
+			continue
+		}
+		index[v.Name] = len(out)
+		out = append(out, assistantGroup{Latest: v})
+	}
+	return out
+}
+
+// tierOrder is how tierSummary orders the known tiers: from what the
+// assistant does on its own to what it is never allowed to do. A tier the
+// catalog names that is not listed here follows, in order of appearance.
+var tierOrder = []string{"auto", "approve", "never"}
+
+// tierSummary digests intents into one line per tier ("auto: discovery,
+// schedule", "approve: decline, share_details"); tiers with no intent are
+// left out, and intents keep their catalog order within a tier. nil for no
+// intents.
+func tierSummary(intents []assistantinstall.CatalogIntent) []tierLine {
+	byTier := map[string][]string{}
+	order := append([]string(nil), tierOrder...)
+	for _, in := range intents {
+		if _, known := byTier[in.Tier]; !known {
+			byTier[in.Tier] = nil
+			if !slices.Contains(order, in.Tier) {
+				order = append(order, in.Tier)
+			}
+		}
+		byTier[in.Tier] = append(byTier[in.Tier], in.Name)
+	}
+	var out []tierLine
+	for _, tier := range order {
+		if names := byTier[tier]; len(names) > 0 {
+			out = append(out, tierLine{Tier: tier, Names: strings.Join(names, ", ")})
+		}
 	}
 	return out
 }
@@ -139,6 +211,7 @@ func Assistants(svc *assistantinstall.Service, publicBaseURL string, showManage 
 		} else {
 			data.Source = source
 			data.Entries = buildAssistantViews(entries)
+			data.Groups = groupAssistants(data.Entries)
 		}
 		var buf bytes.Buffer
 		if err := assistantsTmpl.ExecuteTemplate(&buf, "assistants", data); err != nil {
