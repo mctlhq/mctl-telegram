@@ -3,24 +3,46 @@
 <head>
 {{template "ui_head" .}}
 <style>
-  /* Each catalog entry is a product card. Values map onto the shared tokens:
+  /* One card per assistant, laid out as a grid over the whole container
+     (the hero keeps the reading column). Values map onto the shared tokens:
      surface, hairline border, neutral text; only the tier and lifecycle
      badges carry a status color. */
-  .page section.assistant-entry {
-    margin-top: 32px;
-    padding: 28px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
+  .assistant-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+    margin-top: 48px;
   }
-  .assistant-entry > :last-child { margin-bottom: 0; }
-  @media (max-width: 640px) { .page section.assistant-entry { padding: 20px; } }
-  .assistant-entry .section-head { margin-bottom: 12px; }
-  .assistant-entry h3 {
-    font-size: 15px; font-weight: 600; color: var(--text);
-    margin: 28px 0 10px;
+  @media (min-width: 900px) {
+    .assistant-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
-  /* Example messages read as incoming chat bubbles. */
+  .page .assistant-card {
+    margin-top: 0;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .assistant-card > * { margin: 0; }
+  @media (max-width: 640px) { .page .assistant-card { padding: 20px; } }
+  .assistant-card h2 {
+    font-size: 20px; font-weight: 700; line-height: 1.3; letter-spacing: -.01em;
+    border-bottom: 0; padding-bottom: 0; margin: 0;
+  }
+  .assistant-card h3 {
+    font-size: 14px; font-weight: 600; color: var(--text);
+    margin: 20px 0 8px;
+  }
+  .assistant-card .assistant-ref { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+  .assistant-card .assistant-ref code { font-size: 13px; }
+  .assistant-card .assistant-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+  .assistant-card .assistant-tags span {
+    font-size: 12px; color: var(--text-dim);
+    padding: 1px 8px; border-radius: var(--mctl-radius-md);
+    background: color-mix(in srgb, var(--surface-fg) 4%, transparent);
+  }
+  .assistant-card .description { color: var(--text-dim); font-size: 14px; line-height: 1.55; }
+  /* The example message reads as an incoming chat bubble. */
   ul.chat-examples { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
   ul.chat-examples > li {
     padding: 8px 14px;
@@ -30,8 +52,41 @@
     color: var(--text);
     font-size: 14px;
   }
-  /* Parameter names: neutral monospace, regular weight. */
-  .assistant-entry .tbl td:first-child code { font-weight: 500; color: var(--text); }
+  /* Tier digest and defaults: compact key/value lines. */
+  .assistant-card .assistant-tiers, .assistant-card .assistant-defaults {
+    font-size: 13px; color: var(--text-dim); line-height: 1.6;
+  }
+  .assistant-card .assistant-tiers code, .assistant-card .assistant-defaults code { font-size: 12px; }
+  .assistant-card .assistant-tiers .tier-auto    { color: var(--text); }
+  .assistant-card .assistant-tiers .tier-approve { color: var(--status-warn-text); }
+  .assistant-card .assistant-tiers .tier-never   { color: var(--status-bad-text); }
+  /* Collapsed sections: the full tables of the newest version, and each
+     older version in full. CSS-only; a <details> opens without script. */
+  details.assistant-details {
+    margin-top: 6px;
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+  }
+  details.assistant-details > summary {
+    cursor: pointer; font-size: 13px; color: var(--text-dim);
+    list-style: none; display: flex; align-items: center; gap: 8px;
+  }
+  details.assistant-details > summary::-webkit-details-marker { display: none; }
+  details.assistant-details > summary::before {
+    content: ""; width: 6px; height: 6px; flex: none;
+    border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted);
+    transform: rotate(-45deg); transition: transform .15s;
+  }
+  details.assistant-details[open] > summary::before { transform: rotate(45deg); }
+  details.assistant-details > summary:hover { color: var(--text); }
+  details.assistant-details:target > summary { color: var(--accent-text); }
+  details.assistant-details .table-scroll { margin: 8px 0; }
+  details.assistant-details .tbl { font-size: 13px; }
+  details.assistant-details .tbl th, details.assistant-details .tbl td { padding: 6px 10px; }
+  details.assistant-details ul { margin: 0; padding-left: 20px; font-size: 14px; }
+  .assistant-card .tbl td:first-child code { font-weight: 500; color: var(--text); }
+  .assistant-card .assistant-versions a { color: var(--text-dim); text-decoration: underline; text-decoration-color: var(--link-underline); }
+  .assistant-card .assistant-versions a:hover { color: var(--text); }
   .pill-never {
     background: var(--status-bad-soft);
     color: var(--status-bad-text);
@@ -73,19 +128,56 @@
   <section id="catalog-empty">
     <p class="muted">No assistants are available to install yet.</p>
   </section>
-  {{else}}
-  {{range .Entries}}
-  <section class="assistant-entry" id="{{.Name}}-{{.Version}}">
-    <div class="section-head">
-      <h2>{{if .Title}}{{.Title}}{{else}}{{.Name}}{{end}}</h2>
-    </div>
-    <p class="muted"><code>{{.Name}}@{{.Version}}</code> · <span class="badge {{if eq .Lifecycle "published"}}ok{{else if eq .Lifecycle "disabled"}}pill-never{{else}}pill-read{{end}}">{{.Lifecycle}}</span>{{range .Tags}} · {{.}}{{end}}</p>
-    {{if .Description}}<p>{{.Description}}</p>{{end}}
-    {{if .Examples}}
-    <h3>Messages it handles</h3>
-    <ul class="chat-examples">{{range .Examples}}<li>{{.}}</li>{{end}}</ul>
-    {{end}}
+  {{end}}
 
+</div>
+
+  {{if .Groups}}
+  <div class="assistant-grid">
+  {{range .Groups}}
+  {{with .Latest}}
+  <article class="card assistant-card" id="{{.Name}}-{{.Version}}">
+    <h2>{{if .Title}}{{.Title}}{{else}}{{.Name}}{{end}}</h2>
+    <p class="assistant-ref muted"><code>{{.Name}}@{{.Version}}</code> {{template "assistant_lifecycle" .Lifecycle}}</p>
+    {{if .Tags}}<p class="assistant-tags">{{range .Tags}}<span>{{.}}</span>{{end}}</p>{{end}}
+    {{if .Description}}<p class="description">{{.Description}}</p>{{end}}
+    {{if .Examples}}<ul class="chat-examples"><li>{{index .Examples 0}}</li></ul>{{end}}
+    {{if .Tiers}}<p class="assistant-tiers">{{range $i, $t := .Tiers}}{{if $i}} · {{end}}<span class="tier-{{$t.Tier}}">{{$t.Tier}}</span>: {{$t.Names}}{{end}}</p>{{end}}
+    <p class="assistant-defaults">Mode <code>{{.Mode}}</code>{{if .Limits}} · {{.Limits}}{{end}}</p>
+    <details class="assistant-details">
+      <summary>Values, intents and defaults</summary>
+      {{template "assistant_full" .}}
+    </details>
+  {{end}}
+    {{if .Older}}
+    <p class="assistant-versions muted">Other versions: {{range $i, $o := .Older}}{{if $i}}, {{end}}<a href="#{{$o.Name}}-{{$o.Version}}">{{$o.Version}}</a>{{end}}</p>
+    {{range .Older}}
+    <details class="assistant-details assistant-older" id="{{.Name}}-{{.Version}}">
+      <summary><code>{{.Name}}@{{.Version}}</code> {{template "assistant_lifecycle" .Lifecycle}}</summary>
+      {{if .Description}}<p class="description">{{.Description}}</p>{{end}}
+      {{if .Examples}}<h3>Messages it handles</h3><ul class="chat-examples">{{range .Examples}}<li>{{.}}</li>{{end}}</ul>{{end}}
+      {{template "assistant_full" .}}
+    </details>
+    {{end}}
+    {{end}}
+  </article>
+  {{end}}
+  </div>
+  {{end}}
+
+</main>
+
+{{template "ui_footer" .}}
+
+{{template "ui_script" .}}
+</body>
+</html>
+
+{{define "assistant_lifecycle"}}<span class="badge {{if eq . "published"}}ok{{else if eq . "disabled"}}pill-never{{else}}pill-read{{end}}">{{.}}</span>{{end}}
+
+{{/* assistant_full is the complete reference of one version: the values it
+     asks for, its intents with default tiers, and its defaults. */}}
+{{define "assistant_full"}}
     <h3>Values it asks for</h3>
     {{if .Variables}}
     <div class="table-scroll">
@@ -130,15 +222,4 @@
       {{if .Limits}}<li>Limits: {{.Limits}}</li>{{end}}
       <li>Disclosure line: {{if eq .DisclosurePolicy "required"}}always added{{else if eq .DisclosurePolicy "optional"}}added unless you turn it off{{else}}{{.DisclosurePolicy}}{{end}}</li>
     </ul>
-  </section>
-  {{end}}
-  {{end}}
-
-</div>
-</main>
-
-{{template "ui_footer" .}}
-
-{{template "ui_script" .}}
-</body>
-</html>
+{{end}}
