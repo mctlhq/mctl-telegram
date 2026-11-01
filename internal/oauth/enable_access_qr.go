@@ -19,7 +19,6 @@ import (
 	"context"
 	"errors"
 	"html/template"
-	"log/slog"
 	"net/http"
 	neturl "net/url"
 	"strconv"
@@ -90,7 +89,7 @@ func (s *Server) qrLogin(wait time.Duration) loginMethod {
 			cfg.OnQRAccepted = func() {
 				lf.step = "qr_accepted"
 				if at := lf.qrConfirmedAt.Load(); at != 0 {
-					slog.Info("enable: qr login accepted", "uid", uid,
+					s.logger().Info("enable: qr login accepted", "uid", uid,
 						"since_qr_confirmed", time.Since(time.Unix(0, at)).String())
 				}
 			}

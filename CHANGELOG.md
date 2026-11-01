@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.119.0](https://github.com/mctlhq/mctl-telegram/compare/0.118.0...0.119.0) (2026-11-01)
+
+
+### Features
+
+* **agents:** issue-1072-feat-onboarding-record-acquisition-sourc ([c56b570](https://github.com/mctlhq/mctl-telegram/commit/c56b57033ff00e4eefe8ff9ee9197c2c567fed83))
+* **landing:** show connected sessions instead of sessions used this hour ([fed7c1b](https://github.com/mctlhq/mctl-telegram/commit/fed7c1b6426d4ccca7461edb5b783dc6b219a01b))
+* **landing:** show connected sessions instead of sessions used this hour ([2d9104d](https://github.com/mctlhq/mctl-telegram/commit/2d9104dbaf89196c222e70d5cb5a3de89d7d88db))
+
 ## [0.118.0](https://github.com/mctlhq/mctl-telegram/compare/0.117.0...0.118.0) (2026-11-01)
 
 
