@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.120.0](https://github.com/mctlhq/mctl-telegram/compare/0.119.0...0.120.0) (2026-11-01)
+
+
+### Features
+
+* **web:** lighter landing page (design handoff 1b) ([5ab546e](https://github.com/mctlhq/mctl-telegram/commit/5ab546eacb777cd4f6b04033534479698df34f91))
+* **web:** lighter landing page (design handoff 1b) ([37e8a8c](https://github.com/mctlhq/mctl-telegram/commit/37e8a8c4f3a9d47443bd0421957adffebecf165c))
+
+
+### Bug Fixes
+
+* **oauth:** give Server its own logger and join login-flow goroutines in tests ([08fc7cb](https://github.com/mctlhq/mctl-telegram/commit/08fc7cb94f9348f86c97641c3bcb180dca8af3f2))
+* **oauth:** inject a per-server logger and join login-flow goroutines in tests ([6d4c095](https://github.com/mctlhq/mctl-telegram/commit/6d4c095ea03a4f0d0e20a337098a6d63c566d906))
+
 ## [0.119.0](https://github.com/mctlhq/mctl-telegram/compare/0.118.0...0.119.0) (2026-11-01)
 
 
