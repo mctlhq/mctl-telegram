@@ -67,7 +67,7 @@ func TestHandleTelegramCallback_CountsEveryRejection(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			captureOAuthLog(t)
+			captureServerLog(t)
 			srv := newTestServer(t)
 			m := &flowMetrics{}
 			srv.WithMetrics(m)
@@ -86,7 +86,7 @@ func TestHandleTelegramCallback_CountsEveryRejection(t *testing.T) {
 	// A callback that succeeds counts nothing: the counter measures
 	// rejections, not traffic.
 	t.Run("success", func(t *testing.T) {
-		captureOAuthLog(t)
+		captureServerLog(t)
 		srv := newTestServer(t)
 		m := &flowMetrics{}
 		srv.WithMetrics(m)

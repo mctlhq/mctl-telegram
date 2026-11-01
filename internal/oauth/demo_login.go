@@ -17,7 +17,6 @@ import (
 	"crypto/subtle"
 	"errors"
 	"html/template"
-	"log/slog"
 	"net"
 	"net/http"
 	"sync"
@@ -130,7 +129,7 @@ func (s *Server) handleDemoLogin(w http.ResponseWriter, r *http.Request) {
 	userOK := subtle.ConstantTimeCompare([]byte(username), []byte(s.cfg.DemoReviewerUsername)) == 1
 	passOK := subtle.ConstantTimeCompare([]byte(password), []byte(s.cfg.DemoReviewerPassword)) == 1
 	if !(userOK && passOK) {
-		slog.Warn("oauth: demo reviewer login rejected", "ip", ip)
+		s.logger().Warn("oauth: demo reviewer login rejected", "ip", ip)
 		renderDemoChooserStatus(w, http.StatusUnauthorized, demoChooserPage{
 			Issuer: s.cfg.Issuer,
 			State:  state,
@@ -151,17 +150,17 @@ func (s *Server) handleDemoLogin(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, db.ErrUserNotFound) {
 		// Operator misconfiguration, not a client error — surface as 5xx so it
 		// is distinguishable in monitoring from a malformed/expired request.
-		slog.Error("oauth: demo reviewer account not provisioned", "tg_id", s.cfg.DemoReviewerTGID)
+		s.logger().Error("oauth: demo reviewer account not provisioned", "tg_id", s.cfg.DemoReviewerTGID)
 		renderDemoServerError(w, "The demo account is not provisioned on this server. Contact the operator.")
 		return
 	}
 	if err != nil {
-		slog.Error("oauth: demo reviewer user lookup failed", "err", err)
+		s.logger().Error("oauth: demo reviewer user lookup failed", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	if _, serr := s.store.CheckSessionValid(r.Context(), uid); serr != nil {
-		slog.Error("oauth: demo reviewer session not usable", "err", serr)
+		s.logger().Error("oauth: demo reviewer session not usable", "err", serr)
 		renderDemoServerError(w, "The demo account has no active Telegram session. Contact the operator.")
 		return
 	}
@@ -195,7 +194,7 @@ func (s *Server) consumePending(ctx context.Context, state string) (*pendingAuth
 			// so a transient outage during a review session leaves a trace
 			// instead of a misleading "session expired" page. Mirrors
 			// handleTelegramCallback.
-			slog.Error("oauth: consume demo pending failed", "err", err)
+			s.logger().Error("oauth: consume demo pending failed", "err", err)
 			return nil, false
 		}
 		return &pendingAuth{

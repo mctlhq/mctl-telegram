@@ -13,7 +13,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -317,7 +316,10 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 		}
 	}
 
+	s.flowWG.Add(1)
 	go func() {
+		// Registered first so it runs last, after every deferred log line.
+		defer s.flowWG.Done()
 		defer cancel()
 		defer close(lf.done)
 		// Only drop the registry entry if it is still ours: a successor has
@@ -349,7 +351,7 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 				if at := lf.qrConfirmedAt.Load(); at != 0 {
 					attrs = append(attrs, "since_qr_confirmed", time.Since(time.Unix(0, at)).String())
 				}
-				slog.Info("enable: telegram login succeeded", attrs...)
+				s.logger().Info("enable: telegram login succeeded", attrs...)
 			case lf.superseded.Load() && isAbandonment(lf.err):
 				// A later /start re-submission cancelled this flow — the user
 				// started over, not walked away. INFO, not an error: this is
@@ -360,12 +362,12 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 				// while this goroutine already holds a real failure
 				// (FLOOD_WAIT, identity mismatch, errModeCheckFailed), which
 				// must keep falling through to the ERROR arm with its err.
-				slog.Info("enable: login flow superseded",
+				s.logger().Info("enable: login flow superseded",
 					"uid", uid, "step", lf.step, "elapsed", elapsed)
 			case errors.Is(lf.err, telegram.ErrQRLoginExpired):
 				// Nobody scanned the QR code in time: the user walked away
 				// from it, the QR counterpart of the arm below.
-				slog.Warn("enable: onboarding abandoned",
+				s.logger().Warn("enable: onboarding abandoned",
 					"uid", uid, "step", lf.step, "method", m.name, "elapsed", elapsed)
 			case isAbandonment(lf.err) && isUserWaitStep(lf.step):
 				// The CodeTTL deadline expired while parked in askCode/
@@ -382,7 +384,7 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 				// hasActiveLocalAccount query above times out. Those are
 				// Telegram- or DB-side stalls, not a user walking away, and
 				// they keep the ERROR arm with the underlying err.
-				slog.Warn("enable: onboarding abandoned",
+				s.logger().Warn("enable: onboarding abandoned",
 					"uid", uid, "step", lf.step, "elapsed", elapsed)
 			case isAbandonment(lf.err) && lf.step == "queued":
 				// The flow's own CodeTTL ran out while it was still waiting
@@ -390,10 +392,10 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 				// contacted the database or Telegram, so there is no failure
 				// to report, only a slot that was never reached. WARN like the
 				// walked-away case, not ERROR.
-				slog.Warn("enable: login flow expired before it started",
+				s.logger().Warn("enable: login flow expired before it started",
 					"uid", uid, "elapsed", elapsed)
 			default:
-				slog.Error("enable: telegram login failed",
+				s.logger().Error("enable: telegram login failed",
 					"uid", uid, "want_tg_id", wantTgID,
 					"elapsed", elapsed, "err", lf.err)
 			}
@@ -577,9 +579,9 @@ func (s *Server) logOutUnusedSession(bgCtx context.Context, uid int64, data []by
 	outcome := "ok"
 	if err != nil {
 		outcome = "error"
-		slog.Warn("enable: logout of an unused session failed", "uid", uid, "reason", reason, "err", err)
+		s.logger().Warn("enable: logout of an unused session failed", "uid", uid, "reason", reason, "err", err)
 	} else {
-		slog.Info("enable: logged out an unused session", "uid", uid, "reason", reason)
+		s.logger().Info("enable: logged out an unused session", "uid", uid, "reason", reason)
 	}
 	if s.metrics != nil {
 		s.metrics.CountLoginLogOut(reason, outcome)
@@ -1309,9 +1311,9 @@ func (s *Server) finishEnable(w http.ResponseWriter, r *http.Request, es *enable
 	if s.cfg.AutoApproveClients && !s.cfg.AdminTelegramIDs[es.tgID] && !s.cfg.LookupAdminTelegramIDs[es.tgID] {
 		granted, terr := s.store.GrantClientTierIfUnset(r.Context(), es.tgID)
 		if terr != nil {
-			slog.Error("finishEnable: grant client tier", "uid", es.uid, "err", terr)
+			s.logger().Error("finishEnable: grant client tier", "uid", es.uid, "err", terr)
 		} else if granted {
-			slog.Info("auto-granted client tier on enable", "telegram_id", es.tgID)
+			s.logger().Info("auto-granted client tier on enable", "telegram_id", es.tgID)
 		}
 	}
 	s.issueAuthCode(w, r, es.oc)

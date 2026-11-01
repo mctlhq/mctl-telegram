@@ -309,7 +309,7 @@ func TestCIMD_JTIStoreErrorIsRetryableNeverAPass(t *testing.T) {
 		t.Fatalf("consumeJTI with a failing store = %v, want errJTIStore", err)
 	}
 	rec := httptest.NewRecorder()
-	writeCIMDTokenError(rec, cimdFailure("test", pkjwtClientID, err))
+	writeCIMDTokenError(rec, srv.cimdFailure("test", pkjwtClientID, err))
 	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") == "" {
 		t.Fatalf("store error answered %d (Retry-After %q), want 503 with Retry-After", rec.Code, rec.Header().Get("Retry-After"))
 	}

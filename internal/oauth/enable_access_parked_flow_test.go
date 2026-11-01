@@ -27,7 +27,7 @@ import (
 // A's CodeTTL. With the registry removed, A stays parked for the full 10s
 // CodeTTL and B never reaches askCode in time.
 func TestStartLoginFlow_NewAttemptSupersedesParkedFlowForSameUID(t *testing.T) {
-	buf := captureEnableLog(t)
+	buf := captureServerLog(t)
 	srv, _ := newEnableTestServer(t, nil, func(c *Config) { c.CodeTTL = 10 * time.Second })
 	srv.loginFn = stubLoginParksAtCode()
 
@@ -198,7 +198,7 @@ func TestEnableAccess_SendCodeTimeout_CancelsFlow(t *testing.T) {
 // on #861: a flow whose CodeTTL expires while it is still queued on the uid
 // mutex never ran anything, so it must not log "telegram login failed".
 func TestStartLoginFlow_CodeTTLWhileQueuedLogsWarnNotError(t *testing.T) {
-	buf := captureEnableLog(t)
+	buf := captureServerLog(t)
 	srv, _ := newEnableTestServer(t, nil, func(c *Config) { c.CodeTTL = 100 * time.Millisecond })
 	srv.loginFn = stubLoginParksAtCode()
 

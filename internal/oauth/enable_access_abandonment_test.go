@@ -1,11 +1,9 @@
 package oauth
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -13,18 +11,6 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
-
-// captureEnableLog swaps slog's default handler for a text handler writing
-// to a buffer, restoring the previous default at test cleanup — same
-// pattern as internal/oauth/registration_audit_test.go's captureLog.
-func captureEnableLog(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	return &buf
-}
 
 // stubLoginParksAtCode fakes telegram.Login blocking forever in askCode,
 // returning whatever error askCode's ctx eventually surfaces (a CodeTTL
@@ -59,7 +45,7 @@ func waitForFlowDone(t *testing.T, lf *loginFlow, timeout time.Duration) {
 // logging "enable: telegram login failed" at ERROR, even though the error
 // text itself is Telegram's own FLOOD_WAIT shape.
 func TestStartLoginFlow_FloodWaitStillLogsError(t *testing.T) {
-	buf := captureEnableLog(t)
+	buf := captureServerLog(t)
 	srv, _ := newEnableTestServer(t, nil)
 	floodErr := errors.New("FLOOD_WAIT_300")
 	srv.loginFn = stubLogin(false, floodErr)
@@ -92,7 +78,7 @@ func TestStartLoginFlow_FloodWaitStillLogsError(t *testing.T) {
 // (nobody ever submits a code or cancels it) must log "enable: onboarding
 // abandoned" at WARN, carrying the step it reached.
 func TestStartLoginFlow_CodeTTLDeadlineLogsAbandonment(t *testing.T) {
-	buf := captureEnableLog(t)
+	buf := captureServerLog(t)
 	srv, _ := newEnableTestServer(t, nil, func(c *Config) { c.CodeTTL = 60 * time.Millisecond })
 	srv.loginFn = stubLoginParksAtCode()
 
@@ -141,7 +127,7 @@ func stubLoginHangsInSendCode() LoginFunc {
 // Telegram-side incident, and it must keep the ERROR line with its err —
 // never be reclassified as "onboarding abandoned".
 func TestStartLoginFlow_DeadlineDuringLoginFnStaysError(t *testing.T) {
-	buf := captureEnableLog(t)
+	buf := captureServerLog(t)
 	srv, _ := newEnableTestServer(t, nil, func(c *Config) { c.CodeTTL = 60 * time.Millisecond })
 	srv.loginFn = stubLoginHangsInSendCode()
 
@@ -166,7 +152,7 @@ func TestStartLoginFlow_DeadlineDuringLoginFnStaysError(t *testing.T) {
 // error may take the INFO supersession arm; a real error keeps the ERROR
 // line and its err even when superseded is set.
 func TestStartLoginFlow_SupersededWithRealErrorStaysError(t *testing.T) {
-	buf := captureEnableLog(t)
+	buf := captureServerLog(t)
 	srv, _ := newEnableTestServer(t, nil)
 	floodErr := errors.New("FLOOD_WAIT_300")
 	srv.loginFn = stubLogin(false, floodErr)
@@ -204,7 +190,7 @@ func TestStartLoginFlow_SupersededWithRealErrorStaysError(t *testing.T) {
 // and the step/superseded fields must survive concurrent access cleanly
 // under `go test -race`.
 func TestStartLoginFlow_SupersededLogsInfoNotError(t *testing.T) {
-	buf := captureEnableLog(t)
+	buf := captureServerLog(t)
 	srv, _ := newEnableTestServer(t, nil, func(c *Config) { c.CodeTTL = 10 * time.Second })
 	srv.loginFn = stubLoginParksAtCode()
 

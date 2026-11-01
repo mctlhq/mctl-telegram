@@ -1,14 +1,12 @@
 package oauth
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"html"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -105,6 +103,7 @@ func newTestServer(t *testing.T, opts ...func(*Config)) *Server {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	adoptTestLogger(t, srv)
 	return srv
 }
 
@@ -889,26 +888,13 @@ func callbackWithStateHeaders(t *testing.T, mux *mockRouter, state string, heade
 	return rec
 }
 
-// captureOAuthLog swaps slog's default handler for a text handler writing to
-// a buffer, restoring the previous default on test cleanup. Matches the
-// pattern in internal/oauth/enable_access_abandonment_test.go's
-// captureEnableLog.
-func captureOAuthLog(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	return &buf
-}
-
 // TestHandleTelegramCallback_ReusedState_FriendlyPage confirms an unknown
 // state on the callback renders HTML (not a plain-text body) at 200, with one
 // WARN log line carrying reason=unknown_state — for both the in-memory and
 // the DB-backed pending store.
 func TestHandleTelegramCallback_ReusedState_FriendlyPage(t *testing.T) {
 	t.Run("in-memory", func(t *testing.T) {
-		buf := captureOAuthLog(t)
+		buf := captureServerLog(t)
 		srv := newTestServer(t)
 		mux := newMockRouter()
 		srv.Register(mux)
@@ -933,7 +919,7 @@ func TestHandleTelegramCallback_ReusedState_FriendlyPage(t *testing.T) {
 	// newPostgresOAuthStore in dcr_allowlist_pg_test.go. Skipped when unset,
 	// same as that file's tests.
 	t.Run("db-backed", func(t *testing.T) {
-		buf := captureOAuthLog(t)
+		buf := captureServerLog(t)
 		store := newPostgresOAuthStore(t)
 		srv, err := New(context.Background(), Config{
 			Issuer:              testIssuer,
@@ -948,6 +934,7 @@ func TestHandleTelegramCallback_ReusedState_FriendlyPage(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
+		adoptTestLogger(t, srv)
 		if !srv.useDB {
 			t.Fatal("server is not on the DB path")
 		}
@@ -995,7 +982,7 @@ func TestHandleTelegramCallback_ReusedState_FriendlyPage(t *testing.T) {
 // missing-state request keeps the genuine 400 (it is malformed, not a reused
 // link) and still logs one WARN with reason=missing_state.
 func TestHandleTelegramCallback_MissingState_StillFourHundred(t *testing.T) {
-	buf := captureOAuthLog(t)
+	buf := captureServerLog(t)
 	srv := newTestServer(t)
 	mux := newMockRouter()
 	srv.Register(mux)
@@ -1033,7 +1020,7 @@ func TestHandleTelegramCallback_OIDCErrorAndMissingCode_Logged(t *testing.T) {
 			_, challenge := pkceVerifierAndChallenge()
 			state := stateFromAuthorize(t, mux, challenge)
 
-			buf := captureOAuthLog(t)
+			buf := captureServerLogFor(t, srv)
 			q := url.Values{"state": {state}}
 			for k, v := range tc.extra {
 				q[k] = v
@@ -1068,7 +1055,7 @@ func TestHandleTelegramCallback_OIDCErrorAndMissingCode_Logged(t *testing.T) {
 // not a bare literal) and answers 401 with an opaque body that names no
 // Telegram id.
 func TestHandleTelegramCallback_ExchangeFailureLogsReason(t *testing.T) {
-	buf := captureOAuthLog(t)
+	buf := captureServerLog(t)
 	srv := newTestServer(t)
 	mux := newMockRouter()
 	srv.Register(mux)
