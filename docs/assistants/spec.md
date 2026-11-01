@@ -35,6 +35,8 @@ and [`assistants/schemas/assistant-install.schema.json`](../../assistants/schema
 (JSON Schema 2020-12). `internal/assistant` validates both, checks the install
 against its definition and maps it onto today's profile.
 
+How the pieces fit together end to end (versions, eval, publishing, runtime) and the manual procedures are in [how-it-works.md](how-it-works.md).
+
 Worked example: [`assistants/hr-recruiter/assistant.yaml`](../../assistants/hr-recruiter/assistant.yaml)
 and [`install.example.yaml`](../../assistants/hr-recruiter/install.example.yaml).
 
