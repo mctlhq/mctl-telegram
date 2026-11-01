@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func acqRow(t *testing.T, s *Store, uid int64) (Acquisition, bool) {
@@ -77,6 +78,9 @@ func TestEnsureUserByTelegramCapture_AcquisitionFailureKeepsUser(t *testing.T) {
 	}
 	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM user_acquisition_gone`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("no row (and never a direct stand-in) expected: %d %v", n, err)
+	}
+	if got := testutil.ToFloat64(reg.AcquisitionWriteFailuresTotal); got != 1 {
+		t.Fatalf("mctl_acquisition_write_failures_total = %v, want 1", got)
 	}
 }
 

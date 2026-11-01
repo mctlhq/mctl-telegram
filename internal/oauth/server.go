@@ -45,6 +45,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/acquisition"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/auth/telegramoidc"
+	"github.com/mctlhq/mctl-telegram/internal/connectfunnel"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/notify"
 	"github.com/mctlhq/mctl-telegram/internal/oauth/cimd"
@@ -1939,7 +1940,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		LastName:    identity.LastName,
 		Source:      "telegram_oidc",
 		CapturedAt:  time.Now().UTC(),
-		Acquisition: toDBAcquisition(acquisition.Unmarshal(pending.Acquisition, s.clock())),
+		Acquisition: toDBAcquisition(acquisitionForCallback(pending, s.clock())),
 	})
 	if err != nil {
 		slog.Error("ensure user failed", "err", err)
@@ -3724,4 +3725,17 @@ func (s *Server) probeBotChat(ctx context.Context, uid, telegramID int64) {
 	if _, err := s.store.RecordOIDCBotAccessGrant(ctx, uid, time.Now().UTC(), notify.SourceOIDCGetChat); err != nil {
 		slog.Error("record oidc bot chat probe failed", "err", err)
 	}
+}
+
+// acquisitionForCallback decodes the snapshot carried by the pending entry.
+// A pending row minted by an image that predates the acquisition column
+// carries no snapshot and decodes as unknown with an empty client; the
+// redirect URI is still on the row, so the bounded client label is filled
+// from it rather than lost for the whole rollout window.
+func acquisitionForCallback(pending *pendingAuth, now time.Time) acquisition.Snapshot {
+	snap := acquisition.Unmarshal(pending.Acquisition, now)
+	if snap.MCPClient == "" && pending.RedirectURI != "" {
+		snap.MCPClient = connectfunnel.ClientLabel(pending.RedirectURI)
+	}
+	return snap
 }

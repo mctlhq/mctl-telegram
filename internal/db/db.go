@@ -100,8 +100,10 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 	); err != nil {
 		return fmt.Errorf("migrate: stamp acquisition epoch: %w", err)
 	}
-	// oauth_pending_auth exists on Postgres only (SQLite keeps pending state
-	// in memory).
+	// oauth_pending_auth is only present at this point of the migration on
+	// Postgres (UseDBForOAuth is Postgres-only; on SQLite pending state is
+	// kept in memory and the table does not exist when this ALTER runs, as
+	// the SQLite test suite shows), so the column is added on Postgres only.
 	if pg {
 		if err := addColumnIfMissing(ctx, dbConn, pg, "oauth_pending_auth", "acquisition",
 			"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {

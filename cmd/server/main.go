@@ -480,7 +480,7 @@ func main() {
 		}
 		mux.Use(acquisition.Middleware(acquisition.DeriveKey([]byte(cfg.OAUTHJWTSecret)), selfHost, secureCookie,
 			"/", "/docs", "/demo", "/security", "/privacy", "/terms", "/platforms",
-			"/assistants", "/local-bridge", "/docs/product-updates"))
+			"/assistants", "/docs/local-bridge", "/docs/product-updates"))
 	}
 
 	// Authorization server URL — for the Telegram-native local-jwt path

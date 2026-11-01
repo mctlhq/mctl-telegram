@@ -1271,7 +1271,7 @@ Output: JSON {days, buckets: [{source, signups, tool_call_users, active_2plus_da
 		}
 		days := intArg(req.GetArguments(), "days", 7)
 		if days < 1 {
-			days = 7
+			days = 1
 		}
 		if days > 90 {
 			days = 90
