@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -89,6 +90,24 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 	for _, s := range stmts {
 		if _, err := dbConn.ExecContext(ctx, s); err != nil {
 			return fmt.Errorf("migrate: %w\nstmt: %s", err, s)
+		}
+	}
+	// Stamp the acquisition capture epoch once, so reports can tell a user
+	// created before capture existed from one whose write was missed.
+	if _, err := dbConn.ExecContext(ctx,
+		`INSERT INTO acquisition_capture_epoch(id, enabled_at) VALUES(1, $1) ON CONFLICT DO NOTHING`,
+		time.Now().UTC(),
+	); err != nil {
+		return fmt.Errorf("migrate: stamp acquisition epoch: %w", err)
+	}
+	// oauth_pending_auth is only present at this point of the migration on
+	// Postgres (UseDBForOAuth is Postgres-only; on SQLite pending state is
+	// kept in memory and the table does not exist when this ALTER runs, as
+	// the SQLite test suite shows), so the column is added on Postgres only.
+	if pg {
+		if err := addColumnIfMissing(ctx, dbConn, pg, "oauth_pending_auth", "acquisition",
+			"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
 		}
 	}
 	// Idempotent ALTER passes for columns added after the initial schema.
@@ -1054,6 +1073,26 @@ func sqliteSchema() []string {
 		`CREATE INDEX IF NOT EXISTS idx_connect_first_call_open ON connect_first_call(user_id, client_id, granted_at) WHERE outcome IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_connect_first_call_granted ON connect_first_call(granted_at) WHERE outcome IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_connect_first_call_classified ON connect_first_call(classified_at) WHERE outcome IS NOT NULL`,
+		// Sign-up acquisition source (issue-1072): one immutable row per user,
+		// written once when the users row is created. See acquisition.go.
+		`CREATE TABLE IF NOT EXISTS user_acquisition (
+			user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+			state TEXT NOT NULL CHECK (state IN ('attributed','direct','unknown')),
+			referrer_host TEXT NOT NULL DEFAULT '',
+			utm_source TEXT NOT NULL DEFAULT '',
+			utm_medium TEXT NOT NULL DEFAULT '',
+			utm_campaign TEXT NOT NULL DEFAULT '',
+			utm_content TEXT NOT NULL DEFAULT '',
+			utm_term TEXT NOT NULL DEFAULT '',
+			landing_path TEXT NOT NULL DEFAULT '',
+			mcp_client TEXT NOT NULL DEFAULT '',
+			captured_at DATETIME NOT NULL,
+			recorded_at DATETIME NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS acquisition_capture_epoch (
+			id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+			enabled_at DATETIME NOT NULL
+		)`,
 	}
 }
 
@@ -1347,5 +1386,25 @@ func pgSchema() []string {
 		`CREATE INDEX IF NOT EXISTS idx_connect_first_call_open ON connect_first_call(user_id, client_id, granted_at) WHERE outcome IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_connect_first_call_granted ON connect_first_call(granted_at) WHERE outcome IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_connect_first_call_classified ON connect_first_call(classified_at) WHERE outcome IS NOT NULL`,
+		// Sign-up acquisition source (issue-1072): one immutable row per user,
+		// written once when the users row is created. See acquisition.go.
+		`CREATE TABLE IF NOT EXISTS user_acquisition (
+			user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+			state TEXT NOT NULL CHECK (state IN ('attributed','direct','unknown')),
+			referrer_host TEXT NOT NULL DEFAULT '',
+			utm_source TEXT NOT NULL DEFAULT '',
+			utm_medium TEXT NOT NULL DEFAULT '',
+			utm_campaign TEXT NOT NULL DEFAULT '',
+			utm_content TEXT NOT NULL DEFAULT '',
+			utm_term TEXT NOT NULL DEFAULT '',
+			landing_path TEXT NOT NULL DEFAULT '',
+			mcp_client TEXT NOT NULL DEFAULT '',
+			captured_at TIMESTAMPTZ NOT NULL,
+			recorded_at TIMESTAMPTZ NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS acquisition_capture_epoch (
+			id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+			enabled_at TIMESTAMPTZ NOT NULL
+		)`,
 	}
 }

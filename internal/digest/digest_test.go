@@ -28,14 +28,14 @@ func TestUntilNextHour(t *testing.T) {
 }
 
 func TestBuildDigestMessage(t *testing.T) {
-	if msg := buildDigestMessage(nil, 0, false, nil); msg != "" {
+	if msg := buildDigestMessage(nil, 0, false, nil, nil); msg != "" {
 		t.Errorf("no new clients must produce an empty message, got %q", msg)
 	}
 	rows := []db.IdentityRow{
 		{TelegramID: 111, Username: "alice", AccessTier: "client", HasSession: true},
 		{TelegramID: 222, DisplayName: "Bob B", AccessTier: "", HasSession: false}, // unset tier
 	}
-	msg := buildDigestMessage(rows, 5, false, nil)
+	msg := buildDigestMessage(rows, 5, false, nil, nil)
 	for _, want := range []string{"2 new client", "(5 total)", "alice", "id 111", "Bob B", "id 222"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("digest message missing %q; got:\n%s", want, msg)
@@ -43,7 +43,7 @@ func TestBuildDigestMessage(t *testing.T) {
 	}
 	// Under auto-approve an unset-tier user must show as an effective client,
 	// never "none" — that would imply the operator still has to act.
-	autoMsg := buildDigestMessage(rows, 5, true, nil)
+	autoMsg := buildDigestMessage(rows, 5, true, nil, nil)
 	if !strings.Contains(autoMsg, "client (auto)") {
 		t.Errorf("auto-approve digest should label unset users client (auto); got:\n%s", autoMsg)
 	}
@@ -63,7 +63,7 @@ func TestBuildDigestMessage_ReachabilitySuffix(t *testing.T) {
 	steps := map[int64]db.ConnectStep{
 		111: {Step: "phone_submitted", Status: "ok", At: time.Date(2026, 5, 16, 14, 28, 0, 0, time.UTC)},
 	}
-	msg := buildDigestMessage(rows, 3, false, steps)
+	msg := buildDigestMessage(rows, 3, false, steps, nil)
 	if !strings.Contains(msg, "alice — id 111 — tier=none — no session — last: phone_submitted 14:28 — bot: blocked") {
 		t.Errorf("blocked row missing its onboarding-stage and reachability suffixes; got:\n%s", msg)
 	}
@@ -92,7 +92,7 @@ func TestBuildDigestMessage_RevokedWithoutConnectStep(t *testing.T) {
 		444: {RevokedReason: "disconnect"}, // revoke lookup only: no Step, zero At
 		555: {},                            // zero entry with nothing to say
 	}
-	msg := buildDigestMessage(rows, 2, false, steps)
+	msg := buildDigestMessage(rows, 2, false, steps, nil)
 	if !strings.Contains(msg, "dana — id 444 — tier=none — no session — session revoked (disconnect)\n") {
 		t.Errorf("revoke-only entry must render just the revoke clause; got:\n%s", msg)
 	}
@@ -120,5 +120,23 @@ func TestEffectiveTier(t *testing.T) {
 		if got := effectiveTier(c.raw, c.autoApprove); got != c.want {
 			t.Errorf("effectiveTier(%q, %v) = %q, want %q", c.raw, c.autoApprove, got, c.want)
 		}
+	}
+}
+
+func TestBuildDigestMessageSrcSuffix(t *testing.T) {
+	rows := []db.IdentityRow{{TelegramID: 1001, Username: "alice"}, {TelegramID: 1002, Username: "bob"}}
+	src := map[int64]string{
+		1001: "news\n\u202e\u200eevil", // newline + RTL override + LRM, written as escapes so the hostile bytes are visible
+		1002: "direct",
+	}
+	msg := buildDigestMessage(rows, 2, false, nil, src)
+	if !strings.Contains(msg, "src=direct") {
+		t.Fatalf("missing src=direct: %q", msg)
+	}
+	if strings.Contains(msg, "\u202e") || strings.Contains(msg, "\u200e") || strings.Count(msg, "\n") != 3 {
+		t.Fatalf("hostile label not sanitized to one line: %q", msg)
+	}
+	if strings.Contains(buildDigestMessage(rows, 2, false, nil, nil), "src=") {
+		t.Fatal("nil src must render no suffix")
 	}
 }

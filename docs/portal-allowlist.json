@@ -127,6 +127,15 @@
       "reason": "Admin-only listing of every signed-in Telegram user with access tier and session state; the upstream refuses it with scope-denied for anyone without admin:users(:read). Only TG_LOGIN_ADMINS hold that scope."
     },
     {
+      "name": "get_acquisition_report",
+      "enabled": true,
+      "upstream_gates": [
+        "admin:users",
+        "admin:users:read"
+      ],
+      "reason": "Admin-only aggregate of sign-ups, tool-call users and 2+ active-day users per acquisition source label; no per-user data. The upstream refuses it without admin:users(:read)."
+    },
+    {
       "name": "mint_worker_token",
       "enabled": true,
       "upstream_gates": [

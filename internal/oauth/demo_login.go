@@ -207,6 +207,7 @@ func (s *Server) consumePending(ctx context.Context, state string) (*pendingAuth
 			Scope:               dbPA.Scope,
 			Nonce:               dbPA.Nonce,
 			TGCodeVerifier:      dbPA.TGCodeVerifier,
+			Acquisition:         dbPA.Acquisition,
 			CreatedAt:           dbPA.CreatedAt,
 		}, true
 	}

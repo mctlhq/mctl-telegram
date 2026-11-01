@@ -1047,6 +1047,9 @@ func (s *Server) approveActivation(w http.ResponseWriter, r *http.Request, act *
 		LastName:   identity.LastName,
 		Source:     "local_bridge_activation",
 		CapturedAt: time.Now().UTC(),
+		// No cookie reaches a Local Bridge activation, so nothing was
+		// observed: unknown, never direct.
+		Acquisition: &db.Acquisition{State: db.AcquisitionUnknown, MCPClient: "local-bridge", CapturedAt: time.Now().UTC()},
 	})
 	if err != nil {
 		slog.Error("local bridge activation: ensure user failed", "err", err)

@@ -87,6 +87,7 @@ func runDigest(ctx context.Context, store *db.Store, botToken string, recipients
 	// pre-existing plain "no session" text (steps stays nil) rather than
 	// skipping the send.
 	var steps map[int64]db.ConnectStep
+	var src map[int64]string
 	if len(newRows) > 0 {
 		tgIDs := make([]int64, len(newRows))
 		for i, r := range newRows {
@@ -98,8 +99,16 @@ func runDigest(ctx context.Context, store *db.Store, botToken string, recipients
 		} else {
 			steps = s
 		}
+		// Acquisition source labels (issue-1072). A lookup error omits the
+		// suffix (src stays nil); it is never rendered as "unknown".
+		labels, srcErr := store.AcquisitionLabelsFor(qctx, tgIDs)
+		if srcErr != nil {
+			slog.Warn("digest: acquisition labels", "err", srcErr)
+		} else {
+			src = labels
+		}
 	}
-	msg := buildDigestMessage(newRows, len(all), autoApprove, steps)
+	msg := buildDigestMessage(newRows, len(all), autoApprove, steps, src)
 	if msg == "" {
 		slog.Info("digest: no new clients in the last 24h, skipping send")
 		return
@@ -175,8 +184,9 @@ func effectiveTier(raw string, autoApprove bool) string {
 // new clients so the caller can skip an empty send. steps is the result of
 // LastConnectStepFor keyed by Telegram id; nil when that lookup failed or
 // was skipped, in which case every row falls back to the plain pre-existing
-// "no session" text.
-func buildDigestMessage(rows []db.IdentityRow, total int, autoApprove bool, steps map[int64]db.ConnectStep) string {
+// "no session" text. src maps Telegram id to its acquisition label; nil, or
+// an id missing from it, renders no src= suffix.
+func buildDigestMessage(rows []db.IdentityRow, total int, autoApprove bool, steps map[int64]db.ConnectStep, src map[int64]string) string {
 	if len(rows) == 0 {
 		return ""
 	}
@@ -191,9 +201,20 @@ func buildDigestMessage(rows []db.IdentityRow, total int, autoApprove bool, step
 			name = "(no username)"
 		}
 		fmt.Fprintf(&b, "• %s — id %d — tier=%s — %s%s\n",
-			name, r.TelegramID, effectiveTier(r.AccessTier, autoApprove), sessionSuffix(r, steps), reachabilitySuffix(r))
+			name, r.TelegramID, effectiveTier(r.AccessTier, autoApprove), sessionSuffix(r, steps), reachabilitySuffix(r)+srcSuffix(r, src))
 	}
 	return b.String()
+}
+
+// srcSuffix returns " — src=<label>" for a row with an acquisition label.
+// The label is sanitized again here so a hostile value can neither break the
+// line nor smuggle bidi or control characters into the message.
+func srcSuffix(r db.IdentityRow, src map[int64]string) string {
+	label, ok := src[r.TelegramID]
+	if !ok {
+		return ""
+	}
+	return " — src=" + db.SanitizeAcquisitionLabel(label)
 }
 
 // sessionSuffix renders the session column. Rows WITH a session are

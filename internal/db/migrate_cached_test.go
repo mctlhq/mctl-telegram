@@ -67,7 +67,8 @@ func dumpSQLite(t *testing.T, conn *sql.DB) []string {
 				// The one clock reading Migrate writes. The replay copies the
 				// template's, taken when the template was migrated, so it is
 				// earlier than a fresh Migrate's and otherwise meaningless.
-				if table == "agent_migrations" && cols[i] == "applied_at" {
+				if (table == "agent_migrations" && cols[i] == "applied_at") ||
+					(table == "acquisition_capture_epoch" && cols[i] == "enabled_at") {
 					v = "<time>"
 				}
 				cells[i] = fmt.Sprintf("%s=%v", cols[i], v)
