@@ -72,6 +72,9 @@ type Server struct {
 	// definition that is disabled, or whose lifecycle is unknown, takes no
 	// new jobs. Set by WithRegistryLifecycle when ASSISTANT_REGISTRY_ENABLED.
 	registryGate bool
+	// forksEnabled is ASSISTANT_FORKS_ENABLED (#1043): off, an account
+	// that runs a private fork takes no new jobs.
+	forksEnabled bool
 	// now is the clock for the lifecycle gate; nil is time.Now.
 	now func() time.Time
 	// snapshots caches parsed registry definitions by digest.
@@ -131,6 +134,13 @@ func (s *Server) WithRegistryLifecycle() *Server {
 	return s
 }
 
+// WithForks lets accounts run their private assistant forks
+// (ASSISTANT_FORKS_ENABLED). Returns s for chaining.
+func (s *Server) WithForks() *Server {
+	s.forksEnabled = true
+	return s
+}
+
 func (s *Server) clock() time.Time {
 	if s.now != nil {
 		return s.now()
@@ -158,24 +168,29 @@ type registrar interface {
 // Register binds every /api/agent/v1 route onto mux. Paths are relative —
 // mount at "/api/agent/v1" (behind the aud=agent auth middleware; see
 // cmd/server/main.go's selectAgentProvider) and the effective URLs become
-// e.g. "/api/agent/v1/jobs/claim".
+// e.g. "/api/agent/v1/jobs/claim". Every route passes through toolGate,
+// which refuses a route serving a tool outside the caller's tool set
+// (tools.Endpoints) and leaves the others alone.
 func (s *Server) Register(mux registrar) {
-	mux.Get("/events", s.handleLegacyEvents)
-	mux.Get("/event/{eventID}", s.handleGetEvent)
-	mux.Get("/conversations/{id}/context", s.handleConversationContext)
-	mux.Get("/recruiters/{peer}", s.handleRecruiterProfile)
-	mux.Get("/leads/{id}", s.handleGetLead)
-	mux.Get("/policy", s.handlePolicy)
-	mux.Get("/jobs/{id}", s.handleGetJob)
-	mux.Post("/actions/propose_reply", s.handleProposeReply)
-	mux.Post("/leads", s.handleSaveLead)
-	mux.Post("/actions/request_owner_approval", s.handleRequestOwnerApproval)
-	mux.Post("/notify/summary", s.handleNotifySummary)
-	mux.Post("/autopilot/pause", s.handleAutopilotPause)
-	mux.Post("/jobs/claim", s.handleClaimJobs)
-	mux.Post("/jobs/{id}/complete", s.handleJobComplete)
+	get := func(p string, h http.HandlerFunc) { mux.Get(p, s.toolGate("GET "+p, h)) }
+	post := func(p string, h http.HandlerFunc) { mux.Post(p, s.toolGate("POST "+p, h)) }
+	get("/events", s.handleLegacyEvents)
+	get("/event/{eventID}", s.handleGetEvent)
+	get("/conversations/{id}/context", s.handleConversationContext)
+	get("/conversations/{id}/leads", s.handleConversationLeads)
+	get("/recruiters/{peer}", s.handleRecruiterProfile)
+	get("/leads/{id}", s.handleGetLead)
+	get("/policy", s.handlePolicy)
+	get("/jobs/{id}", s.handleGetJob)
+	post("/actions/propose_reply", s.handleProposeReply)
+	post("/leads", s.handleSaveLead)
+	post("/actions/request_owner_approval", s.handleRequestOwnerApproval)
+	post("/notify/summary", s.handleNotifySummary)
+	post("/autopilot/pause", s.handleAutopilotPause)
+	post("/jobs/claim", s.handleClaimJobs)
+	post("/jobs/{id}/complete", s.handleJobComplete)
 	// Worker-only cost report — deliberately absent from allowedTools and
 	// NewMCPServer's tool list (internal/agentworker) so the model can never
 	// assert its own spend. See handleReportJobCost's doc comment.
-	mux.Post("/jobs/{id}/cost", s.handleReportJobCost)
+	post("/jobs/{id}/cost", s.handleReportJobCost)
 }

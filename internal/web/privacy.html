@@ -9,6 +9,14 @@
   ul { color: var(--text-dim); padding-left: 22px; margin: 12px 0; }
   li { margin-bottom: 8px; line-height: 1.6; }
   li strong { color: var(--text); }
+  /* Data inventory: four fixed-proportion columns, top-aligned cells; a
+     minimum width keeps the columns readable inside .table-scroll on phones. */
+  .table-scroll > table.inventory { width: 100%; min-width: 640px; }
+  .inventory th, .inventory td { vertical-align: top; }
+  .inventory .col-where { width: 18%; }
+  .inventory .col-contents { width: 30%; }
+  .inventory .col-why { width: 22%; }
+  .inventory .col-retention { width: 30%; }
   pre {
     background: var(--surface); border: 1px solid var(--border);
     border-radius: var(--mctl-radius-md); padding: 14px 16px; overflow-x: auto;
@@ -32,36 +40,37 @@
     <p class="lead">What this service stores, for how long, who can access it, and how to remove it. See <a href="/security">/security</a> for the threat model.</p>
   </section>
 
-  <h2>Claude, ChatGPT and other MCP users</h2>
+  <h2>Claude, ChatGPT, and other MCP users</h2>
   <p>When you connect MCTL to Claude, ChatGPT, or another MCP client, the following data flows apply:</p>
   <ul>
     <li><strong>User-authorized account access:</strong> this service operates only on the Telegram account you explicitly connect. It is MCTL Assistant, an unofficial third-party connector using the Telegram API, and an independent project: it is not affiliated with, endorsed by, or operated by Telegram, Anthropic, or OpenAI.</li>
-    <li><strong>Through your MCP client:</strong> your prompts, MCP tool arguments (for example peer identifiers or draft text), and tool results returned by this server. That traffic is also processed by the MCP client provider under its own privacy policy.</li>
-    <li><strong>Stored by this server for ordinary MCP calls:</strong> an encrypted MTProto session blob, your Telegram user id and display name/username, and audit metadata (tool name, redacted peer reference, status). Message bodies returned by read tools are fetched for that request and are not copied into the audit log. Accounts onboarded through <a href="/docs/local-bridge">Local Bridge</a> <code>activate</code> have no stored session blob here.</li>
+    <li><strong>Through your MCP client:</strong> your prompts, MCP tool arguments (for example, peer identifiers or draft text), and tool results returned by this server pass through your MCP client. That traffic is also processed by the MCP client provider under its own privacy policy.</li>
+    <li><strong>Stored by this server for ordinary MCP calls:</strong> an encrypted MTProto session blob, your Telegram user ID and display name/username, and audit metadata (tool name, redacted peer reference, status). Message bodies returned by read tools are fetched for that request and are not copied into the audit log. Accounts onboarded through <a href="/docs/local-bridge">Local Bridge</a> <code>activate</code> have no stored session blob here.</li>
     <li><strong>Stored when Communication Agent is enabled:</strong> relevant incoming Telegram events, agent-visible conversation messages, and proposed action payloads are durably stored so the queue, policy, approval, and recovery flow can operate. Sensitive body/payload fields are encrypted at rest with your derived key. Message/event bodies and terminal or inactive pre-send action content use the agent retention window below; executing action content remains until persisted-random-ID recovery reaches a terminal state.</li>
-    <li><strong>Revoke access:</strong> <code>disconnect_telegram_account</code> (or <code>POST /api/account/disconnect</code>, or disconnect at <code>/telegram/connect/manage</code> after signing in with Telegram) ends the Telegram session but keeps your client's OAuth connection, so reconnecting Telegram does not require re-adding the connector. <code>delete_telegram_account</code> (or <code>DELETE /api/account</code>) also revokes every OAuth client's refresh tokens, every worker token issued for your Telegram id, and every Local Bridge device. Removing the app/connector from your client settings revokes its tokens only if that client calls <code>/oauth/revoke</code>; we cannot see the removal otherwise. These calls need a connection granted <code>account:manage</code>. Access tokens already issued expire within their lifetime (at most 1 hour in production).</li>
+    <li><strong>Revoke access:</strong> <code>disconnect_telegram_account</code> (or <code>POST /api/account/disconnect</code>, or disconnect at <code>/telegram/connect/manage</code> after signing in with Telegram) ends the Telegram session but keeps your client's OAuth connection, so reconnecting Telegram does not require re-adding the connector. <code>delete_telegram_account</code> (or <code>DELETE /api/account</code>) also revokes every OAuth client's refresh tokens, every worker token issued for your Telegram ID, and every Local Bridge device. Removing the app/connector from your client settings revokes its tokens only if that client calls <code>/oauth/revoke</code>; we cannot see the removal otherwise. These calls need a connection granted <code>account:manage</code>. Access tokens already issued expire within their lifetime (at most 1 hour in production).</li>
   </ul>
 
   <h2 id="ai-use">AI use of your messages</h2>
   <p>Your chats contain messages written by other people, who have not agreed to anything with this service. Telegram's terms forbid using Telegram data to train AI models without consent, so the rules here are narrow:</p>
   <ul>
     <li><strong>Inference for your own requests only.</strong> Message content is read only to answer a request you make through your own AI assistant, and is returned to that assistant and nowhere else.</li>
-    <li><strong>No training by this service.</strong> This service never uses message content, or anything derived from it, to train, fine-tune or evaluate any AI model, and never sells or shares it for that purpose.</li>
+    <li><strong>No training by this service.</strong> This service never uses message content, or anything derived from it, to train, fine-tune, or evaluate any AI model, and never sells or shares it for that purpose.</li>
     <li><strong>Turn off training in your AI client.</strong> Your MCP client provider handles the tool results it receives under its own policy. Before connecting, switch off any setting that lets the provider use your conversations to improve its models.</li>
-    <li><strong>Broadcast channel posts come with Telegram's sponsored messages.</strong> When your assistant reads posts from a broadcast channel, this service also fetches the official sponsored messages Telegram serves for that channel, returns them to your assistant separately from the posts, labelled as advertising, and tells Telegram they were shown, as Telegram's API terms require. They are not stored, and their text is not logged.</li>
+    <li><strong>Broadcast channel posts come with Telegram's sponsored messages.</strong> When your assistant reads posts from a broadcast channel, this service also fetches the official sponsored messages Telegram serves for that channel, returns them to your assistant separately from the posts, labeled as advertising, and tells Telegram they were shown, as Telegram's API terms require. They are not stored, and their text is not logged.</li>
     <li><strong>Kept no longer than the feature needs.</strong> Ordinary MCP calls fetch messages for that request and do not store them. Only Communication Agent stores message content, encrypted, for the retention window in the table below.</li>
   </ul>
 
   <h2>Data inventory</h2>
   <div class="table-scroll">
-  <table>
+  <table class="inventory">
+    <colgroup><col class="col-where"><col class="col-contents"><col class="col-why"><col class="col-retention"></colgroup>
     <thead><tr><th>Where</th><th>Contents</th><th>Why</th><th>Retention</th></tr></thead>
     <tbody>
       <tr>
         <td><code>users</code> table</td>
-        <td>Telegram user id, display name, and username</td>
+        <td>Telegram user ID, display name, and username</td>
         <td>Resolves your identity for per-user storage isolation</td>
-        <td>Account deletion clears the display name, username and last-seen time and removes related user-scoped rows by database cascade where configured. The Telegram user id, access tier and the time of the delete are kept, so a later sign-in is matched to the same row and an authorization code issued before the delete cannot be redeemed after it.</td>
+        <td>Account deletion clears the display name, username, and last-seen time and removes related user-scoped rows by database cascade where configured. The Telegram user ID, access tier, and the time of the delete are kept, so a later sign-in is matched to the same row and an authorization code issued before the delete cannot be redeemed after it.</td>
       </tr>
       <tr>
         <td><code>client_notification_prefs</code> table</td>
@@ -102,7 +111,7 @@
       <tr>
         <td>Process memory</td>
         <td>Plaintext Telegram messages, decrypted agent content, tool arguments, and tool results while a request, listener update, policy evaluation, or queue job is being processed</td>
-        <td>Required to fulfil the request or agent workflow</td>
+        <td>Required to fulfill the request or agent workflow</td>
         <td>Released after processing; the running process/operator can access it while present</td>
       </tr>
       <tr>
@@ -124,11 +133,18 @@
     <li>The contents of <code>Authorization: Bearer</code> headers</li>
     <li>Your IP address in the service database (the platform ingress may keep normal L4/L7 access logs)</li>
   </ul>
-  <p><strong>Important:</strong> when Communication Agent is enabled, message content is stored in encrypted agent tables as described above. The previous “message text is never written to disk” guarantee applies only to ordinary read-tool responses and audit/logging paths, not to the durable agent workflow.</p>
+  <div class="callout">
+    <div class="tag">Important</div>
+    <p>When Communication Agent is enabled, message content is stored in encrypted agent tables as described above. The previous “message text is never written to disk” guarantee applies only to ordinary read-tool responses and audit/logging paths, not to the durable agent workflow.</p>
+  </div>
 
   <h2 id="website-analytics">Website analytics</h2>
-  <p>To learn how many people visit tg.mctl.ai and where they come from, the public content pages (home, docs, demo, security, privacy, terms, Local Bridge docs and product updates) load Umami, an open-source analytics tool that we host ourselves at stats.mctl.ai. No analytics data is sent to a third party. Umami sets no cookies. For each page view it records the page address (including campaign parameters such as <code>utm_source</code>), the referring site, browser, operating system, device type, screen size, language, and country, region and city derived from your IP address. Your IP address and user agent are used to compute an anonymous visitor identifier; the IP address itself is not stored.</p>
-  <p>The sign-in, consent, connect and account-management pages under <code>/oauth</code>, <code>/telegram/connect</code> and <code>/local-bridge/activate</code> do not load Umami, and no Telegram data, tool call, token or account identifier is ever sent to it. Page-view records are deleted automatically 2 years after they were recorded.</p>
+  <p>To learn how many people visit tg.mctl.ai and where they come from, the public content pages (home, docs, demo, security, privacy, terms, Local Bridge docs, and product updates) load Umami, an open-source analytics tool that we host ourselves at stats.mctl.ai. No analytics data is sent to a third party. Umami itself sets no cookies (this service sets one separate sign-up attribution cookie, described below). For each page view it records the page address (including campaign parameters such as <code>utm_source</code>), the referring site, browser, operating system, device type, screen size, language, and country, region, and city derived from your IP address. Your IP address and user agent are used to compute an anonymous visitor identifier; the IP address itself is not stored.</p>
+  <p>The sign-in, consent, connect, and account-management pages under <code>/oauth</code>, <code>/telegram/connect</code>, and <code>/local-bridge/activate</code> do not load Umami, and no Telegram data, tool call, token, or account identifier is ever sent to it. Page-view records are deleted automatically 2 years after they were recorded.</p>
+
+  <h2 id="signup-attribution">Sign-up attribution</h2>
+  <p>To learn which posts, listings and links bring people to the service, the first public content page you open sets one first-party cookie, <code>mctl_acq</code>. It is signed, HttpOnly, SameSite=Lax, and expires after 24 hours. It holds the campaign parameters present in the page address (<code>utm_source</code>, <code>utm_medium</code>, <code>utm_campaign</code>, <code>utm_content</code>, <code>utm_term</code>, each at most 100 characters), the host name of the referring site (no path or query), and the landing page path. A later page view does not overwrite it.</p>
+  <p>Only when you create your account for the first time, one record is stored with those values, the type of AI client you connected from (for example Claude or ChatGPT), and the time. If no cookie is present the record says the source is unknown. No IP address, user agent, or other fingerprint is stored for this purpose, the record is never updated afterwards, and it is deleted when you delete your account.</p>
 
   <h2>Communication Agent controls</h2>
   <ul>
@@ -140,9 +156,9 @@
   </ul>
 
   <h2>Self-service controls</h2>
-  <p>You can remove account access and inspect what was recorded without operator involvement. Disconnect and delete require a connection granted <code>account:manage</code>; read-only connections, worker tokens and Local Bridge device credentials are refused with <code>403</code>, and the refusal is recorded in your audit log. On tg.mctl.ai, you can still disconnect from the manage page after signing in with Telegram.</p>
+  <p>You can remove account access and inspect what was recorded without operator involvement. Disconnect and delete require a connection granted <code>account:manage</code>; read-only connections, worker tokens, and Local Bridge device credentials are refused with <code>403</code>, and the refusal is recorded in your audit log. On tg.mctl.ai, you can still disconnect from the manage page after signing in with Telegram.</p>
   <pre>POST   /api/account/disconnect   # end Telegram session; OAuth grant kept
-DELETE /api/account              # delete account/session row and user-scoped data; revoke OAuth refresh tokens, worker tokens and Local Bridge devices
+DELETE /api/account              # delete account/session row and user-scoped data; revoke OAuth refresh tokens, worker tokens, and Local Bridge devices
 GET    /api/account              # connection status + feature/send flags
 GET    /api/account/audit        # newest-first audit rows (limit, before)
 GET    /api/account/audit/verify # recompute the audit hash chain</pre>
@@ -163,7 +179,7 @@ PUT    /api/account/notifications   # change one or more categories</pre>
   <h2>Third parties</h2>
   <ul>
     <li><strong>Telegram</strong> (transport and identity) — the connected account uses Telegram MTProto, and sign-in uses Telegram OIDC.</li>
-    <li><strong>Your MCP client provider</strong> — for example Anthropic or OpenAI — processes the conversation and tool traffic you send through that product.</li>
+    <li><strong>Your MCP client provider</strong> — for example, Anthropic or OpenAI — processes the conversation and tool traffic you send through that product.</li>
     <li>No advertising or third-party analytics is injected by this service. Public content pages count visits with Umami, which we host ourselves (see <a href="#website-analytics">Website analytics</a>). OAuth/session-management pages use strict CSP and load no analytics; public content pages load the mctl design stylesheet and web fonts for presentation.</li>
   </ul>
 

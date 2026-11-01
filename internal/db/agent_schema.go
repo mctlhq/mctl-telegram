@@ -60,6 +60,18 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_actions", "send_body_encrypted", "BYTEA", "BLOB"); err != nil {
 		return err
 	}
+	// agent_actions.send_attempts: send RPCs issued for the action, stamped
+	// before each one, so recovery can bound its retries and tell "never
+	// attempted" apart from "attempted, outcome unknown" (#1029).
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_actions", "send_attempts",
+		"INTEGER NOT NULL DEFAULT 0", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	// agent_actions.retry_not_before: the earliest time recovery may retry
+	// the send, set from a FLOOD_WAIT (#1055). NULL means no wait.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_actions", "retry_not_before", "TIMESTAMPTZ", "DATETIME"); err != nil {
+		return err
+	}
 	// Approval codes are looked up by a tenant-scoped keyed blind index and
 	// retained reversibly only as per-user AES-GCM ciphertext so notification
 	// retries can reproduce the original command without leaving a live
@@ -772,6 +784,30 @@ func agentSchemaSQLite() []string {
 			fetched_at DATETIME NOT NULL,
 			lifecycle_checked_at DATETIME NOT NULL
 		)`,
+		// Private forks of catalog assistants (#1043,
+		// docs/assistants/adr-forks.md): one row per immutable fork version.
+		// The document is the canonical materialized definition, sealed with
+		// the owner's key; it is read only by (user_id, digest) or by
+		// (user_id, name), never across accounts, and purged with the
+		// account. base_* name the catalog version the fork narrows, whose
+		// lifecycle is the fork's. promotion is observe until P4.3.
+		`CREATE TABLE IF NOT EXISTS assistant_forks (
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			name TEXT NOT NULL,
+			version TEXT NOT NULL,
+			digest TEXT NOT NULL,
+			base_name TEXT NOT NULL,
+			base_version TEXT NOT NULL,
+			base_digest TEXT NOT NULL,
+			document_encrypted BLOB NOT NULL,
+			promotion TEXT NOT NULL DEFAULT 'observe',
+			created_at DATETIME NOT NULL,
+			PRIMARY KEY (user_id, name, version)
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_assistant_forks_digest
+			ON assistant_forks(user_id, digest)`,
+		`CREATE INDEX IF NOT EXISTS idx_assistant_forks_base
+			ON assistant_forks(base_digest)`,
 	}
 }
 
@@ -1099,5 +1135,29 @@ func agentSchemaPG() []string {
 			fetched_at TIMESTAMPTZ NOT NULL,
 			lifecycle_checked_at TIMESTAMPTZ NOT NULL
 		)`,
+		// Private forks of catalog assistants (#1043,
+		// docs/assistants/adr-forks.md): one row per immutable fork version.
+		// The document is the canonical materialized definition, sealed with
+		// the owner's key; it is read only by (user_id, digest) or by
+		// (user_id, name), never across accounts, and purged with the
+		// account. base_* name the catalog version the fork narrows, whose
+		// lifecycle is the fork's. promotion is observe until P4.3.
+		`CREATE TABLE IF NOT EXISTS assistant_forks (
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			name TEXT NOT NULL,
+			version TEXT NOT NULL,
+			digest TEXT NOT NULL,
+			base_name TEXT NOT NULL,
+			base_version TEXT NOT NULL,
+			base_digest TEXT NOT NULL,
+			document_encrypted BYTEA NOT NULL,
+			promotion TEXT NOT NULL DEFAULT 'observe',
+			created_at TIMESTAMPTZ NOT NULL,
+			PRIMARY KEY (user_id, name, version)
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_assistant_forks_digest
+			ON assistant_forks(user_id, digest)`,
+		`CREATE INDEX IF NOT EXISTS idx_assistant_forks_base
+			ON assistant_forks(base_digest)`,
 	}
 }

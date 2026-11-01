@@ -3,7 +3,7 @@
 // install onto the agent profile the runtime uses today.
 //
 // The mapping is deliberately lossless or nothing: a setting the current
-// runtime cannot enforce (a restricted tool set, other record kinds) fails with ErrUnsupported instead of being
+// runtime cannot enforce (execution settings, other record kinds) fails with ErrUnsupported instead of being
 // dropped, so an install never looks applied while part of it is ignored.
 package assistant
 
@@ -50,8 +50,10 @@ var disclosureRank = map[profile.DisclosureLevel]int{
 }
 
 // RuntimeTools is every tool the worker implements, by canonical name. A
-// definition must name all of them, each by that name or a generic alias
-// (internal/agent/tools).
+// definition names any subset of them that includes the mandatory tools
+// (tools.Mandatory), each by that name or a generic alias
+// (internal/agent/tools). The agent API refuses a job's calls to a tool its
+// definition leaves out.
 var RuntimeTools = slices.Clone(tools.Canonical)
 
 // Limits are the per-conversation limits of an assistant.
@@ -95,6 +97,9 @@ type Definition struct {
 		Status      string   `json:"status"`
 		Tags        []string `json:"tags"`
 		Examples    []string `json:"examples"`
+		// Fork is set on a private fork only (ParseDefinition holds the two
+		// together with the name and visibility).
+		Fork *ForkRef `json:"fork,omitempty"`
 	} `json:"metadata"`
 	Spec struct {
 		// Instructions point at a file (path, in an authored definition) or
@@ -277,8 +282,11 @@ func ParseDefinition(raw []byte) (*Definition, error) {
 	if err := withinCeilings(d.Spec.Defaults.Limits, d.Spec.Defaults.Ceilings); err != nil {
 		return nil, fmt.Errorf("defaults: %w", err)
 	}
-	if _, err := tools.Resolve(d.Spec.Tools); err != nil {
+	if _, err := tools.Validate(d.Spec.Tools); err != nil {
 		return nil, fmt.Errorf("tools: %w", err)
+	}
+	if err := checkForkMetadata(&d); err != nil {
+		return nil, err
 	}
 	return &d, nil
 }
@@ -466,15 +474,12 @@ func Resolve(def *Definition, in *Install) (*Profile, error) {
 
 // supported rejects what the runtime cannot enforce yet.
 func supported(def *Definition, in *Install) error {
-	// Each tool may be named by its canonical name or a generic alias, but
-	// all of them must be there: the agent API does not check which tools a
-	// job may call, so a subset would look enforced while it is not.
-	bindings, err := tools.Resolve(def.Spec.Tools)
-	if err != nil {
+	// A subset of the tools is enforced: the job token carries the
+	// definition's tools and the agent API refuses calls outside them. The
+	// mandatory tools must still be there, since a job cannot finish
+	// without them.
+	if _, err := tools.Validate(def.Spec.Tools); err != nil {
 		return fmt.Errorf("tools: %w", err)
-	}
-	if !tools.Complete(bindings) {
-		return fmt.Errorf("tools: a restricted tool set is %w", ErrUnsupported)
 	}
 	// The worker's model, budget and timeout come from its own environment;
 	// a definition that sets them would look enforced while being ignored.

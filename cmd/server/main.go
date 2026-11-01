@@ -9,6 +9,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -21,6 +22,7 @@ import (
 
 	gotdtelegram "github.com/gotd/td/telegram"
 	mctltelegram "github.com/mctlhq/mctl-telegram"
+	"github.com/mctlhq/mctl-telegram/internal/acquisition"
 	"github.com/mctlhq/mctl-telegram/internal/agent/control"
 	"github.com/mctlhq/mctl-telegram/internal/agent/executor"
 	"github.com/mctlhq/mctl-telegram/internal/agent/listener"
@@ -55,6 +57,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/productupdate"
 	"github.com/mctlhq/mctl-telegram/internal/sweeper"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
+	"github.com/mctlhq/mctl-telegram/internal/ui"
 	"github.com/mctlhq/mctl-telegram/internal/web"
 	"github.com/mctlhq/mctl-telegram/internal/workctx"
 	"github.com/mctlhq/mctl-telegram/internal/workertoken"
@@ -456,6 +459,16 @@ func main() {
 			}
 		}
 	}()
+	// Public usage numbers for the landing page and GET /api/stats:
+	// recounted from the database on a timer, served from memory. The
+	// canary accounts are excluded the same way the SLI rules drop
+	// traffic="canary".
+	statsCache := &web.StatsCache{}
+	canaryIDs := make([]int64, 0, len(cfg.CanaryTelegramIDs))
+	for id := range cfg.CanaryTelegramIDs {
+		canaryIDs = append(canaryIDs, id)
+	}
+	web.StartStatsSampler(ctx, store, statsCache, canaryIDs, cfg.PublicStatsRefresh)
 
 	mux := chi.NewRouter()
 	mux.Use(middleware.RequestID)
@@ -468,6 +481,17 @@ func main() {
 	mux.Use(middleware.Recoverer)
 	mux.Use(middleware.Timeout(60 * time.Second))
 	mux.Use(web.SecurityHeaders(cfg.PublicBaseURL))
+	// First-touch acquisition cookie (issue-1072) on the public content pages
+	// only; never on /oauth/*, /telegram/connect or /local-bridge/activate.
+	if cfg.OAUTHJWTSecret != "" {
+		selfHost, secureCookie := "", false
+		if u, err := url.Parse(cfg.PublicBaseURL); err == nil {
+			selfHost, secureCookie = u.Hostname(), u.Scheme == "https"
+		}
+		mux.Use(acquisition.Middleware(acquisition.DeriveKey([]byte(cfg.OAUTHJWTSecret)), selfHost, secureCookie,
+			"/", "/docs", "/demo", "/security", "/privacy", "/terms", "/platforms",
+			"/assistants", "/docs/local-bridge", "/docs/product-updates"))
+	}
 
 	// Authorization server URL — for the Telegram-native local-jwt path
 	// (default), this is the same as PublicBaseURL: mctl-telegram is its own
@@ -487,9 +511,15 @@ func main() {
 	mux.Get("/.well-known/oauth-protected-resource", prmHandler)
 	mux.Get("/.well-known/oauth-protected-resource"+cfg.MCPPath, prmHandler)
 	mux.Get("/.well-known/openai-apps-challenge", web.OpenAIAppsChallenge())
+	mux.Get("/robots.txt", web.RobotsTxt(cfg.PublicBaseURL))
+	mux.Get("/sitemap.xml", web.Sitemap(cfg.PublicBaseURL))
 	mux.Get("/favicon.svg", web.Favicon())
 	mux.Get("/favicon.ico", web.Favicon())
 	mux.Get("/og.png", web.OGImage())
+	// Deployment-wide usage counts, no auth: the body holds four aggregate
+	// numbers and nothing per user. Served from the sampler's cache, so a
+	// burst of requests never reaches the database.
+	mux.Get("/api/stats", web.StatsJSON(statsCache))
 	// "/" itself is registered after the MCP mount below: it serves the
 	// landing page and, for a client configured with the bare origin, MCP.
 	mux.Get("/security", web.Security(cfg.PublicBaseURL, showManage))
@@ -592,11 +622,47 @@ func main() {
 	// web approval page below. Disabled when BROADCAST_OPERATORS is empty.
 	broadcastSvc := newBroadcastService(store, cfg)
 
+	// The assistant catalog and install service (#1020-#1022), behind the
+	// MCP tools, the admin install route, /assistants and the manage page's
+	// assistant section. Only with AGENT_ENABLED, like the agent itself.
+	var (
+		catalog      *assistant.Catalog
+		registry     *assistantregistry.Client
+		assistantSvc *assistantinstall.Service
+	)
+	if cfg.AgentEnabled {
+		// The catalog is compiled in and covered by tests, so a load
+		// failure is a broken build: refuse to start rather than run jobs
+		// without their assistant's instructions.
+		catalog, err = assistant.LoadCatalog(mctltelegram.Catalog)
+		if err != nil {
+			slog.Error("agent: assistant catalog failed to load", "err", err)
+			os.Exit(1)
+		}
+		// The assistant registry (#1020): off by default. With it on,
+		// installs fetch from mctl-api and store a snapshot, a refresh keeps
+		// pinned lifecycles current, and claims stop for a disabled or
+		// unknown one. Claims never call the registry.
+		if cfg.AssistantRegistryEnabled {
+			registry = assistantregistry.NewClient(cfg.MCTLAPIBaseURL, cfg.MCTLSurfaceTelegramToken, nil)
+			refresher := &assistantregistry.Refresher{Store: store, Client: registry}
+			go refresher.Run(ctx, assistantregistry.RefreshInterval)
+		}
+		slog.Info("assistant registry", "enabled", cfg.AssistantRegistryEnabled, "mctl_api_base_url", cfg.MCTLAPIBaseURL)
+		assistantSvc = assistantinstall.New(store, catalog, registry)
+		assistantSvc.ForksEnabled = cfg.AssistantForksEnabled
+		slog.Info("assistant forks", "enabled", cfg.AssistantForksEnabled)
+		// The public catalog page: the same entries as list_assistants.
+		mux.Get("/assistants", web.Assistants(assistantSvc, cfg.PublicBaseURL, showManage))
+		ui.SetAssistantsMounted(true)
+		web.SetAssistantsMounted(true)
+	}
+
 	// Session management dashboard — only mounted in local-jwt mode alongside
 	// the self-connect wizard. Requires auth so only the session owner can
 	// manage their own session.
 	if strings.EqualFold(cfg.AuthMode, "local-jwt") {
-		manageSrv := web.NewManageServer(store, pool, strings.TrimRight(cfg.PublicBaseURL, "/"), cfg.TelegramLoginBotUsername, oauth.ConnectClientID).WithCanaryGuard(cfg.CanaryTelegramIDs)
+		manageSrv := web.NewManageServer(store, pool, strings.TrimRight(cfg.PublicBaseURL, "/"), cfg.TelegramLoginBotUsername, oauth.ConnectClientID).WithCanaryGuard(cfg.CanaryTelegramIDs).WithAssistants(assistantSvc)
 		// Browser navigations get an HTML sign-in page; API clients keep JSON 401.
 		// Auth is still required — only the unauthenticated presentation changes.
 		manageAuth := auth.MiddlewareWithHTML(provider, true, m, resourceMeta, manageSrv.WriteUnauthorized)
@@ -604,6 +670,10 @@ func main() {
 		mux.With(manageAuth).Post("/telegram/connect/manage/disconnect", manageSrv.HandleDisconnect)
 		mux.With(manageAuth).Post("/telegram/connect/manage/toggle-send", manageSrv.HandleToggleSend)
 		mux.With(manageAuth).Post("/telegram/connect/manage/notifications", manageSrv.HandleSetNotifications)
+		if assistantSvc != nil {
+			mux.With(manageAuth).Post("/telegram/connect/manage/assistant/install", manageSrv.HandleAssistantInstall)
+			mux.With(manageAuth).Post("/telegram/connect/manage/assistant/update", manageSrv.HandleAssistantUpdate)
+		}
 		// Broadcast approval (issue-439). Under /telegram/connect so the
 		// connect-session cookie reaches it; the handler itself requires a
 		// token issued to the self-connect client, so an MCP token can
@@ -741,30 +811,11 @@ func main() {
 		// production onboarding.
 		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Put("/api/admin/agent/profile",
 			agentapi.NewAdminAgentProfileHandler(store))
-		// The catalog is compiled in and covered by tests, so a load
-		// failure is a broken build: refuse to start rather than run jobs
-		// without their assistant's instructions.
-		catalog, err := assistant.LoadCatalog(mctltelegram.Catalog)
-		if err != nil {
-			slog.Error("agent: assistant catalog failed to load", "err", err)
-			os.Exit(1)
-		}
-		// The assistant registry (#1020): off by default. With it on,
-		// installs fetch from mctl-api and store a snapshot, a refresh keeps
-		// pinned lifecycles current, and claims stop for a disabled or
-		// unknown one. Claims never call the registry.
-		var registry *assistantregistry.Client
-		if cfg.AssistantRegistryEnabled {
-			registry = assistantregistry.NewClient(cfg.MCTLAPIBaseURL, cfg.MCTLSurfaceTelegramToken, nil)
-			refresher := &assistantregistry.Refresher{Store: store, Client: registry}
-			go refresher.Run(ctx, assistantregistry.RefreshInterval)
-		}
-		slog.Info("assistant registry", "enabled", cfg.AssistantRegistryEnabled, "mctl_api_base_url", cfg.MCTLAPIBaseURL)
 		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Put("/api/admin/agent/install",
 			agentapi.NewAdminAgentInstallHandler(store, catalog, registry))
 		// The same install service behind the owner's own MCP tools
 		// (list_assistants, install_assistant, update_install).
-		mcpSrv.WithAssistants(assistantinstall.New(store, catalog, registry))
+		mcpSrv.WithAssistants(assistantSvc)
 		agentProvider := selectAgentProvider(cfg, store, workerTokenRevocationCache)
 		if jobProvider := selectAgentJobProvider(cfg, store, workerTokenRevocationCache); jobProvider != nil {
 			agentProvider = chainProvider{agentProvider, jobProvider}
@@ -776,6 +827,9 @@ func main() {
 		agentSrv.WithCatalog(catalog)
 		if cfg.AssistantRegistryEnabled {
 			agentSrv.WithRegistryLifecycle()
+		}
+		if cfg.AssistantForksEnabled {
+			agentSrv.WithForks()
 		}
 		if cfg.OAUTHJWTSecret != "" {
 			jobSigner, err := localjwt.NewIssuer([]byte(cfg.OAUTHJWTSecret), strings.TrimRight(cfg.PublicBaseURL, "/"))
@@ -823,7 +877,7 @@ func main() {
 	// sessions carry across. Belt-and-braces alongside config.Load's own
 	// MCP_PATH validation: a Config built directly must not be able to put
 	// the MCP mount itself on "/".
-	root := web.RootMCP(web.Landing(cfg.PublicBaseURL, cfg.MCPPath, authServer, showManage), guarded, m.CountRootMCPRequest)
+	root := web.RootMCP(web.Landing(cfg.PublicBaseURL, cfg.MCPPath, authServer, showManage, web.WithStats(statsCache)), guarded, m.CountRootMCPRequest)
 	mux.Get("/", root.ServeHTTP)
 	if strings.Trim(cfg.MCPPath, "/") != "" {
 		mux.Post("/", root.ServeHTTP)

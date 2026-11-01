@@ -285,7 +285,7 @@ func TestPortalAllowlist_CoversEveryRegisteredTool(t *testing.T) {
 	// could only be enabled via selfOnlyTools, but the honest failure is here.
 	// apps.go registers prepare_send_message (only reachable with
 	// AppsEnabled=true above), so it must be scanned too.
-	fset, parsed := parseSources(t, "tools.go", "media_tools.go", "apps.go", "broadcast_tools.go", "reply_tools.go", "assistant_tools.go")
+	fset, parsed := parseSources(t, "tools.go", "media_tools.go", "apps.go", "broadcast_tools.go", "reply_tools.go", "assistant_tools.go", "fork_tools.go")
 	fromSource, err := gatesFromSource(fset, parsed...)
 	if err != nil {
 		t.Fatal(err)

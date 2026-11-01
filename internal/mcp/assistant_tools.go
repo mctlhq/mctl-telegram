@@ -59,26 +59,14 @@ type listAssistantsResult struct {
 	Source     string                          `json:"source"`
 	Assistants []assistantinstall.CatalogEntry `json:"assistants"`
 	Mine       assistantInstalled              `json:"mine"`
+	// Forks are the caller's own private forks (#1043), never anyone
+	// else's, listed apart from the catalog.
+	Forks []assistantinstall.ForkSummary `json:"forks"`
 }
 
-// installSettings is what an install resolved to: the settings the agent
-// runs with, never the values or notes they were derived from.
-type installSettings struct {
-	Mode                string   `json:"mode"`
-	Paused              bool     `json:"paused"`
-	Listening           bool     `json:"listening"`
-	DisclosureEnabled   bool     `json:"disclosure_enabled"`
-	DisclosureText      string   `json:"disclosure_text"`
-	MaxAutonomousTurns  int      `json:"max_autonomous_turns"`
-	MaxMsgsPerMinute    int      `json:"max_msgs_per_minute"`
-	MaxReplyChars       int      `json:"max_reply_chars"`
-	AutoIntents         []string `json:"auto_intents"`
-	NeverIntents        []string `json:"never_intents"`
-	WorkingHours        string   `json:"working_hours"`
-	AudienceExcludes    []string `json:"audience_excludes"`
-	OnlySendersCount    int      `json:"only_senders_count"`
-	BlockedSendersCount int      `json:"blocked_senders_count"`
-}
+// installSettings is what an install resolved to; see
+// assistantinstall.Settings.
+type installSettings = assistantinstall.Settings
 
 type installAssistantResult struct {
 	Assistant       string          `json:"assistant"`
@@ -87,26 +75,10 @@ type installAssistantResult struct {
 	Settings        installSettings `json:"settings"`
 }
 
-func csvList(s string) []string {
-	if s == "" {
-		return []string{}
-	}
-	return strings.Split(s, ",")
-}
-
 func installResult(res *assistantinstall.Result) installAssistantResult {
-	p := res.Profile
 	return installAssistantResult{
-		Assistant: res.Name, Version: res.Version, InstallRevision: p.InstallRevision,
-		Settings: installSettings{
-			Mode: p.Mode, Paused: p.AutopilotPaused, Listening: p.ListenerEnabled,
-			DisclosureEnabled: !p.DisclosureDisabled, DisclosureText: p.DisclosureText,
-			MaxAutonomousTurns: p.MaxAutonomousTurns, MaxMsgsPerMinute: p.MaxMsgsPerMinute,
-			MaxReplyChars: p.MaxReplyChars,
-			AutoIntents:   csvList(p.IntentAllowlist), NeverIntents: csvList(p.IntentDenylist),
-			WorkingHours: p.WorkingHours, AudienceExcludes: csvList(p.AudienceExcludes),
-			OnlySendersCount: len(csvList(p.SenderAllowlist)), BlockedSendersCount: len(csvList(p.BlockedSenders)),
-		},
+		Assistant: res.Name, Version: res.Version, InstallRevision: res.Profile.InstallRevision,
+		Settings: assistantinstall.SettingsOf(res.Profile),
 	}
 }
 
@@ -138,6 +110,14 @@ func (s *Server) assistantErrResult(ctx context.Context, tool string, err error)
 		case assistantinstall.KindUnavailable:
 			code, reason, retryable = "registry_unavailable", ReasonHandlerError, true
 			msg = "assistant registry unavailable; nothing changed, retry in a minute"
+		case assistantinstall.KindForkLimit:
+			code, reason = "fork_limit", ReasonRefused
+		case assistantinstall.KindForkInUse:
+			code, reason = "fork_in_use", ReasonRefused
+		case assistantinstall.KindForkConflict:
+			code, reason, retryable = "fork_conflict", ReasonRefused, true
+		case assistantinstall.KindForksDisabled:
+			code, reason = "forks_disabled", ReasonCapabilityDisabled
 		}
 		if ie.Err != nil {
 			slog.Warn("mcp assistant tool error", "tool", tool, "code", code, "err", ie.Err)
@@ -174,12 +154,13 @@ func (s *Server) toolListAssistants() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		outputSchema[listAssistantsResult](),
 		mcplib.WithDescription(`List the assistants YOUR Telegram account can install, and which one it runs now. No arguments; always about the caller's own account.
 
-Output: {source, assistants, mine}.
+Output: {source, assistants, mine, forks}.
   source — "registry" (the mctl assistant registry) or "embedded" (the catalog built into this server).
-  assistants — [{name, version, title, description, tags, lifecycle, variables: [{name, type, required, default?, choices?, description}], intents: [{name, description, tier}], defaults: {mode, limits: {maxAutonomousTurns, maxMsgsPerMinute, maxReplyChars}, disclosure_policy}}], by name, highest version first.
+  assistants — [{name, version, title, description, tags, examples, lifecycle, variables: [{name, type, required, default?, choices?, description}], intents: [{name, description, tier}], defaults: {mode, limits: {maxAutonomousTurns, maxMsgsPerMinute, maxReplyChars}, disclosure_policy}}], by name, highest version first.
   mine — {assistant, version, install_revision, installed}. installed=false means the account was never configured through an install. Pass install_revision as expected_revision to update_install.
+  forks — your own private forks (fork_assistant), never anyone else's: [{name, base: {name, version, digest}, latest, versions: [{name, version, digest, base, promotion}]}]. Install one with install_assistant by its full name and a version.
 
-Never returns your stored values, owner notes or an assistant's instructions. If the registry cannot be read, the call fails with error "registry_unavailable" (retryable) rather than returning an empty list.`),
+Never returns your stored values, owner notes, an assistant's instructions or a fork's instructions. If the registry cannot be read, the call fails with error "registry_unavailable" (retryable) rather than returning an empty list.`),
 	)
 	handler := func(ctx context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
@@ -204,10 +185,16 @@ Never returns your stored values, owner notes or an assistant's instructions. If
 		if entries == nil {
 			entries = []assistantinstall.CatalogEntry{}
 		}
+		forks, err := s.Assistants.ListForks(ctx, id.UserID)
+		if err != nil {
+			s.audit(ctx, id, "list_assistants", "", errors.New(assistantErrCode(err)), startedAt)
+			return s.assistantErrResult(ctx, "list_assistants", err)
+		}
 		s.audit(ctx, id, "list_assistants", "", nil, startedAt)
 		return jsonResult(listAssistantsResult{
 			Source: source, Assistants: entries,
-			Mine: assistantInstalled{Assistant: mine.Assistant, Version: mine.Version, InstallRevision: mine.InstallRevision, Installed: mine.Installed},
+			Mine:  assistantInstalled{Assistant: mine.Assistant, Version: mine.Version, InstallRevision: mine.InstallRevision, Installed: mine.Installed},
+			Forks: forks,
 		})
 	}
 	return tool, handler
@@ -215,29 +202,7 @@ Never returns your stored values, owner notes or an assistant's instructions. If
 
 // assistantErrCode is the audit text of a failed call: the error kind,
 // never the message, which for a validation error names variables.
-func assistantErrCode(err error) string {
-	var ie *assistantinstall.Error
-	if !errors.As(err, &ie) {
-		return "internal error"
-	}
-	switch ie.Kind {
-	case assistantinstall.KindInvalid:
-		return "invalid install"
-	case assistantinstall.KindNotFound:
-		return "assistant not found"
-	case assistantinstall.KindLifecycle:
-		return "lifecycle refused"
-	case assistantinstall.KindRevisionConflict:
-		return "install revision conflict"
-	case assistantinstall.KindNoInstall:
-		return "no install"
-	case assistantinstall.KindUpstream:
-		return "registry returned an invalid answer"
-	case assistantinstall.KindUnavailable:
-		return "registry unavailable"
-	}
-	return "internal error"
-}
+func assistantErrCode(err error) string { return assistantinstall.AuditText(err) }
 
 // expectedRevisionArg reads expected_revision: absent is (nil, true); a
 // non-integer or a value below 1 is (nil, false).
@@ -302,7 +267,7 @@ func (s *Server) toolInstallAssistant() (mcplib.Tool, mcpserver.ToolHandlerFunc)
 		mcplib.WithDescription(`Install a catalog assistant on YOUR OWN Telegram account, replacing the current install as a whole. Requires the account:manage scope. There is no telegram_id argument.
 
 Inputs:
-  name, version — required. The exact catalog version from list_assistants; there is no "latest".
+  name, version — required. The exact catalog version from list_assistants; there is no "latest". name may also be the full name of one of your own forks (list_assistants' forks), which installs that fork version; a fork runs in observe or off mode only, so mode "guarded" is refused for it.
   values — object: the assistant's variables, keyed by variable name.
   mode — "observe" | "guarded" | "off"; default the assistant's default mode.
   paused — boolean; default true. listening — boolean; default false. A new install starts paused and not listening: going live is an explicit choice.
@@ -316,7 +281,7 @@ Inputs:
 
 Output: {assistant, version, install_revision, settings}. settings is what the install resolved to (mode, paused, listening, limits, auto and never intents, schedule, audience); values and ownerNotes are never echoed.
 
-Errors are JSON: {error, message, retryable, current_revision?}. error is one of invalid_install, assistant_not_found, lifecycle_refused (disabled, or deprecated for an account not already running it), revision_conflict (with current_revision; nothing changed), registry_unavailable (retryable; nothing changed), registry_invalid, internal_error. Work queued under the previous install is refused once this one is saved.`),
+Errors are JSON: {error, message, retryable, current_revision?}. error is one of invalid_install, assistant_not_found, lifecycle_refused (disabled, or deprecated for an account not already running it; for a fork, its base's lifecycle), revision_conflict (with current_revision; nothing changed), forks_disabled, registry_unavailable (retryable; nothing changed), registry_invalid, internal_error. Work queued under the previous install is refused once this one is saved.`),
 		mcplib.WithString("name", mcplib.Required(), mcplib.Description("Assistant name, as list_assistants returns it.")),
 		mcplib.WithString("version", mcplib.Required(), mcplib.Description("Exact assistant version, e.g. 0.1.0.")),
 		mcplib.WithObject("values", mcplib.Description("Variable values keyed by variable name.")),

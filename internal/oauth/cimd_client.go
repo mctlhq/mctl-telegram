@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -68,7 +67,7 @@ func (s *Server) resolveCIMDClient(ctx context.Context, clientID, where string) 
 	if len(clientID) > maxClientIDBytes {
 		// The same cap /oauth/authorize applies, enforced here so the token
 		// grants cannot resolve a client_id no authorization could have used.
-		slog.Warn("oauth: cimd client refused", "where", where, "err", "client_id exceeds 256 bytes")
+		s.logger().Warn("oauth: cimd client refused", "where", where, "err", "client_id exceeds 256 bytes")
 		return cimd.Document{}, true, errCIMDRefused
 	}
 	doc, err = s.cfg.CIMD.Resolve(ctx, clientID)
@@ -76,15 +75,15 @@ func (s *Server) resolveCIMDClient(ctx context.Context, clientID, where string) 
 		err = fmt.Errorf("%w: unsupported token_endpoint_auth_method %q", cimd.ErrInvalidDocument, doc.AuthMethod)
 	}
 	if err != nil {
-		return cimd.Document{}, true, cimdFailure(where, clientID, err)
+		return cimd.Document{}, true, s.cimdFailure(where, clientID, err)
 	}
 	return doc, true, nil
 }
 
 // cimdFailure logs err with its reason and maps it to the caller-facing
 // error, which never carries the reason.
-func cimdFailure(where, clientID string, err error) error {
-	slog.Warn("oauth: cimd client refused", "where", where, "client_id", clientID, "err", err)
+func (s *Server) cimdFailure(where, clientID string, err error) error {
+	s.logger().Warn("oauth: cimd client refused", "where", where, "client_id", clientID, "err", err)
 	switch {
 	case errors.Is(err, cimd.ErrFetch), errors.Is(err, cimd.ErrRateLimited):
 		return errCIMDUnavailable
@@ -111,25 +110,25 @@ func (s *Server) authenticateCIMDClient(r *http.Request, clientID, where string)
 	switch doc.AuthMethod {
 	case cimd.AuthMethodNone:
 		if assertionType != "" || assertion != "" {
-			return doc, true, cimdFailure(where, clientID,
+			return doc, true, s.cimdFailure(where, clientID,
 				fmt.Errorf("%w: client declares none and must not send a client assertion", errCIMDAuthFailed))
 		}
 		return doc, true, nil
 	case cimd.AuthMethodPrivateKeyJWT:
 		if assertionType != ClientAssertionTypeJWT || assertion == "" {
-			return doc, true, cimdFailure(where, clientID,
+			return doc, true, s.cimdFailure(where, clientID,
 				fmt.Errorf("%w: private_key_jwt client must send client_assertion_type %s and client_assertion", errCIMDAuthFailed, ClientAssertionTypeJWT))
 		}
 		a, err := s.cfg.CIMD.VerifyAssertion(r.Context(), doc, assertion, s.assertionAudiences())
 		if err != nil {
-			return doc, true, cimdFailure(where, clientID, err)
+			return doc, true, s.cimdFailure(where, clientID, err)
 		}
 		if err := s.consumeJTI(r.Context(), clientID, a); err != nil {
-			return doc, true, cimdFailure(where, clientID, err)
+			return doc, true, s.cimdFailure(where, clientID, err)
 		}
 		return doc, true, nil
 	}
-	return doc, true, cimdFailure(where, clientID,
+	return doc, true, s.cimdFailure(where, clientID,
 		fmt.Errorf("%w: unsupported token_endpoint_auth_method %q", errCIMDAuthFailed, doc.AuthMethod))
 }
 
@@ -195,13 +194,13 @@ func (s *Server) sweepJTIs(now time.Time) {
 // validateCIMDRedirect checks redirectURI against a resolved document. The
 // match is exact, except for an http redirect on 127.0.0.1 or [::1], where
 // any port is accepted (RFC 8252 section 7.3).
-func validateCIMDRedirect(doc cimd.Document, redirectURI string) error {
+func (s *Server) validateCIMDRedirect(doc cimd.Document, redirectURI string) error {
 	if cimd.RedirectAllowed(doc.RedirectURIs, redirectURI) {
 		return nil
 	}
 	// The detail goes to the log only: the caller gets the same refusal as
 	// for any other unusable document.
-	slog.Warn("oauth: cimd redirect_uri not in document",
+	s.logger().Warn("oauth: cimd redirect_uri not in document",
 		"client_id", doc.ClientID, "redirect_uri", redirectURI,
 		"dropped_redirect_uris", doc.DroppedRedirectURIs)
 	return errCIMDRefused

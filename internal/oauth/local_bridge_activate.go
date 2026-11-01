@@ -43,7 +43,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -709,7 +708,7 @@ func (s *Server) handleActivateStart(w http.ResponseWriter, r *http.Request) {
 	userCode, err := s.mintUserCodeLocked()
 	if err != nil {
 		s.mu.Unlock()
-		slog.Error("local bridge activation: could not mint a unique user_code", "err", err)
+		s.logger().Error("local bridge activation: could not mint a unique user_code", "err", err)
 		s.writeActivateError(w, http.StatusServiceUnavailable, "could not allocate a verification code, try again")
 		return
 	}
@@ -897,7 +896,7 @@ func (s *Server) finishActivation(w http.ResponseWriter, r *http.Request, act *l
 
 	identity, err := s.tgoidc.Exchange(r.Context(), code, verifier, nonce)
 	if err != nil {
-		slog.Error("local bridge activation: telegram OIDC exchange failed", "err", err)
+		s.logger().Error("local bridge activation: telegram OIDC exchange failed", "err", err)
 		s.denyActivation(act, "telegram verification failed")
 		renderActivationDenied(w, "Telegram sign-in could not be verified. Return to your terminal and run the activation command again.")
 		return
@@ -1047,9 +1046,12 @@ func (s *Server) approveActivation(w http.ResponseWriter, r *http.Request, act *
 		LastName:   identity.LastName,
 		Source:     "local_bridge_activation",
 		CapturedAt: time.Now().UTC(),
+		// No cookie reaches a Local Bridge activation, so nothing was
+		// observed: unknown, never direct.
+		Acquisition: &db.Acquisition{State: db.AcquisitionUnknown, MCPClient: "local-bridge", CapturedAt: time.Now().UTC()},
 	})
 	if err != nil {
-		slog.Error("local bridge activation: ensure user failed", "err", err)
+		s.logger().Error("local bridge activation: ensure user failed", "err", err)
 		s.retryActivationAfterStoreFailure(w, act, "We hit a temporary problem resolving your account. Approve again to retry.")
 		return
 	}
@@ -1057,7 +1059,7 @@ func (s *Server) approveActivation(w http.ResponseWriter, r *http.Request, act *
 	provErr := s.store.ProvisionLocalAccount(ctx, uid, identity.TelegramID, displayName, identity.Username)
 	if provErr != nil {
 		if !errors.Is(provErr, db.ErrAccountAlreadyActive) {
-			slog.Error("local bridge activation: provision local account failed", "err", provErr)
+			s.logger().Error("local bridge activation: provision local account failed", "err", provErr)
 			s.retryActivationAfterStoreFailure(w, act, "We hit a temporary problem provisioning your account. Approve again to retry.")
 			return
 		}
@@ -1066,7 +1068,7 @@ func (s *Server) approveActivation(w http.ResponseWriter, r *http.Request, act *
 		// the hosted case.
 		mode, modeErr := s.store.GetAccountMode(ctx, uid)
 		if modeErr != nil {
-			slog.Error("local bridge activation: get account mode failed", "err", modeErr)
+			s.logger().Error("local bridge activation: get account mode failed", "err", modeErr)
 			s.retryActivationAfterStoreFailure(w, act, "We hit a temporary problem checking your account. Approve again to retry.")
 			return
 		}
@@ -1079,7 +1081,7 @@ func (s *Server) approveActivation(w http.ResponseWriter, r *http.Request, act *
 
 	deviceID, regErr := s.store.RegisterDevice(ctx, uid, deviceLabel, deviceRegKey, devicePubkey)
 	if regErr != nil {
-		slog.Error("local bridge activation: register device failed", "err", regErr)
+		s.logger().Error("local bridge activation: register device failed", "err", regErr)
 		s.retryActivationAfterStoreFailure(w, act, "We hit a temporary problem registering the device. Approve again to retry.")
 		return
 	}

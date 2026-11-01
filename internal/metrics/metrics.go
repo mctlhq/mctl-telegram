@@ -175,6 +175,13 @@ type Registry struct {
 	// ConnectFirstCallErrorsTotal counts store errors in the connect funnel
 	// by op (insert, close, classify, sweep).
 	ConnectFirstCallErrorsTotal *prometheus.CounterVec
+	// AcquisitionCaptureTotal counts the acquisition snapshot attached at
+	// /oauth/authorize by state (attributed, direct, unknown) and reason
+	// (ok, missing, invalid, expired).
+	AcquisitionCaptureTotal *prometheus.CounterVec
+	// AcquisitionWriteFailuresTotal counts failed user_acquisition inserts at
+	// user creation. The sign-in itself still succeeds.
+	AcquisitionWriteFailuresTotal prometheus.Counter
 
 	// TelegramReplicaID is an info-type gauge (constant value 1) labeled by
 	// replica_id. Operators use it to verify that a given user_id consistently
@@ -229,6 +236,11 @@ type Registry struct {
 	// single persistently-failing retry from inflating this past the actual
 	// number of distinct restart episodes (Codex finding on #307).
 	AgentExecutorRestartsTotal prometheus.Counter
+	// AgentDeliveryUnknownTotal counts actions the executor moved to
+	// delivery_unknown: sends whose outcome it could not observe and will
+	// not retry (#1029). Each one is also an owner alert; any increase is
+	// worth a look.
+	AgentDeliveryUnknownTotal prometheus.Counter
 
 	// AgentPolicyDenialsTotal counts hard policy denials, labeled by the
 	// closed-set denial code (policy.DenyCode, never the free-text reason —
@@ -236,8 +248,8 @@ type Registry struct {
 	// otherwise make label cardinality unbounded) and the call site that
 	// consumed the decision (one of PolicySurface*). Deliberately NOT
 	// labeled by account, conversation or peer: those become cardinality
-	// and, for peers, personal data. Bound: 23 codes (22 + "unknown") x 6
-	// surfaces = 138 series, all compile-time fixed and all pre-created at
+	// and, for peers, personal data. Bound: 24 codes (23 + "unknown") x 7
+	// surfaces = 168 series, all compile-time fixed and all pre-created at
 	// zero by New() — see issue #591 and the comment on the pre-init loops.
 	AgentPolicyDenialsTotal *prometheus.CounterVec // {reason, surface}
 
@@ -309,6 +321,10 @@ const (
 	PolicySurfaceOwnerSummary    = "send_owner_summary"
 	PolicySurfaceExecutorSend    = "executor_send"
 	PolicySurfaceExecutorRecover = "executor_recover"
+	// PolicySurfaceToolGate is the agent API's tool gate (#1041): a request
+	// to a route serving a tool outside the caller's tool set, always with
+	// reason tool_not_allowed.
+	PolicySurfaceToolGate = "tool_gate"
 	// PolicySurfaceUnknown is the bounded fallback for a surface that could
 	// not be resolved — see policySurfaceForOwnerTool. Its appearance in the
 	// series is the signal that a caller went unmapped.
@@ -328,6 +344,7 @@ var (
 		PolicySurfaceOwnerSummary,
 		PolicySurfaceExecutorSend,
 		PolicySurfaceExecutorRecover,
+		PolicySurfaceToolGate,
 		PolicySurfaceUnknown,
 	}
 	policyDenyReasons = []string{
@@ -353,6 +370,7 @@ var (
 		"intent_never",
 		"audience_excluded",
 		"install_changed",
+		"tool_not_allowed",
 		"unknown",
 	}
 )
@@ -549,6 +567,17 @@ func (r *Registry) CountConnectFirstCall(client, outcome, reason string) {
 	r.ConnectFirstCallTotal.WithLabelValues(client, outcome, reason).Inc()
 }
 
+// CountAcquisitionCapture records one acquisition snapshot decision at
+// /oauth/authorize. Both arguments come from closed sets in internal/oauth.
+func (r *Registry) CountAcquisitionCapture(state, reason string) {
+	r.AcquisitionCaptureTotal.WithLabelValues(state, reason).Inc()
+}
+
+// CountAcquisitionWriteFailure records one failed user_acquisition insert.
+func (r *Registry) CountAcquisitionWriteFailure() {
+	r.AcquisitionWriteFailuresTotal.Inc()
+}
+
 // CountConnectFirstCallError records one connect funnel store error.
 // Satisfies connectfunnel.Metrics.
 func (r *Registry) CountConnectFirstCallError(op string) {
@@ -734,6 +763,15 @@ func New() *Registry {
 		Help: "Total store errors in the connect first-call funnel, labeled by op: insert, close, classify, sweep.",
 	}, []string{"op"})
 
+	r.AcquisitionCaptureTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_acquisition_capture_total",
+		Help: "Acquisition snapshots attached at /oauth/authorize, by state (attributed, direct, unknown) and reason (ok, missing, invalid, expired).",
+	}, []string{"state", "reason"})
+	r.AcquisitionWriteFailuresTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "mctl_acquisition_write_failures_total",
+		Help: "Failed user_acquisition inserts at user creation; the sign-in still succeeds.",
+	})
+
 	r.TelegramReplicaID = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "mctl_telegram_replica_id",
 		Help: "Info gauge (always 1) identifying this replica. " +
@@ -819,9 +857,14 @@ func New() *Registry {
 		Help: "Actions observed stuck in executing for the first time (not counted again on later sweeps while still stuck).",
 	})
 
+	r.AgentDeliveryUnknownTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "mctl_agent_delivery_unknown_total",
+		Help: "Communication-agent sends moved to delivery_unknown: outcome not observable, not retried, owner alerted.",
+	})
+
 	r.AgentPolicyDenialsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_agent_policy_denials_total",
-		Help: "Total hard policy denials, labeled by a closed-set denial reason code (bounded: 18 values, see policy.DenyCode) and the consuming surface (bounded: 6 values, see PolicySurface* constants). Never labeled by account, conversation, or peer.",
+		Help: "Total hard policy denials, labeled by a closed-set denial reason code (bounded: 24 values, see policy.DenyCode) and the consuming surface (bounded: 7 values, see PolicySurface* constants). Never labeled by account, conversation, or peer.",
 	}, []string{"reason", "surface"})
 
 	r.AgentJobCostUSDTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -921,6 +964,8 @@ func New() *Registry {
 		r.LoginFlowDuration,
 		r.ConnectFirstCallTotal,
 		r.ConnectFirstCallErrorsTotal,
+		r.AcquisitionCaptureTotal,
+		r.AcquisitionWriteFailuresTotal,
 		r.SessionsBorrowTotal,
 		r.TelegramReplicaID,
 		r.BridgeActiveDaemons,
@@ -932,6 +977,7 @@ func New() *Registry {
 		r.AgentActionsExecutingStuck,
 		r.AgentApprovalLatencySeconds,
 		r.AgentExecutorRestartsTotal,
+		r.AgentDeliveryUnknownTotal,
 		r.AgentPolicyDenialsTotal,
 		r.AgentJobCostUSDTotal,
 		r.AgentClaudeResultErrorsTotal,
@@ -952,7 +998,7 @@ func New() *Registry {
 	// sample becomes the baseline, and the alert misses the first, and
 	// possibly only, occurrence it exists for. See issue #591.
 	//
-	// Four families, 4 + 6 + 138 = 148 series, every one of them a
+	// Four families, 4 + 6 + 168 = 178 series, every one of them a
 	// compile-time-fixed label set. The per-loop comments below say what
 	// each one costs and what breaks without it.
 	for _, class := range claudeResultClasses {
@@ -1013,14 +1059,14 @@ func New() *Registry {
 	for _, status := range jobStatuses {
 		r.AgentJobsTotal.WithLabelValues(status).Add(0)
 	}
-	// AgentPolicyDenialsTotal too, all 138 combinations. This was originally
+	// AgentPolicyDenialsTotal too, all 168 combinations. This was originally
 	// left lazy on the grounds that MctlAgentPolicyDenialRateHigh's "> 4"
 	// floor means a single first denial could not fire it anyway. True, and
 	// beside the point: if the first FIVE denials for one reason land between
 	// two scrapes, Prometheus first observes the series at 5, every later
 	// sample reads 5, and increase() over the window is 0 — so the rule
 	// misses its own documented "at least 5 denials" case, in the burst
-	// scenario ("worker hammering a paused account") it exists for. 138 zero
+	// scenario ("worker hammering a paused account") it exists for. 168 zero
 	// series is a cheap price for the floor meaning what it says.
 	for _, reason := range policyDenyReasons {
 		for _, surface := range policySurfaces {

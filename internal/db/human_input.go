@@ -315,12 +315,14 @@ func (s *Store) SupersedeHumanInputDeliveries(ctx context.Context, userID int64,
 // the notification has no (still queued) human-input row (e.g. a follow-up).
 func (s *Store) SetHumanInputDeliveryMessageID(ctx context.Context, notificationID, tgMessageID int64) (createdAt time.Time, found bool, err error) {
 	now := time.Now().UTC()
+	// 0 means delivered with an unknown message id (#1029): NULL, not 0.
+	msgID := sql.NullInt64{Int64: tgMessageID, Valid: tgMessageID != 0}
 	err = s.DB.QueryRowContext(ctx,
 		`UPDATE human_input_deliveries
 		    SET tg_message_id = $1, state = $2, delivered_at = $3, updated_at = $3
 		  WHERE notification_id = $4 AND state = $5
 		  RETURNING created_at`,
-		tgMessageID, HumanInputSent, now, notificationID, HumanInputQueued,
+		msgID, HumanInputSent, now, notificationID, HumanInputQueued,
 	).Scan(&createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return time.Time{}, false, nil

@@ -1,0 +1,102 @@
+name: assistant-publish-prep
+
+# Semi-automatic registry publish for catalog assistants. On a push to main
+# this works out which name@version the mctl-api registry does not have yet
+# and prepares everything for it: the request body (as an artifact) and the
+# one command the owner runs, in the job summary and as a comment on the
+# merged PR. It publishes nothing and holds no registry credential:
+# publishing is a human-admin call by design (docs/assistants/spec.md,
+# "Publishing"). The registry is read only through the public catalog.
+#
+# A registry read that fails or cannot be understood is an unknown, never
+# "not published", and a version the registry holds under another digest
+# is a broken immutability invariant: either fails the job and no command
+# is prepared for any version.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "assistants/**"
+      - "deploy/agent-worker/system-prompt.txt"
+      - "internal/assistant/**"
+      - "cmd/assistant-materialize/**"
+      - "cmd/assistant-publish-plan/**"
+      - "scripts/publish-assistant.sh"
+      - ".github/workflows/assistant-publish-prep.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: assistant-publish-prep-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Only to find the PR a push merged and comment on it. The comment
+      # goes through the issues comments API; either scope is documented to
+      # allow that on a PR, and both are set so it does not hinge on which.
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.10"
+      - name: Compare the catalog with the registry
+        run: |
+          set +e
+          go run ./cmd/assistant-publish-plan -git-sha "$GITHUB_SHA" -out dist/assistant-publish
+          status=$?
+          set -e
+          if [ -f dist/assistant-publish/summary.md ]; then
+            cat dist/assistant-publish/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "assistant-publish-plan wrote no summary (exit $status)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: assistant-publish-requests
+          path: dist/assistant-publish/
+          if-no-files-found: ignore
+      - name: Comment the publish command on the merged PR
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tsv=dist/assistant-publish/commands.tsv
+          if [ ! -s "$tsv" ]; then
+            echo "Nothing to publish."
+            exit 0
+          fi
+          # The PR whose merge commit this push is; none for a direct push.
+          pr=$(gh api "repos/$REPO/commits/$GITHUB_SHA/pulls" \
+            --jq "[.[] | select(.merged_at != null and .merge_commit_sha == \"$GITHUB_SHA\")][0].number // empty")
+          if [ -z "$pr" ]; then
+            echo "No merged PR has $GITHUB_SHA as its merge commit; the command is in the job summary only."
+            exit 0
+          fi
+          existing=$(gh api --paginate "repos/$REPO/issues/$pr/comments" --jq '.[].body')
+          while IFS=$'\t' read -r key cmd; do
+            marker="<!-- assistant-publish-prep: $key -->"
+            if grep -qF -- "$marker" <<<"$existing"; then
+              echo "#$pr already carries the command for $key."
+              continue
+            fi
+            # shellcheck disable=SC2016 # the backticks are Markdown
+            printf '%s\nTo publish `%s` to the registry (human-admin, from the workspace root):\n\n`! %s`\n\nThe script rebuilds the document at that commit, checks the digest, publishes it and verifies the public catalog. Details: the job summary of %s/%s/actions/runs/%s.\n' \
+              "$marker" "$key" "$cmd" "$GITHUB_SERVER_URL" "$REPO" "$GITHUB_RUN_ID" > comment.md
+            gh api "repos/$REPO/issues/$pr/comments" -F body=@comment.md >/dev/null
+            echo "Commented on #$pr for $key."
+          done < "$tsv"

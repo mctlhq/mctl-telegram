@@ -31,6 +31,41 @@ func TestEvaluate_GuardedAllowlistedAllows(t *testing.T) {
 	}
 }
 
+// A private fork never auto-sends before it is promoted (#1043): guarded on
+// an account running a fork evaluates as observe, whatever wrote the mode.
+func TestEvaluate_GuardedForkIsObserve(t *testing.T) {
+	in := baseInput()
+	in.Profile.AssistantName = "hr-recruiter~abcdefgh23~careful"
+	got := Evaluate(in)
+	if got.Decision != RequireApproval || !strings.Contains(strings.Join(got.Reasons, ";"), ReasonObserveMode) {
+		t.Fatalf("decision = %s (%v), want require_approval for observe mode", got.Decision, got.Reasons)
+	}
+	in.Profile.AssistantName = "hr-recruiter"
+	if got := Evaluate(in); got.Decision != Allow {
+		t.Fatalf("catalog assistant decision = %s (%v), want allow", got.Decision, got.Reasons)
+	}
+}
+
+// A promoted fork in guarded mode is judged like a catalog assistant (#1044);
+// promotion does not lift observe mode or any other gate.
+func TestEvaluate_PromotedForkIsGuarded(t *testing.T) {
+	in := baseInput()
+	in.Profile.AssistantName = "hr-recruiter~abcdefgh23~careful"
+	in.ForkPromoted = true
+	if got := Evaluate(in); got.Decision != Allow {
+		t.Fatalf("decision = %s (%v), want allow", got.Decision, got.Reasons)
+	}
+	in.Profile.Mode = db.AgentModeObserve
+	if got := Evaluate(in); got.Decision != RequireApproval {
+		t.Fatalf("observe decision = %s (%v), want require_approval", got.Decision, got.Reasons)
+	}
+	in.Profile.Mode = db.AgentModeGuarded
+	in.Action.Intent = "share_details"
+	if got := Evaluate(in); got.Decision != RequireApproval {
+		t.Fatalf("non-allowlisted decision = %s (%v), want require_approval", got.Decision, got.Reasons)
+	}
+}
+
 func TestEvaluate_DenyRules(t *testing.T) {
 	cases := []struct {
 		name   string

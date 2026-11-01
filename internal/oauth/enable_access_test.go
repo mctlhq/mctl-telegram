@@ -102,6 +102,7 @@ func newEnableTestServer(t *testing.T, login LoginFunc, opts ...func(*Config)) (
 	}
 	mux := chi.NewRouter()
 	srv.Register(&chiAdapter{mux: mux})
+	adoptTestLogger(t, srv)
 	return srv, mux
 }
 

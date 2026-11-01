@@ -1,8 +1,6 @@
 package oauth
 
 import (
-	"bytes"
-	"log/slog"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -12,18 +10,6 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
-
-// captureLog swaps slog's default handler for a text handler writing to buf,
-// restoring the previous default at test cleanup, mirroring the pattern in
-// internal/bridge/auth_failure_observability_test.go.
-func captureLog(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	return &buf
-}
 
 // registerReq POSTs body to /oauth/register through mux and returns the
 // response recorder.
@@ -45,7 +31,7 @@ func registerReq(t *testing.T, mux *mockRouter, body string) *httptest.ResponseR
 // review's own instruction not to reuse cursor:// verbatim in a committed
 // fixture.
 func TestRegister_RejectedClientEmitsAuditLine(t *testing.T) {
-	buf := captureLog(t)
+	buf := captureServerLog(t)
 	reg := metrics.New()
 	srv := newTestServer(t)
 	srv.WithMetrics(reg)
@@ -170,7 +156,7 @@ func TestRegister_TerminalExitsProduceExactlyOneAuditedOutcome(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			buf := captureLog(t)
+			buf := captureServerLog(t)
 			reg := metrics.New()
 			srv := newTestServer(t, func(c *Config) { c.MaxRedirectURIs = 2; c.MaxRedirectURILength = 200 })
 			srv.WithMetrics(reg)
@@ -199,7 +185,7 @@ func TestRegister_TerminalExitsProduceExactlyOneAuditedOutcome(t *testing.T) {
 // TestRegister_PersistFailureIsAuditedAsError drives the InsertClientReg
 // failure exit (outcome=error, reason=persist_failed) via the DB-backed path.
 func TestRegister_PersistFailureIsAuditedAsError(t *testing.T) {
-	buf := captureLog(t)
+	buf := captureServerLog(t)
 	reg := metrics.New()
 	srv := newTestServer(t)
 	srv.WithMetrics(reg)
@@ -234,7 +220,7 @@ func TestRegister_PersistFailureIsAuditedAsError(t *testing.T) {
 // carrying no IP.
 func TestRegister_AcceptedAndRateLimitedKeepExistingAttributes(t *testing.T) {
 	t.Run("accepted", func(t *testing.T) {
-		buf := captureLog(t)
+		buf := captureServerLog(t)
 		reg := metrics.New()
 		srv := newTestServer(t)
 		srv.WithMetrics(reg)
@@ -257,7 +243,7 @@ func TestRegister_AcceptedAndRateLimitedKeepExistingAttributes(t *testing.T) {
 	})
 
 	t.Run("rate_limited", func(t *testing.T) {
-		buf := captureLog(t)
+		buf := captureServerLog(t)
 		reg := metrics.New()
 		srv := newTestServer(t, func(c *Config) {
 			c.RegisterRatePerMin = 1

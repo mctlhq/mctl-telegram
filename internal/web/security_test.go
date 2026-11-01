@@ -21,6 +21,12 @@ func TestSecurity_ServesHTML(t *testing.T) {
 	body := w.Body.String()
 	for _, must := range []string{
 		"Not zero-knowledge",
+		// contact cards, in-page nav, and the callout's anchor to Local Bridge
+		`<a href="mailto:security@mctl.ai">security@mctl.ai</a>`,
+		`<nav class="page-nav" aria-label="On this page">`,
+		`id="local-bridge-mode"`,
+		`<a href="#local-bridge-mode">Local Bridge mode</a>`,
+		"under one App ID",
 		// #853
 		`id="account-risk"`,
 		"The server does not retry a frozen account's refusals.",
@@ -42,7 +48,8 @@ func TestSecurity_ServesHTML(t *testing.T) {
 		// shared chrome — unified with landing/docs
 		`class="mctl-site-header"`,
 		`class="theme-toggle"`,
-		`<a href="/security" class="active">Security</a>`,
+		// legal pages left the top nav; the footer still links them
+		`<a href="/security">Security</a>`,
 		// mobile: wide table must sit in a horizontal-scroll wrapper
 		`class="table-scroll"`,
 	} {
@@ -60,8 +67,11 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 	}
 	body := w.Body.String()
 	for _, must := range []string{
-		"Claude, ChatGPT and other MCP users",
+		"Claude, ChatGPT, and other MCP users",
 		"Data inventory",
+		`<table class="inventory">`,
+		`<col class="col-where">`,
+		`<div class="callout">`,
 		"Communication Agent controls",
 		"incoming_events",
 		"conversation_messages",
@@ -73,6 +83,7 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 		"audit/verify",
 		// Telegram API terms §1.5 and §2.2 (#852)
 		`id="ai-use"`,
+		`<meta name="robots" content="noindex, follow">`,
 		"never uses message content, or anything derived from it, to train",
 		"switch off any setting that lets the provider use your conversations",
 		"MCTL Assistant, an unofficial third-party connector using the Telegram API",
@@ -81,7 +92,8 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 		// shared chrome — unified with landing/docs
 		`class="mctl-site-header"`,
 		`class="theme-toggle"`,
-		`<a href="/privacy" class="active">Privacy</a>`,
+		// legal pages left the top nav; the footer still links them
+		`<a href="/privacy">Privacy</a>`,
 		// mobile: wide table must sit in a horizontal-scroll wrapper
 		`class="table-scroll"`,
 	} {
@@ -111,7 +123,7 @@ func TestPrivacy_DisclosesNotificationState(t *testing.T) {
 		// inventory rows
 		"client_notification_prefs",
 		"client_bot_reachability",
-		// the four reachability states, named rather than summarised
+		// the four reachability states, named rather than summarized
 		"cannot_initiate",
 		// the no-probe rule, which is the reason reachability is allowed to
 		// exist at all
@@ -145,18 +157,20 @@ func TestTerms_ServesHTML(t *testing.T) {
 	body := w.Body.String()
 	for _, must := range []string{
 		"Terms of",
-		"not affiliated with, endorsed by, or operated by Telegram, OpenAI or Anthropic",
+		"not affiliated with, endorsed by, or operated by Telegram, OpenAI, or Anthropic",
 		// Telegram API terms §2.2 and §1.5 (#852)
 		"unofficial third-party connector using the Telegram API (MTProto)",
 		"must not use it to train or fine-tune AI models",
 		"your own",
 		"read-only by default",
+		`<meta name="robots" content="noindex, follow">`,
 		"spam",
 		"without warranties of any kind",
 		"support@mctl.ai",
 		// shared chrome — unified with landing/docs
 		`class="mctl-site-header"`,
-		`<a href="/terms" class="active">Terms</a>`,
+		// legal pages left the top nav; the footer still links them
+		`<a href="/terms">Terms</a>`,
 	} {
 		if !strings.Contains(body, must) {
 			t.Fatalf("/terms missing %q", must)
@@ -173,9 +187,9 @@ func TestLanding_HasTransparencySections(t *testing.T) {
 	body := w.Body.String()
 	for _, must := range []string{
 		"inside Claude</span></h1>",
-		"Connect in Claude",
-		"MCTL Assistant · Unofficial third-party connector using the Telegram API",
-		`href="#claude"`,
+		"Connect in a minute",
+		"Unofficial Telegram connector · MCP",
+		"MCTL Assistant is an unofficial third-party connector using the Telegram API. Not affiliated with Telegram, Anthropic or OpenAI.",
 		`id="claude"`,
 		"Customize &#8594; Connectors",
 		"Add custom connector",
@@ -194,12 +208,19 @@ func TestLanding_HasTransparencySections(t *testing.T) {
 		"How it works",
 		`href="/security"`,
 		`href="/privacy"`,
-		"Common questions",
+		"Questions",
 		"What does my AI assistant see?",
 	} {
 		if !strings.Contains(body, must) {
 			t.Fatalf("landing missing %q", must)
 		}
+	}
+	// Telegram API terms 2.2: users must be told the app uses the Telegram API,
+	// prominently and in the intro. The disclosure has to sit in the hero, ahead
+	// of the first content section, not only in the footer.
+	legal := strings.Index(body, "unofficial third-party connector using the Telegram API")
+	if first := strings.Index(body, `id="use-cases"`); legal < 0 || first < 0 || legal > first {
+		t.Fatalf("the Telegram API disclosure must precede the first content section (disclosure at %d, use-cases at %d)", legal, first)
 	}
 	// The connector steps both clients replaced: ChatGPT's Settings -> Apps /
 	// Developer Mode path and Claude's old /customize/connectors URL.
@@ -248,7 +269,7 @@ func TestPrivacy_HasSupportContact(t *testing.T) {
 	if !strings.Contains(body, "support@mctl.ai") {
 		t.Fatal("/privacy missing support@mctl.ai")
 	}
-	if !strings.Contains(body, "Claude, ChatGPT and other MCP users") {
+	if !strings.Contains(body, "Claude, ChatGPT, and other MCP users") {
 		t.Fatal("/privacy missing MCP users section")
 	}
 }
@@ -350,8 +371,13 @@ func TestLanding_ClaudeFirst(t *testing.T) {
 	w := httptest.NewRecorder()
 	Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
 	body := w.Body.String()
-	if !strings.Contains(body, `<a class="cta-btn" href="#claude">`) {
-		t.Fatal("landing primary CTA is not the Claude setup")
+	// The primary control is Copy MCP URL, followed by the Claude connectors
+	// link (owner decision, 2026-11-01); the Claude setup section still leads
+	// the page body below the hero.
+	copyAt := strings.Index(body, `<button class="cta-btn" type="button" id="copy-mcp-url"`)
+	connectorsAt := strings.Index(body, `href="https://claude.ai/new#customize/connectors/yours"`)
+	if copyAt < 0 || connectorsAt < 0 || copyAt > connectorsAt {
+		t.Fatalf("hero actions must be Copy MCP URL then Open Claude connectors (copy=%d connectors=%d)", copyAt, connectorsAt)
 	}
 	claude, chatgpt := strings.Index(body, `id="claude"`), strings.Index(body, `id="chatgpt"`)
 	if claude < 0 || chatgpt < 0 || claude > chatgpt {
@@ -419,9 +445,11 @@ func TestLanding_UntestedClientsLabelled(t *testing.T) {
 	Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
 	body := w.Body.String()
 	for _, label := range []string{
-		"<strong>Cursor</strong> (not yet tested)",
-		"<strong>VS Code</strong> (not yet tested)",
-		"<strong>Windsurf and others</strong> (not yet tested)",
+		// The Cursor / VS Code snippets sit under one "not yet tested" tag in
+		// the "Other clients" tab; Windsurf is named in the FAQ answer, which
+		// carries the label too (TestUntestedClients_LabelledEverywhere).
+		`<span class="tag-untested">not yet tested</span>`,
+		"Cursor, VS Code, Windsurf) may work but are not yet tested",
 	} {
 		if !strings.Contains(body, label) {
 			t.Errorf("landing missing %q", label)

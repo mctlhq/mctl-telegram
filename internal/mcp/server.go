@@ -481,6 +481,10 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 		s.addTool(srv, t, h)
 	}
 	{
+		t, h := s.toolGetAcquisitionReport()
+		s.addTool(srv, t, h)
+	}
+	{
 		t, h := s.toolSetAccess()
 		s.addTool(srv, t, h)
 	}
@@ -506,6 +510,7 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 	}
 	for _, reg := range []func() (mcplib.Tool, mcpserver.ToolHandlerFunc){
 		s.toolListAssistants, s.toolInstallAssistant, s.toolUpdateInstall,
+		s.toolForkAssistant, s.toolUpdateFork, s.toolDeleteFork,
 	} {
 		t, h := reg()
 		s.addTool(srv, t, h)

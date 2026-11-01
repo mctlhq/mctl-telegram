@@ -217,6 +217,11 @@ type Config struct {
 	// open without authentication — suitable for Kubernetes PodMonitor scrape
 	// patterns where network policy provides the access control.
 	MetricsAllowCIDR string // METRICS_ALLOW_CIDR, optional
+	// PublicStatsRefresh is how often the landing page's usage numbers are
+	// recounted from the database (PUBLIC_STATS_REFRESH, default 5m). 0 or a
+	// negative value disables the sampler, GET /api/stats answers 503 and
+	// the landing page renders without the strip.
+	PublicStatsRefresh time.Duration // PUBLIC_STATS_REFRESH, default 5m
 	// TelegramMaxSessions caps the number of concurrently live MTProto client
 	// pool entries. 0 means no cap (default). Set via TELEGRAM_MAX_SESSIONS.
 	TelegramMaxSessions int // TELEGRAM_MAX_SESSIONS, 0 = no cap
@@ -457,6 +462,12 @@ type Config struct {
 	// catalog and no registry call is made. Set via
 	// ASSISTANT_REGISTRY_ENABLED.
 	AssistantRegistryEnabled bool
+	// AssistantForksEnabled lets accounts create, change and install
+	// private forks of catalog assistants (#1043,
+	// docs/assistants/adr-forks.md). Off by default; turning it off also
+	// stops the jobs of every account that runs a fork. Deleting a fork
+	// stays possible. Set via ASSISTANT_FORKS_ENABLED.
+	AssistantForksEnabled bool
 	// WorkItemTenant is the single configured mctl-api tenant every
 	// Telegram-originated work item belongs to (see requirements.md's Open
 	// questions — this repository's own "tenant" concept is a different
@@ -542,6 +553,7 @@ func Load() (*Config, error) {
 		BroadcastApprovalTTL:          envDuration("BROADCAST_APPROVAL_TTL", 30*time.Minute),
 		WorkContextEnabled:            envBool("WORK_CONTEXT_ENABLED", false),
 		AssistantRegistryEnabled:      envBool("ASSISTANT_REGISTRY_ENABLED", false),
+		AssistantForksEnabled:         envBool("ASSISTANT_FORKS_ENABLED", false),
 		MCTLAPIBaseURL:                envOr("MCTL_API_BASE_URL", "https://api.mctl.ai"),
 		MCTLSurfaceTelegramToken:      os.Getenv("MCTL_SURFACE_TELEGRAM_TOKEN"),
 		WorkItemTenant:                os.Getenv("MCTL_WORK_ITEM_TENANT"),
@@ -550,6 +562,7 @@ func Load() (*Config, error) {
 		ProductUpdateFeedDir:          envOr("PRODUCT_UPDATE_FEED_DIR", "docs/product-updates"),
 	}
 	c.MetricsAllowCIDR = os.Getenv("METRICS_ALLOW_CIDR")
+	c.PublicStatsRefresh = envDuration("PUBLIC_STATS_REFRESH", 5*time.Minute)
 	c.TelegramMaxSessions = envInt("TELEGRAM_MAX_SESSIONS", 0)
 	c.TGAPIRatePerSec = envFloat("TG_API_RATE_PER_SEC", 0)
 	c.TGAPIRateBurst = envInt("TG_API_RATE_BURST", 0)

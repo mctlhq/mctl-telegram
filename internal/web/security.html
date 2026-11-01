@@ -16,6 +16,10 @@
   ul, ol { color: var(--text-dim); padding-left: 22px; margin: 12px 0; }
   li { margin-bottom: 8px; line-height: 1.6; }
   li strong { color: var(--text); }
+  ul ul { margin: 8px 0 0; }
+  .contact-cards { margin: 24px 0 8px; }
+  .contact-cards h3 { margin: 0 0 8px; font-size: 16px; color: var(--text); }
+  .contact-cards p { margin: 0; color: var(--text-dim); font-size: 14px; line-height: 1.6; }
   pre {
     background: var(--surface); border: 1px solid var(--border);
     border-radius: var(--mctl-radius-md); padding: 14px 16px; overflow-x: auto;
@@ -40,16 +44,40 @@
   </section>
 
   <div class="warn">
-    <strong>Not zero-knowledge (hosted mode).</strong> MCTL makes outbound MTProto calls to Telegram on your behalf. The running server handles plaintext Telegram data while processing requests and, when Communication Agent is enabled, decrypts encrypted agent message state for listener/queue processing. You are trusting both the deployment operator and the integrity of this code. For a stronger session-storage model, see <strong>Local Bridge mode</strong> below.
+    <strong>Not zero-knowledge (hosted mode).</strong> MCTL makes outbound MTProto calls to Telegram on your behalf. The running server handles plaintext Telegram data while processing requests and, when Communication Agent is enabled, decrypts encrypted agent message state for listener/queue processing. You are trusting both the deployment operator and the integrity of this code. For a stronger session-storage model, see <a href="#local-bridge-mode">Local Bridge mode</a> below.
   </div>
 
-  <h2>Reporting vulnerabilities</h2>
-  <p>Email <strong>security@mctl.ai</strong>. Please <em>do not</em> open public GitHub issues for unpatched vulnerabilities. Acknowledgement target: 72 hours. Fixes are disclosed in the <a href="https://github.com/mctlhq/mctl-telegram/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG</a> once a release ships.</p>
+  <nav class="page-nav" aria-label="On this page">
+    <span class="page-nav-label">On this page</span>
+    <a href="#trust-boundaries">Trust boundaries</a>
+    <a href="#server-visibility">What the server sees</a>
+    <a href="#agent-safety">Agent safety</a>
+    <a href="#agent-storage">Agent storage</a>
+    <a href="#account-risk">Account risk</a>
+    <a href="#local-bridge-mode">Local Bridge</a>
+    <a href="#never-persisted">Never persisted</a>
+    <a href="#shared-hmac-legacy">shared-hmac-legacy</a>
+    <a href="#crypto-invariants">Cryptography</a>
+    <a href="#send-gate">Send gate</a>
+    <a href="#auth-required">Auth-required mode</a>
+    <a href="#rate-limiting">Rate limiting</a>
+    <a href="#session-ttl">Session TTL</a>
+    <a href="#audit-log">Audit log</a>
+    <a href="#content-boundary">Content boundary</a>
+  </nav>
 
-  <h2>End-user support</h2>
-  <p>For product help (setup, disconnect, account questions): email <strong><a href="mailto:support@mctl.ai">support@mctl.ai</a></strong>. Do not use the security address for general support.</p>
+  <div class="card-grid contact-cards">
+    <div class="card" id="reporting">
+      <h3>Reporting vulnerabilities</h3>
+      <p>Email <strong><a href="mailto:security@mctl.ai">security@mctl.ai</a></strong>. Please <em>do not</em> open public GitHub issues for unpatched vulnerabilities. Acknowledgment target: 72 hours. Fixes are disclosed in the <a href="https://github.com/mctlhq/mctl-telegram/blob/main/CHANGELOG.md" target="_blank" rel="noopener">CHANGELOG</a> once a release ships.</p>
+    </div>
+    <div class="card" id="support">
+      <h3>End-user support</h3>
+      <p>For product help (setup, disconnect, account questions): email <strong><a href="mailto:support@mctl.ai">support@mctl.ai</a></strong>. Do not use the security address for general support.</p>
+    </div>
+  </div>
 
-  <h2>Trust boundaries</h2>
+  <h2 id="trust-boundaries">Trust boundaries</h2>
   <div class="table-scroll">
   <table>
     <thead><tr><th>Boundary</th><th>Trusted credential / state</th><th>Lives</th></tr></thead>
@@ -74,14 +102,14 @@
   </div>
   <p>Every database lookup for user content is intended to be scoped to the owning user. Compromise of one account should not expose another account unless the service, key derivation, or deployment boundary itself is compromised.</p>
 
-  <h2>What the server sees</h2>
+  <h2 id="server-visibility">What the server sees</h2>
   <ul>
     <li><strong>Plaintext MTProto traffic and tool content in memory.</strong> The service must decrypt the session and message/action fields while processing them.</li>
     <li><strong>Encrypted Communication Agent content at rest.</strong> When the listener is enabled, relevant message bodies and proposed action payloads are durably stored for queue recovery, policy evaluation, approval, and conversation context.</li>
     <li><strong>Audit metadata, persisted separately.</strong> Tool/action name, redacted peer reference, status, and redacted error text. Audit rows do not contain Telegram message bodies.</li>
   </ul>
 
-  <h2>Communication Agent safety boundary</h2>
+  <h2 id="agent-safety">Communication Agent safety boundary</h2>
   <p>The model prompt and model output are not trusted as a security boundary. The server-side listener, state machine, policy engine, approval flow, and Telegram send gate remain authoritative.</p>
   <ul>
     <li><strong>Explicit enablement.</strong> Only profiles with the listener enabled receive durable Telegram updates. Disabling a profile removes the listener account and immediately stops its pinned Telegram client.</li>
@@ -94,7 +122,7 @@
   </ul>
   <p>Enabling the listener does not bypass the existing <code>ALLOW_SEND</code>, scope, per-account, and per-peer send gates.</p>
 
-  <h2>Communication Agent storage and retention</h2>
+  <h2 id="agent-storage">Communication Agent storage and retention</h2>
   <ul>
     <li><code>incoming_events</code> and <code>conversation_messages</code> may contain third-party Telegram message bodies.</li>
     <li><code>agent_actions</code> may contain proposed reply payloads and approval/policy metadata.</li>
@@ -104,24 +132,29 @@
   </ul>
 
   <h2 id="account-risk">Telegram account risk</h2>
-  <p>MCTL Assistant is an unofficial third-party connector using the Telegram API. Telegram's anti-spam system can limit an account (<code>PEER_FLOOD</code>) or freeze it (<code>FROZEN_METHOD_INVALID</code>) when it sends spam-like traffic, whichever app the traffic comes from. On the hosted deployment every session reaches Telegram from the same datacenter under one app id, which gives that traffic a shared profile.</p>
+  <p>MCTL Assistant is an unofficial third-party connector using the Telegram API. Telegram's anti-spam system can limit an account (<code>PEER_FLOOD</code>) or freeze it (<code>FROZEN_METHOD_INVALID</code>) when it sends spam-like traffic, whichever app the traffic comes from. On the hosted deployment every session reaches Telegram from the same datacenter under one App ID, which gives that traffic a shared profile.</p>
   <ul>
     <li><strong>The server does not retry a frozen account's refusals.</strong> The call fails with a clear error and is not repeated.</li>
     <li><strong>A frozen account can be appealed</strong> in the Telegram app, through <a href="https://t.me/spambot" target="_blank" rel="noopener">@SpamBot</a>, or at <code>recover@telegram.org</code>. Nothing on this server lifts a freeze.</li>
     <li><strong>Local Bridge keeps the traffic on your machine.</strong> In Local Bridge mode the MTProto connection leaves from your own device and IP address rather than the shared datacenter.</li>
   </ul>
 
-  <h2>Local Bridge mode</h2>
+  <h2 id="local-bridge-mode">Local Bridge mode</h2>
   <p>When an account is set to <code>mode='local'</code>, the MTProto session it uses lives on the user's machine rather than in the hosted session pool, and this server acts as a relay. Turning it on for a new account is self-service via the <code>mctl-telegram-local activate</code> CLI; migrating an existing hosted account into local mode still goes through an operator (<code>set_account_mode</code>). Setup is documented at <a href="/docs/local-bridge">/docs/local-bridge</a>.</p>
   <ul>
-    <li><strong>Whether the server ever held a copy of the session depends on how the account became local.</strong> <code>session_encrypted</code> is nullable: an account provisioned directly as local-only (via <code>provision_local_account</code>, without ever completing a hosted login) has <code>session_encrypted = NULL</code> from the start — the server never holds a copy of your session at all. An account migrated from an existing hosted login (via <code>set_account_mode</code>) keeps the sealed session blob that was stored when it first connected; switching to local mode stops the server from borrowing that blob, but does not erase it (clearing it is a separate, not-yet-implemented step). Revoking the hosted session of a migrated account does not revert it to hosted mode or disconnect the bridge — <code>mode</code> is a property of the account, independent of whether its stored session is still considered valid. To render a migrated account's stored copy useless, terminate that session from your own Telegram client (Settings &rarr; Devices); the stored bytes then hold a dead authorization key.</li>
+    <li><strong>Whether the server ever held a copy of the session depends on how the account became local.</strong> <code>session_encrypted</code> is nullable:
+      <ul>
+        <li><strong>Provisioned as local-only</strong> (via <code>provision_local_account</code>, without ever completing a hosted login): the account has <code>session_encrypted = NULL</code> from the start — the server never holds a copy of your session at all.</li>
+        <li><strong>Migrated from an existing hosted login</strong> (via <code>set_account_mode</code>): the account keeps the sealed session blob that was stored when it first connected. Switching to local mode stops the server from borrowing that blob, but does not erase it (clearing it is a separate, not-yet-implemented step). Revoking the hosted session of a migrated account does not revert it to hosted mode or disconnect the bridge — <code>mode</code> is a property of the account, independent of whether its stored session is still considered valid. To render a migrated account's stored copy useless, terminate that session from your own Telegram client (Settings &rarr; Devices); the stored bytes then hold a dead authorization key.</li>
+      </ul>
+    </li>
     <li><strong>New Telegram traffic originates from your machine.</strong> Once a daemon is connected, tool calls are dispatched over the relay to it and the MTProto connection to Telegram is made by your daemon using the session on your disk. The <code>call_path</code> audit column records which route each call took.</li>
     <li><strong>Tool arguments and responses still pass through relay memory.</strong> The relay can see plaintext while routing the call and does not provide end-to-end encryption from the MCP client to the daemon.</li>
     <li><strong>Audit content remains metadata-only.</strong> The <code>call_path</code> marks local relay calls, while message bodies are excluded from audit rows and stdout.</li>
     <li><strong>Communication Agent limitation.</strong> A hosted listener requires an active server-side Telegram client. Do not assume Local Bridge automatically provides the same always-on listener semantics without an explicitly deployed local listener path.</li>
   </ul>
 
-  <h2>What logs and audit rows never persist</h2>
+  <h2 id="never-persisted">What logs and audit rows never persist</h2>
   <ul>
     <li>Telegram message bodies or proposed reply payloads</li>
     <li>Phone numbers, login codes, or 2FA passwords</li>
@@ -131,14 +164,14 @@
   </ul>
   <p>This guarantee applies to logs and audit rows. Communication Agent message/action tables intentionally store encrypted content as described above.</p>
 
-  <h2>Known coupling: shared-hmac-legacy mode</h2>
+  <h2 id="shared-hmac-legacy">Known coupling: shared-hmac-legacy mode</h2>
   <p><code>AUTH_MODE=shared-hmac-legacy</code> validates JWTs using secret material shared with an external authorization service. It must also be unlocked explicitly with <code>AUTH_ALLOW_SHARED_HMAC_LEGACY=true</code>. The coupling does not apply to <code>local-jwt</code>, the mode tg.mctl.ai runs.</p>
   <ul>
     <li><strong>Impact:</strong> compromise of either service's shared secret can affect both trust domains.</li>
     <li><strong>Mitigation:</strong> rotate the shared secret for both services in the same change and prefer <code>local-jwt</code> for new deployments.</li>
   </ul>
 
-  <h2>Cryptographic invariants</h2>
+  <h2 id="crypto-invariants">Cryptographic invariants</h2>
   <ul>
     <li><code>ENCRYPTION_KEY</code> must be 32 random bytes, hex-encoded as 64 characters. Production must set it.</li>
     <li>MTProto session blobs, agent message bodies, and action payloads are AES-256-GCM sealed with per-user HKDF-derived keys.</li>
@@ -146,33 +179,33 @@
     <li>The deployment operator or an attacker controlling the running pod and key material can decrypt user data. Hosted mode is not zero-knowledge.</li>
   </ul>
 
-  <h2>Send gate (defense in depth)</h2>
-  <p>Every newly connected account starts read-only (<code>send_enabled=false</code>) unless its owner chooses <em>Read + send</em> on the permissions step while connecting. Every write to Telegram — <code>send_message</code>, <code>send_media</code>, <code>edit_message</code>, <code>delete_messages</code>, <code>forward_messages</code>, <code>set_reaction</code>, <code>pin_message</code> and <code>send_reply</code> — requires <strong>all</strong> of:</p>
+  <h2 id="send-gate">Send gate (defense in depth)</h2>
+  <p>Every newly connected account starts read-only (<code>send_enabled=false</code>) unless its owner chooses <em>Read + send</em> on the permissions step while connecting. Every write to Telegram — <code>send_message</code>, <code>send_media</code>, <code>edit_message</code>, <code>delete_messages</code>, <code>forward_messages</code>, <code>set_reaction</code>, <code>pin_message</code>, and <code>send_reply</code> — requires <strong>all</strong> of:</p>
   <ol>
     <li>Server flag <code>ALLOW_SEND=true</code>. This is the operator kill switch: on for production <code>tg.mctl.ai</code>; set <code>ALLOW_SEND=false</code> on a deployment that must never deliver.</li>
     <li>Identity has the tool's scope (<code>telegram:messages:send</code>, or <code>telegram:messages:pin</code> for pins). A tool outside the token's scopes, or outside the connection's tool profile, is not listed and is refused as unknown.</li>
     <li><code>telegram_accounts.send_enabled = true</code> for that account (owner sets this on the permissions step, via <code>set_send_consent</code>{{if .ShowManage}} or <a href="/telegram/connect/manage">/telegram/connect/manage</a>{{end}}).</li>
     <li>The per-peer send rate limit is not exhausted.</li>
   </ol>
-  <p>When any condition fails, no write RPC reaches Telegram. <code>send_message</code> and <code>send_media</code> return a dry-run result (<code>sent=false</code>) with a <code>dry_reason</code>; every other write tool — <code>edit_message</code>, <code>delete_messages</code>, <code>forward_messages</code>, <code>set_reaction</code>, <code>pin_message</code> and <code>send_reply</code> — returns a tool error naming the condition, never a preview. <code>pin_message</code> and <code>send_reply</code> additionally require a single-use confirmation issued by <code>prepare_pin_message</code> or <code>draft_reply</code>. A denied media call does not fetch its URL or decode its base64 payload.</p>
+  <p>When any condition fails, no write RPC reaches Telegram. <code>send_message</code> and <code>send_media</code> return a dry-run result (<code>sent=false</code>) with a <code>dry_reason</code>; every other write tool — <code>edit_message</code>, <code>delete_messages</code>, <code>forward_messages</code>, <code>set_reaction</code>, <code>pin_message</code>, and <code>send_reply</code> — returns a tool error naming the condition, never a preview. <code>pin_message</code> and <code>send_reply</code> additionally require a single-use confirmation issued by <code>prepare_pin_message</code> or <code>draft_reply</code>. A denied media call does not fetch its URL or decode its base64 payload.</p>
 
-  <h2>Authentication-required mode</h2>
+  <h2 id="auth-required">Authentication-required mode</h2>
   <ul>
     <li><code>AUTH_REQUIRED=false</code> is for local development only. Production must use authenticated OAuth mode.</li>
     <li><code>AUTH_MODE=local-dev</code> returns a fixed platform-admin identity and must not be reachable from a public production interface.</li>
   </ul>
 
-  <h2>Rate limiting</h2>
+  <h2 id="rate-limiting">Rate limiting</h2>
   <p>The default per-identity token bucket is 30 requests/minute with the same burst. Write paths additionally use per-peer limits so one recipient cannot be targeted up to the global ceiling. Public and well-known endpoints are limited at the ingress layer.</p>
 
-  <h2>Session TTL</h2>
+  <h2 id="session-ttl">Session TTL</h2>
   <ul>
     <li><strong>Idle TTL — 30 days.</strong> A session not used within the idle window is revoked.</li>
     <li><strong>Absolute TTL — 90 days.</strong> A session past <code>expires_at</code> is revoked.</li>
     <li>An hourly sweeper applies the same predicate to abandoned rows.</li>
   </ul>
 
-  <h2>Tamper-evident audit log</h2>
+  <h2 id="audit-log">Tamper-evident audit log</h2>
   <p>Audit rows form a SHA-256 hash chain using <code>prev_hash</code> and <code>entry_hash</code>. You can ask the server to verify the chain:</p>
   <pre>GET /api/account/audit/verify
 {
@@ -181,8 +214,8 @@
 }</pre>
   <p>A non-OK response includes <code>first_bad_id</code> and a reason. Rows created before hash chaining are skipped.</p>
 
-  <h2>Prompt-injection content boundary</h2>
-  <p>Read tools wrap Telegram message bodies in <code>&lt;telegram-content origin="telegram" peer="redacted" untrusted="true"&gt;…&lt;/telegram-content&gt;</code> and escape literal closing tags inside message text. This is a signalling boundary for the MCP client, not a substitute for the server-side Communication Agent policy engine.</p>
+  <h2 id="content-boundary">Prompt-injection content boundary</h2>
+  <p>Read tools wrap Telegram message bodies in <code>&lt;telegram-content origin="telegram" peer="redacted" untrusted="true"&gt;…&lt;/telegram-content&gt;</code> and escape literal closing tags inside message text. This is a signaling boundary for the MCP client, not a substitute for the server-side Communication Agent policy engine.</p>
 
 </div>
 </main>

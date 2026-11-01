@@ -1,18 +1,25 @@
 #!/bin/bash
-# Keep the off-cluster agent worker on the same commit as tg-preview.
+# Keep the off-cluster agent worker on the same commit as the mctl-telegram
+# server it talks to.
 #
 # Runs on the worker host itself (launchd, see install.sh). Each run reads the
-# image tag tg-preview runs from mctl-gitops (public, no token), and when it
-# names a commit other than the installed one, builds cmd/agent-worker at that
-# commit, installs the binary and deploy/agent-worker/system-prompt.txt from
-# the same commit, restarts the worker and checks /readyz. A failed check
-# rolls both files back. A prompt edited by hand on the host is put back to
-# the commit's version on the next run.
+# image tag the tracked environment runs from mctl-gitops (public, no token),
+# and when it names a commit other than the installed one, builds
+# cmd/agent-worker at that commit, installs the binary and
+# deploy/agent-worker/system-prompt.txt from the same commit, restarts the
+# worker and checks /readyz. A failed check rolls both files back. A prompt
+# edited by hand on the host is put back to the commit's version on the next
+# run.
+#
+# Track: $BASE/TRACK holds "preview" (tg-preview, image.tag main-<sha>) or
+# "prod" (production, image.tag is a release tag like 0.116.0, resolved
+# through the git tag of the same name). A missing file means preview. Any
+# other content is an error: the worker is left as it is.
 #
 # Hold or roll back: write a commit into $BASE/PIN and the timer installs
-# that commit instead of tg-preview's; delete the file to follow tg-preview
-# again. A commit that fails its readiness check is recorded in $BASE/FAILED
-# and skipped until the target changes.
+# that commit instead of the tracked environment's; delete the file to follow
+# the track again. A commit that fails its readiness check is recorded in
+# $BASE/FAILED and skipped until the target changes.
 #
 # Usage: self-update.sh [--dry-run]
 set -euo pipefail
@@ -20,7 +27,9 @@ set -euo pipefail
 BASE="${AGENT_WORKER_BASE:-$HOME/agent-worker}"
 SRC="$BASE/src"
 REPO_URL="https://github.com/mctlhq/mctl-telegram.git"
-VALUES_URL="https://raw.githubusercontent.com/mctlhq/mctl-gitops/main/platform-gitops/services/labs/mctl-telegram-preview/values.yaml"
+VALUES_BASE_URL="https://raw.githubusercontent.com/mctlhq/mctl-gitops/main/platform-gitops/services/labs"
+PREVIEW_VALUES_URL="$VALUES_BASE_URL/mctl-telegram-preview/values.yaml"
+PROD_VALUES_URL="$VALUES_BASE_URL/mctl-telegram/values.yaml"
 LABEL="com.mctl.agent-worker"
 READY_URL="http://127.0.0.1:18090/readyz"
 PROMPT_PATH="deploy/agent-worker/system-prompt.txt"
@@ -60,6 +69,7 @@ if ! mkdir "$lock" 2>/dev/null; then
 fi
 echo $$ > "$lock/pid"
 work=""
+# shellcheck disable=SC2329 # invoked by the trap
 cleanup() {
   # Only the run that owns the lock removes it.
   if [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$$" ]; then rm -rf "$lock"; fi
@@ -67,26 +77,51 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Which environment to follow. Missing file = preview; anything but the two
+# known words is an error, never a default.
+track="preview"
+if [ -f "$BASE/TRACK" ]; then
+  track="$(tr -d '[:space:]' < "$BASE/TRACK")"
+fi
+case "$track" in
+  preview) values_url="$PREVIEW_VALUES_URL" ;;
+  prod) values_url="$PROD_VALUES_URL" ;;
+  *) die "$BASE/TRACK must contain 'preview' or 'prod', not '$track'" ;;
+esac
+
 # Resolve the target. A failed or unparsable read is an error, never "no
-# change": the worker is left exactly as it is.
+# change": the worker is left exactly as it is. The preview tag names a main
+# commit directly (main-<sha>); the prod tag is a release (x.y.z) and names
+# the commit through the git tag of the same name.
 if [ -s "$BASE/PIN" ]; then
   want="$(tr -d '[:space:]' < "$BASE/PIN")"
   source_desc="PIN"
 else
-  values="$(curl -fsS --max-time 30 "$VALUES_URL")" || die "cannot read tg-preview values from mctl-gitops"
+  values="$(curl -fsS --max-time 30 "$values_url")" || die "cannot read $track values from mctl-gitops"
   tag="$(awk '/^image:/{f=1;next} f&&/^[^ ]/{f=0} f&&/^  tag:/{gsub(/"/,"",$2);print $2;exit}' <<<"$values")"
-  case "$tag" in
-    main-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) want="${tag#main-}" ;;
-    *) die "tg-preview image.tag '$tag' does not name a main commit" ;;
+  case "$track" in
+    preview)
+      case "$tag" in
+        main-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) want="${tag#main-}" ;;
+        *) die "preview image.tag '$tag' does not name a main commit" ;;
+      esac ;;
+    prod)
+      if [[ "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        want="$tag"
+      else
+        die "prod image.tag '$tag' is not a release tag (x.y.z)"
+      fi ;;
   esac
-  source_desc="tg-preview $tag"
+  source_desc="$track $tag"
 fi
 
 if [ ! -d "$SRC/.git" ]; then
   git clone -q --no-checkout "$REPO_URL" "$SRC" || die "clone failed"
 fi
-git -C "$SRC" fetch -q origin || die "fetch failed"
-full="$(git -C "$SRC" rev-parse --verify -q "$want^{commit}")" || die "commit $want ($source_desc) not found"
+# Tags are fetched for the prod track; the preview track does not need them
+# but one fetch covers both.
+git -C "$SRC" fetch -q --tags origin || die "fetch failed"
+full="$(git -C "$SRC" rev-parse --verify -q "$want^{commit}")" || die "$source_desc: commit or tag '$want' not found in $REPO_URL"
 short="${full:0:7}"
 
 # The prompt is streamed to a file, byte for byte, so the installed file's
@@ -101,6 +136,9 @@ have_prompt_sha="$(shasum -a 256 "$BASE/system-prompt.txt" 2>/dev/null | cut -d'
 if [ "$have_version" = "$short" ] && [ "$have_prompt_sha" = "$want_prompt_sha" ]; then
   exit 0
 fi
+# Logged only when there is something to do: a no-op run every 10 minutes
+# stays silent.
+log "source: $source_desc -> $full"
 # A commit that already failed its readiness check is not retried until the
 # target changes; otherwise every run would bounce the worker through the same
 # failed install and rollback.
@@ -163,11 +201,17 @@ if restart; then
   rm -f "$BASE/FAILED"
   echo "$short" > VERSION
   log "ready on $short (previous $prev_version), prompt sha256 $want_prompt_sha"
-  # Take this script from the same commit for the next run, if it parses.
-  # Not while pinned: an older commit's script may not know about PIN.
+  # Take this script from the same commit for the next run, if it parses and
+  # knows about tracks. Not while pinned: an older commit's script may not
+  # know about PIN. The prod track can point at a release older than this
+  # script, whose copy would read the preview values again: a copy without
+  # the TRACK marker is never installed.
   if [ ! -s "$BASE/PIN" ] && git -C "$SRC" show "$full:$SELF_PATH" > "$BASE/self-update.sh.new" 2>/dev/null &&
     [ -s "$BASE/self-update.sh.new" ]; then
-    if bash -n "$BASE/self-update.sh.new"; then
+    if ! grep -q "TRACK" "$BASE/self-update.sh.new"; then
+      rm -f "$BASE/self-update.sh.new"
+      log "target commit's self-update.sh predates TRACK support, keeping the current script"
+    elif bash -n "$BASE/self-update.sh.new"; then
       chmod 755 "$BASE/self-update.sh.new"
       mv "$BASE/self-update.sh.new" "$BASE/self-update.sh"
     else
