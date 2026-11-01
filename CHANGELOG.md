@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.121.1](https://github.com/mctlhq/mctl-telegram/compare/0.121.0...0.121.1) (2026-11-01)
+
+
+### Bug Fixes
+
+* **ui:** rename footer 'Platform' link to 'MCTL' ([1d4fa31](https://github.com/mctlhq/mctl-telegram/commit/1d4fa3128a0adc06c045d5c87102176858639f32))
+* **ui:** rename footer 'Platform' link to 'MCTL' ([3772365](https://github.com/mctlhq/mctl-telegram/commit/377236587ad02039d1d0607adeba91fc2a66c2b7))
+
 ## [0.121.0](https://github.com/mctlhq/mctl-telegram/compare/0.120.0...0.121.0) (2026-11-01)
 
 
