@@ -35,7 +35,8 @@ func TestPublicStatsQuery_CountsAndExclusions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.EnsureUserByTelegramID(ctx, 333, "carol", "Carol"); err != nil {
+	carol, err := s.EnsureUserByTelegramID(ctx, 333, "carol", "Carol")
+	if err != nil {
 		t.Fatal(err)
 	}
 	dana, err := s.EnsureUserByTelegramID(ctx, 444, "dana", "Dana")
@@ -60,7 +61,8 @@ func TestPublicStatsQuery_CountsAndExclusions(t *testing.T) {
 		seedAuditRow(t, s, dana, "get_messages", "ok", now.Add(-time.Duration(i)*time.Minute))
 	}
 
-	// Sessions: Alice live, Bob revoked, Carol live but idle for two hours.
+	// Sessions: Alice live, Bob revoked, Carol live but idle for two hours,
+	// Dana (canary) live and used a minute ago.
 	if _, err := s.DB.ExecContext(ctx,
 		`INSERT INTO telegram_accounts(user_id, session_encrypted, last_used_at) VALUES($1,$2,$3)`,
 		alice, []byte("a"), now.Add(-time.Minute)); err != nil {
@@ -71,13 +73,23 @@ func TestPublicStatsQuery_CountsAndExclusions(t *testing.T) {
 		bob, []byte("b"), now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, session_encrypted, last_used_at) VALUES($1,$2,$3)`,
+		carol, []byte("c"), now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO telegram_accounts(user_id, session_encrypted, last_used_at) VALUES($1,$2,$3)`,
+		dana, []byte("d"), now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
 
 	got, err := s.PublicStatsQuery(ctx, []int64{444})
 	if err != nil {
 		t.Fatalf("PublicStatsQuery: %v", err)
 	}
-	if got.AccountsTotal != 4 {
-		t.Errorf("AccountsTotal = %d, want 4 (alice, bob, carol, dana; legacy row has no telegram id)", got.AccountsTotal)
+	if got.AccountsTotal != 3 {
+		t.Errorf("AccountsTotal = %d, want 3 (alice, bob, carol; dana is canary, legacy row has no telegram id)", got.AccountsTotal)
 	}
 	if got.ToolCallsTotal != 4 {
 		t.Errorf("ToolCallsTotal = %d, want 4 (3 alice + 1 bob; error, connect, bridge, POST and canary excluded)", got.ToolCallsTotal)
@@ -86,17 +98,19 @@ func TestPublicStatsQuery_CountsAndExclusions(t *testing.T) {
 		t.Errorf("ActiveUsers30d = %d, want 1 (alice; bob is 40 days old, dana is canary)", got.ActiveUsers30d)
 	}
 	if got.SessionsActive != 1 {
-		t.Errorf("SessionsActive = %d, want 1 (alice; bob revoked)", got.SessionsActive)
+		t.Errorf("SessionsActive = %d, want 1 (alice; bob revoked, carol idle 2h, dana canary)", got.SessionsActive)
 	}
 
-	// Without a canary list the canary counts like anyone else: proves the
-	// exclusion above is the clause doing the work, not a coincidence.
+	// Without a canary list the canary counts like anyone else in every
+	// field: proves the exclusion above is the clause doing the work, not a
+	// coincidence.
 	all, err := s.PublicStatsQuery(ctx, nil)
 	if err != nil {
 		t.Fatalf("PublicStatsQuery(nil): %v", err)
 	}
-	if all.ToolCallsTotal != 54 || all.ActiveUsers30d != 2 {
-		t.Errorf("without canary list: ToolCallsTotal=%d ActiveUsers30d=%d, want 54 and 2", all.ToolCallsTotal, all.ActiveUsers30d)
+	if all.AccountsTotal != 4 || all.ToolCallsTotal != 54 || all.ActiveUsers30d != 2 || all.SessionsActive != 2 {
+		t.Errorf("without canary list: Accounts=%d ToolCalls=%d Active30d=%d Sessions=%d, want 4/54/2/2",
+			all.AccountsTotal, all.ToolCallsTotal, all.ActiveUsers30d, all.SessionsActive)
 	}
 }
 
