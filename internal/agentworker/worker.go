@@ -369,7 +369,10 @@ var ErrClaudeUsageLimit = fmt.Errorf("%w: usage limit or quota exhausted", ErrCl
 // token set, not a captured value. res.Result is deliberately NOT inspected:
 // it can carry model-derived Telegram content and is prompt-injectable,
 // exactly as CheckResult's doc comment explains for the error string itself.
-var usageLimitSubtypes = []string{"usage_limit", "rate_limit", "quota", "credit_balance", "insufficient_credits"}
+var usageLimitSubtypes = []string{"usage_limit", "rate_limit", "quota", "credit_balance", "insufficient_credits",
+	// provider_429: OpenAIRunner maps an exhausted provider retry loop to
+	// error_provider_429 (docs/agent-worker.md).
+	"provider_429"}
 
 // isUsageLimitSubtype reports whether subtype (case-insensitively) contains
 // one of usageLimitSubtypes.

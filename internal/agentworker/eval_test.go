@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -21,26 +22,13 @@ import (
 //go:embed testdata/c1-system-prompt.txt
 var c1SystemPrompt string
 
-// This is an opt-in model evaluation, not a normal unit test. It launches the
-// real Claude Code CLI and the real agent-worker stdio MCP server once per
-// fixture of hr-recruiter@0.1.0's eval suite
-// (assistants/hr-recruiter/eval/0.1.0), while internal/agenteval's fake Agent
-// API records durable effects and judges every proposed reply with the
-// guarded policy as a dry run. Run with:
-//
-//	AGENT_C1_EVAL=1 go test ./internal/agentworker -run TestC1ObserveEval -count=1 -v
-//
+// This is an opt-in model evaluation, not a normal unit test. By default it
+// exercises Claude Code as before. Set AGENT_C1_EVAL_RUNNER=openai to run the
+// exact same fixtures through OpenAIRunner and its shared in-process tool set.
 // The normal test suite skips it so CI never consumes model quota.
-//
-// AGENT_C1_EVAL_PROMPT=catalog runs the same fixtures with the prompt the
-// server hands out on claim: the hr-recruiter catalog entry rendered with the
-// suite's values, delivered as JobEnvelope.Instructions with no fallback
-// SystemPrompt. That is the P1 acceptance run for the assistant catalog.
-// AGENT_C1_EVAL_VERSION picks the hr-recruiter version and its suite
-// (default 0.1.0).
 func TestC1ObserveEval(t *testing.T) {
 	if os.Getenv("AGENT_C1_EVAL") != "1" {
-		t.Skip("set AGENT_C1_EVAL=1 to run the real Claude Code evaluation")
+		t.Skip("set AGENT_C1_EVAL=1 to run the real model evaluation")
 	}
 	catalog, err := assistant.LoadCatalog(mctltelegram.Catalog)
 	if err != nil {
@@ -62,8 +50,12 @@ func TestC1ObserveEval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
-	t.Logf("C1: %s@%s digest=%s suite=%s harness=%s", base.Definition.Metadata.Name,
-		base.Definition.Metadata.Version, base.Digest, suite.Digest, agenteval.HarnessVersion)
+	runnerName := strings.ToLower(strings.TrimSpace(os.Getenv("AGENT_C1_EVAL_RUNNER")))
+	if runnerName == "" {
+		runnerName = "claude"
+	}
+	t.Logf("C1: runner=%s %s@%s digest=%s suite=%s harness=%s", runnerName,
+		base.Definition.Metadata.Name, base.Definition.Metadata.Version, base.Digest, suite.Digest, agenteval.HarnessVersion)
 
 	var only []string
 	if filter := strings.TrimSpace(os.Getenv("AGENT_C1_EVAL_FILTER")); filter != "" {
@@ -81,17 +73,46 @@ func TestC1ObserveEval(t *testing.T) {
 		t.Fatalf("AGENT_C1_EVAL_FILTER=%v matched no fixtures", only)
 	}
 
-	workerBin := buildEvalWorker(t)
 	systemPrompt, instructions := c1SystemPrompt, ""
 	if os.Getenv("AGENT_C1_EVAL_PROMPT") == "catalog" {
 		instructions, systemPrompt = target.Instructions, ""
 	}
-	claudeBin := os.Getenv("AGENT_CLAUDE_BIN")
-	if claudeBin == "" {
-		claudeBin = "claude"
-	}
-	if _, err := exec.LookPath(claudeBin); err != nil {
-		t.Fatalf("find Claude Code CLI %q: %v", claudeBin, err)
+
+	var claude *ClaudeInvoker
+	var openai *OpenAIRunner
+	switch runnerName {
+	case "claude":
+		workerBin := buildEvalWorker(t)
+		claudeBin := os.Getenv("AGENT_CLAUDE_BIN")
+		if claudeBin == "" {
+			claudeBin = "claude"
+		}
+		if _, err := exec.LookPath(claudeBin); err != nil {
+			t.Fatalf("find Claude Code CLI %q: %v", claudeBin, err)
+		}
+		claude = &ClaudeInvoker{ClaudeBin: claudeBin, Self: workerBin, APIToken: "c1-eval-token", SystemPrompt: systemPrompt, MaxBudgetUSD: 0.50}
+	case "openai":
+		baseURL := evalRequiredEnv(t, "AGENT_OPENAI_BASE_URL")
+		apiKey := evalRequiredEnv(t, "AGENT_OPENAI_API_KEY")
+		model := evalRequiredEnv(t, "AGENT_MODEL")
+		inputPrice := evalFloat(t, "MODEL_INPUT_USD_PER_MTOK")
+		outputPrice := evalFloat(t, "MODEL_OUTPUT_USD_PER_MTOK")
+		minInterval := time.Duration(0)
+		if raw := strings.TrimSpace(os.Getenv("AGENT_OPENAI_MIN_INTERVAL")); raw != "" {
+			minInterval, err = time.ParseDuration(raw)
+			if err != nil || minInterval < 0 {
+				t.Fatalf("AGENT_OPENAI_MIN_INTERVAL=%q: want non-negative duration", raw)
+			}
+		}
+		openai = &OpenAIRunner{
+			Client: &OpenAIClient{
+				BaseURL: baseURL, APIKey: apiKey, GatewayToken: os.Getenv("AGENT_GATEWAY_TOKEN"), Model: model,
+			},
+			SystemPrompt: systemPrompt, MaxTurns: 12, MaxBudgetUSD: 0.50,
+			Prices: Prices{InputUSDPerMTok: inputPrice, OutputUSDPerMTok: outputPrice}, MinInterval: minInterval,
+		}
+	default:
+		t.Fatalf("AGENT_C1_EVAL_RUNNER=%q: want claude or openai", runnerName)
 	}
 
 	results := make([]agenteval.FixtureResult, 0, len(fixtures))
@@ -102,17 +123,21 @@ func TestC1ObserveEval(t *testing.T) {
 		job := JobEnvelope{
 			JobID: jobID, EventID: "eval-" + fixture.ID,
 			ConversationID: 1, Attempt: 1, Instructions: instructions, Tools: target.JobTools,
-			Deadline: time.Now().Add(3 * time.Minute).Format(time.RFC3339),
+			JobToken: "c1-eval-token", Deadline: time.Now().Add(3 * time.Minute).Format(time.RFC3339),
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-		err := (&ClaudeInvoker{
-			ClaudeBin: claudeBin, Self: workerBin, APIBaseURL: api.URL,
-			APIToken: "c1-eval-token", SystemPrompt: systemPrompt, MaxBudgetUSD: 0.50,
-		}).Run(ctx, job)
+		var runErr error
+		if claude != nil {
+			claude.APIBaseURL = api.URL
+			runErr = claude.Run(ctx, job)
+		} else {
+			openai.APIBaseURL = api.URL
+			runErr = openai.Run(ctx, job)
+		}
 		cancel()
 		api.Close()
-		if err != nil {
-			t.Logf("%s [%s]: invocation failed: %v", fixture.ID, fixture.Category, err)
+		if runErr != nil {
+			t.Logf("%s [%s]: invocation failed: %v", fixture.ID, fixture.Category, runErr)
 		}
 		results = append(results, task.Result())
 	}
@@ -142,6 +167,25 @@ func TestC1ObserveEval(t *testing.T) {
 	for _, failure := range report.Failures {
 		t.Error(failure)
 	}
+}
+
+func evalRequiredEnv(t *testing.T, key string) string {
+	t.Helper()
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		t.Fatalf("%s is required for AGENT_C1_EVAL_RUNNER=openai", key)
+	}
+	return v
+}
+
+func evalFloat(t *testing.T, key string) float64 {
+	t.Helper()
+	raw := evalRequiredEnv(t, key)
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil || v < 0 {
+		t.Fatalf("%s=%q: want non-negative number", key, raw)
+	}
+	return v
 }
 
 func buildEvalWorker(t *testing.T) string {

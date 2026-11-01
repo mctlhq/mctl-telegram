@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -269,33 +268,10 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 		return fmt.Errorf("job %d: %w (stdout: %d bytes, see run logs)", job.JobID, parseErr, stdout.Len())
 	}
 	client := NewClient(c.APIBaseURL, c.APIToken, nil)
-	// Recorded BEFORE CheckResult so a job that fails the check below still
-	// reports what it spent — spend telemetry must not be gated on the run
-	// having succeeded.
-	c.recordCost(ctx, client, job, res)
-	if err := CheckResult(res); err != nil {
-		c.countResultError(err)
-		return err
-	}
-
-	// The final model text is never evidence of a completed action: a model
-	// with no tools can emit text that merely resembles a tool call and still
-	// exit 0/is_error=false. Query the API's durable, user-scoped job record
-	// instead. Requiring the same attempt preserves the claim fencing used by
-	// complete_agent_job and prevents a stale invocation from taking credit
-	// for a newer worker's completion.
-	status, err := client.GetJobStatus(ctx, job.JobID)
-	if err != nil {
-		return fmt.Errorf("verify job %d completion: %w", job.JobID, err)
-	}
-	if status.JobID != job.JobID || status.Attempt != job.Attempt || !status.Terminal() {
-		return fmt.Errorf("%w: job_id=%d returned_job_id=%d status=%s attempt=%d expected_attempt=%d",
-			ErrAgentDidNotCompleteJob, job.JobID, status.JobID, status.Status, status.Attempt, job.Attempt)
-	}
-	return nil
+	return finishRun(ctx, client, job, res, c.Metrics)
 }
 
-// recordCost is a no-op when res.TotalCostUSD is nil — the claude result
+// recordCost (shared with OpenAIRunner via recordRunCost in finishrun.go) is a no-op when res.TotalCostUSD is nil — the claude result
 // carried no total_cost_usd key, or it was JSON null, so nothing was
 // actually observed to report. Otherwise it best-effort reports the figure
 // to the agent API so it lands on the job row's cost_usd column, and, when a
@@ -310,42 +286,14 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 // a future caller that leaves it nil would otherwise silently stop
 // persisting spend (claude review P3 on PR #583).
 func (c *ClaudeInvoker) recordCost(ctx context.Context, client *Client, job JobEnvelope, res *ClaudeResult) {
-	if res == nil || res.TotalCostUSD == nil {
-		return
-	}
-	cost := *res.TotalCostUSD
-	if cost < 0 {
-		// prometheus.Counter.Add panics on a negative delta, and the value
-		// comes straight from the claude CLI's total_cost_usd — nothing
-		// upstream constrains its sign. Drop it rather than take the
-		// poll-loop process down, and keep the DB write honest too.
-		slog.Warn("agent-worker: ignoring negative reported job cost", "job_id", job.JobID)
-		return
-	}
-	result := metrics.JobCostResultSuccess
-	if res.IsError {
-		result = metrics.JobCostResultError
-	}
-	if c.Metrics != nil {
-		c.Metrics.AgentJobCostUSDTotal.WithLabelValues(result).Add(cost)
-	}
-	if err := client.ReportJobCost(ctx, job.JobID, job.Attempt, cost); err != nil {
-		slog.Warn("agent-worker: report job cost failed", "job_id", job.JobID, "err", err)
-	}
+	recordRunCost(ctx, client, job, res, c.Metrics)
 }
 
 // countResultError increments mctl_agent_claude_result_errors_total for a
 // CheckResult error, classifying it as usage_limit or other. No-op on a nil
 // registry.
 func (c *ClaudeInvoker) countResultError(err error) {
-	if c.Metrics == nil || err == nil {
-		return
-	}
-	class := metrics.ClaudeResultClassOther
-	if errors.Is(err, ErrClaudeUsageLimit) {
-		class = metrics.ClaudeResultClassUsageLimit
-	}
-	c.Metrics.AgentClaudeResultErrorsTotal.WithLabelValues(class).Inc()
+	countRunResultError(c.Metrics, err)
 }
 
 // jobPrompt is deliberately minimal AND deliberately job-identity-free: the
