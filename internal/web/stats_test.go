@@ -90,6 +90,40 @@ func TestSampleStats_KeepsPreviousOnError(t *testing.T) {
 	}
 }
 
+func TestStartStatsSampler_DisabledAndCancelled(t *testing.T) {
+	// every <= 0: nothing runs, the cache stays empty, no goroutine starts.
+	cache := &StatsCache{}
+	src := &fakeStatsSource{stats: db.PublicStats{AccountsTotal: 1}}
+	StartStatsSampler(context.Background(), src, cache, nil, 0)
+	time.Sleep(20 * time.Millisecond)
+	if _, ok := cache.Get(); ok || src.calls != 0 {
+		t.Fatalf("disabled sampler must not sample: ok=%v calls=%d", ok, src.calls)
+	}
+
+	// Enabled: samples immediately, then stops ticking once ctx is cancelled.
+	cache = &StatsCache{}
+	src = &fakeStatsSource{stats: db.PublicStats{AccountsTotal: 1}}
+	ctx, cancel := context.WithCancel(context.Background())
+	StartStatsSampler(ctx, src, cache, nil, 5*time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, ok := cache.Get(); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("sampler never filled the cache")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	time.Sleep(30 * time.Millisecond)
+	n := src.calls
+	time.Sleep(50 * time.Millisecond)
+	if src.calls != n {
+		t.Errorf("sampler kept running after cancel: %d -> %d calls", n, src.calls)
+	}
+}
+
 func TestLanding_StatsStripOnlyWhenSampled(t *testing.T) {
 	cache := &StatsCache{}
 	h := Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true, WithStats(cache))

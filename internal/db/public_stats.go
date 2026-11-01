@@ -116,12 +116,14 @@ func (s *Store) PublicStatsQuery(ctx context.Context, canaryTelegramIDs []int64)
 	// Same rule as CountActiveSessions (live row, used within the hour or
 	// never), minus the canary's always-on session. Kept as its own
 	// statement rather than changing CountActiveSessions, whose gauge feeds
-	// the SLO rules and must keep counting the canary.
+	// the SLO rules and must keep counting the canary. The canary clause
+	// comes before the cutoff placeholder, as in the statement above, so the
+	// placeholders appear in the text in argument order on both dialects.
 	cutoff := time.Now().UTC().Add(-time.Hour)
 	if err := s.DB.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM telegram_accounts
-		  WHERE revoked_at IS NULL
-		    AND (last_used_at IS NULL OR last_used_at > `+nextPlaceholder+`)`+notCanary("user_id"),
+		  WHERE revoked_at IS NULL`+notCanary("user_id")+`
+		    AND (last_used_at IS NULL OR last_used_at > `+nextPlaceholder+`)`,
 		withExtra(cutoff)...,
 	).Scan(&out.SessionsActive); err != nil {
 		return PublicStats{}, fmt.Errorf("public stats: sessions: %w", err)
