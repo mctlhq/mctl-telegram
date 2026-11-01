@@ -56,7 +56,7 @@ func TestOpenAIRunner_Retry429HonoursRetryAfter(t *testing.T) {
 	var calls atomic.Int32
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if calls.Add(1) == 1 {
-			w.Header().Set("Retry-After", "1")
+			w.Header().Set("Retry-After", "2")
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = w.Write([]byte("secret provider body"))
 			return
@@ -72,7 +72,7 @@ func TestOpenAIRunner_Retry429HonoursRetryAfter(t *testing.T) {
 	if calls.Load() != 2 {
 		t.Fatalf("provider calls=%d want 2", calls.Load())
 	}
-	if elapsed := time.Since(start); elapsed < 900*time.Millisecond {
+	if elapsed := time.Since(start); elapsed < 1900*time.Millisecond {
 		t.Fatalf("Retry-After was not honoured: elapsed=%v", elapsed)
 	}
 }

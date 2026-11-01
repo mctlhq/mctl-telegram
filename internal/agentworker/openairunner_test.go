@@ -112,7 +112,9 @@ func TestOpenAIRunner_MaxTurns(t *testing.T) {
 		}
 	}))
 	defer api.Close()
+	var providerCalls atomic.Int32
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls.Add(1)
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"x","type":"function","function":{"name":"get_event","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
 	}))
 	defer provider.Close()
@@ -120,6 +122,9 @@ func TestOpenAIRunner_MaxTurns(t *testing.T) {
 	err := r.Run(context.Background(), JobEnvelope{JobID: 1, EventID: "e", Attempt: 1, JobToken: "j", Tools: []string{"get_event", "complete_agent_job"}})
 	if !errors.Is(err, ErrClaudeReportedError) {
 		t.Fatalf("err=%v", err)
+	}
+	if n := providerCalls.Load(); n != 2 {
+		t.Fatalf("provider calls=%d want exactly MaxTurns=2", n)
 	}
 }
 
