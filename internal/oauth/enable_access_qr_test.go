@@ -1,11 +1,9 @@
 package oauth
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -169,34 +167,6 @@ func (q *qrStub) fn() QRLoginFunc {
 		}
 		return q.tgID, "Dana", "dana_tg", nil
 	}
-}
-
-// lockedBuffer is a bytes.Buffer safe to write from the login goroutine while
-// the test reads it (CI runs with -race).
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
-
-func captureQRLog(t *testing.T) *lockedBuffer {
-	t.Helper()
-	buf := &lockedBuffer{}
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	return buf
 }
 
 // flowMetrics records ObserveLoginFlow, CountLoginFlowStarted and
@@ -406,7 +376,7 @@ func TestEnableQR_ButtonOnlyOnDesktop(t *testing.T) {
 // the login token stays out of the status URL, the pages' text, the logs and
 // the audit.
 func TestEnableQR_EndToEndWithTwoFA(t *testing.T) {
-	logs := captureQRLog(t)
+	logs := captureServerLog(t)
 	q := newQRStub(500100101)
 	q.needPw = true
 	srv, mux := newQRTestServer(t, q, true)
@@ -599,7 +569,7 @@ func assertExistingSessionUntouched(t *testing.T, srv *Server, uid int64) {
 // enableQRWait, logs as a walked-away user at WARN with step qr_shown, and
 // leaves the user a way to start over.
 func TestEnableQR_ExpiredCodeIsAbandonment(t *testing.T) {
-	logs := captureQRLog(t)
+	logs := captureServerLog(t)
 	prev := enableQRWait
 	enableQRWait = 50 * time.Millisecond
 	t.Cleanup(func() { enableQRWait = prev })
@@ -651,7 +621,7 @@ func TestEnableQR_WaitEndsWithTheSession(t *testing.T) {
 // has done their part, so a deadline in the work after it is a stall on our
 // side or Telegram's, logged at ERROR, not a user who walked away.
 func TestEnableQR_StallAfterScanIsAnError(t *testing.T) {
-	logs := captureQRLog(t)
+	logs := captureServerLog(t)
 	q := newQRStub(500100101)
 	q.stall = true
 	srv, _ := newQRTestServer(t, q, true, func(c *Config) { c.CodeTTL = 100 * time.Millisecond })
