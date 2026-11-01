@@ -249,6 +249,14 @@ jobs:
           go-version: "1.26.10"
       - run: bash scripts/publish-assistant_test.sh
 
+  # The Mac host worker's self-update script, offline: target resolution for
+  # the preview and prod tracks against a local repository and fixtures.
+  agent-worker-self-update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - run: bash deploy/agent-worker/mac-mini/self-update_test.sh
+
   govulncheck:
     runs-on: ubuntu-latest
     steps:
