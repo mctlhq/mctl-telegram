@@ -16,6 +16,7 @@ the record is wrong and should be fixed.
 | [0005](0005-session-pool-and-sticky-routing.md) | MTProto sessions live in a per-pod pool; the service runs as one replica, with sticky routing ready for more | Accepted |
 | [0006](0006-local-bridge-relay.md) | Local Bridge keeps the session on the user's machine and turns the server into a relay | Accepted (beta) |
 | [0007](0007-tool-surface-as-contract.md) | The tool surface is a reviewed contract: a committed snapshot and a release gate | Accepted |
+| [0008](0008-managed-runtime.md) | Managed runtime: one pooled platform worker per environment, OpenAI-compatible models through the AI gateway, consent and hard budget caps | Proposed |
 
 ## Format
 
