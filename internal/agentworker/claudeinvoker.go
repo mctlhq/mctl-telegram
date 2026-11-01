@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -16,10 +15,7 @@ import (
 )
 
 // mcpConfigTempFile writes cfg to a 0600 temp file and returns its path.
-// --mcp-config accepts either an inline JSON string or a file path — using a
-// file keeps AGENT_API_TOKEN (embedded in the MCP server's env block) out of
-// the claude process's argv, which every other process on the host can read
-// via /proc/<pid>/cmdline or `ps auxww`.
+// Using a file keeps AGENT_API_TOKEN out of argv.
 func mcpConfigTempFile(cfg mcpConfig) (path string, cleanup func(), err error) {
 	f, err := os.CreateTemp("", "agent-worker-mcp-*.json")
 	if err != nil {
@@ -45,10 +41,7 @@ func mcpConfigTempFile(cfg mcpConfig) (path string, cleanup func(), err error) {
 	return f.Name(), cleanup, nil
 }
 
-// promptTempFile writes a system prompt to a private temp file for
-// --system-prompt-file. The prompt can carry the account owner's notes, so it
-// is kept out of argv, which /proc/<pid>/cmdline and `ps auxww` expose to
-// every process on the host, as the API token is.
+// promptTempFile keeps the per-account system prompt out of argv.
 func promptTempFile(prompt string) (path string, cleanup func(), err error) {
 	f, err := os.CreateTemp("", "agent-worker-prompt-*.txt")
 	if err != nil {
@@ -64,25 +57,15 @@ func promptTempFile(prompt string) (path string, cleanup func(), err error) {
 	closeErr := f.Close()
 	if writeErr != nil {
 		cleanup()
-		return "", nil, fmt.Errorf("write prompt temp file: %w", writeErr)
+		return "", nil, fmt.Errorf("write system prompt: %w", writeErr)
 	}
 	if closeErr != nil {
 		cleanup()
-		return "", nil, fmt.Errorf("close prompt temp file: %w", closeErr)
+		return "", nil, fmt.Errorf("close system prompt: %w", closeErr)
 	}
 	return f.Name(), cleanup, nil
 }
 
-// jobTools is the exact set of MCP tools a spawned `claude` invocation may
-// use, under the names the job's assistant gives them — no Bash, Read,
-// Write, WebFetch, or any other built-in tool is ever allowed, so the
-// model's only way to affect anything is through this package's
-// API-proxying tools. The set may be a subset of the tools that includes
-// the mandatory ones; the agent API enforces it from the job token. A job
-// from a server without a catalog carries no names and gets the canonical
-// ones. See NewMCPServer's doc comment for why
-// job identity is pinned server-side rather than accepted as a tool
-// argument.
 func jobTools(job JobEnvelope) ([]tools.Binding, error) {
 	return tools.ForJob(job.Tools)
 }
@@ -95,29 +78,18 @@ func qualifiedToolNames(bindings []tools.Binding) []string {
 	return out
 }
 
-// ClaudeInvoker is the concrete Runner that shells out to the `claude` CLI
-// binary (see cmd/agent-worker for the self-invocation `--mcp-serve` mode
-// that becomes the MCP server's command). Self is the absolute path to this
-// same worker binary (os.Executable()) — the spawned `claude` process
-// re-execs it as the MCP server so the tool implementations run in-process
-// with this worker's own AGENT_API_TOKEN, never handed to Claude itself.
+// ClaudeInvoker is the existing CLI-backed Runner. OpenAIRunner shares its
+// result/error/cost tail through finishRun, but not its subprocess transport.
 type ClaudeInvoker struct {
 	ClaudeBin    string
 	Self         string
 	APIBaseURL   string
 	APIToken     string
 	SystemPrompt string
-	// MaxBudgetUSD, if > 0, is passed as --max-budget-usd so a single job
-	// cannot spend past this even if the model loops.
 	MaxBudgetUSD float64
-	// Metrics is optional (nil is a no-op, matching every other optional
-	// registry field in this codebase) — when set, Run records the parsed
-	// job cost and CheckResult error class onto it.
-	Metrics *metrics.Registry
+	Metrics      *metrics.Registry
 }
 
-// mcpConfig is the JSON shape `claude --mcp-config` expects for an inline
-// (non-file) server definition.
 type mcpConfig struct {
 	MCPServers map[string]mcpServerConfig `json:"mcpServers"`
 }
@@ -129,17 +101,8 @@ type mcpServerConfig struct {
 	AlwaysLoad bool              `json:"alwaysLoad"`
 }
 
-// ErrAgentDidNotCompleteJob means Claude exited successfully but the durable
-// job remained non-terminal (or was completed under a different attempt).
-// A zero process exit is not a successful worker outcome unless the model
-// actually called complete_agent_job and its fenced database transition
-// succeeded.
 var ErrAgentDidNotCompleteJob = errors.New("agent did not complete job")
 
-// mcpToken returns the credential for the MCP subprocess of job: the
-// conversation-bound job token when the server issued one, else the
-// account-wide token (a newer worker against an older server). The worker's
-// own poll, complete and cost calls keep using APIToken.
 func (c *ClaudeInvoker) mcpToken(job JobEnvelope) string {
 	if job.JobToken != "" {
 		return job.JobToken
@@ -147,11 +110,6 @@ func (c *ClaudeInvoker) mcpToken(job JobEnvelope) string {
 	return c.APIToken
 }
 
-// systemPrompt is the prompt for job: the instructions the server rendered
-// for the account's assistant, or the worker's own AGENT_SYSTEM_PROMPT when
-// the server sent none (a server without a catalog). The server's copy wins
-// because it is per account; the env prompt is one text for every account
-// the worker serves.
 func (c *ClaudeInvoker) systemPrompt(job JobEnvelope) string {
 	if job.Instructions != "" {
 		return job.Instructions
@@ -159,7 +117,6 @@ func (c *ClaudeInvoker) systemPrompt(job JobEnvelope) string {
 	return c.SystemPrompt
 }
 
-// buildMCPConfig returns the mcp-config for one job's `claude -p` run.
 func (c *ClaudeInvoker) buildMCPConfig(job JobEnvelope) mcpConfig {
 	env := map[string]string{
 		"AGENT_API_BASE_URL": c.APIBaseURL,
@@ -170,40 +127,26 @@ func (c *ClaudeInvoker) buildMCPConfig(job JobEnvelope) mcpConfig {
 		"AGENT_JOB_CONV_ID":  fmt.Sprintf("%d", job.ConversationID),
 	}
 	if len(job.SourceEventIDs) > 1 {
-		// Event ids contain no commas, so a plain join is unambiguous.
 		env["AGENT_JOB_SOURCE_EVENT_IDS"] = strings.Join(job.SourceEventIDs, ",")
 	}
 	if len(job.Tools) > 0 {
-		// Tool names contain no commas either.
 		env["AGENT_JOB_TOOLS"] = strings.Join(job.Tools, ",")
 	}
 	return mcpConfig{MCPServers: map[string]mcpServerConfig{
 		ServerName: {
-			Command: c.Self,
-			Args:    []string{"--mcp-serve"},
-			// Claude Code starts MCP servers asynchronously by default. A
-			// single-turn `claude -p` can therefore build and dispatch its
-			// only model request before this cold stdio server's tools are
-			// present. alwaysLoad makes startup wait for the server (bounded
-			// by Claude Code's MCP connection timeout) and eagerly includes
-			// all 11 tools in the first turn.
-			AlwaysLoad: true,
-			Env:        env,
+			Command: c.Self, Args: []string{"--mcp-serve"}, AlwaysLoad: true, Env: env,
 		},
 	}}
 }
 
-// Run builds and executes one `claude -p` invocation for job. The model does
-// all of its work through the 11 MCP tools, and this method reports success
-// only when both the CLI result is successful and the API confirms that this
-// exact claimed attempt reached a terminal state.
+// Run executes Claude Code and delegates the common post-run accounting,
+// result classification and durable terminal-state verification to finishRun.
 func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 	bindings, err := jobTools(job)
 	if err != nil {
 		return fmt.Errorf("job tools: %w", err)
 	}
-	cfg := c.buildMCPConfig(job)
-	cfgPath, cleanup, err := mcpConfigTempFile(cfg)
+	cfgPath, cleanup, err := mcpConfigTempFile(c.buildMCPConfig(job))
 	if err != nil {
 		return fmt.Errorf("write mcp config: %w", err)
 	}
@@ -213,21 +156,9 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 		"-p", jobPrompt(),
 		"--mcp-config", cfgPath,
 		"--strict-mcp-config",
-		// --allowedTools only grants permission for the listed tools — it
-		// does not remove Claude's built-in tools (Bash, Read, Write, ...)
-		// from the available set. --tools "" disables every built-in tool
-		// so the model's ONLY way to affect anything is the 11 MCP tools
-		// this package exposes — the restriction allowedTools's own doc
-		// comment already claimed but didn't actually enforce.
 		"--tools", "",
 		"--allowedTools", strings.Join(qualifiedToolNames(bindings), ","),
 		"--output-format", "json",
-		// The transcript for every job otherwise contains plaintext Telegram
-		// message bodies and history (from get_event/get_conversation_context
-		// tool results) written under HOME by Claude Code's own session
-		// persistence — outside this service's encrypted tables and
-		// retention sweeper entirely. --no-session-persistence (documented
-		// for --print mode) stops that write.
 		"--no-session-persistence",
 	}
 	if prompt := c.systemPrompt(job); prompt != "" {
@@ -251,17 +182,8 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-
-	runErr := cmd.Run()
-	if runErr != nil {
-		// Deliberately excludes stderr content from the returned error:
-		// worker.Loop logs this error verbatim (slog.Warn), and stderr can
-		// carry the model's own output — which can itself carry the
-		// fetched Telegram message body it was reasoning about, on a
-		// malformed-output or prompt-injection path. The redaction layer
-		// operates on structured attribute keys, not free-form error
-		// values, so embedding raw content here would bypass it. Length is
-		// still useful for triage without the content.
+	if runErr := cmd.Run(); runErr != nil {
+		// stderr may contain model-derived Telegram content; only expose size.
 		return fmt.Errorf("claude -p exited: %w (stderr: %d bytes, see run logs)", runErr, stderr.Len())
 	}
 	res, parseErr := ParseClaudeResult(stdout.Bytes())
@@ -269,106 +191,23 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 		return fmt.Errorf("job %d: %w (stdout: %d bytes, see run logs)", job.JobID, parseErr, stdout.Len())
 	}
 	client := NewClient(c.APIBaseURL, c.APIToken, nil)
-	// Recorded BEFORE CheckResult so a job that fails the check below still
-	// reports what it spent — spend telemetry must not be gated on the run
-	// having succeeded.
-	c.recordCost(ctx, client, job, res)
-	if err := CheckResult(res); err != nil {
-		c.countResultError(err)
-		return err
-	}
-
-	// The final model text is never evidence of a completed action: a model
-	// with no tools can emit text that merely resembles a tool call and still
-	// exit 0/is_error=false. Query the API's durable, user-scoped job record
-	// instead. Requiring the same attempt preserves the claim fencing used by
-	// complete_agent_job and prevents a stale invocation from taking credit
-	// for a newer worker's completion.
-	status, err := client.GetJobStatus(ctx, job.JobID)
-	if err != nil {
-		return fmt.Errorf("verify job %d completion: %w", job.JobID, err)
-	}
-	if status.JobID != job.JobID || status.Attempt != job.Attempt || !status.Terminal() {
-		return fmt.Errorf("%w: job_id=%d returned_job_id=%d status=%s attempt=%d expected_attempt=%d",
-			ErrAgentDidNotCompleteJob, job.JobID, status.JobID, status.Status, status.Attempt, job.Attempt)
-	}
-	return nil
+	return finishRun(ctx, client, job, res, c.Metrics)
 }
 
-// recordCost is a no-op when res.TotalCostUSD is nil — the claude result
-// carried no total_cost_usd key, or it was JSON null, so nothing was
-// actually observed to report. Otherwise it best-effort reports the figure
-// to the agent API so it lands on the job row's cost_usd column, and, when a
-// registry is wired, also increments mctl_agent_job_cost_usd_total labeled
-// by whether the CLI's own result reported is_error. A failure to report is
-// logged as a warning and never changes Run's return value — spend
-// telemetry must not be able to fail a job.
-//
-// The nil-registry check deliberately guards ONLY the counter. cost_usd is a
-// durable accounting record and must not depend on whether an optional
-// telemetry field happens to be set: Metrics is documented as optional, and
-// a future caller that leaves it nil would otherwise silently stop
-// persisting spend (claude review P3 on PR #583).
+// Keep these methods as compatibility/test seams while the actual logic is
+// shared with OpenAIRunner.
 func (c *ClaudeInvoker) recordCost(ctx context.Context, client *Client, job JobEnvelope, res *ClaudeResult) {
-	if res == nil || res.TotalCostUSD == nil {
-		return
-	}
-	cost := *res.TotalCostUSD
-	if cost < 0 {
-		// prometheus.Counter.Add panics on a negative delta, and the value
-		// comes straight from the claude CLI's total_cost_usd — nothing
-		// upstream constrains its sign. Drop it rather than take the
-		// poll-loop process down, and keep the DB write honest too.
-		slog.Warn("agent-worker: ignoring negative reported job cost", "job_id", job.JobID)
-		return
-	}
-	result := metrics.JobCostResultSuccess
-	if res.IsError {
-		result = metrics.JobCostResultError
-	}
-	if c.Metrics != nil {
-		c.Metrics.AgentJobCostUSDTotal.WithLabelValues(result).Add(cost)
-	}
-	if err := client.ReportJobCost(ctx, job.JobID, job.Attempt, cost); err != nil {
-		slog.Warn("agent-worker: report job cost failed", "job_id", job.JobID, "err", err)
-	}
+	recordRunCost(ctx, client, job, res, c.Metrics)
 }
 
-// countResultError increments mctl_agent_claude_result_errors_total for a
-// CheckResult error, classifying it as usage_limit or other. No-op on a nil
-// registry.
 func (c *ClaudeInvoker) countResultError(err error) {
-	if c.Metrics == nil || err == nil {
-		return
-	}
-	class := metrics.ClaudeResultClassOther
-	if errors.Is(err, ErrClaudeUsageLimit) {
-		class = metrics.ClaudeResultClassUsageLimit
-	}
-	c.Metrics.AgentClaudeResultErrorsTotal.WithLabelValues(class).Inc()
+	countRunResultError(c.Metrics, err)
 }
 
-// jobPrompt is deliberately minimal AND deliberately job-identity-free: the
-// model has get_event and get_conversation_context tools to pull its own
-// context, resolved server-side from the pinned JobContext (see
-// NewMCPServer's doc comment), so the prompt never needs to name this turn's
-// event. An earlier version embedded job.EventID directly — which encodes
-// the account/chat/message Telegram IDs (see the evt:v1:<acct>:<chat>:<msgid>
-// format) — in this string, and -p places it straight into the claude
-// process's argv, defeating the same /proc/<pid>/cmdline exposure the
-// 0600 mcp-config file was written specifically to avoid for the API token.
 func jobPrompt() string {
 	return "A new Telegram message arrived. Use get_event and get_conversation_context to see it and the conversation so far, decide what to do, and call complete_agent_job exactly once when you are done."
 }
 
-// minimalEnv passes through only what the `claude` subprocess needs to
-// authenticate and run (HOME for credential/config lookup, PATH to find its
-// own dependencies, explicit proxy/custom-CA settings, and any
-// CLAUDE_CODE_*/ANTHROPIC_* auth vars already in this process's environment)
-// rather than the worker's full environment —
-// AGENT_API_TOKEN in particular must never leak into the model's own
-// process env since it is set only on the MCP server subprocess's env
-// (see Run's mcpServerConfig.Env), not this one.
 func minimalEnv() []string {
 	var out []string
 	passthrough := map[string]struct{}{
