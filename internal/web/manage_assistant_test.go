@@ -426,3 +426,29 @@ func TestAssistantValuesFromForm_RefusesNonFiniteNumbers(t *testing.T) {
 		}
 	}
 }
+
+// Each catalog version gets its own install form, and installing a later
+// version from it moves the install to exactly that version.
+func TestManageAssistant_InstallsEitherVersion(t *testing.T) {
+	f := newManageAssistantFixture(t, nil)
+	res := f.installDirect()
+	body := f.get(f.identity(accountManageScope)).Body.String()
+	for _, v := range []string{"0.1.1", "0.1.0"} {
+		if !strings.Contains(body, `name="version" value="`+v+`"`) {
+			t.Errorf("no install form for %s", v)
+		}
+	}
+	rec := f.post(f.srv.HandleAssistantInstall, "/telegram/connect/manage/assistant/install", f.identity(accountManageScope), url.Values{
+		"expected_revision": {rev(res.Profile.InstallRevision)},
+		"name":              {"hr-recruiter"},
+		"version":           {"0.1.1"},
+		"value.name":        {webMarkName},
+		"value.role":        {webMarkRole},
+	})
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if page := f.get(f.identity(accountManageScope)).Body.String(); !strings.Contains(page, `id="assistant-ref">hr-recruiter@0.1.1<`) {
+		t.Fatal("install did not move to 0.1.1")
+	}
+}

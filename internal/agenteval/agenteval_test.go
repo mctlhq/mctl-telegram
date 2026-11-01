@@ -27,6 +27,7 @@ const testForkName = "hr-recruiter~abcdefgh23~careful"
 // changed suite needs a new base version, not an edit here.
 var activeSuiteDigests = map[string]string{
 	"hr-recruiter@0.1.0": "sha256:20bfe4242c4e671fc8ac30627810dd75b7d551452fe41b535e6583f7806675e1",
+	"hr-recruiter@0.1.1": "sha256:7b75c623dadd162f93675f4ccae6e313b38655a570d410a78ae4b07b9a015730",
 }
 
 func TestActiveSuitesAreImmutable(t *testing.T) {
@@ -76,15 +77,17 @@ func TestActiveSuitesAreImmutable(t *testing.T) {
 	}
 }
 
-func hrBase(t *testing.T) *assistant.Entry {
+func hrBase(t *testing.T) *assistant.Entry { return hrVersion(t, "0.1.0") }
+
+func hrVersion(t *testing.T, version string) *assistant.Entry {
 	t.Helper()
 	c, err := assistant.LoadCatalog(mctltelegram.Catalog)
 	if err != nil {
 		t.Fatal(err)
 	}
-	e, ok := c.Lookup("hr-recruiter", "0.1.0")
+	e, ok := c.Lookup("hr-recruiter", version)
 	if !ok {
-		t.Fatal("no hr-recruiter@0.1.0")
+		t.Fatal("no hr-recruiter@" + version)
 	}
 	return e
 }
@@ -216,7 +219,24 @@ var compensation = regexp.MustCompile(`(?i)\b(eur|usd|gbp|salary|compensation|ra
 // whose sender named pay, now or earlier in the conversation, may expect a
 // reply to go out on its own.
 func TestSuite_CompensationNeverAllowsAutoSend(t *testing.T) {
-	s := hrSuite(t, hrBase(t))
+	c, err := assistant.LoadCatalog(mctltelegram.Catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range c.Entries() {
+		s, err := LoadSuite(mctltelegram.Catalog, e)
+		if errors.Is(err, ErrNoSuite) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		compensationFixtures(t, s)
+	}
+}
+
+func compensationFixtures(t *testing.T, s *Suite) {
+	t.Helper()
 	n := 0
 	for _, f := range s.Fixtures {
 		senderTurns := []string{f.Incoming}
@@ -228,11 +248,32 @@ func TestSuite_CompensationNeverAllowsAutoSend(t *testing.T) {
 		}
 		n++
 		if f.ExpectedDecision == policy.Allow {
-			t.Errorf("%s names pay but expects allow", f.ID)
+			t.Errorf("%s@%s %s names pay but expects allow", s.Base.Name, s.Base.Version, f.ID)
 		}
 	}
 	if n == 0 {
-		t.Fatal("the suite has no compensation fixture")
+		t.Errorf("%s@%s: the suite has no compensation fixture", s.Base.Name, s.Base.Version)
+	}
+}
+
+// hr-recruiter 0.1.1 holds pay for the owner: its compensation intent is
+// approve-tier, so a reply labelled with it is no auto-send, while a
+// discovery reply to the same message still is, and is wrong.
+func TestHRRecruiter011_CompensationIsHeld(t *testing.T) {
+	base := hrVersion(t, "0.1.1")
+	target, err := Prepare(base, base, hrSuite(t, base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := serve(t, target, "outreach-05")
+	e.reply("compensation", cleanReply)
+	if rep := Score(target.Suite, target.Adaptation, []FixtureResult{e.task.Result()}, []string{"outreach-05"}); !rep.Passed {
+		t.Fatalf("compensation reply: %v", rep.Failures)
+	}
+	e = serve(t, target, "outreach-05")
+	e.reply("discovery", cleanReply)
+	if rep := Score(target.Suite, target.Adaptation, []FixtureResult{e.task.Result()}, []string{"outreach-05"}); rep.WrongAutoSends != 1 {
+		t.Fatalf("discovery reply: wrong auto-sends = %d, want 1", rep.WrongAutoSends)
 	}
 }
 

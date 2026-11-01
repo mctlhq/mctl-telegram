@@ -21,6 +21,12 @@ func TestSecurity_ServesHTML(t *testing.T) {
 	body := w.Body.String()
 	for _, must := range []string{
 		"Not zero-knowledge",
+		// contact cards, in-page nav, and the callout's anchor to Local Bridge
+		`<a href="mailto:security@mctl.ai">security@mctl.ai</a>`,
+		`<nav class="page-nav" aria-label="On this page">`,
+		`id="local-bridge-mode"`,
+		`<a href="#local-bridge-mode">Local Bridge mode</a>`,
+		"under one App ID",
 		// #853
 		`id="account-risk"`,
 		"The server does not retry a frozen account's refusals.",
@@ -42,7 +48,8 @@ func TestSecurity_ServesHTML(t *testing.T) {
 		// shared chrome — unified with landing/docs
 		`class="mctl-site-header"`,
 		`class="theme-toggle"`,
-		`<a href="/security" class="active">Security</a>`,
+		// legal pages left the top nav; the footer still links them
+		`<a href="/security">Security</a>`,
 		// mobile: wide table must sit in a horizontal-scroll wrapper
 		`class="table-scroll"`,
 	} {
@@ -60,8 +67,11 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 	}
 	body := w.Body.String()
 	for _, must := range []string{
-		"Claude, ChatGPT and other MCP users",
+		"Claude, ChatGPT, and other MCP users",
 		"Data inventory",
+		`<table class="inventory">`,
+		`<col class="col-where">`,
+		`<div class="callout">`,
 		"Communication Agent controls",
 		"incoming_events",
 		"conversation_messages",
@@ -73,6 +83,7 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 		"audit/verify",
 		// Telegram API terms §1.5 and §2.2 (#852)
 		`id="ai-use"`,
+		`<meta name="robots" content="noindex, follow">`,
 		"never uses message content, or anything derived from it, to train",
 		"switch off any setting that lets the provider use your conversations",
 		"MCTL Assistant, an unofficial third-party connector using the Telegram API",
@@ -81,7 +92,8 @@ func TestPrivacy_ServesHTML(t *testing.T) {
 		// shared chrome — unified with landing/docs
 		`class="mctl-site-header"`,
 		`class="theme-toggle"`,
-		`<a href="/privacy" class="active">Privacy</a>`,
+		// legal pages left the top nav; the footer still links them
+		`<a href="/privacy">Privacy</a>`,
 		// mobile: wide table must sit in a horizontal-scroll wrapper
 		`class="table-scroll"`,
 	} {
@@ -111,7 +123,7 @@ func TestPrivacy_DisclosesNotificationState(t *testing.T) {
 		// inventory rows
 		"client_notification_prefs",
 		"client_bot_reachability",
-		// the four reachability states, named rather than summarised
+		// the four reachability states, named rather than summarized
 		"cannot_initiate",
 		// the no-probe rule, which is the reason reachability is allowed to
 		// exist at all
@@ -145,18 +157,20 @@ func TestTerms_ServesHTML(t *testing.T) {
 	body := w.Body.String()
 	for _, must := range []string{
 		"Terms of",
-		"not affiliated with, endorsed by, or operated by Telegram, OpenAI or Anthropic",
+		"not affiliated with, endorsed by, or operated by Telegram, OpenAI, or Anthropic",
 		// Telegram API terms §2.2 and §1.5 (#852)
 		"unofficial third-party connector using the Telegram API (MTProto)",
 		"must not use it to train or fine-tune AI models",
 		"your own",
 		"read-only by default",
+		`<meta name="robots" content="noindex, follow">`,
 		"spam",
 		"without warranties of any kind",
 		"support@mctl.ai",
 		// shared chrome — unified with landing/docs
 		`class="mctl-site-header"`,
-		`<a href="/terms" class="active">Terms</a>`,
+		// legal pages left the top nav; the footer still links them
+		`<a href="/terms">Terms</a>`,
 	} {
 		if !strings.Contains(body, must) {
 			t.Fatalf("/terms missing %q", must)
@@ -248,7 +262,7 @@ func TestPrivacy_HasSupportContact(t *testing.T) {
 	if !strings.Contains(body, "support@mctl.ai") {
 		t.Fatal("/privacy missing support@mctl.ai")
 	}
-	if !strings.Contains(body, "Claude, ChatGPT and other MCP users") {
+	if !strings.Contains(body, "Claude, ChatGPT, and other MCP users") {
 		t.Fatal("/privacy missing MCP users section")
 	}
 }

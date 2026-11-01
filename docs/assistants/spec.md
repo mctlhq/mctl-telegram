@@ -40,6 +40,14 @@ How the pieces fit together end to end (versions, eval, publishing, runtime) and
 Worked example: [`assistants/hr-recruiter/assistant.yaml`](../../assistants/hr-recruiter/assistant.yaml)
 and [`install.example.yaml`](../../assistants/hr-recruiter/install.example.yaml).
 
+**Catalog layout.** An assistant's first version is
+`assistants/<name>/assistant.yaml`; each later version is
+`assistants/<name>/versions/<version>/assistant.yaml`, with its own
+instructions file beside it, so adding a version never touches an active
+one's files. The loader holds every definition to its directories (name and
+version). A version's eval suite, if it has one, is
+`assistants/<name>/eval/<version>/` ([adr-forks.md](adr-forks.md#suites)).
+
 ## Definition
 
 ```yaml
@@ -425,7 +433,10 @@ carries the text and no path, so it is complete without the repository.
   digest, so editing an active definition or its instructions (for
   `hr-recruiter`, `deploy/agent-worker/system-prompt.txt`) fails CI until the
   change ships as a new version. `hr-recruiter@0.1.0` is `public` and
-  `active` since P3.2.
+  `active` since P3.2. `hr-recruiter@0.1.1` (`public`, `active`) is 0.1.0
+  with pay held for the owner: a reply to a message that raises pay is
+  labelled with the approve-tier intent `compensation`, never `discovery` or
+  `schedule`, so it never goes out on its own in guarded mode (#602).
 - **Install from the registry (P3.4).** With `ASSISTANT_REGISTRY_ENABLED`
   on, an install fetches
   `GET /api/v1/assistant-catalog/{name}/versions/{version}/definition` from

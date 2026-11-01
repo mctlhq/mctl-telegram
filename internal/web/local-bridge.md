@@ -13,7 +13,7 @@ Turning it on is self-service. The zero-admin path is:
 4. `daemon` — keep it running
 
 Nobody has to flip a database flag, provision an account, or mint you a
-token. A brand-new Telegram id is provisioned directly into local mode, so
+token. A brand-new Telegram ID is provisioned directly into local mode, so
 tg.mctl.ai never holds a session for it.
 
 The first credential is **read-only**. Sending is a separate owner step.
@@ -51,7 +51,7 @@ stays reachable.
   server decides per account whether a call goes to the hosted session
   pool or to your daemon.
 - **Starting fresh creates no server-side session.** Running `activate`
-  for a brand-new Telegram id never stores `session_encrypted` here. If
+  for a brand-new Telegram ID never stores `session_encrypted` here. If
   you later migrate an existing hosted account, that sealed copy stays in
   the database until you terminate it from Telegram yourself. Migration
   is an operator step; see [Support and recovery](/docs/local-bridge/support).
@@ -61,7 +61,7 @@ stays reachable.
 These are current, not permanent. Plan around them.
 
 - Seven tools return an explicit error: `edit_message`, `delete_messages`,
-  `forward_messages`, `search_messages`, `set_reaction`, `draft_reply` and
+  `forward_messages`, `search_messages`, `set_reaction`, `draft_reply`, and
   `send_reply`. The daemon
   implements `list_dialogs`, `get_unread_messages`, `get_messages`,
   `send_message`, `send_media`, `prepare_get_media`, `get_media`, and
@@ -83,4 +83,4 @@ Until the daemon is running, tool calls return
 recoverable — it clears as soon as the daemon connects.
 
 Start at [Quick start](/docs/local-bridge/quickstart). Support, recovery,
-and `connect --token` are labelled as such and are not part of this path.
+and `connect --token` are labeled as such and are not part of this path.

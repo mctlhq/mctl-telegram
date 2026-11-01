@@ -65,6 +65,7 @@ func Privacy(publicBaseURL string, showManage bool) http.HandlerFunc {
 		NavActive:     "privacy",
 		PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
 		ShowManage:    showManage,
+		NoIndex:       true,
 	})
 }
 
@@ -76,5 +77,6 @@ func Terms(publicBaseURL string, showManage bool) http.HandlerFunc {
 		NavActive:     "terms",
 		PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
 		ShowManage:    showManage,
+		NoIndex:       true,
 	})
 }
