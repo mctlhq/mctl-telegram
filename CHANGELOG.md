@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.122.0](https://github.com/mctlhq/mctl-telegram/compare/0.121.1...0.122.0) (2026-11-01)
+
+
+### Features
+
+* **agent-worker:** add minimal OpenAI chat client ([467885c](https://github.com/mctlhq/mctl-telegram/commit/467885c77fc64dfea2b1c989019e703a190fef51))
+* **agent-worker:** add OpenAI token pricing ([ee9b4b3](https://github.com/mctlhq/mctl-telegram/commit/ee9b4b37376baf04058f369cc1b40b1bd7896193))
+* **agent-worker:** add OpenAI-compatible runner ([dee9c19](https://github.com/mctlhq/mctl-telegram/commit/dee9c19b47eaa586259c4e1aca54965634a18ce8))
+* **agent-worker:** classify provider 429 as usage limit ([67e4de0](https://github.com/mctlhq/mctl-telegram/commit/67e4de0625bdca8359a8a7ef2f7cb57f9a99d67a))
+* **agent-worker:** OpenAI-compatible runner behind shared tool set ([3138bd0](https://github.com/mctlhq/mctl-telegram/commit/3138bd0b47a12930ee7aa125e0f74be904395e1f))
+* **agent-worker:** select Claude or OpenAI runner ([74f0280](https://github.com/mctlhq/mctl-telegram/commit/74f0280e104680f7b0d1b0c1aeb5019fd8e802b3))
+* **agent-worker:** share tool definitions across runners ([a14c137](https://github.com/mctlhq/mctl-telegram/commit/a14c137841451ac50bb9081147b698491238ab79))
+
+
+### Bug Fixes
+
+* **agent-worker:** bound retries and preserve canceled-run cost ([1c151f8](https://github.com/mctlhq/mctl-telegram/commit/1c151f8b411b73274dc2e3aa66ffae6bd5703419))
+* **agent-worker:** default OpenAI user agent ([197026b](https://github.com/mctlhq/mctl-telegram/commit/197026b5477ff2ffc101e3d060572f78b7a3e3d9))
+* **agent-worker:** report cost with account token, restore guard rationale, fail closed on missing usage ([5aa4a0e](https://github.com/mctlhq/mctl-telegram/commit/5aa4a0e984387e1eb773c83c259bfc86f522bcad))
+
 ## [0.121.1](https://github.com/mctlhq/mctl-telegram/compare/0.121.0...0.121.1) (2026-11-01)
 
 
