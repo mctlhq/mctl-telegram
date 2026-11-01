@@ -13,6 +13,11 @@
    * tables and the grid background mirror mctl.ai (mctl-web: BaseButton,
    * BaseCard) and docs.mctl.ai (mctl-docs: custom.css tables), all built on
    * the same --site-* / --text-* roles.
+   *
+   * Accent discipline (@mctlhq/css 0.19.0): the accent marks the one primary
+   * button in a group and the highlighted word in an h1. Inline code, step
+   * numbers, secondary buttons, table keys, card hovers, nav and meta links
+   * are neutral, so the accented thing on a screen is the one that matters.
    */
   :root {
     --bg:            var(--surface-bg);
@@ -27,14 +32,12 @@
     --accent-2:      var(--status-ok);     /* terminal green */
     --warn:          var(--status-warn);
     --danger:        var(--status-bad);
-    --code-fg:       var(--accent-highlight);
+    /* Neutral borders for controls, from faint to hover. */
+    --border-interactive:       color-mix(in srgb, var(--surface-fg) 16%, transparent);
+    --border-interactive-hover: color-mix(in srgb, var(--surface-fg) 28%, transparent);
     --accent-2-soft: color-mix(in srgb, var(--accent-2) 14%, transparent);
     --warn-soft:     color-mix(in srgb, var(--warn) 14%, transparent);
   }
-  :root[data-theme="light"] {
-    --code-fg: var(--accent-text);
-  }
-
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
   /* Clip, not hidden, so this never creates a scroll container (which would
@@ -108,7 +111,17 @@
     transition: color .2s ease;
   }
   .site-nav a:hover,
-  .site-nav a.active { color: var(--accent-text); }
+  .site-nav a.active { color: var(--surface-fg); }
+  /* Manage is an account action, not a page: a quiet outlined chip next to
+     GitHub rather than one more text link. */
+  .site-nav a.nav-manage {
+    padding: 4px 12px;
+    border: 1px solid var(--border-interactive);
+    border-radius: var(--mctl-radius-md);
+    color: var(--surface-fg);
+  }
+  .site-nav a.nav-manage:hover,
+  .site-nav a.nav-manage.active { border-color: var(--border-interactive-hover); }
   .site-nav a.gh-link { display: inline-flex; align-items: center; }
   .site-nav a.gh-link svg { width: 18px; height: 18px; }
 
@@ -132,8 +145,8 @@
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: .14em;
-    color: var(--text-dim);
-    margin-bottom: 22px;
+    color: var(--marker-fg);
+    margin-bottom: var(--mctl-layout-hero-eyebrow-gap);
   }
   /* Entrance motion only when the user has not asked for less. It moves the
      text but never fades it, so a paused or skipped animation (background tab,
@@ -151,6 +164,7 @@
   }
   .status-dot {
     width: 8px; height: 8px;
+    flex-shrink: 0; /* a wrapping eyebrow squeezed it into an oval on phones */
     border-radius: 50%;
     background: var(--accent-2);
     box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-2) 60%, transparent);
@@ -169,7 +183,7 @@
     font-weight: var(--text-docs-hero-weight);
     line-height: var(--text-docs-hero-leading);
     letter-spacing: var(--text-docs-hero-tracking);
-    margin: 0 0 16px;
+    margin: 0 0 var(--mctl-layout-hero-title-gap);
     color: var(--text);
     overflow-wrap: break-word;
   }
@@ -177,10 +191,10 @@
   h1 .slash { color: var(--muted); margin: 0 .15em; }
   .lead {
     font-size: 17px;
-    line-height: 1.55;
+    line-height: 1.65;
     color: var(--text-dim);
-    margin: 0 0 32px;
-    max-width: 62ch;
+    margin: 0 0 var(--mctl-layout-hero-actions-gap);
+    max-width: var(--mctl-layout-measure-lede);
     text-wrap: pretty;
   }
 
@@ -242,20 +256,30 @@
 
   /* ===== Body content ===== */
   p { color: var(--text-dim); margin: 0 0 14px; text-wrap: pretty; }
+  /* Long-form pages read at the prose leading. */
+  .page p, .page li { line-height: var(--text-prose-leading); }
   /* Content links only: chrome links (header, footer, buttons) reset the
-     underline themselves, so it never leaks into the nav. */
-  a { color: var(--accent-text); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); transition: border-color .15s, color .15s; }
-  a:hover { border-bottom-color: var(--accent); }
+     underline themselves, so it never leaks into the nav. A link is
+     foreground text with an accent underline; the accent fills in on hover. */
+  a {
+    color: var(--text);
+    text-decoration: underline;
+    text-decoration-color: var(--link-underline);
+    text-decoration-thickness: 1px;
+    text-underline-offset: 4px;
+    transition: text-decoration-color .15s, color .15s;
+  }
+  a:hover { color: var(--accent-text); text-decoration-color: var(--accent); }
 
   code, pre, .mono {
     font-family: var(--font-mono);
   }
   code {
-    background: var(--surface-2);
+    background: var(--code-bg);
     border: 1px solid var(--border);
-    padding: 1px 6px;
+    padding: .12em .38em;
     border-radius: var(--mctl-radius-md);
-    font-size: .85em;
+    font-size: .875em;
     color: var(--code-fg);
     /* break-word, not anywhere: a token that fits on a line moves to the next
        line whole instead of splitting mid-word (scope names, URLs), and only a
@@ -264,6 +288,10 @@
     overflow-wrap: break-word;
   }
   a code { color: inherit; }
+  /* A URL or a flag reads as one token: never split it at a hyphen. A URL
+     longer than the line still breaks, because .url (below) allows it. */
+  code.url, code.nowrap { white-space: nowrap; }
+  @media (max-width: 640px) { code.url { white-space: normal; } }
 
   pre {
     background: var(--bg-elev);
@@ -310,16 +338,24 @@
     font-weight: var(--mctl-typography-font-weight-medium);
     line-height: 1.4;
     padding: 8px 20px;
-    border: 1px solid var(--accent);
+    border: 1px solid transparent;
     border-radius: var(--mctl-radius-md);
     cursor: pointer;
     text-decoration: none;
     transition: background-color .2s ease, color .2s ease, border-color .2s ease;
   }
-  .btn, .cta-btn { background: var(--accent); color: var(--accent-fg); }
-  .btn:hover, .cta-btn:hover { background: transparent; color: var(--accent-text); border-color: var(--accent); }
-  .btn-secondary { background: transparent; color: var(--accent-text); }
-  .btn-secondary:hover { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+  /* Primary: the one accented control in a group. Secondary: neutral. */
+  .btn, .cta-btn { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+  .btn:hover, .cta-btn:hover { background: var(--accent-highlight); border-color: var(--accent-highlight); }
+  .btn-secondary {
+    background: color-mix(in srgb, var(--surface-fg) 2.5%, transparent);
+    color: var(--text);
+    border-color: var(--border-interactive);
+  }
+  .btn-secondary:hover {
+    background: color-mix(in srgb, var(--surface-fg) 5%, transparent);
+    border-color: var(--border-interactive-hover);
+  }
   .btn:focus-visible, .cta-btn:focus-visible, .btn-secondary:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
@@ -330,7 +366,7 @@
   }
 
   /* ===== Cards (mctl.ai BaseCard) ===== */
-  /* Neutral hairline at rest; accent border + shadow on hover. */
+  /* Neutral hairline at rest; a stronger neutral border + shadow on hover. */
   .use-card, .trust-card, .faq-item {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -338,7 +374,7 @@
     transition: border-color .3s ease, box-shadow .3s ease, transform .3s ease;
   }
   .use-card:hover, .trust-card:hover, .faq-item:hover {
-    border-color: var(--accent);
+    border-color: var(--border-interactive-hover);
     box-shadow: var(--shadow-md);
   }
   @media (prefers-reduced-motion: no-preference) {
@@ -373,9 +409,9 @@
     place-items: center;
     font-family: var(--font-mono);
     font-size: 12px;
-    color: var(--accent-text);
-    background: var(--accent-soft);
-    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    color: var(--marker-fg);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
     border-radius: var(--mctl-radius-md);
   }
   ol.steps strong { color: var(--text); font-weight: 600; }
@@ -424,7 +460,7 @@
     margin: 16px 0;
     font-size: 14px;
     line-height: 1.55;
-    border: 1px solid color-mix(in srgb, var(--accent) 15%, transparent);
+    border: 1px solid var(--border);
   }
   .tbl th, .tbl td,
   .table-scroll > table th, .table-scroll > table td,
@@ -432,18 +468,18 @@
     text-align: left;
     vertical-align: top;
     padding: 8px 16px;
-    border: 1px solid color-mix(in srgb, var(--accent) 10%, transparent);
+    border: 1px solid var(--border);
     color: var(--text);
   }
   .tbl th, .table-scroll > table th, .doc table th {
     font-weight: var(--mctl-typography-font-weight-semibold);
-    background: color-mix(in srgb, var(--accent) 6%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--surface-2);
+    border-color: var(--border);
   }
   .tbl tbody tr:nth-child(2n),
   .table-scroll > table tbody tr:nth-child(2n),
   .doc table tbody tr:nth-child(2n) {
-    background: color-mix(in srgb, var(--accent) 3%, transparent);
+    background: color-mix(in srgb, var(--surface-fg) 2%, transparent);
   }
   .tbl td code, .tbl th code {
     background: transparent;
@@ -452,7 +488,7 @@
     color: var(--text);
     font-size: 13px;
   }
-  .tbl td:first-child code { color: var(--accent-text); font-weight: 500; }
+  .tbl td:first-child code { color: var(--text); font-weight: 600; }
 
   /* ===== Pills / badges ===== */
   .badge, .pill {
@@ -471,20 +507,22 @@
     vertical-align: middle;
   }
   .badge.mcp {
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+    background: var(--surface-2);
+    color: var(--text);
+    border-color: var(--border);
   }
   .badge.mcp::before {
     content: "";
     width: 6px; height: 6px;
-    background: var(--accent);
+    background: var(--status-ok);
     border-radius: 50%;
   }
+  /* Read is neutral, write is the warning tint: only the mode that can
+     change something is coloured. */
   .pill-read {
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+    background: var(--surface-2);
+    color: var(--text-dim);
+    border-color: var(--border);
   }
   .pill-write {
     background: var(--status-warn-soft);
@@ -492,7 +530,65 @@
     border-color: color-mix(in srgb, var(--warn) 30%, transparent);
   }
 
+  .badge.ok {
+    background: var(--status-ok-soft);
+    color: var(--status-ok-text);
+    border-color: color-mix(in srgb, var(--status-ok) 30%, transparent);
+  }
+
+  /* ===== In-page navigation: a row of neutral pills ===== */
+  .page-nav {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 24px 0 8px;
+    font-size: 14px;
+  }
+  .page-nav .page-nav-label { color: var(--muted); margin-right: 4px; }
+  .page-nav a {
+    padding: 4px 10px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--surface-fg) 4%, transparent);
+    color: var(--text-dim);
+    text-decoration: none;
+    transition: background .15s, color .15s;
+  }
+  .page-nav a:hover { background: color-mix(in srgb, var(--surface-fg) 8%, transparent); color: var(--text); }
+
+  /* ===== Neutral note: runtime status, placeholders, info ===== */
+  .note {
+    margin: 16px 0;
+    padding: 10px 14px;
+    border-left: 2px solid var(--border-interactive);
+    background: color-mix(in srgb, var(--surface-fg) 2.5%, transparent);
+    border-radius: 0 var(--mctl-radius-md) var(--mctl-radius-md) 0;
+    color: var(--text-dim);
+    font-size: 14px;
+  }
+  .note > :last-child { margin-bottom: 0; }
+
+  /* ===== Card grid inside article pages ===== */
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+    margin: 16px 0;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--mctl-radius-lg);
+    padding: 20px 24px;
+  }
+  .card > :last-child { margin-bottom: 0; }
+
   .muted { color: var(--muted); font-size: 13px; }
+  /* Meta link rows (hero micro-links, guide credits): muted, no underline,
+     foreground on hover. .meta-em keeps the one link worth noticing. */
+  .muted a { color: var(--muted); text-decoration: none; }
+  .muted a:hover { color: var(--text); }
+  .muted a.meta-em { color: var(--text-dim); text-decoration: underline; text-decoration-color: var(--link-underline); }
 
   /* ===== Light/dark toggle ===== */
   .theme-toggle {
@@ -523,7 +619,9 @@
 
   /* ===== Site footer (site.css .mctl-site-footer) ===== */
   .mctl-site-footer .wordmark { font-size: 20px; }
-  .mctl-site-footer a { border-bottom: 0; text-decoration: none; transition: color .2s ease; }
+  .mctl-site-footer a { border-bottom: 0; text-decoration: none; color: var(--muted); transition: color .2s ease; }
+  .mctl-site-footer a:hover { color: var(--text); }
+  .mctl-site-footer a.brand { color: var(--surface-fg); }
   .mctl-site-footer .service { margin: 0; font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
   .mctl-site-footer code { font-size: inherit; background: transparent; border: 0; padding: 0; color: inherit; }
 
@@ -536,7 +634,9 @@
   /* Section anchor offset: clear the sticky header. */
   section, h2[id] { scroll-margin-top: calc(var(--site-header-height) + 16px); }
 
-  /* ===== Mobile header: CSS-only menu below 768px ===== */
+  /* ===== Narrow header: CSS-only menu below 768px ===== */
+  /* The header carries the product pages only (legal pages live in the hero
+     meta row and the footer), so it fits down to tablet width. */
   @media (max-width: 767px) {
     .mctl-site-header { height: 64px; }
     /* Keep the anchor offset in step with the 64px mobile bar. */
@@ -583,6 +683,7 @@
     .nav-toggle:checked ~ .site-nav { display: flex; }
     .site-nav a { padding: 12px 0; font-size: 1rem; border-bottom: 1px solid var(--border); }
     .site-nav a:last-child { border-bottom: 0; }
+    .site-nav a.nav-manage { padding: 12px 0; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; }
     .site-nav a.gh-link { gap: 8px; }
     .site-nav a.gh-link::after { content: "GitHub"; }
   }

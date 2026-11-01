@@ -1,0 +1,30 @@
+schema: mctl-telegram.product-update/v1
+id: acquisition-report
+kind: new_tool
+title: Admins can see which channels bring new users
+summary: >-
+  Operators with the admin users scope can call get_acquisition_report to
+  see, for a chosen window of up to 90 days, how many people signed up per
+  source, how many of them made at least one tool call and how many came
+  back on two or more days. The source is recorded once, when an account is
+  created, from the first public page the person opened: the UTM tags on
+  that link, the referring site's host name and the MCP client they
+  connected with. No IP address, user agent or page path is kept, the
+  record is deleted with the account, and the privacy page describes the
+  short-lived first-party cookie that carries it. This tool is for
+  operators; it changes nothing for everyday use.
+locale: en
+delivery: docs_only
+high_value: false
+tools: [get_acquisition_report]
+evidence:
+  from: 0.118.0
+  changes:
+    - {tool: get_acquisition_report, change: added}
+status: approved
+provenance:
+  author: mashkovd
+  assisted_by: claude-fable-5-1
+  reviewed_by: mashkovd
+created_at: "2026-11-01"
+reviewed_at: "2026-11-01"

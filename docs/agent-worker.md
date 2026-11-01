@@ -116,7 +116,7 @@ exactly one file. It carries:
 - `mctl_agent_credential_domain{domain_id=...}` — the info gauge described
   above.
 - `mctl_agent_jobs_total` (6 children) and `mctl_agent_policy_denials_total`
-  (138 children), all at a **constant zero**. These are server-side families:
+  (168 children), all at a **constant zero**. These are server-side families:
   `AgentJobsTotal` is incremented only in `internal/agent/queue`, and
   `CountPolicyDenial` only in `internal/agentapi` and `internal/agent/executor`
   — none of which run in this process. They appear here because `metrics.New()`
@@ -138,7 +138,7 @@ the first — and possibly only — occurrence they exist for (issue #591).
 it is the denominator of `MctlAgentJobCostHigh` and a lazy denominator makes the
 first completed job after a restart read as zero completions.
 `mctl_agent_policy_denials_total` is pre-created too, across its full
-23 x 6 = 138 label space. It was originally left lazy on the grounds that
+24 x 7 = 168 label space. It was originally left lazy on the grounds that
 `MctlAgentPolicyDenialRateHigh`'s `> 4` floor means one first denial cannot
 fire it — true, and beside the point: if the first *five* denials for one
 reason land between two scrapes, the series is first observed at 5, every later
@@ -279,8 +279,11 @@ carries `install_revision`, the account's install revision at claim time
 (logged with the assistant and digest; see `docs/assistants/spec.md`), and
 `tools`, the definition's tool names (a canonical name or a generic
 alias for each tool, see `docs/assistants/spec.md`); the worker passes them
-to the MCP server as `AGENT_JOB_TOOLS` and allows exactly those names. A job
-whose names do not cover every tool fails before `claude` starts. A prompt
+to the MCP server as `AGENT_JOB_TOOLS` and allows exactly those names. The names
+may be a subset; a job whose names leave out `get_event` or
+`complete_agent_job`, name a tool twice or name an unknown tool fails before
+`claude` starts. The agent API enforces the subset itself from the job
+token, so the worker's list is not the boundary. A prompt
 change therefore ships with the server release. `AGENT_SYSTEM_PROMPT` is the
 fallback for a server without the catalog and should still be the contents
 of `deploy/agent-worker/system-prompt.txt`, the canonical guarded prompt that
@@ -556,24 +559,35 @@ fake shell script for `ClaudeBin` to assert on the exact CLI invocation
 network.
 
 The C1 observe-mode model evaluation is intentionally opt-in because it runs
-30 real Claude Code turns and consumes quota:
+32 real Claude Code turns and consumes quota:
 
 ```bash
 AGENT_C1_EVAL=1 go test ./internal/agentworker \
   -run TestC1ObserveEval -count=1 -v
 ```
 
-It builds the real `cmd/agent-worker`, starts its real job-scoped stdio MCP
-server, and uses a local fake Agent API to feed
-`testdata/c1-fixtures.jsonl` and record durable effects. Acceptance is
-classification ≥29/32, terminal completion 32/32, zero restricted-data
-echoes and owner-voice markers, and zero job/conversation/attempt binding violations. Normal
-`go test ./...` skips the model evaluation and spends no model quota.
+It builds the real `cmd/agent-worker` and starts its real job-scoped stdio
+MCP server. The fixtures, values and threshold come from hr-recruiter@0.1.0's
+eval suite, `assistants/hr-recruiter/eval/0.1.0/`, and the fake Agent API and
+scorer from `internal/agenteval`, which P4.3's server-side fork evals share
+(docs/assistants/adr-forks.md, Promotion). The fake records durable effects,
+enforces the definition's tool set as the production tool gate does, and
+judges every proposed reply with the real policy engine as a guarded dry run;
+the model itself is always told the reply is pending approval.
+
+Acceptance is classification ≥29/32, terminal completion 32/32, zero
+restricted-data echoes and owner-voice markers, zero job/conversation/attempt
+binding violations, and zero **wrong auto-sends**: a reply the guarded dry run
+would send on its own where the fixture's `expected_decision` is not `allow`
+(for example any reply to a message that names pay), or one that carries a
+forbidden marker. Normal `go test ./...` skips the model evaluation and spends
+no model quota.
 
 For diagnosis only, `AGENT_C1_EVAL_FILTER` accepts a comma-separated list of
 fixture IDs. A filtered run requires every selected fixture to classify
-correctly and still enforces terminal completion, zero leaks, and zero binding
-violations. It does not replace the required single unfiltered 32-fixture gate:
+correctly and still enforces terminal completion, zero leaks, zero binding
+violations and zero wrong auto-sends. It does not replace the required single
+unfiltered 32-fixture gate:
 
 ```bash
 AGENT_C1_EVAL=1 \
@@ -584,7 +598,8 @@ go test ./internal/agentworker -run TestC1ObserveEval -count=1 -v
 By default the eval uses its own observe-mode prompt,
 `internal/agentworker/testdata/c1-system-prompt.txt`, as the worker's fallback
 prompt. `AGENT_C1_EVAL_PROMPT=catalog` instead renders `hr-recruiter` from the
-compiled-in catalog for its example install, the way the claim handler does,
+compiled-in catalog with the suite's values and no owner notes, the way the
+claim handler renders an install,
 and delivers it as the job's `instructions` with no fallback. Use it to check a
 change to the catalog prompt or to the rendering:
 

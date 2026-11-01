@@ -8,131 +8,272 @@
 
   /* Layout (hero, section titles, card grid) is site.css: .mctl-site-*. */
 
-  /* Inside the hero text stack the grid gap spaces the items. */
-  .mctl-site-hero__text > * { margin: 0; }
+  /* The hero stack is spaced by site.css's rhythm (eyebrow 20px, title to
+     lede 24px, lede to actions 40px); the lede is one sentence. */
+  .mctl-site-hero__lede { max-width: 44ch; }
 
-  /* Use-case cards */
-  .use-card { padding: 20px; }
-  .use-card .card-icon {
-    width: 36px; height: 36px;
-    margin-bottom: 14px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--accent-soft);
-    border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
-    border-radius: var(--mctl-radius-md);
-    color: var(--accent);
-    flex-shrink: 0;
-  }
-  .use-card .card-icon svg {
-    width: 18px; height: 18px;
-    stroke-width: 1.75;
-  }
-  .use-card h3 {
-    font-family: var(--font-display), system-ui, sans-serif;
-    font-size: 16px;
-    font-weight: 600;
-    color: var(--text);
-    margin: 0 0 8px;
-  }
-  .use-card p {
-    font-size: 14px;
-    color: var(--text-dim);
-    margin: 0;
-    line-height: 1.55;
-  }
-
-  /* How it works flow diagram */
-  .flow-diagram {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0;
-    margin: 24px 0;
-  }
-  .flow-node {
-    background: var(--surface);
-    border: 1px solid var(--border);
+  /* Usage strip: four deployment-wide counts under the actions. Rendered
+     only when a sample exists (see landingData.Stats); refreshed in place by
+     the script at the bottom of the page. The strip takes the hero's
+     actions-to-meta gap from site.css; the note sits tight under it and
+     the meta row keeps its own gap below the note. */
+  .stats-strip {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    border: 1px solid var(--surface-line);
     border-radius: var(--mctl-radius-lg);
-    padding: 16px 24px;
-    text-align: center;
-    min-width: 140px;
-  }
-  .flow-node .node-name {
-    font-family: var(--font-mono);
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text);
-    display: block;
-  }
-  .flow-node .node-label {
-    font-size: 12px;
-    color: var(--text-dim);
-    display: block;
-    margin-top: 4px;
-  }
-  .flow-arrow {
-    color: var(--accent);
-    padding: 0 4px;
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-  }
-
-  /* Trust section */
-  .trust-card { padding: 24px; }
-  .trust-card ul {
-    margin: 12px 0;
-    padding-left: 20px;
-    color: var(--text-dim);
-  }
-  .trust-card li { margin-bottom: 8px; font-size: 14px; line-height: 1.6; }
-  .trust-card li strong { color: var(--text); }
-  .trust-card .trust-links {
-    margin-top: 16px;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px 20px;
-    font-size: 14px;
-  }
-
-  /* FAQ */
-  .faq-list {
-    margin: 0;
-    padding: 0;
-  }
-  .faq-item {
-    margin-bottom: 10px;
+    background: var(--surface-elevated);
     overflow: hidden;
   }
-  .faq-item dt {
-    font-weight: 600;
-    color: var(--text);
-    padding: 14px 18px;
-    font-size: 15px;
-    cursor: default;
+  .stat { padding: 18px 22px; min-width: 0; border-left: 1px solid var(--surface-line); }
+  .stat:first-child { border-left: 0; }
+  .stat__value {
+    display: block;
+    font-family: var(--font-display), system-ui, sans-serif;
+    font-weight: 800;
+    font-size: clamp(26px, 2.6vw, 34px);
+    line-height: 1.1;
+    letter-spacing: -.02em;
+    color: var(--surface-fg);
+    font-variant-numeric: tabular-nums;
   }
-  .faq-item dd {
+  .stat__label {
+    display: block;
+    margin-top: 6px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--marker-fg);
+  }
+  .mctl-site-hero__text > .stats-strip + .stats-note { margin-top: 10px; }
+  .stats-note {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 0;
+    font-family: var(--font-mono);
+    font-size: 11px; letter-spacing: .06em;
+    color: var(--surface-fg-subtle);
+  }
+  .live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--status-ok); flex-shrink: 0; }
+  @media (max-width: 760px) {
+    .stats-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .stat:nth-child(3) { border-left: 0; }
+    .stat:nth-child(n+3) { border-top: 1px solid var(--surface-line); }
+  }
+
+  /* Hero: URL box, chips, legal line. The URL and its Copy button share one
+     bordered box; the chips are informational, not links. */
+  .mctl-site-hero__actions { align-items: stretch; }
+  .url-box {
+    display: flex; align-items: stretch; min-width: 0;
+    border: 1px solid var(--border-interactive);
+    border-radius: var(--mctl-radius-md);
+    background: var(--surface-elevated);
+    overflow: hidden;
+  }
+  .url-box code {
+    display: flex; align-items: center; min-width: 0;
+    padding: 0 16px;
+    font-family: var(--font-mono); font-size: 14px;
+    color: var(--surface-fg);
+    background: none; border: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .url-box .cta-btn { border-radius: 0; flex-shrink: 0; }
+  .hero-chips {
+    margin-top: 20px;
+    display: flex; flex-wrap: wrap; justify-content: center; gap: 8px;
+  }
+  .hero-chips span {
+    padding: 4px 10px;
+    border-radius: var(--mctl-radius-md);
+    background: color-mix(in srgb, var(--surface-fg) 4%, transparent);
+    font-size: 13px; color: var(--surface-fg-muted);
+  }
+  .hero-chips + .stats-strip { margin-top: 56px; }
+  /* Telegram API terms 2.2: the Telegram-API fact stays in the first screen. */
+  .hero-legal {
+    margin: 20px auto 0; max-width: 70ch;
+    font-size: 13px; line-height: 1.6; color: var(--surface-fg-subtle);
+  }
+
+  /* Section rhythm for the shortened page. */
+  .section-note { margin: 20px 0 0; text-align: center; font-size: 14px; color: var(--surface-fg-subtle); }
+  .mono-label {
+    font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: .12em; text-transform: uppercase;
+    color: var(--surface-fg-subtle);
+  }
+
+  /* Use-case cards: a label and one example prompt. */
+  .use-card { padding: 24px; display: flex; flex-direction: column; gap: 14px; }
+  .use-card p {
     margin: 0;
-    padding: 12px 18px 14px;
-    color: var(--text-dim);
-    font-size: 14px;
-    line-height: 1.6;
-    border-top: 1px solid var(--border);
+    font-family: var(--font-display), system-ui, sans-serif;
+    font-size: 20px; font-weight: 500; line-height: 1.4; letter-spacing: -.01em;
+    color: var(--surface-fg);
   }
+
+  /* How it works: three nodes joined by labelled connectors. */
+  .flow-diagram {
+    display: flex; align-items: center; justify-content: center;
+    gap: 0; margin: 0;
+  }
+  .flow-node {
+    background: var(--surface-card);
+    border: 1px solid var(--surface-line);
+    border-radius: var(--mctl-radius-lg);
+    padding: 20px 28px;
+    text-align: center;
+    min-width: 180px;
+  }
+  .flow-node.strong { border-color: var(--surface-line-strong); }
+  .flow-node .node-name {
+    display: block;
+    font-family: var(--font-mono); font-size: 14px; font-weight: 600;
+    color: var(--surface-fg);
+  }
+  .flow-node .node-label {
+    display: block; margin-top: 4px;
+    font-size: 13px; color: var(--surface-fg-muted);
+  }
+  .flow-link {
+    width: 150px; flex-shrink: 0;
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: .1em; text-transform: uppercase;
+    color: var(--surface-fg-subtle);
+  }
+  .flow-link::after { content: ""; width: 100%; height: 1px; background: var(--surface-line-strong); }
+
+  /* Connect: segmented tabs over numbered step rows. Without JS every panel
+     is shown, each under its own heading; the script turns the headings into
+     a tablist. */
+  .connect-col { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+  .tabs {
+    align-self: center; display: flex; gap: 4px; padding: 4px;
+    max-width: 100%; overflow-x: auto;
+    border: 1px solid var(--surface-line);
+    border-radius: var(--mctl-radius-lg);
+    background: var(--surface-elevated);
+  }
+  .tabs[hidden] { display: none; }
+  .tabs button {
+    padding: 8px 18px; font: inherit; font-size: 14px; font-weight: 500;
+    white-space: nowrap; cursor: pointer;
+    border: 0; border-radius: var(--mctl-radius-md);
+    background: transparent; color: var(--surface-fg-muted);
+  }
+  .tabs button[aria-selected="true"] { background: var(--surface-card); color: var(--surface-fg); }
+  .tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .tabpanel { display: flex; flex-direction: column; gap: 10px; }
+  .tabpanel[hidden] { display: none; }
+  .tabpanel > h3 { margin: 12px 0 0; font-size: 16px; font-weight: 600; color: var(--surface-fg); }
+  .js-tabs .tabpanel > h3 { display: none; }
+  .step-row {
+    display: flex; gap: 16px; align-items: center;
+    padding: 16px 18px;
+    border: 1px solid var(--surface-line);
+    border-radius: var(--mctl-radius-lg);
+    background: var(--surface-card);
+    color: var(--surface-fg-muted);
+  }
+  .step-row > .num {
+    width: 28px; height: 28px; flex-shrink: 0;
+    display: grid; place-items: center;
+    font-family: var(--font-mono); font-size: 12px;
+    color: var(--surface-fg-subtle);
+    border: 1px solid var(--surface-line); border-radius: var(--mctl-radius-md);
+  }
+  .step-row > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+  .step-row strong { color: var(--surface-fg); font-weight: 600; }
+  .tabpanel pre {
+    margin: 0; padding: 16px 18px;
+    font-family: var(--font-mono); font-size: 13px; line-height: 1.55;
+    background: var(--surface-elevated);
+    border: 1px solid var(--surface-line);
+    border-radius: var(--mctl-radius-lg);
+    color: var(--surface-fg); overflow-x: auto;
+  }
+  .tabpanel pre .c { color: var(--surface-fg-subtle); }
+  .tabpanel .foot { margin: 6px 0 0; font-size: 13px; color: var(--surface-fg-subtle); text-align: center; }
+  .tabpanel .after { margin: 0; text-align: center; color: var(--surface-fg-muted); }
+  .tag-untested {
+    align-self: center; padding: 2px 8px;
+    font-family: var(--font-mono); font-size: 10.5px; font-weight: 600;
+    letter-spacing: .08em; text-transform: uppercase;
+    border-radius: var(--mctl-radius-md);
+    background: var(--status-warn-soft); color: var(--status-warn-text);
+  }
+
+  /* Your data: three cells divided by 1px gaps over the line colour. */
+  .data-grid {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px;
+    background: var(--surface-line);
+    border: 1px solid var(--surface-line);
+    border-radius: var(--mctl-radius-lg);
+    overflow: hidden;
+  }
+  .data-cell { padding: 28px; background: var(--surface-card); display: flex; flex-direction: column; gap: 12px; }
+  .data-cell .big { font-size: 18px; font-weight: 600; line-height: 1.4; color: var(--surface-fg); }
+  .data-cell .small { font-size: 14px; color: var(--surface-fg-muted); }
+  .links-row { margin-top: 20px; display: flex; flex-wrap: wrap; justify-content: center; gap: 8px 28px; font-size: 14px; }
+
+  /* Local Bridge banner. */
+  .bridge {
+    max-width: 960px; margin: 0 auto; padding: 24px 28px;
+    display: flex; align-items: center; gap: 24px;
+    background: var(--surface-elevated);
+    border: 1px solid var(--surface-line);
+    border-radius: var(--mctl-radius-lg);
+  }
+  .bridge > div { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .bridge .title { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 18px; font-weight: 600; color: var(--surface-fg); }
+  .bridge .sub { font-size: 14px; color: var(--surface-fg-muted); }
+  .bridge .btn-secondary { white-space: nowrap; }
+  .beta {
+    padding: 2px 8px;
+    font-family: var(--font-mono); font-size: 10.5px; font-weight: 600;
+    letter-spacing: .08em; text-transform: uppercase;
+    border: 1px solid var(--surface-line); border-radius: var(--mctl-radius-md);
+    color: var(--surface-fg-muted);
+  }
+
+  /* FAQ: native <details>, no cards. */
+  .faq-col { max-width: 760px; margin: 0 auto; border-top: 1px solid var(--surface-line); }
+  .faq-col details { border-bottom: 1px solid var(--surface-line); }
+  .faq-col summary {
+    display: flex; justify-content: space-between; align-items: center; gap: 16px;
+    padding: 18px 4px; cursor: pointer; list-style: none;
+    font-size: 16px; font-weight: 600; color: var(--surface-fg);
+  }
+  .faq-col summary::-webkit-details-marker { display: none; }
+  .faq-col summary::after { content: "+"; font-family: var(--font-mono); font-size: 18px; color: var(--surface-fg-subtle); }
+  .faq-col details[open] summary::after { content: "\2212"; }
+  .faq-col summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .faq-col .answer { margin: 0; padding: 0 4px 18px; max-width: 64ch; font-size: 15px; line-height: 1.6; color: var(--surface-fg-muted); }
+
+  /* Publisher line, replacing the old Support section. */
+  .publisher { max-width: 70ch; margin: 0 auto; text-align: center; font-size: 13px; line-height: 1.6; color: var(--surface-fg-subtle); }
 
   /* Landing entrance motion (keyframes in components.css): moves, never fades. */
   @media (prefers-reduced-motion: no-preference) {
     .mctl-site-hero__actions { animation: riseIn .5s  cubic-bezier(.22,.68,0,1.2) .32s backwards; }
-    .mctl-site-hero .muted   { animation: riseIn .45s cubic-bezier(.22,.68,0,1.2) .40s backwards; }
+    .hero-chips { animation: riseIn .45s cubic-bezier(.22,.68,0,1.2) .40s backwards; }
   }
 
   /* Responsive — landing-specific only; shared breakpoints live in components.css */
+  @media (max-width: 760px) {
+    .data-grid { grid-template-columns: 1fr; }
+  }
   @media (max-width: 640px) {
     .flow-diagram { flex-direction: column; }
-    .flow-arrow { transform: rotate(90deg); padding: 4px 0; }
-    .mctl-site-hero__actions { flex-direction: column; align-items: flex-start; }
+    .flow-node { min-width: 0; width: 100%; max-width: 280px; }
+    .flow-link { width: auto; flex-direction: row; gap: 10px; padding: 8px 0; }
+    .flow-link::after { width: 1px; height: 22px; }
+    .mctl-site-hero__actions { flex-direction: column; align-items: stretch; }
+    .bridge { flex-direction: column; align-items: flex-start; }
   }
 </style>
 </head>
@@ -147,230 +288,183 @@
     <div class="mctl-site-hero__text">
     <div class="eyebrow">
       <span class="status-dot" aria-hidden="true"></span>
-      <span>MCTL Assistant · Unofficial third-party connector using the Telegram API</span>
+      <span>Unofficial Telegram connector · MCP</span>
     </div>
     <h1 class="mctl-site-hero__title">Your authorized Telegram account,<br><span class="accent">inside Claude</span></h1>
     <p class="mctl-site-hero__lede">
-      Add tg.mctl.ai as a custom connector in Claude — on the web, in the desktop and mobile apps, or in Claude Code — and ask Claude to summarise chats, search messages, and draft replies in the Telegram account you own. ChatGPT can add it by URL too; other MCP clients are not yet tested. New accounts start read-only unless you choose <em>Read + send</em> when you connect.
+      Summarize chats, search messages and draft replies in your own Telegram account — just by asking Claude.
     </p>
     <div class="mctl-site-hero__actions">
-      <a class="cta-btn" href="#claude">Connect in Claude</a>
-      <a class="btn-secondary" href="https://claude.ai/new#customize/connectors/yours" target="_blank" rel="noopener">Open Claude connectors</a>
-      <button class="btn-secondary" type="button" id="copy-mcp-url" data-url="{{.MCPURL}}">Copy MCP URL</button>
-      <a href="/docs#setup">See the docs</a>
+      <div class="url-box">
+        <code>{{.MCPURL}}</code>
+        <button class="cta-btn" type="button" id="copy-mcp-url" data-url="{{.MCPURL}}" aria-label="Copy MCP URL">Copy</button>
+      </div>
+      <a class="btn-secondary" href="https://claude.ai/new#customize/connectors/yours" target="_blank" rel="noopener">Open Claude connectors &#8599;</a>
     </div>
-    <p class="muted">
-      <a href="/privacy">Privacy policy</a> · <a href="/security">Security model</a> ·
-      <a href="mailto:support@mctl.ai">support@mctl.ai</a>
-      · Want the session on your own machine? <a href="/docs/local-bridge">Local Bridge</a>
-    </p>
+    <div class="hero-chips">
+      <span>Claude web · desktop · mobile · Code</span>
+      <span>ChatGPT by URL</span>
+      <span>Read-only by default</span>
+      <span>Open source</span>
+    </div>
+    {{if .Stats}}
+    <div class="stats-strip" id="stats" aria-label="Usage so far">
+      <div class="stat"><span class="stat__value" data-stat="tool_calls_total">{{fmtCount .Stats.ToolCallsTotal}}</span><span class="stat__label">tool calls</span></div>
+      <div class="stat"><span class="stat__value" data-stat="accounts_total">{{fmtCount .Stats.AccountsTotal}}</span><span class="stat__label">connected accounts</span></div>
+      <div class="stat"><span class="stat__value" data-stat="active_users_30d">{{fmtCount .Stats.ActiveUsers30d}}</span><span class="stat__label">active last 30 days</span></div>
+      <div class="stat"><span class="stat__value" data-stat="sessions_connected">{{fmtCount .Stats.SessionsConnected}}</span><span class="stat__label">connected sessions</span></div>
+    </div>
+    <p class="stats-note"><span class="live-dot" aria-hidden="true"></span><span>live · since Aug 2026 · updated <time id="stats-updated" datetime="{{.Stats.UpdatedAt.Format "2006-01-02T15:04:05Z07:00"}}">{{.Stats.UpdatedAt.Format "15:04"}} UTC</time></span></p>
+    {{end}}
+    <p class="hero-legal">MCTL Assistant is an unofficial third-party connector using the Telegram API. Not affiliated with Telegram, Anthropic or OpenAI.</p>
     </div>
   </section>
 
   <!-- ============ Use cases ============ -->
   <section id="use-cases" class="mctl-site-container mctl-site-section">
-    <h2 class="mctl-site-section__title">What you can do</h2>
+    <h2 class="mctl-site-section__title">What you can ask</h2>
     <div class="mctl-site-grid">
-      <div class="use-card">
-        <span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
-        <h3>Summarise unread chats</h3>
-        <p>Ask Claude what you missed while you were away. Get a digest of any chat, group, or channel without opening Telegram.</p>
-      </div>
-      <div class="use-card">
-        <span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></span>
-        <h3>Draft and review messages</h3>
-        <p>Let Claude write or check a reply before it goes out. Review tone, catch errors, or translate — nothing is sent until you allow sending.</p>
-      </div>
-      <div class="use-card">
-        <span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
-        <h3>Search across conversations</h3>
-        <p>Find anything you said or received, instantly. Search by topic, person, or date across your full history.</p>
-      </div>
-      <div class="use-card">
-        <span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="9" y1="6" x2="20" y2="6"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="18" x2="20" y2="18"/><polyline points="4 6 5 7 7 5"/><polyline points="4 12 5 13 7 11"/><polyline points="4 18 5 19 7 17"/></svg></span>
-        <h3>Triage your inbox</h3>
-        <p>List every chat and surface what still needs a reply, so you can clear a backlog of unread conversations in one pass.</p>
-      </div>
-      <div class="use-card">
-        <span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></span>
-        <h3>Translate on the fly</h3>
-        <p>Read foreign-language chats in your own language, or draft a reply in theirs — without leaving the conversation.</p>
-      </div>
-      <div class="use-card">
-        <span class="card-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17z"/></svg></span>
-        <h3>Pin what matters</h3>
-        <p>Ask Claude to pin a key message so it stays at the top for everyone in the chat. It asks you to confirm first, needs sending turned on, and needs admin rights in groups.</p>
-      </div>
+      <div class="use-card"><span class="mono-label">Summarize</span><p>&ldquo;What did I miss in my chats today?&rdquo;</p></div>
+      <div class="use-card"><span class="mono-label">Draft &amp; review</span><p>&ldquo;Draft a polite reply to Anna.&rdquo;</p></div>
+      <div class="use-card"><span class="mono-label">Search</span><p>&ldquo;Find the address Max sent last week.&rdquo;</p></div>
+      <div class="use-card"><span class="mono-label">Triage</span><p>&ldquo;Which chats still need my reply?&rdquo;</p></div>
+      <div class="use-card"><span class="mono-label">Translate</span><p>&ldquo;Translate the last messages in this group.&rdquo;</p></div>
+      <div class="use-card"><span class="mono-label">Pin</span><p>&ldquo;Pin the meeting link in Team chat.&rdquo;</p></div>
     </div>
+    <p class="section-note">Nothing is sent until you turn sending on.</p>
   </section>
 
   <!-- ============ How it works ============ -->
   <section id="how-it-works" class="mctl-site-container mctl-site-section">
     <h2 class="mctl-site-section__title">How it works</h2>
     <div class="flow-diagram">
-      <div class="flow-node">
-        <span class="node-name">Claude</span>
-        <span class="node-label">or another MCP client</span>
-      </div>
-      <span class="flow-arrow"><svg viewBox="0 0 32 16" width="32" height="14" fill="none" aria-hidden="true"><line x1="0" y1="7" x2="22" y2="7" stroke="currentColor" stroke-width="1.5"/><polyline points="17,2 23,7 17,12" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
-      <div class="flow-node">
-        <span class="node-name">MCTL</span>
-        <span class="node-label">MCP server</span>
-      </div>
-      <span class="flow-arrow"><svg viewBox="0 0 32 16" width="32" height="14" fill="none" aria-hidden="true"><line x1="0" y1="7" x2="22" y2="7" stroke="currentColor" stroke-width="1.5"/><polyline points="17,2 23,7 17,12" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
-      <div class="flow-node">
-        <span class="node-name">Telegram</span>
-        <span class="node-label">MTProto API</span>
-      </div>
+      <div class="flow-node"><span class="node-name">Claude</span><span class="node-label">you ask</span></div>
+      <div class="flow-link"><span>OAuth</span></div>
+      <div class="flow-node strong"><span class="node-name">MCTL</span><span class="node-label">encrypted session</span></div>
+      <div class="flow-link"><span>MTProto</span></div>
+      <div class="flow-node"><span class="node-name">Telegram</span><span class="node-label">your account</span></div>
     </div>
-    <ol class="steps">
-      <li>You sign in with Telegram and, once, give MCTL message access. MCTL stores an encrypted MTProto session on your behalf.</li>
-      <li>When you ask Claude about your chats, it calls the MCP tools on this server over an OAuth-authenticated connection.</li>
-      <li>MCTL makes MTProto calls to Telegram, formats the result, and returns it to Claude.</li>
-    </ol>
   </section>
 
-  <!-- ============ Claude ============ -->
+  <!-- ============ Connect ============ -->
   <section id="claude" class="mctl-site-container mctl-site-section">
-    <h2 class="mctl-site-section__title">Connect in Claude</h2>
-    <ol class="steps">
-      <li>On <a href="https://claude.ai" target="_blank" rel="noopener">claude.ai</a> or in the Claude desktop app, open <a href="https://claude.ai/new#customize/connectors/yours" target="_blank" rel="noopener"><strong>Customize &#8594; Connectors</strong></a> and choose <strong>Add custom connector</strong>.</li>
-      <li>Name it <code>MCTL Assistant</code> and set the MCP server URL to <code class="url">{{.MCPURL}}</code>. Keep the default sign-in settings: Claude registers itself with this server, so there is no client ID or secret to enter. Click <strong>Add</strong>.</li>
-      <li>Click <strong>Connect</strong> and sign in with Telegram in the browser window that opens. The first time, MCTL asks for message access: choose <em>Read only</em> (the default) or <em>Read + send</em>, then enter your phone number, the login code Telegram sends to your Telegram app, and your two-step verification password if you use one.</li>
-      <li>In a chat, open the <strong>+</strong> menu &#8594; <strong>Connectors</strong> and make sure MCTL Assistant is switched on. Try: <em>&ldquo;What did I miss in my unread Telegram chats today?&rdquo;</em></li>
-    </ol>
-    <ul class="ctrl">
-      <li><strong>Team and Enterprise:</strong> an Owner adds the connector once in <strong>Organization settings &#8594; Connectors</strong> (<em>Add &#8594; Custom &#8594; Web</em>, same URL). Members then find it under <strong>Customize &#8594; Connectors</strong> and click <strong>Connect</strong>; each member signs in with their own Telegram account.</li>
-      <li><strong>Mobile:</strong> a connector added on the web or in the desktop app is available in the Claude iOS and Android apps once you are signed in.</li>
-      <li><strong>Free plan:</strong> Claude allows one custom connector on the Free plan.</li>
-      <li><strong>Claude Code:</strong> add it from your terminal, then run <code>/mcp</code> inside Claude Code to sign in:
-<pre><code>claude mcp add --transport http --scope user mctl {{.MCPURL}}</code></pre></li>
-    </ul>
-    <p class="muted">Anthropic's guide: <a href="https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp" target="_blank" rel="noopener">Get started with custom connectors using remote MCP</a>.</p>
-  </section>
+    <span id="connect"></span>
+    <h2 class="mctl-site-section__title">Connect in a minute</h2>
+    <div class="connect-col" id="connect-tabs">
+      <div class="tabs" role="tablist" aria-label="Client" hidden>
+        <button type="button" role="tab" id="tab-claude" aria-controls="panel-claude" aria-selected="true" data-tab="claude">Claude</button>
+        <button type="button" role="tab" id="tab-code" aria-controls="panel-code" aria-selected="false" tabindex="-1" data-tab="code">Claude Code</button>
+        <button type="button" role="tab" id="tab-chatgpt" aria-controls="chatgpt" aria-selected="false" tabindex="-1" data-tab="chatgpt">ChatGPT</button>
+        <button type="button" role="tab" id="tab-other" aria-controls="panel-other" aria-selected="false" tabindex="-1" data-tab="other">Other clients</button>
+      </div>
 
-  <!-- ============ Other clients ============ -->
-  <section id="connect" class="mctl-site-container mctl-site-section">
-    <h2 class="mctl-site-section__title">Other MCP clients</h2>
-    <p>MCTL is a standard remote MCP server with OAuth: add <code class="url">{{.MCPURL}}</code>, sign in with Telegram once, and pick read-only or read and send. Claude is the client we test against; the clients marked <em>not yet tested</em> below have no verified sign-in against tg.mctl.ai, so treat their snippets as a starting point.</p>
-    <ul class="ctrl">
-      <li id="chatgpt"><strong>ChatGPT:</strong> on the web, open <a href="https://chatgpt.com/plugins?directoryTab=personal" target="_blank" rel="noopener"><strong>Plugins &#8594; Personal</strong></a>, then <strong>Add &#8594; Add custom MCP server</strong>. Name it <code>MCTL Assistant</code>, keep <em>Server URL</em> and set it to <code class="url">{{.MCPURL}}</code>, keep <strong>OAuth</strong> as the authentication with the discovered settings (there is no client ID or secret to enter), tick <em>I understand and want to continue</em> and click <strong>Create as a plugin</strong>. Sign in with Telegram when ChatGPT opens the browser window. Which plans can add custom MCP servers is set by OpenAI. MCTL is not listed in the public plugin directory; adding it as your own plugin is the supported path.</li>
-      <li><strong>Cursor</strong> (not yet tested)<strong>:</strong> add to <code>~/.cursor/mcp.json</code>, then sign in when Cursor prompts. A <code>cursor://</code> redirect is refused today (only <code>https</code> and loopback redirects are accepted), so sign-in may fail:
-<pre><code>{ "mcpServers": { "mctl": { "url": "{{.MCPURL}}" } } }</code></pre></li>
-      <li><strong>VS Code</strong> (not yet tested)<strong>:</strong> run <em>MCP: Add Server &#8594; HTTP</em>, or add to <code>.vscode/mcp.json</code>:
-<pre><code>{ "servers": { "mctl": { "type": "http", "url": "{{.MCPURL}}" } } }</code></pre></li>
-      <li><strong>Windsurf and others</strong> (not yet tested)<strong>:</strong> paste the MCP URL into the client's remote MCP server settings. OAuth discovery URLs and a smoke-test command are in <a href="/docs#setup">/docs</a>.</li>
-    </ul>
-  </section>
+      <div class="tabpanel" id="panel-claude" role="tabpanel" aria-labelledby="tab-claude">
+        <h3>Claude</h3>
+        <div class="step-row"><span class="num">01</span><span>Open <a href="https://claude.ai/new#customize/connectors/yours" target="_blank" rel="noopener"><strong>Customize &#8594; Connectors &#8594; Add custom connector</strong></a></span></div>
+        <div class="step-row"><span class="num">02</span><span>Name <code>MCTL Assistant</code> URL <code class="url">{{.MCPURL}}</code></span></div>
+        <div class="step-row"><span class="num">03</span><span><strong>Connect</strong>, sign in with Telegram, pick <strong>Read only</strong> or <strong>Read + send</strong></span></div>
+        <p class="foot">Works on mobile once added. Team &amp; Enterprise: an Owner adds it once in Organization settings.</p>
+      </div>
 
-  <!-- ============ Data at a glance ============ -->
-  <section id="data" class="mctl-site-container mctl-site-section">
-    <h2 class="mctl-site-section__title">Data at a glance</h2>
-    <div class="trust-card">
-      <ul>
-        <li><strong>Stored on this server:</strong> an AES-256-GCM encrypted Telegram session blob per account and audit metadata without message text. When Communication Agent is enabled, relevant incoming message/event content and proposed action payloads are also stored encrypted at rest.</li>
-        <li><strong>Not stored in logs or audit history:</strong> message bodies, phone numbers, 2FA passwords, or OAuth tokens.</li>
-        <li><strong>Through your AI assistant:</strong> your prompts, tool arguments, and tool results pass through the assistant to reach this server. The assistant's provider (Anthropic for Claude, OpenAI for ChatGPT) handles that traffic under its own policies.</li>
-        <li><strong>Your controls:</strong> disconnect or delete your account at any time via MCP tools or the HTTP API{{if .ShowManage}}, or on the <a href="/telegram/connect/manage">manage</a> page{{end}}. Full inventory in our <a href="/privacy">privacy policy</a>.</li>
-      </ul>
+      <div class="tabpanel" id="panel-code" role="tabpanel" aria-labelledby="tab-code">
+        <h3>Claude Code</h3>
+        <pre><code>claude mcp add --transport http --scope user mctl {{.MCPURL}}</code></pre>
+        <p class="after">Then run <code>/mcp</code> inside Claude Code to sign in.</p>
+      </div>
+
+      <div class="tabpanel" id="chatgpt" role="tabpanel" aria-labelledby="tab-chatgpt">
+        <h3>ChatGPT</h3>
+        <div class="step-row"><span class="num">01</span><span>Open <a href="https://chatgpt.com/plugins?directoryTab=personal" target="_blank" rel="noopener"><strong>Plugins &#8594; Personal &#8594; Add custom MCP server</strong></a></span></div>
+        <div class="step-row"><span class="num">02</span><span>Server URL <code class="url">{{.MCPURL}}</code>, authentication <strong>OAuth</strong></span></div>
+        <div class="step-row"><span class="num">03</span><span><strong>Create as a plugin</strong> and sign in with Telegram</span></div>
+      </div>
+
+      <div class="tabpanel" id="panel-other" role="tabpanel" aria-labelledby="tab-other">
+        <h3>Other clients</h3>
+        <span class="tag-untested">not yet tested</span>
+        <pre><code><span class="c">// Cursor · ~/.cursor/mcp.json</span>
+{ "mcpServers": { "mctl": { "url": "{{.MCPURL}}" } } }
+
+<span class="c">// VS Code · .vscode/mcp.json</span>
+{ "servers": { "mctl": { "type": "http", "url": "{{.MCPURL}}" } } }</code></pre>
+        <p class="foot">Cursor sign-in may fail today: <code>cursor://</code> redirects are refused. Details in <a href="/docs#setup">/docs</a>.</p>
+      </div>
     </div>
   </section>
 
-  <!-- ============ Trust ============ -->
-  <section id="trust" class="mctl-site-container mctl-site-section">
-    <h2 class="mctl-site-section__title">Our trust model</h2>
-    <div class="trust-card">
-      <p>MCTL holds a server-side Telegram session on your behalf. Here is exactly what that means:</p>
-      <ul>
-        <li><strong>Sessions are AES-256-GCM encrypted at rest</strong> with per-user keys derived via HKDF-SHA256.</li>
-        <li><strong>Message text is never written to logs or audit history.</strong> Communication Agent message and action content is encrypted at rest and retained according to the policy in <a href="/privacy">/privacy</a>.</li>
-        <li><strong>You can disconnect (soft revoke) or delete (hard delete) your session at any time</strong> using the MCP tools or the API.</li>
-      </ul>
-      <p>MCP endpoint: <code class="url">{{.MCPURL}}</code><br>
-      OAuth protected resource document: <code class="url">{{.WellKnownURL}}</code></p>
-      <div class="trust-links">
-        <a href="/security">Full security model</a>
-        <a href="/privacy">Data retention</a>
-        <a href="/docs#controls">Developer reference</a>
+  <!-- ============ Your data ============ -->
+  <section id="data" class="mctl-site-container mctl-site-section">
+    <span id="trust"></span>
+    <h2 class="mctl-site-section__title">Your data</h2>
+    <div class="data-grid">
+      <div class="data-cell">
+        <span class="mono-label">Stored, encrypted</span>
+        <span class="big">Telegram session and audit metadata</span>
+        <span class="small">AES-256-GCM, a separate key per user. When Communication Agent is enabled, relevant message and action content is also stored encrypted at rest; see the retention details in <a href="/privacy">/privacy</a>.</span>
       </div>
+      <div class="data-cell">
+        <span class="mono-label">Not stored in logs or audit history</span>
+        <span class="big">Message text, phone numbers, 2FA passwords, tokens</span>
+      </div>
+      <div class="data-cell">
+        <span class="mono-label">You control</span>
+        <span class="big">Disconnect or delete your account at any time</span>
+        {{if .ShowManage}}<span class="small">On the <a href="/telegram/connect/manage">manage</a> page, or with MCP tools.</span>{{end}}
+      </div>
+    </div>
+    <div class="links-row">
+      <a href="/security">Security model</a>
+      <a href="/privacy">Privacy policy</a>
+      <a href="/docs#controls">Developer reference</a>
     </div>
   </section>
 
   <!-- ============ Local Bridge ============ -->
   <section id="local-bridge" class="mctl-site-container mctl-site-section">
-    <h2 class="mctl-site-section__title">Keep the session on your machine</h2>
-    <div class="trust-card">
-      <p>
-        <strong>Local Bridge</strong> (beta) is the self-service path where the Telegram session
-        stays on a machine you control and tg.mctl.ai acts only as a relay. It is not the standard
-        connector install path. You need a machine that stays on. Activation is self-service.
-      </p>
-      <ol class="steps">
-        <li><code>init</code>, then <code>login --phone +…</code></li>
-        <li><code>activate --server https://tg.mctl.ai</code> and approve the device in a browser. After <code>login</code>, <code>--telegram-id</code> is optional.</li>
-        <li><code>daemon</code> — first credential is read-only. Turn sending on yourself with <code>set_send_consent</code>{{if .ShowManage}} or the <a href="/telegram/connect/manage">manage</a> page{{end}}.</li>
-      </ol>
-      <div class="trust-links">
-        <a href="/docs/local-bridge/quickstart">Quick start</a>
-        <a href="/docs/local-bridge">Overview</a>
-        <a href="/docs/local-bridge/owner">Owner controls</a>
-        <a href="/docs/local-bridge/support">Support and recovery</a>
+    <div class="bridge">
+      <div>
+        <span class="title">Keep the session on your machine <span class="beta">Beta</span></span>
+        <span class="sub">With <a href="/docs/local-bridge">Local Bridge</a>, tg.mctl.ai only relays calls to a daemon you run.</span>
       </div>
+      <a class="btn-secondary" href="/docs/local-bridge/quickstart">Quick start &#8594;</a>
     </div>
   </section>
 
   <!-- ============ FAQ ============ -->
   <section id="faq" class="mctl-site-container mctl-site-section">
-    <h2 class="mctl-site-section__title">Common questions</h2>
-    <dl class="faq-list">
-      <div class="faq-item">
-        <dt>Which AI assistants does this work with?</dt>
-        <dd>Claude first — claude.ai, the desktop and mobile apps, and Claude Code — and ChatGPT by URL. It is a standard remote MCP server with OAuth, so other clients such as Cursor, VS Code and Windsurf may work, but they are not yet tested against tg.mctl.ai.</dd>
-      </div>
-      <div class="faq-item">
-        <dt>Is this an official Telegram app?</dt>
-        <dd>No. MCTL Assistant is an unofficial third-party connector using the Telegram API. It is an independent project, not affiliated with or endorsed by Telegram, Anthropic or OpenAI. It operates only on the Telegram account you explicitly connect, and you remain responsible for following Telegram's terms.</dd>
-      </div>
-      <div class="faq-item">
-        <dt>Can it send messages on my behalf?</dt>
-        <dd>Only if you allow it. When you connect, MCTL asks whether to give <em>Read only</em> (the default) or <em>Read + send</em> access. With sending off (<code>send_enabled=false</code>), <code>send_message</code> and <code>send_media</code> return a preview (<code>sent=false</code>) instead of delivering, and the other write tools (edit, delete, forward, react, pin) refuse with an error. You can change your choice later with <code>set_send_consent</code>{{if .ShowManage}} or the <a href="/telegram/connect/manage">manage</a> page{{end}}. A real send also needs the <code>telegram:messages:send</code> scope and the operator-level <code>ALLOW_SEND</code> flag (on for tg.mctl.ai). There is no mode argument to bypass the gate.</dd>
-      </div>
-      <div class="faq-item">
-        <dt>What does my AI assistant see?</dt>
-        <dd>Your prompts, the tool arguments the assistant sends (for example a chat name, or the text of a draft), and the tool results this server returns. That traffic is handled by the assistant's provider under its own policies. For ordinary MCP calls, this server stores an encrypted session blob and audit metadata. Listener-enabled Communication Agent accounts additionally store encrypted message and action content as described in <a href="/privacy">/privacy</a>.</dd>
-      </div>
-      <div class="faq-item">
-        <dt>What data does MCTL store?</dt>
-        <dd>An encrypted session blob and metadata are stored per account. When Communication Agent is enabled, relevant incoming messages/events and proposed action payloads are stored encrypted at rest; logs and audit history still exclude message bodies. See <a href="/privacy">/privacy</a> for retention details.</dd>
-      </div>
-      <div class="faq-item">
-        <dt>How do I revoke access?</dt>
-        <dd>Remove the connector in Claude (<em>Customize &#8594; Connectors</em>) or your other client to stop it calling this server. To end the Telegram session itself, call <code>disconnect_telegram_account</code> (soft revoke, keeps the row) or <code>delete_telegram_account</code> (hard delete: removes the encrypted session and stored data, keeps only your Telegram id, tier and deletion time — see <a href="/privacy">/privacy</a>) from a connection granted <code>account:manage</code>{{if .ShowManage}}, or disconnect on the <a href="/telegram/connect/manage">manage</a> page after signing in with Telegram{{end}}. You can also revoke from Telegram's side: Settings &#8594; Devices.</dd>
-      </div>
-      <div class="faq-item">
-        <dt>Is this open source?</dt>
-        <dd>Yes. The full source is at <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a>. You can audit the code, run your own deployment, or contribute.</dd>
-      </div>
-      <div class="faq-item">
-        <dt>What is the Local Bridge?</dt>
-        <dd>An optional self-hosted mode (beta) where the Telegram session stays on your own machine and tg.mctl.ai acts only as a relay. It is not part of the standard hosted connect path, and it needs a machine that stays on, but turning it on is self-service: <code>init</code>, <code>login</code>, <code>activate</code>, <code>daemon</code>. Migrating an existing hosted account into this mode still uses <code>set_account_mode</code> (an operator step, not onboarding). Start at the <a href="/docs/local-bridge/quickstart">quick start</a>.</dd>
-      </div>
-    </dl>
+    <h2 class="mctl-site-section__title">Questions</h2>
+    <div class="faq-col">
+      <details open>
+        <summary>Is this an official Telegram app?</summary>
+        <p class="answer">No. It is an independent, unofficial connector using the Telegram API, not affiliated with or endorsed by Telegram, Anthropic or OpenAI. It works only on the account you connect, and you remain responsible for following Telegram's terms.</p>
+      </details>
+      <details>
+        <summary>Can it send messages on my behalf?</summary>
+        <p class="answer">Only if you choose Read + send. In read-only mode <code>send_message</code> and <code>send_media</code> return a preview and nothing is delivered, and the other write tools refuse with an error. You can change this any time{{if .ShowManage}} on the <a href="/telegram/connect/manage">manage</a> page{{end}}.</p>
+      </details>
+      <details>
+        <summary>What does my AI assistant see?</summary>
+        <p class="answer">Your prompts, tool arguments and the results this server returns. The assistant's provider handles that traffic under its own policies. Listener-enabled Communication Agent accounts additionally store encrypted message and action content as described in <a href="/privacy">/privacy</a>.</p>
+      </details>
+      <details>
+        <summary>How do I revoke access?</summary>
+        <p class="answer">Remove the connector in Claude, disconnect{{if .ShowManage}} on the <a href="/telegram/connect/manage">manage</a> page{{else}} with the MCP tools{{end}}, or end the session in Telegram: Settings &#8594; Devices.</p>
+      </details>
+      <details>
+        <summary>Which assistants does it work with?</summary>
+        <p class="answer">Claude on web, desktop, mobile and Claude Code; ChatGPT by URL. Other MCP clients (Cursor, VS Code, Windsurf) may work but are not yet tested.</p>
+      </details>
+      <details>
+        <summary>Is it open source?</summary>
+        <p class="answer">Yes &mdash; <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a>. Audit the code, self-host or contribute.</p>
+      </details>
+    </div>
+    <p class="section-note"><a href="/docs">More in the docs</a></p>
   </section>
 
-  <!-- ============ Support ============ -->
+  <!-- ============ Publisher ============ -->
   <section id="support" class="mctl-site-container mctl-site-section">
-    <h2 class="mctl-site-section__title">Support and publisher</h2>
-    <div class="trust-card">
-      <ul>
-        <li><strong>Product:</strong> MCTL Assistant, an unofficial third-party connector using the Telegram API</li>
-        <li><strong>Publisher:</strong> mctl</li>
-        <li><strong>Support:</strong> <a href="mailto:support@mctl.ai">support@mctl.ai</a></li>
-        <li><strong>Privacy policy:</strong> <a href="/privacy">{{.PublicBaseURL}}/privacy</a></li>
-        <li><strong>Security reports:</strong> <a href="mailto:security@mctl.ai">security@mctl.ai</a> (see <a href="/security">/security</a>)</li>
-        <li><strong>Source code:</strong> <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener">github.com/mctlhq/mctl-telegram</a> (open source — audit, self-host, or contribute)</li>
-      </ul>
-    </div>
+    <p class="publisher">MCTL Assistant is an unofficial third-party connector using the Telegram API, published by mctl. Not affiliated with Telegram, Anthropic or OpenAI. Support: <a href="mailto:support@mctl.ai">support@mctl.ai</a> · Security: <a href="mailto:security@mctl.ai">security@mctl.ai</a> · <a href="/privacy">{{.PublicBaseURL}}/privacy</a></p>
   </section>
 
 </main>
@@ -399,6 +493,80 @@
       }
     });
   }
+
+  // Usage strip refresh: once a minute while the tab is visible, re-read
+  // /api/stats (same origin, allowed by connect-src 'self') and rewrite the
+  // four values in place. Any failure leaves the server-rendered numbers as
+  // they are. Grouping matches ui.FormatCount ("57,339").
+  var strip = document.getElementById('stats');
+  if (strip && window.fetch) {
+    var fmt = function (n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ','); };
+    var refresh = function () {
+      if (document.visibilityState === 'hidden') return;
+      fetch('/api/stats', { cache: 'no-store', credentials: 'omit' }).then(function (r) {
+        if (!r.ok) return null;
+        return r.json();
+      }).then(function (s) {
+        if (!s) return;
+        var els = strip.querySelectorAll('[data-stat]');
+        for (var i = 0; i < els.length; i++) {
+          var v = s[els[i].getAttribute('data-stat')];
+          if (typeof v === 'number') els[i].textContent = fmt(v);
+        }
+        var t = document.getElementById('stats-updated');
+        if (t && s.updated_at) {
+          var d = new Date(s.updated_at);
+          if (!isNaN(d)) {
+            t.setAttribute('datetime', d.toISOString());
+            t.textContent = ('0' + d.getUTCHours()).slice(-2) + ':' + ('0' + d.getUTCMinutes()).slice(-2) + ' UTC';
+          }
+        }
+      }).catch(function () {});
+    };
+    setInterval(refresh, 60000);
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') refresh();
+    });
+  }
+
+  // Connect tabs. Without this script every panel is visible under its own
+  // heading. With it the headings become a tablist: click, arrow keys, and the
+  // old anchors (#claude, #connect, #chatgpt) pick the tab.
+  (function () {
+    var root = document.getElementById('connect-tabs');
+    if (!root) return;
+    var list = root.querySelector('[role="tablist"]');
+    var tabs = Array.prototype.slice.call(root.querySelectorAll('[role="tab"]'));
+    if (!list || !tabs.length) return;
+    var ids = { claude: 'panel-claude', code: 'panel-code', chatgpt: 'chatgpt', other: 'panel-other' };
+    var hashes = { claude: 'claude', connect: 'other', chatgpt: 'chatgpt', code: 'code', other: 'other' };
+    var show = function (name, focus) {
+      tabs.forEach(function (t) {
+        var on = t.getAttribute('data-tab') === name;
+        t.setAttribute('aria-selected', on ? 'true' : 'false');
+        t.tabIndex = on ? 0 : -1;
+        if (on && focus) t.focus();
+        document.getElementById(ids[t.getAttribute('data-tab')]).hidden = !on;
+      });
+    };
+    root.classList.add('js-tabs');
+    list.hidden = false;
+    tabs.forEach(function (t, i) {
+      t.addEventListener('click', function () { show(t.getAttribute('data-tab')); });
+      t.addEventListener('keydown', function (e) {
+        var d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+        if (!d) return;
+        e.preventDefault();
+        show(tabs[(i + d + tabs.length) % tabs.length].getAttribute('data-tab'), true);
+      });
+    });
+    var fromHash = function () {
+      var name = hashes[(location.hash || '').replace('#', '')];
+      return name || null;
+    };
+    window.addEventListener('hashchange', function () { var n = fromHash(); if (n) show(n); });
+    show(fromHash() || 'claude');
+  })();
 </script>
 </body>
 </html>

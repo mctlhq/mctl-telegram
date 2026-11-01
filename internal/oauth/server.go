@@ -42,8 +42,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/acquisition"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/auth/telegramoidc"
+	"github.com/mctlhq/mctl-telegram/internal/connectfunnel"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/notify"
 	"github.com/mctlhq/mctl-telegram/internal/oauth/cimd"
@@ -55,6 +57,10 @@ import (
 // Server wires the OAuth endpoints. Construct with New, mount handlers with
 // Register.
 type Server struct {
+	// log is where the server and its login-flow goroutines write. nil means
+	// slog.Default() (see logger); tests set their own so a goroutine that
+	// outlives a test cannot write into another test's swapped default.
+	log    *slog.Logger
 	cfg    Config
 	issuer *localjwt.Issuer
 	tgoidc telegramoidc.Authenticator
@@ -75,6 +81,7 @@ type Server struct {
 	dcrRedirectURIs map[string]struct{}
 
 	mu      sync.Mutex
+	acqKey  []byte                    // HKDF-derived MAC key for the acquisition cookie
 	pending map[string]*pendingAuth   // keyed by "state" issued at /oauth/authorize
 	codes   map[string]*authCode      // keyed by the authorization_code value
 	clients map[string]*clientReg     // keyed by client_id
@@ -154,6 +161,9 @@ type Server struct {
 	// it displaced, so the newest attempt always wins the mutex promptly.
 	// The goroutine removes its own entry on exit (mctl-telegram#859).
 	loginFlows sync.Map
+	// flowWG counts startLoginFlow goroutines still running, so a test can
+	// join them before it returns instead of leaking one into the next test.
+	flowWG sync.WaitGroup
 
 	// modeCheckFn, when non-nil, replaces the store's HasActiveLocalAccount on
 	// both enable_access mode checks. Test seam (nil in production): the store
@@ -662,7 +672,9 @@ type pendingAuth struct {
 	Scope               string
 	Nonce               string
 	TGCodeVerifier      string
-	CreatedAt           time.Time
+	// Acquisition is the JSON acquisition snapshot taken at authorize.
+	Acquisition string
+	CreatedAt   time.Time
 }
 
 // authCode is the redeemable authorization_code returned via the redirect.
@@ -836,6 +848,7 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 		store:                 store,
 		clock:                 time.Now,
 		useDB:                 cfg.UseDBForOAuth && store != nil,
+		acqKey:                acquisition.DeriveKey(cfg.JWTSecret),
 		pending:               map[string]*pendingAuth{},
 		codes:                 map[string]*authCode{},
 		clients:               map[string]*clientReg{},
@@ -1108,14 +1121,14 @@ func (s *Server) sweepDB(_ time.Time) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if _, _, err := s.store.DeleteExpiredOAuthRows(ctx, s.cfg.CodeTTL); err != nil {
-		slog.Warn("oauth db sweep failed", "err", err)
+		s.logger().Warn("oauth db sweep failed", "err", err)
 	}
 	if _, err := s.store.DeleteExpiredClientAssertionJTIs(ctx); err != nil {
-		slog.Warn("oauth db client assertion jti sweep failed", "err", err)
+		s.logger().Warn("oauth db client assertion jti sweep failed", "err", err)
 	}
 	if s.cfg.ClientRegistrationTTL > 0 {
 		if _, err := s.store.DeleteExpiredClientRegs(ctx, s.cfg.ClientRegistrationTTL); err != nil {
-			slog.Warn("oauth db client_reg sweep failed", "err", err)
+			s.logger().Warn("oauth db client_reg sweep failed", "err", err)
 		}
 	}
 }
@@ -1132,7 +1145,7 @@ func (s *Server) samplePendingAuthGauge() {
 		defer cancel()
 		n, err := s.store.CountOAuthPending(ctx, s.cfg.CodeTTL)
 		if err != nil {
-			slog.Warn("oauth pending_auth gauge sample failed", "err", err)
+			s.logger().Warn("oauth pending_auth gauge sample failed", "err", err)
 			return
 		}
 		s.metrics.SetOAuthPendingAuthSize(float64(n))
@@ -1569,7 +1582,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		sort.Strings(extraParams)
-		slog.Info("oauth: authorize request",
+		s.logger().Info("oauth: authorize request",
 			"user_agent", r.Header.Get("User-Agent"),
 			"client_id", clientID,
 			"redirect_uri_host", host,
@@ -1590,6 +1603,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	// verifier is replayed at the token exchange). Both are kept server-side.
 	serverState := randomToken(32)
 	nonce := randomToken(16)
+	acq := s.acquisitionFromRequest(r, redirectURI)
 	tgVerifier, tgChallenge := pkceChallenge()
 	now := s.clock()
 	if s.useDB {
@@ -1601,7 +1615,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		// all insert, temporarily exceeding MaxPendingAuth by at most N. The
 		// sweeper converges the count back below the cap within its next tick.
 		if err := s.store.EvictOldestOAuthPendingIfOver(r.Context(), s.cfg.MaxPendingAuth, s.cfg.CodeTTL); err != nil {
-			slog.Warn("oauth: pending_auth eviction failed", "err", err)
+			s.logger().Warn("oauth: pending_auth eviction failed", "err", err)
 		}
 		if err := s.store.InsertOAuthPending(r.Context(), db.OAuthPendingAuth{
 			State:           serverState,
@@ -1613,9 +1627,10 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			Scope:           scope,
 			Nonce:           nonce,
 			TGCodeVerifier:  tgVerifier,
+			Acquisition:     acq,
 			CreatedAt:       now,
 		}); err != nil {
-			slog.Error("oauth: persist pending_auth failed", "err", err)
+			s.logger().Error("oauth: persist pending_auth failed", "err", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -1648,6 +1663,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			Scope:               scope,
 			Nonce:               nonce,
 			TGCodeVerifier:      tgVerifier,
+			Acquisition:         acq,
 			CreatedAt:           now,
 		}
 		s.mu.Unlock()
@@ -1746,7 +1762,7 @@ func isPrefetch(r *http.Request) bool {
 // routes emit. It also counts the rejection.
 func (s *Server) logCallbackReject(r *http.Request, reason string) {
 	s.countCallbackReject(reason)
-	slog.Warn("oauth: callback request rejected",
+	s.logger().Warn("oauth: callback request rejected",
 		"route", "/oauth/telegram/callback",
 		"reason", reason,
 		"prefetch", isPrefetch(r))
@@ -1764,7 +1780,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	// needs.
 	if isPrefetch(r) {
 		s.countCallbackReject(reasonPrefetchRefused)
-		slog.Info("oauth: callback request rejected",
+		s.logger().Info("oauth: callback request rejected",
 			"route", "/oauth/telegram/callback",
 			"reason", reasonPrefetchRefused,
 			"prefetch", true)
@@ -1837,7 +1853,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if err != nil {
-			slog.Error("oauth: consume pending_auth failed", "err", err)
+			s.logger().Error("oauth: consume pending_auth failed", "err", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -1850,6 +1866,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 			Scope:               dbPA.Scope,
 			Nonce:               dbPA.Nonce,
 			TGCodeVerifier:      dbPA.TGCodeVerifier,
+			Acquisition:         dbPA.Acquisition,
 			CreatedAt:           dbPA.CreatedAt,
 		}
 	} else {
@@ -1898,7 +1915,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		// (oauth2.RetrieveError), which can carry a Telegram user id — log it
 		// server-side, return an opaque message to the browser.
 		s.countCallbackReject(reasonExchangeFailed)
-		slog.Error("telegram OIDC token exchange failed",
+		s.logger().Error("telegram OIDC token exchange failed",
 			"route", "/oauth/telegram/callback",
 			"reason", reasonExchangeFailed,
 			"prefetch", isPrefetch(r),
@@ -1924,15 +1941,16 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	// into their own columns with explicit provenance (identity_source =
 	// telegram_oidc) — see internal/db.TelegramIdentityCapture.
 	uid, err := s.store.EnsureUserByTelegramCapture(r.Context(), db.TelegramIdentityCapture{
-		TelegramID: identity.TelegramID,
-		Username:   identity.Username,
-		FirstName:  identity.FirstName,
-		LastName:   identity.LastName,
-		Source:     "telegram_oidc",
-		CapturedAt: time.Now().UTC(),
+		TelegramID:  identity.TelegramID,
+		Username:    identity.Username,
+		FirstName:   identity.FirstName,
+		LastName:    identity.LastName,
+		Source:      "telegram_oidc",
+		CapturedAt:  time.Now().UTC(),
+		Acquisition: toDBAcquisition(acquisitionForCallback(pending, s.clock())),
 	})
 	if err != nil {
-		slog.Error("ensure user failed", "err", err)
+		s.logger().Error("ensure user failed", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -1944,10 +1962,10 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	if signal == "" {
 		signal = string(telegramoidc.BotAccessUnknown)
 	}
-	slog.Info("telegram oidc sign-in", "bot_access_signal", signal, "reported_scope", identity.ReportedScope)
+	s.logger().Info("telegram oidc sign-in", "bot_access_signal", signal, "reported_scope", identity.ReportedScope)
 	if identity.BotAccess == telegramoidc.BotAccessGranted {
 		if _, err := s.store.RecordOIDCBotAccessGrant(r.Context(), uid, time.Now().UTC(), notify.SourceOIDCBotAccess); err != nil {
-			slog.Error("record oidc bot access grant failed", "err", err)
+			s.logger().Error("record oidc bot access grant failed", "err", err)
 		}
 	} else if s.cfg.BotChatProbe != nil {
 		s.probeBotChat(r.Context(), uid, identity.TelegramID)
@@ -1987,15 +2005,15 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	if s.cfg.AutoApproveClients && !isLookupOnly {
 		dbTier, err := s.store.GetAccessTier(r.Context(), identity.TelegramID)
 		if err != nil {
-			slog.Error("get access tier for auto-grant failed", "err", err)
+			s.logger().Error("get access tier for auto-grant failed", "err", err)
 			// non-fatal: skip the write, transient grant in isClientTier still covers this user
 		}
 		if err == nil && dbTier == "" {
 			if err := s.store.SetAccessTier(r.Context(), identity.TelegramID, db.TierClient); err != nil {
-				slog.Error("auto-set client tier failed", "telegram_id", identity.TelegramID, "err", err)
+				s.logger().Error("auto-set client tier failed", "telegram_id", identity.TelegramID, "err", err)
 				// non-fatal: transient grant in isClientTier still covers this user
 			} else {
-				slog.Info("auto-granted client tier on sign-in", "telegram_id", identity.TelegramID)
+				s.logger().Info("auto-granted client tier on sign-in", "telegram_id", identity.TelegramID)
 			}
 		}
 	}
@@ -2034,7 +2052,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		// An unexpected storage error must not be silently treated as
 		// "no session" — that would divert the user into re-login (and a
 		// possible session overwrite) on a transient DB blip.
-		slog.Error("session check failed", "err", sessErr)
+		s.logger().Error("session check failed", "err", sessErr)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -2046,7 +2064,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	// and then fail every tool call for lack of a session.
 	isClient, err := s.isClientTier(r.Context(), identity.TelegramID)
 	if err != nil {
-		slog.Error("resolve client tier failed", "err", err)
+		s.logger().Error("resolve client tier failed", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -2189,7 +2207,7 @@ func (s *Server) issueAuthCode(w http.ResponseWriter, r *http.Request, oc oauthC
 	if s.useDB {
 		// Best-effort cap enforcement — see same comment in handleAuthorize.
 		if err := s.store.EvictOldestOAuthCodeIfOver(r.Context(), s.cfg.MaxAuthCodes, s.cfg.CodeTTL); err != nil {
-			slog.Warn("oauth: auth_code eviction failed", "err", err)
+			s.logger().Warn("oauth: auth_code eviction failed", "err", err)
 		}
 		if err := s.store.InsertOAuthCode(r.Context(), db.OAuthCode{
 			Code:             code,
@@ -2206,14 +2224,14 @@ func (s *Server) issueAuthCode(w http.ResponseWriter, r *http.Request, oc oauthC
 				s.renderAccountDeletedDuringSignIn(w, oc)
 				return
 			}
-			slog.Error("oauth: persist auth_code failed", "err", err)
+			s.logger().Error("oauth: persist auth_code failed", "err", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 	} else {
 		deleted, err := s.store.AccountDeletedSince(r.Context(), oc.UserID, oc.SignInStartedAt)
 		if err != nil {
-			slog.Error("oauth: read account deletion failed", "err", err)
+			s.logger().Error("oauth: read account deletion failed", "err", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -2291,7 +2309,7 @@ func (s *Server) isExternalRedirect(u *url.URL) bool {
 		// log it so a future misconfiguration is discoverable rather than
 		// silently routing every redirect (including same-host) through the
 		// interstitial.
-		slog.Warn("oauth: issuer parse failed; treating redirect as external", "issuer", s.cfg.Issuer, "err", err)
+		s.logger().Warn("oauth: issuer parse failed; treating redirect as external", "issuer", s.cfg.Issuer, "err", err)
 		return true
 	}
 	return !strings.EqualFold(u.Host, iss.Host)
@@ -2388,7 +2406,7 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	// the code's own redirect_uri below.
 	if doc, isCIMD, err := s.authenticateCIMDClient(r, clientID, "token_code"); isCIMD {
 		if err == nil && redirectURI != "" {
-			err = validateCIMDRedirect(doc, redirectURI)
+			err = s.validateCIMDRedirect(doc, redirectURI)
 		}
 		if err != nil {
 			writeCIMDTokenError(w, err)
@@ -2404,7 +2422,7 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err != nil {
-			slog.Error("oauth: consume auth_code failed", "err", err)
+			s.logger().Error("oauth: consume auth_code failed", "err", err)
 			writeTokenError(w, "server_error", "could not redeem code", http.StatusInternalServerError)
 			return
 		}
@@ -2460,7 +2478,7 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	// the difference showed (#607).
 	scopes = narrowGrant(scopes, entry.Scope)
 	// Diagnostic: requested-vs-granted scope reconciliation.
-	slog.Info("oauth: token authorization_code grant",
+	s.logger().Info("oauth: token authorization_code grant",
 		"user_agent", r.Header.Get("User-Agent"),
 		"client_id", clientID,
 		"requested_scope", entry.Scope,
@@ -2498,7 +2516,7 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, db.ErrAccountDeletedSinceGrant) {
 		// The access token minted above is dropped unsent: the account was
 		// deleted after this code was issued, so the code grants nothing.
-		slog.Warn("oauth: code exchange refused, account deleted since the grant",
+		s.logger().Warn("oauth: code exchange refused, account deleted since the grant",
 			"client_id", clientID, "user_id", uid)
 		writeTokenError(w, "invalid_grant", "the account was deleted after this code was issued", http.StatusBadRequest)
 		return
@@ -2614,7 +2632,7 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 	tok, mErr := s.mintAccessToken(tokenOrigin{ClientID: child.ClientID, RedirectURI: child.RedirectURI, RedirectURIKnown: child.RedirectURIKnown},
 		child.TelegramID, child.TelegramUsername, groups, scopes)
 	if errors.Is(mErr, errProfileUnresolvable) {
-		slog.Warn("oauth refresh refused: family predates redirect_uri storage and a redirect_uri profile binding may apply",
+		s.logger().Warn("oauth refresh refused: family predates redirect_uri storage and a redirect_uri profile binding may apply",
 			"family_id", familyID, "client_id", child.ClientID, "path", "grace_replay")
 		writeTokenError(w, "invalid_grant", profileUnresolvableDescription, http.StatusBadRequest)
 		return graceRejectedSoft
@@ -2623,7 +2641,7 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
 		return graceServerError
 	}
-	slog.Info("oauth refresh token grace-window replay: re-issuing existing successor", "family_id", familyID)
+	s.logger().Info("oauth refresh token grace-window replay: re-issuing existing successor", "family_id", familyID)
 	writeTokenJSON(w, tok, candidate, int(s.cfg.AccessTokenTTL.Seconds()), scopes)
 	return graceRecovered
 }
@@ -2704,7 +2722,7 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		// token usable after a detected theft. Fail closed with a 500 so the
 		// incident surfaces and the caller retries.
 		if _, revErr := s.store.RevokeRefreshTokenFamily(r.Context(), rt.FamilyID, "reuse_detected"); revErr != nil {
-			slog.Error("refresh token family revoke failed — reuse detection not enforced",
+			s.logger().Error("refresh token family revoke failed — reuse detection not enforced",
 				"err", revErr, "family_id", rt.FamilyID)
 			writeTokenError(w, "server_error", "could not complete reuse detection", http.StatusInternalServerError)
 			return
@@ -2742,7 +2760,7 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	tok, err := s.mintAccessToken(tokenOrigin{ClientID: rt.ClientID, RedirectURI: rt.RedirectURI, RedirectURIKnown: rt.RedirectURIKnown},
 		rt.TelegramID, rt.TelegramUsername, groups, scopes)
 	if errors.Is(err, errProfileUnresolvable) {
-		slog.Warn("oauth refresh refused: family predates redirect_uri storage and a redirect_uri profile binding may apply",
+		s.logger().Warn("oauth refresh refused: family predates redirect_uri storage and a redirect_uri profile binding may apply",
 			"family_id", rt.FamilyID, "client_id", rt.ClientID)
 		writeTokenError(w, "invalid_grant", profileUnresolvableDescription, http.StatusBadRequest)
 		return
@@ -2787,7 +2805,7 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 				// mistaken for "nothing to recover" — that would let a DB
 				// blip fall through to family revocation, same class of bug
 				// attemptGraceRecovery itself already guards against.
-				slog.Error("could not re-read predecessor after rotation race",
+				s.logger().Error("could not re-read predecessor after rotation race",
 					"err", reErr, "family_id", rt.FamilyID)
 				writeTokenError(w, "server_error", "could not verify rotation race", http.StatusInternalServerError)
 				return
@@ -2815,7 +2833,7 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 			// client-facing answer regardless, and the family will still be
 			// caught if the now-revoked token is replayed.
 			if _, revErr := s.store.RevokeRefreshTokenFamily(r.Context(), rt.FamilyID, "reuse_detected"); revErr != nil {
-				slog.Error("refresh token family revoke failed after rotation race",
+				s.logger().Error("refresh token family revoke failed after rotation race",
 					"err", revErr, "family_id", rt.FamilyID)
 			}
 			writeTokenError(w, "invalid_grant", "refresh token already used", http.StatusBadRequest)
@@ -3129,7 +3147,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 	if uris, ok := raw["redirect_uris"].([]any); ok {
 		redirectURICount = len(uris)
 	}
-	slog.Info("oauth: client_registration request",
+	s.logger().Info("oauth: client_registration request",
 		"user_agent", userAgent,
 		"keys", strings.Join(keys, ","),
 		"client_name", rawClientName,
@@ -3223,7 +3241,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 			CreatedAt:    now,
 		})
 		if err != nil {
-			slog.Error("oauth: persist pinned client_reg failed", "err", err)
+			s.logger().Error("oauth: persist pinned client_reg failed", "err", err)
 			s.auditRegistration(regOutcomeError, regPersistFailed, req.ClientName, userAgent, "", "")
 			writeTokenError(w, "server_error", "could not persist registration", http.StatusInternalServerError)
 			return
@@ -3232,7 +3250,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 	} else if s.useDB {
 		// Best-effort cap enforcement — see same comment in handleAuthorize.
 		if err := s.store.EvictOldestClientRegIfOver(r.Context(), s.cfg.MaxRegisteredClients); err != nil {
-			slog.Warn("oauth: client_reg eviction failed", "err", err)
+			s.logger().Warn("oauth: client_reg eviction failed", "err", err)
 		}
 		if err := s.store.InsertClientReg(r.Context(), db.OAuthClientReg{
 			ClientID:     clientID,
@@ -3240,7 +3258,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 			RedirectURIs: req.RedirectURIs,
 			CreatedAt:    now,
 		}); err != nil {
-			slog.Error("oauth: persist client_reg failed", "err", err)
+			s.logger().Error("oauth: persist client_reg failed", "err", err)
 			s.auditRegistration(regOutcomeError, regPersistFailed, req.ClientName, userAgent, "", "")
 			writeTokenError(w, "server_error", "could not persist registration", http.StatusInternalServerError)
 			return
@@ -3555,7 +3573,7 @@ func (s *Server) validateClient(ctx context.Context, clientID, redirectURI strin
 		if err != nil {
 			return err
 		}
-		return validateCIMDRedirect(doc, redirectURI)
+		return s.validateCIMDRedirect(doc, redirectURI)
 	}
 	if s.useDB {
 		// Look up registration in the Postgres table.
@@ -3707,11 +3725,33 @@ func (s *Server) probeBotChat(ctx context.Context, uid, telegramID int64) {
 			}
 		}
 	}
-	slog.Info("telegram oidc bot chat probe", "result", result)
+	s.logger().Info("telegram oidc bot chat probe", "result", result)
 	if err != nil {
 		return
 	}
 	if _, err := s.store.RecordOIDCBotAccessGrant(ctx, uid, time.Now().UTC(), notify.SourceOIDCGetChat); err != nil {
-		slog.Error("record oidc bot chat probe failed", "err", err)
+		s.logger().Error("record oidc bot chat probe failed", "err", err)
 	}
+}
+
+// acquisitionForCallback decodes the snapshot carried by the pending entry.
+// A pending row minted by an image that predates the acquisition column
+// carries no snapshot and decodes as unknown with an empty client; the
+// redirect URI is still on the row, so the bounded client label is filled
+// from it rather than lost for the whole rollout window.
+func acquisitionForCallback(pending *pendingAuth, now time.Time) acquisition.Snapshot {
+	snap := acquisition.Unmarshal(pending.Acquisition, now)
+	if snap.MCPClient == "" && pending.RedirectURI != "" {
+		snap.MCPClient = connectfunnel.ClientLabel(pending.RedirectURI)
+	}
+	return snap
+}
+
+// logger returns the server's logger, falling back to the process default when
+// none was injected (production, and Server literals built by tests).
+func (s *Server) logger() *slog.Logger {
+	if s.log != nil {
+		return s.log
+	}
+	return slog.Default()
 }

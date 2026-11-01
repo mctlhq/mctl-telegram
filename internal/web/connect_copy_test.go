@@ -50,3 +50,31 @@ func TestConnectOtherPages_NoScriptSrc(t *testing.T) {
 		t.Error("error page renders a script")
 	}
 }
+
+// The success page joins the MCP URL and its copy button in one bar, keeps
+// the Active Sessions note after the first-prompt hint, and makes the
+// notifications link a secondary button.
+func TestConnectSuccess_Layout(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderConnectSuccess(rec, connectSuccessData{ClaudeURL: "https://claude.test", MCPURL: "https://tg.test/mcp"})
+	body := rec.Body.String()
+	for _, want := range []string{
+		`<div class="url-group">`,
+		`<input type="text" id="mcp-url" readonly value="https://tg.test/mcp">`,
+		`<a class="btn-secondary" href="/telegram/connect/manage?onboarding=1#notifications">Configure bot notifications</a>`,
+		"uses to\n       access your account under the permissions you selected.",
+		"<li>Sign in</li>",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("success page lacks %q", want)
+		}
+	}
+	hint := strings.Index(body, "list my recent Telegram chats")
+	note := strings.Index(body, `<p class="note">A new session called`)
+	if hint < 0 || note < 0 || note < hint {
+		t.Errorf("Active Sessions note must follow the first-prompt hint (hint %d, note %d)", hint, note)
+	}
+	if strings.Contains(body, "Use this MCP URL") || strings.Contains(body, "read your messages") {
+		t.Error("success page keeps replaced copy")
+	}
+}

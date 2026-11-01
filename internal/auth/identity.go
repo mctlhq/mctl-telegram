@@ -60,6 +60,9 @@ type Identity struct {
 	JobID          int64
 	JobAttempt     int
 	ConversationID int64
+	// JobTools is the canonical tool set bound into an agent job credential
+	// (localjwt claim job_tools). Empty for every other credential.
+	JobTools []string
 }
 
 func (i *Identity) HasScope(s string) bool {

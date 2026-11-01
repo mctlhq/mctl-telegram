@@ -39,7 +39,10 @@ type OAuthPendingAuth struct {
 	Scope           string
 	Nonce           string
 	TGCodeVerifier  string
-	CreatedAt       time.Time
+	// Acquisition is the JSON acquisition snapshot taken at authorize; empty
+	// for rows minted before the column existed.
+	Acquisition string
+	CreatedAt   time.Time
 }
 
 // OAuthCode is the persistent representation of an issued authorization code.
@@ -93,11 +96,11 @@ func (s *Store) InsertOAuthPending(ctx context.Context, p OAuthPendingAuth) erro
 	res, err := s.DB.ExecContext(ctx,
 		`INSERT INTO oauth_pending_auth
 			(state, client_id, redirect_uri, client_state, code_challenge,
-			 challenge_method, scope, nonce, tg_code_verifier, created_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+			 challenge_method, scope, nonce, tg_code_verifier, acquisition, created_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		 ON CONFLICT (state) DO NOTHING`,
 		p.State, p.ClientID, p.RedirectURI, p.ClientState, p.CodeChallenge,
-		p.ChallengeMethod, p.Scope, p.Nonce, p.TGCodeVerifier, p.CreatedAt.UTC(),
+		p.ChallengeMethod, p.Scope, p.Nonce, p.TGCodeVerifier, p.Acquisition, p.CreatedAt.UTC(),
 	)
 	if err != nil {
 		return fmt.Errorf("insert oauth_pending_auth: %w", err)
@@ -194,16 +197,16 @@ func (s *Store) EvictOldestClientRegIfOver(ctx context.Context, max int) error {
 func (s *Store) ConsumeOAuthPending(ctx context.Context, state string, ttl time.Duration) (*OAuthPendingAuth, error) {
 	cutoff := time.Now().UTC().Add(-ttl)
 	var p OAuthPendingAuth
-	var clientState, scope sql.NullString
+	var clientState, scope, acq sql.NullString
 	err := s.DB.QueryRowContext(ctx,
 		`DELETE FROM oauth_pending_auth
 		  WHERE state = $1
 		RETURNING state, client_id, redirect_uri, client_state, code_challenge,
-		          challenge_method, scope, nonce, tg_code_verifier, created_at`,
+		          challenge_method, scope, nonce, tg_code_verifier, acquisition, created_at`,
 		state,
 	).Scan(
 		&p.State, &p.ClientID, &p.RedirectURI, &clientState, &p.CodeChallenge,
-		&p.ChallengeMethod, &scope, &p.Nonce, &p.TGCodeVerifier, &p.CreatedAt,
+		&p.ChallengeMethod, &scope, &p.Nonce, &p.TGCodeVerifier, &acq, &p.CreatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrOAuthNotFound
@@ -213,6 +216,7 @@ func (s *Store) ConsumeOAuthPending(ctx context.Context, state string, ttl time.
 	}
 	p.ClientState = clientState.String
 	p.Scope = scope.String
+	p.Acquisition = acq.String
 	if p.CreatedAt.Before(cutoff) {
 		return nil, ErrOAuthExpired
 	}

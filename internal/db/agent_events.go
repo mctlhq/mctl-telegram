@@ -236,11 +236,11 @@ func (s *Store) SweepAgentMessageBodies(ctx context.Context, retention time.Dura
 		        approval_code = NULL, approval_code_hash = NULL,
 		        approval_code_encrypted = NULL
 		  WHERE created_at < $1
-		    AND status IN ($2,$3,$4,$5)
+		    AND status IN ($2,$3,$4,$5,$6)
 		    AND (payload_encrypted IS NOT NULL OR send_body_encrypted IS NOT NULL
 		         OR approval_code IS NOT NULL OR approval_code_hash IS NOT NULL
 		         OR approval_code_encrypted IS NOT NULL)`,
-		cutoff, ActionExecuted, ActionRejected, ActionExpired, ActionDenied,
+		cutoff, ActionExecuted, ActionRejected, ActionExpired, ActionDenied, ActionDeliveryUnknown,
 	)
 	if err != nil {
 		return total, fmt.Errorf("sweep action payloads: %w", err)

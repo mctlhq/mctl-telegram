@@ -30,10 +30,10 @@ func TestFullChrome(t *testing.T) {
 		`<footer class="mctl-site-footer">`,
 		`<div class="mctl-site-container mctl-site-footer__inner">`,
 		`<nav class="mctl-site-footer__links"`,
-		"ui.mctl.ai/0.15.0/mctl.css",
+		"ui.mctl.ai/0.19.0/mctl.css",
 		// global.css and site.css are pinned as a set with mctl.css.
-		"ui.mctl.ai/0.15.0/global.css",
-		"ui.mctl.ai/0.15.0/site.css",
+		"ui.mctl.ai/0.19.0/global.css",
+		"ui.mctl.ai/0.19.0/site.css",
 		"family=Onest:wght@300;400;500;600;700;800",
 		"Instrument+Serif",
 		"JetBrains+Mono",
@@ -52,6 +52,11 @@ func TestFullChrome(t *testing.T) {
 		"#e25a3c",
 		// Self-hosted Umami page-view counter on public content pages.
 		AnalyticsScript,
+		// Ecosystem cross-links and Schema.org metadata.
+		`<a href="https://mctl.ai" target="_blank" rel="noopener">Platform</a>`,
+		`<a href="https://alice.mctl.ai" target="_blank" rel="noopener">Alice MCP</a>`,
+		`type="application/ld+json"`,
+		`"https://mctl.ai/#organization"`,
 	} {
 		if !strings.Contains(out, s) {
 			t.Errorf("full page missing %q", s)
@@ -160,8 +165,60 @@ func TestButtonsUseAccentFg(t *testing.T) {
 			t.Errorf("%s CSS hard-codes #0a0b0d; use var(--accent-fg)", name)
 		}
 	}
-	if !strings.Contains(componentsCSS, ".btn, .cta-btn { background: var(--accent); color: var(--accent-fg); }") {
+	if !strings.Contains(componentsCSS, ".btn, .cta-btn { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }") {
 		t.Error("shared primary button must use --accent-fg")
+	}
+}
+
+// Accent discipline (@mctlhq/css 0.19.0): the accent is for the primary
+// button and the h1 highlight. Inline code, secondary buttons, step numbers,
+// table keys and the active nav link must not take it.
+func TestAccentKeptForPrimaryAction(t *testing.T) {
+	rule := func(sel string) string {
+		i := strings.Index(componentsCSS, sel+" {")
+		if i < 0 {
+			t.Fatalf("rule %q not found", sel)
+		}
+		return componentsCSS[i : i+strings.Index(componentsCSS[i:], "}")]
+	}
+	for _, sel := range []string{
+		"  code",
+		"  .btn-secondary",
+		"  .btn-secondary:hover",
+		"  ol.steps > li::before",
+		"  .tbl td:first-child code",
+		"  .site-nav a.active",
+		"  .pill-read",
+		"  .badge.mcp",
+	} {
+		if r := rule(sel); strings.Contains(r, "var(--accent") {
+			t.Errorf("%s must be neutral, got:\n%s", strings.TrimSpace(sel), r)
+		}
+	}
+	for _, tok := range []string{"--code-fg: var(--surface-fg);", "--marker-fg:", "--link-underline:"} {
+		if !strings.Contains(tokensCSS, tok) {
+			t.Errorf("inline tokens must define %s for the strict-CSP pages", tok)
+		}
+	}
+}
+
+// The header lists the product pages only; the legal pages move to the
+// landing hero's meta row and the footer, which must keep them.
+func TestHeaderOmitsLegalLinksFooterKeepsThem(t *testing.T) {
+	render := func(name string) string {
+		return render(t, "page_"+name, `{{template "`+name+`" .}}`, Data{ShowManage: true, NavActive: "manage"})
+	}
+	head, foot := render("ui_topbar"), render("ui_footer")
+	for _, href := range []string{`href="/security"`, `href="/privacy"`, `href="/terms"`} {
+		if strings.Contains(head, href) {
+			t.Errorf("header must not link %s", href)
+		}
+		if !strings.Contains(foot, href) {
+			t.Errorf("footer must still link %s", href)
+		}
+	}
+	if !strings.Contains(head, `class="nav-manage active"`) {
+		t.Error("Manage must render as the nav-manage chip, active on its page")
 	}
 }
 
@@ -239,6 +296,18 @@ func TestSiteCSSMirrorMatchesPinnedVersion(t *testing.T) {
 	}
 }
 
+// Strict-CSP pages load no CDN sheet, so every token the site.css mirror reads
+// without a fallback must be in the inline subset. 0.18.0 put the header on
+// --mctl-z-index-nav; missing here, the open mobile menu drew under the page.
+func TestSiteCSSTokensInInlineSubset(t *testing.T) {
+	re := regexp.MustCompile(`var\((--[a-z0-9-]+)\)`)
+	for _, m := range re.FindAllStringSubmatch(siteCSS, -1) {
+		if !strings.Contains(tokensCSS, m[1]+":") {
+			t.Errorf("site.css reads %s with no fallback, but tokens.css does not define it", m[1])
+		}
+	}
+}
+
 // The content box is 1400px plus a 20px gutter on each side, the same edge as
 // mctl.ai and docs.mctl.ai. The old 920px .wrap (an 872px column) and the
 // 100vw header/footer breakout it needed must not come back.
@@ -253,5 +322,22 @@ func TestNoLocalPageWrap(t *testing.T) {
 	}
 	if !strings.Contains(tokensCSS, "--mctl-layout-prose-width: 720px;") {
 		t.Error("fallback tokens must carry the 720px prose width site.css reads")
+	}
+}
+
+func TestNoIndexRobotsTag(t *testing.T) {
+	page := `<!doctype html><html lang="en"><head>{{template "ui_head" .}}</head><body></body></html>`
+
+	withNoIndex := render(t, "noindex", page, Data{Title: "T", NoIndex: true})
+	if !strings.Contains(withNoIndex, `<meta name="robots" content="noindex, follow">`) {
+		t.Error("page with NoIndex: true must emit noindex robots tag")
+	}
+
+	withoutNoIndex := render(t, "indexed", page, Data{Title: "T", NoIndex: false})
+	if strings.Contains(withoutNoIndex, `noindex`) {
+		t.Error("page with NoIndex: false must not emit noindex robots tag")
+	}
+	if !strings.Contains(withoutNoIndex, `<meta name="robots" content="max-image-preview:large, max-snippet:-1, max-video-preview:-1">`) {
+		t.Error("page with NoIndex: false must emit discover robots tag")
 	}
 }

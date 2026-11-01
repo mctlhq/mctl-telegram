@@ -2,7 +2,6 @@ package oauth
 
 import (
 	"errors"
-	"log/slog"
 	"net/url"
 )
 
@@ -127,7 +126,7 @@ func (s *Server) auditRegistration(outcome regOutcome, reason regReason, clientN
 		attrs = append(attrs, "redirect_scheme", scheme, "redirect_host", host)
 	}
 	attrs = append(attrs, extra...)
-	slog.Info("oauth: client_registration audit", attrs...)
+	s.logger().Info("oauth: client_registration audit", attrs...)
 	if s.metrics != nil {
 		s.metrics.CountOAuthClientRegistration(string(outcome), string(reason))
 	}

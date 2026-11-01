@@ -28,6 +28,7 @@ func TestToolAnnotations(t *testing.T) {
 		{"get_media", first(s.toolGetMedia()), true, false, true},
 		{"list_telegram_identities", first(s.toolListIdentities()), true, false, false},
 		{"get_user_audit_log", first(s.toolGetUserAuditLog()), true, false, false},
+		{"get_acquisition_report", first(s.toolGetAcquisitionReport()), true, false, false},
 		{"prepare_broadcast", first(s.toolPrepareBroadcast()), false, false, false},
 		{"list_broadcasts", first(s.toolListBroadcasts()), true, false, false},
 		{"get_broadcast", first(s.toolGetBroadcast()), true, false, false},
@@ -61,6 +62,9 @@ func TestToolAnnotations(t *testing.T) {
 		{"list_assistants", first(s.toolListAssistants()), true, false, false},
 		{"install_assistant", first(s.toolInstallAssistant()), false, true, false},
 		{"update_install", first(s.toolUpdateInstall()), false, true, false},
+		{"fork_assistant", first(s.toolForkAssistant()), false, false, false},
+		{"update_fork", first(s.toolUpdateFork()), false, false, false},
+		{"delete_fork", first(s.toolDeleteFork()), false, true, false},
 	}
 
 	// Every registered tool must have a row here: a tool without one would

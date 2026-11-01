@@ -94,11 +94,16 @@ var toolScopes = map[string][]string{
 	// The caller's own assistant install (#1021).
 	"install_assistant": {"account:manage"},
 	"update_install":    {"account:manage"},
+	// The caller's own private assistant forks (#1043).
+	"fork_assistant": {"account:manage"},
+	"update_fork":    {"account:manage"},
+	"delete_fork":    {"account:manage"},
 
 	// Operator lookups: the lookup tier's admin:users:read is accepted here
 	// and nowhere else (see requireAnyScope).
 	"list_telegram_identities": {"admin:users", "admin:users:read"},
 	"get_user_audit_log":       {"admin:users", "admin:users:read"},
+	"get_acquisition_report":   {"admin:users", "admin:users:read"},
 
 	// Operator writes.
 	"set_telegram_access":     {"admin:users"},

@@ -53,6 +53,23 @@ type landingData struct {
 	// BotAccessRequested shows the "Allow messages" sign-in hint (docs only)
 	// while the telegram:bot_access scope is requested.
 	BotAccessRequested bool
+	// Stats is the latest public usage snapshot, or nil when none has been
+	// sampled yet (or the sampler is disabled). The template renders the
+	// stats strip only when it is non-nil; it never shows zeros.
+	Stats *StatsSnapshot
+}
+
+// LandingOption adjusts Landing without widening its positional signature.
+type LandingOption func(*landingConfig)
+
+type landingConfig struct {
+	stats *StatsCache
+}
+
+// WithStats makes the landing page render the usage strip from cache. A nil
+// cache, or one that has not been filled yet, renders the page without it.
+func WithStats(cache *StatsCache) LandingOption {
+	return func(c *landingConfig) { c.stats = cache }
 }
 
 // Landing renders the product landing page at PublicBaseURL/.
@@ -67,7 +84,11 @@ type landingData struct {
 // showManage gates the "manage" nav/footer link: /telegram/connect/manage is
 // only mounted in local-jwt mode, so main.go passes false for shared-hmac
 // deployments to avoid a 404.
-func Landing(publicBaseURL, mcpPath, authServer string, showManage bool) http.HandlerFunc {
+func Landing(publicBaseURL, mcpPath, authServer string, showManage bool, opts ...LandingOption) http.HandlerFunc {
+	var lc landingConfig
+	for _, o := range opts {
+		o(&lc)
+	}
 	base := strings.TrimRight(publicBaseURL, "/")
 	mcpPath = "/" + strings.TrimLeft(mcpPath, "/")
 	if authServer == "" {
@@ -76,7 +97,7 @@ func Landing(publicBaseURL, mcpPath, authServer string, showManage bool) http.Ha
 	data := landingData{
 		Data: ui.Data{
 			Title:         "MCTL — Your Telegram, inside your AI assistant",
-			Description:   "Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarise unread chats, draft and review replies, and search your full history — no extra apps, encrypted and revocable any time.",
+			Description:   "Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarize unread chats, draft and review replies, and search your full history — no extra apps, encrypted and revocable any time.",
 			NavActive:     "home",
 			PublicBaseURL: base,
 			ShowManage:    showManage,
@@ -86,7 +107,19 @@ func Landing(publicBaseURL, mcpPath, authServer string, showManage bool) http.Ha
 		WellKnownURL: base + "/.well-known/oauth-protected-resource",
 		AuthServer:   authServer,
 	}
-	return chromePage(landingTmpl, "landing", data)
+	if lc.stats == nil {
+		return chromePage(landingTmpl, "landing", data)
+	}
+	// The usage numbers change between requests, so the page data is copied
+	// per request with the current snapshot attached; everything else in it
+	// is immutable and shared.
+	return func(w http.ResponseWriter, r *http.Request) {
+		d := data
+		if snap, ok := lc.stats.Get(); ok {
+			d.Stats = &snap
+		}
+		chromePage(landingTmpl, "landing", d).ServeHTTP(w, r)
+	}
 }
 
 // BrowserRedirect wraps an MCP Streamable-HTTP handler so that a plain

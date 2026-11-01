@@ -34,7 +34,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -311,7 +310,7 @@ func (s *Server) handleDeviceCredential(w http.ResponseWriter, r *http.Request) 
 
 	telegramID, err := s.store.GetTelegramID(r.Context(), device.UserID)
 	if err != nil || telegramID <= 0 {
-		slog.Error("local bridge device issue: resolve telegram id failed", "device_id", deviceID, "err", err)
+		s.logger().Error("local bridge device issue: resolve telegram id failed", "device_id", deviceID, "err", err)
 		s.writeActivateError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -331,7 +330,7 @@ func (s *Server) handleDeviceCredential(w http.ResponseWriter, r *http.Request) 
 	// db.Store.ClaimDeviceCredentialLineage's doc comment.
 	won, err := s.store.ClaimDeviceCredentialLineage(r.Context(), deviceID, jti, issuedAt)
 	if err != nil {
-		slog.Error("local bridge device issue: claim lineage failed", "device_id", deviceID, "err", err)
+		s.logger().Error("local bridge device issue: claim lineage failed", "device_id", deviceID, "err", err)
 		s.writeActivateError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -360,7 +359,7 @@ func (s *Server) handleDeviceCredential(w http.ResponseWriter, r *http.Request) 
 		// Should not happen: deviceReadOnlyScopes is a subset of
 		// allowedLocalBridgeScopes by construction. Surface as an internal
 		// error rather than silently downgrading.
-		slog.Error("local bridge device issue: mint failed", "device_id", deviceID, "err", err)
+		s.logger().Error("local bridge device issue: mint failed", "device_id", deviceID, "err", err)
 		s.writeActivateError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -407,7 +406,7 @@ func (s *Server) handleDeviceRefresh(w http.ResponseWriter, r *http.Request) {
 
 	sendEnabled, err := s.store.IsSendEnabled(r.Context(), device.UserID)
 	if err != nil {
-		slog.Error("local bridge device refresh: read send_enabled failed", "device_id", deviceID, "err", err)
+		s.logger().Error("local bridge device refresh: read send_enabled failed", "device_id", deviceID, "err", err)
 		s.writeActivateError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -421,7 +420,7 @@ func (s *Server) handleDeviceRefresh(w http.ResponseWriter, r *http.Request) {
 
 	telegramID, err := s.store.GetTelegramID(r.Context(), device.UserID)
 	if err != nil || telegramID <= 0 {
-		slog.Error("local bridge device refresh: resolve telegram id failed", "device_id", deviceID, "err", err)
+		s.logger().Error("local bridge device refresh: resolve telegram id failed", "device_id", deviceID, "err", err)
 		s.writeActivateError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -439,7 +438,7 @@ func (s *Server) handleDeviceRefresh(w http.ResponseWriter, r *http.Request) {
 		OriginalIssuedAt: *device.CredentialIssuedAt,
 	})
 	if err != nil {
-		slog.Error("local bridge device refresh: mint failed", "device_id", deviceID, "err", err)
+		s.logger().Error("local bridge device refresh: mint failed", "device_id", deviceID, "err", err)
 		s.writeActivateError(w, http.StatusInternalServerError, "internal error")
 		return
 	}

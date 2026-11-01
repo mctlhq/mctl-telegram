@@ -1,5 +1,143 @@
 # Changelog
 
+## [0.121.0](https://github.com/mctlhq/mctl-telegram/compare/0.120.0...0.121.0) (2026-11-01)
+
+
+### Features
+
+* **web:** one card per assistant on /assistants, compact full-width grid ([93a9085](https://github.com/mctlhq/mctl-telegram/commit/93a9085c6038bd3f1e19f6cfac3891b69968f867))
+
+## [0.120.0](https://github.com/mctlhq/mctl-telegram/compare/0.119.0...0.120.0) (2026-11-01)
+
+
+### Features
+
+* **web:** lighter landing page (design handoff 1b) ([5ab546e](https://github.com/mctlhq/mctl-telegram/commit/5ab546eacb777cd4f6b04033534479698df34f91))
+* **web:** lighter landing page (design handoff 1b) ([37e8a8c](https://github.com/mctlhq/mctl-telegram/commit/37e8a8c4f3a9d47443bd0421957adffebecf165c))
+
+
+### Bug Fixes
+
+* **oauth:** give Server its own logger and join login-flow goroutines in tests ([08fc7cb](https://github.com/mctlhq/mctl-telegram/commit/08fc7cb94f9348f86c97641c3bcb180dca8af3f2))
+* **oauth:** inject a per-server logger and join login-flow goroutines in tests ([6d4c095](https://github.com/mctlhq/mctl-telegram/commit/6d4c095ea03a4f0d0e20a337098a6d63c566d906))
+
+## [0.119.0](https://github.com/mctlhq/mctl-telegram/compare/0.118.0...0.119.0) (2026-11-01)
+
+
+### Features
+
+* **agents:** issue-1072-feat-onboarding-record-acquisition-sourc ([c56b570](https://github.com/mctlhq/mctl-telegram/commit/c56b57033ff00e4eefe8ff9ee9197c2c567fed83))
+* **landing:** show connected sessions instead of sessions used this hour ([fed7c1b](https://github.com/mctlhq/mctl-telegram/commit/fed7c1b6426d4ccca7461edb5b783dc6b219a01b))
+* **landing:** show connected sessions instead of sessions used this hour ([2d9104d](https://github.com/mctlhq/mctl-telegram/commit/2d9104dbaf89196c222e70d5cb5a3de89d7d88db))
+
+## [0.118.0](https://github.com/mctlhq/mctl-telegram/compare/0.117.0...0.118.0) (2026-11-01)
+
+
+### Features
+
+* **landing:** live usage numbers on the home page and GET /api/stats ([03b62f8](https://github.com/mctlhq/mctl-telegram/commit/03b62f84403c3d649f2526b1da956e0e9e5ee0fb))
+* **landing:** live usage numbers on the home page and GET /api/stats ([dce0249](https://github.com/mctlhq/mctl-telegram/commit/dce024912f37cae90c2197c1fc366db46ccc8326))
+
+
+### Bug Fixes
+
+* **stats:** exclude the canary from accounts and online sessions too ([d3afbae](https://github.com/mctlhq/mctl-telegram/commit/d3afbaef1767074429efd8c24812f567a5b9c7dc))
+
+## [0.117.0](https://github.com/mctlhq/mctl-telegram/compare/0.116.0...0.117.0) (2026-11-01)
+
+
+### Features
+
+* **agent-worker:** let the Mac host worker track production releases ([859b9ea](https://github.com/mctlhq/mctl-telegram/commit/859b9eac9a80e6c471c32a94e20ae3a1621dd2ba))
+* **agent-worker:** let the Mac host worker track production releases ([f2a6f1c](https://github.com/mctlhq/mctl-telegram/commit/f2a6f1cf984869119031b81b2e1da939eb71a979))
+
+## [0.116.0](https://github.com/mctlhq/mctl-telegram/compare/0.115.0...0.116.0) (2026-11-01)
+
+
+### Features
+
+* **seo:** add sitemap, robots.txt, and discover robots directive ([b5c9ec3](https://github.com/mctlhq/mctl-telegram/commit/b5c9ec37258393d5498f0f7a033e344247c3d550))
+
+
+### Bug Fixes
+
+* **agent:** measure the flood-wait bound from the reservation ([b8ec7fc](https://github.com/mctlhq/mctl-telegram/commit/b8ec7fcce5b6fe7ac95ed7a5d9bff068d9af86c7))
+* **agent:** report a lost race instead of a denial it did not make ([186f9d9](https://github.com/mctlhq/mctl-telegram/commit/186f9d931a0a2266f31a74fb492ad55ce1bc64e6))
+* **agent:** settle definitive send refusals and bound gate-held retries ([ae332ea](https://github.com/mctlhq/mctl-telegram/commit/ae332eae40799514d8d0df57ddacd1ec5ab26e92))
+* **agent:** treat a flood wait on a decided row as a lost race ([3c6cfae](https://github.com/mctlhq/mctl-telegram/commit/3c6cfae0105634379300513da8bca210da546d19))
+
+## [0.115.0](https://github.com/mctlhq/mctl-telegram/compare/0.114.0...0.115.0) (2026-10-31)
+
+
+### Features
+
+* **agent:** enforce an assistant's tool set server-side ([dec71d8](https://github.com/mctlhq/mctl-telegram/commit/dec71d8385231474f2225f5ca0840b098ad6fc22))
+* **agent:** enforce an assistant's tool set server-side ([2cdd8a2](https://github.com/mctlhq/mctl-telegram/commit/2cdd8a2301dc505d18a97d82de29566fef08bc16)), closes [#1041](https://github.com/mctlhq/mctl-telegram/issues/1041)
+* **agenteval:** baseline eval core for fork promotion ([e703e75](https://github.com/mctlhq/mctl-telegram/commit/e703e75e764aabd7fa0f064aa03400f817e12222))
+* **agenteval:** baseline eval core for fork promotion (P4.3 S1) ([3322543](https://github.com/mctlhq/mctl-telegram/commit/3322543bd278fbb316f1c4886411355c2424a948))
+* **assistant:** fork document, name and narrowing rules ([fac8889](https://github.com/mctlhq/mctl-telegram/commit/fac88899d9e4fbbead2a256a0e31e3221f3067ca)), closes [#1043](https://github.com/mctlhq/mctl-telegram/issues/1043)
+* **assistant:** hr-recruiter 0.1.1 holds pay for the owner ([673953a](https://github.com/mctlhq/mctl-telegram/commit/673953afa8f99b76eca04f254ff244672432db7c))
+* **assistant:** hr-recruiter 0.1.1 holds pay for the owner ([1d494d5](https://github.com/mctlhq/mctl-telegram/commit/1d494d5e5a8a6accecce9d3ad3bbee74b325ef58))
+* **assistant:** install and run private forks, observe only ([b0c112b](https://github.com/mctlhq/mctl-telegram/commit/b0c112b0140c969cfe5138e98f5131ef7bdc652a)), closes [#1043](https://github.com/mctlhq/mctl-telegram/issues/1043)
+* **assistant:** private forks of catalog assistants (P4.2) ([c7d8113](https://github.com/mctlhq/mctl-telegram/commit/c7d8113bce03b916fcfd42fb5a4d5c755cbefafd))
+* **db:** assistant_forks store, quotas and purge ([58a36fa](https://github.com/mctlhq/mctl-telegram/commit/58a36fa8c1b028a9b05e1dd684cac79761852456)), closes [#1043](https://github.com/mctlhq/mctl-telegram/issues/1043)
+* **mcp:** fork_assistant, update_fork and delete_fork ([3342be1](https://github.com/mctlhq/mctl-telegram/commit/3342be1686a3fd679a8206596aaf757eb6b9733f)), closes [#1043](https://github.com/mctlhq/mctl-telegram/issues/1043)
+* **seo:** emit noindex on privacy and terms pages ([c9c5a39](https://github.com/mctlhq/mctl-telegram/commit/c9c5a39377bb67887f0c5afb1756ab7950cd80da))
+* **seo:** emit noindex on privacy and terms pages ([ed78f36](https://github.com/mctlhq/mctl-telegram/commit/ed78f360e4c5049547b561169e1b30c46eed64ed))
+* **seo:** link ecosystem services and add application schema ([7eadbb4](https://github.com/mctlhq/mctl-telegram/commit/7eadbb4b4dc8fa76a3d3d59a89264d9a4a5c851e))
+* **seo:** link ecosystem services and add application schema ([580aa02](https://github.com/mctlhq/mctl-telegram/commit/580aa0227af093aa6a6ddacaa7c6f5eafdacae21))
+* **web:** accent discipline, hero rhythm and copy pass on public pages ([5972848](https://github.com/mctlhq/mctl-telegram/commit/59728485de2db930317fcdaf96bc1023d87ec60f))
+* **web:** accent discipline, hero rhythm and copy pass on public pages ([0401d1b](https://github.com/mctlhq/mctl-telegram/commit/0401d1b62ebd43307d47b9a6b45518d21f3c5771))
+* **web:** link /assistants from the header, centre the site shell ([6b6cbd4](https://github.com/mctlhq/mctl-telegram/commit/6b6cbd453349eae2abb07214ab6a924d038af15c))
+* **web:** link /assistants from the header, centre the site shell ([ad1fc7d](https://github.com/mctlhq/mctl-telegram/commit/ad1fc7dddcab11f5eb6b24cce530681e3470a8b8))
+
+
+### Bug Fixes
+
+* **agent:** end ambiguous sends in delivery_unknown, not retries ([99a7d3e](https://github.com/mctlhq/mctl-telegram/commit/99a7d3eab78de39d205dda83326b8bdd3ba63c27))
+* **agent:** end ambiguous sends in delivery_unknown, not retries ([b69e4f3](https://github.com/mctlhq/mctl-telegram/commit/b69e4f341214f898f98648bfef21d13a38ed0c44))
+* **agent:** end recovery retries that hit RANDOM_ID_DUPLICATE ([ae781d6](https://github.com/mctlhq/mctl-telegram/commit/ae781d6734e2a11be6b8dddf507f13804b3dd639))
+* **agenteval:** close the review's four gaps in the eval core ([8cf7318](https://github.com/mctlhq/mctl-telegram/commit/8cf7318d285a727d9e9de2e22d3be54288439776))
+* **agent:** key the echo window on the send, not the draft ([18248ad](https://github.com/mctlhq/mctl-telegram/commit/18248adb651a529009c659987032400ee684dba6))
+* **agent:** look up and match late sends from the send, not the draft ([22203ed](https://github.com/mctlhq/mctl-telegram/commit/22203ed0529db64829822989c68020217a793de9))
+* **agent:** read get_lead through a lead-only route ([dfe3b4d](https://github.com/mctlhq/mctl-telegram/commit/dfe3b4d9469c00384e75639d78430cd0f9e65ea6)), closes [#1043](https://github.com/mctlhq/mctl-telegram/issues/1043)
+* **agent:** record a duplicate on the first send as delivered ([3276946](https://github.com/mctlhq/mctl-telegram/commit/3276946e034c14cf1c2954e6c51d7c0c3071213e))
+* **agent:** trust echo-noted ids; treat notification duplicates as sent ([1bd198d](https://github.com/mctlhq/mctl-telegram/commit/1bd198da6461da568fc5971cb2be782c0ea131c5))
+* **assistant:** close two intent loosenings in fork validation ([56ad117](https://github.com/mctlhq/mctl-telegram/commit/56ad117216eea3930b5b5cad6c3d248136749c44)), closes [#1043](https://github.com/mctlhq/mctl-telegram/issues/1043)
+* **ui:** keep the eyebrow status dot round on phones ([97d7e9d](https://github.com/mctlhq/mctl-telegram/commit/97d7e9d65b8577071bde44e237c827bcdc5a81be))
+* **ui:** re-mirror site.css 0.19.0 after the review fixes ([ae41f19](https://github.com/mctlhq/mctl-telegram/commit/ae41f19c469e6e205906cc721ad0eca9285788d1))
+* **ui:** use publicBaseURL for json-ld and assert ecosystem links ([b7d4a1d](https://github.com/mctlhq/mctl-telegram/commit/b7d4a1d6567599ab88ccbc2113ce332128973578))
+* **web:** size the demo video frame from the video's own ratio ([c34f778](https://github.com/mctlhq/mctl-telegram/commit/c34f7784e86357accf6e285ef2783936b29010e2))
+* **web:** size the demo video frame from the video's own ratio ([f3680d0](https://github.com/mctlhq/mctl-telegram/commit/f3680d0f97a62e02ce371d862d78e14b8058d387))
+
+## [0.114.0](https://github.com/mctlhq/mctl-telegram/compare/0.113.0...0.114.0) (2026-10-31)
+
+
+### Features
+
+* **agent:** fence assistant work by install revision ([cb4c901](https://github.com/mctlhq/mctl-telegram/commit/cb4c9014d33a3b8a7c89b21b2434bfee0bfed1b1))
+* **agent:** fence assistant work by install revision ([5b43140](https://github.com/mctlhq/mctl-telegram/commit/5b431404aa4c09929878aea401ad32b83acc60f0)), closes [#1018](https://github.com/mctlhq/mctl-telegram/issues/1018)
+* **agent:** materialized registry form for catalog assistants ([75c0fc6](https://github.com/mctlhq/mctl-telegram/commit/75c0fc6922cf6d2fffd762d55c877f31c3f06522))
+* **agent:** materialized registry form for catalog assistants ([3ae648a](https://github.com/mctlhq/mctl-telegram/commit/3ae648af984ee9f8e8bd38e0f6f276cc9ea0e09b)), closes [#1019](https://github.com/mctlhq/mctl-telegram/issues/1019)
+* **agent:** one install service with a revision compare-and-set ([c3df35d](https://github.com/mctlhq/mctl-telegram/commit/c3df35d5faed59cc638667d54d89d7e5f497b502)), closes [#1021](https://github.com/mctlhq/mctl-telegram/issues/1021)
+* **agent:** publish hr-recruiter as a public, active assistant ([1328f4e](https://github.com/mctlhq/mctl-telegram/commit/1328f4e0646b23ec81abeadfa889e9015bac4c39))
+* **agent:** registry-backed assistant definitions with a DB snapshot ([ae8126e](https://github.com/mctlhq/mctl-telegram/commit/ae8126ec11e81c82b014d6111177cfd070af3bd0))
+* **agent:** registry-backed assistant definitions with a DB snapshot ([38ea277](https://github.com/mctlhq/mctl-telegram/commit/38ea27740f406d7fb70a99879fe7870b4a4292a6)), closes [#1020](https://github.com/mctlhq/mctl-telegram/issues/1020)
+* **mcp:** assistant install tools on one install service ([336deac](https://github.com/mctlhq/mctl-telegram/commit/336deac8ef86c20c865c7ada53ca3d01a4e04000))
+* **mcp:** list_assistants, install_assistant and update_install ([72fa12b](https://github.com/mctlhq/mctl-telegram/commit/72fa12b3fd5c3cb3ae6cd1a79ce6f41109debf0a)), closes [#1021](https://github.com/mctlhq/mctl-telegram/issues/1021)
+* **web:** assistant catalog page and manage-page install section ([308d8a1](https://github.com/mctlhq/mctl-telegram/commit/308d8a1a57b3016a5ea20dff5b6d004fe45626ef))
+* **web:** assistant catalog page and manage-page install section ([9c02941](https://github.com/mctlhq/mctl-telegram/commit/9c02941cfd069bdb6d26f9851634358e7fdf54e2)), closes [#1022](https://github.com/mctlhq/mctl-telegram/issues/1022)
+
+
+### Bug Fixes
+
+* **agent:** address review nits on the registry snapshot ([4a6d5a6](https://github.com/mctlhq/mctl-telegram/commit/4a6d5a6abbb45363bb4d5232a620eeefe156482b))
+* **agent:** canonical JSON keeps &lt;, &gt; and & literal ([6273a72](https://github.com/mctlhq/mctl-telegram/commit/6273a72d1c3a76e7a18737ed08eab86c8eb27a8e))
+* **agent:** clear the pre-P3.2 hr-recruiter digest on migrate ([c28ea81](https://github.com/mctlhq/mctl-telegram/commit/c28ea81ae3105feea2b9d8ae8d0c0a8e199a841e))
+* **agent:** compare-and-set every install; fresh accounts report rev 1 ([cc454c4](https://github.com/mctlhq/mctl-telegram/commit/cc454c4cfe69450a73262de33b0c8e8750c01f33))
+* **agent:** keep install-fence refusals explainable ([305b156](https://github.com/mctlhq/mctl-telegram/commit/305b1567e1a6cde5ef402ad1555e3dc6d10c2f6d))
+* **web:** refuse non-finite numbers; choices select only for strings ([9f2a565](https://github.com/mctlhq/mctl-telegram/commit/9f2a565fd5055a310463af7165d79cbedc9a4067)), closes [#1022](https://github.com/mctlhq/mctl-telegram/issues/1022)
+
 ## [0.113.0](https://github.com/mctlhq/mctl-telegram/compare/0.112.0...0.113.0) (2026-10-31)
 
 

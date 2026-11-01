@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -18,6 +19,7 @@ import (
 type agentAPI interface {
 	GetEvent(ctx context.Context, eventID string) (*EventDTO, error)
 	GetConversationContext(ctx context.Context, conversationID int64, limit int) (*ConversationContext, error)
+	GetConversationLeads(ctx context.Context, conversationID int64) ([]LeadDTO, error)
 	GetRecruiterProfile(ctx context.Context, peerTGID int64) (map[string]any, error)
 	GetPolicy(ctx context.Context) (*PolicyDTO, error)
 	ProposeReply(ctx context.Context, conversationID, jobID int64, attempt int, intent, text string) (*ActionResult, error)
@@ -62,7 +64,9 @@ const ServerName = "agent"
 //
 // Each tool is registered under the name the job's assistant uses for it,
 // a canonical name or a generic alias; the implementation is the same. The
-// names must cover every tool, as jobTools requires on the invoking side.
+// names may be a subset that includes the mandatory tools (tools.ForJob, as
+// jobTools on the invoking side); a tool left out is not registered, and the
+// agent API refuses its routes for this job regardless.
 func NewMCPServer(api agentAPI, job JobContext) (*mcpserver.MCPServer, error) {
 	bindings, err := tools.ForJob(job.Tools)
 	if err != nil {
@@ -217,23 +221,37 @@ func (b *toolBuilder) getRecruiterProfile() (mcplib.Tool, mcpserver.ToolHandlerF
 // let a prompt-injected message from one recruiter fetch another
 // conversation's lead details (company, compensation, recruiter identity)
 // through this account's own token. Always resolving via this job's own
-// conversation (the same lookup get_conversation_context already exposes)
-// keeps the tool scoped to data this job is actually allowed to see, the
-// same "server derives it, caller can't override" shape as JobContext's
-// other pinned fields.
+// conversation keeps the tool scoped to data this job is actually allowed
+// to see, the same "server derives it, caller can't override" shape as
+// JobContext's other pinned fields.
+//
+// It reads GET /conversations/{id}/leads, which returns the leads and no
+// messages, so get_lead does not grant what get_conversation_context does
+// (#1043). Only a server without that route (a 404 that is not the
+// route's own "conversation not found") is read through the context route,
+// as before.
 func (b *toolBuilder) getLead() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("get_lead",
 		mcplib.WithDescription("Fetch the job leads saved for this job's own conversation, newest first, if any. Equivalent to get_conversation_context's leads field, offered separately for a quick standalone lookup."),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		convCtx, err := b.api.GetConversationContext(ctx, b.job.ConversationID, 0)
+		leads, err := b.api.GetConversationLeads(ctx, b.job.ConversationID)
+		// The route answers "conversation not found" itself; any other 404
+		// is a server without the route.
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound && apiErr.Message != "conversation not found" {
+			convCtx, cerr := b.api.GetConversationContext(ctx, b.job.ConversationID, 0)
+			if cerr != nil {
+				return toolErr(cerr), nil
+			}
+			leads, err = convCtx.Leads, nil
+			if len(leads) == 0 && convCtx.Lead != nil {
+				// A server that predates #951 returns only the single lead.
+				leads = []LeadDTO{*convCtx.Lead}
+			}
+		}
 		if err != nil {
 			return toolErr(err), nil
-		}
-		leads := convCtx.Leads
-		if len(leads) == 0 && convCtx.Lead != nil {
-			// A server that predates #951 returns only the single lead.
-			leads = []LeadDTO{*convCtx.Lead}
 		}
 		if len(leads) == 0 {
 			return mcplib.NewToolResultError("no lead saved yet for this conversation"), nil

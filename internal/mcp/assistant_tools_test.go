@@ -196,10 +196,15 @@ func TestListAssistants_EmbeddedCatalogWithoutValuesOrNotes(t *testing.T) {
 	}
 	var out listAssistantsResult
 	decodeToolJSON(t, res, &out)
-	if len(out.Assistants) != 1 {
+	// Every installable version is listed, by name and highest version
+	// first, as the tool's description says; there is no "latest".
+	if len(out.Assistants) != 2 || out.Assistants[0].Name != "hr-recruiter" || out.Assistants[0].Version != "0.1.1" {
 		t.Fatalf("assistants = %+v", out.Assistants)
 	}
-	hr := out.Assistants[0]
+	if hr := out.Assistants[0]; len(hr.Intents) != 5 || hr.Intents[4].Name != "compensation" || hr.Intents[4].Tier != "approve" {
+		t.Fatalf("0.1.1 entry = %+v", hr)
+	}
+	hr := out.Assistants[1]
 	if hr.Name != "hr-recruiter" || hr.Version != "0.1.0" || hr.Lifecycle != "published" ||
 		hr.Defaults.Mode != "observe" || hr.Defaults.DisclosurePolicy != "optional" ||
 		hr.Defaults.Limits == nil || hr.Defaults.Limits.MaxReplyChars != 1200 || len(hr.Variables) != 7 || len(hr.Intents) != 4 {
@@ -223,6 +228,8 @@ type fakeCatalogRegistry struct {
 	down  bool
 	entry *assistant.Entry
 	srv   *httptest.Server
+	// lifecycle is hr-recruiter@0.1.0's; "" is published.
+	lifecycle string
 }
 
 func newFakeCatalogRegistry(t *testing.T) *fakeCatalogRegistry {
@@ -266,8 +273,12 @@ func (f *fakeCatalogRegistry) serve(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		lifecycle := f.lifecycle
+		if lifecycle == "" {
+			lifecycle = "published"
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"name": "hr-recruiter", "version": "0.1.0", "lifecycle": "published",
+			"name": "hr-recruiter", "version": "0.1.0", "lifecycle": lifecycle,
 			"contentHash": f.entry.Digest, "definition": json.RawMessage(f.entry.Materialized),
 		})
 	default:

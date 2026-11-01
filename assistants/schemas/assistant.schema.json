@@ -14,12 +14,18 @@
       "additionalProperties": false,
       "required": ["name", "title", "description", "version", "owner", "visibility", "status"],
       "properties": {
-        "name": { "$ref": "#/$defs/slug" },
+        "name": {
+          "description": "A catalog name is a slug. A private fork is named <base>~<owner-scope>~<slug> and carries fork.",
+          "anyOf": [{ "$ref": "#/$defs/slug" }, { "$ref": "#/$defs/forkName" }]
+        },
         "title": { "type": "string", "minLength": 1, "maxLength": 80 },
         "description": { "type": "string", "minLength": 1, "maxLength": 1000 },
         "version": { "$ref": "#/$defs/semver" },
         "owner": { "type": "string", "minLength": 1 },
-        "visibility": { "enum": ["public", "tenant", "admin"] },
+        "visibility": {
+          "description": "private is a fork's, and only a fork's: it is visible to its owner alone.",
+          "enum": ["public", "tenant", "admin", "private"]
+        },
         "status": { "enum": ["draft", "active", "deprecated"] },
         "tags": { "type": "array", "items": { "$ref": "#/$defs/slug" }, "uniqueItems": true },
         "examples": {
@@ -27,6 +33,24 @@
           "type": "array",
           "items": { "type": "string", "minLength": 1, "maxLength": 500 },
           "maxItems": 10
+        },
+        "fork": {
+          "description": "Set on a private fork only: the catalog version it narrows, pinned by digest. See docs/assistants/adr-forks.md.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["base"],
+          "properties": {
+            "base": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "version", "digest"],
+              "properties": {
+                "name": { "$ref": "#/$defs/slug" },
+                "version": { "$ref": "#/$defs/semver" },
+                "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+              }
+            }
+          }
         }
       }
     },
@@ -78,7 +102,7 @@
           }
         },
         "tools": {
-          "description": "Platform tools the assistant's model may call: every tool, each by its canonical name or a generic alias (get_owner_profile, get_record, save_record).",
+          "description": "Platform tools the assistant's model may call, each by its canonical name or a generic alias (get_owner_profile, get_record, save_record). A subset is enforced by the agent API and must include get_event and complete_agent_job.",
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
@@ -151,6 +175,7 @@
   },
   "$defs": {
     "slug": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+    "forkName": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}~[a-z2-7]{10}~[a-z0-9][a-z0-9_-]{0,31}$" },
     "semver": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$" },
     "tier": { "enum": ["auto", "approve", "never"] },
     "mode": { "enum": ["observe", "guarded", "off"] },

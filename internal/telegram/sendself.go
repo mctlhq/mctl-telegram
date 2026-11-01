@@ -4,10 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 // SendToInputPeer sends a plain text message to an already-resolved peer and
@@ -46,7 +50,7 @@ func SendToInputPeerWithRandomID(ctx context.Context, c *telegram.Client, userID
 		NoWebpage: true,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("send: %w", err)
+		return 0, classifySendError(err)
 	}
 	messageID := extractMessageID(updates)
 	// Mark the server-assigned id before returning, matching SendMessage in
@@ -55,6 +59,47 @@ func SendToInputPeerWithRandomID(ctx context.Context, c *telegram.Client, userID
 	// through this path is not misread as a manual owner takeover.
 	notifyAgentSent(userID, int64(messageID))
 	return messageID, nil
+}
+
+// refusalClasses is the closed list of messages.sendMessage errors that
+// prove the message was not delivered (#1055): the peer cannot be written
+// to, the peer is not valid, or the message itself was rejected. Anything
+// else, a timeout included, stays ambiguous. Keep it closed: adding an
+// error that can follow a delivery would turn delivered sends into denied.
+var refusalClasses = []string{
+	"USER_IS_BLOCKED",
+	"YOU_BLOCKED_USER",
+	"PEER_ID_INVALID",
+	"INPUT_USER_DEACTIVATED",
+	"PRIVACY_PREMIUM_REQUIRED",
+	"CHAT_WRITE_FORBIDDEN",
+	"PEER_FLOOD",
+	"MESSAGE_EMPTY",
+	"MESSAGE_TOO_LONG",
+}
+
+// RefusalClass reports the RPC error type when err is one of the
+// refusals on the closed list.
+func RefusalClass(err error) (string, bool) {
+	rpcErr, ok := tgerr.As(err)
+	if !ok || !rpcErr.IsOneOf(refusalClasses...) {
+		return "", false
+	}
+	return rpcErr.Type, true
+}
+
+// ErrRandomIDDuplicate marks a send Telegram refused because its random_id
+// was already used: an earlier send with that id was delivered (#1029).
+var ErrRandomIDDuplicate = errors.New("random_id already used")
+
+// classifySendError wraps a messages.sendMessage failure, tagging
+// RANDOM_ID_DUPLICATE with ErrRandomIDDuplicate so callers can tell "already
+// delivered" apart from a failed send.
+func classifySendError(err error) error {
+	if tgerr.Is(err, "RANDOM_ID_DUPLICATE") {
+		return fmt.Errorf("send: %w: %w", ErrRandomIDDuplicate, err)
+	}
+	return fmt.Errorf("send: %w", err)
 }
 
 // SendToSelf sends a message to the account's own Saved Messages. This is the
@@ -76,4 +121,76 @@ func SendToSelf(ctx context.Context, c *telegram.Client, userID int64, text stri
 // SendToInputPeerWithRandomID's identical rationale for executor sends.
 func SendToSelfWithRandomID(ctx context.Context, c *telegram.Client, userID, randomID int64, text string) (int, error) {
 	return SendToInputPeerWithRandomID(ctx, c, userID, &tg.InputPeerSelf{}, text, randomID)
+}
+
+// locateHistoryLimit is how far back LocateOwnOutgoing looks in the chat.
+// The send it looks for was reserved minutes earlier, so it is near the top
+// unless the chat has been unusually busy since, in which case the id simply
+// stays unknown.
+const locateHistoryLimit = 50
+
+// locateClockSlack widens the "sent at or after" floor for clock skew
+// between this server and Telegram.
+const locateClockSlack = 30 * time.Second
+
+// LocateOwnOutgoing finds the id of a message this account already sent to
+// peer but whose send result was lost: Telegram refused a resend with
+// RANDOM_ID_DUPLICATE, which carries no message (#1029). Messages do not
+// expose random_id, so the match is on content: exactly one outgoing message
+// with this text (whitespace-trimmed) dated at or after since. None or
+// several is "not found". A found id is marked as an agent send, like a
+// normal send's, so its echo is not read as the owner taking over.
+func LocateOwnOutgoing(ctx context.Context, c *telegram.Client, userID int64, peer tg.InputPeerClass, text string, since time.Time) (int, bool, error) {
+	hist, err := c.API().MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+		Peer:  peer,
+		Limit: locateHistoryLimit,
+	})
+	if err != nil {
+		return 0, false, fmt.Errorf("get history: %w", err)
+	}
+	modified, ok := hist.AsModified()
+	if !ok {
+		return 0, false, nil
+	}
+	_, self := peer.(*tg.InputPeerSelf)
+	id, found := uniqueOutgoingMatch(modified.GetMessages(), text, since, !self)
+	if found {
+		notifyAgentSent(userID, int64(id))
+	}
+	return id, found, nil
+}
+
+// LocateOwnSaved is LocateOwnOutgoing for the owner's Saved Messages, where
+// owner notifications go. Every message there is the account's own, and
+// messages.getHistory on InputPeerSelf does not reliably set Out (see the
+// listener's Saved Messages history reader), so Out is not required.
+func LocateOwnSaved(ctx context.Context, c *telegram.Client, userID int64, text string, since time.Time) (int, bool, error) {
+	return LocateOwnOutgoing(ctx, c, userID, &tg.InputPeerSelf{}, text, since)
+}
+
+// uniqueOutgoingMatch returns the id of the single message in msgs whose
+// text equals text (both trimmed), whose date is not before since, and, when
+// requireOut is set, that is outgoing. A second match makes the answer
+// ambiguous, so it reports not found.
+func uniqueOutgoingMatch(msgs []tg.MessageClass, text string, since time.Time, requireOut bool) (int, bool) {
+	want := strings.TrimSpace(text)
+	if want == "" {
+		return 0, false
+	}
+	// Telegram dates are whole seconds and come from Telegram's clock, since
+	// from ours; allow some skew. Exact text and a single match still guard
+	// against a false hit.
+	floor := since.Add(-locateClockSlack).Truncate(time.Second).Unix()
+	id, n := 0, 0
+	for _, raw := range msgs {
+		m, ok := raw.(*tg.Message)
+		if !ok || (requireOut && !m.Out) || int64(m.Date) < floor {
+			continue
+		}
+		if strings.TrimSpace(m.Message) != want {
+			continue
+		}
+		id, n = m.ID, n+1
+	}
+	return id, n == 1
 }

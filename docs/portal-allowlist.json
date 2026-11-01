@@ -127,6 +127,15 @@
       "reason": "Admin-only listing of every signed-in Telegram user with access tier and session state; the upstream refuses it with scope-denied for anyone without admin:users(:read). Only TG_LOGIN_ADMINS hold that scope."
     },
     {
+      "name": "get_acquisition_report",
+      "enabled": true,
+      "upstream_gates": [
+        "admin:users",
+        "admin:users:read"
+      ],
+      "reason": "Admin-only aggregate of sign-ups, tool-call users and 2+ active-day users per acquisition source label; no per-user data. The upstream refuses it without admin:users(:read)."
+    },
+    {
       "name": "mint_worker_token",
       "enabled": true,
       "upstream_gates": [
@@ -299,6 +308,30 @@
         "account:manage"
       ],
       "reason": "Patches the caller's OWN assistant install with a compare-and-set on its install revision; there is no telegram_id argument and the output never echoes values or notes. Gated on the account:manage scope."
+    },
+    {
+      "name": "fork_assistant",
+      "enabled": true,
+      "upstream_gates": [
+        "account:manage"
+      ],
+      "reason": "Creates a private fork of a catalog assistant on the caller's OWN account only; there is no telegram_id argument. The fork can only narrow its base, runs in observe mode only, and the output reports name, version and digest, never the instructions. Gated on the account:manage scope."
+    },
+    {
+      "name": "update_fork",
+      "enabled": true,
+      "upstream_gates": [
+        "account:manage"
+      ],
+      "reason": "Writes a new immutable version of one of the caller's OWN forks; there is no telegram_id argument, the fork can only narrow its base and runs in observe mode only, and the output never echoes the instructions. Gated on the account:manage scope."
+    },
+    {
+      "name": "delete_fork",
+      "enabled": true,
+      "upstream_gates": [
+        "account:manage"
+      ],
+      "reason": "Deletes versions of one of the caller's OWN forks; there is no telegram_id argument and the version the caller's install runs is never deleted. Gated on the account:manage scope."
     },
     {
       "name": "set_telegram_access",

@@ -33,6 +33,9 @@ package ui
 import (
 	_ "embed"
 	"html/template"
+	"strconv"
+	"strings"
+	"sync/atomic"
 )
 
 //go:embed assets/tokens.css
@@ -61,10 +64,11 @@ var toggleJS string
 type Data struct {
 	Title         string // <title> text
 	Description   string // social-share / meta description; falls back to a default when empty
-	NavActive     string // "home" | "docs" | "platforms" | "security" | "privacy" | "terms" | "demo" | "manage" | ""
+	NavActive     string // "docs" | "platforms" | "assistants" | "demo" | "manage" highlight a header link; "home" | "security" | "privacy" | "terms" | "" highlight none (those pages are linked from the footer and the landing hero)
 	PublicBaseURL string // shown in the footer, and used as the og:url / og:image origin
 	ShowManage    bool   // set true only when /telegram/connect/manage is mounted (local-jwt auth mode)
 	CanonicalPath string // when set, emits <link rel="canonical"> at PublicBaseURL+CanonicalPath
+	NoIndex       bool   // when set, emits <meta name="robots" content="noindex, follow">
 }
 
 // FaviconLink is the shared tab icon pointing at the design-CDN terracotta T
@@ -85,7 +89,7 @@ const AnalyticsScript = `<script defer src="https://stats.mctl.ai/insights.js" d
 // tokens.css mirrors the same version's values and site.css is mirrored
 // verbatim, for the strict-CSP pages and as a fallback when the CDN is
 // unreachable.
-const DesignVersion = "0.15.0"
+const DesignVersion = "0.19.0"
 
 // wordmark is the MCTL brand mark: accent "M" + "CTL", as LogoDefault.vue
 // (mctl.ai) and BrandMark.vue (docs.mctl.ai) draw it.
@@ -96,21 +100,40 @@ const wordmark = `<span class="wordmark"><span class="wordmark-m">M</span><span 
 var defs = `
 {{define "ui_head"}}<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{.Title}}</title>
-<meta name="description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarise unread chats, draft replies, and search your history — no extra apps.{{end}}">
+{{if .NoIndex}}<meta name="robots" content="noindex, follow">
+{{else}}<meta name="robots" content="max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+{{end}}<title>{{.Title}}</title>
+<meta name="description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarize unread chats, draft replies, and search your history — no extra apps.{{end}}">
 {{if .CanonicalPath}}<link rel="canonical" href="{{.PublicBaseURL}}{{.CanonicalPath}}">
 {{end}}` + FaviconLink + `
 <link rel="shortcut icon" href="/favicon.ico">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="MCTL Assistant">
 <meta property="og:title" content="{{.Title}}">
-<meta property="og:description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarise unread chats, draft replies, and search your history — no extra apps.{{end}}">
+<meta property="og:description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarize unread chats, draft replies, and search your history — no extra apps.{{end}}">
 <meta property="og:url" content="{{.PublicBaseURL}}">
 <meta property="og:image" content="{{.PublicBaseURL}}/og.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="{{.Title}}">
-<meta name="twitter:description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarise unread chats, draft replies, and search your history — no extra apps.{{end}}">
+<meta name="twitter:description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarize unread chats, draft replies, and search your history — no extra apps.{{end}}">
 <meta name="twitter:image" content="{{.PublicBaseURL}}/og.png">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "MCTL Assistant",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Cloud",
+  "url": "{{.PublicBaseURL}}",
+  "description": "Connect Telegram to Claude, ChatGPT, or any AI assistant via MCP",
+  "provider": {
+    "@type": "Organization",
+    "@id": "https://mctl.ai/#organization",
+    "name": "MCTL",
+    "url": "https://mctl.ai"
+  }
+}
+</script>
 <style>` + tokensCSS + siteCSS + `</style>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -128,14 +151,11 @@ var defs = `
     <input type="checkbox" id="site-nav-toggle" class="nav-toggle" aria-label="Open menu" aria-controls="site-nav">
     <label for="site-nav-toggle" class="nav-burger" title="Menu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></label>
     <nav class="site-nav" id="site-nav" aria-label="Main">
-      <a href="/"{{if eq .NavActive "home"}} class="active"{{end}}>Home</a>
       <a href="/docs"{{if eq .NavActive "docs"}} class="active"{{end}}>Docs</a>
       <a href="/platforms"{{if eq .NavActive "platforms"}} class="active"{{end}}>Platforms</a>
+      {{if assistantsMounted}}<a href="/assistants"{{if eq .NavActive "assistants"}} class="active"{{end}}>Assistants</a>{{end}}
       <a href="/demo"{{if eq .NavActive "demo"}} class="active"{{end}}>Demo</a>
-      <a href="/security"{{if eq .NavActive "security"}} class="active"{{end}}>Security</a>
-      <a href="/privacy"{{if eq .NavActive "privacy"}} class="active"{{end}}>Privacy</a>
-      <a href="/terms"{{if eq .NavActive "terms"}} class="active"{{end}}>Terms</a>
-      {{if .ShowManage}}<a href="/telegram/connect/manage"{{if eq .NavActive "manage"}} class="active"{{end}}>Manage</a>{{end}}
+      {{if .ShowManage}}<a href="/telegram/connect/manage" class="nav-manage{{if eq .NavActive "manage"}} active{{end}}">Manage</a>{{end}}
       <a href="https://github.com/mctlhq/mctl-telegram" target="_blank" rel="noopener" aria-label="GitHub" title="GitHub" class="gh-link"><svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
     </nav>
     <button class="theme-toggle" type="button" aria-label="Toggle theme" title="Toggle theme">
@@ -149,10 +169,13 @@ var defs = `
     <div class="mctl-site-container mctl-site-footer__inner">
     <a class="brand" href="/" aria-label="MCTL home">` + wordmark + `</a>
     <nav class="mctl-site-footer__links" aria-label="Footer">
+      <a href="https://mctl.ai" target="_blank" rel="noopener">Platform</a>
+      <a href="https://alice.mctl.ai" target="_blank" rel="noopener">Alice MCP</a>
       <a href="/">Home</a>
       <a href="/docs">Docs</a>
       <a href="/platforms">Platforms</a>
-      <a href="/demo">Demo</a>
+      {{if assistantsMounted}}<a href="/assistants">Assistants</a>
+      {{end}}<a href="/demo">Demo</a>
       <a href="/security">Security</a>
       <a href="/privacy">Privacy</a>
       <a href="/terms">Terms</a>
@@ -246,8 +269,50 @@ const AuthCSS = `
   .url { font-family: var(--font-mono); font-size: 13px; word-break: break-all; color: var(--accent-highlight); }
 `
 
+// assistantsMounted records whether the server mounted /assistants (it only
+// does with AGENT_ENABLED), so the header and footer link to it only where it
+// exists. It is set once at startup, before any page renders, and read at
+// render time, so every page picks it up without each handler carrying it.
+var assistantsMounted atomic.Bool
+
+// SetAssistantsMounted tells the shared chrome whether /assistants is served.
+func SetAssistantsMounted(on bool) { assistantsMounted.Store(on) }
+
 // base carries the shared defines; pages clone it and add their own body.
-var base = template.Must(template.New("ui").Parse(defs))
+var base = template.Must(template.New("ui").Funcs(template.FuncMap{
+	"assistantsMounted": assistantsMounted.Load,
+	"fmtCount":          FormatCount,
+}).Parse(defs))
+
+// FormatCount renders an integer with comma thousands separators ("57,339").
+// Pages use it through the fmtCount template func; the landing page's
+// refresh script applies the same grouping so a refreshed value looks like
+// the server-rendered one.
+func FormatCount(n int64) string {
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	s := strconv.FormatInt(n, 10)
+	if len(s) > 3 {
+		var b strings.Builder
+		head := len(s) % 3
+		if head > 0 {
+			b.WriteString(s[:head])
+		}
+		for i := head; i < len(s); i += 3 {
+			if b.Len() > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(s[i : i+3])
+		}
+		s = b.String()
+	}
+	if neg {
+		return "-" + s
+	}
+	return s
+}
 
 // New returns a template named name whose body is page and which can reference
 // the shared {{template "ui_*"}} defines. Execute it with ExecuteTemplate(w, name, data).

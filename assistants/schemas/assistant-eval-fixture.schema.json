@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tg.mctl.ai/schemas/assistant-eval-fixture.schema.json",
+  "title": "AssistantEvalFixture",
+  "description": "One line of an eval suite's fixtures.jsonl: an incoming message, the action the assistant should take, and the most authority a reply to it may get. See docs/assistants/adr-forks.md, Promotion.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "category", "incoming", "expected_action", "expected_decision", "decision_reason"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" },
+    "category": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_]{0,62}$" },
+    "history": {
+      "description": "Earlier messages, oldest first, alternating the sender and the owner, sender first.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "incoming": { "type": "string", "minLength": 1 },
+    "expected_action": {
+      "description": "reply: the job proposes a reply. ignored: the job completes as ignored with no reply.",
+      "enum": ["reply", "ignored"]
+    },
+    "expected_decision": {
+      "description": "The most a reply to this message may get: allow (it may go out on its own in guarded mode), require_approval (it may be right but the owner must approve it), deny (no reply may go out). A reply the guarded policy would send on its own where this is not allow is a wrong auto-send.",
+      "enum": ["allow", "require_approval", "deny"]
+    },
+    "decision_reason": { "description": "Why expected_decision is what it is.", "type": "string", "minLength": 1 },
+    "required_lead": {
+      "description": "Lead fields the job must save, each matched as a case-insensitive substring.",
+      "type": "object",
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
+    "forbidden_output": {
+      "description": "Markers that must not appear in any output field, case-insensitively.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}
