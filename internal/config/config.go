@@ -217,6 +217,11 @@ type Config struct {
 	// open without authentication — suitable for Kubernetes PodMonitor scrape
 	// patterns where network policy provides the access control.
 	MetricsAllowCIDR string // METRICS_ALLOW_CIDR, optional
+	// PublicStatsRefresh is how often the landing page's usage numbers are
+	// recounted from the database (PUBLIC_STATS_REFRESH, default 5m). 0 or a
+	// negative value disables the sampler, GET /api/stats answers 503 and
+	// the landing page renders without the strip.
+	PublicStatsRefresh time.Duration // PUBLIC_STATS_REFRESH, default 5m
 	// TelegramMaxSessions caps the number of concurrently live MTProto client
 	// pool entries. 0 means no cap (default). Set via TELEGRAM_MAX_SESSIONS.
 	TelegramMaxSessions int // TELEGRAM_MAX_SESSIONS, 0 = no cap
@@ -557,6 +562,7 @@ func Load() (*Config, error) {
 		ProductUpdateFeedDir:          envOr("PRODUCT_UPDATE_FEED_DIR", "docs/product-updates"),
 	}
 	c.MetricsAllowCIDR = os.Getenv("METRICS_ALLOW_CIDR")
+	c.PublicStatsRefresh = envDuration("PUBLIC_STATS_REFRESH", 5*time.Minute)
 	c.TelegramMaxSessions = envInt("TELEGRAM_MAX_SESSIONS", 0)
 	c.TGAPIRatePerSec = envFloat("TG_API_RATE_PER_SEC", 0)
 	c.TGAPIRateBurst = envInt("TG_API_RATE_BURST", 0)
