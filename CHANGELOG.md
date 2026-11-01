@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.117.0](https://github.com/mctlhq/mctl-telegram/compare/0.116.0...0.117.0) (2026-11-01)
+
+
+### Features
+
+* **agent-worker:** let the Mac host worker track production releases ([859b9ea](https://github.com/mctlhq/mctl-telegram/commit/859b9eac9a80e6c471c32a94e20ae3a1621dd2ba))
+* **agent-worker:** let the Mac host worker track production releases ([f2a6f1c](https://github.com/mctlhq/mctl-telegram/commit/f2a6f1cf984869119031b81b2e1da939eb71a979))
+
 ## [0.116.0](https://github.com/mctlhq/mctl-telegram/compare/0.115.0...0.116.0) (2026-11-01)
 
 
