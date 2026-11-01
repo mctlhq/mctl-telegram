@@ -24,8 +24,10 @@ evidence:
     - {tool: install_assistant, change: schema}
     - {tool: update_install, change: schema}
     - {tool: list_assistants, change: schema}
-status: draft
+status: approved
 provenance:
   author: mashkovd
   assisted_by: claude-sonnet-5-5
+  reviewed_by: mashkovd
 created_at: "2026-11-01"
+reviewed_at: "2026-11-01"
