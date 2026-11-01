@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -162,5 +163,62 @@ func TestOpenAIRunner_MissingUsageWithoutBudgetDoesNotReportZeroCost(t *testing.
 func TestUsageLimitSubtypes_IncludesProvider429(t *testing.T) {
 	if !isUsageLimitSubtype("error_provider_429") {
 		t.Fatal("error_provider_429 must classify as a usage limit")
+	}
+}
+
+// With the account token configured, model-reachable tool routes must still
+// carry the conversation-bound job token; only /cost and the terminal-state
+// GET carry the account token. Swapping buildToolSet onto the worker client
+// would silently widen what the model can reach.
+func TestOpenAIRunner_ToolRoutesKeepJobTokenWhenAccountTokenSet(t *testing.T) {
+	seen := map[string]string{}
+	var mu sync.Mutex
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen[r.Method+" "+r.URL.Path] = r.Header.Get("Authorization")
+		mu.Unlock()
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/event/e1":
+			writeTestJSON(w, map[string]any{"event_id": "e1", "body": "hello"})
+		case r.Method == http.MethodPost && r.URL.Path == "/jobs/42/complete", r.Method == http.MethodPost && r.URL.Path == "/jobs/42/cost":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/jobs/42":
+			writeTestJSON(w, map[string]any{"job_id": 42, "status": "ignored", "attempt": 1})
+		default:
+			t.Errorf("unexpected agent request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer api.Close()
+	var calls atomic.Int32
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if calls.Add(1) == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"get_event","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c2","type":"function","function":{"name":"complete_agent_job","arguments":"{\"status\":\"ignored\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer provider.Close()
+	r := &OpenAIRunner{
+		Client:     &OpenAIClient{BaseURL: provider.URL, APIKey: "k", Model: "m", HTTP: provider.Client()},
+		APIBaseURL: api.URL, APIToken: "account-token", MaxTurns: 4,
+	}
+	job := JobEnvelope{JobID: 42, EventID: "e1", ConversationID: 7, Attempt: 1, JobToken: "job-token", Tools: []string{"get_event", "complete_agent_job"}}
+	if err := r.Run(context.Background(), job); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"GET /event/e1":          "Bearer job-token",
+		"POST /jobs/42/complete": "Bearer job-token",
+		"POST /jobs/42/cost":     "Bearer account-token",
+		"GET /jobs/42":           "Bearer account-token",
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for route, auth := range want {
+		if seen[route] != auth {
+			t.Errorf("%s auth=%q want %q", route, seen[route], auth)
+		}
 	}
 }

@@ -131,7 +131,9 @@ the durable terminal-state verification. Unset `AGENT_RUNNER` is exactly the
   maps to the existing usage-limit error class and metric. `no_usage` is
   returned when `AGENT_MAX_BUDGET_USD` is set and a 2xx response carries no
   token usage (unknown spend would bypass the cap); without a budget the turn
-  is logged and no cost is reported rather than a fabricated $0.
+  is logged and no cost is reported rather than a fabricated $0. If only some
+  turns omit usage, the reported `cost_usd` is a lower bound (a warning is
+  logged at report time).
 - **Provider errors.** A non-2xx response is represented by HTTP status and
   `Retry-After` only. The body is drained but never retained, returned or
   logged, because it can echo message or tool content. 429 and 5xx are retried

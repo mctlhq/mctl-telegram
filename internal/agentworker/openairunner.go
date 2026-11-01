@@ -79,12 +79,17 @@ func (r *OpenAIRunner) Run(ctx context.Context, job JobEnvelope) error {
 	started := time.Now()
 	totalCost := 0.0
 	costObserved := false
+	usageMissing := false
 	turns := 0
 
 	result := func(subtype string, isError bool) *ClaudeResult {
 		res := &ClaudeResult{Type: "result", Subtype: subtype, IsError: isError, NumTurns: turns,
 			DurationMS: time.Since(started).Milliseconds()}
 		if costObserved {
+			if usageMissing {
+				// Reported cost is a lower bound: some turns carried no usage.
+				slog.Warn("agent-worker: reporting partial job cost (lower bound); some turns carried no provider usage", "job_id", job.JobID)
+			}
 			cost := totalCost
 			res.TotalCostUSD = &cost
 		}
@@ -129,6 +134,7 @@ func (r *OpenAIRunner) Run(ctx context.Context, job JobEnvelope) error {
 			if r.MaxBudgetUSD > 0 {
 				return finish("error_provider_no_usage", true)
 			}
+			usageMissing = true
 			slog.Warn("agent-worker: provider response carried no usage; cost not recorded for this turn", "job_id", job.JobID)
 		} else {
 			costObserved = true
