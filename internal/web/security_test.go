@@ -189,7 +189,6 @@ func TestLanding_HasTransparencySections(t *testing.T) {
 		"inside Claude</span></h1>",
 		"Connect in Claude",
 		"MCTL Assistant · Unofficial third-party connector using the Telegram API",
-		`href="#claude"`,
 		`id="claude"`,
 		"Customize &#8594; Connectors",
 		"Add custom connector",
@@ -364,8 +363,13 @@ func TestLanding_ClaudeFirst(t *testing.T) {
 	w := httptest.NewRecorder()
 	Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
 	body := w.Body.String()
-	if !strings.Contains(body, `<a class="cta-btn" href="#claude">`) {
-		t.Fatal("landing primary CTA is not the Claude setup")
+	// The primary control is Copy MCP URL, followed by the Claude connectors
+	// link (owner decision, 2026-11-01); the Claude setup section still leads
+	// the page body below the hero.
+	copyAt := strings.Index(body, `<button class="cta-btn" type="button" id="copy-mcp-url"`)
+	connectorsAt := strings.Index(body, `href="https://claude.ai/new#customize/connectors/yours"`)
+	if copyAt < 0 || connectorsAt < 0 || copyAt > connectorsAt {
+		t.Fatalf("hero actions must be Copy MCP URL then Open Claude connectors (copy=%d connectors=%d)", copyAt, connectorsAt)
 	}
 	claude, chatgpt := strings.Index(body, `id="claude"`), strings.Index(body, `id="chatgpt"`)
 	if claude < 0 || chatgpt < 0 || claude > chatgpt {

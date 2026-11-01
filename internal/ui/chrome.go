@@ -33,6 +33,8 @@ package ui
 import (
 	_ "embed"
 	"html/template"
+	"strconv"
+	"strings"
 	"sync/atomic"
 )
 
@@ -279,7 +281,38 @@ func SetAssistantsMounted(on bool) { assistantsMounted.Store(on) }
 // base carries the shared defines; pages clone it and add their own body.
 var base = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"assistantsMounted": assistantsMounted.Load,
+	"fmtCount":          FormatCount,
 }).Parse(defs))
+
+// FormatCount renders an integer with comma thousands separators ("57,339").
+// Pages use it through the fmtCount template func; the landing page's
+// refresh script applies the same grouping so a refreshed value looks like
+// the server-rendered one.
+func FormatCount(n int64) string {
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	s := strconv.FormatInt(n, 10)
+	if len(s) > 3 {
+		var b strings.Builder
+		head := len(s) % 3
+		if head > 0 {
+			b.WriteString(s[:head])
+		}
+		for i := head; i < len(s); i += 3 {
+			if b.Len() > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(s[i : i+3])
+		}
+		s = b.String()
+	}
+	if neg {
+		return "-" + s
+	}
+	return s
+}
 
 // New returns a template named name whose body is page and which can reference
 // the shared {{template "ui_*"}} defines. Execute it with ExecuteTemplate(w, name, data).

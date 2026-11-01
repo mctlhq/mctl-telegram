@@ -13,6 +13,56 @@
      only drops its trailing paragraph margin. */
   .mctl-site-hero__text > p.muted { margin-bottom: 0; }
 
+  /* Usage strip: four deployment-wide counts under the actions. Rendered
+     only when a sample exists (see landingData.Stats); refreshed in place by
+     the script at the bottom of the page. The strip takes the hero's
+     actions-to-meta gap from site.css; the note sits tight under it and
+     the meta row keeps its own gap below the note. */
+  .stats-strip {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    border: 1px solid var(--surface-line);
+    border-radius: var(--mctl-radius-lg);
+    background: var(--surface-elevated);
+    overflow: hidden;
+  }
+  .stat { padding: 18px 22px; min-width: 0; border-left: 1px solid var(--surface-line); }
+  .stat:first-child { border-left: 0; }
+  .stat__value {
+    display: block;
+    font-family: var(--font-display), system-ui, sans-serif;
+    font-weight: 800;
+    font-size: clamp(26px, 2.6vw, 34px);
+    line-height: 1.1;
+    letter-spacing: -.02em;
+    color: var(--surface-fg);
+    font-variant-numeric: tabular-nums;
+  }
+  .stat__label {
+    display: block;
+    margin-top: 6px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--marker-fg);
+  }
+  .mctl-site-hero__text > .stats-strip + .stats-note { margin-top: 10px; }
+  .stats-note {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 0;
+    font-family: var(--font-mono);
+    font-size: 11px; letter-spacing: .06em;
+    color: var(--surface-fg-subtle);
+  }
+  .live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--status-ok); flex-shrink: 0; }
+  @media (max-width: 760px) {
+    .stats-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .stat:nth-child(3) { border-left: 0; }
+    .stat:nth-child(n+3) { border-top: 1px solid var(--surface-line); }
+  }
+
   /* Use-case cards */
   .use-card { padding: 20px; }
   .use-card .card-icon {
@@ -156,11 +206,19 @@
       Add tg.mctl.ai as a custom connector in Claude — on the web, in the desktop and mobile apps, or in Claude Code — and ask Claude to summarize chats, search messages, and draft replies in the Telegram account you own. ChatGPT can add it by URL too; other MCP clients are not yet tested. New accounts start read-only unless you choose <em>Read + send</em> when you connect.
     </p>
     <div class="mctl-site-hero__actions">
-      <a class="cta-btn" href="#claude">Connect in Claude</a>
+      <button class="cta-btn" type="button" id="copy-mcp-url" data-url="{{.MCPURL}}">Copy MCP URL</button>
       <a class="btn-secondary" href="https://claude.ai/new#customize/connectors/yours" target="_blank" rel="noopener">Open Claude connectors</a>
-      <button class="btn-secondary" type="button" id="copy-mcp-url" data-url="{{.MCPURL}}">Copy MCP URL</button>
       <a href="/docs#setup">See the docs</a>
     </div>
+    {{if .Stats}}
+    <div class="stats-strip" id="stats" aria-label="Usage so far">
+      <div class="stat"><span class="stat__value" data-stat="tool_calls_total">{{fmtCount .Stats.ToolCallsTotal}}</span><span class="stat__label">tool calls</span></div>
+      <div class="stat"><span class="stat__value" data-stat="accounts_total">{{fmtCount .Stats.AccountsTotal}}</span><span class="stat__label">connected accounts</span></div>
+      <div class="stat"><span class="stat__value" data-stat="active_users_30d">{{fmtCount .Stats.ActiveUsers30d}}</span><span class="stat__label">active last 30 days</span></div>
+      <div class="stat"><span class="stat__value" data-stat="sessions_active">{{fmtCount .Stats.SessionsActive}}</span><span class="stat__label">sessions online now</span></div>
+    </div>
+    <p class="stats-note"><span class="live-dot" aria-hidden="true"></span><span>live · since Aug 2026 · updated <time id="stats-updated" datetime="{{.Stats.UpdatedAt.Format "2006-01-02T15:04:05Z07:00"}}">{{.Stats.UpdatedAt.Format "15:04"}} UTC</time></span></p>
+    {{end}}
     <p class="muted">
       <a href="/privacy">Privacy policy</a> · <a href="/security">Security model</a> ·
       <a href="/terms">Terms</a> · <a href="mailto:support@mctl.ai">support@mctl.ai</a>
@@ -399,6 +457,41 @@
         copyBtn.textContent = url;
         setTimeout(function () { copyBtn.textContent = label; }, 4000);
       }
+    });
+  }
+
+  // Usage strip refresh: once a minute while the tab is visible, re-read
+  // /api/stats (same origin, allowed by connect-src 'self') and rewrite the
+  // four values in place. Any failure leaves the server-rendered numbers as
+  // they are. Grouping matches ui.FormatCount ("57,339").
+  var strip = document.getElementById('stats');
+  if (strip && window.fetch) {
+    var fmt = function (n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ','); };
+    var refresh = function () {
+      if (document.visibilityState === 'hidden') return;
+      fetch('/api/stats', { cache: 'no-store', credentials: 'omit' }).then(function (r) {
+        if (!r.ok) return null;
+        return r.json();
+      }).then(function (s) {
+        if (!s) return;
+        var els = strip.querySelectorAll('[data-stat]');
+        for (var i = 0; i < els.length; i++) {
+          var v = s[els[i].getAttribute('data-stat')];
+          if (typeof v === 'number') els[i].textContent = fmt(v);
+        }
+        var t = document.getElementById('stats-updated');
+        if (t && s.updated_at) {
+          var d = new Date(s.updated_at);
+          if (!isNaN(d)) {
+            t.setAttribute('datetime', d.toISOString());
+            t.textContent = ('0' + d.getUTCHours()).slice(-2) + ':' + ('0' + d.getUTCMinutes()).slice(-2) + ' UTC';
+          }
+        }
+      }).catch(function () {});
+    };
+    setInterval(refresh, 60000);
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') refresh();
     });
   }
 </script>
