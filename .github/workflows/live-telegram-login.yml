@@ -1,0 +1,61 @@
+name: live-telegram-login
+
+# Live proof of the product QR login against real Telegram (issue #1057): the
+# anchor session of the dedicated service account accepts the login token that
+# telegram.LoginQR exports, the new session is stored, one read-only MCP call
+# is made with it, and the new authorization is logged out.
+#
+# DEDICATED ACCOUNT ONLY. The secrets belong to the login-proof service
+# account. Never put a personal, operator or canary account (TG_LIVE_SESSION
+# is the canary's) behind them.
+#
+# This workflow must never gain a schedule or pull_request trigger and must
+# never be dispatched by release-please.yml: a full login is a rare, deliberate
+# act, not a per-release or per-PR check. cmd/login-proof/workflow_test.go
+# fails CI if that changes.
+#
+# The secrets live in the live-telegram-login environment, restricted to main.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-telegram-login
+  cancel-in-progress: false
+
+jobs:
+  qr-login:
+    runs-on: ubuntu-latest
+    environment: live-telegram-login
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.10"
+      - name: qr login proof
+        env:
+          TG_PROOF_API_ID: ${{ secrets.TG_PROOF_API_ID }}
+          TG_PROOF_API_HASH: ${{ secrets.TG_PROOF_API_HASH }}
+          TG_PROOF_ANCHOR_SESSION: ${{ secrets.TG_PROOF_ANCHOR_SESSION }}
+          TG_PROOF_EXPECT_TG_ID: ${{ secrets.TG_PROOF_EXPECT_TG_ID }}
+          TG_PROOF_PASSWORD: ${{ secrets.TG_PROOF_PASSWORD }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -uo pipefail
+          # stdout is the evidence line only; stderr carries no identifiers.
+          if ! go run ./cmd/login-proof qr > /tmp/proof.out; then
+            cat /tmp/proof.out
+            echo "::error::the live login proof did not pass"
+            exit 1
+          fi
+          cat /tmp/proof.out
+          # Exit 0 is not enough: exactly one line, and it must say pass.
+          if [ "$(wc -l < /tmp/proof.out)" -ne 1 ] || ! grep -q '^login-proof mode=qr outcome=pass ' /tmp/proof.out; then
+            echo "::error::no single outcome=pass evidence line"
+            exit 1
+          fi
