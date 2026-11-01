@@ -28,6 +28,7 @@ func TestToolAnnotations(t *testing.T) {
 		{"get_media", first(s.toolGetMedia()), true, false, true},
 		{"list_telegram_identities", first(s.toolListIdentities()), true, false, false},
 		{"get_user_audit_log", first(s.toolGetUserAuditLog()), true, false, false},
+		{"get_acquisition_report", first(s.toolGetAcquisitionReport()), true, false, false},
 		{"prepare_broadcast", first(s.toolPrepareBroadcast()), false, false, false},
 		{"list_broadcasts", first(s.toolListBroadcasts()), true, false, false},
 		{"get_broadcast", first(s.toolGetBroadcast()), true, false, false},

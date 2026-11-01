@@ -25,6 +25,7 @@ func TestToolOutputSchemas(t *testing.T) {
 		{"prepare_pin_message", first(s.toolPreparePinMessage())},
 		{"list_telegram_identities", first(s.toolListIdentities())},
 		{"get_user_audit_log", first(s.toolGetUserAuditLog())},
+		{"get_acquisition_report", first(s.toolGetAcquisitionReport())},
 		{"get_my_audit_log", first(s.toolGetMyAuditLog())},
 		{"get_my_send_status", first(s.toolGetMySendStatus())},
 		{"get_my_identity", first(s.toolGetMyIdentity())},

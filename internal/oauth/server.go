@@ -42,8 +42,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/acquisition"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/auth/telegramoidc"
+	"github.com/mctlhq/mctl-telegram/internal/connectfunnel"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/notify"
 	"github.com/mctlhq/mctl-telegram/internal/oauth/cimd"
@@ -75,6 +77,7 @@ type Server struct {
 	dcrRedirectURIs map[string]struct{}
 
 	mu      sync.Mutex
+	acqKey  []byte                    // HKDF-derived MAC key for the acquisition cookie
 	pending map[string]*pendingAuth   // keyed by "state" issued at /oauth/authorize
 	codes   map[string]*authCode      // keyed by the authorization_code value
 	clients map[string]*clientReg     // keyed by client_id
@@ -662,7 +665,9 @@ type pendingAuth struct {
 	Scope               string
 	Nonce               string
 	TGCodeVerifier      string
-	CreatedAt           time.Time
+	// Acquisition is the JSON acquisition snapshot taken at authorize.
+	Acquisition string
+	CreatedAt   time.Time
 }
 
 // authCode is the redeemable authorization_code returned via the redirect.
@@ -836,6 +841,7 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 		store:                 store,
 		clock:                 time.Now,
 		useDB:                 cfg.UseDBForOAuth && store != nil,
+		acqKey:                acquisition.DeriveKey(cfg.JWTSecret),
 		pending:               map[string]*pendingAuth{},
 		codes:                 map[string]*authCode{},
 		clients:               map[string]*clientReg{},
@@ -1590,6 +1596,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	// verifier is replayed at the token exchange). Both are kept server-side.
 	serverState := randomToken(32)
 	nonce := randomToken(16)
+	acq := s.acquisitionFromRequest(r, redirectURI)
 	tgVerifier, tgChallenge := pkceChallenge()
 	now := s.clock()
 	if s.useDB {
@@ -1613,6 +1620,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			Scope:           scope,
 			Nonce:           nonce,
 			TGCodeVerifier:  tgVerifier,
+			Acquisition:     acq,
 			CreatedAt:       now,
 		}); err != nil {
 			slog.Error("oauth: persist pending_auth failed", "err", err)
@@ -1648,6 +1656,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			Scope:               scope,
 			Nonce:               nonce,
 			TGCodeVerifier:      tgVerifier,
+			Acquisition:         acq,
 			CreatedAt:           now,
 		}
 		s.mu.Unlock()
@@ -1850,6 +1859,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 			Scope:               dbPA.Scope,
 			Nonce:               dbPA.Nonce,
 			TGCodeVerifier:      dbPA.TGCodeVerifier,
+			Acquisition:         dbPA.Acquisition,
 			CreatedAt:           dbPA.CreatedAt,
 		}
 	} else {
@@ -1924,12 +1934,13 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	// into their own columns with explicit provenance (identity_source =
 	// telegram_oidc) — see internal/db.TelegramIdentityCapture.
 	uid, err := s.store.EnsureUserByTelegramCapture(r.Context(), db.TelegramIdentityCapture{
-		TelegramID: identity.TelegramID,
-		Username:   identity.Username,
-		FirstName:  identity.FirstName,
-		LastName:   identity.LastName,
-		Source:     "telegram_oidc",
-		CapturedAt: time.Now().UTC(),
+		TelegramID:  identity.TelegramID,
+		Username:    identity.Username,
+		FirstName:   identity.FirstName,
+		LastName:    identity.LastName,
+		Source:      "telegram_oidc",
+		CapturedAt:  time.Now().UTC(),
+		Acquisition: toDBAcquisition(acquisitionForCallback(pending, s.clock())),
 	})
 	if err != nil {
 		slog.Error("ensure user failed", "err", err)
@@ -3714,4 +3725,17 @@ func (s *Server) probeBotChat(ctx context.Context, uid, telegramID int64) {
 	if _, err := s.store.RecordOIDCBotAccessGrant(ctx, uid, time.Now().UTC(), notify.SourceOIDCGetChat); err != nil {
 		slog.Error("record oidc bot chat probe failed", "err", err)
 	}
+}
+
+// acquisitionForCallback decodes the snapshot carried by the pending entry.
+// A pending row minted by an image that predates the acquisition column
+// carries no snapshot and decodes as unknown with an empty client; the
+// redirect URI is still on the row, so the bounded client label is filled
+// from it rather than lost for the whole rollout window.
+func acquisitionForCallback(pending *pendingAuth, now time.Time) acquisition.Snapshot {
+	snap := acquisition.Unmarshal(pending.Acquisition, now)
+	if snap.MCPClient == "" && pending.RedirectURI != "" {
+		snap.MCPClient = connectfunnel.ClientLabel(pending.RedirectURI)
+	}
+	return snap
 }

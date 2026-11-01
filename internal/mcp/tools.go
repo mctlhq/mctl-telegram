@@ -1246,6 +1246,55 @@ Use this to find a newly signed-in user, then grant them access with set_telegra
 	return tool, handler
 }
 
+// toolGetAcquisitionReport is the admin-only sign-up source report.
+func (s *Server) toolGetAcquisitionReport() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("get_acquisition_report",
+		mcplib.WithTitleAnnotation("Sign-up acquisition report"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithOpenWorldHintAnnotation(false),
+		outputSchema[acquisitionReportResult](),
+		mcplib.WithDescription(`Admin only (requires the admin:users or admin:users:read scope). Group the users created in the last N days by sign-up source and show how many made a tool call and how many were active on 2 or more distinct UTC days.
+
+Inputs:
+  days — int, optional, default 7, 1..90.
+
+Output: JSON {days, buckets: [{source, signups, tool_call_users, active_2plus_days}]}. source is utm_source, else the referrer host, else "direct" (capture ran and saw no source), "unknown" (no usable capture), "unknown (pre-capture)" (user predates capture) or "unknown (not recorded)". Values are self-reported by the visitor's browser and sanitized.`),
+		mcplib.WithNumber("days",
+			mcplib.Description("Window in days (default 7, max 90).")),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
+		id := auth.From(ctx)
+		if err := requireAnyScope(id, "admin:users", "admin:users:read"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		days := intArg(req.GetArguments(), "days", 7)
+		if days < 1 {
+			days = 1
+		}
+		if days > 90 {
+			days = 90
+		}
+		buckets, err := s.Store.AcquisitionReport(ctx, time.Now().UTC().AddDate(0, 0, -days))
+		s.audit(ctx, id, "get_acquisition_report", "", err, startedAt)
+		if err != nil {
+			return s.storeErr(ctx, "get_acquisition_report", err), nil
+		}
+		if buckets == nil {
+			buckets = []db.AcquisitionBucket{}
+		}
+		return jsonResult(acquisitionReportResult{Days: days, Buckets: buckets})
+	}
+	return tool, handler
+}
+
+// acquisitionReportResult is the success payload of get_acquisition_report.
+type acquisitionReportResult struct {
+	Days    int                    `json:"days"`
+	Buckets []db.AcquisitionBucket `json:"buckets"`
+}
+
 // toolSetAccess grants or revokes the client tier for a Telegram user.
 func (s *Server) toolSetAccess() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("set_telegram_access",

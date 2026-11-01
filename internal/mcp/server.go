@@ -481,6 +481,10 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 		s.addTool(srv, t, h)
 	}
 	{
+		t, h := s.toolGetAcquisitionReport()
+		s.addTool(srv, t, h)
+	}
+	{
 		t, h := s.toolSetAccess()
 		s.addTool(srv, t, h)
 	}

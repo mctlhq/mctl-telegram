@@ -106,6 +106,7 @@ var reviewerWriteRules = map[string]reviewerWriteRule{
 	"revoke_local_bridge_device": reviewerRefused,
 	"list_telegram_identities":   reviewerRefused,
 	"get_user_audit_log":         reviewerRefused,
+	"get_acquisition_report":     reviewerRefused,
 	"set_telegram_access":        reviewerRefused,
 	"set_account_send":           reviewerRefused,
 	"set_account_mode":           reviewerRefused,
