@@ -19,7 +19,7 @@ delivery: docs_only
 high_value: false
 tools: [install_assistant, update_install, list_assistants]
 evidence:
-  from: 0.114.0
+  from: 0.121.1
   changes:
     - {tool: install_assistant, change: schema}
     - {tool: update_install, change: schema}

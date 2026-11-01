@@ -228,6 +228,7 @@ func NewAdminAgentProfileHandlerWithManaged(store *db.Store, managed assistantin
 			SenderAllowlist:    req.SenderAllowlist,
 		}
 		var runtimeChange assistantinstall.RuntimeChange
+		runtimeConsent := "none"
 		if req.Runtime != nil {
 			current, err := store.GetAgentProfile(ctx, targetUserID)
 			if err != nil {
@@ -252,6 +253,12 @@ func NewAdminAgentProfileHandlerWithManaged(store *db.Store, managed assistantin
 				}
 				return
 			}
+			// The admin only moves the runtime. managed_consent_version and
+			// managed_consent_at record the moment of the owner's explicit
+			// consent; an administrative change must neither mint nor
+			// refresh them, so DecideRuntime's consent record is dropped.
+			runtimeChange.ConsentVersion, runtimeChange.ConsentAt, runtimeChange.Consented = nil, nil, false
+			runtimeConsent = stored
 			runtimeChange.Apply(&update)
 		}
 		if clearOwnerProfile {
@@ -305,12 +312,12 @@ func NewAdminAgentProfileHandlerWithManaged(store *db.Store, managed assistantin
 		}
 
 		if runtimeChange.Changed {
-			consent := "none"
-			if runtimeChange.ConsentVersion != nil {
-				consent = *runtimeChange.ConsentVersion
+			consent := runtimeConsent
+			if consent == "" {
+				consent = "none"
 			}
 			store.LogToolCall(ctx, db.ToolCall{UserID: targetUserID, Tool: "assistant.runtime", Status: "ok",
-				Reason: runtimeChange.From + "->" + runtimeChange.To + " consent=" + consent})
+				Reason: runtimeChange.From + "->" + runtimeChange.To + " consent=" + consent + " (admin)"})
 		}
 		store.LogToolCall(ctx, db.ToolCall{UserID: id.UserID, Tool: "admin.agent_profile.upsert", Status: "ok"})
 		slog.Info("agent profile upserted",

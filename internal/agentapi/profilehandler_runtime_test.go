@@ -38,7 +38,8 @@ func TestAdminAgentProfileHandler_Runtime(t *testing.T) {
 		t.Fatalf("no consent: %d %s", rec.Code, rec.Body)
 	}
 	// The owner consented.
-	v, now := db.ManagedConsentCurrent, time.Now()
+	// The owner consented two days ago; an admin switch today must not move it.
+	v, now := db.ManagedConsentCurrent, time.Now().Add(-48*time.Hour)
 	if err := store.UpdateAgentProfileFields(ctx, uid, db.AgentProfileUpdate{ManagedConsentVersion: &v, ManagedConsentAt: &now}); err != nil {
 		t.Fatal(err)
 	}
@@ -48,8 +49,14 @@ func TestAdminAgentProfileHandler_Runtime(t *testing.T) {
 	if rec := doProfileReq(on, adminIdentity(), `{"telegram_id":777,"runtime":"managed"}`); rec.Code != http.StatusOK {
 		t.Fatalf("managed: %d %s", rec.Code, rec.Body)
 	}
-	if p, _ := store.GetAgentProfile(ctx, uid); p.Runtime != "managed" {
+	p, _ := store.GetAgentProfile(ctx, uid)
+	if p.Runtime != "managed" {
 		t.Fatalf("runtime = %q", p.Runtime)
+	}
+	// The admin switch must keep the owner's original consent time: it is the
+	// moment of the owner's consent, not of the administrative change.
+	if p.ManagedConsentAt.Sub(now).Abs() > time.Second {
+		t.Fatalf("consent time rewritten: stored %v, owner consented %v", p.ManagedConsentAt, now)
 	}
 	// Back to own always works, flag off included.
 	if rec := doProfileReq(off, adminIdentity(), `{"telegram_id":777,"runtime":"own"}`); rec.Code != http.StatusOK {
