@@ -61,6 +61,33 @@ func SendToInputPeerWithRandomID(ctx context.Context, c *telegram.Client, userID
 	return messageID, nil
 }
 
+// refusalClasses is the closed list of messages.sendMessage errors that
+// prove the message was not delivered (#1055): the peer cannot be written
+// to, the peer is not valid, or the message itself was rejected. Anything
+// else, a timeout included, stays ambiguous. Keep it closed: adding an
+// error that can follow a delivery would turn delivered sends into denied.
+var refusalClasses = []string{
+	"USER_IS_BLOCKED",
+	"YOU_BLOCKED_USER",
+	"PEER_ID_INVALID",
+	"INPUT_USER_DEACTIVATED",
+	"PRIVACY_PREMIUM_REQUIRED",
+	"CHAT_WRITE_FORBIDDEN",
+	"PEER_FLOOD",
+	"MESSAGE_EMPTY",
+	"MESSAGE_TOO_LONG",
+}
+
+// RefusalClass reports the RPC error type when err is one of the
+// refusals on the closed list.
+func RefusalClass(err error) (string, bool) {
+	rpcErr, ok := tgerr.As(err)
+	if !ok || !rpcErr.IsOneOf(refusalClasses...) {
+		return "", false
+	}
+	return rpcErr.Type, true
+}
+
 // ErrRandomIDDuplicate marks a send Telegram refused because its random_id
 // was already used: an earlier send with that id was delivered (#1029).
 var ErrRandomIDDuplicate = errors.New("random_id already used")
