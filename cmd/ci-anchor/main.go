@@ -21,6 +21,10 @@
 // Signing in adds a "MCTL CI" device to that account's active sessions;
 // terminating it there invalidates the secret, and then this is run again.
 //
+// The same command seeds the anchor session of the live login proof
+// (cmd/login-proof, docs/runbooks/live-login-proof.md) for its own, separate
+// dedicated account; map TG_LIVE_* to TG_PROOF_* as described there.
+//
 // DIR keeps the auth key and the pending code hash between the steps and,
 // after confirm, holds DIR/session.json, the value for the TG_LIVE_SESSION
 // secret. Keep DIR outside the repository; it holds credentials.
