@@ -264,6 +264,15 @@ func (k *Task) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// RecordBindingViolation records a request that used this fixture's
+// credential for another job, or that no single fixture could own, as a
+// binding violation, the way boundBody records a wrong-job write.
+func (k *Task) RecordBindingViolation() {
+	k.mu.Lock()
+	k.bindingViolation = true
+	k.mu.Unlock()
+}
+
 // allows reports whether the tool set holds one of served, or served is
 // mandatory for every tool set.
 func (k *Task) allows(served []string) bool {

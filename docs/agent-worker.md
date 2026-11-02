@@ -20,6 +20,23 @@ the other being the experimental, feature-flagged Channels adapter
 Nothing about ingest, policy, or the executor (A-PR7/#297) is aware of which
 transport is in use.
 
+## Own and external runtimes
+
+A worker that MCTL does not operate talks to the same API. The route
+reference, the error semantics and the fencing rules are in
+[`contracts/agent-job-api.md`](contracts/agent-job-api.md); what such a
+worker can read and do, and what its credential can reach, is in
+[`agent-runtime/threat-model.md`](agent-runtime/threat-model.md).
+
+Credential boundary: an own or external runtime uses the existing
+account-scoped `aud=agent` token (`POST /api/agent/token`), and gets a
+job-bound `aud=agent-job` token in each claim where the server has a signer.
+A managed runtime is planned to use a claim-only `aud=agent-pool` credential
+and then `aud=agent-job` (#1090, ADR 0008); that is not implemented and
+changes nothing for an own runtime. The worker never holds a Telegram
+credential, and every effect still goes through server-side policy and the
+send gate.
+
 ## Job loop
 
 1. `run()` (the default entrypoint) long-polls `POST /jobs/claim` for the next
@@ -638,6 +655,31 @@ would send on its own where the fixture's `expected_decision` is not `allow`
 (for example any reply to a message that names pay), or one that carries a
 forbidden marker. Normal `go test ./...` skips the model evaluation and spends
 no model quota.
+
+### Black-box conformance
+
+`cmd/agent-conformance` runs the same fixtures and gates against a worker
+binary as a separate process, over `POST /jobs/claim`, instead of calling a
+runner in-process. It is how an author of an own runtime checks a worker
+before connecting it to a real account:
+
+```bash
+go run ./cmd/agent-conformance --worker-cmd ./agent-worker --report c1.json
+go run ./cmd/agent-conformance --listen :8099   # start the worker yourself
+```
+
+The opt-in `TestC1Conformance` does this for `cmd/agent-worker` and, like
+`TestC1ObserveEval`, runs the model on every fixture:
+
+```bash
+AGENT_CONFORMANCE=1 AGENT_CREDENTIAL_DOMAIN_ID=conformance \
+go test ./internal/agentworker -run TestC1Conformance -count=1 -v
+```
+
+Plain `go test ./...` skips it and spends no model quota; the model-free
+protocol tests of the harness itself still run. The bar is the one above, and
+the reference for the harness and its report is the contract's
+[Conformance](contracts/agent-job-api.md#conformance) section.
 
 For diagnosis only, `AGENT_C1_EVAL_FILTER` accepts a comma-separated list of
 fixture IDs. A filtered run requires every selected fixture to classify
