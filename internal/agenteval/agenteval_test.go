@@ -611,6 +611,12 @@ func TestNoPathToEffects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("go list: %v", err)
 	}
+	// The check covers the whole package, so it covers conformance.go only
+	// while that file is part of it.
+	files, err := exec.Command("go", "list", "-f", "{{.GoFiles}}", ".").Output()
+	if err != nil || !strings.Contains(string(files), "conformance.go") {
+		t.Fatalf("conformance.go is not in the guarded package: %s %v", files, err)
+	}
 	for _, forbidden := range []string{
 		"/internal/agent/executor", "/internal/agent/control", "/internal/agentapi",
 		"/internal/agentworker", "/internal/telegram", "/internal/bot", "/internal/botapi",

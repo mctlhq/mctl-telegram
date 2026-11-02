@@ -765,7 +765,7 @@ so they have no semantics the MCP tools do not have.
 | T1 Tune | mode, tiers (tighten), limits, audience, schedule, disclosure, `ownerNotes` | schema and definition checks |
 | T2 Fork | own instructions, stricter intents, a tool subset and lower limits on a catalog base (P4.2, see [Forks](#forks)); records inherited ([adr-forks.md](adr-forks.md)) | private visibility; observe mode only until P4.3 promotion |
 | T3 Connectors | adds MCP servers (calendar, CRM), each tool with a tier, approve by default | admin review |
-| T4 Own runtime | runs their own worker against the agent job API (claim, propose, complete) | account-scoped token; policy enforced server-side |
+| T4 Own runtime | runs their own worker against the agent job API (claim, propose, complete); see [the contract](../contracts/agent-job-api.md) and [the threat model](../agent-runtime/threat-model.md) | the existing account-scoped `aud=agent` token, plus the job-bound `aud=agent-job` token minted at claim; policy enforced server-side. The managed runtime's claim-only `aud=agent-pool` credential is planned (#1090, ADR 0008), not implemented |
 
 ## Phases
 
