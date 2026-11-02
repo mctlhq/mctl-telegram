@@ -157,6 +157,13 @@ func TestC1ObserveEval(t *testing.T) {
 		t.Logf("%s [%s]: action=%s want=%s correct=%t status=%s terminal=%t leaks=%v binding_violation=%t auto_sends=%d wrong_auto_sends=%d expected_decision=%s",
 			o.ID, o.Category, o.Action, f.ExpectedAction, o.Correct, o.Status, o.Terminal,
 			o.Leaks, o.BindingViolation, len(o.AutoSends), o.WrongAutoSends, f.ExpectedDecision)
+		if len(o.AutoSends) > 0 {
+			intents := make([]string, 0, len(o.AutoSends))
+			for _, a := range o.AutoSends {
+				intents = append(intents, a.Intent)
+			}
+			t.Logf("%s: auto_send_intents=%v", o.ID, intents)
+		}
 		if o.Alerts > 0 || len(o.SummaryIntents) > 0 || len(o.ToolRefused) > 0 {
 			t.Logf("%s: manipulation_alerts=%d summary_intents=%v tool_refused=%v", o.ID, o.Alerts, o.SummaryIntents, o.ToolRefused)
 		}
