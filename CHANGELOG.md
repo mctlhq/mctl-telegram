@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.122.0](https://github.com/mctlhq/mctl-telegram/compare/0.121.1...0.122.0) (2026-11-02)
+
+
+### Features
+
+* **agent-worker:** add minimal OpenAI chat client ([467885c](https://github.com/mctlhq/mctl-telegram/commit/467885c77fc64dfea2b1c989019e703a190fef51))
+* **agent-worker:** add OpenAI token pricing ([ee9b4b3](https://github.com/mctlhq/mctl-telegram/commit/ee9b4b37376baf04058f369cc1b40b1bd7896193))
+* **agent-worker:** add OpenAI-compatible runner ([dee9c19](https://github.com/mctlhq/mctl-telegram/commit/dee9c19b47eaa586259c4e1aca54965634a18ce8))
+* **agent-worker:** classify provider 429 as usage limit ([67e4de0](https://github.com/mctlhq/mctl-telegram/commit/67e4de0625bdca8359a8a7ef2f7cb57f9a99d67a))
+* **agent-worker:** OpenAI-compatible runner behind shared tool set ([3138bd0](https://github.com/mctlhq/mctl-telegram/commit/3138bd0b47a12930ee7aa125e0f74be904395e1f))
+* **agent-worker:** select Claude or OpenAI runner ([74f0280](https://github.com/mctlhq/mctl-telegram/commit/74f0280e104680f7b0d1b0c1aeb5019fd8e802b3))
+* **agent-worker:** share tool definitions across runners ([a14c137](https://github.com/mctlhq/mctl-telegram/commit/a14c137841451ac50bb9081147b698491238ab79))
+* **agents:** external runtime contract, threat model and conformance runner ([4897b63](https://github.com/mctlhq/mctl-telegram/commit/4897b63d9d19962c5b9a276137924595edb31458))
+* **agents:** issue-1046-p4-5-external-runtime-contract-threat-mo ([f388a5c](https://github.com/mctlhq/mctl-telegram/commit/f388a5c53965a127a44cd88aaf122383e97506a2))
+* **agents:** issue-1057-e2e-low-frequency-live-telegram-login-pr ([937881c](https://github.com/mctlhq/mctl-telegram/commit/937881ccc1f3105d00e7700df955f562ea992bca))
+* **agents:** issue-1057-e2e-low-frequency-live-telegram-login-pr ([9311fac](https://github.com/mctlhq/mctl-telegram/commit/9311fac34f9aae52331c92611a209292f996613d))
+* **agents:** issue-1089-feat-assistant-runtime-field-on-assistan ([33aeab7](https://github.com/mctlhq/mctl-telegram/commit/33aeab768c5fa70000d1215a129c04b3c112b331))
+* **agents:** issue-1089-feat-assistant-runtime-field-on-assistan ([7401fc9](https://github.com/mctlhq/mctl-telegram/commit/7401fc9e2954b44d4e1cece4a0b926627646049d))
+
+
+### Bug Fixes
+
+* **agent-worker:** bound retries and preserve canceled-run cost ([1c151f8](https://github.com/mctlhq/mctl-telegram/commit/1c151f8b411b73274dc2e3aa66ffae6bd5703419))
+* **agent-worker:** default OpenAI user agent ([197026b](https://github.com/mctlhq/mctl-telegram/commit/197026b5477ff2ffc101e3d060572f78b7a3e3d9))
+* **agent-worker:** report cost with account token, restore guard rationale, fail closed on missing usage ([5aa4a0e](https://github.com/mctlhq/mctl-telegram/commit/5aa4a0e984387e1eb773c83c259bfc86f522bcad))
+* **agents:** address P1/P2 codex findings on issue-1057-e2e-low-frequency-live-telegram-login-pr ([2a6ee2d](https://github.com/mctlhq/mctl-telegram/commit/2a6ee2dc2c4e194b9083b7cb982987bde89e4007))
+* **agents:** managed runtime review follow-ups for [#1089](https://github.com/mctlhq/mctl-telegram/issues/1089) ([91463de](https://github.com/mctlhq/mctl-telegram/commit/91463de22c0f17497cf2a47b69a58385d124070b))
+* **assistant:** do not send an unstated runtime; HTTP test for the admin install route ([33833eb](https://github.com/mctlhq/mctl-telegram/commit/33833ebdc46a432f90b555c6af4bd621b78e90b0))
+* **assistant:** erase managed consent on opt-out, keep runtime when unstated ([cf737e7](https://github.com/mctlhq/mctl-telegram/commit/cf737e73e3dad73534d19f36c6193d442db66d1a))
+* **assistant:** managed runtime review follow-ups for [#1089](https://github.com/mctlhq/mctl-telegram/issues/1089) (round 2) ([42e08db](https://github.com/mctlhq/mctl-telegram/commit/42e08dbb7f2cd850a78fcea04a780598a407579b))
+* **conformance:** treat job_id 0 as unnamed and tidy the runner ([ba1a58b](https://github.com/mctlhq/mctl-telegram/commit/ba1a58bb47b632457db086f5cc828256d2cf65ca))
+* **login-proof:** use Migrate, fail closed on cleanup without a hash ([1292475](https://github.com/mctlhq/mctl-telegram/commit/1292475527679b075efa06315dacf568fe458972)), closes [#1057](https://github.com/mctlhq/mctl-telegram/issues/1057)
+
 ## [0.121.1](https://github.com/mctlhq/mctl-telegram/compare/0.121.0...0.121.1) (2026-11-01)
 
 
