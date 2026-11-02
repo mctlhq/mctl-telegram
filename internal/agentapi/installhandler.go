@@ -54,8 +54,10 @@ type installAgentResponse struct {
 //
 // This handler carries no managed-runtime gate on purpose: an admin cannot
 // move an account to the managed runtime here, because that needs the
-// owner's own consent. Such a document is refused (409/400), and the
-// admin profile route is the place for an administrative runtime change.
+// owner's own consent, which an admin never supplies. Such a document is
+// refused (409/400). The admin profile route moves an account to managed
+// only on a consent the owner gave and has not since withdrawn (opting out
+// erases it); managed -> own is always open to the admin.
 func NewAdminAgentInstallHandler(store *db.Store, catalog *assistant.Catalog, registry *assistantregistry.Client) http.HandlerFunc {
 	svc := assistantinstall.New(store, catalog, registry)
 	return func(w http.ResponseWriter, r *http.Request) {

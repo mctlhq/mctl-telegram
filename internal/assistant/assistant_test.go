@@ -83,7 +83,6 @@ func TestHRInstallMatchesTodaysProfile(t *testing.T) {
 	want := map[string]any{
 		"telegram_id":          int64(danaID),
 		"mode":                 "guarded",
-		"runtime":              "own",
 		"autopilot_paused":     false,
 		"listener_enabled":     true,
 		"disclosure_text":      "",
@@ -416,6 +415,11 @@ func TestRuntimeDefaultsToOwnAndSchemaChecksIt(t *testing.T) {
 	p, err := Resolve(def, in)
 	if err != nil || p.Runtime != RuntimeOwn {
 		t.Fatalf("Resolve: runtime %q, err %v", p.Runtime, err)
+	}
+	if req, err := ProfileRequest(def, in, danaID); err != nil {
+		t.Fatal(err)
+	} else if _, has := req["runtime"]; has {
+		t.Fatalf("ProfileRequest sent runtime %v for an install that states none", req["runtime"])
 	}
 	in.Spec.Runtime, in.Spec.Consent = RuntimeManaged, "managed-data-flow/v1"
 	req, err := ProfileRequest(def, in, danaID)

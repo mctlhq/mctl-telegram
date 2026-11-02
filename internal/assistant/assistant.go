@@ -354,7 +354,6 @@ func ProfileRequest(def *Definition, in *Install, telegramID int64) (map[string]
 	req := map[string]any{
 		"telegram_id":          telegramID,
 		"mode":                 p.Mode,
-		"runtime":              p.Runtime,
 		"autopilot_paused":     p.AutopilotPaused,
 		"listener_enabled":     p.ListenerEnabled,
 		"disclosure_text":      p.DisclosureText,
@@ -369,6 +368,12 @@ func ProfileRequest(def *Definition, in *Install, telegramID int64) (map[string]
 		"blocked_senders":      p.BlockedSenders,
 		"sender_allowlist":     p.SenderAllowlist,
 		"owner_profile":        p.OwnerProfile,
+	}
+	// An install that does not state a runtime leaves the account's runtime
+	// alone: sending the resolved default "own" would move a managed
+	// account back and erase its consent.
+	if in.Spec.Runtime != "" {
+		req["runtime"] = p.Runtime
 	}
 	// spec.consent is deliberately not copied: the admin profile route
 	// refuses it, because an administrator cannot consent for the owner.
