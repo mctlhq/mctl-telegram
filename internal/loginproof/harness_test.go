@@ -68,6 +68,7 @@ func TestRun_QR_Mutations(t *testing.T) {
 		"logout and reset fail": func(f *fake) Steps {
 			f.logoutErr = errors.New("x")
 			f.fallbackErr = errors.New("y")
+			f.stillListed = true
 			return f.steps()
 		},
 		"logout fails, hash still listed": func(f *fake) Steps {
@@ -107,7 +108,7 @@ func TestRun_FallbackCleanupPasses(t *testing.T) {
 
 func TestRun_CleanupFailedOutcome(t *testing.T) {
 	f := okFake()
-	f.logoutErr, f.fallbackErr = errors.New("x"), errors.New("y")
+	f.logoutErr, f.fallbackErr, f.stillListed = errors.New("x"), errors.New("y"), true
 	if out, _ := Run(context.Background(), ModeQR, f.steps()); out != OutcomeCleanupFailed {
 		t.Fatalf("out = %s", out)
 	}
@@ -151,5 +152,17 @@ func TestRun_Negative(t *testing.T) {
 	f = &fake{session: []byte("s")}
 	if out, _ := Run(context.Background(), ModePhoneWrongPassword, f.steps()); out == OutcomePass || !f.loggedOut {
 		t.Fatalf("unexpected login success: out=%s loggedOut=%v", out, f.loggedOut)
+	}
+}
+
+func TestRun_ScannedLoginFailure_AlreadyGoneKeepsRealOutcome(t *testing.T) {
+	f := okFake()
+	f.loginErr = telegram.ErrQRLoginExpired
+	f.scanned = true
+	f.fallbackErr = errors.New("HASH_INVALID")
+	f.stillListed = false
+	out, _ := Run(context.Background(), ModeQR, f.steps())
+	if out == OutcomePass || out == OutcomeCleanupFailed {
+		t.Fatalf("out = %s, want the login error's class", out)
 	}
 }

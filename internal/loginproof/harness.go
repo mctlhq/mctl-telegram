@@ -136,11 +136,12 @@ func cleanup(ctx context.Context, data []byte, s Steps) error {
 		}
 	}
 	if s.Fallback != nil && s.StillAuthorized != nil {
-		if err := s.Fallback(ctx); err == nil {
-			still, cerr := s.StillAuthorized(ctx)
-			if cerr == nil && !still {
-				return nil
-			}
+		// The reset may be rejected because the authorization is already gone,
+		// so the listing, not the reset result, decides whether cleanup held.
+		_ = s.Fallback(ctx)
+		still, cerr := s.StillAuthorized(ctx)
+		if cerr == nil && !still {
+			return nil
 		}
 	}
 	return ErrCleanupFailed
