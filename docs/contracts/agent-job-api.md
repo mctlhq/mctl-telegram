@@ -156,6 +156,8 @@ go build -o agent-conformance ./cmd/agent-conformance
 ./agent-conformance --listen :8099                                  # or start it yourself
 ```
 
+The fake is stricter than the server for the account token: a request that names no job (no job id in the path or the body, or a body `job_id` of zero), such as `GET /policy`, cannot be attributed to a fixture and is refused with `409` when zero or several jobs are open, and that fails the run. The server accepts such a request. A worker should send its job token, which carries the job.
+
 The worker command gets `AGENT_API_BASE_URL` and `AGENT_API_TOKEN` and inherits the rest of the environment (model credentials are yours). With `--listen` the tool prints both values and waits. The run ends with a drain: after the last fixture is terminal it waits for the worker's status reads and cost reports (`--settle-quiet`, `--settle-max`), releases a long-polling worker, stops it (`--stop-grace`), shuts the server down gracefully and only then scores. The JSON report is bound to `harness_version`, `suite_digest` and `definition_digest` and holds no model text. Exit status is 0 on pass, 1 on fail, 2 on a setup error. A `settle_timeout` is reported and does not change the verdict.
 
 `AGENT_CONFORMANCE=1 go test ./internal/agentworker -run TestC1Conformance` runs the first-party worker through it. Plain `go test ./...` skips that and spends no model quota.

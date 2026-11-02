@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -160,5 +161,22 @@ func TestUsage(t *testing.T) {
 	}
 	if code := run([]string{"--worker-cmd", "x", "--listen", ":0"}, &out, &errb); code != 2 {
 		t.Fatalf("both modes: exit %d", code)
+	}
+}
+
+func TestDialAddr(t *testing.T) {
+	for in, want := range map[string]string{
+		"[::]:8099":      "127.0.0.1:8099",
+		"0.0.0.0:8099":   "127.0.0.1:8099",
+		"127.0.0.1:8099": "127.0.0.1:8099",
+		"192.0.2.7:8099": "192.0.2.7:8099",
+	} {
+		a, err := net.ResolveTCPAddr("tcp", in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := dialAddr(a); got != want {
+			t.Errorf("dialAddr(%s) = %s, want %s", in, got, want)
+		}
 	}
 }

@@ -379,3 +379,24 @@ func TestConformance_DrainReleasesALongPoll(t *testing.T) {
 		t.Fatal("a claim after the drain was held")
 	}
 }
+
+// A body job_id of zero or none is "not named", as in the agent API: a job
+// token supplies its own job, so the harness must not call it a binding
+// violation. (A write is still held to Task's own full binding check.)
+func TestConformance_ZeroOrAbsentJobIDIsNotNamed(t *testing.T) {
+	for body, want := range map[string]bool{
+		`{"job_id":0,"company":"x"}`: false,
+		`{"company":"x"}`:            false,
+		`{"job_id":7}`:               true,
+		`{"job_id":"0"}`:             false,
+	} {
+		if _, got := namedJob("/leads", []byte(body)); got != want {
+			t.Errorf("namedJob(%s) named = %v, want %v", body, got, want)
+		}
+	}
+	r := newConfRun(t, "outreach-01")
+	a, _ := r.claim()
+	if code, out := r.do(a.JobToken, http.MethodPost, "/leads", map[string]any{"job_id": 0, "company": "x"}); code == http.StatusForbidden {
+		t.Fatalf("job token with job_id 0 = %d %v, want no cross-job refusal", code, out)
+	}
+}

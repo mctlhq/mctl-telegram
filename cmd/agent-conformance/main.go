@@ -36,6 +36,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -246,7 +247,7 @@ func execute(ctx context.Context, cfg config, stderr io.Writer) (*Report, error)
 	srv := &http.Server{Handler: http.StripPrefix(apiPrefix, conf), ReadHeaderTimeout: 10 * time.Second}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
-	baseURL := "http://" + ln.Addr().String() + apiPrefix
+	baseURL := "http://" + dialAddr(ln.Addr()) + apiPrefix
 
 	var worker *exec.Cmd
 	workerDone := make(chan error, 1)
@@ -295,7 +296,7 @@ running:
 	}
 
 	// Settling: the post-terminal status reads and cost reports still to come.
-	settleCtx, cancelSettle := context.WithTimeout(context.Background(), cfg.settleMax+time.Second)
+	settleCtx, cancelSettle := context.WithTimeout(ctx, cfg.settleMax+time.Second)
 	timedOut, unsettled := conf.Settle(settleCtx, cfg.settleQuiet, cfg.settleMax)
 	cancelSettle()
 
@@ -417,4 +418,13 @@ func splitCommand(s string) ([]string, error) {
 		return nil, fmt.Errorf("--worker-cmd is empty")
 	}
 	return words, nil
+}
+
+// dialAddr is the address a worker connects to: a wildcard listener
+// ("[::]:8099") is reached through loopback.
+func dialAddr(a net.Addr) string {
+	if t, ok := a.(*net.TCPAddr); ok && t.IP.IsUnspecified() {
+		return net.JoinHostPort("127.0.0.1", strconv.Itoa(t.Port))
+	}
+	return a.String()
 }

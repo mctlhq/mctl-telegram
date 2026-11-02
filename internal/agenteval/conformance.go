@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -85,11 +84,7 @@ func NewConformance(t *Target, fixtures []Fixture, token string, hold time.Durat
 func NewHarnessToken() string { return randomToken() }
 
 func randomToken() string {
-	b := make([]byte, 24)
-	if _, err := rand.Read(b); err != nil {
-		panic("agenteval: no entropy: " + err.Error())
-	}
-	return hex.EncodeToString(b)
+	return rand.Text()
 }
 
 // jobRoute extracts the job id a path names: /jobs/{id}[/complete|/cost].
@@ -198,7 +193,8 @@ func (s *statusRecorder) WriteHeader(code int) {
 }
 
 // namedJob returns the job id a request names in its path, else in a JSON
-// body's job_id.
+// body's job_id. A body job_id of zero is "not named", as in the agent API,
+// where a client serialising an unset int64 sends 0.
 func namedJob(path string, body []byte) (string, bool) {
 	if m := jobRoute.FindStringSubmatch(path); m != nil {
 		return m[1], true
@@ -211,7 +207,7 @@ func namedJob(path string, body []byte) (string, bool) {
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
-	if err := dec.Decode(&b); err != nil || b.JobID == nil {
+	if err := dec.Decode(&b); err != nil || b.JobID == nil || b.JobID.String() == "0" {
 		return "", false
 	}
 	return b.JobID.String(), true
@@ -233,7 +229,7 @@ func (c *Conformance) openJobs() []*claimedJob {
 
 // refuseUnattributed answers 409 for a request that names no single fixture.
 // The violation is recorded on every fixture it could have meant, and counted
-// for the run when none is open.
+// for the run on every refusal, whether or not a fixture is open.
 func (c *Conformance) refuseUnattributed(w http.ResponseWriter, candidates []*claimedJob) {
 	c.mu.Lock()
 	c.unattributed++
