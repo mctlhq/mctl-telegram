@@ -4,14 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"sync"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
-
-	"github.com/mctlhq/mctl-telegram/internal/agent/tools"
 )
 
 // agentAPI is the subset of *Client every tool needs — narrowed to an
@@ -67,29 +64,17 @@ const ServerName = "agent"
 // names may be a subset that includes the mandatory tools (tools.ForJob, as
 // jobTools on the invoking side); a tool left out is not registered, and the
 // agent API refuses its routes for this job regardless.
+//
+// buildToolSet is authoritative for both this MCP surface and OpenAIRunner,
+// so aliases, schemas and handlers cannot drift between the two runners.
 func NewMCPServer(api agentAPI, job JobContext) (*mcpserver.MCPServer, error) {
-	bindings, err := tools.ForJob(job.Tools)
+	_, defs, err := buildToolSet(api, job)
 	if err != nil {
 		return nil, err
 	}
-	b := &toolBuilder{api: api, job: job}
-	build := map[string]func() (mcplib.Tool, mcpserver.ToolHandlerFunc){
-		"get_event": b.getEvent, "get_conversation_context": b.getConversationContext,
-		"get_recruiter_profile": b.getRecruiterProfile, "get_lead": b.getLead,
-		"get_policy": b.getPolicy, "propose_reply": b.proposeReply,
-		"save_job_lead": b.saveJobLead, "request_owner_approval": b.requestOwnerApproval,
-		"send_owner_summary": b.sendOwnerSummary, "pause_autopilot": b.pauseAutopilot,
-		"complete_agent_job": b.completeAgentJob,
-	}
 	srv := mcpserver.NewMCPServer(ServerName, "0.1.0", mcpserver.WithToolCapabilities(false))
-	for _, bind := range bindings {
-		f, ok := build[bind.Canonical]
-		if !ok {
-			return nil, fmt.Errorf("no implementation for tool %q", bind.Canonical)
-		}
-		tool, handler := f()
-		tool.Name = bind.Name
-		srv.AddTool(tool, handler)
+	for _, def := range defs {
+		srv.AddTool(def.Tool, def.Handler)
 	}
 	return srv, nil
 }
@@ -118,6 +103,15 @@ type toolBuilder struct {
 	// either id.
 	resultActionID int64
 	resultLeadID   int64
+}
+
+// Completed reports whether complete_agent_job has succeeded. It uses the
+// same mutex as guarded so an in-process runner cannot observe completion
+// halfway through a state-changing tool call.
+func (b *toolBuilder) Completed() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.completed
 }
 
 var errJobAlreadyCompleted = errors.New("this job was already marked complete — no further actions are allowed")

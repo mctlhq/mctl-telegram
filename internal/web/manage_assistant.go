@@ -32,6 +32,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/assistantinstall"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
 // WithAssistants wires the install service behind the assistant section.
@@ -62,6 +63,9 @@ const assistantValueField = "value."
 // decides what is valid.
 var assistantModes = []string{"observe", "guarded", "off"}
 
+// assistantRuntimes are the runtimes the runtime form offers.
+var assistantRuntimes = []string{db.RuntimeOwn, db.RuntimeManaged}
+
 // assistantSectionView is the manage page's assistant section.
 type assistantSectionView struct {
 	// LoadErr: the install could not be read. The section then shows
@@ -78,6 +82,11 @@ type assistantSectionView struct {
 	Catalog            []assistantInstallOption
 	CatalogUnavailable bool
 	Modes              []string
+	Runtimes           []string
+	// ConsentText is the verbatim managed data flow consent text, and
+	// ConsentValue the value the checkbox sends.
+	ConsentText  string
+	ConsentValue string
 	// Notice is the outcome of the last submission. NoticeOK marks a
 	// success; anything else renders as an error.
 	Notice   string
@@ -107,7 +116,8 @@ func (s *ManageServer) buildAssistantSection(r *http.Request, id *auth.Identity,
 	if s.assistants == nil {
 		return nil
 	}
-	v := &assistantSectionView{CanManage: canManageAccount(id), Modes: assistantModes}
+	v := &assistantSectionView{CanManage: canManageAccount(id), Modes: assistantModes,
+		Runtimes: assistantRuntimes, ConsentText: db.ManagedConsentText, ConsentValue: db.ManagedConsentCurrent}
 	if notice != nil {
 		v.Notice, v.NoticeOK = notice.msg, notice.ok
 	}
@@ -323,7 +333,13 @@ func (s *ManageServer) HandleAssistantUpdate(w http.ResponseWriter, r *http.Requ
 		s.assistantFailure(w, r, id, manageAssistantUpdateRoute, err)
 		return
 	}
-	res, err := s.assistants.Patch(r.Context(), id.UserID, raw, expected)
+	// The consent checkbox is a per-call assertion: it matters only when
+	// the change is to managed, and is never stored.
+	consent := ""
+	if r.PostForm.Get("setting") == "runtime" {
+		consent = strings.TrimSpace(r.PostForm.Get("consent"))
+	}
+	res, err := s.assistants.PatchWithConsent(r.Context(), id.UserID, raw, expected, consent)
 	if err != nil {
 		s.assistantFailure(w, r, id, manageAssistantUpdateRoute, err)
 		return
@@ -346,6 +362,12 @@ func assistantPatchFromForm(setting, value string) (map[string]any, bool) {
 			return map[string]any{setting: true}, true
 		case "false":
 			return map[string]any{setting: false}, true
+		}
+	case "runtime":
+		for _, m := range assistantRuntimes {
+			if value == m {
+				return map[string]any{"runtime": value}, true
+			}
 		}
 	case "mode":
 		for _, m := range assistantModes {
@@ -380,6 +402,12 @@ func (s *ManageServer) assistantFailure(w http.ResponseWriter, r *http.Request, 
 			status, msg = http.StatusNotFound, ie.Msg+". Nothing was changed."
 		case assistantinstall.KindLifecycle, assistantinstall.KindNoInstall:
 			status, msg = http.StatusConflict, ie.Msg+". Nothing was changed."
+		case assistantinstall.KindManagedConsentRequired:
+			status, msg = http.StatusUnprocessableEntity, "Tick the box to agree to the managed data flow before switching. Nothing was changed."
+		case assistantinstall.KindManagedDisabled:
+			status, msg = http.StatusForbidden, "The managed runtime is not available. Nothing was changed."
+		case assistantinstall.KindManagedQuota:
+			status, msg = http.StatusConflict, "No managed capacity is available right now. Nothing was changed."
 		case assistantinstall.KindUnavailable:
 			status, msg = http.StatusServiceUnavailable, "The assistant catalog is unavailable right now. Nothing was changed; try again in a minute."
 		case assistantinstall.KindUpstream:
@@ -408,6 +436,8 @@ const manageAssistantSection = `
     <div class="field-row"><span class="field-label">Install revision</span><span class="field-value" id="assistant-revision">{{.Revision}}</span></div>
     {{with .Settings}}
     <div class="field-row"><span class="field-label">Mode</span><span class="field-value" id="assistant-mode">{{.Mode}}</span></div>
+    <div class="field-row"><span class="field-label">Runtime</span><span class="field-value" id="assistant-runtime">{{if eq .Runtime "managed"}}managed (platform worker){{else}}own (your worker){{end}}</span></div>
+    {{if .ManagedReconsentRequired}}<p class="error" id="assistant-reconsent">Your consent to the managed data flow is out of date. Agree again below to keep using the managed runtime.</p>{{end}}
     <div class="field-row"><span class="field-label">Paused</span><span class="field-value" id="assistant-paused">{{if .Paused}}yes{{else}}no{{end}}</span></div>
     <div class="field-row"><span class="field-label">Listening</span><span class="field-value" id="assistant-listening">{{if .Listening}}yes{{else}}no{{end}}</span></div>
     <div class="field-row"><span class="field-label">Disclosure line</span><span class="field-value">{{if .DisclosureEnabled}}on{{if .DisclosureText}}: {{.DisclosureText}}{{end}}{{else}}off{{end}}</span></div>
@@ -443,6 +473,15 @@ const manageAssistantSection = `
         <select name="value">{{$mode := .Mode}}{{range $.Assistant.Modes}}<option value="{{.}}"{{if eq . $mode}} selected{{end}}>{{.}}</option>{{end}}</select>
       </label>
       <button type="submit" class="btn-secondary">Change mode</button>
+    </form>
+    <form method="POST" action="/telegram/connect/manage/assistant/update" class="assistant-form" id="assistant-runtime-form">
+      <input type="hidden" name="expected_revision" value="{{$.Assistant.Revision}}">
+      <input type="hidden" name="setting" value="runtime">
+      <label>Runtime
+        <select name="value">{{$rt := .Runtime}}{{range $.Assistant.Runtimes}}<option value="{{.}}"{{if eq . $rt}} selected{{end}}>{{.}}</option>{{end}}</select>
+      </label>
+      <label><input type="checkbox" name="consent" value="{{$.Assistant.ConsentValue}}"> {{$.Assistant.ConsentText}}</label>
+      <button type="submit" class="btn-secondary">Change runtime</button>
     </form>
     {{end}}{{end}}
     <h3 class="notif-heading">Install an assistant</h3>

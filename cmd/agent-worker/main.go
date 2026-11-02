@@ -1,14 +1,16 @@
 // Command agent-worker is the production (Option C) headless transport for
 // the communication agent: it long-polls mctl-telegram's
-// /api/agent/v1/events for due jobs and, for each one, invokes `claude -p`
-// with a restricted MCP tool surface (internal/agentworker.NewMCPServer)
-// that proxies 1:1 onto the same API. See mctlhq/mctl-telegram#298 and the
-// transport decision in the Communication Agent plan for why this replaced
-// the originally-scoped Claude Code Channels bridge as the production path.
+// /api/agent/v1/events for due jobs and, for each one, runs the configured
+// model runner (AGENT_RUNNER: claude, the default, or openai) with the same
+// restricted tool surface: internal/agentworker.NewMCPServer for `claude -p`,
+// the shared buildToolSet in-process for OpenAI-compatible models. See
+// mctlhq/mctl-telegram#298 and the transport decision in the Communication
+// Agent plan for why this replaced the originally-scoped Claude Code Channels
+// bridge as the production path.
 //
 // This binary runs in two modes, selected by --mcp-serve:
-//   - default: the poll loop (see run()). Spawns `claude` as a subprocess
-//     per job.
+//   - default: the poll loop (see run()). With the claude runner it spawns
+//     `claude` as a subprocess per job; the openai runner stays in-process.
 //   - --mcp-serve: a stdio MCP server exposing the 11 agent tools, scoped to
 //     exactly one job via AGENT_JOB_* env vars. `claude` spawns this mode
 //     itself (as configured by the default mode's --mcp-config), so an
@@ -62,7 +64,7 @@ func configureLogging(w io.Writer) {
 	slog.SetDefault(slog.New(audit.NewRedactingHandler(inner)))
 }
 
-// run is the default (poll-loop) mode.
+// run is the default poll-loop mode.
 func run() error {
 	apiBaseURL, err := requireEnv("AGENT_API_BASE_URL")
 	if err != nil {
@@ -84,12 +86,6 @@ func run() error {
 	if err := validateDomainID(credentialDomainID); err != nil {
 		return err
 	}
-
-	self, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("resolve own executable path: %w", err)
-	}
-
 	maxBudgetUSD, err := envFloat("AGENT_MAX_BUDGET_USD", 0)
 	if err != nil {
 		return err
@@ -97,23 +93,86 @@ func run() error {
 
 	m := metrics.New()
 	m.AgentCredentialDomain.WithLabelValues(credentialDomainID).Set(1)
-
 	client := agentworker.NewClient(apiBaseURL, apiToken, nil)
-	invoker := &agentworker.ClaudeInvoker{
-		ClaudeBin:    os.Getenv("AGENT_CLAUDE_BIN"),
-		Self:         self,
-		APIBaseURL:   apiBaseURL,
-		APIToken:     apiToken,
-		SystemPrompt: os.Getenv("AGENT_SYSTEM_PROMPT"),
-		MaxBudgetUSD: maxBudgetUSD,
-		Metrics:      m,
+
+	runnerName := strings.ToLower(strings.TrimSpace(os.Getenv("AGENT_RUNNER")))
+	if runnerName == "" {
+		runnerName = "claude"
 	}
+	var runner agentworker.Runner
+	switch runnerName {
+	case "claude":
+		self, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("resolve own executable path: %w", err)
+		}
+		runner = &agentworker.ClaudeInvoker{
+			ClaudeBin:    os.Getenv("AGENT_CLAUDE_BIN"),
+			Self:         self,
+			APIBaseURL:   apiBaseURL,
+			APIToken:     apiToken,
+			SystemPrompt: os.Getenv("AGENT_SYSTEM_PROMPT"),
+			MaxBudgetUSD: maxBudgetUSD,
+			Metrics:      m,
+		}
+	case "openai":
+		model, err := requireEnv("AGENT_MODEL")
+		if err != nil {
+			return err
+		}
+		openAIBaseURL, err := requireEnv("AGENT_OPENAI_BASE_URL")
+		if err != nil {
+			return err
+		}
+		openAIAPIKey, err := requireEnv("AGENT_OPENAI_API_KEY")
+		if err != nil {
+			return err
+		}
+		inputPrice, err := requiredEnvFloat("MODEL_INPUT_USD_PER_MTOK")
+		if err != nil {
+			return err
+		}
+		outputPrice, err := requiredEnvFloat("MODEL_OUTPUT_USD_PER_MTOK")
+		if err != nil {
+			return err
+		}
+		maxTurns, err := envPositiveInt("AGENT_MAX_TURNS", 12)
+		if err != nil {
+			return err
+		}
+		minInterval, err := envDuration("AGENT_OPENAI_MIN_INTERVAL", 0)
+		if err != nil {
+			return err
+		}
+		runner = &agentworker.OpenAIRunner{
+			Client: &agentworker.OpenAIClient{
+				BaseURL:      openAIBaseURL,
+				APIKey:       openAIAPIKey,
+				GatewayToken: os.Getenv("AGENT_GATEWAY_TOKEN"),
+				Model:        model,
+				UserAgent:    "mctl-telegram-agent-worker/" + version,
+			},
+			APIBaseURL:   apiBaseURL,
+			APIToken:     apiToken,
+			SystemPrompt: os.Getenv("AGENT_SYSTEM_PROMPT"),
+			MaxTurns:     maxTurns,
+			MaxBudgetUSD: maxBudgetUSD,
+			Prices: agentworker.Prices{
+				InputUSDPerMTok: inputPrice, OutputUSDPerMTok: outputPrice,
+			},
+			MinInterval: minInterval,
+			Metrics:     m,
+		}
+	default:
+		return fmt.Errorf("AGENT_RUNNER must be claude or openai, got %q", runnerName)
+	}
+
 	health := &agentworker.Health{}
 	concurrency, err := envConcurrency("AGENT_WORKER_CONCURRENCY")
 	if err != nil {
 		return err
 	}
-	worker := agentworker.NewWorker(client, invoker).WithConcurrency(concurrency).WithHealth(health)
+	worker := agentworker.NewWorker(client, runner).WithConcurrency(concurrency).WithHealth(health)
 
 	healthAddr := os.Getenv("AGENT_HEALTH_ADDR")
 	if healthAddr == "" {
@@ -141,7 +200,7 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	slog.Info("agent-worker: starting poll loop", "version", version, "api_base_url", apiBaseURL, "health_addr", healthAddr)
+	slog.Info("agent-worker: starting poll loop", "version", version, "runner", runnerName, "api_base_url", apiBaseURL, "health_addr", healthAddr)
 	loopErr := worker.Loop(ctx)
 	slog.Info("agent-worker: stopped")
 
@@ -157,7 +216,6 @@ func run() error {
 		// alongside it.
 		slog.Warn("agent-worker: health server failed", "err", err)
 	}
-
 	// A fatal-auth stop must reach main() as a nonzero exit — otherwise a
 	// process supervisor watching for failures sees the same clean return as
 	// an ordinary SIGTERM shutdown and never restarts or alerts on an
@@ -260,6 +318,42 @@ func envConcurrency(key string) (int, error) {
 		return 0, fmt.Errorf("%s must be an integer in 1..%d, got %q", key, agentworker.MaxConcurrency, raw)
 	}
 	return n, nil
+}
+
+func envPositiveInt(key string, def int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer, got %q", key, raw)
+	}
+	return n, nil
+}
+
+func envDuration(key string, def time.Duration) (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("%s must be a non-negative duration, got %q", key, raw)
+	}
+	return d, nil
+}
+
+func requiredEnvFloat(key string) (float64, error) {
+	raw, err := requireEnv(key)
+	if err != nil {
+		return 0, err
+	}
+	f, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < 0 {
+		return 0, fmt.Errorf("parse %s: %q must be a finite non-negative number", key, raw)
+	}
+	return f, nil
 }
 
 // envFloat fails loudly on a set-but-unparseable value rather than silently

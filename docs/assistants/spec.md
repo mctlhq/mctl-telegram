@@ -123,6 +123,8 @@ spec:
   mode: guarded            # observe | guarded | off; default: the definition's
   paused: false            # default: true
   listening: true          # default: false
+  runtime: own             # own (default) | managed; managed needs consent, see ADR 0008
+  consent: "..."           # per-call assertion for managed; never stored
   values: {...}            # variable values
   disclosureLevels: {...}  # per variable, stricter only
   intentTiers: {...}       # per intent, within userOverride
@@ -135,6 +137,13 @@ spec:
   schedule: {mode: always | outside_hours, timezone, hours}
   ownerNotes: "..."        # the user's own instructions, max 2000 chars
 ```
+
+`runtime` chooses which worker runs the account's jobs: `own`, the
+default, or `managed` (a platform worker, ADR 0008). Switching `own` to
+`managed` needs `consent: "managed-data-flow/v1"` on that call, and the
+server may refuse it (`managed_disabled`, `managed_quota`). `consent` is an
+assertion of one call: it is never stored in the install. Switching back to
+`own` needs nothing.
 
 `ownerNotes` are appended after the definition's instructions in a delimited
 block, introduced as lower priority than everything before them; the notes

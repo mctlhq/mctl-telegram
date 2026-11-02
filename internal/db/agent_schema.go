@@ -167,6 +167,23 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "assistant_installed_at", "TIMESTAMPTZ", "DATETIME"); err != nil {
 		return err
 	}
+	// Managed runtime (ADR 0008): which worker runs the account's jobs, and
+	// the consent the owner gave to the managed data flow.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "runtime",
+		"TEXT NOT NULL DEFAULT 'own'", "TEXT NOT NULL DEFAULT 'own'"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "managed_consent_version",
+		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "managed_consent_at", "TIMESTAMPTZ", "DATETIME"); err != nil {
+		return err
+	}
+	// budget_paused_until is unused in this slice.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "budget_paused_until", "TIMESTAMPTZ", "DATETIME"); err != nil {
+		return err
+	}
 	// conversations.peer_contact: whether the peer was in the owner's
 	// contacts on the latest inbound message: 'contact', 'non_contact', or
 	// '' when Telegram did not say.

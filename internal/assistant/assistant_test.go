@@ -408,3 +408,37 @@ func TestDefinitionToolAliases(t *testing.T) {
 		t.Fatal("a tool named twice was accepted")
 	}
 }
+
+func TestRuntimeDefaultsToOwnAndSchemaChecksIt(t *testing.T) {
+	def := hrDefinition(t)
+	in := hrInstall(t)
+	p, err := Resolve(def, in)
+	if err != nil || p.Runtime != RuntimeOwn {
+		t.Fatalf("Resolve: runtime %q, err %v", p.Runtime, err)
+	}
+	if req, err := ProfileRequest(def, in, danaID); err != nil {
+		t.Fatal(err)
+	} else if _, has := req["runtime"]; has {
+		t.Fatalf("ProfileRequest sent runtime %v for an install that states none", req["runtime"])
+	}
+	in.Spec.Runtime, in.Spec.Consent = RuntimeManaged, "managed-data-flow/v1"
+	req, err := ProfileRequest(def, in, danaID)
+	if _, has := req["consent"]; err != nil || req["runtime"] != RuntimeManaged || has {
+		t.Fatalf("ProfileRequest = %v, %v", req, err)
+	}
+	const hdr = `{"apiVersion":"assistants.mctl.ai/v1alpha1","kind":"AssistantInstall","spec":{"assistant":{"name":"hr-recruiter","version":"0.1.0"},`
+	for _, tc := range []struct {
+		raw string
+		ok  bool
+	}{
+		{`"runtime":"own"}}`, true},
+		{`"runtime":"managed","consent":"managed-data-flow/v1"}}`, true},
+		{`"runtime":"remote"}}`, false},
+		{`"runtime":1}}`, false},
+		{`"consent":1}}`, false},
+	} {
+		if _, err := ParseInstall([]byte(hdr + tc.raw)); (err == nil) != tc.ok {
+			t.Errorf("%s: err = %v, want ok=%v", tc.raw, err, tc.ok)
+		}
+	}
+}

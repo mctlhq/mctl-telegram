@@ -146,6 +146,8 @@ type Install struct {
 			Version string `json:"version"`
 		} `json:"assistant"`
 		Mode             string                             `json:"mode"`
+		Runtime          string                             `json:"runtime"`
+		Consent          string                             `json:"consent"`
 		Paused           *bool                              `json:"paused"`
 		Listening        *bool                              `json:"listening"`
 		Values           map[string]any                     `json:"values"`
@@ -315,7 +317,9 @@ func withinCeilings(l, c Limits) error {
 // Profile is every agent setting an install resolves to: the definition's
 // defaults with the install's values and overrides applied.
 type Profile struct {
-	Mode               string
+	Mode string
+	// Runtime is "own" or "managed"; an install without one resolves to own.
+	Runtime            string
 	AutopilotPaused    bool
 	ListenerEnabled    bool
 	DisclosureText     string
@@ -347,7 +351,7 @@ func ProfileRequest(def *Definition, in *Install, telegramID int64) (map[string]
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{
+	req := map[string]any{
 		"telegram_id":          telegramID,
 		"mode":                 p.Mode,
 		"autopilot_paused":     p.AutopilotPaused,
@@ -364,8 +368,23 @@ func ProfileRequest(def *Definition, in *Install, telegramID int64) (map[string]
 		"blocked_senders":      p.BlockedSenders,
 		"sender_allowlist":     p.SenderAllowlist,
 		"owner_profile":        p.OwnerProfile,
-	}, nil
+	}
+	// An install that does not state a runtime leaves the account's runtime
+	// alone: sending the resolved default "own" would move a managed
+	// account back and erase its consent.
+	if in.Spec.Runtime != "" {
+		req["runtime"] = p.Runtime
+	}
+	// spec.consent is deliberately not copied: the admin profile route
+	// refuses it, because an administrator cannot consent for the owner.
+	return req, nil
 }
+
+// Runtime values (ADR 0008); they equal db.RuntimeOwn and db.RuntimeManaged.
+const (
+	RuntimeOwn     = "own"
+	RuntimeManaged = "managed"
+)
 
 // Resolve checks an install against def and returns the settings it
 // resolves to.
@@ -453,8 +472,13 @@ func Resolve(def *Definition, in *Install) (*Profile, error) {
 		return nil, err
 	}
 
+	runtime := s.Runtime
+	if runtime == "" {
+		runtime = RuntimeOwn
+	}
 	return &Profile{
 		Mode:               mode,
+		Runtime:            runtime,
 		AutopilotPaused:    paused,
 		ListenerEnabled:    listening,
 		DisclosureText:     disclosureText,
