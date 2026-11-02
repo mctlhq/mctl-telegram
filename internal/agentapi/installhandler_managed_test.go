@@ -3,6 +3,7 @@ package agentapi
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -58,7 +59,14 @@ func TestAdminAgentInstallHandler_ManagedDocumentIsRefused(t *testing.T) {
 			t.Fatalf("%s: status = %d %s, want 409", extra, rec.Code, rec.Body)
 		}
 	}
-	if p, err := store.GetAgentProfile(ctx, uid); err == nil && p.Runtime != "" && p.Runtime != db.RuntimeOwn {
-		t.Fatalf("runtime = %q after a refused install", p.Runtime)
+	// The refusal must leave either no profile row or an own one; any other
+	// read error is a failure of the check itself, not a pass.
+	p, err := store.GetAgentProfile(ctx, uid)
+	switch {
+	case errors.Is(err, db.ErrAgentProfileNotFound):
+	case err != nil:
+		t.Fatalf("read profile after a refused install: %v", err)
+	case p.Runtime != db.RuntimeOwn:
+		t.Fatalf("runtime = %q after a refused install, want own", p.Runtime)
 	}
 }
