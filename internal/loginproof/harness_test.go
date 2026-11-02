@@ -162,7 +162,21 @@ func TestRun_ScannedLoginFailure_AlreadyGoneKeepsRealOutcome(t *testing.T) {
 	f.fallbackErr = errors.New("HASH_INVALID")
 	f.stillListed = false
 	out, _ := Run(context.Background(), ModeQR, f.steps())
-	if out == OutcomePass || out == OutcomeCleanupFailed {
-		t.Fatalf("out = %s, want the login error's class", out)
+	if out != OutcomeTimeout {
+		t.Fatalf("out = %s, want %s (the login error's class)", out, OutcomeTimeout)
+	}
+}
+
+// A failed login that nonetheless stored a session, whose cleanup then
+// fails, reports cleanup_failed: the operator must terminate the device.
+func TestRun_NegativeModeReportsAFailedCleanup(t *testing.T) {
+	f := &fake{
+		loginErr:    errors.New("PASSWORD_HASH_INVALID"),
+		session:     []byte("s"),
+		logoutErr:   errors.New("logout failed"),
+		stillListed: true,
+	}
+	if out, _ := Run(context.Background(), ModePhoneWrongPassword, f.steps()); out != OutcomeCleanupFailed {
+		t.Fatalf("out = %s, want %s", out, OutcomeCleanupFailed)
 	}
 }

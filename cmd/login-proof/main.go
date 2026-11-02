@@ -328,8 +328,13 @@ func runQR(ctx context.Context, mode loginproof.Mode, e env, store *db.Store, ui
 		}
 		steps.StillAuthorized = func(ctx context.Context) (bool, error) {
 			acceptedMu.Lock()
-			h := hash
+			h, ok := hash, accepted
 			acceptedMu.Unlock()
+			if !ok {
+				// No hash to look for: whether an authorization exists is
+				// unknown, never "gone".
+				return true, errors.New("no authorization hash")
+			}
 			list, err := anchor.API().AccountGetAuthorizations(ctx)
 			if err != nil {
 				return true, err
@@ -370,7 +375,7 @@ func newStore(ctx context.Context) (*db.Store, int64, error) {
 	if err != nil {
 		return nil, 0, fmt.Errorf("open store: %w", err)
 	}
-	if err := db.MigrateCached(ctx, conn); err != nil {
+	if err := db.Migrate(ctx, conn); err != nil {
 		return nil, 0, fmt.Errorf("migrate store: %w", err)
 	}
 	crypt, err := mcrypto.New(nil)

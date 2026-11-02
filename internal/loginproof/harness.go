@@ -119,7 +119,10 @@ func runNegative(ctx context.Context, want string, s Steps, rec *Recorder) error
 		return fmt.Errorf("load session: %w", err)
 	}
 	if len(data) != 0 {
-		_ = cleanup(ctx, data, s)
+		if cerr := cleanup(ctx, data, s); cerr != nil {
+			// The operator must be told a device may need terminating by hand.
+			return cerr
+		}
 		return errors.New("a session was stored by a failed login")
 	}
 	rec.Observe(StepNoSession)
