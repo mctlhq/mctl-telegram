@@ -66,7 +66,7 @@ func TestDecideRuntime(t *testing.T) {
 		t.Fatalf("switch = %+v, %v", ch, e)
 	}
 	ch, e = off.DecideRuntime("managed", "own", "", now)
-	if e != nil || !ch.Changed || *ch.Runtime != "own" || ch.ConsentVersion != nil {
+	if e != nil || !ch.Changed || !ch.ClearConsent || *ch.Runtime != "own" || ch.ConsentVersion != nil {
 		t.Fatalf("managed -> own = %+v, %v", ch, e)
 	}
 	ch, e = off.DecideRuntime("managed", "managed", "", now)
@@ -119,8 +119,8 @@ func TestCommit_SwitchToManagedNeedsConsentAndStoresNoConsent(t *testing.T) {
 		t.Fatalf("managed -> own: %v", err)
 	}
 	p, _ = svc.Store.GetAgentProfile(ctx, uid)
-	if p.Runtime != "own" || p.ManagedConsentVersion != db.ManagedConsentCurrent {
-		t.Fatalf("profile after switching back = %+v", p)
+	if p.Runtime != "own" || p.ManagedConsentVersion != "" || !p.ManagedConsentAt.IsZero() {
+		t.Fatalf("profile after switching back = %+v, want own with the consent erased", p)
 	}
 
 	// A later patch cannot inherit the earlier consent.
@@ -271,5 +271,31 @@ func TestStripConsent_KeepsLargeIntegersAndDropsConsent(t *testing.T) {
 	}
 	if strings.Contains(string(out), "consent") || !strings.Contains(string(out), "9007199254740993") {
 		t.Fatalf("stripConsent = %s", out)
+	}
+}
+
+// A full install that does not state a runtime leaves the account's runtime
+// alone; only an explicit "own" moves a managed account back.
+func TestApply_AbsentRuntimeKeepsManagedExplicitOwnSwitches(t *testing.T) {
+	svc, uid := newTestService(t)
+	ctx := context.Background()
+	svc.Managed = ManagedRuntime{Enabled: true, MaxAccounts: 5}
+	if _, err := svc.Apply(ctx, uid, runtimeInstall(t, "managed", db.ManagedConsentCurrent), CommitOptions{}); err != nil {
+		t.Fatalf("managed install: %v", err)
+	}
+	at := func() time.Time { p, _ := svc.Store.GetAgentProfile(ctx, uid); return p.ManagedConsentAt }
+	consentAt := at()
+	if _, err := svc.Apply(ctx, uid, runtimeInstall(t, "", ""), CommitOptions{}); err != nil {
+		t.Fatalf("install without runtime: %v", err)
+	}
+	p, _ := svc.Store.GetAgentProfile(ctx, uid)
+	if p.Runtime != db.RuntimeManaged || !p.ManagedConsentAt.Equal(consentAt) {
+		t.Fatalf("runtime = %q, consent at %v; want managed with the original consent", p.Runtime, p.ManagedConsentAt)
+	}
+	if _, err := svc.Apply(ctx, uid, runtimeInstall(t, "own", ""), CommitOptions{}); err != nil {
+		t.Fatalf("explicit own: %v", err)
+	}
+	if p, _ = svc.Store.GetAgentProfile(ctx, uid); p.Runtime != db.RuntimeOwn {
+		t.Fatalf("runtime = %q, want own", p.Runtime)
 	}
 }

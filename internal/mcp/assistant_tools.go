@@ -285,7 +285,7 @@ Inputs:
   name, version — required. The exact catalog version from list_assistants; there is no "latest". name may also be the full name of one of your own forks (list_assistants' forks), which installs that fork version; a fork runs in observe or off mode only, so mode "guarded" is refused for it.
   values — object: the assistant's variables, keyed by variable name.
   mode — "observe" | "guarded" | "off"; default the assistant's default mode.
-  runtime — "own" (default) or "managed". managed means a platform worker runs the jobs and messages needed for assistant tasks are sent to MCTL's configured third-party AI provider through MCTL's AI gateway (gateway logging and caching are disabled). Switching own to managed needs consent: show the user that text and, if they agree, pass consent "managed-data-flow/v1". Switching managed back to own needs no consent.
+  runtime — "own" or "managed"; omitted keeps the account's current runtime (own for a new account). managed means a platform worker runs the jobs and messages needed for assistant tasks are sent to MCTL's configured third-party AI provider through MCTL's AI gateway (gateway logging and caching are disabled). Switching own to managed needs consent: show the user that text and, if they agree, pass consent "managed-data-flow/v1". Switching managed back to own needs no consent and erases the stored consent, so going back to managed needs a new one.
   consent — "managed-data-flow/v1", only with runtime "managed", asserting the user agreed to the text above. It is never stored with the install.
   paused — boolean; default true. listening — boolean; default false. A new install starts paused and not listening: going live is an explicit choice.
   limits — {maxAutonomousTurns, maxMsgsPerMinute, maxReplyChars}, at most the assistant's ceilings.
@@ -303,7 +303,7 @@ Errors are JSON: {error, message, retryable, current_revision?}. error is one of
 		mcplib.WithString("version", mcplib.Required(), mcplib.Description("Exact assistant version, e.g. 0.1.0.")),
 		mcplib.WithObject("values", mcplib.Description("Variable values keyed by variable name.")),
 		mcplib.WithString("mode", mcplib.Enum("observe", "guarded", "off"), mcplib.Description("Agent mode; default the assistant's.")),
-		mcplib.WithString("runtime", mcplib.Enum("own", "managed"), mcplib.Description("Which worker runs the jobs; default own. managed needs consent.")),
+		mcplib.WithString("runtime", mcplib.Enum("own", "managed"), mcplib.Description("Which worker runs the jobs; omitted keeps the current one (own for a new account). managed needs consent.")),
 		mcplib.WithString("consent", mcplib.Description("managed-data-flow/v1, to switch to managed after the user agreed to the data flow text.")),
 		mcplib.WithBoolean("paused", mcplib.Description("Default true.")),
 		mcplib.WithBoolean("listening", mcplib.Description("Default false.")),
@@ -388,7 +388,7 @@ func (s *Server) toolUpdateInstall() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 
 Inputs:
   patch — object, required. An RFC 7396 JSON merge patch over the install's spec (the same fields install_assistant takes, with assistant as {name, version}): a member replaces the stored one, a nested object merges, null removes a member, an array replaces the whole array. Example: {"paused": false, "values": {"headline": null}, "ownerNotes": "Reply in English."}. Changing assistant.name or assistant.version switches or upgrades the assistant like an install.
-  consent — optional string: "managed-data-flow/v1", to switch runtime to "managed" after the user agreed to the text install_assistant shows. managed back to own needs none. It is never stored.
+  consent — optional string: "managed-data-flow/v1", to switch runtime to "managed" after the user agreed to the text install_assistant shows. managed back to own needs none and erases the stored consent. It is never stored with the install.
   expected_revision — integer, required: mine.install_revision from list_assistants. The change applies only if the install is still at that revision.
 
 The server decrypts the stored install, applies the patch, validates the result as a whole install and saves it; if the result is invalid or the revision moved, nothing changes.

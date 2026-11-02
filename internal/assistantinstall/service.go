@@ -407,7 +407,9 @@ func (s *Service) Commit(ctx context.Context, userID int64, p *Prepared, opts Co
 	} else {
 		update.MarkInstalledAt = &installedAt
 	}
-	change, rerr := s.Managed.DecideRuntime(current.Runtime, r.Runtime, p.consent, s.now())
+	// A document that does not state a runtime leaves the account's runtime
+	// alone; only an explicit "own" moves a managed account back.
+	change, rerr := s.Managed.DecideRuntime(current.Runtime, p.install.Spec.Runtime, p.consent, s.now())
 	if rerr != nil {
 		return nil, rerr
 	}

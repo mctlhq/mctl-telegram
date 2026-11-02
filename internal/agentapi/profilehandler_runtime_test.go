@@ -62,9 +62,56 @@ func TestAdminAgentProfileHandler_Runtime(t *testing.T) {
 	if rec := doProfileReq(off, adminIdentity(), `{"telegram_id":777,"runtime":"own"}`); rec.Code != http.StatusOK {
 		t.Fatalf("own: %d %s", rec.Code, rec.Body)
 	}
+	// Switching back to own erased the stored consent, so the quota check
+	// below needs the owner's consent again to be reached.
+	if p, _ = store.GetAgentProfile(ctx, uid); p.ManagedConsentVersion != "" || !p.ManagedConsentAt.IsZero() {
+		t.Fatalf("consent survived managed -> own: %q %v", p.ManagedConsentVersion, p.ManagedConsentAt)
+	}
+	fresh := time.Now()
+	if err := store.UpdateAgentProfileFields(ctx, uid, db.AgentProfileUpdate{ManagedConsentVersion: &v, ManagedConsentAt: &fresh}); err != nil {
+		t.Fatal(err)
+	}
 	// Quota exhausted.
 	full := NewAdminAgentProfileHandlerWithManaged(store, assistantinstall.ManagedRuntime{Enabled: true, MaxAccounts: 0})
 	if rec := doProfileReq(full, adminIdentity(), `{"telegram_id":777,"runtime":"managed"}`); rec.Code != http.StatusConflict {
 		t.Fatalf("quota: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// The owner opts out (managed -> own through the install service). An admin
+// must not be able to put the account back on managed with the consent the
+// owner gave before opting out.
+func TestAdminAgentProfileHandler_OptOutThenAdminCannotReuseOldConsent(t *testing.T) {
+	ctx := context.Background()
+	store := newProfileTestStore(t)
+	uid, err := store.EnsureUserByTelegramID(ctx, 778, "dana", "Dana")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureAgentProfile(ctx, uid); err != nil {
+		t.Fatal(err)
+	}
+	managed := assistantinstall.ManagedRuntime{Enabled: true, MaxAccounts: 5}
+	h := NewAdminAgentProfileHandlerWithManaged(store, managed)
+	v, at, rt := db.ManagedConsentCurrent, time.Now().Add(-time.Hour), db.RuntimeManaged
+	if err := store.UpdateAgentProfileFields(ctx, uid, db.AgentProfileUpdate{Runtime: &rt, ManagedConsentVersion: &v, ManagedConsentAt: &at}); err != nil {
+		t.Fatal(err)
+	}
+	// The opt-out, as the owner does it: managed -> own.
+	ch, rerr := managed.DecideRuntime(db.RuntimeManaged, db.RuntimeOwn, "", time.Now())
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	var up db.AgentProfileUpdate
+	ch.Apply(&up)
+	if err := store.UpdateAgentProfileFields(ctx, uid, up); err != nil {
+		t.Fatal(err)
+	}
+	rec := doProfileReq(h, adminIdentity(), `{"telegram_id":778,"runtime":"managed"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("admin re-enable with the old consent: %d %s, want 409 managed_consent_required", rec.Code, rec.Body)
+	}
+	if p, _ := store.GetAgentProfile(ctx, uid); p.Runtime != db.RuntimeOwn {
+		t.Fatalf("runtime = %q, want own", p.Runtime)
 	}
 }

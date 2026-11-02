@@ -438,6 +438,10 @@ type AgentProfileUpdate struct {
 	Runtime               *string
 	ManagedConsentVersion *string
 	ManagedConsentAt      *time.Time
+	// ClearManagedConsent erases the stored consent (version and time): the
+	// owner opted out of the managed runtime, so coming back needs a new
+	// consent. It cannot be combined with a consent being recorded.
+	ClearManagedConsent bool
 	// ManagedQuota, set only for an own -> managed write, makes the UPDATE
 	// apply only while fewer than *ManagedQuota other accounts are managed;
 	// otherwise it changes nothing and returns ErrManagedQuota.
@@ -559,6 +563,9 @@ func (s *Store) updateAgentProfileFields(ctx context.Context, ex execer, userID 
 	}
 	if u.ManagedConsentAt != nil {
 		set("managed_consent_at", u.ManagedConsentAt.UTC())
+	}
+	if u.ClearManagedConsent {
+		sets = append(sets, "managed_consent_version = ''", "managed_consent_at = NULL")
 	}
 	if u.ResetInstalledAt != nil {
 		set("assistant_installed_at", u.ResetInstalledAt.UTC())

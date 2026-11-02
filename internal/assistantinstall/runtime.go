@@ -22,6 +22,10 @@ type RuntimeChange struct {
 	// Quota is set for an own -> managed write: the store refuses it while
 	// that many other accounts are already managed.
 	Quota *int
+	// ClearConsent: managed -> own erases the stored consent, so a later
+	// move back to managed (by the owner or by an admin using the stored
+	// consent) needs a new one.
+	ClearConsent bool
 	// Changed: the runtime moves. Consented: a consent is recorded.
 	Changed, Consented bool
 	From, To           string
@@ -30,6 +34,7 @@ type RuntimeChange struct {
 // Apply copies the change onto u.
 func (c RuntimeChange) Apply(u *db.AgentProfileUpdate) {
 	u.Runtime, u.ManagedConsentVersion, u.ManagedConsentAt, u.ManagedQuota = c.Runtime, c.ConsentVersion, c.ConsentAt, c.Quota
+	u.ClearManagedConsent = c.ClearConsent
 }
 
 // DecideRuntime returns the profile columns a write must set, or a refusal.
@@ -69,8 +74,8 @@ func (m ManagedRuntime) DecideRuntime(currentRuntime, requested, consent string,
 			ch.Consented = true
 		}
 	case currentRuntime == db.RuntimeManaged:
-		// managed -> own: no checks, nothing else cleared.
-		ch.Changed = true
+		// managed -> own: no checks, and the stored consent is erased.
+		ch.Changed, ch.ClearConsent = true, true
 	default:
 		ch.Runtime = nil
 	}

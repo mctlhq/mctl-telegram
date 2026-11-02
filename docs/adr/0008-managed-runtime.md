@@ -77,7 +77,7 @@ a confirmed operation:
 - `install_assistant` and `update_install` refuse `runtime: managed` with
   `managed_consent_required` unless the call carries
   `consent: "managed-data-flow/v1"`. The manage page shows a checkbox with
-  the same text and sends the same value. `managed -> own` needs no consent.
+  the same text and sends the same value. `managed -> own` needs no consent and erases the stored consent (version and time), so a later `own -> managed` by the owner, or by an admin through the profile route, needs a new current consent. An install document that does not state `runtime` leaves the account's runtime unchanged; only an explicit `own` moves a managed account back.
 - Consent text, verbatim: *Messages needed to perform assistant tasks will
   be sent to MCTL's configured third-party AI provider through MCTL's AI
   gateway; gateway logging and caching are disabled.*
