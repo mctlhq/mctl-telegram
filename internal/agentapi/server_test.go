@@ -462,7 +462,7 @@ func TestHandleProposeReply_RedeliveryReturnsSameApprovalCode(t *testing.T) {
 	jobID := h.seedJob("evt:v1:1:555:redelivery", conv.ID)
 	// Claim it first, like a real worker would via POST /jobs/claim — propose_reply
 	// is only ever called while the job is actively processing.
-	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, db.RuntimeOwn, 1)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
 	}
@@ -487,7 +487,7 @@ func TestHandleProposeReply_RedeliveryReturnsSameApprovalCode(t *testing.T) {
 	); err != nil {
 		t.Fatalf("unbackoff: %v", err)
 	}
-	reclaimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	reclaimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, db.RuntimeOwn, 1)
 	if err != nil || len(reclaimed) != 1 {
 		t.Fatalf("reclaim: jobs=%+v err=%v", reclaimed, err)
 	}
@@ -524,7 +524,7 @@ func TestHandleProposeReply_RedeliveryUsesPersistedActionState(t *testing.T) {
 	h.seedProfile(db.AgentModeObserve)
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:policy-changed-redelivery", conv.ID)
-	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, db.RuntimeOwn, 1)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
 	}
@@ -557,7 +557,7 @@ func TestHandleProposeReply_RedeliveryUsesPersistedActionState(t *testing.T) {
 	); err != nil {
 		t.Fatalf("unbackoff: %v", err)
 	}
-	reclaimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	reclaimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, db.RuntimeOwn, 1)
 	if err != nil || len(reclaimed) != 1 {
 		t.Fatalf("reclaim: jobs=%+v err=%v", reclaimed, err)
 	}
@@ -604,7 +604,7 @@ func TestHandleProposeReply_NotificationEnqueueFailureFailsJobTiedCall(t *testin
 	h.seedProfile(db.AgentModeObserve)
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:notif-fail", conv.ID)
-	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, db.RuntimeOwn, 1)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
 	}
@@ -769,7 +769,7 @@ func TestProposeReply_PausedAccountQueuesOwnerAlert(t *testing.T) {
 	}
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:paused-alert", conv.ID)
-	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, db.RuntimeOwn, 1)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
 	}
@@ -868,7 +868,7 @@ func TestProposeReply_PauseAlertIsThrottledAcrossConversations(t *testing.T) {
 		peer := int64(900 + i)
 		conv := h.seedConversation(peer)
 		jobID := h.seedJob("evt:v1:1:"+strconv.FormatInt(peer, 10)+":throttle", conv.ID)
-		claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+		claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, db.RuntimeOwn, 1)
 		if err != nil || len(claimed) != 1 {
 			t.Fatalf("claim %d: jobs=%+v err=%v", i, claimed, err)
 		}
@@ -931,7 +931,7 @@ func TestProposeReply_RedeliveryAfterPauseDoesNotAlertOnAllowedAction(t *testing
 	}
 	conv := h.seedConversation(556)
 	jobID := h.seedJob("evt:v1:1:556:redelivery-after-pause", conv.ID)
-	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, db.RuntimeOwn, 1)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
 	}
@@ -1042,7 +1042,7 @@ func TestHandleJobComplete_RequiresPersistedAction(t *testing.T) {
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:2", conv.ID)
 	// Claim it first, like a real worker would via POST /jobs/claim.
-	if _, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1); err != nil {
+	if _, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, db.RuntimeOwn, 1); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
 
@@ -1083,7 +1083,7 @@ func TestHandleJobComplete_LegacyRolloutBridge(t *testing.T) {
 	h := newHarness(t)
 	h.srv.AllowLegacyJobCompletion = true
 	jobID := h.seedJob("evt:v1:1:1:legacy-complete", 0)
-	claimed, err := h.store.ClaimAgentJobs(context.Background(), "legacy-worker", h.userID, 1)
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "legacy-worker", h.userID, db.RuntimeOwn, 1)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
 	}
@@ -1103,7 +1103,7 @@ func TestHandleJobComplete_FailedNeedsNoAction(t *testing.T) {
 	h := newHarness(t)
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:3", conv.ID)
-	if _, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1); err != nil {
+	if _, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, db.RuntimeOwn, 1); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
 	rec := h.do("POST", "/jobs/"+itoaTest(jobID)+"/complete", completeJobRequest{
@@ -1404,7 +1404,7 @@ func TestHandleOwnerFacing_RedeliveryDoesNotDuplicateNotification(t *testing.T) 
 	h.seedProfile(db.AgentModeObserve)
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:notify-redelivery", conv.ID)
-	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, db.RuntimeOwn, 1)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
 	}
@@ -1450,7 +1450,7 @@ func TestHandleOwnerFacing_RedeliveryUsesPersistedActionState(t *testing.T) {
 		h.seedProfile(db.AgentModeObserve)
 		conv := h.seedConversation(555)
 		jobID := h.seedJob("evt:v1:1:555:notify-denied-replay", conv.ID)
-		claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+		claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, db.RuntimeOwn, 1)
 		if err != nil || len(claimed) != 1 {
 			t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
 		}
@@ -1495,7 +1495,7 @@ func TestHandleOwnerFacing_RedeliveryUsesPersistedActionState(t *testing.T) {
 		h.seedProfile(db.AgentModeObserve)
 		conv := h.seedConversation(555)
 		jobID := h.seedJob("evt:v1:1:555:notify-executed-replay", conv.ID)
-		claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+		claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, db.RuntimeOwn, 1)
 		if err != nil || len(claimed) != 1 {
 			t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
 		}
@@ -1568,7 +1568,7 @@ func TestHandleJobComplete_LeadOnlyJobCanComplete(t *testing.T) {
 	h := newHarness(t)
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:lead-only", conv.ID)
-	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, db.RuntimeOwn, 1)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
 	}

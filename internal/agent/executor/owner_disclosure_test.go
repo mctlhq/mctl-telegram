@@ -116,7 +116,7 @@ func TestExecutor_Disclosure_SenderWordsSendBeforeEngagement(t *testing.T) {
 	}, conv.ID); err != nil || !ok {
 		t.Fatalf("ingest: ok=%v err=%v", ok, err)
 	}
-	jobs, err := store.ClaimAgentJobs(ctx, "r", uid, 1)
+	jobs, err := store.ClaimAgentJobs(ctx, "r", uid, db.RuntimeOwn, 1)
 	if err != nil || len(jobs) != 1 {
 		t.Fatalf("claim: %d jobs, err=%v", len(jobs), err)
 	}

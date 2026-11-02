@@ -521,7 +521,7 @@ func TestUpsertJobLead_FencesActiveJobAttempt(t *testing.T) {
 	); err != nil {
 		t.Fatalf("bind job conversation: %v", err)
 	}
-	first, err := s.ClaimAgentJobs(ctx, "worker-1", uid, 1)
+	first, err := s.ClaimAgentJobs(ctx, "worker-1", uid, RuntimeOwn, 1)
 	if err != nil || len(first) != 1 {
 		t.Fatalf("first claim: jobs=%+v err=%v", first, err)
 	}
@@ -541,7 +541,7 @@ func TestUpsertJobLead_FencesActiveJobAttempt(t *testing.T) {
 	); err != nil {
 		t.Fatalf("unbackoff: %v", err)
 	}
-	second, err := s.ClaimAgentJobs(ctx, "worker-2", uid, 1)
+	second, err := s.ClaimAgentJobs(ctx, "worker-2", uid, RuntimeOwn, 1)
 	if err != nil || len(second) != 1 {
 		t.Fatalf("second claim: jobs=%+v err=%v", second, err)
 	}

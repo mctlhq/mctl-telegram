@@ -61,13 +61,21 @@ func (q *Queue) Ingest(ctx context.Context, ev db.IncomingEvent, conversationID 
 }
 
 // Claim atomically claims up to limit due jobs for this replica, scoped to
-// userID — see Store.ClaimAgentJobs for why the scoping is load-bearing.
-func (q *Queue) Claim(ctx context.Context, userID int64, limit int) ([]db.AgentJob, error) {
-	jobs, err := q.Store.ClaimAgentJobs(ctx, q.ReplicaID, userID, limit)
+// userID and runtime (db.RuntimeOwn or db.RuntimeManaged) — see
+// Store.ClaimAgentJobs for why the scoping is load-bearing.
+func (q *Queue) Claim(ctx context.Context, userID int64, runtime string, limit int) ([]db.AgentJob, error) {
+	jobs, err := q.Store.ClaimAgentJobs(ctx, q.ReplicaID, userID, runtime, limit)
 	if err == nil {
 		q.count(db.JobProcessing, len(jobs))
 	}
 	return jobs, err
+}
+
+// ReleaseUnissued undoes a claim made by this replica whose credential was
+// never issued, without charging the job an attempt. See
+// Store.ReleaseUnissuedClaim.
+func (q *Queue) ReleaseUnissued(ctx context.Context, jobID int64, attempt int) error {
+	return q.Store.ReleaseUnissuedClaim(ctx, jobID, attempt, q.ReplicaID)
 }
 
 // Complete closes a processing job with a terminal status. attempt is the

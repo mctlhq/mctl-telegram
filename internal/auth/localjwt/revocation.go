@@ -86,6 +86,17 @@ func NewRevocationCache(store *db.Store, ttl time.Duration) *RevocationCache {
 // — otherwise a single transient DB blip would turn every worker-token
 // request into a 401 rather than merely risk staleness within the TTL bound.
 func (c *RevocationCache) IsRevoked(ctx context.Context, jti string, telegramID int64, issuedAt time.Time) (bool, error) {
+	return c.check(ctx, jti, true, telegramID, issuedAt)
+}
+
+// IsBlanketRevoked is the blanket half of IsRevoked: it reports whether
+// telegramID carries a blanket revocation recorded at or after issuedAt,
+// without any jti lookup. Same refresh and fail-closed rules as IsRevoked.
+func (c *RevocationCache) IsBlanketRevoked(ctx context.Context, telegramID int64, issuedAt time.Time) (bool, error) {
+	return c.check(ctx, "", false, telegramID, issuedAt)
+}
+
+func (c *RevocationCache) check(ctx context.Context, jti string, checkJti bool, telegramID int64, issuedAt time.Time) (bool, error) {
 	c.mu.Lock()
 	stale := !c.populated || c.now().Sub(c.lastRefresh) >= c.ttl
 	wasPopulated := c.populated
@@ -102,8 +113,10 @@ func (c *RevocationCache) IsRevoked(ctx context.Context, jti string, telegramID 
 	if !c.populated {
 		return false, errors.New("revocation cache never populated")
 	}
-	if _, ok := c.jtis[jti]; ok {
-		return true, nil
+	if checkJti {
+		if _, ok := c.jtis[jti]; ok {
+			return true, nil
+		}
 	}
 	if revokedAt, ok := c.blanket[telegramID]; ok && !issuedAt.After(revokedAt) {
 		return true, nil

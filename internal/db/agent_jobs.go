@@ -51,19 +51,22 @@ type AgentJob struct {
 	// InstallRevision is the account's install revision when the job was
 	// last claimed (#1018); its actions inherit it.
 	InstallRevision int64
-	ID              int64
-	EventID         string
-	UserID          int64
-	ConversationID  int64 // 0 ⇒ not associated yet
-	Status          string
-	Attempts        int
-	MaxAttempts     int
-	NextRunAt       time.Time
-	ClaimedBy       string
-	ClaimedAt       time.Time // zero value ⇒ never claimed
-	LastError       string
-	ResultActionID  int64
-	ResultLeadID    int64
+	// Runtime is the runtime the job was last claimed under (own|managed);
+	// empty for a job never claimed since the column existed.
+	Runtime        string
+	ID             int64
+	EventID        string
+	UserID         int64
+	ConversationID int64 // 0 ⇒ not associated yet
+	Status         string
+	Attempts       int
+	MaxAttempts    int
+	NextRunAt      time.Time
+	ClaimedBy      string
+	ClaimedAt      time.Time // zero value ⇒ never claimed
+	LastError      string
+	ResultActionID int64
+	ResultLeadID   int64
 	// CostUSD is the last-reported Claude spend for this job (see
 	// RecordAgentJobCost). sql.NullFloat64, not float64: an unreported job
 	// must read as SQL NULL, never a false 0 that would understate spend —
@@ -305,6 +308,11 @@ func (s *Store) InsertEventAndEnqueueJob(ctx context.Context, ev IncomingEvent, 
 	return jobID, true, nil
 }
 
+// claimRuntimePredicate separates own and managed jobs in SQL: a job is
+// claimable only by the runtime its account's profile names (an account with
+// no profile row is own). Both claim queries append a placeholder.
+const claimRuntimePredicate = "COALESCE((SELECT ap.runtime FROM agent_profiles ap WHERE ap.user_id = j.user_id), 'own') = "
+
 // ClaimAgentJobs atomically claims up to limit due pending jobs for this
 // replica, scoped to userID: flips them to processing, increments attempts,
 // stamps claimed_by/claimed_at, and opens an agent_job_attempts row per
@@ -321,15 +329,18 @@ func (s *Store) InsertEventAndEnqueueJob(ctx context.Context, ev IncomingEvent, 
 // On Postgres the inner SELECT uses FOR UPDATE SKIP LOCKED so concurrent
 // replicas never claim the same row. SQLite runs with a single connection
 // (Open sets SetMaxOpenConns(1)), so the plain form is race-free there.
-func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, userID int64, limit int) ([]AgentJob, error) {
+func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, userID int64, runtime string, limit int) ([]AgentJob, error) {
 	if userID <= 0 {
 		return nil, errors.New("user id required")
+	}
+	if runtime != RuntimeOwn && runtime != RuntimeManaged {
+		return nil, fmt.Errorf("claim agent jobs: invalid runtime %q", runtime)
 	}
 	if limit <= 0 {
 		limit = 1
 	}
 	if s.turnCfg != nil {
-		return s.claimCoalesced(ctx, replicaID, userID, limit)
+		return s.claimCoalesced(ctx, replicaID, userID, runtime, limit)
 	}
 	now := time.Now().UTC()
 	lock := ""
@@ -361,10 +372,12 @@ func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, userID int
 		`UPDATE agent_jobs
 		    SET status = $1, attempts = attempts + 1,
 		        claimed_by = $2, claimed_at = $3, updated_at = $3,
-		        install_revision = COALESCE((SELECT install_revision FROM agent_profiles WHERE user_id = agent_jobs.user_id), 1)
+		        install_revision = COALESCE((SELECT install_revision FROM agent_profiles WHERE user_id = agent_jobs.user_id), 1),
+		        runtime = $7
 		  WHERE status = $4 AND id IN (
 		        SELECT j.id FROM agent_jobs j
 		         WHERE j.status = $4 AND j.next_run_at <= $3 AND j.user_id = $6
+		           AND `+claimRuntimePredicate+`$7
 		           AND NOT EXISTS (
 		               SELECT 1 FROM agent_jobs p
 		                WHERE p.conversation_id = j.conversation_id
@@ -376,8 +389,8 @@ func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, userID int
 		 RETURNING id, event_id, user_id, conversation_id, status, attempts,
 		           max_attempts, next_run_at, claimed_by, claimed_at, last_error,
 		           result_action_id, result_lead_id, cost_usd, created_at, updated_at,
-		           turn_id, coalesced_into, install_revision`,
-		JobProcessing, replicaID, now, JobPending, limit, userID,
+		           turn_id, coalesced_into, install_revision, runtime`,
+		JobProcessing, replicaID, now, JobPending, limit, userID, runtime,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("claim agent jobs: %w", err)
@@ -427,11 +440,12 @@ func scanAgentJobs(rows *sql.Rows) ([]AgentJob, error) {
 			costUSD                      sql.NullFloat64
 			turnID                       sql.NullString
 			coalescedInto                sql.NullInt64
+			runtime                      sql.NullString
 		)
 		if err := rows.Scan(&j.ID, &j.EventID, &j.UserID, &convID, &j.Status, &j.Attempts,
 			&j.MaxAttempts, &j.NextRunAt, &claimedBy, &claimedAt, &lastErr,
 			&resultActionID, &resultLeadID, &costUSD, &j.CreatedAt, &j.UpdatedAt,
-			&turnID, &coalescedInto, &j.InstallRevision); err != nil {
+			&turnID, &coalescedInto, &j.InstallRevision, &runtime); err != nil {
 			return nil, fmt.Errorf("scan agent job: %w", err)
 		}
 		j.ConversationID = convID.Int64
@@ -442,6 +456,7 @@ func scanAgentJobs(rows *sql.Rows) ([]AgentJob, error) {
 		j.CostUSD = costUSD
 		j.TurnID = turnID.String
 		j.CoalescedInto = coalescedInto.Int64
+		j.Runtime = runtime.String
 		if claimedAt.Valid {
 			j.ClaimedAt = claimedAt.Time
 		}
@@ -456,7 +471,7 @@ func (s *Store) GetAgentJob(ctx context.Context, userID, id int64) (*AgentJob, e
 		`SELECT id, event_id, user_id, conversation_id, status, attempts,
 		        max_attempts, next_run_at, claimed_by, claimed_at, last_error,
 		        result_action_id, result_lead_id, cost_usd, created_at, updated_at,
-		        turn_id, coalesced_into, install_revision
+		        turn_id, coalesced_into, install_revision, runtime
 		   FROM agent_jobs WHERE id = $1 AND user_id = $2`,
 		id, userID,
 	)
@@ -761,6 +776,66 @@ func (s *Store) RetryAgentJob(ctx context.Context, jobID int64, attempt int, err
 	}
 	s.notifyOutbox(routed)
 	return status, nil
+}
+
+// ReleaseUnissuedClaim undoes a claim whose credential was never issued (the
+// job token could not be minted, so no envelope, token or worker holds the
+// attempt). Unlike RetryAgentJob it is not a failed attempt: the job returns
+// from processing to pending with its attempt count restored, so a signer
+// outage never moves it toward dead_letter. The open attempt row is removed
+// (the attempt never ran); turn_id and coalesced members are left as they
+// are, exactly as on a retry. The CAS covers status, attempt and claimant;
+// zero rows is ErrAgentJobNotFound and nothing is written.
+func (s *Store) ReleaseUnissuedClaim(ctx context.Context, jobID int64, attempt int, replicaID string) error {
+	now := time.Now().UTC()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin release tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx,
+		`UPDATE agent_jobs
+		    SET status = $1, attempts = attempts - 1, claimed_by = NULL, claimed_at = NULL,
+		        next_run_at = $2, last_error = $3, updated_at = $4
+		  WHERE id = $5 AND status = $6 AND attempts = $7 AND claimed_by = $8`,
+		JobPending, now.Add(releaseUnissuedDelay), "job token mint failed", now,
+		jobID, JobProcessing, attempt, replicaID,
+	)
+	if err != nil {
+		return fmt.Errorf("release unissued claim: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrAgentJobNotFound
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM agent_job_attempts WHERE job_id = $1 AND attempt = $2 AND finished_at IS NULL`,
+		jobID, attempt,
+	); err != nil {
+		return fmt.Errorf("delete unissued attempt: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit release tx: %w", err)
+	}
+	return nil
+}
+
+// releaseUnissuedDelay is the fixed short delay before a released claim is
+// due again; deliberately not AgentJobBackoff, so repeated outages do not
+// grow the delay.
+const releaseUnissuedDelay = time.Second
+
+// AgentJobOwner returns the user id owning a job, for attributing audit rows
+// of a request that names a job but carries no account identity.
+func (s *Store) AgentJobOwner(ctx context.Context, jobID int64) (int64, bool, error) {
+	var uid int64
+	err := s.DB.QueryRowContext(ctx, `SELECT user_id FROM agent_jobs WHERE id = $1`, jobID).Scan(&uid)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("agent job owner: %w", err)
+	}
+	return uid, true, nil
 }
 
 // finishOpenAttempt closes the newest still-running attempt row for a job.

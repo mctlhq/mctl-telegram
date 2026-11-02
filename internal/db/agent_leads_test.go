@@ -198,7 +198,7 @@ func assertJobSavesTwoLeads(t *testing.T, s *Store, uid int64) {
 	if _, err := s.DB.ExecContext(ctx, `UPDATE agent_jobs SET conversation_id=$1 WHERE id=$2`, conv.ID, jobID); err != nil {
 		t.Fatalf("bind job: %v", err)
 	}
-	claimed, err := s.ClaimAgentJobs(ctx, "worker", uid, 1)
+	claimed, err := s.ClaimAgentJobs(ctx, "worker", uid, RuntimeOwn, 1)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim: %+v err=%v", claimed, err)
 	}
@@ -309,7 +309,7 @@ func seedJobBoundLead(t *testing.T, s *Store, uid int64) (convID, jobID int64, a
 	if _, err := s.DB.ExecContext(ctx, `UPDATE agent_jobs SET conversation_id=$1 WHERE id=$2`, conv.ID, jobID); err != nil {
 		t.Fatalf("bind job: %v", err)
 	}
-	claimed, err := s.ClaimAgentJobs(ctx, "worker", uid, 1)
+	claimed, err := s.ClaimAgentJobs(ctx, "worker", uid, RuntimeOwn, 1)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim: %+v err=%v", claimed, err)
 	}

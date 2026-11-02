@@ -54,7 +54,7 @@ func (f *supersessionFixture) ingest(t *testing.T, msg int64, suffix string) str
 // claim claims the oldest pending job of the conversation.
 func (f *supersessionFixture) claim(t *testing.T) AgentJob {
 	t.Helper()
-	jobs, err := f.s.ClaimAgentJobs(context.Background(), "r", f.uid, 1)
+	jobs, err := f.s.ClaimAgentJobs(context.Background(), "r", f.uid, RuntimeOwn, 1)
 	if err != nil || len(jobs) != 1 {
 		t.Fatalf("claim: %d jobs, err=%v", len(jobs), err)
 	}
@@ -458,7 +458,7 @@ func assertDeleteBeforeMessage(t *testing.T, f *supersessionFixture) {
 	if res := f.recordDelete(t, 20); res != (MessageDeleteResult{}) {
 		t.Fatalf("redelivered delete = %+v, want no-op", res)
 	}
-	jobs, err := f.s.ClaimAgentJobs(context.Background(), "r", f.uid, 1)
+	jobs, err := f.s.ClaimAgentJobs(context.Background(), "r", f.uid, RuntimeOwn, 1)
 	if err != nil || len(jobs) != 0 {
 		t.Fatalf("claimed %d jobs err=%v, want none", len(jobs), err)
 	}
@@ -474,7 +474,7 @@ func assertDeleteBeforeMessageAndEdit(t *testing.T, f *supersessionFixture) {
 	if st, note := f.jobState(t, edit); st != JobIgnored || note != ReasonSourceDeleted {
 		t.Fatalf("edit job = %s %q, want ignored", st, note)
 	}
-	jobs, err := f.s.ClaimAgentJobs(context.Background(), "r", f.uid, 1)
+	jobs, err := f.s.ClaimAgentJobs(context.Background(), "r", f.uid, RuntimeOwn, 1)
 	if err != nil || len(jobs) != 0 {
 		t.Fatalf("claimed %d jobs err=%v, want none", len(jobs), err)
 	}

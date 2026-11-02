@@ -805,6 +805,13 @@ func main() {
 			mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/agent/token",
 				agentapi.NewAgentTokenHandler([]byte(secret), selectAgentIssuer(cfg)))
 		}
+		// Managed runtime (ADR 0008): the claim-only pool credential and its
+		// mint route exist only while MANAGED_RUNTIME_ENABLED is on.
+		managedPool := cfg.ManagedRuntimeEnabled && cfg.OAUTHJWTSecret != ""
+		if managedPool {
+			mux.With(auth.Middleware(provider, true, m, resourceMeta)).Post("/api/agent/pool-token",
+				agentapi.NewPoolTokenHandler([]byte(cfg.OAUTHJWTSecret), strings.TrimRight(cfg.PublicBaseURL, "/")))
+		}
 		// Admin-scoped agent_profiles management. Same provider/scope as the
 		// token mint above — an agent worker's own aud=agent token must never
 		// reach this route. Previously the only way to create or change this
@@ -822,6 +829,13 @@ func main() {
 		agentProvider := selectAgentProvider(cfg, store, workerTokenRevocationCache)
 		if jobProvider := selectAgentJobProvider(cfg, store, workerTokenRevocationCache); jobProvider != nil {
 			agentProvider = chainProvider{agentProvider, jobProvider}
+		}
+		if managedPool {
+			if poolProvider := selectAgentPoolProvider(cfg, workerTokenRevocationCache); poolProvider != nil {
+				// After the agent and job providers, which both refuse
+				// aud=agent-pool.
+				agentProvider = chainProvider{agentProvider, poolProvider}
+			}
 		}
 		agentSrv := agentapi.New(store, agentQueue, cfg.AgentJobVisibility, m)
 		agentSrv.GlobalKill = cfg.AgentKillSwitch
@@ -841,6 +855,13 @@ func main() {
 			} else {
 				agentSrv.WithJobTokenSigner(jobSigner)
 			}
+		}
+		if managedPool {
+			agentSrv.WithManagedClaims(agentapi.ManagedClaimConfig{
+				MaxInflightPerAccount: cfg.ManagedMaxInflightPerAccount,
+				Revocations:           workerTokenRevocationCache,
+			})
+			slog.Info("managed runtime pool credential enabled", "max_inflight_per_account", cfg.ManagedMaxInflightPerAccount)
 		}
 		agentMux := chi.NewRouter()
 		agentSrv.Register(agentMux)
@@ -1348,6 +1369,26 @@ func (c chainProvider) Authenticate(r *http.Request) (*auth.Identity, error) {
 		}
 	}
 	return nil, firstErr
+}
+
+// selectAgentPoolProvider builds the provider for the claim-only
+// "agent-pool" credential, signed under this service's own issuer in every
+// AUTH_MODE. Returns nil when it cannot be built, in which case a pool token
+// is refused with 401.
+func selectAgentPoolProvider(cfg *config.Config, revocationCache *localjwt.RevocationCache) auth.Provider {
+	if cfg.OAUTHJWTSecret == "" {
+		return nil
+	}
+	p, err := localjwt.NewPoolProvider(localjwt.PoolProviderConfig{
+		Secret:          []byte(cfg.OAUTHJWTSecret),
+		ExpectedIssuer:  strings.TrimRight(cfg.PublicBaseURL, "/"),
+		RevocationCache: revocationCache,
+	})
+	if err != nil {
+		slog.Error("agent: pool provider init failed; pool credential disabled", "err", err)
+		return nil
+	}
+	return p
 }
 
 // selectAgentJobProvider builds the provider for the per-job "agent-job"

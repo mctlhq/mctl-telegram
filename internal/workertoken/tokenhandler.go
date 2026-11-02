@@ -213,7 +213,11 @@ func isAllowedScope(scope string, allowlist []string) bool {
 // in this codebase and needs no new dependency; it is large enough that
 // collision is not a practical concern for the "single-digit to low-hundreds
 // of live worker tokens" scale this feature targets.
-func generateJti() (string, error) {
+func generateJti() (string, error) { return GenerateJti() }
+
+// GenerateJti is the exported jti generator, shared with the pool token mint
+// so one generator exists.
+func GenerateJti() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generate jti: %w", err)

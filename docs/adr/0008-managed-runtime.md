@@ -103,11 +103,19 @@ a confirmed operation:
   reaches the worker as `AGENT_API_TOKEN` through an ExternalSecret.
 - A pool identity may call exactly one route: `POST /jobs/claim`. A new
   `requireNotPool` guard in `internal/agentapi/binding.go` returns 403 and
-  audits on every other route, including `GET /jobs/{id}` and
+  records the refusal (a `slog` warning and a policy-denial metric; an
+  `audit_logs` row under the job owner only when the route names a job, since
+  `audit_logs.user_id` requires a real user) on every other route, including `GET /jobs/{id}` and
   `POST /jobs/{id}/cost`. The worker therefore uses the job token for every
   per-job call (`GetJobStatus`, `ReportJobCost`, the tool routes); in pool
   mode (`AGENT_POOL_MODE=true`) a job without a job token is a hard error,
-  never a fallback to the pool token.
+  never a fallback to the pool token. `MANAGED_MAX_INFLIGHT_PER_ACCOUNT`
+  (default 1) caps processing jobs per managed account. An account under a
+  blanket revocation (`RevocationCache.IsBlanketRevoked`) is skipped by the
+  pool claim, because job tokens inheriting the pool's `orig_iat` would be
+  dead on arrival. A pool-claimed job whose token cannot be minted is released
+  with `Store.ReleaseUnissuedClaim`, never `RetryAgentJob`, so a signer outage
+  does not spend its retry budget.
 - Revocation: the existing `revoke_worker_token` tool by `jti` revokes the
   pool. Job tokens inherit the parent's `jti` and `orig_iat` (as today), so
   revoking the pool also revokes every job token derived from it within

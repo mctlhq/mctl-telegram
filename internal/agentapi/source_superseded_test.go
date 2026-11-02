@@ -47,7 +47,7 @@ func TestHandleProposeReply_SourceSupersededIsDenied(t *testing.T) {
 			}, conv.ID); err != nil || !ok {
 				t.Fatalf("ingest: ok=%v err=%v", ok, err)
 			}
-			jobs, err := h.store.ClaimAgentJobs(ctx, "r", h.userID, 1)
+			jobs, err := h.store.ClaimAgentJobs(ctx, "r", h.userID, db.RuntimeOwn, 1)
 			if err != nil || len(jobs) != 1 {
 				t.Fatalf("claim: %d jobs, err=%v", len(jobs), err)
 			}

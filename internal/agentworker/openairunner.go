@@ -30,7 +30,11 @@ type OpenAIRunner struct {
 	// with 401 and the spend silently dropped. Every model-reachable tool
 	// call keeps using the job token, and the model never sees either token
 	// in this runner. Empty falls back to the job token (older callers).
-	APIToken     string
+	APIToken string
+	// PoolMode is AGENT_POOL_MODE: APIToken is the claim-only pool
+	// credential and is never used for worker-side calls; finishRun runs on
+	// the job token.
+	PoolMode     bool
 	SystemPrompt string // fallback, as in ClaudeInvoker
 	MaxTurns     int    // AGENT_MAX_TURNS, default 12
 	MaxBudgetUSD float64
@@ -51,7 +55,7 @@ func (r *OpenAIRunner) Run(ctx context.Context, job JobEnvelope) error {
 	}
 	api := NewClient(r.APIBaseURL, job.JobToken, nil)
 	workerAPI := api
-	if r.APIToken != "" {
+	if r.APIToken != "" && !r.PoolMode {
 		workerAPI = NewClient(r.APIBaseURL, r.APIToken, nil)
 	}
 	builder, defs, err := buildToolSet(api, JobContext{

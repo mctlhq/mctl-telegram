@@ -35,6 +35,12 @@ type RuntimeChange struct {
 func (c RuntimeChange) Apply(u *db.AgentProfileUpdate) {
 	u.Runtime, u.ManagedConsentVersion, u.ManagedConsentAt, u.ManagedQuota = c.Runtime, c.ConsentVersion, c.ConsentAt, c.Quota
 	u.ClearManagedConsent = c.ClearConsent
+	// A runtime switch fences the in-flight attempt: the old runtime's job
+	// token is refused once the install revision moves, the sweeper requeues
+	// the job and the new runtime claims it.
+	if c.Runtime != nil && c.From != c.To {
+		u.BumpInstallRevision = true
+	}
 }
 
 // DecideRuntime returns the profile columns a write must set, or a refusal.
