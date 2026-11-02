@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -450,5 +451,34 @@ func TestManageAssistant_InstallsEitherVersion(t *testing.T) {
 	}
 	if page := f.get(f.identity(accountManageScope)).Body.String(); !strings.Contains(page, `id="assistant-ref">hr-recruiter@0.1.1<`) {
 		t.Fatal("install did not move to 0.1.1")
+	}
+}
+
+func TestManageAssistant_RuntimeSwitchNeedsConsentBox(t *testing.T) {
+	f := newManageAssistantFixture(t, nil)
+	f.svc.Managed = assistantinstall.ManagedRuntime{Enabled: true, MaxAccounts: 3}
+	res := f.installDirect()
+	r0 := res.Profile.InstallRevision
+
+	page := f.get(f.identity(accountManageScope)).Body.String()
+	if !strings.Contains(page, `id="assistant-runtime"`) || !strings.Contains(page, "own (your worker)") ||
+		!strings.Contains(page, html.EscapeString(db.ManagedConsentText)) {
+		t.Fatalf("page lacks the runtime row or the consent text")
+	}
+
+	post := func(form url.Values) *httptest.ResponseRecorder {
+		return f.post(f.srv.HandleAssistantUpdate, "/telegram/connect/manage/assistant/update", f.identity(accountManageScope), form)
+	}
+	rec := post(url.Values{"expected_revision": {rev(r0)}, "setting": {"runtime"}, "value": {"managed"}})
+	if rec.Code != http.StatusUnprocessableEntity || f.profile().Runtime != "own" || f.profile().InstallRevision != r0 {
+		t.Fatalf("without the box: status %d, runtime %q", rec.Code, f.profile().Runtime)
+	}
+	rec = post(url.Values{"expected_revision": {rev(r0)}, "setting": {"runtime"}, "value": {"managed"}, "consent": {db.ManagedConsentCurrent}})
+	if rec.Code != http.StatusFound || f.profile().Runtime != "managed" {
+		t.Fatalf("with the box: status %d, runtime %q", rec.Code, f.profile().Runtime)
+	}
+	rec = post(url.Values{"expected_revision": {rev(r0 + 1)}, "setting": {"runtime"}, "value": {"own"}})
+	if rec.Code != http.StatusFound || f.profile().Runtime != "own" {
+		t.Fatalf("back to own: status %d, runtime %q", rec.Code, f.profile().Runtime)
 	}
 }

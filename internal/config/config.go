@@ -468,6 +468,17 @@ type Config struct {
 	// stops the jobs of every account that runs a fork. Deleting a fork
 	// stays possible. Set via ASSISTANT_FORKS_ENABLED.
 	AssistantForksEnabled bool
+	// ManagedRuntimeEnabled lets an account choose runtime "managed" for its
+	// assistant (ADR 0008). Off by default: switching to managed is then
+	// refused. Set via MANAGED_RUNTIME_ENABLED.
+	ManagedRuntimeEnabled bool
+	// ManagedRuntimeMaxAccounts caps how many accounts may be managed at
+	// once; 0 means none may become managed. Set via
+	// MANAGED_RUNTIME_MAX_ACCOUNTS.
+	ManagedRuntimeMaxAccounts int
+	// ManagedMaxInflightPerAccount is parsed only in this slice. Set via
+	// MANAGED_MAX_INFLIGHT_PER_ACCOUNT.
+	ManagedMaxInflightPerAccount int
 	// WorkItemTenant is the single configured mctl-api tenant every
 	// Telegram-originated work item belongs to (see requirements.md's Open
 	// questions — this repository's own "tenant" concept is a different
@@ -554,6 +565,9 @@ func Load() (*Config, error) {
 		WorkContextEnabled:            envBool("WORK_CONTEXT_ENABLED", false),
 		AssistantRegistryEnabled:      envBool("ASSISTANT_REGISTRY_ENABLED", false),
 		AssistantForksEnabled:         envBool("ASSISTANT_FORKS_ENABLED", false),
+		ManagedRuntimeEnabled:         envBool("MANAGED_RUNTIME_ENABLED", false),
+		ManagedRuntimeMaxAccounts:     envInt("MANAGED_RUNTIME_MAX_ACCOUNTS", 1),
+		ManagedMaxInflightPerAccount:  envInt("MANAGED_MAX_INFLIGHT_PER_ACCOUNT", 1),
 		MCTLAPIBaseURL:                envOr("MCTL_API_BASE_URL", "https://api.mctl.ai"),
 		MCTLSurfaceTelegramToken:      os.Getenv("MCTL_SURFACE_TELEGRAM_TOKEN"),
 		WorkItemTenant:                os.Getenv("MCTL_WORK_ITEM_TENANT"),
@@ -632,6 +646,12 @@ func Load() (*Config, error) {
 		if c.MCTLSurfaceTelegramToken == "" || c.WorkItemTenant == "" {
 			return nil, fmt.Errorf("WORK_CONTEXT_ENABLED requires MCTL_SURFACE_TELEGRAM_TOKEN and MCTL_WORK_ITEM_TENANT")
 		}
+	}
+	if c.ManagedRuntimeMaxAccounts < 0 {
+		return nil, fmt.Errorf("MANAGED_RUNTIME_MAX_ACCOUNTS must not be negative")
+	}
+	if c.ManagedMaxInflightPerAccount < 1 {
+		return nil, fmt.Errorf("MANAGED_MAX_INFLIGHT_PER_ACCOUNT must be at least 1")
 	}
 	if c.AssistantRegistryEnabled && c.MCTLSurfaceTelegramToken == "" {
 		return nil, fmt.Errorf("ASSISTANT_REGISTRY_ENABLED requires MCTL_SURFACE_TELEGRAM_TOKEN")

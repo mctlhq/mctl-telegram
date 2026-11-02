@@ -51,6 +51,13 @@ type installAgentResponse struct {
 //
 // Admin-scoped and mounted like NewAdminAgentProfileHandler; an agent's own
 // token must never reach it.
+//
+// This handler carries no managed-runtime gate on purpose: an admin cannot
+// move an account to the managed runtime here, because that needs the
+// owner's own consent, which an admin never supplies. Such a document is
+// refused (409/400). The admin profile route moves an account to managed
+// only on a consent the owner gave and has not since withdrawn (opting out
+// erases it); managed -> own is always open to the admin.
 func NewAdminAgentInstallHandler(store *db.Store, catalog *assistant.Catalog, registry *assistantregistry.Client) http.HandlerFunc {
 	svc := assistantinstall.New(store, catalog, registry)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -178,6 +185,10 @@ func writeInstallError(w http.ResponseWriter, err error, fromRegistry bool) {
 		}
 		writeJSONError(w, status, ie.Msg)
 	case assistantinstall.KindLifecycle, assistantinstall.KindRevisionConflict, assistantinstall.KindNoInstall:
+		writeJSONError(w, http.StatusConflict, ie.Msg)
+	case assistantinstall.KindManagedConsentRequired:
+		writeJSONError(w, http.StatusBadRequest, ie.Msg)
+	case assistantinstall.KindManagedDisabled, assistantinstall.KindManagedQuota:
 		writeJSONError(w, http.StatusConflict, ie.Msg)
 	case assistantinstall.KindUpstream:
 		logHandlerErr("admin.agent_install", ie.Err)

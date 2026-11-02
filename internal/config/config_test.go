@@ -729,3 +729,27 @@ func TestLoadAgentTurnAndUnclaimedSettings(t *testing.T) {
 		}
 	})
 }
+
+func TestLoadManagedRuntime(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ManagedRuntimeEnabled || cfg.ManagedRuntimeMaxAccounts != 1 || cfg.ManagedMaxInflightPerAccount != 1 {
+		t.Fatalf("defaults = %v %d %d", cfg.ManagedRuntimeEnabled, cfg.ManagedRuntimeMaxAccounts, cfg.ManagedMaxInflightPerAccount)
+	}
+	t.Setenv("MANAGED_RUNTIME_ENABLED", "true")
+	t.Setenv("MANAGED_RUNTIME_MAX_ACCOUNTS", "0")
+	if cfg, err = Load(); err != nil || !cfg.ManagedRuntimeEnabled || cfg.ManagedRuntimeMaxAccounts != 0 {
+		t.Fatalf("set = %+v, %v", cfg, err)
+	}
+	t.Setenv("MANAGED_RUNTIME_MAX_ACCOUNTS", "-1")
+	if _, err := Load(); err == nil {
+		t.Fatal("negative MANAGED_RUNTIME_MAX_ACCOUNTS must fail")
+	}
+	t.Setenv("MANAGED_RUNTIME_MAX_ACCOUNTS", "1")
+	t.Setenv("MANAGED_MAX_INFLIGHT_PER_ACCOUNT", "0")
+	if _, err := Load(); err == nil {
+		t.Fatal("MANAGED_MAX_INFLIGHT_PER_ACCOUNT=0 must fail")
+	}
+}

@@ -651,6 +651,8 @@ func main() {
 		slog.Info("assistant registry", "enabled", cfg.AssistantRegistryEnabled, "mctl_api_base_url", cfg.MCTLAPIBaseURL)
 		assistantSvc = assistantinstall.New(store, catalog, registry)
 		assistantSvc.ForksEnabled = cfg.AssistantForksEnabled
+		assistantSvc.Managed = assistantinstall.ManagedRuntime{Enabled: cfg.ManagedRuntimeEnabled, MaxAccounts: cfg.ManagedRuntimeMaxAccounts}
+		slog.Info("managed runtime", "enabled", cfg.ManagedRuntimeEnabled, "max_accounts", cfg.ManagedRuntimeMaxAccounts)
 		slog.Info("assistant forks", "enabled", cfg.AssistantForksEnabled)
 		// The public catalog page: the same entries as list_assistants.
 		mux.Get("/assistants", web.Assistants(assistantSvc, cfg.PublicBaseURL, showManage))
@@ -810,7 +812,8 @@ func main() {
 		// operator uses for enable/disable, test-account rotation, and future
 		// production onboarding.
 		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Put("/api/admin/agent/profile",
-			agentapi.NewAdminAgentProfileHandler(store))
+			agentapi.NewAdminAgentProfileHandlerWithManaged(store,
+				assistantinstall.ManagedRuntime{Enabled: cfg.ManagedRuntimeEnabled, MaxAccounts: cfg.ManagedRuntimeMaxAccounts}))
 		mux.With(auth.Middleware(provider, true, m, resourceMeta)).Put("/api/admin/agent/install",
 			agentapi.NewAdminAgentInstallHandler(store, catalog, registry))
 		// The same install service behind the owner's own MCP tools
