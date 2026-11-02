@@ -370,9 +370,8 @@ func ProfileRequest(def *Definition, in *Install, telegramID int64) (map[string]
 		"sender_allowlist":     p.SenderAllowlist,
 		"owner_profile":        p.OwnerProfile,
 	}
-	if in.Spec.Consent != "" {
-		req["consent"] = in.Spec.Consent
-	}
+	// spec.consent is deliberately not copied: the admin profile route
+	// refuses it, because an administrator cannot consent for the owner.
 	return req, nil
 }
 

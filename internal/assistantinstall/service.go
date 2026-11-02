@@ -252,8 +252,12 @@ func (s *Service) prepare(ctx context.Context, userID int64, raw json.RawMessage
 // stripConsent removes spec.consent from an install document, so a consent
 // is an act of one call and is never stored or inherited by a later patch.
 func stripConsent(document []byte) ([]byte, error) {
+	// UseNumber keeps every number as written: a float64 round trip would
+	// lose integers above 2^53 in install values.
+	dec := json.NewDecoder(bytes.NewReader(document))
+	dec.UseNumber()
 	var doc map[string]any
-	if err := json.Unmarshal(document, &doc); err != nil {
+	if err := dec.Decode(&doc); err != nil {
 		return nil, err
 	}
 	if spec, ok := doc["spec"].(map[string]any); ok {
@@ -536,6 +540,13 @@ func (s *Service) PatchWithConsent(ctx context.Context, userID int64, patch json
 	merged, _ := mergePatch(spec, patchObj).(map[string]any)
 	if merged == nil {
 		return nil, fail(KindInvalid, "patch must leave a spec object")
+	}
+	// The stored document can lag the runtime column (the admin profile route
+	// writes only the column). A patch that does not name a runtime keeps the
+	// runtime the account actually runs, so an unrelated patch never switches
+	// it back to what an old document says.
+	if _, named := patchObj["runtime"]; !named {
+		merged["runtime"] = runtimeOrOwn(current.Runtime)
 	}
 	if consent != "" {
 		merged["consent"] = consent

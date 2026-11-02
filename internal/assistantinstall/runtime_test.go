@@ -221,3 +221,55 @@ func TestConsentTextIsInTheADR(t *testing.T) {
 		t.Fatal("ADR 0008 does not contain db.ManagedConsentText verbatim")
 	}
 }
+
+// An admin runtime change writes only the profile column, so the stored
+// install document can still say "own". A patch that does not name a runtime
+// must keep the runtime the account runs, not follow the stale document.
+func TestPatch_UnrelatedPatchKeepsColumnRuntime(t *testing.T) {
+	svc, uid := newTestService(t)
+	ctx := context.Background()
+	svc.Managed = ManagedRuntime{Enabled: true, MaxAccounts: 5}
+	if _, err := svc.Apply(ctx, uid, runtimeInstall(t, "", ""), CommitOptions{}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	managed, consentVer := db.RuntimeManaged, db.ManagedConsentCurrent
+	at := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	if err := svc.Store.UpdateAgentProfileFields(ctx, uid, db.AgentProfileUpdate{
+		Runtime: &managed, ManagedConsentVersion: &consentVer, ManagedConsentAt: &at,
+	}); err != nil {
+		t.Fatalf("admin column write: %v", err)
+	}
+	a, err := svc.Store.GetAgentAssistant(ctx, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Patch(ctx, uid, json.RawMessage(`{"paused":false}`), a.InstallRevision); err != nil {
+		t.Fatalf("unrelated patch: %v", err)
+	}
+	p, err := svc.Store.GetAgentProfile(ctx, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Runtime != db.RuntimeManaged || !p.ManagedConsentAt.Equal(at) {
+		t.Fatalf("runtime = %q consent at %v, want managed kept with the original consent time", p.Runtime, p.ManagedConsentAt)
+	}
+	// Naming the runtime still switches it.
+	a, _ = svc.Store.GetAgentAssistant(ctx, uid)
+	if _, err := svc.Patch(ctx, uid, json.RawMessage(`{"runtime":"own"}`), a.InstallRevision); err != nil {
+		t.Fatalf("explicit switch: %v", err)
+	}
+	if p, _ = svc.Store.GetAgentProfile(ctx, uid); p.Runtime != db.RuntimeOwn {
+		t.Fatalf("runtime = %q, want own", p.Runtime)
+	}
+}
+
+func TestStripConsent_KeepsLargeIntegersAndDropsConsent(t *testing.T) {
+	doc := []byte(`{"spec":{"consent":"managed-data-flow/v1","values":{"id":9007199254740993}}}`)
+	out, err := stripConsent(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "consent") || !strings.Contains(string(out), "9007199254740993") {
+		t.Fatalf("stripConsent = %s", out)
+	}
+}

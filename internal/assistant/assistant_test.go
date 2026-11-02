@@ -419,7 +419,7 @@ func TestRuntimeDefaultsToOwnAndSchemaChecksIt(t *testing.T) {
 	}
 	in.Spec.Runtime, in.Spec.Consent = RuntimeManaged, "managed-data-flow/v1"
 	req, err := ProfileRequest(def, in, danaID)
-	if err != nil || req["runtime"] != RuntimeManaged || req["consent"] != "managed-data-flow/v1" {
+	if _, has := req["consent"]; err != nil || req["runtime"] != RuntimeManaged || has {
 		t.Fatalf("ProfileRequest = %v, %v", req, err)
 	}
 	const hdr = `{"apiVersion":"assistants.mctl.ai/v1alpha1","kind":"AssistantInstall","spec":{"assistant":{"name":"hr-recruiter","version":"0.1.0"},`
