@@ -903,7 +903,8 @@ func (s *Server) handleReportJobCost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	if _, err := s.Store.GetAgentJob(ctx, id.UserID, jobID); err != nil {
+	job, err := s.Store.GetAgentJob(ctx, id.UserID, jobID)
+	if err != nil {
 		if errors.Is(err, db.ErrAgentJobNotFound) {
 			writeJSONError(w, http.StatusNotFound, "job not found")
 			return
@@ -937,19 +938,19 @@ func (s *Server) handleReportJobCost(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"recorded": true, "unchanged": true})
 		return
 	}
-	s.countUsage(req)
+	s.countUsage(req, job.Runtime == db.RuntimeManaged)
 	s.audit(ctx, id.UserID, "report_agent_job_cost", "ok", "")
 	writeJSON(w, http.StatusOK, map[string]any{"recorded": true})
 }
 
 // countUsage adds a first settle to the usage metrics. Runner is clamped to a
-// fixed set and model to a bounded set (Registry.UsageModel), so a worker
-// cannot grow the label space.
-func (s *Server) countUsage(req reportJobCostRequest) {
+// fixed set and model to a bounded set (Registry.UsageModel) that only
+// managed-runtime jobs can add to, so no worker can grow the label space.
+func (s *Server) countUsage(req reportJobCostRequest, managed bool) {
 	if s.m == nil {
 		return
 	}
-	model := s.m.UsageModel(req.Model)
+	model := s.m.UsageModel(req.Model, managed)
 	s.m.AgentUsageCostUSDTotal.WithLabelValues(metrics.UsageRunner(req.Runner), model).Add(req.CostUSD)
 	s.m.AgentUsageTokensTotal.WithLabelValues("input", model).Add(float64(req.InputTokens))
 	s.m.AgentUsageTokensTotal.WithLabelValues("output", model).Add(float64(req.OutputTokens))

@@ -421,10 +421,14 @@ func UsageRunner(runner string) string {
 const MaxUsageModelLabels = 16
 
 // UsageModel returns the "model" label value for a reported model: "unknown"
-// for an empty string, the model itself while fewer than MaxUsageModelLabels
-// distinct values have been seen (or when it is one of them), and "other"
-// otherwise. A nil Registry returns "other".
-func (r *Registry) UsageModel(model string) string {
+// for an empty string, the model itself when it already holds a slot, and
+// otherwise the model itself only when mayClaim is set and fewer than
+// MaxUsageModelLabels slots are taken; everything else is "other". The caller
+// sets mayClaim only for a report on a managed-runtime job (the runtime comes
+// from the job row), so an own-runtime account cannot fill the slots with
+// strings of its own and push the pool's real models into "other". A nil
+// Registry returns "other".
+func (r *Registry) UsageModel(model string, mayClaim bool) string {
 	if model == "" {
 		return "unknown"
 	}
@@ -436,7 +440,7 @@ func (r *Registry) UsageModel(model string) string {
 	if _, ok := r.usageModels[model]; ok {
 		return model
 	}
-	if len(r.usageModels) >= MaxUsageModelLabels {
+	if !mayClaim || len(r.usageModels) >= MaxUsageModelLabels {
 		return "other"
 	}
 	if r.usageModels == nil {

@@ -151,3 +151,39 @@ func TestRecordCost_OwnJobRecordedAsOwn(t *testing.T) {
 		t.Fatalf("bad runner: %d", rec.Code)
 	}
 }
+
+// Only a report on a managed-runtime job can take one of the bounded model
+// label slots; an own-runtime report with a model the registry has not seen
+// is counted as "other", so own accounts cannot fill the slots. The runtime
+// is the job row's, not anything the worker says.
+// Mutation: pass true (or ignore mayClaim) in countUsage.
+func TestRecordCost_OwnJobCannotTakeModelLabelSlot(t *testing.T) {
+	h, m, jobID, _ := managedJobHarness(t)
+	if _, err := h.store.DB.Exec(`UPDATE agent_jobs SET runtime = 'own' WHERE id = $1`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	rec := h.do("POST", "/jobs/"+itoaTest(jobID)+"/cost",
+		map[string]any{"cost_usd": 0.25, "model": "own-junk-1", "runner": "openai"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("own report: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := testutil.ToFloat64(m.AgentUsageCostUSDTotal.WithLabelValues("openai", "other")); got != 0.25 {
+		t.Fatalf("own report under model=other = %v, want 0.25", got)
+	}
+	if got := m.UsageModel("own-junk-1", false); got != "other" {
+		t.Fatalf("own model took a slot: label %q", got)
+	}
+}
+
+// The managed counterpart: a managed-runtime report takes a free slot.
+func TestRecordCost_ManagedJobTakesModelLabelSlot(t *testing.T) {
+	h2, m2, jobID2, _ := managedJobHarness(t)
+	rec := h2.do("POST", "/jobs/"+itoaTest(jobID2)+"/cost",
+		map[string]any{"cost_usd": 0.1, "model": "pool-model", "runner": "openai"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("managed report: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := testutil.ToFloat64(m2.AgentUsageCostUSDTotal.WithLabelValues("openai", "pool-model")); got != 0.1 {
+		t.Fatalf("managed report under its own model label = %v, want 0.1", got)
+	}
+}

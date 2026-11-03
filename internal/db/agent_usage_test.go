@@ -868,3 +868,29 @@ func TestRouteUnclaimed_SkipsGlobalBudgetHold(t *testing.T) {
 		t.Fatalf("managed=%s own=%s, want pending/routed", status(managed), status(own))
 	}
 }
+
+// The sweeper's holdEndedReservations scans reserved rows on every tick; a
+// partial index keeps that proportional to the live reservations.
+// Mutation: drop the idx_agent_usage_reserved statement from either schema.
+func TestAgentUsage_ReservedPartialIndex(t *testing.T) {
+	t.Run("sqlite", func(t *testing.T) {
+		s := newTestStoreCrypted(t)
+		var def string
+		if err := s.DB.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_agent_usage_reserved'`).Scan(&def); err != nil {
+			t.Fatalf("index missing: %v", err)
+		}
+		if !strings.Contains(def, "WHERE status = 'reserved'") {
+			t.Fatalf("index is not partial on reserved: %s", def)
+		}
+	})
+	t.Run("postgres", func(t *testing.T) {
+		s := newFreshSchemaPostgresStore(t)
+		var def string
+		if err := s.DB.QueryRow(`SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_agent_usage_reserved'`).Scan(&def); err != nil {
+			t.Fatalf("index missing: %v", err)
+		}
+		if !strings.Contains(def, "WHERE (status = 'reserved'") {
+			t.Fatalf("index is not partial on reserved: %s", def)
+		}
+	})
+}

@@ -715,6 +715,10 @@ func agentSchemaSQLite() []string {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_usage_user ON agent_usage(user_id, runtime, created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_usage_runtime ON agent_usage(runtime, created_at)`,
+		// The sweeper's holdEndedReservations looks only at reserved rows on
+		// every tick; the partial index keeps that proportional to the live
+		// reservations instead of the whole ledger.
+		`CREATE INDEX IF NOT EXISTS idx_agent_usage_reserved ON agent_usage(job_id) WHERE status = 'reserved'`,
 		`CREATE TABLE IF NOT EXISTS agent_job_lead_results (
 			job_id INTEGER PRIMARY KEY REFERENCES agent_jobs(id) ON DELETE CASCADE,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1110,6 +1114,10 @@ func agentSchemaPG() []string {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_usage_user ON agent_usage(user_id, runtime, created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_usage_runtime ON agent_usage(runtime, created_at)`,
+		// The sweeper's holdEndedReservations looks only at reserved rows on
+		// every tick; the partial index keeps that proportional to the live
+		// reservations instead of the whole ledger.
+		`CREATE INDEX IF NOT EXISTS idx_agent_usage_reserved ON agent_usage(job_id) WHERE status = 'reserved'`,
 		`CREATE TABLE IF NOT EXISTS agent_job_lead_results (
 			job_id BIGINT PRIMARY KEY REFERENCES agent_jobs(id) ON DELETE CASCADE,
 			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

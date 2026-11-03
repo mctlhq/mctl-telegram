@@ -311,7 +311,8 @@ a confirmed operation:
   bills.
 - Metrics (runner is clamped to `claude|openai|other`; model to at most 16
   distinct values plus `other` and `unknown`, because any worker credential
-  can name a model): `mctl_agent_usage_cost_usd_total{runner,model}`,
+  can name a model, and only a report on a managed-runtime job, by the job
+  row, can take a free slot): `mctl_agent_usage_cost_usd_total{runner,model}`,
   `mctl_agent_usage_tokens_total{direction,model}`,
   `mctl_agent_budget_exhausted_total{scope}`,
   `mctl_agent_budget_deferred_total{scope}`, `mctl_agent_managed_accounts`,
