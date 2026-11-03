@@ -181,7 +181,7 @@ func checkDeployWorkflows(preview, release, build string) []string {
 			bad = append(bad, "release: dispatch must live in its own agent-worker-release job")
 		} else {
 			if !strings.Contains(job, "    needs: release-please\n") ||
-				!strings.Contains(job, "    if: ${{ needs.release-please.outputs.release_created == 'true' }}\n") {
+				!strings.Contains(job, "    if: ${{ !cancelled() && needs.release-please.outputs.release_created == 'true' }}\n") {
 				bad = append(bad, "release: agent-worker-release lacks needs/release_created guard")
 			}
 			if !strings.Contains(job, "ref: ${{ needs.release-please.outputs.tag_name }}") {
@@ -255,7 +255,10 @@ func TestDeployWorkflowsGuardCatchesMutations(t *testing.T) {
 			return p, strings.Replace(r, "                -f dockerfile_path=Dockerfile.agent-worker \\\n", "", 1), b
 		}},
 		{"drop release_created guard", func(p, r, b string) (string, string, string) {
-			return p, strings.Replace(r, "    if: ${{ needs.release-please.outputs.release_created == 'true' }}\n", "", 1), b
+			return p, strings.Replace(r, "    if: ${{ !cancelled() && needs.release-please.outputs.release_created == 'true' }}\n", "", 1), b
+		}},
+		{"drop !cancelled() so a failed Local Bridge build skips the dispatch", func(p, r, b string) (string, string, string) {
+			return p, strings.Replace(r, "if: ${{ !cancelled() && needs.release-please.outputs.release_created == 'true' }}", "if: ${{ needs.release-please.outputs.release_created == 'true' }}", 1), b
 		}},
 		{"move release dispatch back into the release-please job", func(p, r, b string) (string, string, string) {
 			moved := strings.Replace(r, rs, "", 1)
