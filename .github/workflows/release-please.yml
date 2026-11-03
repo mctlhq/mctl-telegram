@@ -101,6 +101,44 @@ jobs:
           ref: ${{ steps.release.outputs.tag_name }}
           persist-credentials: false
 
+      # Release-tagged worker image for the managed agent runtime
+      # (docs/adr/0008-managed-runtime.md section 6). Runs before the Local
+      # Bridge cross-compile so a failed build cannot block it.
+      #
+      # Guarded: production agent-worker-managed does not exist in gitops until
+      # the production rollout after #889/#334, so until then every release
+      # emits the skip notice and publishes no ghcr.io/mctlhq/agent-worker
+      # image. Absence (HTTP 404) skips; any unobservable read fails the step.
+      - name: Dispatch agent-worker release-deploy
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: |
+          VALUES=platform-gitops/services/labs/agent-worker-managed/values.yaml
+          rc=0; .github/scripts/gitops-values-present.sh "$VALUES" || rc=$?
+          case "$rc" in
+            0)
+              gh workflow run release-deploy.yaml \
+                --repo mctlhq/mctl-gitops \
+                --ref main \
+                -f repo=mctlhq/mctl-telegram \
+                -f git_ref="$TAG" \
+                -f image_name=ghcr.io/mctlhq/agent-worker \
+                -f image_tag="$TAG" \
+                -f dockerfile_path=Dockerfile.agent-worker \
+                -f team_name=labs \
+                -f component_name=agent-worker-managed
+              ;;
+            3)
+              echo "::notice::$VALUES not on mctl-gitops main; skipping agent-worker-managed dispatch"
+              ;;
+            *)
+              echo "::error::could not read $VALUES on mctl-gitops main (rc=$rc)"
+              exit 1
+              ;;
+          esac
+
       - name: Set up Go
         if: ${{ steps.release.outputs.release_created == 'true' }}
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
