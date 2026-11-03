@@ -32,6 +32,7 @@ func TestRootMCP_Dispatch(t *testing.T) {
 		{"GET without Accept", http.MethodGet, "", "landing"},
 		{"GET json only", http.MethodGet, "application/json", "landing"},
 		{"browser that also lists event-stream", http.MethodGet, "text/html, text/event-stream", "landing"},
+		{"uptime monitor HEAD", http.MethodHead, "", "landing"},
 		{"MCP SSE stream", http.MethodGet, "text/event-stream", "mcp"},
 		{"MCP SSE stream mixed case", http.MethodGet, "Application/JSON, Text/Event-Stream", "mcp"},
 		{"JSON-RPC POST", http.MethodPost, "application/json, text/event-stream", "mcp"},
