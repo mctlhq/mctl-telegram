@@ -149,3 +149,25 @@ func (q *Queue) RouteUnclaimed(ctx context.Context, after time.Duration) (int64,
 	}
 	return n, err
 }
+
+// RefreshUsageGauges sets the managed-tier gauges: the number of managed
+// accounts and the held reservations of the current UTC day (reservation
+// reconciliation drift). Called by the sweeper; a failed read leaves the
+// previous value rather than reporting zero.
+func (q *Queue) RefreshUsageGauges(ctx context.Context) error {
+	if q.m == nil {
+		return nil
+	}
+	n, err := q.Store.CountManagedAccounts(ctx)
+	if err != nil {
+		return err
+	}
+	usd, rows, err := q.Store.HeldUsage(ctx)
+	if err != nil {
+		return err
+	}
+	q.m.AgentManagedAccounts.Set(float64(n))
+	q.m.AgentUsageHeldUSD.Set(usd)
+	q.m.AgentUsageHeldRows.Set(float64(rows))
+	return nil
+}

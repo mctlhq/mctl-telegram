@@ -72,10 +72,30 @@ func (s *Store) claimCoalesced(ctx context.Context, replicaID string, userID int
 		return nil, fmt.Errorf("begin claim tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	budgeted := s.budgeted(runtime, maxInflight)
+	if budgeted {
+		if err := s.lockManagedBudget(ctx, tx, capPG, userID); err != nil {
+			return nil, err
+		}
+	}
 	if maxInflight > 0 {
 		if limit, err = s.reserveInflight(ctx, tx, capPG, userID, limit, maxInflight); err != nil || limit == 0 {
 			return nil, err
 		}
+	}
+	if budgeted {
+		room, ev, err := s.reserveBudget(ctx, tx, userID, limit)
+		if err != nil {
+			return nil, err
+		}
+		if room == 0 {
+			if err := tx.Commit(); err != nil {
+				return nil, fmt.Errorf("commit budget tx: %w", err)
+			}
+			s.countBudgetEvent(ev)
+			return nil, nil
+		}
+		limit = room
 	}
 
 	cands, err := loadClaimCandidates(ctx, tx,
@@ -155,6 +175,11 @@ func (s *Store) claimCoalesced(ctx context.Context, replicaID string, userID int
 			claimed[0].ID, claimed[0].Attempts, now,
 		); err != nil {
 			return nil, fmt.Errorf("insert job attempt: %w", err)
+		}
+		if budgeted {
+			if err := s.insertReservation(ctx, tx, claimed[0]); err != nil {
+				return nil, err
+			}
 		}
 		if err := s.fillSourceEvents(ctx, tx, claimed); err != nil {
 			return nil, err

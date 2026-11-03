@@ -337,6 +337,18 @@ type ClaudeResult struct {
 	// A false zero here would silently understate persisted spend.
 	TotalCostUSD *float64 `json:"total_cost_usd"`
 	Result       string   `json:"result"`
+	// Usage is the CLI's token usage, when it reports one.
+	Usage *struct {
+		InputTokens  int64 `json:"input_tokens"`
+		OutputTokens int64 `json:"output_tokens"`
+	} `json:"usage"`
+
+	// Runner, Model and the token counts are filled by the runner that
+	// produced the result, for the usage report. Not part of the CLI's output.
+	Runner       string `json:"-"`
+	Model        string `json:"-"`
+	InputTokens  int64  `json:"-"`
+	OutputTokens int64  `json:"-"`
 }
 
 // ParseClaudeResult extracts the final JSON result object from `claude -p

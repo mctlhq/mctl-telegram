@@ -66,6 +66,8 @@ func (s *Store) ListManagedClaimCandidates(ctx context.Context, now time.Time, m
 		 HAVING MIN(j.next_run_at) > $8 OR (MIN(j.next_run_at) = $8 AND ap.user_id > $9)`
 		args = append(args, after.oldest, after.userID)
 	}
+	budgetSQL, budgetArgs := s.budgetCandidateFilter(now.UTC(), len(args)+1)
+	args = append(args, budgetArgs...)
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT ap.user_id, u.telegram_login_id, MIN(j.next_run_at)
 		   FROM agent_profiles ap
@@ -81,7 +83,7 @@ func (s *Store) ListManagedClaimCandidates(ctx context.Context, now time.Time, m
 		         WHERE b.conversation_id = j.conversation_id
 		           AND (b.status = $5 OR (b.status = $1 AND b.id < j.id))
 		    )
-		    -- budget filter (budget_paused_until, slice 4, #1092) goes here
+		    `+budgetSQL+`
 		  GROUP BY ap.user_id, u.telegram_login_id`+having+`
 		  ORDER BY MIN(j.next_run_at), ap.user_id
 		  LIMIT $7`,

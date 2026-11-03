@@ -203,6 +203,10 @@ func agentJobsSweepOnce(ctx context.Context, q *queue.Queue, visibility, approva
 		slog.Info("agent job sweep", "routed_unclaimed", routed, "after", unclaimedAfter)
 	}
 
+	if err := q.RefreshUsageGauges(ctx); err != nil {
+		slog.Warn("agent usage gauge refresh failed", "err", err)
+	}
+
 	expired, err := q.Store.ExpireStaleAgentActions(ctx, approvalTTL)
 	if err != nil {
 		slog.Warn("agent action expiry sweep failed", "err", err)

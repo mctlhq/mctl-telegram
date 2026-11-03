@@ -249,8 +249,8 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 		defer cleanupPrompt()
 		args = append(args, "--system-prompt-file", promptPath)
 	}
-	if c.MaxBudgetUSD > 0 {
-		args = append(args, "--max-budget-usd", fmt.Sprintf("%.2f", c.MaxBudgetUSD))
+	if budget := jobBudget(c.MaxBudgetUSD, c.PoolMode, job); budget > 0 {
+		args = append(args, "--max-budget-usd", fmt.Sprintf("%.2f", budget))
 	}
 
 	claudeBin := c.ClaudeBin
@@ -279,11 +279,15 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 	if parseErr != nil {
 		return fmt.Errorf("job %d: %w (stdout: %d bytes, see run logs)", job.JobID, parseErr, stdout.Len())
 	}
+	res.Runner = "claude"
 	finishToken := c.APIToken
 	if c.PoolMode {
 		finishToken = job.JobToken
 	}
 	client := NewClient(c.APIBaseURL, finishToken, nil)
+	if c.PoolMode {
+		client.WithJobScope()
+	}
 	return finishRun(ctx, client, job, res, c.Metrics)
 }
 

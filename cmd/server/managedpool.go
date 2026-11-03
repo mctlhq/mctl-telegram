@@ -42,8 +42,19 @@ func wireManagedPool(cfg *config.Config, mux chi.Router, adminMW func(http.Handl
 	}
 	agentSrv.WithManagedClaims(agentapi.ManagedClaimConfig{
 		MaxInflightPerAccount: cfg.ManagedMaxInflightPerAccount,
+		MaxJobCostUSD:         cfg.ManagedMaxJobCostUSD,
 		Revocations:           revocations,
 	})
+	// The spend caps are enforced inside the claim transaction. They are wired
+	// with the pool and only then: without the flag nothing reserves budget.
+	if agentSrv.Store != nil && cfg.ManagedMaxJobCostUSD > 0 {
+		agentSrv.Store.WithManagedBudget(db.ManagedBudget{
+			PerJobUSD:       cfg.ManagedMaxJobCostUSD,
+			AccountDayUSD:   cfg.ManagedBudgetUSDPerAccountDay,
+			AccountMonthUSD: cfg.ManagedBudgetUSDPerAccountMonth,
+			GlobalDayUSD:    cfg.ManagedBudgetUSDGlobalDay,
+		})
+	}
 	slog.Info("managed runtime pool credential enabled", "max_inflight_per_account", cfg.ManagedMaxInflightPerAccount)
 	return agentProvider
 }

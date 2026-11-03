@@ -308,3 +308,73 @@ func writeJSONFixture(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
 }
+
+// The usage-ledger body: model, runner and tokens ride along; with a job
+// token the attempt is left to the token; an account-token client still
+// sends it. Mutation: always send the attempt, or drop a field.
+func TestClient_ReportJobUsage_Shape(t *testing.T) {
+	var gotBody map[string]any
+	client, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotBody = nil
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		writeJSONFixture(w, map[string]any{"recorded": true})
+	})
+	u := UsageReport{CostUSD: 0.2, Model: "m", Runner: "openai", InputTokens: 7, OutputTokens: 3}
+	if err := client.ReportJobUsage(context.Background(), 42, 2, u); err != nil {
+		t.Fatal(err)
+	}
+	if gotBody["attempt"] != float64(2) || gotBody["model"] != "m" || gotBody["runner"] != "openai" ||
+		gotBody["input_tokens"] != float64(7) || gotBody["output_tokens"] != float64(3) || gotBody["cost_usd"] != 0.2 {
+		t.Fatalf("account-token body = %v", gotBody)
+	}
+	if err := client.WithJobScope().ReportJobUsage(context.Background(), 42, 2, u); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := gotBody["attempt"]; has {
+		t.Fatalf("job-token body carries an attempt: %v", gotBody)
+	}
+}
+
+// An older server rejects the new fields with 400 before mutating; the client
+// retries once with the legacy {attempt, cost_usd} body.
+// Mutation: drop the fallback in ReportJobUsage.
+func TestClient_ReportJobUsage_FallsBackOn400(t *testing.T) {
+	var bodies []map[string]any
+	client, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		bodies = append(bodies, b)
+		if len(b) > 2 || b["attempt"] == nil {
+			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+		writeJSONFixture(w, map[string]any{"recorded": true})
+	})
+	client.WithJobScope()
+	err := client.ReportJobUsage(context.Background(), 42, 3, UsageReport{CostUSD: 0.1, Model: "m", Runner: "claude"})
+	if err != nil {
+		t.Fatalf("ReportJobUsage: %v", err)
+	}
+	if len(bodies) != 2 || bodies[1]["attempt"] != float64(3) || bodies[1]["cost_usd"] != 0.1 || len(bodies[1]) != 2 {
+		t.Fatalf("bodies = %v, want new shape then legacy {attempt, cost_usd}", bodies)
+	}
+}
+
+func TestJobBudget(t *testing.T) {
+	job := JobEnvelope{MaxJobCostUSD: 0.5}
+	cases := []struct {
+		configured float64
+		pool       bool
+		want       float64
+	}{
+		{0.8, true, 0.5}, {0.3, true, 0.3}, {0, true, 0.5}, {0.8, false, 0.8}, {0, false, 0},
+	}
+	for _, c := range cases {
+		if got := jobBudget(c.configured, c.pool, job); got != c.want {
+			t.Errorf("jobBudget(%v, pool=%v) = %v, want %v", c.configured, c.pool, got, c.want)
+		}
+	}
+	if got := jobBudget(0.8, true, JobEnvelope{}); got != 0.8 {
+		t.Errorf("no envelope cap = %v, want 0.8", got)
+	}
+}

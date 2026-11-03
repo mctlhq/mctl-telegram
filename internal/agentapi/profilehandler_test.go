@@ -536,3 +536,69 @@ func TestAdminAgentProfileHandler_DisclosureDisabledNeedsAdmin(t *testing.T) {
 		t.Fatalf("disclosure_disabled was written by a non-admin identity")
 	}
 }
+
+// The admin route sets, clears and rejects the managed budget overrides, and
+// the override changes the cap the managed claim uses (ADR 0008 section 5).
+// Mutation: drop the override read in db.reserveBudget, or accept negatives.
+func TestAdminAgentProfileHandler_ManagedBudgetOverride(t *testing.T) {
+	ctx := context.Background()
+	store := newProfileTestStore(t)
+	store.WithManagedBudget(db.ManagedBudget{PerJobUSD: 0.5, AccountDayUSD: 0.5, AccountMonthUSD: 15, GlobalDayUSD: 20})
+	uid, err := store.EnsureUserByTelegramID(ctx, 778, "dana", "Dana")
+	if err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	h := NewAdminAgentProfileHandler(store)
+
+	for _, bad := range []string{`{"telegram_id":778,"managed_budget_usd_day":-1}`, `{"telegram_id":778,"managed_budget_usd_month":"x"}`} {
+		if rec := doProfileReq(h, adminIdentity(), bad); rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status %d, want 400", bad, rec.Code)
+		}
+	}
+	rec := doProfileReq(h, adminIdentity(), `{"telegram_id":778,"managed_budget_usd_day":1.5,"managed_budget_usd_month":9}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp agentProfileResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.ManagedBudgetUSDDay == nil || *resp.ManagedBudgetUSDDay != 1.5 || resp.ManagedBudgetUSDMonth == nil || *resp.ManagedBudgetUSDMonth != 9 {
+		t.Fatalf("response overrides = %v %v", resp.ManagedBudgetUSDDay, resp.ManagedBudgetUSDMonth)
+	}
+	// Omitted leaves them, null clears one.
+	if rec = doProfileReq(h, adminIdentity(), `{"telegram_id":778,"managed_budget_usd_month":null}`); rec.Code != http.StatusOK {
+		t.Fatalf("clear: %d %s", rec.Code, rec.Body.String())
+	}
+	p, err := store.GetAgentProfile(ctx, uid)
+	if err != nil || p.ManagedBudgetUSDDay == nil || *p.ManagedBudgetUSDDay != 1.5 || p.ManagedBudgetUSDMonth != nil {
+		t.Fatalf("profile = %+v err %v", p, err)
+	}
+	var audited int
+	if err := store.DB.QueryRow(`SELECT COUNT(*) FROM audit_logs WHERE tool_name = 'admin.agent_profile.budget'`).Scan(&audited); err != nil || audited != 2 {
+		t.Fatalf("budget audit rows = %d %v, want 2", audited, err)
+	}
+
+	// The 1.50 day override lets three 0.50 jobs through; the 0.50 default would allow one.
+	if _, err := store.DB.Exec(`UPDATE agent_profiles SET runtime = 'managed', managed_consent_version = $1 WHERE user_id = $2`, db.ManagedConsentCurrent, uid); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		conv, err := store.EnsureConversation(ctx, uid, int64(900+i), "peer", "Peer")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ev := "evt:v1:1:" + itoaTest(int64(900+i)) + ":override"
+		if _, _, err := store.InsertIncomingEvent(ctx, db.IncomingEvent{EventID: ev, UserID: uid, Kind: db.EventKindPrivateMessage,
+			ChatTGID: int64(900 + i), SenderTGID: 1, MessageID: 1}); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok, err := store.EnqueueAgentJob(ctx, ev, uid, conv.ID); err != nil || !ok {
+			t.Fatalf("enqueue: %v %v", ok, err)
+		}
+	}
+	jobs, err := store.ClaimManagedAgentJobs(ctx, "pool", uid, 10, 10)
+	if err != nil || len(jobs) != 3 {
+		t.Fatalf("claim under the 1.50 override took %d jobs err %v, want 3", len(jobs), err)
+	}
+}

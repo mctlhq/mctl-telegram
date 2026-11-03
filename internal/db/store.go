@@ -67,6 +67,11 @@ type Store struct {
 	// WithTurnCoalescing). timeNow is a test hook for the clock.
 	turnCfg *turn.Config
 	timeNow func() time.Time
+	// budget, when non-nil, makes managed claims reserve spend against the
+	// caps (see WithManagedBudget). budgetLockHook runs in a managed claim
+	// just before it takes the global budget lock. Tests only.
+	budget         *ManagedBudget
+	budgetLockHook func(userID int64)
 }
 
 // AccountInfo is the user-visible projection of a telegram_accounts row,

@@ -57,7 +57,12 @@ func (r *OpenAIRunner) Run(ctx context.Context, job JobEnvelope) error {
 	workerAPI := api
 	if r.APIToken != "" && !r.PoolMode {
 		workerAPI = NewClient(r.APIBaseURL, r.APIToken, nil)
+	} else if r.PoolMode {
+		// Pool mode: the cost report rides a second client on the job token,
+		// whose attempt the server takes from the token.
+		workerAPI = NewClient(r.APIBaseURL, job.JobToken, nil).WithJobScope()
 	}
+	maxBudget := jobBudget(r.MaxBudgetUSD, r.PoolMode, job)
 	builder, defs, err := buildToolSet(api, JobContext{
 		JobID: job.JobID, Attempt: job.Attempt, EventID: job.EventID,
 		ConversationID: job.ConversationID, SourceEventIDs: job.SourceEventIDs, Tools: job.Tools,
@@ -82,13 +87,15 @@ func (r *OpenAIRunner) Run(ctx context.Context, job JobEnvelope) error {
 	}
 	started := time.Now()
 	totalCost := 0.0
+	var inTokens, outTokens int64
 	costObserved := false
 	usageMissing := false
 	turns := 0
 
 	result := func(subtype string, isError bool) *ClaudeResult {
 		res := &ClaudeResult{Type: "result", Subtype: subtype, IsError: isError, NumTurns: turns,
-			DurationMS: time.Since(started).Milliseconds()}
+			DurationMS: time.Since(started).Milliseconds(),
+			Runner:     "openai", Model: r.Client.Model, InputTokens: inTokens, OutputTokens: outTokens}
 		if costObserved {
 			if usageMissing {
 				// Reported cost is a lower bound: some turns carried no usage.
@@ -135,7 +142,7 @@ func (r *OpenAIRunner) Run(ctx context.Context, job JobEnvelope) error {
 			// every turn, so fail closed; without one there is nothing to
 			// bypass, so warn and keep the cost unreported rather than
 			// recording a fabricated $0.
-			if r.MaxBudgetUSD > 0 {
+			if maxBudget > 0 {
 				return finish("error_provider_no_usage", true)
 			}
 			usageMissing = true
@@ -143,8 +150,10 @@ func (r *OpenAIRunner) Run(ctx context.Context, job JobEnvelope) error {
 		} else {
 			costObserved = true
 			totalCost += r.Prices.Cost(out.Usage)
+			inTokens += int64(out.Usage.PromptTokens)
+			outTokens += int64(out.Usage.CompletionTokens)
 		}
-		if r.MaxBudgetUSD > 0 && totalCost > r.MaxBudgetUSD {
+		if maxBudget > 0 && totalCost > maxBudget {
 			return finish("error_max_budget", true)
 		}
 

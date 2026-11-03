@@ -408,6 +408,7 @@ func (s *Store) claimAgentJobs(ctx context.Context, replicaID string, userID int
 		return s.claimCoalesced(ctx, replicaID, userID, runtime, limit, maxInflight)
 	}
 	now := time.Now().UTC()
+	budgeted := s.budgeted(runtime, maxInflight)
 	lock := ""
 	if s.isPostgres(ctx) {
 		lock = " FOR UPDATE SKIP LOCKED"
@@ -421,10 +422,32 @@ func (s *Store) claimAgentJobs(ctx context.Context, replicaID string, userID int
 		return nil, fmt.Errorf("begin claim tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Lock order: the global budget lock, then the account lock, then the
+	// claim's row locks. See lockManagedBudget.
+	if budgeted {
+		if err := s.lockManagedBudget(ctx, tx, capPG, userID); err != nil {
+			return nil, err
+		}
+	}
 	if maxInflight > 0 {
 		if limit, err = s.reserveInflight(ctx, tx, capPG, userID, limit, maxInflight); err != nil || limit == 0 {
 			return nil, err
 		}
+	}
+	if budgeted {
+		room, ev, err := s.reserveBudget(ctx, tx, userID, limit)
+		if err != nil {
+			return nil, err
+		}
+		if room == 0 {
+			// A durable exhaustion wrote the pause and its notification.
+			if err := tx.Commit(); err != nil {
+				return nil, fmt.Errorf("commit budget tx: %w", err)
+			}
+			s.countBudgetEvent(ev)
+			return nil, nil
+		}
+		limit = room
 	}
 
 	// The outer UPDATE re-checks status = pending. With SKIP LOCKED this is
@@ -500,6 +523,11 @@ func (s *Store) claimAgentJobs(ctx context.Context, replicaID string, userID int
 		}
 		if err := storeTurnContext(ctx, tx, &jobs[i]); err != nil {
 			return nil, err
+		}
+		if budgeted {
+			if err := s.insertReservation(ctx, tx, jobs[i]); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -784,22 +812,8 @@ func (s *Store) CompleteAgentJobWithResult(
 // the report idempotent under an HTTP retry. Cumulative spend across
 // retries remains available from mctl_agent_job_cost_usd_total.
 func (s *Store) RecordAgentJobCost(ctx context.Context, userID, jobID int64, attempt int, cost float64) error {
-	if userID <= 0 {
-		return errors.New("user id required")
-	}
-	now := time.Now().UTC()
-	res, err := s.DB.ExecContext(ctx,
-		`UPDATE agent_jobs SET cost_usd = $1, updated_at = $2
-		  WHERE id = $3 AND user_id = $4 AND attempts = $5`,
-		cost, now, jobID, userID, attempt,
-	)
-	if err != nil {
-		return fmt.Errorf("record agent job cost: %w", err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrAgentJobNotFound
-	}
-	return nil
+	_, err := s.RecordAgentJobUsage(ctx, userID, jobID, attempt, Usage{CostUSD: cost})
+	return err
 }
 
 // RetryAgentJob returns a processing job to the queue after a transient
@@ -901,6 +915,15 @@ func (s *Store) ReleaseUnissuedClaim(ctx context.Context, jobID int64, attempt i
 		jobID, attempt,
 	); err != nil {
 		return fmt.Errorf("delete unissued attempt: %w", err)
+	}
+	// No token for this attempt ever left the server and the attempt number is
+	// reused by the next claim, so its reservation goes. This is the only path
+	// that removes a reservation without a cost report.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM agent_usage WHERE job_id = $1 AND attempt = $2 AND status = $3`,
+		jobID, attempt, UsageReserved,
+	); err != nil {
+		return fmt.Errorf("delete unissued reservation: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit release tx: %w", err)
@@ -1027,6 +1050,19 @@ func (s *Store) RequeueStaleAgentJobs(ctx context.Context, visibility time.Durat
 	if err := closeAttempts(fencedIDs, "runtime switched"); err != nil {
 		return 0, 0, err
 	}
+	// agent_jobs was locked first above; the ledger follows. The attempts'
+	// tokens have left the server, so their reservations are held, never
+	// released.
+	for _, ids := range [][]int64{fencedIDs, deadIDs, requeuedIDs} {
+		if err := holdReservations(ctx, tx, ids, now); err != nil {
+			return 0, 0, err
+		}
+	}
+	// Attempts the worker itself ended (complete, fail, retry, dead-letter)
+	// without a cost report: hold their reservations once the grace has passed.
+	if err := holdEndedReservations(ctx, tx, now); err != nil {
+		return 0, 0, err
+	}
 	var routed bool
 	for _, id := range deadIDs {
 		wrote, err := s.routeJobEventTx(ctx, tx, id, RouteWorkerFailure)
@@ -1076,6 +1112,7 @@ func purgeAgentJobs(ctx context.Context, ex execer, userID int64) error {
 		// write whose only purpose is acquiring those locks.
 		`UPDATE agent_jobs SET updated_at = updated_at WHERE user_id = $1`,
 		`DELETE FROM agent_job_attempts WHERE job_id IN (SELECT id FROM agent_jobs WHERE user_id = $1)`,
+		`DELETE FROM agent_usage WHERE user_id = $1`,
 		`DELETE FROM agent_jobs WHERE user_id = $1`,
 	}
 	for _, q := range stmts {

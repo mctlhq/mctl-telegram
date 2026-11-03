@@ -131,6 +131,9 @@ func (s *Server) WithJobTokenSigner(i *localjwt.Issuer) *Server {
 type ManagedClaimConfig struct {
 	// MaxInflightPerAccount caps processing jobs per managed account.
 	MaxInflightPerAccount int
+	// MaxJobCostUSD is the per-job spend cap reserved against the account's
+	// budget at claim time, handed to the worker as max_job_cost_usd.
+	MaxJobCostUSD float64
 	// Revocations is consulted to skip accounts under a blanket revocation.
 	Revocations *localjwt.RevocationCache
 }

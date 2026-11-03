@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
 // eventsPollInterval is how often the long-poll loop re-checks the queue
@@ -40,6 +42,10 @@ type jobEnvelope struct {
 	// JobToken is a short-lived credential (aud "agent-job") bound to this
 	// job, attempt and conversation. Omitted when no signer is configured.
 	JobToken string `json:"job_token,omitempty"`
+	// MaxJobCostUSD is the server's per-job spend cap for a managed job: the
+	// amount reserved against the account's budget. The worker's own model
+	// budget must not exceed it. Omitted for the account runtime.
+	MaxJobCostUSD float64 `json:"max_job_cost_usd,omitempty"`
 	// TurnID and SourceEventIDs are set when the job is a coalesced turn:
 	// every event of the turn in arrival order, head first. EventID stays the
 	// head's event so older workers keep working. An edit job that carries
@@ -630,6 +636,7 @@ func (s *Server) poolClaimOne(r *http.Request, id *auth.Identity, c db.ManagedCl
 		Attempt:         j.Attempts,
 		Deadline:        j.ClaimedAt.Add(s.jobVisibility).UTC().Format(time.RFC3339),
 		JobToken:        tok,
+		MaxJobCostUSD:   s.managed.MaxJobCostUSD,
 		TurnID:          j.TurnID,
 		SourceEventIDs:  j.SourceEventIDs,
 		Instructions:    instructions,
@@ -829,10 +836,22 @@ func (s *Server) handleJobComplete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"completed": true})
 }
 
+// reportJobCostRequest is the body of POST /jobs/{id}/cost. It carries only
+// what the worker observed. The user, job, attempt (from the job token) and
+// runtime (from the job row) are never read from it: decodeStrict rejects a
+// body that names user_id, runtime or job_id.
 type reportJobCostRequest struct {
-	Attempt int     `json:"attempt"`
-	CostUSD float64 `json:"cost_usd"`
+	// Attempt is the legacy claim identity; optional with a job token.
+	Attempt      int     `json:"attempt"`
+	CostUSD      float64 `json:"cost_usd"`
+	Model        string  `json:"model"`
+	Runner       string  `json:"runner"`
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
 }
+
+// usageLabelRE bounds the runner and model strings a worker may report.
+var usageLabelRE = regexp.MustCompile(`^[A-Za-z0-9._:/-]{0,128}$`)
 
 // handleReportJobCost is POST /jobs/{id}/cost — a worker-only, out-of-band
 // report of the Claude spend observed for one claimed attempt. Modelled on
@@ -860,10 +879,14 @@ func (s *Server) handleReportJobCost(w http.ResponseWriter, r *http.Request) {
 	if !s.enforceBinding(w, r, id, "report_agent_job_cost", 0, jobID, req.Attempt) {
 		return
 	}
-	// RecordAgentJobCost fences on attempts = $5 with no status predicate, so
-	// attempt 0 would match a never-claimed pending job. ClaimAgentJobs always
-	// hands out attempts >= 1, so no legitimate caller ever sends 0.
-	if req.Attempt <= 0 {
+	// With a job token the attempt is the token's. An account token must name
+	// it: the cost write fences on attempts, and attempt 0 would match a
+	// never-claimed pending job (ClaimAgentJobs always hands out >= 1).
+	attempt := req.Attempt
+	if jobBound(id) {
+		attempt = id.JobAttempt
+	}
+	if attempt <= 0 {
 		writeJSONError(w, http.StatusBadRequest, "attempt must be positive")
 		return
 	}
@@ -871,8 +894,17 @@ func (s *Server) handleReportJobCost(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "cost_usd must not be negative")
 		return
 	}
+	if req.InputTokens < 0 || req.OutputTokens < 0 {
+		writeJSONError(w, http.StatusBadRequest, "token counts must not be negative")
+		return
+	}
+	if !usageLabelRE.MatchString(req.Runner) || !usageLabelRE.MatchString(req.Model) {
+		writeJSONError(w, http.StatusBadRequest, "invalid runner or model")
+		return
+	}
 	ctx := r.Context()
-	if _, err := s.Store.GetAgentJob(ctx, id.UserID, jobID); err != nil {
+	job, err := s.Store.GetAgentJob(ctx, id.UserID, jobID)
+	if err != nil {
 		if errors.Is(err, db.ErrAgentJobNotFound) {
 			writeJSONError(w, http.StatusNotFound, "job not found")
 			return
@@ -881,7 +913,22 @@ func (s *Server) handleReportJobCost(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "lookup failed")
 		return
 	}
-	if err := s.Store.RecordAgentJobCost(ctx, id.UserID, jobID, req.Attempt, req.CostUSD); err != nil {
+	outcome, err := s.Store.RecordAgentJobUsage(ctx, id.UserID, jobID, attempt, db.Usage{
+		CostUSD: req.CostUSD, Model: req.Model, Runner: req.Runner,
+		InputTokens: req.InputTokens, OutputTokens: req.OutputTokens,
+		JobScoped: jobBound(id),
+	})
+	if err != nil {
+		if errors.Is(err, db.ErrUsageCredential) {
+			s.audit(ctx, id.UserID, "report_agent_job_cost", "denied", "managed job needs its job token")
+			writeJSONError(w, http.StatusForbidden, "managed job cost must be reported with the job token")
+			return
+		}
+		if errors.Is(err, db.ErrUsageConflict) {
+			s.audit(ctx, id.UserID, "report_agent_job_cost", "refused", "usage_conflict")
+			writeJSON(w, http.StatusConflict, map[string]any{"error": "usage_conflict"})
+			return
+		}
 		if errors.Is(err, db.ErrAgentJobNotFound) {
 			// Same "too late" shape as handleJobComplete's own CAS loss: the
 			// claim was requeued and re-claimed under a newer attempt since
@@ -893,6 +940,24 @@ func (s *Server) handleReportJobCost(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "record cost failed")
 		return
 	}
+	if outcome == db.UsageUnchanged {
+		writeJSON(w, http.StatusOK, map[string]any{"recorded": true, "unchanged": true})
+		return
+	}
+	s.countUsage(req, job.Runtime == db.RuntimeManaged)
 	s.audit(ctx, id.UserID, "report_agent_job_cost", "ok", "")
 	writeJSON(w, http.StatusOK, map[string]any{"recorded": true})
+}
+
+// countUsage adds a first settle to the usage metrics. Runner is clamped to a
+// fixed set and model to a bounded set (Registry.UsageModel) that only
+// managed-runtime jobs can add to, so no worker can grow the label space.
+func (s *Server) countUsage(req reportJobCostRequest, managed bool) {
+	if s.m == nil {
+		return
+	}
+	model := s.m.UsageModel(req.Model, managed)
+	s.m.AgentUsageCostUSDTotal.WithLabelValues(metrics.UsageRunner(req.Runner), model).Add(req.CostUSD)
+	s.m.AgentUsageTokensTotal.WithLabelValues("input", model).Add(float64(req.InputTokens))
+	s.m.AgentUsageTokensTotal.WithLabelValues("output", model).Add(float64(req.OutputTokens))
 }
