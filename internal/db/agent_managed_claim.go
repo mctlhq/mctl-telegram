@@ -30,17 +30,23 @@ func (s *Store) CountManagedAccountsWithPendingJobs(ctx context.Context) (int, e
 }
 
 // ListManagedClaimCandidates lists managed accounts the pool may claim for:
-// runtime managed, current managed consent, at least one due pending job, a
-// non-zero Telegram login id, and fewer than maxInflight jobs processing.
-// Accounts are ordered by their oldest due job first. Read-only and
-// lock-free: the claim itself (SKIP LOCKED plus the runtime predicate) stays
-// the only authority, so a stale candidate only costs an empty claim.
-func (s *Store) ListManagedClaimCandidates(ctx context.Context, now time.Time, maxInflight, limit int) ([]ManagedClaimCandidate, error) {
+// runtime managed, current managed consent, at least one due pending job the
+// claim could actually take (the claim's per-conversation predicate: no
+// earlier job of the conversation pending or processing), a non-zero
+// Telegram login id, and fewer than maxInflight jobs processing. Accounts are
+// ordered by their oldest claimable job first; offset and limit page through
+// that order. Read-only and lock-free: the claim itself
+// (Store.ClaimManagedAgentJobs) stays the only authority, so a stale
+// candidate only costs an empty claim.
+func (s *Store) ListManagedClaimCandidates(ctx context.Context, now time.Time, maxInflight, offset, limit int) ([]ManagedClaimCandidate, error) {
 	if maxInflight < 1 {
 		maxInflight = 1
 	}
 	if limit < 1 {
 		limit = 1
+	}
+	if offset < 0 {
+		offset = 0
 	}
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT ap.user_id, u.telegram_login_id
@@ -52,11 +58,16 @@ func (s *Store) ListManagedClaimCandidates(ctx context.Context, now time.Time, m
 		    AND u.telegram_login_id IS NOT NULL AND u.telegram_login_id <> 0
 		    AND (SELECT COUNT(*) FROM agent_jobs p
 		          WHERE p.user_id = ap.user_id AND p.status = $5) < $6
+		    AND NOT EXISTS (
+		        SELECT 1 FROM agent_jobs b
+		         WHERE b.conversation_id = j.conversation_id
+		           AND (b.status = $5 OR (b.status = $1 AND b.id < j.id))
+		    )
 		    -- budget filter (budget_paused_until, slice 4, #1092) goes here
 		  GROUP BY ap.user_id, u.telegram_login_id
 		  ORDER BY MIN(j.next_run_at), ap.user_id
-		  LIMIT $7`,
-		JobPending, now.UTC(), RuntimeManaged, ManagedConsentCurrent, JobProcessing, maxInflight, limit)
+		  LIMIT $7 OFFSET $8`,
+		JobPending, now.UTC(), RuntimeManaged, ManagedConsentCurrent, JobProcessing, maxInflight, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list managed claim candidates: %w", err)
 	}

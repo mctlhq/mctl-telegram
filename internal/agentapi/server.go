@@ -84,6 +84,9 @@ type Server struct {
 	// managed enables the pool claim branch (MANAGED_RUNTIME_ENABLED); nil
 	// leaves a pool identity with nothing to claim.
 	managed *ManagedClaimConfig
+	// poolCandidatePage is how many candidate accounts one page of a pool
+	// claim reads (defaultPoolCandidatePage; lowered by tests).
+	poolCandidatePage int
 
 	longPollTimeout time.Duration
 	jobVisibility   time.Duration
@@ -100,11 +103,12 @@ func New(store *db.Store, q *queue.Queue, jobVisibility time.Duration, m *metric
 		jobVisibility = 5 * time.Minute
 	}
 	return &Server{
-		Store:           store,
-		Queue:           q,
-		longPollTimeout: defaultLongPollTimeout,
-		jobVisibility:   jobVisibility,
-		m:               m,
+		Store:             store,
+		Queue:             q,
+		longPollTimeout:   defaultLongPollTimeout,
+		poolCandidatePage: defaultPoolCandidatePage,
+		jobVisibility:     jobVisibility,
+		m:                 m,
 	}
 }
 

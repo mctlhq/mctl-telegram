@@ -965,6 +965,24 @@ func (s *Store) RequeueStaleAgentJobs(ctx context.Context, visibility time.Durat
 	// moved, then close those jobs' attempt rows. Touching attempts first
 	// would take the two tables' locks in the opposite order and deadlock on
 	// Postgres against a still-alive worker finishing the same job.
+	//
+	// A stale job the completion fence refused (claimed under a runtime the
+	// account no longer runs, ADR 0008) is requeued first, before the
+	// dead-letter rule can see it: the switch cut its attempt short, so it
+	// must not be the attempt that exhausts the job. It gets one more attempt
+	// when it was on its last one; attempt numbers stay monotonic, so the
+	// claim identity is never reused.
+	fencedIDs, err := requeueTransition(ctx, tx,
+		`UPDATE agent_jobs
+		    SET status = $1, next_run_at = $2, last_error = $3, updated_at = $2,
+		        max_attempts = CASE WHEN attempts >= max_attempts THEN attempts + 1 ELSE max_attempts END
+		  WHERE status = $4 AND claimed_at < $5 AND NOT `+completeRuntimeFence+`
+		 RETURNING id`,
+		JobPending, now, "runtime switched, requeued for the new runtime", JobProcessing, cutoff,
+	)
+	if err != nil {
+		return 0, 0, fmt.Errorf("requeue runtime-fenced jobs: %w", err)
+	}
 	deadIDs, err := requeueTransition(ctx, tx,
 		`UPDATE agent_jobs
 		    SET status = $1, last_error = $2, updated_at = $3
@@ -990,15 +1008,24 @@ func (s *Store) RequeueStaleAgentJobs(ctx context.Context, visibility time.Durat
 	// Otherwise the timed-out attempt stays open forever: the next claim opens
 	// another running attempt and finishOpenAttempt only ever closes the
 	// newest one, corrupting attempt history and any open-attempt monitoring.
-	for _, id := range append(append([]int64{}, deadIDs...), requeuedIDs...) {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE agent_job_attempts
-			    SET finished_at = $1, status = $2, error = $3
-			  WHERE job_id = $4 AND finished_at IS NULL`,
-			now, JobFailed, "visibility timeout", id,
-		); err != nil {
-			return 0, 0, fmt.Errorf("close stale attempts: %w", err)
+	closeAttempts := func(ids []int64, reason string) error {
+		for _, id := range ids {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE agent_job_attempts
+				    SET finished_at = $1, status = $2, error = $3
+				  WHERE job_id = $4 AND finished_at IS NULL`,
+				now, JobFailed, reason, id,
+			); err != nil {
+				return fmt.Errorf("close stale attempts: %w", err)
+			}
 		}
+		return nil
+	}
+	if err := closeAttempts(append(append([]int64{}, deadIDs...), requeuedIDs...), "visibility timeout"); err != nil {
+		return 0, 0, err
+	}
+	if err := closeAttempts(fencedIDs, "runtime switched"); err != nil {
+		return 0, 0, err
 	}
 	var routed bool
 	for _, id := range deadIDs {
@@ -1012,7 +1039,7 @@ func (s *Store) RequeueStaleAgentJobs(ctx context.Context, visibility time.Durat
 		return 0, 0, fmt.Errorf("commit requeue tx: %w", err)
 	}
 	s.notifyOutbox(routed)
-	return int64(len(requeuedIDs)), int64(len(deadIDs)), nil
+	return int64(len(requeuedIDs) + len(fencedIDs)), int64(len(deadIDs)), nil
 }
 
 // requeueTransition runs one stale-claim UPDATE ... RETURNING id and collects

@@ -143,15 +143,22 @@ a confirmed operation:
 - The pool branch of `handleClaimJobs`:
   1. refuses with 503 when no job-token signer is configured (a pool claim
      without job tokens would leave the worker with no credential);
-  2. lists candidate accounts: `runtime = 'managed'`, a due pending job, a
-     Telegram login id (so a job token can be minted), fewer than
-     `MANAGED_MAX_INFLIGHT_PER_ACCOUNT` jobs processing, budget available
-     (section 5), oldest waiting first;
+  2. lists candidate accounts: `runtime = 'managed'`, a due pending job the
+     claim could take (the claim's per-conversation rule, so an account
+     blocked head-of-line is not listed), a Telegram login id (so a job token
+     can be minted), fewer than `MANAGED_MAX_INFLIGHT_PER_ACCOUNT` jobs
+     processing, budget available (section 5), oldest waiting first;
   3. for each candidate renders the instructions **before** claiming (as
      today; an account whose assistant is disabled or unknown is skipped and
      its jobs stay pending), then claims one job for that account, round
      robin, until the requested limit is reached. One job per account per
-     response: concurrency across accounts, not within one;
+     response: concurrency across accounts, not within one. The candidate
+     order is walked page by page until `limit` jobs are claimed or it is
+     exhausted, not read as one fixed window: a skipped account (blanket
+     revocation, an assistant that cannot render) keeps its place at the
+     front, and a fixed window would let a few of them starve every other
+     managed account. A request that skipped candidates and served nobody
+     logs one warning with the skip reasons;
   4. mints the job token from the **job's** user (`Store.TelegramIDByUserID`),
      not from the parent, keeping the pool's `jti` and `orig_iat`;
   5. audits each claim under the job's user id with `pool:<name>` as the
@@ -164,8 +171,11 @@ a confirmed operation:
   (`completeRuntimeFence`) refuses to close an attempt whose
   `agent_jobs.runtime` differs from the profile's, so the old worker gets
   409 and the job stays processing. `RequeueStaleAgentJobs` returns it to
-  pending after `AGENT_JOB_VISIBILITY` and the new runtime claims it. The old
-  job token stays valid until its deadline, but nothing it does can act. No double send is possible. `/mctl assistant` and the manage
+  pending after `AGENT_JOB_VISIBILITY` and the new runtime claims it. The
+  sweep requeues such a fenced job before its dead-letter rule runs and gives
+  it one more attempt if it was on its last, so a switch never dead-letters
+  the job. The old job token stays valid until its deadline, but nothing it
+  does can act. No double send is possible. `/mctl assistant` and the manage
   page show the runtime, so an own worker that suddenly sees an empty queue
   is diagnosable.
 

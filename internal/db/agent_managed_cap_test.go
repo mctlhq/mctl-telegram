@@ -106,7 +106,7 @@ func TestClaimManagedAgentJobs_CapIsAuthoritativeOverStaleHint(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Both claimers read the hint while the account is empty.
-	cands, err := s.ListManagedClaimCandidates(ctx, time.Now(), 1, 10)
+	cands, err := s.ListManagedClaimCandidates(ctx, time.Now(), 1, 0, 10)
 	if err != nil || len(cands) != 1 || cands[0].UserID != uid {
 		t.Fatalf("candidates = %+v err %v", cands, err)
 	}
@@ -408,5 +408,89 @@ func TestCountManagedAccountsWithPendingJobs(t *testing.T) {
 	}
 	if n, err := s.CountManagedAccountsWithPendingJobs(ctx); err != nil || n != 2 {
 		t.Fatalf("count = %d err %v; want 2", n, err)
+	}
+}
+
+// A runtime-fenced job on its last attempt is requeued for the new runtime
+// with one more attempt, not dead-lettered; a stale job that was not fenced
+// still dead-letters on its last attempt.
+// Mutation: drop the fenced-requeue transition from RequeueStaleAgentJobs.
+func TestRequeueStale_RuntimeFencedLastAttemptIsReclaimed(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	fenced := seedManagedAccount(t, s, "fenced", RuntimeOwn, 1)
+	plain := seedManagedAccount(t, s, "plain", RuntimeOwn, 1)
+	var jobs []AgentJob
+	for _, uid := range []int64{fenced, plain} {
+		if _, err := s.DB.ExecContext(ctx, `UPDATE agent_jobs SET max_attempts = 1 WHERE user_id = $1`, uid); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.ClaimAgentJobs(ctx, "own-worker", uid, RuntimeOwn, 1)
+		if err != nil || len(got) != 1 || got[0].Attempts != 1 {
+			t.Fatalf("claim: %+v err %v", got, err)
+		}
+		jobs = append(jobs, got[0])
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE agent_profiles SET runtime = $1 WHERE user_id = $2`, RuntimeManaged, fenced); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE agent_jobs SET claimed_at = $1`, time.Now().UTC().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	requeued, dead, err := s.RequeueStaleAgentJobs(ctx, time.Minute)
+	if err != nil || requeued != 1 || dead != 1 {
+		t.Fatalf("sweep: requeued=%d dead=%d err %v; want 1 and 1", requeued, dead, err)
+	}
+	f, _ := s.GetAgentJob(ctx, fenced, jobs[0].ID)
+	if f.Status != JobPending || f.Attempts != 1 || f.MaxAttempts != 2 {
+		t.Fatalf("fenced job %+v; want pending, attempts 1, max 2", f)
+	}
+	if p, _ := s.GetAgentJob(ctx, plain, jobs[1].ID); p.Status != JobDeadLetter {
+		t.Fatalf("unfenced last-attempt job status %s, want dead_letter", p.Status)
+	}
+	var open int
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM agent_job_attempts WHERE job_id = $1 AND finished_at IS NULL`, f.ID).Scan(&open); err != nil || open != 0 {
+		t.Fatalf("fenced job open attempt rows = %d err %v", open, err)
+	}
+	re, err := s.ClaimManagedAgentJobs(ctx, "pool", fenced, 1, 1)
+	if err != nil || len(re) != 1 || re[0].Attempts != 2 || re[0].Runtime != RuntimeManaged {
+		t.Fatalf("new runtime reclaim: %+v err %v; want attempt 2 as managed", re, err)
+	}
+}
+
+// Candidates mirror the claim's per-conversation rule: an account whose only
+// due job waits behind a processing job of the same conversation is not a
+// candidate (it would only take a window slot); offset pages the order.
+// Mutations: drop the NOT EXISTS predicate; ignore the offset.
+func TestListManagedClaimCandidates_HeadOfLineAndPaging(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	mk := func(login string, tg int64, n int) int64 {
+		uid := seedManagedAccount(t, s, login, RuntimeManaged, n)
+		if _, err := s.DB.ExecContext(ctx, `UPDATE users SET telegram_login_id = $1 WHERE id = $2`, tg, uid); err != nil {
+			t.Fatal(err)
+		}
+		return uid
+	}
+	blocked := mk("blocked", 9851, 1)
+	a := mk("a", 9852, 1)
+	b := mk("b", 9853, 1)
+	// blocked's only due job waits behind a processing job in its conversation
+	// (cap 5, so the in-flight filter is not what excludes it).
+	var conv int64
+	if err := s.DB.QueryRow(`SELECT conversation_id FROM agent_jobs WHERE user_id = $1`, blocked).Scan(&conv); err != nil {
+		t.Fatal(err)
+	}
+	busy := seedJob(t, s, blocked, "evt:v1:blocked:busy:1")
+	if _, err := s.DB.ExecContext(ctx, `UPDATE agent_jobs SET conversation_id = $1, status = $2 WHERE id = $3`, conv, JobProcessing, busy); err != nil {
+		t.Fatal(err)
+	}
+	all, err := s.ListManagedClaimCandidates(ctx, time.Now(), 5, 0, 10)
+	if err != nil || len(all) != 2 || all[0].UserID != a || all[1].UserID != b {
+		t.Fatalf("candidates = %+v err %v; want a, b (blocked excluded)", all, err)
+	}
+	second, err := s.ListManagedClaimCandidates(ctx, time.Now(), 5, 1, 1)
+	if err != nil || len(second) != 1 || second[0].UserID != b {
+		t.Fatalf("page 2 = %+v err %v; want b", second, err)
 	}
 }

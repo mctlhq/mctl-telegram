@@ -99,7 +99,7 @@ func TestListManagedClaimCandidates(t *testing.T) {
 	for i, uid := range []int64{a, b, noTG, own} {
 		seedJob(t, s, uid, "evt:v1:9:"+itoa(int64(i))+":1")
 	}
-	cands, err := s.ListManagedClaimCandidates(ctx, time.Now(), 1, 10)
+	cands, err := s.ListManagedClaimCandidates(ctx, time.Now(), 1, 0, 10)
 	if err != nil || len(cands) != 2 || cands[0].UserID != a || cands[1].UserID != b {
 		t.Fatalf("candidates = %+v err %v; want a then b", cands, err)
 	}
@@ -108,7 +108,7 @@ func TestListManagedClaimCandidates(t *testing.T) {
 		t.Fatalf("claim a: %v", err)
 	}
 	seedJob(t, s, a, "evt:v1:9:9:2")
-	cands, _ = s.ListManagedClaimCandidates(ctx, time.Now(), 1, 10)
+	cands, _ = s.ListManagedClaimCandidates(ctx, time.Now(), 1, 0, 10)
 	if len(cands) != 1 || cands[0].UserID != b {
 		t.Fatalf("candidates after cap = %+v", cands)
 	}
@@ -116,7 +116,7 @@ func TestListManagedClaimCandidates(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `UPDATE agent_profiles SET managed_consent_version = 'old' WHERE user_id = $1`, b); err != nil {
 		t.Fatal(err)
 	}
-	if cands, _ = s.ListManagedClaimCandidates(ctx, time.Now(), 1, 10); len(cands) != 0 {
+	if cands, _ = s.ListManagedClaimCandidates(ctx, time.Now(), 1, 0, 10); len(cands) != 0 {
 		t.Fatalf("stale consent must not be a candidate: %+v", cands)
 	}
 }

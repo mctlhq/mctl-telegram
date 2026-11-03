@@ -1,12 +1,16 @@
 package agentapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -260,5 +264,82 @@ func TestHandleClaimJobs_Pool_InflightCapConcurrent(t *testing.T) {
 	}
 	if total != 1 || processing != 1 {
 		t.Fatalf("6 concurrent pool claims handed out %d jobs, %d processing; cap is 1", total, processing)
+	}
+}
+
+// seedBrokenManaged creates n managed accounts whose assistant cannot render
+// (a fork while forks are disabled), so the pool must skip every one of them.
+func (h *testHarness) seedBrokenManaged(firstTG int64, n int) []int64 {
+	h.t.Helper()
+	var uids []int64
+	for i := 0; i < n; i++ {
+		uid := h.seedManaged(firstTG+int64(i), db.RuntimeManaged, 1)
+		if _, err := h.store.DB.Exec(`UPDATE agent_profiles SET assistant_name = 'hr-recruiter~deadbeef~careful', assistant_version = '0.1.0' WHERE user_id = $1`, uid); err != nil {
+			h.t.Fatal(err)
+		}
+		uids = append(uids, uid)
+	}
+	return uids
+}
+
+func (h *testHarness) seedHealthyManaged(tg int64) int64 {
+	h.t.Helper()
+	uid := h.seedManaged(tg, db.RuntimeManaged, 1)
+	if _, err := h.store.DB.Exec(`UPDATE agent_profiles SET assistant_name = 'hr-recruiter', assistant_version = '0.1.0' WHERE user_id = $1`, uid); err != nil {
+		h.t.Fatal(err)
+	}
+	return uid
+}
+
+// Accounts the pool must skip keep the front of the candidate order (their
+// oldest job never leaves). limit+4 of them ahead of a healthy account must
+// not starve it, with the default page and when the walk has to cross pages.
+// Mutation: read one fixed window of limit*4 candidates instead of paging.
+func TestHandleClaimJobs_Pool_SkippedAccountsDoNotStarveOthers(t *testing.T) {
+	for _, page := range []int{defaultPoolCandidatePage, 2} {
+		t.Run(fmt.Sprintf("page=%d", page), func(t *testing.T) { testSkippedAccountsDoNotStarve(t, page) })
+	}
+}
+
+func testSkippedAccountsDoNotStarve(t *testing.T, page int) {
+	{
+		h := poolHarness(t)
+		h.srv.WithCatalog(gateCatalog(t))
+		h.srv.poolCandidatePage = page
+		broken := h.seedBrokenManaged(9070, 5) // limit+4 for limit=1, all older
+		healthy := h.seedHealthyManaged(9090)
+		_, jobs := h.poolClaim("1")
+		if len(jobs) != 1 {
+			t.Fatalf("page %d: claimed %d jobs, want the healthy account's one", page, len(jobs))
+		}
+		if got, err := h.store.GetAgentJob(context.Background(), healthy, jobs[0].JobID); err != nil || got.UserID != healthy {
+			t.Fatalf("page %d: served %+v err %v, want the healthy account", page, got, err)
+		}
+		for _, uid := range broken {
+			var st string
+			if err := h.store.DB.QueryRow(`SELECT status FROM agent_jobs WHERE user_id = $1`, uid).Scan(&st); err != nil || st != db.JobPending {
+				t.Fatalf("page %d: skipped account %d job %q err %v, want pending", page, uid, st, err)
+			}
+		}
+	}
+}
+
+// A request that skipped candidates and served nobody says so once, with the
+// reasons, so a starved pool is visible in the logs.
+// Mutation: drop the warning in handlePoolClaim's finish.
+func TestHandleClaimJobs_Pool_LogsWhenAllCandidatesSkipped(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(prev)
+	h := poolHarness(t)
+	h.srv.WithCatalog(gateCatalog(t))
+	h.seedBrokenManaged(9095, 2)
+	if _, jobs := h.poolClaim("1"); len(jobs) != 0 {
+		t.Fatalf("claimed %d jobs from unservable accounts", len(jobs))
+	}
+	out := logs.String()
+	if strings.Count(out, "candidate accounts were skipped and none was served") != 1 || !strings.Contains(out, "instructions_unavailable") {
+		t.Fatalf("want exactly one skip warning naming the reason, got %q", out)
 	}
 }
