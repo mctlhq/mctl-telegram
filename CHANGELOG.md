@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.123.0](https://github.com/mctlhq/mctl-telegram/compare/0.122.0...0.123.0) (2026-11-03)
+
+
+### Features
+
+* **agents:** issue-1090-feat-agentapi-pool-credential-and-manage ([5f5fe9b](https://github.com/mctlhq/mctl-telegram/commit/5f5fe9be6168553cd1a3a2e51df1264f6c9a79a5))
+* **agents:** issue-1090-feat-agentapi-pool-credential-and-manage ([42cd1df](https://github.com/mctlhq/mctl-telegram/commit/42cd1dfcaabcfec77a62246c0297ea6315770dc0))
+
+
+### Bug Fixes
+
+* **agents:** make the managed claim cap and runtime fence authoritative ([99f3853](https://github.com/mctlhq/mctl-telegram/commit/99f38530f55036f3f652befc51df295432e4860e))
+* **agents:** one managed job per account per response across pages ([1f8722a](https://github.com/mctlhq/mctl-telegram/commit/1f8722ae8ece8042e1d42e500b1092569d405f8b))
+* **agents:** page managed claim candidates with a keyset cursor ([2aab313](https://github.com/mctlhq/mctl-telegram/commit/2aab313f3efddac6b11d00d4daadd3118fd1fdf0))
+* **agents:** stop skipped accounts starving the managed pool ([d1a9e03](https://github.com/mctlhq/mctl-telegram/commit/d1a9e03078ca9cbd569980828424c44a7b40ceae))
+
 ## [0.122.0](https://github.com/mctlhq/mctl-telegram/compare/0.121.1...0.122.0) (2026-11-02)
 
 
