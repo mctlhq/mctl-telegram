@@ -50,6 +50,12 @@ func splitSteps(src string) []step {
 		if strings.HasPrefix(l, "      - ") {
 			flush()
 		}
+		// A non-empty line indented less than a step (the next job, or a
+		// comment above it) ends the current step instead of joining it.
+		if strings.TrimSpace(l) != "" && !strings.HasPrefix(l, "      ") {
+			flush()
+			continue
+		}
 		cur = append(cur, l)
 	}
 	flush()
@@ -75,13 +81,13 @@ func checkGuardedStep(s step, component string) []string {
 	if !strings.Contains(s.text, "VALUES="+want) {
 		bad = append(bad, component+": guard path does not match component")
 	}
-	zero := strings.Index(s.text, "0)")
+	zero := armIndex(s.text, "0")
 	run := strings.Index(s.text, "gh workflow run release-deploy.yaml")
-	three := strings.Index(s.text, "3)")
+	three := armIndex(s.text, "3")
 	if zero < 0 || run < zero || (three >= 0 && run > three) {
 		bad = append(bad, component+": dispatch is not under the 0) arm")
 	}
-	star := strings.Index(s.text, "*)")
+	star := armIndex(s.text, `\*`)
 	if star < 0 || !strings.Contains(s.text[star:], "exit 1") {
 		bad = append(bad, component+": no failing *) arm")
 	}
@@ -89,6 +95,30 @@ func checkGuardedStep(s step, component string) []string {
 		bad = append(bad, component+": no 3) skip notice")
 	}
 	return bad
+}
+
+// armIndex returns the offset of the case arm "<label>)" written on a line of
+// its own, or -1. Matching the whole line keeps a "0)" inside a comment or an
+// expression from passing for the arm.
+func armIndex(text, label string) int {
+	loc := regexp.MustCompile(`(?m)^[ \t]+` + label + `\)[ \t]*$`).FindStringIndex(text)
+	if loc == nil {
+		return -1
+	}
+	return loc[0]
+}
+
+// jobBlock returns the text of one top-level job of a workflow, or "".
+func jobBlock(src, job string) string {
+	i := strings.Index(src, "\n  "+job+":\n")
+	if i < 0 {
+		return ""
+	}
+	rest := src[i+1:]
+	if j := regexp.MustCompile(`(?m)^  [A-Za-z0-9_-]+:\n`).FindAllStringIndex(rest, 2); len(j) == 2 {
+		rest = rest[:j[1][0]]
+	}
+	return rest
 }
 
 func checkInputs(s step, want map[string]string) []string {
@@ -144,14 +174,25 @@ func checkDeployWorkflows(preview, release, build string) []string {
 			"team_name":       "labs",
 		})...)
 		bad = append(bad, checkGuardedStep(rs, "agent-worker-managed")...)
-		if !strings.Contains(rs.text, "if: ${{ steps.release.outputs.release_created == 'true' }}") {
-			bad = append(bad, "release: dispatch lacks the release_created guard")
+		// Its own job: a failed guard must fail visibly (no continue-on-error)
+		// without skipping the Local Bridge steps of the release-please job.
+		job := jobBlock(release, "agent-worker-release")
+		if job == "" || !strings.Contains(job, rs.text) {
+			bad = append(bad, "release: dispatch must live in its own agent-worker-release job")
+		} else {
+			if !strings.Contains(job, "    needs: release-please\n") ||
+				!strings.Contains(job, "    if: ${{ needs.release-please.outputs.release_created == 'true' }}\n") {
+				bad = append(bad, "release: agent-worker-release lacks needs/release_created guard")
+			}
+			if !strings.Contains(job, "ref: ${{ needs.release-please.outputs.tag_name }}") {
+				bad = append(bad, "release: agent-worker-release must check out the released tag")
+			}
 		}
-		at := strings.Index(release, rs.text)
-		co := strings.Index(release, "name: Check out the released tag")
-		gb := strings.Index(release, "go build -trimpath")
-		if at < 0 || co < 0 || gb < 0 || !(co < at && at < gb) {
-			bad = append(bad, "release: dispatch must follow the tag checkout and precede go build")
+		if strings.Contains(jobBlock(release, "release-please"), rs.text) {
+			bad = append(bad, "release: dispatch must not run inside the release-please job")
+		}
+		if strings.Contains(job, "continue-on-error") {
+			bad = append(bad, "release: a failed guard must fail the job, not continue")
 		}
 	}
 	if s, ok := r["mctl-telegram"]; !ok {
@@ -214,12 +255,22 @@ func TestDeployWorkflowsGuardCatchesMutations(t *testing.T) {
 			return p, strings.Replace(r, "                -f dockerfile_path=Dockerfile.agent-worker \\\n", "", 1), b
 		}},
 		{"drop release_created guard", func(p, r, b string) (string, string, string) {
-			return p, strings.Replace(r, "name: Dispatch agent-worker release-deploy\n        if: ${{ steps.release.outputs.release_created == 'true' }}", "name: Dispatch agent-worker release-deploy", 1), b
+			return p, strings.Replace(r, "    if: ${{ needs.release-please.outputs.release_created == 'true' }}\n", "", 1), b
 		}},
-		{"move release dispatch after go build", func(p, r, b string) (string, string, string) {
+		{"move release dispatch back into the release-please job", func(p, r, b string) (string, string, string) {
 			moved := strings.Replace(r, rs, "", 1)
-			i := strings.Index(moved, "      - name: Attach the binaries")
+			i := strings.Index(moved, "      - name: Set up Go")
 			return p, moved[:i] + rs + "\n" + moved[i:], b
+		}},
+		{"continue-on-error on the release dispatch", func(p, r, b string) (string, string, string) {
+			return p, strings.Replace(r, "      - name: Dispatch agent-worker release-deploy\n", "      - name: Dispatch agent-worker release-deploy\n        continue-on-error: true\n", 1), b
+		}},
+		{"release job checks out main instead of the tag", func(p, r, b string) (string, string, string) {
+			return p, strings.Replace(r, "ref: ${{ needs.release-please.outputs.tag_name }}", "ref: main", 1), b
+		}},
+		{"zero arm only in a comment", func(p, r, b string) (string, string, string) {
+			mutated := strings.Replace(rs, "            0)\n", "            # 0) handled below\n            9)\n", 1)
+			return p, strings.Replace(r, rs, mutated, 1), b
 		}},
 		{"push true in build.yml", func(p, r, b string) (string, string, string) {
 			return p, r, strings.Replace(b, "push: false", "push: true", 1)
@@ -259,7 +310,7 @@ func runGuardScript(t *testing.T, apiURL, token, path string) int {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("bash", script, path)
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GITHUB_API_URL=" + apiURL}
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GITHUB_API_URL=" + apiURL, "GITOPS_VALUES_RETRIES=0"}
 	if token != "" {
 		cmd.Env = append(cmd.Env, "GH_TOKEN="+token)
 	}

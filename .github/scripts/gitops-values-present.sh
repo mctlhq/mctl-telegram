@@ -2,8 +2,10 @@
 # Reports whether a values file exists on mctl-gitops main.
 #
 # Usage: gitops-values-present.sh platform-gitops/services/<team>/<svc>/values.yaml
-# Env:   GH_TOKEN        token with contents:read on mctl-gitops (required)
-#        GITHUB_API_URL  API base, defaults to https://api.github.com
+# Env:   GH_TOKEN               token with contents:read on mctl-gitops (required)
+#        GITHUB_API_URL         API base, defaults to https://api.github.com
+#        GITOPS_VALUES_RETRIES  curl retries on a transient failure, default 3
+#                               (tests set 0 so the failure cases do not back off)
 #
 # Exit codes:
 #   0  HTTP 200, the file is present
@@ -26,9 +28,14 @@ if [ -z "${GH_TOKEN:-}" ]; then
   exit 1
 fi
 
+retries="${GITOPS_VALUES_RETRIES:-3}"
+case "$retries" in
+  ''|*[!0-9]*) echo "invalid GITOPS_VALUES_RETRIES: '$retries'" >&2; exit 1 ;;
+esac
+
 api="${GITHUB_API_URL:-https://api.github.com}"
 crc=0
-code="$(curl -sS --connect-timeout 10 --max-time 30 --retry 3 --retry-all-errors -o /dev/null -w '%{http_code}' \
+code="$(curl -sS --connect-timeout 10 --max-time 30 --retry "$retries" --retry-all-errors -o /dev/null -w '%{http_code}' \
   -H "Authorization: Bearer ${GH_TOKEN}" \
   -H "Accept: application/vnd.github+json" \
   "${api}/repos/mctlhq/mctl-gitops/contents/${path}?ref=main")" || crc=$?
