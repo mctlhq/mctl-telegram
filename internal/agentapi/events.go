@@ -500,6 +500,11 @@ func (s *Server) handlePoolClaim(w http.ResponseWriter, r *http.Request, id *aut
 		// their place at the front of the order, and a fixed window would let
 		// a few of them starve every other managed account.
 		var after *db.ManagedClaimCursor
+		// served makes "one job per account per response" hold for any
+		// in-flight cap: with a cap above 1 an account served on one page
+		// can sort after the cursor again (its next claimable job is due
+		// later) and would otherwise get a second job ahead of others.
+		served := map[int64]bool{}
 		for scanned := 0; len(out) < limit && scanned < maxPoolCandidateScan; scanned += page {
 			cands, err := s.Store.ListManagedClaimCandidates(ctx, s.clock(), s.managed.MaxInflightPerAccount, after, page)
 			if err != nil {
@@ -515,11 +520,15 @@ func (s *Server) handlePoolClaim(w http.ResponseWriter, r *http.Request, id *aut
 				if len(out) >= limit {
 					break
 				}
+				if served[c.UserID] {
+					continue
+				}
 				env, reason := s.poolClaimOne(r, id, c, origin)
 				if reason != "" {
 					skipped[reason]++
 					continue
 				}
+				served[c.UserID] = true
 				out = append(out, env)
 			}
 			if len(cands) < page {

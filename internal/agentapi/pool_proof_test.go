@@ -389,3 +389,46 @@ func TestPoolCredential_RefusalWithoutMetrics(t *testing.T) {
 		t.Fatalf("status = %d, want 403", rec.Code)
 	}
 }
+
+// One job per account per response holds for an in-flight cap above 1, also
+// across candidate pages. Due order: A1, X (unservable), A2, B; cap 2,
+// limit 2, a 2-account page. Page 1 serves A and skips X; A's next claimable
+// job (A2) then sorts after the cursor, so page 2 lists A again before B.
+// Without the served set A gets both jobs and B none.
+// Mutation: drop the served check in handlePoolClaim.
+func TestHandleClaimJobs_Pool_OneJobPerAccountAcrossPages(t *testing.T) {
+	h := poolHarness(t)
+	h.srv.WithCatalog(gateCatalog(t))
+	h.srv.WithManagedClaims(ManagedClaimConfig{MaxInflightPerAccount: 2})
+	h.srv.poolCandidatePage = 2
+	a := h.seedManaged(9120, db.RuntimeManaged, 2)
+	if _, err := h.store.DB.Exec(`UPDATE agent_profiles SET assistant_name = 'hr-recruiter', assistant_version = '0.1.0' WHERE user_id = $1`, a); err != nil {
+		t.Fatal(err)
+	}
+	x := h.seedBrokenManaged(9121, 1)[0]
+	b := h.seedHealthyManaged(9122)
+	base := time.Now().UTC().Add(-time.Hour)
+	set := func(uid int64, nth, secs int) {
+		if _, err := h.store.DB.Exec(`UPDATE agent_jobs SET next_run_at = $1 WHERE id = (
+			SELECT id FROM agent_jobs WHERE user_id = $2 ORDER BY id LIMIT 1 OFFSET $3)`,
+			base.Add(time.Duration(secs)*time.Second), uid, nth); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set(a, 0, 0)
+	set(x, 0, 1)
+	set(a, 1, 2)
+	set(b, 0, 3)
+	_, jobs := h.poolClaim("2")
+	per := map[int64]int{}
+	for _, j := range jobs {
+		var owner int64
+		if err := h.store.DB.QueryRow(`SELECT user_id FROM agent_jobs WHERE id = $1`, j.JobID).Scan(&owner); err != nil {
+			t.Fatal(err)
+		}
+		per[owner]++
+	}
+	if len(jobs) != 2 || per[a] != 1 || per[b] != 1 {
+		t.Fatalf("jobs per account %v (%d total); want one each for A and B", per, len(jobs))
+	}
+}
