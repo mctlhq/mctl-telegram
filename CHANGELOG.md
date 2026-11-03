@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.123.2](https://github.com/mctlhq/mctl-telegram/compare/0.123.1...0.123.2) (2026-11-03)
+
+
+### Bug Fixes
+
+* **web:** serve HEAD / as the landing page, not as MCP ([9566c02](https://github.com/mctlhq/mctl-telegram/commit/9566c0265b5b3c54b1ef402546f086bf077f0e9e))
+* **web:** serve HEAD / as the landing page, not as MCP ([0ddf54b](https://github.com/mctlhq/mctl-telegram/commit/0ddf54ba3d9ec4d8c7e7c7a5b73ef84ee64f31bf))
+
 ## [0.123.1](https://github.com/mctlhq/mctl-telegram/compare/0.123.0...0.123.1) (2026-11-03)
 
 
