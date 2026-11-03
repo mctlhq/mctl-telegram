@@ -157,7 +157,9 @@ func BrowserRedirect(next http.Handler, landingPath string) http.Handler {
 // loads are not counted.
 func RootMCP(landing, mcp http.Handler, count func(method, uaFamily string)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && !wantsEventStream(r.Header.Get("Accept")) {
+		// HEAD is the landing page too: uptime monitors probe the origin with
+		// it, and sending it to the MCP handler answered 401.
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && !wantsEventStream(r.Header.Get("Accept")) {
 			landing.ServeHTTP(w, r)
 			return
 		}

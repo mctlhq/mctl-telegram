@@ -76,3 +76,43 @@ jobs:
             -f dockerfile_path=Dockerfile.agent-worker \
             -f team_name=labs \
             -f component_name=agent-worker-preview
+
+      # Preview of the managed agent runtime (docs/adr/0008-managed-runtime.md
+      # section 6): component agent-worker-managed-preview runs the same
+      # agent-worker-preview image as the step above, so this run builds and
+      # pushes the same tag a second time in parallel. That is harmless: both
+      # components pin by tag, both build from one commit and Dockerfile, and
+      # gitops pushes are rebase-retried.
+      #
+      # Guarded: release-deploy exits 2 when the component's values file is
+      # missing, and the component only appears with mctl-gitops#2345. Absence
+      # (HTTP 404) skips with a notice; any unobservable read fails the step.
+      - name: Dispatch agent-worker-managed-preview release-deploy
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          SHORT_SHA="${SHA::7}"
+          VALUES=platform-gitops/services/labs/agent-worker-managed-preview/values.yaml
+          rc=0; .github/scripts/gitops-values-present.sh "$VALUES" || rc=$?
+          case "$rc" in
+            0)
+              gh workflow run release-deploy.yaml \
+                --repo mctlhq/mctl-gitops \
+                --ref main \
+                -f repo=mctlhq/mctl-telegram \
+                -f git_ref="$SHA" \
+                -f image_name=ghcr.io/mctlhq/agent-worker-preview \
+                -f image_tag="main-${SHORT_SHA}" \
+                -f dockerfile_path=Dockerfile.agent-worker \
+                -f team_name=labs \
+                -f component_name=agent-worker-managed-preview
+              ;;
+            3)
+              echo "::notice::$VALUES not on mctl-gitops main; skipping agent-worker-managed-preview dispatch"
+              ;;
+            *)
+              echo "::error::could not read $VALUES on mctl-gitops main (rc=$rc)"
+              exit 1
+              ;;
+          esac
