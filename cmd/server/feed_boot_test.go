@@ -80,6 +80,17 @@ func TestServerBootsWithMissingFeedDir(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	// Uptime monitors (UptimeRobot) probe with HEAD: it must not be a 405.
+	for _, p := range []string{"/", "/healthz", "/readyz"} {
+		hr, herr := http.Head(base + p)
+		if herr != nil {
+			t.Fatalf("HEAD %s: %v", p, herr)
+		}
+		_ = hr.Body.Close()
+		if hr.StatusCode != http.StatusOK {
+			t.Fatalf("HEAD %s = %d, want 200", p, hr.StatusCode)
+		}
+	}
 	resp, err := http.Get(base + "/docs/product-updates")
 	if err != nil {
 		t.Fatal(err)
