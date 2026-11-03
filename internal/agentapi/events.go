@@ -536,7 +536,9 @@ func (s *Server) poolClaimOne(r *http.Request, id *auth.Identity, c db.ManagedCl
 		return jobEnvelope{}, false
 	}
 	jobTools := tools.CanonicalNames(bindings)
-	jobs, err := s.Queue.Claim(ctx, c.UserID, db.RuntimeManaged, 1)
+	// The candidate list is a lock-free hint; ClaimManaged re-checks the
+	// in-flight cap atomically with the claim.
+	jobs, err := s.Queue.ClaimManaged(ctx, c.UserID, 1, s.managed.MaxInflightPerAccount)
 	if err != nil {
 		if ctx.Err() == nil {
 			slog.Warn("agentapi pool claim: claim failed", "user_id", c.UserID, "err", err)

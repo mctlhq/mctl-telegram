@@ -71,6 +71,17 @@ func (q *Queue) Claim(ctx context.Context, userID int64, runtime string, limit i
 	return jobs, err
 }
 
+// ClaimManaged is Claim for the managed-runtime pool: one account's due
+// managed jobs, with the per-account in-flight cap enforced inside the claim
+// transaction (see Store.ClaimManagedAgentJobs).
+func (q *Queue) ClaimManaged(ctx context.Context, userID int64, limit, maxInflight int) ([]db.AgentJob, error) {
+	jobs, err := q.Store.ClaimManagedAgentJobs(ctx, q.ReplicaID, userID, limit, maxInflight)
+	if err == nil {
+		q.count(db.JobProcessing, len(jobs))
+	}
+	return jobs, err
+}
+
 // ReleaseUnissued undoes a claim made by this replica whose credential was
 // never issued, without charging the job an attempt. See
 // Store.ReleaseUnissuedClaim.

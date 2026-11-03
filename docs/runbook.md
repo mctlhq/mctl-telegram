@@ -354,6 +354,9 @@ New `agent_jobs` status label values: `coalesced` (member of a coalesced turn, t
 | profile `autopilot_paused` | `true` on bootstrap | Per-account pause on autonomous recruiter-facing replies. Does not stop owner-facing notifications (send_owner_summary, request_owner_approval, or the throttled pause alert described above) — issue #581. |
 | profile `mode` | `observe` | `observe` always requires owner approval; `guarded` is production-gated. |
 | worker `AGENT_API_TOKEN` | required | Tenant-scoped bearer capability. Current JWTs are stateless and cannot be revoked individually before expiry. |
+| `MANAGED_RUNTIME_ENABLED` | `false` | Managed runtime (ADR 0008). Mounts `POST /api/agent/pool-token` and accepts the claim-only `aud=agent-pool` credential on `POST /api/agent/v1/jobs/claim`. Off: the mint route is 404 and a pool token is 401; jobs of accounts on `runtime: managed` are not claimed by anyone (own workers never claim them), so they wait, or are routed to the operator after `AGENT_UNCLAIMED_ROUTE_AFTER` when operator routing is on, until the account is switched back to `runtime: own`. The server logs `managed runtime disabled: jobs of managed accounts are paused` with the account count at start. |
+| `MANAGED_MAX_INFLIGHT_PER_ACCOUNT` | `1` | Processing jobs a managed account may have at once (>= 1). Enforced inside the claim transaction (a per-account advisory lock on Postgres), so concurrent pool workers cannot exceed it. |
+| worker `AGENT_POOL_MODE` | `false` | Worker-side (`true`/`false`, anything else refuses to start): `AGENT_API_TOKEN` is the pool credential, which can only claim. Every per-job call, including the status check and cost report, uses the job token; a job without one fails and the pool token is never a fallback. |
 
 ### Dead-letter handling
 

@@ -110,7 +110,11 @@ a confirmed operation:
   per-job call (`GetJobStatus`, `ReportJobCost`, the tool routes); in pool
   mode (`AGENT_POOL_MODE=true`) a job without a job token is a hard error,
   never a fallback to the pool token. `MANAGED_MAX_INFLIGHT_PER_ACCOUNT`
-  (default 1) caps processing jobs per managed account. An account under a
+  (default 1) caps processing jobs per managed account. The cap is enforced
+  inside the claim transaction (`Store.ClaimManagedAgentJobs`: a per-account
+  `pg_advisory_xact_lock`, then the processing count, then the claim), so
+  concurrent pool workers cannot exceed it; the candidate list read before it
+  is only a hint. An account under a
   blanket revocation (`RevocationCache.IsBlanketRevoked`) is skipped by the
   pool claim, because job tokens inheriting the pool's `orig_iat` would be
   dead on arrival. A pool-claimed job whose token cannot be minted is released
@@ -153,10 +157,15 @@ a confirmed operation:
   5. audits each claim under the job's user id with `pool:<name>` as the
      message (`audit_logs.user_id` has a foreign key; a pool has no user).
 - Switching runtime is an install change, so it bumps `install_revision`
-  and the existing fence (`internal/agentapi/actions.go`) refuses the old
-  attempt's propose and complete; the job is requeued by
-  `RequeueStaleAgentJobs` after `AGENT_JOB_VISIBILITY` and claimed by the
-  new runtime. No double send is possible. `/mctl assistant` and the manage
+  (`RuntimeChange.Apply`, which also covers the admin profile route). The
+  bump makes `policy.Evaluate` deny whatever the old attempt proposes
+  (`DenyInstallChanged`, checked at propose, approve and send). Completion
+  is fenced separately: the completion CAS in `internal/db/agent_jobs.go`
+  (`completeRuntimeFence`) refuses to close an attempt whose
+  `agent_jobs.runtime` differs from the profile's, so the old worker gets
+  409 and the job stays processing. `RequeueStaleAgentJobs` returns it to
+  pending after `AGENT_JOB_VISIBILITY` and the new runtime claims it. The old
+  job token stays valid until its deadline, but nothing it does can act. No double send is possible. `/mctl assistant` and the manage
   page show the runtime, so an own worker that suddenly sees an empty queue
   is diagnosable.
 
@@ -268,8 +277,13 @@ a confirmed operation:
   release workflow.
 - Rollback, fastest first: `runtime: own` (the fence does the rest); scale
   the component to 0; revoke the pool `jti` (15 s); flag off (pool tokens
-  get 401; managed accounts' jobs route to the operator after the
-  visibility window like any unclaimed job).
+  get 401). With the flag off, jobs of accounts still on `runtime: managed`
+  are claimed by nobody: own workers never take them. They are paused, or
+  routed to the operator after `AGENT_UNCLAIMED_ROUTE_AFTER` when operator
+  routing is on, until each account moves back to `runtime: own`. The server
+  logs the number of such accounts at start, so the flag is never turned off
+  silently. Flag off is therefore a pause for managed accounts, not a
+  fallback to their own workers.
 
 ### 7. Tests that must exist (each fails with the bug put back)
 
@@ -283,7 +297,9 @@ a confirmed operation:
 - Pool identity is claim-only: a table over every registered route.
 - Job token minted from the job's user, with the pool's `jti`.
 - Round robin and in-flight cap across accounts; render-before-claim skips
-  a disabled assistant and leaves its jobs pending.
+  a disabled assistant and leaves its jobs pending. The cap holds under
+  concurrent pool claims (`TestClaimManagedAgentJobs_InflightCap_Postgres`:
+  parallel transactions, cap 1, exactly one claim).
 - Budget race: two concurrent claim transactions, budget for one job,
   exactly one claim. Reservation settled on cost report, released on
   requeue. Exhausted account held, notified once, not routed to the

@@ -13,6 +13,22 @@ type ManagedClaimCandidate struct {
 	TelegramID int64
 }
 
+// CountManagedAccountsWithPendingJobs counts accounts on runtime managed that
+// have at least one pending job. Used to surface that those jobs are paused
+// while MANAGED_RUNTIME_ENABLED is off.
+func (s *Store) CountManagedAccountsWithPendingJobs(ctx context.Context) (int, error) {
+	var n int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(DISTINCT ap.user_id)
+		   FROM agent_profiles ap
+		   JOIN agent_jobs j ON j.user_id = ap.user_id AND j.status = $1
+		  WHERE ap.runtime = $2`,
+		JobPending, RuntimeManaged).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count managed accounts with pending jobs: %w", err)
+	}
+	return n, nil
+}
+
 // ListManagedClaimCandidates lists managed accounts the pool may claim for:
 // runtime managed, current managed consent, at least one due pending job, a
 // non-zero Telegram login id, and fewer than maxInflight jobs processing.

@@ -56,6 +56,7 @@ func TestPoolProvider_RejectsAccountShapedClaims(t *testing.T) {
 		"job_tools":    func(c *Claims) { c.JobTools = []string{"x"} },
 		"no jti":       func(c *Claims) { c.Jti = "" },
 		"tg subject":   func(c *Claims) { c.Subject = "tg:7" },
+		"no prefix":    func(c *Claims) { c.Subject = "main" },
 		"bad name":     func(c *Claims) { c.Subject = "pool:Bad_Name" },
 		"empty name":   func(c *Claims) { c.Subject = "pool:" },
 		"agent aud":    func(c *Claims) { c.Audience = []string{"agent"} },

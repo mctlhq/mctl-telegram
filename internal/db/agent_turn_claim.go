@@ -57,17 +57,26 @@ type claimCandidate struct {
 // The other members of the turn move to coalesced in the same transaction.
 // Jobs that waited behind an earlier turn coalesce regardless of their
 // arrival gaps (see readyTurn).
-func (s *Store) claimCoalesced(ctx context.Context, replicaID string, userID int64, runtime string, limit int) ([]AgentJob, error) {
+func (s *Store) claimCoalesced(ctx context.Context, replicaID string, userID int64, runtime string, limit, maxInflight int) ([]AgentJob, error) {
 	now := s.now()
 	lock := ""
 	if s.isPostgres(ctx) {
 		lock = " FOR UPDATE OF j SKIP LOCKED"
+	}
+	capPG, err := s.managedClaimDialect(ctx, maxInflight)
+	if err != nil {
+		return nil, err
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin claim tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if maxInflight > 0 {
+		if limit, err = s.reserveInflight(ctx, tx, capPG, userID, limit, maxInflight); err != nil || limit == 0 {
+			return nil, err
+		}
+	}
 
 	cands, err := loadClaimCandidates(ctx, tx,
 		`SELECT j.id, j.event_id, j.conversation_id, j.created_at, COALESCE(j.body_bytes, 0),

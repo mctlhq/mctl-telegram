@@ -112,8 +112,10 @@ func TestHandleClaimJobs_Pool_MintsJobTokenFromJobUser(t *testing.T) {
 func TestHandleClaimJobs_Pool_RoundRobinAndRuntimeSeparation(t *testing.T) {
 	h := poolHarness(t)
 	h.srv.WithManagedClaims(ManagedClaimConfig{MaxInflightPerAccount: 5})
+	// Three due jobs per account, so a second job per account is available
+	// in every round and only the one-per-account rule keeps it out.
 	for _, tg := range []int64{9101, 9102, 9103} {
-		h.seedManaged(tg, db.RuntimeManaged, 2)
+		h.seedManaged(tg, db.RuntimeManaged, 3)
 	}
 	ownUID := h.seedManaged(9199, db.RuntimeOwn, 1)
 	for _, limit := range []string{"3", "10"} {
@@ -212,8 +214,13 @@ func TestHandleClaimJobs_Pool_MintFailureRequeuesWithoutChargingAttempt(t *testi
 		if err := h.store.DB.QueryRow(`SELECT COUNT(*) FROM agent_job_attempts WHERE job_id = $1 AND finished_at IS NULL`, jobID).Scan(&open); err != nil {
 			t.Fatal(err)
 		}
-		if status != db.JobPending || attempts != 0 || claimedBy != nil || open != 0 {
-			t.Fatalf("iteration %d: status=%s attempts=%d claimed_by=%v open attempt rows=%d", i, status, attempts, claimedBy, open)
+		var maxNow int
+		if err := h.store.DB.QueryRow(`SELECT max_attempts FROM agent_jobs WHERE id = $1`, jobID).Scan(&maxNow); err != nil {
+			t.Fatal(err)
+		}
+		if status != db.JobPending || attempts != 0 || claimedBy != nil || open != 0 || maxNow != maxAttempts {
+			t.Fatalf("iteration %d: status=%s attempts=%d max_attempts=%d (was %d) claimed_by=%v open attempt rows=%d",
+				i, status, attempts, maxNow, maxAttempts, claimedBy, open)
 		}
 		// Make it due again without waiting out the release delay.
 		if _, err := h.store.DB.Exec(`UPDATE agent_jobs SET next_run_at = $1 WHERE id = $2`, time.Now().Add(-time.Second).UTC(), jobID); err != nil {

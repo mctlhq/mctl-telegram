@@ -299,3 +299,61 @@ func TestApply_AbsentRuntimeKeepsManagedExplicitOwnSwitches(t *testing.T) {
 		t.Fatalf("runtime = %q, want own", p.Runtime)
 	}
 }
+
+// T12 (unit half): an actual runtime move bumps the install revision so the
+// in-flight attempt is fenced; a write that keeps the runtime (a consent
+// refresh on a managed account, or no runtime at all) does not.
+// Mutation: drop the BumpInstallRevision line in RuntimeChange.Apply.
+func TestRuntimeChange_ApplyBumpsRevisionOnlyOnSwitch(t *testing.T) {
+	m := ManagedRuntime{Enabled: true, MaxAccounts: 5}
+	now := time.Now()
+	cases := []struct {
+		name, from, to, consent string
+		wantBump                bool
+	}{
+		{"own to managed", db.RuntimeOwn, db.RuntimeManaged, db.ManagedConsentCurrent, true},
+		{"managed to own", db.RuntimeManaged, db.RuntimeOwn, "", true},
+		{"profile-less to managed", "", db.RuntimeManaged, db.ManagedConsentCurrent, true},
+		{"managed consent refresh", db.RuntimeManaged, db.RuntimeManaged, db.ManagedConsentCurrent, false},
+		{"own stays own", db.RuntimeOwn, db.RuntimeOwn, "", false},
+		{"runtime unchanged (omitted)", db.RuntimeManaged, "", "", false},
+	}
+	for _, tc := range cases {
+		ch, ierr := m.DecideRuntime(tc.from, tc.to, tc.consent, now)
+		if ierr != nil {
+			t.Fatalf("%s: decide: %v", tc.name, ierr)
+		}
+		var u db.AgentProfileUpdate
+		ch.Apply(&u)
+		if u.BumpInstallRevision != tc.wantBump {
+			t.Errorf("%s: BumpInstallRevision = %v, want %v", tc.name, u.BumpInstallRevision, tc.wantBump)
+		}
+	}
+}
+
+// T12 (update_install half): the install service, which update_install and
+// install_assistant call, moves the install revision on every runtime switch
+// in both directions, so the in-flight attempt is fenced on this path too.
+func TestApply_RuntimeSwitchBumpsInstallRevision(t *testing.T) {
+	svc, uid := newTestService(t)
+	ctx := context.Background()
+	svc.Managed = ManagedRuntime{Enabled: true, MaxAccounts: 5}
+	if _, err := svc.Apply(ctx, uid, runtimeInstall(t, "own", ""), CommitOptions{}); err != nil {
+		t.Fatalf("own install: %v", err)
+	}
+	rev := func() int64 { p, _ := svc.Store.GetAgentProfile(ctx, uid); return p.InstallRevision }
+	r0 := rev()
+	if _, err := svc.Apply(ctx, uid, runtimeInstall(t, "managed", db.ManagedConsentCurrent), CommitOptions{}); err != nil {
+		t.Fatalf("switch to managed: %v", err)
+	}
+	r1 := rev()
+	if r1 <= r0 {
+		t.Fatalf("own -> managed: revision %d -> %d, want a bump", r0, r1)
+	}
+	if _, err := svc.Apply(ctx, uid, runtimeInstall(t, "own", ""), CommitOptions{}); err != nil {
+		t.Fatalf("switch back to own: %v", err)
+	}
+	if r2 := rev(); r2 <= r1 {
+		t.Fatalf("managed -> own: revision %d -> %d, want a bump", r1, r2)
+	}
+}

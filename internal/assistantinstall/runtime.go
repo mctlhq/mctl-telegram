@@ -35,9 +35,14 @@ type RuntimeChange struct {
 func (c RuntimeChange) Apply(u *db.AgentProfileUpdate) {
 	u.Runtime, u.ManagedConsentVersion, u.ManagedConsentAt, u.ManagedQuota = c.Runtime, c.ConsentVersion, c.ConsentAt, c.Quota
 	u.ClearManagedConsent = c.ClearConsent
-	// A runtime switch fences the in-flight attempt: the old runtime's job
-	// token is refused once the install revision moves, the sweeper requeues
-	// the job and the new runtime claims it.
+	// A runtime switch fences the in-flight attempt. The bump makes
+	// policy.Evaluate deny anything that attempt proposes (DenyInstallChanged,
+	// checked at propose, approve and send, #1018), and the job-completion
+	// CAS (db completeRuntimeFence) refuses to close an attempt claimed under
+	// the old runtime, so the job stays processing until
+	// RequeueStaleAgentJobs returns it to pending and the new runtime's claim
+	// (whose predicate reads the profile live) picks it up. The job token
+	// itself stays valid until its deadline; nothing it does can act.
 	if c.Runtime != nil && c.From != c.To {
 		u.BumpInstallRevision = true
 	}

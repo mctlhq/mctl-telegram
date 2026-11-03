@@ -64,6 +64,19 @@ func TestClaimAgentJobs_RuntimePredicate(t *testing.T) {
 			t.Fatalf("managed claim: %+v err %v", jobs, err)
 		}
 	})
+
+	t.Run("coalesced profile-less is own", func(t *testing.T) {
+		f := newTurnFixture(t, &turnCfg) // no agent_profiles row
+		f.ingest(t, 555, 1, 5, 0)
+		f.now = turnBase.Add(time.Minute)
+		if jobs, err := f.s.ClaimAgentJobs(ctx, "r", f.uid, RuntimeManaged, 5); err != nil || len(jobs) != 0 {
+			t.Fatalf("managed claimed a profile-less turn: %d jobs, err %v", len(jobs), err)
+		}
+		jobs, err := f.s.ClaimAgentJobs(ctx, "r", f.uid, RuntimeOwn, 5)
+		if err != nil || len(jobs) != 1 || jobs[0].Runtime != RuntimeOwn {
+			t.Fatalf("own claim of a profile-less turn: %+v err %v", jobs, err)
+		}
+	})
 }
 
 func TestListManagedClaimCandidates(t *testing.T) {

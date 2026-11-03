@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -330,6 +331,70 @@ const claimRuntimePredicate = "COALESCE((SELECT ap.runtime FROM agent_profiles a
 // replicas never claim the same row. SQLite runs with a single connection
 // (Open sets SetMaxOpenConns(1)), so the plain form is race-free there.
 func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, userID int64, runtime string, limit int) ([]AgentJob, error) {
+	return s.claimAgentJobs(ctx, replicaID, userID, runtime, limit, 0)
+}
+
+// ClaimManagedAgentJobs is ClaimAgentJobs for the managed-runtime pool, with
+// the per-account in-flight cap enforced inside the claim transaction: at
+// most maxInflight jobs of userID are processing once it commits, however
+// many pool claims run at the same time. The candidate list the pool reads
+// first is only a hint; this is the authority.
+func (s *Store) ClaimManagedAgentJobs(ctx context.Context, replicaID string, userID int64, limit, maxInflight int) ([]AgentJob, error) {
+	if maxInflight < 1 {
+		return nil, fmt.Errorf("claim managed agent jobs: max in-flight must be >= 1, got %d", maxInflight)
+	}
+	return s.claimAgentJobs(ctx, replicaID, userID, RuntimeManaged, limit, maxInflight)
+}
+
+// managedClaimLockNamespace prefixes the per-account advisory lock key that
+// serializes managed claims of one account on Postgres.
+const managedClaimLockNamespace = "mctl-telegram:managed-claim:"
+
+// reserveInflight serializes this transaction against every other capped
+// claim of userID and returns how many jobs it may still claim (0 when the
+// account is at the cap). On Postgres a transaction-scoped advisory lock per
+// account makes the count and the claim that follows atomic: a second claim
+// blocks until the first commits and then, under READ COMMITTED, counts the
+// first one's processing rows. SQLite runs on a single connection, so the
+// transaction itself serializes. pg comes from managedClaimDialect, resolved
+// before the transaction opens.
+func (s *Store) reserveInflight(ctx context.Context, tx *sql.Tx, pg bool, userID int64, limit, maxInflight int) (int, error) {
+	if pg {
+		if _, err := tx.ExecContext(ctx,
+			`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+			managedClaimLockNamespace+strconv.FormatInt(userID, 10)); err != nil {
+			return 0, fmt.Errorf("lock managed claim: %w", err)
+		}
+	}
+	var inflight int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM agent_jobs WHERE user_id = $1 AND status = $2`,
+		userID, JobProcessing).Scan(&inflight); err != nil {
+		return 0, fmt.Errorf("count managed in-flight jobs: %w", err)
+	}
+	room := maxInflight - inflight
+	if room <= 0 {
+		return 0, nil
+	}
+	return min(limit, room), nil
+}
+
+// managedClaimDialect resolves the dialect for a capped claim before its
+// transaction opens (the probe needs a connection of its own, and SQLite has
+// one). An inconclusive probe is an error, not a guess: a cap that might not
+// be enforced is not applied.
+func (s *Store) managedClaimDialect(ctx context.Context, maxInflight int) (bool, error) {
+	if maxInflight <= 0 {
+		return false, nil
+	}
+	pg, err := s.postgresDialect(ctx)
+	if err != nil {
+		return false, fmt.Errorf("managed claim: %w", err)
+	}
+	return pg, nil
+}
+
+func (s *Store) claimAgentJobs(ctx context.Context, replicaID string, userID int64, runtime string, limit, maxInflight int) ([]AgentJob, error) {
 	if userID <= 0 {
 		return nil, errors.New("user id required")
 	}
@@ -340,18 +405,27 @@ func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, userID int
 		limit = 1
 	}
 	if s.turnCfg != nil {
-		return s.claimCoalesced(ctx, replicaID, userID, runtime, limit)
+		return s.claimCoalesced(ctx, replicaID, userID, runtime, limit, maxInflight)
 	}
 	now := time.Now().UTC()
 	lock := ""
 	if s.isPostgres(ctx) {
 		lock = " FOR UPDATE SKIP LOCKED"
 	}
+	capPG, err := s.managedClaimDialect(ctx, maxInflight)
+	if err != nil {
+		return nil, err
+	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin claim tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if maxInflight > 0 {
+		if limit, err = s.reserveInflight(ctx, tx, capPG, userID, limit, maxInflight); err != nil || limit == 0 {
+			return nil, err
+		}
+	}
 
 	// The outer UPDATE re-checks status = pending. With SKIP LOCKED this is
 	// redundant; without it (SQLite, or a Postgres claim while the dialect
@@ -368,13 +442,15 @@ func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, userID int
 	// recorded. Head-of-line blocking per conversation is intentional:
 	// message order beats throughput inside a dialog. Jobs without a
 	// conversation are unconstrained (the NULL comparison never matches).
+	//
+	// The due rows are picked in a CTE, not an IN (subquery ... LIMIT), for
+	// the reason ClaimBroadcastDeliveries gives: Postgres may plan the IN as
+	// a nested-loop semi join that re-runs the LIMIT ... SKIP LOCKED subquery
+	// per outer row. On a table without statistics that was observed
+	// claiming all 8 due jobs for limit 1, which also defeated the managed
+	// in-flight cap. A CTE with FOR UPDATE is never inlined, so it runs once.
 	rows, err := tx.QueryContext(ctx,
-		`UPDATE agent_jobs
-		    SET status = $1, attempts = attempts + 1,
-		        claimed_by = $2, claimed_at = $3, updated_at = $3,
-		        install_revision = COALESCE((SELECT install_revision FROM agent_profiles WHERE user_id = agent_jobs.user_id), 1),
-		        runtime = $7
-		  WHERE status = $4 AND id IN (
+		`WITH due AS (
 		        SELECT j.id FROM agent_jobs j
 		         WHERE j.status = $4 AND j.next_run_at <= $3 AND j.user_id = $6
 		           AND `+claimRuntimePredicate+`$7
@@ -385,7 +461,13 @@ func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, userID int
 		           )
 		         ORDER BY j.next_run_at, j.id
 		         LIMIT $5`+lock+`
-		  )
+		)
+		UPDATE agent_jobs
+		    SET status = $1, attempts = attempts + 1,
+		        claimed_by = $2, claimed_at = $3, updated_at = $3,
+		        install_revision = COALESCE((SELECT install_revision FROM agent_profiles WHERE user_id = agent_jobs.user_id), 1),
+		        runtime = $7
+		  WHERE status = $4 AND id IN (SELECT id FROM due)
 		 RETURNING id, event_id, user_id, conversation_id, status, attempts,
 		           max_attempts, next_run_at, claimed_by, claimed_at, last_error,
 		           result_action_id, result_lead_id, cost_usd, created_at, updated_at,
@@ -534,6 +616,13 @@ type rowsQueryer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
+// completeRuntimeFence refuses the terminal transition of an attempt claimed
+// under a runtime the account no longer runs (ADR 0008 runtime switch): the
+// job stays processing, RequeueStaleAgentJobs returns it to pending after the
+// visibility timeout, and the new runtime's claim picks it up. A job claimed
+// before agent_jobs.runtime existed (NULL) is not fenced.
+const completeRuntimeFence = `(runtime IS NULL OR runtime = COALESCE((SELECT ap.runtime FROM agent_profiles ap WHERE ap.user_id = agent_jobs.user_id), 'own'))`
+
 // CompleteAgentJob closes a processing job with a terminal status
 // (completed, failed, or ignored) and finishes its open attempt row.
 //
@@ -555,7 +644,7 @@ func (s *Store) CompleteAgentJob(ctx context.Context, jobID int64, attempt int, 
 	defer func() { _ = tx.Rollback() }()
 	res, err := tx.ExecContext(ctx,
 		`UPDATE agent_jobs SET status = $1, last_error = $2, updated_at = $3
-		  WHERE id = $4 AND status = $5 AND attempts = $6`,
+		  WHERE id = $4 AND status = $5 AND attempts = $6 AND `+completeRuntimeFence,
 		status, nullable(note), now, jobID, JobProcessing, attempt,
 	)
 	if err != nil {
@@ -652,7 +741,7 @@ func (s *Store) CompleteAgentJobWithResult(
 		`UPDATE agent_jobs
 		    SET status = $1, last_error = $2,
 		        result_action_id = $3, result_lead_id = $4, updated_at = $5
-		  WHERE id = $6 AND user_id = $7 AND status = $8 AND attempts = $9`,
+		  WHERE id = $6 AND user_id = $7 AND status = $8 AND attempts = $9 AND `+completeRuntimeFence,
 		status, nullable(note), nullableInt(resultActionID), nullableInt(resultLeadID),
 		now, jobID, userID, JobProcessing, attempt,
 	)
