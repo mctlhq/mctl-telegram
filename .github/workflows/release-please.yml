@@ -109,8 +109,13 @@ jobs:
       # the production rollout after #889/#334, so until then every release
       # emits the skip notice and publishes no ghcr.io/mctlhq/agent-worker
       # image. Absence (HTTP 404) skips; any unobservable read fails the step.
+      #
+      # continue-on-error: a failed read must still annotate the run, but must
+      # not skip the Local Bridge build/attach steps below (a rerun cannot
+      # recover them, release_created is false the second time).
       - name: Dispatch agent-worker release-deploy
         if: ${{ steps.release.outputs.release_created == 'true' }}
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           TAG: ${{ steps.release.outputs.tag_name }}

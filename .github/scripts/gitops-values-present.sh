@@ -28,7 +28,7 @@ fi
 
 api="${GITHUB_API_URL:-https://api.github.com}"
 crc=0
-code="$(curl -sS -o /dev/null -w '%{http_code}' \
+code="$(curl -sS --connect-timeout 10 --max-time 30 --retry 3 --retry-all-errors -o /dev/null -w '%{http_code}' \
   -H "Authorization: Bearer ${GH_TOKEN}" \
   -H "Accept: application/vnd.github+json" \
   "${api}/repos/mctlhq/mctl-gitops/contents/${path}?ref=main")" || crc=$?
