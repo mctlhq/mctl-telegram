@@ -473,6 +473,9 @@ func main() {
 	mux := chi.NewRouter()
 	mux.Use(middleware.RequestID)
 	mux.Use(middleware.RealIP)
+	// Uptime monitors probe with HEAD; chi answers 405 for it unless GET
+	// routes are also served as HEAD, so a healthy site read as down.
+	mux.Use(middleware.GetHead)
 	// HTTPMiddleware is placed before Recoverer so that panics recovered as
 	// HTTP 500 by Recoverer are still captured in mctl_http_requests_total.
 	// Recoverer writes the 500 status, which the metrics responseWriter wrapper
