@@ -414,7 +414,9 @@ not gated. A token without `job_tools` resolves the set from the account's
 installed definition, and when that cannot be resolved the gated routes
 answer `503`, not "all tools". See [spec.md, Tool names](spec.md#tool-names).
 
-**Worker.** `cmd/agent-worker` runs off-cluster on the Mac mini (LaunchAgent
+**Where jobs run.** Which process claims a job depends on the account's `runtime`.
+
+*Own runtime.* `cmd/agent-worker` runs off-cluster on the Mac mini (LaunchAgent
 `com.mctl.agent-worker`) against tg-preview's `/api/agent/v1`
 ([deploy/agent-worker/mac-mini/README.md](../../deploy/agent-worker/mac-mini/README.md)).
 A second LaunchAgent self-updates it every 10 minutes to the commit
@@ -422,6 +424,20 @@ tg-preview runs. For each claimed job it passes the server's `instructions`
 to `claude` through `--system-prompt-file` (a 0600 temp file) and allows
 exactly the job's `tools`. Its own `AGENT_SYSTEM_PROMPT` is used only when a
 server without a catalog sends no instructions.
+
+*Managed runtime.* A single pool worker per environment
+(`labs/agent-worker-managed-preview`) claims the jobs of accounts with
+`runtime: managed`, in pool mode (`AGENT_POOL_MODE=true`, claim-only
+`aud=agent-pool` token) with `AGENT_RUNNER=openai`. It reaches its
+in-cluster API URL and calls the model through the `mctl-telegram` Cloudflare
+AI Gateway, with gateway logging and caching off. See
+[agent-worker.md](../agent-worker.md#pool-mode-managed-runtime-1090).
+
+*Separation.* The claim SQL filters on `agent_profiles.runtime`: an own
+worker claims only `own` accounts and the pool worker only `managed` ones.
+When `MANAGED_RUNTIME_ENABLED` is off, no worker claims managed jobs: they
+wait, or go to the operator after `AGENT_UNCLAIMED_ROUTE_AFTER` when operator
+routing is on, until the account is switched back to `runtime: own`.
 
 ## 6. Surfaces
 

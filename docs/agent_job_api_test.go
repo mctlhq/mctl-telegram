@@ -3,6 +3,7 @@ package docs
 import (
 	"net/http"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -124,18 +125,22 @@ func TestThreatModel_NamesEveryRoute(t *testing.T) {
 	}
 }
 
-// The three documents state the same credential boundary and mark the
-// managed model as planned.
+// The four documents state the same credential boundary and describe the
+// managed runtime as implemented, not planned.
 func TestCredentialBoundary_DocumentsAgree(t *testing.T) {
+	stale := regexp.MustCompile(`(?is)agent-pool[^.]*(planned|not implemented)`)
 	for _, path := range []string{contractPath, threatModelPath, "assistants/spec.md", "agent-worker.md"} {
 		doc := readDoc(t, path)
-		for _, want := range []string{"aud=agent", "agent-pool"} {
+		for _, want := range []string{"aud=agent", "agent-pool", "aud=agent-job"} {
 			if !strings.Contains(doc, want) {
 				t.Errorf("%s does not mention %q", path, want)
 			}
 		}
-		if !strings.Contains(doc, "not implemented") && !strings.Contains(doc, "planned") {
-			t.Errorf("%s does not mark the managed model as planned", path)
+		if strings.Contains(strings.ToLower(doc), "planned, not implemented") {
+			t.Errorf("%s still says the managed runtime is planned, not implemented", path)
+		}
+		if loc := stale.FindString(doc); loc != "" {
+			t.Errorf("%s still marks agent-pool as planned or not implemented: %q", path, loc)
 		}
 	}
 }

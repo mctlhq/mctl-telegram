@@ -31,9 +31,11 @@ worker can read and do, and what its credential can reach, is in
 Credential boundary: an own or external runtime uses the existing
 account-scoped `aud=agent` token (`POST /api/agent/token`), and gets a
 job-bound `aud=agent-job` token in each claim where the server has a signer.
-A managed runtime is planned to use a claim-only `aud=agent-pool` credential
-and then `aud=agent-job` (#1090, ADR 0008); that is not implemented and
-changes nothing for an own runtime. The worker never holds a Telegram
+The managed runtime (#1089-#1092, ADR 0008) is implemented behind
+`MANAGED_RUNTIME_ENABLED`. Its worker holds a claim-only `aud=agent-pool`
+credential (`POST /api/agent/pool-token`) and then uses the `aud=agent-job`
+token of each claim for every per-job call; see [Pool mode](#pool-mode-managed-runtime-1090).
+It changes nothing for an own runtime. The worker never holds a Telegram
 credential, and every effect still goes through server-side policy and the
 send gate.
 
@@ -92,7 +94,7 @@ send gate.
 | Env var | Required | Meaning |
 |---|---|---|
 | `AGENT_API_BASE_URL` | yes | Full `/api/agent/v1` root, e.g. `https://labs-mctl-telegram.labs.svc:8080/api/agent/v1`. |
-| `AGENT_API_TOKEN` | yes | Long-lived worker bearer token, minted via `POST /api/agent/token` (`aud=agent`, admin-scoped — see `internal/agentapi/tokenhandler.go`). Never logged; passed to the spawned `--mcp-serve` subprocess's env, never to the model's own process env. |
+| `AGENT_API_TOKEN` | yes | Long-lived worker bearer token: the account token minted via `POST /api/agent/token` (`aud=agent`, admin-scoped — see `internal/agentapi/tokenhandler.go`) or, with `AGENT_POOL_MODE=true`, the pool token (`aud=agent-pool`, `POST /api/agent/pool-token`, claim only). Never logged; passed to the spawned `--mcp-serve` subprocess's env, never to the model's own process env. |
 | `AGENT_CREDENTIAL_DOMAIN_ID` | yes | Non-secret identifier for the credential/quota pool this worker runs against — e.g. a Vault path or account label, **never the credential itself**. Must match `[A-Za-z0-9._:/-]{1,128}`; the poll loop (`run()`) refuses to start without it, and exported as the `mctl_agent_credential_domain{domain_id=...}` info gauge so a claim of quota isolation between deployments has a machine-checkable counterpart. Not required by `--mcp-serve` mode. See the rollout-ordering note below before upgrading an existing deployment. |
 | `AGENT_CLAUDE_BIN` | no | Override the `claude` binary path/name (default: `claude` on `$PATH`). |
 | `AGENT_SYSTEM_PROMPT` | no | Fallback system prompt, used only when the server's claim response carries no `instructions` (a server without the assistant catalog). Use `deploy/agent-worker/system-prompt.txt`; see [Owner-profile disclosure](#owner-profile-disclosure-953) and [docs/assistants/spec.md](assistants/spec.md). |
@@ -101,6 +103,7 @@ send gate.
 | `AGENT_HEALTH_ADDR` | no | Bind address for the `/livez`/`/healthz`/`/readyz`/`/metrics` probe server (default: `:8080`, all interfaces). |
 | `AGENT_METRICS_ALLOW_CIDR` | no | Optional CIDR allowlist guarding `/metrics` (see below). Unset means open, matching `cmd/server`'s `METRICS_ALLOW_CIDR` default. A malformed value fails closed (every `/metrics` request gets 403), never silently open. |
 | `AGENT_RUNNER` | no | `claude` (default when unset) or `openai`. Anything else refuses to start. See [OpenAI-compatible runner](#openai-compatible-runner-1091). |
+| `AGENT_POOL_MODE` | no | `true` or `false` (default `false`), parsed strictly: any other value refuses to start. `true` makes the worker a managed-runtime pool worker; see [Pool mode](#pool-mode-managed-runtime-1090). |
 | `AGENT_MODEL` | `openai` only | OpenAI-compatible provider model name. |
 | `AGENT_OPENAI_BASE_URL` | `openai` only | Base URL immediately above `/chat/completions` (normally the Cloudflare AI Gateway compatibility endpoint). |
 | `AGENT_OPENAI_API_KEY` | `openai` only | Provider API key. Sensitive; never logged (redacted by `internal/audit`). |
@@ -108,7 +111,7 @@ send gate.
 | `MODEL_INPUT_USD_PER_MTOK` | `openai` only | Input list price in USD per million tokens; finite and non-negative. |
 | `MODEL_OUTPUT_USD_PER_MTOK` | `openai` only | Output list price in USD per million tokens; finite and non-negative. |
 | `AGENT_MAX_TURNS` | no | `openai` runner: maximum provider turns per job (default `12`). |
-| `AGENT_OPENAI_MIN_INTERVAL` | no | `openai` runner: minimum interval between provider requests, as a Go duration such as `2s`. State on the single `OpenAIRunner` instance (shared by all concurrent jobs), not a package global. Hetzner allows about 35 requests per minute per key. |
+| `AGENT_OPENAI_MIN_INTERVAL` | no | `openai` runner: minimum interval between provider requests, as a Go duration such as `2s`. State on the single `OpenAIRunner` instance (shared by all concurrent jobs), not a package global. `6s` keeps within Hetzner's limit of 10 requests per 60 s (ADR 0008); the labs pool worker uses `6s`. |
 
 `AGENT_JOB_ID`, `AGENT_JOB_ATTEMPT`, `AGENT_JOB_EVENT_ID`, `AGENT_JOB_CONV_ID`
 and `AGENT_JOB_SOURCE_EVENT_IDS` (comma-joined, only for a coalesced turn)
@@ -124,13 +127,13 @@ through the same `finishRun`: cost report first, then the result check, then
 the durable terminal-state verification. Unset `AGENT_RUNNER` is exactly the
 `claude` behaviour. The `openai` runner needs no Claude account credential.
 
-- **Job token for tools, account token for accounting.** An `openai` job
+- **Job token for tools, account token for accounting (own mode).** An `openai` job
   refuses to run without the claim's narrow `job_token`; every
-  model-reachable tool call uses a client authenticated with it. The cost
+  model-reachable tool call uses a client authenticated with it. In own mode the cost
   report and the completion check use `AGENT_API_TOKEN`, exactly like the
   `claude` runner: the job token expires at the claim deadline, the same
   moment a deadline cancellation fires, so a cost report sent with it would be
-  rejected and the spend lost. The model never sees either token. No
+  rejected and the spend lost. In pool mode the cost report uses the job token instead (see [Pool mode](#pool-mode-managed-runtime-1090)). The model never sees either token. No
   job-specific state is shared between jobs; provider pacing state
   (`AGENT_OPENAI_MIN_INTERVAL`) is shared.
 - **Request.** Non-streaming `POST {AGENT_OPENAI_BASE_URL}/chat/completions`
@@ -711,3 +714,39 @@ go test ./internal/agentworker -run TestC1ObserveEval -count=1 -v
 harness inside a one-shot Kubernetes Job with the worker's dedicated Claude
 credential. Set `AGENT_EVAL_WORKER_BIN=/usr/local/bin/mctl-telegram-agent-worker`
 there; the default image entrypoint remains the production worker.
+
+### Pool mode (managed runtime, #1090)
+
+`AGENT_POOL_MODE=true` is for the platform's managed worker. `AGENT_API_TOKEN`
+is then the pool token (`aud=agent-pool`). That token can call
+`POST /jobs/claim` only; every other route refuses it (`requireNotPool`). The
+server mints the per-job `aud=agent-job` token from the job's user, bound to
+the pool's `jti`, and the worker uses it for every per-job call, including the
+cost report and the completion check. A job claimed without a job token is a
+hard error. The worker never chooses the account it bills. The per-job budget
+is `min(AGENT_MAX_BUDGET_USD, max_job_cost_usd)`, where `max_job_cost_usd`
+comes from the claim.
+
+Example env block (secret names only, values come from Vault through
+ExternalSecrets):
+
+```
+AGENT_RUNNER=openai
+AGENT_POOL_MODE=true
+AGENT_API_BASE_URL=<in-cluster /api/agent/v1 root>
+AGENT_API_TOKEN=<secret: pool token>
+AGENT_CREDENTIAL_DOMAIN_ID=<non-secret pool label>
+AGENT_MODEL=<provider model>
+AGENT_OPENAI_BASE_URL=<AI Gateway compat endpoint>
+AGENT_OPENAI_API_KEY=<secret: provider key>
+AGENT_GATEWAY_TOKEN=<secret: gateway run token>
+AGENT_MAX_BUDGET_USD=0.25
+AGENT_MAX_TURNS=12
+AGENT_OPENAI_MIN_INTERVAL=6s
+AGENT_WORKER_CONCURRENCY=1
+MODEL_INPUT_USD_PER_MTOK=<price>
+MODEL_OUTPUT_USD_PER_MTOK=<price>
+```
+
+Mint, rotate and revoke the pool token with the procedure in
+[`runbook.md`](runbook.md#managed-runtime-pool-token).
