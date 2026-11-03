@@ -103,11 +103,23 @@ a confirmed operation:
   reaches the worker as `AGENT_API_TOKEN` through an ExternalSecret.
 - A pool identity may call exactly one route: `POST /jobs/claim`. A new
   `requireNotPool` guard in `internal/agentapi/binding.go` returns 403 and
-  audits on every other route, including `GET /jobs/{id}` and
+  records the refusal (a `slog` warning and a policy-denial metric; an
+  `audit_logs` row under the job owner only when the route names a job, since
+  `audit_logs.user_id` requires a real user) on every other route, including `GET /jobs/{id}` and
   `POST /jobs/{id}/cost`. The worker therefore uses the job token for every
   per-job call (`GetJobStatus`, `ReportJobCost`, the tool routes); in pool
   mode (`AGENT_POOL_MODE=true`) a job without a job token is a hard error,
-  never a fallback to the pool token.
+  never a fallback to the pool token. `MANAGED_MAX_INFLIGHT_PER_ACCOUNT`
+  (default 1) caps processing jobs per managed account. The cap is enforced
+  inside the claim transaction (`Store.ClaimManagedAgentJobs`: a per-account
+  `pg_advisory_xact_lock`, then the processing count, then the claim), so
+  concurrent pool workers cannot exceed it; the candidate list read before it
+  is only a hint. An account under a
+  blanket revocation (`RevocationCache.IsBlanketRevoked`) is skipped by the
+  pool claim, because job tokens inheriting the pool's `orig_iat` would be
+  dead on arrival. A pool-claimed job whose token cannot be minted is released
+  with `Store.ReleaseUnissuedClaim`, never `RetryAgentJob`, so a signer outage
+  does not spend its retry budget.
 - Revocation: the existing `revoke_worker_token` tool by `jti` revokes the
   pool. Job tokens inherit the parent's `jti` and `orig_iat` (as today), so
   revoking the pool also revokes every job token derived from it within
@@ -131,24 +143,41 @@ a confirmed operation:
 - The pool branch of `handleClaimJobs`:
   1. refuses with 503 when no job-token signer is configured (a pool claim
      without job tokens would leave the worker with no credential);
-  2. lists candidate accounts: `runtime = 'managed'`, a due pending job, a
-     Telegram login id (so a job token can be minted), fewer than
-     `MANAGED_MAX_INFLIGHT_PER_ACCOUNT` jobs processing, budget available
-     (section 5), oldest waiting first;
+  2. lists candidate accounts: `runtime = 'managed'`, a due pending job the
+     claim could take (the claim's per-conversation rule, so an account
+     blocked head-of-line is not listed), a Telegram login id (so a job token
+     can be minted), fewer than `MANAGED_MAX_INFLIGHT_PER_ACCOUNT` jobs
+     processing, budget available (section 5), oldest waiting first;
   3. for each candidate renders the instructions **before** claiming (as
      today; an account whose assistant is disabled or unknown is skipped and
      its jobs stay pending), then claims one job for that account, round
      robin, until the requested limit is reached. One job per account per
-     response: concurrency across accounts, not within one;
+     response: concurrency across accounts, not within one. The candidate
+     order is walked page by page with a keyset cursor (oldest claimable
+     job, then user id; not an offset, because a served account drops out of
+     the order mid-walk) until `limit` jobs are claimed or it is exhausted,
+     not read as one fixed window: a skipped account (blanket
+     revocation, an assistant that cannot render) keeps its place at the
+     front, and a fixed window would let a few of them starve every other
+     managed account. A request that skipped candidates and served nobody
+     logs one warning with the skip reasons;
   4. mints the job token from the **job's** user (`Store.TelegramIDByUserID`),
      not from the parent, keeping the pool's `jti` and `orig_iat`;
   5. audits each claim under the job's user id with `pool:<name>` as the
      message (`audit_logs.user_id` has a foreign key; a pool has no user).
 - Switching runtime is an install change, so it bumps `install_revision`
-  and the existing fence (`internal/agentapi/actions.go`) refuses the old
-  attempt's propose and complete; the job is requeued by
-  `RequeueStaleAgentJobs` after `AGENT_JOB_VISIBILITY` and claimed by the
-  new runtime. No double send is possible. `/mctl assistant` and the manage
+  (`RuntimeChange.Apply`, which also covers the admin profile route). The
+  bump makes `policy.Evaluate` deny whatever the old attempt proposes
+  (`DenyInstallChanged`, checked at propose, approve and send). Completion
+  is fenced separately: the completion CAS in `internal/db/agent_jobs.go`
+  (`completeRuntimeFence`) refuses to close an attempt whose
+  `agent_jobs.runtime` differs from the profile's, so the old worker gets
+  409 and the job stays processing. `RequeueStaleAgentJobs` returns it to
+  pending after `AGENT_JOB_VISIBILITY` and the new runtime claims it. The
+  sweep requeues such a fenced job before its dead-letter rule runs and gives
+  it one more attempt if it was on its last, so a switch never dead-letters
+  the job. The old job token stays valid until its deadline, but nothing it
+  does can act. No double send is possible. `/mctl assistant` and the manage
   page show the runtime, so an own worker that suddenly sees an empty queue
   is diagnosable.
 
@@ -260,8 +289,13 @@ a confirmed operation:
   release workflow.
 - Rollback, fastest first: `runtime: own` (the fence does the rest); scale
   the component to 0; revoke the pool `jti` (15 s); flag off (pool tokens
-  get 401; managed accounts' jobs route to the operator after the
-  visibility window like any unclaimed job).
+  get 401). With the flag off, jobs of accounts still on `runtime: managed`
+  are claimed by nobody: own workers never take them. They are paused, or
+  routed to the operator after `AGENT_UNCLAIMED_ROUTE_AFTER` when operator
+  routing is on, until each account moves back to `runtime: own`. The server
+  logs the number of such accounts at start, so the flag is never turned off
+  silently. Flag off is therefore a pause for managed accounts, not a
+  fallback to their own workers.
 
 ### 7. Tests that must exist (each fails with the bug put back)
 
@@ -275,7 +309,9 @@ a confirmed operation:
 - Pool identity is claim-only: a table over every registered route.
 - Job token minted from the job's user, with the pool's `jti`.
 - Round robin and in-flight cap across accounts; render-before-claim skips
-  a disabled assistant and leaves its jobs pending.
+  a disabled assistant and leaves its jobs pending. The cap holds under
+  concurrent pool claims (`TestClaimManagedAgentJobs_InflightCap_Postgres`:
+  parallel transactions, cap 1, exactly one claim).
 - Budget race: two concurrent claim transactions, budget for one job,
   exactly one claim. Reservation settled on cost report, released on
   requeue. Exhausted account held, notified once, not routed to the

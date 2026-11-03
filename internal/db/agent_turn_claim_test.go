@@ -57,7 +57,7 @@ func itoa(n int64) string { return strconv.FormatInt(n, 10) }
 
 func (f *turnFixture) claim(t *testing.T, limit int) []AgentJob {
 	t.Helper()
-	jobs, err := f.s.ClaimAgentJobs(context.Background(), "r", f.uid, limit)
+	jobs, err := f.s.ClaimAgentJobs(context.Background(), "r", f.uid, RuntimeOwn, limit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +496,7 @@ func TestRouteUnclaimed_RaceWithClaimMovesJobOnce(t *testing.T) { // T3.4
 		var routed int64
 		var claimErr, routeErr error
 		wg.Add(2)
-		go func() { defer wg.Done(); claimed, claimErr = f.s.ClaimAgentJobs(ctx, "r", f.uid, 1) }()
+		go func() { defer wg.Done(); claimed, claimErr = f.s.ClaimAgentJobs(ctx, "r", f.uid, RuntimeOwn, 1) }()
 		go func() { defer wg.Done(); routed, routeErr = f.s.RouteUnclaimedAgentJobs(ctx, time.Minute) }()
 		wg.Wait()
 		if claimErr != nil || routeErr != nil {

@@ -76,7 +76,7 @@ func TestClaimAgentJobs_ClaimsDueInOrderAndOpensAttempt(t *testing.T) {
 		t.Fatalf("defer j3: %v", err)
 	}
 
-	jobs, err := s.ClaimAgentJobs(ctx, "replica-a", uid, 5)
+	jobs, err := s.ClaimAgentJobs(ctx, "replica-a", uid, RuntimeOwn, 5)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestClaimAgentJobs_ClaimsDueInOrderAndOpensAttempt(t *testing.T) {
 	}
 
 	// Second claim must find nothing (all due jobs already processing).
-	jobs, err = s.ClaimAgentJobs(ctx, "replica-b", uid, 5)
+	jobs, err = s.ClaimAgentJobs(ctx, "replica-b", uid, RuntimeOwn, 5)
 	if err != nil {
 		t.Fatalf("claim 2: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestCompleteAgentJob_CASFromProcessing(t *testing.T) {
 	if err := s.CompleteAgentJob(ctx, jid, 1, JobCompleted, ""); err != ErrAgentJobNotFound {
 		t.Fatalf("complete unclaimed err = %v, want ErrAgentJobNotFound", err)
 	}
-	if _, err := s.ClaimAgentJobs(ctx, "r", uid, 1); err != nil {
+	if _, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
 	if err := s.CompleteAgentJob(ctx, jid, 1, "sideways", ""); err == nil {
@@ -153,7 +153,7 @@ func TestCompleteAgentJobWithResult_BindsExactActionAtomically(t *testing.T) {
 	s := newTestStoreCrypted(t)
 	uid := seedAgentUser(t, s, "result-owner")
 	jid := seedJob(t, s, uid, "evt:v1:1:1:result")
-	claimed, err := s.ClaimAgentJobs(ctx, "r", uid, 1)
+	claimed, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
 	}
@@ -205,11 +205,11 @@ func TestCompleteAgentJobWithResult_RejectsCrossTenantAndStaleAttempt(t *testing
 	other := seedAgentUser(t, s, "result-owner-b")
 	jid := seedJob(t, s, owner, "evt:v1:1:1:result-owner")
 	otherJob := seedJob(t, s, other, "evt:v1:2:1:result-other")
-	ownerClaims, err := s.ClaimAgentJobs(ctx, "owner-worker", owner, 1)
+	ownerClaims, err := s.ClaimAgentJobs(ctx, "owner-worker", owner, RuntimeOwn, 1)
 	if err != nil || len(ownerClaims) != 1 {
 		t.Fatalf("claim owner: jobs=%+v err=%v", ownerClaims, err)
 	}
-	otherClaims, err := s.ClaimAgentJobs(ctx, "other-worker", other, 1)
+	otherClaims, err := s.ClaimAgentJobs(ctx, "other-worker", other, RuntimeOwn, 1)
 	if err != nil || len(otherClaims) != 1 {
 		t.Fatalf("claim other: jobs=%+v err=%v", otherClaims, err)
 	}
@@ -262,7 +262,7 @@ func TestCompleteAgentJobWithResult_PreservesLeadAssociationAcrossUpserts(t *tes
 	if _, err := s.DB.ExecContext(ctx, `UPDATE agent_jobs SET conversation_id=$1 WHERE id=$2`, conv.ID, first); err != nil {
 		t.Fatalf("bind first conversation: %v", err)
 	}
-	claimed, err := s.ClaimAgentJobs(ctx, "worker", uid, 1)
+	claimed, err := s.ClaimAgentJobs(ctx, "worker", uid, RuntimeOwn, 1)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim first: jobs=%+v err=%v", claimed, err)
 	}
@@ -280,7 +280,7 @@ func TestCompleteAgentJobWithResult_PreservesLeadAssociationAcrossUpserts(t *tes
 	if _, err := s.DB.ExecContext(ctx, `UPDATE agent_jobs SET conversation_id=$1 WHERE id=$2`, conv.ID, second); err != nil {
 		t.Fatalf("bind second conversation: %v", err)
 	}
-	claimed, err = s.ClaimAgentJobs(ctx, "worker", uid, 1)
+	claimed, err = s.ClaimAgentJobs(ctx, "worker", uid, RuntimeOwn, 1)
 	if err != nil || len(claimed) != 1 || claimed[0].ID != second {
 		t.Fatalf("claim second: jobs=%+v err=%v", claimed, err)
 	}
@@ -317,7 +317,7 @@ func TestRecordAgentJobCost_SetsValueForMatchingAttempt(t *testing.T) {
 	s := newTestStoreCrypted(t)
 	uid := seedAgentUser(t, s, "cost-owner")
 	jid := seedJob(t, s, uid, "evt:v1:1:1:cost")
-	claimed, err := s.ClaimAgentJobs(ctx, "r", uid, 1)
+	claimed, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
 	}
@@ -345,7 +345,7 @@ func TestRecordAgentJobCost_StaleAttemptReturnsNotFoundAndLeavesValueUntouched(t
 	s := newTestStoreCrypted(t)
 	uid := seedAgentUser(t, s, "cost-owner-2")
 	jid := seedJob(t, s, uid, "evt:v1:1:1:cost-2")
-	claimed, err := s.ClaimAgentJobs(ctx, "r", uid, 1)
+	claimed, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
 	}
@@ -397,7 +397,7 @@ func TestRetryAgentJob_BackoffThenDeadLetter(t *testing.T) {
 	}
 
 	// Attempt 1: claim + retry → pending with future next_run_at.
-	if _, err := s.ClaimAgentJobs(ctx, "r", uid, 1); err != nil {
+	if _, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1); err != nil {
 		t.Fatalf("claim 1: %v", err)
 	}
 	status, err := s.RetryAgentJob(ctx, jid, 1, "model timeout")
@@ -421,7 +421,7 @@ func TestRetryAgentJob_BackoffThenDeadLetter(t *testing.T) {
 	); err != nil {
 		t.Fatalf("re-arm: %v", err)
 	}
-	if _, err := s.ClaimAgentJobs(ctx, "r", uid, 1); err != nil {
+	if _, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1); err != nil {
 		t.Fatalf("claim 2: %v", err)
 	}
 	status, err = s.RetryAgentJob(ctx, jid, 2, "model timeout again")
@@ -443,7 +443,7 @@ func TestRetryAgentJob_LostRaceReturnsNotFound(t *testing.T) {
 	s := newTestStoreCrypted(t)
 	uid := seedAgentUser(t, s, "owner")
 	jid := seedJob(t, s, uid, "evt:v1:1:1:1")
-	if _, err := s.ClaimAgentJobs(ctx, "r", uid, 1); err != nil {
+	if _, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
 	// Simulate another transaction (the stale-claim sweeper) moving the row
@@ -476,7 +476,7 @@ func TestStaleClaimCannotCompleteReclaimedJob(t *testing.T) {
 	jid := seedJob(t, s, uid, "evt:v1:1:1:1")
 
 	// Worker A claims (attempts=1), then stalls past the visibility timeout.
-	first, err := s.ClaimAgentJobs(ctx, "worker-a", uid, 1)
+	first, err := s.ClaimAgentJobs(ctx, "worker-a", uid, RuntimeOwn, 1)
 	if err != nil || len(first) != 1 {
 		t.Fatalf("claim a: %v", err)
 	}
@@ -490,7 +490,7 @@ func TestStaleClaimCannotCompleteReclaimedJob(t *testing.T) {
 		t.Fatalf("requeue: %v", err)
 	}
 	// Worker B re-claims (attempts=2).
-	second, err := s.ClaimAgentJobs(ctx, "worker-b", uid, 1)
+	second, err := s.ClaimAgentJobs(ctx, "worker-b", uid, RuntimeOwn, 1)
 	if err != nil || len(second) != 1 {
 		t.Fatalf("claim b: %v", err)
 	}
@@ -521,7 +521,7 @@ func TestRequeueStaleAgentJobs_ClosesOpenAttempt(t *testing.T) {
 	s := newTestStoreCrypted(t)
 	uid := seedAgentUser(t, s, "owner")
 	jid := seedJob(t, s, uid, "evt:v1:1:1:1")
-	if _, err := s.ClaimAgentJobs(ctx, "r", uid, 1); err != nil {
+	if _, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
 	if _, err := s.DB.ExecContext(ctx,
@@ -634,7 +634,7 @@ func TestClaimAgentJobs_SerializesPerConversation(t *testing.T) {
 
 	// Only the conversation's OLDEST job plus the unassociated one may be
 	// claimed; message 2 must wait for message 1 even though it is due.
-	jobs, err := s.ClaimAgentJobs(ctx, "r1", uid, 10)
+	jobs, err := s.ClaimAgentJobs(ctx, "r1", uid, RuntimeOwn, 10)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -642,14 +642,14 @@ func TestClaimAgentJobs_SerializesPerConversation(t *testing.T) {
 		t.Fatalf("claimed %+v, want [%d %d]", jobs, first, loose)
 	}
 	// While message 1 is processing the conversation stays blocked.
-	if jobs, err = s.ClaimAgentJobs(ctx, "r2", uid, 10); err != nil || len(jobs) != 0 {
+	if jobs, err = s.ClaimAgentJobs(ctx, "r2", uid, RuntimeOwn, 10); err != nil || len(jobs) != 0 {
 		t.Fatalf("claim while in flight = %+v err=%v, want none", jobs, err)
 	}
 	// Completing message 1 releases message 2.
 	if err := s.CompleteAgentJob(ctx, first, 1, JobCompleted, ""); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
-	if jobs, err = s.ClaimAgentJobs(ctx, "r2", uid, 10); err != nil || len(jobs) != 1 || jobs[0].ID != second {
+	if jobs, err = s.ClaimAgentJobs(ctx, "r2", uid, RuntimeOwn, 10); err != nil || len(jobs) != 1 || jobs[0].ID != second {
 		t.Fatalf("claim after complete = %+v err=%v, want [%d]", jobs, err, second)
 	}
 }
@@ -659,7 +659,7 @@ func TestInsertAgentAction_IdempotentPerJob(t *testing.T) {
 	s := newTestStoreCrypted(t)
 	uid := seedAgentUser(t, s, "owner")
 	jid := seedJob(t, s, uid, "evt:v1:1:1:1")
-	claimed, err := s.ClaimAgentJobs(ctx, "r", uid, 1)
+	claimed, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
 	}
@@ -766,7 +766,7 @@ func TestInsertAgentAction_RejectsAfterJobNoLongerActive(t *testing.T) {
 
 	t.Run("terminal status", func(t *testing.T) {
 		jid := seedJob(t, s, uid, "evt:v1:1:1:terminal")
-		claimed, err := s.ClaimAgentJobs(ctx, "r", uid, 1)
+		claimed, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1)
 		if err != nil || len(claimed) != 1 {
 			t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
 		}
@@ -786,7 +786,7 @@ func TestInsertAgentAction_RejectsAfterJobNoLongerActive(t *testing.T) {
 
 	t.Run("stale attempt after requeue", func(t *testing.T) {
 		jid := seedJob(t, s, uid, "evt:v1:1:1:stale-attempt")
-		claimed, err := s.ClaimAgentJobs(ctx, "r", uid, 1)
+		claimed, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1)
 		if err != nil || len(claimed) != 1 {
 			t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
 		}
@@ -801,7 +801,7 @@ func TestInsertAgentAction_RejectsAfterJobNoLongerActive(t *testing.T) {
 		); err != nil {
 			t.Fatalf("unbackoff: %v", err)
 		}
-		reclaimed, err := s.ClaimAgentJobs(ctx, "r", uid, 1)
+		reclaimed, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1)
 		if err != nil || len(reclaimed) != 1 {
 			t.Fatalf("reclaim: jobs=%+v err=%v", reclaimed, err)
 		}
@@ -893,7 +893,7 @@ func TestRequeueStaleAgentJobs(t *testing.T) {
 	stale := seedJob(t, s, uid, "evt:v1:1:1:2")
 	exhausted := seedJob(t, s, uid, "evt:v1:1:1:3")
 
-	if _, err := s.ClaimAgentJobs(ctx, "r", uid, 3); err != nil {
+	if _, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 3); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
 	// Backdate two claims past the visibility window; exhaust one of them.

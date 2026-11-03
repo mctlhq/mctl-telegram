@@ -32,7 +32,7 @@ func inactiveConversationCases(t *testing.T, setup func(t *testing.T) (*Store, i
 			if status != JobIgnored || reason != ReasonConversationNotActive {
 				t.Fatalf("job = %q / %q, want %q / %q", status, reason, JobIgnored, ReasonConversationNotActive)
 			}
-			jobs, err := s.ClaimAgentJobs(ctx, "r", uid, 5)
+			jobs, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 5)
 			if err != nil || len(jobs) != 0 {
 				t.Fatalf("claimed %d jobs in a %s conversation, err=%v", len(jobs), state, err)
 			}

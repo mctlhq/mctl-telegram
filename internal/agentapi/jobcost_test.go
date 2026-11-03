@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
 // TestHandleReportJobCost_RecordsForClaimedAttempt covers the happy path:
@@ -14,7 +16,7 @@ func TestHandleReportJobCost_RecordsForClaimedAttempt(t *testing.T) {
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:v1:1:555:cost", conv.ID)
 
-	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, 1)
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, db.RuntimeOwn, 1)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
 	}
@@ -45,7 +47,7 @@ func TestHandleReportJobCost_StaleAttemptReturnsConflict(t *testing.T) {
 	jobID := h.seedJob("evt:v1:1:555:cost-stale", conv.ID)
 
 	ctx := context.Background()
-	first, err := h.store.ClaimAgentJobs(ctx, "test-replica", h.userID, 1)
+	first, err := h.store.ClaimAgentJobs(ctx, "test-replica", h.userID, db.RuntimeOwn, 1)
 	if err != nil || len(first) != 1 {
 		t.Fatalf("claim: jobs=%+v err=%v", first, err)
 	}
@@ -66,7 +68,7 @@ func TestHandleReportJobCost_StaleAttemptReturnsConflict(t *testing.T) {
 	if _, _, err := h.store.RequeueStaleAgentJobs(ctx, 5*time.Minute); err != nil {
 		t.Fatalf("requeue: %v", err)
 	}
-	second, err := h.store.ClaimAgentJobs(ctx, "other-replica", h.userID, 1)
+	second, err := h.store.ClaimAgentJobs(ctx, "other-replica", h.userID, db.RuntimeOwn, 1)
 	if err != nil || len(second) != 1 {
 		t.Fatalf("re-claim: jobs=%+v err=%v", second, err)
 	}

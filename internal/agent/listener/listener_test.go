@@ -46,7 +46,7 @@ func newTestListener(t *testing.T, router CommandRouter) (*Listener, *db.Store, 
 func claimAttemptForJob(t *testing.T, store *db.Store, userID, jobID int64) int {
 	t.Helper()
 	for tries := 0; tries < 50; tries++ {
-		jobs, err := store.ClaimAgentJobs(context.Background(), "listener-test", userID, 50)
+		jobs, err := store.ClaimAgentJobs(context.Background(), "listener-test", userID, db.RuntimeOwn, 50)
 		if err != nil {
 			t.Fatalf("claim jobs: %v", err)
 		}

@@ -20,7 +20,7 @@ type storePoller struct {
 }
 
 func (p *storePoller) PollEvents(ctx context.Context, limit int) ([]JobEnvelope, error) {
-	jobs, err := p.s.ClaimAgentJobs(ctx, "r", p.uid, limit)
+	jobs, err := p.s.ClaimAgentJobs(ctx, "r", p.uid, db.RuntimeOwn, limit)
 	if err != nil {
 		return nil, err
 	}

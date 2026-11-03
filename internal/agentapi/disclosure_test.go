@@ -144,7 +144,7 @@ func TestProposeReply_SenderWordsAreNotDisclosure(t *testing.T) {
 	if err != nil || !enqueued {
 		t.Fatalf("enqueue: id=%d enqueued=%v err=%v", jobID, enqueued, err)
 	}
-	claimed, err := h.store.ClaimAgentJobs(ctx, "test-replica", h.userID, 1)
+	claimed, err := h.store.ClaimAgentJobs(ctx, "test-replica", h.userID, db.RuntimeOwn, 1)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
 	}

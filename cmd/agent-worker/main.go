@@ -99,6 +99,10 @@ func run() error {
 	if runnerName == "" {
 		runnerName = "claude"
 	}
+	poolMode, err := envBoolStrict("AGENT_POOL_MODE")
+	if err != nil {
+		return err
+	}
 	var runner agentworker.Runner
 	switch runnerName {
 	case "claude":
@@ -111,6 +115,7 @@ func run() error {
 			Self:         self,
 			APIBaseURL:   apiBaseURL,
 			APIToken:     apiToken,
+			PoolMode:     poolMode,
 			SystemPrompt: os.Getenv("AGENT_SYSTEM_PROMPT"),
 			MaxBudgetUSD: maxBudgetUSD,
 			Metrics:      m,
@@ -154,6 +159,7 @@ func run() error {
 			},
 			APIBaseURL:   apiBaseURL,
 			APIToken:     apiToken,
+			PoolMode:     poolMode,
 			SystemPrompt: os.Getenv("AGENT_SYSTEM_PROMPT"),
 			MaxTurns:     maxTurns,
 			MaxBudgetUSD: maxBudgetUSD,
@@ -308,6 +314,20 @@ func validateDomainID(id string) error {
 // envConcurrency reads the worker concurrency: unset gives 1, anything other
 // than an integer in 1..agentworker.MaxConcurrency is refused rather than
 // silently clamped.
+// envBoolStrict parses a true/false env var; unset is false and anything
+// else is an error.
+func envBoolStrict(key string) (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return false, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s must be true or false, got %q", key, raw)
+	}
+	return v, nil
+}
+
 func envConcurrency(key string) (int, error) {
 	raw := os.Getenv(key)
 	if raw == "" {

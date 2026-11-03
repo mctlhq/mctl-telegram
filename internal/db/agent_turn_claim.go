@@ -19,7 +19,7 @@ const claimCandidateScan = 100
 const agentJobCols = `id, event_id, user_id, conversation_id, status, attempts,
            max_attempts, next_run_at, claimed_by, claimed_at, last_error,
            result_action_id, result_lead_id, cost_usd, created_at, updated_at,
-           turn_id, coalesced_into, install_revision`
+           turn_id, coalesced_into, install_revision, runtime`
 
 // WithTurnCoalescing turns on claim-time turn coalescing with cfg. A nil cfg or
 // one with QuietMS <= 0 leaves it off (one job per event, today's claim).
@@ -57,17 +57,26 @@ type claimCandidate struct {
 // The other members of the turn move to coalesced in the same transaction.
 // Jobs that waited behind an earlier turn coalesce regardless of their
 // arrival gaps (see readyTurn).
-func (s *Store) claimCoalesced(ctx context.Context, replicaID string, userID int64, limit int) ([]AgentJob, error) {
+func (s *Store) claimCoalesced(ctx context.Context, replicaID string, userID int64, runtime string, limit, maxInflight int) ([]AgentJob, error) {
 	now := s.now()
 	lock := ""
 	if s.isPostgres(ctx) {
 		lock = " FOR UPDATE OF j SKIP LOCKED"
+	}
+	capPG, err := s.managedClaimDialect(ctx, maxInflight)
+	if err != nil {
+		return nil, err
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin claim tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if maxInflight > 0 {
+		if limit, err = s.reserveInflight(ctx, tx, capPG, userID, limit, maxInflight); err != nil || limit == 0 {
+			return nil, err
+		}
+	}
 
 	cands, err := loadClaimCandidates(ctx, tx,
 		`SELECT j.id, j.event_id, j.conversation_id, j.created_at, COALESCE(j.body_bytes, 0),
@@ -75,6 +84,7 @@ func (s *Store) claimCoalesced(ctx context.Context, replicaID string, userID int
 		   FROM agent_jobs j
 		   JOIN incoming_events e ON e.event_id = j.event_id AND e.user_id = j.user_id
 		  WHERE j.status = $1 AND j.next_run_at <= $2 AND j.user_id = $3
+		    AND `+claimRuntimePredicate+`$6
 		    AND NOT EXISTS (
 		        SELECT 1 FROM agent_jobs p
 		         WHERE p.conversation_id = j.conversation_id
@@ -82,7 +92,7 @@ func (s *Store) claimCoalesced(ctx context.Context, replicaID string, userID int
 		    )
 		  ORDER BY j.next_run_at, j.id
 		  LIMIT $5`+lock,
-		JobPending, now, userID, JobProcessing, claimCandidateScan)
+		JobPending, now, userID, JobProcessing, claimCandidateScan, runtime)
 	if err != nil {
 		return nil, fmt.Errorf("claim agent jobs: %w", err)
 	}
@@ -112,10 +122,11 @@ func (s *Store) claimCoalesced(ctx context.Context, replicaID string, userID int
 			`UPDATE agent_jobs
 			    SET status = $1, attempts = attempts + 1,
 			        claimed_by = $2, claimed_at = $3, updated_at = $3, turn_id = $4,
-			        install_revision = COALESCE((SELECT install_revision FROM agent_profiles WHERE user_id = agent_jobs.user_id), 1)
+			        install_revision = COALESCE((SELECT install_revision FROM agent_profiles WHERE user_id = agent_jobs.user_id), 1),
+			        runtime = $7
 			  WHERE id = $5 AND status = $6
 			 RETURNING `+agentJobCols,
-			JobProcessing, replicaID, now, tid, c.id, JobPending)
+			JobProcessing, replicaID, now, tid, c.id, JobPending, runtime)
 		if err != nil {
 			return nil, fmt.Errorf("claim agent job: %w", err)
 		}

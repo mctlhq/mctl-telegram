@@ -137,7 +137,7 @@ func runAdmissionSim(t *testing.T, users []string, sessionsPerUser []int, jobsPe
 			if free <= 0 {
 				continue
 			}
-			jobs, err := s.ClaimAgentJobs(ctx, "sim", uids[i], free)
+			jobs, err := s.ClaimAgentJobs(ctx, "sim", uids[i], RuntimeOwn, free)
 			if err != nil {
 				t.Fatalf("claim: %v", err)
 			}

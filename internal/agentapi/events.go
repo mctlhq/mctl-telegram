@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strconv"
@@ -275,14 +276,41 @@ func (s *Server) mintJobToken(parent *auth.Identity, j db.AgentJob, jobTools []s
 	if s.jobTokenSigner == nil || parent.TelegramID == 0 {
 		return ""
 	}
+	return s.signJobToken(parent, parent.Subject, parent.TelegramID, parent.TelegramUsername, j, jobTools)
+}
+
+// mintJobTokenFor is mintJobToken for either kind of parent. A pool parent
+// belongs to no account, so Subject and TelegramID come from the job's user;
+// the pool's jti and origin are still inherited, which is what lets revoking
+// the pool revoke every job token derived from it. Returns "" when no token
+// can be minted: a pool-claimed job is never handed out without one.
+func (s *Server) mintJobTokenFor(ctx context.Context, parent *auth.Identity, j db.AgentJob, jobTools []string) string {
+	if !parent.IsPool() {
+		return s.mintJobToken(parent, j, jobTools)
+	}
+	if s.jobTokenSigner == nil {
+		return ""
+	}
+	tg, found, err := s.Store.TelegramIDByUserID(ctx, j.UserID)
+	if err != nil {
+		logHandlerErr("mint_job_token", err)
+		return ""
+	}
+	if !found {
+		return ""
+	}
+	return s.signJobToken(parent, "tg:"+strconv.FormatInt(tg, 10), tg, "", j, jobTools)
+}
+
+func (s *Server) signJobToken(parent *auth.Identity, subject string, tgID int64, tgUsername string, j db.AgentJob, jobTools []string) string {
 	ttl := time.Until(j.ClaimedAt.Add(s.jobVisibility))
 	if ttl <= 0 {
 		return ""
 	}
 	tok, err := s.jobTokenSigner.Mint(localjwt.Claims{
-		Subject:          parent.Subject,
-		TelegramID:       parent.TelegramID,
-		TelegramUsername: parent.TelegramUsername,
+		Subject:          subject,
+		TelegramID:       tgID,
+		TelegramUsername: tgUsername,
 		Audience:         []string{jobTokenAudience},
 		Jti:              parent.Jti,
 		OriginalIssuedAt: parent.OriginalIssuedAt,
@@ -333,6 +361,11 @@ func (s *Server) handleClaimJobs(w http.ResponseWriter, r *http.Request) {
 		limit = n
 	}
 
+	if id.IsPool() {
+		s.handlePoolClaim(w, r, id, limit)
+		return
+	}
+
 	// Rendered before anything is claimed, so a failure leaves every job
 	// queued instead of claimed by a request that cannot run it.
 	instructions, assistantRef, assistantDigest, toolNames, err := s.accountInstructions(r, id.UserID)
@@ -369,7 +402,7 @@ func (s *Server) handleClaimJobs(w http.ResponseWriter, r *http.Request) {
 	tick := time.NewTicker(eventsPollInterval)
 	defer tick.Stop()
 	for {
-		jobs, err := s.Queue.Claim(ctx, id.UserID, limit)
+		jobs, err := s.Queue.Claim(ctx, id.UserID, db.RuntimeOwn, limit)
 		if err != nil {
 			// A client disconnect mid-Claim surfaces here as context.Canceled
 			// (the ctx.Done() case below only catches cancellation *between*
@@ -419,6 +452,192 @@ func (s *Server) handleClaimJobs(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// handlePoolClaim is POST /jobs/claim for the managed-runtime pool identity:
+// one job per managed account per response, round robin over the accounts
+// with due work, each handed a job token minted from the job's own user.
+// Every account's instructions are rendered before its job is claimed, and a
+// job whose token cannot be minted is released without charging an attempt.
+func (s *Server) handlePoolClaim(w http.ResponseWriter, r *http.Request, id *auth.Identity, limit int) {
+	if s.jobTokenSigner == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "job tokens not configured")
+		return
+	}
+	if s.managed == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "managed runtime not enabled")
+		return
+	}
+	ctx := r.Context()
+	origin := time.Unix(id.OriginalIssuedAt, 0)
+	deadline := time.Now().Add(s.longPollTimeout)
+	tick := time.NewTicker(eventsPollInterval)
+	defer tick.Stop()
+	// skipped counts, by reason, the accounts this request passed over; it is
+	// logged once if the request ends without serving anyone, so a pool that
+	// is starved by accounts it cannot serve is visible.
+	skipped := map[string]int{}
+	finish := func(out []jobEnvelope) {
+		// nothing_claimable alone is normal contention (another pool replica
+		// took the job between the candidate read and the claim), not a
+		// starved pool.
+		starved := false
+		for reason := range skipped {
+			starved = starved || reason != poolSkipNothing
+		}
+		if len(out) == 0 && starved {
+			slog.Warn("agentapi pool claim: candidate accounts were skipped and none was served",
+				"pool", id.Pool, "skipped", skipped)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"jobs": out})
+	}
+	page := max(s.poolCandidatePage, limit, 1)
+	for {
+		out := make([]jobEnvelope, 0, limit)
+		// Walk the whole candidate order, page by page, until limit jobs are
+		// claimed: accounts the pool must skip (blanket revocation, an
+		// assistant that cannot render, a claim that comes back empty) keep
+		// their place at the front of the order, and a fixed window would let
+		// a few of them starve every other managed account.
+		var after *db.ManagedClaimCursor
+		// served makes "one job per account per response" hold for any
+		// in-flight cap: with a cap above 1 an account served on one page
+		// can sort after the cursor again (its next claimable job is due
+		// later) and would otherwise get a second job ahead of others.
+		served := map[int64]bool{}
+		for scanned := 0; len(out) < limit && scanned < maxPoolCandidateScan; scanned += page {
+			cands, err := s.Store.ListManagedClaimCandidates(ctx, s.clock(), s.managed.MaxInflightPerAccount, after, page)
+			if err != nil {
+				if ctx.Err() != nil {
+					writeJSON(w, http.StatusOK, map[string]any{"jobs": []jobEnvelope{}})
+					return
+				}
+				logHandlerErr("get_events", err)
+				writeJSONError(w, http.StatusInternalServerError, "claim failed")
+				return
+			}
+			for _, c := range cands {
+				if len(out) >= limit {
+					break
+				}
+				if served[c.UserID] {
+					continue
+				}
+				env, reason := s.poolClaimOne(r, id, c, origin)
+				if reason != "" {
+					skipped[reason]++
+					continue
+				}
+				served[c.UserID] = true
+				out = append(out, env)
+			}
+			if len(cands) < page {
+				break
+			}
+			after = &cands[len(cands)-1].Cursor
+		}
+		if len(out) > 0 {
+			finish(out)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			finish([]jobEnvelope{})
+			return
+		case <-tick.C:
+			if time.Now().After(deadline) {
+				finish([]jobEnvelope{})
+				return
+			}
+		}
+	}
+}
+
+// defaultPoolCandidatePage is how many candidate accounts one page of the
+// pool claim reads; maxPoolCandidateScan bounds one pass over the candidate
+// order (well above MANAGED_RUNTIME_MAX_ACCOUNTS today).
+const (
+	defaultPoolCandidatePage = 32
+	maxPoolCandidateScan     = 4096
+)
+
+// Skip reasons poolClaimOne reports for an account it hands nothing out for.
+const (
+	poolSkipRevoked     = "blanket_revoked"
+	poolSkipRevokeCheck = "revocation_check_failed"
+	poolSkipRender      = "instructions_unavailable"
+	poolSkipTools       = "tool_set_unavailable"
+	poolSkipClaimError  = "claim_failed"
+	poolSkipNothing     = "nothing_claimable"
+	poolSkipMint        = "job_token_unavailable"
+)
+
+// poolClaimOne claims at most one job of candidate c for the pool. A
+// non-empty reason means nothing is handed out for this account; its jobs
+// stay pending.
+func (s *Server) poolClaimOne(r *http.Request, id *auth.Identity, c db.ManagedClaimCandidate, origin time.Time) (jobEnvelope, string) {
+	ctx := r.Context()
+	// A blanket revocation of the account at or after the pool's origin would
+	// make every job token minted from the pool dead on arrival.
+	if s.managed.Revocations != nil {
+		revoked, err := s.managed.Revocations.IsBlanketRevoked(ctx, c.TelegramID, origin)
+		if err != nil {
+			slog.Debug("agentapi pool claim: revocation check failed; account skipped", "user_id", c.UserID, "err", err)
+			return jobEnvelope{}, poolSkipRevokeCheck
+		}
+		if revoked {
+			return jobEnvelope{}, poolSkipRevoked
+		}
+	}
+	instructions, assistantRef, assistantDigest, toolNames, err := s.accountInstructions(r, c.UserID)
+	if err != nil {
+		slog.Debug("agentapi pool claim: instructions unavailable; account skipped", "user_id", c.UserID, "err", err)
+		return jobEnvelope{}, poolSkipRender
+	}
+	bindings, err := tools.ForJob(toolNames)
+	if err != nil {
+		slog.Debug("agentapi pool claim: tool set unavailable; account skipped", "user_id", c.UserID, "err", err)
+		return jobEnvelope{}, poolSkipTools
+	}
+	jobTools := tools.CanonicalNames(bindings)
+	// The candidate list is a lock-free hint; ClaimManaged re-checks the
+	// in-flight cap atomically with the claim.
+	jobs, err := s.Queue.ClaimManaged(ctx, c.UserID, 1, s.managed.MaxInflightPerAccount)
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("agentapi pool claim: claim failed", "user_id", c.UserID, "err", err)
+		}
+		return jobEnvelope{}, poolSkipClaimError
+	}
+	if len(jobs) == 0 {
+		return jobEnvelope{}, poolSkipNothing
+	}
+	j := jobs[0]
+	tok := s.mintJobTokenFor(ctx, id, j, jobTools)
+	if tok == "" {
+		// Not RetryAgentJob: a signer outage must not spend the job's retry
+		// budget. The release keeps the context alive past a hang-up.
+		if err := s.Queue.ReleaseUnissued(context.WithoutCancel(ctx), j.ID, j.Attempts); err != nil {
+			slog.Warn("agentapi pool claim: release of unissued claim failed", "job_id", j.ID, "err", err)
+		}
+		return jobEnvelope{}, poolSkipMint
+	}
+	s.audit(ctx, c.UserID, "get_events", "ok", "pool:"+id.Pool)
+	return jobEnvelope{
+		JobID:           j.ID,
+		EventID:         j.EventID,
+		ConversationID:  j.ConversationID,
+		Attempt:         j.Attempts,
+		Deadline:        j.ClaimedAt.Add(s.jobVisibility).UTC().Format(time.RFC3339),
+		JobToken:        tok,
+		TurnID:          j.TurnID,
+		SourceEventIDs:  j.SourceEventIDs,
+		Instructions:    instructions,
+		Assistant:       assistantRef,
+		AssistantDigest: assistantDigest,
+		Tools:           toolNames,
+		InstallRevision: j.InstallRevision,
+	}, ""
 }
 
 // eventResponse is the full payload for GET /event/{eventID}.

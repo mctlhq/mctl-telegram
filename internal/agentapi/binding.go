@@ -2,9 +2,14 @@ package agentapi
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
 // A job credential (audience "agent-job", minted by handleClaimJobs) is bound
@@ -53,4 +58,30 @@ func (s *Server) requireAccountToken(w http.ResponseWriter, r *http.Request, id 
 	}
 	s.denyBinding(w, r, id, tool, "job credential cannot call an account-scoped route")
 	return false
+}
+
+// requireNotPool makes a route unreachable for the managed-runtime pool
+// credential (aud "agent-pool"), which may only call POST /jobs/claim. It
+// runs outside toolGate: the gate resolves a tool set from id.UserID, which
+// is 0 for a pool. The refusal is a slog line and a policy-denial metric;
+// audit_logs.user_id is a foreign key to users, so a row is written only
+// under the job owner when the route names a job that resolves.
+func (s *Server) requireNotPool(route string, h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := auth.From(r.Context())
+		if !id.IsPool() {
+			h(w, r)
+			return
+		}
+		slog.Warn("agentapi pool credential refused", "pool", id.Pool, "route", route, "jti", id.Jti)
+		s.m.CountPolicyDenial("pool_claim_only", metrics.PolicySurfaceToolGate)
+		if s.Store != nil && strings.Contains(route, "/jobs/{id}") {
+			if jobID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64); err == nil {
+				if owner, found, err := s.Store.AgentJobOwner(r.Context(), jobID); err == nil && found {
+					s.audit(r.Context(), owner, route, "denied", "pool:"+id.Pool+" claim-only")
+				}
+			}
+		}
+		writeJSONError(w, http.StatusForbidden, "pool_credential_claim_only")
+	}
 }

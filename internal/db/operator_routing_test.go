@@ -39,7 +39,7 @@ func newRoutingFixture(t *testing.T, routing bool, maxAttempts int) *routingFixt
 			t.Fatal(err)
 		}
 	}
-	jobs, err := f.s.ClaimAgentJobs(context.Background(), "r", f.uid, 1)
+	jobs, err := f.s.ClaimAgentJobs(context.Background(), "r", f.uid, RuntimeOwn, 1)
 	if err != nil || len(jobs) != 1 {
 		t.Fatalf("claim: %v %v", jobs, err)
 	}
@@ -221,7 +221,7 @@ func TestOperatorRouting_InactiveConversationPublishesNothing(t *testing.T) {
 			if n := outboxCount(t, s); n != want {
 				t.Fatalf("outbox rows = %d, want %d", n, want)
 			}
-			if jobs, err := s.ClaimAgentJobs(ctx, "r", uid, 1); err != nil || len(jobs) != 0 {
+			if jobs, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1); err != nil || len(jobs) != 0 {
 				t.Fatalf("claimed %d jobs, err=%v", len(jobs), err)
 			}
 		})

@@ -103,7 +103,7 @@ func TestInstallRevisionFencesStaleJob(t *testing.T) {
 	}
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:rev:1", conv.ID)
-	claimed, err := h.store.ClaimAgentJobs(ctx, "test-replica", h.userID, 1)
+	claimed, err := h.store.ClaimAgentJobs(ctx, "test-replica", h.userID, db.RuntimeOwn, 1)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim: %v %v", claimed, err)
 	}
@@ -131,7 +131,7 @@ func TestInstallRevisionFencesStaleJob(t *testing.T) {
 		t.Fatal(err)
 	}
 	fresh := h.seedJob("evt:rev:2", conv.ID)
-	claimed, err = h.store.ClaimAgentJobs(ctx, "test-replica", h.userID, 1)
+	claimed, err = h.store.ClaimAgentJobs(ctx, "test-replica", h.userID, db.RuntimeOwn, 1)
 	if err != nil || len(claimed) != 1 || claimed[0].ID != fresh {
 		t.Fatalf("claim fresh: %v %v", claimed, err)
 	}
@@ -156,7 +156,7 @@ func TestInstallRevisionFencesOwnerSummary(t *testing.T) {
 	h.seedProfile(db.AgentModeGuarded)
 	conv := h.seedConversation(555)
 	jobID := h.seedJob("evt:rev:sum", conv.ID)
-	claimed, err := h.store.ClaimAgentJobs(ctx, "test-replica", h.userID, 1)
+	claimed, err := h.store.ClaimAgentJobs(ctx, "test-replica", h.userID, db.RuntimeOwn, 1)
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim: %v %v", claimed, err)
 	}

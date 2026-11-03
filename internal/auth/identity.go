@@ -63,7 +63,14 @@ type Identity struct {
 	// JobTools is the canonical tool set bound into an agent job credential
 	// (localjwt claim job_tools). Empty for every other credential.
 	JobTools []string
+	// Pool is the managed-runtime pool name of an "agent-pool" credential
+	// (localjwt.PoolProvider only). A pool identity has UserID 0 and
+	// TelegramID 0 -- it belongs to no account -- and may only claim jobs.
+	Pool string
 }
+
+// IsPool reports whether the identity is a managed-runtime pool credential.
+func (i *Identity) IsPool() bool { return i != nil && i.Pool != "" }
 
 func (i *Identity) HasScope(s string) bool {
 	if i == nil {

@@ -81,6 +81,13 @@ type Server struct {
 	snapshotMu sync.Mutex
 	snapshots  map[string]*assistant.Entry
 
+	// managed enables the pool claim branch (MANAGED_RUNTIME_ENABLED); nil
+	// leaves a pool identity with nothing to claim.
+	managed *ManagedClaimConfig
+	// poolCandidatePage is how many candidate accounts one page of a pool
+	// claim reads (defaultPoolCandidatePage; lowered by tests).
+	poolCandidatePage int
+
 	longPollTimeout time.Duration
 	jobVisibility   time.Duration
 	m               *metrics.Registry
@@ -96,11 +103,12 @@ func New(store *db.Store, q *queue.Queue, jobVisibility time.Duration, m *metric
 		jobVisibility = 5 * time.Minute
 	}
 	return &Server{
-		Store:           store,
-		Queue:           q,
-		longPollTimeout: defaultLongPollTimeout,
-		jobVisibility:   jobVisibility,
-		m:               m,
+		Store:             store,
+		Queue:             q,
+		longPollTimeout:   defaultLongPollTimeout,
+		poolCandidatePage: defaultPoolCandidatePage,
+		jobVisibility:     jobVisibility,
+		m:                 m,
 	}
 }
 
@@ -116,6 +124,24 @@ func (s *Server) WithProfile(p OwnerProfileProvider) *Server {
 // for chaining.
 func (s *Server) WithJobTokenSigner(i *localjwt.Issuer) *Server {
 	s.jobTokenSigner = i
+	return s
+}
+
+// ManagedClaimConfig configures the managed-runtime pool claim branch.
+type ManagedClaimConfig struct {
+	// MaxInflightPerAccount caps processing jobs per managed account.
+	MaxInflightPerAccount int
+	// Revocations is consulted to skip accounts under a blanket revocation.
+	Revocations *localjwt.RevocationCache
+}
+
+// WithManagedClaims enables POST /jobs/claim for a pool identity. Returns s
+// for chaining.
+func (s *Server) WithManagedClaims(c ManagedClaimConfig) *Server {
+	if c.MaxInflightPerAccount < 1 {
+		c.MaxInflightPerAccount = 1
+	}
+	s.managed = &c
 	return s
 }
 
@@ -172,8 +198,14 @@ type registrar interface {
 // which refuses a route serving a tool outside the caller's tool set
 // (tools.Endpoints) and leaves the others alone.
 func (s *Server) Register(mux registrar) {
-	get := func(p string, h http.HandlerFunc) { mux.Get(p, s.toolGate("GET "+p, h)) }
-	post := func(p string, h http.HandlerFunc) { mux.Post(p, s.toolGate("POST "+p, h)) }
+	// The pool guard wraps every route outside toolGate; the single
+	// exception, POST /jobs/claim, is registered explicitly below.
+	get := func(p string, h http.HandlerFunc) {
+		mux.Get(p, s.requireNotPool("GET "+p, s.toolGate("GET "+p, h)))
+	}
+	post := func(p string, h http.HandlerFunc) {
+		mux.Post(p, s.requireNotPool("POST "+p, s.toolGate("POST "+p, h)))
+	}
 	get("/events", s.handleLegacyEvents)
 	get("/event/{eventID}", s.handleGetEvent)
 	get("/conversations/{id}/context", s.handleConversationContext)
@@ -187,7 +219,7 @@ func (s *Server) Register(mux registrar) {
 	post("/actions/request_owner_approval", s.handleRequestOwnerApproval)
 	post("/notify/summary", s.handleNotifySummary)
 	post("/autopilot/pause", s.handleAutopilotPause)
-	post("/jobs/claim", s.handleClaimJobs)
+	mux.Post("/jobs/claim", s.toolGate("POST /jobs/claim", s.handleClaimJobs))
 	post("/jobs/{id}/complete", s.handleJobComplete)
 	// Worker-only cost report — deliberately absent from allowedTools and
 	// NewMCPServer's tool list (internal/agentworker) so the model can never

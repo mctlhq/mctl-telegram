@@ -106,6 +106,12 @@ type ClaudeInvoker struct {
 	APIBaseURL   string
 	APIToken     string
 	SystemPrompt string
+	// PoolMode is AGENT_POOL_MODE: APIToken is the claim-only pool
+	// credential, which can reach nothing but the claim route. The job token
+	// then serves the MCP subprocess and the worker's own status and cost
+	// calls, a job without one fails, and APIToken is never used as a
+	// fallback.
+	PoolMode bool
 	// MaxBudgetUSD, if > 0, is passed as --max-budget-usd so a single job
 	// cannot spend past this even if the model loops.
 	MaxBudgetUSD float64
@@ -142,6 +148,9 @@ var ErrAgentDidNotCompleteJob = errors.New("agent did not complete job")
 func (c *ClaudeInvoker) mcpToken(job JobEnvelope) string {
 	if job.JobToken != "" {
 		return job.JobToken
+	}
+	if c.PoolMode {
+		return ""
 	}
 	return c.APIToken
 }
@@ -197,6 +206,9 @@ func (c *ClaudeInvoker) buildMCPConfig(job JobEnvelope) mcpConfig {
 // only when both the CLI result is successful and the API confirms that this
 // exact claimed attempt reached a terminal state.
 func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
+	if c.PoolMode && job.JobToken == "" {
+		return errNoJobToken
+	}
 	bindings, err := jobTools(job)
 	if err != nil {
 		return fmt.Errorf("job tools: %w", err)
@@ -267,7 +279,11 @@ func (c *ClaudeInvoker) Run(ctx context.Context, job JobEnvelope) error {
 	if parseErr != nil {
 		return fmt.Errorf("job %d: %w (stdout: %d bytes, see run logs)", job.JobID, parseErr, stdout.Len())
 	}
-	client := NewClient(c.APIBaseURL, c.APIToken, nil)
+	finishToken := c.APIToken
+	if c.PoolMode {
+		finishToken = job.JobToken
+	}
+	client := NewClient(c.APIBaseURL, finishToken, nil)
 	return finishRun(ctx, client, job, res, c.Metrics)
 }
 

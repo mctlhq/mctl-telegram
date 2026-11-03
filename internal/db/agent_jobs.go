@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -51,19 +52,22 @@ type AgentJob struct {
 	// InstallRevision is the account's install revision when the job was
 	// last claimed (#1018); its actions inherit it.
 	InstallRevision int64
-	ID              int64
-	EventID         string
-	UserID          int64
-	ConversationID  int64 // 0 ⇒ not associated yet
-	Status          string
-	Attempts        int
-	MaxAttempts     int
-	NextRunAt       time.Time
-	ClaimedBy       string
-	ClaimedAt       time.Time // zero value ⇒ never claimed
-	LastError       string
-	ResultActionID  int64
-	ResultLeadID    int64
+	// Runtime is the runtime the job was last claimed under (own|managed);
+	// empty for a job never claimed since the column existed.
+	Runtime        string
+	ID             int64
+	EventID        string
+	UserID         int64
+	ConversationID int64 // 0 ⇒ not associated yet
+	Status         string
+	Attempts       int
+	MaxAttempts    int
+	NextRunAt      time.Time
+	ClaimedBy      string
+	ClaimedAt      time.Time // zero value ⇒ never claimed
+	LastError      string
+	ResultActionID int64
+	ResultLeadID   int64
 	// CostUSD is the last-reported Claude spend for this job (see
 	// RecordAgentJobCost). sql.NullFloat64, not float64: an unreported job
 	// must read as SQL NULL, never a false 0 that would understate spend —
@@ -305,6 +309,11 @@ func (s *Store) InsertEventAndEnqueueJob(ctx context.Context, ev IncomingEvent, 
 	return jobID, true, nil
 }
 
+// claimRuntimePredicate separates own and managed jobs in SQL: a job is
+// claimable only by the runtime its account's profile names (an account with
+// no profile row is own). Both claim queries append a placeholder.
+const claimRuntimePredicate = "COALESCE((SELECT ap.runtime FROM agent_profiles ap WHERE ap.user_id = j.user_id), 'own') = "
+
 // ClaimAgentJobs atomically claims up to limit due pending jobs for this
 // replica, scoped to userID: flips them to processing, increments attempts,
 // stamps claimed_by/claimed_at, and opens an agent_job_attempts row per
@@ -321,26 +330,102 @@ func (s *Store) InsertEventAndEnqueueJob(ctx context.Context, ev IncomingEvent, 
 // On Postgres the inner SELECT uses FOR UPDATE SKIP LOCKED so concurrent
 // replicas never claim the same row. SQLite runs with a single connection
 // (Open sets SetMaxOpenConns(1)), so the plain form is race-free there.
-func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, userID int64, limit int) ([]AgentJob, error) {
+func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, userID int64, runtime string, limit int) ([]AgentJob, error) {
+	return s.claimAgentJobs(ctx, replicaID, userID, runtime, limit, 0)
+}
+
+// ClaimManagedAgentJobs is ClaimAgentJobs for the managed-runtime pool, with
+// the per-account in-flight cap enforced inside the claim transaction: at
+// most maxInflight jobs of userID are processing once it commits, however
+// many pool claims run at the same time. The candidate list the pool reads
+// first is only a hint; this is the authority.
+func (s *Store) ClaimManagedAgentJobs(ctx context.Context, replicaID string, userID int64, limit, maxInflight int) ([]AgentJob, error) {
+	if maxInflight < 1 {
+		return nil, fmt.Errorf("claim managed agent jobs: max in-flight must be >= 1, got %d", maxInflight)
+	}
+	return s.claimAgentJobs(ctx, replicaID, userID, RuntimeManaged, limit, maxInflight)
+}
+
+// managedClaimLockNamespace prefixes the per-account advisory lock key that
+// serializes managed claims of one account on Postgres.
+const managedClaimLockNamespace = "mctl-telegram:managed-claim:"
+
+// reserveInflight serializes this transaction against every other capped
+// claim of userID and returns how many jobs it may still claim (0 when the
+// account is at the cap). On Postgres a transaction-scoped advisory lock per
+// account makes the count and the claim that follows atomic: a second claim
+// blocks until the first commits and then, under READ COMMITTED, counts the
+// first one's processing rows. SQLite runs on a single connection, so the
+// transaction itself serializes. pg comes from managedClaimDialect, resolved
+// before the transaction opens.
+func (s *Store) reserveInflight(ctx context.Context, tx *sql.Tx, pg bool, userID int64, limit, maxInflight int) (int, error) {
+	if pg {
+		if _, err := tx.ExecContext(ctx,
+			`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+			managedClaimLockNamespace+strconv.FormatInt(userID, 10)); err != nil {
+			return 0, fmt.Errorf("lock managed claim: %w", err)
+		}
+	}
+	var inflight int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM agent_jobs WHERE user_id = $1 AND status = $2`,
+		userID, JobProcessing).Scan(&inflight); err != nil {
+		return 0, fmt.Errorf("count managed in-flight jobs: %w", err)
+	}
+	room := maxInflight - inflight
+	if room <= 0 {
+		return 0, nil
+	}
+	return min(limit, room), nil
+}
+
+// managedClaimDialect resolves the dialect for a capped claim before its
+// transaction opens (the probe needs a connection of its own, and SQLite has
+// one). An inconclusive probe is an error, not a guess: a cap that might not
+// be enforced is not applied.
+func (s *Store) managedClaimDialect(ctx context.Context, maxInflight int) (bool, error) {
+	if maxInflight <= 0 {
+		return false, nil
+	}
+	pg, err := s.postgresDialect(ctx)
+	if err != nil {
+		return false, fmt.Errorf("managed claim: %w", err)
+	}
+	return pg, nil
+}
+
+func (s *Store) claimAgentJobs(ctx context.Context, replicaID string, userID int64, runtime string, limit, maxInflight int) ([]AgentJob, error) {
 	if userID <= 0 {
 		return nil, errors.New("user id required")
+	}
+	if runtime != RuntimeOwn && runtime != RuntimeManaged {
+		return nil, fmt.Errorf("claim agent jobs: invalid runtime %q", runtime)
 	}
 	if limit <= 0 {
 		limit = 1
 	}
 	if s.turnCfg != nil {
-		return s.claimCoalesced(ctx, replicaID, userID, limit)
+		return s.claimCoalesced(ctx, replicaID, userID, runtime, limit, maxInflight)
 	}
 	now := time.Now().UTC()
 	lock := ""
 	if s.isPostgres(ctx) {
 		lock = " FOR UPDATE SKIP LOCKED"
 	}
+	capPG, err := s.managedClaimDialect(ctx, maxInflight)
+	if err != nil {
+		return nil, err
+	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin claim tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if maxInflight > 0 {
+		if limit, err = s.reserveInflight(ctx, tx, capPG, userID, limit, maxInflight); err != nil || limit == 0 {
+			return nil, err
+		}
+	}
 
 	// The outer UPDATE re-checks status = pending. With SKIP LOCKED this is
 	// redundant; without it (SQLite, or a Postgres claim while the dialect
@@ -357,14 +442,18 @@ func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, userID int
 	// recorded. Head-of-line blocking per conversation is intentional:
 	// message order beats throughput inside a dialog. Jobs without a
 	// conversation are unconstrained (the NULL comparison never matches).
+	//
+	// The due rows are picked in a CTE, not an IN (subquery ... LIMIT), for
+	// the reason ClaimBroadcastDeliveries gives: Postgres may plan the IN as
+	// a nested-loop semi join that re-runs the LIMIT ... SKIP LOCKED subquery
+	// per outer row. On a table without statistics that was observed
+	// claiming all 8 due jobs for limit 1, which also defeated the managed
+	// in-flight cap. A CTE with FOR UPDATE is never inlined, so it runs once.
 	rows, err := tx.QueryContext(ctx,
-		`UPDATE agent_jobs
-		    SET status = $1, attempts = attempts + 1,
-		        claimed_by = $2, claimed_at = $3, updated_at = $3,
-		        install_revision = COALESCE((SELECT install_revision FROM agent_profiles WHERE user_id = agent_jobs.user_id), 1)
-		  WHERE status = $4 AND id IN (
+		`WITH due AS (
 		        SELECT j.id FROM agent_jobs j
 		         WHERE j.status = $4 AND j.next_run_at <= $3 AND j.user_id = $6
+		           AND `+claimRuntimePredicate+`$7
 		           AND NOT EXISTS (
 		               SELECT 1 FROM agent_jobs p
 		                WHERE p.conversation_id = j.conversation_id
@@ -372,12 +461,18 @@ func (s *Store) ClaimAgentJobs(ctx context.Context, replicaID string, userID int
 		           )
 		         ORDER BY j.next_run_at, j.id
 		         LIMIT $5`+lock+`
-		  )
+		)
+		UPDATE agent_jobs
+		    SET status = $1, attempts = attempts + 1,
+		        claimed_by = $2, claimed_at = $3, updated_at = $3,
+		        install_revision = COALESCE((SELECT install_revision FROM agent_profiles WHERE user_id = agent_jobs.user_id), 1),
+		        runtime = $7
+		  WHERE status = $4 AND id IN (SELECT id FROM due)
 		 RETURNING id, event_id, user_id, conversation_id, status, attempts,
 		           max_attempts, next_run_at, claimed_by, claimed_at, last_error,
 		           result_action_id, result_lead_id, cost_usd, created_at, updated_at,
-		           turn_id, coalesced_into, install_revision`,
-		JobProcessing, replicaID, now, JobPending, limit, userID,
+		           turn_id, coalesced_into, install_revision, runtime`,
+		JobProcessing, replicaID, now, JobPending, limit, userID, runtime,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("claim agent jobs: %w", err)
@@ -427,11 +522,12 @@ func scanAgentJobs(rows *sql.Rows) ([]AgentJob, error) {
 			costUSD                      sql.NullFloat64
 			turnID                       sql.NullString
 			coalescedInto                sql.NullInt64
+			runtime                      sql.NullString
 		)
 		if err := rows.Scan(&j.ID, &j.EventID, &j.UserID, &convID, &j.Status, &j.Attempts,
 			&j.MaxAttempts, &j.NextRunAt, &claimedBy, &claimedAt, &lastErr,
 			&resultActionID, &resultLeadID, &costUSD, &j.CreatedAt, &j.UpdatedAt,
-			&turnID, &coalescedInto, &j.InstallRevision); err != nil {
+			&turnID, &coalescedInto, &j.InstallRevision, &runtime); err != nil {
 			return nil, fmt.Errorf("scan agent job: %w", err)
 		}
 		j.ConversationID = convID.Int64
@@ -442,6 +538,7 @@ func scanAgentJobs(rows *sql.Rows) ([]AgentJob, error) {
 		j.CostUSD = costUSD
 		j.TurnID = turnID.String
 		j.CoalescedInto = coalescedInto.Int64
+		j.Runtime = runtime.String
 		if claimedAt.Valid {
 			j.ClaimedAt = claimedAt.Time
 		}
@@ -456,7 +553,7 @@ func (s *Store) GetAgentJob(ctx context.Context, userID, id int64) (*AgentJob, e
 		`SELECT id, event_id, user_id, conversation_id, status, attempts,
 		        max_attempts, next_run_at, claimed_by, claimed_at, last_error,
 		        result_action_id, result_lead_id, cost_usd, created_at, updated_at,
-		        turn_id, coalesced_into, install_revision
+		        turn_id, coalesced_into, install_revision, runtime
 		   FROM agent_jobs WHERE id = $1 AND user_id = $2`,
 		id, userID,
 	)
@@ -519,6 +616,13 @@ type rowsQueryer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
+// completeRuntimeFence refuses the terminal transition of an attempt claimed
+// under a runtime the account no longer runs (ADR 0008 runtime switch): the
+// job stays processing, RequeueStaleAgentJobs returns it to pending after the
+// visibility timeout, and the new runtime's claim picks it up. A job claimed
+// before agent_jobs.runtime existed (NULL) is not fenced.
+const completeRuntimeFence = `(runtime IS NULL OR runtime = COALESCE((SELECT ap.runtime FROM agent_profiles ap WHERE ap.user_id = agent_jobs.user_id), 'own'))`
+
 // CompleteAgentJob closes a processing job with a terminal status
 // (completed, failed, or ignored) and finishes its open attempt row.
 //
@@ -540,7 +644,7 @@ func (s *Store) CompleteAgentJob(ctx context.Context, jobID int64, attempt int, 
 	defer func() { _ = tx.Rollback() }()
 	res, err := tx.ExecContext(ctx,
 		`UPDATE agent_jobs SET status = $1, last_error = $2, updated_at = $3
-		  WHERE id = $4 AND status = $5 AND attempts = $6`,
+		  WHERE id = $4 AND status = $5 AND attempts = $6 AND `+completeRuntimeFence,
 		status, nullable(note), now, jobID, JobProcessing, attempt,
 	)
 	if err != nil {
@@ -637,7 +741,7 @@ func (s *Store) CompleteAgentJobWithResult(
 		`UPDATE agent_jobs
 		    SET status = $1, last_error = $2,
 		        result_action_id = $3, result_lead_id = $4, updated_at = $5
-		  WHERE id = $6 AND user_id = $7 AND status = $8 AND attempts = $9`,
+		  WHERE id = $6 AND user_id = $7 AND status = $8 AND attempts = $9 AND `+completeRuntimeFence,
 		status, nullable(note), nullableInt(resultActionID), nullableInt(resultLeadID),
 		now, jobID, userID, JobProcessing, attempt,
 	)
@@ -763,6 +867,66 @@ func (s *Store) RetryAgentJob(ctx context.Context, jobID int64, attempt int, err
 	return status, nil
 }
 
+// ReleaseUnissuedClaim undoes a claim whose credential was never issued (the
+// job token could not be minted, so no envelope, token or worker holds the
+// attempt). Unlike RetryAgentJob it is not a failed attempt: the job returns
+// from processing to pending with its attempt count restored, so a signer
+// outage never moves it toward dead_letter. The open attempt row is removed
+// (the attempt never ran); turn_id and coalesced members are left as they
+// are, exactly as on a retry. The CAS covers status, attempt and claimant;
+// zero rows is ErrAgentJobNotFound and nothing is written.
+func (s *Store) ReleaseUnissuedClaim(ctx context.Context, jobID int64, attempt int, replicaID string) error {
+	now := time.Now().UTC()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin release tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx,
+		`UPDATE agent_jobs
+		    SET status = $1, attempts = attempts - 1, claimed_by = NULL, claimed_at = NULL,
+		        next_run_at = $2, last_error = $3, updated_at = $4
+		  WHERE id = $5 AND status = $6 AND attempts = $7 AND claimed_by = $8`,
+		JobPending, now.Add(releaseUnissuedDelay), "job token mint failed", now,
+		jobID, JobProcessing, attempt, replicaID,
+	)
+	if err != nil {
+		return fmt.Errorf("release unissued claim: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrAgentJobNotFound
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM agent_job_attempts WHERE job_id = $1 AND attempt = $2 AND finished_at IS NULL`,
+		jobID, attempt,
+	); err != nil {
+		return fmt.Errorf("delete unissued attempt: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit release tx: %w", err)
+	}
+	return nil
+}
+
+// releaseUnissuedDelay is the fixed short delay before a released claim is
+// due again; deliberately not AgentJobBackoff, so repeated outages do not
+// grow the delay.
+const releaseUnissuedDelay = time.Second
+
+// AgentJobOwner returns the user id owning a job, for attributing audit rows
+// of a request that names a job but carries no account identity.
+func (s *Store) AgentJobOwner(ctx context.Context, jobID int64) (int64, bool, error) {
+	var uid int64
+	err := s.DB.QueryRowContext(ctx, `SELECT user_id FROM agent_jobs WHERE id = $1`, jobID).Scan(&uid)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("agent job owner: %w", err)
+	}
+	return uid, true, nil
+}
+
 // finishOpenAttempt closes the newest still-running attempt row for a job.
 func finishOpenAttempt(ctx context.Context, ex execer, jobID int64, status, errMsg string, now time.Time) error {
 	if _, err := ex.ExecContext(ctx,
@@ -801,6 +965,24 @@ func (s *Store) RequeueStaleAgentJobs(ctx context.Context, visibility time.Durat
 	// moved, then close those jobs' attempt rows. Touching attempts first
 	// would take the two tables' locks in the opposite order and deadlock on
 	// Postgres against a still-alive worker finishing the same job.
+	//
+	// A stale job the completion fence refused (claimed under a runtime the
+	// account no longer runs, ADR 0008) is requeued first, before the
+	// dead-letter rule can see it: the switch cut its attempt short, so it
+	// must not be the attempt that exhausts the job. It gets one more attempt
+	// when it was on its last one; attempt numbers stay monotonic, so the
+	// claim identity is never reused.
+	fencedIDs, err := requeueTransition(ctx, tx,
+		`UPDATE agent_jobs
+		    SET status = $1, next_run_at = $2, last_error = $3, updated_at = $2,
+		        max_attempts = CASE WHEN attempts >= max_attempts THEN attempts + 1 ELSE max_attempts END
+		  WHERE status = $4 AND claimed_at < $5 AND NOT `+completeRuntimeFence+`
+		 RETURNING id`,
+		JobPending, now, "runtime switched, requeued for the new runtime", JobProcessing, cutoff,
+	)
+	if err != nil {
+		return 0, 0, fmt.Errorf("requeue runtime-fenced jobs: %w", err)
+	}
 	deadIDs, err := requeueTransition(ctx, tx,
 		`UPDATE agent_jobs
 		    SET status = $1, last_error = $2, updated_at = $3
@@ -826,15 +1008,24 @@ func (s *Store) RequeueStaleAgentJobs(ctx context.Context, visibility time.Durat
 	// Otherwise the timed-out attempt stays open forever: the next claim opens
 	// another running attempt and finishOpenAttempt only ever closes the
 	// newest one, corrupting attempt history and any open-attempt monitoring.
-	for _, id := range append(append([]int64{}, deadIDs...), requeuedIDs...) {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE agent_job_attempts
-			    SET finished_at = $1, status = $2, error = $3
-			  WHERE job_id = $4 AND finished_at IS NULL`,
-			now, JobFailed, "visibility timeout", id,
-		); err != nil {
-			return 0, 0, fmt.Errorf("close stale attempts: %w", err)
+	closeAttempts := func(ids []int64, reason string) error {
+		for _, id := range ids {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE agent_job_attempts
+				    SET finished_at = $1, status = $2, error = $3
+				  WHERE job_id = $4 AND finished_at IS NULL`,
+				now, JobFailed, reason, id,
+			); err != nil {
+				return fmt.Errorf("close stale attempts: %w", err)
+			}
 		}
+		return nil
+	}
+	if err := closeAttempts(append(append([]int64{}, deadIDs...), requeuedIDs...), "visibility timeout"); err != nil {
+		return 0, 0, err
+	}
+	if err := closeAttempts(fencedIDs, "runtime switched"); err != nil {
+		return 0, 0, err
 	}
 	var routed bool
 	for _, id := range deadIDs {
@@ -848,7 +1039,7 @@ func (s *Store) RequeueStaleAgentJobs(ctx context.Context, visibility time.Durat
 		return 0, 0, fmt.Errorf("commit requeue tx: %w", err)
 	}
 	s.notifyOutbox(routed)
-	return int64(len(requeuedIDs)), int64(len(deadIDs)), nil
+	return int64(len(requeuedIDs) + len(fencedIDs)), int64(len(deadIDs)), nil
 }
 
 // requeueTransition runs one stale-claim UPDATE ... RETURNING id and collects

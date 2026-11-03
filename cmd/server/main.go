@@ -842,6 +842,12 @@ func main() {
 				agentSrv.WithJobTokenSigner(jobSigner)
 			}
 		}
+		// Managed runtime (ADR 0008): the claim-only pool credential, its mint
+		// route and the pool claim branch exist only while
+		// MANAGED_RUNTIME_ENABLED is on.
+		agentProvider = wireManagedPool(cfg, mux, auth.Middleware(provider, true, m, resourceMeta),
+			agentProvider, agentSrv, workerTokenRevocationCache)
+		warnManagedJobsPaused(ctx, cfg, store)
 		agentMux := chi.NewRouter()
 		agentSrv.Register(agentMux)
 		mux.Mount("/api/agent/v1", auth.Middleware(agentProvider, true, m, resourceMeta)(agentMux))
@@ -1348,6 +1354,26 @@ func (c chainProvider) Authenticate(r *http.Request) (*auth.Identity, error) {
 		}
 	}
 	return nil, firstErr
+}
+
+// selectAgentPoolProvider builds the provider for the claim-only
+// "agent-pool" credential, signed under this service's own issuer in every
+// AUTH_MODE. Returns nil when it cannot be built, in which case a pool token
+// is refused with 401.
+func selectAgentPoolProvider(cfg *config.Config, revocationCache *localjwt.RevocationCache) auth.Provider {
+	if cfg.OAUTHJWTSecret == "" {
+		return nil
+	}
+	p, err := localjwt.NewPoolProvider(localjwt.PoolProviderConfig{
+		Secret:          []byte(cfg.OAUTHJWTSecret),
+		ExpectedIssuer:  strings.TrimRight(cfg.PublicBaseURL, "/"),
+		RevocationCache: revocationCache,
+	})
+	if err != nil {
+		slog.Error("agent: pool provider init failed; pool credential disabled", "err", err)
+		return nil
+	}
+	return p
 }
 
 // selectAgentJobProvider builds the provider for the per-job "agent-job"
