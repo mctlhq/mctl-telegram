@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
@@ -68,5 +69,37 @@ func TestQueue_TransitionsCountMetrics(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(m.AgentDeadLetterTotal); got != 0 {
 		t.Fatalf("dead letter count = %v, want 0", got)
+	}
+}
+
+// The sweeper refreshes the managed account gauge and the held-reservation
+// drift gauges from the ledger.
+// Mutation: skip the HeldUsage read or set the gauges before checking errors.
+func TestQueue_RefreshUsageGauges(t *testing.T) {
+	ctx := context.Background()
+	q, m, uid := newTestQueue(t)
+	if err := q.Store.UpsertAgentProfile(ctx, db.AgentProfile{UserID: uid, Mode: db.AgentModeObserve}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Store.DB.Exec(`UPDATE agent_profiles SET runtime = 'managed' WHERE user_id = $1`, uid); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := q.Store.DB.Exec(
+		`INSERT INTO agent_usage(job_id, attempt, user_id, runtime, reserved_usd, status, created_at, updated_at)
+		 VALUES(1, 1, $1, 'managed', 0.5, 'held', $2, $2)`, uid, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.RefreshUsageGauges(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if v := testutil.ToFloat64(m.AgentManagedAccounts); v != 1 {
+		t.Fatalf("managed accounts = %v, want 1", v)
+	}
+	if v := testutil.ToFloat64(m.AgentUsageHeldUSD); v != 0.5 {
+		t.Fatalf("held usd = %v, want 0.5", v)
+	}
+	if v := testutil.ToFloat64(m.AgentUsageHeldRows); v != 1 {
+		t.Fatalf("held rows = %v, want 1", v)
 	}
 }

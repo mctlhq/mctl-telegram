@@ -42,6 +42,16 @@ type Client struct {
 	baseURL string
 	token   string
 	http    *http.Client
+	// jobScoped is set when token is the job's own credential: the server
+	// then takes the attempt from the token and the cost report omits it.
+	jobScoped bool
+}
+
+// WithJobScope marks c as holding a job token (not the account token), so a
+// usage report leaves the attempt to the token. Returns c for chaining.
+func (c *Client) WithJobScope() *Client {
+	c.jobScoped = true
+	return c
 }
 
 // NewClient builds a Client. baseURL is the full /api/agent/v1 root (e.g.
@@ -115,6 +125,9 @@ type JobEnvelope struct {
 	// JobToken is the conversation-bound credential for this job's MCP
 	// subprocess. Empty when the server does not issue job tokens.
 	JobToken string `json:"job_token,omitempty"`
+	// MaxJobCostUSD is the server's per-job spend cap of a managed job. The
+	// worker's model budget is the smaller of this and its own.
+	MaxJobCostUSD float64 `json:"max_job_cost_usd,omitempty"`
 	// TurnID and SourceEventIDs describe a coalesced turn: every event the
 	// job answers, in arrival order, head first. Empty for a single-event job.
 	TurnID         string   `json:"turn_id,omitempty"`
@@ -467,4 +480,37 @@ func (c *Client) ReportJobCost(ctx context.Context, jobID int64, attempt int, co
 	body := map[string]any{"attempt": attempt, "cost_usd": cost}
 	path := "/jobs/" + strconv.FormatInt(jobID, 10) + "/cost"
 	return c.do(ctx, http.MethodPost, path, body, nil)
+}
+
+// UsageReport is what the worker observed for one attempt. The server takes
+// the account, job, attempt and runtime from the credential and the job row,
+// never from this.
+type UsageReport struct {
+	CostUSD      float64
+	Model        string
+	Runner       string
+	InputTokens  int64
+	OutputTokens int64
+}
+
+// ReportJobUsage calls POST /jobs/{id}/cost with the usage-ledger body
+// {cost_usd, model, runner, input_tokens, output_tokens}. With a job token it
+// omits the attempt (the token carries it). A 400 from an older server, whose
+// strict decoder rejects the new fields before mutating anything, is retried
+// once with the legacy {attempt, cost_usd} body.
+func (c *Client) ReportJobUsage(ctx context.Context, jobID int64, attempt int, u UsageReport) error {
+	body := map[string]any{
+		"cost_usd": u.CostUSD, "model": u.Model, "runner": u.Runner,
+		"input_tokens": u.InputTokens, "output_tokens": u.OutputTokens,
+	}
+	if !c.jobScoped {
+		body["attempt"] = attempt
+	}
+	path := "/jobs/" + strconv.FormatInt(jobID, 10) + "/cost"
+	err := c.do(ctx, http.MethodPost, path, body, nil)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+		return err
+	}
+	return c.ReportJobCost(ctx, jobID, attempt, u.CostUSD)
 }

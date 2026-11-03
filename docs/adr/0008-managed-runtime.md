@@ -223,24 +223,62 @@ a confirmed operation:
 
 - Table `agent_usage` (one row per job attempt, `UNIQUE(job_id, attempt)`):
   user, runtime (copied from `agent_jobs.runtime`), runner, model, input and
-  output tokens, `cost_usd`, `status reserved|settled|released`, timestamps.
-  `agent_jobs.cost_usd` stays as the last attempt's cost for existing
-  dashboards.
+  output tokens, `reserved_usd`, `cost_usd`, `status reserved|held|settled`,
+  timestamps. There is no `released` status. `agent_jobs.cost_usd` stays as
+  the last attempt's cost for existing dashboards.
 - **Reservation at claim.** Claiming a managed job inserts a `reserved`
-  row for the per-job cap (`max_job_cost_usd`, which the server puts in the
-  claim envelope so worker and server agree on the number). Available
-  budget is cap minus settled cost minus outstanding reservations, computed
-  inside the claim transaction with the profile row locked, so two
-  concurrent claims on an account with budget for one job yield exactly
-  one claim. The cost report settles the row; a job requeued by the
-  sweeper releases it. A cap checked only at claim time would be advisory;
-  this one is not.
+  row for the server's per-job cap (`MANAGED_MAX_JOB_COST_USD`, default
+  0.50), which the server puts in the claim envelope as `max_job_cost_usd`
+  so worker and server agree on the number; in pool mode the worker's model
+  budget is the smaller of `AGENT_MAX_BUDGET_USD` and that value. Available
+  budget is cap minus settled cost minus every unsettled reservation
+  (`reserved` and `held`) of the window, computed inside the claim
+  transaction with the global budget lock held, so two concurrent claims on
+  an account (or on two accounts under the global cap) with budget for one
+  job yield exactly one claim. A cap checked only at claim time would be
+  advisory; this one is not.
+- **Lock order.** A managed claim with a budget takes the global budget
+  advisory lock first, then the account advisory lock (`reserveInflight`),
+  then its `FOR UPDATE SKIP LOCKED` row locks. There is no
+  `agent_profiles` row lock: the global lock already serializes every such
+  claim, and the global pause updates other accounts' profile rows while
+  holding it, so any claim that held an account or profile lock while
+  waiting for the global lock could close a deadlock cycle.
+- **Windows.** Day and month are UTC calendar windows; an attempt belongs to
+  the window of its `created_at`, the claim time.
+- **Settle, hold, delete.** The cost report settles the row (a `held` row
+  too, while `agent_jobs.attempts` still equals that attempt). When the
+  sweeper requeues, dead-letters or fences a stale managed attempt its
+  reservation becomes `held`, never released: the job token has left the
+  server, the run may have spent up to the cap, and a pool job token expires
+  at the same deadline the sweeper uses, so its cost report can be refused
+  with 401. A `held` row keeps counting at `reserved_usd` until a report
+  settles it or its window ends, and is exposed as
+  `mctl_agent_usage_held_usd` / `mctl_agent_usage_held_rows` (the
+  reconciliation drift). Only `ReleaseUnissuedClaim`, where no token for the
+  attempt ever left the server and the attempt number is reused, deletes a
+  reservation without a cost report.
+- **Overshoot.** The runner checks its budget after each model call
+  (`totalCost > MaxBudgetUSD`), so one attempt can spend more than
+  `reserved_usd` by at most one call. The settle records the actual cost and
+  the next claim sees it, so a cap can be overrun by at most one model call
+  per in-flight managed attempt.
 - Caps: per job (`AGENT_MAX_BUDGET_USD`, enforced in the runner and
   reserved by the server), per account per day and per month
   (`MANAGED_BUDGET_USD_PER_ACCOUNT_DAY` 1.00, `_MONTH` 15.00, with an
   admin-settable per-account override), global per day
-  (`MANAGED_BUDGET_USD_GLOBAL_DAY` 20.00).
-- When a cap is reached the account's jobs are **held pending** until the
+  (`MANAGED_BUDGET_USD_GLOBAL_DAY` 20.00). The per-account override is
+  `managed_budget_usd_day` / `managed_budget_usd_month` on the admin profile
+  route (a non-negative number, or null to clear).
+- **Durable versus in-flight exhaustion.** Durable usage is settled cost
+  plus `held` reservations; in-flight usage is `reserved` rows of attempts
+  still running, which settle within the claim deadline. Only durable
+  exhaustion pauses: the claim sets `budget_paused_until` to the end of the
+  window and counts `mctl_agent_budget_exhausted_total{scope}`; a global
+  exhaustion pauses every managed account with pending jobs. A cap that has
+  room except for in-flight reservations only defers the claim
+  (`mctl_agent_budget_deferred_total{scope}`): no pause, no notification.
+- When a cap is durably reached the account's jobs are **held pending** until the
   window resets: the owner is notified once per window, and the unclaimed
   sweeper does not route them to the operator (`budget_paused_until` on the
   profile, read by the candidate query and by `RouteUnclaimedAgentJobs`).
@@ -256,7 +294,8 @@ a confirmed operation:
   bills.
 - Metrics: `mctl_agent_usage_cost_usd_total{runner,model}`,
   `mctl_agent_usage_tokens_total{direction,model}`,
-  `mctl_agent_budget_exhausted_total{scope}`, `mctl_agent_managed_accounts`,
+  `mctl_agent_budget_exhausted_total{scope}`,
+  `mctl_agent_budget_deferred_total{scope}`, `mctl_agent_managed_accounts`,
   `mctl_agent_openai_requests_total{status_class}` and retries. Alerts live
   in mctl-gitops: global cap hit, hourly spend above a threshold, pool
   worker down while managed accounts exist.

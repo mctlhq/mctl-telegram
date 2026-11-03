@@ -60,11 +60,15 @@ func newManagedSurface(t *testing.T, managedEnabled bool) *managedSurface {
 	}
 	store := db.NewStore(conn, crypt)
 	cfg := &config.Config{
-		AuthMode:                     "local-jwt",
-		OAUTHJWTSecret:               managedTestSecret,
-		PublicBaseURL:                "https://tg.example.test",
-		ManagedRuntimeEnabled:        managedEnabled,
-		ManagedMaxInflightPerAccount: 1,
+		AuthMode:                        "local-jwt",
+		OAUTHJWTSecret:                  managedTestSecret,
+		PublicBaseURL:                   "https://tg.example.test",
+		ManagedRuntimeEnabled:           managedEnabled,
+		ManagedMaxInflightPerAccount:    1,
+		ManagedMaxJobCostUSD:            0.5,
+		ManagedBudgetUSDPerAccountDay:   1,
+		ManagedBudgetUSDPerAccountMonth: 15,
+		ManagedBudgetUSDGlobalDay:       20,
 	}
 	m := metrics.New()
 	rc := localjwt.NewRevocationCache(store, time.Hour) // advanced explicitly with Refresh
@@ -165,6 +169,8 @@ type claimedJob struct {
 	Attempt  int    `json:"attempt"`
 	JobToken string `json:"job_token"`
 	ConvID   int64  `json:"conversation_id"`
+	// MaxJobCostUSD is the per-job cap of a managed claim.
+	MaxJobCostUSD float64 `json:"max_job_cost_usd"`
 }
 
 func (s *managedSurface) claim(bearer string) (int, []claimedJob) {
@@ -328,5 +334,44 @@ func TestWarnManagedJobsPaused(t *testing.T) {
 	s.cfg.OAUTHJWTSecret = ""
 	if managedPoolEnabled(s.cfg) {
 		t.Fatal("pool must stay disabled without a signing secret")
+	}
+}
+
+// The spend budget is wired with the pool and only then: with the flag on a
+// pool claim reserves the per-job cap and hands it out as max_job_cost_usd;
+// with it off the managed claim path does not exist and nothing is reserved.
+// Mutation: call WithManagedBudget outside the managedPoolEnabled guard, or
+// drop MaxJobCostUSD from the ManagedClaimConfig.
+func TestWireManagedPool_BudgetOnlyWithFlag(t *testing.T) {
+	signer, err := localjwt.NewIssuer([]byte(managedTestSecret), "https://tg.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	pool, err := signer.Mint(localjwt.Claims{
+		Subject: localjwt.PoolSubjectPrefix + "main", Audience: []string{localjwt.PoolAudience},
+		Jti: "budget-test", IssuedAt: now.Unix(), OriginalIssuedAt: now.Unix(),
+	}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	on := newManagedSurface(t, true)
+	on.seedManaged(9401, 1)
+	code, jobs := on.claim(pool)
+	if code != http.StatusOK || len(jobs) != 1 || jobs[0].MaxJobCostUSD != 0.5 {
+		t.Fatalf("flag on: claim = %d %+v, want max_job_cost_usd 0.5", code, jobs)
+	}
+	var reserved float64
+	if err := on.store.DB.QueryRow(`SELECT reserved_usd FROM agent_usage WHERE status = 'reserved'`).Scan(&reserved); err != nil || reserved != 0.5 {
+		t.Fatalf("reservation = %v err %v, want 0.5", reserved, err)
+	}
+
+	off := newManagedSurface(t, false)
+	off.seedManaged(9402, 1)
+	var before, after int
+	_ = off.store.DB.QueryRow(`SELECT COUNT(*) FROM agent_usage`).Scan(&before)
+	off.claim(pool)
+	if err := off.store.DB.QueryRow(`SELECT COUNT(*) FROM agent_usage`).Scan(&after); err != nil || after != before {
+		t.Fatalf("flag off: ledger rows %d -> %d err %v", before, after, err)
 	}
 }

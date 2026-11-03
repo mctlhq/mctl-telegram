@@ -262,6 +262,17 @@ type Registry struct {
 	// that sample becomes the baseline.
 	AgentJobCostUSDTotal *prometheus.CounterVec // {result}
 
+	// Managed-tier usage ledger (ADR 0008 section 5). Runner is clamped to
+	// claude|openai|other and the model label to the validated, bounded
+	// worker configuration; scope is one of BudgetScopes.
+	AgentUsageCostUSDTotal    *prometheus.CounterVec // {runner, model}
+	AgentUsageTokensTotal     *prometheus.CounterVec // {direction, model}
+	AgentBudgetExhaustedTotal *prometheus.CounterVec // {scope}
+	AgentBudgetDeferredTotal  *prometheus.CounterVec // {scope}
+	AgentManagedAccounts      prometheus.Gauge
+	AgentUsageHeldUSD         prometheus.Gauge
+	AgentUsageHeldRows        prometheus.Gauge
+
 	// AgentClaudeResultErrorsTotal counts CheckResult errors consumed by
 	// ClaudeInvoker.Run, labeled by whether the error was classified as a
 	// usage-limit/quota condition or something else. Bound: 2 series
@@ -381,6 +392,19 @@ const (
 	ClaudeResultClassUsageLimit = "usage_limit"
 	ClaudeResultClassOther      = "other"
 )
+
+// BudgetScopes is the closed set of the "scope" label on
+// AgentBudgetExhaustedTotal and AgentBudgetDeferredTotal.
+var BudgetScopes = []string{"account_day", "account_month", "global_day"}
+
+// UsageRunner clamps a worker-reported runner name to the bounded label set.
+func UsageRunner(runner string) string {
+	switch runner {
+	case "claude", "openai":
+		return runner
+	}
+	return "other"
+}
 
 // Job-cost outcomes — the "result" label on AgentJobCostUSDTotal, set by
 // ClaudeInvoker.recordCost from the CLI result's own is_error field.
@@ -872,6 +896,35 @@ func New() *Registry {
 		Help: "Total Claude spend (total_cost_usd) attributed to communication-agent jobs, labeled by result (bounded: success, error). Recorded before the job's is_error check, so a job that fails afterwards still reports its spend.",
 	}, []string{"result"})
 
+	r.AgentUsageCostUSDTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_agent_usage_cost_usd_total",
+		Help: "Settled model spend of agent job attempts from the usage ledger, labeled by runner (claude, openai, other) and model.",
+	}, []string{"runner", "model"})
+	r.AgentUsageTokensTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_agent_usage_tokens_total",
+		Help: "Settled model tokens of agent job attempts from the usage ledger, labeled by direction (input, output) and model.",
+	}, []string{"direction", "model"})
+	r.AgentBudgetExhaustedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_agent_budget_exhausted_total",
+		Help: "Managed claims that found a budget durably exhausted (settled plus held usage), labeled by scope (account_day, account_month, global_day).",
+	}, []string{"scope"})
+	r.AgentBudgetDeferredTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mctl_agent_budget_deferred_total",
+		Help: "Managed claims deferred because in-flight reservations alone used up a budget (no pause, no notification), labeled by scope.",
+	}, []string{"scope"})
+	r.AgentManagedAccounts = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "mctl_agent_managed_accounts",
+		Help: "Number of agent profiles on the managed runtime.",
+	})
+	r.AgentUsageHeldUSD = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "mctl_agent_usage_held_usd",
+		Help: "Sum of reserved USD over held usage rows of the current UTC day: reservation reconciliation drift.",
+	})
+	r.AgentUsageHeldRows = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "mctl_agent_usage_held_rows",
+		Help: "Number of held usage rows of the current UTC day: reservation reconciliation drift.",
+	})
+
 	r.AgentClaudeResultErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_agent_claude_result_errors_total",
 		Help: "Total CheckResult errors observed by ClaudeInvoker.Run, labeled by class (bounded: usage_limit, other).",
@@ -980,6 +1033,13 @@ func New() *Registry {
 		r.AgentDeliveryUnknownTotal,
 		r.AgentPolicyDenialsTotal,
 		r.AgentJobCostUSDTotal,
+		r.AgentUsageCostUSDTotal,
+		r.AgentUsageTokensTotal,
+		r.AgentBudgetExhaustedTotal,
+		r.AgentBudgetDeferredTotal,
+		r.AgentManagedAccounts,
+		r.AgentUsageHeldUSD,
+		r.AgentUsageHeldRows,
 		r.AgentClaudeResultErrorsTotal,
 		r.AgentCredentialDomain,
 		r.WorkContextRequestsTotal,
@@ -1049,6 +1109,10 @@ func New() *Registry {
 	}
 	for _, result := range jobCostResults {
 		r.AgentJobCostUSDTotal.WithLabelValues(result).Add(0)
+	}
+	for _, scope := range BudgetScopes {
+		r.AgentBudgetExhaustedTotal.WithLabelValues(scope).Add(0)
+		r.AgentBudgetDeferredTotal.WithLabelValues(scope).Add(0)
 	}
 	// AgentJobsTotal gets the same treatment, for the same reason on the
 	// other side of a division. MctlAgentJobCostHigh divides spend by

@@ -685,3 +685,64 @@ func TestTrafficClass(t *testing.T) {
 		t.Errorf("TrafficFrom(unknown) = %q, want user", got)
 	}
 }
+
+// TestNew_RegistersUsageLedgerMetrics pins the family names, types and label
+// sets of the managed-tier usage ledger metrics (#1092).
+func TestNew_RegistersUsageLedgerMetrics(t *testing.T) {
+	reg := New()
+	reg.AgentUsageCostUSDTotal.WithLabelValues("claude", "m").Add(0.01)
+	reg.AgentUsageTokensTotal.WithLabelValues("input", "m").Add(1)
+	reg.AgentManagedAccounts.Set(1)
+	reg.AgentUsageHeldUSD.Set(0.5)
+	reg.AgentUsageHeldRows.Set(1)
+
+	mfs, err := reg.Prometheus.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	gathered := map[string]*dto.MetricFamily{}
+	for _, mf := range mfs {
+		gathered[mf.GetName()] = mf
+	}
+	cases := []struct {
+		name       string
+		wantType   dto.MetricType
+		wantLabels []string
+	}{
+		{"mctl_agent_usage_cost_usd_total", dto.MetricType_COUNTER, []string{"runner", "model"}},
+		{"mctl_agent_usage_tokens_total", dto.MetricType_COUNTER, []string{"direction", "model"}},
+		{"mctl_agent_budget_exhausted_total", dto.MetricType_COUNTER, []string{"scope"}},
+		{"mctl_agent_budget_deferred_total", dto.MetricType_COUNTER, []string{"scope"}},
+		{"mctl_agent_managed_accounts", dto.MetricType_GAUGE, nil},
+		{"mctl_agent_usage_held_usd", dto.MetricType_GAUGE, nil},
+		{"mctl_agent_usage_held_rows", dto.MetricType_GAUGE, nil},
+	}
+	for _, c := range cases {
+		mf, ok := gathered[c.name]
+		if !ok {
+			t.Fatalf("metric family %q not found", c.name)
+		}
+		if mf.GetType() != c.wantType {
+			t.Errorf("%s: type = %v, want %v", c.name, mf.GetType(), c.wantType)
+		}
+		got := map[string]bool{}
+		for _, lp := range mf.GetMetric()[0].GetLabel() {
+			got[lp.GetName()] = true
+		}
+		if len(got) != len(c.wantLabels) {
+			t.Errorf("%s: labels = %v, want %v", c.name, got, c.wantLabels)
+		}
+		for _, l := range c.wantLabels {
+			if !got[l] {
+				t.Errorf("%s: missing label %q", c.name, l)
+			}
+		}
+	}
+	// The exhaustion counters are pre-created at zero for every scope.
+	if n := len(gathered["mctl_agent_budget_exhausted_total"].GetMetric()); n != len(BudgetScopes) {
+		t.Errorf("exhausted series = %d, want %d", n, len(BudgetScopes))
+	}
+	if UsageRunner("claude") != "claude" || UsageRunner("x") != "other" {
+		t.Error("UsageRunner clamp wrong")
+	}
+}

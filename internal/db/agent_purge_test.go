@@ -61,6 +61,10 @@ func TestHardDeleteAccount_PurgesAgentData(t *testing.T) {
 		`INSERT INTO tg_channel_state(user_id, channel_id, pts) VALUES($1, 777, 5)`, uid); err != nil {
 		t.Fatalf("channel state: %v", err)
 	}
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO agent_usage(job_id, attempt, user_id, runtime, status) VALUES(1, 1, $1, 'managed', 'held')`, uid); err != nil {
+		t.Fatalf("usage row: %v", err)
+	}
 	// A telegram_accounts row so HardDeleteAccount has something to delete.
 	if _, err := s.DB.ExecContext(ctx,
 		`INSERT INTO telegram_accounts(user_id, session_encrypted) VALUES($1, $2)`,
@@ -77,7 +81,7 @@ func TestHardDeleteAccount_PurgesAgentData(t *testing.T) {
 	tables := []string{
 		"agent_profiles", "incoming_events", "agent_sent_messages", "conversations", "job_leads",
 		"agent_actions", "owner_notifications", "tg_update_state", "tg_channel_state",
-		"agent_saved_command_cursors",
+		"agent_saved_command_cursors", "agent_usage",
 	}
 	for _, tbl := range tables {
 		var n int

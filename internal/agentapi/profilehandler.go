@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
@@ -44,6 +46,27 @@ type upsertAgentProfileRequest struct {
 	// OwnerProfile is a strict JSON document matching profile.Data. Omitted
 	// means unchanged; null clears it.
 	OwnerProfile json.RawMessage `json:"owner_profile,omitempty"`
+	// ManagedBudgetUSDDay and ManagedBudgetUSDMonth override the managed
+	// spend caps of this account (ADR 0008 section 5): omitted leaves them
+	// unchanged, null clears the override, a non-negative number sets it.
+	ManagedBudgetUSDDay   json.RawMessage `json:"managed_budget_usd_day,omitempty"`
+	ManagedBudgetUSDMonth json.RawMessage `json:"managed_budget_usd_month,omitempty"`
+}
+
+// parseBudgetOverride reads an omitted / null / non-negative number override.
+// set reports whether the field was present; value is nil for null.
+func parseBudgetOverride(raw json.RawMessage) (value *float64, set bool, err error) {
+	if len(raw) == 0 {
+		return nil, false, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, true, nil
+	}
+	var f float64
+	if err := json.Unmarshal(raw, &f); err != nil || f < 0 || math.IsNaN(f) || math.IsInf(f, 0) {
+		return nil, true, errors.New("budget override must be a non-negative number or null")
+	}
+	return &f, true, nil
 }
 
 // upsertAgentProfileKeys lists the JSON names of upsertAgentProfileRequest.
@@ -51,7 +74,7 @@ var upsertAgentProfileKeys = [...]string{
 	"telegram_id", "mode", "runtime", "autopilot_paused", "listener_enabled",
 	"disclosure_text", "disclosure_disabled", "max_autonomous_turns", "max_msgs_per_minute",
 	"max_reply_chars", "intent_allowlist", "intent_denylist", "working_hours", "audience_excludes", "blocked_senders",
-	"sender_allowlist", "owner_profile",
+	"sender_allowlist", "owner_profile", "managed_budget_usd_day", "managed_budget_usd_month",
 }
 
 type agentProfileResponse struct {
@@ -74,6 +97,10 @@ type agentProfileResponse struct {
 	// The profile contents are deliberately never echoed from this
 	// administrative policy response.
 	OwnerProfileConfigured bool `json:"owner_profile_configured"`
+	// ManagedBudgetUSDDay and ManagedBudgetUSDMonth are the per-account cap
+	// overrides, null when the platform default applies.
+	ManagedBudgetUSDDay   *float64 `json:"managed_budget_usd_day"`
+	ManagedBudgetUSDMonth *float64 `json:"managed_budget_usd_month"`
 }
 
 // NewAdminAgentProfileHandler returns the http.HandlerFunc for PUT
@@ -162,6 +189,12 @@ func NewAdminAgentProfileHandlerWithManaged(store *db.Store, managed assistantin
 			// Store the canonical form the install path writes.
 			canonical := h.String()
 			req.WorkingHours = &canonical
+		}
+		budgetDay, daySet, dayErr := parseBudgetOverride(req.ManagedBudgetUSDDay)
+		budgetMonth, monthSet, monthErr := parseBudgetOverride(req.ManagedBudgetUSDMonth)
+		if dayErr != nil || monthErr != nil {
+			writeJSONError(w, http.StatusBadRequest, "managed_budget_usd_day and managed_budget_usd_month must be a non-negative number or null")
+			return
 		}
 		var ownerProfileDocument []byte
 		clearOwnerProfile := false
@@ -261,6 +294,12 @@ func NewAdminAgentProfileHandlerWithManaged(store *db.Store, managed assistantin
 			runtimeConsent = stored
 			runtimeChange.Apply(&update)
 		}
+		if daySet {
+			update.ManagedBudgetUSDDay, update.ClearManagedBudgetUSDDay = budgetDay, budgetDay == nil
+		}
+		if monthSet {
+			update.ManagedBudgetUSDMonth, update.ClearManagedBudgetUSDMonth = budgetMonth, budgetMonth == nil
+		}
 		if clearOwnerProfile {
 			empty := []byte(nil)
 			update.OwnerProfileDocument = &empty
@@ -319,6 +358,10 @@ func NewAdminAgentProfileHandlerWithManaged(store *db.Store, managed assistantin
 			store.LogToolCall(ctx, db.ToolCall{UserID: targetUserID, Tool: "assistant.runtime", Status: "ok",
 				Reason: runtimeChange.From + "->" + runtimeChange.To + " consent=" + consent + " (admin)"})
 		}
+		if daySet || monthSet {
+			store.LogToolCall(ctx, db.ToolCall{UserID: targetUserID, Tool: "admin.agent_profile.budget", Status: "ok",
+				Reason: "managed budget override day=" + formatBudget(p.ManagedBudgetUSDDay) + " month=" + formatBudget(p.ManagedBudgetUSDMonth) + " (admin)"})
+		}
 		store.LogToolCall(ctx, db.ToolCall{UserID: id.UserID, Tool: "admin.agent_profile.upsert", Status: "ok"})
 		slog.Info("agent profile upserted",
 			"admin_user_id", id.UserID, "target_tg_id", req.TelegramID, "target_user_id", targetUserID,
@@ -343,6 +386,15 @@ func NewAdminAgentProfileHandlerWithManaged(store *db.Store, managed assistantin
 			BlockedSenders:         p.BlockedSenders,
 			SenderAllowlist:        p.SenderAllowlist,
 			OwnerProfileConfigured: ownerProfileConfigured,
+			ManagedBudgetUSDDay:    p.ManagedBudgetUSDDay,
+			ManagedBudgetUSDMonth:  p.ManagedBudgetUSDMonth,
 		})
 	}
+}
+
+func formatBudget(v *float64) string {
+	if v == nil {
+		return "default"
+	}
+	return strconv.FormatFloat(*v, 'f', -1, 64)
 }

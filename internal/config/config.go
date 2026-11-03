@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/url"
 	"os"
 	"regexp"
@@ -479,6 +480,16 @@ type Config struct {
 	// ManagedMaxInflightPerAccount is parsed only in this slice. Set via
 	// MANAGED_MAX_INFLIGHT_PER_ACCOUNT.
 	ManagedMaxInflightPerAccount int
+	// Managed spend caps (ADR 0008 section 5), in USD. MaxJobCostUSD is the
+	// amount reserved per claimed job (MANAGED_MAX_JOB_COST_USD); the others
+	// are the UTC-calendar-day and month caps per account and the global day
+	// cap (MANAGED_BUDGET_USD_PER_ACCOUNT_DAY, _PER_ACCOUNT_MONTH,
+	// MANAGED_BUDGET_USD_GLOBAL_DAY). A zero value means the budget is not
+	// wired (a Config built by hand, not by Load).
+	ManagedMaxJobCostUSD            float64
+	ManagedBudgetUSDPerAccountDay   float64
+	ManagedBudgetUSDPerAccountMonth float64
+	ManagedBudgetUSDGlobalDay       float64
 	// WorkItemTenant is the single configured mctl-api tenant every
 	// Telegram-originated work item belongs to (see requirements.md's Open
 	// questions — this repository's own "tenant" concept is a different
@@ -499,81 +510,85 @@ type Config struct {
 func Load() (*Config, error) {
 	authMode := envOr("AUTH_MODE", "local-dev")
 	c := &Config{
-		Addr:                          envOr("ADDR", ":8080"),
-		PublicBaseURL:                 envOr("PUBLIC_BASE_URL", "http://localhost:8080"),
-		MCPPath:                       envOr("MCP_PATH", "/mcp"),
-		AuthMode:                      authMode,
-		AuthRequired:                  envBool("AUTH_REQUIRED", false),
-		OperatorLogin:                 envOr("OPERATOR_GITHUB_LOGIN", "operator"),
-		Environment:                   envOr("ENV", ""),
-		DatabaseURL:                   envOr("DATABASE_URL", "file:mctl-telegram.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"),
-		OAUTHJWTSecret:                jwtSigningKey(authMode),
-		OAUTHJWTAudience:              os.Getenv("OAUTH_JWT_AUDIENCE"),
-		OAUTHJWTAudReq:                envBool("OAUTH_JWT_AUDIENCE_REQUIRED", false),
-		WorkerTokenRevocationCacheTTL: envDuration("WORKER_TOKEN_REVOCATION_CACHE_TTL", 10*time.Second),
-		TGAPIHash:                     os.Getenv("TG_API_HASH"),
-		TGTestDC:                      TestDCFromEnv(),
-		AllowSend:                     envBool("ALLOW_SEND", false),
-		IdleClientTimeout:             envDuration("IDLE_CLIENT_TIMEOUT", 10*time.Minute),
-		RateLimitPerUser:              envInt("RATE_LIMIT_PER_USER", 30),
-		AuditRetentionDays:            envInt("AUDIT_RETENTION_DAYS", 90),
-		AgentRetentionDays:            envInt("AGENT_RETENTION_DAYS", 30),
-		AgentJobVisibility:            envDuration("AGENT_JOB_VISIBILITY", 5*time.Minute),
-		AgentAllowLegacyCompletion:    envBool("AGENT_ALLOW_LEGACY_COMPLETION", false),
-		AgentApprovalTTL:              envDuration("AGENT_APPROVAL_TTL", 24*time.Hour),
-		AgentEnabled:                  envBool("AGENT_ENABLED", false),
-		AgentKillSwitch:               envBool("AGENT_KILL_SWITCH", false),
-		AppsEnabled:                   envBool("MCP_APPS_ENABLED", false),
-		BroadcastContentEnabled:       broadcastContentFromEnv(),
-		EventsValkeyURL:               os.Getenv("EVENTS_VALKEY_URL"),
-		EventsValkeyPassword:          os.Getenv("EVENTS_VALKEY_PASSWORD"),
-		EventsStream:                  envOr("EVENTS_STREAM", "mctl:events:telegram"),
-		EventsOperatorRouting:         envBool("EVENTS_OPERATOR_ROUTING", false),
-		AgentTurnQuiet:                envDuration("AGENT_TURN_QUIET", 0),
-		AgentTurnMaxWait:              envDuration("AGENT_TURN_MAX_WAIT", 15*time.Second),
-		AgentTurnMaxMsgs:              envInt("AGENT_TURN_MAX_MSGS", 10),
-		AgentTurnMaxBytes:             envInt("AGENT_TURN_MAX_BYTES", 16384),
-		AgentUnclaimedRouteAfter:      envDuration("AGENT_UNCLAIMED_ROUTE_AFTER", 5*time.Minute),
-		AgentProfilePath:              os.Getenv("AGENT_PROFILE_PATH"),
-		AgentProfileOwnerTGID:         envInt64("AGENT_PROFILE_OWNER_TG_ID", 0),
-		AgentTestCrashAfterReserve:    envBool("AGENT_TEST_CRASH_AFTER_RESERVE", false),
-		LogLevel:                      envOr("LOG_LEVEL", "info"),
-		TelegramLoginBotToken:         os.Getenv("TELEGRAM_LOGIN_BOT_TOKEN"),
-		TelegramLoginBotUsername:      loginBotUsernameFromEnv(),
-		TelegramOIDCClientID:          os.Getenv("TELEGRAM_OIDC_CLIENT_ID"),
-		TelegramOIDCBotAccessEnabled:  envBool("TELEGRAM_OIDC_BOT_ACCESS_ENABLED", false),
-		TelegramOIDCClientSecret:      os.Getenv("TELEGRAM_OIDC_CLIENT_SECRET"),
-		TelegramOIDCIssuerURL:         envOr("TELEGRAM_OIDC_ISSUER", "https://oauth.telegram.org"),
-		TelegramOIDCRedirectURL:       os.Getenv("TELEGRAM_OIDC_REDIRECT_URL"),
-		OAUTHCodeTTL:                  envDuration("OAUTH_CODE_TTL", 10*time.Minute),
-		OAUTHAccessTokenTTL:           envDuration("OAUTH_ACCESS_TOKEN_TTL", 1*time.Hour),
-		OAUTHRefreshTokenTTL:          envDuration("OAUTH_REFRESH_TOKEN_TTL", 720*time.Hour),
-		OAUTHAllowImplicitClient:      envBool("OAUTH_ALLOW_IMPLICIT_CLIENT", false),
-		OAUTHCIMDAccept:               envBool("OAUTH_CIMD_ACCEPT", false),
-		OAUTHCIMDAdvertise:            envBool("OAUTH_CIMD_ADVERTISE", false),
-		AllowSharedHMACLegacy:         envBool("AUTH_ALLOW_SHARED_HMAC_LEGACY", false),
-		OAUTHRegisterRatePerMin:       envInt("OAUTH_REGISTER_RATE_PER_MIN", 10),
-		AutoApproveClients:            envBool("AUTO_APPROVE_CLIENTS", false),
-		DigestHourUTC:                 envInt("DIGEST_HOUR_UTC", 9),
-		BotReceiverEnabled:            envBool("BOT_RECEIVER_ENABLED", false),
-		BotStartBridgeToken:           strings.TrimSpace(os.Getenv("BOT_START_BRIDGE_TOKEN")),
-		BroadcastRatePerSec:           envFloat("BROADCAST_RATE_PER_SEC", 10),
-		BroadcastBatchSize:            envInt("BROADCAST_BATCH_SIZE", 20),
-		BroadcastMaxAttempts:          envInt("BROADCAST_MAX_ATTEMPTS", 5),
-		BroadcastRecipientLimit:       envInt("BROADCAST_RECIPIENT_LIMIT", 1000),
-		BroadcastApprovalTTL:          envDuration("BROADCAST_APPROVAL_TTL", 30*time.Minute),
-		WorkContextEnabled:            envBool("WORK_CONTEXT_ENABLED", false),
-		AssistantRegistryEnabled:      envBool("ASSISTANT_REGISTRY_ENABLED", false),
-		AssistantForksEnabled:         envBool("ASSISTANT_FORKS_ENABLED", false),
-		ManagedRuntimeEnabled:         envBool("MANAGED_RUNTIME_ENABLED", false),
-		ManagedRuntimeMaxAccounts:     envInt("MANAGED_RUNTIME_MAX_ACCOUNTS", 1),
-		ManagedMaxInflightPerAccount:  envInt("MANAGED_MAX_INFLIGHT_PER_ACCOUNT", 1),
-		MCTLAPIBaseURL:                envOr("MCTL_API_BASE_URL", "https://api.mctl.ai"),
-		MCTLSurfaceTelegramToken:      os.Getenv("MCTL_SURFACE_TELEGRAM_TOKEN"),
-		WorkItemTenant:                os.Getenv("MCTL_WORK_ITEM_TENANT"),
-		HumanInputEnabled:             envBool("HUMAN_INPUT_ENABLED", false),
-		HumanInputPollInterval:        envDuration("HUMAN_INPUT_POLL_INTERVAL", 30*time.Second),
-		ProductUpdateFeedDir:          envOr("PRODUCT_UPDATE_FEED_DIR", "docs/product-updates"),
+		Addr:                            envOr("ADDR", ":8080"),
+		PublicBaseURL:                   envOr("PUBLIC_BASE_URL", "http://localhost:8080"),
+		MCPPath:                         envOr("MCP_PATH", "/mcp"),
+		AuthMode:                        authMode,
+		AuthRequired:                    envBool("AUTH_REQUIRED", false),
+		OperatorLogin:                   envOr("OPERATOR_GITHUB_LOGIN", "operator"),
+		Environment:                     envOr("ENV", ""),
+		DatabaseURL:                     envOr("DATABASE_URL", "file:mctl-telegram.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"),
+		OAUTHJWTSecret:                  jwtSigningKey(authMode),
+		OAUTHJWTAudience:                os.Getenv("OAUTH_JWT_AUDIENCE"),
+		OAUTHJWTAudReq:                  envBool("OAUTH_JWT_AUDIENCE_REQUIRED", false),
+		WorkerTokenRevocationCacheTTL:   envDuration("WORKER_TOKEN_REVOCATION_CACHE_TTL", 10*time.Second),
+		TGAPIHash:                       os.Getenv("TG_API_HASH"),
+		TGTestDC:                        TestDCFromEnv(),
+		AllowSend:                       envBool("ALLOW_SEND", false),
+		IdleClientTimeout:               envDuration("IDLE_CLIENT_TIMEOUT", 10*time.Minute),
+		RateLimitPerUser:                envInt("RATE_LIMIT_PER_USER", 30),
+		AuditRetentionDays:              envInt("AUDIT_RETENTION_DAYS", 90),
+		AgentRetentionDays:              envInt("AGENT_RETENTION_DAYS", 30),
+		AgentJobVisibility:              envDuration("AGENT_JOB_VISIBILITY", 5*time.Minute),
+		AgentAllowLegacyCompletion:      envBool("AGENT_ALLOW_LEGACY_COMPLETION", false),
+		AgentApprovalTTL:                envDuration("AGENT_APPROVAL_TTL", 24*time.Hour),
+		AgentEnabled:                    envBool("AGENT_ENABLED", false),
+		AgentKillSwitch:                 envBool("AGENT_KILL_SWITCH", false),
+		AppsEnabled:                     envBool("MCP_APPS_ENABLED", false),
+		BroadcastContentEnabled:         broadcastContentFromEnv(),
+		EventsValkeyURL:                 os.Getenv("EVENTS_VALKEY_URL"),
+		EventsValkeyPassword:            os.Getenv("EVENTS_VALKEY_PASSWORD"),
+		EventsStream:                    envOr("EVENTS_STREAM", "mctl:events:telegram"),
+		EventsOperatorRouting:           envBool("EVENTS_OPERATOR_ROUTING", false),
+		AgentTurnQuiet:                  envDuration("AGENT_TURN_QUIET", 0),
+		AgentTurnMaxWait:                envDuration("AGENT_TURN_MAX_WAIT", 15*time.Second),
+		AgentTurnMaxMsgs:                envInt("AGENT_TURN_MAX_MSGS", 10),
+		AgentTurnMaxBytes:               envInt("AGENT_TURN_MAX_BYTES", 16384),
+		AgentUnclaimedRouteAfter:        envDuration("AGENT_UNCLAIMED_ROUTE_AFTER", 5*time.Minute),
+		AgentProfilePath:                os.Getenv("AGENT_PROFILE_PATH"),
+		AgentProfileOwnerTGID:           envInt64("AGENT_PROFILE_OWNER_TG_ID", 0),
+		AgentTestCrashAfterReserve:      envBool("AGENT_TEST_CRASH_AFTER_RESERVE", false),
+		LogLevel:                        envOr("LOG_LEVEL", "info"),
+		TelegramLoginBotToken:           os.Getenv("TELEGRAM_LOGIN_BOT_TOKEN"),
+		TelegramLoginBotUsername:        loginBotUsernameFromEnv(),
+		TelegramOIDCClientID:            os.Getenv("TELEGRAM_OIDC_CLIENT_ID"),
+		TelegramOIDCBotAccessEnabled:    envBool("TELEGRAM_OIDC_BOT_ACCESS_ENABLED", false),
+		TelegramOIDCClientSecret:        os.Getenv("TELEGRAM_OIDC_CLIENT_SECRET"),
+		TelegramOIDCIssuerURL:           envOr("TELEGRAM_OIDC_ISSUER", "https://oauth.telegram.org"),
+		TelegramOIDCRedirectURL:         os.Getenv("TELEGRAM_OIDC_REDIRECT_URL"),
+		OAUTHCodeTTL:                    envDuration("OAUTH_CODE_TTL", 10*time.Minute),
+		OAUTHAccessTokenTTL:             envDuration("OAUTH_ACCESS_TOKEN_TTL", 1*time.Hour),
+		OAUTHRefreshTokenTTL:            envDuration("OAUTH_REFRESH_TOKEN_TTL", 720*time.Hour),
+		OAUTHAllowImplicitClient:        envBool("OAUTH_ALLOW_IMPLICIT_CLIENT", false),
+		OAUTHCIMDAccept:                 envBool("OAUTH_CIMD_ACCEPT", false),
+		OAUTHCIMDAdvertise:              envBool("OAUTH_CIMD_ADVERTISE", false),
+		AllowSharedHMACLegacy:           envBool("AUTH_ALLOW_SHARED_HMAC_LEGACY", false),
+		OAUTHRegisterRatePerMin:         envInt("OAUTH_REGISTER_RATE_PER_MIN", 10),
+		AutoApproveClients:              envBool("AUTO_APPROVE_CLIENTS", false),
+		DigestHourUTC:                   envInt("DIGEST_HOUR_UTC", 9),
+		BotReceiverEnabled:              envBool("BOT_RECEIVER_ENABLED", false),
+		BotStartBridgeToken:             strings.TrimSpace(os.Getenv("BOT_START_BRIDGE_TOKEN")),
+		BroadcastRatePerSec:             envFloat("BROADCAST_RATE_PER_SEC", 10),
+		BroadcastBatchSize:              envInt("BROADCAST_BATCH_SIZE", 20),
+		BroadcastMaxAttempts:            envInt("BROADCAST_MAX_ATTEMPTS", 5),
+		BroadcastRecipientLimit:         envInt("BROADCAST_RECIPIENT_LIMIT", 1000),
+		BroadcastApprovalTTL:            envDuration("BROADCAST_APPROVAL_TTL", 30*time.Minute),
+		WorkContextEnabled:              envBool("WORK_CONTEXT_ENABLED", false),
+		AssistantRegistryEnabled:        envBool("ASSISTANT_REGISTRY_ENABLED", false),
+		AssistantForksEnabled:           envBool("ASSISTANT_FORKS_ENABLED", false),
+		ManagedRuntimeEnabled:           envBool("MANAGED_RUNTIME_ENABLED", false),
+		ManagedRuntimeMaxAccounts:       envInt("MANAGED_RUNTIME_MAX_ACCOUNTS", 1),
+		ManagedMaxInflightPerAccount:    envInt("MANAGED_MAX_INFLIGHT_PER_ACCOUNT", 1),
+		ManagedMaxJobCostUSD:            envFloat("MANAGED_MAX_JOB_COST_USD", 0.50),
+		ManagedBudgetUSDPerAccountDay:   envFloat("MANAGED_BUDGET_USD_PER_ACCOUNT_DAY", 1.00),
+		ManagedBudgetUSDPerAccountMonth: envFloat("MANAGED_BUDGET_USD_PER_ACCOUNT_MONTH", 15.00),
+		ManagedBudgetUSDGlobalDay:       envFloat("MANAGED_BUDGET_USD_GLOBAL_DAY", 20.00),
+		MCTLAPIBaseURL:                  envOr("MCTL_API_BASE_URL", "https://api.mctl.ai"),
+		MCTLSurfaceTelegramToken:        os.Getenv("MCTL_SURFACE_TELEGRAM_TOKEN"),
+		WorkItemTenant:                  os.Getenv("MCTL_WORK_ITEM_TENANT"),
+		HumanInputEnabled:               envBool("HUMAN_INPUT_ENABLED", false),
+		HumanInputPollInterval:          envDuration("HUMAN_INPUT_POLL_INTERVAL", 30*time.Second),
+		ProductUpdateFeedDir:            envOr("PRODUCT_UPDATE_FEED_DIR", "docs/product-updates"),
 	}
 	c.MetricsAllowCIDR = os.Getenv("METRICS_ALLOW_CIDR")
 	c.PublicStatsRefresh = envDuration("PUBLIC_STATS_REFRESH", 5*time.Minute)
@@ -652,6 +667,28 @@ func Load() (*Config, error) {
 	}
 	if c.ManagedMaxInflightPerAccount < 1 {
 		return nil, fmt.Errorf("MANAGED_MAX_INFLIGHT_PER_ACCOUNT must be at least 1")
+	}
+	for _, b := range []struct {
+		name string
+		v    float64
+	}{
+		{"MANAGED_MAX_JOB_COST_USD", c.ManagedMaxJobCostUSD},
+		{"MANAGED_BUDGET_USD_PER_ACCOUNT_DAY", c.ManagedBudgetUSDPerAccountDay},
+		{"MANAGED_BUDGET_USD_PER_ACCOUNT_MONTH", c.ManagedBudgetUSDPerAccountMonth},
+		{"MANAGED_BUDGET_USD_GLOBAL_DAY", c.ManagedBudgetUSDGlobalDay},
+	} {
+		if !(b.v > 0) || math.IsInf(b.v, 0) {
+			return nil, fmt.Errorf("%s must be greater than 0", b.name)
+		}
+	}
+	for name, capUSD := range map[string]float64{
+		"MANAGED_BUDGET_USD_PER_ACCOUNT_DAY":   c.ManagedBudgetUSDPerAccountDay,
+		"MANAGED_BUDGET_USD_PER_ACCOUNT_MONTH": c.ManagedBudgetUSDPerAccountMonth,
+		"MANAGED_BUDGET_USD_GLOBAL_DAY":        c.ManagedBudgetUSDGlobalDay,
+	} {
+		if c.ManagedMaxJobCostUSD > capUSD {
+			return nil, fmt.Errorf("MANAGED_MAX_JOB_COST_USD must not exceed %s", name)
+		}
 	}
 	if c.AssistantRegistryEnabled && c.MCTLSurfaceTelegramToken == "" {
 		return nil, fmt.Errorf("ASSISTANT_REGISTRY_ENABLED requires MCTL_SURFACE_TELEGRAM_TOKEN")

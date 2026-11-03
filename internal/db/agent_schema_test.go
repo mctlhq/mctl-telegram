@@ -448,3 +448,39 @@ func TestRetirePreExecutorApprovedActions_RunsOnce(t *testing.T) {
 		t.Fatalf("fresh action status=%q, want approved after marker exists", fresh.Status)
 	}
 }
+
+// The usage ledger table, its UNIQUE(job_id, attempt) and the profile budget
+// columns exist, and migrating twice is idempotent (#1092).
+func TestMigrate_CreatesUsageLedger(t *testing.T) {
+	ctx := context.Background()
+	conn, err := Open(ctx, "file::memory:?cache=shared", 0, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	for i := 0; i < 2; i++ {
+		if err := Migrate(ctx, conn); err != nil {
+			t.Fatalf("migrate %d: %v", i, err)
+		}
+	}
+	for _, col := range []string{"id", "job_id", "attempt", "user_id", "runtime", "runner", "model",
+		"input_tokens", "output_tokens", "reserved_usd", "cost_usd", "status", "created_at", "updated_at", "settled_at"} {
+		var n int
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('agent_usage') WHERE name = $1`, col).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("agent_usage.%s: n=%d err=%v", col, n, err)
+		}
+	}
+	for _, col := range []string{"managed_budget_usd_day", "managed_budget_usd_month"} {
+		var n int
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('agent_profiles') WHERE name = $1`, col).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("agent_profiles.%s: n=%d err=%v", col, n, err)
+		}
+	}
+	ins := `INSERT INTO agent_usage(job_id, attempt, user_id, runtime, status) VALUES(1, 1, 1, 'managed', 'reserved')`
+	if _, err := conn.ExecContext(ctx, ins); err != nil {
+		t.Fatalf("first insert: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, ins); err == nil {
+		t.Fatal("duplicate (job_id, attempt) accepted")
+	}
+}

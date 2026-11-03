@@ -753,3 +753,38 @@ func TestLoadManagedRuntime(t *testing.T) {
 		t.Fatal("MANAGED_MAX_INFLIGHT_PER_ACCOUNT=0 must fail")
 	}
 }
+
+func TestLoadManagedBudget(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ManagedMaxJobCostUSD != 0.50 || cfg.ManagedBudgetUSDPerAccountDay != 1.00 ||
+		cfg.ManagedBudgetUSDPerAccountMonth != 15.00 || cfg.ManagedBudgetUSDGlobalDay != 20.00 {
+		t.Fatalf("defaults = %v %v %v %v", cfg.ManagedMaxJobCostUSD, cfg.ManagedBudgetUSDPerAccountDay,
+			cfg.ManagedBudgetUSDPerAccountMonth, cfg.ManagedBudgetUSDGlobalDay)
+	}
+	t.Setenv("MANAGED_BUDGET_USD_GLOBAL_DAY", "42.5")
+	if cfg, err = Load(); err != nil || cfg.ManagedBudgetUSDGlobalDay != 42.5 {
+		t.Fatalf("set = %v, %v", cfg.ManagedBudgetUSDGlobalDay, err)
+	}
+	for name, val := range map[string]string{
+		"MANAGED_MAX_JOB_COST_USD":             "0",
+		"MANAGED_BUDGET_USD_PER_ACCOUNT_DAY":   "-1",
+		"MANAGED_BUDGET_USD_PER_ACCOUNT_MONTH": "0",
+		"MANAGED_BUDGET_USD_GLOBAL_DAY":        "0",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, val)
+			if _, err := Load(); err == nil {
+				t.Fatalf("%s=%s must fail", name, val)
+			}
+		})
+	}
+	t.Run("per_job_above_cap", func(t *testing.T) {
+		t.Setenv("MANAGED_MAX_JOB_COST_USD", "2")
+		if _, err := Load(); err == nil {
+			t.Fatal("a per-job cost above the account day cap must fail")
+		}
+	})
+}

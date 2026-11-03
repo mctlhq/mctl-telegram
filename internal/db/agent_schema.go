@@ -180,9 +180,16 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "managed_consent_at", "TIMESTAMPTZ", "DATETIME"); err != nil {
 		return err
 	}
-	// budget_paused_until is unused in this slice.
+	// budget_paused_until: the managed budget pause (ADR 0008 section 5), set
+	// to the end of the exhausted window.
 	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", "budget_paused_until", "TIMESTAMPTZ", "DATETIME"); err != nil {
 		return err
+	}
+	// Per-account managed budget overrides (nullable; NULL uses the default).
+	for _, col := range []string{"managed_budget_usd_day", "managed_budget_usd_month"} {
+		if err := addColumnIfMissing(ctx, dbConn, pg, "agent_profiles", col, "DOUBLE PRECISION", "REAL"); err != nil {
+			return err
+		}
 	}
 	// agent_jobs.runtime: the runtime the job was last claimed under
 	// (own|managed). NULL means never claimed since the column existed.
@@ -688,6 +695,26 @@ func agentSchemaSQLite() []string {
 			error TEXT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_job_attempts_job ON agent_job_attempts(job_id)`,
+		`CREATE TABLE IF NOT EXISTS agent_usage (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			job_id INTEGER NOT NULL,
+			attempt INTEGER NOT NULL,
+			user_id INTEGER NOT NULL,
+			runtime TEXT NOT NULL,
+			runner TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			input_tokens INTEGER NOT NULL DEFAULT 0,
+			output_tokens INTEGER NOT NULL DEFAULT 0,
+			reserved_usd REAL NOT NULL DEFAULT 0,
+			cost_usd REAL,
+			status TEXT NOT NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			settled_at DATETIME,
+			UNIQUE(job_id, attempt)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_usage_user ON agent_usage(user_id, runtime, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_usage_runtime ON agent_usage(runtime, created_at)`,
 		`CREATE TABLE IF NOT EXISTS agent_job_lead_results (
 			job_id INTEGER PRIMARY KEY REFERENCES agent_jobs(id) ON DELETE CASCADE,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1063,6 +1090,26 @@ func agentSchemaPG() []string {
 			error TEXT
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_job_attempts_job ON agent_job_attempts(job_id)`,
+		`CREATE TABLE IF NOT EXISTS agent_usage (
+			id BIGSERIAL PRIMARY KEY,
+			job_id BIGINT NOT NULL,
+			attempt INT NOT NULL,
+			user_id BIGINT NOT NULL,
+			runtime TEXT NOT NULL,
+			runner TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			input_tokens BIGINT NOT NULL DEFAULT 0,
+			output_tokens BIGINT NOT NULL DEFAULT 0,
+			reserved_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+			cost_usd DOUBLE PRECISION,
+			status TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			settled_at TIMESTAMPTZ,
+			UNIQUE(job_id, attempt)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_usage_user ON agent_usage(user_id, runtime, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_usage_runtime ON agent_usage(runtime, created_at)`,
 		`CREATE TABLE IF NOT EXISTS agent_job_lead_results (
 			job_id BIGINT PRIMARY KEY REFERENCES agent_jobs(id) ON DELETE CASCADE,
 			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

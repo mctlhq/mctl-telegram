@@ -70,7 +70,11 @@ func recordRunCost(ctx context.Context, client *Client, job JobEnvelope, res *Cl
 	if m != nil {
 		m.AgentJobCostUSDTotal.WithLabelValues(result).Add(cost)
 	}
-	if err := client.ReportJobCost(ctx, job.JobID, job.Attempt, cost); err != nil {
+	u := UsageReport{CostUSD: cost, Model: res.Model, Runner: res.Runner, InputTokens: res.InputTokens, OutputTokens: res.OutputTokens}
+	if res.Usage != nil && u.InputTokens == 0 && u.OutputTokens == 0 {
+		u.InputTokens, u.OutputTokens = res.Usage.InputTokens, res.Usage.OutputTokens
+	}
+	if err := client.ReportJobUsage(ctx, job.JobID, job.Attempt, u); err != nil {
 		slog.Warn("agent-worker: report job cost failed", "job_id", job.JobID, "err", err)
 	}
 }
@@ -87,4 +91,17 @@ func countRunResultError(m *metrics.Registry, err error) {
 		class = metrics.ClaudeResultClassUsageLimit
 	}
 	m.AgentClaudeResultErrorsTotal.WithLabelValues(class).Inc()
+}
+
+// jobBudget is the model budget of one job: the worker's own cap, lowered to
+// the server's per-job cap (max_job_cost_usd) in pool mode, where that cap is
+// what the account's budget reserved for the job.
+func jobBudget(configured float64, poolMode bool, job JobEnvelope) float64 {
+	if !poolMode || job.MaxJobCostUSD <= 0 {
+		return configured
+	}
+	if configured <= 0 || job.MaxJobCostUSD < configured {
+		return job.MaxJobCostUSD
+	}
+	return configured
 }

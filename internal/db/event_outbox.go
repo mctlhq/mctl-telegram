@@ -179,7 +179,10 @@ func (s *Store) routeJobEventTx(ctx context.Context, tx *sql.Tx, jobID int64, re
 // compare-and-set serializes with ClaimAgentJobs on the row lock, so a job is
 // never both routed and claimed. An event already routed for another reason
 // keeps its first outbox row; its job still leaves pending. Returns the number
-// of jobs moved.
+// of jobs moved. A job of an account whose managed budget pause
+// (budget_paused_until) is in the future stays pending: the owner was told
+// once, and the message is held for the account's runtime, not diverted to
+// the operator.
 func (s *Store) RouteUnclaimedAgentJobs(ctx context.Context, after time.Duration) (int64, error) {
 	if !s.operatorRouting || s.outbox == nil || after <= 0 {
 		return 0, nil
@@ -197,6 +200,10 @@ func (s *Store) RouteUnclaimedAgentJobs(ctx context.Context, after time.Duration
 		        SELECT 1 FROM agent_jobs p
 		         WHERE p.conversation_id = agent_jobs.conversation_id
 		           AND (p.status = $6 OR (p.status = $4 AND p.id < agent_jobs.id))
+		    )
+		    AND NOT EXISTS (
+		        SELECT 1 FROM agent_profiles bp
+		         WHERE bp.user_id = agent_jobs.user_id AND bp.budget_paused_until > $3
 		    )
 		 RETURNING id`,
 		JobRouted, "unclaimed past threshold, routed to operator", now, JobPending, now.Add(-after), JobProcessing)

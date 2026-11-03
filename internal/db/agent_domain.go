@@ -90,10 +90,15 @@ type AgentProfile struct {
 	// to the managed data flow. Zero time means never.
 	ManagedConsentVersion string
 	ManagedConsentAt      time.Time
-	// BudgetPausedUntil is unused in this slice.
+	// BudgetPausedUntil is the end of the managed budget window the account
+	// exhausted; claims and operator routing skip it until then.
 	BudgetPausedUntil time.Time
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	// ManagedBudgetUSDDay and ManagedBudgetUSDMonth are the per-account
+	// overrides of the managed day and month caps; nil uses the default.
+	ManagedBudgetUSDDay   *float64
+	ManagedBudgetUSDMonth *float64
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
 }
 
 // NeedsManagedReconsent reports a managed account whose stored consent is not
@@ -160,19 +165,21 @@ func (s *Store) UpsertAgentProfile(ctx context.Context, p AgentProfile) error {
 func (s *Store) GetAgentProfile(ctx context.Context, userID int64) (*AgentProfile, error) {
 	var p AgentProfile
 	var installedAt, consentAt, pausedUntil sql.NullTime
+	var budgetDay, budgetMonth sql.NullFloat64
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT user_id, mode, autopilot_paused, listener_enabled, disclosure_text,
 		        max_autonomous_turns, max_msgs_per_minute, max_reply_chars,
 		        intent_allowlist, blocked_senders, sender_allowlist, created_at, updated_at,
 		        disclosure_disabled, intent_denylist, working_hours, audience_excludes, assistant_installed_at, install_revision,
-		        assistant_name, runtime, managed_consent_version, managed_consent_at, budget_paused_until
+		        assistant_name, runtime, managed_consent_version, managed_consent_at, budget_paused_until,
+		        managed_budget_usd_day, managed_budget_usd_month
 		   FROM agent_profiles WHERE user_id = $1`,
 		userID,
 	).Scan(&p.UserID, &p.Mode, &p.AutopilotPaused, &p.ListenerEnabled, &p.DisclosureText,
 		&p.MaxAutonomousTurns, &p.MaxMsgsPerMinute, &p.MaxReplyChars,
 		&p.IntentAllowlist, &p.BlockedSenders, &p.SenderAllowlist, &p.CreatedAt, &p.UpdatedAt,
 		&p.DisclosureDisabled, &p.IntentDenylist, &p.WorkingHours, &p.AudienceExcludes, &installedAt, &p.InstallRevision,
-		&p.AssistantName, &p.Runtime, &p.ManagedConsentVersion, &consentAt, &pausedUntil)
+		&p.AssistantName, &p.Runtime, &p.ManagedConsentVersion, &consentAt, &pausedUntil, &budgetDay, &budgetMonth)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrAgentProfileNotFound
 	}
@@ -182,6 +189,14 @@ func (s *Store) GetAgentProfile(ctx context.Context, userID int64) (*AgentProfil
 	p.AssistantInstalledAt = installedAt.Time
 	p.ManagedConsentAt = consentAt.Time
 	p.BudgetPausedUntil = pausedUntil.Time
+	if budgetDay.Valid {
+		v := budgetDay.Float64
+		p.ManagedBudgetUSDDay = &v
+	}
+	if budgetMonth.Valid {
+		v := budgetMonth.Float64
+		p.ManagedBudgetUSDMonth = &v
+	}
 	return &p, nil
 }
 
@@ -442,6 +457,12 @@ type AgentProfileUpdate struct {
 	// owner opted out of the managed runtime, so coming back needs a new
 	// consent. It cannot be combined with a consent being recorded.
 	ClearManagedConsent bool
+	// ManagedBudgetUSDDay and ManagedBudgetUSDMonth set the per-account budget
+	// overrides; the Clear flags set the column back to NULL (the default).
+	ManagedBudgetUSDDay        *float64
+	ManagedBudgetUSDMonth      *float64
+	ClearManagedBudgetUSDDay   bool
+	ClearManagedBudgetUSDMonth bool
 	// ManagedQuota, set only for an own -> managed write, makes the UPDATE
 	// apply only while fewer than *ManagedQuota other accounts are managed;
 	// otherwise it changes nothing and returns ErrManagedQuota.
@@ -566,6 +587,18 @@ func (s *Store) updateAgentProfileFields(ctx context.Context, ex execer, userID 
 	}
 	if u.ClearManagedConsent {
 		sets = append(sets, "managed_consent_version = ''", "managed_consent_at = NULL")
+	}
+	if u.ManagedBudgetUSDDay != nil {
+		set("managed_budget_usd_day", *u.ManagedBudgetUSDDay)
+	}
+	if u.ManagedBudgetUSDMonth != nil {
+		set("managed_budget_usd_month", *u.ManagedBudgetUSDMonth)
+	}
+	if u.ClearManagedBudgetUSDDay {
+		sets = append(sets, "managed_budget_usd_day = NULL")
+	}
+	if u.ClearManagedBudgetUSDMonth {
+		sets = append(sets, "managed_budget_usd_month = NULL")
 	}
 	if u.ResetInstalledAt != nil {
 		set("assistant_installed_at", u.ResetInstalledAt.UTC())
