@@ -435,8 +435,9 @@ AI Gateway, with gateway logging and caching off. See
 
 *Separation.* The claim SQL filters on `agent_profiles.runtime`: an own
 worker claims only `own` accounts and the pool worker only `managed` ones.
-When `MANAGED_RUNTIME_ENABLED` is off, managed jobs wait and nothing runs
-them.
+When `MANAGED_RUNTIME_ENABLED` is off, no worker claims managed jobs: they
+wait, or go to the operator after `AGENT_UNCLAIMED_ROUTE_AFTER` when operator
+routing is on, until the account is switched back to `runtime: own`.
 
 ## 6. Surfaces
 

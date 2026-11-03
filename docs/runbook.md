@@ -507,16 +507,20 @@ it goes straight to Vault and is never pasted into a chat, a ticket or a log.
 `MANAGED_RUNTIME_ENABLED` on (otherwise the route is 404):
 
 ```sh
-curl -sS -X POST "$TG_BASE/api/agent/pool-token" \
+resp=$(curl -fsS -X POST "$TG_BASE/api/agent/pool-token" \
   -H "Authorization: Bearer $ADMIN_BEARER" -H 'Content-Type: application/json' \
-  -d '{"pool_name":"agent-worker-managed-preview","ttl_hours":720}' \
-  | tee >(jq '{jti, expires_at}' >&2) \
-  | jq -r .pool_token \
-  | vault kv put secret/platform/labs/agent-worker-managed-preview/api token=-
+  -d '{"pool_name":"agent-worker-managed-preview","ttl_hours":720}') \
+  && tok=$(printf '%s' "$resp" | jq -er '.pool_token | select(length > 0)') \
+  && printf '%s' "$resp" | jq '{jti, expires_at}' \
+  && printf '%s' "$tok" | vault kv put secret/platform/labs/agent-worker-managed-preview/api token=-
+unset resp tok
 ```
 
 Record the `jti` and `expires_at` that are printed; the token itself is not
-echoed. `pool_name` must match `^[a-z0-9][a-z0-9-]{0,62}$`, and the TTL is
+echoed. Each step runs only if the previous one succeeded, so a failed mint
+(404 with the flag off, 401, a body without `pool_token`) never reaches
+`vault kv put`: during a rotation the working token in Vault is left as it
+was. `pool_name` must match `^[a-z0-9][a-z0-9-]{0,62}$`, and the TTL is
 clamped to the agent-token TTL bounds. The ExternalSecret
 `labs-agent-worker-managed-preview-api` maps the Vault property `token` to
 `AGENT_API_TOKEN` of the pool worker.
@@ -1054,7 +1058,7 @@ mctl_agent_managed_accounts
 
 ```promql
 max(mctl_agent_managed_accounts)
-up{job=~".*agent-worker-managed-preview.*"}
+up{namespace="labs", service="labs-agent-worker-managed-preview-base-service"}
 ```
 
 Check the Argo CD Application, the pod state and the worker log for the

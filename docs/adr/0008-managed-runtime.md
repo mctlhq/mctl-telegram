@@ -12,11 +12,12 @@ files and symbols it named the code the change would touch; once implemented,
 the code is authoritative and this record is corrected to match it. It has now
 been reconciled with the code on `main` (a787e97).
 
-Implementation status: #1089 runtime field and consent, #1091 OpenAI runner
-(both in code on `main`; PR numbers not recorded here), #1090 pool credential
-and claim path (#1105), #1092 ledger and caps (#1113), #1094 CI image (#1114),
-mctlhq/mctl-gitops#2345 deployment (inert, `replicaCount: 0`). #1093 (C1
-gate) is not confirmed as merged by this reconciliation. Activation is a
+Implementation status (merged PRs): #1089 runtime field and consent (#1098),
+#1090 pool credential and claim path (#1105), #1091 OpenAI runner (#1100),
+#1092 ledger and caps (#1113), #1093 C1 gate (eval logging #1103; verdict in
+mctlhq/.github#293: production GLM-5.1 on Nebius, development Qwen3.6 on
+Hetzner), #1094 CI image (#1114), mctlhq/mctl-gitops#2345 deployment
+(mctlhq/mctl-gitops#2376, inert at `replicaCount: 0`). Activation is a
 separate owner decision; see the runbook.
 
 ## Context
