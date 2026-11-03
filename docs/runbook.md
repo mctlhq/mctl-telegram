@@ -46,6 +46,10 @@ to do about it), see [docs/troubleshooting.md](troubleshooting.md) instead.
 - [MctlAgentClaudeUsageLimit — communication-agent Claude credential quota exhausted](#mctlagentclaudeusagelimit)
 - [MctlAgentPolicyDenialRateHigh — communication-agent policy-denial share high](#mctlagentpolicydenialratehigh)
 - [MctlAgentJobCostHigh — communication-agent spend per finished job high](#mctlagentjobcosthigh)
+- [MctlAgentManagedGlobalCapHit — managed global daily budget exhausted](#mctlagentmanagedglobalcaphit)
+- [MctlAgentManagedSpendHigh — managed OpenAI spend high](#mctlagentmanagedspendhigh)
+- [MctlAgentManagedPoolWorkerDown — managed pool worker down](#mctlagentmanagedpoolworkerdown)
+- [Managed runtime: pool token, activation and rollback](#managed-runtime-pool-token)
 - [Login-bot update receiver](#login-bot-update-receiver)
 - [Media response memory bounds (issue #705)](#media-response-memory-bounds)
 - [Connect and OAuth callback rejection reasons](#connectrejectionreasons)
@@ -355,11 +359,12 @@ New `agent_jobs` status label values: `coalesced` (member of a coalesced turn, t
 | profile `mode` | `observe` | `observe` always requires owner approval; `guarded` is production-gated. |
 | worker `AGENT_API_TOKEN` | required | Tenant-scoped bearer capability. Current JWTs are stateless and cannot be revoked individually before expiry. |
 | `MANAGED_RUNTIME_ENABLED` | `false` | Managed runtime (ADR 0008). Mounts `POST /api/agent/pool-token` and accepts the claim-only `aud=agent-pool` credential on `POST /api/agent/v1/jobs/claim`. Off: the mint route is 404 and a pool token is 401; jobs of accounts on `runtime: managed` are not claimed by anyone (own workers never claim them), so they wait, or are routed to the operator after `AGENT_UNCLAIMED_ROUTE_AFTER` when operator routing is on, until the account is switched back to `runtime: own`. The server logs `managed runtime disabled: jobs of managed accounts are paused` with the account count at start. |
+| `MANAGED_RUNTIME_MAX_ACCOUNTS` | `1` | Most accounts that may be on `runtime: managed` at once (>= 0); further switches are refused with `managed_quota`. The managed flag also needs the JWT signing secret (`OAUTH_JWT_SIGNING_KEY`): without it the pool route is not mounted even with `MANAGED_RUNTIME_ENABLED` on. |
 | `MANAGED_MAX_INFLIGHT_PER_ACCOUNT` | `1` | Processing jobs a managed account may have at once (>= 1). Enforced inside the claim transaction (a per-account advisory lock on Postgres), so concurrent pool workers cannot exceed it. |
 | `MANAGED_MAX_JOB_COST_USD` | `0.50` | Managed spend: the amount reserved against the budgets for every claimed managed job, and the `max_job_cost_usd` the claim envelope hands the worker (> 0, not above any cap below). ADR 0008 section 5. |
 | `MANAGED_BUDGET_USD_PER_ACCOUNT_DAY` | `1.00` | Managed spend cap per account per UTC day (> 0). Overridable per account through the admin profile route (`managed_budget_usd_day`). |
 | `MANAGED_BUDGET_USD_PER_ACCOUNT_MONTH` | `15.00` | Managed spend cap per account per UTC month (> 0). Per-account override: `managed_budget_usd_month`. |
-| `MANAGED_BUDGET_USD_GLOBAL_DAY` | `20.00` | Managed spend cap across all accounts per UTC day (> 0). At the cap every managed account with pending jobs is paused until the day ends and its owner is notified once. |
+| `MANAGED_BUDGET_USD_GLOBAL_DAY` | `20.00` (tg-preview deploys `5.00`) | Managed spend cap across all accounts per UTC day (> 0). At the cap every managed account with pending jobs is paused until the day ends and its owner is notified once. |
 | worker `AGENT_POOL_MODE` | `false` | Worker-side (`true`/`false`, anything else refuses to start): `AGENT_API_TOKEN` is the pool credential, which can only claim. Every per-job call, including the status check and cost report, uses the job token; a job without one fails and the pool token is never a fallback. |
 
 ### Dead-letter handling
@@ -488,6 +493,102 @@ not “delete immediately.”
   a separately reviewed dual-key re-encryption migration before replacing
   it. Never replace the key directly; existing ciphertext would become
   unreadable.
+
+<a id="managed-runtime-pool-token"></a>
+### Managed runtime: pool token
+
+The pool token (`aud=agent-pool`) is the widest credential in the agent API:
+it can claim the jobs of every managed account. It can call
+`POST /api/agent/v1/jobs/claim` only; the server mints a job token per claim
+and the worker uses that for everything else. Treat it like a signing key:
+it goes straight to Vault and is never pasted into a chat, a ticket or a log.
+
+**Mint.** With an `admin:users` bearer (`$ADMIN_BEARER`), and with
+`MANAGED_RUNTIME_ENABLED` on (otherwise the route is 404):
+
+```sh
+curl -sS -X POST "$TG_BASE/api/agent/pool-token" \
+  -H "Authorization: Bearer $ADMIN_BEARER" -H 'Content-Type: application/json' \
+  -d '{"pool_name":"agent-worker-managed-preview","ttl_hours":720}' \
+  | tee >(jq '{jti, expires_at}' >&2) \
+  | jq -r .pool_token \
+  | vault kv put secret/platform/labs/agent-worker-managed-preview/api token=-
+```
+
+Record the `jti` and `expires_at` that are printed; the token itself is not
+echoed. `pool_name` must match `^[a-z0-9][a-z0-9-]{0,62}$`, and the TTL is
+clamped to the agent-token TTL bounds. The ExternalSecret
+`labs-agent-worker-managed-preview-api` maps the Vault property `token` to
+`AGENT_API_TOKEN` of the pool worker.
+
+**Rotate.** The pool has one replica.
+
+1. Mint a new token as above and write it to the same Vault path.
+2. Wait for the ExternalSecret refresh or force it, then roll the pod.
+3. Verify the worker claims jobs on the new token (its log and the claim
+   metrics).
+4. Revoke the old `jti` (below).
+
+Revoking the old `jti` also kills every job token minted under it within the
+revocation cache TTL (about 15 s), which ends their in-flight jobs. The
+sweeper requeues those jobs and their budget reservations become `held`.
+Rotate when the queue is quiet.
+
+**Revoke.** Use the `revoke_worker_token` MCP tool with the `jti`, as in
+[Revoking a leaked worker token](#revokingaleakedworkertoken). It covers
+`aud=agent-pool` because `derivedAudiences` in `internal/auth/localjwt`
+includes it, and it reaches the job tokens derived from the pool token.
+
+<a id="managed-runtime-activation"></a>
+### Managed runtime activation
+
+Activation starts only after the owner's separate activation approval. Each
+step starts only after the previous one is verified. The canonical list is
+the "Activation" section of
+`platform-gitops/agents-state/mctl-gitops/proposals/issue-2345-feat-labs-agent-worker-managed-preview-m/requirements.md`
+in mctl-gitops. A4 and A5 never share a PR, and A2-A6 are never combined into
+one change.
+
+1. A1, PR: set `MANAGED_RUNTIME_ENABLED: "true"` on `mctl-telegram-preview`.
+   Verify `POST /api/agent/pool-token` no longer answers 404 and no account
+   is `managed`.
+2. A2, Cloudflare: one PR declares `cloudflare_ai_gateway.mctl_telegram` in
+   `infrastructure/cloudflare/account/ai-gateway.tf` and the token
+   `mctl-telegram-ai-gateway-run` (Vault `platform/mctl-telegram/ai-gateway`)
+   in `infrastructure/cloudflare/tokens/manifest.tf`. The owner creates that
+   token in the dashboard (AI Gateway Run only) in the same PR. The required
+   `cloudflare-plan` stays red while the tokens drift mctl-gitops#2378 is
+   open, so resolve #2378 first. Then run `cloudflare-apply.yml` for the
+   account root. Verify by reading the gateway back: logs off, auth on,
+   byok_only on, cache 0.
+3. A3, Vault: mint the pool token (see "Managed runtime: pool token") and
+   write `secret/platform/labs/agent-worker-managed-preview/api`, `.../openai`
+   (Hetzner key) and `.../gateway` (the run token, canonical copy at
+   `secret/platform/mctl-telegram/ai-gateway`), property `token` each.
+4. A4, PR: the three ExternalSecrets and `envFrom` on
+   `labs/agent-worker-managed-preview`, still at `replicaCount: 0`. Verify all
+   three report `SecretSynced` and the Application is Healthy.
+5. A5, PR: set `replicaCount: 1`. Verify the pod is Ready, the scrape target
+   is up, `mctl_agent_credential_domain` is present, and a gateway smoke call
+   answers 200 with the bearer and 401 without.
+6. A6: the owner switches one preview account to `runtime: managed` with
+   consent, then a soak of at least 30 jobs.
+
+<a id="managed-runtime-rollback"></a>
+### Managed runtime rollback
+
+Roll back in this order, so no job is claimed by a worker that is about to
+disappear and no credential outlives the worker:
+
+1. Switch every managed account back with `runtime: own`.
+2. Scale the pool worker to zero (`replicaCount: 0` on
+   `labs/agent-worker-managed-preview`).
+3. Revoke the pool token with `revoke_worker_token` by `jti`.
+4. Set `MANAGED_RUNTIME_ENABLED: "false"` on `mctl-telegram-preview`.
+
+With the flag off, the mint route is 404, a pool token is 401, and jobs of
+accounts still on `managed` wait. At the next start the server logs
+`managed runtime disabled: jobs of managed accounts are paused`.
 
 ---
 
@@ -838,6 +939,137 @@ sum by (status) (increase(mctl_agent_jobs_total[1h]))
 Open a postmortem if the high-cost window traced back to a retry storm that
 also produced dead-lettered jobs, or if spend continued after the test window
 should have been closed.
+
+
+<a id="mctlagentmanagedglobalcaphit"></a>
+## MctlAgentManagedGlobalCapHit — managed global daily budget exhausted
+
+### Symptom
+
+- Alert `MctlAgentManagedGlobalCapHit` fires when
+  `increase(mctl_agent_budget_exhausted_total{scope="global_day"}[15m]) > 0`:
+  a managed claim found the global day budget durably exhausted (settled plus
+  held usage).
+- Every managed account with pending jobs is paused until the UTC day ends
+  (`budget_paused_until`), and its owner is notified once. Messages are not
+  dropped; jobs stay pending.
+
+### Likely causes
+
+- Genuine volume: many managed accounts or long conversations.
+- A retry storm or a looping model spending within jobs.
+- Reservation drift: `held` rows that were never reconciled still count
+  against the budget.
+- A cap set too low. The code default of `MANAGED_BUDGET_USD_GLOBAL_DAY` is
+  `20.00`; tg-preview deploys `5.00`.
+
+### Diagnostic queries
+
+```promql
+sum by (scope) (increase(mctl_agent_budget_exhausted_total[1h]))
+sum by (scope) (increase(mctl_agent_budget_deferred_total[1h]))
+sum by (model) (increase(mctl_agent_usage_cost_usd_total{runner="openai"}[24h]))
+mctl_agent_usage_held_usd
+mctl_agent_usage_held_rows
+```
+
+`mctl_agent_budget_exhausted_total` is durable exhaustion. In-flight
+reservations alone only defer a claim (`mctl_agent_budget_deferred_total`,
+no pause, no notification) and clear when the running jobs finish.
+
+### Mitigation
+
+1. Compare settled spend with `mctl_agent_usage_held_usd`. A large held value
+   with little settled spend is drift, not spend: investigate the held rows
+   before raising anything.
+2. If spend is real and expected, wait for the UTC day to end; the pause lifts
+   itself.
+3. Raise `MANAGED_BUDGET_USD_GLOBAL_DAY` only after the owner agrees, through a
+   reviewed mctl-gitops PR, never to silence the alert.
+4. If spend is a storm, follow [Managed runtime rollback](#managed-runtime-rollback).
+
+### Escalation
+
+- **Warning**: investigate within 1 business day; the owner decides on any cap
+  change.
+
+<a id="mctlagentmanagedspendhigh"></a>
+## MctlAgentManagedSpendHigh — managed OpenAI spend high
+
+### Symptom
+
+- Alert `MctlAgentManagedSpendHigh` fires when
+  `increase(mctl_agent_usage_cost_usd_total{runner="openai"}[1h]) > 1.00`.
+- This is a leading signal: it fires before the daily caps are reached.
+
+### Likely causes
+
+- A burst of managed traffic, or one account with a long conversation.
+- A looping model: per-job spend is bounded by `MANAGED_MAX_JOB_COST_USD`
+  and `AGENT_MAX_BUDGET_USD`, but retries multiply it.
+- Wrong `MODEL_INPUT_USD_PER_MTOK` or `MODEL_OUTPUT_USD_PER_MTOK` on the
+  worker, which skews the computed cost.
+
+### Diagnostic queries
+
+```promql
+sum by (model) (increase(mctl_agent_usage_cost_usd_total{runner="openai"}[1h]))
+sum by (direction, model) (increase(mctl_agent_usage_tokens_total[1h]))
+sum by (status) (increase(mctl_agent_jobs_total[1h]))
+mctl_agent_managed_accounts
+```
+
+### Mitigation
+
+1. Check whether failed or retried jobs drive the spend (jobs by status).
+2. If one account is responsible, switch it back to `runtime: own` or pause
+   it; do not close the whole pool.
+3. If the spend is unexplained, follow [Managed runtime rollback](#managed-runtime-rollback).
+
+### Escalation
+
+- **Warning**: investigate within 1 business day. Escalate to the owner if the
+  hour's spend is near the global day cap.
+
+<a id="mctlagentmanagedpoolworkerdown"></a>
+## MctlAgentManagedPoolWorkerDown — managed pool worker down
+
+### Symptom
+
+- Alert `MctlAgentManagedPoolWorkerDown` fires when
+  `max(mctl_agent_managed_accounts) > 0` and the `up` series of
+  `labs-agent-worker-managed-preview-base-service` is absent for 10 minutes.
+- Managed accounts exist but nothing is claiming their jobs; jobs wait.
+
+### Likely causes
+
+- The worker is scaled to zero (`replicaCount: 0`), for example after a
+  rollback that left accounts on `managed`.
+- The pod is crash-looping: a bad `AGENT_POOL_MODE` or other env value
+  (refuses to start), an expired or revoked pool token, or an unsynced
+  ExternalSecret.
+- `MANAGED_RUNTIME_ENABLED` is off, so the pool token is refused (401).
+
+### Diagnostic queries
+
+```promql
+max(mctl_agent_managed_accounts)
+up{job=~".*agent-worker-managed-preview.*"}
+```
+
+Check the Argo CD Application, the pod state and the worker log for the
+refusal reason. Check the ExternalSecrets for `SecretSynced`.
+
+### Mitigation
+
+1. If the worker is expected to run, fix the cause above. For an expired or
+   revoked token, mint and roll a new one (see "Managed runtime: pool token").
+2. If the pool was deliberately stopped, switch the accounts back to
+   `runtime: own` so their jobs are not left waiting.
+
+### Escalation
+
+- **Warning**: investigate within 1 business day.
 
 ---
 

@@ -19,7 +19,7 @@ The runtime holds no Telegram credential and no Telegram session material. Every
 | Runtime | Credential | Status |
 |---|---|---|
 | Own / external (T4) | The existing account-scoped `aud=agent` token from `POST /api/agent/token`, plus the `aud=agent-job` token the server mints for each job at claim. | Implemented. This document is about it. |
-| Managed (P5) | A claim-only `aud=agent-pool` credential, then job-bound `aud=agent-job`. | **Planned, not implemented.** Design intent only: #1090 and [ADR 0008](../adr/0008-managed-runtime.md). Nothing below depends on it, and no code reads an `agent-pool` audience today. |
+| Managed (P5) | A claim-only `aud=agent-pool` credential, then job-bound `aud=agent-job`. | **Implemented behind `MANAGED_RUNTIME_ENABLED`** (#1090, [ADR 0008](../adr/0008-managed-runtime.md)). The pool identity can call `POST /jobs/claim` only (`requireNotPool` elsewhere). Residual risk: the pool token can claim the jobs of every managed account, so it is the widest credential in the agent API; revoke it by `jti` if it leaks. |
 
 Own and managed runtimes are different trust boundaries. The own credential path is not changed by the managed model.
 

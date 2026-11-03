@@ -12,7 +12,7 @@ An own / external runtime uses **the existing account-scoped `aud=agent` token**
 
 Job-level binding comes from the **`aud=agent-job` token** the server mints for each job at `POST /jobs/claim`, where a job-token signer is configured. It is bound to one job, attempt and conversation, signs the job's tool set (`job_tools`), and expires at `claim time + AGENT_JOB_VISIBILITY` (code default 5 minutes). A worker should give the model only this token, never the account token. When the server has no signer, `job_token` is absent from the claim and the worker has only its account token.
 
-**Managed runtime: planned, not implemented.** A pooled platform runtime is designed to use a claim-only `aud=agent-pool` credential and then job-bound `aud=agent-job` (#1090, [ADR 0008](../adr/0008-managed-runtime.md)). This is design intent. No `agent-pool` audience exists in the code, no route in this document accepts one, and nothing here changes for it.
+**Managed runtime: implemented behind `MANAGED_RUNTIME_ENABLED`.** The pooled platform runtime uses a claim-only `aud=agent-pool` credential (`POST /api/agent/pool-token`) and then job-bound `aud=agent-job` (#1090, [ADR 0008](../adr/0008-managed-runtime.md)). The pool identity may call `POST /jobs/claim` only; every other route in this document refuses it (`requireNotPool`). Nothing here changes for an own runtime.
 
 Audiences are distinct. A bridge token or a regular MCP token does not authenticate on this mount.
 

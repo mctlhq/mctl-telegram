@@ -22,6 +22,9 @@ func TestRunbookAnchorsPresent(t *testing.T) {
 		"telegramclienterrors",
 		"ratelimitspike",
 		"sloburnrate",
+		"mctlagentmanagedglobalcaphit",
+		"mctlagentmanagedspendhigh",
+		"mctlagentmanagedpoolworkerdown",
 	}
 
 	for _, anchor := range anchors {

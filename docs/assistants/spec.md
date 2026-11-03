@@ -138,12 +138,32 @@ spec:
   ownerNotes: "..."        # the user's own instructions, max 2000 chars
 ```
 
+### Runtime and consent
+
 `runtime` chooses which worker runs the account's jobs: `own`, the
-default, or `managed` (a platform worker, ADR 0008). Switching `own` to
-`managed` needs `consent: "managed-data-flow/v1"` on that call, and the
-server may refuse it (`managed_disabled`, `managed_quota`). `consent` is an
-assertion of one call: it is never stored in the install. Switching back to
-`own` needs nothing.
+default, or `managed` (the platform's pooled worker, ADR 0008). An install
+document that does not state `runtime` leaves the account's runtime unchanged;
+only an explicit `own` moves a managed account back.
+
+Switching `own` to `managed` is a confirmed operation, because the content of
+Telegram messages then goes to a third-party model provider. The call must
+carry `consent: "managed-data-flow/v1"`, asserting that the user agreed to this
+text, verbatim:
+
+> Messages needed to perform assistant tasks will be sent to MCTL's configured third-party AI provider through MCTL's AI gateway; gateway logging and caching are disabled.
+
+- `consent` is an assertion of one call and is never stored in the install.
+  The profile stores the consent version and time, and the change is audited.
+- Refusals: `managed_consent_required` (no or stale consent),
+  `managed_disabled` (`MANAGED_RUNTIME_ENABLED` is off) and `managed_quota`
+  (`MANAGED_RUNTIME_MAX_ACCOUNTS` reached). Nothing changes on a refusal.
+- Switching `managed` back to `own` needs no consent and erases the stored
+  consent, so going back to `managed` needs a new one.
+- A runtime switch bumps the install revision. Work created under the earlier
+  revision is fenced by it and is not run by the other runtime.
+- Budget hold: when a managed budget window is exhausted, the account's jobs
+  stay pending until the window resets, the owner is notified once, and
+  messages are not dropped.
 
 `ownerNotes` are appended after the definition's instructions in a delimited
 block, introduced as lower priority than everything before them; the notes
@@ -765,7 +785,7 @@ so they have no semantics the MCP tools do not have.
 | T1 Tune | mode, tiers (tighten), limits, audience, schedule, disclosure, `ownerNotes` | schema and definition checks |
 | T2 Fork | own instructions, stricter intents, a tool subset and lower limits on a catalog base (P4.2, see [Forks](#forks)); records inherited ([adr-forks.md](adr-forks.md)) | private visibility; observe mode only until P4.3 promotion |
 | T3 Connectors | adds MCP servers (calendar, CRM), each tool with a tier, approve by default | admin review |
-| T4 Own runtime | runs their own worker against the agent job API (claim, propose, complete); see [the contract](../contracts/agent-job-api.md) and [the threat model](../agent-runtime/threat-model.md) | the existing account-scoped `aud=agent` token, plus the job-bound `aud=agent-job` token minted at claim; policy enforced server-side. The managed runtime's claim-only `aud=agent-pool` credential is planned (#1090, ADR 0008), not implemented |
+| T4 Own or managed runtime | runs their own worker against the agent job API (claim, propose, complete), or uses the platform's managed worker via `runtime: managed`; see [the contract](../contracts/agent-job-api.md) and [the threat model](../agent-runtime/threat-model.md) | `aud=agent` (own: the existing account-scoped token), `aud=agent-pool` (managed: the platform pool, claim only) and `aud=agent-job` (both: the job-bound token minted at claim); policy and the send gate are enforced server-side either way |
 
 ## Phases
 

@@ -1,15 +1,23 @@
 # 0008. Managed runtime: one pooled platform worker, OpenAI-compatible models through the AI gateway
 
-Status: Proposed (owner GO with amendments, 2026-11-01). Epic: #1088 (P5 of
+Status: Accepted (2026-11-03; owner GO with amendments, 2026-11-01). Epic: #1088 (P5 of
 #1002; manifest `roadmap/epics/telegram-managed-runtime.yaml` in mctlhq/.github).
 Slices: #1089 runtime field and consent, #1090 pool credential and claim path,
 #1091 OpenAI runner, #1092 ledger and caps, #1093 C1 gate, #1094 CI image,
 mctlhq/mctl-gitops#2345 deployment, #1095 docs. Spike: mctlhq/.github#293.
 Builds on #1046 (P4.5, external runtime contract) and [0002](0002-send-gate.md).
 
-Unlike 0001-0007 this record is written before the code. Where it names
-files and symbols it names the code the change will touch; once implemented,
-the code is authoritative and this record is corrected to match it.
+Unlike 0001-0007 this record was written before the code. Where it names
+files and symbols it named the code the change would touch; once implemented,
+the code is authoritative and this record is corrected to match it. It has now
+been reconciled with the code on `main` (a787e97).
+
+Implementation status: #1089 runtime field and consent, #1091 OpenAI runner
+(both in code on `main`; PR numbers not recorded here), #1090 pool credential
+and claim path (#1105), #1092 ledger and caps (#1113), #1094 CI image (#1114),
+mctlhq/mctl-gitops#2345 deployment (inert, `replicaCount: 0`). #1093 (C1
+gate) is not confirmed as merged by this reconciliation. Activation is a
+separate owner decision; see the runbook.
 
 ## Context
 
@@ -98,7 +106,8 @@ a confirmed operation:
   `agent-pool`, so the revocation check always runs.
 - Minted by `POST /api/agent/pool-token` (scope `admin:users`, body
   `{pool_name, ttl_hours}`, TTL 30 d default, 90 d cap, same constants as
-  the account token), mounted only under the flag. It is not an MCP tool:
+  the account token), mounted only under the flag (`managedPoolEnabled` also requires the JWT
+  signing secret). It is not an MCP tool:
   one mint per environment per rotation. The value lives in Vault and
   reaches the worker as `AGENT_API_TOKEN` through an ExternalSecret.
 - A pool identity may call exactly one route: `POST /jobs/claim`. A new
@@ -319,7 +328,9 @@ a confirmed operation:
   `mctl_agent_usage_tokens_total{direction,model}`,
   `mctl_agent_budget_exhausted_total{scope}`,
   `mctl_agent_budget_deferred_total{scope}`, `mctl_agent_managed_accounts`,
-  `mctl_agent_openai_requests_total{status_class}` and retries. Alerts live
+  `mctl_agent_usage_held_usd` and `mctl_agent_usage_held_rows`. The
+  `mctl_agent_openai_requests_total{status_class}` and retries metrics named
+  in the original design are not implemented. Alerts live
   in mctl-gitops: global cap hit, hourly spend above a threshold, pool
   worker down while managed accounts exist.
 
