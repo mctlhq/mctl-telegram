@@ -187,3 +187,25 @@ func TestRecordCost_ManagedJobTakesModelLabelSlot(t *testing.T) {
 		t.Fatalf("managed report under its own model label = %v, want 0.1", got)
 	}
 }
+
+// An account token (no job binding) naming the attempt of a managed job is
+// refused with 403 and an audit row, and the reservation stays reserved:
+// otherwise the owner could settle their own reservations at zero.
+// Mutation: drop JobScoped from the handler's Usage (always false is caught
+// by the pool-report tests; always true is caught here).
+func TestRecordCost_AccountTokenRefusedOnManagedJob(t *testing.T) {
+	h, _, jobID, attempt := managedJobHarness(t)
+	h.id = &auth.Identity{UserID: h.userID, Subject: "tg:1", TelegramID: 1}
+	rec := h.do("POST", "/jobs/"+itoaTest(jobID)+"/cost", map[string]any{"attempt": attempt, "cost_usd": 0, "model": "x"})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("account-token report: %d %s, want 403", rec.Code, rec.Body.String())
+	}
+	var status string
+	if err := h.store.DB.QueryRow(`SELECT status FROM agent_usage WHERE job_id = $1`, jobID).Scan(&status); err != nil || status != db.UsageReserved {
+		t.Fatalf("row status %q %v, want reserved", status, err)
+	}
+	var n int
+	if err := h.store.DB.QueryRow(`SELECT COUNT(*) FROM audit_logs WHERE tool_name = 'report_agent_job_cost' AND status = 'denied'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("denied audit rows = %d %v, want 1", n, err)
+	}
+}

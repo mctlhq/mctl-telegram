@@ -916,8 +916,14 @@ func (s *Server) handleReportJobCost(w http.ResponseWriter, r *http.Request) {
 	outcome, err := s.Store.RecordAgentJobUsage(ctx, id.UserID, jobID, attempt, db.Usage{
 		CostUSD: req.CostUSD, Model: req.Model, Runner: req.Runner,
 		InputTokens: req.InputTokens, OutputTokens: req.OutputTokens,
+		JobScoped: jobBound(id),
 	})
 	if err != nil {
+		if errors.Is(err, db.ErrUsageCredential) {
+			s.audit(ctx, id.UserID, "report_agent_job_cost", "denied", "managed job needs its job token")
+			writeJSONError(w, http.StatusForbidden, "managed job cost must be reported with the job token")
+			return
+		}
 		if errors.Is(err, db.ErrUsageConflict) {
 			s.audit(ctx, id.UserID, "report_agent_job_cost", "refused", "usage_conflict")
 			writeJSON(w, http.StatusConflict, map[string]any{"error": "usage_conflict"})

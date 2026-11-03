@@ -35,6 +35,13 @@ const NotificationBudget = "budget"
 // with different figures. Nothing was changed.
 var ErrUsageConflict = errors.New("usage already settled with different values")
 
+// ErrUsageCredential means a cost report for a managed-runtime job came with
+// a credential that is not bound to that job (an account token). Only the
+// pool-issued job token may settle a managed reservation: otherwise the
+// account owner could settle their own reservations at zero and get around
+// the caps that are meant to limit them. Nothing was changed.
+var ErrUsageCredential = errors.New("managed job usage requires the job's own credential")
+
 // managedBudgetLockKey is the Postgres advisory lock key of the global
 // managed budget. It is taken before any account lock (see reserveBudget).
 const managedBudgetLockKey = "mctl-telegram:managed-budget:global"
@@ -77,6 +84,11 @@ type Usage struct {
 	Runner       string
 	InputTokens  int64
 	OutputTokens int64
+	// JobScoped is a fact about the credential, set by the server from the
+	// authenticated identity and never from the report: true when the caller
+	// holds a token bound to this job. A managed-runtime job accepts only
+	// such a report (ErrUsageCredential).
+	JobScoped bool
 }
 
 // UsageOutcome is the result of RecordAgentJobUsage.
@@ -334,6 +346,11 @@ func (s *Store) RecordAgentJobUsage(ctx context.Context, userID, jobID int64, at
 	runtime := RuntimeOwn
 	if rt.Valid && rt.String == RuntimeManaged {
 		runtime = RuntimeManaged
+	}
+	// Decided under the job row lock, so a pool claim cannot slip in between
+	// a runtime check and the settle.
+	if runtime == RuntimeManaged && !u.JobScoped {
+		return 0, ErrUsageCredential
 	}
 
 	var (

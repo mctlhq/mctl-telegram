@@ -308,7 +308,10 @@ a confirmed operation:
   with identical fields is a no-op (200); one with different tokens, cost
   or model is refused with 409 `usage_conflict` and audited. An own job can
   never be labelled managed, and the worker can never pick the account it
-  bills.
+  bills. A managed-runtime job's usage is accepted only with the job token
+  the pool was issued for it: an account token naming the attempt is
+  refused with 403 and audited, decided under the job row lock, so an owner
+  cannot settle their own reservations at zero.
 - Metrics (runner is clamped to `claude|openai|other`; model to at most 16
   distinct values plus `other` and `unknown`, because any worker credential
   can name a model, and only a report on a managed-runtime job, by the job

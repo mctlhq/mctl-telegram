@@ -157,7 +157,7 @@ func TestReservation_SettledOnCost(t *testing.T) {
 		t.Fatalf("claim over the reservation took %d jobs", len(got))
 	}
 	j := jobs[0]
-	out, err := s.RecordAgentJobUsage(ctx, uid, j.ID, j.Attempts, Usage{CostUSD: 0.02, Model: "m", Runner: "openai", InputTokens: 10, OutputTokens: 5})
+	out, err := s.RecordAgentJobUsage(ctx, uid, j.ID, j.Attempts, Usage{JobScoped: true, CostUSD: 0.02, Model: "m", Runner: "openai", InputTokens: 10, OutputTokens: 5})
 	if err != nil || out != UsageRecorded {
 		t.Fatalf("settle: %v %v", out, err)
 	}
@@ -182,7 +182,7 @@ func TestRecordAgentJobUsage_Outcomes(t *testing.T) {
 	s := withBudget(newTestStoreCrypted(t), 0.5, 1, 15, 20)
 	uid := seedManagedAccount(t, s, "outcomes", RuntimeManaged, 1)
 	j := claimOne(t, s, uid)[0]
-	u := Usage{CostUSD: 0.1, Model: "m", Runner: "claude", InputTokens: 3, OutputTokens: 4}
+	u := Usage{JobScoped: true, CostUSD: 0.1, Model: "m", Runner: "claude", InputTokens: 3, OutputTokens: 4}
 	if out, err := s.RecordAgentJobUsage(ctx, uid, j.ID, j.Attempts, u); err != nil || out != UsageRecorded {
 		t.Fatalf("first: %v %v", out, err)
 	}
@@ -190,9 +190,9 @@ func TestRecordAgentJobUsage_Outcomes(t *testing.T) {
 		t.Fatalf("repeat: %v %v", out, err)
 	}
 	for _, d := range []Usage{
-		{CostUSD: 0.2, Model: "m", Runner: "claude", InputTokens: 3, OutputTokens: 4},
-		{CostUSD: 0.1, Model: "x", Runner: "claude", InputTokens: 3, OutputTokens: 4},
-		{CostUSD: 0.1, Model: "m", Runner: "claude", InputTokens: 9, OutputTokens: 4},
+		{JobScoped: true, CostUSD: 0.2, Model: "m", Runner: "claude", InputTokens: 3, OutputTokens: 4},
+		{JobScoped: true, CostUSD: 0.1, Model: "x", Runner: "claude", InputTokens: 3, OutputTokens: 4},
+		{JobScoped: true, CostUSD: 0.1, Model: "m", Runner: "claude", InputTokens: 9, OutputTokens: 4},
 	} {
 		if _, err := s.RecordAgentJobUsage(ctx, uid, j.ID, j.Attempts, d); !errors.Is(err, ErrUsageConflict) {
 			t.Fatalf("different report %+v: %v, want ErrUsageConflict", d, err)
@@ -230,7 +230,7 @@ func TestRecordCost_OwnJobNeverManaged(t *testing.T) {
 	if err != nil || len(oj) != 1 {
 		t.Fatalf("own claim: %v", err)
 	}
-	if _, err := s.RecordAgentJobUsage(ctx, own, oj[0].ID, oj[0].Attempts, Usage{CostUSD: 9, Runner: "claude"}); err != nil {
+	if _, err := s.RecordAgentJobUsage(ctx, own, oj[0].ID, oj[0].Attempts, Usage{JobScoped: true, CostUSD: 9, Runner: "claude"}); err != nil {
 		t.Fatal(err)
 	}
 	var rt, status string
@@ -314,7 +314,7 @@ func runHeldOnDeadlineCrossing(t *testing.T, mk func(t *testing.T) *Store) {
 			}
 			if kind == "dead_lettered" {
 				// A dead-lettered job cannot be re-claimed; a late report settles it.
-				if _, err := s.RecordAgentJobUsage(ctx, uid, j.ID, j.Attempts, Usage{CostUSD: 0.03}); err != nil {
+				if _, err := s.RecordAgentJobUsage(ctx, uid, j.ID, j.Attempts, Usage{JobScoped: true, CostUSD: 0.03}); err != nil {
 					t.Fatalf("late report: %v", err)
 				}
 				if usd, rows, _ := s.HeldUsage(ctx); usd != 0 || rows != 0 {
@@ -323,7 +323,7 @@ func runHeldOnDeadlineCrossing(t *testing.T, mk func(t *testing.T) *Store) {
 				return
 			}
 			// A late report while attempts still matches settles at the reported cost.
-			if _, err := s.RecordAgentJobUsage(ctx, uid, j.ID, j.Attempts, Usage{CostUSD: 0.03}); err != nil {
+			if _, err := s.RecordAgentJobUsage(ctx, uid, j.ID, j.Attempts, Usage{JobScoped: true, CostUSD: 0.03}); err != nil {
 				t.Fatalf("late report: %v", err)
 			}
 			var cost float64
@@ -347,7 +347,7 @@ func runHeldOnDeadlineCrossing(t *testing.T, mk func(t *testing.T) *Store) {
 		if len(again) != 1 || again[0].Attempts != j.Attempts+1 {
 			t.Fatalf("re-claim: %+v", again)
 		}
-		if _, err := s.RecordAgentJobUsage(ctx, uid, j.ID, j.Attempts, Usage{CostUSD: 0.01}); !errors.Is(err, ErrAgentJobNotFound) {
+		if _, err := s.RecordAgentJobUsage(ctx, uid, j.ID, j.Attempts, Usage{JobScoped: true, CostUSD: 0.01}); !errors.Is(err, ErrAgentJobNotFound) {
 			t.Fatalf("old attempt report: %v, want ErrAgentJobNotFound", err)
 		}
 		var status string
@@ -416,7 +416,7 @@ func TestBudgetNotification_OncePerWindow(t *testing.T) {
 	uid := seedManagedAccount(t, s, "notify", RuntimeManaged, 4)
 
 	j := claimOne(t, s, uid)[0]
-	if _, err := s.RecordAgentJobUsage(ctx, uid, j.ID, j.Attempts, Usage{CostUSD: 0.5}); err != nil {
+	if _, err := s.RecordAgentJobUsage(ctx, uid, j.ID, j.Attempts, Usage{JobScoped: true, CostUSD: 0.5}); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
@@ -440,7 +440,7 @@ func TestBudgetNotification_OncePerWindow(t *testing.T) {
 	if len(j2) != 1 {
 		t.Fatalf("claim in the new window took %d jobs", len(j2))
 	}
-	if _, err := s.RecordAgentJobUsage(ctx, uid, j2[0].ID, j2[0].Attempts, Usage{CostUSD: 0.5}); err != nil {
+	if _, err := s.RecordAgentJobUsage(ctx, uid, j2[0].ID, j2[0].Attempts, Usage{JobScoped: true, CostUSD: 0.5}); err != nil {
 		t.Fatal(err)
 	}
 	claimOne(t, s, uid)
@@ -462,7 +462,7 @@ func TestBudgetNotification_GlobalOncePerAccount(t *testing.T) {
 		if len(ja) != 1 {
 			t.Fatalf("claim a: %d", len(ja))
 		}
-		if _, err := g.RecordAgentJobUsage(ctx, a, ja[0].ID, ja[0].Attempts, Usage{CostUSD: 0.5}); err != nil {
+		if _, err := g.RecordAgentJobUsage(ctx, a, ja[0].ID, ja[0].Attempts, Usage{JobScoped: true, CostUSD: 0.5}); err != nil {
 			t.Fatal(err)
 		}
 		claimOne(t, g, b)
@@ -583,7 +583,7 @@ func TestBudget_InflightReservationsDoNotPause(t *testing.T) {
 		uid int64
 		j   AgentJob
 	}{{a, ja[0]}, {b, jb[0]}} {
-		if _, err := s.RecordAgentJobUsage(ctx, p.uid, p.j.ID, p.j.Attempts, Usage{CostUSD: 0.02}); err != nil {
+		if _, err := s.RecordAgentJobUsage(ctx, p.uid, p.j.ID, p.j.Attempts, Usage{JobScoped: true, CostUSD: 0.02}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -621,7 +621,7 @@ func TestManagedClaim_GlobalPauseNoDeadlock(t *testing.T) {
 	if len(ja) != 1 {
 		t.Fatalf("setup claim: %d", len(ja))
 	}
-	if _, err := s.RecordAgentJobUsage(ctx, a, ja[0].ID, ja[0].Attempts, Usage{CostUSD: 0.5}); err != nil {
+	if _, err := s.RecordAgentJobUsage(ctx, a, ja[0].ID, ja[0].Attempts, Usage{JobScoped: true, CostUSD: 0.5}); err != nil {
 		t.Fatal(err)
 	}
 	reached := make(chan struct{})
@@ -773,7 +773,7 @@ func runHeldAfterAttemptEnds(t *testing.T, mk func(t *testing.T) *Store) {
 					t.Fatal(err)
 				}
 				if kind == "reported_in_grace" {
-					if _, err := s.RecordAgentJobUsage(ctx, uid, j.ID, j.Attempts, Usage{CostUSD: 0.02}); err != nil {
+					if _, err := s.RecordAgentJobUsage(ctx, uid, j.ID, j.Attempts, Usage{JobScoped: true, CostUSD: 0.02}); err != nil {
 						t.Fatalf("report: %v", err)
 					}
 				}
@@ -893,4 +893,33 @@ func TestAgentUsage_ReservedPartialIndex(t *testing.T) {
 			t.Fatalf("index is not partial on reserved: %s", def)
 		}
 	})
+}
+
+// A managed-runtime job's reservation can be settled only with a credential
+// bound to that job. An account token (JobScoped false) is refused and the
+// row stays reserved, so the owner cannot settle their own reservations at
+// zero; the pool's report then settles it. An own job still accepts the
+// account token. Mutation: drop the JobScoped check in RecordAgentJobUsage.
+func TestRecordAgentJobUsage_ManagedNeedsJobCredential(t *testing.T) {
+	ctx := context.Background()
+	s := withBudget(newTestStoreCrypted(t), 0.5, 1, 15, 20)
+	uid := seedManagedAccount(t, s, "needs-job-cred", RuntimeManaged, 1)
+	j := claimOne(t, s, uid)[0]
+	if _, err := s.RecordAgentJobUsage(ctx, uid, j.ID, j.Attempts, Usage{CostUSD: 0}); !errors.Is(err, ErrUsageCredential) {
+		t.Fatalf("account-token report on a managed job: %v, want ErrUsageCredential", err)
+	}
+	if n := usageRows(t, s, `job_id = $1 AND status = $2`, j.ID, UsageReserved); n != 1 {
+		t.Fatalf("refused report changed the reservation: %d reserved rows, want 1", n)
+	}
+	if _, err := s.RecordAgentJobUsage(ctx, uid, j.ID, j.Attempts, Usage{JobScoped: true, CostUSD: 0.07}); err != nil {
+		t.Fatalf("pool report: %v", err)
+	}
+	own := seedManagedAccount(t, s, "needs-job-cred-own", RuntimeOwn, 1)
+	oj, err := s.ClaimAgentJobs(ctx, "own", own, RuntimeOwn, 1)
+	if err != nil || len(oj) != 1 {
+		t.Fatalf("own claim: %v %v", oj, err)
+	}
+	if err := s.RecordAgentJobCost(ctx, own, oj[0].ID, oj[0].Attempts, 0.03); err != nil {
+		t.Fatalf("own account-token report: %v", err)
+	}
 }
