@@ -942,16 +942,14 @@ func (s *Server) handleReportJobCost(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"recorded": true})
 }
 
-// countUsage adds a first settle to the usage metrics. Runner is clamped and
-// model is the validated string, so both labels stay bounded.
+// countUsage adds a first settle to the usage metrics. Runner is clamped to a
+// fixed set and model to a bounded set (Registry.UsageModel), so a worker
+// cannot grow the label space.
 func (s *Server) countUsage(req reportJobCostRequest) {
 	if s.m == nil {
 		return
 	}
-	model := req.Model
-	if model == "" {
-		model = "unknown"
-	}
+	model := s.m.UsageModel(req.Model)
 	s.m.AgentUsageCostUSDTotal.WithLabelValues(metrics.UsageRunner(req.Runner), model).Add(req.CostUSD)
 	s.m.AgentUsageTokensTotal.WithLabelValues("input", model).Add(float64(req.InputTokens))
 	s.m.AgentUsageTokensTotal.WithLabelValues("output", model).Add(float64(req.OutputTokens))

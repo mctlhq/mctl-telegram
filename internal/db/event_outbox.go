@@ -193,6 +193,24 @@ func (s *Store) RouteUnclaimedAgentJobs(ctx context.Context, after time.Duration
 		return 0, fmt.Errorf("begin route unclaimed tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	args := []any{JobRouted, "unclaimed past threshold, routed to operator", now, JobPending, now.Add(-after), JobProcessing}
+	// A managed account kept out of the pool by the global day budget is held
+	// for its runtime too, even when the global pause never stamped it (it had
+	// no pending job when the pause ran): the same predicate as the candidate
+	// filter in budgetCandidateFilter.
+	globalHold := ""
+	if s.budget != nil {
+		bn := s.budget.now()
+		dayStart := time.Date(bn.Year(), bn.Month(), bn.Day(), 0, 0, 0, 0, time.UTC)
+		globalHold = `
+		    AND NOT (
+		        EXISTS (SELECT 1 FROM agent_profiles gp
+		                 WHERE gp.user_id = agent_jobs.user_id AND gp.runtime = 'managed')
+		        AND (SELECT COALESCE(SUM(COALESCE(u.cost_usd, u.reserved_usd)), 0) FROM agent_usage u
+		              WHERE u.runtime = 'managed' AND u.created_at >= $7) + $8 > $9 + 1e-9
+		    )`
+		args = append(args, dayStart, s.budget.PerJobUSD, s.budget.GlobalDayUSD)
+	}
 	ids, err := requeueTransition(ctx, tx,
 		`UPDATE agent_jobs SET status = $1, last_error = $2, updated_at = $3
 		  WHERE status = $4 AND attempts = 0 AND created_at < $5
@@ -204,9 +222,9 @@ func (s *Store) RouteUnclaimedAgentJobs(ctx context.Context, after time.Duration
 		    AND NOT EXISTS (
 		        SELECT 1 FROM agent_profiles bp
 		         WHERE bp.user_id = agent_jobs.user_id AND bp.budget_paused_until > $3
-		    )
+		    )`+globalHold+`
 		 RETURNING id`,
-		JobRouted, "unclaimed past threshold, routed to operator", now, JobPending, now.Add(-after), JobProcessing)
+		args...)
 	if err != nil {
 		return 0, fmt.Errorf("route unclaimed agent jobs: %w", err)
 	}

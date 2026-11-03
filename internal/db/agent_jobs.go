@@ -1058,6 +1058,11 @@ func (s *Store) RequeueStaleAgentJobs(ctx context.Context, visibility time.Durat
 			return 0, 0, err
 		}
 	}
+	// Attempts the worker itself ended (complete, fail, retry, dead-letter)
+	// without a cost report: hold their reservations once the grace has passed.
+	if err := holdEndedReservations(ctx, tx, now); err != nil {
+		return 0, 0, err
+	}
 	var routed bool
 	for _, id := range deadIDs {
 		wrote, err := s.routeJobEventTx(ctx, tx, id, RouteWorkerFailure)

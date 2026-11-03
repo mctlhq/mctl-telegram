@@ -5,6 +5,7 @@
 package metrics
 
 import (
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -16,6 +17,11 @@ import (
 type Registry struct {
 	// Prometheus is the underlying registry used to serve /metrics.
 	Prometheus *prometheus.Registry
+
+	// usageModels is the bounded set of model label values seen so far on
+	// the usage counters (see UsageModel).
+	usageModelsMu sync.Mutex
+	usageModels   map[string]struct{}
 
 	// HTTP layer — labeled by method, route (chi pattern), status_code.
 	HTTPRequestsTotal *prometheus.CounterVec
@@ -263,8 +269,9 @@ type Registry struct {
 	AgentJobCostUSDTotal *prometheus.CounterVec // {result}
 
 	// Managed-tier usage ledger (ADR 0008 section 5). Runner is clamped to
-	// claude|openai|other and the model label to the validated, bounded
-	// worker configuration; scope is one of BudgetScopes.
+	// claude|openai|other and the model label to at most MaxUsageModelLabels
+	// distinct values plus "other" and "unknown" (Registry.UsageModel); scope
+	// is one of BudgetScopes.
 	AgentUsageCostUSDTotal    *prometheus.CounterVec // {runner, model}
 	AgentUsageTokensTotal     *prometheus.CounterVec // {direction, model}
 	AgentBudgetExhaustedTotal *prometheus.CounterVec // {scope}
@@ -404,6 +411,39 @@ func UsageRunner(runner string) string {
 		return runner
 	}
 	return "other"
+}
+
+// MaxUsageModelLabels bounds the distinct "model" label values on the usage
+// counters. The model string comes from whoever holds a worker credential,
+// including an own-runtime account token, so the server cannot trust it to
+// stay within its configuration; past this many distinct values every new one
+// is counted as "other" and the series count stays bounded.
+const MaxUsageModelLabels = 16
+
+// UsageModel returns the "model" label value for a reported model: "unknown"
+// for an empty string, the model itself while fewer than MaxUsageModelLabels
+// distinct values have been seen (or when it is one of them), and "other"
+// otherwise. A nil Registry returns "other".
+func (r *Registry) UsageModel(model string) string {
+	if model == "" {
+		return "unknown"
+	}
+	if r == nil {
+		return "other"
+	}
+	r.usageModelsMu.Lock()
+	defer r.usageModelsMu.Unlock()
+	if _, ok := r.usageModels[model]; ok {
+		return model
+	}
+	if len(r.usageModels) >= MaxUsageModelLabels {
+		return "other"
+	}
+	if r.usageModels == nil {
+		r.usageModels = make(map[string]struct{}, MaxUsageModelLabels)
+	}
+	r.usageModels[model] = struct{}{}
+	return model
 }
 
 // Job-cost outcomes — the "result" label on AgentJobCostUSDTotal, set by

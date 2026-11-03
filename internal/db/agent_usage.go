@@ -389,8 +389,13 @@ func (s *Store) RecordAgentJobUsage(ctx context.Context, userID, jobID int64, at
 
 // holdReservations moves the still-reserved rows of jobs whose attempt the
 // sweeper just ended to held. Their token has left the server and the run may
-// have spent up to the per-job cap, so the reservation keeps counting until a
-// cost report settles it or its window ends.
+// have spent up to the per-job cap, so the reservation keeps counting at the
+// full per-job amount. A late cost report settles it only while the job's
+// attempts still equal the row's attempt (RecordAgentJobUsage fences on the
+// current attempt): once the job is re-claimed, the old attempt's report is
+// refused and the row charges the full reservation until its window ends.
+// That is deliberate: a pool job token expires at the same deadline the
+// sweeper uses, so such a report would be refused with 401 anyway.
 func holdReservations(ctx context.Context, tx *sql.Tx, ids []int64, now time.Time) error {
 	for _, id := range ids {
 		if _, err := tx.ExecContext(ctx,
@@ -398,6 +403,38 @@ func holdReservations(ctx context.Context, tx *sql.Tx, ids []int64, now time.Tim
 			UsageHeld, now, id, UsageReserved); err != nil {
 			return fmt.Errorf("hold usage reservation: %w", err)
 		}
+	}
+	return nil
+}
+
+// reservationEndGrace is how long a reservation of an attempt that has
+// already ended (completed, failed, retried or dead-lettered by the worker)
+// stays reserved before the sweeper holds it. The worker reports cost right
+// after the run, but the agent can close its job through a tool before that
+// report lands; holding at once would turn a cents-sized run into a durable
+// 0.50 and could pause the account until the window ends. After the grace a
+// missing report is a missing report, and the row must count as durable so
+// that exhaustion pauses and notifies instead of deferring silently.
+const reservationEndGrace = 2 * time.Minute
+
+// holdEndedReservations moves to held every still-reserved managed row whose
+// attempt has ended (the job is no longer processing under that attempt) and
+// whose job has not transitioned for reservationEndGrace. It runs in the
+// sweeper's transaction after agent_jobs is locked, so it follows the same
+// lock order as holdReservations. A late report still settles a held row
+// while the job's attempts equal the row's attempt (RecordAgentJobUsage).
+func holdEndedReservations(ctx context.Context, tx *sql.Tx, now time.Time) error {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE agent_usage SET status = $1, updated_at = $2
+		  WHERE status = $3 AND runtime = 'managed'
+		    AND EXISTS (
+		        SELECT 1 FROM agent_jobs j
+		         WHERE j.id = agent_usage.job_id
+		           AND (j.status <> $4 OR j.attempts <> agent_usage.attempt)
+		           AND j.updated_at < $5
+		    )`,
+		UsageHeld, now, UsageReserved, JobProcessing, now.Add(-reservationEndGrace)); err != nil {
+		return fmt.Errorf("hold ended reservations: %w", err)
 	}
 	return nil
 }

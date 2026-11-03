@@ -258,6 +258,20 @@ a confirmed operation:
   reconciliation drift). Only `ReleaseUnissuedClaim`, where no token for the
   attempt ever left the server and the attempt number is reused, deletes a
   reservation without a cost report.
+- **Attempts the worker ends without a report.** A worker can complete,
+  fail or retry its job and never report cost (an unknown cost, a crash, a
+  failed POST). The sweeper holds such a reservation once the job has not
+  transitioned for `reservationEndGrace` (2 minutes) and is no longer
+  processing under that attempt, so the missing spend counts as durable and
+  exhaustion pauses and notifies instead of deferring silently. The grace
+  exists because the agent can close its job through a tool before the
+  worker's cost report lands. A run that is still processing under its
+  attempt stays in flight however long it runs.
+- **Late reports.** A `held` row settles only while `agent_jobs.attempts`
+  still equals its attempt. Once the job is re-claimed, a report for the old
+  attempt is refused and the row charges the full `reserved_usd` until its
+  window ends. This is deliberate: it is the conservative bound, and a pool
+  job token for that attempt has expired anyway.
 - **Overshoot.** The runner checks its budget after each model call
   (`totalCost > MaxBudgetUSD`), so one attempt can spend more than
   `reserved_usd` by at most one call. The settle records the actual cost and
@@ -282,6 +296,9 @@ a confirmed operation:
   window resets: the owner is notified once per window, and the unclaimed
   sweeper does not route them to the operator (`budget_paused_until` on the
   profile, read by the candidate query and by `RouteUnclaimedAgentJobs`).
+  The router also holds a managed account's jobs while the global day budget
+  has no room for one more reservation, even when the global pause never
+  stamped that account, using the same predicate as the candidate query.
   Messages are never dropped; the reply may be late.
 - **The ledger is server-authoritative.** `POST /jobs/{id}/cost` accepts
   only `model`, `input_tokens`, `output_tokens`, `runner`, `cost_usd`. The
@@ -292,7 +309,9 @@ a confirmed operation:
   or model is refused with 409 `usage_conflict` and audited. An own job can
   never be labelled managed, and the worker can never pick the account it
   bills.
-- Metrics: `mctl_agent_usage_cost_usd_total{runner,model}`,
+- Metrics (runner is clamped to `claude|openai|other`; model to at most 16
+  distinct values plus `other` and `unknown`, because any worker credential
+  can name a model): `mctl_agent_usage_cost_usd_total{runner,model}`,
   `mctl_agent_usage_tokens_total{direction,model}`,
   `mctl_agent_budget_exhausted_total{scope}`,
   `mctl_agent_budget_deferred_total{scope}`, `mctl_agent_managed_accounts`,
@@ -352,9 +371,9 @@ a confirmed operation:
   concurrent pool claims (`TestClaimManagedAgentJobs_InflightCap_Postgres`:
   parallel transactions, cap 1, exactly one claim).
 - Budget race: two concurrent claim transactions, budget for one job,
-  exactly one claim. Reservation settled on cost report, released on
-  requeue. Exhausted account held, notified once, not routed to the
-  operator.
+  exactly one claim. Reservation settled on cost report, held (never
+  released) on requeue and on a worker-ended attempt without a report.
+  Exhausted account held, notified once, not routed to the operator.
 - Ledger: `TestRecordCost_IgnoresBodyIdentity`,
   `TestRecordCost_IdempotentSame`, `TestRecordCost_ConflictRefused`; an own
   job cannot be relabelled managed.

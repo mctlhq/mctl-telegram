@@ -710,3 +710,161 @@ func TestManagedClaim_BudgetOnCoalescedPath(t *testing.T) {
 		t.Fatalf("claim over the cap: %d jobs, err %v", len(more), err)
 	}
 }
+
+// T17. An attempt the worker itself ends (complete or retry) without a cost
+// report must not leave its reservation "reserved" until the window ends:
+// that counts as in-flight, so the account would be deferred silently (no
+// pause, no notification) while its messages wait. Within the grace the row
+// stays reserved, because the cost report can still be on its way; after it
+// the sweeper holds the row, the exhaustion is durable, and the account is
+// paused and told once. A report that lands within the grace settles normally.
+// A run that is still going (processing under the same attempt, before its
+// deadline) keeps its reservation in flight however long it has run.
+// Mutations: (a) make holdEndedReservations a no-op; (b) drop the grace
+// (hold at the first sweep); (c) drop the "attempt has ended" condition.
+func TestReservation_HeldAfterAttemptEndsWithoutReport(t *testing.T) {
+	t.Run("sqlite", func(t *testing.T) { runHeldAfterAttemptEnds(t, newTestStoreCrypted) })
+	t.Run("postgres", func(t *testing.T) { runHeldAfterAttemptEnds(t, newFreshSchemaPostgresStore) })
+}
+
+func TestReservation_LongRunningAttemptStaysReserved(t *testing.T) {
+	for name, mk := range map[string]func(t *testing.T) *Store{"sqlite": newTestStoreCrypted, "postgres": newFreshSchemaPostgresStore} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			s := withBudget(mk(t), 0.5, 1.0, 15, 20)
+			uid := seedManagedAccount(t, s, "long-run", RuntimeManaged, 1)
+			if got := claimOne(t, s, uid); len(got) != 1 {
+				t.Fatalf("claim took %d, want 1", len(got))
+			}
+			// Running for longer than the grace, well inside a one-hour visibility.
+			old := time.Now().UTC().Add(-reservationEndGrace - 5*time.Minute)
+			if _, err := s.DB.Exec(`UPDATE agent_jobs SET updated_at = $1, claimed_at = $1 WHERE user_id = $2`, old, uid); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := s.RequeueStaleAgentJobs(ctx, time.Hour); err != nil {
+				t.Fatal(err)
+			}
+			if n := usageRows(t, s, `user_id = $1 AND status = $2`, uid, UsageReserved); n != 1 {
+				t.Fatalf("running attempt: %d reserved rows, want 1", n)
+			}
+		})
+	}
+}
+
+func runHeldAfterAttemptEnds(t *testing.T, mk func(t *testing.T) *Store) {
+	ctx := context.Background()
+	for _, kind := range []string{"complete", "retry", "reported_in_grace"} {
+		t.Run(kind, func(t *testing.T) {
+			s := withBudget(mk(t), 0.5, 1.0, 15, 20)
+			uid := seedManagedAccount(t, s, "ended-"+kind, RuntimeManaged, 4)
+			jobs := claimOne(t, s, uid)
+			if len(jobs) != 2 {
+				t.Fatalf("claim took %d jobs, want 2 (1.00 / 0.50)", len(jobs))
+			}
+			for _, j := range jobs {
+				var err error
+				switch kind {
+				case "retry":
+					_, err = s.RetryAgentJob(ctx, j.ID, j.Attempts, "runner error, no cost")
+				default:
+					err = s.CompleteAgentJob(ctx, j.ID, j.Attempts, JobCompleted, "")
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if kind == "reported_in_grace" {
+					if _, err := s.RecordAgentJobUsage(ctx, uid, j.ID, j.Attempts, Usage{CostUSD: 0.02}); err != nil {
+						t.Fatalf("report: %v", err)
+					}
+				}
+			}
+			sweep := func() {
+				t.Helper()
+				if _, _, err := s.RequeueStaleAgentJobs(ctx, time.Hour); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			// Within the grace: nothing is held, nothing is paused.
+			sweep()
+			if kind != "reported_in_grace" {
+				if n := usageRows(t, s, `user_id = $1 AND status = $2`, uid, UsageReserved); n != 2 {
+					t.Fatalf("within grace: %d reserved rows, want 2", n)
+				}
+			}
+			if got := pausedUntil(t, s, uid); !got.IsZero() {
+				t.Fatalf("within grace: paused until %v, want no pause", got)
+			}
+
+			// Past the grace.
+			if _, err := s.DB.Exec(`UPDATE agent_jobs SET updated_at = $1 WHERE user_id = $2`,
+				time.Now().UTC().Add(-reservationEndGrace-time.Minute), uid); err != nil {
+				t.Fatal(err)
+			}
+			sweep()
+
+			if kind == "reported_in_grace" {
+				if n := usageRows(t, s, `user_id = $1 AND status = $2`, uid, UsageSettled); n != 2 {
+					t.Fatalf("reported: %d settled rows, want 2", n)
+				}
+				if got := claimOne(t, s, uid); len(got) != 1 {
+					t.Fatalf("after 0.04 settled, claim took %d jobs, want 1", len(got))
+				}
+				if got := pausedUntil(t, s, uid); !got.IsZero() || budgetNotifications(t, s, uid) != 0 {
+					t.Fatalf("reported: paused until %v, %d notifications; want none", got, budgetNotifications(t, s, uid))
+				}
+				return
+			}
+			if n := usageRows(t, s, `user_id = $1 AND status = $2`, uid, UsageHeld); n != 2 {
+				t.Fatalf("past grace: %d held rows, want 2", n)
+			}
+			if usd, rows, err := s.HeldUsage(ctx); err != nil || usd != 1.0 || rows != 2 {
+				t.Fatalf("HeldUsage = %v %d %v, want 1 2", usd, rows, err)
+			}
+			if got := claimOne(t, s, uid); len(got) != 0 {
+				t.Fatalf("durably exhausted account claimed %d jobs", len(got))
+			}
+			if got := pausedUntil(t, s, uid); got.IsZero() {
+				t.Fatal("durable exhaustion did not pause the account")
+			}
+			if n := budgetNotifications(t, s, uid); n != 1 {
+				t.Fatalf("%d budget notifications, want 1", n)
+			}
+		})
+	}
+}
+
+// A managed account the global day budget keeps out of the pool stays queued
+// for its runtime even when the global pause never stamped it (it had no
+// pending job when the pause ran). An own-runtime account is still routed.
+// Mutation: drop the globalHold predicate from RouteUnclaimedAgentJobs.
+func TestRouteUnclaimed_SkipsGlobalBudgetHold(t *testing.T) {
+	ctx := context.Background()
+	s := withBudget(newTestStoreCrypted(t), 0.5, 1.0, 15, 0.5).WithEventOutbox(reasonBuilder).WithOperatorRouting(true)
+	spender := seedManagedAccount(t, s, "global-spender", RuntimeManaged, 1)
+	if got := claimOne(t, s, spender); len(got) != 1 {
+		t.Fatalf("spender claimed %d, want 1", len(got))
+	}
+	managed := seedManagedAccount(t, s, "global-held", RuntimeManaged, 1)
+	own := seedManagedAccount(t, s, "global-own", RuntimeOwn, 1)
+	if _, err := s.DB.Exec(`UPDATE agent_jobs SET created_at = $1 WHERE user_id IN ($2, $3)`,
+		time.Now().UTC().Add(-time.Hour), managed, own); err != nil {
+		t.Fatal(err)
+	}
+	if got := pausedUntil(t, s, managed); !got.IsZero() {
+		t.Fatalf("precondition: managed account paused until %v", got)
+	}
+	if _, err := s.RouteUnclaimedAgentJobs(ctx, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	status := func(uid int64) string {
+		var st string
+		if err := s.DB.QueryRow(`SELECT status FROM agent_jobs WHERE user_id = $1`, uid).Scan(&st); err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	if status(managed) != JobPending || status(own) != JobRouted {
+		t.Fatalf("managed=%s own=%s, want pending/routed", status(managed), status(own))
+	}
+}
