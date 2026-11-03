@@ -106,7 +106,7 @@ func TestClaimManagedAgentJobs_CapIsAuthoritativeOverStaleHint(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Both claimers read the hint while the account is empty.
-	cands, err := s.ListManagedClaimCandidates(ctx, time.Now(), 1, 0, 10)
+	cands, err := s.ListManagedClaimCandidates(ctx, time.Now(), 1, nil, 10)
 	if err != nil || len(cands) != 1 || cands[0].UserID != uid {
 		t.Fatalf("candidates = %+v err %v", cands, err)
 	}
@@ -460,37 +460,87 @@ func TestRequeueStale_RuntimeFencedLastAttemptIsReclaimed(t *testing.T) {
 
 // Candidates mirror the claim's per-conversation rule: an account whose only
 // due job waits behind a processing job of the same conversation is not a
-// candidate (it would only take a window slot); offset pages the order.
-// Mutations: drop the NOT EXISTS predicate; ignore the offset.
+// candidate (it would only take a window slot).
+// Mutation: drop the NOT EXISTS predicate.
 func TestListManagedClaimCandidates_HeadOfLineAndPaging(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStoreCrypted(t)
-	mk := func(login string, tg int64, n int) int64 {
-		uid := seedManagedAccount(t, s, login, RuntimeManaged, n)
-		if _, err := s.DB.ExecContext(ctx, `UPDATE users SET telegram_login_id = $1 WHERE id = $2`, tg, uid); err != nil {
-			t.Fatal(err)
-		}
-		return uid
-	}
-	blocked := mk("blocked", 9851, 1)
-	a := mk("a", 9852, 1)
-	b := mk("b", 9853, 1)
-	// blocked's only due job waits behind a processing job in its conversation
-	// (cap 5, so the in-flight filter is not what excludes it).
+	blocked, a, b := seedPagingAccounts(t, s, "hol")
 	var conv int64
 	if err := s.DB.QueryRow(`SELECT conversation_id FROM agent_jobs WHERE user_id = $1`, blocked).Scan(&conv); err != nil {
 		t.Fatal(err)
 	}
-	busy := seedJob(t, s, blocked, "evt:v1:blocked:busy:1")
+	busy := seedJob(t, s, blocked, "evt:v1:hol-blocked:busy:1")
 	if _, err := s.DB.ExecContext(ctx, `UPDATE agent_jobs SET conversation_id = $1, status = $2 WHERE id = $3`, conv, JobProcessing, busy); err != nil {
 		t.Fatal(err)
 	}
-	all, err := s.ListManagedClaimCandidates(ctx, time.Now(), 5, 0, 10)
+	all, err := s.ListManagedClaimCandidates(ctx, time.Now(), 5, nil, 10)
 	if err != nil || len(all) != 2 || all[0].UserID != a || all[1].UserID != b {
 		t.Fatalf("candidates = %+v err %v; want a, b (blocked excluded)", all, err)
 	}
-	second, err := s.ListManagedClaimCandidates(ctx, time.Now(), 5, 1, 1)
-	if err != nil || len(second) != 1 || second[0].UserID != b {
-		t.Fatalf("page 2 = %+v err %v; want b", second, err)
+	assertKeysetPaging(t, s, []int64{a, b})
+}
+
+// seedPagingAccounts creates three managed accounts with one due job each,
+// due in creation order, and returns their user ids.
+func seedPagingAccounts(t *testing.T, s *Store, prefix string) (int64, int64, int64) {
+	t.Helper()
+	ctx := context.Background()
+	var uids []int64
+	for i, name := range []string{"blocked", "a", "b"} {
+		uid := seedManagedAccount(t, s, prefix+"-"+name, RuntimeManaged, 1)
+		if _, err := s.DB.ExecContext(ctx, `UPDATE users SET telegram_login_id = $1 WHERE id = $2`, 9850+int64(i)+int64(len(prefix))*10, uid); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DB.ExecContext(ctx, `UPDATE agent_jobs SET next_run_at = $1 WHERE user_id = $2`,
+			time.Now().UTC().Add(-time.Hour).Add(time.Duration(i)*time.Second), uid); err != nil {
+			t.Fatal(err)
+		}
+		uids = append(uids, uid)
 	}
+	return uids[0], uids[1], uids[2]
+}
+
+// assertKeysetPaging walks the candidate order one account per page and
+// checks it visits want in order, then stops. A served account dropping out
+// between pages must not make the walk skip the next one, which an offset
+// would. Mutation: ignore the cursor (every page restarts at the front).
+func assertKeysetPaging(t *testing.T, s *Store, want []int64) {
+	t.Helper()
+	ctx := context.Background()
+	var after *ManagedClaimCursor
+	var got []int64
+	for i := 0; i < len(want)+2; i++ {
+		page, err := s.ListManagedClaimCandidates(ctx, time.Now(), 5, after, 1)
+		if err != nil {
+			t.Fatalf("page %d: %v", i, err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		got = append(got, page[0].UserID)
+		after = &page[0].Cursor
+		if i == 0 {
+			// The first account is served: its only job leaves pending.
+			if _, err := s.DB.ExecContext(ctx, `UPDATE agent_jobs SET status = $1 WHERE user_id = $2`, JobCompleted, page[0].UserID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("keyset walk visited %v, want %v", got, want)
+	}
+}
+
+// The cursor holds the aggregate as the driver returned it; prove the walk on
+// Postgres too, where that is a timestamptz rather than SQLite's text.
+func TestListManagedClaimCandidates_KeysetPaging_Postgres(t *testing.T) {
+	s := newFreshSchemaPostgresStore(t)
+	_, a, b := seedPagingAccounts(t, s, "pg")
+	// No head-of-line block here: all three are candidates.
+	all, err := s.ListManagedClaimCandidates(context.Background(), time.Now(), 5, nil, 10)
+	if err != nil || len(all) != 3 {
+		t.Fatalf("candidates = %+v err %v", all, err)
+	}
+	assertKeysetPaging(t, s, []int64{all[0].UserID, a, b})
 }

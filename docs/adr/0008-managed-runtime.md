@@ -153,8 +153,10 @@ a confirmed operation:
      its jobs stay pending), then claims one job for that account, round
      robin, until the requested limit is reached. One job per account per
      response: concurrency across accounts, not within one. The candidate
-     order is walked page by page until `limit` jobs are claimed or it is
-     exhausted, not read as one fixed window: a skipped account (blanket
+     order is walked page by page with a keyset cursor (oldest claimable
+     job, then user id; not an offset, because a served account drops out of
+     the order mid-walk) until `limit` jobs are claimed or it is exhausted,
+     not read as one fixed window: a skipped account (blanket
      revocation, an assistant that cannot render) keeps its place at the
      front, and a fixed window would let a few of them starve every other
      managed account. A request that skipped candidates and served nobody

@@ -478,7 +478,14 @@ func (s *Server) handlePoolClaim(w http.ResponseWriter, r *http.Request, id *aut
 	// is starved by accounts it cannot serve is visible.
 	skipped := map[string]int{}
 	finish := func(out []jobEnvelope) {
-		if len(out) == 0 && len(skipped) > 0 {
+		// nothing_claimable alone is normal contention (another pool replica
+		// took the job between the candidate read and the claim), not a
+		// starved pool.
+		starved := false
+		for reason := range skipped {
+			starved = starved || reason != poolSkipNothing
+		}
+		if len(out) == 0 && starved {
 			slog.Warn("agentapi pool claim: candidate accounts were skipped and none was served",
 				"pool", id.Pool, "skipped", skipped)
 		}
@@ -492,8 +499,9 @@ func (s *Server) handlePoolClaim(w http.ResponseWriter, r *http.Request, id *aut
 		// assistant that cannot render, a claim that comes back empty) keep
 		// their place at the front of the order, and a fixed window would let
 		// a few of them starve every other managed account.
-		for offset := 0; len(out) < limit && offset < maxPoolCandidateScan; offset += page {
-			cands, err := s.Store.ListManagedClaimCandidates(ctx, s.clock(), s.managed.MaxInflightPerAccount, offset, page)
+		var after *db.ManagedClaimCursor
+		for scanned := 0; len(out) < limit && scanned < maxPoolCandidateScan; scanned += page {
+			cands, err := s.Store.ListManagedClaimCandidates(ctx, s.clock(), s.managed.MaxInflightPerAccount, after, page)
 			if err != nil {
 				if ctx.Err() != nil {
 					writeJSON(w, http.StatusOK, map[string]any{"jobs": []jobEnvelope{}})
@@ -517,6 +525,7 @@ func (s *Server) handlePoolClaim(w http.ResponseWriter, r *http.Request, id *aut
 			if len(cands) < page {
 				break
 			}
+			after = &cands[len(cands)-1].Cursor
 		}
 		if len(out) > 0 {
 			finish(out)

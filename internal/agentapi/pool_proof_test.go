@@ -343,3 +343,49 @@ func TestHandleClaimJobs_Pool_LogsWhenAllCandidatesSkipped(t *testing.T) {
 		t.Fatalf("want exactly one skip warning naming the reason, got %q", out)
 	}
 }
+
+// An account served from one candidate page drops out of the order before
+// the next page is read; the walk must not skip the account that moves into
+// its place. Order: A (healthy), X and Y (unservable), B (healthy); limit 3
+// and a 3-account page. Page 1 serves A and skips X, Y. A then drops out, so
+// an offset of 3 would land past B and return only A; the keyset continues
+// after Y and serves B as well.
+// Mutation: page with an offset instead of the keyset cursor.
+func TestHandleClaimJobs_Pool_PagingDoesNotSkipAfterServing(t *testing.T) {
+	h := poolHarness(t)
+	h.srv.WithCatalog(gateCatalog(t))
+	h.srv.poolCandidatePage = 3
+	a := h.seedHealthyManaged(9110)
+	broken := h.seedBrokenManaged(9111, 2)
+	b := h.seedHealthyManaged(9113)
+	for i, uid := range append(append([]int64{a}, broken...), b) {
+		if _, err := h.store.DB.Exec(`UPDATE agent_jobs SET next_run_at = $1 WHERE user_id = $2`,
+			time.Now().UTC().Add(-time.Hour).Add(time.Duration(i)*time.Second), uid); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, jobs := h.poolClaim("3")
+	served := map[int64]bool{}
+	for _, j := range jobs {
+		var owner int64
+		if err := h.store.DB.QueryRow(`SELECT user_id FROM agent_jobs WHERE id = $1`, j.JobID).Scan(&owner); err != nil {
+			t.Fatal(err)
+		}
+		served[owner] = true
+	}
+	if len(jobs) != 2 || !served[a] || !served[b] {
+		t.Fatalf("served %v (%d jobs); want both healthy accounts", served, len(jobs))
+	}
+}
+
+// agy finding on d1a9e030 (refuted): a Server built without metrics refuses
+// a pool credential with 403 and does not panic, because
+// (*metrics.Registry).CountPolicyDenial is nil-receiver safe.
+func TestPoolCredential_RefusalWithoutMetrics(t *testing.T) {
+	h := poolHarness(t)
+	h.srv.m = nil
+	rec := h.doAs(poolIdentity(), "GET", "/policy", nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+}
