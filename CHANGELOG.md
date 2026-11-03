@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.123.1](https://github.com/mctlhq/mctl-telegram/compare/0.123.0...0.123.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* **server:** answer HEAD on GET routes so uptime monitors see 200 ([7339d27](https://github.com/mctlhq/mctl-telegram/commit/7339d2774e8c6b7a3ad4dcc976ae0e645be0411c))
+* **server:** answer HEAD on GET routes so uptime monitors see 200 ([d3e19c7](https://github.com/mctlhq/mctl-telegram/commit/d3e19c7a4851d08326da14c3e92befd37815cf2a))
+
 ## [0.123.0](https://github.com/mctlhq/mctl-telegram/compare/0.122.0...0.123.0) (2026-11-03)
 
 
