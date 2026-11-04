@@ -43,12 +43,16 @@ to do about it), see [docs/troubleshooting.md](troubleshooting.md) instead.
 - [Canary](#canary)
 - [Deployment compatibility boundaries](#deployment-compatibility)
 - [Communication Agent operations](#communication-agent-operations)
-- [MctlAgentClaudeUsageLimit — communication-agent Claude credential quota exhausted](#mctlagentclaudeusagelimit)
+- [MctlAgentClaudeUsageLimit — communication-agent model credential limit reached](#mctlagentclaudeusagelimit)
 - [MctlAgentPolicyDenialRateHigh — communication-agent policy-denial share high](#mctlagentpolicydenialratehigh)
 - [MctlAgentJobCostHigh — communication-agent spend per finished job high](#mctlagentjobcosthigh)
 - [MctlAgentManagedGlobalCapHit — managed global daily budget exhausted](#mctlagentmanagedglobalcaphit)
 - [MctlAgentManagedSpendHigh — managed OpenAI spend high](#mctlagentmanagedspendhigh)
 - [MctlAgentManagedPoolWorkerDown — managed pool worker down](#mctlagentmanagedpoolworkerdown)
+- [MctlAgentManagedAccountMonthCapHit — managed account monthly budget exhausted](#mctlagentmanagedaccountmonthcaphit)
+- [MctlAgentManagedBudgetDeferredSustained — managed claims deferred for 30 minutes](#mctlagentmanagedbudgetdeferredsustained)
+- [MctlAgentManagedUsageHeld — managed usage rows held](#mctlagentmanagedusageheld)
+- [MctlAgentProviderRateLimitHigh — provider rate limits failing agent jobs](#mctlagentproviderratelimithigh)
 - [Managed runtime: pool token, activation and rollback](#managed-runtime-pool-token)
 - [Login-bot update receiver](#login-bot-update-receiver)
 - [Media response memory bounds (issue #705)](#media-response-memory-bounds)
@@ -653,7 +657,10 @@ approve or send the held replies in bulk.
 ---
 
 <a id="mctlagentclaudeusagelimit"></a>
-## MctlAgentClaudeUsageLimit — communication-agent Claude credential quota exhausted
+## MctlAgentClaudeUsageLimit — communication-agent model credential limit reached
+
+The name is historical: the alert also covers the OpenAI runner, whose
+`error_provider_429` subtype counts as `usage_limit`.
 
 The deployed rule for this alert lives in the `mctl-gitops` copy of
 `mctl-telegram-ops.yaml`; the copy in `deploy/alerts/mctl-telegram.rules.yaml`
@@ -1130,6 +1137,159 @@ refusal reason. Check the ExternalSecrets for `SecretSynced`.
 ### Escalation
 
 - **Warning**: investigate within 1 business day.
+
+<a id="mctlagentmanagedaccountmonthcaphit"></a>
+## MctlAgentManagedAccountMonthCapHit — managed account monthly budget exhausted
+
+The thresholds of this and the next three alerts are proposed values, pending
+the owner's decision D3 on mctlhq/mctl-telegram#334.
+
+### Symptom
+
+- Alert `MctlAgentManagedAccountMonthCapHit` fires when
+  `sum(increase(mctl_agent_budget_exhausted_total{scope="account_month"}[15m])) > 0`.
+- One account's settled plus held usage reached
+  `MANAGED_BUDGET_USD_PER_ACCOUNT_MONTH`. Its jobs wait until the UTC month
+  rolls over. Other accounts are not affected.
+
+### Likely causes
+
+- One account's real traffic over the month.
+- Held rows counted against the budget without a confirmed cost. See
+  [MctlAgentManagedUsageHeld](#mctlagentmanagedusageheld).
+
+### Diagnostic queries
+
+```promql
+sum by (scope) (increase(mctl_agent_budget_exhausted_total[24h]))
+mctl_agent_usage_held_usd
+sum by (model) (increase(mctl_agent_usage_cost_usd_total{runner="openai"}[24h]))
+```
+
+### Mitigation
+
+1. Separate real spend from held rows before anything else.
+2. If the spend is real and expected, leave the account paused until the month
+   rolls over, or switch it to `runtime: own`.
+3. Raise the cap only after the owner agrees, through a reviewed mctl-gitops
+   PR, never to silence the alert.
+
+### Escalation
+
+- **Warning**: investigate within 1 business day; the owner decides on any cap
+  change.
+
+<a id="mctlagentmanagedbudgetdeferredsustained"></a>
+## MctlAgentManagedBudgetDeferredSustained — managed claims deferred for 30 minutes
+
+### Symptom
+
+- Alert `MctlAgentManagedBudgetDeferredSustained` fires when
+  `sum(increase(mctl_agent_budget_deferred_total[15m])) > 0` holds for 30 minutes.
+- A deferral means in-flight reservations alone used up a budget. It causes no
+  pause and no notification, and it normally clears when the running jobs
+  finish. Sustained deferral means that reservations are not clearing.
+
+### Likely causes
+
+- A job stuck in processing, which holds its reservation.
+- A budget so close to its reservation size that one job fills it.
+
+### Diagnostic queries
+
+```promql
+sum by (scope) (increase(mctl_agent_budget_deferred_total[1h]))
+sum by (status) (increase(mctl_agent_jobs_total[1h]))
+mctl_agent_usage_held_usd
+```
+
+### Mitigation
+
+1. Find the scope that defers and check for a job stuck in processing.
+2. If nothing is stuck, compare the cap with `MANAGED_MAX_JOB_COST_USD`. A cap
+   change is the owner's decision.
+
+### Escalation
+
+- **Warning**: investigate within 1 business day.
+
+<a id="mctlagentmanagedusageheld"></a>
+## MctlAgentManagedUsageHeld — managed usage rows held
+
+### Symptom
+
+- Alert `MctlAgentManagedUsageHeld` fires when
+  `max(mctl_agent_usage_held_rows) > 0` holds for 15 minutes.
+- A held row is a reservation that ended without a settled cost report. It
+  counts against the budget at its reserved amount.
+- The gauge covers the current UTC day, so the alert resolves at the day
+  rollover at the latest. That does not mean the row was reconciled.
+
+### Likely causes
+
+- A worker that died or was rolled during a job, before it reported the cost.
+- A cost report refused by the server (see `ErrUsageConflict` and
+  `ErrUsageCredential` in `internal/db/agent_usage.go`).
+
+### Diagnostic queries
+
+```promql
+max(mctl_agent_usage_held_rows)
+max(mctl_agent_usage_held_usd)
+sum by (status) (increase(mctl_agent_jobs_total[1h]))
+```
+
+Read the worker log around the attempt for the failed report. Log lines carry
+no message bodies.
+
+### Mitigation
+
+1. Identify the attempt and why its report did not arrive.
+2. Compare the reserved amount with the provider's usage before you treat the
+   amount as lost or as spent.
+3. Do not edit `agent_usage` rows by hand to clear the alert.
+
+### Escalation
+
+- **Warning**: investigate within 1 business day. Escalate to the owner if held
+  rows are what exhausted a budget.
+
+<a id="mctlagentproviderratelimithigh"></a>
+## MctlAgentProviderRateLimitHigh — provider rate limits failing agent jobs
+
+### Symptom
+
+- Alert `MctlAgentProviderRateLimitHigh` fires when more than 2 jobs in the last
+  hour, and more than 20 percent of finished jobs, ended on a usage limit or an
+  exhausted provider 429 retry loop.
+- [MctlAgentClaudeUsageLimit](#mctlagentclaudeusagelimit) is the presence test
+  for one such job. This alert is the rate.
+
+### Likely causes
+
+- Managed traffic above the provider limit of the key's quota domain.
+- Another consumer of the same provider project, if the limit is shared at
+  project level. That scope is unread (mctlhq/mctl-telegram#334, W5).
+
+### Diagnostic queries
+
+```promql
+sum(increase(mctl_agent_claude_result_errors_total{class="usage_limit"}[1h]))
+sum by (status) (increase(mctl_agent_jobs_total[1h]))
+```
+
+Check the Nebius console for the limit and the current usage of the project.
+
+### Mitigation
+
+1. Reduce the load: pause the account responsible, not the whole pool.
+2. If the limit is too low for the expected traffic, the owner requests a
+   higher one from the provider.
+
+### Escalation
+
+- **Warning**: investigate within 1 business day. Escalate to the owner if it
+  persists for more than one hour of traffic.
 
 ---
 
