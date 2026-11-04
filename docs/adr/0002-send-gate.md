@@ -25,13 +25,14 @@ owner each need a separate way to say no.
   what it would have sent and why it was not.
 - `get_my_send_status` answers from the same gate code, so the status a
   client shows and the outcome of a send cannot disagree.
-- A per-recipient budget (`PeerSendCap`, 20 per hour,
+- A per-recipient budget (`PeerSendCap`, 200 per hour; 20 until 2026-11-04,
   `internal/audit/ratelimit.go`) applies on top, against bulk sending from
   one account. It is keyed on the recipient (`telegram.PeerLimitKey`, kept
   only as an HMAC), not on the `RedactPeer` audit tag, which collapses every
   `user:<id>` into one value (#846). Writes that only take something back
   (`delete_messages`, removing a reaction, unpinning) spend a separate
-  `PeerCleanupCap` budget of 60 per hour, so hitting the send cap never
+  `PeerCleanupCap` budget of 200 per hour (60 until 2026-11-04, raised so it is never
+  smaller than the send cap), so hitting the send cap never
   blocks cleanup.
 - New accounts start read-only. The connect wizard pre-selects "Read only",
   and sending is a separate opt-in (`internal/oauth/enable_access.go`,

@@ -173,8 +173,9 @@ const PeerSendCap = 200
 // PeerCleanupCap is the per-(identity, peer) budget for writes that only
 // take something back: deleting messages, removing a reaction, unpinning.
 // It is a separate bucket so that a caller who hit PeerSendCap can still
-// clean up what it sent, and it is larger because cleanup reaches nobody.
-const PeerCleanupCap = 60
+// clean up what it sent, and it is at least as large as PeerSendCap because
+// cleanup reaches nobody and must be able to undo a full hour of sends.
+const PeerCleanupCap = 200
 
 // PeerWindow is the bucket capacity refill horizon for AllowPeer.
 const PeerWindow = time.Hour

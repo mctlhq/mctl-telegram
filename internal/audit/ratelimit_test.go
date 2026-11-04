@@ -100,7 +100,7 @@ func TestAllowPeerN_DebitsBatchCostNotOne(t *testing.T) {
 	base := time.Now()
 	r.now = func() time.Time { return base }
 
-	// 20-token cap (matches PeerSendCap); a single batch of 15 should debit
+	// 20-token cap (an explicit test value, independent of PeerSendCap); a single batch of 15 should debit
 	// 15, not 1 — leaving only 5 for a subsequent call.
 	if !r.AllowPeerN(id, "peerA", 15, 20, time.Hour) {
 		t.Fatal("first batch of 15 should be allowed under a cap of 20")
