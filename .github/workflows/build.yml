@@ -257,6 +257,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
       - run: bash deploy/agent-worker/mac-mini/self-update_test.sh
 
+  # The #889 soak sampler, offline: a fake kubectl proves that every failed read
+  # and every change it exists to surface actually shows up.
+  gate-889-sampler:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - run: bash scripts/gate-889/sampler_test.sh
+
   govulncheck:
     runs-on: ubuntu-latest
     steps:
