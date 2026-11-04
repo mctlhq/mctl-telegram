@@ -29,7 +29,7 @@ the gate until the owner accepts an amendment (decision D6). A date and a
 |---|---|---|---|---|---|
 | 1 | Worker credential belongs to a quota domain not used by interactive Claude Code or `claude-review.yml` | Preview: no Anthropic dependency, dedicated Vault path. Separate path is not separate quota: Nebius project and limit scope unread (W5). Production credential: none | | owner, W5 | no |
 | 2 | Credential stored only in Vault and mounted only into the worker pod | Preview, 2026-11-04: Secret only in `labs`, one consuming pod. Vault readers unread (W4, D5) | | agent and owner, W4 | no |
-| 3 | Per-job budget remains configured; monthly budget and rate-limit alerts are tested | Per-job cap 0.25 on preview. Alert rules: draft PRs, unmerged. Fire-and-resolve test not run (W7, D4). Production budgets undecided (W6, D3) | | owner, W2, W6, W7 | no |
+| 3 | Per-job budget remains configured; monthly budget and rate-limit alerts are tested | Per-job cap 0.25 on preview. Alert rules merged (gitops#2396), routed to the operator (gitops#2398). Route delivery and resolve observed; a real rule firing not yet (W7, see Alert evidence). Production budgets undecided (W6, D3) | | owner, W2, W6, W7 | no |
 | 4 | Revocation and rotation documented and exercised without exposing the credential | Documented: `docs/runbook.md`, "Managed runtime: model and gateway credential rotation". Not exercised (W8, D5) | | owner, W8 | no |
 | 5 | A controlled invocation succeeds while the interactive or review pool is unavailable or independently rate-limited | Not run. Row 5(b) and 5(c) deferred until the support pilot ends, 2026-11-11, and then only on owner command (W9, D7) | | owner, W9 | no |
 | 6 | C1-style evidence records the credential domain, budget controls, alert evidence and drill result | This report; every section below is still empty | | agent, W10 | no |
@@ -68,7 +68,27 @@ For each alert: the condition exercised, the time it fired, the time it resolved
 the channel that received it and the delivery time against the stated maximum.
 An alert that exists in a rules file but reaches nobody does not count.
 
-Not run yet.
+Route and delivery test, preview, 2026-11-04. Four synthetic alerts, labelled as a
+delivery test, were posted to the Alertmanager API, one per alert name. This
+proves routing and delivery only: the rules' expressions are covered by promtool
+tests in CI and have not yet fired on a real condition.
+
+| Alert | Receivers read back | Posted | Resolved posted |
+|---|---|---|---|
+| `MctlAgentManagedAccountMonthCapHit` | `telegram`, `mctl-agent-paged` | 23:17:38Z | 23:24:41Z |
+| `MctlAgentManagedBudgetDeferredSustained` | `telegram`, `mctl-agent-paged` | 23:17:38Z | 23:24:41Z |
+| `MctlAgentManagedUsageHeld` | `telegram`, `mctl-agent-paged` | 23:17:38Z | 23:24:41Z |
+| `MctlAgentProviderRateLimitHigh` | `telegram`, `mctl-agent-paged` | 23:17:38Z | 23:24:41Z |
+
+`alertmanager_notifications_total{integration="telegram"}` went from 150 to 154
+within 46 seconds of posting and to 158 within 6 minutes of resolving, with every
+`alertmanager_notifications_failed_total{integration="telegram"}` at 0.
+The counter is not per alert, so the message text in the channel is the owner's
+to confirm.
+
+Still to do: one real firing through a temporarily lowered preview cap, with the
+cap restored before the #889 window. It needs a pending managed job, so it follows
+listening on the managed account.
 
 ## Rotation drill
 
