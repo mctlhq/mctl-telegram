@@ -788,3 +788,25 @@ func TestLoadManagedBudget(t *testing.T) {
 		}
 	})
 }
+
+func TestLoad_ManagedClaimNotAfter(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ManagedClaimNotAfter.IsZero() {
+		t.Fatalf("unset = %v, want zero", cfg.ManagedClaimNotAfter)
+	}
+	t.Setenv("MANAGED_CLAIM_NOT_AFTER", "2030-06-15T03:00:00+03:00")
+	if cfg, err = Load(); err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Date(2030, 6, 15, 0, 0, 0, 0, time.UTC); !cfg.ManagedClaimNotAfter.Equal(want) {
+		t.Fatalf("parsed = %v, want %v", cfg.ManagedClaimNotAfter, want)
+	}
+	// A cutoff that cannot be read must stop the server, not silently mean "none".
+	t.Setenv("MANAGED_CLAIM_NOT_AFTER", "2030-06-15")
+	if _, err := Load(); err == nil {
+		t.Fatal("a malformed cutoff must fail")
+	}
+}
