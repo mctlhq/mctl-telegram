@@ -594,6 +594,62 @@ With the flag off, the mint route is 404, a pool token is 401, and jobs of
 accounts still on `managed` wait. At the next start the server logs
 `managed runtime disabled: jobs of managed accounts are paused`.
 
+### Managed runtime preview soak (A6)
+
+How the A6 soak and the GLM-5.1 / Nebius run were done on preview (results in
+mctlhq/mctl-telegram#1088). Preview only; nothing here enables production.
+
+Before the run:
+
+- Set `audience.onlySenders` (one test sender) **before** `listening: true`.
+  A real account has a backlog (service chats such as 777000); listening
+  without the filter ingests it and spends managed jobs on it.
+- A conversation in `taken_over` is ignored (`conversation not active: agent
+  not invoked`). Release it by typing `/mctl continue <conversation_id>` in
+  the owner's Saved Messages.
+- Feed fixtures one at a time and wait for each job: a message that arrives
+  while a job is pending is coalesced, not a new job.
+- The per-peer send cap is `audit.PeerSendCap` (200 per hour per recipient,
+  was 20 until #1119) and is a compile-time constant. It also throttles the
+  test sender, so a 32-message run needs it.
+- The target stays in `observe` with `send_enabled` off: every reply is held as
+  `propose_reply` / `pending_approval` and nothing reaches the peer.
+
+Budgets (preview server): per job `MANAGED_MAX_JOB_COST_USD`, per account per
+UTC day `MANAGED_BUDGET_USD_PER_ACCOUNT_DAY` (preview 1.00), global per day
+`MANAGED_BUDGET_USD_GLOBAL_DAY`, per account per month
+`MANAGED_BUDGET_USD_PER_ACCOUNT_MONTH` (default 15.00). A reservation is taken
+at claim and settled at completion.
+
+Switching the pool worker model (Hetzner -> Nebius): in
+`labs/agent-worker-managed-preview` change `AGENT_MODEL`,
+`AGENT_OPENAI_BASE_URL` (`.../mctl-telegram/custom-<provider>/v1`), the
+`...-openai` ExternalSecret `remoteKey` and `AGENT_CREDENTIAL_DOMAIN_ID` to a
+dedicated key path (never share a key with another service). The owner writes
+the Vault value; check it with a 1-token gateway call that prints only the HTTP
+code: 200 with the bearer, 401 without. The Cloudflare custom provider must
+already exist (`ai-gateway-custom-providers.json`).
+
+Evidence (metadata only; draft bodies are encrypted and are not read):
+
+- Outcome and latency: `agent_jobs` (`status`, `runtime`, `attempts`,
+  `created_at`, `updated_at`).
+- Cost and settlement: `agent_jobs.cost_usd` and `agent_usage` (every row
+  `settled`, no held rows).
+- Sends: `agent_actions.executed_tg_message_id` is null for every
+  `propose_reply`.
+- Isolation: switch a second account to `listening` on `runtime: own` and check
+  its jobs stay `pending` with 0 attempts and no usage row, and that the pool
+  worker makes no claim for it.
+- `agent_sent_messages` is a marker of programmatic sends keyed by the
+  sending account (it is swept by retention); it is not a log of agent
+  actions.
+- The AI Gateway keeps no logs by design, so there are no gateway logs.
+
+After the run: set the target to `listening: false`, `paused: true`, turn its
+send off, and leave the second account `own` with `listening: false`. Do not
+approve or send the held replies in bulk.
+
 ---
 
 <a id="mctlagentclaudeusagelimit"></a>
