@@ -50,6 +50,7 @@ to do about it), see [docs/troubleshooting.md](troubleshooting.md) instead.
 - [MctlAgentManagedSpendHigh — managed OpenAI spend high](#mctlagentmanagedspendhigh)
 - [MctlAgentManagedPoolWorkerDown — managed pool worker down](#mctlagentmanagedpoolworkerdown)
 - [Managed runtime: pool token, activation and rollback](#managed-runtime-pool-token)
+- [Managed runtime: model and gateway credential rotation](#managed-runtime-credential-rotation)
 - [Login-bot update receiver](#login-bot-update-receiver)
 - [Media response memory bounds (issue #705)](#media-response-memory-bounds)
 - [Connect and OAuth callback rejection reasons](#connectrejectionreasons)
@@ -546,6 +547,15 @@ includes it, and it reaches the job tokens derived from the pool token.
 <a id="managed-runtime-activation"></a>
 ### Managed runtime activation
 
+**Step 0, production go/no-go.** This section describes preview activation.
+Before any production activation, all of the following must be true, and the
+owner decides separately even then:
+
+- mctlhq/mctl-telegram#334 is closed;
+- mctlhq/mctl-telegram#889 is closed;
+- Part B of the #889 managed soak has a recorded PASS;
+- `docs/reports/communication-agent-c2.md` carries `Go/no-go: go`.
+
 Activation starts only after the owner's separate activation approval. Each
 step starts only after the previous one is verified. The canonical list is
 the "Activation" section of
@@ -577,6 +587,74 @@ one change.
    answers 200 with the bearer and 401 without.
 6. A6: the owner switches one preview account to `runtime: managed` with
    consent, then a soak of at least 30 jobs.
+
+<a id="managed-runtime-credential-rotation"></a>
+### Managed runtime: model and gateway credential rotation
+
+The pool worker holds two more credentials besides the pool token. Neither
+value is ever pasted into a chat, a ticket or a log, and the worker's Secrets
+are never read with `-o json` or `-o yaml`.
+
+| Credential | Vault path, property `token` | ExternalSecret | Env |
+|---|---|---|---|
+| Nebius model key | `secret/platform/labs/agent-worker-managed-preview/openai-nebius` | `labs-agent-worker-managed-preview-openai` | `AGENT_OPENAI_API_KEY` |
+| AI Gateway run token | `secret/platform/labs/agent-worker-managed-preview/gateway`, canonical copy `secret/platform/mctl-telegram/ai-gateway` | `labs-agent-worker-managed-preview-gateway` | `AGENT_GATEWAY_TOKEN` |
+
+Both reach the pod through `envFrom`, so the pod reads them only when it
+starts: a Vault write changes nothing until the ExternalSecret has refreshed
+and the pod has been rolled. Vault writes and provider console actions are done
+by the owner.
+
+**Planned rotation of the Nebius key.** Do it when the queue is quiet.
+
+1. Note the time. In the Nebius console, create a new key in the same project.
+   Do not reuse a key of another service.
+2. Write it to Vault from the clipboard, so that it is not on a command line:
+   `pbpaste | vault kv put secret/platform/labs/agent-worker-managed-preview/openai-nebius token=-`.
+   Clear the clipboard.
+3. Check the new version with `vault kv metadata get` on that path, never
+   `vault kv get`.
+4. Wait for the ExternalSecret refresh or force it, and confirm it reports
+   `SecretSynced`.
+5. Roll the worker pod and wait until it is Ready.
+6. Run one controlled job on the managed test account and confirm that it
+   reaches a terminal status with a `settled` `agent_usage` row.
+7. Revoke the old key in the Nebius console. Note the time.
+8. Prove that the old key fails: a 1-token call with it through the gateway,
+   printing only the HTTP status, must be refused. Run one more controlled job
+   and confirm that the new key still works.
+9. Record in `docs/reports/communication-agent-c2.md`: the times of steps 1 and
+   7, the Vault version numbers and the results of steps 6 and 8. No key value
+   and no key fragment.
+
+**Suspected leak of the Nebius key.** Revocation comes first and availability
+second:
+
+1. Revoke the key in the Nebius console at once.
+2. Expect `error_provider` failures on managed jobs until the new key is live.
+   If traffic is flowing, stop it first with the targeted stop: `listening:
+   false`, then `paused: true`. Do not close the whole pool.
+3. Follow steps 2 to 6 above with a new key, then re-enable the account.
+4. Review the Nebius usage for the exposure period and record the result.
+
+**AI Gateway run token.**
+
+1. Create the replacement in the Cloudflare dashboard for the
+   `mctl-telegram-ai-gateway-run` manifest entry in
+   `infrastructure/cloudflare/tokens/manifest.tf` (AI Gateway Run only). A
+   change to that manifest goes through a reviewed mctl-gitops PR.
+2. Write it to both Vault paths above, again with `pbpaste` and `token=-`.
+3. Follow steps 3 to 6 above for `labs-agent-worker-managed-preview-gateway`.
+4. Check the gateway with a 1-token call that prints only the HTTP status: 200
+   with the bearer and 401 without. The gateway header is
+   `cf-aig-authorization`.
+5. Delete the old token in the dashboard, then confirm that it answers 401.
+
+The gateway token proves authorisation to the gateway. It is not a quota
+boundary, and rotating it does not change the Nebius quota domain.
+
+The rotation drill of #334 runs this procedure on preview and needs a separate
+owner approval, because it writes to Vault and acts in the Nebius console.
 
 <a id="managed-runtime-rollback"></a>
 ### Managed runtime rollback

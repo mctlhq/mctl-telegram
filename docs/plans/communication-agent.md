@@ -332,6 +332,7 @@ DB: reuse the existing `labs-mctl-telegram` database (no new DB).
 2. **Before Guarded autopilot, all of the following must be true**:
    - Production quota domain provisioned and in use (separate from
      interactive Claude Code + `claude-review.yml` pool).
+     Evidence and go/no-go: [`docs/reports/communication-agent-c2.md`](../reports/communication-agent-c2.md).
    - ✅ PR 6 hardening debt resolved (`POST /jobs/claim`, atomic exact-result
      completion).
    - ✅ Approval-code invariants verified by explicit tests; codes use a
