@@ -308,14 +308,13 @@ spec:
             severity: warning
             service: mctl-telegram
           annotations:
-            summary: "Communication-agent Claude credential hit its usage limit"
+            summary: "Communication-agent model credential hit a usage or provider rate limit"
             description: >
-              The agent-worker's dedicated Claude credential
+              The agent-worker's dedicated model credential
               (mctl_agent_claude_result_errors_total{class="usage_limit"})
-              reported a usage-limit/quota error in the last 15 minutes.
-              Worker.Loop processes jobs sequentially, so every job after this
-              one blocks on the same exhausted pool until the quota window
-              resets.
+              reported a usage-limit, quota or exhausted provider 429 error in the
+              last 15 minutes. The name is historical: this also covers the OpenAI
+              runner.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlagentclaudeusagelimit"
 
         # Aggregated by `reason`, not `surface`: `reason` is the label an
@@ -507,6 +506,137 @@ spec:
               +Inf when spend occurred with zero finished jobs in the window;
               that is intended.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlagentjobcosthigh"
+
+    # Mirror of group mctl-telegram-managed in mctl-gitops
+    # vm-rules/mctl-telegram-ops.yaml, the deployed copy.
+    - name: mctl-telegram-managed
+      rules:
+        # scope="global_day" is the exact label value (db.BudgetScopeGlobalDay).
+        - alert: MctlAgentManagedGlobalCapHit
+          expr: sum(increase(mctl_agent_budget_exhausted_total{scope="global_day"}[15m])) > 0
+          for: 0m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "Managed-runtime global daily budget cap reached"
+            description: >-
+              The managed runtime hit its global daily budget cap in the last
+              15 minutes; managed jobs are paused until the day rolls over.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlagentmanagedglobalcaphit"
+
+        # 1.00 per hour is 20 percent of the 5.00 global daily cap on preview.
+        - alert: MctlAgentManagedSpendHigh
+          expr: sum(increase(mctl_agent_usage_cost_usd_total{runner="openai"}[1h])) > 1.00
+          for: 0m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "Managed-runtime spend over the last hour is high"
+            description: >-
+              Managed (openai runner) spend over the last hour is above the
+              $1.00 threshold.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlagentmanagedspendhigh"
+
+        # With 0 replicas there is no `up` series, so `unless` lets the left
+        # side through: an account on managed with no worker is the case this
+        # rule exists for (its jobs fall to operator routing).
+        - alert: MctlAgentManagedPoolWorkerDown
+          expr: |
+            max(mctl_agent_managed_accounts) > 0
+            unless on()
+            (sum(up{namespace="labs", service="labs-agent-worker-managed-preview-base-service"}) > 0)
+          for: 10m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "Managed-runtime pool worker is down while managed accounts exist"
+            description: >-
+              Accounts are on the managed runtime but no
+              labs-agent-worker-managed-preview scrape target has been up for
+              10 minutes. This includes a worker scaled to 0 replicas.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlagentmanagedpoolworkerdown"
+
+        # The two per-account scopes differ. Reaching account_day is the cap
+        # working and lifts itself within a day, so it stays unmatched. Reaching
+        # account_month stops that account until the month rolls over, and
+        # mctl-telegram#334 requires a tested monthly-budget alert.
+        - alert: MctlAgentManagedAccountMonthCapHit
+          expr: sum(increase(mctl_agent_budget_exhausted_total{scope="account_month"}[15m])) > 0
+          for: 0m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "A managed account reached its monthly budget cap"
+            description: >-
+              A managed claim found an account's monthly budget durably
+              exhausted in the last 15 minutes; that account's jobs wait until
+              the month rolls over.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlagentmanagedaccountmonthcaphit"
+
+        # Deferral is normal for a moment, because in-flight reservations clear
+        # when their jobs finish. Deferrals in every 15-minute window for 30
+        # minutes mean reservations are not clearing. The window and the hold are
+        # proposed values (mctl-telegram#334, D3).
+        - alert: MctlAgentManagedBudgetDeferredSustained
+          expr: sum(increase(mctl_agent_budget_deferred_total[15m])) > 0
+          for: 30m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "Managed claims have been deferred by the budget for 30 minutes"
+            description: >-
+              Managed claims kept being deferred because in-flight reservations
+              used up a budget, for at least 30 minutes.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlagentmanagedbudgetdeferredsustained"
+
+        # max(), not sum(): every process exports this gauge and only the
+        # server's value is meaningful (workers export a pre-created zero). A
+        # held row is reconciliation drift that counts against the budget. The
+        # gauge covers the current UTC day, so an unreconciled row clears at the
+        # day rollover at the latest.
+        - alert: MctlAgentManagedUsageHeld
+          expr: max(mctl_agent_usage_held_rows) > 0
+          for: 15m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "Managed usage rows are held and not reconciled"
+            description: >-
+              At least one managed usage row has been held for 15 minutes. Held
+              rows count against the budget without a confirmed cost.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlagentmanagedusageheld"
+
+        # MctlAgentClaudeUsageLimit is a presence test: one exhausted retry loop
+        # fires it. This is the rate: more than 2 such jobs in an hour and more
+        # than 20 percent of finished jobs. `> 2` rather than `>= 3` because
+        # increase() extrapolates to a float. Both numbers are proposed
+        # (mctl-telegram#334, D3); the Nebius limit itself is unmeasured.
+        - alert: MctlAgentProviderRateLimitHigh
+          expr: |
+            sum(increase(mctl_agent_claude_result_errors_total{class="usage_limit"}[1h])) > 2
+            and
+            (
+              sum(increase(mctl_agent_claude_result_errors_total{class="usage_limit"}[1h]))
+              /
+              (sum(increase(mctl_agent_jobs_total{status=~"^(completed|ignored|failed|dead_letter)$"}[1h])) or vector(0))
+            ) > 0.2
+          for: 0m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "Provider rate limits are failing a large share of agent jobs"
+            description: >-
+              More than 2 agent jobs in the last hour, and more than 20 percent
+              of finished jobs, ended on a usage limit or an exhausted provider
+              429 retry loop.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlagentproviderratelimithigh"
 
     - name: mctl-telegram-tool-availability
       rules:
