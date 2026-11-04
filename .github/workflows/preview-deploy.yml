@@ -1,9 +1,11 @@
 name: Preview Deploy
 run-name: "preview-deploy main-${{ github.sha }}"
 
+# Frozen for the Part B window of mctlhq/mctl-telegram#889: a rollout would
+# restart its 72 hour clock. Restore `push: branches: [main]` after the window.
+# Manual dispatch stays available, so that a deliberate fix can be deployed.
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 permissions: {}
 
