@@ -145,17 +145,22 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		maxOutputTokens, err := envPositiveInt("AGENT_OPENAI_MAX_OUTPUT_TOKENS", 0)
+		if err != nil {
+			return err
+		}
 		minInterval, err := envDuration("AGENT_OPENAI_MIN_INTERVAL", 0)
 		if err != nil {
 			return err
 		}
 		runner = &agentworker.OpenAIRunner{
 			Client: &agentworker.OpenAIClient{
-				BaseURL:      openAIBaseURL,
-				APIKey:       openAIAPIKey,
-				GatewayToken: os.Getenv("AGENT_GATEWAY_TOKEN"),
-				Model:        model,
-				UserAgent:    "mctl-telegram-agent-worker/" + version,
+				BaseURL:         openAIBaseURL,
+				APIKey:          openAIAPIKey,
+				GatewayToken:    os.Getenv("AGENT_GATEWAY_TOKEN"),
+				Model:           model,
+				UserAgent:       "mctl-telegram-agent-worker/" + version,
+				MaxOutputTokens: maxOutputTokens,
 			},
 			APIBaseURL:   apiBaseURL,
 			APIToken:     apiToken,

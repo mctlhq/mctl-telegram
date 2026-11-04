@@ -54,6 +54,10 @@ type ManagedBudget struct {
 	AccountDayUSD   float64
 	AccountMonthUSD float64
 	GlobalDayUSD    float64
+	// ClaimNotAfter, when set, ends managed claims at that instant: from then on
+	// a claim takes nothing and reserves nothing, without a pause or a
+	// notification. Jobs already claimed finish and settle normally.
+	ClaimNotAfter time.Time
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
 }
@@ -188,6 +192,9 @@ func usageSums(ctx context.Context, tx *sql.Tx, since time.Time, userID int64) (
 func (s *Store) reserveBudget(ctx context.Context, tx *sql.Tx, userID int64, limit int) (int, *budgetEvent, error) {
 	b := s.budget
 	now := b.now()
+	if !b.ClaimNotAfter.IsZero() && !now.Before(b.ClaimNotAfter) {
+		return 0, nil, nil
+	}
 	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 

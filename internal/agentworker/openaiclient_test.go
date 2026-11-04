@@ -97,3 +97,27 @@ func TestToolCall_ObjectArgumentsAreAccepted(t *testing.T) {
 		t.Fatalf("tool call=%+v", tc)
 	}
 }
+
+// The job budget is checked after a turn, so max_tokens is what bounds the turn
+// that passes it. Unset, the field must be absent, not zero.
+func TestOpenAIClient_MaxOutputTokens(t *testing.T) {
+	for _, tc := range []struct {
+		set  int
+		want any
+	}{{4096, float64(4096)}, {0, nil}} {
+		var got map[string]any
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&got)
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+		}))
+		c := &OpenAIClient{BaseURL: srv.URL, APIKey: "k", Model: "m", HTTP: srv.Client(), MaxOutputTokens: tc.set}
+		_, err := c.Chat(context.Background(), []ChatMessage{{Role: "user", Content: "hi"}}, nil)
+		srv.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got["max_tokens"] != tc.want {
+			t.Fatalf("set %d: max_tokens = %v, want %v", tc.set, got["max_tokens"], tc.want)
+		}
+	}
+}

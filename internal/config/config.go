@@ -489,7 +489,11 @@ type Config struct {
 	ManagedMaxJobCostUSD            float64
 	ManagedBudgetUSDPerAccountDay   float64
 	ManagedBudgetUSDPerAccountMonth float64
-	ManagedBudgetUSDGlobalDay       float64
+	// ManagedClaimNotAfter (MANAGED_CLAIM_NOT_AFTER, RFC 3339, optional) ends
+	// managed claims at that instant, so a time-boxed run stops spending without
+	// depending on anyone being there to stop it. Zero means no cutoff.
+	ManagedClaimNotAfter      time.Time
+	ManagedBudgetUSDGlobalDay float64
 	// WorkItemTenant is the single configured mctl-api tenant every
 	// Telegram-originated work item belongs to (see requirements.md's Open
 	// questions — this repository's own "tenant" concept is a different
@@ -680,6 +684,13 @@ func Load() (*Config, error) {
 		if !(b.v > 0) || math.IsInf(b.v, 0) {
 			return nil, fmt.Errorf("%s must be greater than 0", b.name)
 		}
+	}
+	if v := strings.TrimSpace(os.Getenv("MANAGED_CLAIM_NOT_AFTER")); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			return nil, fmt.Errorf("MANAGED_CLAIM_NOT_AFTER must be RFC 3339: %w", err)
+		}
+		c.ManagedClaimNotAfter = t.UTC()
 	}
 	for name, capUSD := range map[string]float64{
 		"MANAGED_BUDGET_USD_PER_ACCOUNT_DAY":   c.ManagedBudgetUSDPerAccountDay,

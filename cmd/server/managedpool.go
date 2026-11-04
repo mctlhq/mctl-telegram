@@ -53,6 +53,7 @@ func wireManagedPool(cfg *config.Config, mux chi.Router, adminMW func(http.Handl
 			AccountDayUSD:   cfg.ManagedBudgetUSDPerAccountDay,
 			AccountMonthUSD: cfg.ManagedBudgetUSDPerAccountMonth,
 			GlobalDayUSD:    cfg.ManagedBudgetUSDGlobalDay,
+			ClaimNotAfter:   cfg.ManagedClaimNotAfter,
 		})
 	}
 	slog.Info("managed runtime pool credential enabled", "max_inflight_per_account", cfg.ManagedMaxInflightPerAccount)

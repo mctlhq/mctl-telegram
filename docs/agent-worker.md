@@ -111,6 +111,7 @@ send gate.
 | `MODEL_INPUT_USD_PER_MTOK` | `openai` only | Input list price in USD per million tokens; finite and non-negative. |
 | `MODEL_OUTPUT_USD_PER_MTOK` | `openai` only | Output list price in USD per million tokens; finite and non-negative. |
 | `AGENT_MAX_TURNS` | no | `openai` runner: maximum provider turns per job (default `12`). |
+| `AGENT_OPENAI_MAX_OUTPUT_TOKENS` | no | `openai` runner: sent as `max_tokens` on every turn (unset: omitted). The job budget is checked after a turn, so this bounds the cost of the turn that passes it. |
 | `AGENT_OPENAI_MIN_INTERVAL` | no | `openai` runner: minimum interval between provider requests, as a Go duration such as `2s`. State on the single `OpenAIRunner` instance (shared by all concurrent jobs), not a package global. `6s` keeps within Hetzner's limit of 10 requests per 60 s (ADR 0008); the labs pool worker uses `6s`. |
 
 `AGENT_JOB_ID`, `AGENT_JOB_ATTEMPT`, `AGENT_JOB_EVENT_ID`, `AGENT_JOB_CONV_ID`
