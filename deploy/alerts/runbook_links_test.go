@@ -93,3 +93,46 @@ func TestRunbookURLsResolve(t *testing.T) {
 		}
 	}
 }
+
+// TestProductionGoNoGoCheckStaysWired fails when the production go/no-go check
+// of mctlhq/mctl-telegram#334 stops being reachable: the runbook's activation
+// section must name both gates and the report, and the report must carry exactly
+// one recognised Go/no-go line.
+func TestProductionGoNoGoCheckStaysWired(t *testing.T) {
+	root := filepath.Join("..", "..")
+
+	runbook, err := os.ReadFile(filepath.Join(root, "docs", "runbook.md"))
+	if err != nil {
+		t.Fatalf("read runbook: %v", err)
+	}
+	const heading = "### Managed runtime activation"
+	_, section, ok := strings.Cut(string(runbook), heading)
+	if !ok {
+		t.Fatalf("runbook has no %q section", heading)
+	}
+	section, _, _ = strings.Cut(section, "\n### ")
+	for _, want := range []string{
+		"Step 0, production go/no-go",
+		"mctlhq/mctl-telegram#334",
+		"mctlhq/mctl-telegram#889",
+		"Part B",
+		"docs/reports/communication-agent-c2.md",
+		"`Go/no-go: go`",
+	} {
+		if !strings.Contains(section, want) {
+			t.Errorf("runbook activation section does not mention %q", want)
+		}
+	}
+
+	report, err := os.ReadFile(filepath.Join(root, "docs", "reports", "communication-agent-c2.md"))
+	if err != nil {
+		t.Fatalf("read C2 report: %v", err)
+	}
+	lines := regexp.MustCompile(`(?m)^Go/no-go: (go|no-go)$`).FindAllString(string(report), -1)
+	if len(lines) != 1 {
+		t.Errorf("C2 report must carry exactly one Go/no-go line, found %d", len(lines))
+	}
+	if !strings.Contains(string(report), "#334") {
+		t.Error("C2 report does not reference #334")
+	}
+}
