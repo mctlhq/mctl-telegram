@@ -75,6 +75,8 @@ func TestRun_OpenAIFailsClosedPerSetting(t *testing.T) {
 		{"MODEL_OUTPUT_USD_PER_MTOK", "NaN"},
 		{"AGENT_MAX_TURNS", "0"},
 		{"AGENT_OPENAI_MIN_INTERVAL", "-1s"},
+		{"AGENT_OPENAI_MAX_OUTPUT_TOKENS", "0"},
+		{"AGENT_OPENAI_MAX_OUTPUT_TOKENS", "many"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.key+"="+tc.val, func(t *testing.T) {

@@ -364,6 +364,7 @@ New `agent_jobs` status label values: `coalesced` (member of a coalesced turn, t
 | `MANAGED_MAX_JOB_COST_USD` | `0.50` | Managed spend: the amount reserved against the budgets for every claimed managed job, and the `max_job_cost_usd` the claim envelope hands the worker (> 0, not above any cap below). ADR 0008 section 5. |
 | `MANAGED_BUDGET_USD_PER_ACCOUNT_DAY` | `1.00` | Managed spend cap per account per UTC day (> 0). Overridable per account through the admin profile route (`managed_budget_usd_day`). |
 | `MANAGED_BUDGET_USD_PER_ACCOUNT_MONTH` | `15.00` | Managed spend cap per account per UTC month (> 0). Per-account override: `managed_budget_usd_month`. |
+| `MANAGED_CLAIM_NOT_AFTER` | unset | RFC 3339 instant at which managed claims stop. Nothing new is claimed or reserved from then on; jobs already claimed finish and settle. Ingestion is not affected. For time-boxed runs. |
 | `MANAGED_BUDGET_USD_GLOBAL_DAY` | `20.00` (tg-preview deploys `5.00`) | Managed spend cap across all accounts per UTC day (> 0). At the cap every managed account with pending jobs is paused until the day ends and its owner is notified once. |
 | worker `AGENT_POOL_MODE` | `false` | Worker-side (`true`/`false`, anything else refuses to start): `AGENT_API_TOKEN` is the pool credential, which can only claim. Every per-job call, including the status check and cost report, uses the job token; a job without one fails and the pool token is never a fallback. |
 

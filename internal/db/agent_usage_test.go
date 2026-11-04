@@ -923,3 +923,60 @@ func TestRecordAgentJobUsage_ManagedNeedsJobCredential(t *testing.T) {
 		t.Fatalf("own account-token report: %v", err)
 	}
 }
+
+// TestManagedClaim_NotAfterEndsClaims proves the cutoff both ways on both managed
+// claim paths: before the instant a claim works; at or after it, it takes nothing,
+// reserves nothing, and neither pauses the account nor notifies the owner.
+// Mutation: remove the ClaimNotAfter check from reserveBudget.
+func TestManagedClaim_NotAfterEndsClaims(t *testing.T) {
+	budgetWith := func(notAfter time.Time, now func() time.Time) ManagedBudget {
+		return ManagedBudget{PerJobUSD: 0.25, AccountDayUSD: 1, AccountMonthUSD: 15, GlobalDayUSD: 5, ClaimNotAfter: notAfter, Now: now}
+	}
+	for _, tc := range []struct {
+		name   string
+		offset time.Duration
+		want   int
+	}{
+		{"before", time.Second, 1},
+		{"at", 0, 0},
+		{"after", -time.Second, 0},
+	} {
+		t.Run("plain_"+tc.name, func(t *testing.T) {
+			s := newTestStoreCrypted(t).WithManagedBudget(budgetWith(budgetNow.Add(tc.offset), func() time.Time { return budgetNow }))
+			uid := seedManagedAccount(t, s, "acct", RuntimeManaged, 1)
+			if got := len(claimOne(t, s, uid)); got != tc.want {
+				t.Fatalf("claimed %d jobs, want %d", got, tc.want)
+			}
+			assertCutoffLedger(t, s, uid, tc.want)
+		})
+		t.Run("coalesced_"+tc.name, func(t *testing.T) {
+			f := newTurnFixture(t, &turnCfg)
+			clock := turnBase.Add(time.Minute)
+			f.s.WithManagedBudget(budgetWith(clock.Add(tc.offset), func() time.Time { return clock }))
+			setRuntime(t, f.s, f.uid, RuntimeManaged)
+			f.ingest(t, 555, 1, 5, 0)
+			f.now = clock
+			jobs, err := f.s.ClaimManagedAgentJobs(context.Background(), "r", f.uid, 5, 5)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(jobs) != tc.want {
+				t.Fatalf("claimed %d jobs, want %d", len(jobs), tc.want)
+			}
+			assertCutoffLedger(t, f.s, f.uid, tc.want)
+		})
+	}
+}
+
+func assertCutoffLedger(t *testing.T, s *Store, uid int64, wantRows int) {
+	t.Helper()
+	if got := usageRows(t, s, `user_id = $1`, uid); got != wantRows {
+		t.Fatalf("usage rows = %d, want %d", got, wantRows)
+	}
+	if got := budgetNotifications(t, s, uid); got != 0 {
+		t.Fatalf("budget notifications = %d, want 0", got)
+	}
+	if got := pausedUntil(t, s, uid); !got.IsZero() {
+		t.Fatalf("paused until %v, want no pause", got)
+	}
+}
