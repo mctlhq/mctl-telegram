@@ -46,7 +46,7 @@ select * from (
   union all select 'c6a_own_jobs_claimed', count(*)::text, case when count(*)=0 then 'green' else 'red' end from o where attempts > 0 or claimed_at is not null
   union all select 'c6b_own_attempt_rows', count(*)::text, case when count(*)=0 then 'green' else 'red' end from agent_job_attempts t join o on o.id=t.job_id
   union all select 'c6c_own_usage_rows', count(*)::text, case when count(*)=0 then 'green' else 'red' end from us where job_id in (select id from o)
-  union all select 'c6d_own_status_outside_allowed', count(*)::text, case when count(*)=0 then 'green' else 'red' end from o where status not in ('pending','routed')
+  union all select 'c6d_own_status_outside_allowed', count(*)::text, case when count(*)=0 then 'green' else 'red' end from o where status not in ('pending','routed','ignored')
   union all select 'c7_usage_unsettled_past_grace', count(*)::text, case when count(*)=0 then 'green' else 'red' end from us where status <> 'settled' and created_at < now() - interval '7 minutes'
   union all select 'c8_cost_per_completed_turn', coalesce(round(((select c from cost)/nullif((select n from turns),0))::numeric,4)::text,'n/a'),
     case when (select n from turns)=0 then 'unknown' when (select coalesce(c,0) from cost)/(select n from turns) <= 0.0572 then 'green' else 'red' end

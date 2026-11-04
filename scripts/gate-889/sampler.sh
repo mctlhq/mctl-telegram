@@ -107,13 +107,23 @@ templates() {
 
 images() { pod_lines | awk '{print $NF}' | sort -u; }
 
+pod_names() { pod_lines | awk '{print $1}' | sort; }
+
 save_logs() {
-  local since=$1 pod
-  for pod in $(pod_lines | awk '{print $1}'); do
+  # Returns non-zero if any fetch failed or the pods could not be listed, so the
+  # caller keeps its cursor and the next tick fetches the same interval again.
+  local since=$1 pod names ok=0
+  names=$(pod_names) && [ -n "$names" ] || {
+    collect_error 'logs: pods unreadable'
+    return 1
+  }
+  for pod in $names; do
     if ! kubectl -n "$NS" logs "$pod" --timestamps --since-time="$since" >>"$DIR/logs/$pod.log" 2>"$DIR/state/stderr"; then
       collect_error "logs $pod stderr=$(head -c 300 "$DIR/state/stderr" | tr '\n' ' ')"
+      ok=1
     fi
   done
+  return "$ok"
 }
 
 check_restarts() {
@@ -136,11 +146,12 @@ pin() {
   : >"$SAMPLE"
   images >"$DIR/state/images.pinned" && [ -s "$DIR/state/images.pinned" ] || { echo 'cannot read images' >&2; return 1; }
   templates >"$DIR/state/templates.pinned" || { echo 'cannot read templates' >&2; return 1; }
-  cat "$DIR/state/images.pinned" "$DIR/state/templates.pinned"
+  pod_names >"$DIR/state/pods.pinned" && [ -s "$DIR/state/pods.pinned" ] || { echo 'cannot read pods' >&2; return 1; }
+  cat "$DIR/state/images.pinned" "$DIR/state/templates.pinned" "$DIR/state/pods.pinned"
 }
 
 once() {
-  local now stamp last gap since cur
+  local now stamp last gap since next cur
   now=$(epoch)
   stamp=$(date -u +%Y%m%dT%H%M%SZ)
   SAMPLE="$DIR/samples/$stamp.txt"
@@ -179,6 +190,13 @@ once() {
     else
       collect_error 'templates unreadable'
     fi
+    # A replaced pod starts with restartCount 0 and the same digest and template,
+    # so only its name shows it.
+    if cur=$(pod_names) && [ -n "$cur" ]; then
+      [ "$cur" = "$(cat "$DIR/state/pods.pinned")" ] || alert 'POD_REPLACED: running pods differ from the pin'
+    else
+      collect_error 'pod names unreadable'
+    fi
   else
     collect_error 'no pin: run sampler.sh pin first'
   fi
@@ -187,11 +205,16 @@ once() {
   case "$cur" in *COLLECT_ERROR*) collect_error 'previous logs unreadable' ;; esac
   [ -n "$cur" ] && while read -r line; do alert "$line"; done <<<"$cur"
 
+  # The cursor is taken before the fetch and saved only after every fetch worked.
+  # Overlapping lines are removed at analysis by timestamp; a lost line is not
+  # recoverable.
   since=$(cat "$DIR/state/last_ts" 2>/dev/null || echo "$WS")
-  save_logs "$since"
-  date -u +%FT%TZ >"$DIR/state/last_ts"
+  next=$(date -u +%FT%TZ)
+  save_logs "$since" && printf '%s\n' "$next" >"$DIR/state/last_ts"
 
-  grep -E '^detector c[0-9a-z_]+ .* red$' "$SAMPLE" | while read -r line; do printf '%s %s\n' "$(date -u +%FT%TZ)" "$line" >>"$DIR/alerts.log"; done
+  # c5 stays red until the third burst, by design, so it is judged at the end of
+  # the window rather than alerted on every tick.
+  { grep -E '^detector c[0-9a-z_]+ .* red$' "$SAMPLE" || true; } | { grep -v '^detector c5_' || true; } | while read -r line; do printf '%s %s\n' "$(date -u +%FT%TZ)" "$line" >>"$DIR/alerts.log"; done
   grep -E '^db listening_with_send_enabled [1-9]' "$SAMPLE" >/dev/null && alert 'SEND_ENABLED on a listening account'
 
   printf '%s\n' "$now" >"$DIR/state/last_epoch"

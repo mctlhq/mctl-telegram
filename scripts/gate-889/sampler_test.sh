@@ -27,10 +27,10 @@ case "$args" in
   *) cat "$FAKE/counts" ;;
   esac
   ;;
-*"get pods"*) printf 'labs-mctl-telegram-preview-x %s <none> %s\nlabs-agent-worker-managed-preview-y 0 <none> digest-w\nunrelated-z 0 <none> digest-o\n' "$(cat "$FAKE/restarts")" "$(cat "$FAKE/image")" ;;
+*"get pods"*) printf 'labs-mctl-telegram-preview-x %s <none> %s\nlabs-agent-worker-managed-preview-y 0 <none> digest-w\nunrelated-z 0 <none> digest-o\n' "$(cat "$FAKE/restarts")" "$(cat "$FAKE/image")" | sed "s/preview-x/preview-$(cat "$FAKE/podsuffix")/" ;;
 *"top pod"*) printf 'labs-mctl-telegram-preview-x 1m 10Mi\nlabs-agent-worker-managed-preview-y 1m 10Mi\n' ;;
 *"get deploy"*) cat "$FAKE/template" ;;
-*" logs "*) echo '2030-06-15T00:00:00Z synthetic log line' ;;
+*" logs "*) echo "2030-06-15T00:00:00Z synthetic log line since=${args##*--since-time=}" ;;
 esac
 FAKE
 chmod +x "$ROOT/bin/kubectl"
@@ -50,6 +50,7 @@ fresh() {
   export GATE889_DIR="$ROOT/evidence"
   echo 0 >"$FAKE/restarts"
   echo digest-s >"$FAKE/image"
+  echo x >"$FAKE/podsuffix"
   echo template-a >"$FAKE/template"
   : >"$FAKE/reasons"
   printf 'max_job_id 1\nlistening_with_send_enabled 0\n' >"$FAKE/counts"
@@ -88,6 +89,22 @@ fresh; echo template-b >"$FAKE/template"
 fresh; "$HERE/sampler.sh" once >/dev/null; echo 1 >"$FAKE/restarts"
 "$HERE/sampler.sh" once >/dev/null; check "restart alerts" "$(alerts | grep -c RESTART)" 1
 check "restart saves previous logs" "$(ls "$GATE889_DIR/logs" | grep -c previous)" 1
+
+fresh; echo renamed >"$FAKE/podsuffix"
+"$HERE/sampler.sh" once >/dev/null; check "replaced pod alerts" "$(alerts | grep -c POD_REPLACED)" 1
+
+# A failed log fetch must keep the cursor, so that the next tick recovers the interval.
+fresh; "$HERE/sampler.sh" once >/dev/null; cursor=$(cat "$GATE889_DIR/state/last_ts")
+sleep 1; : >"$FAKE/fail. logs "
+"$HERE/sampler.sh" once >/dev/null
+check "failed log fetch keeps the cursor" "$(cat "$GATE889_DIR/state/last_ts")" "$cursor"
+rm "$FAKE/fail. logs "
+sleep 1; "$HERE/sampler.sh" once >/dev/null
+check "next tick refetches from the kept cursor" "$(tail -1 "$GATE889_DIR/logs/labs-mctl-telegram-preview-x.log" | sed 's/.*since=\([^ ]*\).*/\1/')" "$cursor"
+check "successful fetch moves the cursor" "$([ "$(cat "$GATE889_DIR/state/last_ts")" != "$cursor" ] && echo moved)" moved
+
+fresh; printf 'c5_coalesced_turns 1 red\n' >"$FAKE/detectors"
+"$HERE/sampler.sh" once >/dev/null; check "c5 below minimum does not alert every tick" "$(alerts | grep -c c5_)" 0
 
 fresh; printf 'max_job_id 1\nlistening_with_send_enabled 1\n' >"$FAKE/counts"
 "$HERE/sampler.sh" once >/dev/null; check "send enabled alerts" "$(alerts | grep -c SEND_ENABLED)" 1

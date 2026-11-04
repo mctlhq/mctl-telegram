@@ -112,6 +112,11 @@ for name, (det, want, planted) in MUT.items():
     ok = got[1] == want
     fails += not ok
     print(f"{'caught' if ok else 'SURVIVED':8} {name:18} {det} = {got[0]} {got[1]}")
+# Ingest closes an own job as ignored without a claim, for example on an early delete.
+own_ignored = BASE + jobs(job(50, "ignored", rt="own", attempts=0))
+got = run(own_ignored).get("c6d_own_status_outside_allowed")
+ok = got[1] == "green"; fails += not ok
+print("caught  " if ok else "SURVIVED", "own_ignored_stays_green", got)
 # Below the minimum: only two coalesced turns.
 two = jobs(job(1, turn="a"), job(2, "coalesced", turn="a"), job(3, turn="b"), job(4, "coalesced", turn="b")) + usage(1, 1)
 got = run(two).get("c5_coalesced_turns")

@@ -39,9 +39,15 @@ below this document's own bar, so the command is replaced below. The Nebius key
 was not shown anywhere; the owner may still treat that read as an exposure of
 the object to the client and rotate under the rotation drill if preferred.
 
-Commands to use (names and counts only; the Secret `data` is never fetched):
+Commands to use (names and counts only). An output format such as
+`-o custom-columns` changes only what kubectl prints: the API server still returns
+the whole Secret, `data` included, so it is not a metadata-only read and is not
+used here. Default table output asks the server for a Table, whose rows carry
+object metadata only. Do not add `-o`, and do not use a verbosity that prints
+response bodies.
 
-- `kubectl get secret -A --field-selector metadata.name=<name> -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,ANN:.metadata.annotations`;
+- `kubectl get secret -A --field-selector metadata.name=<name>` (namespace, name,
+  type, key count, age; the request's `Accept` header is `as=Table`);
 - `kubectl get externalsecret -A -o json`, then `jq` on `remoteRef.key` and status;
 - `kubectl get pods -A -o json`, then `jq` on `secretKeyRef`, `secretRef` and
   secret volumes (Pod specs hold references, never secret values);
