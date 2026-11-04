@@ -1,26 +1,26 @@
 # Preflight checklist: Part B managed soak (gate #889)
 
-Status: PLANNED, NOT APPROVED FOR EXECUTION (2026-11-04). Run this list on the
-day before the window. Every item needs a recorded answer. A blank or "could
-not check" is a NO-GO for starting, not a pass. Plan: `gate-889-managed-soak.md`.
+Status: APPROVED (2026-11-04). Run this list before the window. Every item needs
+a recorded answer. A blank or "could not check" is a NO-GO for starting, not a
+pass. Plan: `gate-889-managed-soak.md`.
 
-Items marked OWNER need a separate owner permission. Nothing on this list is
-done by the agent without it.
+Section A records owner permissions. Tester consent is confirmed by the owner, and
+no identifier or consent text is written to GitHub.
 
 ## A. Authorisations (all OWNER)
 
-- [ ] A1. Owner decision D-A recorded on #889 (how Part A is closed).
-- [ ] A2. Tester allowlist approved (plan D1): at least 3 testers who are not contacts and have no chat with the account, who asks, how consent is kept.
-- [ ] A3. Written consent from every tester, covering: AI processing by a
-      third-party provider, no replies sent, withdrawal at any time. Kept by the
-      owner outside the repository.
-- [ ] A4. Permission to set `audience.onlySenders` to the allowlist (D2).
-- [ ] A5. Permission to set `listening: true` for the window (D2).
-- [ ] A6. Permission for the isolation account to listen on `runtime: own` (D2).
+- [ ] A1. Owner decision D-A recorded on #889: Part A stays INCONCLUSIVE.
+- [ ] A2. Three testers who are not contacts and have no chat with the account.
+- [ ] A3. The owner confirms written consent from every tester, covering AI
+      processing by a third-party provider, no replies sent, and withdrawal at any
+      time by direct message to the owner. Kept outside the repository.
+- [ ] A4. Allowlist permitted (D2) and set to the consenting testers only.
+- [ ] A5. Listening and lifting `autopilot_paused` on the managed account permitted (D2).
+- [ ] A6. Isolation account listening on `runtime: own` permitted (D2).
 - [ ] A7. Stop actions pre-authorised for the window (D2).
-- [ ] A8. Window caps approved (D3), and a gitops PR approved if the day cap is raised.
-- [ ] A9. Thresholds approved (D5).
-- [ ] A10. The Part B acceptance table posted on #889 and accepted by the owner.
+- [ ] A8. Window limit of $3 and day cap of 1.00 recorded (D3).
+- [ ] A9. Thresholds recorded (D5).
+- [ ] A10. The Part B acceptance table posted on #889 with the owner's decision.
 
 ## B. Build and configuration (read-only checks)
 
@@ -31,31 +31,36 @@ done by the agent without it.
 - [ ] B3. Worker: `AGENT_RUNNER=openai`, model `zai-org/GLM-5.1`, base URL
       `custom-nebius`, `AGENT_WORKER_CONCURRENCY=1`, 1 replica, memory limit 256Mi.
 - [ ] B4. `MANAGED_RUNTIME_ENABLED` true on preview, `MANAGED_RUNTIME_MAX_ACCOUNTS`
-      1, caps as agreed in A8; per-job cap 0.25.
+      1, day cap 1.00, per-job cap 0.25. `MANAGED_BUDGET_USD_PER_ACCOUNT_MONTH` is
+      the month's ledger total at the start plus 2.70, `MANAGED_CLAIM_NOT_AFTER`
+      is the window end, `AGENT_OPENAI_MAX_OUTPUT_TOKENS` is 4096, and all of them
+      are read from the running pods. The window lies inside one UTC month.
 - [ ] B5. Production has no `MANAGED_*` flags set and its release PR #1117 is untouched.
-- [ ] B6. Managed account install: `runtime: managed`, mode `observe`, send
-      disabled, install revision recorded, `listening: false` before A5.
-- [ ] B7. Isolation account is `runtime: own`, `listening: false` before A6.
+- [ ] B6. Managed account install: `runtime: managed`, mode `observe`, sending
+      read back as off, install revision recorded, `listening: false` before A5.
+- [ ] B7. Isolation account is `runtime: own`, sending read back as off,
+      `listening: false` before A6.
 - [ ] B8. Pool token present and not revoked; its `jti` recorded (not the token).
 - [ ] B9. Held replies from earlier runs are `expired` or otherwise accounted for.
-- [ ] B10. No rollout, image bump or gitops change to the server or worker is
-      scheduled for the window (freeze). The owner is told the window dates.
+- [ ] B10. Freeze: the `push` trigger is gone from `preview-deploy.yml` on `main`,
+      no rollout, image bump or gitops change to the server or worker is scheduled
+      for the window, and `sampler.sh pin` has recorded the digests and templates.
+- [ ] B11. The four budget alerts route to the operator Telegram channel, firing
+      and resolving were both observed, and any temporary cap is restored.
 
 ## C. Evidence tooling (read-only)
 
 - [ ] C1. Sampler dry run produced a baseline sample: restarts, `kubectl top`,
       job counts by status, `processing` older than 5 min, unsettled usage rows,
       owner-only notification counts.
-- [ ] C2. Database access works read-only and the queries for criteria 3 to 11b
-      run on the baseline, are green on it, and are shown red on a deliberate
-      mutation (for example a planted `propose_reply` row with a message id in a
-      scratch copy), so each detector is proven both ways.
+- [ ] C2. Database access works read-only and `scripts/gate-889/criteria.sql` runs
+      on the live database. `scripts/gate-889/mutations.py` shows every detector
+      green on a converged input and red on a deliberate mutation.
 - [ ] C3. Log retention for the server and worker covers 72 h plus a margin, and
       previous-container logs are saved on any restart.
 - [ ] C4. Metrics queryable in vmsingle: the names listed in section 3.4 of the plan.
 - [ ] C5. Window start and end times and the baseline job id are written down;
-      every query filters on `created_at` from the start time. The end falls before
-      2026-11-11.
+      every query filters on `created_at` from the start time.
 - [ ] C7. The value of `EVENTS_OPERATOR_ROUTING` on preview is recorded (default false:
       then no routed rows exist and criterion 3's route-reason check is not observable).
 - [ ] C6. Minimum traffic precondition: 30 completed turns and 3 coalesced turns
@@ -75,5 +80,6 @@ done by the agent without it.
 All of A, B, C and D are ticked, and the comment on #889 quotes each recorded
 value (tester count, window start and end, baseline job id, caps, thresholds). A
 tick with no quoted value does not count and a blank is NO-GO.
-The agent then asks for the start command from the owner; it does not start by
-itself.
+On a green list the agent starts the window at the next 00:00 UTC without a
+further "go" (owner decision, 2026-11-04) and records the actual UTC boundaries,
+baseline, versions and budget on #889.

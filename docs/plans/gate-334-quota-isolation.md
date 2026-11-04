@@ -127,14 +127,19 @@ stated delivery time.
 
 ## 7. Decisions for the owner
 
-- D2. Is the Nebius key for the managed runtime in its own Nebius project, and
-  if not, will one be created.
-- D3. Production budget numbers (day, month, global).
-- D4. Permission to lower a cap temporarily on preview for the alert test.
-- D5. Permission for the rotation drill (Vault write, Nebius console) and for a
-  Vault policy read.
-- D6. Accept or reject the amendment in section 3. Note: the monthly-budget
+Recorded 2026-11-04. Production budget and production rollout are not approved.
+
+- D2. Open: is the Nebius key for the managed runtime in its own Nebius project,
+  and if not, will one be created. Reading this needs the owner's console.
+- D3. Open: production budget numbers (day, month, global).
+- D4. Granted: lowering a preview cap temporarily through GitOps for the alert
+  test, restored before the #889 window. The four alerts also route to the operator
+  Telegram channel, and firing and resolving must both be observed.
+- D5. Granted: rotating the dedicated preview keys per the runbook. Shared keys and
+  the limits of neighbouring services are not changed. Console actions are the
+  owner's.
+- D6. Open: accept or reject the amendment in section 3. Note: the monthly-budget
   bullet would document the missing global monthly cap as accepted, which can be
   read as weakening the gate; the owner decides knowingly.
-- D7. Permission for the neighbour and reverse drills (row 5 b and c, W9) and the
-  numeric bounds of row 5(c). Without D7 those drills do not run.
+- D7. Kept: neighbour and reverse drills (row 5 b and c, W9) run after the support
+  pilot ends, not before 2026-11-11, and only on owner command.

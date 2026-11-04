@@ -1,8 +1,9 @@
 # Gate #889: conversation-plane gate and managed-runtime soak
 
-Status: PLANNED, NOT APPROVED FOR EXECUTION (2026-11-04). Nothing in this plan
-has been run. Issue #889 stays open and its acceptance criteria are not changed
-by this document. Related: #334 (`gate-334-quota-isolation.md`), #1088, ADR 0008,
+Status: APPROVED FOR PREPARATION AND EXECUTION by the owner (2026-11-04),
+subject to a green repeat preflight. Production budget and production rollout
+are not approved. Issue #889 stays open and its acceptance criteria are not
+changed by this document. Related: #334 (`gate-334-quota-isolation.md`), #1088, ADR 0008,
 checklist `gate-889-soak-preflight.md`.
 
 #889 was written for the conversation plane (`agent_jobs`, bounded worker,
@@ -11,8 +12,8 @@ worker. The two have different workers, different concurrency and different
 evidence, so this plan keeps them as two separate acceptances:
 
 - **Part A: the original #889 gate**, exactly as the issue words it.
-- **Part B: a managed-runtime soak**, a new acceptance that this plan proposes
-  to add. It is not part of the issue until the owner accepts it on the issue.
+- **Part B: a managed-runtime soak**, a new acceptance added by the owner's
+  decision of 2026-11-04, recorded on the issue.
 
 Neither part substitutes for the other. An owner amendment of Part A is the only
 way to close Part A without new evidence.
@@ -47,31 +48,18 @@ Verdict today: stability criteria met; the concurrency, cost and traffic
 criteria are not met, so Part A is **INCONCLUSIVE and open**. Declaring Part A
 passed on a concurrency-1 run is not allowed without an amendment.
 
-Ways to close Part A (owner chooses, D-A):
+Owner decision, 2026-11-04 (D-A): **Part A stays INCONCLUSIVE and is not renamed
+PASS.** The missing 72 hours, the cost and the bursts are checked in Part B.
+Production observe-mode data is supplementary only (D6) and turns nothing into a
+pass.
 
-1. A new preview run with worker concurrency 2 and traffic that meets the
-   minimum. `agent-worker-preview` already sets `AGENT_WORKER_CONCURRENCY: "2"`
-   with `replicaCount: 0`, so the change is to scale that worker, not a new
-   setting. The Part B pool worker stays at concurrency 1 and is never changed
-   mid-window (a change restarts the 72 h clock); the Mac mini worker that
-   served the first soak follows production release tags. Only one listener per
-   account is safe, so a second worker must not listen on the same account. The
-   window must also end before the Anthropic promotional credit expires on
-   2026-11-11. Sequencing: the concurrency-2 run uses a separate worker on a
-   separate account, or runs strictly before or after Part B, never overlapping
-   its freeze. Two back-to-back 72 h windows plus approvals do not fit before
-   2026-11-11 (today is 2026-11-04), so within that credit window at most one of
-   them can run, and the other waits for D-A. Owner approval is needed for
-   whichever worker is scaled. The run must show the 2-claim moment and
-   the bounds. This satisfies the issue as written.
-2. An owner amendment recorded on #889: the conversation plane is accepted at
-   concurrency 1, with the reasoning, and the global bound of 2 is replaced by
-   the bound that holds at concurrency 1. The issue's criteria are not edited by
-   this plan; the owner decides.
-
-Production observe-mode traffic from 2026-11-01 may be reported as supplementary
-evidence, labelled production, and does not turn an INCONCLUSIVE Part A into a
-pass by itself.
+What this amendment does not do: Part B runs at concurrency 1, so it cannot show
+the 2-claim moment or the global bound of 2. That criterion of Part A stays
+unmet after a Part B PASS. Closing it needs either a preview run with a second
+concurrency level or an owner amendment recorded on #889, and neither is decided
+here. `agent-worker-preview` already sets `AGENT_WORKER_CONCURRENCY: "2"` with
+`replicaCount: 0`; such a run needs a separate account or separate dates, because
+only one listener per account is safe and Part B's freeze must not be disturbed.
 
 Step A0 (read-only, no approval): post the final analysis of the finished soak
 on #889, using the table above, with the window and the figures filled in.
@@ -86,6 +74,16 @@ Nebius with concurrency 1, the audience and consent are set by the owner, caps
 are recorded, the sampler runs, and the build is frozen for the window. A
 rollout restarts the 72 h clock unless the owner waives it; the rollout 503 gap
 (tg#1108) counts as a rollout effect.
+
+The window starts at the first 00:00 UTC after the preflight is green and ends
+exactly 72 hours later.
+
+Freeze: automatic preview updates are switched off by a reviewed change to
+`.github/workflows/preview-deploy.yml` that removes the `push` trigger, merged
+after every other change and rollout, and before the final preflight. The
+digests and pod templates are then pinned (`scripts/gate-889/sampler.sh pin`), and
+the sampler alerts on any difference. A second reviewed change restores the
+trigger after the window.
 
 ### 3.2 Traffic source (decision D1): allowlist of consenting testers
 
@@ -103,16 +101,25 @@ real inbound. The chosen variant is a limited allowlist of testers who agreed:
   from the allowlist. The consent record is kept by the owner outside this
   repository. No names, handles or numeric ids are written to the repository or
   to GitHub; documents refer to "tester 1..N".
-- Proposed size: 3 to 6 testers, asked to write in bursts of 2 or more messages
+- Size: three testers (owner decision). The owner recruits them and collects
+  their written consent. A consent given earlier counts only if it covers this
+  run. Nothing is assumed: without the owner's confirmation the preflight is red.
+  Withdrawal goes by direct message to the owner. They are asked to write in bursts of 2 or more messages
   at gaps shorter than 3 s and longer than 8 s, plus edits and deletes, over the
   whole window. A schedule is agreed with them.
 - Testers must be fresh non-contacts with no existing chat with the account: on
   2026-11-01 `onlySenders` admitted nobody who was in the contacts or chats, and
   opening scope exclusions is a separate owner permission that this plan does not
-  assume. The existing test sender is removed from `onlySenders` or kept, as the
-  owner says in D1.
-- Setting the allowlist, setting `listening: true` and the consent step are
-  separate owner permissions (D2). This plan does not perform them.
+  assume. The allowlist holds consenting testers only, so the existing test sender
+  is removed unless the owner confirms that it is one of them.
+- The owner permits (D2) setting the allowlist of consenting testers, enabling
+  listening and lifting `autopilot_paused` on the managed account for the window,
+  and enabling listening on the isolation account with `runtime: own`. Sending is
+  off and verified off on both before the start. Mode stays `observe`, and held
+  replies are not approved.
+- Scenarios: each tester sends bursts at gaps under 3 s and over 8 s, edits and
+  deletes, spread across the window. Bursts, edits and deletes come from people,
+  not scripts.
 
 If fewer testers agree than the minimum traffic needs, the run is reported as
 INCONCLUSIVE, not widened.
@@ -152,24 +159,28 @@ Cost denominators, defined once:
 | 5 | Coalescing | At least 3 coalesced turns (a `turn_id` grouping 2 or more jobs; `coalesced` rows point to the head through `coalesced_into`). | `agent_jobs` |
 | 6 | Isolation | A second account on `runtime: own` with `listening: true` exists for part of the window; its jobs are never claimed: 0 attempts, no `agent_usage` row, status `pending` or `routed` with reason `worker_unclaimed`, and the pool worker claims nothing for it. 0 binding rejections outside tests, each explained. | `agent_jobs.user_id`, `agent_usage`, logs |
 | 7 | Ledger | No `agent_usage` row older than visibility timeout plus one sweep outside `settled`; `mctl_agent_usage_held_usd` is 0 whenever no job is processing (it sums held rows of the current UTC day, so only idle moments are checked). | `agent_usage`, vmsingle |
-| 8 | Cost | Cost per completed turn at most 2x $0.0286; total within the window cap (D3). A ledger figure at list prices, not an invoice. | `agent_usage` summed as `COALESCE(cost_usd, reserved_usd)`, because `reserved` and `held` rows have NULL `cost_usd` (cross-check `agent_jobs.cost_usd`) |
-| 9 | Latency | p95 job latency at most 60 s (baseline p95 34 s, max 55.8 s). Proposed. | timestamps |
+| 8 | Cost | Cost per completed turn at most $0.0572 (2x $0.0286); total within the $3 window cap, including reserved and held (D3). A ledger figure at list prices, not an invoice. | `agent_usage` summed as `COALESCE(cost_usd, reserved_usd)`, because `reserved` and `held` rows have NULL `cost_usd` (cross-check `agent_jobs.cost_usd`) |
+| 9 | Latency | p95 job latency at most 60 s (baseline p95 34 s, max 55.8 s). | timestamps |
 | 10 | Provider health | Rates of `error_provider_429`, `error_provider`, `error_provider_no_usage` reported; no run of 3 or more consecutive jobs failing for provider reasons. | `last_error`, worker log |
 | 11a | No peer sends | `propose_reply` is the only peer-addressed action type. 0 rows with `action_type='propose_reply'` and (`executed_tg_message_id IS NOT NULL` or `status IN ('approved','executing','executed','delivery_unknown')` or `send_attempts > 0`), so an unconfirmed send also fails. Every `propose_reply` ends in `pending_approval`, `expired`, `denied` or `rejected`; a row still `proposed` at the end of the window is reported and resolved before the verdict. A single peer send is a stop condition. Queries filter on `action_type`; `status='executed'` alone also matches owner summaries. | `agent_actions` |
 | 11b | Owner-only notifications | `send_owner_summary` and `request_owner_approval` actions (security alerts are an intent of `send_owner_summary`) and `owner_notifications` rows (`kind` summary, approval_request, alert, human_input, and `budget`, which is queued once per exhausted budget window and is expected when criterion 12 records a cap hit) are expected; a `delivery_unknown` notification or action means a send with unknown outcome and is a stop condition, not an owner-only pass; a drafted `propose_reply` also yields an `approval_request` notification. Counted by `kind`, with the rate reported. Delivery goes to the managed account's own Saved Messages through the self-sender, there is no recipient column, and owner actions carry no `executed_tg_message_id`, so the evidence is `owner_notifications.status='sent'` with a `tg_message_id`. They are not peer sends and do not fail 11a. A notification that cannot be tied to the self-sender (for example a send logged to a peer) fails this row. | `owner_notifications`, `agent_actions` |
-| 12 | Budget behaviour | No unexplained `budget_paused_until`; any cap that is hit is recorded with whether it was intended. At the 1.00 per-account day cap a 72 h window spans up to four UTC days and about $4, so a $6 total needs the day cap raised (D3); otherwise the cap pause is expected and is not a failure. | `mctl_agent_budget_*`, `agent_usage` |
+| 12 | Budget behaviour | No unexplained `budget_paused_until`; any cap that is hit is recorded with whether it was intended. The window is three UTC days at the 1.00 per-account day cap, under the $3 total of D3, and a cap pause is expected and is not a failure. | `mctl_agent_budget_*`, `agent_usage` |
 | 13 | Observation integrity | No sampler gap longer than 15 minutes and logs cover the whole window; otherwise every dependent criterion is INCONCLUSIVE, never PASS. | sampler log |
 
 Minimum for a conclusive verdict: at least 3 coalesced turns and at least 30
-completed turns (proposed, D5). `ignored` jobs do not count. Below the minimum
-the verdict is INCONCLUSIVE and Part B stays open.
+completed turns (D5). `ignored` jobs do not count. Below the minimum the verdict
+is INCONCLUSIVE and Part B stays open.
 
 ### 3.4 Observability and evidence
 
-A read-only sampler runs every 5 minutes: restart counts and last termination
-reason, `kubectl top pod`, job counts by status, `processing` rows past the
-timeout, usage rows not settled, owner-only notification counts, and
-previous-container logs saved to a file whenever a restart is seen. At the end
+A read-only sampler (`scripts/gate-889/`) runs every 5 minutes: restart counts and
+last termination reason, `kubectl top pod`, job counts by status, `processing`
+rows past the timeout, usage rows not settled, owner-only notification counts,
+the detectors, image digests and pod templates against the pin, server and worker
+logs since the last sample, and previous-container logs whenever a restart is
+seen. Route reasons are saved per job while the window runs, because
+`event_outbox` does not reliably hold them afterwards. A failed or empty read is
+recorded as `COLLECT_ERROR`. Missing data is never counted as success. At the end
 the criteria are computed from `agent_jobs`, `agent_job_attempts`,
 `agent_usage`, `agent_actions` (metadata only; draft bodies are encrypted and are
 not read) and the metrics `mctl_agent_jobs_total`,
@@ -208,27 +219,45 @@ agent does nothing beyond them and reports at once.
 
 ### 3.6 Owner decisions (D)
 
-- D-A. How Part A is closed: a concurrency-2 run, or an owner amendment (section 2).
-- D1. Tester allowlist: how many testers, who asks them and records consent.
-- D2. Set the allowlist, switch to `listening: true`, bring up the isolation
-  account, and pre-authorise the stop actions in 3.5. Each is a separate
-  permission; nothing here is done without it.
-- D3. Window caps (raising the per-account day cap is required to reach $6). $6 over 72 h is about 210 completed turns at the $0.0286
-  baseline; the arithmetic is a proposal and the observed first-24 h rate
-  corrects it. Only per-account day (1.00 now, 3.00 if raised), per-account
-  month (15.00) and global day (5.00) are enforceable in config; the 72 h total
-  is a sampler stop condition. Raising and reverting the day cap are mctl-gitops
-  PRs.
-- D4. Worker stays on GLM-5.1 / Nebius (already decided).
-- D5. Thresholds: p95 60 s, cost per completed turn 2x, 30 completed turns, 15 min
-  sampler gap.
-- D6. Whether production observe numbers count as supplementary evidence for Part A.
-- D7. Minting or rotating the pool token or scaling the worker if needed; starting
-  the sampler against the preview database.
+All decided by the owner on 2026-11-04, except as noted.
+
+- D-A. Part A stays INCONCLUSIVE; section 2 records what this leaves open.
+- D1. Three testers. The owner recruits them and holds their consent, outside
+  GitHub. Withdrawal is by direct message to the owner.
+- D2. Allowlist, listening and lifting `autopilot_paused` on the managed account,
+  listening on the isolation account (`runtime: own`), and the stop actions of 3.5
+  are permitted for the window.
+- D3. At most $3 for the window, including reserved and held. The day cap stays
+  1.00. A schedule is not a guarantee, so the limit is enforced as described below.
+- D4. GLM-5.1 / Nebius.
+- D5. At least 30 completed turns, p95 at most 60 s, cost per completed turn at
+  most $0.0572, sampler gap at most 15 minutes. Too little traffic means
+  INCONCLUSIVE.
+- D6. Production observe data is supplementary only.
+
+How the $3 is held, for a window inside one UTC month:
+
+- `MANAGED_BUDGET_USD_PER_ACCOUNT_MONTH` is set to the month's ledger total at the
+  start plus 2.70, so the month cap is the window cap. A claim needs 0.25 of room,
+  and the reservation counts until the job settles.
+- With concurrency 1 only one job can overshoot its reservation. The job budget is
+  checked after a turn, so a job costs at most 0.25 plus one turn.
+  `AGENT_OPENAI_MAX_OUTPUT_TOKENS: "4096"` bounds that turn's output. Input is
+  bounded by the context limit: 200k tokens at list price is 0.28, and 4096 output
+  tokens is 0.018, so 0.30 at worst and 2.70 + 0.30 = 3.00. A job started near the
+  cap therefore still stays within the limit.
+- `MANAGED_CLAIM_NOT_AFTER` is set to the end of the window. From that instant no
+  job is claimed or reserved, whether or not anyone is present. Jobs already
+  claimed finish and settle.
+- A `held` row counts its reservation of 0.25, because its real cost is unknown,
+  and a job that never reports may have cost up to 0.55. So a row outside
+  `settled` past the grace is a stop condition (3.5) rather than something to
+  wait out, and the sampler alerts on it.
+- The ledger uses list prices, not the invoice. The provider's own figure is read
+  for #334 and is reported next to the ledger.
 
 Not in this plan, and each needs its own approval when it comes up: Cloudflare
-apply, Vault writes, production deploys or flags, any change of listening or
-sending outside D2.
+apply, production deploys or flags, any change of listening or sending outside D2.
 
 ### 3.7 GO / NO-GO
 
@@ -244,7 +273,7 @@ keeps the gate open; extend or repeat.
 
 ### 3.8 Risks
 
-- With 3 to 6 testers the volume may be too low (the 2026-10-31 soak was). The
+- With three testers the volume may be too low (the 2026-10-31 soak was). The
   result is then INCONCLUSIVE and the audience is not widened.
 - Testers see no reply, which can confuse them; the briefing says so.
 - The Nebius rate limit is unmeasured; a provider 429 storm resembles an
