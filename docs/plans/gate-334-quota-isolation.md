@@ -1,8 +1,14 @@
 # Gate #334: production quota isolation for the agent worker
 
-Status: draft plan, 2026-11-04. Nothing here has been executed. Issue #334
-stays open and the gate is not lifted by this document. Related: #889
-(`gate-889-managed-soak.md`), #1088, ADR 0008, `communication-agent.md`.
+Status: PLANNED, NOT APPROVED FOR EXECUTION (2026-11-04). Only the read-only
+Kubernetes checks in `gate-334-readonly-checks.md` have been run. Issue #334
+stays open and its acceptance criteria are not changed by this document.
+Related: #889 (`gate-889-managed-soak.md`), #1088, ADR 0008,
+`communication-agent.md`.
+
+Closure rule: #334 closes on its own evidence. It does not wait for #889 and
+#889 does not wait for it. Production GO for the managed runtime needs both
+closed (and the #889 Part B soak), as a separate owner decision.
 
 ## 1. Why the requirements need a reading for the managed runtime
 
@@ -35,7 +41,7 @@ not Claude Code.
 | # | Requirement (#334 acceptance) | Current evidence | Gap | Proposed verification |
 |---|---|---|---|---|
 | 1 | Credential belongs to a quota domain not used by interactive Claude Code or `claude-review.yml` | Managed path has no Anthropic dependency. Dedicated key at `secret/platform/labs/agent-worker-managed-preview/openai-nebius`; `AGENT_CREDENTIAL_DOMAIN_ID` is set to that path and exported as `mctl_agent_credential_domain`. | All of this evidence is for the preview worker; no production worker or production credential exists yet, so a production credential domain is a separate artifact still to be provisioned and evidenced. Separate Vault path is not separate quota. Whether the Nebius project or key is shared with other Nebius consumers (the support pilot uses a different Vault key) is unknown from the repo. A Cloudflare gateway token is shared across providers (auth only, not quota). | Owner confirms in the Nebius console which project each key belongs to and its rate limits; record non-secret project ids and the limit scope (key, project or organization). The AI Gateway account is also shared with the support agent, so record gateway-level limits too. The values file says the Nebius limit was not measured. If shared, decision D2. |
-| 2 | Credential only in Vault, mounted only into the worker pod | ExternalSecret `labs-agent-worker-managed-preview-openai` reads the Vault path above; one consuming Deployment. | Not proven that the Secret is not reflected into other namespaces (a past incident reflected a different PAT everywhere) or readable by other Vault roles. | `kubectl get secret` annotations and a search of all namespaces for the name; Vault policy listing for readers of the path (owner-assisted login). |
+| 2 | Credential only in Vault, mounted only into the worker pod | ExternalSecret `labs-agent-worker-managed-preview-openai` reads the Vault path above. Read-only kubectl on 2026-11-04: the Secret exists only in `labs`, is not reflected, is referenced by one pod, the worker has no `ANTHROPIC` or `CLAUDE` variable and its `envFrom` is three Secrets (`-api`, `-openai`, `-gateway`). | The cluster has one ClusterSecretStore, `vault-backend`, with the Vault role `external-secrets`. Whether that role (or any human or CI role) can read the managed path, for example through a `platform/*` wildcard, is unknown. | Vault checks in `gate-334-readonly-checks.md` section 2 (owner login, metadata and policy reads only). |
 | 3a | Per-job budget configured | `AGENT_MAX_BUDGET_USD: "0.25"`, server `MANAGED_MAX_JOB_COST_USD` 0.25, reservation at claim, settle at completion. | None for configuration. | Existing store tests; link them in the C2 report. |
 | 3b | Monthly budget configured | `MANAGED_BUDGET_USD_PER_ACCOUNT_MONTH` default 15.00, per-account day and global day caps. | Caps exist only on preview. Production has no `MANAGED_*` values, so the production numbers are undecided. The server has per-account day, per-account month and global day caps only; there is no global monthly cap, so cross-account monthly spend is bounded only by the global day cap times 30 and by a provider-side billing alert. | Decision D3; set them in gitops with the rollout PR, not before. |
 | 3c | Budget and rate-limit alerts tested | Metrics exist: `mctl_agent_budget_exhausted_total`, `mctl_agent_budget_deferred_total`, `mctl_agent_usage_held_usd`, `mctl_agent_managed_accounts`. Existing alerts: `MctlAgentClaudeUsageLimit` (class `usage_limit` of the Claude result metric), `MctlAgentJobCostHigh`, `MctlAgentDeadLetter`. | Deployed in mctl-gitops (`vm-rules/mctl-telegram-ops.yaml`): `MctlAgentManagedGlobalCapHit` (global day scope), `MctlAgentManagedSpendHigh` (OpenAI runner spend per hour) and `MctlAgentManagedPoolWorkerDown`. `error_provider_429` already maps to class `usage_limit`, so `MctlAgentClaudeUsageLimit` fires when the provider retry loop is exhausted, but its text and runbook are Claude-worded and it is a presence test, not a rate. Remaining gaps: no alert for the `account_day` and `account_month` scopes (deliberately omitted today), `budget_deferred_total`, `usage_held_usd` or `usage_held_rows`; no rate-based 429 alert; Nebius-side billing alert unverified. The repo file `deploy/alerts/mctl-telegram.rules.yaml` is a mirror, and the deployed copy lives in mctl-gitops. | Decide which missing alerts are required (D3); add them in the mirror and in a mctl-gitops PR, reword the usage-limit alert and runbook for provider 429, add promtool unit tests, state recipient and maximum delivery time, then one fire-and-resolve test on preview (D4). Owner confirms any Nebius billing alert. |
@@ -81,8 +87,8 @@ diverge. Until then the original text is the gate.
 | W1 | Reconcile the gitops proposal with the matrix | No | none |
 | W2 | Alert rules and promtool tests for row 3c: mirror file here and the deployed copy in mctl-gitops (a gitops PR, merged under the gitops approval rule) | No for the PRs; the deployed rules take effect only on merge | W1, D3 |
 | W3 | Managed rotation and revocation procedure in the runbook | No (PR) | none |
-| W4 | Static proofs: secret reflection, readers of the Vault path, no Anthropic env in the worker | No for read-only kubectl; a Vault policy read needs the owner's login (D5) | none |
-| W5 | Nebius project and limits confirmation, billing alert at Nebius | Yes (D2, owner console) | none |
+| W4 | Static proofs. Kubernetes part done (read-only). Vault part: readers of the path, per `gate-334-readonly-checks.md` section 2 | No for read-only kubectl; the Vault part needs the owner's login (D5) and reads metadata and policies only | none |
+| W5 | Nebius project and quota scope, billing alert, per `gate-334-readonly-checks.md` section 3 (read-only, owner reads the console) | Yes (D2, owner console); no change to keys or limits | none |
 | W6 | Production budget numbers | Yes (D3) | W5 |
 | W7 | Alert fire-and-resolve test on preview | Yes (D4): lowers a cap temporarily via gitops | W2, W6 |
 | W8 | Rotation drill on preview | Yes (D5): Vault write, Nebius console | W3, W5 |
@@ -95,8 +101,9 @@ production deploy or flag change happens without a separate owner approval.
 ## 5. GO / NO-GO
 
 GO for closing #334 only if every row of the matrix is either closed with
-evidence or covered by an owner-accepted amendment, the C2 report carries
-`Go/no-go: go`, and #889 is also closed. A GO here does not enable production.
+evidence or covered by an owner-accepted amendment and the C2 report carries
+`Go/no-go: go`. Closure does not depend on #889. A GO here does not enable
+production: production GO needs #334 and #889 both closed plus the Part B soak.
 NO-GO if isolation from other Nebius consumers is not demonstrated by the
 measured neighbour test (an owner statement from the console is evidence to
 record, not a substitute), if the production credential domain does not exist
