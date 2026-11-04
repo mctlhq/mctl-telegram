@@ -10,7 +10,7 @@ done by the agent without it.
 ## A. Authorisations (all OWNER)
 
 - [ ] A1. Owner decision D-A recorded on #889 (how Part A is closed).
-- [ ] A2. Tester allowlist approved (D1): count, who asks, how consent is kept.
+- [ ] A2. Tester allowlist approved (plan D1): at least 3 testers who are not contacts and have no chat with the account, who asks, how consent is kept.
 - [ ] A3. Written consent from every tester, covering: AI processing by a
       third-party provider, no replies sent, withdrawal at any time. Kept by the
       owner outside the repository.
@@ -47,12 +47,17 @@ done by the agent without it.
       job counts by status, `processing` older than 5 min, unsettled usage rows,
       owner-only notification counts.
 - [ ] C2. Database access works read-only and the queries for criteria 3 to 11b
-      run on the baseline.
+      run on the baseline, are green on it, and are shown red on a deliberate
+      mutation (for example a planted `propose_reply` row with a message id in a
+      scratch copy), so each detector is proven both ways.
 - [ ] C3. Log retention for the server and worker covers 72 h plus a margin, and
       previous-container logs are saved on any restart.
 - [ ] C4. Metrics queryable in vmsingle: the names listed in section 3.4 of the plan.
-- [ ] C5. Window start time and the baseline job id are written down; every
-      query filters on `created_at` from that time.
+- [ ] C5. Window start and end times and the baseline job id are written down;
+      every query filters on `created_at` from the start time. The end falls before
+      2026-11-11.
+- [ ] C6. Minimum traffic precondition: 30 completed turns and 3 coalesced turns
+      from organic tester traffic are achievable with the agreed schedule.
 
 ## D. Safety
 
@@ -65,6 +70,8 @@ done by the agent without it.
 
 ## E. Go for start
 
-All of A, B, C and D are ticked, with the answers recorded in a comment on #889.
+All of A, B, C and D are ticked, and the comment on #889 quotes each recorded
+value (tester count, window start and end, baseline job id, caps, thresholds). A
+tick with no quoted value does not count and a blank is NO-GO.
 The agent then asks for the start command from the owner; it does not start by
 itself.

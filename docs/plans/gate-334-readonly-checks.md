@@ -20,25 +20,38 @@ Results on preview, 2026-11-04:
   `labs/labs-agent-worker-managed-preview-openai`, Ready, store `vault-backend`.
 - The only pod that references that Secret is the pool worker pod in `labs`.
 - The worker Deployment has no environment variable with `ANTHROPIC` or `CLAUDE`
-  in its name; its `envFrom` is three Secrets: `-api`, `-openai` and `-gateway`.
-- `vault-backend` is the one ClusterSecretStore in the cluster. It authenticates
+  in its name (checked on the Deployment `env` names); its `envFrom` is three
+  Secrets: `-api`, `-openai` and `-gateway`. The key names inside those Secrets
+  (`AGENT_API_TOKEN`, `AGENT_OPENAI_API_KEY`, `AGENT_GATEWAY_TOKEN`) are taken
+  from the values file, not read from the Secrets.
+- Only `ExternalSecret` objects were listed. `ClusterExternalSecret`,
+  `PushSecret` and namespaced `SecretStore` objects were not, and are added to
+  the checks below.
+- `vault-backend` is the one ClusterSecretStore in the cluster, and any namespace
+  may reference a ClusterSecretStore, which is an isolation question in itself. It authenticates
   to Vault with the `external-secrets` role (Kubernetes auth). Which Vault paths
   that role can read is the open question below.
 
-Commands used (they print names and counts only):
+Disclosure: on 2026-11-04 the first of these reads used `-o json` on the Secret
+object, so the Secret's `data` was fetched into the local pipe, although only
+metadata keys were printed and nothing was displayed, logged or stored. That is
+below this document's own bar, so the command is replaced below. The Nebius key
+was not shown anywhere; the owner may still treat that read as an exposure of
+the object to the client and rotate under the rotation drill if preferred.
 
-- `kubectl get secret -A --field-selector metadata.name=<name> -o json`, then
-  `jq` on metadata and annotation keys only;
+Commands to use (names and counts only; the Secret `data` is never fetched):
+
+- `kubectl get secret -A --field-selector metadata.name=<name> -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,ANN:.metadata.annotations`;
 - `kubectl get externalsecret -A -o json`, then `jq` on `remoteRef.key` and status;
 - `kubectl get pods -A -o json`, then `jq` on `secretKeyRef`, `secretRef` and
-  secret volumes;
+  secret volumes (Pod specs hold references, never secret values);
 - `kubectl -n labs get deploy <worker> -o json`, then `jq` on env variable names.
 
 ## 2. Vault (read-only, needs the owner's login)
 
 Purpose: show who can read `secret/platform/labs/agent-worker-managed-preview/`.
-The owner logs in first with the full command from the memory file (OIDC); the
-agent then runs only read operations. If the token cannot read policies, the
+The owner logs in first with the OIDC login command documented in
+`docs/runbook.md`; the agent then runs only read operations. If the token cannot read policies, the
 owner runs the commands and shares the policy names, not secret values.
 
 1. `vault kv metadata get secret/platform/labs/agent-worker-managed-preview/openai-nebius`
@@ -50,12 +63,18 @@ owner runs the commands and shares the policy names, not secret values.
    read on `secret/data/platform/*`, `secret/data/platform/labs/*` or the exact
    path? A wildcard means every ExternalSecret that the store accepts can read
    this key, which is the isolation gap to record.
-4. `vault list auth/kubernetes/role`, then `vault read` on each role and check
-   the policies for the same paths.
+4. `vault auth list` to enumerate every auth mount (kubernetes, oidc, approle,
+   jwt, userpass). For each mount, list its roles (`vault list auth/<mount>/role`)
+   and `vault read` each one, checking the attached policies for the same paths.
+   Then `vault list identity/group/name` and `vault list identity/entity/name`,
+   reading the policies attached to groups and entities, and `vault policy read
+   default` and any admin or root-like policy.
 5. `vault token capabilities secret/data/platform/labs/agent-worker-managed-preview/openai-nebius`
    for the owner's own token, to know what the owner's role can do (informational).
-6. Check the OIDC and human roles listed with `vault list auth/oidc-or-mctl/role`
-   (path depends on the mount in use) for policies reading the platform path.
+6. Also in the cluster (read-only kubectl, metadata only): `kubectl get
+   clusterexternalsecret,pushsecret,secretstore -A` and the `ClusterSecretStore`
+   conditions, to know which namespaces may reference `vault-backend` and
+   whether anything else can read or copy the path.
 
 Record: role names, policy names, the exact path patterns granted, and a
 yes/no for "only the ExternalSecret of the worker can read this path". If the

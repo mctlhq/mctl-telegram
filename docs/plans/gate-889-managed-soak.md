@@ -33,7 +33,7 @@ Interim result: 2026-11-01; the final analysis is not yet posted.
 
 | Original criterion | Status | Evidence and what is missing |
 |---|---|---|
-| #885 merged and on preview | Issue closed; build not verified | Confirm by `git merge-base --is-ancestor` against the preview image tag (preflight P1). |
+| #885 merged and on preview | Issue closed; build not verified | Confirm by `git merge-base --is-ancestor` against the preview image tag (preflight B1). |
 | #886 merged | Issue closed; build not verified | Same. |
 | 0 OOMKilled and 0 restarts on both pods; worker peak against 512Mi | Met in the interim result | Peak RSS 15.4 MiB, 0 restarts. Confirm over the full window. |
 | Session health: no `AUTH_KEY_*` or `unauthorized` | Met in the interim result | 0 lines in 26 h of logs. Confirm over the full window. |
@@ -49,8 +49,14 @@ passed on a concurrency-1 run is not allowed without an amendment.
 
 Ways to close Part A (owner chooses, D-A):
 
-1. A new preview run with worker concurrency 2 (a mctl-gitops change, needs
-   approval) and traffic that meets the minimum, showing the 2-claim moment and
+1. A new preview run with worker concurrency 2 and traffic that meets the
+   minimum. `agent-worker-preview` already sets `AGENT_WORKER_CONCURRENCY: "2"`
+   with `replicaCount: 0`, so the change is to scale that worker (or raise the
+   managed pool worker's concurrency), not a new setting; the Mac mini worker that
+   served the first soak follows production release tags. Only one listener per
+   account is safe, so a second worker must not listen on the same account. The
+   window must also end before the Anthropic promotional credit expires on
+   2026-11-11. Owner approval is needed for whichever worker is scaled, and the run showing the 2-claim moment and
    the bounds. This satisfies the issue as written.
 2. An owner amendment recorded on #889: the conversation plane is accepted at
    concurrency 1, with the reasoning, and the global bound of 2 is replaced by
@@ -78,7 +84,7 @@ rollout restarts the 72 h clock unless the owner waives it; the rollout 503 gap
 ### 3.2 Traffic source (decision D1): allowlist of consenting testers
 
 Preview allows `MANAGED_RUNTIME_MAX_ACCOUNTS: "1"`; the managed account is
-@mctlhq, whose `audience.onlySenders` holds one test sender, so it receives no
+the managed test account, whose `audience.onlySenders` holds one test sender, so it receives no
 real inbound. The chosen variant is a limited allowlist of testers who agreed:
 
 - The allowlist is `audience.onlySenders` of the managed install, set before
@@ -94,6 +100,11 @@ real inbound. The chosen variant is a limited allowlist of testers who agreed:
 - Proposed size: 3 to 6 testers, asked to write in bursts of 2 or more messages
   at gaps shorter than 3 s and longer than 8 s, plus edits and deletes, over the
   whole window. A schedule is agreed with them.
+- Testers must be fresh non-contacts with no existing chat with the account: on
+  2026-11-01 `onlySenders` admitted nobody who was in the contacts or chats, and
+  opening scope exclusions is a separate owner permission that this plan does not
+  assume. The existing test sender is removed from `onlySenders` or kept, as the
+  owner says in D1.
 - Setting the allowlist, setting `listening: true` and the consent step are
   separate owner permissions (D2). This plan does not perform them.
 
@@ -109,8 +120,13 @@ earlier `dead_letter` rows).
 
 Cost denominators, defined once:
 
-- Total cost = the sum of `agent_jobs.cost_usd` over all jobs created in the
-  window, ignored and failed ones included, because they invoke the model.
+- Total cost = the sum of `agent_usage.cost_usd` (the ledger, one row per job
+  and attempt, so retries are counted) over the jobs created in the window.
+  `agent_jobs.cost_usd` holds only the last attempt and is NULL for coalesced
+  members, so it is a cross-check, not the total. Jobs closed as `ignored`
+  without a model call (#1012, conversation not active) have no usage row; the
+  report splits ignored jobs into model-invoking and model-less, and cost per job
+  is computed over all jobs and over model-invoking jobs.
 - Cost per job = total cost / number of jobs. GLM-5.1 preview baseline: $0.6585
   / 32 = $0.0206.
 - Cost per completed turn = total cost / number of completed turns, where a turn
@@ -125,17 +141,17 @@ Cost denominators, defined once:
 |---|---|---|---|
 | 1 | Uptime and restarts | 0 OOMKilled and 0 crash restarts for the preview server pods and the pool worker; highest sampled working set against the 256Mi worker limit (a sampled peak). Rollout restarts excluded only under a recorded owner waiver of the freeze. | `kubectl get pod`, `lastState`, `kubectl top`, sampler |
 | 2 | Session health | 0 `AUTH_KEY_*` or `unauthorized` revocations of the managed account. | server logs |
-| 3 | Job outcomes | `dead_letter` = 0 for jobs of the window (an explained dead letter still fails); no job `processing` with `claimed_at` older than the visibility timeout (5 min); each `attempts > 1` listed and explained; `routed` only for policy reasons, never `worker_unclaimed` (route reason in `event_outbox`). | `agent_jobs`, `event_outbox` |
+| 3 | Job outcomes | For the managed account: `dead_letter` = 0 for jobs of the window (an explained dead letter still fails); no job `processing` with `claimed_at` older than the visibility timeout (5 min); each `attempts > 1` listed and explained; `routed` only for policy reasons, never `worker_unclaimed` (route reason in `event_outbox`). The isolation account is excluded here and covered by criterion 6, because the server routes any `pending` job with 0 attempts older than `AGENT_UNCLAIMED_ROUTE_AFTER` (5 m) to `routed(worker_unclaimed)` whatever its runtime. | `agent_jobs`, `event_outbox` |
 | 4 | Concurrency and claim | Worker concurrency is 1: never more than 1 concurrent claim globally and never more than 1 per conversation. This says nothing about Part A's 2-claim criterion and is not offered as evidence for it. | `agent_job_attempts` overlap query |
 | 5 | Coalescing | At least 3 coalesced turns (a `turn_id` grouping 2 or more jobs; `coalesced` rows point to the head through `coalesced_into`). | `agent_jobs` |
-| 6 | Isolation | A second account on `runtime: own` with `listening: true` exists for part of the window; its jobs stay `pending` with 0 attempts, no claim and no `agent_usage` row, and the pool worker claims nothing for it. 0 binding rejections outside tests, each explained. | `agent_jobs.user_id`, `agent_usage`, logs |
+| 6 | Isolation | A second account on `runtime: own` with `listening: true` exists for part of the window; its jobs are never claimed: 0 attempts, no `agent_usage` row, status `pending` or `routed` with reason `worker_unclaimed`, and the pool worker claims nothing for it. 0 binding rejections outside tests, each explained. | `agent_jobs.user_id`, `agent_usage`, logs |
 | 7 | Ledger | No `agent_usage` row older than visibility timeout plus one sweep outside `settled`; `mctl_agent_usage_held_usd` is 0 whenever no job is processing (it sums held rows of the current UTC day, so only idle moments are checked). | `agent_usage`, vmsingle |
-| 8 | Cost | Cost per completed turn at most 2x $0.0286; total within the window cap (D3). A ledger figure at list prices, not an invoice. | `agent_jobs.cost_usd` |
+| 8 | Cost | Cost per completed turn at most 2x $0.0286; total within the window cap (D3). A ledger figure at list prices, not an invoice. | `agent_usage.cost_usd` (cross-check `agent_jobs.cost_usd`) |
 | 9 | Latency | p95 job latency at most 60 s (baseline p95 34 s, max 55.8 s). Proposed. | timestamps |
 | 10 | Provider health | Rates of `error_provider_429`, `error_provider`, `error_provider_no_usage` reported; no run of 3 or more consecutive jobs failing for provider reasons. | `last_error`, worker log |
-| 11a | No peer sends | 0 actions addressed to a peer with an executed Telegram message id (`propose_reply` and any other peer-addressed action); every `propose_reply` stays `pending_approval` or ends `expired`. A single peer send is a stop condition. | `agent_actions` |
-| 11b | Owner-only notifications | `send_owner_summary`, approval requests and security alerts are expected. They are counted separately by type, each is addressed to the owner chat only, and the rate is reported. They are not peer sends and do not fail 11a, but a notification addressed to anyone other than the owner fails this row. | `agent_actions`, notifier logs |
-| 12 | Budget behaviour | No unexplained `budget_paused_until`; any cap that is hit is recorded with whether it was intended. | `mctl_agent_budget_*`, `agent_usage` |
+| 11a | No peer sends | `propose_reply` is the only peer-addressed action type. 0 rows with `action_type='propose_reply'` and (`executed_tg_message_id IS NOT NULL` or `status IN ('approved','executing','executed','delivery_unknown')` or `send_attempts > 0`), so an unconfirmed send also fails. Every `propose_reply` ends in `pending_approval`, `expired`, `denied` or `rejected`. A single peer send is a stop condition. Queries filter on `action_type`; `status='executed'` alone also matches owner summaries. | `agent_actions` |
+| 11b | Owner-only notifications | `send_owner_summary` and `request_owner_approval` actions (security alerts are an intent of `send_owner_summary`) and `owner_notifications` rows (`kind` summary, approval_request, alert, human_input) are expected; a drafted `propose_reply` also yields an `approval_request` notification. Counted by `kind`, with the rate reported. Delivery goes to the managed account's own Saved Messages through the self-sender, there is no recipient column, and owner actions carry no `executed_tg_message_id`, so the evidence is `owner_notifications.status='sent'` with a `tg_message_id`. They are not peer sends and do not fail 11a. A notification that cannot be tied to the self-sender (for example a send logged to a peer) fails this row. | `owner_notifications`, `agent_actions` |
+| 12 | Budget behaviour | No unexplained `budget_paused_until`; any cap that is hit is recorded with whether it was intended. At the 1.00 per-account day cap a 72 h window spans up to four UTC days and about $4, so a $6 total needs the day cap raised (D3); otherwise the cap pause is expected and is not a failure. | `mctl_agent_budget_*`, `agent_usage` |
 | 13 | Observation integrity | No sampler gap longer than 15 minutes and logs cover the whole window; otherwise every dependent criterion is INCONCLUSIVE, never PASS. | sampler log |
 
 Minimum for a conclusive verdict: at least 3 coalesced turns and at least 30
@@ -175,7 +191,7 @@ Stop conditions:
 
 A targeted stop (spend, a single-account problem, an auth revocation, a
 withdrawn tester): set `listening: false` first so nothing new is ingested, then
-`paused: true`; do not close the whole pool (runbook, spend-storm mitigation).
+`paused: true`; do not close the whole pool (runbook, spend-storm mitigation; the listening step is an addition to the runbook text).
 A full rollback (a pool-level defect, a cross-account claim) follows the
 runbook "Managed runtime rollback" in order: account to `runtime: own` with
 `listening: false`, worker `replicaCount: 0`, revoke the pool token, then
@@ -191,7 +207,7 @@ agent does nothing beyond them and reports at once.
 - D2. Set the allowlist, switch to `listening: true`, bring up the isolation
   account, and pre-authorise the stop actions in 3.5. Each is a separate
   permission; nothing here is done without it.
-- D3. Window caps. $6 over 72 h is about 210 completed turns at the $0.0286
+- D3. Window caps (raising the per-account day cap is required to reach $6). $6 over 72 h is about 210 completed turns at the $0.0286
   baseline; the arithmetic is a proposal and the observed first-24 h rate
   corrects it. Only per-account day (1.00 now, 3.00 if raised), per-account
   month (15.00) and global day (5.00) are enforceable in config; the 72 h total
@@ -210,9 +226,11 @@ sending outside D2.
 
 ### 3.7 GO / NO-GO
 
-Part B is PASS only if the minimum traffic is met, criterion 13 holds, no stop
-condition fired, the preflight was complete, and tester consent covered the
-whole window. Part B PASS is evidence for the managed-runtime production
+Part B is PASS only if every criterion 1 to 13 is PASS with none INCONCLUSIVE,
+the minimum traffic is met by organic tester traffic from at least 3 distinct
+testers (no scripted or fixture-replay input counts toward the minimum), no stop
+condition fired, the preflight was complete with each recorded value quoted, and
+tester consent covered the whole window. Part B PASS is evidence for the managed-runtime production
 decision; it does not close #889 by itself (section 1).
 
 An inconclusive Part A or Part B never counts as a pass. NO-GO or INCONCLUSIVE
