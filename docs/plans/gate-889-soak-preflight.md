@@ -56,6 +56,8 @@ done by the agent without it.
 - [ ] C5. Window start and end times and the baseline job id are written down;
       every query filters on `created_at` from the start time. The end falls before
       2026-11-11.
+- [ ] C7. The value of `EVENTS_OPERATOR_ROUTING` on preview is recorded (default false:
+      then no routed rows exist and criterion 3's route-reason check is not observable).
 - [ ] C6. Minimum traffic precondition: 30 completed turns and 3 coalesced turns
       from organic tester traffic are achievable with the agreed schedule.
 
