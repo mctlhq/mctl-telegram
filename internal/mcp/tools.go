@@ -3116,7 +3116,7 @@ Inputs (required):
 			return mcplib.NewToolResultError("forward blocked: " + s.withSendDisabledHint(id, dryReason)), nil
 		}
 		// Rate-limit on the destination peer (outbound message target), costed
-		// by batch size — forwarding N messages spends N of the 20/hour budget,
+		// by batch size — forwarding N messages spends N of the 200/hour budget,
 		// not 1, so a single large batch can't bypass the per-peer cap.
 		toPeerRedacted := telegram.RedactPeer(toPeer)
 		if blocked, r := evaluateDirectSendLimiterN(s.Limiter, id, toPeer, len(messageIDs)); blocked {
