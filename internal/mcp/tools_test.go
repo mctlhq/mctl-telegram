@@ -1723,8 +1723,8 @@ func TestDirectSendLimiter_RefusalNamesTheWait(t *testing.T) {
 		evaluateDirectSendLimiter(limiter, id, "@alice")
 	}
 	_, reason := evaluateDirectSendLimiter(limiter, id, "@alice")
-	if !strings.Contains(reason, "rate limit reached") || !strings.Contains(reason, "retry in about 3 min") {
-		t.Errorf("refusal %q does not name the 3 min wait", reason)
+	if !strings.Contains(reason, "rate limit reached") || !strings.Contains(reason, "retry in about 18 s") {
+		t.Errorf("refusal %q does not name the 18 s wait", reason)
 	}
 	_, reason = evaluateDirectSendLimiterN(limiter, id, "@carol", audit.PeerSendCap+1)
 	if !strings.Contains(reason, "rate limit reached") || !strings.Contains(reason, "can never fit") || strings.Contains(reason, "retry in") {
