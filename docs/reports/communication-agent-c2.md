@@ -58,7 +58,7 @@ check.
 |---|---|---|
 | Per job, `MANAGED_MAX_JOB_COST_USD` and `AGENT_MAX_BUDGET_USD` | 0.25 | undecided (D3) |
 | Per account per UTC day, `MANAGED_BUDGET_USD_PER_ACCOUNT_DAY` | 1.00 | undecided (D3) |
-| Per account per month, `MANAGED_BUDGET_USD_PER_ACCOUNT_MONTH` | 15.00 | undecided (D3) |
+| Per account per month, `MANAGED_BUDGET_USD_PER_ACCOUNT_MONTH` | 15.00 (code default; not set in the preview values) | undecided (D3) |
 | Global per UTC day, `MANAGED_BUDGET_USD_GLOBAL_DAY` | 5.00 | undecided (D3) |
 | Global per month | does not exist | undecided: bounded only by the global day cap times 30 and by a provider-side alert |
 
