@@ -30,7 +30,7 @@ data. `GATE889_DIR` must be set; there is no default.
 
 ```sh
 export GATE889_DIR=... GATE889_WS=2030-06-15T00:00:00Z GATE889_WE=2030-06-18T00:00:00Z
-scripts/gate-889/sampler.sh pin    # record images and pod templates under test
+scripts/gate-889/sampler.sh pin    # record images, pod templates and pod names under test
 scripts/gate-889/sampler.sh once   # a dry run; exit 0 only if every collector worked
 scripts/gate-889/sampler.sh loop
 ```
@@ -40,9 +40,9 @@ scripts/gate-889/sampler.sh loop
 | `samples/<ts>.txt` | One file per sample. `COLLECT_ERROR` marks a read that failed or returned nothing. |
 | `ticks.log` | One line per sample with its error count. Gaps are computed from it. |
 | `errors.log` | Every collection error. |
-| `alerts.log` | Gaps over 15 minutes, restarts, image or pod template changes, a listening account with sending on, red detectors, managed jobs routed as `worker_unclaimed`. |
+| `alerts.log` | Gaps over 15 minutes, restarts, replaced pods, image or pod template changes, a listening account with sending on, red detectors, managed jobs routed as `worker_unclaimed`. `c5_coalesced_turns` is left out because it stays red until the third burst; it is judged at the end of the window. |
 | `route-reasons.log` | `job_id runtime reason` for routed jobs in the window, saved while `event_outbox` still holds them; `unobserved` when it does not. |
-| `logs/` | Server and worker logs since the last sample; `*.previous.*` after a restart. |
+| `logs/` | Server and worker logs since the last sample; `*.previous.*` after a restart. A failed fetch keeps the cursor, so lines can repeat: remove duplicates at analysis. |
 
 A sample with `COLLECT_ERROR` is not evidence of anything. Any gap over 15 minutes
 makes the dependent criteria INCONCLUSIVE, never PASS.
