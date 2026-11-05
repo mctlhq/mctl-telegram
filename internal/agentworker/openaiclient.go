@@ -106,7 +106,10 @@ type OpenAIClient struct {
 	GatewayToken string
 	Model        string
 	UserAgent    string
-	HTTP         *http.Client
+	// MaxOutputTokens, when positive, is sent as max_tokens, so that the cost of
+	// the one turn that can pass the job budget is bounded. Zero omits it.
+	MaxOutputTokens int
+	HTTP            *http.Client
 }
 
 type openAITool struct {
@@ -140,7 +143,8 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []ChatMessage, tools []too
 		Tools      []openAITool  `json:"tools,omitempty"`
 		ToolChoice string        `json:"tool_choice,omitempty"`
 		Stream     bool          `json:"stream"`
-	}{Model: c.Model, Messages: msgs, Tools: wireTools, ToolChoice: "auto", Stream: false})
+		MaxTokens  int           `json:"max_tokens,omitempty"`
+	}{Model: c.Model, Messages: msgs, Tools: wireTools, ToolChoice: "auto", Stream: false, MaxTokens: c.MaxOutputTokens})
 	if err != nil {
 		return nil, fmt.Errorf("encode chat request: %w", err)
 	}

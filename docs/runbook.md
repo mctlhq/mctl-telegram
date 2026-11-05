@@ -43,13 +43,18 @@ to do about it), see [docs/troubleshooting.md](troubleshooting.md) instead.
 - [Canary](#canary)
 - [Deployment compatibility boundaries](#deployment-compatibility)
 - [Communication Agent operations](#communication-agent-operations)
-- [MctlAgentClaudeUsageLimit — communication-agent Claude credential quota exhausted](#mctlagentclaudeusagelimit)
+- [MctlAgentClaudeUsageLimit — communication-agent model credential limit reached](#mctlagentclaudeusagelimit)
 - [MctlAgentPolicyDenialRateHigh — communication-agent policy-denial share high](#mctlagentpolicydenialratehigh)
 - [MctlAgentJobCostHigh — communication-agent spend per finished job high](#mctlagentjobcosthigh)
 - [MctlAgentManagedGlobalCapHit — managed global daily budget exhausted](#mctlagentmanagedglobalcaphit)
 - [MctlAgentManagedSpendHigh — managed OpenAI spend high](#mctlagentmanagedspendhigh)
 - [MctlAgentManagedPoolWorkerDown — managed pool worker down](#mctlagentmanagedpoolworkerdown)
+- [MctlAgentManagedAccountMonthCapHit — managed account monthly budget exhausted](#mctlagentmanagedaccountmonthcaphit)
+- [MctlAgentManagedBudgetDeferredSustained — managed claims deferred for 30 minutes](#mctlagentmanagedbudgetdeferredsustained)
+- [MctlAgentManagedUsageHeld — managed usage rows held](#mctlagentmanagedusageheld)
+- [MctlAgentProviderRateLimitHigh — provider rate limits failing agent jobs](#mctlagentproviderratelimithigh)
 - [Managed runtime: pool token, activation and rollback](#managed-runtime-pool-token)
+- [Managed runtime: model and gateway credential rotation](#managed-runtime-credential-rotation)
 - [Login-bot update receiver](#login-bot-update-receiver)
 - [Media response memory bounds (issue #705)](#media-response-memory-bounds)
 - [Connect and OAuth callback rejection reasons](#connectrejectionreasons)
@@ -364,6 +369,7 @@ New `agent_jobs` status label values: `coalesced` (member of a coalesced turn, t
 | `MANAGED_MAX_JOB_COST_USD` | `0.50` | Managed spend: the amount reserved against the budgets for every claimed managed job, and the `max_job_cost_usd` the claim envelope hands the worker (> 0, not above any cap below). ADR 0008 section 5. |
 | `MANAGED_BUDGET_USD_PER_ACCOUNT_DAY` | `1.00` | Managed spend cap per account per UTC day (> 0). Overridable per account through the admin profile route (`managed_budget_usd_day`). |
 | `MANAGED_BUDGET_USD_PER_ACCOUNT_MONTH` | `15.00` | Managed spend cap per account per UTC month (> 0). Per-account override: `managed_budget_usd_month`. |
+| `MANAGED_CLAIM_NOT_AFTER` | unset | RFC 3339 instant at which managed claims stop. Nothing new is claimed or reserved from then on; jobs already claimed finish and settle. Ingestion is not affected. For time-boxed runs. |
 | `MANAGED_BUDGET_USD_GLOBAL_DAY` | `20.00` (tg-preview deploys `5.00`) | Managed spend cap across all accounts per UTC day (> 0). At the cap every managed account with pending jobs is paused until the day ends and its owner is notified once. |
 | worker `AGENT_POOL_MODE` | `false` | Worker-side (`true`/`false`, anything else refuses to start): `AGENT_API_TOKEN` is the pool credential, which can only claim. Every per-job call, including the status check and cost report, uses the job token; a job without one fails and the pool token is never a fallback. |
 
@@ -546,6 +552,15 @@ includes it, and it reaches the job tokens derived from the pool token.
 <a id="managed-runtime-activation"></a>
 ### Managed runtime activation
 
+**Step 0, production go/no-go.** This section describes preview activation.
+Before any production activation, all of the following must be true, and the
+owner decides separately even then:
+
+- mctlhq/mctl-telegram#334 is closed;
+- mctlhq/mctl-telegram#889 is closed;
+- Part B of the #889 managed soak has a recorded PASS;
+- `docs/reports/communication-agent-c2.md` carries `Go/no-go: go`.
+
 Activation starts only after the owner's separate activation approval. Each
 step starts only after the previous one is verified. The canonical list is
 the "Activation" section of
@@ -577,6 +592,74 @@ one change.
    answers 200 with the bearer and 401 without.
 6. A6: the owner switches one preview account to `runtime: managed` with
    consent, then a soak of at least 30 jobs.
+
+<a id="managed-runtime-credential-rotation"></a>
+### Managed runtime: model and gateway credential rotation
+
+The pool worker holds two more credentials besides the pool token. Neither
+value is ever pasted into a chat, a ticket or a log, and the worker's Secrets
+are never read with `-o json` or `-o yaml`.
+
+| Credential | Vault path, property `token` | ExternalSecret | Env |
+|---|---|---|---|
+| Nebius model key | `secret/platform/labs/agent-worker-managed-preview/openai-nebius` | `labs-agent-worker-managed-preview-openai` | `AGENT_OPENAI_API_KEY` |
+| AI Gateway run token | `secret/platform/labs/agent-worker-managed-preview/gateway`, canonical copy `secret/platform/mctl-telegram/ai-gateway` | `labs-agent-worker-managed-preview-gateway` | `AGENT_GATEWAY_TOKEN` |
+
+Both reach the pod through `envFrom`, so the pod reads them only when it
+starts: a Vault write changes nothing until the ExternalSecret has refreshed
+and the pod has been rolled. Vault writes and provider console actions are done
+by the owner.
+
+**Planned rotation of the Nebius key.** Do it when the queue is quiet.
+
+1. Note the time. In the Nebius console, create a new key in the same project.
+   Do not reuse a key of another service.
+2. Write it to Vault from the clipboard, so that it is not on a command line:
+   `pbpaste | vault kv put secret/platform/labs/agent-worker-managed-preview/openai-nebius token=-`.
+   Clear the clipboard.
+3. Check the new version with `vault kv metadata get` on that path, never
+   `vault kv get`.
+4. Wait for the ExternalSecret refresh or force it, and confirm it reports
+   `SecretSynced`.
+5. Roll the worker pod and wait until it is Ready.
+6. Run one controlled job on the managed test account and confirm that it
+   reaches a terminal status with a `settled` `agent_usage` row.
+7. Revoke the old key in the Nebius console. Note the time.
+8. Prove that the old key fails: a 1-token call with it through the gateway,
+   printing only the HTTP status, must be refused. Run one more controlled job
+   and confirm that the new key still works.
+9. Record in `docs/reports/communication-agent-c2.md`: the times of steps 1 and
+   7, the Vault version numbers and the results of steps 6 and 8. No key value
+   and no key fragment.
+
+**Suspected leak of the Nebius key.** Revocation comes first and availability
+second:
+
+1. Revoke the key in the Nebius console at once.
+2. Expect `error_provider` failures on managed jobs until the new key is live.
+   If traffic is flowing, stop it first with the targeted stop: `listening:
+   false`, then `paused: true`. Do not close the whole pool.
+3. Follow steps 2 to 6 above with a new key, then re-enable the account.
+4. Review the Nebius usage for the exposure period and record the result.
+
+**AI Gateway run token.**
+
+1. Create the replacement in the Cloudflare dashboard for the
+   `mctl-telegram-ai-gateway-run` manifest entry in
+   `infrastructure/cloudflare/tokens/manifest.tf` (AI Gateway Run only). A
+   change to that manifest goes through a reviewed mctl-gitops PR.
+2. Write it to both Vault paths above, again with `pbpaste` and `token=-`.
+3. Follow steps 3 to 6 above for `labs-agent-worker-managed-preview-gateway`.
+4. Check the gateway with a 1-token call that prints only the HTTP status: 200
+   with the bearer and 401 without. The gateway header is
+   `cf-aig-authorization`.
+5. Delete the old token in the dashboard, then confirm that it answers 401.
+
+The gateway token proves authorisation to the gateway. It is not a quota
+boundary, and rotating it does not change the Nebius quota domain.
+
+The rotation drill of #334 runs this procedure on preview and needs a separate
+owner approval, because it writes to Vault and acts in the Nebius console.
 
 <a id="managed-runtime-rollback"></a>
 ### Managed runtime rollback
@@ -653,7 +736,10 @@ approve or send the held replies in bulk.
 ---
 
 <a id="mctlagentclaudeusagelimit"></a>
-## MctlAgentClaudeUsageLimit — communication-agent Claude credential quota exhausted
+## MctlAgentClaudeUsageLimit — communication-agent model credential limit reached
+
+The name is historical: the alert also covers the OpenAI runner, whose
+`error_provider_429` subtype counts as `usage_limit`.
 
 The deployed rule for this alert lives in the `mctl-gitops` copy of
 `mctl-telegram-ops.yaml`; the copy in `deploy/alerts/mctl-telegram.rules.yaml`
@@ -1130,6 +1216,159 @@ refusal reason. Check the ExternalSecrets for `SecretSynced`.
 ### Escalation
 
 - **Warning**: investigate within 1 business day.
+
+<a id="mctlagentmanagedaccountmonthcaphit"></a>
+## MctlAgentManagedAccountMonthCapHit — managed account monthly budget exhausted
+
+The thresholds of this and the next three alerts are proposed values, pending
+the owner's decision D3 on mctlhq/mctl-telegram#334.
+
+### Symptom
+
+- Alert `MctlAgentManagedAccountMonthCapHit` fires when
+  `sum(increase(mctl_agent_budget_exhausted_total{scope="account_month"}[15m])) > 0`.
+- One account's settled plus held usage reached
+  `MANAGED_BUDGET_USD_PER_ACCOUNT_MONTH`. Its jobs wait until the UTC month
+  rolls over. Other accounts are not affected.
+
+### Likely causes
+
+- One account's real traffic over the month.
+- Held rows counted against the budget without a confirmed cost. See
+  [MctlAgentManagedUsageHeld](#mctlagentmanagedusageheld).
+
+### Diagnostic queries
+
+```promql
+sum by (scope) (increase(mctl_agent_budget_exhausted_total[24h]))
+mctl_agent_usage_held_usd
+sum by (model) (increase(mctl_agent_usage_cost_usd_total{runner="openai"}[24h]))
+```
+
+### Mitigation
+
+1. Separate real spend from held rows before anything else.
+2. If the spend is real and expected, leave the account paused until the month
+   rolls over, or switch it to `runtime: own`.
+3. Raise the cap only after the owner agrees, through a reviewed mctl-gitops
+   PR, never to silence the alert.
+
+### Escalation
+
+- **Warning**: investigate within 1 business day; the owner decides on any cap
+  change.
+
+<a id="mctlagentmanagedbudgetdeferredsustained"></a>
+## MctlAgentManagedBudgetDeferredSustained — managed claims deferred for 30 minutes
+
+### Symptom
+
+- Alert `MctlAgentManagedBudgetDeferredSustained` fires when
+  `sum(increase(mctl_agent_budget_deferred_total[15m])) > 0` holds for 30 minutes.
+- A deferral means in-flight reservations alone used up a budget. It causes no
+  pause and no notification, and it normally clears when the running jobs
+  finish. Sustained deferral means that reservations are not clearing.
+
+### Likely causes
+
+- A job stuck in processing, which holds its reservation.
+- A budget so close to its reservation size that one job fills it.
+
+### Diagnostic queries
+
+```promql
+sum by (scope) (increase(mctl_agent_budget_deferred_total[1h]))
+sum by (status) (increase(mctl_agent_jobs_total[1h]))
+mctl_agent_usage_held_usd
+```
+
+### Mitigation
+
+1. Find the scope that defers and check for a job stuck in processing.
+2. If nothing is stuck, compare the cap with `MANAGED_MAX_JOB_COST_USD`. A cap
+   change is the owner's decision.
+
+### Escalation
+
+- **Warning**: investigate within 1 business day.
+
+<a id="mctlagentmanagedusageheld"></a>
+## MctlAgentManagedUsageHeld — managed usage rows held
+
+### Symptom
+
+- Alert `MctlAgentManagedUsageHeld` fires when
+  `max(mctl_agent_usage_held_rows) > 0` holds for 15 minutes.
+- A held row is a reservation that ended without a settled cost report. It
+  counts against the budget at its reserved amount.
+- The gauge covers the current UTC day, so the alert resolves at the day
+  rollover at the latest. That does not mean the row was reconciled.
+
+### Likely causes
+
+- A worker that died or was rolled during a job, before it reported the cost.
+- A cost report refused by the server (see `ErrUsageConflict` and
+  `ErrUsageCredential` in `internal/db/agent_usage.go`).
+
+### Diagnostic queries
+
+```promql
+max(mctl_agent_usage_held_rows)
+max(mctl_agent_usage_held_usd)
+sum by (status) (increase(mctl_agent_jobs_total[1h]))
+```
+
+Read the worker log around the attempt for the failed report. Log lines carry
+no message bodies.
+
+### Mitigation
+
+1. Identify the attempt and why its report did not arrive.
+2. Compare the reserved amount with the provider's usage before you treat the
+   amount as lost or as spent.
+3. Do not edit `agent_usage` rows by hand to clear the alert.
+
+### Escalation
+
+- **Warning**: investigate within 1 business day. Escalate to the owner if held
+  rows are what exhausted a budget.
+
+<a id="mctlagentproviderratelimithigh"></a>
+## MctlAgentProviderRateLimitHigh — provider rate limits failing agent jobs
+
+### Symptom
+
+- Alert `MctlAgentProviderRateLimitHigh` fires when more than 2 jobs in the last
+  hour, and more than 20 percent of finished jobs, ended on a usage limit or an
+  exhausted provider 429 retry loop.
+- [MctlAgentClaudeUsageLimit](#mctlagentclaudeusagelimit) is the presence test
+  for one such job. This alert is the rate.
+
+### Likely causes
+
+- Managed traffic above the provider limit of the key's quota domain.
+- Another consumer of the same provider project, if the limit is shared at
+  project level. That scope is unread (mctlhq/mctl-telegram#334, W5).
+
+### Diagnostic queries
+
+```promql
+sum(increase(mctl_agent_claude_result_errors_total{class="usage_limit"}[1h]))
+sum by (status) (increase(mctl_agent_jobs_total[1h]))
+```
+
+Check the Nebius console for the limit and the current usage of the project.
+
+### Mitigation
+
+1. Reduce the load: pause the account responsible, not the whole pool.
+2. If the limit is too low for the expected traffic, the owner requests a
+   higher one from the provider.
+
+### Escalation
+
+- **Warning**: investigate within 1 business day. Escalate to the owner if it
+  persists for more than one hour of traffic.
 
 ---
 
