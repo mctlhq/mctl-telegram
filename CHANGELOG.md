@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.124.0](https://github.com/mctlhq/mctl-telegram/compare/0.123.2...0.124.0) (2026-11-05)
+
+
+### Features
+
+* **agent:** add hard limiters for time-boxed managed runs ([5dfad36](https://github.com/mctlhq/mctl-telegram/commit/5dfad36aa7eca27b5500e5e6c4d2c3b9ea9d8f34))
+* **agent:** add hard limiters for time-boxed managed runs ([dfa6b5a](https://github.com/mctlhq/mctl-telegram/commit/dfa6b5aac8f5ba9303c267c17c0a06efbd449cb3))
+* **agents:** issue-1092-feat-agent-managed-tier-usage-ledger-wit ([a787e97](https://github.com/mctlhq/mctl-telegram/commit/a787e97940efe54863695fb82c5d190f905a8f4c))
+* **agents:** issue-1092-feat-agent-managed-tier-usage-ledger-wit ([b33966d](https://github.com/mctlhq/mctl-telegram/commit/b33966d3a5d9eccb76daab0257c299fdb0c0b0b5))
+* **agents:** issue-1094-ci-release-publish-the-agent-worker-imag ([5b73592](https://github.com/mctlhq/mctl-telegram/commit/5b73592335484cba9558b21baa13578cf4fb9447))
+* **agents:** issue-1095-docs-managed-runtime-env-table-spec-t4-r ([0bf4c0f](https://github.com/mctlhq/mctl-telegram/commit/0bf4c0f8c18cc992eaa68d4c74927add4185abb7))
+* **alerts:** mirror managed budget alerts and add runbooks ([e27b955](https://github.com/mctlhq/mctl-telegram/commit/e27b955eeba0b568d8af75ca84a7b8c6f9fba7ea))
+* **alerts:** mirror managed budget alerts and add runbooks ([cdf6ed7](https://github.com/mctlhq/mctl-telegram/commit/cdf6ed75dc969427bd1ae670401a56803c9882da))
+
+
+### Bug Fixes
+
+* **agentapi:** only the job token settles a managed reservation ([c956663](https://github.com/mctlhq/mctl-telegram/commit/c9566634c79a0163a30d0236ca9a7fa456380fbe))
+* **agent:** hold worker-ended reservations, bound model label ([8eaf066](https://github.com/mctlhq/mctl-telegram/commit/8eaf066e8ef0711bc5fa1f442ffd75e9951e8649))
+* **agent:** managed-only model label slots, reserved partial index ([8341c9b](https://github.com/mctlhq/mctl-telegram/commit/8341c9bf3572098ec3ace2a2cd28897e472da8a0))
+* **agents:** address P1/P2 codex findings on issue-1094-ci-release-publish-the-agent-worker-imag ([1cbd97a](https://github.com/mctlhq/mctl-telegram/commit/1cbd97aa0b6bf90e26cbe0f28e92313b26470b4f))
+* **gate-889:** close sampler and detector gaps found in review ([e8f54fa](https://github.com/mctlhq/mctl-telegram/commit/e8f54fa06b4a02462934cfa02e0aba32a8ce1359))
+
 ## [0.123.2](https://github.com/mctlhq/mctl-telegram/compare/0.123.1...0.123.2) (2026-11-03)
 
 
