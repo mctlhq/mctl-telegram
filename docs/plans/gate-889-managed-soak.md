@@ -69,8 +69,8 @@ on #889, using the table above, with the window and the figures filled in.
 ### 3.1 Preconditions
 
 See `gate-889-soak-preflight.md` for the checklist. In short: #885 and #886 are
-in the build under test (same check as Part A), the pool worker is on GLM-5.1 via
-Nebius with concurrency 1, the audience and consent are set by the owner, caps
+in the build under test (same check as Part A), the pool worker is on GLM-5.3-Flash via
+Nebius (D4) with concurrency 1, the audience and consent are set by the owner, caps
 are recorded, the sampler runs, and the build is frozen for the window. A
 rollout restarts the 72 h clock unless the owner waives it; the rollout 503 gap
 (tg#1108) counts as a rollout effect.
@@ -229,7 +229,15 @@ All decided by the owner on 2026-11-04, except as noted.
   are permitted for the window.
 - D3. At most $3 for the window, including reserved and held. The day cap stays
   1.00. A schedule is not a guarantee, so the limit is enforced as described below.
-- D4. GLM-5.1 / Nebius.
+- D4. GLM-5.3-Flash / Nebius, amended by the owner on 2026-11-05. It was GLM-5.1,
+  which hangs on Nebius and leaves Serverless on 2026-11-09. Flash answered a tool
+  call directly and through the gateway, and its prices (0.15 input, 0.50 output
+  per Mtok) were read from the Nebius API catalog. Part B therefore validates the
+  runtime, not the model for production: Flash failed C1 in spike #1093, and any
+  production model still needs two clean C1 passes on the current prompt version.
+  The cost threshold and the p95 baseline below were measured on GLM-5.1. They
+  stand as set, but Flash is about nine times cheaper, so meeting the cost
+  threshold proves little.
 - D5. At least 30 completed turns, p95 at most 60 s, cost per completed turn at
   most $0.0572, sampler gap at most 15 minutes. Too little traffic means
   INCONCLUSIVE.
