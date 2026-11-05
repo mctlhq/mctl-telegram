@@ -28,7 +28,7 @@ no identifier or consent text is written to GitHub.
       image and of the pool worker image. Both tags recorded.
 - [ ] B2. Preview server and pool worker are on the same release lineage; image
       tags recorded and compared to `main`.
-- [ ] B3. Worker: `AGENT_RUNNER=openai`, model `zai-org/GLM-5.1`, base URL
+- [ ] B3. Worker: `AGENT_RUNNER=openai`, model `zai-org/GLM-5.3-Flash` (D4), base URL
       `custom-nebius`, `AGENT_WORKER_CONCURRENCY=1`, 1 replica, memory limit 256Mi.
 - [ ] B4. `MANAGED_RUNTIME_ENABLED` true on preview, `MANAGED_RUNTIME_MAX_ACCOUNTS`
       1, day cap 1.00, per-job cap 0.25. `MANAGED_BUDGET_USD_PER_ACCOUNT_MONTH` is
