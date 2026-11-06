@@ -351,6 +351,7 @@ New `agent_jobs` status label values: `coalesced` (member of a coalesced turn, t
 | `AGENT_ENABLED` | `false` | Mounts the Agent API and starts agent runtime components. It is not the emergency send cutoff. |
 | `AGENT_KILL_SWITCH` | `false` | Global server-side deny gate. Production values must explicitly set it; dark starts use `true`. |
 | `AGENT_RETENTION_DAYS` | `30` | Clears encrypted message-derived content after this many days. `0` means indefinite retention and is prohibited for production without a documented exception. |
+| `AGENT_LEAD_RETENTION_DAYS` | `90` | Deletes a job lead this many days after its last update. `0` keeps leads until account deletion. |
 | `AGENT_JOB_VISIBILITY` | `5m` | Time before a processing claim is treated as stale and requeued/dead-lettered. Must exceed the worst expected model turn. |
 | `AGENT_TURN_QUIET` | `0` (off) | Turn-coalescing quiet window. When set (e.g. `3s`), a burst of messages in one conversation becomes one job; every reply waits at least this long. `AGENT_TURN_MAX_WAIT` (`15s`), `AGENT_TURN_MAX_MSGS` (`10`) and `AGENT_TURN_MAX_BYTES` (`16384`) bound a turn. Roll workers out before enabling. |
 | `AGENT_UNCLAIMED_ROUTE_AFTER` | `5m` | With `EVENTS_OPERATOR_ROUTING` on, a job no worker claimed within this time is moved to `routed` and forwarded to the operator stream with `routing_reason=worker_unclaimed`. Must exceed `AGENT_TURN_MAX_WAIT` when coalescing is on. Worst-case latency is this plus the 1m sweep interval. |
@@ -443,7 +444,7 @@ action rows, and close the test window if it dead-letters again.
 | `conversation_messages` | Encrypted inbound/outbound context | `AGENT_RETENTION_DAYS` | Rows deleted by agent retention sweeper or hard account deletion |
 | `agent_actions` | Policy/lifecycle metadata, encrypted draft and exact send body, encrypted approval capability | Terminal or inactive pre-send content: `AGENT_RETENTION_DAYS`; executing recovery content: until terminal; lifecycle tombstone: account lifetime | Old inactive pre-send actions are denied, then terminal content/capabilities are nulled; executing rows retain the exact body and random ID for safe recovery; row purged on hard deletion |
 | `owner_notifications` | Encrypted owner summary/draft plus delivery metadata | Body: `AGENT_RETENTION_DAYS`; metadata: account lifetime | Body nulled by sweeper; row purged on hard deletion |
-| `job_leads` | Recruiter/company/role/compensation details | Account lifetime or earlier user-requested deletion | Hard account deletion |
+| `job_leads` | Encrypted recruiter/company/role/compensation details; status in the clear | `AGENT_LEAD_RETENTION_DAYS` (90d default) after the last update | Rows deleted by job lead sweeper or hard account deletion |
 | `conversations` | Peer metadata, state, counters, timestamps | Account lifetime | Hard account deletion |
 | `agent_jobs`, `agent_job_attempts` | Queue state, attempt timing, bounded error text, result IDs | Account lifetime; message body is not copied here | Hard account deletion |
 | `agent_profiles` | Policy settings and per-tenant encrypted owner profile | Account lifetime | Hard account deletion; a content-free legacy-import tombstone may remain while the login identity remains |

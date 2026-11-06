@@ -347,6 +347,12 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	if err := addColumnIfMissing(ctx, dbConn, pg, "job_leads", "job_id", "BIGINT", "INTEGER"); err != nil {
 		return fmt.Errorf("migrate agent: %w", err)
 	}
+	// New writes keep a lead's private fields here, sealed with the owner's
+	// key. The old columns stay for rows SealPlaintextJobLeads has not reached
+	// yet and for an older binary after a rollback.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "job_leads", "data_encrypted", "BYTEA", "BLOB"); err != nil {
+		return fmt.Errorf("migrate agent: %w", err)
+	}
 	idxStmt := `CREATE INDEX IF NOT EXISTS idx_job_leads_job ON job_leads(job_id) WHERE job_id IS NOT NULL`
 	if _, err := dbConn.ExecContext(ctx, idxStmt); err != nil {
 		return fmt.Errorf("migrate agent: %w\nstmt: %s", err, idxStmt)

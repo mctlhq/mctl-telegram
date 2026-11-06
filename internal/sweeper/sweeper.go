@@ -129,6 +129,40 @@ func refreshTokenSweepOnce(ctx context.Context, store *db.Store) {
 	}
 }
 
+// JobLeads keeps job_leads in line with the privacy page until ctx is
+// cancelled: it deletes leads not updated within retention and encrypts any
+// that still have fields in the clear. It runs at boot and then daily.
+func JobLeads(ctx context.Context, store *db.Store, retention time.Duration) {
+	ticker := time.NewTicker(AgentRetentionSweeperInterval)
+	defer ticker.Stop()
+	jobLeadsSweepOnce(ctx, store, retention)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			jobLeadsSweepOnce(ctx, store, retention)
+		}
+	}
+}
+
+func jobLeadsSweepOnce(ctx context.Context, store *db.Store, retention time.Duration) {
+	deleted, err := store.SweepJobLeads(ctx, retention)
+	if err != nil {
+		slog.Warn("job lead retention sweep failed", "err", err)
+	} else if deleted > 0 {
+		slog.Info("job lead retention sweep", "deleted_rows", deleted, "retention", retention)
+	}
+	sealed, failed, err := store.SealPlaintextJobLeads(ctx)
+	if err != nil {
+		slog.Warn("job lead seal pass failed", "err", err, "sealed", sealed, "failed", failed)
+		return
+	}
+	if sealed > 0 || failed > 0 {
+		slog.Info("job lead seal pass", "sealed", sealed, "failed", failed)
+	}
+}
+
 // AgentRetentionSweeperInterval is how often AgentRetention() wakes up. Daily
 // matches the other retention sweeps; the window is measured in days.
 const AgentRetentionSweeperInterval = 24 * time.Hour
