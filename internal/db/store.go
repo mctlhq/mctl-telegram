@@ -30,6 +30,9 @@ type Store struct {
 	Crypt   *crypto.AESGCM
 	metrics *metrics.Registry
 
+	// sessionEnded receives sessions a user ended; see WithSessionEnded.
+	sessionEnded func(userID int64, session []byte)
+
 	// ttlExempt holds Telegram ids whose sessions never hit the absolute or
 	// idle TTL. Read-only after construction; see WithAbsoluteTTLExempt.
 	ttlExempt map[int64]bool
@@ -1069,20 +1072,108 @@ func (s *Store) UpdateSessionBlobByID(ctx context.Context, userID, sessionID int
 //
 // reason is recorded in mctl_sessions_revoked_total{reason} when a metrics
 // registry is wired.
+//
+// Because the user asked for the connection to end, the sealed session is
+// erased in the same statement and handed to the WithSessionEnded hook, which
+// ends the authorization at Telegram. Marking the row revoked alone would leave
+// a working auth key in the database and the device listed in Telegram.
 func (s *Store) RevokeActiveSession(ctx context.Context, userID int64, reason string) (bool, error) {
-	res, err := s.DB.ExecContext(ctx,
-		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = $2
+	// Resolve the dialect before opening the transaction: the probe uses a
+	// second pooled connection, which would deadlock on single-connection SQLite.
+	pg, err := s.postgresDialect(ctx)
+	if err != nil {
+		return false, fmt.Errorf("revoke session: %w", err)
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("revoke session: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	// The same users-row lock saveSession takes, so a sign-in cannot commit a
+	// row between the read and the update below. Such a row would be revoked
+	// and erased without its authorization being ended.
+	if pg {
+		if _, err := tx.ExecContext(ctx, `SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, userID); err != nil {
+			return false, fmt.Errorf("revoke session: lock user: %w", err)
+		}
+	}
+	sealed, err := activeSessionBlobs(ctx, tx, userID)
+	if err != nil {
+		return false, fmt.Errorf("revoke session: %w", err)
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = $2, session_encrypted = NULL
 		 WHERE user_id = $1 AND revoked_at IS NULL`,
 		userID, nullable(reason),
 	)
 	if err != nil {
 		return false, fmt.Errorf("revoke session: %w", err)
 	}
-	rows, _ := res.RowsAffected()
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("revoke session: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("revoke session: commit: %w", err)
+	}
 	if rows > 0 && s.metrics != nil && reason != "" {
 		s.metrics.SessionsRevokedTotal.WithLabelValues(reason).Inc()
 	}
+	s.notifySessionsEnded(userID, sealed)
 	return rows > 0, nil
+}
+
+// activeSessionBlobs reads the sealed sessions of the user's active rows. A
+// local-mode row holds none and is skipped.
+func activeSessionBlobs(ctx context.Context, tx *sql.Tx, userID int64) ([][]byte, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT session_encrypted FROM telegram_accounts WHERE user_id = $1 AND revoked_at IS NULL`,
+		userID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("read active sessions: %w", err)
+	}
+	defer rows.Close()
+	var out [][]byte
+	for rows.Next() {
+		var blob []byte
+		if err := rows.Scan(&blob); err != nil {
+			return nil, fmt.Errorf("read active sessions: %w", err)
+		}
+		if len(blob) > 0 {
+			out = append(out, blob)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read active sessions: %w", err)
+	}
+	return out, nil
+}
+
+// WithSessionEnded sets the hook that receives the decrypted bytes of each
+// session a user ended by disconnecting or deleting the account. It runs after
+// the commit, on the caller's goroutine and possibly under the client pool's
+// lock, so it must return without waiting on Telegram.
+func (s *Store) WithSessionEnded(fn func(userID int64, session []byte)) *Store {
+	s.sessionEnded = fn
+	return s
+}
+
+// notifySessionsEnded hands committed, erased sessions to the hook. A session
+// that no longer decrypts is logged: its row is already gone, and the user can
+// still close the device from Telegram.
+func (s *Store) notifySessionsEnded(userID int64, sealed [][]byte) {
+	if s.sessionEnded == nil {
+		return
+	}
+	for _, blob := range sealed {
+		data, err := s.Crypt.OpenForUser(blob, userID)
+		if err != nil {
+			slog.Warn("db: ended session did not decrypt, Telegram logout skipped", "uid", userID, "err", err)
+			continue
+		}
+		s.sessionEnded(userID, data)
+	}
 }
 
 // RevokeSessionByID revokes one specific active session row. Runtime clients
@@ -1147,6 +1238,13 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 		userID,
 	).Scan(&activeRows); err != nil {
 		return 0, fmt.Errorf("delete account: count active: %w", err)
+	}
+
+	// The active sessions go with the rows; read them so their authorizations
+	// can be ended at Telegram once the delete has committed.
+	sealedSessions, err := activeSessionBlobs(ctx, tx, userID)
+	if err != nil {
+		return 0, fmt.Errorf("delete account: %w", err)
 	}
 
 	// Read the Telegram ids before the account rows go: worker tokens and
@@ -1312,6 +1410,7 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	if activeRows > 0 && s.metrics != nil {
 		s.metrics.SessionsRevokedTotal.WithLabelValues("delete").Add(float64(activeRows))
 	}
+	s.notifySessionsEnded(userID, sealedSessions)
 	return rows, nil
 }
 
