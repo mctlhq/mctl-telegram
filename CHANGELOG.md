@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.125.2](https://github.com/mctlhq/mctl-telegram/compare/0.125.1...0.125.2) (2026-11-06)
+
+
+### Bug Fixes
+
+* **seo:** cache-bust OpenGraph image to purge outdated preview ([78ee3fc](https://github.com/mctlhq/mctl-telegram/commit/78ee3fc3d1fa1623ceebc9b1ddc54ef28f190f4c))
+
 ## [0.125.1](https://github.com/mctlhq/mctl-telegram/compare/0.125.0...0.125.1) (2026-11-06)
 
 
