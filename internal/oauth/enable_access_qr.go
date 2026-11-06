@@ -174,6 +174,8 @@ func (s *Server) handleEnableQRStart(w http.ResponseWriter, r *http.Request) {
 	}
 	defer es.lock.Unlock()
 
+	s.recordHeardFrom(r, es)
+
 	if s.cfg.TGAPIID == 0 || s.cfg.TGAPIHash == "" {
 		renderEnableError(w, "This server is not configured for in-browser Telegram login. Contact the operator.")
 		return

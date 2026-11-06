@@ -1259,7 +1259,7 @@ func (s *Server) toolGetAcquisitionReport() (mcplib.Tool, mcpserver.ToolHandlerF
 Inputs:
   days — int, optional, default 7, 1..90.
 
-Output: JSON {days, buckets: [{source, signups, tool_call_users, active_2plus_days}]}. source is utm_source, else the referrer host, else "direct" (capture ran and saw no source), "unknown" (no usable capture), "unknown (pre-capture)" (user predates capture) or "unknown (not recorded)". Values are self-reported by the visitor's browser and sanitized.`),
+Output: JSON {days, buckets: [{source, signups, tool_call_users, active_2plus_days}]}. source is the answer the person picked on the connect screen for "How did you hear about us?" (optional, from a fixed list), else, on accounts created before that question existed, utm_source, the referrer host or "direct", else "unknown" (no answer), "unknown (pre-capture)" (user predates capture) or "unknown (not recorded)". Values are self-reported and sanitized.`),
 		mcplib.WithNumber("days",
 			mcplib.Description("Window in days (default 7, max 90).")),
 	)

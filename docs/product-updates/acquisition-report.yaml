@@ -7,12 +7,11 @@ summary: >-
   see, for a chosen window of up to 90 days, how many people signed up per
   source, how many of them made at least one tool call and how many came
   back on two or more days. The source is recorded once, when an account is
-  created, from the first public page the person opened: the UTM tags on
-  that link, the referring site's host name and the MCP client they
-  connected with. No IP address, user agent or page path is kept, the
-  record is deleted with the account, and the privacy page describes the
-  short-lived first-party cookie that carries it. This tool is for
-  operators; it changes nothing for everyday use.
+  created: the MCP client they connected with and, if they choose to answer,
+  how they heard about the service. No cookie, IP address or user agent is
+  used for it, the record is deleted with the account, and the privacy page
+  describes it. This tool is for operators; it changes nothing for everyday
+  use.
 locale: en
 delivery: docs_only
 high_value: false
