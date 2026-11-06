@@ -147,7 +147,7 @@
       <tr>
         <td><code>user_acquisition</code></td>
         <td>The sign-up record described under <a href="#signup-attribution">Sign-up attribution</a></td>
-        <td>Learning which links bring people to the service</td>
+        <td>Learning how people find the service</td>
         <td>Removed by account deletion</td>
       </tr>
       <tr>
@@ -180,8 +180,8 @@
   <p>The sign-in, consent, connect, and account-management pages under <code>/oauth</code>, <code>/telegram/connect</code>, and <code>/local-bridge/activate</code> do not load Umami, and no Telegram data, tool call, token, or account identifier is ever sent to it. Page-view records are deleted automatically 2 years after they were recorded.</p>
 
   <h2 id="signup-attribution">Sign-up attribution</h2>
-  <p>To learn which posts, listings and links bring people to the service, the first public content page you open sets one first-party cookie, <code>mctl_acq</code>. It is signed, HttpOnly, SameSite=Lax, and expires after 24 hours. It holds the campaign parameters present in the page address (<code>utm_source</code>, <code>utm_medium</code>, <code>utm_campaign</code>, <code>utm_content</code>, <code>utm_term</code>, each at most 100 characters), the host name of the referring site (no path or query), and the landing page path. A later page view does not overwrite it.</p>
-  <p>Only when you create your account for the first time, one record is stored with those values, the type of AI client you connected from (for example Claude or ChatGPT), and the time. If no cookie is present the record says the source is unknown. No IP address, user agent, or other fingerprint is stored for this purpose, the record is never updated afterwards, and it is deleted when you delete your account.</p>
+  <p>When you create your account, the connect screen asks &ldquo;How did you hear about us?&rdquo;. The answer is optional, and you pick it from a fixed list. One record is stored with your answer, if you gave one, the type of AI client you connected from (for example Claude or ChatGPT), and the time. The service sets no cookie for this and stores no IP address, user agent, or other fingerprint for it. The record is deleted when you delete your account.</p>
+  <p>The record of an account created earlier may also hold the campaign parameters (<code>utm_source</code>, <code>utm_medium</code>, <code>utm_campaign</code>, <code>utm_content</code>, <code>utm_term</code>), referring host name and landing page path that a first-party cookie, <code>mctl_acq</code>, carried at sign-up. That cookie is no longer set.</p>
 
   <h2>Communication Agent controls</h2>
   <ul>

@@ -199,3 +199,67 @@ func TestEnsureUserByTelegramCapture_ReturningUserWithoutRowGetsNone(t *testing.
 		t.Fatal("a returning user must not gain an acquisition row")
 	}
 }
+
+func TestRecordHeardFrom_FirstAnswerStaysAndLeadsTheLabel(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, err := s.EnsureUserByTelegramCapture(ctx, captureFor(77021,
+		&Acquisition{State: AcquisitionAttributed, UTMSource: "blog"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	since := time.Now().UTC().Add(-time.Hour)
+	if ask, err := s.HeardFromUnanswered(ctx, uid, since); err != nil || !ask {
+		t.Fatalf("new account: ask=%v err=%v, want true", ask, err)
+	}
+	if err := s.RecordHeardFrom(ctx, uid, "search"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordHeardFrom(ctx, uid, "telegram"); err != nil {
+		t.Fatal(err)
+	}
+	if ask, err := s.HeardFromUnanswered(ctx, uid, since); err != nil || ask {
+		t.Fatalf("answered account: ask=%v err=%v, want false", ask, err)
+	}
+	labels, err := s.AcquisitionLabelsFor(ctx, []int64{77021})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if labels[77021] != "search" {
+		t.Fatalf("label = %q, want the first answer", labels[77021])
+	}
+}
+
+func TestHeardFromUnanswered_NotAskedOutsideTheWindowOrWithoutARecord(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	old, err := s.EnsureUserByTelegramCapture(ctx, captureFor(77022, &Acquisition{State: AcquisitionUnknown}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	since := time.Now().UTC().Add(time.Hour)
+	if ask, err := s.HeardFromUnanswered(ctx, old, since); err != nil || ask {
+		t.Fatalf("record older than the window: ask=%v err=%v", ask, err)
+	}
+	none, err := s.EnsureUserByTelegramCapture(ctx, captureFor(77023, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ask, err := s.HeardFromUnanswered(ctx, none, time.Now().UTC().Add(-time.Hour)); err != nil || ask {
+		t.Fatalf("no record: ask=%v err=%v", ask, err)
+	}
+}
+
+func TestHeardFromUnanswered_FailedReadIsAnErrorNotFalse(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	if _, err := s.DB.Exec(`ALTER TABLE user_acquisition RENAME TO user_acquisition_gone`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.HeardFromUnanswered(ctx, 1, time.Now()); err == nil {
+		t.Fatal("a failed read must return an error")
+	}
+	if err := s.RecordHeardFrom(ctx, 1, "search"); err == nil {
+		t.Fatal("a failed write must return an error")
+	}
+}

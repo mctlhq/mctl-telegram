@@ -471,6 +471,12 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 		"TIMESTAMPTZ", "DATETIME"); err != nil {
 		return err
 	}
+	// user_acquisition.heard_from: the optional answer to "How did you hear
+	// about us?" on the connect screen. Empty means no answer.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "user_acquisition", "heard_from",
+		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	// broadcast_campaigns.end_reason (issue-439 delivery): why a campaign
 	// ended without delivering to its whole audience -- e.g. the audience
 	// grew past the recipient limit between approval and execution. Empty
