@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.125.1](https://github.com/mctlhq/mctl-telegram/compare/0.125.0...0.125.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* **login:** end replaced sessions of another account ([80b6059](https://github.com/mctlhq/mctl-telegram/commit/80b6059f5cdebf17def6441606da485f603dd504))
+* **login:** end replaced sessions of another account ([e4b4774](https://github.com/mctlhq/mctl-telegram/commit/e4b4774873d9babc9fc4687d87b4acb6a4114d16))
+
 ## [0.125.0](https://github.com/mctlhq/mctl-telegram/compare/0.124.1...0.125.0) (2026-11-06)
 
 
