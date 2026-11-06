@@ -220,7 +220,7 @@ PUT    /api/account/notifications   # change one or more categories</pre>
     <li><strong>Hetzner</strong> (hosting) — the service and its database run on Hetzner Cloud servers.</li>
     <li><strong>Cloudflare</strong> (network and backups) — traffic to tg.mctl.ai passes through Cloudflare, which can read it while forwarding it. Database backups are stored in Cloudflare R2.</li>
     <li><strong>Google Fonts</strong> — public content pages load web fonts from Google, so your browser sends your IP address to Google when you open them.</li>
-    <li><strong>The AI model provider behind Communication Agent</strong> — when the agent is enabled, the model that runs it receives the Telegram messages and context it works on, in readable form.</li>
+    <li><strong>Anthropic</strong> (AI model) — when Communication Agent is enabled, the Claude model that runs it receives the Telegram messages and context it works on, in readable form. Our test environment uses Nebius, reached through Cloudflare AI Gateway, instead.</li>
     <li>No advertising or third-party analytics is injected by this service. Public content pages count visits with Umami, which we host ourselves (see <a href="#website-analytics">Website analytics</a>). OAuth/session-management pages use strict CSP and load no analytics; public content pages load the mctl design stylesheet and web fonts for presentation.</li>
   </ul>
 
