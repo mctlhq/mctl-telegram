@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.124.1](https://github.com/mctlhq/mctl-telegram/compare/0.124.0...0.124.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* **account:** end the Telegram session on disconnect and delete ([fae8e1d](https://github.com/mctlhq/mctl-telegram/commit/fae8e1d6f2ef55ab723ca9383fde1899a007400e))
+* **account:** end the Telegram session on disconnect and delete ([ce398f7](https://github.com/mctlhq/mctl-telegram/commit/ce398f763acb656b4e755d9fb4004d79fbb6db80))
+* **deps:** bump brotli and compress past reachable advisories ([3b0cf22](https://github.com/mctlhq/mctl-telegram/commit/3b0cf22e5b753f51a8e7e2329a461857f6f0562c))
+* **deps:** bump brotli and compress past reachable advisories ([5ff7445](https://github.com/mctlhq/mctl-telegram/commit/5ff7445986e91126d4aea5424c18a782c800a5ba))
+
 ## [0.124.0](https://github.com/mctlhq/mctl-telegram/compare/0.123.2...0.124.0) (2026-11-05)
 
 
