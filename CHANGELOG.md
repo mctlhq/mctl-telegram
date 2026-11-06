@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.125.3](https://github.com/mctlhq/mctl-telegram/compare/0.125.2...0.125.3) (2026-11-06)
+
+
+### Bug Fixes
+
+* **branding:** add raster apple-touch-icon, binary favicon.ico, and ecosystem links ([a743d1e](https://github.com/mctlhq/mctl-telegram/commit/a743d1ea9efc34bbc26e121d41a3e3bf940dbd78))
+* **branding:** add raster apple-touch-icon, binary favicon.ico, and ecosystem links ([ff08951](https://github.com/mctlhq/mctl-telegram/commit/ff089514c53d20e11318c08ec505fb165b9d1c65))
+
 ## [0.125.2](https://github.com/mctlhq/mctl-telegram/compare/0.125.1...0.125.2) (2026-11-06)
 
 
