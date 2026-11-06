@@ -106,7 +106,7 @@
         <td><code>audit_logs</code> table</td>
         <td>Tool/action name, redacted peer reference, status, and a redacted error string. <strong>No message body, phone number, bearer token, or session bytes.</strong></td>
         <td>Operational visibility, abuse detection, and user-visible audit history</td>
-        <td>Default 90 days via <code>AUDIT_RETENTION_DAYS</code>; 0 keeps rows indefinitely</td>
+        <td>Default 90 days via <code>AUDIT_RETENTION_DAYS</code>; 0 keeps rows indefinitely. Account deletion does not remove these rows: they stay until that window ends. They are not encrypted.</td>
       </tr>
       <tr>
         <td>Process memory</td>
@@ -120,9 +120,46 @@
         <td>Operator debugging</td>
         <td>Per the platform's Loki retention (typically 14–30 days)</td>
       </tr>
+      <tr>
+        <td><code>job_leads</code></td>
+        <td>Job leads the Communication Agent records from your conversations: company, role, recruiter name and Telegram ID, compensation, status, and other details. These fields are not encrypted.</td>
+        <td>Tracking the leads the agent handles for you</td>
+        <td>Until account deletion. <code>AGENT_RETENTION_DAYS</code> does not apply.</td>
+      </tr>
+      <tr>
+        <td><code>oauth_refresh_tokens</code></td>
+        <td>A hash of each refresh token, the client's ID, name and redirect address, your Telegram ID and username, the granted scope, and issue, expiry and revocation times</td>
+        <td>Keeps your MCP client connected</td>
+        <td>Revoked by account deletion. The row is removed after the token expires.</td>
+      </tr>
+      <tr>
+        <td><code>local_bridge_devices</code></td>
+        <td>Device ID and label, registration and last-seen times, and revocation details</td>
+        <td>Local Bridge device management</td>
+        <td>Revoked by account deletion, and the row is kept as a revoked record</td>
+      </tr>
+      <tr>
+        <td><code>worker_token_revocations</code></td>
+        <td>Your Telegram ID, token ID, revocation time and reason</td>
+        <td>Makes sure a revoked worker token stays refused</td>
+        <td>Kept after account deletion</td>
+      </tr>
+      <tr>
+        <td><code>user_acquisition</code></td>
+        <td>The sign-up record described under <a href="#signup-attribution">Sign-up attribution</a></td>
+        <td>Learning which links bring people to the service</td>
+        <td>Removed by account deletion</td>
+      </tr>
+      <tr>
+        <td>Database backups</td>
+        <td>Copies of the database, including the tables above</td>
+        <td>Disaster recovery</td>
+        <td>14 days. Data deleted from the database can stay in a backup until then.</td>
+      </tr>
     </tbody>
   </table>
   </div>
+  <p class="muted">This table covers the main stores, not every internal table.</p>
 
   <h2>What is NOT stored in logs or audit history</h2>
   <ul>
@@ -139,7 +176,7 @@
   </div>
 
   <h2 id="website-analytics">Website analytics</h2>
-  <p>To learn how many people visit tg.mctl.ai and where they come from, the public content pages (home, docs, demo, security, privacy, terms, Local Bridge docs, and product updates) load Umami, an open-source analytics tool that we host ourselves at stats.mctl.ai. No analytics data is sent to a third party. Umami itself sets no cookies (this service sets one separate sign-up attribution cookie, described below). For each page view it records the page address (including campaign parameters such as <code>utm_source</code>), the referring site, browser, operating system, device type, screen size, language, and country, region, and city derived from your IP address. Your IP address and user agent are used to compute an anonymous visitor identifier; the IP address itself is not stored.</p>
+  <p>To learn how many people visit tg.mctl.ai and where they come from, the public content pages (home, docs, demo, security, privacy, terms, platforms, assistants, Local Bridge docs, and product updates) load Umami, an open-source analytics tool that we host ourselves at stats.mctl.ai. No analytics data is sent to a third party. Umami itself sets no cookies (this service sets one separate sign-up attribution cookie, described below). For each page view it records the page address (including campaign parameters such as <code>utm_source</code>), the referring site, browser, operating system, device type, screen size, language, and country, region, and city derived from your IP address. Your IP address and user agent are used to compute an anonymous visitor identifier; the IP address itself is not stored.</p>
   <p>The sign-in, consent, connect, and account-management pages under <code>/oauth</code>, <code>/telegram/connect</code>, and <code>/local-bridge/activate</code> do not load Umami, and no Telegram data, tool call, token, or account identifier is ever sent to it. Page-view records are deleted automatically 2 years after they were recorded.</p>
 
   <h2 id="signup-attribution">Sign-up attribution</h2>
@@ -180,6 +217,10 @@ PUT    /api/account/notifications   # change one or more categories</pre>
   <ul>
     <li><strong>Telegram</strong> (transport and identity) — the connected account uses Telegram MTProto, and sign-in uses Telegram OIDC.</li>
     <li><strong>Your MCP client provider</strong> — for example, Anthropic or OpenAI — processes the conversation and tool traffic you send through that product.</li>
+    <li><strong>Hetzner</strong> (hosting) — the service and its database run on Hetzner Cloud servers.</li>
+    <li><strong>Cloudflare</strong> (network and backups) — traffic to tg.mctl.ai passes through Cloudflare, which can read it while forwarding it. Database backups are stored in Cloudflare R2.</li>
+    <li><strong>Google Fonts</strong> — public content pages load web fonts from Google, so your browser sends your IP address to Google when you open them.</li>
+    <li><strong>The AI model provider behind Communication Agent</strong> — when the agent is enabled, the model that runs it receives the Telegram messages and context it works on, in readable form.</li>
     <li>No advertising or third-party analytics is injected by this service. Public content pages count visits with Umami, which we host ourselves (see <a href="#website-analytics">Website analytics</a>). OAuth/session-management pages use strict CSP and load no analytics; public content pages load the mctl design stylesheet and web fonts for presentation.</li>
   </ul>
 
