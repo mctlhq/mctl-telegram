@@ -92,3 +92,33 @@ func TestSitemap(t *testing.T) {
 		t.Error("sitemap must NOT contain noindex /privacy page")
 	}
 }
+
+func TestFaviconAndIcons(t *testing.T) {
+	tests := []struct {
+		name        string
+		handler     http.HandlerFunc
+		wantType    string
+		wantMinSize int
+	}{
+		{"FaviconSVG", Favicon(), "image/svg+xml", 100},
+		{"FaviconICO", FaviconICO(), "image/x-icon", 500},
+		{"AppleTouchIcon", AppleTouchIcon(), "image/png", 500},
+		{"OGImage", OGImage(), "image/png", 1000},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			tc.handler(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200 OK, got %d", rec.Code)
+			}
+			if ct := rec.Header().Get("Content-Type"); ct != tc.wantType {
+				t.Errorf("Content-Type = %q, want %q", ct, tc.wantType)
+			}
+			if rec.Body.Len() < tc.wantMinSize {
+				t.Errorf("body size = %d, want at least %d", rec.Body.Len(), tc.wantMinSize)
+			}
+		})
+	}
+}
