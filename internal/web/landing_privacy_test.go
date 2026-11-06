@@ -40,3 +40,20 @@ func TestLandingPrivacyClaimsAlignWithAgentStorage(t *testing.T) {
 		}
 	}
 }
+
+func TestPrivacyNamesTheOperatorInContact(t *testing.T) {
+	w := httptest.NewRecorder()
+	Privacy("https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/privacy", nil))
+	body := w.Body.String()
+
+	contact := strings.Index(body, "<h2>Contact</h2>")
+	if contact < 0 {
+		t.Fatal("privacy page has no Contact section")
+	}
+	section := body[contact:]
+	for _, must := range []string{"operated by Dmitrii Mashkov", "mailto:privacy@mctl.ai"} {
+		if !strings.Contains(section, must) {
+			t.Fatalf("Contact section missing %q", must)
+		}
+	}
+}
