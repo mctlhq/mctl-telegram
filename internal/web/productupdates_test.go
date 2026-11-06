@@ -46,7 +46,7 @@ func TestProductUpdatesPage_ListsGroupsAndOmitsProvenance(t *testing.T) {
 		t.Fatalf("status = %d", w.Code)
 	}
 	body := w.Body.String()
-	for _, want := range []string{"0.70.0", "0.69.0", "Send messages send-message", "Send messages list-dialogs", "Send messages docs-note", "(docs only)"} {
+	for _, want := range []string{"0.70.0", "0.69.0", "Send messages send-message", "Send messages list-dialogs", "Send messages docs-note", "(not sent as a message)"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("page missing %q:\n%s", want, body)
 		}

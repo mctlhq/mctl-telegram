@@ -164,7 +164,7 @@
       <li><strong>Audit log:</strong> tool name, redacted peer reference, status, and error — <strong style="color: var(--text)">never the message body, phone number, or session bytes</strong>. Kept for 90 days by default.</li>
       <li><strong>Account row:</strong> your Telegram ID and access tier. Deleting your account clears your username, names, and last-seen time; the ID stays so a later sign-in is matched and an authorization code issued before the delete cannot be used after it.</li>
     </ul>
-    <p>The complete inventory, with every table and its retention, is in the <a href="/privacy">privacy policy</a>.</p>
+    <p>The main stores and their retention are listed in the <a href="/privacy">privacy policy</a>.</p>
   </section>
 
   <!-- ============ 05 Controls ============ -->
@@ -188,10 +188,10 @@
     <div class="section-head">
       <h2>Smoke test from your terminal</h2>
     </div>
-    <p>Confirm the well-known and a JSON-RPC handshake before adding the connector:</p>
+    <p>Confirm the well-known and the OAuth challenge before adding the connector. Without a token, the second call returns <code>401</code> with a <code>WWW-Authenticate</code> header that points at the well-known:</p>
 <pre><code>curl -s {{.WellKnownURL}}
 
-curl -s -X POST {{.MCPURL}} \
+curl -si -X POST {{.MCPURL}} \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize",

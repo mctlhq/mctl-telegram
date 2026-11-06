@@ -17,8 +17,8 @@ type PublicStats struct {
 	// AccountsTotal is the number of users who signed in with Telegram and
 	// have not deleted their account.
 	AccountsTotal int64
-	// ToolCallsTotal is the number of successful MCP tool invocations ever
-	// recorded in audit_logs, excluding connect steps, Local Bridge keepalive
+	// ToolCallsTotal is the number of successful MCP tool invocations still
+	// held in audit_logs, so it covers the audit retention window, excluding connect steps, Local Bridge keepalive
 	// traffic and web form posts.
 	ToolCallsTotal int64
 	// ActiveUsers30d is the number of distinct users with at least one such
