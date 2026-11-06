@@ -218,14 +218,6 @@ func (s *Store) SweepJobLeads(ctx context.Context, retention time.Duration) (int
 		return 0, fmt.Errorf("begin lead sweep: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	// Explicit because SQLite runs without foreign_keys here, so the cascade
-	// on agent_job_lead_results fires on Postgres only.
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM agent_job_lead_results
-		  WHERE lead_id IN (SELECT id FROM job_leads WHERE updated_at < $1)`, cutoff,
-	); err != nil {
-		return 0, fmt.Errorf("sweep job lead results: %w", err)
-	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM job_leads WHERE updated_at < $1`, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("sweep job leads: %w", err)
@@ -233,6 +225,14 @@ func (s *Store) SweepJobLeads(ctx context.Context, retention time.Duration) (int
 	n, err := res.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("sweep job leads: %w", err)
+	}
+	// After the delete, so a lead saved during the sweep keeps its binding.
+	// Explicit because SQLite runs without foreign_keys here; on Postgres the
+	// cascade has already done this.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM agent_job_lead_results WHERE lead_id NOT IN (SELECT id FROM job_leads)`,
+	); err != nil {
+		return 0, fmt.Errorf("sweep job lead results: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit lead sweep: %w", err)
