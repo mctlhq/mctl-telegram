@@ -90,12 +90,19 @@ func TestSweepJobLeads_RemovesJobResultBinding(t *testing.T) {
 	if _, err := s.DB.Exec(`INSERT INTO agent_job_lead_results(job_id, user_id, lead_id) VALUES(999,$1,$2)`, uid, id); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
+	fresh := insertLegacyLead(t, s, uid, conv, time.Now().UTC())
+	if _, err := s.DB.Exec(`INSERT INTO agent_job_lead_results(job_id, user_id, lead_id) VALUES(1000,$1,$2)`, uid, fresh); err != nil {
+		t.Fatalf("bind fresh: %v", err)
+	}
 	if _, err := s.SweepJobLeads(ctx, 90*24*time.Hour); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 	var n int
 	if err := s.DB.QueryRow(`SELECT count(*) FROM agent_job_lead_results WHERE lead_id = $1`, id).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("bindings left = %d, err %v", n, err)
+	}
+	if err := s.DB.QueryRow(`SELECT count(*) FROM agent_job_lead_results WHERE lead_id = $1`, fresh).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("fresh lead bindings = %d, err %v", n, err)
 	}
 }
 
