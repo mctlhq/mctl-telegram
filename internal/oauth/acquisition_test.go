@@ -5,119 +5,141 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
-
-	"github.com/mctlhq/mctl-telegram/internal/acquisition"
-	"github.com/mctlhq/mctl-telegram/internal/auth/telegramoidc"
 )
 
-// signUpWithCookie drives /oauth/authorize (optionally carrying the
-// acquisition cookie) and the OIDC callback for the default fake identity.
-func signUpWithCookie(t *testing.T, srv *Server, mux *mockRouter, cookie *http.Cookie) {
-	t.Helper()
-	_, challenge := pkceVerifierAndChallenge()
-	q := url.Values{
-		"response_type":         {"code"},
-		"client_id":             {"claude.ai"},
-		"redirect_uri":          {"https://claude.ai/cb"},
-		"state":                 {"client-state-abc"},
-		"code_challenge":        {challenge},
-		"code_challenge_method": {"S256"},
-	}
-	req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
-	if cookie != nil {
-		req.AddCookie(cookie)
-	}
-	rec := httptest.NewRecorder()
-	mux.serve("GET", "/oauth/authorize", rec, req)
-	if rec.Code != http.StatusFound {
-		t.Fatalf("authorize status = %d", rec.Code)
-	}
-	loc, _ := url.Parse(rec.Header().Get("Location"))
-	authCodeRedirect(t, callbackWithState(t, mux, loc.Query().Get("state")))
-}
+const danaTelegramID = 500100101
 
-func acqCookie(snap acquisition.Snapshot) *http.Cookie {
-	return &http.Cookie{Name: acquisition.CookieName, Value: acquisition.Encode(acquisition.DeriveKey(testJWTSecret), snap)}
-}
-
-func readAcq(t *testing.T, srv *Server, tgID int64) (state, utmSource, campaign, host, client string, n int) {
+func readSignUpRecord(t *testing.T, srv *Server) (state, client, heardFrom, utm string) {
 	t.Helper()
-	ctx := context.Background()
-	if err := srv.store.DB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM user_acquisition a JOIN users u ON u.id=a.user_id WHERE u.telegram_login_id=$1`, tgID).Scan(&n); err != nil {
-		t.Fatal(err)
-	}
-	if n == 0 {
-		return
-	}
-	if err := srv.store.DB.QueryRowContext(ctx,
-		`SELECT a.state, a.utm_source, a.utm_campaign, a.referrer_host, a.mcp_client
-		   FROM user_acquisition a JOIN users u ON u.id=a.user_id WHERE u.telegram_login_id=$1`, tgID).
-		Scan(&state, &utmSource, &campaign, &host, &client); err != nil {
+	err := srv.store.DB.QueryRowContext(context.Background(),
+		`SELECT a.state, a.mcp_client, a.heard_from, a.utm_source
+		   FROM user_acquisition a JOIN users u ON u.id=a.user_id WHERE u.telegram_login_id=$1`, danaTelegramID).
+		Scan(&state, &client, &heardFrom, &utm)
+	if err != nil {
 		t.Fatal(err)
 	}
 	return
 }
 
-func danaIdentity(tgID int64) *telegramoidc.Identity {
-	return &telegramoidc.Identity{TelegramID: tgID, Username: "dana_tg", FirstName: "Dana"}
-}
-
-func TestSignUp_RecordsAttributedAcquisition(t *testing.T) {
-	srv := newTestServer(t)
-	mux := newMockRouter()
-	srv.Register(mux)
-	const tg = 500100201
-	authFake(srv).identity = danaIdentity(tg)
-	snap := acquisition.Snapshot{State: acquisition.StateAttributed, UTMSource: "x", UTMCampaign: "y",
-		ReferrerHost: "news.example", LandingPath: "/docs", CapturedAt: time.Now()}
-	signUpWithCookie(t, srv, mux, acqCookie(snap))
-	state, src, camp, host, client, n := readAcq(t, srv, tg)
-	if n != 1 || state != "attributed" || src != "x" || camp != "y" || host != "news.example" || client != "claude" {
-		t.Fatalf("row = %q %q %q %q %q n=%d", state, src, camp, host, client, n)
+func TestSignUp_OldCookieIsNeitherReadNorSet(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	_, challenge := pkceVerifierAndChallenge()
+	q := url.Values{
+		"response_type": {"code"}, "client_id": {"claude.ai"}, "redirect_uri": {"https://claude.ai/cb"},
+		"state": {"s"}, "code_challenge": {challenge}, "code_challenge_method": {"S256"},
+	}
+	rec := getWithCookie(t, mux, "/oauth/authorize?"+q.Encode(), &http.Cookie{Name: "mctl_acq", Value: "anything"})
+	if rec.Code != http.StatusFound {
+		t.Fatalf("authorize = %d", rec.Code)
+	}
+	if got := rec.Header().Get("Set-Cookie"); strings.Contains(got, "mctl_acq") {
+		t.Fatalf("authorize set the removed cookie: %s", got)
+	}
+	loc, _ := url.Parse(rec.Header().Get("Location"))
+	if cb := callbackViaChi(t, mux, loc.Query().Get("state")); cb.Code != http.StatusOK {
+		t.Fatalf("callback = %d", cb.Code)
+	}
+	state, client, _, utm := readSignUpRecord(t, srv)
+	if state != "unknown" || client != "claude" || utm != "" {
+		t.Fatalf("record = %q %q %q", state, client, utm)
 	}
 }
 
-func TestSignUp_DirectUnknownNeverCrossed(t *testing.T) {
-	key := acquisition.DeriveKey(testJWTSecret)
-	expired := acquisition.Snapshot{State: acquisition.StateDirect, CapturedAt: time.Now().Add(-48 * time.Hour)}
-	cases := []struct {
-		name   string
-		tg     int64
-		cookie *http.Cookie
-		want   string
-	}{
-		{"direct", 500100211, acqCookie(acquisition.Snapshot{State: acquisition.StateDirect, CapturedAt: time.Now()}), "direct"},
-		{"missing", 500100212, nil, "unknown"},
-		{"tampered", 500100213, &http.Cookie{Name: acquisition.CookieName, Value: acquisition.Encode(key, acquisition.Snapshot{State: acquisition.StateDirect, CapturedAt: time.Now()}) + "x"}, "unknown"},
-		{"expired", 500100214, acqCookie(expired), "unknown"},
+func TestHeardFrom_NewAccountIsAskedAndTheAnswerIsStored(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	_, challenge := pkceVerifierAndChallenge()
+	rec := callbackViaChi(t, mux, authorizeViaChi(t, mux, challenge))
+	body := rec.Body.String()
+	for _, want := range []string{"How did you hear about us? (optional)", `name="heard_from"`, `value="search"`, `value="" selected`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("phone step missing %q", want)
+		}
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			srv := newTestServer(t)
-			mux := newMockRouter()
-			srv.Register(mux)
-			authFake(srv).identity = danaIdentity(c.tg)
-			signUpWithCookie(t, srv, mux, c.cookie)
-			state, _, _, _, client, n := readAcq(t, srv, c.tg)
-			if n != 1 || state != c.want || client != "claude" {
-				t.Fatalf("state = %q client = %q n = %d, want %q", state, client, n, c.want)
+	es := extractInputValue(t, body, "es")
+	rec = postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}, "heard_from": {"search"}})
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "enable_access/code") {
+		t.Fatalf("start = %d", rec.Code)
+	}
+	state, client, heard, utm := readSignUpRecord(t, srv)
+	if state != "unknown" || client == "" || heard != "search" || utm != "" {
+		t.Fatalf("record = %q %q %q %q", state, client, heard, utm)
+	}
+}
+
+func TestHeardFrom_SkippedOrUnlistedStoresNothing(t *testing.T) {
+	for _, answer := range []string{"", "my friend Dana", "SEARCH"} {
+		t.Run(answer, func(t *testing.T) {
+			srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+			es := driveToPhone(t, mux)
+			rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+				url.Values{"es": {es}, "phone": {"+14155551234"}, "heard_from": {answer}})
+			if rec.Code != http.StatusOK {
+				t.Fatalf("start = %d", rec.Code)
+			}
+			if _, _, heard, _ := readSignUpRecord(t, srv); heard != "" {
+				t.Fatalf("heard_from = %q, want empty", heard)
 			}
 		})
 	}
 }
 
-func TestSignUp_ReturningUserKeepsFirstAcquisition(t *testing.T) {
-	srv := newTestServer(t)
-	mux := newMockRouter()
-	srv.Register(mux)
-	const tg = 500100221
-	authFake(srv).identity = danaIdentity(tg)
-	signUpWithCookie(t, srv, mux, acqCookie(acquisition.Snapshot{State: acquisition.StateAttributed, UTMSource: "a", CapturedAt: time.Now()}))
-	signUpWithCookie(t, srv, mux, acqCookie(acquisition.Snapshot{State: acquisition.StateAttributed, UTMSource: "b", CapturedAt: time.Now()}))
-	if _, src, _, _, _, n := readAcq(t, srv, tg); n != 1 || src != "a" {
-		t.Fatalf("src = %q n = %d, want first touch a", src, n)
+func TestHeardFrom_QRSubmitStoresTheAnswer(t *testing.T) {
+	q := newQRStub(danaTelegramID)
+	srv, mux := newQRTestServer(t, q, true)
+	es, page := driveToPhoneAs(t, mux, desktopUA)
+	if !strings.Contains(page, `name="heard_from"`) {
+		t.Fatal("the QR variant of the phone step must carry the question")
 	}
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/qr", url.Values{"es": {es}, "heard_from": {"telegram"}})
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("POST /qr = %d", rec.Code)
+	}
+	if _, _, heard, _ := readSignUpRecord(t, srv); heard != "telegram" {
+		t.Fatalf("heard_from = %q", heard)
+	}
+}
+
+func TestHeardFrom_ExistingAccountIsNotAsked(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	_, challenge := pkceVerifierAndChallenge()
+	state := authorizeViaChi(t, mux, challenge)
+	// Pre-create the record outside the window: this account is not new.
+	uid, err := srv.store.EnsureUserByTelegramID(context.Background(), danaTelegramID, "dana_tg", "Dana")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.store.DB.Exec(
+		`INSERT INTO user_acquisition(user_id, state, captured_at, recorded_at) VALUES($1,'unknown',$2,$2)`,
+		uid, time.Now().UTC().Add(-48*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if body := callbackViaChi(t, mux, state).Body.String(); strings.Contains(body, "heard_from") {
+		t.Fatal("an existing account must not be asked")
+	}
+}
+
+func TestHeardFrom_LookupFailureHidesTheQuestionAndSignInContinues(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	if _, err := srv.store.DB.Exec(`ALTER TABLE user_acquisition RENAME TO user_acquisition_gone`); err != nil {
+		t.Fatal(err)
+	}
+	_, challenge := pkceVerifierAndChallenge()
+	rec := callbackViaChi(t, mux, authorizeViaChi(t, mux, challenge))
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "heard_from") ||
+		!strings.Contains(rec.Body.String(), "enable_access/start") {
+		t.Fatalf("callback = %d", rec.Code)
+	}
+}
+
+func getWithCookie(t *testing.T, mux http.Handler, target string, c *http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodGet, target, nil)
+	r.AddCookie(c)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, r)
+	return rec
 }

@@ -81,7 +81,6 @@ type Server struct {
 	dcrRedirectURIs map[string]struct{}
 
 	mu      sync.Mutex
-	acqKey  []byte                    // HKDF-derived MAC key for the acquisition cookie
 	pending map[string]*pendingAuth   // keyed by "state" issued at /oauth/authorize
 	codes   map[string]*authCode      // keyed by the authorization_code value
 	clients map[string]*clientReg     // keyed by client_id
@@ -848,7 +847,6 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 		store:                 store,
 		clock:                 time.Now,
 		useDB:                 cfg.UseDBForOAuth && store != nil,
-		acqKey:                acquisition.DeriveKey(cfg.JWTSecret),
 		pending:               map[string]*pendingAuth{},
 		codes:                 map[string]*authCode{},
 		clients:               map[string]*clientReg{},
@@ -1603,7 +1601,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	// verifier is replayed at the token exchange). Both are kept server-side.
 	serverState := randomToken(32)
 	nonce := randomToken(16)
-	acq := s.acquisitionFromRequest(r, redirectURI)
+	acq := s.acquisitionFromRequest(redirectURI)
 	tgVerifier, tgChallenge := pkceChallenge()
 	now := s.clock()
 	if s.useDB {
@@ -2089,6 +2087,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		step:      stepPhone,
 		qrOffered: s.cfg.EnableAccessQREnabled && isDesktopBrowser(r.UserAgent()),
 	}
+	es.askHeardFrom = s.shouldAskHeardFrom(r.Context(), uid)
 	esTok := randomToken(32)
 	s.mu.Lock()
 	if s.cfg.MaxPendingEnable > 0 && len(s.enables) >= s.cfg.MaxPendingEnable {
@@ -2123,7 +2122,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		// sending is opt-in. A new account starts read-only, matching the
 		// published "preview by default" promise; the owner enables sending
 		// later with set_send_consent or on the manage page.
-		renderEnablePhone(w, enablePhonePage{Issuer: s.cfg.Issuer, EnableToken: esTok, QROffered: es.qrOffered})
+		renderEnablePhone(w, enablePhonePage{Issuer: s.cfg.Issuer, EnableToken: esTok, QROffered: es.qrOffered, AskHeardFrom: es.askHeardFrom})
 	}
 }
 
@@ -3736,8 +3735,7 @@ func (s *Server) probeBotChat(ctx context.Context, uid, telegramID int64) {
 
 // acquisitionForCallback decodes the snapshot carried by the pending entry.
 // A pending row minted by an image that predates the acquisition column
-// carries no snapshot and decodes as unknown with an empty client; the
-// redirect URI is still on the row, so the bounded client label is filled
+// carries no snapshot and decodes with an empty client; the redirect URI is still on the row, so the bounded client label is filled
 // from it rather than lost for the whole rollout window.
 func acquisitionForCallback(pending *pendingAuth, now time.Time) acquisition.Snapshot {
 	snap := acquisition.Unmarshal(pending.Acquisition, now)

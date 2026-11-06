@@ -42,7 +42,7 @@ type Acquisition struct {
 // insertAcquisitionBestEffort writes the user_acquisition row for a user the
 // enclosing transaction just created. The insert is the only statement under
 // SAVEPOINT acq; on failure the savepoint is rolled back, the failure is
-// logged (never with cookie or UTM values) and counted, and the user row
+// logged (never with its values) and counted, and the user row
 // stays. A failed write leaves the row absent; it never becomes "direct".
 func (s *Store) insertAcquisitionBestEffort(ctx context.Context, tx *sql.Tx, login string, a Acquisition) {
 	fail := func(stage string, err error) {
@@ -86,6 +86,34 @@ func (s *Store) insertAcquisitionBestEffort(ctx context.Context, tx *sql.Tx, log
 	_, _ = tx.ExecContext(ctx, `RELEASE SAVEPOINT acq`)
 }
 
+// HeardFromUnanswered reports whether the user has a sign-up record created
+// at or after since with no answer yet. No record means false, so an account
+// from before capture, or one whose write failed, is not asked.
+func (s *Store) HeardFromUnanswered(ctx context.Context, userID int64, since time.Time) (bool, error) {
+	var n int
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM user_acquisition
+		 WHERE user_id = $1 AND heard_from = '' AND recorded_at >= $2`, userID, since.UTC()).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("heard_from lookup: %w", err)
+	}
+	return n > 0, nil
+}
+
+// RecordHeardFrom stores the answer on the user's sign-up record. The first
+// answer stays: a later call changes nothing.
+func (s *Store) RecordHeardFrom(ctx context.Context, userID int64, answer string) error {
+	_, err := s.DB.ExecContext(ctx,
+		`UPDATE user_acquisition SET heard_from = $1 WHERE user_id = $2 AND heard_from = ''`, answer, userID)
+	if err != nil {
+		if s.metrics != nil {
+			s.metrics.CountAcquisitionWriteFailure()
+		}
+		return fmt.Errorf("heard_from write: %w", err)
+	}
+	return nil
+}
+
 // acquisitionLabelSQL is the report label expression over alias a
 // (user_acquisition, possibly NULL) and u (users) and e (epoch).
 const acquisitionLabelSQL = `CASE
@@ -93,6 +121,7 @@ const acquisitionLabelSQL = `CASE
 		CASE WHEN e.enabled_at IS NOT NULL AND u.created_at < e.enabled_at
 			THEN '` + AcquisitionLabelPreCapture + `'
 			ELSE '` + AcquisitionLabelNotRecorded + `' END
+	WHEN a.heard_from <> '' THEN a.heard_from
 	WHEN a.utm_source <> '' THEN a.utm_source
 	WHEN a.referrer_host <> '' THEN a.referrer_host
 	WHEN a.state = 'direct' THEN 'direct'
@@ -108,7 +137,8 @@ func SanitizeAcquisitionLabel(l string) string {
 }
 
 // AcquisitionLabelsFor returns the source label of each Telegram id in one
-// bounded query: utm_source, else referrer_host, else direct, unknown,
+// bounded query: the heard_from answer, else utm_source, else referrer_host
+// (those two only on records from before the cookie was removed), else direct, unknown,
 // "unknown (pre-capture)" or "unknown (not recorded)". Ids with no users
 // row are absent from the map.
 func (s *Store) AcquisitionLabelsFor(ctx context.Context, tgIDs []int64) (map[int64]string, error) {

@@ -73,11 +73,14 @@ type enableSession struct {
 	// the duration of one step (acquired via acquireStepLock, which waits
 	// briefly so a concurrent double-submit resolves instead of dead-ending),
 	// so step/flow below need no further synchronisation between handlers.
-	lock      sync.Mutex
-	step      enableStep
-	phone     string
-	sendOptIn bool
-	flow      *loginFlow
+	lock sync.Mutex
+	// askHeardFrom shows the optional sign-up source question on the phone
+	// step, until the first submit of that step.
+	askHeardFrom bool
+	step         enableStep
+	phone        string
+	sendOptIn    bool
+	flow         *loginFlow
 
 	// terminalMsg is non-empty once the session has been refused for a reason
 	// restarting cannot clear (today: an active Local Bridge account). The
@@ -675,12 +678,13 @@ func (s *Server) handleEnablePermissions(w http.ResponseWriter, r *http.Request)
 	es.sendOptIn = sendOptin == "send"
 	es.step = stepPhone
 	renderEnablePhone(w, enablePhonePage{
-		Issuer:      s.cfg.Issuer,
-		EnableToken: esTok,
-		SendOptIn:   es.sendOptIn,
-		WizardMode:  true,
-		WizardStep:  3,
-		QROffered:   es.qrOffered,
+		Issuer:       s.cfg.Issuer,
+		EnableToken:  esTok,
+		SendOptIn:    es.sendOptIn,
+		WizardMode:   true,
+		WizardStep:   3,
+		QROffered:    es.qrOffered,
+		AskHeardFrom: es.askHeardFrom,
 	})
 }
 
@@ -698,6 +702,7 @@ func renderEnablePhoneStep(w http.ResponseWriter, es *enableSession, p enablePho
 	}
 	es.step = stepPhone
 	p.QROffered = es.qrOffered
+	p.AskHeardFrom = es.askHeardFrom
 	renderEnablePhone(w, p)
 }
 
@@ -816,6 +821,8 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer es.lock.Unlock()
+
+	s.recordHeardFrom(r, es)
 
 	if s.cfg.TGAPIID == 0 || s.cfg.TGAPIHash == "" {
 		renderEnableError(w, "This server is not configured for in-browser Telegram login. Contact the operator.")
