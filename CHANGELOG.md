@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.125.0](https://github.com/mctlhq/mctl-telegram/compare/0.124.1...0.125.0) (2026-11-06)
+
+
+### Features
+
+* **acquisition:** ask how people found us instead of a cookie ([7b1902a](https://github.com/mctlhq/mctl-telegram/commit/7b1902ae9507b7f831ac7522803ac0b2d05ac2d8))
+* **acquisition:** ask how people found us instead of a cookie ([b068363](https://github.com/mctlhq/mctl-telegram/commit/b06836332f857cbd9bef336d287aac7d35af7a4c))
+* **db:** encrypt job leads and delete them after 90 days ([fb462a3](https://github.com/mctlhq/mctl-telegram/commit/fb462a3ac41c0e6848543b41d280efaf182275c7))
+* **db:** encrypt job leads and delete them after 90 days ([e9f85aa](https://github.com/mctlhq/mctl-telegram/commit/e9f85aad16e09f485279ab156cabf41436badd56))
+
+
+### Bug Fixes
+
+* **db:** delete job leads before their result bindings ([45fc050](https://github.com/mctlhq/mctl-telegram/commit/45fc0506493aae0b4995de0aed60581160fde4d3))
+* **db:** erase the sealed session on every revocation ([2e5e6ba](https://github.com/mctlhq/mctl-telegram/commit/2e5e6ba327aad25f4c8a359f01949963cb053d59))
+* **db:** erase the sealed session on every revocation ([d16fdf7](https://github.com/mctlhq/mctl-telegram/commit/d16fdf79e90e7a09362c3510f42bc18ee89501fd))
+* **web:** name the operator on the privacy page ([47ccdbd](https://github.com/mctlhq/mctl-telegram/commit/47ccdbd43afe07cc6c80e334c1354432c3fc1021))
+* **web:** name the operator on the privacy page ([c04e1ec](https://github.com/mctlhq/mctl-telegram/commit/c04e1ec535520c2978c3b516606f51eb58c0b8fa))
+
 ## [0.124.1](https://github.com/mctlhq/mctl-telegram/compare/0.124.0...0.124.1) (2026-11-06)
 
 
