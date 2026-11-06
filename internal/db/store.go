@@ -852,7 +852,7 @@ func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte,
 	revoked, err := tx.QueryContext(ctx,
 		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = 'superseded'
 		 WHERE user_id = $1 AND revoked_at IS NULL
-		 RETURNING mode, telegram_user_id, session_encrypted`,
+		 RETURNING id, mode, telegram_user_id, session_encrypted`,
 		userID,
 	)
 	if err != nil {
@@ -860,14 +860,17 @@ func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte,
 	}
 	hasLocal := false
 	var supersededBlobs [][]byte
+	var revokedIDs []int64
 	for revoked.Next() {
+		var rowID int64
 		var mode string
 		var tgID sql.NullInt64
 		var old []byte
-		if err := revoked.Scan(&mode, &tgID, &old); err != nil {
+		if err := revoked.Scan(&rowID, &mode, &tgID, &old); err != nil {
 			revoked.Close()
 			return nil, fmt.Errorf("scan revoked mode: %w", err)
 		}
+		revokedIDs = append(revokedIDs, rowID)
 		if mode == ModeLocal {
 			hasLocal = true
 		}
@@ -883,6 +886,14 @@ func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte,
 	if hasLocal {
 		// Deferred Rollback undoes the revoke above.
 		return nil, ErrAccountModeConflict
+	}
+	// RETURNING above had to read the old bytes for the caller's logout, so
+	// they are erased here rather than in that statement.
+	for _, rowID := range revokedIDs {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE telegram_accounts SET session_encrypted = NULL WHERE id = $1`, rowID); err != nil {
+			return nil, fmt.Errorf("erase superseded session: %w", err)
+		}
 	}
 	now := time.Now().UTC()
 	// An exempt identity gets a NULL expires_at, which every absolute-TTL
@@ -1176,7 +1187,8 @@ func (s *Store) notifySessionsEnded(userID int64, sealed [][]byte) {
 	}
 }
 
-// RevokeSessionByID revokes one specific active session row. Runtime clients
+// RevokeSessionByID revokes one specific active session row and erases its
+// sealed session; no revoked row keeps one. Runtime clients
 // use this after Telegram rejects the auth key they loaded: a concurrent OAuth
 // reconnect may already have inserted a newer active row for the same user, so
 // revoking by user_id alone could invalidate the replacement session.
@@ -1186,7 +1198,7 @@ func (s *Store) RevokeSessionByID(ctx context.Context, userID, sessionID int64, 
 		return false, nil
 	}
 	res, err := s.DB.ExecContext(ctx,
-		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = $3, revoked_detail = $4
+		`UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP, revoked_reason = $3, revoked_detail = $4, session_encrypted = NULL
 		 WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL`,
 		sessionID, userID, nullable(reason), nullable(detail),
 	)
@@ -1825,7 +1837,7 @@ func (s *Store) SweepExpiredSessions(ctx context.Context) (int64, error) {
 	}
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE telegram_accounts
-		 SET revoked_at = $1
+		 SET revoked_at = $1, session_encrypted = NULL
 		 WHERE revoked_at IS NULL
 		   AND mode <> 'local'
 		   AND (
@@ -1853,7 +1865,7 @@ func (s *Store) SweepIdleSessions(ctx context.Context) (int64, error) {
 	// lazy CheckSessionValid revoke), so without it the digest's
 	// "session revoked (...)" clause could never say idle_expiry.
 	query := `UPDATE telegram_accounts
-		 SET revoked_at = $1, revoked_reason = 'idle_expiry'
+		 SET revoked_at = $1, revoked_reason = 'idle_expiry', session_encrypted = NULL
 		 WHERE revoked_at IS NULL
 		   AND mode <> 'local'
 		   AND last_used_at IS NOT NULL
@@ -1882,7 +1894,7 @@ func (s *Store) SweepAbsoluteSessions(ctx context.Context) (int64, error) {
 	now := time.Now().UTC()
 	res, err := s.DB.ExecContext(ctx,
 		`UPDATE telegram_accounts
-		 SET revoked_at = $1, revoked_reason = 'absolute_expiry'
+		 SET revoked_at = $1, revoked_reason = 'absolute_expiry', session_encrypted = NULL
 		 WHERE revoked_at IS NULL
 		   AND mode <> 'local'
 		   AND expires_at IS NOT NULL

@@ -427,6 +427,23 @@ func main() {
 	// Connect first-call reconciler: classifies grants whose window is over
 	// and deletes classified rows after connectfunnel.Retention.
 	go funnel.Run(ctx)
+	// One-off cleanup of the sealed sessions that revoked rows kept before every
+	// revocation path erased them. Off unless REVOKED_SESSION_CLEANUP_ENABLED.
+	if cfg.RevokedSessionCleanupEnabled {
+		logOutCfg := telegram.LoginConfig{GlobalMiddleware: globalTGLimiter, TestDC: cfg.TGTestDC}
+		go sweeper.RevokedSessions(ctx, store, sweeper.RevokedSessionDeps{
+			LogOut: func(ctx context.Context, data []byte) error {
+				lctx, cancel := telegram.DetachedLogOutContext(ctx)
+				defer cancel()
+				return telegram.LogOutSession(lctx, cfg.TGAPIID, cfg.TGAPIHash, data, logOutCfg)
+			},
+			KeyID:          telegram.SessionAuthKeyID,
+			AlreadyEnded:   telegram.IsSessionAlreadyEnded,
+			CountLogOut:    func(outcome string) { m.CountLoginLogOut(sweeper.LogOutReasonRevokedCleanup, outcome) },
+			PauseBetween:   sweeper.RevokedSessionPause,
+			RepeatInterval: sweeper.RevokedSessionInterval,
+		})
+	}
 	// Communication-agent message retention: deletes stored incoming_events /
 	// conversation_messages older than AGENT_RETENTION_DAYS (default 30).
 	// Privacy control, not just hygiene — these rows carry third-party
