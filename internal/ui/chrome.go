@@ -112,11 +112,14 @@ var defs = `
 <meta property="og:title" content="{{.Title}}">
 <meta property="og:description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarize unread chats, draft replies, and search your history — no extra apps.{{end}}">
 <meta property="og:url" content="{{.PublicBaseURL}}">
-<meta property="og:image" content="{{.PublicBaseURL}}/og.png">
+<meta property="og:image" content="{{.PublicBaseURL}}/og.png?v=2">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:type" content="image/png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="{{.Title}}">
 <meta name="twitter:description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarize unread chats, draft replies, and search your history — no extra apps.{{end}}">
-<meta name="twitter:image" content="{{.PublicBaseURL}}/og.png">
+<meta name="twitter:image" content="{{.PublicBaseURL}}/og.png?v=2">
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
