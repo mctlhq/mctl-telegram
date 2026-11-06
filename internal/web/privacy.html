@@ -122,9 +122,9 @@
       </tr>
       <tr>
         <td><code>job_leads</code></td>
-        <td>Job leads the Communication Agent records from your conversations: company, role, recruiter name and Telegram ID, compensation, status, and other details. These fields are not encrypted.</td>
+        <td>Job leads the Communication Agent records from your conversations: company, role, recruiter name and Telegram ID, compensation, status, and other details. Encrypted with your per-user key, except the status.</td>
         <td>Tracking the leads the agent handles for you</td>
-        <td>Until account deletion. <code>AGENT_RETENTION_DAYS</code> does not apply.</td>
+        <td>90 days after the lead was last updated, or until account deletion if that comes first (<code>AGENT_LEAD_RETENTION_DAYS</code>).</td>
       </tr>
       <tr>
         <td><code>oauth_refresh_tokens</code></td>

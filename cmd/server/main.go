@@ -447,6 +447,9 @@ func main() {
 	// Privacy control, not just hygiene — these rows carry third-party
 	// message content. AGENT_RETENTION_DAYS=0 keeps rows forever.
 	go sweeper.AgentRetention(ctx, store, time.Duration(cfg.AgentRetentionDays)*24*time.Hour)
+	// Job leads: deletes leads not updated for AGENT_LEAD_RETENTION_DAYS
+	// (default 90) and encrypts rows written before leads were sealed.
+	go sweeper.JobLeads(ctx, store, time.Duration(cfg.AgentLeadRetentionDays)*24*time.Hour)
 	// Communication-agent queue maintenance: requeues jobs whose claim
 	// outlived AGENT_JOB_VISIBILITY (worker crash recovery) and expires
 	// pending approvals past AGENT_APPROVAL_TTL. No-op on empty tables.

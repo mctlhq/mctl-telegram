@@ -50,6 +50,7 @@ Unlike read-only MCP tool results, Communication Agent processing requires durab
 * Message bodies and action payloads are AES-256-GCM sealed with the owning user's derived key before storage.
 * Agent content is user-scoped in every repository getter.
 * The daily retention sweeper removes stored agent message content older than `AGENT_RETENTION_DAYS` (default **30 days**). Setting the value to `0` keeps rows indefinitely and should be treated as an explicit privacy trade-off.
+* Job leads are sealed the same way, except their status, and are deleted `AGENT_LEAD_RETENTION_DAYS` (default **90 days**) after their last update.
 * Audit rows use their separate `AUDIT_RETENTION_DAYS` policy (default 90 days) and do not contain message bodies.
 
 ## Telegram-native OAuth (`AUTH_MODE=local-jwt`)

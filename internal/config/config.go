@@ -344,6 +344,10 @@ type Config struct {
 	// message content, so the default is deliberately short. 0 keeps rows
 	// forever. Set via AGENT_RETENTION_DAYS.
 	AgentRetentionDays int // AGENT_RETENTION_DAYS, default 30
+	// AgentLeadRetentionDays is how long a job lead is kept after its last
+	// update. Separate from AgentRetentionDays because a lead outlives the
+	// messages it came from. 0 keeps leads until account deletion.
+	AgentLeadRetentionDays int // AGENT_LEAD_RETENTION_DAYS, default 90
 
 	// RevokedSessionCleanupEnabled runs the cleanup of sealed sessions left in
 	// already revoked rows. Set via REVOKED_SESSION_CLEANUP_ENABLED.
@@ -537,6 +541,7 @@ func Load() (*Config, error) {
 		RateLimitPerUser:                envInt("RATE_LIMIT_PER_USER", 30),
 		AuditRetentionDays:              envInt("AUDIT_RETENTION_DAYS", 90),
 		AgentRetentionDays:              envInt("AGENT_RETENTION_DAYS", 30),
+		AgentLeadRetentionDays:          envInt("AGENT_LEAD_RETENTION_DAYS", 90),
 		RevokedSessionCleanupEnabled:    envBool("REVOKED_SESSION_CLEANUP_ENABLED", false),
 		AgentJobVisibility:              envDuration("AGENT_JOB_VISIBILITY", 5*time.Minute),
 		AgentAllowLegacyCompletion:      envBool("AGENT_ALLOW_LEGACY_COMPLETION", false),

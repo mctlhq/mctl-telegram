@@ -47,7 +47,7 @@ func TestJobLeads_Postgres(t *testing.T) {
 		t.Skip("TEST_DATABASE_URL not set")
 	}
 	s := newPostgresTestStore(t, dsn)
-	leadCases(t, func(t *testing.T) (*Store, int64) {
+	owner := func(t *testing.T) (*Store, int64) {
 		uid := seedAgentUser(t, s, fmt.Sprintf("lead_%d", time.Now().UnixNano()))
 		t.Cleanup(func() {
 			for _, q := range []string{
@@ -62,7 +62,9 @@ func TestJobLeads_Postgres(t *testing.T) {
 			}
 		})
 		return s, uid
-	})
+	}
+	leadCases(t, owner)
+	sealedLeadCases(t, owner)
 }
 
 func assertTwoLeadsInOneConversation(t *testing.T, s *Store, uid int64) {

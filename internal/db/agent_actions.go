@@ -1176,19 +1176,17 @@ func (s *Store) UpsertJobLead(ctx context.Context, l JobLead) (int64, error) {
 }
 
 func (s *Store) insertJobLead(ctx context.Context, l JobLead) (int64, error) {
+	blob, err := s.sealJobLead(l)
+	if err != nil {
+		return 0, err
+	}
 	const insertLead = `INSERT INTO job_leads
-	   (user_id, conversation_id, job_id, company, role, recruiter_name, recruiter_tg_id,
-	    compensation, status, detail, updated_at)
+	   (user_id, conversation_id, job_id, status, data_encrypted, updated_at)
 	`
 	args := []any{
-		l.UserID, l.ConversationID, nullableInt(l.JobID), nullable(l.Company), nullable(l.Role),
-		nullable(l.RecruiterName), nullableInt(l.RecruiterTGID),
-		nullable(l.Compensation), nullable(l.Status), l.Detail, time.Now().UTC(),
+		l.UserID, l.ConversationID, nullableInt(l.JobID), nullable(l.Status), blob, time.Now().UTC(),
 	}
-	var (
-		id  int64
-		err error
-	)
+	var id int64
 	if l.JobID != 0 {
 		lock, lockErr := s.leadJobLock(ctx)
 		if lockErr != nil {
@@ -1196,16 +1194,16 @@ func (s *Store) insertJobLead(ctx context.Context, l JobLead) (int64, error) {
 		}
 		err = s.DB.QueryRowContext(ctx,
 			insertLead+`
-			 SELECT $1,$2,j.id,$4,$5,$6,$7,$8,COALESCE($9,'new'),$10,$11
+			 SELECT $1,$2,j.id,COALESCE($4,'new'),$5,$6
 			   FROM agent_jobs j
 			  WHERE j.id=$3 AND j.user_id=$1 AND j.conversation_id=$2
-			    AND j.status=$12 AND j.attempts=$13`+lock+`
+			    AND j.status=$7 AND j.attempts=$8`+lock+`
 			 RETURNING id`,
 			append(args, JobProcessing, l.Attempt)...,
 		).Scan(&id)
 	} else {
 		err = s.DB.QueryRowContext(ctx,
-			insertLead+` VALUES($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,'new'),$10,$11) RETURNING id`,
+			insertLead+` VALUES($1,$2,$3,COALESCE($4,'new'),$5,$6) RETURNING id`,
 			args...,
 		).Scan(&id)
 	}
@@ -1228,6 +1226,10 @@ func (s *Store) updateJobLead(ctx context.Context, l JobLead) (int64, error) {
 			return 0, err
 		}
 	}
+	rowLock, err := s.leadRowLock(ctx)
+	if err != nil {
+		return 0, err
+	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin lead update: %w", err)
@@ -1248,23 +1250,48 @@ func (s *Store) updateJobLead(ctx context.Context, l JobLead) (int64, error) {
 			return 0, fmt.Errorf("check lead job: %w", err)
 		}
 	}
+	// The fields share one blob, so the merge that COALESCE used to do in SQL
+	// happens here, under the row lock. A blob that does not open fails the
+	// save rather than being overwritten by the incoming fields alone.
+	cur, err := s.scanJobLead(tx.QueryRowContext(ctx,
+		`SELECT `+jobLeadColumns+` FROM job_leads
+		  WHERE id = $1 AND user_id = $2 AND conversation_id = $3`+rowLock,
+		l.ID, l.UserID, l.ConversationID,
+	).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrJobLeadNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read job lead: %w", err)
+	}
+	merged := cur
+	merged.Company = firstNonEmpty(l.Company, cur.Company)
+	merged.Role = firstNonEmpty(l.Role, cur.Role)
+	merged.RecruiterName = firstNonEmpty(l.RecruiterName, cur.RecruiterName)
+	merged.Compensation = firstNonEmpty(l.Compensation, cur.Compensation)
+	if l.RecruiterTGID != 0 {
+		merged.RecruiterTGID = l.RecruiterTGID
+	}
+	if l.Detail != "{}" {
+		merged.Detail = l.Detail
+	}
+	blob, err := s.sealJobLead(merged)
+	if err != nil {
+		return 0, err
+	}
 	var id int64
 	err = tx.QueryRowContext(ctx,
 		`UPDATE job_leads SET
 		   job_id = COALESCE($4, job_id),
-		   company = COALESCE($5, company),
-		   role = COALESCE($6, role),
-		   recruiter_name = COALESCE($7, recruiter_name),
-		   recruiter_tg_id = COALESCE($8, recruiter_tg_id),
-		   compensation = COALESCE($9, compensation),
-		   status = COALESCE($10, status),
-		   detail = CASE WHEN $11 <> '{}' THEN $11 ELSE detail END,
-		   updated_at = $12
+		   company = NULL, role = NULL, recruiter_name = NULL,
+		   recruiter_tg_id = NULL, compensation = NULL, detail = '{}',
+		   data_encrypted = $5,
+		   status = COALESCE($6, status),
+		   updated_at = $7
 		 WHERE id = $1 AND user_id = $2 AND conversation_id = $3
 		 RETURNING id`,
-		l.ID, l.UserID, l.ConversationID, nullableInt(l.JobID), nullable(l.Company), nullable(l.Role),
-		nullable(l.RecruiterName), nullableInt(l.RecruiterTGID), nullable(l.Compensation),
-		nullable(l.Status), l.Detail, time.Now().UTC(),
+		l.ID, l.UserID, l.ConversationID, nullableInt(l.JobID), blob,
+		nullable(l.Status), time.Now().UTC(),
 	).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrJobLeadNotFound
@@ -1306,30 +1333,15 @@ func (s *Store) GetJobLeadByConversation(ctx context.Context, userID, conversati
 }
 
 func (s *Store) getJobLead(ctx context.Context, where string, args ...any) (*JobLead, error) {
-	var (
-		l                              JobLead
-		convID, recruiterTGID          sql.NullInt64
-		company, role, recruiter, comp sql.NullString
-	)
-	err := s.DB.QueryRowContext(ctx,
-		`SELECT id, user_id, conversation_id, company, role, recruiter_name, recruiter_tg_id,
-		        compensation, status, detail, created_at, updated_at
-		   FROM job_leads WHERE `+where,
-		args...,
-	).Scan(&l.ID, &l.UserID, &convID, &company, &role, &recruiter, &recruiterTGID,
-		&comp, &l.Status, &l.Detail, &l.CreatedAt, &l.UpdatedAt)
+	l, err := s.scanJobLead(s.DB.QueryRowContext(ctx,
+		`SELECT `+jobLeadColumns+` FROM job_leads WHERE `+where, args...,
+	).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrJobLeadNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get job lead: %w", err)
 	}
-	l.ConversationID = convID.Int64
-	l.Company = company.String
-	l.Role = role.String
-	l.RecruiterName = recruiter.String
-	l.RecruiterTGID = recruiterTGID.Int64
-	l.Compensation = comp.String
 	return &l, nil
 }
 
@@ -1354,10 +1366,7 @@ func (s *Store) ListJobLeadsByConversation(ctx context.Context, userID, conversa
 
 func (s *Store) listJobLeads(ctx context.Context, where string, args ...any) ([]JobLead, error) {
 	rows, err := s.DB.QueryContext(ctx,
-		`SELECT id, user_id, conversation_id, company, role, recruiter_name, recruiter_tg_id,
-		        compensation, status, detail, created_at, updated_at
-		   FROM job_leads WHERE `+where,
-		args...,
+		`SELECT `+jobLeadColumns+` FROM job_leads WHERE `+where, args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list job leads: %w", err)
@@ -1365,21 +1374,10 @@ func (s *Store) listJobLeads(ctx context.Context, where string, args ...any) ([]
 	defer func() { _ = rows.Close() }()
 	var out []JobLead
 	for rows.Next() {
-		var (
-			l                              JobLead
-			convID, recruiterTGID          sql.NullInt64
-			company, role, recruiter, comp sql.NullString
-		)
-		if err := rows.Scan(&l.ID, &l.UserID, &convID, &company, &role, &recruiter, &recruiterTGID,
-			&comp, &l.Status, &l.Detail, &l.CreatedAt, &l.UpdatedAt); err != nil {
+		l, err := s.scanJobLead(rows.Scan)
+		if err != nil {
 			return nil, fmt.Errorf("scan job lead: %w", err)
 		}
-		l.ConversationID = convID.Int64
-		l.Company = company.String
-		l.Role = role.String
-		l.RecruiterName = recruiter.String
-		l.RecruiterTGID = recruiterTGID.Int64
-		l.Compensation = comp.String
 		out = append(out, l)
 	}
 	return out, rows.Err()

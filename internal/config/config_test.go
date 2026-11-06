@@ -810,3 +810,14 @@ func TestLoad_ManagedClaimNotAfter(t *testing.T) {
 		t.Fatal("a malformed cutoff must fail")
 	}
 }
+
+func TestLoadAgentLeadRetentionDefaultsTo90Days(t *testing.T) {
+	t.Setenv("AGENT_LEAD_RETENTION_DAYS", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.AgentLeadRetentionDays != 90 {
+		t.Fatalf("AGENT_LEAD_RETENTION_DAYS default = %d, want 90", cfg.AgentLeadRetentionDays)
+	}
+}
