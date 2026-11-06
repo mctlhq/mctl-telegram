@@ -960,7 +960,7 @@ func TestEnableAccess_SupersededOtherAccount(t *testing.T) {
 		logOuts         []string
 		metric          string
 	}{
-		"no key": {replaced: `{"Version":1,"Data":{"DC":2}}`},
+		"no key":        {replaced: `{"Version":1,"Data":{"DC":2}}`},
 		"logged out":    {logOuts: []string{otherAccountSession}, metric: "superseded/ok"},
 		"already ended": {logOutErr: fmt.Errorf("auth.logOut: %w", tgerr.New(401, "AUTH_KEY_UNREGISTERED")), logOuts: []string{otherAccountSession}, metric: "superseded/already_ended"},
 		"failed":        {logOutErr: errors.New("telegram unreachable"), logOuts: []string{otherAccountSession}, metric: "superseded/error"},
