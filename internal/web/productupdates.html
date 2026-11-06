@@ -39,7 +39,7 @@
     </div>
     {{range .Entries}}
     <div class="update-entry">
-      <h3>{{.Title}}{{if .DocsOnly}} <span class="muted">(docs only)</span>{{end}}</h3>
+      <h3>{{.Title}}{{if .DocsOnly}} <span class="muted">(not sent as a message)</span>{{end}}</h3>
       <p class="muted">{{.Kind}}{{if .Tools}} · {{range $i, $t := .Tools}}{{if $i}}, {{end}}{{$t}}{{end}}{{end}}</p>
       <p>{{.Summary}}</p>
       {{if .Links}}

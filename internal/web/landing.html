@@ -309,12 +309,12 @@
     </div>
     {{if .Stats}}
     <div class="stats-strip" id="stats" aria-label="Usage so far">
-      <div class="stat"><span class="stat__value" data-stat="tool_calls_total">{{fmtCount .Stats.ToolCallsTotal}}</span><span class="stat__label">tool calls</span></div>
-      <div class="stat"><span class="stat__value" data-stat="accounts_total">{{fmtCount .Stats.AccountsTotal}}</span><span class="stat__label">connected accounts</span></div>
+      <div class="stat"><span class="stat__value" data-stat="tool_calls_total">{{fmtCount .Stats.ToolCallsTotal}}</span><span class="stat__label">tool calls, last 90 days</span></div>
+      <div class="stat"><span class="stat__value" data-stat="accounts_total">{{fmtCount .Stats.AccountsTotal}}</span><span class="stat__label">accounts</span></div>
       <div class="stat"><span class="stat__value" data-stat="active_users_30d">{{fmtCount .Stats.ActiveUsers30d}}</span><span class="stat__label">active last 30 days</span></div>
       <div class="stat"><span class="stat__value" data-stat="sessions_connected">{{fmtCount .Stats.SessionsConnected}}</span><span class="stat__label">connected sessions</span></div>
     </div>
-    <p class="stats-note"><span class="live-dot" aria-hidden="true"></span><span>live · since Aug 2026 · updated <time id="stats-updated" datetime="{{.Stats.UpdatedAt.Format "2006-01-02T15:04:05Z07:00"}}">{{.Stats.UpdatedAt.Format "15:04"}} UTC</time></span></p>
+    <p class="stats-note"><span class="live-dot" aria-hidden="true"></span><span>live · updated <time id="stats-updated" datetime="{{.Stats.UpdatedAt.Format "2006-01-02T15:04:05Z07:00"}}">{{.Stats.UpdatedAt.Format "15:04"}} UTC</time></span></p>
     {{end}}
     <p class="hero-legal">MCTL Assistant is an unofficial third-party connector using the Telegram API. Not affiliated with Telegram, Anthropic or OpenAI.</p>
     </div>
@@ -399,8 +399,8 @@
     <div class="data-grid">
       <div class="data-cell">
         <span class="mono-label">Stored, encrypted</span>
-        <span class="big">Telegram session and audit metadata</span>
-        <span class="small">AES-256-GCM, a separate key per user. When Communication Agent is enabled, relevant message and action content is also stored encrypted at rest; see the retention details in <a href="/privacy">/privacy</a>.</span>
+        <span class="big">Telegram session</span>
+        <span class="small">AES-256-GCM, with a key derived per user from one service key. Audit metadata (tool name, redacted peer, status) is stored without this encryption. When Communication Agent is enabled, relevant message and action content is also stored encrypted at rest; see the retention details in <a href="/privacy">/privacy</a>.</span>
       </div>
       <div class="data-cell">
         <span class="mono-label">Not stored in logs or audit history</span>
@@ -409,7 +409,7 @@
       <div class="data-cell">
         <span class="mono-label">You control</span>
         <span class="big">Disconnect or delete your account at any time</span>
-        {{if .ShowManage}}<span class="small">On the <a href="/telegram/connect/manage">manage</a> page, or with MCP tools.</span>{{end}}
+        {{if .ShowManage}}<span class="small">Disconnect on the <a href="/telegram/connect/manage">manage</a> page or with MCP tools. Delete with an MCP tool or the API.</span>{{end}}
       </div>
     </div>
     <div class="links-row">
