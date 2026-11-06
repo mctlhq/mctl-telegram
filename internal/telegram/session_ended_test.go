@@ -3,8 +3,11 @@ package telegram
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/gotd/td/tgerr"
 )
 
 func TestSessionEndedLogOut(t *testing.T) {
@@ -14,6 +17,10 @@ func TestSessionEndedLogOut(t *testing.T) {
 	}{
 		"ok":    {nil, "ok"},
 		"error": {errors.New("telegram unreachable"), "error"},
+		"already ended": {
+			fmt.Errorf("auth.logOut: %w", tgerr.New(401, "AUTH_KEY_UNREGISTERED")),
+			"already_ended",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			logged := make(chan string, 1)

@@ -808,7 +808,7 @@ func New() *Registry {
 
 	r.LoginLogOutTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_login_logout_total",
-		Help: "Total logouts of sessions nobody holds any more, labeled by reason (unsaved, superseded, session_ended) and outcome (ok, error).",
+		Help: "Total logouts of sessions nobody holds any more, labeled by reason (unsaved, superseded, session_ended) and outcome: ok (Telegram accepted auth.logOut, so the call ended the session), already_ended (Telegram no longer accepts the key), key_in_use (not logged out, an active session holds the key), error (the session may still be alive).",
 	}, []string{"reason", "outcome"})
 
 	r.ConnectFirstCallTotal = prometheus.NewCounterVec(prometheus.CounterOpts{

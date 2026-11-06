@@ -362,12 +362,12 @@ func TestClearStraySessionIfLocal_LeavesHostedOnlyUserAlone(t *testing.T) {
 	}
 }
 
-// TestSaveSessionForSignInSuperseding_ReturnsOnlySameAccountKeys: the save
-// hands back, decrypted, the session of every hosted row it superseded for
-// the same Telegram account, for the caller to log out (#913). A row of
-// another account or of no recorded account is superseded all the same but
-// not returned: its key is not provably the one this sign-in replaced.
-func TestSaveSessionForSignInSuperseding_ReturnsOnlySameAccountKeys(t *testing.T) {
+// TestSaveSessionForSignInSuperseding_ReturnsKnownAccountKeys: the save hands
+// back, decrypted and with its account, the session of every hosted row it
+// superseded, for the caller to log out (#913). A row of no recorded account is
+// superseded all the same but not returned: the gotd SessionStore wrote it
+// mid-login and it carries no completed authorization.
+func TestSaveSessionForSignInSuperseding_ReturnsKnownAccountKeys(t *testing.T) {
 	ctx := context.Background()
 	s := newSaveSessionTestStore(t)
 
@@ -401,8 +401,12 @@ func TestSaveSessionForSignInSuperseding_ReturnsOnlySameAccountKeys(t *testing.T
 	if err != nil {
 		t.Fatalf("SaveSessionForSignInSuperseding: %v", err)
 	}
-	if len(got) != 1 || string(got[0]) != "old-same-account" {
-		t.Errorf("superseded = %q, want only the same account's old key", got)
+	found := map[string]int64{}
+	for _, old := range got {
+		found[string(old.Data)] = old.TelegramUserID
+	}
+	if len(got) != 2 || found["old-same-account"] != 700000401 || found["old-other-account"] != 700000402 {
+		t.Errorf("superseded = %+v, want both known accounts' old keys with their accounts", got)
 	}
 	var active int
 	if err := s.DB.QueryRowContext(ctx,
@@ -411,5 +415,60 @@ func TestSaveSessionForSignInSuperseding_ReturnsOnlySameAccountKeys(t *testing.T
 	}
 	if active != 1 {
 		t.Errorf("active rows = %d, want only the new one", active)
+	}
+	var blobs int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM telegram_accounts WHERE user_id = $1 AND revoked_at IS NOT NULL AND session_encrypted IS NOT NULL`, uid).Scan(&blobs); err != nil {
+		t.Fatal(err)
+	}
+	if blobs != 0 {
+		t.Errorf("superseded rows with a session = %d, want every one erased", blobs)
+	}
+}
+
+// TestActiveSessionsSharingAccount covers the proof a logout relies on: rows of
+// the user and of the account are returned, revoked and unrelated rows are not,
+// and one unreadable row fails the call rather than shortening the list.
+func TestActiveSessionsSharingAccount(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid, err := s.EnsureUser(ctx, "sharing-a", "", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := s.EnsureUser(ctx, "sharing-b", "", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelated, err := s.EnsureUser(ctx, "sharing-c", "", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct {
+		uid  int64
+		tgID int64
+		data string
+	}{{uid, 900001, "mine"}, {other, 900002, "same-account"}, {unrelated, 900003, "unrelated"}} {
+		if err := s.SaveSession(ctx, row.uid, []byte(row.data), row.tgID, "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.ActiveSessionsSharingAccount(ctx, uid, 900002)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, data := range got {
+		seen[string(data)] = true
+	}
+	if len(got) != 2 || !seen["mine"] || !seen["same-account"] {
+		t.Errorf("sessions = %q, want the user's and the account's", got)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE telegram_accounts SET session_encrypted = $1 WHERE user_id = $2`, []byte("not-a-sealed-blob"), other); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.ActiveSessionsSharingAccount(ctx, uid, 900002); err == nil {
+		t.Errorf("sessions = %q with an unreadable row, want an error", got)
 	}
 }

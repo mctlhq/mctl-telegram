@@ -247,10 +247,26 @@ func SessionAuthKeyID(data []byte) (string, error) {
 	return hex.EncodeToString(loaded.AuthKeyID), nil
 }
 
-// IsSessionAlreadyEnded reports a logout refused because Telegram no longer
-// accepts the key: the authorization this logout wanted to end is already gone.
-func IsSessionAlreadyEnded(err error) bool {
-	return auth.IsUnauthorized(err)
+// Outcomes of a logout, the outcome label on mctl_login_logout_total.
+const (
+	// LogOutOK: Telegram accepted auth.logOut, so this call ended the session.
+	LogOutOK = "ok"
+	// LogOutAlreadyEnded: Telegram no longer accepts the key, so the session
+	// was already gone before this call.
+	LogOutAlreadyEnded = "already_ended"
+	// LogOutError: the logout failed and the session may still be alive.
+	LogOutError = "error"
+)
+
+// LogOutOutcome classifies the error of a logout.
+func LogOutOutcome(err error) string {
+	switch {
+	case err == nil:
+		return LogOutOK
+	case auth.IsUnauthorized(err):
+		return LogOutAlreadyEnded
+	}
+	return LogOutError
 }
 
 // SessionEndedLogOut returns a db.Store.WithSessionEnded hook that ends a session
@@ -262,9 +278,9 @@ func SessionEndedLogOut(apiID int, apiHash string, cfg LoginConfig, count func(r
 		go func() {
 			ctx, cancel := DetachedLogOutContext(context.Background())
 			defer cancel()
-			outcome := "ok"
-			if err := logOutSessionFn(ctx, apiID, apiHash, data, cfg); err != nil {
-				outcome = "error"
+			err := logOutSessionFn(ctx, apiID, apiHash, data, cfg)
+			outcome := LogOutOutcome(err)
+			if outcome == LogOutError {
 				slog.Warn("telegram: logout of an ended session failed", "uid", userID, "err", err)
 			}
 			if count != nil {

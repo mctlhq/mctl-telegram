@@ -3,10 +3,12 @@ package oauth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -122,6 +124,11 @@ func handOverSession(cfgs []telegram.LoginConfig, data []byte) error {
 // after the inputs are consumed (mimicking PHONE_CODE_INVALID etc.); otherwise
 // it hands a session over and reports success as the admin id.
 func stubLogin(needPw bool, failErr error) LoginFunc {
+	return stubLoginWithSession(needPw, failErr, "fake-mtproto-session")
+}
+
+// stubLoginWithSession is stubLogin handing over the given session bytes.
+func stubLoginWithSession(needPw bool, failErr error, session string) LoginFunc {
 	return func(ctx context.Context, apiID int, apiHash string, store *db.Store,
 		uid int64, phone string,
 		askCode func(context.Context) (string, error),
@@ -139,7 +146,7 @@ func stubLogin(needPw bool, failErr error) LoginFunc {
 		if failErr != nil {
 			return 0, "", "", failErr
 		}
-		if err := handOverSession(cfgs, []byte("fake-mtproto-session")); err != nil {
+		if err := handOverSession(cfgs, []byte(session)); err != nil {
 			return 0, "", "", err
 		}
 		return 500100101, "Dana", "dana_tg", nil
@@ -916,6 +923,84 @@ func TestEnableAccess_ReLoginLogsOutTheSupersededKey(t *testing.T) {
 	}
 	if len(m.results) != 1 || m.results[0] != "code/ok" {
 		t.Errorf("finished flows = %v, want [code/ok]", m.results)
+	}
+}
+
+// Real session bytes, so the key check can read them: a session of another
+// Telegram account, and the fresh one a sign-in saves.
+const (
+	otherAccountSession = `{"Version":1,"Data":{"DC":2,"Addr":"x","AuthKey":"AQID","AuthKeyID":"BAUG"}}`
+	freshSignInSession  = `{"Version":1,"Data":{"DC":2,"Addr":"x","AuthKey":"DQ4P","AuthKeyID":"EBES"}}`
+)
+
+// seedOtherAccountSession gives the user a row of an account other than the
+// one the stub sign-in returns.
+func seedOtherAccountSession(t *testing.T, srv *Server) int64 {
+	t.Helper()
+	uid := seedExistingSession(t, srv)
+	if err := srv.store.UpdateSessionBlob(context.Background(), uid, []byte(otherAccountSession)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.store.DB.ExecContext(context.Background(),
+		`UPDATE telegram_accounts SET telegram_user_id = $1 WHERE user_id = $2`, 500100999, uid); err != nil {
+		t.Fatal(err)
+	}
+	return uid
+}
+
+// TestEnableAccess_SupersededOtherAccount covers replacing a session of another
+// Telegram account: it is logged out unless an active session holds its key,
+// and a check that could not read the active sessions logs nothing out.
+func TestEnableAccess_SupersededOtherAccount(t *testing.T) {
+	for name, tc := range map[string]struct {
+		activeElsewhere string
+		logOutErr       error
+		logOuts         []string
+		metric          string
+	}{
+		"logged out":    {logOuts: []string{otherAccountSession}, metric: "superseded/ok"},
+		"already ended": {logOutErr: fmt.Errorf("auth.logOut: %w", tgerr.New(401, "AUTH_KEY_UNREGISTERED")), logOuts: []string{otherAccountSession}, metric: "superseded/already_ended"},
+		"failed":        {logOutErr: errors.New("telegram unreachable"), logOuts: []string{otherAccountSession}, metric: "superseded/error"},
+		"key in use":    {activeElsewhere: otherAccountSession, metric: "superseded/key_in_use"},
+		"unreadable":    {activeElsewhere: `{not json`, metric: "superseded/error"},
+		"different key": {
+			activeElsewhere: `{"Version":1,"Data":{"DC":2,"Addr":"x","AuthKey":"BwgJ","AuthKeyID":"CgsM"}}`,
+			logOuts:         []string{otherAccountSession},
+			metric:          "superseded/ok",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv, mux := newEnableTestServer(t, stubLoginWithSession(false, nil, freshSignInSession))
+			m := &flowMetrics{}
+			srv.WithMetrics(m)
+			logOuts := recordSessionLogOuts(srv, tc.logOutErr)
+			es := driveToPhone(t, mux)
+			seedOtherAccountSession(t, srv)
+			if tc.activeElsewhere != "" {
+				ctx := context.Background()
+				other, err := srv.store.EnsureUser(ctx, "same-account-elsewhere", "", "test")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := srv.store.SaveSession(ctx, other, []byte(tc.activeElsewhere), 500100999, "", ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if loc := authCodeRedirect(t, signInByPhone(t, mux, es)); loc.Query().Get("code") == "" {
+				t.Fatalf("no authorization code in %s", loc)
+			}
+			srv.bgLogOuts.Wait()
+
+			if got := logOuts(); !slices.Equal(got, tc.logOuts) {
+				t.Errorf("logouts = %q, want %q", got, tc.logOuts)
+			}
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			if len(m.logOuts) != 1 || m.logOuts[0] != tc.metric {
+				t.Errorf("logout metrics = %v, want [%s]", m.logOuts, tc.metric)
+			}
+		})
 	}
 }
 

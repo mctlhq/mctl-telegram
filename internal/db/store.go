@@ -764,17 +764,24 @@ func (s *Store) SaveSessionForSignIn(ctx context.Context, userID int64, plaintex
 	return err
 }
 
+// SupersededSession is a hosted session a sign-in replaced, decrypted.
+type SupersededSession struct {
+	// TelegramUserID is the account the session belongs to, which may differ
+	// from the account that just signed in.
+	TelegramUserID int64
+	Data           []byte
+}
+
 // SaveSessionForSignInSuperseding is SaveSessionForSignIn that also returns
-// the session bytes of the hosted rows it superseded for the same Telegram
-// account, decrypted, once the save has committed. A sign-in now starts from
-// a fresh auth key (#913), so the authorization those bytes carry is no
-// longer held by anyone; the caller logs it out. Rows of another or an
-// unknown Telegram account, rows without bytes and bytes that no longer
-// decrypt are left out: logging out a session nobody can attribute is not
-// this function's call. Every superseded row is erased all the same, so an
-// authorization left out here is never logged out by this service and ends
-// only at Telegram. On an error nothing is returned.
-func (s *Store) SaveSessionForSignInSuperseding(ctx context.Context, userID int64, plaintext []byte, telegramUserID int64, displayName, username string, signInStartedAt time.Time) ([][]byte, error) {
+// the hosted sessions it superseded, decrypted, once the save has committed. A
+// sign-in now starts from a fresh auth key (#913), so nobody here holds the
+// authorization those bytes carry any more; the caller logs it out. Rows with
+// no recorded Telegram account are left out: the gotd SessionStore wrote them
+// mid-login and they carry no completed authorization to end. Rows without
+// bytes and bytes that no longer decrypt are left out too. Every superseded row
+// is erased all the same, so a session left out here ends only at Telegram. On
+// an error nothing is returned.
+func (s *Store) SaveSessionForSignInSuperseding(ctx context.Context, userID int64, plaintext []byte, telegramUserID int64, displayName, username string, signInStartedAt time.Time) ([]SupersededSession, error) {
 	if signInStartedAt.IsZero() {
 		return nil, errors.New("save session: missing sign-in start")
 	}
@@ -784,7 +791,7 @@ func (s *Store) SaveSessionForSignInSuperseding(ctx context.Context, userID int6
 // saveSession implements SaveSession; a non-zero signInStartedAt adds the
 // deletion check of SaveSessionForSignIn. It returns the superseded sessions
 // SaveSessionForSignInSuperseding describes.
-func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte, telegramUserID int64, displayName, username string, signInStartedAt time.Time) ([][]byte, error) {
+func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte, telegramUserID int64, displayName, username string, signInStartedAt time.Time) ([]SupersededSession, error) {
 	blob, err := s.Crypt.SealForUser(plaintext, userID)
 	if err != nil {
 		return nil, fmt.Errorf("encrypt session: %w", err)
@@ -861,7 +868,7 @@ func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte,
 		return nil, fmt.Errorf("revoke prior sessions: %w", err)
 	}
 	hasLocal := false
-	var supersededBlobs [][]byte
+	var supersededBlobs []SupersededSession
 	var revokedIDs []int64
 	for revoked.Next() {
 		var rowID int64
@@ -876,8 +883,8 @@ func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte,
 		if mode == ModeLocal {
 			hasLocal = true
 		}
-		if mode == ModeHosted && tgID.Valid && tgID.Int64 == telegramUserID && old != nil {
-			supersededBlobs = append(supersededBlobs, old)
+		if mode == ModeHosted && tgID.Valid && old != nil {
+			supersededBlobs = append(supersededBlobs, SupersededSession{TelegramUserID: tgID.Int64, Data: old})
 		}
 	}
 	if err := revoked.Err(); err != nil {
@@ -925,15 +932,47 @@ func (s *Store) saveSession(ctx context.Context, userID int64, plaintext []byte,
 	if s.metrics != nil {
 		s.metrics.SessionsConnectedTotal.Inc()
 	}
-	var superseded [][]byte
+	var superseded []SupersededSession
 	for _, old := range supersededBlobs {
-		pt, err := s.Crypt.OpenForUser(old, userID)
+		pt, err := s.Crypt.OpenForUser(old.Data, userID)
 		if err != nil {
 			continue
 		}
-		superseded = append(superseded, pt)
+		superseded = append(superseded, SupersededSession{TelegramUserID: old.TelegramUserID, Data: pt})
 	}
 	return superseded, nil
+}
+
+// ActiveSessionsSharingAccount returns the decrypted sessions of the active
+// rows of a user or a Telegram account. One unreadable row fails the whole
+// call: the caller uses this to prove a logout will not end a session in use,
+// and a row it could not read proves nothing.
+func (s *Store) ActiveSessionsSharingAccount(ctx context.Context, userID, telegramUserID int64) ([][]byte, error) {
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT user_id, session_encrypted FROM telegram_accounts
+		  WHERE revoked_at IS NULL AND session_encrypted IS NOT NULL
+		    AND (user_id = $1 OR telegram_user_id = $2)`, userID, telegramUserID)
+	if err != nil {
+		return nil, fmt.Errorf("list active sessions: %w", err)
+	}
+	defer rows.Close()
+	var out [][]byte
+	for rows.Next() {
+		var owner int64
+		var sealed []byte
+		if err := rows.Scan(&owner, &sealed); err != nil {
+			return nil, fmt.Errorf("list active sessions: scan: %w", err)
+		}
+		data, err := s.Crypt.OpenForUser(sealed, owner)
+		if err != nil {
+			return nil, fmt.Errorf("list active sessions: open: %w", err)
+		}
+		out = append(out, data)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list active sessions: %w", err)
+	}
+	return out, nil
 }
 
 // Session TTL policy. Borrow refuses a session whose last_used_at is older
