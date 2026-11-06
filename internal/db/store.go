@@ -771,7 +771,9 @@ func (s *Store) SaveSessionForSignIn(ctx context.Context, userID int64, plaintex
 // longer held by anyone; the caller logs it out. Rows of another or an
 // unknown Telegram account, rows without bytes and bytes that no longer
 // decrypt are left out: logging out a session nobody can attribute is not
-// this function's call. On an error nothing is returned.
+// this function's call. Every superseded row is erased all the same, so an
+// authorization left out here is never logged out by this service and ends
+// only at Telegram. On an error nothing is returned.
 func (s *Store) SaveSessionForSignInSuperseding(ctx context.Context, userID int64, plaintext []byte, telegramUserID int64, displayName, username string, signInStartedAt time.Time) ([][]byte, error) {
 	if signInStartedAt.IsZero() {
 		return nil, errors.New("save session: missing sign-in start")

@@ -38,7 +38,9 @@ type RevokedSessionResult struct {
 
 // sessionReasonNeedsLogOut says which revoked rows may still hold a working
 // authorization a person expects to be gone: an explicit disconnect, a
-// replaced login, and rows from before revocation reasons were recorded. The
+// replaced login, and rows with no reason. Those are mostly from before reasons
+// were recorded; the deprecated SweepExpiredSessions also leaves none, and for
+// a session that already ended the logout gets a 401 and the row is erased. The
 // rest are only erased: Telegram rejected the key (unauthorized), the sign-in
 // never finished (login_incomplete), or the session ran out by age and is left
 // to expire at Telegram.
@@ -57,7 +59,7 @@ func RevokedSessions(ctx context.Context, store *db.Store, deps RevokedSessionDe
 	defer ticker.Stop()
 	for {
 		res, err := CleanRevokedSessions(ctx, store, deps)
-		if err != nil {
+		if err != nil && ctx.Err() == nil {
 			slog.Warn("revoked session cleanup failed", "err", err)
 		}
 		if res != (RevokedSessionResult{}) {
