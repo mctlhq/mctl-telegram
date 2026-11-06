@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/mctlhq/mctl-telegram/internal/acquisition"
 	"github.com/mctlhq/mctl-telegram/internal/ui"
 )
 
@@ -31,6 +32,13 @@ type enablePhonePage struct {
 	// the phone number below it as the alternative (#901); see
 	// enableSession.qrOffered.
 	QROffered bool
+	// AskHeardFrom shows the optional "How did you hear about us?" question.
+	AskHeardFrom bool
+}
+
+// HeardFromOptions exposes the fixed answers to the phone step template.
+func (enablePhonePage) HeardFromOptions() []acquisition.HeardFromOption {
+	return acquisition.HeardFromOptions
 }
 
 type enableCodePage struct {
@@ -113,7 +121,7 @@ type connectSuccessPage struct {
 const enableExtraCSS = `
   .field { display: block; margin: 20px 0 8px; }
   .field span { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; color: var(--text); }
-  .field input { width: 100%; box-sizing: border-box; font-size: 15px; padding: 9px 10px;
+  .field input, .field select { width: 100%; box-sizing: border-box; font-size: 15px; padding: 9px 10px;
                  border: 1px solid var(--border-strong); border-radius: var(--mctl-radius-md);
                  background: var(--surface-elevated); color: var(--text); font-family: var(--font-mono); }
   .check { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; color: var(--text-dim); margin: 14px 0; }
@@ -219,6 +227,13 @@ var enablePhoneTemplate = template.Must(template.New("enablePhone").Parse(enable
     {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
     <form method="POST" action="/oauth/telegram/enable_access/start" autocomplete="off">
       <input type="hidden" name="es" value="{{.EnableToken}}">
+      {{if .AskHeardFrom}}<label class="field">
+        <span>How did you hear about us? (optional)</span>
+        <select name="heard_from">
+          <option value="" selected>Prefer not to say</option>
+          {{range .HeardFromOptions}}<option value="{{.Value}}">{{.Label}}</option>
+          {{end}}</select>
+      </label>{{end}}
       {{if .WizardMode}}{{else}}<label class="check">
         <input type="checkbox" name="send_optin" value="on"{{if .SendOptIn}} checked{{end}}>
         <span>Also allow this connector to send messages on my behalf (you can turn this off later)</span>
