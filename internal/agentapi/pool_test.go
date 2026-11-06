@@ -72,7 +72,14 @@ func (h *testHarness) seedManaged(tg int64, runtime string, n int) int64 {
 
 func (h *testHarness) poolClaim(limit string) (int, []jobEnvelope) {
 	h.t.Helper()
-	rec := h.doAs(poolIdentity(), "POST", "/jobs/claim?limit="+limit, nil)
+	return h.poolClaimAs(poolIdentity(), limit)
+}
+
+// poolClaimAs claims as the given pool identity, so a test that asserts on the
+// identity can hold one value for both the request and the assertion.
+func (h *testHarness) poolClaimAs(id *auth.Identity, limit string) (int, []jobEnvelope) {
+	h.t.Helper()
+	rec := h.doAs(id, "POST", "/jobs/claim?limit="+limit, nil)
 	var body struct {
 		Jobs []jobEnvelope `json:"jobs"`
 	}
@@ -85,7 +92,13 @@ func (h *testHarness) poolClaim(limit string) (int, []jobEnvelope) {
 func TestHandleClaimJobs_Pool_MintsJobTokenFromJobUser(t *testing.T) {
 	h := poolHarness(t)
 	uid := h.seedManaged(9001, db.RuntimeManaged, 1)
-	code, jobs := h.poolClaim("1")
+	// One explicit identity serves as both the request and the expectation. Its
+	// issue time is a fixed past instant, so it cannot coincide with a value
+	// recomputed from time.Now(): rebuilding the expectation with poolIdentity()
+	// after the claim would compare against a different second whenever the
+	// clock ticked in between.
+	pool := &auth.Identity{Subject: "pool:main", Pool: "main", Jti: "pool-jti", OriginalIssuedAt: 1700000000}
+	code, jobs := h.poolClaimAs(pool, "1")
 	if code != 200 || len(jobs) != 1 {
 		t.Fatalf("code=%d jobs=%+v", code, jobs)
 	}
@@ -93,7 +106,6 @@ func TestHandleClaimJobs_Pool_MintsJobTokenFromJobUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify job token: %v", err)
 	}
-	pool := poolIdentity()
 	if c.Subject != "tg:9001" || c.TelegramID != 9001 || c.TelegramUsername != "" {
 		t.Errorf("subject/telegram from job user wrong: %+v", c)
 	}
