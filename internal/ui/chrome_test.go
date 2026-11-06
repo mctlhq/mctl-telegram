@@ -54,7 +54,12 @@ func TestFullChrome(t *testing.T) {
 		AnalyticsScript,
 		// Ecosystem cross-links and Schema.org metadata.
 		`<a href="https://mctl.ai" target="_blank" rel="noopener">MCTL</a>`,
+		`<a href="https://docs.mctl.ai" target="_blank" rel="noopener">Docs</a>`,
+		`<a href="https://academy.mctl.ai" target="_blank" rel="noopener">Academy</a>`,
 		`<a href="https://alice.mctl.ai" target="_blank" rel="noopener">Alice MCP</a>`,
+		`<link rel="apple-touch-icon" href="/apple-touch-icon.png">`,
+		`<link rel="icon" href="/favicon.ico" sizes="any">`,
+		"og.png?v=3",
 		`type="application/ld+json"`,
 		`"https://mctl.ai/#organization"`,
 	} {

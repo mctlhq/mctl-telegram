@@ -510,7 +510,8 @@ func main() {
 	mux.Get("/robots.txt", web.RobotsTxt(cfg.PublicBaseURL))
 	mux.Get("/sitemap.xml", web.Sitemap(cfg.PublicBaseURL))
 	mux.Get("/favicon.svg", web.Favicon())
-	mux.Get("/favicon.ico", web.Favicon())
+	mux.Get("/favicon.ico", web.FaviconICO())
+	mux.Get("/apple-touch-icon.png", web.AppleTouchIcon())
 	mux.Get("/og.png", web.OGImage())
 	// Deployment-wide usage counts, no auth: the body holds four aggregate
 	// numbers and nothing per user. Served from the sampler's cache, so a

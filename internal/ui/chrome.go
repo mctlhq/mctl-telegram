@@ -106,20 +106,21 @@ var defs = `
 <meta name="description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarize unread chats, draft replies, and search your history — no extra apps.{{end}}">
 {{if .CanonicalPath}}<link rel="canonical" href="{{.PublicBaseURL}}{{.CanonicalPath}}">
 {{end}}` + FaviconLink + `
-<link rel="shortcut icon" href="/favicon.ico">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="MCTL Assistant">
 <meta property="og:title" content="{{.Title}}">
 <meta property="og:description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarize unread chats, draft replies, and search your history — no extra apps.{{end}}">
 <meta property="og:url" content="{{.PublicBaseURL}}">
-<meta property="og:image" content="{{.PublicBaseURL}}/og.png?v=2">
+<meta property="og:image" content="{{.PublicBaseURL}}/og.png?v=3">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:type" content="image/png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="{{.Title}}">
 <meta name="twitter:description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarize unread chats, draft replies, and search your history — no extra apps.{{end}}">
-<meta name="twitter:image" content="{{.PublicBaseURL}}/og.png?v=2">
+<meta name="twitter:image" content="{{.PublicBaseURL}}/og.png?v=3">
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
@@ -173,6 +174,8 @@ var defs = `
     <a class="brand" href="/" aria-label="MCTL home">` + wordmark + `</a>
     <nav class="mctl-site-footer__links" aria-label="Footer">
       <a href="https://mctl.ai" target="_blank" rel="noopener">MCTL</a>
+      <a href="https://docs.mctl.ai" target="_blank" rel="noopener">Docs</a>
+      <a href="https://academy.mctl.ai" target="_blank" rel="noopener">Academy</a>
       <a href="https://alice.mctl.ai" target="_blank" rel="noopener">Alice MCP</a>
       <a href="/">Home</a>
       <a href="/docs">Docs</a>

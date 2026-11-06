@@ -16,15 +16,39 @@ var landingHTML string
 //go:embed favicon.svg
 var faviconSVG []byte
 
+//go:embed favicon.ico
+var faviconICO []byte
+
+//go:embed apple-touch-icon.png
+var appleTouchIconPNG []byte
+
 //go:embed og.png
 var ogPNG []byte
 
-// Favicon returns the SVG favicon at /favicon.svg and /favicon.ico.
+// Favicon returns the SVG favicon at /favicon.svg.
 func Favicon() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/svg+xml")
 		w.Header().Set("Cache-Control", "public, max-age=86400")
 		_, _ = w.Write(faviconSVG)
+	}
+}
+
+// FaviconICO returns the binary multi-resolution .ico favicon at /favicon.ico.
+func FaviconICO() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/x-icon")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(faviconICO)
+	}
+}
+
+// AppleTouchIcon returns the 180x180 raster PNG for Apple devices at /apple-touch-icon.png.
+func AppleTouchIcon() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(appleTouchIconPNG)
 	}
 }
 
