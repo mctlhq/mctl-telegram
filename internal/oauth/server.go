@@ -3735,8 +3735,9 @@ func (s *Server) probeBotChat(ctx context.Context, uid, telegramID int64) {
 
 // acquisitionForCallback decodes the snapshot carried by the pending entry.
 // A pending row minted by an image that predates the acquisition column
-// carries no snapshot and decodes with an empty client; the redirect URI is still on the row, so the bounded client label is filled
-// from it rather than lost for the whole rollout window.
+// carries no snapshot and decodes with an empty client; the redirect URI is
+// still on the row, so the bounded client label is filled from it rather than
+// lost for the whole rollout window.
 func acquisitionForCallback(pending *pendingAuth, now time.Time) acquisition.Snapshot {
 	snap := acquisition.Unmarshal(pending.Acquisition, now)
 	if snap.MCPClient == "" && pending.RedirectURI != "" {
