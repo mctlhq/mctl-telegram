@@ -693,9 +693,9 @@ func (r *Registry) CountRootMCPRequest(method, uaFamily string) {
 	r.RootMCPRequestsTotal.WithLabelValues(method, uaFamily).Inc()
 }
 
-// CountLoginLogOut counts one enable_access logout of a session nobody holds
-// any more. Satisfies oauth.metricsIface. reason and outcome come from closed
-// sets in internal/oauth.
+// CountLoginLogOut counts one logout of a session nobody holds any more.
+// Satisfies oauth.metricsIface. reason and outcome come from closed sets in
+// internal/oauth and internal/telegram.
 func (r *Registry) CountLoginLogOut(reason, outcome string) {
 	r.LoginLogOutTotal.WithLabelValues(reason, outcome).Inc()
 }
@@ -818,7 +818,7 @@ func New() *Registry {
 
 	r.LoginLogOutTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_login_logout_total",
-		Help: "Total enable_access logouts of sessions nobody holds any more, labeled by reason (unsaved, superseded) and outcome (ok, error).",
+		Help: "Total logouts of sessions nobody holds any more, labeled by reason (unsaved, superseded, session_ended) and outcome (ok, error).",
 	}, []string{"reason", "outcome"})
 
 	r.ConnectFirstCallTotal = prometheus.NewCounterVec(prometheus.CounterOpts{

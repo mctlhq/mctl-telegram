@@ -840,7 +840,7 @@ func (s *Server) toolDisconnectAccount() (mcplib.Tool, mcpserver.ToolHandlerFunc
 		outputSchema[disconnectResult](),
 		mcplib.WithDescription(`Disconnect your Telegram account from this server.
 
-Marks your active session as revoked and immediately closes the in-memory MTProto client. The encrypted session blob stays in the database (audit trail) but is no longer usable for new Telegram calls. To remove the blob entirely, use delete_telegram_account.
+Marks your active session as revoked, erases the encrypted session blob, immediately closes the in-memory MTProto client, and asks Telegram to end the session. The request to Telegram is best effort: if it fails, close the device in Telegram under Settings, then Devices. To remove the account row and per-account data as well, use delete_telegram_account.
 
 This tool is part of self-service controls — you do not need an operator to disconnect. It requires the account:manage scope; read-only and device credentials are refused, and on deployments with the Telegram manage page enabled, the owner can also disconnect there after signing in with Telegram.
 
@@ -906,7 +906,7 @@ func (s *Server) toolDeleteAccount() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		outputSchema[deleteResult](),
 		mcplib.WithDescription(`Hard-delete your Telegram account record from this server.
 
-Removes the encrypted session blob and all per-account metadata, and revokes every credential issued for the account: OAuth refresh tokens of every connected client, worker tokens and Local Bridge devices. Clients connected to this account have to be re-authorized after a reconnect. The audit log of past tool calls is retained per the server retention policy. This is irreversible — to use the connector again, reconnect it and sign in to Telegram from the start.
+Removes the encrypted session blob and per-account data, asks Telegram to end the session (best effort), and revokes every credential issued for the account: OAuth refresh tokens of every connected client, worker tokens and Local Bridge devices. Clients connected to this account have to be re-authorized after a reconnect. The audit log of past tool calls is retained per the server retention policy. This is irreversible — to use the connector again, reconnect it and sign in to Telegram from the start.
 
 For a softer alternative that keeps the row but disables it, use disconnect_telegram_account. Requires the account:manage scope.
 
