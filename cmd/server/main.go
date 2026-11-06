@@ -247,6 +247,10 @@ func main() {
 		WithMetrics(m).
 		WithAgentRuntime(agentListener)
 	defer pool.Shutdown()
+	// A disconnect or account delete erases the sealed session; this ends its
+	// authorization at Telegram too, so the device does not stay listed there.
+	store.WithSessionEnded(telegram.SessionEndedLogOut(cfg.TGAPIID, cfg.TGAPIHash,
+		telegram.LoginConfig{GlobalMiddleware: globalTGLimiter, TestDC: cfg.TGTestDC}, m.CountLoginLogOut))
 
 	// Communication-agent control plane: the executor sends approved replies
 	// (crash-safely — see internal/agent/executor's package doc), the

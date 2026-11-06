@@ -192,6 +192,10 @@ func DetachedLogOutContext(ctx context.Context) (context.Context, context.Cancel
 	return context.WithTimeout(context.WithoutCancel(ctx), logOutTimeout)
 }
 
+// LogOutReasonSessionEnded labels mctl_login_logout_total for a session the user
+// ended by disconnecting or deleting the account.
+const LogOutReasonSessionEnded = "session_ended"
+
 // logOutSessionFn is LogOutSession; a var only so tests can record it.
 var logOutSessionFn = LogOutSession
 
@@ -206,6 +210,27 @@ func LogOutSession(ctx context.Context, apiID int, apiHash string, data []byte, 
 		}
 		return nil
 	})
+}
+
+// SessionEndedLogOut returns a db.Store.WithSessionEnded hook that ends a session
+// at Telegram, best effort and off the caller's goroutine: the user's disconnect
+// or delete has already committed and must not wait on, or fail with, Telegram.
+// A failure is logged and counted. count may be nil.
+func SessionEndedLogOut(apiID int, apiHash string, cfg LoginConfig, count func(reason, outcome string)) func(userID int64, data []byte) {
+	return func(userID int64, data []byte) {
+		go func() {
+			ctx, cancel := DetachedLogOutContext(context.Background())
+			defer cancel()
+			outcome := "ok"
+			if err := logOutSessionFn(ctx, apiID, apiHash, data, cfg); err != nil {
+				outcome = "error"
+				slog.Warn("telegram: logout of an ended session failed", "uid", userID, "err", err)
+			}
+			if count != nil {
+				count(LogOutReasonSessionEnded, outcome)
+			}
+		}()
+	}
 }
 
 // acceptQRAuth is the part of LoginQR's callback right after Telegram has
