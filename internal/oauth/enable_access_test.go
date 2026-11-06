@@ -950,14 +950,17 @@ func seedOtherAccountSession(t *testing.T, srv *Server) int64 {
 
 // TestEnableAccess_SupersededOtherAccount covers replacing a session of another
 // Telegram account: it is logged out unless an active session holds its key,
-// and a check that could not read the active sessions logs nothing out.
+// a check that could not read the active sessions logs nothing out, and a
+// session with no auth key has nothing to end and is not counted.
 func TestEnableAccess_SupersededOtherAccount(t *testing.T) {
 	for name, tc := range map[string]struct {
 		activeElsewhere string
+		replaced        string
 		logOutErr       error
 		logOuts         []string
 		metric          string
 	}{
+		"no key": {replaced: `{"Version":1,"Data":{"DC":2}}`},
 		"logged out":    {logOuts: []string{otherAccountSession}, metric: "superseded/ok"},
 		"already ended": {logOutErr: fmt.Errorf("auth.logOut: %w", tgerr.New(401, "AUTH_KEY_UNREGISTERED")), logOuts: []string{otherAccountSession}, metric: "superseded/already_ended"},
 		"failed":        {logOutErr: errors.New("telegram unreachable"), logOuts: []string{otherAccountSession}, metric: "superseded/error"},
@@ -975,7 +978,12 @@ func TestEnableAccess_SupersededOtherAccount(t *testing.T) {
 			srv.WithMetrics(m)
 			logOuts := recordSessionLogOuts(srv, tc.logOutErr)
 			es := driveToPhone(t, mux)
-			seedOtherAccountSession(t, srv)
+			uid := seedOtherAccountSession(t, srv)
+			if tc.replaced != "" {
+				if err := srv.store.UpdateSessionBlob(context.Background(), uid, []byte(tc.replaced)); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if tc.activeElsewhere != "" {
 				ctx := context.Background()
 				other, err := srv.store.EnsureUser(ctx, "same-account-elsewhere", "", "test")
@@ -997,8 +1005,12 @@ func TestEnableAccess_SupersededOtherAccount(t *testing.T) {
 			}
 			m.mu.Lock()
 			defer m.mu.Unlock()
-			if len(m.logOuts) != 1 || m.logOuts[0] != tc.metric {
-				t.Errorf("logout metrics = %v, want [%s]", m.logOuts, tc.metric)
+			var want []string
+			if tc.metric != "" {
+				want = []string{tc.metric}
+			}
+			if !slices.Equal(m.logOuts, want) {
+				t.Errorf("logout metrics = %v, want %v", m.logOuts, want)
 			}
 		})
 	}
