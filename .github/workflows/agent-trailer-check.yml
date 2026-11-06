@@ -1,0 +1,17 @@
+name: Agent trailers
+
+# Reports which assistant each commit declares through its Agent trailer and
+# sets the agent:* label (mctlhq/.github#316). Warning only for now.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions: {}
+
+jobs:
+  agent-trailer:
+    permissions:
+      issues: write
+      pull-requests: write
+    uses: mctlhq/.github/.github/workflows/agent-trailer.yml@afb232838c79279141d293e6ce311f3ec664bfbc
