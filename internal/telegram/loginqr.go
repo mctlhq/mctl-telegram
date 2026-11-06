@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,7 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gotd/td/session"
 	gotdtelegram "github.com/gotd/td/telegram"
+	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/auth/qrlogin"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
@@ -210,6 +213,44 @@ func LogOutSession(ctx context.Context, apiID int, apiHash string, data []byte, 
 		}
 		return nil
 	})
+}
+
+// ErrNoAuthKey reports session bytes that hold no authorization at all, so
+// there is nothing to end at Telegram.
+var ErrNoAuthKey = errors.New("session holds no auth key")
+
+// SessionAuthKeyID returns the id of the auth key in session bytes. Two
+// sessions with the same id are one authorization, so logging one out ends
+// the other. Malformed bytes are an error, never "no key".
+func SessionAuthKeyID(data []byte) (string, error) {
+	if len(data) == 0 {
+		return "", ErrNoAuthKey
+	}
+	storage := &session.StorageMemory{}
+	if err := storage.StoreSession(context.Background(), data); err != nil {
+		return "", fmt.Errorf("read session: %w", err)
+	}
+	loader := session.Loader{Storage: storage}
+	loaded, err := loader.Load(context.Background())
+	if errors.Is(err, session.ErrNotFound) {
+		return "", ErrNoAuthKey
+	}
+	if err != nil {
+		return "", fmt.Errorf("parse session: %w", err)
+	}
+	if len(loaded.AuthKey) == 0 {
+		return "", ErrNoAuthKey
+	}
+	if len(loaded.AuthKeyID) == 0 {
+		return "", fmt.Errorf("parse session: auth key without an id")
+	}
+	return hex.EncodeToString(loaded.AuthKeyID), nil
+}
+
+// IsSessionAlreadyEnded reports a logout refused because Telegram no longer
+// accepts the key: the authorization this logout wanted to end is already gone.
+func IsSessionAlreadyEnded(err error) bool {
+	return auth.IsUnauthorized(err)
 }
 
 // SessionEndedLogOut returns a db.Store.WithSessionEnded hook that ends a session

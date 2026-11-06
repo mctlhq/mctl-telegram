@@ -344,6 +344,10 @@ type Config struct {
 	// message content, so the default is deliberately short. 0 keeps rows
 	// forever. Set via AGENT_RETENTION_DAYS.
 	AgentRetentionDays int // AGENT_RETENTION_DAYS, default 30
+
+	// RevokedSessionCleanupEnabled runs the cleanup of sealed sessions left in
+	// already revoked rows. Set via REVOKED_SESSION_CLEANUP_ENABLED.
+	RevokedSessionCleanupEnabled bool
 	// AgentJobVisibility is how long a claimed (processing) agent job may sit
 	// before the sweeper assumes the worker died and requeues it. Must exceed
 	// the worst-case model round-trip for one job. Set via AGENT_JOB_VISIBILITY.
@@ -533,6 +537,7 @@ func Load() (*Config, error) {
 		RateLimitPerUser:                envInt("RATE_LIMIT_PER_USER", 30),
 		AuditRetentionDays:              envInt("AUDIT_RETENTION_DAYS", 90),
 		AgentRetentionDays:              envInt("AGENT_RETENTION_DAYS", 30),
+		RevokedSessionCleanupEnabled:    envBool("REVOKED_SESSION_CLEANUP_ENABLED", false),
 		AgentJobVisibility:              envDuration("AGENT_JOB_VISIBILITY", 5*time.Minute),
 		AgentAllowLegacyCompletion:      envBool("AGENT_ALLOW_LEGACY_COMPLETION", false),
 		AgentApprovalTTL:                envDuration("AGENT_APPROVAL_TTL", 24*time.Hour),
