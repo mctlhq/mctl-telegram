@@ -100,7 +100,7 @@ func TestSaveSessionForSignInSuperseding_StillReturnsTheOldSession(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(old) != 1 || string(old[0]) != "first" {
-		t.Fatalf("superseded = %q: erasing must not lose the bytes the logout needs", old)
+	if len(old) != 1 || string(old[0].Data) != "first" {
+		t.Fatalf("superseded = %+v: erasing must not lose the bytes the logout needs", old)
 	}
 }

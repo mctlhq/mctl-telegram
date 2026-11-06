@@ -532,18 +532,19 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 		if s.evictPooledClient != nil {
 			s.evictPooledClient(uid)
 		}
-		// A re-login to the same account started from a fresh auth key
-		// (#913), so the key of the row it just superseded is held by
-		// nobody any more. Before #913 the phone login reused that key; now
-		// it is logged out, or the user would collect one orphaned device
-		// in Active Sessions per re-login. Off the flow's goroutine and best
-		// effort: the sign-in has already succeeded and must not wait on,
-		// or fail with, Telegram ending an old key.
+		// A sign-in starts from a fresh auth key (#913), so the key of the
+		// row it just superseded is held by nobody any more. Before #913 the
+		// phone login reused that key; now it is logged out, or the user
+		// would collect one orphaned device in Active Sessions per re-login,
+		// and a replaced account would keep a session nobody here can reach.
+		// Off the flow's goroutine and best effort: the sign-in has already
+		// succeeded and must not wait on, or fail with, Telegram ending an
+		// old key.
 		for _, old := range superseded {
 			s.bgLogOuts.Add(1)
 			go func() {
 				defer s.bgLogOuts.Done()
-				s.logOutUnusedSession(bgCtx, uid, old, logOutSuperseded)
+				s.logOutSupersededSession(bgCtx, uid, tgID, old)
 			}()
 		}
 		if sendOptIn {
@@ -566,6 +567,70 @@ const (
 	logOutSuperseded = "superseded"
 )
 
+// logOutKeyInUse is the outcome of a superseded session that was not logged out
+// because an active session holds the same auth key.
+const logOutKeyInUse = "key_in_use"
+
+// logOutSupersededSession ends a session a sign-in replaced. A session of the
+// account that just signed in is logged out at once: that sign-in made the
+// fresh key that replaced it. A session of another account was not made by this
+// flow and the account may be connected elsewhere, so it is first proven not to
+// hold the key of an active session. A check that could not read those sessions
+// proves nothing, so that session is not logged out and counts as an error.
+func (s *Server) logOutSupersededSession(bgCtx context.Context, uid, signedIn int64, old db.SupersededSession) {
+	if old.TelegramUserID != signedIn {
+		ctx, cancel := telegram.DetachedLogOutContext(bgCtx)
+		inUse, err := s.sessionKeyInUse(ctx, uid, old)
+		cancel()
+		switch {
+		case errors.Is(err, telegram.ErrNoAuthKey):
+			return
+		case err != nil:
+			s.logger().Warn("enable: could not check a superseded session before logout", "uid", uid, "err", err)
+			s.countLogOut(logOutSuperseded, telegram.LogOutError)
+			return
+		case inUse:
+			s.logger().Info("enable: kept a superseded session whose key is in use", "uid", uid)
+			s.countLogOut(logOutSuperseded, logOutKeyInUse)
+			return
+		}
+	}
+	s.logOutUnusedSession(bgCtx, uid, old.Data, logOutSuperseded)
+}
+
+// sessionKeyInUse reports whether an active session of the user or of the
+// superseded session's account holds the same auth key. ErrNoAuthKey means the
+// superseded session holds no key at all.
+func (s *Server) sessionKeyInUse(ctx context.Context, uid int64, old db.SupersededSession) (bool, error) {
+	key, err := telegram.SessionAuthKeyID(old.Data)
+	if err != nil {
+		return false, err
+	}
+	active, err := s.store.ActiveSessionsSharingAccount(ctx, uid, old.TelegramUserID)
+	if err != nil {
+		return false, err
+	}
+	for _, data := range active {
+		id, err := telegram.SessionAuthKeyID(data)
+		if errors.Is(err, telegram.ErrNoAuthKey) {
+			continue
+		}
+		if err != nil {
+			return false, fmt.Errorf("read active session: %w", err)
+		}
+		if id == key {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *Server) countLogOut(reason, outcome string) {
+	if s.metrics != nil {
+		s.metrics.CountLoginLogOut(reason, outcome)
+	}
+}
+
 // logOutUnusedSession ends the authorization a session nobody holds any more
 // carries, best effort, on telegram.DetachedLogOutContext: it often runs
 // because bgCtx was cancelled, and a superseded key's logout runs after the
@@ -579,16 +644,13 @@ func (s *Server) logOutUnusedSession(bgCtx context.Context, uid int64, data []by
 	} else {
 		err = telegram.LogOutSession(ctx, s.cfg.TGAPIID, s.cfg.TGAPIHash, data, s.loginCfg)
 	}
-	outcome := "ok"
-	if err != nil {
-		outcome = "error"
+	outcome := telegram.LogOutOutcome(err)
+	if outcome == telegram.LogOutError {
 		s.logger().Warn("enable: logout of an unused session failed", "uid", uid, "reason", reason, "err", err)
 	} else {
-		s.logger().Info("enable: logged out an unused session", "uid", uid, "reason", reason)
+		s.logger().Info("enable: logout of an unused session finished", "uid", uid, "reason", reason, "outcome", outcome)
 	}
-	if s.metrics != nil {
-		s.metrics.CountLoginLogOut(reason, outcome)
-	}
+	s.countLogOut(reason, outcome)
 }
 
 // hasActiveLocalAccount is the account-mode query both the pre-flight gate and

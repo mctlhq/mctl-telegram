@@ -88,7 +88,7 @@
         <td><code>telegram_accounts</code> table</td>
         <td>AES-256-GCM ciphertext of your MTProto session blob using a per-user derived key, plus account metadata and feature/send flags</td>
         <td>Required to make Telegram API calls on your behalf</td>
-        <td>Until disconnect or deletion, which erase it and ask Telegram to end the session. A session revoked for another reason (a session TTL, Telegram rejecting the key, a newer sign-in) is erased too.</td>
+        <td>Until disconnect or deletion, which erase it and ask Telegram to end the session. A newer sign-in also erases the session it replaced and asks Telegram to end it. A session revoked for a TTL or because Telegram rejected the key is only erased.</td>
       </tr>
       <tr>
         <td><code>incoming_events</code> and <code>conversation_messages</code></td>
