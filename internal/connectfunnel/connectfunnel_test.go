@@ -224,7 +224,7 @@ func TestCallWithinWindowCountsOkOnce(t *testing.T) {
 	tr := f.tracker()
 	ctx := context.Background()
 
-	tr.Granted(ctx, f.alice, claudeClient, claudeRedir)
+	tr.Granted(ctx, f.alice, claudeClient, "", claudeRedir)
 	f.clock.advance(2 * time.Minute)
 	tr.Called(ctx, f.alice, claudeClient)
 	tr.Called(ctx, f.alice, claudeClient)
@@ -243,7 +243,7 @@ func TestNoCallCountsNoneOnceAfterWindow(t *testing.T) {
 	tr := f.tracker()
 	ctx := context.Background()
 
-	tr.Granted(ctx, f.alice, chatgptClient, chatgptRedir)
+	tr.Granted(ctx, f.alice, chatgptClient, "", chatgptRedir)
 	// Inside the window, and inside the grace after it, nothing is judged.
 	f.clock.advance(Window + Grace - time.Second)
 	tr.Reconcile(ctx)
@@ -260,7 +260,7 @@ func TestCallAfterWindowDoesNotCountOk(t *testing.T) {
 	tr := f.tracker()
 	ctx := context.Background()
 
-	tr.Granted(ctx, f.alice, claudeClient, claudeRedir)
+	tr.Granted(ctx, f.alice, claudeClient, "", claudeRedir)
 	f.clock.advance(Window + time.Second)
 	tr.Called(ctx, f.alice, claudeClient)
 	f.clock.advance(Grace)
@@ -274,7 +274,7 @@ func TestCallMatchesOnlyItsOwnUserAndClient(t *testing.T) {
 	tr := f.tracker()
 	ctx := context.Background()
 
-	tr.Granted(ctx, f.alice, claudeClient, claudeRedir)
+	tr.Granted(ctx, f.alice, claudeClient, "", claudeRedir)
 	tr.Called(ctx, f.bob, claudeClient)
 	tr.Called(ctx, f.alice, chatgptClient)
 	f.clock.advance(pastJudgement)
@@ -290,7 +290,7 @@ func TestCallAfterEmptyCloseStillClosesNewGrant(t *testing.T) {
 	ctx := context.Background()
 
 	tr.Called(ctx, f.alice, claudeClient) // no grant yet: caches "no open row"
-	tr.Granted(ctx, f.alice, claudeClient, claudeRedir)
+	tr.Granted(ctx, f.alice, claudeClient, "", claudeRedir)
 	tr.Called(ctx, f.alice, claudeClient)
 
 	assertCounts(t, f.m, map[string]int{"claude/ok/": 1})
@@ -305,7 +305,7 @@ func TestGrantDuringInFlightCloseIsNotCached(t *testing.T) {
 
 	var once sync.Once
 	f.store.beforeClose = func() {
-		once.Do(func() { tr.Granted(ctx, f.alice, claudeClient, claudeRedir) })
+		once.Do(func() { tr.Granted(ctx, f.alice, claudeClient, "", claudeRedir) })
 	}
 	tr.Called(ctx, f.alice, claudeClient) // finds nothing; the grant lands meanwhile
 	f.store.mu.Lock()
@@ -342,7 +342,7 @@ func TestInsertErrorCountsUnknownAtOnce(t *testing.T) {
 	ctx := context.Background()
 
 	f.store.failInsert = true
-	tr.Granted(ctx, f.alice, claudeClient, claudeRedir)
+	tr.Granted(ctx, f.alice, claudeClient, "", claudeRedir)
 
 	assertCounts(t, f.m, map[string]int{"claude/unknown/insert_error": 1})
 	if f.m.errs[OpInsert] != 1 {
@@ -354,7 +354,7 @@ func TestGrantBeforeRestartIsUnknown(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 
-	f.tracker().Granted(ctx, f.alice, claudeClient, claudeRedir)
+	f.tracker().Granted(ctx, f.alice, claudeClient, "", claudeRedir)
 	f.clock.advance(time.Minute)
 	next := f.tracker() // the process restarted
 	f.clock.advance(pastJudgement)
@@ -369,7 +369,7 @@ func TestGrantBeforeRestartClosedAfterIt(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 
-	f.tracker().Granted(ctx, f.alice, claudeClient, claudeRedir)
+	f.tracker().Granted(ctx, f.alice, claudeClient, "", claudeRedir)
 	f.clock.advance(time.Minute)
 	next := f.tracker()
 	next.Called(ctx, f.alice, claudeClient)
@@ -385,7 +385,7 @@ func TestRowsOpenDuringDowntimeAreClassified(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 
-	f.tracker().Granted(ctx, f.alice, claudeClient, claudeRedir)
+	f.tracker().Granted(ctx, f.alice, claudeClient, "", claudeRedir)
 	f.clock.advance(3 * time.Hour)
 	f.tracker().Reconcile(ctx)
 
@@ -400,7 +400,7 @@ func TestCloseErrorMakesWindowUnknownNotNone(t *testing.T) {
 	tr := f.tracker()
 	ctx := context.Background()
 
-	tr.Granted(ctx, f.alice, claudeClient, claudeRedir)
+	tr.Granted(ctx, f.alice, claudeClient, "", claudeRedir)
 	f.clock.advance(time.Minute)
 	f.store.failClose = true
 	tr.Called(ctx, f.alice, claudeClient)
@@ -415,7 +415,7 @@ func TestCloseErrorMakesWindowUnknownNotNone(t *testing.T) {
 
 	// Once judged, the failure range is cleared: a later grant without a
 	// call is none_within_window again.
-	tr.Granted(ctx, f.bob, claudeClient, claudeRedir)
+	tr.Granted(ctx, f.bob, claudeClient, "", claudeRedir)
 	f.clock.advance(pastJudgement)
 	tr.Reconcile(ctx)
 	assertCounts(t, f.m, map[string]int{"claude/unknown/close_error": 1, "claude/none_within_window/": 1})
@@ -436,7 +436,7 @@ func TestHangingStoreCallsAreBounded(t *testing.T) {
 	tr.closeTimeout, tr.insertTimeout = 50*time.Millisecond, 50*time.Millisecond
 	ctx := context.Background()
 
-	tr.Granted(ctx, f.alice, claudeClient, claudeRedir)
+	tr.Granted(ctx, f.alice, claudeClient, "", claudeRedir)
 	f.store.hangClose = true
 	start := time.Now()
 	tr.Called(ctx, f.alice, claudeClient)
@@ -449,7 +449,7 @@ func TestHangingStoreCallsAreBounded(t *testing.T) {
 	assertCounts(t, f.m, map[string]int{"claude/unknown/close_error": 1})
 
 	f.store.hangInsert = true
-	tr.Granted(ctx, f.bob, claudeClient, claudeRedir)
+	tr.Granted(ctx, f.bob, claudeClient, "", claudeRedir)
 	assertCounts(t, f.m, map[string]int{"claude/unknown/close_error": 1, "claude/unknown/insert_error": 1})
 }
 
@@ -460,13 +460,13 @@ func TestCloseErrorDoesNotReachGrantsAfterIt(t *testing.T) {
 	tr := f.tracker()
 	ctx := context.Background()
 
-	tr.Granted(ctx, f.alice, claudeClient, claudeRedir)
+	tr.Granted(ctx, f.alice, claudeClient, "", claudeRedir)
 	f.clock.advance(time.Minute)
 	f.store.failClose = true
 	tr.Called(ctx, f.alice, claudeClient)
 	f.store.failClose = false
 	f.clock.advance(time.Minute)
-	tr.Granted(ctx, f.bob, chatgptClient, chatgptRedir)
+	tr.Granted(ctx, f.bob, chatgptClient, "", chatgptRedir)
 	f.clock.advance(pastJudgement)
 	tr.Reconcile(ctx)
 
@@ -483,7 +483,7 @@ func TestCloseErrorDoesNotReachGrantsBeforeItsWindow(t *testing.T) {
 	tr := f.tracker()
 	ctx := context.Background()
 
-	tr.Granted(ctx, f.alice, claudeClient, claudeRedir)
+	tr.Granted(ctx, f.alice, claudeClient, "", claudeRedir)
 	f.clock.advance(Window + time.Second)
 	f.store.failClose = true
 	tr.Called(ctx, f.bob, claudeClient)
@@ -501,9 +501,9 @@ func TestCloseErrorRangeOutlivesAPassThatCannotJudgeItAll(t *testing.T) {
 	tr := f.tracker()
 	ctx := context.Background()
 
-	tr.Granted(ctx, f.alice, claudeClient, claudeRedir)
+	tr.Granted(ctx, f.alice, claudeClient, "", claudeRedir)
 	f.clock.advance(4 * time.Minute)
-	tr.Granted(ctx, f.bob, claudeClient, claudeRedir)
+	tr.Granted(ctx, f.bob, claudeClient, "", claudeRedir)
 	f.clock.advance(30 * time.Second)
 	f.store.failClose = true
 	tr.Called(ctx, f.alice, chatgptClient) // fails; concerns both grants
@@ -527,13 +527,13 @@ func TestClassifyFailureOnUnknownBlocksNone(t *testing.T) {
 			f := newFixture(t)
 			ctx := context.Background()
 			old := f.tracker()
-			old.Granted(ctx, f.alice, claudeClient, claudeRedir)
+			old.Granted(ctx, f.alice, claudeClient, "", claudeRedir)
 			tr := f.tracker()
 			if reason == ReasonRestart {
 				f.clock.advance(time.Second)
 				tr = f.tracker()
 			}
-			tr.Granted(ctx, f.bob, claudeClient, claudeRedir)
+			tr.Granted(ctx, f.bob, claudeClient, "", claudeRedir)
 			f.clock.advance(time.Minute)
 			f.store.failClose = true
 			tr.Called(ctx, f.alice, chatgptClient)
@@ -566,7 +566,7 @@ func TestClassifyFailureOnNoneRetriesNextPass(t *testing.T) {
 	tr := f.tracker()
 	ctx := context.Background()
 
-	tr.Granted(ctx, f.alice, claudeClient, claudeRedir)
+	tr.Granted(ctx, f.alice, claudeClient, "", claudeRedir)
 	f.clock.advance(pastJudgement)
 	f.store.failClassify[db.ConnectOutcomeNone+"/"] = true
 	tr.Reconcile(ctx)
@@ -582,10 +582,10 @@ func TestRetentionDeletesOnlyOldClassifiedRows(t *testing.T) {
 	tr := f.tracker()
 	ctx := context.Background()
 
-	tr.Granted(ctx, f.alice, claudeClient, claudeRedir)
+	tr.Granted(ctx, f.alice, claudeClient, "", claudeRedir)
 	tr.Called(ctx, f.alice, claudeClient) // classified ok at T0
 	f.clock.advance(Retention - time.Hour)
-	tr.Granted(ctx, f.alice, chatgptClient, chatgptRedir)
+	tr.Granted(ctx, f.alice, chatgptClient, "", chatgptRedir)
 	tr.Called(ctx, f.alice, chatgptClient) // classified ok at T0+Retention-1h
 	f.clock.advance(time.Hour - time.Second)
 	tr.Reconcile(ctx)
@@ -594,7 +594,7 @@ func TestRetentionDeletesOnlyOldClassifiedRows(t *testing.T) {
 	}
 
 	f.clock.advance(2 * time.Second)
-	tr.Granted(ctx, f.bob, claudeClient, claudeRedir) // open, inside its window
+	tr.Granted(ctx, f.bob, claudeClient, "", claudeRedir) // open, inside its window
 	tr.Reconcile(ctx)
 	if n := f.totalRows(t); n != 2 {
 		t.Fatalf("rows after retention = %d, want 2 (the newer ok row and the open one)", n)
@@ -623,10 +623,60 @@ func TestClientLabel(t *testing.T) {
 	}
 }
 
+func TestGrantClientLabel(t *testing.T) {
+	for _, tc := range []struct{ redirect, name, want string }{
+		// The grant shapes seen on production.
+		{"https://claude.ai/api/mcp/auth_callback", "Claude", ClientClaude},
+		{"https://chatgpt.com/connector/oauth/x", "ChatGPT", ClientChatGPT},
+		{"https://mcp.mctl.ai/servers-callback", "Cloudflare MCP portal", ClientPortal},
+		{"https://dash.cloudflare.com/acct/one/access-controls/ai-controls/mcp-server/oauth-callback/tg", "Cloudflare MCP portal", ClientPortal},
+		{"http://127.0.0.1:1455/callback/abc", "Codex", ClientCodex},
+		{"http://127.0.0.1:50121/callback", "Hermes Agent", ClientLocalAgent},
+		{"http://localhost:6274/oauth/callback", "MCP Inspector", ClientLocalAgent},
+		{"http://[::1]:8080/callback", "", ClientLocalAgent},
+		{"http://localhost:33418/callback", "Claude Code (tg)", ClientClaudeCode},
+		{"http://LOCALHOST:33418/callback", " claude code ", ClientClaudeCode},
+
+		// A self-declared name moves nothing outside loopback.
+		{"https://evil.example.com/cb", "Codex", ClientOther},
+		{"https://evil.example.com/cb", "Claude Code", ClientOther},
+		{"http://127.0.0.1:9/cb", "Claude", ClientLocalAgent},
+		{"http://127.0.0.1:9/cb", "ChatGPT", ClientLocalAgent},
+		{"http://127.0.0.1:9/cb", "Cloudflare MCP portal", ClientLocalAgent},
+		{"http://127.0.0.1:9/cb", "Codex fork", ClientLocalAgent},
+
+		// Hosts that only look like a known one.
+		{"https://dash.cloudflare.com/acct/somewhere/else", "Cloudflare MCP portal", ClientOther},
+		{"https://mcp.mctl.ai.example.com/cb", "", ClientOther},
+		{"http://127.0.0.1.example.com/cb", "Codex", ClientOther},
+		{"http://localhost.example.com/cb", "Codex", ClientOther},
+		{"cursor://anysphere.cursor-mcp/oauth/callback", "Cursor", ClientOther},
+		{"::not a url", "Codex", ClientOther},
+		{"", "Codex", ClientOther},
+	} {
+		if got := GrantClientLabel(tc.redirect, tc.name); got != tc.want {
+			t.Errorf("GrantClientLabel(%q, %q) = %q, want %q", tc.redirect, tc.name, got, tc.want)
+		}
+	}
+}
+
+// Every label a grant can get must survive normalizeClient, or a row would be
+// counted as other at classification while its grant was labelled otherwise.
+func TestNormalizeClientKeepsEveryLabel(t *testing.T) {
+	for _, c := range Clients {
+		if got := normalizeClient(c); got != c {
+			t.Errorf("normalizeClient(%q) = %q", c, got)
+		}
+	}
+	if got := normalizeClient("hand-edited"); got != ClientOther {
+		t.Errorf("normalizeClient(unknown) = %q, want other", got)
+	}
+}
+
 func TestNilTrackerIsInert(t *testing.T) {
 	var tr *Tracker
 	ctx := context.Background()
-	tr.Granted(ctx, 1, "c", claudeRedir)
+	tr.Granted(ctx, 1, "c", "", claudeRedir)
 	tr.Called(ctx, 1, "c")
 	tr.Reconcile(ctx)
 }
