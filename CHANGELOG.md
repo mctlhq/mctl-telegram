@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.134.1](https://github.com/mctlhq/mctl-telegram/compare/0.134.0...0.134.1) (2026-11-07)
+
+
+### Bug Fixes
+
+* **botapi:** send HTML broadcasts without a link preview card ([e3ff43c](https://github.com/mctlhq/mctl-telegram/commit/e3ff43c4afb53e002d4754d8dd207ef39a8a61da))
+* **botapi:** send HTML broadcasts without a link preview card ([b2e7218](https://github.com/mctlhq/mctl-telegram/commit/b2e721885dc1b6a8bb0144933dc519d29328cee1))
+* **drafts:** leave a topic draft in the topic's own slot ([7d7fd85](https://github.com/mctlhq/mctl-telegram/commit/7d7fd85937bef44bf04a5ae9f03a6fcf263b3273))
+* **drafts:** leave a topic draft in the topic's own slot ([8e9a971](https://github.com/mctlhq/mctl-telegram/commit/8e9a9710f5f8c0a252b85cb0a8f098fb524faf43)), closes [#1175](https://github.com/mctlhq/mctl-telegram/issues/1175)
+
 ## [0.134.0](https://github.com/mctlhq/mctl-telegram/compare/0.133.0...0.134.0) (2026-11-07)
 
 
