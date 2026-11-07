@@ -90,6 +90,7 @@ func TestCoreReadonly(t *testing.T) {
 	}
 	want := map[string]Rule{
 		"list_dialogs":        {},
+		"list_folders":        {},
 		"get_messages":        {Forbidden: []string{"fetch_media"}, LimitDefault: 20, LimitMax: 50},
 		"get_unread_messages": {Required: []string{"peer"}, Forbidden: []string{"fetch_media"}, LimitDefault: 20, LimitMax: 50},
 		"search_messages":     {Required: []string{"peer"}, LimitDefault: 20, LimitMax: 50},

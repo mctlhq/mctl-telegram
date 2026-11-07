@@ -378,8 +378,13 @@ func scanFolderList(fetch func(*tg.MessagesGetDialogsRequest) (tg.MessagesDialog
 		}
 		out = append(out, page.members...)
 		scan.Scanned += page.scanned
-		if page.scanned == 0 || scan.Scanned >= page.total {
+		if scan.Scanned >= page.total {
 			scan.Complete = true
+			return out, scan, nil
+		}
+		if page.scanned == 0 {
+			// An empty page short of the reported total: the rest of the
+			// list was not observed.
 			return out, scan, nil
 		}
 		next, ok := page.next()

@@ -154,6 +154,9 @@ type fakeDialogPages struct {
 	requests []*tg.MessagesGetDialogsRequest
 	notMod   bool
 	noDates  bool
+	// emptyAfter, when set, answers every request after the first with an
+	// empty slice that still reports count.
+	emptyAfter bool
 }
 
 func (f *fakeDialogPages) fetch(req *tg.MessagesGetDialogsRequest) (tg.MessagesDialogsClass, error) {
@@ -166,6 +169,9 @@ func (f *fakeDialogPages) fetch(req *tg.MessagesGetDialogsRequest) (tg.MessagesD
 		start = req.OffsetID // fixture: top message id == position+1
 	}
 	res := &tg.MessagesDialogsSlice{Count: f.count}
+	if f.emptyAfter && len(f.requests) > 1 {
+		return res, nil
+	}
 	for i := start; i < f.count && len(res.Dialogs) < req.Limit; i++ {
 		id := int64(5000 + i)
 		res.Dialogs = append(res.Dialogs, &tg.Dialog{Peer: &tg.PeerChat{ChatID: id}, TopMessage: i + 1})
@@ -192,6 +198,7 @@ func TestScanFolderList_PagesToTheBoundAndSaysWhetherItEnded(t *testing.T) {
 		{"list longer than the bound", &fakeDialogPages{count: 500}, 200, 200, false, 2},
 		{"short list in one page", &fakeDialogPages{count: 30}, 30, 30, true, 1},
 		{"nothing observable", &fakeDialogPages{count: 30, notMod: true}, 0, 0, false, 1},
+		{"empty page short of the total", &fakeDialogPages{count: 500, emptyAfter: true}, 100, 100, false, 2},
 		{"no offset for the next page", &fakeDialogPages{count: 150, noDates: true}, 100, 100, false, 1},
 	}
 	for _, c := range cases {

@@ -206,7 +206,6 @@ func (s *Server) toolListDialogs() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 Inputs:
   limit — int, default 50, max 200
   query — optional substring filter, case-insensitive, matches title or @username.
-
   folder — optional chat folder id from list_folders; only that folder's dialogs are returned.
 
 Output: JSON array of {id, type, title, username, unread_count, last_message_date}.
