@@ -36,6 +36,8 @@ func (e *DraftConflict) Error() string {
 	return fmt.Sprintf("%s (%d UTF-16 units)", ErrDraftExists.Error(), e.ExistingUnits)
 }
 
+func (e *DraftConflict) Unwrap() error { return ErrDraftExists }
+
 // existingDraft is what the chat holds before SaveDraft writes.
 type existingDraft struct {
 	Text string
@@ -47,12 +49,14 @@ type existingDraft struct {
 
 func (e existingDraft) empty() bool { return e.Text == "" && !e.Other }
 
-func (e *DraftConflict) Unwrap() error { return ErrDraftExists }
-
 // DraftResult is what SaveDraft did.
 type DraftResult struct {
 	// Ref is the canonical ref of the chat the draft was saved in.
 	Ref string
+	// TopicID and TopicTitle name the forum topic the draft was saved in,
+	// 0 and "" when the call named none.
+	TopicID    int
+	TopicTitle string
 	// Cleared is true when text was empty, so the draft was removed.
 	Cleared bool
 	// ReplacedExisting is true when a different non-empty draft was there
@@ -84,17 +88,6 @@ func decideDraft(existing existingDraft, text string, overwrite bool) (DraftResu
 	}
 }
 
-// currentDraft returns the unsent draft in peer, the zero value when there
-// is none. The draft lives on the dialog, so it is read with
-// messages.getPeerDialogs for this one chat.
-func currentDraft(ctx context.Context, api *tg.Client, peer tg.InputPeerClass) (existingDraft, error) {
-	res, err := api.MessagesGetPeerDialogs(ctx, []tg.InputDialogPeerClass{&tg.InputDialogPeer{Peer: peer}})
-	if err != nil {
-		return existingDraft{}, fmt.Errorf("MessagesGetPeerDialogs: %w", err)
-	}
-	return draftFromDialogs(res.Dialogs)
-}
-
 // draftFromDialogs picks the chat's own dialog out of a getPeerDialogs
 // answer and reads its draft. The answer can also carry folder entries for
 // an archived chat or one in a folder, and their order is not documented,
@@ -107,25 +100,73 @@ func draftFromDialogs(dialogs []tg.DialogClass) (existingDraft, error) {
 		return existingDraft{}, nil
 	}
 	for _, dc := range dialogs {
-		d, ok := dc.(*tg.Dialog)
-		if !ok {
-			continue
+		if d, ok := dc.(*tg.Dialog); ok {
+			return draftFrom(d.Draft, 0), nil
 		}
-		dm, ok := d.Draft.(*tg.DraftMessage)
-		if !ok {
-			// draftMessageEmpty, or no draft field at all.
-			return existingDraft{}, nil
-		}
-		_, media := dm.GetMedia()
-		_, reply := dm.GetReplyTo()
-		_, post := dm.GetSuggestedPost()
-		_, rich := dm.GetRichMessage()
-		return existingDraft{Text: dm.Message, Other: media || reply || post || rich}, nil
 	}
 	// Only folders or unknown dialog types came back: the chat's own row
 	// is missing from a non-empty answer. Refuse rather than guess that it
 	// holds no draft.
 	return existingDraft{}, fmt.Errorf("MessagesGetPeerDialogs: no dialog for the chat among %d entries (first is %T)", len(dialogs), dialogs[0])
+}
+
+// draftFrom reads one draft field, the dialog's or a forum topic's.
+// topicID is the forum topic the draft belongs to (0 for the chat's own
+// draft): a topic draft carries a reply header naming the topic itself,
+// which places the draft rather than replying to anything, so it does not
+// count as content besides text.
+func draftFrom(dc tg.DraftMessageClass, topicID int) existingDraft {
+	dm, ok := dc.(*tg.DraftMessage)
+	if !ok {
+		// draftMessageEmpty, or no draft field at all.
+		return existingDraft{}
+	}
+	_, media := dm.GetMedia()
+	rt, reply := dm.GetReplyTo()
+	if reply && isTopicHeader(rt, topicID) {
+		reply = false
+	}
+	_, post := dm.GetSuggestedPost()
+	_, rich := dm.GetRichMessage()
+	return existingDraft{Text: dm.Message, Other: media || reply || post || rich}
+}
+
+// isTopicHeader reports whether rt is only the reply header that puts a
+// draft into forum topic topicID: a reply to the topic's opening message
+// with no quote, no other peer and no checklist item. A reply to a message
+// inside the topic, or a quote, is real content.
+func isTopicHeader(rt tg.InputReplyToClass, topicID int) bool {
+	if topicID <= generalTopicID {
+		return false
+	}
+	m, ok := rt.(*tg.InputReplyToMessage)
+	if !ok || m.ReplyToMsgID != topicID {
+		return false
+	}
+	if top, ok := m.GetTopMsgID(); ok && top != topicID {
+		return false
+	}
+	if _, ok := m.GetReplyToPeerID(); ok {
+		return false
+	}
+	if _, ok := m.GetQuoteText(); ok {
+		return false
+	}
+	if _, ok := m.GetMonoforumPeerID(); ok {
+		return false
+	}
+	if _, ok := m.GetTodoItemID(); ok {
+		return false
+	}
+	return true
+}
+
+// draftInvoker is the subset of *tg.Client SaveDraft uses, so the topic
+// handling can be tested without a live MTProto client.
+type draftInvoker interface {
+	topicByIDInvoker
+	MessagesGetPeerDialogs(ctx context.Context, peers []tg.InputDialogPeerClass) (*tg.MessagesPeerDialogs, error)
+	MessagesSaveDraft(ctx context.Context, req *tg.MessagesSaveDraftRequest) (bool, error)
 }
 
 // SaveDraft stores text as the unsent draft of peerSpec in the user's own
@@ -137,28 +178,67 @@ func draftFromDialogs(dialogs []tg.DialogClass) (existingDraft, error) {
 // overwrite is true; otherwise the call returns a *DraftConflict. The read
 // and the write are two calls, so a draft typed in between is a race this
 // cannot close; it narrows the window to the call's own latency.
-func SaveDraft(ctx context.Context, c *gotdtelegram.Client, peerSpec, text string, overwrite bool, cache *PeerCache, userID int64) (DraftResult, error) {
+//
+// A non-zero topicID saves the draft in that forum topic, which has a draft
+// of its own: the topic must exist and be open, and the no-overwrite rule
+// is applied to the topic's draft, not the chat's. Topic 1, General, is the
+// chat's own draft.
+func SaveDraft(ctx context.Context, c *gotdtelegram.Client, peerSpec, text string, overwrite bool, topicID int, cache *PeerCache, userID int64) (DraftResult, error) {
 	inputPeer, err := ResolvePeerCached(ctx, c, peerSpec, cache, userID)
 	if err != nil {
 		return DraftResult{}, fmt.Errorf("resolve peer: %w", err)
 	}
+	return saveDraftWith(ctx, c.API(), inputPeer, peerSpec, text, overwrite, topicID)
+}
+
+func saveDraftWith(ctx context.Context, api draftInvoker, inputPeer tg.InputPeerClass, peerSpec, text string, overwrite bool, topicID int) (DraftResult, error) {
 	ref := inputPeerRef(inputPeer)
 	if ref == "" {
 		return DraftResult{}, fmt.Errorf("resolve peer: %q names no chat", peerSpec)
 	}
-	existing, err := currentDraft(ctx, c.API(), inputPeer)
-	if err != nil {
-		return DraftResult{}, err
+	var (
+		existing   existingDraft
+		topicTitle string
+		haveDraft  bool
+	)
+	if topicID != 0 {
+		t, err := lookupTopic(ctx, api, peerSpec, inputPeer, topicID)
+		if err != nil {
+			return DraftResult{}, err
+		}
+		if t.Closed {
+			return DraftResult{}, ErrTopicClosed
+		}
+		topicTitle = t.Title
+		if topicID > generalTopicID {
+			existing, haveDraft = draftFrom(t.Draft, topicID), true
+		}
+	}
+	if !haveDraft {
+		res, err := api.MessagesGetPeerDialogs(ctx, []tg.InputDialogPeerClass{&tg.InputDialogPeer{Peer: inputPeer}})
+		if err != nil {
+			return DraftResult{}, fmt.Errorf("MessagesGetPeerDialogs: %w", err)
+		}
+		if existing, err = draftFromDialogs(res.Dialogs); err != nil {
+			return DraftResult{}, err
+		}
 	}
 	out, err := decideDraft(existing, text, overwrite)
 	if err != nil {
 		return DraftResult{}, err
 	}
 	out.Ref = ref
+	if topicID != 0 {
+		out.TopicID, out.TopicTitle = topicID, topicTitle
+	}
 	if out.Unchanged {
 		return out, nil
 	}
-	if _, err := c.API().MessagesSaveDraft(ctx, &tg.MessagesSaveDraftRequest{Peer: inputPeer, Message: text}); err != nil {
+	req := &tg.MessagesSaveDraftRequest{Peer: inputPeer, Message: text}
+	if replyTo := replyToFor(topicID); replyTo != nil {
+		req.SetReplyTo(replyTo)
+	}
+	if _, err := api.MessagesSaveDraft(ctx, req); err != nil {
 		return DraftResult{}, fmt.Errorf("MessagesSaveDraft: %w", err)
 	}
 	return out, nil

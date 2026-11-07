@@ -146,10 +146,10 @@ type Server struct {
 	replyTopic func(ctx context.Context, userID int64, target *telegram.ReplyTarget, topicID int) (*telegram.ReplyTarget, error)
 	// draftSave replaces the Telegram call of save_draft in tests; nil
 	// means the client pool.
-	draftSave func(ctx context.Context, userID int64, peer, text string, overwrite bool) (telegram.DraftResult, error)
+	draftSave func(ctx context.Context, userID int64, peer, text string, overwrite bool, topicID int) (telegram.DraftResult, error)
 	// readMark replaces the Telegram call of mark_read in tests; nil means
 	// the client pool.
-	readMark func(ctx context.Context, userID int64, peer string, maxID int) error
+	readMark func(ctx context.Context, userID int64, peer string, maxID, topicID int) (telegram.MarkReadResult, error)
 }
 
 func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
