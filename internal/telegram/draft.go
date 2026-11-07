@@ -131,6 +131,50 @@ func draftFrom(dc tg.DraftMessageClass, topicID int) existingDraft {
 	return existingDraft{Text: dm.Message, Other: media || reply || post || rich}
 }
 
+// topicDraftFromAll picks forum topic topicID's draft in peer out of a
+// messages.getAllDrafts answer, where every draft of the account arrives as
+// an updateDraftMessage and a topic draft carries the topic in top_msg_id.
+// A topic without an entry has no draft: that is the answer's documented
+// absence. An answer that could not list the drafts (updatesTooLong, or a
+// shape getAllDrafts does not return) is an error, never "no draft": a
+// draft the user typed must not be overwritten because it went unseen.
+func topicDraftFromAll(u tg.UpdatesClass, peer tg.InputPeerClass, topicID int) (existingDraft, error) {
+	ch, ok := peer.(*tg.InputPeerChannel)
+	if !ok {
+		return existingDraft{}, fmt.Errorf("topic draft: %T is not a forum supergroup", peer)
+	}
+	var updates []tg.UpdateClass
+	switch v := u.(type) {
+	case *tg.Updates:
+		updates = v.Updates
+	case *tg.UpdatesCombined:
+		updates = v.Updates
+	case *tg.UpdateShort:
+		updates = []tg.UpdateClass{v.Update}
+	default:
+		return existingDraft{}, fmt.Errorf("MessagesGetAllDrafts: cannot read drafts from %T", u)
+	}
+	found := existingDraft{}
+	for _, uc := range updates {
+		d, ok := uc.(*tg.UpdateDraftMessage)
+		if !ok {
+			continue
+		}
+		pc, ok := d.Peer.(*tg.PeerChannel)
+		if !ok || pc.ChannelID != ch.ChannelID {
+			continue
+		}
+		if _, saved := d.GetSavedPeerID(); saved {
+			continue
+		}
+		if top, ok := d.GetTopMsgID(); !ok || top != topicID {
+			continue
+		}
+		found = draftFrom(d.Draft, topicID)
+	}
+	return found, nil
+}
+
 // isTopicHeader reports whether rt is only the reply header that puts a
 // draft into forum topic topicID: a reply to the topic's opening message
 // with no quote, no other peer and no checklist item. A reply to a message
@@ -166,6 +210,7 @@ func isTopicHeader(rt tg.InputReplyToClass, topicID int) bool {
 type draftInvoker interface {
 	topicByIDInvoker
 	MessagesGetPeerDialogs(ctx context.Context, peers []tg.InputDialogPeerClass) (*tg.MessagesPeerDialogs, error)
+	MessagesGetAllDrafts(ctx context.Context) (tg.UpdatesClass, error)
 	MessagesSaveDraft(ctx context.Context, req *tg.MessagesSaveDraftRequest) (bool, error)
 }
 
@@ -211,7 +256,18 @@ func saveDraftWith(ctx context.Context, api draftInvoker, inputPeer tg.InputPeer
 		}
 		topicTitle = t.Title
 		if topicID > generalTopicID {
-			existing, haveDraft = draftFrom(t.Draft, topicID), true
+			// forumTopic.draft is not filled by getForumTopicsByID: a
+			// live check found it empty while the topic held a draft
+			// (mctl-telegram#1175). Topic drafts are read from
+			// getAllDrafts, keyed by top_msg_id, as Telegram documents.
+			all, err := api.MessagesGetAllDrafts(ctx)
+			if err != nil {
+				return DraftResult{}, fmt.Errorf("MessagesGetAllDrafts: %w", err)
+			}
+			if existing, err = topicDraftFromAll(all, inputPeer, topicID); err != nil {
+				return DraftResult{}, err
+			}
+			haveDraft = true
 		}
 	}
 	if !haveDraft {

@@ -18,6 +18,29 @@ type writeFake struct {
 	saved       *tg.MessagesSaveDraftRequest
 	dialogs     []tg.DialogClass
 	dialogReads int
+	// allDrafts is the getAllDrafts answer; nil answers an empty list.
+	allDrafts     tg.UpdatesClass
+	allDraftsErr  error
+	allDraftReads int
+}
+
+func (f *writeFake) MessagesGetAllDrafts(context.Context) (tg.UpdatesClass, error) {
+	f.allDraftReads++
+	if f.allDraftsErr != nil {
+		return nil, f.allDraftsErr
+	}
+	if f.allDrafts == nil {
+		return &tg.Updates{}, nil
+	}
+	return f.allDrafts, nil
+}
+
+// topicDrafts is a getAllDrafts answer holding d as the draft of topic
+// topicID in the test forum.
+func topicDrafts(topicID int, d *tg.DraftMessage) *tg.Updates {
+	u := &tg.UpdateDraftMessage{Peer: &tg.PeerChannel{ChannelID: forum.ChannelID}, Draft: d}
+	u.SetTopMsgID(topicID)
+	return &tg.Updates{Updates: []tg.UpdateClass{u}}
 }
 
 func (f *writeFake) MessagesReadDiscussion(_ context.Context, req *tg.MessagesReadDiscussionRequest) (bool, error) {
@@ -94,7 +117,8 @@ func TestSaveDraftWith_Topic(t *testing.T) {
 	typed := &tg.DraftMessage{Message: "Bob, about Friday"}
 
 	// The topic's own draft decides, not the chat's.
-	f := forumWith(&tg.ForumTopic{ID: 12, Title: "Releases", Draft: typed})
+	f := forumWith(&tg.ForumTopic{ID: 12, Title: "Releases"})
+	f.allDrafts = topicDrafts(12, typed)
 	f.dialogs = []tg.DialogClass{&tg.Dialog{}}
 	if _, err := saveDraftWith(context.Background(), f, forum, "@carol_team", "notes", false, 12); !errors.Is(err, ErrDraftExists) || f.saved != nil {
 		t.Fatalf("topic draft kept: err=%v saved=%+v", err, f.saved)
@@ -152,13 +176,15 @@ func TestSaveDraftWith_TopicHeaderIsNotAnAttachment(t *testing.T) {
 		return d
 	}
 
-	f := forumWith(&tg.ForumTopic{ID: 12, Title: "Releases", Draft: inTopic(&tg.InputReplyToMessage{ReplyToMsgID: 12})})
+	f := forumWith(&tg.ForumTopic{ID: 12, Title: "Releases"})
+	f.allDrafts = topicDrafts(12, inTopic(&tg.InputReplyToMessage{ReplyToMsgID: 12}))
 	out, err := saveDraftWith(context.Background(), f, forum, "@carol_team", "notes", false, 12)
 	if err != nil || !out.Unchanged || f.saved != nil {
 		t.Fatalf("same text in its own topic: %+v %v saved=%+v", out, err, f.saved)
 	}
 
-	f = forumWith(&tg.ForumTopic{ID: 12, Title: "Releases", Draft: inTopic(&tg.InputReplyToMessage{ReplyToMsgID: 12})})
+	f = forumWith(&tg.ForumTopic{ID: 12, Title: "Releases"})
+	f.allDrafts = topicDrafts(12, inTopic(&tg.InputReplyToMessage{ReplyToMsgID: 12}))
 	_, err = saveDraftWith(context.Background(), f, forum, "@carol_team", "other", false, 12)
 	var c *DraftConflict
 	if !errors.As(err, &c) || c.HasAttachment {
@@ -171,7 +197,8 @@ func TestSaveDraftWith_TopicHeaderIsNotAnAttachment(t *testing.T) {
 		"reply inside the topic": &tg.InputReplyToMessage{ReplyToMsgID: 40, TopMsgID: 12},
 		"quote of the opener":    quoted,
 	} {
-		f = forumWith(&tg.ForumTopic{ID: 12, Title: "Releases", Draft: inTopic(rt)})
+		f = forumWith(&tg.ForumTopic{ID: 12, Title: "Releases"})
+		f.allDrafts = topicDrafts(12, inTopic(rt))
 		_, err = saveDraftWith(context.Background(), f, forum, "@carol_team", "notes", false, 12)
 		if !errors.As(err, &c) || !c.HasAttachment {
 			t.Errorf("%s: want a conflict with an attachment, got %v", name, err)
@@ -181,5 +208,75 @@ func TestSaveDraftWith_TopicHeaderIsNotAnAttachment(t *testing.T) {
 	// Outside a topic any reply header is content.
 	if !draftFrom(inTopic(&tg.InputReplyToMessage{ReplyToMsgID: 12}), 0).Other {
 		t.Error("a chat draft replying to a message was read as text only")
+	}
+}
+
+// The live check of #1175 found forumTopic.draft empty while the topic held
+// a draft, so the topic's draft is read from getAllDrafts by top_msg_id.
+// Drafts of other topics, of the chat itself and of other chats do not
+// count, and an answer that cannot list the drafts refuses the write.
+func TestSaveDraftWith_TopicDraftComesFromAllDrafts(t *testing.T) {
+	typed := &tg.DraftMessage{Message: "Dana, the slides"}
+
+	// What getForumTopicsByID says about the draft is not trusted either
+	// way: an empty field there does not let a typed draft be replaced.
+	f := forumWith(&tg.ForumTopic{ID: 12, Title: "Releases"})
+	f.allDrafts = topicDrafts(12, typed)
+	if _, err := saveDraftWith(context.Background(), f, forum, "@carol_team", "notes", false, 12); !errors.Is(err, ErrDraftExists) || f.saved != nil {
+		t.Fatalf("typed topic draft replaced: err=%v saved=%+v", err, f.saved)
+	}
+	if f.allDraftReads != 1 {
+		t.Fatalf("getAllDrafts read %d times, want 1", f.allDraftReads)
+	}
+
+	other := func() *tg.Updates {
+		otherTopic := &tg.UpdateDraftMessage{Peer: &tg.PeerChannel{ChannelID: forum.ChannelID}, Draft: typed}
+		otherTopic.SetTopMsgID(13)
+		chatOwn := &tg.UpdateDraftMessage{Peer: &tg.PeerChannel{ChannelID: forum.ChannelID}, Draft: typed}
+		otherChat := &tg.UpdateDraftMessage{Peer: &tg.PeerChannel{ChannelID: forum.ChannelID + 1}, Draft: typed}
+		otherChat.SetTopMsgID(12)
+		savedPeer := &tg.UpdateDraftMessage{Peer: &tg.PeerChannel{ChannelID: forum.ChannelID}, Draft: typed}
+		savedPeer.SetTopMsgID(12)
+		savedPeer.SetSavedPeerID(&tg.PeerUser{UserID: 7120})
+		return &tg.Updates{Updates: []tg.UpdateClass{otherTopic, chatOwn, otherChat, savedPeer}}
+	}
+	f = forumWith(&tg.ForumTopic{ID: 12, Title: "Releases"})
+	f.allDrafts = other()
+	if out, err := saveDraftWith(context.Background(), f, forum, "@carol_team", "notes", false, 12); err != nil || out.ReplacedExisting || f.saved == nil {
+		t.Fatalf("draft elsewhere blocked topic 12: %+v %v", out, err)
+	}
+
+	// Clearing a topic draft really writes: an empty text over a typed
+	// draft needs overwrite and then reaches Telegram.
+	f = forumWith(&tg.ForumTopic{ID: 12, Title: "Releases"})
+	f.allDrafts = topicDrafts(12, typed)
+	out, err := saveDraftWith(context.Background(), f, forum, "@carol_team", "", true, 12)
+	if err != nil || !out.Cleared || !out.ReplacedExisting || f.saved == nil || f.saved.Message != "" {
+		t.Fatalf("clear topic draft: %+v %v saved=%+v", out, err, f.saved)
+	}
+
+	// The other answer shapes getAllDrafts may use are read the same way.
+	one := topicDrafts(12, typed).Updates[0]
+	for name, answer := range map[string]tg.UpdatesClass{
+		"updatesCombined": &tg.UpdatesCombined{Updates: []tg.UpdateClass{one}},
+		"updateShort":     &tg.UpdateShort{Update: one},
+	} {
+		f = forumWith(&tg.ForumTopic{ID: 12, Title: "Releases"})
+		f.allDrafts = answer
+		if _, err := saveDraftWith(context.Background(), f, forum, "@carol_team", "notes", false, 12); !errors.Is(err, ErrDraftExists) || f.saved != nil {
+			t.Errorf("%s: typed topic draft replaced (err=%v)", name, err)
+		}
+	}
+
+	for name, fake := range map[string]func(*writeFake){
+		"read failed":     func(f *writeFake) { f.allDraftsErr = errors.New("FLOOD_WAIT_3") },
+		"updatesTooLong":  func(f *writeFake) { f.allDrafts = &tg.UpdatesTooLong{} },
+		"unexpected type": func(f *writeFake) { f.allDrafts = &tg.UpdateShortMessage{} },
+	} {
+		f = forumWith(&tg.ForumTopic{ID: 12, Title: "Releases"})
+		fake(f)
+		if _, err := saveDraftWith(context.Background(), f, forum, "@carol_team", "notes", false, 12); err == nil || f.saved != nil {
+			t.Errorf("%s: wrote with an unread topic draft (err=%v)", name, err)
+		}
 	}
 }
