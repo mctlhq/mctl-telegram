@@ -104,6 +104,10 @@ func TestMarkRead_NeedsPositiveMaxID(t *testing.T) {
 		{"peer": "user:7120"},
 		{"peer": "user:7120", "max_id": float64(0)},
 		{"peer": "user:7120", "max_id": float64(-3)},
+		{"peer": "user:7120", "max_id": float64(1<<32 + 41)},
+		{"peer": "user:7120", "max_id": float64(1 << 31)},
+		{"peer": "user:7120", "max_id": 41.5},
+		{"peer": "user:7120", "max_id": "41"},
 		{"max_id": float64(3)},
 	} {
 		if res := callMarkRead(t, s, id, args); !res.IsError {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -89,9 +90,9 @@ Inputs (required):
 		id := auth.From(ctx)
 		args := req.GetArguments()
 		peer := strings.TrimSpace(stringArg(args, "peer", ""))
-		maxID := intArg(args, "max_id", 0)
-		if peer == "" || maxID <= 0 {
-			return mcplib.NewToolResultError("peer and a positive max_id are required"), nil
+		maxID, ok := messageIDArg(args, "max_id")
+		if peer == "" || !ok {
+			return mcplib.NewToolResultError("peer and a positive integer max_id (at most 2147483647) are required"), nil
 		}
 		// The full send gate, send_enabled included: a read receipt is
 		// visible to the other side (owner decision on #1175).
@@ -120,4 +121,26 @@ Inputs (required):
 		})
 	}
 	return tool, handler
+}
+
+// messageIDArg reads a Telegram message id: a positive whole number that
+// fits the int32 the wire carries. A larger value would be truncated on
+// the wire and mark a different message read than the one named, and a
+// fraction would be silently rounded, so both are refused.
+func messageIDArg(args map[string]any, key string) (int, bool) {
+	var f float64
+	switch v := args[key].(type) {
+	case float64:
+		f = v
+	case int:
+		f = float64(v)
+	case int64:
+		f = float64(v)
+	default:
+		return 0, false
+	}
+	if f <= 0 || f > math.MaxInt32 || f != math.Trunc(f) {
+		return 0, false
+	}
+	return int(f), true
 }
