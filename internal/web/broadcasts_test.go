@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -26,6 +27,7 @@ const (
 type bcEnv struct {
 	t       *testing.T
 	store   *db.Store
+	conn    *sql.DB
 	svc     *broadcast.Service
 	srv     *BroadcastServer
 	opUID   int64
@@ -45,7 +47,7 @@ func newBroadcastEnv(t *testing.T, mutate ...func(*DigestSource)) *bcEnv {
 		t.Fatalf("migrate: %v", err)
 	}
 	store := db.NewStore(conn, nil)
-	e := &bcEnv{t: t, store: store, policy: broadcast.Policy{AdminTelegramIDs: map[int64]bool{bcOperator: true}}}
+	e := &bcEnv{t: t, store: store, conn: conn, policy: broadcast.Policy{AdminTelegramIDs: map[int64]bool{bcOperator: true}}}
 	e.opUID = e.user(bcOperator, "")
 	e.clients = append(e.clients, e.user(bcClient, db.TierClient))
 	e.svc = broadcast.NewService(store, broadcast.Config{
@@ -518,5 +520,70 @@ func TestBroadcastPage_ListShowsSourceRefForDigestCampaignOnly(t *testing.T) {
 	// occurrences: exactly one (the digest campaign's), not two.
 	if n := strings.Count(body, "Source digest"); n != 1 {
 		t.Fatalf(`"Source digest" appears %d times, want 1 (manual campaign %s must not show one)`, n, manual.CampaignID)
+	}
+}
+
+func (e *bcEnv) listBody() string {
+	req := httptest.NewRequest(http.MethodGet, "/telegram/connect/broadcasts", nil)
+	req = req.WithContext(auth.With(req.Context(), e.connectIdentity()))
+	w := httptest.NewRecorder()
+	e.srv.HandleList(w, req)
+	return w.Body.String()
+}
+
+// The pending block leads with a plain-language audience and result, and the
+// raw selector, preview counts and both hashes stay inspectable inside a
+// collapsed details block. The hashes the Approve form carries are unchanged.
+func TestBroadcastPage_PlainLanguageWithTechnicalDetails(t *testing.T) {
+	e := newBroadcastEnv(t)
+	p := e.prepared("Plain language check.")
+	body := e.listBody()
+
+	for _, want := range []string{
+		"<strong>Audience:</strong> Maintenance notices for clients.",
+		"<strong>Result:</strong>",
+		"<details><summary>Technical details</summary>",
+		"Content hash <code>" + p.ContentHash,
+		"Selector hash <code>" + p.SelectorHash,
+		`name="content_hash" value="` + p.ContentHash + `"`,
+		`name="selector_hash" value="` + p.SelectorHash + `"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page missing %q:\n%s", want, body)
+		}
+	}
+	// Raw JSON is not the headline: it appears only after the details opener.
+	if i, j := strings.Index(body, `{&#34;category&#34;`), strings.Index(body, "<summary>Technical details"); i < 0 || j < 0 || i < j {
+		t.Errorf("raw selector JSON must sit inside the technical details block (json at %d, details at %d)", i, j)
+	}
+}
+
+// An unreadable stored selector or preview is reported as unreadable, never
+// as an empty audience or zero recipients.
+func TestBroadcastPage_UnreadableStoredJSONIsNotShownAsZero(t *testing.T) {
+	e := newBroadcastEnv(t)
+	p := e.prepared("Corrupt row check.")
+	if _, err := e.conn.ExecContext(context.Background(),
+		`UPDATE broadcast_campaigns SET selector_json = 'not json', preview_counts = 'not json' WHERE id = ?`, p.CampaignID); err != nil {
+		t.Fatalf("corrupt row: %v", err)
+	}
+	body := e.listBody()
+	if !strings.Contains(body, "Could not read the stored audience") || !strings.Contains(body, "Could not read the stored preview counts") {
+		t.Fatalf("unreadable JSON must be reported as unreadable:\n%s", body)
+	}
+	if strings.Contains(body, "Nobody will receive it") || strings.Contains(body, "None skipped") {
+		t.Fatalf("unreadable counts must not read as zero:\n%s", body)
+	}
+}
+
+func TestBroadcastPage_DigestFormExplainsItself(t *testing.T) {
+	body := newBroadcastEnv(t).listBody()
+	for _, want := range []string{
+		`class="bcform"`, "Empty means clients only.", "Only people seen in the last N days.",
+		"Nothing is sent until you approve it there.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page missing %q", want)
+		}
 	}
 }
