@@ -3508,6 +3508,21 @@ SELECT COUNT(DISTINCT user_id) FROM audit_logs
 WHERE tool_name = 'connect:success' AND reason = 'qr';
 ```
 
+`connect:phone_submitted` carries the channel Telegram chose for the code in `reason` (`app`,
+`sms`, `call`, `email` or `fragment`; empty for a channel the server does not know and for
+rows before #1162's change). Phone submissions that never reached a code row, by channel:
+
+```sql
+SELECT p.reason, COUNT(*) AS submitted,
+  COUNT(*) FILTER (WHERE NOT EXISTS (
+    SELECT 1 FROM audit_logs n
+    WHERE n.user_id = p.user_id AND n.created_at > p.created_at
+      AND n.tool_name IN ('connect:code_submitted', 'connect:retry:code_invalid', 'connect:failed:code_invalid'))) AS no_code_row
+FROM audit_logs p
+WHERE p.tool_name = 'connect:phone_submitted'
+GROUP BY p.reason;
+```
+
 Share of users who signed in with Telegram and then submitted a phone number:
 
 ```sql
