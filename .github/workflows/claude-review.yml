@@ -35,7 +35,7 @@ jobs:
       # which reads like an exhausted quota but is not one. Re-triggering
       # with @claude review does not help either: the actor check looks at
       # who initiated the workflow, so a bot comment fails the same way.
-      allowed-bots: "mctl-claude-remote,github-actions,dependabot,mctl-agents,cursor"
+      allowed-bots: "mctl-claude-remote,github-actions,dependabot,mctl-agents,cursor,mctl-codex"
       conventions: |
         Follow the conventions in this repository's CLAUDE.md (Go style,
         conventional commits, English only, no emoji).
