@@ -2526,6 +2526,10 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	tok, err := s.mintAccessToken(tokenOrigin{ClientID: clientID, RedirectURI: entry.RedirectURI, RedirectURIKnown: true},
 		entry.TelegramID, entry.TelegramUsername, groups, scopes)
 	if err != nil {
+		// The grant log line comes after user resolution, so each failure
+		// before it logs its own line; a 500 must not leave no trace.
+		s.logger().Warn("oauth: token authorization_code grant failed",
+			"client_id", clientID, "stage", "mint_access_token", "err", err)
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
 		return
 	}
@@ -2536,6 +2540,8 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	// will not clobber a name the Telegram callback already stored.
 	uid, err := s.store.EnsureUserByTelegramID(r.Context(), entry.TelegramID, entry.TelegramUsername, "")
 	if err != nil {
+		s.logger().Warn("oauth: token authorization_code grant failed",
+			"client_id", clientID, "stage", "resolve_user", "err", err)
 		writeTokenError(w, "server_error", "could not resolve user", http.StatusInternalServerError)
 		return
 	}
