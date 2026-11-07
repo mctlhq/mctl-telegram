@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.128.0](https://github.com/mctlhq/mctl-telegram/compare/0.127.0...0.128.0) (2026-11-07)
+
+
+### Features
+
+* **mcp:** classify every tool once and mark reads idempotent ([9c66096](https://github.com/mctlhq/mctl-telegram/commit/9c66096dab0b3a08cdbd9837fa38d7b566cbb71e))
+* **mcp:** classify every tool once and mark reads idempotent ([22b23e3](https://github.com/mctlhq/mctl-telegram/commit/22b23e3d2b5612c75ddfc3705f5d06b3f329f3b6))
+* **mcp:** get_my_identity reports the connected account ([c3c2934](https://github.com/mctlhq/mctl-telegram/commit/c3c2934ed4dbcb004b411856d1fdca32fb762caf))
+* **mcp:** get_my_identity reports the connected account ([253e9e4](https://github.com/mctlhq/mctl-telegram/commit/253e9e4b4d023de108ff27c7d7b2da2c86bc682d))
+* **mcp:** list chat folders and filter list_dialogs by folder ([a7d6ab4](https://github.com/mctlhq/mctl-telegram/commit/a7d6ab4642c4a9f7eb48ca53ee1dc111d94ac715))
+* **mcp:** list chat folders and filter list_dialogs by folder ([52274ac](https://github.com/mctlhq/mctl-telegram/commit/52274ac562e59e46abf3c3f5e47537be9f0a33ea))
+* **mcp:** read and search forum topics ([fa6eb70](https://github.com/mctlhq/mctl-telegram/commit/fa6eb70688e00a716e1d57e99efaf8764c308694))
+* **mcp:** read and search forum topics ([c2f3edb](https://github.com/mctlhq/mctl-telegram/commit/c2f3edbb6881e6ebf2a10c6cb83090ece17036bf)), closes [#1155](https://github.com/mctlhq/mctl-telegram/issues/1155)
+* **web:** manage page names the sign-in and the AI clients ([2ab5079](https://github.com/mctlhq/mctl-telegram/commit/2ab5079fa4701b81fb975b92a56c3e09d4943b24))
+* **web:** manage page names the sign-in and the AI clients ([c22a35b](https://github.com/mctlhq/mctl-telegram/commit/c22a35b54c50e14349263a38c3b531917ce7b72a))
+* **web:** revoke one AI client from the manage page ([18034ed](https://github.com/mctlhq/mctl-telegram/commit/18034ed492fcb6a6589faac2e3b24238d3be03ce))
+* **web:** revoke one AI client's sign-ins from the manage page ([6a01f7b](https://github.com/mctlhq/mctl-telegram/commit/6a01f7bb55f5ddb710de2e16d555f7b151d0f3fd))
+
+
+### Bug Fixes
+
+* **oauth:** log a failed code exchange before the grant line ([96c477e](https://github.com/mctlhq/mctl-telegram/commit/96c477e11b548c2eafa147e52a4d3e48a943699d))
+* **telegram:** page folder scans and follow the apps' mute rules ([7e614d3](https://github.com/mctlhq/mctl-telegram/commit/7e614d3e20896c210453086b8e6ed0c07c1d75cb))
+* **telegram:** refuse topic reads on supergroups without topics ([46c9868](https://github.com/mctlhq/mctl-telegram/commit/46c9868f5699b14325597e8a9cf112039e1c91eb)), closes [#1155](https://github.com/mctlhq/mctl-telegram/issues/1155)
+* **telegram:** strict folder scan completeness, list_folders in profiles ([67743fe](https://github.com/mctlhq/mctl-telegram/commit/67743fe2db27831a63a908c50713cc4f336fbeed))
+* **web:** do not show a display name as a [@handle](https://github.com/handle) ([27531a2](https://github.com/mctlhq/mctl-telegram/commit/27531a20af8d5c99cb1f763dd96abdd8f7c4c3e7))
+* **web:** revoke asks twice on the canary and counts live grants only ([9417a53](https://github.com/mctlhq/mctl-telegram/commit/9417a53404b1a908b66f1841fd8fa70f6a0a1978))
+
 ## [0.127.0](https://github.com/mctlhq/mctl-telegram/compare/0.126.0...0.127.0) (2026-11-07)
 
 
