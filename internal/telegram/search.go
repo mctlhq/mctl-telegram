@@ -138,7 +138,7 @@ func searchGlobalWith(ctx context.Context, api searchInvoker, p SearchParams) ([
 		Q:          p.Query,
 		Filter:     &tg.InputMessagesFilterEmpty{},
 		OffsetPeer: &tg.InputPeerEmpty{},
-		Limit:      p.Limit,
+		Limit:      widenForHidden(ctx, p.Limit, 100),
 		MinDate:    minDateUnix(p.MinDate),
 		MaxDate:    maxDateUnix(p.MaxDate),
 	})
@@ -149,7 +149,13 @@ func searchGlobalWith(ctx context.Context, api searchInvoker, p SearchParams) ([
 	// but cannot exclude broadcasts alone, so with the switch off their hits
 	// are dropped here.
 	users, chats := extractSearchMaps(res)
-	return dropHiddenMessages(ctx, decodeGlobalSearchMessages(res, users, chats, p.Limit, !bool(p.BroadcastContent))), nil
+	// Decode the widened page, drop hidden chats, then trim to the asked
+	// size, so hidden hits do not shrink the page (#1152).
+	out := dropHiddenMessages(ctx, decodeGlobalSearchMessages(res, users, chats, widenForHidden(ctx, p.Limit, 100), !bool(p.BroadcastContent)))
+	if len(out) > p.Limit {
+		out = out[:p.Limit]
+	}
+	return out, nil
 }
 
 // searchPeerWith runs a per-peer search_messages query against api.

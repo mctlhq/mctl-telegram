@@ -735,6 +735,11 @@ func getMessagesFromDialogs(ctx context.Context, api *tg.Client, dlgRes tg.Messa
 		if hint.ID != peerSpec && !matchUsername(hint.Username, peerSpec) {
 			continue
 		}
+		// Matched by username, so ResolvePeer never sees it: refuse here,
+		// before any history, media or sponsored-view RPC (#1152).
+		if isHidden(ctx, hint.ID) {
+			return nil, nil, 0, nil, true, ErrPeerHidden
+		}
 		broadcast := isBroadcastChannel(d.Peer, chats)
 		if broadcast && !bool(bc) {
 			return nil, nil, 0, nil, true, &broadcastContentError{peer: peerSpec}

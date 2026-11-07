@@ -155,7 +155,7 @@ func (s *Server) runHiddenScoped(ctx context.Context, store hiddenStore, id *aut
 		local := false
 		args := req.GetArguments()
 		for _, key := range peerArgKeys {
-			raw, _ := args[key].(string)
+			raw := peerArgString(args[key])
 			if strings.TrimSpace(raw) == "" {
 				continue
 			}
@@ -200,23 +200,32 @@ func (s *Server) runHiddenScoped(ctx context.Context, store hiddenStore, id *aut
 
 // argDialogRef maps a peer argument to its canonical ref the way
 // telegram.ResolvePeer reads it: "user:/chat:/channel:<id>", or a bare
-// positive number as a user id. ok=false means a username.
+// positive number as a user id. ok=false means anything else.
 func argDialogRef(raw string) (string, bool) {
 	raw = strings.TrimSpace(raw)
 	if ref, ok := db.CanonicalDialogRef(raw); ok {
 		return ref, true
 	}
-	if strings.Contains(raw, ":") {
-		// A malformed id form; ResolvePeer rejects it, nothing to check.
-		return "", true
+	if n, err := strconv.ParseInt(raw, 10, 64); err == nil && n > 0 {
+		return fmt.Sprintf("user:%d", n), true
 	}
-	if n, err := strconv.ParseInt(raw, 10, 64); err == nil {
-		if n > 0 {
-			return fmt.Sprintf("user:%d", n), true
-		}
-		return "", true
-	}
+	// Anything else (a username, a malformed or non-positive id) is not
+	// checked here: a hosted call resolves it under the hidden set, and a
+	// Local Bridge call is refused while anything is hidden.
 	return "", false
+}
+
+// peerArgString reads a peer argument sent as a JSON string or number.
+func peerArgString(v any) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case float64:
+		return strconv.FormatFloat(x, 'f', -1, 64)
+	case json.Number:
+		return x.String()
+	}
+	return ""
 }
 
 // hiddenResultFields lists the result arrays that carry dialogs, and the

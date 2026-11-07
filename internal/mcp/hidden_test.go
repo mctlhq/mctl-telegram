@@ -77,6 +77,7 @@ func TestHiddenGuard_RefusesNamedHiddenChat(t *testing.T) {
 		{"send_message", map[string]any{"peer": "channel:9", "text": "hi"}},
 		{"forward_messages", map[string]any{"from_peer": "user:5", "to_peer": "user:42"}},
 		{"forward_messages", map[string]any{"from_peer": "channel:9", "to_peer": "user:5"}},
+		{"get_messages", map[string]any{"peer": float64(42)}},
 	} {
 		res, ran, _ := runGuard(t, store, tc.tool, tc.args, `{}`)
 		if ran || !res.IsError || !strings.Contains(firstResultText(res), " blocked: "+telegram.ErrPeerHidden.Error()) {
@@ -112,6 +113,12 @@ func TestHiddenGuard_LocalBridgeNeedsID(t *testing.T) {
 	}
 	if _, ran, _ := runGuard(t, store, "get_messages", map[string]any{"peer": "user:43"}, `{}`); !ran {
 		t.Error("an id form was refused on a local account")
+	}
+	// A non-positive or malformed id is not a canonical ref either.
+	for _, peer := range []string{"-1001234", "0", "channel:-5", "group:5"} {
+		if _, ran, _ := runGuard(t, store, "get_messages", map[string]any{"peer": peer}, `{}`); ran {
+			t.Errorf("%q ran on a local account with hidden chats", peer)
+		}
 	}
 	if _, ran, _ := runGuard(t, &fakeHiddenStore{mode: "local"}, "get_messages", map[string]any{"peer": "@bob"}, `{}`); !ran {
 		t.Error("a username was refused on a local account that hides nothing")

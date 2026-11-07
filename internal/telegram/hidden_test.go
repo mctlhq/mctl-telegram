@@ -94,3 +94,64 @@ func TestGetUnread_HiddenChatNamedIsRefused(t *testing.T) {
 		t.Error("history fetched before refusing")
 	}
 }
+
+// The get_messages dialog scan matches by username without ResolvePeer, so
+// it refuses a hidden chat itself, before any history RPC.
+func TestGetMessagesFromDialogs_HiddenChatRefused(t *testing.T) {
+	f, api := newFake()
+	ref := fmt.Sprintf("channel:%d", bcTeamID)
+	_, _, _, _, matched, err := getMessagesFromDialogs(hiddenCtx(ref), api, f.dialogs, ref, 20, 0, nil, 0, BroadcastContentAllowed, &Sponsored{})
+	if !errors.Is(err, ErrPeerHidden) || !matched {
+		t.Fatalf("err = %v matched = %v, want ErrPeerHidden", err, matched)
+	}
+	if f.called("getHistory") {
+		t.Error("history fetched for a hidden chat")
+	}
+}
+
+// Hidden hits must not shrink the page: Telegram is asked for more and the
+// visible result is trimmed back to the limit.
+func TestSearchGlobal_HiddenHitsKeepPageSize(t *testing.T) {
+	f := &fakeSearchInvoker{result: globalSearchMixedResult(), broadcastIDs: map[int64]bool{}}
+	ctx := hiddenCtx("user:8511")
+	msgs, err := searchGlobalWith(ctx, f, SearchParams{Query: "q", Limit: 2, BroadcastContent: BroadcastContentAllowed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.lastGlobal.Limit != 3 {
+		t.Errorf("asked Telegram for %d, want 3", f.lastGlobal.Limit)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("got %d messages, want 2", len(msgs))
+	}
+	for _, m := range msgs {
+		if m.Peer == "user:8511" {
+			t.Fatal("hidden hit returned")
+		}
+	}
+}
+
+// A hidden chat with no hit in this page still widens the request; the
+// result is trimmed back to the asked size.
+func TestSearchGlobal_WidenedPageTrimmedToLimit(t *testing.T) {
+	f := &fakeSearchInvoker{result: globalSearchMixedResult(), broadcastIDs: map[int64]bool{}}
+	msgs, err := searchGlobalWith(hiddenCtx("user:9999"), f, SearchParams{Query: "q", Limit: 2, BroadcastContent: BroadcastContentAllowed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("got %d messages, want 2", len(msgs))
+	}
+}
+
+func TestWidenForHidden(t *testing.T) {
+	if got := widenForHidden(context.Background(), 50, 200); got != 50 {
+		t.Errorf("nothing hidden = %d", got)
+	}
+	if got := widenForHidden(hiddenCtx("user:1", "user:2"), 50, 200); got != 52 {
+		t.Errorf("two hidden = %d", got)
+	}
+	if got := widenForHidden(hiddenCtx("user:1", "user:2"), 199, 200); got != 200 {
+		t.Errorf("cap = %d", got)
+	}
+}

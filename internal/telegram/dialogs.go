@@ -34,8 +34,9 @@ func ListDialogs(ctx context.Context, c *telegram.Client, limit int, query strin
 		limit = 50
 	}
 	api := c.API()
+	// Ask for enough to fill the page once hidden chats are dropped.
 	res, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
-		Limit:      limit,
+		Limit:      widenForHidden(ctx, limit, 200),
 		OffsetPeer: &tg.InputPeerEmpty{},
 	})
 	if err != nil {
@@ -44,7 +45,11 @@ func ListDialogs(ctx context.Context, c *telegram.Client, limit int, query strin
 
 	users, chats, dialogs := decodeDialogsResult(res)
 	seedPeerCache(cache, userID, users, chats)
-	return dropHiddenDialogs(ctx, dialogEntries(dialogs, users, chats, dialogsTopMessages(res), query)), nil
+	out := dropHiddenDialogs(ctx, dialogEntries(dialogs, users, chats, dialogsTopMessages(res), query))
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 // dialogEntries maps MessagesGetDialogs dialogs (plus the sibling message

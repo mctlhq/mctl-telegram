@@ -67,6 +67,16 @@ func refuseHidden(ctx context.Context, input tg.InputPeerClass) error {
 	return nil
 }
 
+// widenForHidden returns the page size to ask Telegram for so that limit
+// visible entries can remain after hidden ones are dropped, capped at max.
+func widenForHidden(ctx context.Context, limit, max int) int {
+	n := limit + len(HiddenPeersFrom(ctx))
+	if n > max {
+		return max
+	}
+	return n
+}
+
 // dropHiddenDialogs removes hidden dialogs from a listing, in place.
 func dropHiddenDialogs(ctx context.Context, in []Dialog) []Dialog {
 	set := HiddenPeersFrom(ctx)

@@ -83,21 +83,24 @@ func (s *Store) HideDialog(ctx context.Context, userID int64, peer, title string
 	if r := []rune(title); len(r) > 256 {
 		title = string(r[:256])
 	}
-	var n int
-	if err := s.DB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM hidden_dialogs WHERE user_id = $1 AND peer <> $2`, userID, ref,
-	).Scan(&n); err != nil {
-		return fmt.Errorf("hide dialog: count: %w", err)
-	}
-	if n >= MaxHiddenDialogs {
-		return ErrTooManyHiddenDialogs
-	}
-	if _, err := s.DB.ExecContext(ctx,
-		`INSERT INTO hidden_dialogs (user_id, peer, title, hidden_at) VALUES ($1, $2, $3, $4)
+	// One statement, so two concurrent hides cannot both pass the cap. A
+	// row already present always updates; a new row inserts only while
+	// the account holds fewer than MaxHiddenDialogs.
+	res, err := s.DB.ExecContext(ctx,
+		`INSERT INTO hidden_dialogs (user_id, peer, title, hidden_at)
+		 SELECT $1, $2, $3, $4
+		 WHERE EXISTS (SELECT 1 FROM hidden_dialogs WHERE user_id = $1 AND peer = $2)
+		    OR (SELECT COUNT(*) FROM hidden_dialogs WHERE user_id = $1) < $5
 		 ON CONFLICT (user_id, peer) DO UPDATE SET title = excluded.title`,
-		userID, ref, title, time.Now().UTC(),
-	); err != nil {
+		userID, ref, title, time.Now().UTC(), MaxHiddenDialogs,
+	)
+	if err != nil {
 		return fmt.Errorf("hide dialog: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("hide dialog: %w", err)
+	} else if n == 0 {
+		return ErrTooManyHiddenDialogs
 	}
 	return nil
 }
