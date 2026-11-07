@@ -73,6 +73,9 @@ type Activities struct {
 	Vault   *Vault
 	Breaker *fairness.Breaker
 	Log     *slog.Logger
+	// Test-only scheduling seam: fires after the external write, before the
+	// Activity returns its result to the Temporal workflow.
+	AfterProviderWrite func()
 }
 
 func (a *Activities) client(ref string) (*fakeglovo.Client, error) {
@@ -151,6 +154,7 @@ func (a *Activities) MutateBasket(ctx context.Context, s Snapshot, fingerprint s
 	if errors.Is(err, fakeglovo.ErrTimeout) {
 		q, rerr := c.ReadBasket(ctx)
 		if rerr == nil && q.Fingerprint == fingerprint {
+			if a.AfterProviderWrite != nil { a.AfterProviderWrite() }
 			return nil
 		}
 		return temporal.NewNonRetryableApplicationError("write outcome unverified", "write_unverified", nil)
@@ -158,6 +162,7 @@ func (a *Activities) MutateBasket(ctx context.Context, s Snapshot, fingerprint s
 	if err != nil {
 		return temporal.NewNonRetryableApplicationError(err.Error(), "write_failed", nil)
 	}
+	if a.AfterProviderWrite != nil { a.AfterProviderWrite() }
 	return nil
 }
 
