@@ -1,0 +1,46 @@
+schema: mctl-telegram.product-update/v1
+id: read-tools-idempotent
+kind: changed_behavior
+title: Read tools are marked safe to retry
+summary: >-
+  The tools that only read, such as list_dialogs, get_messages and
+  search_messages, now tell your AI client that calling them again with the
+  same arguments has no further effect, so a client that supports the MCP
+  idempotent hint may retry them after a timeout without asking. Nothing about
+  what the tools return or who may call them has changed. Tools that send,
+  change or delete anything are not marked, and neither are the media tools
+  that work with one-time confirmations.
+locale: en
+delivery: docs_only
+high_value: false
+tools: [get_acquisition_report, get_broadcast, get_messages, get_my_audit_log, get_my_identity, get_my_notification_preferences, get_my_send_status, get_unread_messages, get_user_audit_log, list_assistants, list_broadcasts, list_dialogs, list_telegram_identities, search_messages]
+evidence:
+  from: 0.127.0
+  changes:
+    - {tool: get_acquisition_report, change: annotations}
+    - {tool: get_broadcast, change: annotations}
+    - {tool: get_messages, change: annotations}
+    - {tool: get_messages, change: annotations, profile: core-readonly}
+    - {tool: get_messages, change: annotations, profile: core-reply}
+    - {tool: get_my_audit_log, change: annotations}
+    - {tool: get_my_identity, change: annotations}
+    - {tool: get_my_notification_preferences, change: annotations}
+    - {tool: get_my_send_status, change: annotations}
+    - {tool: get_unread_messages, change: annotations}
+    - {tool: get_unread_messages, change: annotations, profile: core-readonly}
+    - {tool: get_unread_messages, change: annotations, profile: core-reply}
+    - {tool: get_user_audit_log, change: annotations}
+    - {tool: list_assistants, change: annotations}
+    - {tool: list_broadcasts, change: annotations}
+    - {tool: list_dialogs, change: annotations}
+    - {tool: list_telegram_identities, change: annotations}
+    - {tool: search_messages, change: annotations}
+    - {tool: search_messages, change: annotations, profile: core-readonly}
+    - {tool: search_messages, change: annotations, profile: core-reply}
+status: approved
+provenance:
+  author: mashkovd
+  assisted_by: claude-opus-5-5
+  reviewed_by: mashkovd
+created_at: "2026-11-07"
+reviewed_at: "2026-11-07"
