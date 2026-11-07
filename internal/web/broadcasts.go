@@ -126,13 +126,20 @@ func (b *BroadcastServer) sameOrigin(r *http.Request) bool {
 }
 
 type broadcastRow struct {
-	ID           string
-	State        string
-	EndReason    string
-	Category     string
-	Selector     string
-	Text         string
-	Preview      string
+	ID        string
+	State     string
+	EndReason string
+	Category  string
+	Selector  string
+	Text      string
+	Preview   string
+	// Audience and Outcome are the plain-language readings of Selector and
+	// Preview; the Ok flags are false when the stored JSON could not be
+	// read, in which case the page says so instead of guessing.
+	Audience     string
+	AudienceOK   bool
+	Outcome      string
+	OutcomeOK    bool
 	ContentHash  string
 	SelectorHash string
 	CreatedBy    int64
@@ -219,6 +226,8 @@ func toRow(c db.BroadcastCampaign, rep *broadcast.Report) broadcastRow {
 		ExpiresAt: c.ExpiresAt.UTC().Format("2006-01-02 15:04 UTC"),
 		Report:    rep,
 	}
+	row.Audience, row.AudienceOK = describeAudience(c.SelectorJSON)
+	row.Outcome, row.OutcomeOK = describeOutcome(c.PreviewCounts)
 	if c.SourceRef != nil {
 		row.SourceRef = fmt.Sprintf("%s v%d sha256:%s", c.SourceRef.DigestID, c.SourceRef.DigestVersion, strings.TrimPrefix(c.SourceRef.ContentHash, "sha256:"))
 	}
@@ -492,6 +501,16 @@ const broadcastExtraCSS = `
   .bc pre { white-space: pre-wrap; word-break: break-word; background: var(--surface-2, #f4f4f4); padding: 10px; border-radius: 6px; }
   .bc code { font-size: 12px; word-break: break-all; }
   .bc .meta { color: var(--text-dim); font-size: 13px; }
+  .bc .who, .bc .result { margin: 6px 0; }
+  .bc details { margin: 6px 0; }
+  .bc summary { cursor: pointer; color: var(--text-dim); font-size: 13px; }
+  .bcform label { display: block; margin: 12px 0 0; font-size: 14px; font-weight: 600; color: var(--text); }
+  .bcform .hint { display: block; margin: 2px 0 0; font-weight: 400; font-size: 13px; color: var(--text-dim); }
+  .bcform select, .bcform input[type=text], .bcform input[type=number] {
+    display: block; width: 100%; max-width: 420px; margin-top: 4px; padding: 8px 10px; font: inherit; font-weight: 400;
+    color: var(--text); background: var(--surface-card); border: 1px solid var(--surface-line-strong); border-radius: 6px; box-sizing: border-box; }
+  .bcform select:focus, .bcform input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .bcform button { margin-top: 16px; }
 `
 
 var broadcastTemplate = newManageTemplate("broadcasts", strings.Replace(manageHead, "<title>Manage Telegram session</title>", "<title>Client broadcasts</title>", 1)+`<style>`+broadcastExtraCSS+`</style>
@@ -503,8 +522,14 @@ var broadcastTemplate = newManageTemplate("broadcasts", strings.Replace(manageHe
     <div class="bc">
       <div><strong>{{.Category}}</strong> · <code>{{.ID}}</code> · prepared by user {{.CreatedBy}} via <code>{{.Surface}}</code> at {{.CreatedAt}} · expires {{.ExpiresAt}}</div>
       <pre>{{.Text}}</pre>
-      <div class="meta">Selector <code>{{.Selector}}</code></div>
-      <div class="meta">Preview <code>{{.Preview}}</code></div>
+      <div class="who"><strong>Audience:</strong> {{if .AudienceOK}}{{.Audience}}{{else}}Could not read the stored audience; do not approve. See technical details.{{end}}</div>
+      <div class="result"><strong>Result:</strong> {{if .OutcomeOK}}{{.Outcome}}{{else}}Could not read the stored preview counts; do not approve. See technical details.{{end}}</div>
+      <details><summary>Technical details</summary>
+        <div class="meta">Selector <code>{{.Selector}}</code></div>
+        <div class="meta">Preview <code>{{.Preview}}</code></div>
+        <div class="meta">Content hash <code>{{.ContentHash}}</code></div>
+        <div class="meta">Selector hash <code>{{.SelectorHash}}</code></div>
+      </details>
       {{if .SourceRef}}<div class="meta">Source digest <code>{{.SourceRef}}</code></div>{{end}}
       <form method="POST" action="/telegram/connect/broadcasts/approve" style="display:inline">
         <input type="hidden" name="campaign_id" value="{{.ID}}">
@@ -521,18 +546,29 @@ var broadcastTemplate = newManageTemplate("broadcasts", strings.Replace(manageHe
     <p class="meta">Nothing is awaiting approval.</p>
     {{end}}
     <h2>Prepare from digest</h2>
-    <p class="meta">Freezes the next weekly digest for a category and prepares its campaign from the reviewed feed text. Preparing never approves: approval stays the separate action above. A busy category (already prepared, approved or sending) refuses.</p>
-    <form method="POST" action="/telegram/connect/broadcasts/prepare-digest">
+    <p class="meta">Use this to build a broadcast from the reviewed product-updates feed. It takes the entries for the chosen category, freezes them as a digest and prepares a campaign that then appears under "Awaiting approval". Nothing is sent until you approve it there. A category that already has a campaign prepared, approved or sending is refused.</p>
+    <form class="bcform" method="POST" action="/telegram/connect/broadcasts/prepare-digest">
       <label>Category
+        <span class="hint">Which kind of notice this is. People who did not opt in to it are skipped.</span>
         <select name="category">
           {{range .Categories}}<option value="{{.}}">{{.}}</option>{{end}}
         </select>
       </label>
-      <label>Digest id <input type="text" name="digest_id" placeholder="product-updates-2026-w39" required></label>
-      <label>Version <input type="number" name="version" value="1" min="1" required></label>
-      <label>Tiers (optional, comma-separated: client, admin) <input type="text" name="tiers" placeholder="client"></label>
-      <label>Connected via (optional, comma-separated) <input type="text" name="connected_via"></label>
-      <label>Active within days (optional) <input type="number" name="active_within_days" min="0"></label>
+      <label>Digest id
+        <span class="hint">A name for this digest, for example the ISO week.</span>
+        <input type="text" name="digest_id" placeholder="product-updates-2026-w39" required></label>
+      <label>Version
+        <span class="hint">1 for a first send. Use 2 or more only to correct an earlier version.</span>
+        <input type="number" name="version" value="1" min="1" required></label>
+      <label>Tiers (optional)
+        <span class="hint">Who may receive it, comma-separated: client, admin. Empty means clients only.</span>
+        <input type="text" name="tiers" placeholder="client"></label>
+      <label>Connected via (optional)
+        <span class="hint">Limit to people who connected through these clients, comma-separated. Empty means any.</span>
+        <input type="text" name="connected_via"></label>
+      <label>Active within days (optional)
+        <span class="hint">Only people seen in the last N days. Empty or 0 means no limit.</span>
+        <input type="number" name="active_within_days" min="0"></label>
       <button type="submit" class="btn">Prepare from digest</button>
     </form>
     <h2>Recent</h2>
