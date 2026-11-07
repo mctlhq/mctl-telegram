@@ -14,15 +14,18 @@ import (
 )
 
 type readFake struct {
-	calls int
-	peer  string
-	maxID int
+	calls   int
+	peer    string
+	maxID   int
+	topicID int
+	result  telegram.MarkReadResult
+	err     error
 }
 
-func (f *readFake) mark(_ context.Context, _ int64, peer string, maxID int) error {
+func (f *readFake) mark(_ context.Context, _ int64, peer string, maxID, topicID int) (telegram.MarkReadResult, error) {
 	f.calls++
-	f.peer, f.maxID = peer, maxID
-	return nil
+	f.peer, f.maxID, f.topicID = peer, maxID, topicID
+	return f.result, f.err
 }
 
 func markReadServer(t *testing.T, sendEnabled bool) (*Server, *readFake, *auth.Identity) {
