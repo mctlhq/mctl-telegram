@@ -83,6 +83,7 @@ func coreReadonlyTools() map[string]Rule {
 	return map[string]Rule{
 		"list_dialogs":        {},
 		"list_folders":        {},
+		"list_topics":         {},
 		"get_messages":        noMedia(messagePage),
 		"get_unread_messages": withPeer(noMedia(messagePage)),
 		"search_messages":     withPeer(messagePage),

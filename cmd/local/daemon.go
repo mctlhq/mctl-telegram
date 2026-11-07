@@ -867,6 +867,58 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 			}
 		}
 
+	case "get_topic_messages":
+		var args struct {
+			messagesArgs
+			TopicID int `json:"topic_id"`
+		}
+		if err := json.Unmarshal(envArgs(env), &args); err != nil {
+			return bridge.EncodeError(env.ID, fmt.Sprintf("get_topic_messages: bad args: %v", err))
+		}
+		if args.TopicID <= 0 {
+			return bridge.EncodeError(env.ID, "get_topic_messages: topic_id is required")
+		}
+		var msgs []tg.Message
+		var nextBeforeID int
+		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
+			var err error
+			msgs, _, nextBeforeID, err = tg.GetTopicMessagesRaw(ctx, c, args.Peer, args.TopicID, args.Limit, args.BeforeID, nil, 0, args.content())
+			return err
+		})
+		if dispErr == nil {
+			resp := map[string]any{
+				"messages": wrapMsgs(msgs),
+				"notice":   untrustedNotice,
+			}
+			if nextBeforeID > 0 {
+				resp["next_before_id"] = nextBeforeID
+			}
+			result, dispErr = json.Marshal(resp)
+		}
+
+	case "list_topics":
+		var args struct {
+			Peer  string `json:"peer"`
+			Query string `json:"query"`
+			Limit int    `json:"limit"`
+		}
+		if err := json.Unmarshal(envArgs(env), &args); err != nil {
+			return bridge.EncodeError(env.ID, fmt.Sprintf("list_topics: bad args: %v", err))
+		}
+		var topics []tg.Topic
+		var list tg.TopicList
+		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
+			var err error
+			topics, list, err = tg.ListTopics(ctx, c, args.Peer, args.Query, args.Limit, nil, 0)
+			return err
+		})
+		if dispErr == nil {
+			if topics == nil {
+				topics = []tg.Topic{}
+			}
+			result, dispErr = json.Marshal(map[string]any{"topics": topics, "list": list})
+		}
+
 	case "send_message":
 		var args struct {
 			Peer      string `json:"peer"`

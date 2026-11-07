@@ -21,6 +21,7 @@ func TestToolAnnotations(t *testing.T) {
 	}{
 		{"list_dialogs", first(s.toolListDialogs()), true, false, true},
 		{"list_folders", first(s.toolListFolders()), true, false, true},
+		{"list_topics", first(s.toolListTopics()), true, false, true},
 		{"get_unread_messages", first(s.toolGetUnreadMessages()), true, false, true},
 		{"get_messages", first(s.toolGetMessages()), true, false, true},
 		{"prepare_pin_message", first(s.toolPreparePinMessage()), false, false, false},

@@ -126,6 +126,14 @@
       "reason": "Returns the caller's own chat folder titles, rule flags and member counts, no peer ids or message bodies. Same scope as list_dialogs, gated upstream per identity."
     },
     {
+      "name": "list_topics",
+      "enabled": true,
+      "upstream_gates": [
+        "telegram:messages:read"
+      ],
+      "reason": "Returns the topic titles and unread counts of a forum supergroup the caller is in, no message bodies. Same scope as get_messages, gated upstream per identity."
+    },
+    {
       "name": "list_telegram_identities",
       "enabled": true,
       "upstream_gates": [
