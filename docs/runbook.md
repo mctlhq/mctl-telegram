@@ -3348,6 +3348,9 @@ characters; no other entity, attribute, tag or non-https link is accepted, tags 
 nest and close, and the visible text (tags removed) counts against Telegram's
 4096-unit limit. The approval page shows the message as recipients will see it,
 lists every link target, and keeps the exact source under "Source HTML".
+HTML broadcasts are sent with the link preview card disabled
+(`link_preview_options.is_disabled`), so a link in the text does not add a card
+under the message.
 
 If Telegram still rejects the markup at send time, that delivery fails with reason
 `rejected_400`. It is not retried and is never re-sent as plain text, because that
