@@ -53,6 +53,7 @@ const (
 var reviewerWriteRules = map[string]reviewerWriteRule{
 	// Reads.
 	"list_dialogs":                    reviewerRead,
+	"list_folders":                    reviewerRead,
 	"get_unread_messages":             reviewerRead,
 	"get_messages":                    reviewerRead,
 	"search_messages":                 reviewerRead,

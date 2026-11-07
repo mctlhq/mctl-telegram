@@ -17,6 +17,9 @@ type Dialog struct {
 	Username        string    `json:"username,omitempty"`
 	UnreadCount     int       `json:"unread_count"`
 	LastMessageDate time.Time `json:"last_message_date,omitempty"`
+	// Archived is set only by a folder listing, for a member found in the
+	// archive.
+	Archived bool `json:"archived,omitempty"`
 }
 
 // ListDialogs returns up to `limit` dialogs from the operator's main dialog

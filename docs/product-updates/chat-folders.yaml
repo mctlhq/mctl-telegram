@@ -1,0 +1,36 @@
+schema: mctl-telegram.product-update/v1
+id: chat-folders
+kind: new_tool
+title: Your AI client can read your chat folders
+summary: >-
+  list_folders lists your Telegram chat folders, both the ones you built and
+  the shared chat lists you joined, with the rules each one uses.
+  list_dialogs takes a new folder argument and then returns only the chats
+  in that folder. Telegram has no call that lists a folder's members, so the
+  folder's rules are checked against your 200 most recent chats and 100
+  archived ones, the same way the Telegram apps apply them; the answer says
+  how many chats were checked and whether that was all of them, so a
+  partial answer is never presented as complete. With the Local Bridge, an
+  older daemon refuses a folder request instead of returning every chat;
+  update the daemon to use folders there.
+locale: en
+delivery: docs_only
+high_value: false
+tools: [list_folders, list_dialogs]
+evidence:
+  from: 0.127.0
+  changes:
+    - {tool: list_folders, change: added}
+    - {tool: list_dialogs, change: schema}
+    - {tool: list_dialogs, change: text}
+    - {tool: list_dialogs, change: schema, profile: core-readonly}
+    - {tool: list_dialogs, change: text, profile: core-readonly}
+    - {tool: list_dialogs, change: schema, profile: core-reply}
+    - {tool: list_dialogs, change: text, profile: core-reply}
+status: approved
+provenance:
+  author: mashkovd
+  assisted_by: claude-opus-5-5
+  reviewed_by: mashkovd
+created_at: "2026-11-07"
+reviewed_at: "2026-11-07"

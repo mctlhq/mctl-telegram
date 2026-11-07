@@ -109,7 +109,7 @@ func TestToolsList_ProfileNarrowsTheScopeSurface(t *testing.T) {
 	// Dialogs only: no message reads, whatever the profile lists.
 	dialogsOnly := auth.With(context.Background(), &auth.Identity{UserID: 1, Scopes: []string{"telegram:dialogs:read"}, Profile: toolprofile.CoreReadonly})
 	got := listedToolNames(t, dialogsOnly, srv)
-	want := []string{"get_my_audit_log", "get_my_identity", "get_my_send_status", "list_dialogs"}
+	want := []string{"get_my_audit_log", "get_my_identity", "get_my_send_status", "list_dialogs", "list_folders"}
 	if !equalStrings(got, want) {
 		t.Fatalf("dialogs-only + core-readonly listed %v, want %v", got, want)
 	}

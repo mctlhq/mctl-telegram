@@ -417,6 +417,10 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 		s.addToolUI(srv, t, h)
 	}
 	{
+		t, h := s.toolListFolders()
+		s.addToolUI(srv, t, h)
+	}
+	{
 		t, h := s.toolGetUnreadMessages()
 		s.addToolUI(srv, t, h)
 	}

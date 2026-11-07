@@ -206,14 +206,21 @@ func (s *Server) toolListDialogs() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 Inputs:
   limit — int, default 50, max 200
   query — optional substring filter, case-insensitive, matches title or @username.
+  folder — optional chat folder id from list_folders; only that folder's dialogs are returned.
 
 Output: JSON array of {id, type, title, username, unread_count, last_message_date}.
-Dialog ids are returned in canonical form ("user:<id>", "chat:<id>", "channel:<id>") usable by the other tools.`),
+Dialog ids are returned in canonical form ("user:<id>", "chat:<id>", "channel:<id>") usable by the other tools.
+With folder, the 200 most recent dialogs and 100 archived ones are checked against the folder's rules,
+and folder_scan says how many were checked and whether that was every dialog (complete=false means a
+member may be missing).`),
 		mcplib.WithNumber("limit",
 			mcplib.Description("Max number of dialogs to return (default 50, max 200)."),
 		),
 		mcplib.WithString("query",
 			mcplib.Description("Case-insensitive substring filter on title or @username."),
+		),
+		mcplib.WithNumber("folder",
+			mcplib.Description("Chat folder id from list_folders. Only dialogs in that folder are returned."),
 		),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -223,27 +230,52 @@ Dialog ids are returned in canonical form ("user:<id>", "chat:<id>", "channel:<i
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		args := req.GetArguments()
+		folderID, inFolder, err := folderArg(args)
+		if err != nil {
+			return toolErr("%s", err.Error()), nil
+		}
 		if s.Hub != nil {
 			mode, err := s.Store.GetAccountMode(ctx, id.UserID)
 			if err == nil && mode == "local" {
-				res, err2 := s.bridgeCall(ctx, id, "list_dialogs", args)
+				// A folder listing goes out under its own envelope name: a
+				// daemon that predates folders answers "unknown tool" instead
+				// of ignoring the argument and returning every dialog.
+				bridgeTool := "list_dialogs"
+				if inFolder {
+					bridgeTool = "list_dialogs_in_folder"
+				}
+				res, err2 := s.bridgeCall(ctx, id, bridgeTool, args)
 				s.audit(ctx, id, "list_dialogs", "", bridgeResultErr(res), startedAt, "local")
 				return res, err2
 			}
 		}
 		limit := intArg(args, "limit", 50)
 		query := stringArg(args, "query", "")
-		var dialogs []telegram.Dialog
-		err := s.borrowWithRetry(ctx, "list_dialogs", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
+		var (
+			dialogs []telegram.Dialog
+			scan    telegram.FolderScan
+		)
+		err = s.borrowWithRetry(ctx, "list_dialogs", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
 			var err error
+			if inFolder {
+				dialogs, scan, err = telegram.ListDialogsInFolder(ctx, c, folderID, limit, query, s.PeerCache, id.UserID)
+				return err
+			}
 			dialogs, err = telegram.ListDialogs(ctx, c, limit, query, s.PeerCache, id.UserID)
 			return err
 		})
 		s.audit(ctx, id, "list_dialogs", "", err, startedAt)
+		if errors.Is(err, telegram.ErrFolderNotFound) {
+			return toolErr("folder %d not found; call list_folders for the ids", folderID), nil
+		}
 		if err != nil {
 			return borrowErrResult(ctx, "list_dialogs", err), nil
 		}
-		return jsonResult(listDialogsResult{Dialogs: dialogs})
+		out := listDialogsResult{Dialogs: dialogs}
+		if inFolder {
+			out.FolderScan = &scan
+		}
+		return jsonResult(out)
 	}
 	return tool, handler
 }
@@ -2518,6 +2550,76 @@ func borrowErrResult(ctx context.Context, tool string, err error) *mcplib.CallTo
 // listDialogsResult is the success payload of list_dialogs.
 type listDialogsResult struct {
 	Dialogs []telegram.Dialog `json:"dialogs"`
+	// FolderScan is set only for a folder listing.
+	FolderScan *telegram.FolderScan `json:"folder_scan,omitempty"`
+}
+
+type listFoldersResult struct {
+	Folders []telegram.Folder `json:"folders"`
+}
+
+// folderArg reads the optional folder id. A present value that is not a
+// positive whole number is an error, never "no folder": a typo must not
+// widen the listing to every dialog.
+func folderArg(args map[string]any) (int, bool, error) {
+	v, ok := args["folder"]
+	if !ok || v == nil {
+		return 0, false, nil
+	}
+	f, isNum := v.(float64)
+	if !isNum {
+		if i, isInt := v.(int); isInt {
+			f, isNum = float64(i), true
+		}
+	}
+	if !isNum || f != float64(int(f)) || f <= 0 {
+		return 0, false, fmt.Errorf("folder must be a folder id from list_folders, got %v", v)
+	}
+	return int(f), true, nil
+}
+
+func (s *Server) toolListFolders() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
+	tool := mcplib.NewTool("list_folders",
+		mcplib.WithTitleAnnotation("List Telegram Chat Folders"),
+		mcplib.WithReadOnlyHintAnnotation(true),
+		mcplib.WithDestructiveHintAnnotation(false),
+		mcplib.WithOpenWorldHintAnnotation(true),
+		outputSchema[listFoldersResult](),
+		mcplib.WithDescription(`List the operator's Telegram chat folders.
+
+Output: {folders: [{id, title, kind, included_peers, excluded_peers, include_rules, exclude_rules}]}.
+kind is "folder" for a folder the user built and "shared" for a chat list joined by invite link.
+include_rules name the chat types the folder takes as a rule (contacts, non_contacts, groups, channels, bots);
+exclude_rules drop rule-matched chats that are muted, read or archived.
+Pass an id to list_dialogs as folder to list that folder's dialogs. The built-in "All chats" is not a folder.`),
+	)
+	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		startedAt := time.Now()
+		id := auth.From(ctx)
+		if err := requireScope(id, "telegram:dialogs:read"); err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		if s.Hub != nil {
+			mode, err := s.Store.GetAccountMode(ctx, id.UserID)
+			if err == nil && mode == "local" {
+				res, err2 := s.bridgeCall(ctx, id, "list_folders", req.GetArguments())
+				s.audit(ctx, id, "list_folders", "", bridgeResultErr(res), startedAt, "local")
+				return res, err2
+			}
+		}
+		var folders []telegram.Folder
+		err := s.borrowWithRetry(ctx, "list_folders", id.UserID, func(ctx context.Context, c *gotdtelegram.Client) error {
+			var err error
+			folders, err = telegram.ListFolders(ctx, c)
+			return err
+		})
+		s.audit(ctx, id, "list_folders", "", err, startedAt)
+		if err != nil {
+			return borrowErrResult(ctx, "list_folders", err), nil
+		}
+		return jsonResult(listFoldersResult{Folders: folders})
+	}
+	return tool, handler
 }
 
 // messagesResult is the success payload of get_messages and

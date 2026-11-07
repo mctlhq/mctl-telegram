@@ -20,6 +20,7 @@ func TestToolOutputSchemas(t *testing.T) {
 		tool mcplib.Tool
 	}{
 		{"list_dialogs", first(s.toolListDialogs())},
+		{"list_folders", first(s.toolListFolders())},
 		{"get_unread_messages", first(s.toolGetUnreadMessages())},
 		{"get_messages", first(s.toolGetMessages())},
 		{"prepare_pin_message", first(s.toolPreparePinMessage())},
