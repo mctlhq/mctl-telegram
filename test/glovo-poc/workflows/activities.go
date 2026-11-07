@@ -181,13 +181,24 @@ func (a *Activities) ExpireHandoff(ctx context.Context, s Snapshot) error {
 	return nil
 }
 
-// Purge deletes encrypted order state and the session reference.
-func (a *Activities) Purge(ctx context.Context, s Snapshot) error {
+// PurgeOrder deletes only the per-order encrypted draft. The install-level
+// provider connection survives so later orders keep working.
+func (a *Activities) PurgeOrder(ctx context.Context, s Snapshot) error {
+	a.Vault.mu.Lock()
+	defer a.Vault.mu.Unlock()
+	delete(a.Vault.Drafts, s.RequestRef)
+	a.Log.Info("order state purged", "order", s.OrderID)
+	return nil
+}
+
+// PurgeConnection deletes the order draft and the session reference. It is
+// used only when the install or connection is revoked.
+func (a *Activities) PurgeConnection(ctx context.Context, s Snapshot) error {
 	a.Vault.mu.Lock()
 	defer a.Vault.mu.Unlock()
 	delete(a.Vault.Drafts, s.RequestRef)
 	delete(a.Vault.Sessions, s.ConnectionRef)
-	a.Log.Info("order state purged", "order", s.OrderID)
+	a.Log.Info("order state and connection purged", "order", s.OrderID)
 	return nil
 }
 

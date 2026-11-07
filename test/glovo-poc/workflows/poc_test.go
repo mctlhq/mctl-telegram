@@ -107,6 +107,37 @@ func TestT9_RevokedDeletesState(t *testing.T) {
 	}
 }
 
+// T9b: revocation after handoff_issued expires the token and purges state.
+func TestT9b_RevokedAfterHandoffIssued(t *testing.T) {
+	h := newHarness(t, lunch())
+	h.consentAt(time.Minute, "n1", nil)
+	h.env.RegisterDelayedCallback(func() { h.env.SignalWorkflow(SigRevoked, nil) }, 2*time.Minute)
+	r := h.run()
+	if r.Status != "cancelled" || !has(r.States, "handoff_issued") {
+		t.Fatalf("states = %v", r.States)
+	}
+	req := controlplane.Request{Principal: "principal-alice", Tenant: "tenant-alpha", OrderID: "ord-1"}
+	if err := h.cp.OpenHandoff(h.cp.Outbox[0], req, "x"); err == nil {
+		t.Fatal("handoff token must be refused after revocation")
+	}
+	if h.vault.Has("conn-ref-1") || len(h.vault.Drafts) != 0 {
+		t.Fatal("order state or session ref survived revocation")
+	}
+}
+
+// Owner cancel purges the order draft but keeps the install connection.
+func TestCancelKeepsConnection(t *testing.T) {
+	h := newHarness(t, lunch())
+	h.env.RegisterDelayedCallback(func() { h.env.SignalWorkflow(SigCancel, nil) }, time.Minute)
+	r := h.run()
+	if r.Status != "cancelled" {
+		t.Fatalf("status = %s", r.Status)
+	}
+	if !h.vault.Has("conn-ref-1") {
+		t.Fatal("cancel must not delete the install connection")
+	}
+}
+
 // T4: an existing provider cart is a collision, never silently overwritten.
 func TestT4_BasketCollision(t *testing.T) {
 	h := newHarness(t, lunch())
@@ -159,10 +190,16 @@ func TestT11_RetryDiscipline(t *testing.T) {
 // T12: the same button pressed twice is applied once and acknowledged.
 func TestT12_DuplicateConsent(t *testing.T) {
 	h := newHarness(t, lunch())
-	h.consentAt(time.Minute, "same", nil)
-	h.consentAt(time.Minute+time.Second, "same", nil)
+	// The same nonce is delivered twice before a valid consent; the second
+	// delivery must be counted as a duplicate, not re-evaluated.
+	h.consentAt(10*time.Second, "same", func(s *ConsentSignal) { s.Fingerprint = "stale" })
+	h.consentAt(30*time.Second, "same", nil)
+	h.consentAt(time.Minute, "n2", nil)
 	h.env.RegisterDelayedCallback(func() { h.env.SignalWorkflow(SigCancel, nil) }, 10*time.Minute)
 	r := h.run()
+	if st := h.status(); st.Duplicates != 1 || st.Rejected != 1 {
+		t.Fatalf("duplicates = %d rejected = %d, want 1 and 1", st.Duplicates, st.Rejected)
+	}
 	if _, w := h.fake.Counts(); w != 1 {
 		t.Fatalf("writes = %d", w)
 	}

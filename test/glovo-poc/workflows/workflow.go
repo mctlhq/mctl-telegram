@@ -67,10 +67,29 @@ func GlovoOrderWorkflow(ctx workflow.Context, snap Snapshot) (Result, error) {
 		var ae *temporal.ApplicationError
 		return errors.As(err, &ae) && ae.Type() == t
 	}
-	purge := func() {
+	purge := func(connection bool) {
 		dctx, _ := workflow.NewDisconnectedContext(ctx)
 		dctx = workflow.WithActivityOptions(dctx, workflow.ActivityOptions{StartToCloseTimeout: time.Minute})
-		_ = workflow.ExecuteActivity(dctx, a.Purge, snap).Get(dctx, nil)
+		if connection {
+			_ = workflow.ExecuteActivity(dctx, a.PurgeConnection, snap).Get(dctx, nil)
+			return
+		}
+		_ = workflow.ExecuteActivity(dctx, a.PurgeOrder, snap).Get(dctx, nil)
+	}
+	// pending reports a revoke or cancel signal received after the consent
+	// loop; revoke wins over cancel.
+	pending := func() (revoked, cancelled bool) {
+		revoked = revokedCh.ReceiveAsync(nil)
+		cancelled = cancelCh.ReceiveAsync(nil)
+		return
+	}
+	finish := func(revoked bool) (Result, error) {
+		dctx, _ := workflow.NewDisconnectedContext(ctx)
+		dctx = workflow.WithActivityOptions(dctx, workflow.ActivityOptions{StartToCloseTimeout: time.Minute})
+		_ = workflow.ExecuteActivity(dctx, a.ExpireHandoff, snap).Get(dctx, nil)
+		purge(revoked)
+		set("cancelled")
+		return res, nil
 	}
 
 	set("prepared")
@@ -108,8 +127,10 @@ func GlovoOrderWorkflow(ctx workflow.Context, snap Snapshot) (Result, error) {
 			case seen[s.Nonce]:
 				st.Duplicates++
 			case s.Fingerprint != q.Fingerprint || s.InstallRevision != snap.InstallRevision:
+				seen[s.Nonce] = true
 				st.Rejected++
 			case q.Collision && !s.ReplaceExisting:
+				seen[s.Nonce] = true
 				st.Rejected++ // collision needs an explicit replace decision
 			default:
 				seen[s.Nonce] = true
@@ -125,11 +146,11 @@ func GlovoOrderWorkflow(ctx workflow.Context, snap Snapshot) (Result, error) {
 	_ = replace
 	switch {
 	case revoked:
-		purge()
+		purge(true)
 		set("cancelled")
 		return res, nil
 	case cancelled:
-		purge()
+		purge(false)
 		set("cancelled")
 		return res, nil
 	case expired:
@@ -137,6 +158,9 @@ func GlovoOrderWorkflow(ctx workflow.Context, snap Snapshot) (Result, error) {
 		return res, nil
 	}
 
+	if rv, cn := pending(); rv || cn {
+		return finish(rv)
+	}
 	// Revalidate immediately before the provider write.
 	if err := workflow.ExecuteActivity(read, a.RevalidateScope, snap).Get(ctx, nil); err != nil {
 		return stale()
@@ -167,14 +191,19 @@ func GlovoOrderWorkflow(ctx workflow.Context, snap Snapshot) (Result, error) {
 	set("handoff_issued")
 	hctx, cancelH := workflow.WithCancel(ctx)
 	htimer := workflow.NewTimer(hctx, snap.HandoffTTL)
-	opened, hexpired := false, false
-	for !opened && !hexpired {
+	opened, hexpired, hrevoked, hcancelled := false, false, false, false
+	for !opened && !hexpired && !hrevoked && !hcancelled {
 		sel := workflow.NewSelector(ctx)
+		sel.AddReceive(revokedCh, func(c workflow.ReceiveChannel, _ bool) { c.Receive(ctx, nil); hrevoked = true })
+		sel.AddReceive(cancelCh, func(c workflow.ReceiveChannel, _ bool) { c.Receive(ctx, nil); hcancelled = true })
 		sel.AddReceive(openedCh, func(c workflow.ReceiveChannel, _ bool) { c.Receive(ctx, nil); opened = true })
 		sel.AddFuture(htimer, func(workflow.Future) { hexpired = true })
 		sel.Select(ctx)
 	}
 	cancelH()
+	if hrevoked || hcancelled {
+		return finish(hrevoked)
+	}
 	if hexpired {
 		_ = workflow.ExecuteActivity(read, a.ExpireHandoff, snap).Get(ctx, nil)
 		set("consent_expired")
