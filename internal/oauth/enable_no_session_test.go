@@ -3,9 +3,12 @@ package oauth
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
+	"github.com/mctlhq/mctl-telegram/internal/auth/telegramoidc"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
@@ -92,5 +95,44 @@ func TestEnableAccess_SignInAfterGrantReachesPhoneStep(t *testing.T) {
 	second := telegramCallbackFor(t, srv, mux, tgID)
 	if second.Code != http.StatusOK || !strings.Contains(second.Body.String(), "/oauth/telegram/enable_access/start") {
 		t.Fatalf("second sign-in after the grant did not reach the phone step: status %d body=%s", second.Code, second.Body.String())
+	}
+}
+
+// The browser's own /telegram/connect flow (client ConnectClientID, same-host
+// redirect) keeps its 302 to /telegram/connect/done on the no-scope path,
+// as issueAuthCode does: the no-session page talks about a connector to
+// remove and an app to return to, which that flow has neither of.
+func TestEnableAccess_NoScopesSameHostKeeps302(t *testing.T) {
+	srv, mux := newEnableTestServer(t, stubLogin(false, nil))
+	authFake(srv).identity = &telegramoidc.Identity{TelegramID: 999000113, Username: "user", FirstName: "User"}
+	_, challenge := pkceVerifierAndChallenge()
+	q := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {ConnectClientID},
+		"redirect_uri":          {testIssuer + "/telegram/connect/done"},
+		"state":                 {"wizard-state"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+	}
+	req := httptest.NewRequest("GET", "/oauth/authorize?"+q.Encode(), nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("authorize = %d body=%s", rec.Code, rec.Body.String())
+	}
+	loc, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("authorize redirect parse: %v", err)
+	}
+	cb := callbackViaChi(t, mux, loc.Query().Get("state"))
+	if cb.Code != http.StatusFound {
+		t.Fatalf("same-host no-scope callback: status %d, want 302; body=%s", cb.Code, cb.Body.String())
+	}
+	done, err := url.Parse(cb.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("callback redirect parse: %v", err)
+	}
+	if done.Path != "/telegram/connect/done" || done.Query().Get("code") == "" || done.Query().Get("state") != "wizard-state" {
+		t.Errorf("same-host no-scope callback redirected to %s, want /telegram/connect/done with code and state", done)
 	}
 }

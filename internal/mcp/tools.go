@@ -1109,7 +1109,7 @@ disable it for an authenticated user. It takes no inputs.`),
 		default:
 			out.CanSend, out.Reason = evaluateSendGateAccountFlag(acct.SendEnabled)
 		}
-		out.Reason = s.withNextStepHints(out.Reason, acct)
+		out.Reason = s.withNextStepHints(id, out.Reason, acct)
 		return jsonResult(out)
 	}
 	return tool, handler
@@ -2199,8 +2199,9 @@ const reasonSendDisabled = "per-account send_enabled=false — real sends are no
 //
 //   - a caller that can call set_send_consent is told to;
 //   - an OAuth connector narrowed below account:manage (it has a client_id)
-//     can be re-authorised with that permission, or the owner can use the
-//     manage page;
+//     can be authorised again with that permission, by removing the
+//     connector and signing in again since a client's Reconnect reuses the
+//     old token (#1127), or the owner can use the manage page;
 //   - a worker or device credential (no client_id) can never gain the
 //     scope, so only the owner can act, on the manage page.
 //
@@ -2219,7 +2220,7 @@ func (s *Server) sendDisabledHint(id *auth.Identity) string {
 		return prefix + ", and this connection cannot change that. An operator of this server can enable them for the account with set_account_send." + confirm
 	}
 	if id != nil && id.ClientID != "" {
-		return prefix + ", and this connection was authorised without account management, so it cannot change that. Reconnect this connector and grant account management, or enable real sends at " + s.ManageURL + " after signing in with Telegram." + confirm
+		return prefix + ", and this connection was authorised without account management, so it cannot change that. Remove this connector's authorization in your client and sign in again, granting account management (Reconnect reuses the old token), or enable real sends at " + s.ManageURL + " after signing in with Telegram." + confirm
 	}
 	return prefix + ", and this credential can never change that. The account owner can enable real sends at " + s.ManageURL + " after signing in with Telegram." + confirm
 }
@@ -2261,8 +2262,10 @@ func (s *Server) noSessionHint() string {
 //   - a missing send scope, which a later grant cannot fix on the old token;
 //   - a signed-in identity with no connected Telegram account, which no
 //     scope or flag can fix either.
-func (s *Server) withNextStepHints(reason string, acct *db.AccountInfo) string {
-	if strings.HasPrefix(reason, "identity missing ") {
+func (s *Server) withNextStepHints(id *auth.Identity, reason string, acct *db.AccountInfo) string {
+	// Only an OAuth connector (it has a client_id) can be removed and
+	// authorised again; a worker or device credential has no such step.
+	if strings.HasPrefix(reason, "identity missing ") && id != nil && id.ClientID != "" {
 		reason += ". " + staleTokenHint
 	}
 	if acct != nil && !acct.Connected {

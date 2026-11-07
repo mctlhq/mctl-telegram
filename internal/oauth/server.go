@@ -2240,6 +2240,14 @@ func (s *Server) issueAuthCodeWithoutSession(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	s.store.LogToolCall(r.Context(), db.ToolCall{UserID: oc.UserID, Tool: "connect:no_session", Status: "ok"})
+	// The browser's own /telegram/connect flow keeps its 302, as in
+	// issueAuthCode: its completion page is /telegram/connect/done, and the
+	// wording below (a connector to remove, an app to return to) belongs to
+	// an external MCP client only.
+	if !s.isExternalRedirect(u) {
+		http.Redirect(w, r, u.String(), http.StatusFound)
+		return
+	}
 	renderEnableNoSession(w, enableNoSessionPage{
 		RedirectURL: u.String(),
 		AppName:     connectAppName(u.Host),

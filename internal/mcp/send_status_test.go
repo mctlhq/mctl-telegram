@@ -263,6 +263,7 @@ func TestGetMySendStatus_ReasonNamesNextStep(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		manageURL string
+		clientID  string
 		scopes    []string
 		connect   bool
 		want      []string
@@ -271,12 +272,14 @@ func TestGetMySendStatus_ReasonNamesNextStep(t *testing.T) {
 		{
 			name:      "no session, manage page known",
 			manageURL: "https://tg.test/telegram/connect/manage",
+			clientID:  "claude.ai",
 			scopes:    []string{"telegram:messages:send"},
 			want:      []string{"No Telegram session is connected", "https://tg.test/telegram/connect/manage"},
 			dontWant:  []string{"Reconnect"},
 		},
 		{
 			name:     "no session, no manage page",
+			clientID: "claude.ai",
 			scopes:   []string{"telegram:messages:send"},
 			want:     []string{"No Telegram session is connected", "operator"},
 			dontWant: []string{"https://"},
@@ -284,16 +287,28 @@ func TestGetMySendStatus_ReasonNamesNextStep(t *testing.T) {
 		{
 			name:      "no session and no send scope",
 			manageURL: "https://tg.test/telegram/connect/manage",
+			clientID:  "claude.ai",
 			scopes:    []string{"telegram:messages:read"},
 			want:      []string{"telegram:messages:send scope", "sign in again", "Reconnect", "https://tg.test/telegram/connect/manage"},
 		},
 		{
 			name:      "connected, token predates the grant",
 			manageURL: "https://tg.test/telegram/connect/manage",
+			clientID:  "claude.ai",
 			scopes:    []string{"telegram:messages:read"},
 			connect:   true,
 			want:      []string{"telegram:messages:send scope", "sign in again", "Reconnect"},
 			dontWant:  []string{"No Telegram session"},
+		},
+		{
+			// A worker or device credential has no connector to remove and
+			// sign in with again, so it gets the reason without that step.
+			name:      "connected, device credential without send scope",
+			manageURL: "https://tg.test/telegram/connect/manage",
+			scopes:    []string{"telegram:messages:read"},
+			connect:   true,
+			want:      []string{"telegram:messages:send scope"},
+			dontWant:  []string{"sign in again", "Reconnect", "No Telegram session"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -309,7 +324,7 @@ func TestGetMySendStatus_ReasonNamesNextStep(t *testing.T) {
 				}
 			}
 			srv := &Server{AllowSend: true, Store: store, ManageURL: tc.manageURL}
-			id := &auth.Identity{UserID: uid, Scopes: tc.scopes}
+			id := &auth.Identity{UserID: uid, ClientID: tc.clientID, Scopes: tc.scopes}
 			out := parseSendStatus(t, callSendStatus(t, srv, id))
 			reason, _ := out["reason"].(string)
 			for _, w := range tc.want {
