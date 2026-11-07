@@ -2523,14 +2523,6 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	// identity's entire entitlement and the log line below was the only place
 	// the difference showed (#607).
 	scopes = narrowGrant(scopes, entry.Scope)
-	// Diagnostic: requested-vs-granted scope reconciliation.
-	s.logger().Info("oauth: token authorization_code grant",
-		"user_agent", r.Header.Get("User-Agent"),
-		"client_id", clientID,
-		"requested_scope", entry.Scope,
-		"granted_scope", strings.Join(scopes, " "),
-		"groups", strings.Join(groups, ","),
-	)
 	tok, err := s.mintAccessToken(tokenOrigin{ClientID: clientID, RedirectURI: entry.RedirectURI, RedirectURIKnown: true},
 		entry.TelegramID, entry.TelegramUsername, groups, scopes)
 	if err != nil {
@@ -2547,6 +2539,17 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "server_error", "could not resolve user", http.StatusInternalServerError)
 		return
 	}
+	// Diagnostic: requested-vs-granted scope reconciliation, and which user a
+	// client grant belongs to; without user_id a grant could be tied to a
+	// user only through the database (#749).
+	s.logger().Info("oauth: token authorization_code grant",
+		"user_agent", r.Header.Get("User-Agent"),
+		"client_id", clientID,
+		"user_id", uid,
+		"requested_scope", entry.Scope,
+		"granted_scope", strings.Join(scopes, " "),
+		"groups", strings.Join(groups, ","),
+	)
 	clientName := s.clientDisplayName(r.Context(), clientID)
 	refreshTok, err := s.issueRefreshToken(r.Context(), entry.CreatedAt, db.RefreshToken{
 		FamilyID:         randomToken(16),
