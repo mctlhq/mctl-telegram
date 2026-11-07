@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -149,6 +150,55 @@ func TestEnableStart_WizardReadsSendChoiceFromForm(t *testing.T) {
 			es.lock.Unlock()
 			if got != tc.want {
 				t.Errorf("sendOptIn = %v, want %v: the wizard must read the checkbox on the phone screen", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEnableQRStart_WizardReadsSendChoiceFromForm is the QR twin of the
+// test above: the QR button submits the same phone form, so a wizard-mode
+// session takes the send choice from its checkbox too. Before the fix the
+// wizard arm kept es.sendOptIn, which nothing sets any more.
+func TestEnableQRStart_WizardReadsSendChoiceFromForm(t *testing.T) {
+	q := newQRStub(500100101)
+	srv, mux := newQRTestServer(t, q, true)
+	for _, tc := range []struct {
+		name string
+		form url.Values
+		want bool
+	}{
+		{"checked", url.Values{"send_optin": {"on"}}, true},
+		{"unchecked", url.Values{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			es := &enableSession{
+				oc:        oauthCtx{ClientID: ConnectClientID, RedirectURI: testIssuer + "/telegram/connect/done"},
+				uid:       1,
+				tgID:      500100101,
+				createdAt: srv.clock(),
+				step:      stepPhone,
+				qrOffered: true,
+			}
+			tok := "wizqr-" + tc.name
+			srv.mu.Lock()
+			srv.enables[tok] = es
+			srv.mu.Unlock()
+			form := url.Values{"es": {tok}}
+			for k, v := range tc.form {
+				form[k] = v
+			}
+			rec := postForm(t, mux, "/oauth/telegram/enable_access/qr", form)
+			if rec.Code != http.StatusSeeOther && rec.Code != http.StatusFound {
+				t.Fatalf("qr start: status %d body=%s", rec.Code, rec.Body.String())
+			}
+			es.lock.Lock()
+			got := es.sendOptIn
+			if es.flow != nil && es.flow.cancel != nil {
+				es.flow.cancel()
+			}
+			es.lock.Unlock()
+			if got != tc.want {
+				t.Errorf("sendOptIn = %v, want %v: the wizard must read the checkbox the QR button submits", got, tc.want)
 			}
 		})
 	}
