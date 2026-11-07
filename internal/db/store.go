@@ -2245,6 +2245,27 @@ type ToolCall struct {
 	Reason       string // operator-only; never hashed (see hashAuditEntry)
 }
 
+// previousAuditHash returns the hash a user's next audit row chains from. Only
+// a user with no chained row yet starts from the zero genesis hash: a read that
+// failed says nothing about the history, and treating it as empty would write a
+// row that claims the chain starts there.
+func previousAuditHash(ctx context.Context, tx *sql.Tx, userID int64) ([]byte, error) {
+	var prev []byte
+	err := tx.QueryRowContext(ctx,
+		`SELECT entry_hash FROM audit_logs
+		 WHERE user_id = $1 AND entry_hash IS NOT NULL
+		 ORDER BY id DESC LIMIT 1`,
+		userID,
+	).Scan(&prev)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("read previous audit hash: %w", err)
+	}
+	if len(prev) == 0 {
+		return make([]byte, sha256.Size), nil
+	}
+	return prev, nil
+}
+
 // auditWriteTimeout bounds one audit write now that it no longer ends with the
 // request that caused it.
 const auditWriteTimeout = 5 * time.Second
@@ -2322,21 +2343,10 @@ func (s *Store) LogToolCall(ctx context.Context, c ToolCall) {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var prev []byte
-	if err := tx.QueryRowContext(ctx,
-		`SELECT entry_hash FROM audit_logs
-		 WHERE user_id = $1 AND entry_hash IS NOT NULL
-		 ORDER BY id DESC LIMIT 1`,
-		userID,
-	).Scan(&prev); err != nil {
-		// No prior row (sql.ErrNoRows) or a real error — either way we
-		// fall back to a zero prev_hash. A zero hash chained at the
-		// start of a user's history is acceptable; VerifyAuditChain
-		// treats it as the genesis sentinel.
-		prev = make([]byte, sha256.Size)
-	}
-	if len(prev) == 0 {
-		prev = make([]byte, sha256.Size)
+	prev, err := previousAuditHash(ctx, tx, userID)
+	if err != nil {
+		slog.Warn("audit: could not write row", "tool", tool, "stage", "select", "err", err)
+		return
 	}
 	entry := hashAuditEntry(prev, userID, tool, peerRedacted, status, errMsg, sql.NullString{String: callPath, Valid: true}, createdAt, edge)
 

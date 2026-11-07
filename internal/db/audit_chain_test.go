@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -285,5 +286,36 @@ func TestLogToolCall_SurvivesAFinishedRequest(t *testing.T) {
 	}
 	if !res.OK {
 		t.Errorf("chain broken after detached writes: %+v", res)
+	}
+}
+
+// A failed read of the chain head is not an empty history: reporting it as the
+// genesis hash would write a row that forks the user's chain.
+func TestPreviousAuditHash_FailedReadIsNotGenesis(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	uid, err := s.EnsureUser(ctx, "alice", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	prev, err := previousAuditHash(ctx, tx, uid)
+	if err != nil {
+		t.Fatalf("empty history: %v", err)
+	}
+	if !bytes.Equal(prev, make([]byte, sha256.Size)) {
+		t.Errorf("empty history: got %x, want the zero genesis hash", prev)
+	}
+
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if prev, err := previousAuditHash(ctx, tx, uid); err == nil {
+		t.Errorf("failed read returned %x and no error", prev)
 	}
 }
