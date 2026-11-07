@@ -1,0 +1,30 @@
+schema: mctl-telegram.product-update/v1
+id: broadcast-html-format
+kind: changed_behavior
+title: Broadcast operators can send formatted messages
+summary: >-
+  prepare_broadcast takes an optional format, plain (the default, unchanged)
+  or html. The html format allows bold, italic, underline, strikethrough,
+  code, quotes and links with an https address; anything else is refused when
+  the broadcast is prepared, not when it is sent. The format is stored with
+  the campaign and covered by the content hash, so changing it after preview
+  invalidates the approval. get_broadcast and list_broadcasts now report the
+  format. This is for operators; it changes nothing for everyday use.
+locale: en
+delivery: docs_only
+high_value: false
+tools: [prepare_broadcast, get_broadcast, list_broadcasts]
+evidence:
+  from: 0.133.0
+  changes:
+    - {tool: prepare_broadcast, change: schema}
+    - {tool: prepare_broadcast, change: text}
+    - {tool: get_broadcast, change: schema}
+    - {tool: list_broadcasts, change: schema}
+status: approved
+provenance:
+  author: mashkovd
+  assisted_by: claude-sonnet-5-5
+  reviewed_by: mashkovd
+created_at: "2026-11-07"
+reviewed_at: "2026-11-07"
