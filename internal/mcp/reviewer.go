@@ -90,6 +90,7 @@ var reviewerWriteRules = map[string]reviewerWriteRule{
 	"forward_messages": reviewerRefused,
 	"set_reaction":     reviewerRefused,
 	"save_draft":       reviewerRefused,
+	"mark_read":        reviewerRefused,
 	"pin_message":      reviewerRefused,
 	// The reviewer may prepare only what it may confirm. prepare_pin_message
 	// also debits the per-peer send budget the allowlisted send needs.

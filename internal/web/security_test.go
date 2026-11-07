@@ -441,6 +441,9 @@ func TestSendGateCopy_PreviewVsError(t *testing.T) {
 	if !strings.Contains(pages["/security"], "Delivering a message requires <code>send_enabled</code>; leaving a draft does not.") {
 		t.Error("/security: the save_draft exception to send_enabled is not stated")
 	}
+	if !strings.Contains(pages["/security"], "<code>send_reply</code>, and <code>mark_read</code> (the other side sees the read receipt) — requires <strong>all</strong> of:") {
+		t.Error("/security: mark_read is not listed under the full send gate")
+	}
 }
 
 // TestLanding_UntestedClientsLabelled keeps support claims to clients with a

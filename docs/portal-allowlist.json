@@ -152,6 +152,15 @@
       "reason": "Admin-only aggregate of sign-ups, tool-call users and 2+ active-day users per acquisition source label; no per-user data. The upstream refuses it without admin:users(:read)."
     },
     {
+      "name": "mark_read",
+      "enabled": true,
+      "upstream_gates": [
+        "send-gate",
+        "telegram:messages:send"
+      ],
+      "reason": "Marks one of the caller's own chats read up to an explicit message id; the other side sees the read receipt, so it runs through evaluateSendGate and is refused, never previewed, unless the full send gate is open."
+    },
+    {
       "name": "mint_worker_token",
       "enabled": true,
       "upstream_gates": [

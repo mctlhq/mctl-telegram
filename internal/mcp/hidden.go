@@ -57,6 +57,7 @@ var toolDialogScope = map[string]dialogScope{
 	"get_unread_messages":  scopeDialogs,
 	"list_dialogs":         scopeDialogs,
 	"list_topics":          scopeDialogs,
+	"mark_read":            scopeDialogs,
 	"pin_message":          scopeDialogs,
 	"prepare_get_media":    scopeDialogs,
 	"prepare_pin_message":  scopeDialogs,

@@ -76,6 +76,7 @@ func TestHiddenGuard_RefusesNamedHiddenChat(t *testing.T) {
 		{"get_messages", map[string]any{"peer": " channel:009 "}},
 		{"send_message", map[string]any{"peer": "channel:9", "text": "hi"}},
 		{"save_draft", map[string]any{"peer": "user:42", "text": "hi"}},
+		{"mark_read", map[string]any{"peer": "user:42", "max_id": float64(3)}},
 		{"forward_messages", map[string]any{"from_peer": "user:5", "to_peer": "user:42"}},
 		{"forward_messages", map[string]any{"from_peer": "channel:9", "to_peer": "user:5"}},
 		{"get_messages", map[string]any{"peer": float64(42)}},

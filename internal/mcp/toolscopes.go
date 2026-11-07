@@ -47,7 +47,9 @@ var toolScopes = map[string][]string{
 	"set_reaction":         {"telegram:messages:send"},
 	// save_draft delivers nothing, but it writes to the account, so it
 	// needs the send scope; it does not need send_enabled (#1175).
-	"save_draft":          {"telegram:messages:send"},
+	"save_draft": {"telegram:messages:send"},
+	// mark_read shows the other side a read receipt: a write like a send.
+	"mark_read":           {"telegram:messages:send"},
 	"prepare_pin_message": {"telegram:messages:pin"},
 	"pin_message":         {"telegram:messages:pin"},
 	// core-reply only (toolprofile.ProfileOnly). draft_reply sends nothing
