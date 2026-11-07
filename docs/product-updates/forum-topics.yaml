@@ -1,0 +1,41 @@
+schema: mctl-telegram.product-update/v1
+id: forum-topics
+kind: new_tool
+title: Your AI client can read forum topics
+summary: >-
+  list_topics lists the topics of a forum supergroup with their unread
+  counts. get_messages takes a new topic_id argument and then reads only
+  that topic, paging with before_id as before; search_messages takes
+  topic_id too and searches inside one topic. A chat without topics is
+  refused with an error rather than answered with an empty list, and a
+  topic id that does not exist is named as such. With the Local Bridge, an
+  older daemon refuses a topic read instead of returning the whole forum;
+  update the daemon to use topics there. Searching is still not available
+  through the Local Bridge.
+locale: en
+delivery: docs_only
+high_value: false
+tools: [list_topics, get_messages, search_messages]
+evidence:
+  from: 0.127.0
+  changes:
+    - {tool: list_topics, change: added}
+    - {tool: get_messages, change: schema}
+    - {tool: get_messages, change: text}
+    - {tool: get_messages, change: schema, profile: core-readonly}
+    - {tool: get_messages, change: text, profile: core-readonly}
+    - {tool: get_messages, change: schema, profile: core-reply}
+    - {tool: get_messages, change: text, profile: core-reply}
+    - {tool: search_messages, change: schema}
+    - {tool: search_messages, change: text}
+    - {tool: search_messages, change: schema, profile: core-readonly}
+    - {tool: search_messages, change: text, profile: core-readonly}
+    - {tool: search_messages, change: schema, profile: core-reply}
+    - {tool: search_messages, change: text, profile: core-reply}
+status: approved
+provenance:
+  author: mashkovd
+  assisted_by: claude-opus-5-5
+  reviewed_by: mashkovd
+created_at: "2026-11-07"
+reviewed_at: "2026-11-07"
