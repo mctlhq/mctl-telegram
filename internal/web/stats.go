@@ -103,7 +103,7 @@ func StartStatsSampler(ctx context.Context, src StatsSource, cache *StatsCache, 
 }
 
 // StatsJSON serves GET /api/stats: the cached snapshot as JSON, publicly
-// cacheable for a minute. It is mounted outside auth.Middleware on purpose.
+// cacheable for a minute and readable from any origin. It is mounted outside auth.Middleware on purpose.
 // The body contains deployment-wide counts only. Before the first successful
 // sample it answers 503 with Retry-After rather than a zero-filled body.
 func StatsJSON(cache *StatsCache) http.HandlerFunc {
@@ -111,6 +111,14 @@ func StatsJSON(cache *StatsCache) http.HandlerFunc {
 		snap, ok := cache.Get()
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		// Public, read-only, no credentials: any origin may read it, so a
+		// page hosted elsewhere can show the same numbers as the landing
+		// strip. The header is set before the 503 branch so a cross-origin
+		// caller can read Retry-After instead of an opaque network error.
+		// A literal "*" is origin-independent, so no Vary: Origin, which
+		// would only fragment the public cache. A plain GET with no custom
+		// headers is a CORS simple request and needs no OPTIONS route.
+		w.Header().Set("Access-Control-Allow-Origin", "*")
 		if !ok {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Retry-After", "60")

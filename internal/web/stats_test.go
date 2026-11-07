@@ -47,6 +47,9 @@ func TestStatsJSON_EmptyCacheIs503NotZeros(t *testing.T) {
 	if rec.Header().Get("Retry-After") == "" {
 		t.Error("empty cache: Retry-After missing")
 	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("empty cache: Access-Control-Allow-Origin = %q, want * so a cross-origin page can read the 503", got)
+	}
 	if strings.Contains(rec.Body.String(), `"tool_calls_total"`) {
 		t.Errorf("empty cache must not serve a zero-filled body, got %s", rec.Body.String())
 	}
@@ -63,6 +66,9 @@ func TestStatsJSON_ServesSnapshotCacheable(t *testing.T) {
 	}
 	if cc := rec.Header().Get("Cache-Control"); cc != "public, max-age=60" {
 		t.Errorf("Cache-Control = %q", cc)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want *", got)
 	}
 	var got map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
@@ -190,5 +196,40 @@ func TestFormatCount(t *testing.T) {
 		if got := ui.FormatCount(n); got != want {
 			t.Errorf("FormatCount(%d) = %q, want %q", n, got, want)
 		}
+	}
+}
+
+// TestStatsJSON_CORSIsSimpleRequest pins the cross-origin contract: both the
+// snapshot and the warming-up answer carry a literal "*" (the body is
+// deployment-wide counts only) and no Vary: Origin, so the public cache
+// holds one copy regardless of the caller's origin.
+func TestStatsJSON_CORSIsSimpleRequest(t *testing.T) {
+	warm := &StatsCache{}
+	warm.Set(StatsSnapshot{AccountsTotal: 1, UpdatedAt: time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC)})
+	for _, tc := range []struct {
+		name  string
+		cache *StatsCache
+		want  int
+	}{
+		{"snapshot", warm, 200},
+		{"warming up", &StatsCache{}, 503},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/api/stats", nil)
+			req.Header.Set("Origin", "https://example.test")
+			rec := httptest.NewRecorder()
+			StatsJSON(tc.cache).ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("status %d, want %d", rec.Code, tc.want)
+			}
+			if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+				t.Errorf("Access-Control-Allow-Origin = %q, want *", got)
+			}
+			for _, v := range rec.Header().Values("Vary") {
+				if strings.Contains(strings.ToLower(v), "origin") {
+					t.Errorf("Vary = %q must not name Origin: the answer is origin-independent", v)
+				}
+			}
+		})
 	}
 }
