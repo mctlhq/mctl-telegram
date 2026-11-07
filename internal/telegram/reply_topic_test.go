@@ -74,6 +74,22 @@ func TestReplyToFor(t *testing.T) {
 	}
 }
 
+func TestDraftReplyToFor(t *testing.T) {
+	if draftReplyToFor(0) != nil || draftReplyToFor(generalTopicID) != nil {
+		t.Fatal("no topic and General keep the chat's own draft, without reply_to")
+	}
+	r, ok := draftReplyToFor(12).(*tg.InputReplyToMessage)
+	if !ok || r.ReplyToMsgID != 12 {
+		t.Fatalf("reply_to = %#v", draftReplyToFor(12))
+	}
+	if top, ok := r.GetTopMsgID(); !ok || top != 12 {
+		t.Fatalf("top_msg_id = %d/%t, want 12", top, ok)
+	}
+	if !isTopicHeader(r, 12) {
+		t.Fatal("the draft's own header must read back as the topic header, not an attachment")
+	}
+}
+
 // The bound topic reaches the wire: a reply into topic 12 carries reply_to
 // 12, and a reply without a topic carries none.
 func TestSendReplyRequest(t *testing.T) {
