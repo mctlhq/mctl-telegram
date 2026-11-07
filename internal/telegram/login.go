@@ -67,9 +67,10 @@ type LoginConfig struct {
 	// on the login goroutine and must not block. LoginQR ignores it.
 	OnCodeSent func(delivery string)
 	// OnConnected, when non-nil, is called by Login once the MTProto
-	// connection is up and the auth flow is about to send the code, so a
-	// caller that gives up waiting can tell a dial or handshake hang from a
-	// SendCode hang. It runs on the login goroutine and must not block.
+	// connection is up, at the start of the client.Run callback and before
+	// any RPC (the auth-status read included), so a caller that gives up
+	// waiting can tell a dial or handshake hang from an RPC hang. It runs on
+	// the login goroutine and must not block.
 	// LoginQR ignores it.
 	OnConnected func()
 }
