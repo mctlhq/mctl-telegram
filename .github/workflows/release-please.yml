@@ -158,6 +158,11 @@ jobs:
     # cannot recover it. The outputs of the release step survive that failure.
     if: ${{ !cancelled() && needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
+    # Main-only; holds DISPATCH_APP_PRIVATE_KEY (#1033). The guard below reads
+    # mctl-gitops with GITHUB_TOKEN (the dispatch App cannot read contents);
+    # that repository is public. If it goes private the read answers 404 and
+    # the guard would skip silently: make it fail closed first.
+    environment: app-dispatch
     permissions:
       contents: read
     steps:
@@ -165,8 +170,8 @@ jobs:
         id: app
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
-          client-id: ${{ vars.AGENTS_APP_CLIENT_ID }}
-          private-key: ${{ secrets.AGENTS_APP_PRIVATE_KEY }}
+          client-id: ${{ vars.DISPATCH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.DISPATCH_APP_PRIVATE_KEY }}
           owner: mctlhq
           repositories: mctl-gitops
 
@@ -180,10 +185,11 @@ jobs:
       - name: Dispatch agent-worker release-deploy
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
+          READ_TOKEN: ${{ github.token }}
           TAG: ${{ needs.release-please.outputs.tag_name }}
         run: |
           VALUES=platform-gitops/services/labs/agent-worker-managed/values.yaml
-          rc=0; .github/scripts/gitops-values-present.sh "$VALUES" || rc=$?
+          rc=0; GH_TOKEN="$READ_TOKEN" .github/scripts/gitops-values-present.sh "$VALUES" || rc=$?
           case "$rc" in
             0)
               gh workflow run release-deploy.yaml \
