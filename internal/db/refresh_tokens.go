@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -395,4 +396,75 @@ func revokeUserRefreshTokens(ctx context.Context, tx *sql.Tx, userID int64, reas
 	}
 	n, _ := res.RowsAffected()
 	return n, nil
+}
+
+// ClientGrant is one OAuth client holding at least one live refresh-token
+// family for a user: the AI clients that can still obtain tokens as that
+// user. It carries no token material.
+type ClientGrant struct {
+	ClientID   string
+	ClientName string
+	// Families is how many live sign-ins this client holds (one per
+	// authorization; a client signed in twice holds two).
+	Families int
+	// LastIssuedAt is when the newest live token was issued: the last sign-in
+	// or refresh by this client.
+	LastIssuedAt time.Time
+}
+
+// ListActiveClientGrants returns the clients with an unrevoked, unexpired
+// refresh token for userID, most recently used first (mctl-telegram#749).
+// An error is a failed read; an empty slice with a nil error means no client
+// holds a live grant.
+func (s *Store) ListActiveClientGrants(ctx context.Context, userID int64, now time.Time) ([]ClientGrant, error) {
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT client_id, client_name, family_id, created_at
+		   FROM oauth_refresh_tokens
+		  WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > $2`,
+		userID, now.UTC(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list client grants: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	byClient := map[string]*ClientGrant{}
+	families := map[string]map[string]struct{}{}
+	for rows.Next() {
+		var clientID, name, family string
+		var created time.Time
+		if err := rows.Scan(&clientID, &name, &family, &created); err != nil {
+			return nil, fmt.Errorf("scan client grant: %w", err)
+		}
+		g, ok := byClient[clientID]
+		if !ok {
+			g = &ClientGrant{ClientID: clientID}
+			byClient[clientID] = g
+			families[clientID] = map[string]struct{}{}
+		}
+		if created.After(g.LastIssuedAt) {
+			g.LastIssuedAt = created
+			if name != "" {
+				g.ClientName = name
+			}
+		}
+		if g.ClientName == "" {
+			g.ClientName = name
+		}
+		families[clientID][family] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list client grants: %w", err)
+	}
+	out := make([]ClientGrant, 0, len(byClient))
+	for id, g := range byClient {
+		g.Families = len(families[id])
+		out = append(out, *g)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].LastIssuedAt.Equal(out[j].LastIssuedAt) {
+			return out[i].LastIssuedAt.After(out[j].LastIssuedAt)
+		}
+		return out[i].ClientID < out[j].ClientID
+	})
+	return out, nil
 }
