@@ -3585,11 +3585,11 @@ Reading the result:
   QR page. So call it "reached the step after OIDC", not "signed in".
 - `started / reached_step` is the headline share. Both columns keep their meaning across
   these releases, so the share can be compared across #1161.
-- A SendCode timeout before the code screen writes no audit row. Such attempts appear only
-  in `mctl_login_phone_step_total`, which includes operators and resets on each deploy.
-- `connect:failed:code_invalid` is a terminal failure only. Since 0.98.1 a wrong code with
-  attempts left re-prompts and writes no failed row, so its fall on 2026-10-28 does not
-  show that delivery improved.
+- `connect:failed:timeout` is written when the 90 s SendCode wait expires, but production
+  holds no such row, although `mctl_login_phone_step_total{result="timeout"}` counted 25 in
+  October. Read the metric for timeouts. It includes operators and resets on each deploy.
+- Since 0.98.1 a wrong code with attempts left writes `connect:retry:code_invalid`, and only
+  a terminal failure writes `connect:failed:code_invalid`. Count both when comparing eras.
 - `telegram_accounts.revoked_reason = 'superseded'` with no Telegram account id on the row
   is the row a login wrote for itself midway, not a re-login over a live session.
 - At about 40 users the share carries roughly plus or minus 13 points. Decide what change
