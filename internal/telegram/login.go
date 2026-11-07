@@ -293,18 +293,6 @@ func LoginCodeDigits(s string) string {
 	return b.String()
 }
 
-// runPhoneFlow is gotd's auth.Flow.Run reworked so that a mistake does not end
-// the flow (#900). auth.Flow returns on the first SignIn or password error;
-// here:
-//
-//   - PHONE_CODE_INVALID asks for the code again and signs in with the same
-//     phone_code_hash, up to LoginCodeAttempts codes in total. No new code is
-//     sent: the one the user has stays valid.
-//   - a rejected 2FA password is asked for again, up to LoginPasswordAttempts.
-//   - AUTH_RESTART, from auth.sendCode or anything after it, restarts at
-//     auth.sendCode once per flow. A second one surfaces as before.
-//
-// PHONE_CODE_EXPIRED and every other error still end the flow.
 // authOnConnection is the start of Login's client.Run callback: the
 // connection is up, so onConnected is reported first, before any RPC, then
 // the auth status is read (its error only means a fresh session) and the
@@ -318,6 +306,18 @@ func authOnConnection(ctx context.Context, onConnected func(), status, flow func
 	return flow(ctx)
 }
 
+// runPhoneFlow is gotd's auth.Flow.Run reworked so that a mistake does not end
+// the flow (#900). auth.Flow returns on the first SignIn or password error;
+// here:
+//
+//   - PHONE_CODE_INVALID asks for the code again and signs in with the same
+//     phone_code_hash, up to LoginCodeAttempts codes in total. No new code is
+//     sent: the one the user has stays valid.
+//   - a rejected 2FA password is asked for again, up to LoginPasswordAttempts.
+//   - AUTH_RESTART, from auth.sendCode or anything after it, restarts at
+//     auth.sendCode once per flow. A second one surfaces as before.
+//
+// PHONE_CODE_EXPIRED and every other error still end the flow.
 func runPhoneFlow(ctx context.Context, client auth.FlowClient, a *interactiveAuthenticator) error {
 	restarted := false
 	restartOnce := func(err error) bool {
