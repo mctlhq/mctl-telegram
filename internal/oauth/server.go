@@ -254,7 +254,7 @@ func (s *Server) WithMetrics(m metricsIface) *Server {
 // connectGrantRecorder is the slice of *connectfunnel.Tracker oauth.Server
 // uses: it records that a grant happened and never fails it.
 type connectGrantRecorder interface {
-	Granted(ctx context.Context, userID int64, clientID, redirectURI string)
+	Granted(ctx context.Context, userID int64, clientID, clientName, redirectURI string)
 }
 
 // WithConnectFunnel wires the connect first-call funnel (issue #960), which
@@ -2574,7 +2574,7 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	if s.funnel != nil {
 		// Before the response, so the client's first call, which may follow
 		// it within milliseconds, finds the row already written.
-		s.funnel.Granted(context.WithoutCancel(r.Context()), uid, clientID, entry.RedirectURI)
+		s.funnel.Granted(context.WithoutCancel(r.Context()), uid, clientID, clientName, entry.RedirectURI)
 	}
 	writeTokenJSON(w, tok, refreshTok, int(s.cfg.AccessTokenTTL.Seconds()), scopes)
 }

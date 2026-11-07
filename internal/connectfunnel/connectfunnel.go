@@ -61,7 +61,18 @@ const (
 const (
 	ClientClaude  = "claude"
 	ClientChatGPT = "chatgpt"
-	ClientOther   = "other"
+	// ClientClaudeCode and ClientCodex are the coding agents, told apart from
+	// other loopback clients by their registered name.
+	ClientClaudeCode = "claude_code"
+	ClientCodex      = "codex"
+	// ClientPortal is the Cloudflare MCP portal. It authorizes on a user's
+	// behalf and may not call for a while, so a grant with no first call says
+	// nothing about the connector.
+	ClientPortal = "portal"
+	// ClientLocalAgent is any other client with a loopback redirect: a local
+	// agent or CLI, which may connect on a schedule and call later.
+	ClientLocalAgent = "local_agent"
+	ClientOther      = "other"
 )
 
 // Reasons attached to the unknown outcome.
@@ -82,7 +93,7 @@ const (
 // Clients, Outcomes and UnknownReasons are the closed label sets, exported so
 // the metrics registry can pre-initialise every series at zero.
 var (
-	Clients        = []string{ClientClaude, ClientChatGPT, ClientOther}
+	Clients        = []string{ClientClaude, ClientChatGPT, ClientClaudeCode, ClientCodex, ClientPortal, ClientLocalAgent, ClientOther}
 	UnknownReasons = []string{ReasonInsertError, ReasonRestart, ReasonCloseError}
 )
 
@@ -164,7 +175,9 @@ func newTracker(store Store, metrics Metrics, now func() time.Time) *Tracker {
 	}
 }
 
-// ClientLabel maps a redirect_uri to its bounded client label.
+// ClientLabel maps a redirect_uri to its bounded client label. Sign-up
+// attribution stores this value, so it keeps its three labels; the funnel uses
+// GrantClientLabel.
 func ClientLabel(redirectURI string) string {
 	u, err := url.Parse(redirectURI)
 	if err != nil {
@@ -176,6 +189,37 @@ func ClientLabel(redirectURI string) string {
 		return ClientClaude
 	case hostMatches(h, "chatgpt.com", "openai.com"):
 		return ClientChatGPT
+	default:
+		return ClientOther
+	}
+}
+
+// GrantClientLabel maps a grant to its bounded funnel label. A registered name
+// is self-declared, so it only separates loopback clients from each other and
+// can never make a client count as Claude, ChatGPT or the portal.
+func GrantClientLabel(redirectURI, clientName string) string {
+	if l := ClientLabel(redirectURI); l != ClientOther {
+		return l
+	}
+	u, err := url.Parse(redirectURI)
+	if err != nil {
+		return ClientOther
+	}
+	h := strings.ToLower(u.Hostname())
+	switch {
+	case h == "mcp.mctl.ai",
+		h == "dash.cloudflare.com" && strings.Contains(u.Path, "/mcp-server/oauth-callback/"):
+		return ClientPortal
+	case h == "127.0.0.1", h == "localhost", h == "::1":
+		name := strings.ToLower(strings.TrimSpace(clientName))
+		switch {
+		case name == "codex":
+			return ClientCodex
+		case strings.HasPrefix(name, "claude code"):
+			return ClientClaudeCode
+		default:
+			return ClientLocalAgent
+		}
 	default:
 		return ClientOther
 	}
@@ -195,11 +239,11 @@ func hostMatches(host string, domains ...string) bool {
 // Granted records one authorization_code grant. It never fails the grant: a
 // row that cannot be written is counted at once as unknown/insert_error,
 // because nothing later could classify it.
-func (t *Tracker) Granted(ctx context.Context, userID int64, clientID, redirectURI string) {
+func (t *Tracker) Granted(ctx context.Context, userID int64, clientID, clientName, redirectURI string) {
 	if t == nil {
 		return
 	}
-	client := ClientLabel(redirectURI)
+	client := GrantClientLabel(redirectURI, clientName)
 	ctx, cancel := context.WithTimeout(ctx, t.insertTimeout)
 	defer cancel()
 	if err := t.store.InsertConnectGrant(ctx, userID, clientID, client, t.now().UTC()); err != nil {
@@ -386,7 +430,7 @@ func (t *Tracker) countError(op string) {
 // a future or hand-edited build.
 func normalizeClient(c string) string {
 	switch c {
-	case ClientClaude, ClientChatGPT:
+	case ClientClaude, ClientChatGPT, ClientClaudeCode, ClientCodex, ClientPortal, ClientLocalAgent:
 		return c
 	default:
 		return ClientOther

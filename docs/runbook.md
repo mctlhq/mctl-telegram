@@ -1740,7 +1740,12 @@ not come back `isError`. A connector that is granted a token and never uses
 it is the shape of the 2026-10-30 "action discovery failed" failure, where
 ChatGPT got a token and then posted to `/` instead of `/mcp`.
 
-- `client` is `claude`, `chatgpt` or `other`, from the redirect URI host.
+- `client` comes from the redirect URI: `claude`, `chatgpt`, `portal` (the
+  Cloudflare MCP portal, `mcp.mctl.ai` and its `dash.cloudflare.com` callback)
+  or, for a loopback redirect, `codex`, `claude_code` or `local_agent` by
+  registered name. `other` is the rest. A registered name is self-declared and
+  only separates loopback clients. Rows and series from before this split carry
+  `other` for all of these, so compare only `claude` and `chatgpt` across it.
   No client id or user id is ever a label.
 - `outcome="ok"`: a successful call within 5 minutes of the grant.
 - `outcome="none_within_window"`: none within 5 minutes. A call that
@@ -3561,6 +3566,69 @@ SELECT COUNT(*) AS one_day_users FROM (
   SELECT user_id FROM audit_logs
   GROUP BY user_id
   HAVING COUNT(DISTINCT DATE(created_at)) = 1) d;
+```
+
+### Re-measuring the funnel over a fixed window (issue-1157)
+
+Use fixed timestamps, never "the last 30 days": a rolling window drifts across releases
+and mixes regimes. Start at the Deployment's rollout time, not the GitHub release time
+(`kubectl -n labs get deploy labs-mctl-telegram-base-service` conditions, type
+`Progressing`). For 0.126.0 that is `2026-11-07T01:38:05Z`, so the window closes at
+`2026-11-21T01:38:05Z`. Compare it with the 14 days before rollout. An older 30-day
+window also covers the period before QR led the desktop step (0.103.0) and the SendCode
+timeouts of October.
+
+The operator accounts to exclude are passed in, and their ids stay out of this public
+repository. Run inside `BEGIN READ ONLY`, Postgres only:
+
+```sql
+-- psql -v operators=<comma-separated user ids> -v a="'<window start>'" -v b="'<window end>'"
+SELECT
+  COUNT(DISTINCT user_id) FILTER (WHERE tool_name = 'connect:oidc_callback') AS reached_step,
+  COUNT(DISTINCT user_id) FILTER (WHERE tool_name IN ('connect:phone_submitted', 'connect:qr_started')) AS started,
+  COUNT(DISTINCT user_id) FILTER (WHERE tool_name = 'connect:qr_started') AS qr,
+  COUNT(DISTINCT user_id) FILTER (WHERE tool_name = 'connect:phone_submitted') AS phone,
+  COUNT(DISTINCT user_id) FILTER (WHERE tool_name = 'connect:success') AS success,
+  COUNT(DISTINCT user_id) FILTER (WHERE tool_name LIKE 'connect:failed:%') AS failed
+FROM audit_logs
+WHERE tool_name LIKE 'connect:%'
+  AND created_at >= :a::timestamptz AND created_at < :b::timestamptz
+  AND user_id NOT IN (:operators);
+```
+
+Reading the result:
+
+- `connect:oidc_callback` is written after the identity check, for a user who is about to
+  be shown the next step. A user with a live session takes the fast path and writes no
+  row. Before #1161 the next step for the built-in wizard was the Permissions screen;
+  since then it is the phone or QR page. For external clients it was always the phone or
+  QR page. So call it "reached the step after OIDC", not "signed in".
+- `started / reached_step` is the headline share. Both columns keep their meaning across
+  these releases, so the share can be compared across #1161.
+- `connect:failed:timeout` is written when the 90 s SendCode wait expires, but production
+  holds no such row, although `mctl_login_phone_step_total{result="timeout"}` counted 25 in
+  October. Read the metric for timeouts. It includes operators and resets on each deploy.
+- Since 0.98.1 a wrong code with attempts left writes `connect:retry:code_invalid`, and only
+  a terminal failure writes `connect:failed:code_invalid`. Count both when comparing eras.
+- `telegram_accounts.revoked_reason = 'superseded'` with no Telegram account id on the row
+  is the row a login wrote for itself midway, not a re-login over a live session.
+- At about 40 users the share carries roughly plus or minus 13 points. Decide what change
+  counts before reading the result.
+- Every deploy in the window restarts the single pod (Recreate strategy): it cuts in-flight
+  logins and resets process counters. List the window's deploy times next to the result.
+
+`connect_first_call` rows are deleted 7 days after they are classified, so one read at the
+end of a 14-day window misses its first half. Save this aggregate on days 6 and 12 and at
+the close, so the copies overlap. Take each `granted_day` from the first copy saved after
+that day ended, because a later copy may already have lost its rows:
+
+```sql
+SELECT DATE(granted_at) AS granted_day, client, outcome, COUNT(*)
+FROM connect_first_call
+WHERE granted_at >= :a::timestamptz AND granted_at < :b::timestamptz
+  AND user_id NOT IN (:operators)
+GROUP BY 1, 2, 3
+ORDER BY 1, 2, 3;
 ```
 
 ## Login bot `/start` and onboarding (issue-679)
