@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.132.0](https://github.com/mctlhq/mctl-telegram/compare/0.131.0...0.132.0) (2026-11-07)
+
+
+### Features
+
+* **oauth:** name the stage a send-code timeout was stuck in ([963e3fb](https://github.com/mctlhq/mctl-telegram/commit/963e3fb231da049c0e87d333e16e18cc266eda67))
+
 ## [0.131.0](https://github.com/mctlhq/mctl-telegram/compare/0.130.0...0.131.0) (2026-11-07)
 
 
