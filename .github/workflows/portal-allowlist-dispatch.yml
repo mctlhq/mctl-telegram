@@ -27,6 +27,9 @@ jobs:
   dispatch:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # Main-only; holds DISPATCH_APP_PRIVATE_KEY (#1033). The `if` above skips
+    # the job on any other ref before the environment is evaluated.
+    environment: app-dispatch
     # One token mint and one dispatch call; a hang must not hold the
     # concurrency group for the default 6 hours.
     timeout-minutes: 5
@@ -35,16 +38,16 @@ jobs:
         with:
           persist-credentials: false
 
-      # The mctl-agents App, as this org's release workflows use to dispatch
-      # into mctl-gitops (mctlhq/mctl-gitops#761): actions:write there and
-      # nothing else. It cannot push to mctl-gitops; the vendor workflow
-      # there mints its own token to open the PR.
+      # The mctl-gitops-dispatch App (mctlhq/mctl-gitops#1033): actions:write
+      # + metadata:read, installed on mctl-gitops alone. It cannot push to
+      # mctl-gitops; the vendor workflow there mints its own token to open the
+      # PR. Its key lives only in the main-only `app-dispatch` environment.
       - name: Generate a dispatch token
         id: app
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
-          client-id: ${{ vars.AGENTS_APP_CLIENT_ID }}
-          private-key: ${{ secrets.AGENTS_APP_PRIVATE_KEY }}
+          client-id: ${{ vars.DISPATCH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.DISPATCH_APP_PRIVATE_KEY }}
           owner: mctlhq
           repositories: mctl-gitops
           permission-actions: write
