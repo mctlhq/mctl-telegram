@@ -252,3 +252,76 @@ func TestGetMySendStatus_SettledVerdictSurvivesAnUnreadableAccountRow(t *testing
 		t.Errorf("connected present (%v) despite an unreadable row", out["connected"])
 	}
 }
+
+// TestGetMySendStatus_ReasonNamesNextStep pins the next-step hints of #1127: a
+// user who signed in without connecting Telegram is told where to connect,
+// and a token issued before an access grant is told to sign in again rather
+// than Reconnect. The shared reason constant stays in front of the hint so
+// the parity with send_message's dry_reason is unchanged.
+func TestGetMySendStatus_ReasonNamesNextStep(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name      string
+		manageURL string
+		scopes    []string
+		connect   bool
+		want      []string
+		dontWant  []string
+	}{
+		{
+			name:      "no session, manage page known",
+			manageURL: "https://tg.test/telegram/connect/manage",
+			scopes:    []string{"telegram:messages:send"},
+			want:      []string{"No Telegram session is connected", "https://tg.test/telegram/connect/manage"},
+			dontWant:  []string{"Reconnect"},
+		},
+		{
+			name:     "no session, no manage page",
+			scopes:   []string{"telegram:messages:send"},
+			want:     []string{"No Telegram session is connected", "operator"},
+			dontWant: []string{"https://"},
+		},
+		{
+			name:      "no session and no send scope",
+			manageURL: "https://tg.test/telegram/connect/manage",
+			scopes:    []string{"telegram:messages:read"},
+			want:      []string{"telegram:messages:send scope", "sign in again", "Reconnect", "https://tg.test/telegram/connect/manage"},
+		},
+		{
+			name:      "connected, token predates the grant",
+			manageURL: "https://tg.test/telegram/connect/manage",
+			scopes:    []string{"telegram:messages:read"},
+			connect:   true,
+			want:      []string{"telegram:messages:send scope", "sign in again", "Reconnect"},
+			dontWant:  []string{"No Telegram session"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newToolsTestStore(t)
+			var uid int64
+			if tc.connect {
+				uid = seedHostedAccount(t, store, 6060, true)
+			} else {
+				var err error
+				uid, err = store.EnsureUserByTelegramID(ctx, 6061, "nobody", "No Session")
+				if err != nil {
+					t.Fatalf("EnsureUserByTelegramID: %v", err)
+				}
+			}
+			srv := &Server{AllowSend: true, Store: store, ManageURL: tc.manageURL}
+			id := &auth.Identity{UserID: uid, Scopes: tc.scopes}
+			out := parseSendStatus(t, callSendStatus(t, srv, id))
+			reason, _ := out["reason"].(string)
+			for _, w := range tc.want {
+				if !strings.Contains(reason, w) {
+					t.Errorf("reason = %q, want it to contain %q", reason, w)
+				}
+			}
+			for _, dw := range tc.dontWant {
+				if strings.Contains(reason, dw) {
+					t.Errorf("reason = %q, must not contain %q", reason, dw)
+				}
+			}
+		})
+	}
+}

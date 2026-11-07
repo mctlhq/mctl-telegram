@@ -1109,6 +1109,7 @@ disable it for an authenticated user. It takes no inputs.`),
 		default:
 			out.CanSend, out.Reason = evaluateSendGateAccountFlag(acct.SendEnabled)
 		}
+		out.Reason = s.withNextStepHints(out.Reason, acct)
 		return jsonResult(out)
 	}
 	return tool, handler
@@ -2234,6 +2235,40 @@ func (s *Server) withSendDisabledHint(id *auth.Identity, reason string) string {
 		return reason
 	}
 	return reason + ". " + s.sendDisabledHint(id)
+}
+
+// staleTokenHint is appended to the missing-scope reason of get_my_send_status.
+// A scope granted after the token was issued (set_telegram_access) reaches
+// the caller only through a new token, and an MCP client's "Reconnect"
+// reuses the old one, so the caller is told the one remedy that works (#1127).
+const staleTokenHint = "If access was granted after this connector was authorised, the new scope applies only to a new token: remove this connector's authorization in your client and sign in again. Reconnect reuses the old token."
+
+// noSessionHint names the next step for an identity that signed in but never
+// connected a Telegram account (#1127). The manage page is where the
+// connect flow lives when the server has one; otherwise only the operator
+// can help.
+func (s *Server) noSessionHint() string {
+	if s.ManageURL == "" {
+		return "No Telegram session is connected for this account yet. Ask the operator how to connect one."
+	}
+	return "No Telegram session is connected for this account yet. Connect one at " + s.ManageURL + " after signing in with Telegram."
+}
+
+// withNextStepHints appends, to the verdict reason of get_my_send_status, the
+// next step the caller can take. The reason itself stays the shared
+// constant so the parity with send_message's dry_reason holds for the
+// per-account flag; the hints only follow it. Two states get one:
+//   - a missing send scope, which a later grant cannot fix on the old token;
+//   - a signed-in identity with no connected Telegram account, which no
+//     scope or flag can fix either.
+func (s *Server) withNextStepHints(reason string, acct *db.AccountInfo) string {
+	if strings.HasPrefix(reason, "identity missing ") {
+		reason += ". " + staleTokenHint
+	}
+	if acct != nil && !acct.Connected {
+		reason += ". " + s.noSessionHint()
+	}
+	return reason
 }
 
 // evaluateSendGateAccountFlag turns the per-account send_enabled flag into the
