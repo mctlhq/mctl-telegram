@@ -148,6 +148,10 @@ func ParseHTML(text string) (*HTMLDoc, error) {
 			}
 			raw := text[i+1 : i+end]
 			i += end + 1
+			// Telegram reads the tag name directly after '<' or '</'.
+			if rest := strings.TrimPrefix(raw, "/"); rest != "" && unicode.IsSpace(rune(rest[0])) {
+				return nil, errors.New("html: whitespace is not allowed right after '<' or '</'")
+			}
 			flush(&cur)
 			tags++
 			if tags > MaxHTMLTags {
@@ -277,11 +281,46 @@ func parseOpenTag(raw string) (name, href string, err error) {
 	if strings.ContainsAny(val, `"<>`) {
 		return "", "", errors.New("html: href contains a forbidden character")
 	}
-	val = html.UnescapeString(val)
+	val, err = decodeHrefEntities(val)
+	if err != nil {
+		return "", "", err
+	}
 	if err := checkHref(val); err != nil {
 		return "", "", err
 	}
 	return name, val, nil
+}
+
+// decodeHrefEntities decodes an href with the same rules as body text: only
+// &amp; &quot; &lt; &gt;, so the URL listed to the approver is the URL
+// Telegram receives. Any other '&' sequence is refused.
+func decodeHrefEntities(v string) (string, error) {
+	var b strings.Builder
+	for i := 0; i < len(v); {
+		if v[i] != '&' {
+			b.WriteByte(v[i])
+			i++
+			continue
+		}
+		semi := strings.IndexByte(v[i:], ';')
+		if semi < 0 || semi > 6 {
+			return "", errors.New("html: a bare '&' in href must be written &amp;")
+		}
+		switch v[i : i+semi+1] {
+		case "&amp;":
+			b.WriteByte('&')
+		case "&quot;":
+			b.WriteByte('"')
+		case "&lt;":
+			b.WriteByte('<')
+		case "&gt;":
+			b.WriteByte('>')
+		default:
+			return "", fmt.Errorf("html: entity %s in href is not supported (use &amp;)", v[i:i+semi+1])
+		}
+		i += semi + 1
+	}
+	return b.String(), nil
 }
 
 func checkHref(v string) error {
