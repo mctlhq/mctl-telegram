@@ -8,25 +8,6 @@ permissions:
   contents: read
 
 jobs:
-  # The Glovo PoC is a nested Go module; root 'go test ./...' cannot see it.
-  # Keep a named, blocking PR check so that tenant/revocation tests cannot
-  # silently rot while main CI stays green. No Glovo credentials or deploy.
-  glovo-poc:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: test/glovo-poc
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: "1.26.10"
-          cache: false
-      - name: Vet nested PoC module
-        run: go vet ./...
-      - name: Test nested PoC module with race detector
-        run: go test -race -count=1 ./...
-
   test:
     runs-on: ubuntu-latest
     # internal/db has two backends, and until now CI only ever exercised one.
@@ -97,6 +78,16 @@ jobs:
       # channels, and #495 was a send-on-closed-channel that plain `go test`
       # could never surface. The whole module passes under -race on main.
       - run: go test -race ./...
+      # A nested Go module is skipped by the root module's go test ./... .
+      # Run it inside the existing required "test" check, so a failing PoC
+      # cannot be merged merely because a new optional check was not required.
+      # These are offline fake-provider tests; no Glovo account is used.
+      - name: Vet Glovo PoC nested module
+        working-directory: test/glovo-poc
+        run: go vet ./...
+      - name: Test Glovo PoC nested module with race detector
+        working-directory: test/glovo-poc
+        run: go test -race -count=1 ./...
       # The Postgres-backed tests degrade to a skip, not a failure, when
       # TEST_DATABASE_URL is missing or the service container never came up --
       # so the step above stays green either way and the coverage this job
