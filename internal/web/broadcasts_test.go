@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/broadcast"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/productupdate"
+	"github.com/mctlhq/mctl-telegram/internal/ui"
 )
 
 const (
@@ -584,6 +586,22 @@ func TestBroadcastPage_DigestFormExplainsItself(t *testing.T) {
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page missing %q", want)
+		}
+	}
+}
+
+// Every custom property the broadcast page's own CSS reads must be defined by
+// the shared UI stylesheet (or carry a fallback): an undefined var() voids the
+// whole declaration and the control silently renders unstyled.
+func TestBroadcastExtraCSS_UsesOnlyDefinedTokens(t *testing.T) {
+	defined := ui.TokensCSS + ui.ComponentsCSS + ui.AuthCSS + manageExtraCSS
+	re := regexp.MustCompile(`var\((--[a-z0-9-]+)(,[^)]*)?\)`)
+	for _, m := range re.FindAllStringSubmatch(broadcastExtraCSS, -1) {
+		if m[2] != "" {
+			continue // has a fallback
+		}
+		if !strings.Contains(defined, m[1]+":") {
+			t.Errorf("broadcastExtraCSS uses %s, which no shared stylesheet defines", m[1])
 		}
 	}
 }

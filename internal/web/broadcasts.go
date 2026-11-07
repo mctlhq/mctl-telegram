@@ -504,11 +504,11 @@ const broadcastExtraCSS = `
   .bc .who, .bc .result { margin: 6px 0; }
   .bc details { margin: 6px 0; }
   .bc summary { cursor: pointer; color: var(--text-dim); font-size: 13px; }
-  .bcform label { display: block; margin: 12px 0 0; font-size: 14px; font-weight: 600; color: var(--fg); }
-  .bcform .hint { display: block; margin: 2px 0 0; font-weight: 400; font-size: 13px; color: var(--fg-muted); }
+  .bcform label { display: block; margin: 12px 0 0; font-size: 14px; font-weight: 600; color: var(--text); }
+  .bcform .hint { display: block; margin: 2px 0 0; font-weight: 400; font-size: 13px; color: var(--text-dim); }
   .bcform select, .bcform input[type=text], .bcform input[type=number] {
     display: block; width: 100%; max-width: 420px; margin-top: 4px; padding: 8px 10px; font: inherit; font-weight: 400;
-    color: var(--fg); background: var(--surface-card); border: 1px solid var(--line-strong); border-radius: 6px; box-sizing: border-box; }
+    color: var(--text); background: var(--surface-card); border: 1px solid var(--surface-line-strong); border-radius: 6px; box-sizing: border-box; }
   .bcform select:focus, .bcform input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
   .bcform button { margin-top: 16px; }
 `
