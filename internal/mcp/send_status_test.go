@@ -268,6 +268,7 @@ func TestGetMySendStatus_ReasonNamesNextStep(t *testing.T) {
 		connect   bool
 		want      []string
 		dontWant  []string
+		exact     string
 	}{
 		{
 			name:      "no session, manage page known",
@@ -310,6 +311,24 @@ func TestGetMySendStatus_ReasonNamesNextStep(t *testing.T) {
 			want:      []string{"telegram:messages:send scope"},
 			dontWant:  []string{"sign in again", "Reconnect", "No Telegram session"},
 		},
+		{
+			// Send scope present and no account row: the verdict comes from
+			// the per-account flag read of a missing row, and the hint must
+			// not start with a stray separator.
+			name:      "no session, exact text",
+			manageURL: "https://tg.test/telegram/connect/manage",
+			clientID:  "claude.ai",
+			scopes:    []string{"telegram:messages:send"},
+			exact:     "per-account send_enabled=false — real sends are not enabled for this account. No Telegram session is connected for this account yet. Connect one at https://tg.test/telegram/connect/manage after signing in with Telegram.",
+		},
+		{
+			// A hint after a hint: no doubled period between them.
+			name:      "no session and no send scope, exact text",
+			manageURL: "https://tg.test/telegram/connect/manage",
+			clientID:  "claude.ai",
+			scopes:    []string{"telegram:messages:read"},
+			exact:     "identity missing telegram:messages:send scope. " + staleTokenHint + " No Telegram session is connected for this account yet. Connect one at https://tg.test/telegram/connect/manage after signing in with Telegram.",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newToolsTestStore(t)
@@ -327,6 +346,9 @@ func TestGetMySendStatus_ReasonNamesNextStep(t *testing.T) {
 			id := &auth.Identity{UserID: uid, ClientID: tc.clientID, Scopes: tc.scopes}
 			out := parseSendStatus(t, callSendStatus(t, srv, id))
 			reason, _ := out["reason"].(string)
+			if tc.exact != "" && reason != tc.exact {
+				t.Errorf("reason = %q\nwant   %q", reason, tc.exact)
+			}
 			for _, w := range tc.want {
 				if !strings.Contains(reason, w) {
 					t.Errorf("reason = %q, want it to contain %q", reason, w)
@@ -338,5 +360,19 @@ func TestGetMySendStatus_ReasonNamesNextStep(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// joinSentences is what keeps the reason readable when a hint follows a
+// reason that is empty or already ends in a period.
+func TestJoinSentences(t *testing.T) {
+	for _, tc := range []struct{ reason, next, want string }{
+		{"", "Next.", "Next."},
+		{"Reason", "Next.", "Reason. Next."},
+		{"Reason.", "Next.", "Reason. Next."},
+	} {
+		if got := joinSentences(tc.reason, tc.next); got != tc.want {
+			t.Errorf("joinSentences(%q, %q) = %q, want %q", tc.reason, tc.next, got, tc.want)
+		}
 	}
 }

@@ -2266,12 +2266,26 @@ func (s *Server) withNextStepHints(id *auth.Identity, reason string, acct *db.Ac
 	// Only an OAuth connector (it has a client_id) can be removed and
 	// authorised again; a worker or device credential has no such step.
 	if strings.HasPrefix(reason, "identity missing ") && id != nil && id.ClientID != "" {
-		reason += ". " + staleTokenHint
+		reason = joinSentences(reason, staleTokenHint)
 	}
 	if acct != nil && !acct.Connected {
-		reason += ". " + s.noSessionHint()
+		reason = joinSentences(reason, s.noSessionHint())
 	}
 	return reason
+}
+
+// joinSentences appends next to reason as a further sentence: no separator
+// when reason is empty (can_send=true with no connected account), and no
+// doubled period when reason already ends in one (a hint after a hint).
+func joinSentences(reason, next string) string {
+	switch {
+	case reason == "":
+		return next
+	case strings.HasSuffix(reason, "."):
+		return reason + " " + next
+	default:
+		return reason + ". " + next
+	}
 }
 
 // evaluateSendGateAccountFlag turns the per-account send_enabled flag into the
