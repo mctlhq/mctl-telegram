@@ -121,6 +121,21 @@ func replyToFor(topicID int) tg.InputReplyToClass {
 	return &tg.InputReplyToMessage{ReplyToMsgID: topicID}
 }
 
+// draftReplyToFor is the reply_to of a draft left in topicID. Unlike a sent
+// message, a draft is not placed into a topic by replying to the topic's
+// opening message: Telegram keeps a draft whose reply_to has no top_msg_id as
+// the chat's own draft, with a reply header to that message, and getAllDrafts
+// then lists no entry for the topic (live check, mctl-telegram#1175). The
+// topic's own draft slot is chosen by top_msg_id, so a topic draft carries it.
+func draftReplyToFor(topicID int) tg.InputReplyToClass {
+	if topicID <= generalTopicID {
+		return nil
+	}
+	r := &tg.InputReplyToMessage{ReplyToMsgID: topicID}
+	r.SetTopMsgID(topicID)
+	return r
+}
+
 // ResolveExistingDialog resolves peer and requires it to be a conversation
 // the account already has: the peer is in the account's dialog list with at
 // least one message, and for a group or channel the account is a member.
