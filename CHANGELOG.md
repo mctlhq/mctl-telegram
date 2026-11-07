@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.129.0](https://github.com/mctlhq/mctl-telegram/compare/0.128.0...0.129.0) (2026-11-07)
+
+
+### Features
+
+* hide chats from connected clients ([#1152](https://github.com/mctlhq/mctl-telegram/issues/1152)) ([8ce404a](https://github.com/mctlhq/mctl-telegram/commit/8ce404a2b6ad6bebcc452f332aafbf54433b2838))
+* hide chats from connected clients ([#1152](https://github.com/mctlhq/mctl-telegram/issues/1152)) ([6818f96](https://github.com/mctlhq/mctl-telegram/commit/6818f96e93c9b0a49f014e7af7a787a9ec539352))
+
+
+### Bug Fixes
+
+* close review gaps in hidden-chat scope ([#1152](https://github.com/mctlhq/mctl-telegram/issues/1152)) ([390d436](https://github.com/mctlhq/mctl-telegram/commit/390d4363c207e0081f7fca7ac2bbb75bb7a158b0))
+
 ## [0.128.0](https://github.com/mctlhq/mctl-telegram/compare/0.127.0...0.128.0) (2026-11-07)
 
 
