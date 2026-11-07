@@ -22,6 +22,15 @@ type fakeTopics struct {
 	lookupErr  error
 	omitChat   bool
 	lookups    int
+	byIDReq    *tg.MessagesGetForumTopicsByIDRequest
+}
+
+func (f *fakeTopics) MessagesGetForumTopicsByID(_ context.Context, req *tg.MessagesGetForumTopicsByIDRequest) (*tg.MessagesForumTopics, error) {
+	f.byIDReq = req
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.topics, nil
 }
 
 func (f *fakeTopics) MessagesGetForumTopics(_ context.Context, req *tg.MessagesGetForumTopicsRequest) (*tg.MessagesForumTopics, error) {

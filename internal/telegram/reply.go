@@ -39,6 +39,77 @@ type ReplyTarget struct {
 	// Title is the display name of the chat, when the history response
 	// carried it.
 	Title string
+	// TopicID is the forum topic the reply goes to, 0 for none. It is set
+	// only by ResolveReplyTopic, so a draft names a topic only after the
+	// topic was checked to exist in this chat.
+	TopicID int
+	// TopicTitle is the topic's title, shown with the recipient.
+	TopicTitle string
+}
+
+// generalTopicID is the id of a forum's General topic. A message sent
+// without reply_to lands there, and its id names no message to reply to.
+const generalTopicID = 1
+
+// ErrTopicClosed is returned when the topic exists but is closed to new
+// messages.
+var ErrTopicClosed = errors.New("this topic is closed to new messages")
+
+// topicByIDInvoker is the subset of *tg.Client ResolveReplyTopic uses, so
+// the decision can be tested without a live MTProto client.
+type topicByIDInvoker interface {
+	MessagesGetForumTopicsByID(ctx context.Context, req *tg.MessagesGetForumTopicsByIDRequest) (*tg.MessagesForumTopics, error)
+	channelLookup
+}
+
+// ResolveReplyTopic returns a copy of target bound to topicID, after
+// checking that the chat is a forum and the topic exists and is open. A
+// draft that names a topic carries it to send_reply, which cannot change it.
+func ResolveReplyTopic(ctx context.Context, c *telegram.Client, target *ReplyTarget, topicID int) (*ReplyTarget, error) {
+	return replyTopicWith(ctx, c.API(), target, topicID)
+}
+
+func replyTopicWith(ctx context.Context, api topicByIDInvoker, target *ReplyTarget, topicID int) (*ReplyTarget, error) {
+	if target == nil || target.Peer == nil {
+		return nil, errors.New("reply target required")
+	}
+	if topicID <= 0 {
+		return nil, fmt.Errorf("topic_id must be a positive topic id")
+	}
+	if err := requireForum(ctx, api, target.Ref, target.Peer); err != nil {
+		return nil, err
+	}
+	res, err := api.MessagesGetForumTopicsByID(ctx, &tg.MessagesGetForumTopicsByIDRequest{Peer: target.Peer, Topics: []int{topicID}})
+	if err != nil {
+		return nil, topicRPCError("MessagesGetForumTopicsByID", err)
+	}
+	if res == nil {
+		return nil, errors.New("MessagesGetForumTopicsByID: empty reply")
+	}
+	for _, tc := range res.Topics {
+		t, ok := tc.(*tg.ForumTopic)
+		if !ok || t.ID != topicID {
+			continue
+		}
+		if t.Closed {
+			return nil, ErrTopicClosed
+		}
+		out := *target
+		out.TopicID, out.TopicTitle = t.ID, t.Title
+		return &out, nil
+	}
+	// The reply answered and does not hold the topic (or holds it as
+	// forumTopicDeleted): Telegram's own statement that it is not there.
+	return nil, ErrTopicNotFound
+}
+
+// replyToFor is the reply_to of a message sent to topicID. The General
+// topic and "no topic" send without one.
+func replyToFor(topicID int) tg.InputReplyToClass {
+	if topicID <= generalTopicID {
+		return nil
+	}
+	return &tg.InputReplyToMessage{ReplyToMsgID: topicID}
 }
 
 // ResolveExistingDialog resolves peer and requires it to be a conversation
@@ -218,6 +289,20 @@ func peerTitle(p tg.InputPeerClass, users []tg.UserClass, chats []tg.ChatClass) 
 	return ""
 }
 
+// sendReplyRequest builds the request SendReply sends: to the stored peer,
+// and into the bound topic when there is one.
+func sendReplyRequest(target *ReplyTarget, text string, randomID int64) *tg.MessagesSendMessageRequest {
+	req := &tg.MessagesSendMessageRequest{
+		Peer:     target.Peer,
+		Message:  text,
+		RandomID: randomID,
+	}
+	if replyTo := replyToFor(target.TopicID); replyTo != nil {
+		req.SetReplyTo(replyTo)
+	}
+	return req
+}
+
 // SendReply delivers text to a target ResolveExistingDialog produced. It
 // sends to the stored InputPeer and never re-resolves: the recipient is the
 // one the draft showed.
@@ -232,11 +317,7 @@ func SendReply(ctx context.Context, c *telegram.Client, target *ReplyTarget, tex
 	if err != nil {
 		return nil, err
 	}
-	updates, err := c.API().MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
-		Peer:     target.Peer,
-		Message:  text,
-		RandomID: randomID,
-	})
+	updates, err := c.API().MessagesSendMessage(ctx, sendReplyRequest(target, text, randomID))
 	if err != nil {
 		return nil, fmt.Errorf("send: %w", err)
 	}

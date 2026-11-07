@@ -23,8 +23,9 @@ import (
 // replyFake stands in for Telegram in the draft_reply / send_reply tests.
 // Peers listed in dialogs exist; anything else has no history.
 type replyFake struct {
-	dialogs   map[string]*telegram.ReplyTarget
-	delivered []delivered
+	dialogs     map[string]*telegram.ReplyTarget
+	delivered   []delivered
+	topicChecks int
 }
 
 type delivered struct {
@@ -35,8 +36,9 @@ type delivered struct {
 
 func newReplyFake() *replyFake {
 	return &replyFake{dialogs: map[string]*telegram.ReplyTarget{
-		"@alice": {Peer: &tg.InputPeerUser{UserID: 7001, AccessHash: 11}, Ref: "user:7001", Title: "Alice"},
-		"@bob":   {Peer: &tg.InputPeerUser{UserID: 7002, AccessHash: 22}, Ref: "user:7002", Title: "Bob"},
+		"@alice":      {Peer: &tg.InputPeerUser{UserID: 7001, AccessHash: 11}, Ref: "user:7001", Title: "Alice"},
+		"@bob":        {Peer: &tg.InputPeerUser{UserID: 7002, AccessHash: 22}, Ref: "user:7002", Title: "Bob"},
+		"@carol_team": {Peer: &tg.InputPeerChannel{ChannelID: 4601, AccessHash: 7}, Ref: "channel:4601", Title: "Carol's team"},
 	}}
 }
 
@@ -52,6 +54,22 @@ func (f *replyFake) install(s *Server) {
 			return nil, telegram.ErrPeerDeleted
 		}
 		return nil, telegram.ErrNoExistingDialog
+	}
+	s.replyTopic = func(_ context.Context, _ int64, target *telegram.ReplyTarget, topicID int) (*telegram.ReplyTarget, error) {
+		f.topicChecks++
+		if target.Ref != "channel:4601" {
+			return nil, telegram.ErrNotAForum
+		}
+		switch topicID {
+		case 12:
+			out := *target
+			out.TopicID, out.TopicTitle = 12, "Releases"
+			return &out, nil
+		case 13:
+			return nil, telegram.ErrTopicClosed
+		default:
+			return nil, telegram.ErrTopicNotFound
+		}
 	}
 	s.replyDeliver = func(_ context.Context, userID int64, target *telegram.ReplyTarget, text string) (*telegram.SendResult, error) {
 		f.delivered = append(f.delivered, delivered{userID, target, text})
