@@ -49,6 +49,7 @@ var toolClasses = map[string]toolClass{
 	"list_assistants":                 {tier: tierRead, idempotent: true},
 	"list_broadcasts":                 {tier: tierRead, idempotent: true},
 	"list_dialogs":                    {tier: tierRead, idempotent: true},
+	"list_folders":                    {tier: tierRead, idempotent: true},
 	"list_telegram_identities":        {tier: tierRead, idempotent: true},
 	"prepare_get_media":               {tier: tierRead, idempotent: false},
 	"search_messages":                 {tier: tierRead, idempotent: true},

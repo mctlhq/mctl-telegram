@@ -776,6 +776,42 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 			result, dispErr = json.Marshal(map[string]any{"dialogs": dialogs})
 		}
 
+	case "list_folders":
+		var folders []tg.Folder
+		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
+			var err error
+			folders, err = tg.ListFolders(ctx, c)
+			return err
+		})
+		if dispErr == nil {
+			result, dispErr = json.Marshal(map[string]any{"folders": folders})
+		}
+
+	case "list_dialogs_in_folder":
+		var args struct {
+			Limit  int    `json:"limit"`
+			Query  string `json:"query"`
+			Folder int    `json:"folder"`
+		}
+		if err := json.Unmarshal(envArgs(env), &args); err != nil {
+			return bridge.EncodeError(env.ID, fmt.Sprintf("list_dialogs_in_folder: bad args: %v", err))
+		}
+		if args.Folder <= 0 {
+			return bridge.EncodeError(env.ID, "list_dialogs_in_folder: folder is required")
+		}
+		var (
+			dialogs []tg.Dialog
+			scan    tg.FolderScan
+		)
+		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
+			var err error
+			dialogs, scan, err = tg.ListDialogsInFolder(ctx, c, args.Folder, args.Limit, args.Query, nil, 0)
+			return err
+		})
+		if dispErr == nil {
+			result, dispErr = json.Marshal(map[string]any{"dialogs": dialogs, "folder_scan": scan})
+		}
+
 	case "get_unread_messages":
 		var args unreadArgs
 		if err := json.Unmarshal(envArgs(env), &args); err != nil {

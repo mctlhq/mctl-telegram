@@ -28,6 +28,7 @@ import (
 var toolScopes = map[string][]string{
 	// Reads.
 	"list_dialogs":        {"telegram:dialogs:read"},
+	"list_folders":        {"telegram:dialogs:read"},
 	"get_unread_messages": {"telegram:messages:read"},
 	"get_messages":        {"telegram:messages:read"},
 	"search_messages":     {"telegram:messages:read"},
