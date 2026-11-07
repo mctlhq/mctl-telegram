@@ -376,8 +376,8 @@ var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(
        button below.</p>
     <a class="btnlink" href="{{.RedirectURL}}">Return to {{.AppName}}</a>
     <p class="meta">Back in {{.AppName}}, try a first request such as &#8220;list my recent
-       Telegram chats&#8221;. If the Telegram tools do not show up, see the
-       <a href="/docs#setup">setup help</a>.</p>
+       Telegram chats&#8221;, or pick one from the <a href="/examples">examples</a>.
+       If the Telegram tools do not show up, see the <a href="/docs#setup">setup help</a>.</p>
     <p class="meta">You can close this tab once {{.AppName}} shows the connection as active.</p>
     <script nonce="{{.Nonce}}">
       setTimeout(function () { window.location.replace("{{.RedirectURL}}"); }, 1200);

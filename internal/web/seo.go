@@ -57,6 +57,7 @@ func Sitemap(publicBaseURL string) http.HandlerFunc {
 		{"/docs", "weekly", 0.8},
 		{"/platforms", "weekly", 0.8},
 		{"/demo", "monthly", 0.7},
+		{"/examples", "monthly", 0.7},
 		{"/security", "monthly", 0.5},
 		{"/docs/local-bridge", "monthly", 0.6},
 		{"/docs/product-updates", "weekly", 0.7},
