@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1122,9 +1123,14 @@ func (s *Server) toolGetMyIdentity() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		mcplib.WithDestructiveHintAnnotation(false),
 		mcplib.WithOpenWorldHintAnnotation(false),
 		outputSchema[myIdentityResult](),
-		mcplib.WithDescription(`Return the Telegram identity of the currently authenticated session.
+		mcplib.WithDescription(`Return the Telegram account this client signed in with, and whether that account has a connected Telegram session here.
 
-Output: {telegram_id, username, display_name}. username and display_name are omitted when they were never captured — Telegram did not supply them, or the row predates capture. They are never inferred from message content.
+Output: {telegram_id, username, display_name, connected, connected_account}.
+- telegram_id, username, display_name: the sign-in identity on this client's token. username and display_name are omitted when they were never captured (Telegram did not supply them, or the row predates capture). They are never inferred from message content.
+- connected: true when this same account has an active session, whose chats the Telegram tools read; false when it has none. Omitted when the session could not be read, which is not the same as false.
+- connected_account: {username, display_name, connected_at} of that session, present only when connected is true.
+
+If the manage page shows a different account, the browser and this client are signed in as two different Telegram accounts. To switch this client, start its sign-in again and open the authorization link in a private window signed in to the account you want.
 
 This is the self-service counterpart of list_telegram_identities: it reports only the caller. No admin scope is required. Operators cannot disable it for an authenticated user. It takes no inputs.`),
 	)
@@ -1154,6 +1160,32 @@ This is the self-service counterpart of list_telegram_identities: it reports onl
 		if out.TelegramID == 0 && out.Username == "" && out.DisplayName == "" {
 			return mcplib.NewToolResultError("get_my_identity: no Telegram identity on this session"), nil
 		}
+		if s.Store != nil && id.UserID != 0 {
+			acct, err := s.Store.GetActiveAccount(ctx, id.UserID)
+			if err != nil {
+				// The sign-in identity stands on its own. An unreadable session
+				// is omitted rather than reported as connected=false.
+				slog.Warn("get_my_identity: account read failed; omitting connected",
+					"user_id", id.UserID, "err", err)
+			} else {
+				connected := acct.Connected
+				out.Connected = &connected
+				if acct.Connected {
+					out.ConnectedAccount = &connectedAccountRef{
+						Username:    acct.Username,
+						DisplayName: acct.DisplayName,
+						ConnectedAt: acct.ConnectedAt,
+					}
+				}
+			}
+		}
+		// Successful answers were not logged, so a support case could not
+		// show which account a client was signed in as (#749).
+		connectedState := "unknown"
+		if out.Connected != nil {
+			connectedState = strconv.FormatBool(*out.Connected)
+		}
+		slog.Info("get_my_identity: answered", "user_id", id.UserID, "connected", connectedState)
 		return jsonResult(out)
 	}
 	return tool, handler
@@ -2554,9 +2586,19 @@ type identitiesResult struct {
 
 // myIdentityResult is the success payload of get_my_identity.
 type myIdentityResult struct {
-	TelegramID  int64  `json:"telegram_id"`
-	Username    string `json:"username,omitempty"`
-	DisplayName string `json:"display_name,omitempty"`
+	TelegramID       int64                `json:"telegram_id"`
+	Username         string               `json:"username,omitempty"`
+	DisplayName      string               `json:"display_name,omitempty"`
+	Connected        *bool                `json:"connected,omitempty"`
+	ConnectedAccount *connectedAccountRef `json:"connected_account,omitempty"`
+}
+
+// connectedAccountRef names the connected Telegram session of the caller's
+// own account. It carries no session material.
+type connectedAccountRef struct {
+	Username    string    `json:"username,omitempty"`
+	DisplayName string    `json:"display_name,omitempty"`
+	ConnectedAt time.Time `json:"connected_at"`
 }
 
 // setAccessResult is the success payload of set_telegram_access.
