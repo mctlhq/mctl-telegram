@@ -188,6 +188,7 @@
     <li>The per-peer send rate limit is not exhausted.</li>
   </ol>
   <p>When any condition fails, no write RPC reaches Telegram. <code>send_message</code> and <code>send_media</code> return a dry-run result (<code>sent=false</code>) with a <code>dry_reason</code>; every other write tool — <code>edit_message</code>, <code>delete_messages</code>, <code>forward_messages</code>, <code>set_reaction</code>, <code>pin_message</code>, and <code>send_reply</code> — returns a tool error naming the condition, never a preview. <code>pin_message</code> and <code>send_reply</code> additionally require a single-use confirmation issued by <code>prepare_pin_message</code> or <code>draft_reply</code>. A denied media call does not fetch its URL or decode its base64 payload.</p>
+  <p><strong>Drafts are the one exception.</strong> <code>save_draft</code> leaves an unsent draft in the input box of one of the account's own chats; it delivers nothing, and nobody but the account owner sees it until they send it themselves. Delivering a message requires <code>send_enabled</code>; leaving a draft does not. Every other condition still applies to it: <code>ALLOW_SEND=true</code>, the <code>telegram:messages:send</code> scope, a per-chat draft budget of its own, the audit log, and the owner's hidden chats. A draft the owner typed is never replaced silently: the call is refused, and only an explicit <code>overwrite=true</code> replaces it.</p>
 
   <h2 id="auth-required">Authentication-required mode</h2>
   <ul>

@@ -208,6 +208,7 @@ func TestReviewerWriteGate_RefusedToolsAreErrorsInTheirHandlers(t *testing.T) {
 		{"delete_messages", s.toolDeleteMessages, map[string]any{"peer": alicePeer, "message_ids": []any{float64(1)}}},
 		{"forward_messages", s.toolForwardMessages, map[string]any{"from_peer": alicePeer, "to_peer": alicePeer, "message_ids": []any{float64(1)}}},
 		{"set_reaction", s.toolSetReaction, map[string]any{"peer": alicePeer, "message_id": float64(1), "emoji": "+1"}},
+		{"save_draft", s.toolSaveDraft, map[string]any{"peer": alicePeer, "text": "hi"}},
 		{"pin_message", s.toolPinMessage, map[string]any{"peer": alicePeer, "message_id": float64(1), "confirmation_id": "cp_0000"}},
 	}
 	for _, c := range cases {

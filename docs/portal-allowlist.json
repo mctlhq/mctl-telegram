@@ -222,6 +222,15 @@
       "reason": "Admin-only revocation of a minted worker token; containment action, refused upstream without admin:users."
     },
     {
+      "name": "save_draft",
+      "enabled": true,
+      "upstream_gates": [
+        "send-gate",
+        "telegram:messages:send"
+      ],
+      "reason": "Leaves an unsent draft in one of the caller's own chats and delivers nothing. Gated by ALLOW_SEND, the send scope and the reviewer rule through evaluateWriteGateBeforeAccount, deliberately without the per-account send_enabled flag (#1175); refuses to replace a draft the user typed unless overwrite=true."
+    },
+    {
       "name": "search_messages",
       "enabled": true,
       "upstream_gates": [

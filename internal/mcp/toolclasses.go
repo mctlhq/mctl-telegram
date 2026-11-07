@@ -81,6 +81,7 @@ var toolClasses = map[string]toolClass{
 	"set_account_mode":                {tier: tierDestructive, idempotent: false},
 	"set_account_send":                {tier: tierDestructive, idempotent: false},
 	"set_my_notification_preferences": {tier: tierDestructive, idempotent: false},
+	"save_draft":                      {tier: tierDestructive, idempotent: false},
 	"set_reaction":                    {tier: tierDestructive, idempotent: false},
 	"set_send_consent":                {tier: tierDestructive, idempotent: false},
 	"set_telegram_access":             {tier: tierDestructive, idempotent: false},
