@@ -34,6 +34,13 @@ owner each need a separate way to say no.
   `PeerCleanupCap` budget of 200 per hour (60 until 2026-11-04, raised so it is never
   smaller than the send cap), so hitting the send cap never
   blocks cleanup.
+- One write is exempt from condition 3: `save_draft` (#1175, owner
+  decision 2026-11-07). It leaves an unsent draft in the account's own
+  input box and delivers nothing, so the flag that guards delivery does not
+  apply. Conditions 1 and 2, the reviewer rule, the audit log and hidden
+  chats still do, and it spends its own per-chat draft budget rather than
+  the send budget. It never replaces a draft the owner typed unless the
+  caller passes `overwrite=true`.
 - New accounts start read-only. The connect wizard pre-selects "Read only",
   and sending is a separate opt-in (`internal/oauth/enable_access.go`,
   0.80.1, #770).

@@ -65,6 +65,7 @@ var toolDialogScope = map[string]dialogScope{
 	"send_media":           scopeDialogs,
 	"send_message":         scopeDialogs,
 	"send_reply":           scopeDialogs,
+	"save_draft":           scopeDialogs,
 	"set_reaction":         scopeDialogs,
 
 	// list_folders returns folder names and member counts, never members.

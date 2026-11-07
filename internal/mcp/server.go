@@ -141,6 +141,9 @@ type Server struct {
 	// draft_reply and send_reply in tests; nil means the client pool.
 	replyResolve func(ctx context.Context, userID int64, peer string) (*telegram.ReplyTarget, error)
 	replyDeliver func(ctx context.Context, userID int64, target *telegram.ReplyTarget, text string) (*telegram.SendResult, error)
+	// draftSave replaces the Telegram call of save_draft in tests; nil
+	// means the client pool.
+	draftSave func(ctx context.Context, userID int64, peer, text string, overwrite bool) (telegram.DraftResult, error)
 }
 
 func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
@@ -572,6 +575,10 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 	}
 	{
 		t, h := s.toolSetReaction()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolSaveDraft()
 		s.addTool(srv, t, h)
 	}
 	for _, reg := range []func() (mcplib.Tool, mcpserver.ToolHandlerFunc){

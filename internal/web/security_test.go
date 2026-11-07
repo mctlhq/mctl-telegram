@@ -436,6 +436,11 @@ func TestSendGateCopy_PreviewVsError(t *testing.T) {
 	if !strings.Contains(pages["/security"], "returns a tool error naming the condition") {
 		t.Error("/security: the error path for the other write tools is not stated")
 	}
+	// save_draft is the one write exempt from send_enabled (#1175); the
+	// page must say so rather than list it under "requires all of".
+	if !strings.Contains(pages["/security"], "Delivering a message requires <code>send_enabled</code>; leaving a draft does not.") {
+		t.Error("/security: the save_draft exception to send_enabled is not stated")
+	}
 }
 
 // TestLanding_UntestedClientsLabelled keeps support claims to clients with a
