@@ -2,8 +2,10 @@ package oauth
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -92,4 +94,35 @@ func TestToken_ConnectGrantOnlyOnSuccessfulCodeExchange(t *testing.T) {
 	if got := rec.snapshot(); len(got) != 1 {
 		t.Fatalf("grants after one exchange and one refresh = %+v, want exactly one", got)
 	}
+}
+
+// TestToken_GrantLogNamesTheUser: the authorization_code grant log line
+// carries the internal user id, so a client grant can be tied to a user from
+// the logs alone (#749).
+func TestToken_GrantLogNamesTheUser(t *testing.T) {
+	const tgID int64 = 500100101 // the admin obtainAuthorizationCode signs in
+	buf := captureServerLog(t)
+	srv := newTestServer(t)
+	srv.mu.Lock()
+	srv.clients["claude.ai"] = &clientReg{ClientName: "Claude", RedirectURIs: []string{"https://claude.ai/cb"}}
+	srv.mu.Unlock()
+	mux := newMockRouter()
+	srv.Register(mux)
+
+	authCodeTokens(t, srv, mux)
+
+	uid, err := srv.store.EnsureUserByTelegramID(context.Background(), tgID, "", "")
+	if err != nil {
+		t.Fatalf("resolve user: %v", err)
+	}
+	want := fmt.Sprintf("user_id=%d", uid)
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(line, "oauth: token authorization_code grant") {
+			if !strings.Contains(line, want) {
+				t.Fatalf("grant log lacks %s: %s", want, line)
+			}
+			return
+		}
+	}
+	t.Fatalf("no grant log line in:\n%s", buf.String())
 }
