@@ -17,6 +17,7 @@ the record is wrong and should be fixed.
 | [0006](0006-local-bridge-relay.md) | Local Bridge keeps the session on the user's machine and turns the server into a relay | Accepted (beta) |
 | [0007](0007-tool-surface-as-contract.md) | The tool surface is a reviewed contract: a committed snapshot and a release gate | Accepted |
 | [0008](0008-managed-runtime.md) | Managed runtime: one pooled platform worker per environment, OpenAI-compatible models through the AI gateway, consent and hard budget caps | Accepted |
+| [0009](0009-assistant-temporal-tenancy.md) | Assistant orders run in a shared `mctl-assistants` Temporal namespace with control-plane tenant isolation; rollout blocked on client auth | Proposed |
 
 ## Format
 
