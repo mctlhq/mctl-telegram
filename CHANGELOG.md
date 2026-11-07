@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.126.0](https://github.com/mctlhq/mctl-telegram/compare/0.125.3...0.126.0) (2026-11-07)
+
+
+### Features
+
+* **oauth:** three-step connect wizard, send choice on the phone screen ([d09d9a8](https://github.com/mctlhq/mctl-telegram/commit/d09d9a8fbf1c901ed52e122023b2e10f3925192f))
+* **oauth:** three-step connect wizard, send choice on the phone screen ([11592b8](https://github.com/mctlhq/mctl-telegram/commit/11592b833429c0e5fa3e1d79f70e4860fc7011b6)), closes [#1157](https://github.com/mctlhq/mctl-telegram/issues/1157)
+* **seo:** optimize docs and local bridge snippets for AI intent ([e2c0ec8](https://github.com/mctlhq/mctl-telegram/commit/e2c0ec82abb42571210afc4ce0d6763e3317a25e))
+* **seo:** optimize docs and local bridge snippets for AI intent ([12f32f1](https://github.com/mctlhq/mctl-telegram/commit/12f32f16b89c8fb56062206bdd3ac778f9338faa))
+
+
+### Bug Fixes
+
+* **mcp:** join send-status hints as sentences ([af1f062](https://github.com/mctlhq/mctl-telegram/commit/af1f062ebd0f6180a50ed3137f315beeef8202f9))
+* **oauth:** keep the same-host 302 and scope the sign-in-again hint ([fe46060](https://github.com/mctlhq/mctl-telegram/commit/fe46060719879a14b3a01b6bda289b040ade7f86))
+* **oauth:** name the next step when a sign-in gets no Telegram session ([04f36ac](https://github.com/mctlhq/mctl-telegram/commit/04f36acd20f77926a20f06171b30b50144bc247a))
+* **oauth:** name the next step when a sign-in gets no Telegram session ([25b1536](https://github.com/mctlhq/mctl-telegram/commit/25b153690c051b2223c6c2734afa4886bc4b445b)), closes [#1127](https://github.com/mctlhq/mctl-telegram/issues/1127) [#1157](https://github.com/mctlhq/mctl-telegram/issues/1157)
+* **oauth:** wizard QR start reads the send checkbox too ([df154ec](https://github.com/mctlhq/mctl-telegram/commit/df154ec47a186be07475cf533a5d3dec80c7b779)), closes [#1157](https://github.com/mctlhq/mctl-telegram/issues/1157)
+* **web:** let any origin read GET /api/stats ([9aded86](https://github.com/mctlhq/mctl-telegram/commit/9aded86566922c47e67d84a3f236bbf07c4c8be0))
+* **web:** let any origin read GET /api/stats ([e4de532](https://github.com/mctlhq/mctl-telegram/commit/e4de532468a77b43a2e31259c8476c47a7d1cf42)), closes [#1157](https://github.com/mctlhq/mctl-telegram/issues/1157)
+
 ## [0.125.3](https://github.com/mctlhq/mctl-telegram/compare/0.125.2...0.125.3) (2026-11-06)
 
 
