@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.133.0](https://github.com/mctlhq/mctl-telegram/compare/0.132.0...0.133.0) (2026-11-07)
+
+
+### Features
+
+* **web:** plain-language broadcast approval page ([0ae9c09](https://github.com/mctlhq/mctl-telegram/commit/0ae9c0921e284b263862bcacafe34fe6448bd028))
+* **web:** plain-language broadcast approval page ([5415392](https://github.com/mctlhq/mctl-telegram/commit/5415392da85302a4ae1089a33be8503a0be216ae))
+
+
+### Bug Fixes
+
+* **drafts:** read a forum topic's draft from getAllDrafts ([a7b7266](https://github.com/mctlhq/mctl-telegram/commit/a7b7266ae058fe2c725a8184af199e7e41e1d127))
+* **drafts:** read a forum topic's draft from getAllDrafts ([10d7d6e](https://github.com/mctlhq/mctl-telegram/commit/10d7d6eb685df6417fcd06611840052e87bdff8e)), closes [#1175](https://github.com/mctlhq/mctl-telegram/issues/1175)
+* **web:** use defined CSS tokens on the broadcast form ([fb3b6f4](https://github.com/mctlhq/mctl-telegram/commit/fb3b6f4f9484b6781e0669dae7a5dc3e7f48d775))
+
 ## [0.132.0](https://github.com/mctlhq/mctl-telegram/compare/0.131.0...0.132.0) (2026-11-07)
 
 
