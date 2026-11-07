@@ -189,4 +189,13 @@ func TestHandoffImmediateAuthorizationFence(t *testing.T) {
 	if err := cp.OpenHandoff(revokedToken, Request{Principal: req.Principal, Tenant: "tenant-beta", OrderID: req.OrderID}, "fp"); !errors.Is(err, ErrRefused) {
 		t.Fatalf("tenant mismatch accepted: %v", err)
 	}
+	// Reinstall with a different install ID but a recycled revision number
+	// must never revive a token from the old installation.
+	cp2 := fixture()
+	cp2.IssueHandoff(req.OrderID, req.Principal, "fp", 15*time.Minute)
+	oldToken := cp2.Outbox[0]
+	cp2.Install(req.Tenant, req.Principal, "inst-replaced", "conn-replaced")
+	if err := cp2.OpenHandoff(oldToken, req, "fp"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("token survived replacement install with same revision: %v", err)
+	}
 }
