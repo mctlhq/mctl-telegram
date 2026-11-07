@@ -235,7 +235,10 @@ func TestSaveDraftWith_TopicDraftComesFromAllDrafts(t *testing.T) {
 		chatOwn := &tg.UpdateDraftMessage{Peer: &tg.PeerChannel{ChannelID: forum.ChannelID}, Draft: typed}
 		otherChat := &tg.UpdateDraftMessage{Peer: &tg.PeerChannel{ChannelID: forum.ChannelID + 1}, Draft: typed}
 		otherChat.SetTopMsgID(12)
-		return &tg.Updates{Updates: []tg.UpdateClass{otherTopic, chatOwn, otherChat}}
+		savedPeer := &tg.UpdateDraftMessage{Peer: &tg.PeerChannel{ChannelID: forum.ChannelID}, Draft: typed}
+		savedPeer.SetTopMsgID(12)
+		savedPeer.SetSavedPeerID(&tg.PeerUser{UserID: 7120})
+		return &tg.Updates{Updates: []tg.UpdateClass{otherTopic, chatOwn, otherChat, savedPeer}}
 	}
 	f = forumWith(&tg.ForumTopic{ID: 12, Title: "Releases"})
 	f.allDrafts = other()
@@ -250,6 +253,19 @@ func TestSaveDraftWith_TopicDraftComesFromAllDrafts(t *testing.T) {
 	out, err := saveDraftWith(context.Background(), f, forum, "@carol_team", "", true, 12)
 	if err != nil || !out.Cleared || !out.ReplacedExisting || f.saved == nil || f.saved.Message != "" {
 		t.Fatalf("clear topic draft: %+v %v saved=%+v", out, err, f.saved)
+	}
+
+	// The other answer shapes getAllDrafts may use are read the same way.
+	one := topicDrafts(12, typed).Updates[0]
+	for name, answer := range map[string]tg.UpdatesClass{
+		"updatesCombined": &tg.UpdatesCombined{Updates: []tg.UpdateClass{one}},
+		"updateShort":     &tg.UpdateShort{Update: one},
+	} {
+		f = forumWith(&tg.ForumTopic{ID: 12, Title: "Releases"})
+		f.allDrafts = answer
+		if _, err := saveDraftWith(context.Background(), f, forum, "@carol_team", "notes", false, 12); !errors.Is(err, ErrDraftExists) || f.saved != nil {
+			t.Errorf("%s: typed topic draft replaced (err=%v)", name, err)
+		}
 	}
 
 	for name, fake := range map[string]func(*writeFake){
