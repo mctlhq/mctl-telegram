@@ -234,7 +234,16 @@ func (s *Server) quote(w http.ResponseWriter, d Draft, addr string) {
 // price, fees, currency and the delivery-address reference.
 func Fingerprint(q Quote) string {
 	lines := append([]QuoteLine(nil), q.Lines...)
-	sort.Slice(lines, func(i, j int) bool { return lines[i].ItemID < lines[j].ItemID })
+	key := func(l QuoteLine) string {
+		b, _ := json.Marshal(l) // modifiers marshal with sorted map keys
+		return string(b)
+	}
+	sort.Slice(lines, func(i, j int) bool {
+		if lines[i].ItemID != lines[j].ItemID {
+			return lines[i].ItemID < lines[j].ItemID
+		}
+		return key(lines[i]) < key(lines[j])
+	})
 	q.Lines, q.Fingerprint = lines, ""
 	b, _ := json.Marshal(q) // map keys are sorted by encoding/json
 	sum := sha256.Sum256(b)

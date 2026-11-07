@@ -21,6 +21,7 @@ func (b *Breaker) Record(rateLimited bool) {
 	defer b.mu.Unlock()
 	if !rateLimited {
 		b.failures = 0
+		b.open = false
 		return
 	}
 	b.failures++
