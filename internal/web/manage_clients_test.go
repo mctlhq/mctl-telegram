@@ -94,3 +94,21 @@ func TestManagePage_UnreadableClientsAreUnknown(t *testing.T) {
 		t.Error("a failed client read hid the sign-in identity")
 	}
 }
+
+// An account without a @handle stores its display name as the username; the
+// page must not show it again as a handle.
+func TestManagePage_NoHandleIsNotShownAsOne(t *testing.T) {
+	ctx := context.Background()
+	store := newManageTestStore(t)
+	uid, err := store.EnsureUserByTelegramID(ctx, 4204, "Carol", "Carol")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	body := getManageBody(t, NewManageServer(store, nil, "https://tg.test", "", ""), &auth.Identity{UserID: uid, TelegramID: 4204})
+	if !strings.Contains(body, `id="signed-in"`) || !strings.Contains(body, "Carol") {
+		t.Fatal("sign-in row missing")
+	}
+	if strings.Contains(body, "(@Carol)") {
+		t.Error("display name shown as a @handle")
+	}
+}

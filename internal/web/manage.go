@@ -194,6 +194,12 @@ func (s *ManageServer) serveManage(w http.ResponseWriter, r *http.Request, id *a
 		if signedIn.Username == "" {
 			signedIn.Username = id.TelegramUsername
 		}
+		// users.telegram_username holds the display name for an account
+		// without a @handle; showing it again as "(@Name)" would claim a
+		// handle the account does not have.
+		if signedIn.Username == signedIn.DisplayName {
+			signedIn.Username = ""
+		}
 		if signedIn.DisplayName == "" && signedIn.Username == "" {
 			if tgID == 0 {
 				tgID = id.TelegramID
