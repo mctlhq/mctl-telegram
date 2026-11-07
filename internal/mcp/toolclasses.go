@@ -24,9 +24,10 @@ type toolClass struct {
 	// idempotent: repeating the call with the same arguments has no further
 	// effect, so a client may retry it. Only reads are marked. Reads tied to a
 	// one-shot confirmation are not: prepare_get_media and draft_reply issue a
-	// fresh one per call, and get_media consumes the one it is given. Writes stay unmarked until a handler
-	// is shown to have no repeated side effect: a false "no" costs a client a
-	// retry it could have made; a false "yes" invites one it should not.
+	// fresh one per call, and get_media consumes the one it is given. Writes
+	// stay unmarked until a handler is shown to have no repeated side effect:
+	// a false "no" costs a client a retry it could have made; a false "yes"
+	// invites one it should not.
 	idempotent bool
 }
 

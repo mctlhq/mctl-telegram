@@ -2523,17 +2523,13 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	// identity's entire entitlement and the log line below was the only place
 	// the difference showed (#607).
 	scopes = narrowGrant(scopes, entry.Scope)
-	// Diagnostic: requested-vs-granted scope reconciliation.
-	s.logger().Info("oauth: token authorization_code grant",
-		"user_agent", r.Header.Get("User-Agent"),
-		"client_id", clientID,
-		"requested_scope", entry.Scope,
-		"granted_scope", strings.Join(scopes, " "),
-		"groups", strings.Join(groups, ","),
-	)
 	tok, err := s.mintAccessToken(tokenOrigin{ClientID: clientID, RedirectURI: entry.RedirectURI, RedirectURIKnown: true},
 		entry.TelegramID, entry.TelegramUsername, groups, scopes)
 	if err != nil {
+		// The grant log line comes after user resolution, so each failure
+		// before it logs its own line; a 500 must not leave no trace.
+		s.logger().Warn("oauth: token authorization_code grant failed",
+			"client_id", clientID, "stage", "mint_access_token", "err", err)
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
 		return
 	}
@@ -2544,9 +2540,22 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	// will not clobber a name the Telegram callback already stored.
 	uid, err := s.store.EnsureUserByTelegramID(r.Context(), entry.TelegramID, entry.TelegramUsername, "")
 	if err != nil {
+		s.logger().Warn("oauth: token authorization_code grant failed",
+			"client_id", clientID, "stage", "resolve_user", "err", err)
 		writeTokenError(w, "server_error", "could not resolve user", http.StatusInternalServerError)
 		return
 	}
+	// Diagnostic: requested-vs-granted scope reconciliation, and which user a
+	// client grant belongs to; without user_id a grant could be tied to a
+	// user only through the database (#749).
+	s.logger().Info("oauth: token authorization_code grant",
+		"user_agent", r.Header.Get("User-Agent"),
+		"client_id", clientID,
+		"user_id", uid,
+		"requested_scope", entry.Scope,
+		"granted_scope", strings.Join(scopes, " "),
+		"groups", strings.Join(groups, ","),
+	)
 	clientName := s.clientDisplayName(r.Context(), clientID)
 	refreshTok, err := s.issueRefreshToken(r.Context(), entry.CreatedAt, db.RefreshToken{
 		FamilyID:         randomToken(16),

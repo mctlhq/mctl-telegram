@@ -1,0 +1,32 @@
+schema: mctl-telegram.product-update/v1
+id: identity-shows-connected-account
+kind: changed_behavior
+title: get_my_identity says whether your account is connected
+summary: >-
+  get_my_identity now reports two things separately: the Telegram account
+  this AI client signed in with, and whether that account has a connected
+  Telegram session here, with the session's name and the time it was
+  connected. When the session cannot be read, the connected field is left
+  out instead of being reported as false. The description also explains what
+  to do when the manage page in your browser shows a different account than
+  your AI client.
+locale: en
+delivery: docs_only
+high_value: false
+tools: [get_my_identity]
+evidence:
+  from: 0.127.0
+  changes:
+    - {tool: get_my_identity, change: schema}
+    - {tool: get_my_identity, change: text}
+    - {tool: get_my_identity, change: schema, profile: core-readonly}
+    - {tool: get_my_identity, change: text, profile: core-readonly}
+    - {tool: get_my_identity, change: schema, profile: core-reply}
+    - {tool: get_my_identity, change: text, profile: core-reply}
+status: approved
+provenance:
+  author: mashkovd
+  assisted_by: claude-opus-5-5
+  reviewed_by: mashkovd
+created_at: "2026-11-07"
+reviewed_at: "2026-11-07"
