@@ -667,7 +667,7 @@ fetch_media (optional bool, default false): when true, also downloads the bytes 
 		}
 		if err != nil {
 			s.audit(ctx, id, "get_messages", telegram.RedactPeer(peer), err, startedAt)
-			if res, ok := topicErrResult(err, topicID); ok {
+			if res, ok := topicErrResult(err, "get_messages", topicID); ok {
 				return res, nil
 			}
 			return borrowErrResult(ctx, "get_messages", err), nil
@@ -2618,10 +2618,10 @@ func positiveIDArg(args map[string]any, key, msg string) (int, bool, error) {
 
 // topicErrResult turns the two topic refusals into an answer the model can
 // act on; any other error is left to the caller.
-func topicErrResult(err error, topicID int) (*mcplib.CallToolResult, bool) {
+func topicErrResult(err error, tool string, topicID int) (*mcplib.CallToolResult, bool) {
 	switch {
 	case errors.Is(err, telegram.ErrNotAForum):
-		return toolErr("%v; call get_messages without topic_id", err), true
+		return toolErr("%v; call %s without topic_id", err, tool), true
 	case errors.Is(err, telegram.ErrTopicNotFound):
 		return toolErr("topic %d not found in this chat; call list_topics for the ids", topicID), true
 	}
@@ -3576,7 +3576,7 @@ the word, or synonyms.`),
 			TopicID:          topicID,
 		})
 		s.audit(ctx, id, "search_messages", telegram.RedactPeer(peer), err, startedAt)
-		if res, ok := topicErrResult(err, topicID); ok {
+		if res, ok := topicErrResult(err, "search_messages", topicID); ok {
 			return res, nil
 		}
 		if err != nil {

@@ -18,6 +18,9 @@ type fakeTopics struct {
 	replies    tg.MessagesMessagesClass
 	err        error
 	broadcast  bool
+	notForum   bool
+	lookupErr  error
+	omitChat   bool
 	lookups    int
 }
 
@@ -39,8 +42,14 @@ func (f *fakeTopics) MessagesGetReplies(_ context.Context, req *tg.MessagesGetRe
 
 func (f *fakeTopics) ChannelsGetChannels(_ context.Context, id []tg.InputChannelClass) (tg.MessagesChatsClass, error) {
 	f.lookups++
+	if f.lookupErr != nil {
+		return nil, f.lookupErr
+	}
+	if f.omitChat {
+		return &tg.MessagesChats{}, nil
+	}
 	chID := id[0].(*tg.InputChannel).ChannelID
-	return &tg.MessagesChats{Chats: []tg.ChatClass{&tg.Channel{ID: chID, Megagroup: !f.broadcast, Broadcast: f.broadcast}}}, nil
+	return &tg.MessagesChats{Chats: []tg.ChatClass{&tg.Channel{ID: chID, Megagroup: !f.broadcast, Broadcast: f.broadcast, Forum: !f.notForum}}}, nil
 }
 
 // forum is the synthetic forum supergroup used throughout (Carol's team chat).
@@ -92,14 +101,17 @@ func TestListTopicsWith_SendsQueryAndBoundsTheLimit(t *testing.T) {
 	if _, _, err := listTopicsWith(context.Background(), f, forum, "rel", 500); err != nil {
 		t.Fatal(err)
 	}
-	if f.topicsReq.Limit != 50 || f.topicsReq.Q != "rel" || f.topicsReq.Peer != forum {
-		t.Errorf("request = %+v, want limit 50, q rel, the forum peer", f.topicsReq)
+	if f.topicsReq.Limit != 100 || f.topicsReq.Q != "rel" || f.topicsReq.Peer != forum {
+		t.Errorf("request = %+v, want limit capped at 100, q rel, the forum peer", f.topicsReq)
 	}
 	if _, _, err := listTopicsWith(context.Background(), f, forum, "", 7); err != nil {
 		t.Fatal(err)
 	}
 	if _, set := f.topicsReq.GetQ(); set || f.topicsReq.Limit != 7 {
 		t.Errorf("request = %+v, want no q and limit 7", f.topicsReq)
+	}
+	if _, _, err := listTopicsWith(context.Background(), f, forum, "", 0); err != nil || f.topicsReq.Limit != 50 {
+		t.Errorf("limit 0: err=%v limit=%d, want the default 50", err, f.topicsReq.Limit)
 	}
 }
 
@@ -143,8 +155,8 @@ func TestGetTopicMessagesWith_ReadsTheTopicThreadAndPages(t *testing.T) {
 	if next != 94 {
 		t.Errorf("next cursor = %d, want 94 (oldest id on the page)", next)
 	}
-	if f.lookups != 1 {
-		t.Errorf("broadcast lookups = %d, want 1 with the switch off", f.lookups)
+	if f.lookups != 2 {
+		t.Errorf("channel lookups = %d, want 2 with the switch off (broadcast check, forum check)", f.lookups)
 	}
 }
 
@@ -160,6 +172,27 @@ func TestGetTopicMessagesWith_RefusesBadTopicAndBroadcastBeforeReading(t *testin
 	}
 	if f.repliesReq != nil {
 		t.Error("a refused peer must not be read")
+	}
+}
+
+// TestGetTopicMessagesWith_NonForumSupergroupIsRefused: on an ordinary
+// supergroup getReplies would return message N's reply thread, so the forum
+// flag is checked first; a lookup that fails or leaves the chat out is an
+// error, never "not a forum".
+func TestGetTopicMessagesWith_NonForumSupergroupIsRefused(t *testing.T) {
+	f := &fakeTopics{replies: &tg.MessagesChannelMessages{}, notForum: true}
+	_, _, _, err := getTopicMessagesWith(context.Background(), f, forum, "carol_team", 4612, 10, 0, true)
+	if !errors.Is(err, ErrNotAForum) || f.repliesReq != nil {
+		t.Errorf("err = %v, read = %v; want not-a-forum before getReplies", err, f.repliesReq != nil)
+	}
+	for name, f := range map[string]*fakeTopics{
+		"lookup failed": {replies: &tg.MessagesChannelMessages{}, lookupErr: errors.New("flood wait")},
+		"chat missing":  {replies: &tg.MessagesChannelMessages{}, omitChat: true},
+	} {
+		_, _, _, err := getTopicMessagesWith(context.Background(), f, forum, "carol_team", 4612, 10, 0, true)
+		if err == nil || errors.Is(err, ErrNotAForum) || f.repliesReq != nil {
+			t.Errorf("%s: err = %v, read = %v; want an error that is not 'not a forum', and no read", name, err, f.repliesReq != nil)
+		}
 	}
 }
 
@@ -180,7 +213,7 @@ func TestCheckTopicScope(t *testing.T) {
 }
 
 func TestSearchPeerWith_TopicSetsTopMsgIDOnlyOnAChannel(t *testing.T) {
-	f := &fakeSearchInvoker{result: fakeSearchResult()}
+	f := &fakeSearchInvoker{result: fakeSearchResult(), forum: true}
 	if _, err := searchPeerWith(context.Background(), f, forum, SearchParams{Peer: "carol_team", Query: "x", Limit: 5, TopicID: 4612}); err != nil {
 		t.Fatal(err)
 	}
@@ -194,6 +227,10 @@ func TestSearchPeerWith_TopicSetsTopMsgIDOnlyOnAChannel(t *testing.T) {
 		t.Error("top_msg_id set without a topic")
 	}
 	f.lastPeer = nil
+	f.forum = false
+	if _, err := searchPeerWith(context.Background(), f, forum, SearchParams{Peer: "carol_team", Query: "x", Limit: 5, TopicID: 4612}); !errors.Is(err, ErrNotAForum) || f.lastPeer != nil {
+		t.Errorf("non-forum supergroup: err = %v, searched = %v; want not-a-forum before any search", err, f.lastPeer != nil)
+	}
 	_, err := searchPeerWith(context.Background(), f, &tg.InputPeerUser{UserID: 4602}, SearchParams{Peer: "bob", Query: "x", Limit: 5, TopicID: 4612})
 	if !errors.Is(err, ErrNotAForum) || f.lastPeer != nil {
 		t.Errorf("err = %v, searched = %v; want not-a-forum before any search", err, f.lastPeer != nil)

@@ -168,8 +168,8 @@ func searchPeerWith(ctx context.Context, api searchInvoker, peer tg.InputPeerCla
 		MaxDate: maxDateUnix(p.MaxDate),
 	}
 	if p.TopicID > 0 {
-		if _, ok := peer.(*tg.InputPeerChannel); !ok {
-			return nil, ErrNotAForum
+		if err := requireForum(ctx, api, p.Peer, peer); err != nil {
+			return nil, err
 		}
 		req.SetTopMsgID(p.TopicID)
 	}

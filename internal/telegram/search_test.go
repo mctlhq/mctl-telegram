@@ -21,7 +21,9 @@ type fakeSearchInvoker struct {
 	result     *tg.MessagesMessages
 	// broadcastIDs are the channels ChannelsGetChannels reports as broadcast.
 	broadcastIDs map[int64]bool
-	lookups      int
+	// forum marks every channel as a forum, for topic-scoped searches.
+	forum   bool
+	lookups int
 }
 
 func (f *fakeSearchInvoker) MessagesSearchGlobal(_ context.Context, req *tg.MessagesSearchGlobalRequest) (tg.MessagesMessagesClass, error) {
@@ -41,7 +43,7 @@ func (f *fakeSearchInvoker) ChannelsGetChannels(_ context.Context, id []tg.Input
 	out := &tg.MessagesChats{}
 	for _, ic := range id {
 		chID := ic.(*tg.InputChannel).ChannelID
-		out.Chats = append(out.Chats, &tg.Channel{ID: chID, Megagroup: !f.broadcastIDs[chID], Broadcast: f.broadcastIDs[chID]})
+		out.Chats = append(out.Chats, &tg.Channel{ID: chID, Megagroup: !f.broadcastIDs[chID], Broadcast: f.broadcastIDs[chID], Forum: f.forum})
 	}
 	return out, nil
 }

@@ -99,6 +99,9 @@ func TestSearchMessages_TopicReachesTheSearchAndNeedsAPeer(t *testing.T) {
 		if p.TopicID == 99 {
 			return nil, telegram.ErrTopicNotFound
 		}
+		if p.TopicID == 98 {
+			return nil, telegram.ErrNotAForum
+		}
 		return nil, nil
 	}
 	srv := (&Server{Store: newToolsTestStore(t)}).newMCPServer()
@@ -115,5 +118,9 @@ func TestSearchMessages_TopicReachesTheSearchAndNeedsAPeer(t *testing.T) {
 	res = callTool(t, ctx, srv, "search_messages", map[string]any{"query": "ship", "peer": "carol_team", "topic_id": float64(99)})
 	if !res.IsError || !strings.Contains(contentText(res), "topic 99 not found") {
 		t.Errorf("missing topic: %s, want it named", contentText(res))
+	}
+	res = callTool(t, ctx, srv, "search_messages", map[string]any{"query": "ship", "peer": "bob", "topic_id": float64(98)})
+	if !res.IsError || !strings.Contains(contentText(res), "call search_messages without topic_id") {
+		t.Errorf("not a forum: %s, want the hint to name search_messages", contentText(res))
 	}
 }

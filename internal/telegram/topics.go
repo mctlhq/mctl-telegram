@@ -56,8 +56,10 @@ func ListTopics(ctx context.Context, c *gotdtelegram.Client, peerSpec, query str
 }
 
 func listTopicsWith(ctx context.Context, api topicsInvoker, input tg.InputPeerClass, query string, limit int) ([]Topic, TopicList, error) {
-	if limit <= 0 || limit > 100 {
+	if limit <= 0 {
 		limit = 50
+	} else if limit > 100 {
+		limit = 100
 	}
 	req := &tg.MessagesGetForumTopicsRequest{Peer: input, Limit: limit}
 	if query != "" {
@@ -115,6 +117,9 @@ func getTopicMessagesWith(ctx context.Context, api topicsInvoker, input tg.Input
 			return nil, nil, 0, err
 		}
 	}
+	if err := requireForum(ctx, api, peerSpec, input); err != nil {
+		return nil, nil, 0, err
+	}
 	limit = clampLimit(limit)
 	res, err := api.MessagesGetReplies(ctx, &tg.MessagesGetRepliesRequest{
 		Peer:     input,
@@ -144,6 +149,41 @@ func resolveForumPeer(ctx context.Context, c *gotdtelegram.Client, peerSpec stri
 		return nil, ErrNotAForum
 	}
 	return input, nil
+}
+
+// requireForum refuses a topic read or search unless Telegram reports the
+// channel as a forum. On an ordinary supergroup messages.getReplies and
+// messages.search with top_msg_id do not fail: they return the reply thread
+// of message N, which would be passed off as a topic. A failed lookup, or a
+// reply that leaves the channel out, is an error and never "not a forum":
+// what could not be observed is not reported as absent.
+func requireForum(ctx context.Context, api channelLookup, peerSpec string, input tg.InputPeerClass) error {
+	v, ok := input.(*tg.InputPeerChannel)
+	if !ok {
+		return ErrNotAForum
+	}
+	res, err := api.ChannelsGetChannels(ctx, []tg.InputChannelClass{
+		&tg.InputChannel{ChannelID: v.ChannelID, AccessHash: v.AccessHash},
+	})
+	if err != nil {
+		return fmt.Errorf("check whether %q has topics: ChannelsGetChannels: %w", peerSpec, err)
+	}
+	var chats []tg.ChatClass
+	switch r := res.(type) {
+	case *tg.MessagesChats:
+		chats = r.Chats
+	case *tg.MessagesChatsSlice:
+		chats = r.Chats
+	}
+	for _, c := range chats {
+		if ch, ok := c.(*tg.Channel); ok && ch.ID == v.ChannelID {
+			if ch.Forum {
+				return nil
+			}
+			return ErrNotAForum
+		}
+	}
+	return fmt.Errorf("check whether %q has topics: Telegram did not return the chat", peerSpec)
 }
 
 func topicRPCError(call string, err error) error {
