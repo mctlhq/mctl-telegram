@@ -55,10 +55,34 @@ func TestSelectorNormalize_Rejects(t *testing.T) {
 		"empty client":     {Category: "maintenance", ConnectedVia: []string{" "}},
 		"negative window":  {Category: "maintenance", ActiveWithinDays: -1},
 		"huge window":      {Category: "maintenance", ActiveWithinDays: MaxActiveWithinDays + 1},
+		"zero id":          {Category: "maintenance", OnlyTelegramIDs: []int64{0}},
+		"negative id":      {Category: "maintenance", OnlyTelegramIDs: []int64{-5}},
+		"too many ids":     {Category: "maintenance", OnlyTelegramIDs: []int64{1, 2, 3, 4, 5, 6}},
 	} {
 		if _, err := sel.Normalize(); !errors.Is(err, ErrInvalidSelector) {
 			t.Errorf("%s: err = %v, want ErrInvalidSelector", name, err)
 		}
+	}
+}
+
+func TestSelectorNormalize_OnlyTelegramIDsCanonical(t *testing.T) {
+	a := mustSel(t, Selector{Category: "maintenance", OnlyTelegramIDs: []int64{30, 10, 30}})
+	b := mustSel(t, Selector{Category: "maintenance", OnlyTelegramIDs: []int64{10, 30}})
+	ja, _ := a.CanonicalJSON()
+	jb, _ := b.CanonicalJSON()
+	if ja != jb || Hash(ja) != Hash(jb) {
+		t.Errorf("same ids must canonicalize equal: %s vs %s", ja, jb)
+	}
+	// Five distinct ids after de-duplication is allowed.
+	if _, err := (Selector{Category: "maintenance", OnlyTelegramIDs: []int64{1, 1, 2, 3, 4, 5}}).Normalize(); err != nil {
+		t.Errorf("duplicates must not count toward the limit: %v", err)
+	}
+	// The ids are part of the approval binding: a different list is a
+	// different selector hash.
+	plain := mustSel(t, Selector{Category: "maintenance"})
+	jp, _ := plain.CanonicalJSON()
+	if Hash(jp) == Hash(ja) {
+		t.Error("only_telegram_ids must change the selector hash")
 	}
 }
 
@@ -217,6 +241,24 @@ func TestEvaluate(t *testing.T) {
 			func() db.BroadcastRecipientFacts { return facts(1) }, Decision{Reason: SkipOutOfAudience}},
 		{"activity window keeps recent user", mustSel(t, Selector{Category: "maintenance", ActiveWithinDays: 30}),
 			func() db.BroadcastRecipientFacts { return facts(1) }, eligible},
+		{"only_telegram_ids keeps a listed eligible user", mustSel(t, Selector{Category: "maintenance", OnlyTelegramIDs: []int64{1001}}),
+			func() db.BroadcastRecipientFacts { return facts(1) }, eligible},
+		{"only_telegram_ids excludes an unlisted user", mustSel(t, Selector{Category: "maintenance", OnlyTelegramIDs: []int64{1002}}),
+			func() db.BroadcastRecipientFacts { return facts(1) }, Decision{Reason: SkipOutOfAudience}},
+		{"only_telegram_ids never overrides consent", mustSel(t, Selector{Category: "product_updates", OnlyTelegramIDs: []int64{1001}}),
+			func() db.BroadcastRecipientFacts { return facts(1) }, Decision{InAudience: true, Reason: SkipUnsubscribed}},
+		{"only_telegram_ids never overrides unreachable", mustSel(t, Selector{Category: "maintenance", OnlyTelegramIDs: []int64{1001}}),
+			func() db.BroadcastRecipientFacts {
+				f := facts(1)
+				f.Reachability = notify.StateBlocked
+				return f
+			}, Decision{InAudience: true, Reason: SkipUnreachable}},
+		{"only_telegram_ids never overrides a deleted account", mustSel(t, Selector{Category: "maintenance", OnlyTelegramIDs: []int64{1001}}),
+			func() db.BroadcastRecipientFacts {
+				f := facts(1)
+				f.IdentityCapturedAt = nil
+				return f
+			}, Decision{InAudience: true, Reason: SkipNoAccount}},
 	}
 	for _, c := range cases {
 		if got := Evaluate(c.sel, c.f(), p, now); got != c.want {
