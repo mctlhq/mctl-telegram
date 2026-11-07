@@ -144,6 +144,9 @@ type Server struct {
 	// draftSave replaces the Telegram call of save_draft in tests; nil
 	// means the client pool.
 	draftSave func(ctx context.Context, userID int64, peer, text string, overwrite bool) (telegram.DraftResult, error)
+	// readMark replaces the Telegram call of mark_read in tests; nil means
+	// the client pool.
+	readMark func(ctx context.Context, userID int64, peer string, maxID int) error
 }
 
 func New(store *db.Store, pool *telegram.ClientPool, allowSend bool) *Server {
@@ -579,6 +582,10 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 	}
 	{
 		t, h := s.toolSaveDraft()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolMarkRead()
 		s.addTool(srv, t, h)
 	}
 	for _, reg := range []func() (mcplib.Tool, mcpserver.ToolHandlerFunc){

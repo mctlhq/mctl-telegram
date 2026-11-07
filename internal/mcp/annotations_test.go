@@ -60,6 +60,7 @@ func TestToolAnnotations(t *testing.T) {
 		{"search_messages", first(s.toolSearchMessages()), true, false, true},
 		{"set_reaction", first(s.toolSetReaction()), false, true, true},
 		{"save_draft", first(s.toolSaveDraft()), false, true, true},
+		{"mark_read", first(s.toolMarkRead()), false, true, true},
 		{"get_my_notification_preferences", first(s.toolGetMyNotificationPreferences()), true, false, false},
 		{"set_my_notification_preferences", first(s.toolSetMyNotificationPreferences()), false, true, false},
 		{"list_assistants", first(s.toolListAssistants()), true, false, false},
