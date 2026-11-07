@@ -30,6 +30,9 @@ type SearchParams struct {
 	// drops their hits (issue #851). Search hits are not a channel feed, so
 	// no sponsored messages are fetched either way.
 	BroadcastContent BroadcastContent
+	// TopicID, when non-zero, scopes a per-peer search to one forum topic.
+	// It needs Peer: a global search cannot be scoped to a topic.
+	TopicID int
 }
 
 // searchInvoker is the subset of *tg.Client methods the search path uses. It exists so
@@ -100,6 +103,9 @@ func SearchMessages(ctx context.Context, c *gotdtelegram.Client, p SearchParams,
 	} else if p.Limit > 100 {
 		p.Limit = 100
 	}
+	if err := checkTopicScope(p); err != nil {
+		return nil, err
+	}
 	api := c.API()
 
 	if p.Peer == "" {
@@ -111,6 +117,19 @@ func SearchMessages(ctx context.Context, c *gotdtelegram.Client, p SearchParams,
 		return nil, fmt.Errorf("resolve peer: %w", err)
 	}
 	return searchPeerWith(ctx, api, inputPeer, p)
+}
+
+// checkTopicScope refuses a topic scope that cannot be honoured: a negative
+// id, or a topic without a peer (messages.searchGlobal has no topic field, so
+// running it would silently search every chat).
+func checkTopicScope(p SearchParams) error {
+	if p.TopicID < 0 {
+		return fmt.Errorf("topic_id must be a positive topic id")
+	}
+	if p.TopicID != 0 && p.Peer == "" {
+		return fmt.Errorf("topic_id needs peer: a global search cannot be scoped to a topic")
+	}
+	return nil
 }
 
 // searchGlobalWith runs a global search_messages query against api.
@@ -140,15 +159,25 @@ func searchPeerWith(ctx context.Context, api searchInvoker, peer tg.InputPeerCla
 			return nil, err
 		}
 	}
-	res, err := api.MessagesSearch(ctx, &tg.MessagesSearchRequest{
+	req := &tg.MessagesSearchRequest{
 		Peer:    peer,
 		Q:       p.Query,
 		Filter:  &tg.InputMessagesFilterEmpty{},
 		Limit:   p.Limit,
 		MinDate: minDateUnix(p.MinDate),
 		MaxDate: maxDateUnix(p.MaxDate),
-	})
+	}
+	if p.TopicID > 0 {
+		if _, ok := peer.(*tg.InputPeerChannel); !ok {
+			return nil, ErrNotAForum
+		}
+		req.SetTopMsgID(p.TopicID)
+	}
+	res, err := api.MessagesSearch(ctx, req)
 	if err != nil {
+		if p.TopicID > 0 {
+			return nil, topicRPCError("MessagesSearch", err)
+		}
 		return nil, fmt.Errorf("MessagesSearch: %w", err)
 	}
 	hint := &Dialog{ID: p.Peer, Title: p.Peer}
