@@ -172,9 +172,16 @@ Inputs (optional):
 		if peer == "" || strings.TrimSpace(text) == "" {
 			return mcplib.NewToolResultError("peer and text are required"), nil
 		}
-		topicID := intArg(args, "topic_id", 0)
-		if _, given := args["topic_id"]; given && topicID <= 0 {
-			return mcplib.NewToolResultError("topic_id must be a positive topic id"), nil
+		topicID := 0
+		if _, given := args["topic_id"]; given {
+			// A topic id is a message id: a positive whole number that fits
+			// int32. A fraction would otherwise be rounded into a topic the
+			// caller did not name.
+			id, ok := messageIDArg(args, "topic_id")
+			if !ok {
+				return mcplib.NewToolResultError("topic_id must be a positive topic id (a whole number, as list_topics shows it)"), nil
+			}
+			topicID = id
 		}
 		if n := replyTextUnits(text); n > maxReplyText {
 			return mcplib.NewToolResultError(fmt.Sprintf("text must be at most %d UTF-16 units (it is %d; most emoji count as two)", maxReplyText, n)), nil
@@ -244,8 +251,9 @@ func (s *Server) toolSendReply() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 		outputSchema[sendReplyResult](),
 		mcplib.WithDescription(`Send a reply prepared by draft_reply.
 
-Takes only the confirmation_id. The recipient and the text are the ones
-draft_reply returned; they cannot be changed here. Each confirmation_id
+Takes only the confirmation_id. The recipient, the forum topic (if
+draft_reply named one) and the text are the ones draft_reply returned; they
+cannot be changed here. Each confirmation_id
 sends at most once and expires after 10 minutes. An unknown, expired or
 already used id is an error: call draft_reply again.
 

@@ -58,6 +58,8 @@ func TestReplyTopic_Refusals(t *testing.T) {
 		{"@alice", float64(12), "has no topics"},
 		{"@carol_team", float64(0), "positive topic id"},
 		{"@carol_team", float64(-4), "positive topic id"},
+		{"@carol_team", 12.7, "positive topic id"},
+		{"@carol_team", "12", "positive topic id"},
 	}
 	for _, c := range cases {
 		s, f, id := replyServer(t, 9322)
