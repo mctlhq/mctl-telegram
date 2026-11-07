@@ -2075,7 +2075,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	// sites need the identical "lookup admin, and not also a full admin"
 	// predicate, and recomputing it is how the two would drift apart.
 	if (!s.cfg.AdminTelegramIDs[identity.TelegramID] && !isClient) || isLookupOnly {
-		s.issueAuthCode(w, r, oc)
+		s.issueAuthCodeWithoutSession(w, r, oc, isLookupOnly)
 		return
 	}
 
@@ -2201,6 +2201,65 @@ const accountDeletedDuringSignInMsg = "This account was deleted while the sign-i
 // has-session Telegram-callback path and the enable_access success path. State
 // is echoed verbatim per RFC 6749 §4.1.2.
 func (s *Server) issueAuthCode(w http.ResponseWriter, r *http.Request, oc oauthCtx) {
+	u, ok := s.mintAuthCode(w, r, oc)
+	if !ok {
+		return
+	}
+
+	// For external OAuth clients (claude.ai / chatgpt.com) render a success
+	// interstitial instead of a bare 302. The final claude.ai -> Desktop-app
+	// hand-off is Anthropic-side and can silently fail to refocus the
+	// backgrounded app, leaving the user unsure the connection worked (they then
+	// retry, each retry a fresh dynamic registration). The interstitial gives a
+	// visible confirmation + an explicit return control while still
+	// auto-redirecting so the web flow stays near-seamless. The self-hosted
+	// wizard's own same-host redirect keeps the 302 — it renders its own page.
+	if s.isExternalRedirect(u) {
+		renderConnectSuccess(w, connectSuccessPage{
+			RedirectURL: u.String(),
+			AppName:     connectAppName(u.Host),
+		})
+		return
+	}
+	http.Redirect(w, r, u.String(), http.StatusFound)
+}
+
+// issueAuthCodeWithoutSession is issueAuthCode for a sign-in that gets a code
+// but no MTProto login: the identity will receive no telegram:* scope (no
+// access tier, or lookup admin only), so the callback never offered the
+// phone/QR step. Before #1127 this path ended on the same "Telegram
+// connected" page as a full connect, so the MCP client reported success
+// while every Telegram tool refused. The page now names what is missing
+// and the exact next step, and the code is still issued so the client flow
+// completes: the four self-service tools work on a scopeless token, and
+// get_my_send_status repeats the same next step. No auto-redirect: the user
+// has to read this one.
+func (s *Server) issueAuthCodeWithoutSession(w http.ResponseWriter, r *http.Request, oc oauthCtx, lookupOnly bool) {
+	u, ok := s.mintAuthCode(w, r, oc)
+	if !ok {
+		return
+	}
+	s.store.LogToolCall(r.Context(), db.ToolCall{UserID: oc.UserID, Tool: "connect:no_session", Status: "ok"})
+	// The browser's own /telegram/connect flow keeps its 302, as in
+	// issueAuthCode: its completion page is /telegram/connect/done, and the
+	// wording below (a connector to remove, an app to return to) belongs to
+	// an external MCP client only.
+	if !s.isExternalRedirect(u) {
+		http.Redirect(w, r, u.String(), http.StatusFound)
+		return
+	}
+	renderEnableNoSession(w, enableNoSessionPage{
+		RedirectURL: u.String(),
+		AppName:     connectAppName(u.Host),
+		ManageURL:   strings.TrimRight(s.cfg.Issuer, "/") + "/telegram/connect/manage",
+		LookupOnly:  lookupOnly,
+	})
+}
+
+// mintAuthCode persists a fresh authorization_code for oc and returns the
+// client's redirect_uri carrying ?code=&state=. On failure it has already
+// written the error response and returns ok=false.
+func (s *Server) mintAuthCode(w http.ResponseWriter, r *http.Request, oc oauthCtx) (u *url.URL, ok bool) {
 	code := randomToken(32)
 	now := s.clock()
 	if s.useDB {
@@ -2221,22 +2280,22 @@ func (s *Server) issueAuthCode(w http.ResponseWriter, r *http.Request, oc oauthC
 		}, oc.UserID, oc.SignInStartedAt); err != nil {
 			if errors.Is(err, db.ErrAccountDeletedSinceGrant) {
 				s.renderAccountDeletedDuringSignIn(w, oc)
-				return
+				return nil, false
 			}
 			s.logger().Error("oauth: persist auth_code failed", "err", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
+			return nil, false
 		}
 	} else {
 		deleted, err := s.store.AccountDeletedSince(r.Context(), oc.UserID, oc.SignInStartedAt)
 		if err != nil {
 			s.logger().Error("oauth: read account deletion failed", "err", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
+			return nil, false
 		}
 		if deleted {
 			s.renderAccountDeletedDuringSignIn(w, oc)
-			return
+			return nil, false
 		}
 		s.mu.Lock()
 		// Cap the authorization-code map. Oldest-evict on insert mirrors the
@@ -2267,10 +2326,11 @@ func (s *Server) issueAuthCode(w http.ResponseWriter, r *http.Request, oc oauthC
 		s.mu.Unlock()
 	}
 
-	u, err := url.Parse(oc.RedirectURI)
+	var err error
+	u, err = url.Parse(oc.RedirectURI)
 	if err != nil {
 		http.Error(w, "invalid redirect_uri", http.StatusInternalServerError)
-		return
+		return nil, false
 	}
 	q := u.Query()
 	q.Set("code", code)
@@ -2278,23 +2338,7 @@ func (s *Server) issueAuthCode(w http.ResponseWriter, r *http.Request, oc oauthC
 		q.Set("state", oc.ClientState)
 	}
 	u.RawQuery = q.Encode()
-
-	// For external OAuth clients (claude.ai / chatgpt.com) render a success
-	// interstitial instead of a bare 302. The final claude.ai -> Desktop-app
-	// hand-off is Anthropic-side and can silently fail to refocus the
-	// backgrounded app, leaving the user unsure the connection worked (they then
-	// retry, each retry a fresh dynamic registration). The interstitial gives a
-	// visible confirmation + an explicit return control while still
-	// auto-redirecting so the web flow stays near-seamless. The self-hosted
-	// wizard's own same-host redirect keeps the 302 — it renders its own page.
-	if s.isExternalRedirect(u) {
-		renderConnectSuccess(w, connectSuccessPage{
-			RedirectURL: u.String(),
-			AppName:     connectAppName(u.Host),
-		})
-		return
-	}
-	http.Redirect(w, r, u.String(), http.StatusFound)
+	return u, true
 }
 
 // isExternalRedirect reports whether u targets a different host than the issuer.
