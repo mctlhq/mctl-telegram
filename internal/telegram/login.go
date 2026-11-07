@@ -184,9 +184,8 @@ func Login(
 	// does not finish must log out, like a scanned QR code.
 	var codeSubmitted bool
 	authenticator := &interactiveAuthenticator{
-		phone:       phone,
-		onCodeSent:  cfg.OnCodeSent,
-		onConnected: cfg.OnConnected,
+		phone:      phone,
+		onCodeSent: cfg.OnCodeSent,
 		code: func(ctx context.Context) (string, error) {
 			code, err := askCode(ctx)
 			if err == nil {
@@ -207,11 +206,10 @@ func Login(
 	slog.InfoContext(ctx, "telegram login: connecting to telegram", "user_id", userID)
 	runErr := client.Run(ctx, func(ctx context.Context) error {
 		slog.InfoContext(ctx, "telegram login: connection established, running auth flow", "user_id", userID)
-		_, authErr := client.Auth().Status(ctx)
-		if authErr != nil {
-			// Fresh session — proceed with flow.
-		}
-		if err := runPhoneFlow(ctx, client.Auth(), authenticator); err != nil {
+		if err := authOnConnection(ctx, cfg.OnConnected,
+			func(ctx context.Context) error { _, err := client.Auth().Status(ctx); return err },
+			func(ctx context.Context) error { return runPhoneFlow(ctx, client.Auth(), authenticator) },
+		); err != nil {
 			return fmt.Errorf("auth flow: %w", err)
 		}
 		me, err := client.Self(ctx)
@@ -307,13 +305,20 @@ func LoginCodeDigits(s string) string {
 //     auth.sendCode once per flow. A second one surfaces as before.
 //
 // PHONE_CODE_EXPIRED and every other error still end the flow.
-func runPhoneFlow(ctx context.Context, client auth.FlowClient, a *interactiveAuthenticator) error {
-	// The flow runs inside client.Run's callback, so reaching it means the
-	// dial and handshake are done; what remains outstanding is the code
-	// request itself.
-	if a.onConnected != nil {
-		a.onConnected()
+// authOnConnection is the start of Login's client.Run callback: the
+// connection is up, so onConnected is reported first, before any RPC, then
+// the auth status is read (its error only means a fresh session) and the
+// phone flow runs. Reporting before the first RPC is what lets a caller tell
+// a dial or handshake hang from an RPC hang (mctl-telegram#1162).
+func authOnConnection(ctx context.Context, onConnected func(), status, flow func(context.Context) error) error {
+	if onConnected != nil {
+		onConnected()
 	}
+	_ = status(ctx) // An error here means a fresh session: proceed.
+	return flow(ctx)
+}
+
+func runPhoneFlow(ctx context.Context, client auth.FlowClient, a *interactiveAuthenticator) error {
 	restarted := false
 	restartOnce := func(err error) bool {
 		if restarted || !tgerr.Is(err, "AUTH_RESTART") {
@@ -477,9 +482,6 @@ type interactiveAuthenticator struct {
 	code       func(ctx context.Context) (string, error)
 	password   func(ctx context.Context) (string, error)
 	onCodeSent func(delivery string)
-	// onConnected is LoginConfig.OnConnected: called once, when runPhoneFlow
-	// starts on the live connection and before the first SendCode.
-	onConnected func()
 }
 
 func (a *interactiveAuthenticator) Phone(ctx context.Context) (string, error) {

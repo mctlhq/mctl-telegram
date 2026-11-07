@@ -154,22 +154,29 @@ func TestInteractiveAuthenticator_ReportsDeliveryBeforeAsking(t *testing.T) {
 	}
 }
 
-// The connected report must come once and before the code request, so a
-// handler that times out waiting for SendCode can tell it from a dial hang
-// (mctl-telegram#1162).
-func TestRunPhoneFlow_ReportsConnectedBeforeSendCode(t *testing.T) {
-	f := &fakeFlowClient{goodCode: "12345", sendCodeErrs: []error{tgerr.New(400, "AUTH_RESTART")}}
-	var connected, sendCodesThen int
-	a := &interactiveAuthenticator{
-		phone:       "+14155551234",
-		code:        (&scriptedPrompt{inputs: []string{"12345"}}).ask,
-		onConnected: func() { connected++; sendCodesThen = f.sendCodes },
+// The connected report must come first, before the auth-status RPC and the
+// code request, so a handler that times out on a hanging RPC can tell it
+// from a dial hang (mctl-telegram#1162).
+func TestAuthOnConnection_ReportsConnectedBeforeAnyRPC(t *testing.T) {
+	var order []string
+	flowErr := errors.New("flow failed")
+	err := authOnConnection(context.Background(),
+		func() { order = append(order, "connected") },
+		func(context.Context) error {
+			order = append(order, "status")
+			return errors.New("AUTH_KEY_UNREGISTERED")
+		},
+		func(context.Context) error { order = append(order, "flow"); return flowErr },
+	)
+	if !errors.Is(err, flowErr) {
+		t.Errorf("err = %v, want the flow's error (a status error only means a fresh session)", err)
 	}
-	if err := runPhoneFlow(context.Background(), f, a); err != nil {
-		t.Fatalf("flow: %v", err)
+	if want := []string{"connected", "status", "flow"}; fmt.Sprint(order) != fmt.Sprint(want) {
+		t.Errorf("order = %v, want %v", order, want)
 	}
-	if connected != 1 || sendCodesThen != 0 {
-		t.Errorf("connected reported %d times, after %d SendCode calls; want once, before any", connected, sendCodesThen)
+	if err := authOnConnection(context.Background(), nil,
+		func(context.Context) error { return nil }, func(context.Context) error { return nil }); err != nil {
+		t.Errorf("nil hook: %v", err)
 	}
 }
 

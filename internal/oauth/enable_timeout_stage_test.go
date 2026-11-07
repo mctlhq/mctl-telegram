@@ -47,26 +47,33 @@ func TestEnableStart_TimeoutRecordsTheStage(t *testing.T) {
 			}, func(c *Config) { c.CodeTTL = 10 * time.Second })
 			esTok := driveToPhone(t, mux)
 
-			var release func()
+			var (
+				release func()
+				parked  chan struct{}
+			)
 			if tc.holdLock {
 				uid, err := srv.store.EnsureUserByTelegramID(context.Background(), 500100101, "dana_tg", "Dana")
 				if err != nil {
 					t.Fatalf("ensure user: %v", err)
 				}
-				parked := make(chan struct{})
+				parked = make(chan struct{})
 				srv.loginFlowParked = sync.OnceFunc(func() { close(parked) })
 				ul := srv.uidLoginMutex(uid)
 				ul.Lock()
 				release = ul.Unlock
-				defer func() {
-					select {
-					case <-parked:
-					default:
-					}
-				}()
 			}
 			rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
 				url.Values{"es": {esTok}, "phone": {"+14155551234"}})
+			if parked != nil {
+				// The flow must really have been waiting on the lock when the
+				// handler gave up, or "queued" would be the default talking.
+				select {
+				case <-parked:
+				case <-time.After(2 * time.Second):
+					release()
+					t.Fatal("the flow never queued on the uid mutex")
+				}
+			}
 			if release != nil {
 				release()
 			}
