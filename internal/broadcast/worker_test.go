@@ -25,15 +25,24 @@ type fakeSender struct {
 type sent struct {
 	chatID int64
 	text   string
+	html   bool
 }
 
-func (f *fakeSender) SendMessage(_ context.Context, chatID int64, text string) error {
+func (f *fakeSender) SendMessage(ctx context.Context, chatID int64, text string) error {
+	return f.send(ctx, chatID, text, false)
+}
+
+func (f *fakeSender) SendHTMLMessage(ctx context.Context, chatID int64, text string) error {
+	return f.send(ctx, chatID, text, true)
+}
+
+func (f *fakeSender) send(_ context.Context, chatID int64, text string, html bool) error {
 	if f.before != nil {
 		f.before(chatID)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.sent = append(f.sent, sent{chatID, text})
+	f.sent = append(f.sent, sent{chatID, text, html})
 	if q := f.results[chatID]; len(q) > 0 {
 		err := q[0]
 		if len(q) > 1 {
@@ -688,6 +697,10 @@ func (c *cancellingSender) SendMessage(ctx context.Context, _ int64, _ string) e
 	c.cancel()
 	c.sent++
 	return ctx.Err()
+}
+
+func (c *cancellingSender) SendHTMLMessage(ctx context.Context, chatID int64, text string) error {
+	return c.SendMessage(ctx, chatID, text)
 }
 
 // A send already under way is not aborted by shutdown: an aborted request

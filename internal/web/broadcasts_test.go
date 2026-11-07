@@ -296,6 +296,10 @@ func (r *recordingSender) SendMessage(_ context.Context, chatID int64, text stri
 	return nil
 }
 
+func (r *recordingSender) SendHTMLMessage(ctx context.Context, chatID int64, text string) error {
+	return r.SendMessage(ctx, chatID, text)
+}
+
 // TestBroadcast_EndToEnd walks the whole path: prepared by an assistant,
 // nothing sent; approved by the operator on the page; delivered by the
 // worker exactly to the eligible client, with the approved text.

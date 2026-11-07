@@ -220,13 +220,17 @@ func (s *Store) broadcastFacts(ctx context.Context, now time.Time, onlyUser int6
 // normalized text that was previewed and will be delivered; it is operator
 // copy, not private chat content, but it is still never written to a log.
 type BroadcastCampaign struct {
-	ID             string
-	State          string
-	Category       string
-	SelectorJSON   string
-	SelectorHash   string
-	Content        string
-	ContentHash    string
+	ID           string
+	State        string
+	Category     string
+	SelectorJSON string
+	SelectorHash string
+	Content      string
+	ContentHash  string
+	// ContentFormat is how Content is sent: "plain" (no parse mode) or
+	// "html". It is covered by ContentHash, so it cannot change after
+	// preview without invalidating the approval. Empty means plain.
+	ContentFormat  string
 	CreatedBy      int64
 	Surface        string
 	RecipientLimit int
@@ -278,15 +282,18 @@ func (s *Store) CreateBroadcastCampaign(ctx context.Context, c BroadcastCampaign
 		return errors.New("create broadcast campaign: id, hashes and creator are required")
 	}
 	now = now.UTC()
+	if c.ContentFormat == "" {
+		c.ContentFormat = "plain"
+	}
 	if c.SourceRef == nil {
 		_, err := s.DB.ExecContext(ctx,
 			`INSERT INTO broadcast_campaigns(id, state, category, selector_json, selector_hash,
 			     content, content_hash, created_by, surface, recipient_limit, preview_counts,
-			     expires_at, created_at, updated_at)
-			 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)`,
+			     expires_at, created_at, updated_at, content_format)
+			 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13,$14)`,
 			c.ID, CampaignPrepared, c.Category, c.SelectorJSON, c.SelectorHash,
 			c.Content, c.ContentHash, c.CreatedBy, c.Surface, c.RecipientLimit, c.PreviewCounts,
-			c.ExpiresAt.UTC(), now,
+			c.ExpiresAt.UTC(), now, c.ContentFormat,
 		)
 		if err != nil {
 			return fmt.Errorf("create broadcast campaign: %w", err)
@@ -300,8 +307,9 @@ func (s *Store) CreateBroadcastCampaign(ctx context.Context, c BroadcastCampaign
 	res, err := s.DB.ExecContext(ctx,
 		`INSERT INTO broadcast_campaigns(id, state, category, selector_json, selector_hash,
 		     content, content_hash, created_by, surface, recipient_limit, preview_counts,
-		     expires_at, created_at, updated_at, source_digest_id, source_digest_version, source_content_hash)
-		 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13,$14,$15,$16
+		     expires_at, created_at, updated_at, source_digest_id, source_digest_version, source_content_hash,
+		     content_format)
+		 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13,$14,$15,$16,$20
 		  WHERE EXISTS (SELECT 1 FROM product_update_digests d
 		                 WHERE d.id = $14 AND d.version = $15 AND d.content_hash = $16 AND d.category = $3)
 		    AND NOT EXISTS (SELECT 1 FROM broadcast_campaigns
@@ -310,7 +318,7 @@ func (s *Store) CreateBroadcastCampaign(ctx context.Context, c BroadcastCampaign
 		c.ID, CampaignPrepared, c.Category, c.SelectorJSON, c.SelectorHash,
 		c.Content, c.ContentHash, c.CreatedBy, c.Surface, c.RecipientLimit, c.PreviewCounts,
 		c.ExpiresAt.UTC(), now, ref.DigestID, ref.DigestVersion, ref.ContentHash,
-		CampaignPrepared, CampaignApproved, CampaignSending,
+		CampaignPrepared, CampaignApproved, CampaignSending, c.ContentFormat,
 	)
 	if isSourceDigestFKViolation(err) {
 		// The digest passed the EXISTS read but was deleted (a concurrent
@@ -366,7 +374,7 @@ func (s *Store) ActiveBroadcastCampaign(ctx context.Context, category string) (*
 const campaignColumns = `id, state, category, selector_json, selector_hash, content, content_hash,
 	created_by, surface, recipient_limit, preview_counts, expires_at, approved_by, approved_at,
 	cancelled_by, cancelled_at, completed_at, end_reason, source_digest_id, source_digest_version,
-	source_content_hash, created_at, updated_at`
+	source_content_hash, created_at, updated_at, content_format`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -384,7 +392,7 @@ func scanCampaign(r rowScanner) (*BroadcastCampaign, error) {
 	if err := r.Scan(&c.ID, &c.State, &c.Category, &c.SelectorJSON, &c.SelectorHash, &c.Content,
 		&c.ContentHash, &c.CreatedBy, &c.Surface, &c.RecipientLimit, &c.PreviewCounts, &c.ExpiresAt,
 		&approvedBy, &approvedAt, &cancelledBy, &cancelledAt, &completedAt, &c.EndReason,
-		&srcID, &srcVersion, &srcHash, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		&srcID, &srcVersion, &srcHash, &c.CreatedAt, &c.UpdatedAt, &c.ContentFormat); err != nil {
 		return nil, err
 	}
 	if srcID.Valid {
