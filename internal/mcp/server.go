@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sync/atomic"
 
+	"github.com/gotd/td/tg"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/mctlhq/mctl-telegram/internal/assistantinstall"
@@ -147,6 +148,9 @@ type Server struct {
 	// draftSave replaces the Telegram call of save_draft in tests; nil
 	// means the client pool.
 	draftSave func(ctx context.Context, userID int64, peer, text string, overwrite bool) (telegram.DraftResult, error)
+	// unreadFolder replaces the Telegram calls of get_unread_messages with
+	// folder in tests; nil means the real ones.
+	unreadFolder func(ctx context.Context, userID int64, folderID, limit int) ([]telegram.Message, []*tg.Message, *telegram.Sponsored, telegram.FolderScan, error)
 	// readMark replaces the Telegram call of mark_read in tests; nil means
 	// the client pool.
 	readMark func(ctx context.Context, userID int64, peer string, maxID int) error

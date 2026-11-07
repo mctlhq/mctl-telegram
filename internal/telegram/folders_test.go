@@ -202,7 +202,12 @@ func TestScanFolderList_PagesToTheBoundAndSaysWhetherItEnded(t *testing.T) {
 		{"no offset for the next page", &fakeDialogPages{count: 150, noDates: true}, 100, 100, false, 1},
 	}
 	for _, c := range cases {
-		got, scan, err := scanFolderList(c.pages.fetch, 0, folderScanMain, spec, false, now, "")
+		acc := newFolderMembers()
+		err := scanFolderList(c.pages.fetch, 0, folderScanMain, spec, false, now, "", acc)
+		got, scan := acc.dialogs, acc.scan
+		if len(acc.raw) != len(got) {
+			t.Errorf("%s: %d raw members for %d listed", c.name, len(acc.raw), len(got))
+		}
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
@@ -212,7 +217,7 @@ func TestScanFolderList_PagesToTheBoundAndSaysWhetherItEnded(t *testing.T) {
 		}
 	}
 	p := &fakeDialogPages{count: 150}
-	_, _, _ = scanFolderList(p.fetch, 1, folderScanMain, spec, true, now, "")
+	_ = scanFolderList(p.fetch, 1, folderScanMain, spec, true, now, "", newFolderMembers())
 	second := p.requests[1]
 	peer, ok := second.OffsetPeer.(*tg.InputPeerChat)
 	if !ok || peer.ChatID != 5099 || second.OffsetID != 100 || second.OffsetDate != 1_700_000_000-99 || second.Limit != 100 {
