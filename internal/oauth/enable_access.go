@@ -872,9 +872,6 @@ func (s *Server) lookupEnable(r *http.Request) (es *enableSession, esTok string,
 	return e, tok, true
 }
 
-// handleEnableStart receives the phone number, launches the MTProto login
-// goroutine, and renders either the SMS-code screen or (on early failure) the
-// phone screen with an error. Re-submitting /start cancels any prior attempt.
 // codeDelivery returns the channel Telegram chose for the login code, or ""
 // when it is not known. Safe on a nil flow: the code step re-renders can run
 // without one.
@@ -886,6 +883,9 @@ func (lf *loginFlow) codeDelivery() string {
 	return d
 }
 
+// handleEnableStart receives the phone number, launches the MTProto login
+// goroutine, and renders either the SMS-code screen or (on early failure) the
+// phone screen with an error. Re-submitting /start cancels any prior attempt.
 func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	es, esTok, ok := s.lookupEnable(r)
 	if !ok {
