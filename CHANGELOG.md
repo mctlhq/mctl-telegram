@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.134.0](https://github.com/mctlhq/mctl-telegram/compare/0.133.0...0.134.0) (2026-11-07)
+
+
+### Features
+
+* **broadcast:** formatted HTML messages with validated approval preview ([7b3745a](https://github.com/mctlhq/mctl-telegram/commit/7b3745a5ecf7d079d6a05eb216980814bcebfe3d))
+* **broadcast:** html message format bound into the approval ([e3b0504](https://github.com/mctlhq/mctl-telegram/commit/e3b05046efca3e8f6f7328d2696332ee0a2190fd)), closes [#1209](https://github.com/mctlhq/mctl-telegram/issues/1209)
+* **mcp,web:** format arg for prepare_broadcast and rendered approval preview ([63dff96](https://github.com/mctlhq/mctl-telegram/commit/63dff9672c697f7b55d38c0ad15d6473cfb3d0aa)), closes [#1209](https://github.com/mctlhq/mctl-telegram/issues/1209)
+
+
+### Bug Fixes
+
+* **broadcast:** decode href like body text, refuse space after tag bracket ([fdf8530](https://github.com/mctlhq/mctl-telegram/commit/fdf85307ead24baa4f98810ad210b01081d63acf))
+
 ## [0.133.0](https://github.com/mctlhq/mctl-telegram/compare/0.132.0...0.133.0) (2026-11-07)
 
 

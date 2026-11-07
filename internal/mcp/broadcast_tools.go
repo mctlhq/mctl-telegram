@@ -83,6 +83,7 @@ type broadcastSummary struct {
 	Category   string     `json:"category"`
 	Selector   string     `json:"selector"`
 	Text       string     `json:"text"`
+	Format     string     `json:"format"`
 	Preview    string     `json:"preview_counts"`
 	CreatedAt  time.Time  `json:"created_at"`
 	ExpiresAt  time.Time  `json:"expires_at"`
@@ -109,12 +110,32 @@ type cancelBroadcastResult struct {
 }
 
 func summarize(c db.BroadcastCampaign) broadcastSummary {
+	format := c.ContentFormat
+	if format == "" {
+		format = string(broadcast.FormatPlain)
+	}
 	return broadcastSummary{
+		Format:     format,
 		CampaignID: c.ID, State: c.State, EndReason: c.EndReason, Category: c.Category,
 		Selector: c.SelectorJSON, Text: c.Content, Preview: c.PreviewCounts,
 		CreatedAt: c.CreatedAt, ExpiresAt: c.ExpiresAt, ApprovedAt: c.ApprovedAt,
 		SourceRef: c.SourceRef,
 	}
+}
+
+// formatArg reads the optional message format strictly: absent or null means
+// plain, but a present value of the wrong type or an unknown name is an error
+// rather than a silent fall back to plain.
+func formatArg(args map[string]any, key string) (broadcast.Format, error) {
+	raw, ok := args[key]
+	if !ok || raw == nil {
+		return broadcast.FormatPlain, nil
+	}
+	str, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("%s must be a string (\"plain\" or \"html\")", key)
+	}
+	return broadcast.ParseFormat(str)
 }
 
 func stringListArg(args map[string]any, key string) ([]string, error) {
@@ -179,7 +200,8 @@ The audience is computed by the server from the selector below. You cannot add r
 
 Inputs:
   category           — string, required. "product_updates" (opt-in only), "maintenance" or "security".
-  text               — string, required. Plain text, at most 4096 UTF-16 units. Sent exactly as normalized here.
+  text               — string, required. At most 4096 UTF-16 units of visible text. Sent exactly as normalized here.
+  format             — string, optional. "plain" (default): sent as is, no formatting. "html": Telegram HTML subset, validated now. Allowed: <b>, <i>, <u>, <s>, <code>, <pre>, <blockquote> and <a href="https://...">; write &lt; &gt; &amp; for literal < > &. Anything else is refused. The format is part of what the operator approves.
   tiers              — array, optional. ["client"] (default) and/or "admin".
   connected_via      — array, optional. Only clients with a live grant for one of these OAuth client names (e.g. "Claude", "ChatGPT").
   active_within_days — number, optional. Only clients seen within this many days.
@@ -189,7 +211,8 @@ Output: campaign_id, the normalized text and its hash, the canonical selector an
 
 Approval is NOT possible through this or any other tool. A human operator must approve the campaign on approval_url, signed in with Telegram in a browser, before expires_at. Hand the URL to the operator. The server re-checks consent and eligibility at send time, so the delivered count can be lower than the preview.`),
 		mcplib.WithString("category", mcplib.Required(), mcplib.Description(`"product_updates", "maintenance" or "security" (required).`)),
-		mcplib.WithString("text", mcplib.Required(), mcplib.Description("The message text (required, plain text).")),
+		mcplib.WithString("text", mcplib.Required(), mcplib.Description("The message text (required). Plain text, or the HTML subset when format is html.")),
+		mcplib.WithString("format", mcplib.Description(`"plain" (default) or "html" (Telegram HTML subset: b, i, u, s, code, pre, blockquote, a with an https href). Bound into the approval.`)),
 		mcplib.WithArray("tiers", mcplib.Description(`Effective tiers to target: "client" (default), "admin".`)),
 		mcplib.WithArray("connected_via", mcplib.Description("OAuth client names; restricts the audience to clients connected through one of them.")),
 		mcplib.WithNumber("active_within_days", mcplib.Description("Restrict to clients seen within this many days.")),
@@ -222,6 +245,11 @@ Approval is NOT possible through this or any other tool. A human operator must a
 			s.audit(ctx, id, "prepare_broadcast", "", err, startedAt)
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
+		format, err := formatArg(args, "format")
+		if err != nil {
+			s.audit(ctx, id, "prepare_broadcast", "", err, startedAt)
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
 		preview, err := s.Broadcast.Prepare(ctx, actor, broadcast.PrepareRequest{
 			Selector: broadcast.Selector{
 				Category:         stringArg(args, "category", ""),
@@ -230,7 +258,8 @@ Approval is NOT possible through this or any other tool. A human operator must a
 				ActiveWithinDays: intArg(args, "active_within_days", 0),
 				OnlyTelegramIDs:  only,
 			},
-			Text: stringArg(args, "text", ""),
+			Text:   stringArg(args, "text", ""),
+			Format: format,
 		})
 		s.audit(ctx, id, "prepare_broadcast", "", err, startedAt)
 		if err != nil {

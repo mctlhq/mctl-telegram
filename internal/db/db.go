@@ -500,6 +500,13 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 			return err
 		}
 	}
+	// broadcast_campaigns.content_format (issue #1209): "plain" (no parse
+	// mode, the behaviour before this column) or "html". Existing rows
+	// default to plain, which is how they were sent and hashed.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "broadcast_campaigns", "content_format",
+		"TEXT NOT NULL DEFAULT 'plain'", "TEXT NOT NULL DEFAULT 'plain'"); err != nil {
+		return err
+	}
 	// At most one prepared/approved/sending digest campaign per category
 	// (issue-683 Guard 2), held by the database so two concurrent
 	// prepare-from-digest submits cannot both insert. Created here rather

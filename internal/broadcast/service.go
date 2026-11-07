@@ -108,6 +108,9 @@ type Actor struct {
 type PrepareRequest struct {
 	Selector Selector
 	Text     string
+	// Format is how Text is sent: plain (the default and the zero value) or
+	// html. It is stored on the campaign and covered by the content hash.
+	Format Format
 	// SourceRef names the frozen product-update digest this body was
 	// rendered from (issue-683); nil for an operator-written campaign.
 	// CreateBroadcastCampaign writes it in the same INSERT as the rest of
@@ -133,6 +136,7 @@ type Counts struct {
 type Preview struct {
 	CampaignID       string            `json:"campaign_id"`
 	Text             string            `json:"text"`
+	Format           Format            `json:"format"`
 	ContentHash      string            `json:"content_hash"`
 	Selector         Selector          `json:"selector"`
 	SelectorHash     string            `json:"selector_hash"`
@@ -173,7 +177,14 @@ func (s *Service) Prepare(ctx context.Context, actor Actor, req PrepareRequest) 
 	if err != nil {
 		return nil, err
 	}
-	text, err := NormalizeText(req.Text)
+	format := req.Format
+	if format == "" {
+		format = FormatPlain
+	}
+	if format != FormatPlain && format != FormatHTML {
+		return nil, fmt.Errorf("unknown broadcast format %q", format)
+	}
+	text, err := NormalizeContent(format, req.Text)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +215,8 @@ func (s *Service) Prepare(ctx context.Context, actor Actor, req PrepareRequest) 
 	p := &Preview{
 		CampaignID:       id,
 		Text:             text,
-		ContentHash:      Hash(text),
+		Format:           format,
+		ContentHash:      ContentHashFor(format, text),
 		Selector:         sel,
 		SelectorHash:     Hash(selJSON),
 		Counts:           counts,
@@ -224,6 +236,7 @@ func (s *Service) Prepare(ctx context.Context, actor Actor, req PrepareRequest) 
 		SelectorHash:   p.SelectorHash,
 		Content:        text,
 		ContentHash:    p.ContentHash,
+		ContentFormat:  string(format),
 		CreatedBy:      actor.UserID,
 		Surface:        actor.Surface,
 		RecipientLimit: s.cfg.RecipientLimit,
@@ -252,10 +265,30 @@ func (s *Service) Approve(ctx context.Context, actor Actor, campaignID, contentH
 	if err != nil {
 		return err
 	}
-	if Hash(c.Content) != c.ContentHash || Hash(c.SelectorJSON) != c.SelectorHash {
+	if !ContentMatches(c) || Hash(c.SelectorJSON) != c.SelectorHash {
 		return db.ErrCampaignMismatch
 	}
 	return s.store.ApproveBroadcastCampaign(ctx, campaignID, actor.UserID, contentHash, selectorHash, s.now())
+}
+
+// CampaignFormat reads a stored campaign's format. An unknown value is an
+// error: a row whose format cannot be read is never sent as plain text.
+func CampaignFormat(c *db.BroadcastCampaign) (Format, error) {
+	switch Format(c.ContentFormat) {
+	case "", FormatPlain:
+		return FormatPlain, nil
+	case FormatHTML:
+		return FormatHTML, nil
+	}
+	return "", fmt.Errorf("campaign %s has unknown content format %q", c.ID, c.ContentFormat)
+}
+
+// ContentMatches reports whether the stored content, under the stored
+// format, still hashes to the stored content hash. An unreadable format is
+// a mismatch.
+func ContentMatches(c *db.BroadcastCampaign) bool {
+	f, err := CampaignFormat(c)
+	return err == nil && ContentHashFor(f, c.Content) == c.ContentHash
 }
 
 // Cancel stops a campaign that has not finished.

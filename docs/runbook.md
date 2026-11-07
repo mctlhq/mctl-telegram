@@ -3333,6 +3333,27 @@ preview counts, and press **Approve and send**. The approval is bound to the
 text and selector hashes the page rendered; if the campaign changed, it is
 refused.
 
+### Message format (`format`)
+
+`prepare_broadcast` takes an optional `format`: `plain` (the default, sent with no
+parse mode) or `html` (sent with `parse_mode=HTML`). The format is stored on the
+campaign and folded into the content hash, so changing it after preview or after
+approval is refused by `Approve` and again by the delivery worker, and nothing is
+sent.
+
+HTML is validated when the campaign is prepared, against a strict allow-list:
+`<b>`, `<i>`, `<u>`, `<s>`, `<code>`, `<pre>`, `<blockquote>` and
+`<a href="https://...">`. Write `&lt;` `&gt;` `&amp;` `&quot;` for literal
+characters; no other entity, attribute, tag or non-https link is accepted, tags must
+nest and close, and the visible text (tags removed) counts against Telegram's
+4096-unit limit. The approval page shows the message as recipients will see it,
+lists every link target, and keeps the exact source under "Source HTML".
+
+If Telegram still rejects the markup at send time, that delivery fails with reason
+`rejected_400`. It is not retried and is never re-sent as plain text, because that
+would deliver a message other than the one that was approved. Delivery of other
+recipients continues.
+
 ### Lifecycle
 
 `prepared → approved → sending → completed`, with two exits:
