@@ -51,6 +51,29 @@ type enableCodePage struct {
 	// QROffered adds "Didn't get the code? Sign in with a QR code" (#901
 	// slice 2); see enableSession.qrOffered.
 	QROffered bool
+	// Delivery is the TL name of the channel Telegram chose for the code;
+	// see DeliveryKind. Empty when it is not known.
+	Delivery string
+}
+
+// DeliveryKind maps Delivery to the sentence the code screen shows. Anything
+// not listed, including a channel Telegram adds later, gets the generic text
+// rather than a claim about a channel the code may not have used.
+func (p enableCodePage) DeliveryKind() string {
+	switch p.Delivery {
+	case "auth.sentCodeTypeApp":
+		return "app"
+	case "auth.sentCodeTypeSms", "auth.sentCodeTypeSmsWord", "auth.sentCodeTypeSmsPhrase", "auth.sentCodeTypeFirebaseSms":
+		return "sms"
+	case "auth.sentCodeTypeCall", "auth.sentCodeTypeFlashCall", "auth.sentCodeTypeMissedCall":
+		return "call"
+	case "auth.sentCodeTypeEmailCode":
+		return "email"
+	case "auth.sentCodeTypeFragmentSms":
+		return "fragment"
+	default:
+		return ""
+	}
 }
 
 type enablePasswordPage struct {
@@ -256,10 +279,19 @@ var enableCodeTemplate = template.Must(template.New("enableCode").Parse(enableHe
       <li{{if eq .WizardStep 3}} class="active"{{end}}>Done</li>
     </ol>{{end}}
     {{if .WizardMode}}<h1>Step {{.WizardStep}} of 3 &#8212; Login code</h1>{{else}}<h1>Enter your login code</h1>{{end}}
-    <p>Telegram sent a login code for <span class="url">{{.Phone}}</span>. It usually arrives
-       as a message from <strong>Telegram</strong> inside the Telegram app on your other
-       device, rather than by SMS.</p>
-    {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+    {{$kind := .DeliveryKind}}{{if eq $kind "app"}}<p>Telegram sent a login code for <span class="url">{{.Phone}}</span> to your
+       <strong>Telegram app</strong>, not by SMS. Open Telegram on any device signed in to
+       this account and look for a message from <strong>Telegram</strong>.</p>
+    {{else if eq $kind "sms"}}<p>Telegram sent a login code by <strong>SMS</strong> to <span class="url">{{.Phone}}</span>.</p>
+    {{else if eq $kind "call"}}<p>Telegram is delivering a login code for <span class="url">{{.Phone}}</span> by
+       <strong>phone call</strong>. Keep the phone nearby.</p>
+    {{else if eq $kind "email"}}<p>Telegram sent a login code for <span class="url">{{.Phone}}</span> to the
+       <strong>email address</strong> set as this account&#8217;s login email.</p>
+    {{else if eq $kind "fragment"}}<p>Telegram sent a login code for <span class="url">{{.Phone}}</span> through
+       <strong>Fragment</strong>, because this is an anonymous number.</p>
+    {{else}}<p>Telegram sent a login code for <span class="url">{{.Phone}}</span>. It usually arrives
+       as a message from <strong>Telegram</strong> inside the Telegram app, rather than by SMS.</p>
+    {{end}}    {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
     <form method="POST" action="/oauth/telegram/enable_access/code" autocomplete="off">
       <input type="hidden" name="es" value="{{.EnableToken}}">
       <label class="field">
