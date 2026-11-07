@@ -246,6 +246,9 @@ func findPeerInDialogs(ctx context.Context, api *tg.Client, peerSpec string) (tg
 		if hint.ID != peerSpec && !matchUsername(hint.Username, peerSpec) {
 			continue
 		}
+		if isHidden(ctx, hint.ID) {
+			return nil, ErrPeerHidden
+		}
 		if input := inputPeerFromPeer(d.Peer, users, chats); input != nil {
 			return input, nil
 		}

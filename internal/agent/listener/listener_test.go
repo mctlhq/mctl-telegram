@@ -807,3 +807,44 @@ func TestOnMessage_OwnerOutgoingKeepsPeerContact(t *testing.T) {
 		t.Fatalf("peer_contact after owner message = %q, want %q", peerContact, db.PeerContactYes)
 	}
 }
+
+// TestOnMessage_HiddenChatNotPersisted: a chat the owner hid on the manage
+// page (#1152) never reaches the assistant; once shown again it does. An
+// unreadable hidden list retries the update instead of reading the chat.
+func TestOnMessage_HiddenChatNotPersisted(t *testing.T) {
+	ctx := context.Background()
+	l, store, acct := newTestListener(t, nil)
+	if err := store.HideDialog(ctx, acct.userID, fmt.Sprintf("user:%d", recruit), "Anna"); err != nil {
+		t.Fatalf("hide: %v", err)
+	}
+	msg := &tg.Message{ID: 42, PeerID: &tg.PeerUser{UserID: recruit}, Message: "Hello"}
+	entities := ents(&tg.User{ID: recruit, Username: "anna_hr", FirstName: "Anna"})
+	count := func() (n int) {
+		if err := store.DB.QueryRowContext(ctx, `SELECT count(*) FROM incoming_events`).Scan(&n); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		return n
+	}
+	if err := l.onMessage(ctx, acct, entities, msg, false); err != nil {
+		t.Fatalf("onMessage: %v", err)
+	}
+	if n := count(); n != 0 {
+		t.Fatalf("hidden chat persisted %d events", n)
+	}
+	if _, err := store.UnhideDialog(ctx, acct.userID, fmt.Sprintf("user:%d", recruit)); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.onMessage(ctx, acct, entities, msg, false); err != nil {
+		t.Fatalf("onMessage: %v", err)
+	}
+	if n := count(); n != 1 {
+		t.Fatalf("visible chat events = %d, want 1", n)
+	}
+	if _, err := store.DB.ExecContext(ctx, `DROP TABLE hidden_dialogs`); err != nil {
+		t.Fatal(err)
+	}
+	msg.ID = 43
+	if err := l.onMessage(ctx, acct, entities, msg, false); err == nil {
+		t.Fatal("an unreadable hidden list did not fail the update")
+	}
+}

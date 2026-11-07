@@ -44,7 +44,7 @@ func ListDialogs(ctx context.Context, c *telegram.Client, limit int, query strin
 
 	users, chats, dialogs := decodeDialogsResult(res)
 	seedPeerCache(cache, userID, users, chats)
-	return dialogEntries(dialogs, users, chats, dialogsTopMessages(res), query), nil
+	return dropHiddenDialogs(ctx, dialogEntries(dialogs, users, chats, dialogsTopMessages(res), query)), nil
 }
 
 // dialogEntries maps MessagesGetDialogs dialogs (plus the sibling message

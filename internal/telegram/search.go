@@ -149,7 +149,7 @@ func searchGlobalWith(ctx context.Context, api searchInvoker, p SearchParams) ([
 	// but cannot exclude broadcasts alone, so with the switch off their hits
 	// are dropped here.
 	users, chats := extractSearchMaps(res)
-	return decodeGlobalSearchMessages(res, users, chats, p.Limit, !bool(p.BroadcastContent)), nil
+	return dropHiddenMessages(ctx, decodeGlobalSearchMessages(res, users, chats, p.Limit, !bool(p.BroadcastContent))), nil
 }
 
 // searchPeerWith runs a per-peer search_messages query against api.

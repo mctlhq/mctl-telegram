@@ -233,6 +233,14 @@ func getUnreadMessagesWith(ctx context.Context, api *tg.Client, peerSpec string,
 		if peerSpec != "" && hint.ID != peerSpec && !matchUsername(hint.Username, peerSpec) {
 			continue
 		}
+		if isHidden(ctx, hint.ID) {
+			// Named explicitly: refuse. Part of the all-chats scan: skip,
+			// so the limit is filled from visible chats.
+			if peerSpec != "" {
+				return nil, nil, nil, ErrPeerHidden
+			}
+			continue
+		}
 		broadcast := isBroadcastChannel(d.Peer, chats)
 		refused := broadcast && !bool(bc)
 		if peerSpec != "" {

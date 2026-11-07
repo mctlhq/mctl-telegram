@@ -16,8 +16,21 @@ import (
 //   - "user:<id>", "chat:<id>", "channel:<id>"
 //   - "<id>" (positive id heuristic — user; negative/large — channel)
 //
-// Returns an InputPeerClass usable by messages.* requests.
+// Returns an InputPeerClass usable by messages.* requests. A peer that
+// resolves to a dialog hidden in ctx (WithHiddenPeers) is refused with
+// ErrPeerHidden, whichever spelling named it.
 func ResolvePeer(ctx context.Context, c *telegram.Client, raw string) (tg.InputPeerClass, error) {
+	peer, err := resolvePeerSpec(ctx, c, raw)
+	if err != nil {
+		return nil, err
+	}
+	if err := refuseHidden(ctx, peer); err != nil {
+		return nil, err
+	}
+	return peer, nil
+}
+
+func resolvePeerSpec(ctx context.Context, c *telegram.Client, raw string) (tg.InputPeerClass, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, errors.New("empty peer")
@@ -99,6 +112,11 @@ func isNumeric(s string) bool {
 func ResolvePeerCached(ctx context.Context, c *telegram.Client, peerSpec string, cache *PeerCache, userID int64) (tg.InputPeerClass, error) {
 	if cache != nil && userID != 0 {
 		if peer, ok := cache.Get(userID, peerSpec); ok {
+			// A cached resolution is checked like a fresh one: the dialog
+			// may have been hidden after it was cached.
+			if err := refuseHidden(ctx, peer); err != nil {
+				return nil, err
+			}
 			return peer, nil
 		}
 	}

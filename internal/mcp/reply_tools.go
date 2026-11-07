@@ -246,6 +246,13 @@ Inputs (required):
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
 		peerRedacted := telegram.RedactPeer(d.Target.Ref)
+		// The draft's recipient was resolved when it was drafted; a chat
+		// hidden since then is refused here, before the draft is spent
+		// (mctl-telegram#1152).
+		if telegram.IsPeerHidden(ctx, d.Target.Ref) {
+			s.auditRefusal(ctx, id, "send_reply:hidden", peerRedacted, telegram.ErrPeerHidden, startedAt, ReasonRefused)
+			return mcplib.NewToolResultError(hiddenRefusalText("send_reply")), nil
+		}
 		// The gate is read before the draft is consumed, so a refusal the
 		// user can fix (turning sends on) keeps the draft usable for the
 		// rest of its window.

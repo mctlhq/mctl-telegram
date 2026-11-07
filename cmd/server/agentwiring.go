@@ -14,6 +14,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/agent/executor"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
+	"github.com/mctlhq/mctl-telegram/internal/web"
 )
 
 // poolSender adapts telegram.ClientPool to executor.Sender: borrow the
@@ -34,6 +35,18 @@ type poolSender struct {
 }
 
 func (s *poolSender) SendWithRandomID(ctx context.Context, userID, peerTGID, peerAccessHash, randomID int64, text string) (int64, error) {
+	// A chat hidden after the assistant queued its reply (#1152) is
+	// refused before any RPC, so the action is denied, not retried. An
+	// unreadable hidden list is an ordinary error: nothing is sent.
+	if s.store != nil {
+		hidden, err := s.store.IsDialogHidden(ctx, userID, fmt.Sprintf("user:%d", peerTGID))
+		if err != nil {
+			return 0, fmt.Errorf("send via pool: %w", err)
+		}
+		if hidden {
+			return 0, fmt.Errorf("send via pool: %w", &executor.SendRefusedError{Class: HiddenChatRefusalClass})
+		}
+	}
 	var messageID int
 	err := s.pool.Borrow(ctx, userID, func(ctx context.Context, c *gotdtelegram.Client) error {
 		peer := &tg.InputPeerUser{UserID: peerTGID, AccessHash: peerAccessHash}
@@ -61,6 +74,10 @@ func (s *poolSender) SendWithRandomID(ctx context.Context, userID, peerTGID, pee
 	}
 	return int64(messageID), nil
 }
+
+// HiddenChatRefusalClass is the refusal class of a send to a chat the owner
+// hid; the executor records it as the denial reason.
+const HiddenChatRefusalClass = "CHAT_HIDDEN_BY_OWNER"
 
 // The executor only looks the id up when its Sender has this capability.
 var _ executor.DeliveryLocator = (*poolSender)(nil)
@@ -173,4 +190,24 @@ func (s *poolSelfSender) LocateSelfDelivered(ctx context.Context, userID int64, 
 		return 0, false, fmt.Errorf("locate delivered notification via pool: %w", err)
 	}
 	return int64(messageID), found, nil
+}
+
+// manageDialogLister feeds the manage page's hidden-chat picker (#1152). It
+// lists without a hidden-chat set on ctx, so hidden chats are listed too;
+// the page drops them itself and shows them in the hidden list.
+func manageDialogLister(pool *telegram.ClientPool, cache *telegram.PeerCache) web.DialogLister {
+	return func(ctx context.Context, userID int64) ([]web.ManageDialog, error) {
+		var out []web.ManageDialog
+		err := pool.Borrow(ctx, userID, func(ctx context.Context, c *gotdtelegram.Client) error {
+			dialogs, err := telegram.ListDialogs(ctx, c, 200, "", cache, userID)
+			if err != nil {
+				return err
+			}
+			for _, d := range dialogs {
+				out = append(out, web.ManageDialog{ID: d.ID, Type: d.Type, Title: d.Title})
+			}
+			return nil
+		})
+		return out, err
+	}
 }

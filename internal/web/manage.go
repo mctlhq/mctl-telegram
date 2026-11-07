@@ -47,6 +47,8 @@ type ManageServer struct {
 	// keeps working on the access token it already holds. See
 	// WithAccessTokenTTL.
 	accessTokenTTL time.Duration
+	// dialogs feeds the hidden-chat picker; see WithDialogLister.
+	dialogs DialogLister
 }
 
 // WithAccessTokenTTL sets the access-token lifetime the page quotes when it
@@ -278,6 +280,7 @@ func (s *ManageServer) serveManage(w http.ResponseWriter, r *http.Request, id *a
 		// only changes presentation; consent is still written by the form.
 		Onboarding: r.URL.Query().Get("onboarding") == "1",
 		Assistant:  s.buildAssistantSection(r, id, notice),
+		Hidden:     s.buildHiddenSection(r, id),
 	})
 }
 
@@ -427,6 +430,8 @@ type managePageData struct {
 	// Assistant is the assistant section; nil hides it (no install
 	// service on this deployment).
 	Assistant *assistantSectionView
+	// Hidden is the hidden-chat section (#1152); never nil.
+	Hidden *hiddenSectionView
 }
 
 // signedInView names the sign-in identity. TelegramID is set only when
@@ -593,6 +598,7 @@ var manageTemplate = newManageTemplate("manage", manageHead+`    <h1>Manage your
     {{end}}<p class="meta" id="revoke-effect">Revoke stops that client from renewing its access as this account. An access token it already holds keeps working until it expires, for up to {{.AccessTokenTTL}}. To use it again, connect it again.</p>
     {{if .IsCanary}}<p class="meta" id="revoke-canary"><strong>This is the monitoring canary account.</strong> Revoking its client makes the canary fail once its access token expires.</p>{{end}}
     {{else}}<p class="meta" id="clients-none">No AI client is signed in as this account.</p>{{end}}
+    `+manageHiddenSection+`
     <p class="meta" id="wrong-account"><strong>Is your AI client missing here, or does it show other chats?</strong> Then it signed in as a different Telegram account than this page. Ask it to run get_my_identity to see which. To switch it, remove the connector's authorization in the client, add it again, and open the sign-in link in a private browser window signed in to the account you want.</p>
     {{if .Bot}}
     <h2 class="notif-heading">Login bot</h2>

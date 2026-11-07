@@ -390,6 +390,9 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 		// Also inside recordToolCall: the reviewer identity's refused
 		// writes are recorded like any other refusal (reviewer.go).
 		mcpserver.WithToolHandlerMiddleware(s.reviewerWriteGuard),
+		// Also inside recordToolCall, so a hidden-chat refusal is recorded
+		// like any other (hidden.go, mctl-telegram#1152).
+		mcpserver.WithToolHandlerMiddleware(s.hiddenScopeGuard),
 		mcpserver.WithHooks(s.firstCallHooks(s.jsonrpcHooks(&registered))),
 		// Discovery and invocation follow the caller's scopes: mcp-go
 		// applies this filter on tools/list and again on tools/call, so a
