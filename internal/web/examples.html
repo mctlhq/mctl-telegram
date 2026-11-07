@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+{{template "ui_head" .}}
+<style>
+  p { color: var(--text-dim); line-height: 1.6; }
+  .cat-lead { margin: 0 0 12px; }
+  ul.prompts {
+    list-style: none; padding: 0; margin: 0 0 8px;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px;
+  }
+  ul.prompts > li {
+    border: 1px solid var(--border); border-radius: var(--mctl-radius-lg);
+    background: var(--surface); padding: 14px 16px; margin: 0;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .prompt-text { margin: 0; color: var(--text); line-height: 1.55; user-select: all; }
+  .prompt-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+  .prompt-meta code { font-size: 12px; }
+  .chip {
+    display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px;
+    border: 1px solid var(--border); background: var(--surface-2); color: var(--text-dim);
+  }
+  .chip--send { color: var(--text); border-color: var(--border-interactive); }
+  .copy-prompt { align-self: flex-start; }
+  .cta { display: flex; flex-wrap: wrap; gap: 12px; margin: 28px 0 4px; }
+</style>
+</head>
+<body>
+
+{{template "ui_topbar" .}}
+
+<main class="mctl-site-container page">
+<div class="mctl-site-prose">
+
+  <section class="hero" style="margin-top: 0;">
+    <div class="eyebrow">
+      <span class="status-dot" aria-hidden="true"></span>
+      <span>Examples</span>
+    </div>
+    <h1>What to <span class="accent">ask</span></h1>
+    <p class="lead">Prompts to try once your Telegram account is connected. Paste one into Claude, ChatGPT or another MCP client and replace the words in square brackets.</p>
+  </section>
+
+  <p>Each prompt lists the tools it is likely to call. Prompts marked <span class="chip">Read-only</span> only read your account. Prompts marked <span class="chip chip--send">Needs sending on</span> change something in Telegram: until you turn sending on for your account they return a preview and nothing is sent.</p>
+
+  {{range .Categories}}
+  <h2 id="{{.ID}}">{{.Title}}</h2>
+  <p class="cat-lead">{{.Lead}}</p>
+  <ul class="prompts">
+    {{range .Prompts}}
+    <li>
+      <p class="prompt-text">{{.Text}}</p>
+      <div class="prompt-meta">
+        {{if .Send}}<span class="chip chip--send">Needs sending on</span>{{else}}<span class="chip">Read-only</span>{{end}}
+        {{range .Tools}}<code>{{.}}</code>{{end}}
+      </div>
+      <button class="btn-secondary copy-prompt" type="button" data-prompt="{{.Text}}" hidden>Copy</button>
+    </li>
+    {{end}}
+  </ul>
+  {{end}}
+
+  <p class="cta"><a class="btn" href="/#claude">Connect your account &#8594;</a> <a class="btn-secondary" href="/docs">Read the docs &#8594;</a></p>
+
+</div>
+</main>
+
+{{template "ui_footer" .}}
+
+{{template "ui_script" .}}
+<script>
+  // Copy buttons stay hidden without JavaScript or clipboard access; the
+  // prompt text is selectable either way.
+  if (navigator.clipboard) {
+    document.querySelectorAll('.copy-prompt').forEach(function (btn) {
+      btn.hidden = false;
+      btn.addEventListener('click', function () {
+        navigator.clipboard.writeText(btn.dataset.prompt).then(function () {
+          btn.textContent = 'Copied';
+          setTimeout(function () { btn.textContent = 'Copy'; }, 2000);
+        }).catch(function () {
+          btn.textContent = 'Copy failed: select the text';
+          setTimeout(function () { btn.textContent = 'Copy'; }, 4000);
+        });
+      });
+    });
+  }
+</script>
+</body>
+</html>
