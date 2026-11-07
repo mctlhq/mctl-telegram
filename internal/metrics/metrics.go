@@ -501,7 +501,7 @@ var (
 	// counters (issue #960). They mirror internal/connectfunnel, which cannot
 	// be imported here (it imports internal/db, which imports this package);
 	// connectfunnel's tests hold the two to the same values.
-	connectFirstCallClients        = []string{"claude", "chatgpt", "other"}
+	connectFirstCallClients        = []string{"claude", "chatgpt", "claude_code", "codex", "portal", "local_agent", "other"}
 	connectFirstCallUnknownReasons = []string{"insert_error", "restart", "close_error"}
 	connectFirstCallOps            = []string{"insert", "close", "classify", "sweep"}
 	// loginFlowMethods, loginCallbackRoutes/Reasons and rootMCPMethods/
@@ -813,7 +813,7 @@ func New() *Registry {
 
 	r.ConnectFirstCallTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_connect_first_call_total",
-		Help: "Total authorization_code grants by whether the same user and client made a successful MCP call within five minutes: outcome ok, none_within_window or unknown (reason insert_error, restart, close_error). client is claude, chatgpt or other.",
+		Help: "Total authorization_code grants by whether the same user and client made a successful MCP call within five minutes: outcome ok, none_within_window or unknown (reason insert_error, restart, close_error). client is claude, chatgpt, claude_code, codex, portal, local_agent or other.",
 	}, []string{"client", "outcome", "reason"})
 
 	r.ConnectFirstCallErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
