@@ -40,16 +40,23 @@ func replyTextUnits(text string) int { return len(utf16.Encode([]rune(text))) }
 type sendReplyResult struct {
 	Sent      bool   `json:"sent"`
 	Recipient string `json:"recipient"`
+	// TopicID is the forum topic the reply went to, as draft_reply bound it.
+	TopicID   int    `json:"topic_id,omitempty"`
 	Text      string `json:"text"`
 	MessageID int    `json:"message_id,omitempty"`
 }
 
 type draftReplyResult struct {
-	ConfirmationID string    `json:"confirmation_id"`
-	Recipient      string    `json:"recipient"`
-	RecipientTitle string    `json:"recipient_title,omitempty"`
-	Text           string    `json:"text"`
-	ExpiresAt      time.Time `json:"expires_at"`
+	ConfirmationID string `json:"confirmation_id"`
+	Recipient      string `json:"recipient"`
+	RecipientTitle string `json:"recipient_title,omitempty"`
+	// TopicID and TopicTitle name the forum topic the reply goes to. They
+	// are part of the confirmation: send_reply delivers to this topic and
+	// nowhere else.
+	TopicID    int       `json:"topic_id,omitempty"`
+	TopicTitle string    `json:"topic_title,omitempty"`
+	Text       string    `json:"text"`
+	ExpiresAt  time.Time `json:"expires_at"`
 	// SendGateOpen says whether send_reply would deliver right now. It is
 	// reported, not enforced here: send_reply evaluates the gate again.
 	SendGateOpen   bool   `json:"send_gate_open"`
@@ -60,14 +67,24 @@ type draftReplyResult struct {
 // resolveReplyTarget and deliverReply are the Telegram half of the two
 // tools. Tests replace them through the Server's replyResolve and
 // replyDeliver fields; nil means the client pool.
-func (s *Server) resolveReplyTarget(ctx context.Context, userID int64, peer string) (*telegram.ReplyTarget, error) {
+func (s *Server) resolveReplyTarget(ctx context.Context, userID int64, peer string, topicID int) (*telegram.ReplyTarget, error) {
 	if s.replyResolve != nil {
-		return s.replyResolve(ctx, userID, peer)
+		target, err := s.replyResolve(ctx, userID, peer)
+		if err != nil || topicID == 0 {
+			return target, err
+		}
+		if s.replyTopic == nil {
+			return nil, errors.New("replyTopic seam not set")
+		}
+		return s.replyTopic(ctx, userID, target, topicID)
 	}
 	var target *telegram.ReplyTarget
 	err := s.borrowWithRetry(ctx, "draft_reply", userID, func(ctx context.Context, c *gotdtelegram.Client) error {
 		var inner error
 		target, inner = telegram.ResolveExistingDialog(ctx, c, peer, s.PeerCache, userID)
+		if inner == nil && topicID != 0 {
+			target, inner = telegram.ResolveReplyTopic(ctx, c, target, topicID)
+		}
 		return inner
 	})
 	return target, err
@@ -118,6 +135,11 @@ for 10 minutes. Show the user the recipient and the text; only after they
 agree, call send_reply with the confirmation_id. To change anything, draft
 again.
 
+In a forum supergroup, pass topic_id (list_topics shows the ids) to reply in
+that topic. The topic is checked to exist and be open, and it is part of the
+confirmation: send_reply posts to it and cannot be pointed elsewhere.
+Without topic_id a forum reply lands in the General topic.
+
 The peer must be a conversation that already exists in the account's
 history. A username or id the account has never talked to is refused: this
 tool cannot start a new conversation.
@@ -126,9 +148,12 @@ Inputs (required):
   peer — "@username", "user:<id>", "chat:<id>", or "channel:<id>", as
          list_dialogs shows it.
   text — the reply, plain text, at most 4096 UTF-16 units (most emoji
-         count as two).`),
+         count as two).
+Inputs (optional):
+  topic_id — forum topic id to reply in (forum supergroups only).`),
 		mcplib.WithString("peer", mcplib.Required(), mcplib.Description("Existing conversation to reply in.")),
 		mcplib.WithString("text", mcplib.Required(), mcplib.Description("Reply text, plain text, at most 4096 UTF-16 units.")),
+		mcplib.WithNumber("topic_id", mcplib.Description("Forum topic id to reply in; forum supergroups only.")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
@@ -147,6 +172,10 @@ Inputs (required):
 		if peer == "" || strings.TrimSpace(text) == "" {
 			return mcplib.NewToolResultError("peer and text are required"), nil
 		}
+		topicID := intArg(args, "topic_id", 0)
+		if _, given := args["topic_id"]; given && topicID <= 0 {
+			return mcplib.NewToolResultError("topic_id must be a positive topic id"), nil
+		}
 		if n := replyTextUnits(text); n > maxReplyText {
 			return mcplib.NewToolResultError(fmt.Sprintf("text must be at most %d UTF-16 units (it is %d; most emoji count as two)", maxReplyText, n)), nil
 		}
@@ -157,7 +186,7 @@ Inputs (required):
 			return mcplib.NewToolResultError("draft_reply is not yet supported for local-bridge accounts"), nil
 		}
 		peerRedacted := telegram.RedactPeer(peer)
-		target, err := s.resolveReplyTarget(ctx, id.UserID, peer)
+		target, err := s.resolveReplyTarget(ctx, id.UserID, peer, topicID)
 		if errors.Is(err, telegram.ErrNoExistingDialog) {
 			s.auditRefusal(ctx, id, "draft_reply:no_dialog", peerRedacted, err, startedAt, ReasonRefused)
 			return mcplib.NewToolResultError("draft_reply blocked: " + peer + " is not an existing conversation of this account; draft_reply only replies in conversations that already exist"), nil
@@ -169,6 +198,10 @@ Inputs (required):
 		if errors.Is(err, telegram.ErrCannotPost) {
 			s.auditRefusal(ctx, id, "draft_reply:cannot_post", peerRedacted, err, startedAt, ReasonRefused)
 			return mcplib.NewToolResultError("draft_reply blocked: this account may not post text messages in " + peer + "; pick a conversation it can write in"), nil
+		}
+		if errors.Is(err, telegram.ErrNotAForum) || errors.Is(err, telegram.ErrTopicNotFound) || errors.Is(err, telegram.ErrTopicClosed) {
+			s.auditRefusal(ctx, id, "draft_reply:topic", peerRedacted, err, startedAt, ReasonRefused)
+			return mcplib.NewToolResultError(fmt.Sprintf("draft_reply blocked: topic_id %d in %s: %s; list_topics shows the topics of a forum", topicID, peer, err.Error())), nil
 		}
 		if err != nil {
 			s.audit(ctx, id, "draft_reply", peerRedacted, err, startedAt)
@@ -185,6 +218,8 @@ Inputs (required):
 			ConfirmationID: d.ID,
 			Recipient:      target.Ref,
 			RecipientTitle: target.Title,
+			TopicID:        target.TopicID,
+			TopicTitle:     target.TopicTitle,
 			Text:           text,
 			ExpiresAt:      d.ExpiresAt.UTC(),
 			SendGateOpen:   open,
@@ -278,7 +313,7 @@ Inputs (required):
 		if err != nil {
 			return borrowErrResult(ctx, "send_reply", err), nil
 		}
-		out := sendReplyResult{Sent: true, Recipient: d.Target.Ref, Text: d.Text}
+		out := sendReplyResult{Sent: true, Recipient: d.Target.Ref, TopicID: d.Target.TopicID, Text: d.Text}
 		if result != nil {
 			out.MessageID = result.MessageID
 		}

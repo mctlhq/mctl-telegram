@@ -141,6 +141,9 @@ type Server struct {
 	// draft_reply and send_reply in tests; nil means the client pool.
 	replyResolve func(ctx context.Context, userID int64, peer string) (*telegram.ReplyTarget, error)
 	replyDeliver func(ctx context.Context, userID int64, target *telegram.ReplyTarget, text string) (*telegram.SendResult, error)
+	// replyTopic replaces the topic check of draft_reply in tests, after
+	// replyResolve; nil with replyResolve set refuses a topic_id.
+	replyTopic func(ctx context.Context, userID int64, target *telegram.ReplyTarget, topicID int) (*telegram.ReplyTarget, error)
 	// draftSave replaces the Telegram call of save_draft in tests; nil
 	// means the client pool.
 	draftSave func(ctx context.Context, userID int64, peer, text string, overwrite bool) (telegram.DraftResult, error)
