@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.130.0](https://github.com/mctlhq/mctl-telegram/compare/0.129.0...0.130.0) (2026-11-07)
+
+
+### Features
+
+* **mcp:** draft_reply binds a forum topic into the confirmation ([ca5e16e](https://github.com/mctlhq/mctl-telegram/commit/ca5e16eb230a9bc0e6c710b8ae410cd8ae4b9361))
+* **mcp:** draft_reply binds a forum topic into the confirmation ([e1b0a49](https://github.com/mctlhq/mctl-telegram/commit/e1b0a49b63457c72e06823ea57f675c5d06fa736)), closes [#1175](https://github.com/mctlhq/mctl-telegram/issues/1175)
+* **mcp:** mark_read marks a chat read up to an explicit message id ([b266a99](https://github.com/mctlhq/mctl-telegram/commit/b266a994ef28eaa80745549f3079fff9abd26611))
+* **mcp:** mark_read marks a chat read up to an explicit message id ([c6eace1](https://github.com/mctlhq/mctl-telegram/commit/c6eace1c88f05a15158ec20ee36b8fa5668bbe75))
+* **mcp:** save_draft leaves an unsent draft for the user to send ([ddecee4](https://github.com/mctlhq/mctl-telegram/commit/ddecee4332522532f74aa21401859b6fa0cc3d53))
+* **mcp:** save_draft leaves an unsent draft for the user to send ([e7346f0](https://github.com/mctlhq/mctl-telegram/commit/e7346f00ebb035daa85bc0ddc8e0521f482faedc))
+
+
+### Bug Fixes
+
+* **mcp:** keep media-only drafts and find the dialog in folders ([4648649](https://github.com/mctlhq/mctl-telegram/commit/4648649d87f28b1ff82e77ed382ce36ae2cf8a5e)), closes [#1175](https://github.com/mctlhq/mctl-telegram/issues/1175)
+* **mcp:** refuse a fractional topic_id and name the topic in send_reply ([de00515](https://github.com/mctlhq/mctl-telegram/commit/de00515740cf60dd74a823a68f194a9a74ae689e)), closes [#1175](https://github.com/mctlhq/mctl-telegram/issues/1175)
+* **mcp:** refuse a mark_read max_id that does not fit int32 ([dde57ae](https://github.com/mctlhq/mctl-telegram/commit/dde57ae6a4afb1235c4807fae3c829884f638455)), closes [#1175](https://github.com/mctlhq/mctl-telegram/issues/1175)
+
 ## [0.129.0](https://github.com/mctlhq/mctl-telegram/compare/0.128.0...0.129.0) (2026-11-07)
 
 
