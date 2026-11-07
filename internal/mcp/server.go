@@ -313,6 +313,10 @@ func toolPassesFilter(tool mcplib.Tool, filter string) bool {
 // addTool registers a (tool, handler) pair unless ToolFilter excludes the tool.
 // The pair arguments match the two-value return of s.toolXxx() builder methods.
 func (s *Server) addTool(srv *mcpserver.MCPServer, tool mcplib.Tool, handler mcpserver.ToolHandlerFunc) {
+	if c, ok := toolClasses[tool.Name]; ok {
+		idempotent := c.idempotent
+		tool.Annotations.IdempotentHint = &idempotent
+	}
 	if toolPassesFilter(tool, s.ToolFilter) {
 		srv.AddTool(tool, handler)
 	}
