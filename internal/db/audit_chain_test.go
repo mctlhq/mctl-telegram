@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -249,5 +250,72 @@ func TestLogToolCall_ReasonIsExcludedFromTheHash(t *testing.T) {
 	}
 	if res.Verified != 3 {
 		t.Fatalf("expected Verified=3, got %d", res.Verified)
+	}
+}
+
+// A client that disconnects must not erase the record of what happened: the
+// connect flow's 90 s wait can outlive the browser, and production has no
+// connect:failed:timeout row although the metric beside it counted 25
+// (mctl-telegram#1162).
+func TestLogToolCall_SurvivesAFinishedRequest(t *testing.T) {
+	s := newTestStore(t)
+	uid, err := s.EnsureUser(context.Background(), "alice", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+
+	for name, ctx := range map[string]context.Context{"cancelled": cancelled, "expired": expired} {
+		tool := "connect:failed:timeout:" + name
+		s.LogToolCall(ctx, ToolCall{UserID: uid, Tool: tool, Status: "error", ErrMsg: "send code timeout"})
+		var n int
+		if err := s.DB.QueryRow(`SELECT COUNT(*) FROM audit_logs WHERE tool_name = $1`, tool).Scan(&n); err != nil {
+			t.Fatalf("%s: read audit: %v", name, err)
+		}
+		if n != 1 {
+			t.Errorf("%s request: %d rows, want 1", name, n)
+		}
+	}
+	res, err := s.VerifyAuditChain(context.Background(), uid)
+	if err != nil {
+		t.Fatalf("VerifyAuditChain: %v", err)
+	}
+	if !res.OK {
+		t.Errorf("chain broken after detached writes: %+v", res)
+	}
+}
+
+// A failed read of the chain head is not an empty history: reporting it as the
+// genesis hash would write a row that forks the user's chain.
+func TestPreviousAuditHash_FailedReadIsNotGenesis(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	uid, err := s.EnsureUser(ctx, "alice", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	prev, err := previousAuditHash(ctx, tx, uid)
+	if err != nil {
+		t.Fatalf("empty history: %v", err)
+	}
+	if !bytes.Equal(prev, make([]byte, sha256.Size)) {
+		t.Errorf("empty history: got %x, want the zero genesis hash", prev)
+	}
+
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if prev, err := previousAuditHash(ctx, tx, uid); err == nil {
+		t.Errorf("failed read returned %x and no error", prev)
 	}
 }
