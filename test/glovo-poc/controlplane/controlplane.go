@@ -64,8 +64,8 @@ type CP struct {
 }
 
 type token struct {
-	order, owner, tenant, fingerprint string
-	installRevision                   int64
+	order, owner, tenant, fingerprint, installID, connectionRef string
+	installRevision int64
 	expires                          time.Time
 	used                             bool
 }
@@ -152,7 +152,7 @@ func (c *CP) Revalidate(s Scope) error {
 		}
 	}
 	in := c.installs[[2]string{s.TenantID, s.OwnerPrincipal}]
-	if !member || in == nil || !in.active || in.revision != s.InstallRevision || !in.connLive {
+	if !member || in == nil || !in.active || in.id != s.InstallID || in.connRef != s.ConnectionRef || in.revision != s.InstallRevision || !in.connLive {
 		return ErrStaleInstall
 	}
 	return nil
@@ -220,15 +220,16 @@ func (c *CP) IssueHandoff(order, owner, fingerprint string, ttl time.Duration) s
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	h := hash(t)
-	var tenant string
+	var tenant, installID, connectionRef string
 	var revision int64
 	if o, ok := c.orders[order]; ok && o.Owner == owner {
 		tenant = o.Tenant
 		if in := c.installs[[2]string{tenant, owner}]; in != nil {
-			revision = in.revision
+			revision, installID, connectionRef = in.revision, in.id, in.connRef
 		}
 	}
 	c.tokens[h] = &token{order: order, owner: owner, tenant: tenant, installRevision: revision,
+		installID: installID, connectionRef: connectionRef,
 		fingerprint: fingerprint, expires: c.Now().Add(ttl)}
 	c.Outbox = append(c.Outbox, t)
 	return h
@@ -250,7 +251,8 @@ func (c *CP) OpenHandoff(tok string, r Request, fingerprint string) error {
 	o, ok := c.orders[r.OrderID]
 	in := c.installs[[2]string{r.Tenant, r.Principal}]
 	if !ok || o.Tenant != r.Tenant || o.Owner != r.Principal ||
-		in == nil || !in.active || !in.connLive || in.revision != t.installRevision {
+		in == nil || !in.active || !in.connLive || in.revision != t.installRevision ||
+		in.id != t.installID || in.connRef != t.connectionRef {
 		return ErrRefused
 	}
 	member := false
