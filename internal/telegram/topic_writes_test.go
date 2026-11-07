@@ -141,3 +141,45 @@ func TestSaveDraftWith_Topic(t *testing.T) {
 		t.Fatalf("no topic: %+v %v lookups=%d", out, err, f.lookups)
 	}
 }
+
+// A topic draft's reply header names the topic itself; that only places the
+// draft, so the same text is Unchanged and a conflict reports no attachment.
+// A reply to another message, or a quote, is still content besides text.
+func TestSaveDraftWith_TopicHeaderIsNotAnAttachment(t *testing.T) {
+	inTopic := func(rt tg.InputReplyToClass) *tg.DraftMessage {
+		d := &tg.DraftMessage{Message: "notes"}
+		d.SetReplyTo(rt)
+		return d
+	}
+
+	f := forumWith(&tg.ForumTopic{ID: 12, Title: "Releases", Draft: inTopic(&tg.InputReplyToMessage{ReplyToMsgID: 12})})
+	out, err := saveDraftWith(context.Background(), f, forum, "@carol_team", "notes", false, 12)
+	if err != nil || !out.Unchanged || f.saved != nil {
+		t.Fatalf("same text in its own topic: %+v %v saved=%+v", out, err, f.saved)
+	}
+
+	f = forumWith(&tg.ForumTopic{ID: 12, Title: "Releases", Draft: inTopic(&tg.InputReplyToMessage{ReplyToMsgID: 12})})
+	_, err = saveDraftWith(context.Background(), f, forum, "@carol_team", "other", false, 12)
+	var c *DraftConflict
+	if !errors.As(err, &c) || c.HasAttachment {
+		t.Fatalf("conflict on a text-only topic draft: %v %+v", err, c)
+	}
+
+	quoted := &tg.InputReplyToMessage{ReplyToMsgID: 12}
+	quoted.SetQuoteText("Friday")
+	for name, rt := range map[string]tg.InputReplyToClass{
+		"reply inside the topic": &tg.InputReplyToMessage{ReplyToMsgID: 40, TopMsgID: 12},
+		"quote of the opener":    quoted,
+	} {
+		f = forumWith(&tg.ForumTopic{ID: 12, Title: "Releases", Draft: inTopic(rt)})
+		_, err = saveDraftWith(context.Background(), f, forum, "@carol_team", "notes", false, 12)
+		if !errors.As(err, &c) || !c.HasAttachment {
+			t.Errorf("%s: want a conflict with an attachment, got %v", name, err)
+		}
+	}
+
+	// Outside a topic any reply header is content.
+	if !draftFrom(inTopic(&tg.InputReplyToMessage{ReplyToMsgID: 12}), 0).Other {
+		t.Error("a chat draft replying to a message was read as text only")
+	}
+}

@@ -101,7 +101,7 @@ func draftFromDialogs(dialogs []tg.DialogClass) (existingDraft, error) {
 	}
 	for _, dc := range dialogs {
 		if d, ok := dc.(*tg.Dialog); ok {
-			return draftFrom(d.Draft), nil
+			return draftFrom(d.Draft, 0), nil
 		}
 	}
 	// Only folders or unknown dialog types came back: the chat's own row
@@ -111,17 +111,54 @@ func draftFromDialogs(dialogs []tg.DialogClass) (existingDraft, error) {
 }
 
 // draftFrom reads one draft field, the dialog's or a forum topic's.
-func draftFrom(dc tg.DraftMessageClass) existingDraft {
+// topicID is the forum topic the draft belongs to (0 for the chat's own
+// draft): a topic draft carries a reply header naming the topic itself,
+// which places the draft rather than replying to anything, so it does not
+// count as content besides text.
+func draftFrom(dc tg.DraftMessageClass, topicID int) existingDraft {
 	dm, ok := dc.(*tg.DraftMessage)
 	if !ok {
 		// draftMessageEmpty, or no draft field at all.
 		return existingDraft{}
 	}
 	_, media := dm.GetMedia()
-	_, reply := dm.GetReplyTo()
+	rt, reply := dm.GetReplyTo()
+	if reply && isTopicHeader(rt, topicID) {
+		reply = false
+	}
 	_, post := dm.GetSuggestedPost()
 	_, rich := dm.GetRichMessage()
 	return existingDraft{Text: dm.Message, Other: media || reply || post || rich}
+}
+
+// isTopicHeader reports whether rt is only the reply header that puts a
+// draft into forum topic topicID: a reply to the topic's opening message
+// with no quote, no other peer and no checklist item. A reply to a message
+// inside the topic, or a quote, is real content.
+func isTopicHeader(rt tg.InputReplyToClass, topicID int) bool {
+	if topicID <= generalTopicID {
+		return false
+	}
+	m, ok := rt.(*tg.InputReplyToMessage)
+	if !ok || m.ReplyToMsgID != topicID {
+		return false
+	}
+	if top, ok := m.GetTopMsgID(); ok && top != topicID {
+		return false
+	}
+	if _, ok := m.GetReplyToPeerID(); ok {
+		return false
+	}
+	if _, ok := m.GetQuoteText(); ok {
+		return false
+	}
+	if _, ok := m.GetMonoforumPeerID(); ok {
+		return false
+	}
+	if _, ok := m.GetTodoItemID(); ok {
+		return false
+	}
+	return true
 }
 
 // draftInvoker is the subset of *tg.Client SaveDraft uses, so the topic
@@ -174,7 +211,7 @@ func saveDraftWith(ctx context.Context, api draftInvoker, inputPeer tg.InputPeer
 		}
 		topicTitle = t.Title
 		if topicID > generalTopicID {
-			existing, haveDraft = draftFrom(t.Draft), true
+			existing, haveDraft = draftFrom(t.Draft, topicID), true
 		}
 	}
 	if !haveDraft {
