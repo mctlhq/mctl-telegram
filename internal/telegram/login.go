@@ -66,6 +66,12 @@ type LoginConfig struct {
 	// delivery it chose (auth.sentCodeTypeApp, ...; see codeDelivery). It runs
 	// on the login goroutine and must not block. LoginQR ignores it.
 	OnCodeSent func(delivery string)
+	// OnConnected, when non-nil, is called by Login once the MTProto
+	// connection is up and the auth flow is about to send the code, so a
+	// caller that gives up waiting can tell a dial or handshake hang from a
+	// SendCode hang. It runs on the login goroutine and must not block.
+	// LoginQR ignores it.
+	OnConnected func()
 }
 
 // loginClientOptions is the gotd configuration shared by the phone and QR
@@ -178,8 +184,9 @@ func Login(
 	// does not finish must log out, like a scanned QR code.
 	var codeSubmitted bool
 	authenticator := &interactiveAuthenticator{
-		phone:      phone,
-		onCodeSent: cfg.OnCodeSent,
+		phone:       phone,
+		onCodeSent:  cfg.OnCodeSent,
+		onConnected: cfg.OnConnected,
 		code: func(ctx context.Context) (string, error) {
 			code, err := askCode(ctx)
 			if err == nil {
@@ -301,6 +308,12 @@ func LoginCodeDigits(s string) string {
 //
 // PHONE_CODE_EXPIRED and every other error still end the flow.
 func runPhoneFlow(ctx context.Context, client auth.FlowClient, a *interactiveAuthenticator) error {
+	// The flow runs inside client.Run's callback, so reaching it means the
+	// dial and handshake are done; what remains outstanding is the code
+	// request itself.
+	if a.onConnected != nil {
+		a.onConnected()
+	}
 	restarted := false
 	restartOnce := func(err error) bool {
 		if restarted || !tgerr.Is(err, "AUTH_RESTART") {
@@ -464,6 +477,9 @@ type interactiveAuthenticator struct {
 	code       func(ctx context.Context) (string, error)
 	password   func(ctx context.Context) (string, error)
 	onCodeSent func(delivery string)
+	// onConnected is LoginConfig.OnConnected: called once, when runPhoneFlow
+	// starts on the live connection and before the first SendCode.
+	onConnected func()
 }
 
 func (a *interactiveAuthenticator) Phone(ctx context.Context) (string, error) {

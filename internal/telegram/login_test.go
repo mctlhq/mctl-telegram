@@ -154,6 +154,25 @@ func TestInteractiveAuthenticator_ReportsDeliveryBeforeAsking(t *testing.T) {
 	}
 }
 
+// The connected report must come once and before the code request, so a
+// handler that times out waiting for SendCode can tell it from a dial hang
+// (mctl-telegram#1162).
+func TestRunPhoneFlow_ReportsConnectedBeforeSendCode(t *testing.T) {
+	f := &fakeFlowClient{goodCode: "12345", sendCodeErrs: []error{tgerr.New(400, "AUTH_RESTART")}}
+	var connected, sendCodesThen int
+	a := &interactiveAuthenticator{
+		phone:       "+14155551234",
+		code:        (&scriptedPrompt{inputs: []string{"12345"}}).ask,
+		onConnected: func() { connected++; sendCodesThen = f.sendCodes },
+	}
+	if err := runPhoneFlow(context.Background(), f, a); err != nil {
+		t.Fatalf("flow: %v", err)
+	}
+	if connected != 1 || sendCodesThen != 0 {
+		t.Errorf("connected reported %d times, after %d SendCode calls; want once, before any", connected, sendCodesThen)
+	}
+}
+
 func runScriptedPhoneFlow(f *fakeFlowClient, codes, passwords *scriptedPrompt) error {
 	a := &interactiveAuthenticator{phone: "+14155551234", code: codes.ask}
 	if passwords != nil {

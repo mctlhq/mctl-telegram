@@ -172,6 +172,11 @@ type loginFlow struct {
 	// handler that received needCode reads the current value. Empty until
 	// then, and for a login that does not report it.
 	delivery atomic.Value
+	// stage is how far a code login got before it asks for the code, for
+	// the audit row of a handler that gave up waiting (#1162): one of the
+	// loginStage* names. Written by the login goroutine (and gotd's callback
+	// goroutine), read by handlers, hence atomic; empty means queued.
+	stage atomic.Value
 	// qrConfirmedAt is when Telegram reported the QR code scanned and the
 	// login confirmed on the phone (LoginConfig.OnQRScanned), as UnixNano;
 	// zero before that. The status page reads it to show the connecting
@@ -182,6 +187,31 @@ type loginFlow struct {
 	// LoginConfig.HoldSession instead of writing it (#919, #913).
 	// Written and read only by the flow's own goroutine.
 	heldSession []byte
+}
+
+// Stages of a code login before the code is asked for (loginFlow.stage). A
+// send-code timeout records the last one reached: still waiting for the
+// per-user lock, checking the account mode, dialling Telegram, or connected
+// with the code request outstanding.
+const (
+	loginStageQueued    = "queued"
+	loginStageModeCheck = "mode_check"
+	loginStageDialing   = "dialing"
+	loginStageConnected = "connected"
+)
+
+func (lf *loginFlow) setStage(stage string) { lf.stage.Store(stage) }
+
+// stageName is the last stage the flow reached, loginStageQueued when it
+// has not left the lock queue.
+func (lf *loginFlow) stageName() string {
+	if lf == nil {
+		return ""
+	}
+	if st, _ := lf.stage.Load().(string); st != "" {
+		return st
+	}
+	return loginStageQueued
 }
 
 // Login method names, the method label on mctl_login_flow_total and the
@@ -438,6 +468,7 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 			lf.err = cErr
 			return
 		}
+		lf.setStage(loginStageModeCheck)
 		// Re-check under the uid lock, after handleEnableStart's pre-flight
 		// check: a local account could have been provisioned between the two.
 		// This is the last point at which we can refuse before the user is
@@ -459,6 +490,7 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 			return
 		}
 		lf.step = m.firstStep
+		lf.setStage(loginStageDialing)
 		// WantTelegramID makes the login itself log out an account other than
 		// the OIDC-proven one, so the refusal below does not leave that
 		// account with a live device (#899).
@@ -476,6 +508,7 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 		// the flow reports done.
 		loginCfg.HoldSession = func(b []byte) { lf.heldSession = b }
 		loginCfg.OnCodeSent = func(d string) { lf.delivery.Store(d) }
+		loginCfg.OnConnected = func() { lf.setStage(loginStageConnected) }
 		defer func() {
 			if lf.heldSession != nil {
 				s.logOutUnusedSession(bgCtx, uid, lf.heldSession, logOutUnsaved)
@@ -1082,7 +1115,10 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		s.finishEnable(w, r, es, esTok)
 	case <-time.After(enableSendCodeWait):
 		observePhoneStep("timeout")
-		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:failed:timeout", Status: "error", ErrMsg: "send code timeout"})
+		// Reason names the stage the flow was stuck in, so a timeout can be
+		// classified from the database: lock queue, mode check, dial, or the
+		// code request itself (#1162).
+		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:failed:timeout", Status: "error", ErrMsg: "send code timeout", Reason: lf.stageName()})
 		// The user is sent back to the phone form, so the flow this request
 		// launched must not keep running behind their back: left alive it
 		// would deliver a login code minutes later, after they have already
