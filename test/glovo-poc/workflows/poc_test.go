@@ -42,7 +42,7 @@ func TestT7T13_HandoffSingleUseAndOutcomeUnknown(t *testing.T) {
 	// second use refused
 	tok := h.cp.Outbox[0]
 	st := controlplane.Request{Principal: "principal-alice", Tenant: "tenant-alpha", OrderID: "ord-1"}
-	if err := h.cp.OpenHandoff(tok, st, "x"); err == nil {
+	if err := h.cp.OpenHandoff(tok, st, h.status().Fingerprint); err == nil {
 		t.Fatal("second use must be refused")
 	}
 }
@@ -117,7 +117,7 @@ func TestT9b_RevokedAfterHandoffIssued(t *testing.T) {
 		t.Fatalf("states = %v", r.States)
 	}
 	req := controlplane.Request{Principal: "principal-alice", Tenant: "tenant-alpha", OrderID: "ord-1"}
-	if err := h.cp.OpenHandoff(h.cp.Outbox[0], req, "x"); err == nil {
+	if err := h.cp.OpenHandoff(h.cp.Outbox[0], req, h.status().Fingerprint); err == nil {
 		t.Fatal("handoff token must be refused after revocation")
 	}
 	if h.vault.Has("conn-ref-1") || len(h.vault.Drafts) != 0 {

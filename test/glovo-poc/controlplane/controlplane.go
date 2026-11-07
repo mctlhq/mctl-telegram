@@ -267,5 +267,11 @@ func (c *CP) Fire(s Scope, schedule string, occurrence time.Time, start func(id 
 	}
 	c.started[id] = true
 	c.mu.Unlock()
-	return id, true, start(id)
+	if err := start(id); err != nil {
+		c.mu.Lock()
+		delete(c.started, id)
+		c.mu.Unlock()
+		return id, false, err
+	}
+	return id, true, nil
 }

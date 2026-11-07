@@ -107,8 +107,11 @@ func (a *Activities) QuoteOrder(ctx context.Context, s Snapshot) (QuoteResult, e
 		return QuoteResult{}, err
 	}
 	a.Vault.mu.Lock()
-	d := a.Vault.Drafts[s.RequestRef]
+	d, ok := a.Vault.Drafts[s.RequestRef]
 	a.Vault.mu.Unlock()
+	if !ok {
+		return QuoteResult{}, temporal.NewNonRetryableApplicationError("order draft not found", ErrTypeNeedsInput, nil)
+	}
 	menu, err := c.GetMenu(ctx, d.Store)
 	a.note(err)
 	if err != nil {
@@ -138,8 +141,11 @@ func (a *Activities) MutateBasket(ctx context.Context, s Snapshot, fingerprint s
 		return err
 	}
 	a.Vault.mu.Lock()
-	d := a.Vault.Drafts[s.RequestRef]
+	d, ok := a.Vault.Drafts[s.RequestRef]
 	a.Vault.mu.Unlock()
+	if !ok {
+		return temporal.NewNonRetryableApplicationError("order draft not found", ErrTypeNeedsInput, nil)
+	}
 	err = c.MutateBasket(ctx, d)
 	a.note(err)
 	if errors.Is(err, fakeglovo.ErrTimeout) {
