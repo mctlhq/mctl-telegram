@@ -205,7 +205,6 @@ func GetUnreadMessagesRaw(ctx context.Context, c *telegram.Client, peerSpec stri
 
 func getUnreadMessagesWith(ctx context.Context, api *tg.Client, peerSpec string, limit int, bc BroadcastContent) ([]Message, []*tg.Message, *Sponsored, error) {
 	limit = clampLimit(limit)
-	sp := &Sponsored{}
 
 	dlgRes, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
 		Limit:      100,
@@ -215,7 +214,43 @@ func getUnreadMessagesWith(ctx context.Context, api *tg.Client, peerSpec string,
 		return nil, nil, nil, fmt.Errorf("MessagesGetDialogs: %w", err)
 	}
 	users, chats, dialogs := decodeDialogsResult(dlgRes)
+	return unreadFromDialogs(ctx, api, dialogs, users, chats, peerSpec, limit, bc)
+}
 
+// GetUnreadMessagesInFolderRaw is GetUnreadMessagesRaw over the members of
+// chat folder folderID instead of the 100 most recent dialogs. The folder
+// is evaluated over the same window ListDialogsInFolder scans, and the
+// returned FolderScan says whether that window covered every dialog, so an
+// incomplete scan may miss a member with unread messages.
+func GetUnreadMessagesInFolderRaw(ctx context.Context, c *telegram.Client, folderID, limit int, bc BroadcastContent, cache *PeerCache, userID int64) ([]Message, []*tg.Message, *Sponsored, FolderScan, error) {
+	return getUnreadMessagesInFolderWith(ctx, c.API(), folderID, limit, bc, cache, userID)
+}
+
+func getUnreadMessagesInFolderWith(ctx context.Context, api *tg.Client, folderID, limit int, bc BroadcastContent, cache *PeerCache, userID int64) ([]Message, []*tg.Message, *Sponsored, FolderScan, error) {
+	limit = clampLimit(limit)
+	spec, err := loadFolderSpec(ctx, api, folderID)
+	if err != nil {
+		return nil, nil, nil, FolderScan{}, err
+	}
+	members, err := scanFolder(folderFetch(ctx, api, cache, userID), spec, time.Now(), "")
+	if err != nil {
+		return nil, nil, nil, FolderScan{}, err
+	}
+	dialogs := make([]tg.DialogClass, len(members.raw))
+	for i, d := range members.raw {
+		dialogs[i] = d
+	}
+	msgs, raw, sp, err := unreadFromDialogs(ctx, api, dialogs, members.users, members.chats, "", limit, bc)
+	if err != nil {
+		return nil, nil, nil, FolderScan{}, err
+	}
+	return msgs, raw, sp, members.scan, nil
+}
+
+// unreadFromDialogs reads the unread messages of dialogs: of the one named
+// by peerSpec, or of every visible dialog when peerSpec is "".
+func unreadFromDialogs(ctx context.Context, api *tg.Client, dialogs []tg.DialogClass, users map[int64]*tg.User, chats map[int64]tg.ChatClass, peerSpec string, limit int, bc BroadcastContent) ([]Message, []*tg.Message, *Sponsored, error) {
+	sp := &Sponsored{}
 	var targets []unreadTarget
 
 	var peerFound bool // true if peerSpec matched a dialog entry (even with 0 unread)

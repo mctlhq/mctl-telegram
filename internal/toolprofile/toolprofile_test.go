@@ -93,7 +93,7 @@ func TestCoreReadonly(t *testing.T) {
 		"list_folders":        {},
 		"list_topics":         {},
 		"get_messages":        {Forbidden: []string{"fetch_media"}, LimitDefault: 20, LimitMax: 50},
-		"get_unread_messages": {Required: []string{"peer"}, Forbidden: []string{"fetch_media"}, LimitDefault: 20, LimitMax: 50},
+		"get_unread_messages": {Required: []string{"peer"}, Forbidden: []string{"fetch_media", "folder"}, LimitDefault: 20, LimitMax: 50},
 		"search_messages":     {Required: []string{"peer"}, LimitDefault: 20, LimitMax: 50},
 		"get_my_identity":     {},
 		"get_my_send_status":  {},

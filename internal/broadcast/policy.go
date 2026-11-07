@@ -100,7 +100,18 @@ type Selector struct {
 	// ActiveWithinDays restricts the audience to users seen (last login
 	// capture) within this many days. Zero means no restriction.
 	ActiveWithinDays int `json:"active_within_days,omitempty"`
+	// OnlyTelegramIDs narrows the audience to these Telegram ids, for a
+	// dry-run on a known test account. It only ever NARROWS: the ids are
+	// intersected with the policy audience, so tier, consent for the
+	// category, deletion and bot reachability are all still evaluated. An id
+	// that is not eligible is skipped, never force-sent. At most
+	// MaxOnlyTelegramIDs entries, so it cannot be used as a hand-built
+	// recipient list. Empty means no restriction.
+	OnlyTelegramIDs []int64 `json:"only_telegram_ids,omitempty"`
 }
+
+// MaxOnlyTelegramIDs bounds Selector.OnlyTelegramIDs.
+const MaxOnlyTelegramIDs = 5
 
 // MaxActiveWithinDays bounds ActiveWithinDays so an absurd value cannot
 // overflow the duration arithmetic.
@@ -150,6 +161,23 @@ func (sel Selector) Normalize() (Selector, error) {
 	}
 	if out.ActiveWithinDays < 0 || out.ActiveWithinDays > MaxActiveWithinDays {
 		return Selector{}, fmt.Errorf("%w: active_within_days must be 0..%d", ErrInvalidSelector, MaxActiveWithinDays)
+	}
+	if len(sel.OnlyTelegramIDs) > 0 {
+		seen := make(map[int64]struct{}, len(sel.OnlyTelegramIDs))
+		for _, id := range sel.OnlyTelegramIDs {
+			if id <= 0 {
+				return Selector{}, fmt.Errorf("%w: only_telegram_ids entries must be positive", ErrInvalidSelector)
+			}
+			if _, dup := seen[id]; dup {
+				continue
+			}
+			seen[id] = struct{}{}
+			out.OnlyTelegramIDs = append(out.OnlyTelegramIDs, id)
+		}
+		if len(out.OnlyTelegramIDs) > MaxOnlyTelegramIDs {
+			return Selector{}, fmt.Errorf("%w: only_telegram_ids takes at most %d ids", ErrInvalidSelector, MaxOnlyTelegramIDs)
+		}
+		sort.Slice(out.OnlyTelegramIDs, func(i, j int) bool { return out.OnlyTelegramIDs[i] < out.OnlyTelegramIDs[j] })
 	}
 	return out, nil
 }
@@ -264,6 +292,9 @@ type Decision struct {
 // reasons are checked in a fixed order so a recipient who is both
 // unsubscribed and unreachable is always reported the same way.
 func Evaluate(sel Selector, f db.BroadcastRecipientFacts, p Policy, now time.Time) Decision {
+	if len(sel.OnlyTelegramIDs) > 0 && !containsID(sel.OnlyTelegramIDs, f.TelegramID) {
+		return Decision{Reason: SkipOutOfAudience}
+	}
 	if len(sel.ConnectedVia) > 0 && !anyConnected(sel.ConnectedVia, f.ConnectedVia) {
 		return Decision{Reason: SkipOutOfAudience}
 	}
@@ -293,6 +324,15 @@ func Evaluate(sel Selector, f db.BroadcastRecipientFacts, p Policy, now time.Tim
 func anyConnected(want, have []string) bool {
 	for _, h := range have {
 		if contains(want, strings.ToLower(strings.TrimSpace(h))) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsID(set []int64, v int64) bool {
+	for _, s := range set {
+		if s == v {
 			return true
 		}
 	}

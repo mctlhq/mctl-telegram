@@ -839,6 +839,44 @@ func dispatchCall(ctx context.Context, cfg *localConfig, pool *tg.ClientPool, us
 			}
 		}
 
+	case "get_unread_messages_in_folder":
+		var args struct {
+			Limit  int `json:"limit"`
+			Folder int `json:"folder"`
+			broadcastArg
+		}
+		if err := json.Unmarshal(envArgs(env), &args); err != nil {
+			return bridge.EncodeError(env.ID, fmt.Sprintf("get_unread_messages_in_folder: bad args: %v", err))
+		}
+		if args.Folder <= 0 {
+			return bridge.EncodeError(env.ID, "get_unread_messages_in_folder: folder is required")
+		}
+		if args.Limit <= 0 {
+			args.Limit = 50
+		}
+		var (
+			msgs      []tg.Message
+			sponsored *tg.Sponsored
+			scan      tg.FolderScan
+		)
+		dispErr = pool.Borrow(ctx, userID, func(ctx context.Context, c *telegram.Client) error {
+			var err error
+			msgs, _, sponsored, scan, err = tg.GetUnreadMessagesInFolderRaw(ctx, c, args.Folder, args.Limit, args.content(), nil, 0)
+			return err
+		})
+		if dispErr == nil {
+			resp := map[string]any{
+				"messages":    wrapMsgs(msgs),
+				"notice":      untrustedNotice,
+				"folder_scan": scan,
+			}
+			addSponsored(resp, sponsored)
+			result, dispErr = json.Marshal(resp)
+			if dispErr == nil {
+				reportSponsoredViews(ctx, pool, userID, sponsored)
+			}
+		}
+
 	case "get_messages":
 		var args messagesArgs
 		if err := json.Unmarshal(envArgs(env), &args); err != nil {

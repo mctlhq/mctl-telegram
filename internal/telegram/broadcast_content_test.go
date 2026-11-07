@@ -46,14 +46,28 @@ type fakeMTProto struct {
 	sponsoredFor []tg.InputPeerClass
 	viewed       [][]byte
 	viewErr      error
+
+	filters []tg.DialogFilterClass // messages.getDialogFilters answer
+	archive *tg.MessagesDialogs    // the folder_id=1 list; nil = empty
 }
 
 func (f *fakeMTProto) Invoke(_ context.Context, input bin.Encoder, output bin.Decoder) error {
 	var res bin.Encoder
 	switch req := input.(type) {
 	case *tg.MessagesGetDialogsRequest:
+		if fid, ok := req.GetFolderID(); ok && fid == 1 {
+			f.calls = append(f.calls, "getArchive")
+			res = f.archive
+			if f.archive == nil {
+				res = &tg.MessagesDialogs{}
+			}
+			break
+		}
 		f.calls = append(f.calls, "getDialogs")
 		res = f.dialogs
+	case *tg.MessagesGetDialogFiltersRequest:
+		f.calls = append(f.calls, "getDialogFilters")
+		res = &tg.MessagesDialogFilters{Filters: f.filters}
 	case *tg.MessagesGetHistoryRequest:
 		f.calls = append(f.calls, "getHistory")
 		f.history = append(f.history, req.Peer)

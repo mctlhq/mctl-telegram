@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -136,6 +137,35 @@ func stringListArg(args map[string]any, key string) ([]string, error) {
 	return out, nil
 }
 
+// telegramIDListArg reads an optional array of whole, positive numbers. A
+// non-array, a non-integer or a non-numeric element is an error, never a
+// silently shorter list: dropping an id (or the whole list) would widen the audience relative to
+// what the operator typed.
+func telegramIDListArg(args map[string]any, key string) ([]int64, error) {
+	v, ok := args[key]
+	if !ok || v == nil {
+		return nil, nil
+	}
+	arr, ok := v.([]any)
+	if !ok {
+		return nil, fmt.Errorf("%s must be an array of numbers", key)
+	}
+	if len(arr) == 0 {
+		// A present-but-empty list would read as "no restriction" and hand
+		// back the whole audience to a caller that meant to narrow it.
+		return nil, fmt.Errorf("%s must not be empty when given; omit it for no restriction", key)
+	}
+	out := make([]int64, 0, len(arr))
+	for _, el := range arr {
+		f, ok := el.(float64)
+		if !ok || f != math.Trunc(f) || f <= 0 || f > 1<<53 {
+			return nil, fmt.Errorf("%s entries must be positive whole numbers", key)
+		}
+		out = append(out, int64(f))
+	}
+	return out, nil
+}
+
 func (s *Server) toolPrepareBroadcast() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("prepare_broadcast",
 		mcplib.WithTitleAnnotation("Prepare a client broadcast (preview only)"),
@@ -145,7 +175,7 @@ func (s *Server) toolPrepareBroadcast() (mcplib.Tool, mcpserver.ToolHandlerFunc)
 		outputSchema[prepareBroadcastResult](),
 		mcplib.WithDescription(`Broadcast operators only (requires the admin:broadcast scope). Prepares a broadcast to opted-in clients through the login bot and returns a PREVIEW. It sends nothing.
 
-The audience is computed by the server from the selector below. There is no way to name recipients. A client is eligible only with a live account, an effective tier inside the selector, consent for the category, and a bot that can reach them.
+The audience is computed by the server from the selector below. You cannot add recipients: only_telegram_ids can only narrow the computed audience, for a dry-run on a test account. A client is eligible only with a live account, an effective tier inside the selector, consent for the category, and a bot that can reach them.
 
 Inputs:
   category           — string, required. "product_updates" (opt-in only), "maintenance" or "security".
@@ -153,6 +183,7 @@ Inputs:
   tiers              — array, optional. ["client"] (default) and/or "admin".
   connected_via      — array, optional. Only clients with a live grant for one of these OAuth client names (e.g. "Claude", "ChatGPT").
   active_within_days — number, optional. Only clients seen within this many days.
+  only_telegram_ids  — array of numbers, optional, at most 5. Narrows the audience to these Telegram ids. An id that fails any eligibility rule is skipped, not sent.
 
 Output: campaign_id, the normalized text and its hash, the canonical selector and its hash, eligible and skipped counts by reason, a redacted sample, estimated batches, expires_at, and approval_url.
 
@@ -162,6 +193,7 @@ Approval is NOT possible through this or any other tool. A human operator must a
 		mcplib.WithArray("tiers", mcplib.Description(`Effective tiers to target: "client" (default), "admin".`)),
 		mcplib.WithArray("connected_via", mcplib.Description("OAuth client names; restricts the audience to clients connected through one of them.")),
 		mcplib.WithNumber("active_within_days", mcplib.Description("Restrict to clients seen within this many days.")),
+		mcplib.WithArray("only_telegram_ids", mcplib.Description("Narrow the audience to these Telegram ids (at most 5). Never adds recipients: every eligibility rule still applies.")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
@@ -185,12 +217,18 @@ Approval is NOT possible through this or any other tool. A human operator must a
 			s.audit(ctx, id, "prepare_broadcast", "", err, startedAt)
 			return mcplib.NewToolResultError(err.Error()), nil
 		}
+		only, err := telegramIDListArg(args, "only_telegram_ids")
+		if err != nil {
+			s.audit(ctx, id, "prepare_broadcast", "", err, startedAt)
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
 		preview, err := s.Broadcast.Prepare(ctx, actor, broadcast.PrepareRequest{
 			Selector: broadcast.Selector{
 				Category:         stringArg(args, "category", ""),
 				Tiers:            tiers,
 				ConnectedVia:     via,
 				ActiveWithinDays: intArg(args, "active_within_days", 0),
+				OnlyTelegramIDs:  only,
 			},
 			Text: stringArg(args, "text", ""),
 		})
