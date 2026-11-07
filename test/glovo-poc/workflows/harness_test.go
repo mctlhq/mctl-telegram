@@ -72,6 +72,7 @@ type harness struct {
 	fake  *fakeglovo.Server
 	cp    *controlplane.CP
 	vault *Vault
+	act   *Activities
 	rec   *leakcheck.Recorder
 	logs  *bytes.Buffer
 	snap  Snapshot
@@ -96,8 +97,9 @@ func newHarness(t *testing.T, draft fakeglovo.Draft) *harness {
 	h.env = s.NewTestWorkflowEnvironment()
 	h.env.SetDataConverter(canaryConverter{DataConverter: converter.GetDefaultDataConverter(), rec: h.rec})
 	h.env.RegisterWorkflow(GlovoOrderWorkflow)
-	h.env.RegisterActivity(&Activities{CP: h.cp, Vault: h.vault, Breaker: fairness.NewBreaker(3),
-		Log: slog.New(slog.NewTextHandler(h.logs, nil))})
+	h.act = &Activities{CP: h.cp, Vault: h.vault, Breaker: fairness.NewBreaker(3),
+		Log: slog.New(slog.NewTextHandler(h.logs, nil))}
+	h.env.RegisterActivity(h.act)
 	return h
 }
 
