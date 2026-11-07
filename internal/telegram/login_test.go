@@ -134,6 +134,26 @@ func (p *scriptedPrompt) ask(ctx context.Context) (string, error) {
 	return p.inputs[len(p.seen)-1], nil
 }
 
+// The code screen reads the delivery when the ask unblocks it, so the report
+// must come first, and once for each SendCode.
+func TestInteractiveAuthenticator_ReportsDeliveryBeforeAsking(t *testing.T) {
+	var order []string
+	a := &interactiveAuthenticator{
+		onCodeSent: func(d string) { order = append(order, "sent:"+d) },
+		code: func(context.Context) (string, error) {
+			order = append(order, "ask")
+			return "12345", nil
+		},
+	}
+	if _, err := a.Code(context.Background(), &tg.AuthSentCode{Type: &tg.AuthSentCodeTypeApp{Length: 5}}); err != nil {
+		t.Fatalf("Code: %v", err)
+	}
+	want := []string{"sent:auth.sentCodeTypeApp", "ask"}
+	if fmt.Sprint(order) != fmt.Sprint(want) {
+		t.Errorf("order = %v, want %v", order, want)
+	}
+}
+
 func runScriptedPhoneFlow(f *fakeFlowClient, codes, passwords *scriptedPrompt) error {
 	a := &interactiveAuthenticator{phone: "+14155551234", code: codes.ask}
 	if passwords != nil {
