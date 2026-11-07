@@ -93,6 +93,11 @@ Inputs (optional):
 		id := auth.From(ctx)
 		args := req.GetArguments()
 		peer := strings.TrimSpace(stringArg(args, "peer", ""))
+		if _, ok := args["text"].(string); !ok {
+			// Omitting text must not clear the draft by default; clearing
+			// is asked for with an explicit empty string.
+			return mcplib.NewToolResultError("text is required (pass an empty string to clear the draft)"), nil
+		}
 		text := stringArg(args, "text", "")
 		overwrite := boolArg(args, "overwrite", false)
 		if peer == "" {
@@ -123,7 +128,7 @@ Inputs (optional):
 		var conflict *telegram.DraftConflict
 		if errors.As(err, &conflict) {
 			s.auditRefusal(ctx, id, "save_draft:draft_exists", peerRedacted, err, startedAt, ReasonRefused)
-			return mcplib.NewToolResultError(fmt.Sprintf("draft blocked: %s already holds a different unsent draft (%d UTF-16 units) that the user typed. Nothing was changed. Ask the user; call again with overwrite=true only if they want it replaced.", peer, conflict.ExistingUnits)), nil
+			return mcplib.NewToolResultError(fmt.Sprintf("draft blocked: %s already holds a different unsent draft that the user typed (%s). Nothing was changed. Ask the user; call again with overwrite=true only if they want it replaced.", peer, draftConflictSize(conflict))), nil
 		}
 		s.audit(ctx, id, "save_draft", peerRedacted, err, startedAt)
 		if err != nil {
@@ -146,4 +151,13 @@ Inputs (optional):
 		})
 	}
 	return tool, handler
+}
+
+// draftConflictSize describes the refused draft by size only, never by
+// content.
+func draftConflictSize(c *telegram.DraftConflict) string {
+	if c.HasAttachment {
+		return fmt.Sprintf("%d UTF-16 units of text plus an attachment or reply", c.ExistingUnits)
+	}
+	return fmt.Sprintf("%d UTF-16 units", c.ExistingUnits)
 }

@@ -23,11 +23,29 @@ type DraftConflict struct {
 	// ExistingUnits is the existing draft's length in UTF-16 units, the
 	// unit Telegram counts message text in.
 	ExistingUnits int
+	// HasAttachment is true when the draft also holds something other than
+	// text: media, a reply target, a suggested post or rich content. Such a
+	// draft can have no text at all and is still the user's.
+	HasAttachment bool
 }
 
 func (e *DraftConflict) Error() string {
+	if e.HasAttachment {
+		return fmt.Sprintf("%s (%d UTF-16 units of text plus an attachment or reply)", ErrDraftExists.Error(), e.ExistingUnits)
+	}
 	return fmt.Sprintf("%s (%d UTF-16 units)", ErrDraftExists.Error(), e.ExistingUnits)
 }
+
+// existingDraft is what the chat holds before SaveDraft writes.
+type existingDraft struct {
+	Text string
+	// Other is true when the draft carries anything besides text (see
+	// DraftConflict.HasAttachment). A draft is empty only when both Text
+	// is "" and Other is false.
+	Other bool
+}
+
+func (e existingDraft) empty() bool { return e.Text == "" && !e.Other }
 
 func (e *DraftConflict) Unwrap() error { return ErrDraftExists }
 
@@ -48,42 +66,66 @@ type DraftResult struct {
 // decideDraft applies the no-overwrite rule to the draft currently in the
 // chat. It is separate from SaveDraft so the rule is testable without a
 // Telegram session.
-func decideDraft(existing, text string, overwrite bool) (DraftResult, error) {
+func decideDraft(existing existingDraft, text string, overwrite bool) (DraftResult, error) {
 	switch {
-	case existing == text:
-		return DraftResult{Unchanged: true, Cleared: text == ""}, nil
-	case existing == "":
-		return DraftResult{Cleared: text == ""}, nil
+	case existing.empty() && text == "":
+		return DraftResult{Unchanged: true, Cleared: true}, nil
+	case !existing.Other && existing.Text == text:
+		return DraftResult{Unchanged: true}, nil
+	case existing.empty():
+		return DraftResult{}, nil
 	case !overwrite:
-		return DraftResult{}, &DraftConflict{ExistingUnits: len(utf16.Encode([]rune(existing)))}
+		return DraftResult{}, &DraftConflict{
+			ExistingUnits: len(utf16.Encode([]rune(existing.Text))),
+			HasAttachment: existing.Other,
+		}
 	default:
 		return DraftResult{Cleared: text == "", ReplacedExisting: true}, nil
 	}
 }
 
-// currentDraft returns the text of the unsent draft in peer, "" when there
+// currentDraft returns the unsent draft in peer, the zero value when there
 // is none. The draft lives on the dialog, so it is read with
 // messages.getPeerDialogs for this one chat.
-func currentDraft(ctx context.Context, api *tg.Client, peer tg.InputPeerClass) (string, error) {
+func currentDraft(ctx context.Context, api *tg.Client, peer tg.InputPeerClass) (existingDraft, error) {
 	res, err := api.MessagesGetPeerDialogs(ctx, []tg.InputDialogPeerClass{&tg.InputDialogPeer{Peer: peer}})
 	if err != nil {
-		return "", fmt.Errorf("MessagesGetPeerDialogs: %w", err)
+		return existingDraft{}, fmt.Errorf("MessagesGetPeerDialogs: %w", err)
 	}
-	if len(res.Dialogs) == 0 {
+	return draftFromDialogs(res.Dialogs)
+}
+
+// draftFromDialogs picks the chat's own dialog out of a getPeerDialogs
+// answer and reads its draft. The answer can also carry folder entries for
+// an archived chat or one in a folder, and their order is not documented,
+// so the chat's dialog is searched for rather than assumed to come first.
+func draftFromDialogs(dialogs []tg.DialogClass) (existingDraft, error) {
+	if len(dialogs) == 0 {
 		// A chat with no dialog row has no draft either; saving one
 		// creates it. This is Telegram's documented absence, not a
 		// failed read.
-		return "", nil
+		return existingDraft{}, nil
 	}
-	if d, ok := res.Dialogs[0].(*tg.Dialog); ok {
-		if dm, ok := d.Draft.(*tg.DraftMessage); ok {
-			return dm.Message, nil
+	for _, dc := range dialogs {
+		d, ok := dc.(*tg.Dialog)
+		if !ok {
+			continue
 		}
-		return "", nil
+		dm, ok := d.Draft.(*tg.DraftMessage)
+		if !ok {
+			// draftMessageEmpty, or no draft field at all.
+			return existingDraft{}, nil
+		}
+		_, media := dm.GetMedia()
+		_, reply := dm.GetReplyTo()
+		_, post := dm.GetSuggestedPost()
+		_, rich := dm.GetRichMessage()
+		return existingDraft{Text: dm.Message, Other: media || reply || post || rich}, nil
 	}
-	// A folder or any other dialog type is not a chat this tool can write
-	// a draft in; refuse rather than guess that it holds no draft.
-	return "", fmt.Errorf("MessagesGetPeerDialogs: unexpected dialog type %T", res.Dialogs[0])
+	// Only folders or unknown dialog types came back: the chat's own row
+	// is missing from a non-empty answer. Refuse rather than guess that it
+	// holds no draft.
+	return existingDraft{}, fmt.Errorf("MessagesGetPeerDialogs: no dialog for the chat among %d entries (first is %T)", len(dialogs), dialogs[0])
 }
 
 // SaveDraft stores text as the unsent draft of peerSpec in the user's own

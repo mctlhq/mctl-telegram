@@ -110,6 +110,11 @@ func TestSaveDraft_ExistingDraftIsRefused(t *testing.T) {
 	if !res.IsError || !strings.Contains(contentText(res), "17 UTF-16 units") || !strings.Contains(contentText(res), "overwrite=true") {
 		t.Fatalf("conflict result = %q", contentText(res))
 	}
+	fake.err = &telegram.DraftConflict{HasAttachment: true}
+	if res := callSaveDraft(t, s, id, map[string]any{"peer": "user:7120", "text": "Hi Bob"}); !res.IsError || !strings.Contains(contentText(res), "attachment or reply") {
+		t.Fatalf("media-only conflict result = %q", contentText(res))
+	}
+	fake.err = &telegram.DraftConflict{ExistingUnits: 17}
 	if got := classifyToolResultReason(res); got != ReasonRefused {
 		t.Errorf("reason = %q, want %q", got, ReasonRefused)
 	}
@@ -151,6 +156,7 @@ func TestSaveDraft_ArgumentChecks(t *testing.T) {
 	s, fake, id := draftServer(t)
 	for _, args := range []map[string]any{
 		{"text": "hi"},
+		{"peer": "user:7120"},
 		{"peer": "user:7120", "text": strings.Repeat("a", maxReplyText+1)},
 	} {
 		if res := callSaveDraft(t, s, id, args); !res.IsError {
