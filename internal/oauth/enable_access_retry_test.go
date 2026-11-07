@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -309,6 +310,30 @@ func TestEnableCode_DeliveryReachesEveryCodeScreen(t *testing.T) {
 		url.Values{"es": {es}, "phone": {"+14155551234"}})
 	if !strings.Contains(rec.Body.String(), want) {
 		t.Errorf("repeated start: code screen does not name the app: %s", rec.Body.String())
+	}
+}
+
+// The channel on the phone row is what lets abandonment after the phone step
+// be read by channel (mctl-telegram#1162). A channel the server does not know
+// stays empty rather than being reported as any channel.
+func TestEnableStart_PhoneRowRecordsTheDelivery(t *testing.T) {
+	for _, tc := range []struct{ delivery, want string }{
+		{"auth.sentCodeTypeApp", "app"},
+		{"auth.sentCodeTypeSms", "sms"},
+		{"auth.sentCodeTypeSomethingNew", ""},
+		{"", ""},
+	} {
+		l := &retryingLogin{goodCode: "12345", delivery: tc.delivery}
+		srv, _, _ := startRetryFlow(t, l)
+		var n int
+		var reason sql.NullString
+		err := srv.store.DB.QueryRow(`SELECT COUNT(*), MAX(reason) FROM audit_logs WHERE tool_name = 'connect:phone_submitted'`).Scan(&n, &reason)
+		if err != nil {
+			t.Fatalf("%q: read audit: %v", tc.delivery, err)
+		}
+		if n != 1 || reason.String != tc.want {
+			t.Errorf("%q: rows = %d, reason = %q, want 1 row with %q", tc.delivery, n, reason.String, tc.want)
+		}
 	}
 }
 

@@ -1017,7 +1017,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	select {
 	case <-lf.needCode:
 		observePhoneStep("ok")
-		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:phone_submitted", Status: "ok"})
+		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:phone_submitted", Status: "ok", Reason: deliveryKind(lf.codeDelivery())})
 		renderEnableCode(w, enableCodePage{
 			Delivery:    lf.codeDelivery(),
 			Issuer:      s.cfg.Issuer,

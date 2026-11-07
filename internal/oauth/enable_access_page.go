@@ -59,8 +59,12 @@ type enableCodePage struct {
 // DeliveryKind maps Delivery to the sentence the code screen shows. Anything
 // not listed, including a channel Telegram adds later, gets the generic text
 // rather than a claim about a channel the code may not have used.
-func (p enableCodePage) DeliveryKind() string {
-	switch p.Delivery {
+func (p enableCodePage) DeliveryKind() string { return deliveryKind(p.Delivery) }
+
+// deliveryKind maps a Telegram sentCodeType to its bounded channel name, or ""
+// when the channel is not known.
+func deliveryKind(delivery string) string {
+	switch delivery {
 	case "auth.sentCodeTypeApp":
 		return "app"
 	case "auth.sentCodeTypeSms", "auth.sentCodeTypeSmsWord", "auth.sentCodeTypeSmsPhrase", "auth.sentCodeTypeFirebaseSms":
