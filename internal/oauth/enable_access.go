@@ -29,13 +29,19 @@ import (
 type enableStep int
 
 const (
-	stepPermissions enableStep = iota // awaiting permissions choice (wizard mode only)
-	stepPhone                         // awaiting the phone number (initial screen)
-	stepCode                          // awaiting the SMS code
-	stepPassword                      // awaiting the 2FA cloud password
-	stepDone                          // session provisioned, authorization code issued
-	stepQR                            // showing a QR code, waiting for a scan (#901)
+	stepPhone    enableStep = iota // awaiting the phone number (initial screen)
+	stepCode                       // awaiting the SMS code
+	stepPassword                   // awaiting the 2FA cloud password
+	stepDone                       // session provisioned, authorization code issued
+	stepQR                         // showing a QR code, waiting for a scan (#901)
 )
+
+// wizardPhoneStep is the position of the phone/QR screen in the self-connect
+// wizard's step indicator: sign in, phone number, done. The send choice is
+// the checkbox on that screen, the same one external clients get; the
+// separate Permissions screen it replaced only set that flag and showed the
+// account-risk notice, which moved next to the checkbox (#1157).
+const wizardPhoneStep = 2
 
 // Per-step waits. SendCode/SignIn are network round-trips against Telegram;
 // the channel sends are near-instant because the login goroutine is already
@@ -711,8 +717,12 @@ func (es *enableSession) acquireStepLock(ctx context.Context) bool {
 	}
 }
 
-// handleEnablePermissions receives the permissions choice (read-only vs
-// read+send), records the opt-in, and advances to the phone screen.
+// handleEnablePermissions answers the POST of the former Permissions screen
+// (step 2 of 4 until #1157). The screen is gone; a tab that was already on it
+// when the release landed still submits here, and is shown the phone/QR
+// screen it would have reached, with the send choice it made carried over.
+// The route can go once every pending flow from before the release has
+// expired (CodeTTL).
 func (s *Server) handleEnablePermissions(w http.ResponseWriter, r *http.Request) {
 	es, esTok, ok := s.lookupEnable(r)
 	if !ok {
@@ -724,29 +734,16 @@ func (s *Server) handleEnablePermissions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	defer es.lock.Unlock()
-
-	if es.step != stepPermissions {
-		renderEnablePhoneStep(w, es, enablePhonePage{
-			Issuer:      s.cfg.Issuer,
-			EnableToken: esTok,
-			Phone:       es.phone,
-			WizardMode:  es.isWizardMode(),
-			WizardStep:  3,
-		})
-		return
+	if r.FormValue("send_optin") == "send" {
+		es.sendOptIn = true
 	}
-
-	sendOptin := r.FormValue("send_optin")
-	es.sendOptIn = sendOptin == "send"
-	es.step = stepPhone
-	renderEnablePhone(w, enablePhonePage{
-		Issuer:       s.cfg.Issuer,
-		EnableToken:  esTok,
-		SendOptIn:    es.sendOptIn,
-		WizardMode:   true,
-		WizardStep:   3,
-		QROffered:    es.qrOffered,
-		AskHeardFrom: es.askHeardFrom,
+	renderEnablePhoneStep(w, es, enablePhonePage{
+		Issuer:      s.cfg.Issuer,
+		EnableToken: esTok,
+		Phone:       es.phone,
+		SendOptIn:   es.sendOptIn,
+		WizardMode:  es.isWizardMode(),
+		WizardStep:  wizardPhoneStep,
 	})
 }
 
@@ -755,12 +752,12 @@ func (s *Server) handleEnablePermissions(w http.ResponseWriter, r *http.Request)
 // so es.step never lags behind the screen actually shown (a stale stepCode /
 // stepPassword would otherwise let a direct POST skip the UI order).
 // It also propagates wizard context from the session so error fallbacks from
-// later steps keep showing the 4-step indicator (callers that already set
+// later steps keep showing the step indicator (callers that already set
 // WizardMode are not overridden).
 func renderEnablePhoneStep(w http.ResponseWriter, es *enableSession, p enablePhonePage) {
 	if es.isWizardMode() && !p.WizardMode {
 		p.WizardMode = true
-		p.WizardStep = 3
+		p.WizardStep = wizardPhoneStep
 	}
 	es.step = stepPhone
 	p.QROffered = es.qrOffered
@@ -819,7 +816,7 @@ func (s *Server) renderModeCheckRetry(w http.ResponseWriter, es *enableSession, 
 		Phone:       phone,
 		SendOptIn:   sendOptIn,
 		WizardMode:  es.isWizardMode(),
-		WizardStep:  3,
+		WizardStep:  wizardPhoneStep,
 		Error:       "Could not verify this account's mode. Try again, or contact the operator if it persists.",
 	})
 }
@@ -905,19 +902,16 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 			EnableToken: esTok,
 			Phone:       es.phone,
 			WizardMode:  es.isWizardMode(),
-			WizardStep:  3,
+			WizardStep:  wizardPhoneStep,
 			QROffered:   es.qrOffered,
 		})
 		return
 	}
 
 	rawPhone := r.FormValue("phone")
-	// In wizard mode the send permission was already captured by
-	// handleEnablePermissions; in non-wizard mode read it from the form.
-	sendOptIn := es.sendOptIn
-	if !es.isWizardMode() {
-		sendOptIn = r.FormValue("send_optin") != ""
-	}
+	// The send choice is the checkbox on this screen in both modes; an
+	// unchecked box means read-only, the default.
+	sendOptIn := r.FormValue("send_optin") != ""
 	phone := normalizePhone(rawPhone)
 	if !validPhone(phone) {
 		renderEnablePhoneStep(w, es, enablePhonePage{
@@ -926,7 +920,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 			Phone:       rawPhone,
 			SendOptIn:   sendOptIn,
 			WizardMode:  es.isWizardMode(),
-			WizardStep:  3,
+			WizardStep:  wizardPhoneStep,
 			Error:       "Enter a phone number in international format, e.g. +14155551234.",
 		})
 		return
@@ -1011,7 +1005,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 			EnableToken: esTok,
 			Phone:       phone,
 			WizardMode:  es.isWizardMode(),
-			WizardStep:  3,
+			WizardStep:  wizardPhoneStep,
 			QROffered:   es.qrOffered,
 		})
 	case <-lf.done:
@@ -1110,7 +1104,7 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 				Issuer:      s.cfg.Issuer,
 				EnableToken: esTok,
 				WizardMode:  es.isWizardMode(),
-				WizardStep:  3,
+				WizardStep:  wizardPhoneStep,
 			})
 			return
 		}
@@ -1137,7 +1131,7 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 			EnableToken: esTok,
 			Phone:       es.phone,
 			WizardMode:  es.isWizardMode(),
-			WizardStep:  3,
+			WizardStep:  wizardPhoneStep,
 			QROffered:   es.qrOffered,
 			Error:       "Enter the code Telegram sent you.",
 		})
@@ -1169,7 +1163,7 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 			EnableToken: esTok,
 			Phone:       es.phone,
 			WizardMode:  es.isWizardMode(),
-			WizardStep:  3,
+			WizardStep:  wizardPhoneStep,
 			QROffered:   es.qrOffered,
 			Error:       codeRepromptMsg(rp),
 		})
@@ -1180,7 +1174,7 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 			Issuer:      s.cfg.Issuer,
 			EnableToken: esTok,
 			WizardMode:  es.isWizardMode(),
-			WizardStep:  3,
+			WizardStep:  wizardPhoneStep,
 		})
 	case <-lf.done:
 		if lf.err != nil {
@@ -1254,7 +1248,7 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 			Issuer:      s.cfg.Issuer,
 			EnableToken: esTok,
 			WizardMode:  es.isWizardMode(),
-			WizardStep:  3,
+			WizardStep:  wizardPhoneStep,
 			Error:       "Enter your Telegram two-step verification password.",
 		})
 		return
@@ -1287,7 +1281,7 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 			EnableToken: esTok,
 			Phone:       es.phone,
 			WizardMode:  es.isWizardMode(),
-			WizardStep:  3,
+			WizardStep:  wizardPhoneStep,
 			QROffered:   es.qrOffered,
 			Error:       codeRepromptMsg(rp),
 		})
@@ -1299,7 +1293,7 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 			Issuer:      s.cfg.Issuer,
 			EnableToken: esTok,
 			WizardMode:  es.isWizardMode(),
-			WizardStep:  3,
+			WizardStep:  wizardPhoneStep,
 			Error:       passwordRepromptMsg(rp),
 		})
 	case <-lf.done:

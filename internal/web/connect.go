@@ -485,13 +485,13 @@ type connectErrorData struct {
 
 var connectLandingTemplate = template.Must(template.New("connectLanding").Parse(connectHead + `    <ol class="flow-steps">
       <li class="active">Sign in</li>
-      <li>Permissions</li>
       <li>Phone number</li>
       <li>Done</li>
     </ol>
-    <h1>Step 1 of 4 &#8212; Connect your Telegram account</h1>
+    <h1>Step 1 of 3 &#8212; Connect your Telegram account</h1>
     <p>Click the button below to sign in with Telegram and link your account to this MCP connector.
-       You will be asked to enter your phone number and a one-time code sent by Telegram.</p>
+       Signing in proves who you are; the next step connects your chats by scanning a QR code
+       with Telegram on your phone, or by entering your phone number and the login code Telegram sends.</p>
     <p>No password is stored. An encrypted Telegram session is saved on this server so the
        connector can read your messages on behalf of your MCP client.</p>
     {{if .BotAccessRequested}}<p>On Telegram&#8217;s sign-in screen, turn on <strong>Allow messages</strong> so the MCTL login bot can send you setup help and the notifications you choose. Telegram leaves it off unless you switch it on, and you can sign in either way.</p>{{end}}
@@ -506,11 +506,10 @@ var connectLandingTemplate = template.Must(template.New("connectLanding").Parse(
 // docs/runbook.md's "Login bot /start and onboarding (issue-679)" section.
 var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(connectHead + `    <ol class="flow-steps">
       <li>Sign in</li>
-      <li>Permissions</li>
       <li>Phone number</li>
       <li class="active">Done</li>
     </ol>
-    <h1>Step 4 of 4 &#8212; Done</h1>
+    <h1>Step 3 of 3 &#8212; Done</h1>
     <p>Your Telegram account is now connected to this MCP connector.</p>
     <h2>Add the connector to your AI client</h2>
     <label for="mcp-url">MCP URL</label>

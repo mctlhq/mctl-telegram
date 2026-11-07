@@ -651,3 +651,23 @@ func TestHandleConnectDone_SessionConsumedOnError(t *testing.T) {
 		t.Error("session should be deleted even when ExchangeConnect fails")
 	}
 }
+
+// TestHandleConnect_ThreeStepWizard pins the wizard's step count on the
+// landing page: sign in, phone number, done. The Permissions screen is gone
+// (#1157), and the landing copy names both ways to connect the chats.
+func TestHandleConnect_ThreeStepWizard(t *testing.T) {
+	srv := newTestConnectServer(t)
+	req := httptest.NewRequest("GET", "/telegram/connect", nil)
+	rec := httptest.NewRecorder()
+	srv.HandleConnect(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "Step 1 of 3") || strings.Contains(body, "<li>Permissions</li>") {
+		t.Errorf("landing page still shows the four-step wizard; body=%s", body)
+	}
+	if !strings.Contains(body, "QR code") || !strings.Contains(body, "proves who you are") {
+		t.Errorf("landing page does not explain the two confirmations; body=%s", body)
+	}
+	if !strings.Contains(connectSuccessTemplate.Tree.Root.String(), "Step 3 of 3") {
+		t.Errorf("success page does not say Step 3 of 3")
+	}
+}

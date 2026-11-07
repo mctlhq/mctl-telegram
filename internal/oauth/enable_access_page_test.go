@@ -52,33 +52,36 @@ func TestRenderEnablePassword_NonceScopedScript(t *testing.T) {
 }
 
 // Sending is opt-in: a new account starts read-only, as the public pages
-// promise. The wizard permissions screen pre-selects the "readonly" radio and
-// the non-wizard phone screen leaves the send_optin checkbox unchecked unless
-// the user already chose sending.
+// promise. The phone/QR screen carries the send_optin checkbox in both
+// modes, unchecked unless the user already chose sending, next to the
+// account-risk notice the user reads before choosing (#853). The separate
+// wizard Permissions screen that used to hold both is gone (#1157).
 func TestEnableUI_DefaultsToReadOnly(t *testing.T) {
-	permRec := httptest.NewRecorder()
-	renderEnablePermissions(permRec, enablePermissionsPage{Issuer: "https://tg.mctl.ai", EnableToken: "tok"})
-	perm := permRec.Body.String()
-	if !strings.Contains(perm, `value="readonly" checked`) {
-		t.Errorf("permissions screen must default-select the read-only radio; body=%s", perm)
-	}
-	if strings.Contains(perm, `value="send" checked`) {
-		t.Errorf("permissions screen must not default-select send")
-	}
-	// The user chooses send while knowing the account can be limited (#853).
-	if !strings.Contains(perm, "Telegram can limit or freeze an account") || !strings.Contains(perm, `href="/security#account-risk"`) {
-		t.Errorf("permissions screen must carry the account-risk notice; body=%s", perm)
-	}
-
-	phoneRec := httptest.NewRecorder()
-	renderEnablePhone(phoneRec, enablePhonePage{Issuer: "https://tg.mctl.ai", EnableToken: "tok"})
-	phone := phoneRec.Body.String()
-	if strings.Contains(phone, `name="send_optin" value="on" checked`) {
-		t.Errorf("phone screen must not pre-check the send_optin checkbox by default; body=%s", phone)
+	for _, mode := range []struct {
+		name   string
+		wizard bool
+	}{{"wizard", true}, {"external client", false}} {
+		t.Run(mode.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			renderEnablePhone(rec, enablePhonePage{Issuer: "https://tg.mctl.ai", EnableToken: "tok", WizardMode: mode.wizard, WizardStep: wizardPhoneStep})
+			body := rec.Body.String()
+			if !strings.Contains(body, `name="send_optin" value="on"`) {
+				t.Fatalf("phone screen lacks the send_optin checkbox; body=%s", body)
+			}
+			if strings.Contains(body, `name="send_optin" value="on" checked`) {
+				t.Errorf("phone screen must not pre-check the send_optin checkbox by default; body=%s", body)
+			}
+			if !strings.Contains(body, "Telegram can limit or freeze an account") || !strings.Contains(body, `href="/security#account-risk"`) {
+				t.Errorf("phone screen must carry the account-risk notice next to the send choice; body=%s", body)
+			}
+			if strings.Contains(body, `value="readonly"`) {
+				t.Errorf("the radio group of the removed Permissions screen is back; body=%s", body)
+			}
+		})
 	}
 
 	// The checkbox still reflects an explicit earlier choice.
-	phoneRec = httptest.NewRecorder()
+	phoneRec := httptest.NewRecorder()
 	renderEnablePhone(phoneRec, enablePhonePage{Issuer: "https://tg.mctl.ai", EnableToken: "tok", SendOptIn: true})
 	if !strings.Contains(phoneRec.Body.String(), `name="send_optin" value="on" checked`) {
 		t.Errorf("phone screen must pre-check the send_optin checkbox when SendOptIn=true")

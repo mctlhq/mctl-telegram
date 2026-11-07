@@ -84,12 +84,6 @@ type enableQRPage struct {
 	WizardMode bool
 }
 
-type enablePermissionsPage struct {
-	Issuer      string
-	EnableToken string
-	Error       string
-}
-
 type enableErrorPage struct {
 	Message string
 	// ReturnURL, when set, is the client's redirect_uri carrying
@@ -197,12 +191,11 @@ var enableFoot = `    </div>
 
 var enablePhoneTemplate = template.Must(template.New("enablePhone").Parse(enableHead + `    {{if .WizardMode}}<ol class="flow-steps">
       <li>Sign in</li>
-      <li>Permissions</li>
-      <li{{if eq .WizardStep 3}} class="active"{{end}}>Phone number</li>
+      <li{{if eq .WizardStep 2}} class="active"{{end}}>Phone number</li>
       <li>Done</li>
     </ol>{{end}}
-    {{if .WizardMode}}<h1>Step {{.WizardStep}} of 4 &#8212; Phone number</h1>{{else}}<h1>Enable message access</h1>{{end}}
-    {{if .WizardMode}}<div class="notice">A new Telegram session will appear in your account&#8217;s Active Sessions. This is normal &#8212; it is this connector.</div>{{end}}
+    {{if .WizardMode}}<h1>Step {{.WizardStep}} of 3 &#8212; Phone number</h1>{{else}}<h1>Enable message access</h1>{{end}}
+    {{if .WizardMode}}<div class="notice">Signing in with Telegram proved who you are. This step connects your chats: a new Telegram session will appear in your account&#8217;s Active Sessions. This is normal &#8212; it is this connector.</div>{{end}}
     <p>You are connecting <span class="url">{{.Issuer}}</span> to your Telegram account. To
        read your messages, this server needs a Telegram session. {{if .QROffered}}The quickest
        way is to scan a QR code with Telegram on your phone; you can also enter your phone
@@ -234,10 +227,14 @@ var enablePhoneTemplate = template.Must(template.New("enablePhone").Parse(enable
           {{range .HeardFromOptions}}<option value="{{.Value}}">{{.Label}}</option>
           {{end}}</select>
       </label>{{end}}
-      {{if .WizardMode}}{{else}}<label class="check">
+      <label class="check">
         <input type="checkbox" name="send_optin" value="on"{{if .SendOptIn}} checked{{end}}>
         <span>Also allow this connector to send messages on my behalf (you can turn this off later)</span>
-      </label>{{end}}
+      </label>
+      <p class="meta">Sending is off by default and can be changed later on the session management page.
+         MCTL Assistant is an unofficial third-party connector using the Telegram API. Telegram can limit or freeze an account
+         that sends spam-like traffic, whichever app sends it, so keep what your assistant sends
+         personal and low-volume. <a href="/security#account-risk">More on this risk</a>.</p>
       {{if .QROffered}}<button type="submit" class="default-submit" tabindex="-1" aria-hidden="true">Send code</button>
       <button type="submit" formaction="/oauth/telegram/enable_access/qr" formnovalidate>Sign in with a QR code</button>
       <p class="hint">Recommended: scan it with Telegram on your phone. No phone number or login code needed.</p>
@@ -255,11 +252,10 @@ var enablePhoneTemplate = template.Must(template.New("enablePhone").Parse(enable
 
 var enableCodeTemplate = template.Must(template.New("enableCode").Parse(enableHead + `    {{if .WizardMode}}<ol class="flow-steps">
       <li>Sign in</li>
-      <li>Permissions</li>
-      <li{{if eq .WizardStep 3}} class="active"{{end}}>Phone number</li>
-      <li{{if eq .WizardStep 4}} class="active"{{end}}>Done</li>
+      <li{{if eq .WizardStep 2}} class="active"{{end}}>Phone number</li>
+      <li{{if eq .WizardStep 3}} class="active"{{end}}>Done</li>
     </ol>{{end}}
-    {{if .WizardMode}}<h1>Step {{.WizardStep}} of 4 &#8212; Login code</h1>{{else}}<h1>Enter your login code</h1>{{end}}
+    {{if .WizardMode}}<h1>Step {{.WizardStep}} of 3 &#8212; Login code</h1>{{else}}<h1>Enter your login code</h1>{{end}}
     <p>Telegram sent a login code for <span class="url">{{.Phone}}</span>. It usually arrives
        as a message from <strong>Telegram</strong> inside the Telegram app on your other
        device, rather than by SMS.</p>
@@ -285,11 +281,10 @@ var enableCodeTemplate = template.Must(template.New("enableCode").Parse(enableHe
 
 var enablePasswordTemplate = template.Must(template.New("enablePassword").Parse(enableHead + `    {{if .WizardMode}}<ol class="flow-steps">
       <li>Sign in</li>
-      <li>Permissions</li>
-      <li{{if eq .WizardStep 3}} class="active"{{end}}>Phone number</li>
-      <li{{if eq .WizardStep 4}} class="active"{{end}}>Done</li>
+      <li{{if eq .WizardStep 2}} class="active"{{end}}>Phone number</li>
+      <li{{if eq .WizardStep 3}} class="active"{{end}}>Done</li>
     </ol>{{end}}
-    {{if .WizardMode}}<h1>Step {{.WizardStep}} of 4 &#8212; Two-step verification</h1>{{else}}<h1>Two-step verification</h1>{{end}}
+    {{if .WizardMode}}<h1>Step {{.WizardStep}} of 3 &#8212; Two-step verification</h1>{{else}}<h1>Two-step verification</h1>{{end}}
     <p>Your Telegram account is protected by a two-step verification password. Enter it to
        finish connecting. This is your <strong>Telegram cloud password</strong> — <strong>not</strong>
        the 5-digit login code you entered on the previous screen.</p>
@@ -400,7 +395,6 @@ var enableRefreshHead = strings.Replace(enableHead,
 
 var enableQRTemplate = template.Must(template.New("enableQR").Parse(enableRefreshHead + `    {{with .Page}}{{if .WizardMode}}<ol class="flow-steps">
       <li>Sign in</li>
-      <li>Permissions</li>
       <li class="active">Phone number</li>
       <li>Done</li>
     </ol>{{end}}
@@ -424,7 +418,6 @@ var enableQRTemplate = template.Must(template.New("enableQR").Parse(enableRefres
 
 var enableQRConnectingTemplate = template.Must(template.New("enableQRConnecting").Parse(enableRefreshHead + `    {{if .WizardMode}}<ol class="flow-steps">
       <li>Sign in</li>
-      <li>Permissions</li>
       <li class="active">Phone number</li>
       <li>Done</li>
     </ol>{{end}}
@@ -438,35 +431,6 @@ var enableQRConnectingTemplate = template.Must(template.New("enableQRConnecting"
 
 var enableQRBusyTemplate = template.Must(template.New("enableQRBusy").Parse(enableRefreshHead + `    <h1>Preparing your QR code&#8230;</h1>
     <p class="meta">This page updates by itself.</p>
-` + enableFoot))
-
-var enablePermissionsTemplate = template.Must(template.New("enablePermissions").Parse(enableHead + `    <ol class="flow-steps">
-      <li>Sign in</li>
-      <li class="active">Permissions</li>
-      <li>Phone number</li>
-      <li>Done</li>
-    </ol>
-    <h1>Step 2 of 4 &#8212; Permissions</h1>
-    <p>Choose what this connector is allowed to do with your Telegram account.</p>
-    {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
-    <form method="POST" action="/oauth/telegram/enable_access/permissions" autocomplete="off">
-      <input type="hidden" name="es" value="{{.EnableToken}}">
-      <div class="radio-group">
-        <label>
-          <input type="radio" name="send_optin" value="readonly" checked>
-          Read only (default) &#8212; the connector can read messages but cannot send. You can turn sending on later.
-        </label>
-        <label>
-          <input type="radio" name="send_optin" value="send">
-          Read + send &#8212; the connector can read and send real messages on your behalf.
-        </label>
-      </div>
-      <button type="submit">Continue</button>
-    </form>
-    <p class="meta">You can change this permission later from the session management page.</p>
-    <p class="meta">MCTL Assistant is an unofficial third-party connector using the Telegram API. Telegram can limit or freeze an account
-       that sends spam-like traffic, whichever app sends it, so keep what your assistant sends
-       personal and low-volume. <a href="/security#account-risk">More on this risk</a>.</p>
 ` + enableFoot))
 
 func renderEnablePhone(w http.ResponseWriter, p enablePhonePage) {
@@ -552,10 +516,6 @@ func (s *Server) renderEnableDenied(w http.ResponseWriter, oc oauthCtx, msg, des
 // the missing-state branch on that same handler stays a genuine 400.
 func renderEnableReused(w http.ResponseWriter, msg string) {
 	renderEnable(w, http.StatusOK, enableErrorTemplate, enableErrorPage{Message: msg}, "")
-}
-
-func renderEnablePermissions(w http.ResponseWriter, p enablePermissionsPage) {
-	renderEnable(w, http.StatusOK, enablePermissionsTemplate, p, "")
 }
 
 // newCSPNonce returns a fresh nonce for a CSP script-src. 16 random bytes is

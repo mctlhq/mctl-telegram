@@ -2113,17 +2113,20 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 	s.enables[esTok] = es
 	s.mu.Unlock()
 	s.store.LogToolCall(r.Context(), db.ToolCall{UserID: uid, Tool: "connect:oidc_callback", Status: "ok"})
-	if es.isWizardMode() {
-		es.step = stepPermissions
-		renderEnablePermissions(w, enablePermissionsPage{Issuer: s.cfg.Issuer, EnableToken: esTok})
-	} else {
-		es.step = stepPhone
-		// SendOptIn defaults false so the send checkbox renders unchecked:
-		// sending is opt-in. A new account starts read-only, matching the
-		// published "preview by default" promise; the owner enables sending
-		// later with set_send_consent or on the manage page.
-		renderEnablePhone(w, enablePhonePage{Issuer: s.cfg.Issuer, EnableToken: esTok, QROffered: es.qrOffered, AskHeardFrom: es.askHeardFrom})
-	}
+	es.step = stepPhone
+	// SendOptIn defaults false so the send checkbox renders unchecked:
+	// sending is opt-in. A new account starts read-only, matching the
+	// published "preview by default" promise; the owner enables sending
+	// later with set_send_consent or on the manage page. The self-connect
+	// wizard shows the same screen as an external client, as step 2 of 3.
+	renderEnablePhone(w, enablePhonePage{
+		Issuer:       s.cfg.Issuer,
+		EnableToken:  esTok,
+		WizardMode:   es.isWizardMode(),
+		WizardStep:   wizardPhoneStep,
+		QROffered:    es.qrOffered,
+		AskHeardFrom: es.askHeardFrom,
+	})
 }
 
 // oauthCtx bundles the per-flow OAuth parameters needed to mint and deliver an
