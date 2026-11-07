@@ -64,9 +64,10 @@ type CP struct {
 }
 
 type token struct {
-	order, owner, fingerprint string
-	expires                   time.Time
-	used                      bool
+	order, owner, tenant, fingerprint string
+	installRevision                   int64
+	expires                          time.Time
+	used                             bool
 }
 
 func New(now func() time.Time) *CP {
@@ -219,7 +220,16 @@ func (c *CP) IssueHandoff(order, owner, fingerprint string, ttl time.Duration) s
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	h := hash(t)
-	c.tokens[h] = &token{order: order, owner: owner, fingerprint: fingerprint, expires: c.Now().Add(ttl)}
+	var tenant string
+	var revision int64
+	if o, ok := c.orders[order]; ok && o.Owner == owner {
+		tenant = o.Tenant
+		if in := c.installs[[2]string{tenant, owner}]; in != nil {
+			revision = in.revision
+		}
+	}
+	c.tokens[h] = &token{order: order, owner: owner, tenant: tenant, installRevision: revision,
+		fingerprint: fingerprint, expires: c.Now().Add(ttl)}
 	c.Outbox = append(c.Outbox, t)
 	return h
 }
@@ -230,7 +240,27 @@ func (c *CP) OpenHandoff(tok string, r Request, fingerprint string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	t := c.tokens[hash(tok)]
-	if t == nil || t.used || c.Now().After(t.expires) || t.order != r.OrderID || t.owner != r.Principal || t.fingerprint != fingerprint {
+	if t == nil || t.used || c.Now().After(t.expires) || t.order != r.OrderID ||
+		t.owner != r.Principal || t.tenant != r.Tenant || t.fingerprint != fingerprint {
+		return ErrRefused
+	}
+	// Re-evaluate the owner's authority at click time, not only when the
+	// token was issued. A revoked install or replaced revision fences a
+	// handoff immediately, even if its Temporal signal has not been handled.
+	o, ok := c.orders[r.OrderID]
+	in := c.installs[[2]string{r.Tenant, r.Principal}]
+	if !ok || o.Tenant != r.Tenant || o.Owner != r.Principal ||
+		in == nil || !in.active || !in.connLive || in.revision != t.installRevision {
+		return ErrRefused
+	}
+	member := false
+	for _, tenant := range c.members[r.Principal] {
+		if tenant == r.Tenant {
+			member = true
+			break
+		}
+	}
+	if !member {
 		return ErrRefused
 	}
 	t.used = true
