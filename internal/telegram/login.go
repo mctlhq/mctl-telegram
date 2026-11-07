@@ -61,6 +61,11 @@ type LoginConfig struct {
 	// metadata in one transaction, or logs the authorization out if it no
 	// longer wants it (#919, #913).
 	HoldSession func(data []byte)
+	// OnCodeSent, when non-nil, is called by Login each time Telegram accepts
+	// auth.sendCode, before the code is asked for, with the TL name of the
+	// delivery it chose (auth.sentCodeTypeApp, ...; see codeDelivery). It runs
+	// on the login goroutine and must not block. LoginQR ignores it.
+	OnCodeSent func(delivery string)
 }
 
 // loginClientOptions is the gotd configuration shared by the phone and QR
@@ -173,7 +178,8 @@ func Login(
 	// does not finish must log out, like a scanned QR code.
 	var codeSubmitted bool
 	authenticator := &interactiveAuthenticator{
-		phone: phone,
+		phone:      phone,
+		onCodeSent: cfg.OnCodeSent,
 		code: func(ctx context.Context) (string, error) {
 			code, err := askCode(ctx)
 			if err == nil {
@@ -454,9 +460,10 @@ func retryAuthRestartOnce[T any](ctx context.Context, fn func() (T, error)) (T, 
 }
 
 type interactiveAuthenticator struct {
-	phone    string
-	code     func(ctx context.Context) (string, error)
-	password func(ctx context.Context) (string, error)
+	phone      string
+	code       func(ctx context.Context) (string, error)
+	password   func(ctx context.Context) (string, error)
+	onCodeSent func(delivery string)
 }
 
 func (a *interactiveAuthenticator) Phone(ctx context.Context) (string, error) {
@@ -464,12 +471,16 @@ func (a *interactiveAuthenticator) Phone(ctx context.Context) (string, error) {
 }
 
 func (a *interactiveAuthenticator) Code(ctx context.Context, sent *tg.AuthSentCode) (string, error) {
-	// The code screen cannot tell where Telegram delivered the code (app,
-	// SMS, email, Fragment), so record it: "no code arrived" is otherwise
-	// undiagnosable. Never the code, hash or phone.
+	// Record where Telegram delivered the code (app, SMS, email, Fragment):
+	// "no code arrived" is otherwise undiagnosable. Never the code, hash or
+	// phone. onCodeSent runs before the code is asked for, so the code screen
+	// that the ask unblocks can already name the channel.
 	delivery, next, timeout := codeDelivery(sent)
 	slog.InfoContext(ctx, "telegram login: code sent",
 		"delivery", delivery, "next_delivery", next, "timeout_s", timeout)
+	if a.onCodeSent != nil {
+		a.onCodeSent(delivery)
+	}
 	return a.code(ctx)
 }
 
