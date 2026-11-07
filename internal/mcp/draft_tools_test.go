@@ -80,7 +80,10 @@ func TestSaveDraft_GateStillApplies(t *testing.T) {
 	}{
 		{"kill switch", func(s *Server, _ *auth.Identity) { s.AllowSend = false }, "ALLOW_SEND=false"},
 		{"scope", func(_ *Server, id *auth.Identity) { id.Scopes = []string{"telegram:messages:read"} }, "identity missing telegram:messages:send scope"},
-		{"reviewer", func(s *Server, id *auth.Identity) { id.TelegramID = reviewerTestTGID; s.DemoReviewerTGID = reviewerTestTGID }, reasonReviewerWriteRefused},
+		{"reviewer", func(s *Server, id *auth.Identity) {
+			id.TelegramID = reviewerTestTGID
+			s.DemoReviewerTGID = reviewerTestTGID
+		}, reasonReviewerWriteRefused},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
