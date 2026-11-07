@@ -112,3 +112,107 @@ func TestManagePage_NoHandleIsNotShownAsOne(t *testing.T) {
 		t.Error("display name shown as a @handle")
 	}
 }
+
+func seedGrant(t *testing.T, store *db.Store, tok string, uid int64, client string) {
+	t.Helper()
+	if err := store.SaveRefreshToken(context.Background(), tok, db.RefreshToken{
+		FamilyID: tok, UserID: uid, ClientID: client, ClientName: client,
+		TelegramID: 1, ExpiresAt: time.Now().Add(24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("save %s: %v", tok, err)
+	}
+}
+
+func postRevokeClient(t *testing.T, srv *ManageServer, id *auth.Identity, clientID string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/telegram/connect/manage/revoke-client",
+		strings.NewReader("client_id="+clientID))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req = req.WithContext(auth.With(req.Context(), id))
+	rec := httptest.NewRecorder()
+	srv.HandleRevokeClient(rec, req)
+	return rec
+}
+
+func revokedState(t *testing.T, store *db.Store, tok string) bool {
+	t.Helper()
+	rt, err := store.LookupRefreshToken(context.Background(), tok)
+	if err != nil {
+		t.Fatalf("lookup %s: %v", tok, err)
+	}
+	return rt.Revoked()
+}
+
+// TestHandleRevokeClient: the browser sign-in revokes one client's grants
+// for its own account only; another user's grant for the same client and
+// the account's other clients stay live.
+func TestHandleRevokeClient(t *testing.T) {
+	ctx := context.Background()
+	store := newManageTestStore(t)
+	alice, _ := store.EnsureUserByTelegramID(ctx, 4211, "alice", "Alice")
+	bob, _ := store.EnsureUserByTelegramID(ctx, 4212, "bob", "Bob")
+	seedGrant(t, store, "alice-claude", alice, "claude.ai")
+	seedGrant(t, store, "alice-gpt", alice, "chatgpt")
+	seedGrant(t, store, "bob-claude", bob, "claude.ai")
+	srv := NewManageServer(store, nil, "https://tg.test", "", "mctl_self_connect")
+	browser := &auth.Identity{UserID: alice, TelegramID: 4211, ClientID: "mctl_self_connect"}
+
+	rec := postRevokeClient(t, srv, browser, "claude.ai")
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "https://tg.test/telegram/connect/manage?revoked=1#clients" {
+		t.Fatalf("revoke = %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+	if !revokedState(t, store, "alice-claude") {
+		t.Error("alice's claude.ai grant still live")
+	}
+	if revokedState(t, store, "alice-gpt") {
+		t.Error("alice's other client was revoked too")
+	}
+	if revokedState(t, store, "bob-claude") {
+		t.Error("another user's grant for the same client was revoked")
+	}
+
+	// A client this account holds nothing for revokes nothing.
+	rec = postRevokeClient(t, srv, browser, "never-connected")
+	if rec.Header().Get("Location") != "https://tg.test/telegram/connect/manage?revoked=0#clients" {
+		t.Fatalf("revoke of an absent client = %q", rec.Header().Get("Location"))
+	}
+}
+
+// A credential that may not disconnect may not revoke either.
+func TestHandleRevokeClient_RefusedWithoutOwnerCredential(t *testing.T) {
+	ctx := context.Background()
+	store := newManageTestStore(t)
+	alice, _ := store.EnsureUserByTelegramID(ctx, 4213, "alice", "Alice")
+	seedGrant(t, store, "alice-claude-2", alice, "claude.ai")
+	srv := NewManageServer(store, nil, "https://tg.test", "", "mctl_self_connect")
+	rec := postRevokeClient(t, srv, &auth.Identity{UserID: alice, TelegramID: 4213, ClientID: "claude.ai"}, "claude.ai")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if revokedState(t, store, "alice-claude-2") {
+		t.Error("a refused revoke revoked the grant")
+	}
+	body := getManageBody(t, srv, &auth.Identity{UserID: alice, TelegramID: 4213, ClientID: "claude.ai"})
+	if strings.Contains(body, "manage/revoke-client") {
+		t.Error("revoke button offered to a credential the handler refuses")
+	}
+}
+
+// The page says plainly that a revoked client keeps its current access token,
+// quoting the configured lifetime.
+func TestManagePage_RevokeExplainsTheAccessTokenWindow(t *testing.T) {
+	ctx := context.Background()
+	store := newManageTestStore(t)
+	alice, _ := store.EnsureUserByTelegramID(ctx, 4214, "alice", "Alice")
+	seedGrant(t, store, "alice-claude-3", alice, "claude.ai")
+	srv := NewManageServer(store, nil, "https://tg.test", "", "mctl_self_connect").WithAccessTokenTTL(30 * time.Minute)
+	body := getManageBody(t, srv, &auth.Identity{UserID: alice, TelegramID: 4214, ClientID: "mctl_self_connect"})
+	for _, want := range []string{`action="/telegram/connect/manage/revoke-client"`, `value="claude.ai"`, `id="revoke-effect"`, "for up to 30 minutes"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("manage page lacks %q", want)
+		}
+	}
+	if got := NewManageServer(store, nil, "", "", "").accessTokenTTLText(); got != "1 hour" {
+		t.Errorf("default TTL text = %q, want 1 hour", got)
+	}
+}

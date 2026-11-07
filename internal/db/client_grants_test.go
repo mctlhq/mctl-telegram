@@ -79,3 +79,58 @@ func TestListActiveClientGrants_FailedReadIsAnError(t *testing.T) {
 		t.Fatalf("got %v with no error after a failed read", got)
 	}
 }
+
+// RevokeClientGrants ends one client's live families for one user only, and
+// a revoked family can no longer rotate.
+func TestRevokeClientGrants(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	later := time.Now().Add(24 * time.Hour)
+	alice, err := s.EnsureUserByTelegramID(ctx, 100, "alice", "Alice")
+	if err != nil {
+		t.Fatalf("ensure alice: %v", err)
+	}
+	bob, err := s.EnsureUserByTelegramID(ctx, 200, "bob", "Bob")
+	if err != nil {
+		t.Fatalf("ensure bob: %v", err)
+	}
+	for _, r := range []struct {
+		tok    string
+		uid    int64
+		client string
+	}{
+		{"a-claude-1", alice, "claude.ai"}, {"a-claude-2", alice, "claude.ai"},
+		{"a-gpt", alice, "chatgpt"}, {"b-claude", bob, "claude.ai"},
+	} {
+		if err := s.SaveRefreshToken(ctx, r.tok, RefreshToken{
+			FamilyID: r.tok, UserID: r.uid, ClientID: r.client, TelegramID: 100, ExpiresAt: later,
+		}); err != nil {
+			t.Fatalf("save %s: %v", r.tok, err)
+		}
+	}
+
+	n, err := s.RevokeClientGrants(ctx, alice, "claude.ai")
+	if err != nil || n != 2 {
+		t.Fatalf("revoke = %d, %v; want 2 rows", n, err)
+	}
+	for tok, wantRevoked := range map[string]bool{"a-claude-1": true, "a-claude-2": true, "a-gpt": false, "b-claude": false} {
+		rt, err := s.LookupRefreshToken(ctx, tok)
+		if err != nil {
+			t.Fatalf("lookup %s: %v", tok, err)
+		}
+		if rt.Revoked() != wantRevoked {
+			t.Errorf("%s revoked = %v, want %v", tok, rt.Revoked(), wantRevoked)
+		}
+		if wantRevoked && rt.RevokedReason != RefreshRevokedByOwner {
+			t.Errorf("%s reason = %q, want %q", tok, rt.RevokedReason, RefreshRevokedByOwner)
+		}
+	}
+	if err := s.RotateRefreshToken(ctx, "a-claude-1", "a-claude-1b", RefreshToken{
+		FamilyID: "a-claude-1", UserID: alice, ClientID: "claude.ai", TelegramID: 100, ExpiresAt: later,
+	}); err == nil {
+		t.Fatal("a revoked family rotated to a new token")
+	}
+	if n, err := s.RevokeClientGrants(ctx, alice, "claude.ai"); err != nil || n != 0 {
+		t.Fatalf("repeat revoke = %d, %v; want 0, nil", n, err)
+	}
+}
