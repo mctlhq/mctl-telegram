@@ -11,6 +11,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -42,6 +43,36 @@ type ManageServer struct {
 	// assistants is the install service behind the assistant section; see
 	// WithAssistants in manage_assistant.go.
 	assistants *assistantinstall.Service
+	// accessTokenTTL is OAUTH_ACCESS_TOKEN_TTL: how long a revoked client
+	// keeps working on the access token it already holds. See
+	// WithAccessTokenTTL.
+	accessTokenTTL time.Duration
+}
+
+// WithAccessTokenTTL sets the access-token lifetime the page quotes when it
+// explains what revoking a client does. Zero keeps the 1 hour default.
+func (s *ManageServer) WithAccessTokenTTL(d time.Duration) *ManageServer {
+	s.accessTokenTTL = d
+	return s
+}
+
+// accessTokenTTLText renders the access-token lifetime for the page, e.g.
+// "1 hour" or "30 minutes".
+func (s *ManageServer) accessTokenTTLText() string {
+	d := s.accessTokenTTL
+	if d <= 0 {
+		d = time.Hour
+	}
+	plural := func(n int64, unit string) string {
+		if n == 1 {
+			return "1 " + unit
+		}
+		return strconv.FormatInt(n, 10) + " " + unit + "s"
+	}
+	if d%time.Hour == 0 {
+		return plural(int64(d/time.Hour), "hour")
+	}
+	return plural(int64((d+time.Minute-1)/time.Minute), "minute")
 }
 
 // WithCanaryGuard sets the monitoring canary's accounts. Disconnecting one of
@@ -219,17 +250,20 @@ func (s *ManageServer) serveManage(w http.ResponseWriter, r *http.Request, id *a
 		clients = buildClientGrantRows(grants)
 	}
 	renderManage(w, status, manageTemplate, managePageData{
-		SignedIn:       signedIn,
-		Clients:        clients,
-		ClientsUnknown: clientsUnknown,
-		Connected:      info.Connected,
-		DisplayName:    info.DisplayName,
-		Username:       info.Username,
-		ConnectedAt:    info.ConnectedAt.Format("2006-01-02 15:04 UTC"),
-		SendEnabled:    info.SendEnabled,
-		CanDisconnect:  canDisconnectFromManagePage(id, s.connectClient),
-		CanManage:      canManageAccount(id),
-		IsCanary:       s.canary.Contains(id.TelegramID),
+		SignedIn:        signedIn,
+		CanRevokeClient: canDisconnectFromManagePage(id, s.connectClient),
+		AccessTokenTTL:  s.accessTokenTTLText(),
+		RevokeNotice:    revokeNotice(r.URL.Query().Get("revoked")),
+		Clients:         clients,
+		ClientsUnknown:  clientsUnknown,
+		Connected:       info.Connected,
+		DisplayName:     info.DisplayName,
+		Username:        info.Username,
+		ConnectedAt:     info.ConnectedAt.Format("2006-01-02 15:04 UTC"),
+		SendEnabled:     info.SendEnabled,
+		CanDisconnect:   canDisconnectFromManagePage(id, s.connectClient),
+		CanManage:       canManageAccount(id),
+		IsCanary:        s.canary.Contains(id.TelegramID),
 		// The browser sign-in token without account:manage may only turn
 		// notifications off; see HandleSetNotifications.
 		NotificationsReduceOnly: !canManageAccount(id) && isBrowserSignIn(id, s.connectClient),
@@ -359,11 +393,18 @@ type managePageData struct {
 	// list is never shown as "no clients".
 	Clients        []clientGrantRow
 	ClientsUnknown bool
-	Connected      bool
-	DisplayName    string
-	Username       string
-	ConnectedAt    string
-	SendEnabled    bool
+	// CanRevokeClient is HandleRevokeClient's own check.
+	CanRevokeClient bool
+	// AccessTokenTTL is the lifetime an access token already issued to a
+	// revoked client keeps, as text ("1 hour").
+	AccessTokenTTL string
+	// RevokeNotice is the outcome of a revoke-client submission, or "".
+	RevokeNotice string
+	Connected    bool
+	DisplayName  string
+	Username     string
+	ConnectedAt  string
+	SendEnabled  bool
 	// CanDisconnect and CanManage are the handlers' own checks
 	// (HandleDisconnect, and HandleToggleSend / HandleSetNotifications), so
 	// the page never offers a control the server would refuse.
@@ -398,6 +439,7 @@ type signedInView struct {
 
 // clientGrantRow is one AI client in the manage page's client list.
 type clientGrantRow struct {
+	ClientID string
 	Name     string
 	SignIns  int
 	LastUsed string
@@ -411,6 +453,7 @@ func buildClientGrantRows(grants []db.ClientGrant) []clientGrantRow {
 			name = g.ClientID
 		}
 		rows = append(rows, clientGrantRow{
+			ClientID: g.ClientID,
 			Name:     name,
 			SignIns:  g.Families,
 			LastUsed: g.LastIssuedAt.UTC().Format("2006-01-02 15:04 UTC"),
@@ -542,9 +585,13 @@ var manageTemplate = newManageTemplate("manage", manageHead+`    <h1>Manage your
     <p>No active Telegram session found.</p>
     {{end}}
     <h2 class="notif-heading" id="clients">AI clients with access</h2>
+    {{if .RevokeNotice}}<p class="meta" id="revoke-notice">{{.RevokeNotice}}</p>{{end}}
     {{if .ClientsUnknown}}<p class="meta" id="clients-unknown">We could not load the list of AI clients right now. This does not mean none have access.</p>
-    {{else if .Clients}}{{range .Clients}}<div class="field-row"><span class="field-label">{{.Name}}</span><span class="field-value">{{if gt .SignIns 1}}{{.SignIns}} sign-ins, {{end}}last used {{.LastUsed}}</span></div>
-    {{end}}{{else}}<p class="meta" id="clients-none">No AI client is signed in as this account.</p>{{end}}
+    {{else if .Clients}}{{$canRevoke := .CanRevokeClient}}{{range .Clients}}<div class="field-row"><span class="field-label">{{.Name}}</span><span class="field-value">{{if gt .SignIns 1}}{{.SignIns}} sign-ins, {{end}}last used {{.LastUsed}}{{if $canRevoke}}
+      <form method="POST" action="/telegram/connect/manage/revoke-client" style="display:inline"><input type="hidden" name="client_id" value="{{.ClientID}}"><button type="submit" class="btn-secondary">Revoke</button></form>{{end}}</span></div>
+    {{end}}<p class="meta" id="revoke-effect">Revoke stops that client from renewing its access as this account. An access token it already holds keeps working until it expires, for up to {{.AccessTokenTTL}}. To use it again, connect it again.</p>
+    {{if .IsCanary}}<p class="meta" id="revoke-canary"><strong>This is the monitoring canary account.</strong> Revoking its client makes the canary fail once its access token expires.</p>{{end}}
+    {{else}}<p class="meta" id="clients-none">No AI client is signed in as this account.</p>{{end}}
     <p class="meta" id="wrong-account"><strong>Is your AI client missing here, or does it show other chats?</strong> Then it signed in as a different Telegram account than this page. Ask it to run get_my_identity to see which. To switch it, remove the connector's authorization in the client, add it again, and open the sign-in link in a private browser window signed in to the account you want.</p>
     {{if .Bot}}
     <h2 class="notif-heading">Login bot</h2>
@@ -587,6 +634,18 @@ var manageCanaryConfirmTemplate = newManageTemplate("manageCanaryConfirm", manag
     <form method="POST" action="/telegram/connect/manage/disconnect" style="display:inline">
       <input type="hidden" name="confirm_canary" value="1">
       <button type="submit" class="btn-danger">Disconnect the canary account</button>
+    </form>
+    <p class="meta"><a href="/telegram/connect/manage">Cancel</a></p>
+`+manageFoot)
+
+// manageCanaryRevokeConfirmTemplate is the second confirmation before an AI
+// client's sign-ins are revoked on the canary account.
+var manageCanaryRevokeConfirmTemplate = newManageTemplate("manageCanaryRevokeConfirm", manageHead+`    <h1>Revoke a client on the monitoring canary?</h1>
+    <div class="error" id="canary-confirm">This Telegram account is the monitoring canary. If you revoke this AI client, the canary fails and alerts once its access token expires, until the client signs in again.</div>
+    <form method="POST" action="/telegram/connect/manage/revoke-client" style="display:inline">
+      <input type="hidden" name="client_id" value="{{.ClientID}}">
+      <input type="hidden" name="confirm_canary" value="1">
+      <button type="submit" class="btn-danger">Revoke the client on the canary account</button>
     </form>
     <p class="meta"><a href="/telegram/connect/manage">Cancel</a></p>
 `+manageFoot)
@@ -641,4 +700,67 @@ func renderManage(w http.ResponseWriter, status int, t *template.Template, data 
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_, _ = w.Write(buf.Bytes())
+}
+
+// msgManageCannotRevokeClient explains a refused revoke-client submission.
+const msgManageCannotRevokeClient = "This connection cannot revoke AI clients. Sign in to this page with Telegram in a browser to revoke one."
+
+// revokeNotice maps the ?revoked= value HandleRevokeClient redirects with to
+// the line shown above the client list. Anything else shows nothing.
+func revokeNotice(v string) string {
+	switch v {
+	case "1":
+		return "Access revoked. That client can no longer renew its access; the token it already holds still works until it expires."
+	case "0":
+		return "That client had no active access to revoke."
+	}
+	return ""
+}
+
+// HandleRevokeClient revokes the live refresh-token families one AI client
+// holds for the signed-in user (mctl-telegram#749). It is offered to the
+// same credentials as Disconnect: revoking only removes access. The access
+// token the client already holds is not revoked and expires on its own; the
+// page says so. The store call is scoped by user_id, so a client_id this
+// user holds no grant for revokes nothing.
+func (s *ManageServer) HandleRevokeClient(w http.ResponseWriter, r *http.Request) {
+	tool := "POST /telegram/connect/manage/revoke-client"
+	id := auth.From(r.Context())
+	if id == nil {
+		s.WriteUnauthorized(w, r, http.StatusUnauthorized, auth.MsgAuthRequired)
+		return
+	}
+	if !canDisconnectFromManagePage(id, s.connectClient) {
+		auditScopeDenied(r, s.store, id, tool)
+		renderManage(w, http.StatusForbidden, manageErrorTemplate, manageErrorData{Message: msgManageCannotRevokeClient})
+		return
+	}
+	clientID := strings.TrimSpace(r.PostFormValue("client_id"))
+	if clientID == "" {
+		renderManage(w, http.StatusBadRequest, manageErrorTemplate, manageErrorData{Message: "No AI client was chosen to revoke."})
+		return
+	}
+	if s.canary.Contains(id.TelegramID) {
+		// As with Disconnect (#961): the first submission only asks again,
+		// and the confirmed one is audited as an override.
+		if r.PostFormValue("confirm_canary") != "1" {
+			renderManage(w, http.StatusOK, manageCanaryRevokeConfirmTemplate, struct{ ClientID string }{clientID})
+			return
+		}
+		tool += canaryguard.OverrideSuffix
+	}
+	n, err := s.store.RevokeClientGrants(r.Context(), id.UserID, clientID)
+	// Audited on both outcomes, like Disconnect.
+	s.auditManage(r, id, tool, err)
+	if err != nil {
+		slog.Warn("manage: revoke client", "err", err)
+		renderManageError(w, "Revoking the client failed. Please try again.")
+		return
+	}
+	slog.Info("manage: client revoked", "user_id", id.UserID, "client_id", clientID, "rows", n)
+	flag := "1"
+	if n == 0 {
+		flag = "0"
+	}
+	http.Redirect(w, r, s.issuer+"/telegram/connect/manage?revoked="+flag+"#clients", http.StatusFound)
 }

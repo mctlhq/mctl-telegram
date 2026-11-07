@@ -468,3 +468,57 @@ func (s *Store) ListActiveClientGrants(ctx context.Context, userID int64, now ti
 	})
 	return out, nil
 }
+
+// RefreshRevokedByOwner is revoked_reason for families the account owner
+// revoked for one client from the manage page.
+const RefreshRevokedByOwner = "owner_revoke"
+
+// RevokeClientGrants revokes every live refresh token userID holds for
+// clientID, so that client can no longer refresh as this user
+// (mctl-telegram#749). Access tokens already issued are not revoked; they
+// stay valid until they expire. It returns the number of rows revoked: 0
+// means the client held no live grant for this user, which is not an error.
+//
+// The users row is locked first, in the same order as RotateRefreshToken and
+// HardDeleteAccount, so a refresh rotating concurrently either finishes
+// before this UPDATE (whose statement then sees the successor) or fails on
+// the already-revoked parent; it cannot leave a live successor behind.
+func (s *Store) RevokeClientGrants(ctx context.Context, userID int64, clientID string) (int64, error) {
+	if userID <= 0 || clientID == "" {
+		return 0, errors.New("revoke client grants: user id and client id required")
+	}
+	pg, err := s.postgresDialect(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("revoke client grants: %w", err)
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("revoke client grants: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if pg {
+		if _, err := tx.ExecContext(ctx, `SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, userID); err != nil {
+			return 0, fmt.Errorf("revoke client grants: lock user: %w", err)
+		}
+	}
+	// Only live grants, the same set ListActiveClientGrants shows: an
+	// expired row is already unusable, and counting it would report a
+	// revocation that changed nothing.
+	now := time.Now().UTC()
+	res, err := tx.ExecContext(ctx,
+		`UPDATE oauth_refresh_tokens SET revoked_at = $1, revoked_reason = $2
+		 WHERE user_id = $3 AND client_id = $4 AND revoked_at IS NULL AND expires_at > $5`,
+		now, RefreshRevokedByOwner, userID, clientID, now,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("revoke client grants: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("revoke client grants: rows: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("revoke client grants: commit: %w", err)
+	}
+	return n, nil
+}
