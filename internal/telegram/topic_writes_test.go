@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/gotd/td/tg"
@@ -278,5 +279,15 @@ func TestSaveDraftWith_TopicDraftComesFromAllDrafts(t *testing.T) {
 		if _, err := saveDraftWith(context.Background(), f, forum, "@carol_team", "notes", false, 12); err == nil || f.saved != nil {
 			t.Errorf("%s: wrote with an unread topic draft (err=%v)", name, err)
 		}
+	}
+}
+
+// The diagnostic shape must never carry the draft's text (mctl-telegram#1175).
+func TestDraftShape_HasNoText(t *testing.T) {
+	d := &tg.DraftMessage{Message: "Bob's unsent secret"}
+	d.SetReplyTo(&tg.InputReplyToMessage{ReplyToMsgID: 12})
+	got := draftShape(d)
+	if strings.Contains(got, "secret") || !strings.Contains(got, "reply_to=12") || !strings.Contains(got, "units=19") {
+		t.Fatalf("draftShape = %q", got)
 	}
 }

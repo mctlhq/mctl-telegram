@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"unicode/utf16"
 
 	gotdtelegram "github.com/gotd/td/telegram"
@@ -268,6 +270,7 @@ func saveDraftWith(ctx context.Context, api draftInvoker, inputPeer tg.InputPeer
 				return DraftResult{}, err
 			}
 			haveDraft = true
+			logTopicDraftShape(all, inputPeer, topicID, existing)
 		}
 	}
 	if !haveDraft {
@@ -298,4 +301,68 @@ func saveDraftWith(ctx context.Context, api draftInvoker, inputPeer tg.InputPeer
 		return DraftResult{}, fmt.Errorf("MessagesSaveDraft: %w", err)
 	}
 	return out, nil
+}
+
+// logTopicDraftShape logs where Telegram keeps a forum topic's draft, without
+// any draft text: the getAllDrafts entries for the chat (top_msg_id, saved
+// peer, reply header), the chat's own draft included as the entry without
+// top_msg_id. A live check
+// found the getAllDrafts read empty while the topic held a draft
+// (mctl-telegram#1175); this records the answer's shape so the fix rests on
+// what Telegram sends. Diagnostic only: it never changes the result.
+func logTopicDraftShape(all tg.UpdatesClass, peer tg.InputPeerClass, topicID int, found existingDraft) {
+	ch, ok := peer.(*tg.InputPeerChannel)
+	if !ok {
+		return
+	}
+	var updates []tg.UpdateClass
+	switch v := all.(type) {
+	case *tg.Updates:
+		updates = v.Updates
+	case *tg.UpdatesCombined:
+		updates = v.Updates
+	case *tg.UpdateShort:
+		updates = []tg.UpdateClass{v.Update}
+	}
+	drafts, entries := 0, []string{}
+	for _, uc := range updates {
+		d, ok := uc.(*tg.UpdateDraftMessage)
+		if !ok {
+			continue
+		}
+		drafts++
+		if pc, ok := d.Peer.(*tg.PeerChannel); !ok || pc.ChannelID != ch.ChannelID {
+			continue
+		}
+		top, hasTop := d.GetTopMsgID()
+		_, saved := d.GetSavedPeerID()
+		entries = append(entries, fmt.Sprintf("top=%d/%t saved=%t %s", top, hasTop, saved, draftShape(d.Draft)))
+	}
+	slog.Info("topic draft read shape",
+		"topic_id", topicID,
+		"answer", fmt.Sprintf("%T", all),
+		"updates", len(updates),
+		"draft_updates", drafts,
+		"chat_entries", strings.Join(entries, "; "),
+		"found_units", len(utf16.Encode([]rune(found.Text))),
+	)
+}
+
+// draftShape describes a draft without its text: its type, text length and
+// reply header.
+func draftShape(dc tg.DraftMessageClass) string {
+	dm, ok := dc.(*tg.DraftMessage)
+	if !ok {
+		return fmt.Sprintf("%T", dc)
+	}
+	out := fmt.Sprintf("draft units=%d", len(utf16.Encode([]rune(dm.Message))))
+	if rt, ok := dm.GetReplyTo(); ok {
+		if m, ok := rt.(*tg.InputReplyToMessage); ok {
+			top, hasTop := m.GetTopMsgID()
+			out += fmt.Sprintf(" reply_to=%d top=%d/%t", m.ReplyToMsgID, top, hasTop)
+		} else {
+			out += fmt.Sprintf(" reply_to=%T", rt)
+		}
+	}
+	return out
 }
