@@ -638,6 +638,18 @@ var manageCanaryConfirmTemplate = newManageTemplate("manageCanaryConfirm", manag
     <p class="meta"><a href="/telegram/connect/manage">Cancel</a></p>
 `+manageFoot)
 
+// manageCanaryRevokeConfirmTemplate is the second confirmation before an AI
+// client's sign-ins are revoked on the canary account.
+var manageCanaryRevokeConfirmTemplate = newManageTemplate("manageCanaryRevokeConfirm", manageHead+`    <h1>Revoke a client on the monitoring canary?</h1>
+    <div class="error" id="canary-confirm">This Telegram account is the monitoring canary. If you revoke this AI client, the canary fails and alerts once its access token expires, until the client signs in again.</div>
+    <form method="POST" action="/telegram/connect/manage/revoke-client" style="display:inline">
+      <input type="hidden" name="client_id" value="{{.ClientID}}">
+      <input type="hidden" name="confirm_canary" value="1">
+      <button type="submit" class="btn-danger">Revoke the client on the canary account</button>
+    </form>
+    <p class="meta"><a href="/telegram/connect/manage">Cancel</a></p>
+`+manageFoot)
+
 var manageErrorTemplate = newManageTemplate("manageError", manageHead+`    <h1>Error</h1>
     <div class="error">{{.Message}}</div>
     <p class="meta"><a href="/telegram/connect/manage">Back</a></p>
@@ -712,7 +724,7 @@ func revokeNotice(v string) string {
 // page says so. The store call is scoped by user_id, so a client_id this
 // user holds no grant for revokes nothing.
 func (s *ManageServer) HandleRevokeClient(w http.ResponseWriter, r *http.Request) {
-	const tool = "POST /telegram/connect/manage/revoke-client"
+	tool := "POST /telegram/connect/manage/revoke-client"
 	id := auth.From(r.Context())
 	if id == nil {
 		s.WriteUnauthorized(w, r, http.StatusUnauthorized, auth.MsgAuthRequired)
@@ -727,6 +739,15 @@ func (s *ManageServer) HandleRevokeClient(w http.ResponseWriter, r *http.Request
 	if clientID == "" {
 		renderManage(w, http.StatusBadRequest, manageErrorTemplate, manageErrorData{Message: "No AI client was chosen to revoke."})
 		return
+	}
+	if s.canary.Contains(id.TelegramID) {
+		// As with Disconnect (#961): the first submission only asks again,
+		// and the confirmed one is audited as an override.
+		if r.PostFormValue("confirm_canary") != "1" {
+			renderManage(w, http.StatusOK, manageCanaryRevokeConfirmTemplate, struct{ ClientID string }{clientID})
+			return
+		}
+		tool += canaryguard.OverrideSuffix
 	}
 	n, err := s.store.RevokeClientGrants(r.Context(), id.UserID, clientID)
 	// Audited on both outcomes, like Disconnect.

@@ -134,3 +134,22 @@ func TestRevokeClientGrants(t *testing.T) {
 		t.Fatalf("repeat revoke = %d, %v; want 0, nil", n, err)
 	}
 }
+
+// An expired grant is not listed on the page, so revoking it must not count
+// as a revocation.
+func TestRevokeClientGrants_IgnoresExpiredGrants(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	carol, err := s.EnsureUserByTelegramID(ctx, 300, "carol", "Carol")
+	if err != nil {
+		t.Fatalf("ensure carol: %v", err)
+	}
+	if err := s.SaveRefreshToken(ctx, "c-old", RefreshToken{
+		FamilyID: "c-old", UserID: carol, ClientID: "claude.ai", TelegramID: 300, ExpiresAt: time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if n, err := s.RevokeClientGrants(ctx, carol, "claude.ai"); err != nil || n != 0 {
+		t.Fatalf("revoke of an expired grant = %d, %v; want 0, nil", n, err)
+	}
+}

@@ -501,10 +501,14 @@ func (s *Store) RevokeClientGrants(ctx context.Context, userID int64, clientID s
 			return 0, fmt.Errorf("revoke client grants: lock user: %w", err)
 		}
 	}
+	// Only live grants, the same set ListActiveClientGrants shows: an
+	// expired row is already unusable, and counting it would report a
+	// revocation that changed nothing.
+	now := time.Now().UTC()
 	res, err := tx.ExecContext(ctx,
 		`UPDATE oauth_refresh_tokens SET revoked_at = $1, revoked_reason = $2
-		 WHERE user_id = $3 AND client_id = $4 AND revoked_at IS NULL`,
-		time.Now().UTC(), RefreshRevokedByOwner, userID, clientID,
+		 WHERE user_id = $3 AND client_id = $4 AND revoked_at IS NULL AND expires_at > $5`,
+		now, RefreshRevokedByOwner, userID, clientID, now,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("revoke client grants: %w", err)

@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/canaryguard"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
@@ -230,5 +232,54 @@ func TestManagePage_RevokeExplainsTheAccessTokenWindow(t *testing.T) {
 	}
 	if got := NewManageServer(store, nil, "", "", "").accessTokenTTLText(); got != "1 hour" {
 		t.Errorf("default TTL text = %q, want 1 hour", got)
+	}
+}
+
+func latestManageAuditTool(t *testing.T, store *db.Store, uid int64) string {
+	t.Helper()
+	var tool string
+	err := store.DB.QueryRowContext(context.Background(),
+		`SELECT tool_name FROM audit_logs WHERE user_id = $1 ORDER BY id DESC LIMIT 1`, uid).Scan(&tool)
+	if err != nil && err != sql.ErrNoRows {
+		t.Fatalf("latest audit: %v", err)
+	}
+	return tool
+}
+
+// TestHandleRevokeClient_CanaryAsksFirst: on the monitoring canary, the first
+// Revoke only asks again; the confirmed one revokes and is audited as an
+// override, like Disconnect (#961).
+func TestHandleRevokeClient_CanaryAsksFirst(t *testing.T) {
+	ctx := context.Background()
+	store := newManageTestStore(t)
+	dana, _ := store.EnsureUserByTelegramID(ctx, 4215, "dana", "Dana")
+	seedGrant(t, store, "dana-claude", dana, "claude.ai")
+	srv := NewManageServer(store, nil, "https://tg.test", "", "mctl_self_connect").
+		WithCanaryGuard(canaryguard.Set{4215: {}})
+	browser := &auth.Identity{UserID: dana, TelegramID: 4215, ClientID: "mctl_self_connect"}
+
+	rec := postRevokeClient(t, srv, browser, "claude.ai")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `name="confirm_canary" value="1"`) ||
+		!strings.Contains(rec.Body.String(), `name="client_id" value="claude.ai"`) {
+		t.Fatalf("first press: status %d, want the confirmation form; body=%s", rec.Code, rec.Body.String())
+	}
+	if revokedState(t, store, "dana-claude") {
+		t.Fatal("the first press revoked the canary's client")
+	}
+	if tool := latestManageAuditTool(t, store, dana); strings.HasPrefix(tool, "POST /telegram/connect/manage/revoke-client") {
+		t.Fatalf("the first press was audited as a revoke: %q", tool)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/telegram/connect/manage/revoke-client",
+		strings.NewReader("client_id=claude.ai&confirm_canary=1"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req = req.WithContext(auth.With(req.Context(), browser))
+	rec = httptest.NewRecorder()
+	srv.HandleRevokeClient(rec, req)
+	if rec.Code != http.StatusFound || !revokedState(t, store, "dana-claude") {
+		t.Fatalf("confirmed press: status %d, revoked=%v", rec.Code, revokedState(t, store, "dana-claude"))
+	}
+	if tool := latestManageAuditTool(t, store, dana); tool != "POST /telegram/connect/manage/revoke-client"+canaryguard.OverrideSuffix {
+		t.Fatalf("audit tool = %q, want the override recorded", tool)
 	}
 }
