@@ -40,6 +40,9 @@ func PinMessage(ctx context.Context, c *telegram.Client, peerSpec string, messag
 		if hint.ID != peerSpec && !matchUsername(hint.Username, peerSpec) {
 			continue
 		}
+		if isHidden(ctx, hint.ID) {
+			return ErrPeerHidden
+		}
 		input := inputPeerFromPeer(d.Peer, users, chats)
 		if input == nil {
 			return fmt.Errorf("cannot build InputPeer for %q", peerSpec)

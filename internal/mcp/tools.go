@@ -2551,6 +2551,10 @@ func borrowErrResult(ctx context.Context, tool string, err error) *mcplib.CallTo
 		hintReason(ctx, ReasonTelegramError)
 		return mcplib.NewToolResultError("server at session capacity — try again later")
 	}
+	if errors.Is(err, telegram.ErrPeerHidden) {
+		hintReason(ctx, ReasonRefused)
+		return mcplib.NewToolResultError(hiddenRefusalText(tool))
+	}
 	if errors.Is(err, telegram.ErrBroadcastContent) {
 		// This server's own policy (BROADCAST_CONTENT_ENABLED off, issue
 		// #851), not a Telegram reply.

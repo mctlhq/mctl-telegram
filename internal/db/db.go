@@ -1099,6 +1099,15 @@ func sqliteSchema() []string {
 			id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
 			enabled_at DATETIME NOT NULL
 		)`,
+		// Dialogs hidden from every connected client (mctl-telegram#1152);
+		// see hidden_dialogs.go.
+		`CREATE TABLE IF NOT EXISTS hidden_dialogs (
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			peer TEXT NOT NULL,
+			title TEXT NOT NULL DEFAULT '',
+			hidden_at DATETIME NOT NULL,
+			PRIMARY KEY (user_id, peer)
+		)`,
 	}
 }
 
@@ -1411,6 +1420,15 @@ func pgSchema() []string {
 		`CREATE TABLE IF NOT EXISTS acquisition_capture_epoch (
 			id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
 			enabled_at TIMESTAMPTZ NOT NULL
+		)`,
+		// Dialogs hidden from every connected client (mctl-telegram#1152) --
+		// see the sqliteSchema comment on this table.
+		`CREATE TABLE IF NOT EXISTS hidden_dialogs (
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			peer TEXT NOT NULL,
+			title TEXT NOT NULL DEFAULT '',
+			hidden_at TIMESTAMPTZ NOT NULL,
+			PRIMARY KEY (user_id, peer)
 		)`,
 	}
 }

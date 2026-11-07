@@ -1339,6 +1339,10 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	if _, err := tx.ExecContext(ctx, `DELETE FROM user_acquisition WHERE user_id = $1`, userID); err != nil {
 		return 0, fmt.Errorf("delete account: purge acquisition: %w", err)
 	}
+	// Hidden dialogs (#1152) name the account's chats; they go with it.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM hidden_dialogs WHERE user_id = $1`, userID); err != nil {
+		return 0, fmt.Errorf("delete account: purge hidden dialogs: %w", err)
+	}
 
 	// Clear the client identity fields (issue-438) tied to the deleted
 	// account, for the same reason as the consent/reachability purge above:

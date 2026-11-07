@@ -330,6 +330,20 @@ func (l *Listener) onMessage(ctx context.Context, acct *account, ents tg.Entitie
 		!l.senderAllowed(acct, ex.Event.SenderTGID) {
 		return nil
 	}
+	// A chat the owner hid on the manage page (#1152) is out of every
+	// client's reach, the assistant's included. Saved Messages commands are
+	// the owner's own channel to the runtime and stay readable.
+	if ex.Event.Kind != db.EventKindSavedCommand {
+		hidden, err := l.Store.IsDialogHidden(ctx, acct.userID, fmt.Sprintf("user:%d", ex.Event.ChatTGID))
+		if err != nil {
+			// Could not tell; retry the update rather than read a chat
+			// that may be hidden.
+			return fmt.Errorf("hidden chat check: %w", err)
+		}
+		if hidden {
+			return nil
+		}
+	}
 	if err := l.persistExtracted(ctx, acct, ex); err != nil {
 		slog.Warn("agent listener persist failed", "user_id", acct.userID, "kind", ex.Event.Kind, "err", err)
 		return err

@@ -233,6 +233,14 @@ func getUnreadMessagesWith(ctx context.Context, api *tg.Client, peerSpec string,
 		if peerSpec != "" && hint.ID != peerSpec && !matchUsername(hint.Username, peerSpec) {
 			continue
 		}
+		if isHidden(ctx, hint.ID) {
+			// Named explicitly: refuse. Part of the all-chats scan: skip,
+			// so the limit is filled from visible chats.
+			if peerSpec != "" {
+				return nil, nil, nil, ErrPeerHidden
+			}
+			continue
+		}
 		broadcast := isBroadcastChannel(d.Peer, chats)
 		refused := broadcast && !bool(bc)
 		if peerSpec != "" {
@@ -726,6 +734,11 @@ func getMessagesFromDialogs(ctx context.Context, api *tg.Client, dlgRes tg.Messa
 		}
 		if hint.ID != peerSpec && !matchUsername(hint.Username, peerSpec) {
 			continue
+		}
+		// Matched by username, so ResolvePeer never sees it: refuse here,
+		// before any history, media or sponsored-view RPC (#1152).
+		if isHidden(ctx, hint.ID) {
+			return nil, nil, 0, nil, true, ErrPeerHidden
 		}
 		broadcast := isBroadcastChannel(d.Peer, chats)
 		if broadcast && !bool(bc) {

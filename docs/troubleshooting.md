@@ -39,6 +39,7 @@ keeps in sync as traffic shifts.
 8. [`RPC_CALL_FAIL`](#8-rpc_call_fail)
 9. [Supported OAuth clients and redirect rules](#9-supported-oauth-clients-and-redirect-rules)
 10. [Frozen account (`FROZEN_METHOD_INVALID` / `FROZEN_PARTICIPANT_MISSING`)](#10-frozen-account)
+11. [`this chat is hidden from connected clients`](#11-hidden-chat)
 
 ---
 
@@ -496,3 +497,39 @@ app (it shows the freeze and an appeal link), by messaging
 [@SpamBot](https://t.me/spambot), or by writing to `recover@telegram.org`. An
 owner who wants their Telegram traffic to leave from their own machine and IP
 can move the account to [Local Bridge](local-bridge.md) mode.
+
+---
+
+## 11. Hidden chat
+
+### Symptom
+
+A tool call fails with `<tool> blocked: this chat is hidden from connected
+clients`, or a chat the user expects is missing from `list_dialogs`,
+`get_unread_messages` or `search_messages`.
+
+On a Local Bridge account a call that names a chat by `@username` can also
+fail with `must name the chat by id` while any chat is hidden.
+
+### Cause
+
+The account owner hid the chat on the manage page
+(`/telegram/connect/manage`, section "Hidden chats"). A hidden chat is out of
+reach of every AI client and assistant connected to the account: it is left
+out of listings and search, and reading, sending, forwarding, pinning or
+downloading media from it is refused. New chats are visible until hidden.
+
+A Local Bridge daemon resolves usernames on the user's machine, where the
+server cannot check them, so while anything is hidden such an account must
+name chats by the id `list_dialogs` returns.
+
+### What the client or agent should do
+
+Tell the user the chat is hidden and that only they can show it again. Do not
+retry, and do not look for the chat under another name.
+
+### What the operator can do
+
+Nothing: the list belongs to the account owner. Only the browser Telegram
+sign-in on the manage page can see or change it, so an AI client holding
+`account:manage` cannot show a chat it was hidden from.

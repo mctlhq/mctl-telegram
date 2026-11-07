@@ -341,6 +341,7 @@ func ListDialogsInFolder(ctx context.Context, c *telegram.Client, folderID, limi
 		scan.Scanned += archScan.Scanned
 		scan.Complete = scan.Complete && archScan.Complete
 	}
+	out = dropHiddenDialogs(ctx, out)
 	if len(out) > limit {
 		out = out[:limit]
 	}
