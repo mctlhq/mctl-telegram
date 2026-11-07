@@ -143,6 +143,9 @@ func TestT10_DuplicateFire(t *testing.T) {
 func TestHandoffTokenRules(t *testing.T) {
 	now := time.Now()
 	cp := New(func() time.Time { return now })
+	cp.AddMember("p", "t")
+	cp.Install("t", "p", "inst", "conn")
+	cp.RegisterOrder(Order{ID: "o", Tenant: "t", Owner: "p"})
 	req := Request{Principal: "p", Tenant: "t", OrderID: "o"}
 	cp.IssueHandoff("o", "p", "fp", 15*time.Minute)
 	tok := cp.Outbox[0]
@@ -162,5 +165,28 @@ func TestHandoffTokenRules(t *testing.T) {
 	now = now.Add(2 * time.Minute)
 	if err := cp.OpenHandoff(cp.Outbox[1], req, "fp"); err == nil {
 		t.Fatal("expired")
+	}
+}
+
+// A previously valid handoff is immediately unusable after the owner changes
+// the assistant install, loses membership, or revokes the connection. Temporal
+// signals may still be queued when the user clicks.
+func TestHandoffImmediateAuthorizationFence(t *testing.T) {
+	cp := fixture()
+	req := Request{Principal: "principal-alice", Tenant: "tenant-alpha", OrderID: "ord-alpha"}
+	cp.IssueHandoff(req.OrderID, req.Principal, "fp", 15*time.Minute)
+	revisionToken := cp.Outbox[len(cp.Outbox)-1]
+	cp.BumpRevision(req.Tenant, req.Principal)
+	if err := cp.OpenHandoff(revisionToken, req, "fp"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("stale revision handoff accepted: %v", err)
+	}
+	cp.IssueHandoff(req.OrderID, req.Principal, "fp", 15*time.Minute)
+	revokedToken := cp.Outbox[len(cp.Outbox)-1]
+	cp.Deactivate(req.Tenant, req.Principal)
+	if err := cp.OpenHandoff(revokedToken, req, "fp"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("revoked install handoff accepted: %v", err)
+	}
+	if err := cp.OpenHandoff(revokedToken, Request{Principal: req.Principal, Tenant: "tenant-beta", OrderID: req.OrderID}, "fp"); !errors.Is(err, ErrRefused) {
+		t.Fatalf("tenant mismatch accepted: %v", err)
 	}
 }
