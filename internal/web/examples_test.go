@@ -148,11 +148,13 @@ func TestCuratedExamples_ValidateAgainstShippedDescriptors(t *testing.T) {
 
 func TestValidateExamples_UnknownToolFails(t *testing.T) {
 	tools := shippedTools(t)
+	// Labelled Sends with a confirmation prompt, so the consent checks alone
+	// would accept it: only the unknown-tool check can reject this example.
 	cats := []exampleCategory{{Slug: "x", Name: "X", Examples: []example{
-		{ID: "a", Title: "A", Prompt: "p", Tools: []string{"get_messages", "read_minds"}},
+		{ID: "a", Title: "A", Prompt: "do it, not until I tell you to", Tools: []string{"read_minds"}, Sends: true},
 	}}}
 	err := validateExamples(cats, tools)
-	if err == nil || !strings.Contains(err.Error(), "read_minds") {
+	if err == nil || !strings.Contains(err.Error(), "read_minds") || !strings.Contains(err.Error(), "not in the shipped tool descriptors") {
 		t.Fatalf("an unknown tool must fail validation naming it, got %v", err)
 	}
 }
