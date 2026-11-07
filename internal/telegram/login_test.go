@@ -154,6 +154,32 @@ func TestInteractiveAuthenticator_ReportsDeliveryBeforeAsking(t *testing.T) {
 	}
 }
 
+// The connected report must come first, before the auth-status RPC and the
+// code request, so a handler that times out on a hanging RPC can tell it
+// from a dial hang (mctl-telegram#1162).
+func TestAuthOnConnection_ReportsConnectedBeforeAnyRPC(t *testing.T) {
+	var order []string
+	flowErr := errors.New("flow failed")
+	err := authOnConnection(context.Background(),
+		func() { order = append(order, "connected") },
+		func(context.Context) error {
+			order = append(order, "status")
+			return errors.New("AUTH_KEY_UNREGISTERED")
+		},
+		func(context.Context) error { order = append(order, "flow"); return flowErr },
+	)
+	if !errors.Is(err, flowErr) {
+		t.Errorf("err = %v, want the flow's error (a status error only means a fresh session)", err)
+	}
+	if want := []string{"connected", "status", "flow"}; fmt.Sprint(order) != fmt.Sprint(want) {
+		t.Errorf("order = %v, want %v", order, want)
+	}
+	if err := authOnConnection(context.Background(), nil,
+		func(context.Context) error { return nil }, func(context.Context) error { return nil }); err != nil {
+		t.Errorf("nil hook: %v", err)
+	}
+}
+
 func runScriptedPhoneFlow(f *fakeFlowClient, codes, passwords *scriptedPrompt) error {
 	a := &interactiveAuthenticator{phone: "+14155551234", code: codes.ask}
 	if passwords != nil {
