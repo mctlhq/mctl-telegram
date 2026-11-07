@@ -1,0 +1,31 @@
+schema: mctl-telegram.product-update/v1
+id: unread-in-folder
+kind: changed_behavior
+title: Unread messages from one chat folder
+summary: >-
+  get_unread_messages takes an optional folder id from list_folders and
+  then reads only the chats in that folder, in the same order as an
+  unscoped call. The folder is checked over the same window list_dialogs
+  uses (the 200 most recent chats and 100 archived ones), and folder_scan
+  says whether that covered every chat. It cannot be combined with peer.
+  Connections under a core tool profile (core-readonly, core-reply) do
+  not get folder: those profiles read one named chat at a time.
+locale: en
+delivery: docs_only
+high_value: false
+tools: [get_unread_messages]
+evidence:
+  from: 0.130.0
+  changes:
+    - {tool: get_unread_messages, change: schema}
+    - {tool: get_unread_messages, change: schema, profile: core-readonly}
+    - {tool: get_unread_messages, change: schema, profile: core-reply}
+  links:
+    - https://github.com/mctlhq/mctl-telegram/issues/1155
+status: approved
+provenance:
+  author: mashkovd
+  assisted_by: claude-opus-5-5
+  reviewed_by: mashkovd
+created_at: "2026-11-07"
+reviewed_at: "2026-11-07"

@@ -74,6 +74,14 @@ func withPeer(r Rule) Rule {
 	return r
 }
 
+// noFolder keeps a message read to the one named chat: folder (#1155)
+// reads every chat in a folder, which is the cross-chat read the core
+// profiles exist to refuse, and peer is required there anyway.
+func noFolder(r Rule) Rule {
+	r.Forbidden = append(r.Forbidden, "folder")
+	return r
+}
+
 func noMedia(r Rule) Rule {
 	r.Forbidden = append([]string{"fetch_media"}, r.Forbidden...)
 	return r
@@ -85,7 +93,7 @@ func coreReadonlyTools() map[string]Rule {
 		"list_folders":        {},
 		"list_topics":         {},
 		"get_messages":        noMedia(messagePage),
-		"get_unread_messages": withPeer(noMedia(messagePage)),
+		"get_unread_messages": withPeer(noFolder(noMedia(messagePage))),
 		"search_messages":     withPeer(messagePage),
 		"get_my_identity":     {},
 		"get_my_send_status":  {},

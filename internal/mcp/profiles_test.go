@@ -242,6 +242,7 @@ func TestToolsCall_ProfileArgumentRefusalIsAudited(t *testing.T) {
 		{"get_messages", map[string]any{"peer": "@x", "fetch_media": true}, "fetch_media is not available"},
 		{"get_messages", map[string]any{"peer": "@x", "limit": 51}, "exceeds the maximum of 50"},
 		{"get_unread_messages", map[string]any{}, "peer is required"},
+		{"get_unread_messages", map[string]any{"peer": "@x", "folder": 3}, "folder is not available"},
 		{"search_messages", map[string]any{"query": "q"}, "peer is required"},
 		{"search_messages", map[string]any{"query": "q", "peer": "@x", "limit": "100"}, "limit must be a number"},
 	}
