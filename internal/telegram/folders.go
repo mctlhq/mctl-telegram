@@ -123,6 +123,11 @@ type folderSpec struct {
 	excludeMuted     bool
 	excludeRead      bool
 	excludeArchived  bool
+	// defaultMuted holds the account-wide notification defaults by peer
+	// kind ("users", "chats", "broadcasts"). A chat without its own
+	// mute_until follows the default for its kind, as in the Telegram apps.
+	// Read only when the folder excludes muted chats.
+	defaultMuted map[string]bool
 }
 
 func specFromFilter(fc tg.DialogFilterClass) (folderSpec, bool) {
@@ -193,18 +198,43 @@ func (f folderSpec) contains(d *tg.Dialog, users map[int64]*tg.User, chats map[i
 	if !f.matchesRule(d.Peer, users, chats) {
 		return false
 	}
-	if f.excludeMuted {
-		if until, ok := d.NotifySettings.GetMuteUntil(); ok && int64(until) > now.Unix() {
-			return false
-		}
+	// Telegram Desktop's ChatFilter::contains keeps a muted chat with an
+	// unread mention while it is in the main list, and a read chat that
+	// still has an unread mention.
+	mention := d.UnreadMentionsCount > 0
+	if f.excludeMuted && f.muted(d, chats, now) && !(mention && !archived) {
+		return false
 	}
-	if f.excludeRead && d.UnreadCount == 0 && !d.UnreadMark {
+	if f.excludeRead && d.UnreadCount == 0 && !d.UnreadMark && !mention {
 		return false
 	}
 	if f.excludeArchived && archived {
 		return false
 	}
 	return true
+}
+
+func (f folderSpec) muted(d *tg.Dialog, chats map[int64]tg.ChatClass, now time.Time) bool {
+	if until, ok := d.NotifySettings.GetMuteUntil(); ok {
+		return int64(until) > now.Unix()
+	}
+	return f.defaultMuted[notifyKind(d.Peer, chats)]
+}
+
+// notifyKind names the account-wide notification default a peer follows.
+func notifyKind(p tg.PeerClass, chats map[int64]tg.ChatClass) string {
+	switch v := p.(type) {
+	case *tg.PeerUser:
+		return "users"
+	case *tg.PeerChat:
+		return "chats"
+	case *tg.PeerChannel:
+		if ch, ok := chats[v.ChannelID].(*tg.Channel); ok && ch.Broadcast {
+			return "broadcasts"
+		}
+		return "chats"
+	}
+	return ""
 }
 
 func (f folderSpec) matchesRule(p tg.PeerClass, users map[int64]*tg.User, chats map[int64]tg.ChatClass) bool {
@@ -269,35 +299,47 @@ func ListDialogsInFolder(ctx context.Context, c *telegram.Client, folderID, limi
 	if !found {
 		return nil, FolderScan{}, fmt.Errorf("%w: %d", ErrFolderNotFound, folderID)
 	}
-	scan := FolderScan{Complete: true}
-	now := time.Now()
-	out := []Dialog{}
-	read := func(folder, max int, archived bool) error {
-		req := &tg.MessagesGetDialogsRequest{Limit: max, OffsetPeer: &tg.InputPeerEmpty{}}
-		if folder != 0 {
-			req.SetFolderID(folder)
+	if spec.excludeMuted {
+		// An unread default would silently decide "not muted", so a failed
+		// read fails the listing.
+		spec.defaultMuted = map[string]bool{}
+		now := time.Now()
+		for kind, peer := range map[string]tg.InputNotifyPeerClass{
+			"users": &tg.InputNotifyUsers{}, "chats": &tg.InputNotifyChats{}, "broadcasts": &tg.InputNotifyBroadcasts{},
+		} {
+			ns, err := api.AccountGetNotifySettings(ctx, peer)
+			if err != nil {
+				return nil, FolderScan{}, fmt.Errorf("AccountGetNotifySettings(%s): %w", kind, err)
+			}
+			if until, ok := ns.GetMuteUntil(); ok && int64(until) > now.Unix() {
+				spec.defaultMuted[kind] = true
+			}
 		}
+	}
+	fetch := func(req *tg.MessagesGetDialogsRequest) (tg.MessagesDialogsClass, error) {
 		res, err := api.MessagesGetDialogs(ctx, req)
 		if err != nil {
-			return fmt.Errorf("MessagesGetDialogs: %w", err)
+			return nil, fmt.Errorf("MessagesGetDialogs: %w", err)
 		}
 		users, chats, _ := decodeDialogsResult(res)
 		seedPeerCache(cache, userID, users, chats)
-		members, scanned, complete := folderMembersOf(res, spec, archived, now, query)
-		scan.Scanned += scanned
-		scan.Complete = scan.Complete && complete
-		out = append(out, members...)
-		return nil
+		return res, nil
 	}
-	if err := read(0, folderScanMain, false); err != nil {
+	now := time.Now()
+	out, scan, err := scanFolderList(fetch, 0, folderScanMain, spec, false, now, query)
+	if err != nil {
 		return nil, FolderScan{}, err
 	}
 	// The archive can only add members when archived chats are not excluded
 	// as a rule, or when a chat was added by hand.
 	if !spec.excludeArchived || len(spec.include) > 0 {
-		if err := read(1, folderScanArchive, true); err != nil {
+		arch, archScan, err := scanFolderList(fetch, 1, folderScanArchive, spec, true, now, query)
+		if err != nil {
 			return nil, FolderScan{}, err
 		}
+		out = append(out, arch...)
+		scan.Scanned += archScan.Scanned
+		scan.Complete = scan.Complete && archScan.Complete
 	}
 	if len(out) > limit {
 		out = out[:limit]
@@ -305,32 +347,113 @@ func ListDialogsInFolder(ctx context.Context, c *telegram.Client, folderID, limi
 	return out, scan, nil
 }
 
-// folderMembersOf evaluates one MessagesGetDialogs page against a folder.
-// complete is false when the page is a slice of a longer list or has a
-// shape that carries no dialogs to evaluate, so the caller cannot claim the
-// folder was read in full.
-func folderMembersOf(res tg.MessagesDialogsClass, spec folderSpec, archived bool, now time.Time, query string) ([]Dialog, int, bool) {
-	complete := true
+// folderPageSize is what one messages.getDialogs call returns at most.
+const folderPageSize = 100
+
+// scanFolderList pages through one dialog list (folder 0 = main, 1 =
+// archive) up to max dialogs and keeps the folder's members. The scan is
+// complete only when the list is known to have ended within the pages read.
+func scanFolderList(fetch func(*tg.MessagesGetDialogsRequest) (tg.MessagesDialogsClass, error), list, max int, spec folderSpec, archived bool, now time.Time, query string) ([]Dialog, FolderScan, error) {
+	var (
+		out  []Dialog
+		scan FolderScan
+	)
+	req := &tg.MessagesGetDialogsRequest{OffsetPeer: &tg.InputPeerEmpty{}}
+	if list != 0 {
+		req.SetFolderID(list)
+	}
+	for scan.Scanned < max {
+		req.Limit = folderPageSize
+		if left := max - scan.Scanned; left < folderPageSize {
+			req.Limit = left
+		}
+		res, err := fetch(req)
+		if err != nil {
+			return nil, FolderScan{}, err
+		}
+		page := folderPageOf(res, spec, archived, now, query)
+		if page.total < 0 {
+			// Nothing observable came back: the scan cannot claim an end.
+			return out, scan, nil
+		}
+		out = append(out, page.members...)
+		scan.Scanned += page.scanned
+		if page.scanned == 0 || scan.Scanned >= page.total {
+			scan.Complete = true
+			return out, scan, nil
+		}
+		next, ok := page.next()
+		if !ok {
+			return out, scan, nil
+		}
+		next.Limit = req.Limit
+		if list != 0 {
+			next.SetFolderID(list)
+		}
+		req = next
+	}
+	return out, scan, nil
+}
+
+// folderPage is one messages.getDialogs answer evaluated against a folder.
+// total is the size of the whole list as Telegram reported it, or -1 when
+// the answer carried no dialogs to evaluate (NotModified or an unknown
+// shape).
+type folderPage struct {
+	members []Dialog
+	scanned int
+	total   int
+	next    func() (*tg.MessagesGetDialogsRequest, bool)
+}
+
+func folderPageOf(res tg.MessagesDialogsClass, spec folderSpec, archived bool, now time.Time, query string) folderPage {
+	total := -1
 	switch v := res.(type) {
 	case *tg.MessagesDialogs:
+		total = len(v.Dialogs)
 	case *tg.MessagesDialogsSlice:
-		if v.Count > len(v.Dialogs) {
-			complete = false
-		}
+		total = v.Count
 	default:
-		// NotModified or an unknown shape: nothing was observed.
-		return nil, 0, false
+		return folderPage{total: -1, next: func() (*tg.MessagesGetDialogsRequest, bool) { return nil, false }}
 	}
 	users, chats, dialogs := decodeDialogsResult(res)
+	messages := dialogsTopMessages(res)
 	var members []tg.DialogClass
+	var last *tg.Dialog
 	for _, dc := range dialogs {
-		if d, ok := dc.(*tg.Dialog); ok && spec.contains(d, users, chats, archived, now) {
+		d, ok := dc.(*tg.Dialog)
+		if !ok {
+			continue
+		}
+		last = d
+		if spec.contains(d, users, chats, archived, now) {
 			members = append(members, d)
 		}
 	}
-	out := dialogEntries(members, users, chats, dialogsTopMessages(res), query)
+	out := dialogEntries(members, users, chats, messages, query)
 	for i := range out {
 		out[i].Archived = archived
 	}
-	return out, len(dialogs), complete
+	return folderPage{
+		members: out,
+		scanned: len(dialogs),
+		total:   total,
+		next: func() (*tg.MessagesGetDialogsRequest, bool) {
+			// The next page starts after the last dialog's top message, as
+			// the Telegram apps page the list.
+			if last == nil {
+				return nil, false
+			}
+			ts, ok := lastMessageDateFor(last, topMessageDates(messages))
+			peer := inputPeerFromPeer(last.Peer, users, chats)
+			if !ok || peer == nil {
+				return nil, false
+			}
+			return &tg.MessagesGetDialogsRequest{
+				OffsetDate: int(ts.Unix()),
+				OffsetID:   last.TopMessage,
+				OffsetPeer: peer,
+			}, true
+		},
+	}
 }

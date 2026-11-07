@@ -120,7 +120,7 @@ func TestFoldersFromFilters_SkipsAllChatsAndDescribesRules(t *testing.T) {
 	}
 }
 
-func TestFolderMembersOf_ReportsWhatWasScanned(t *testing.T) {
+func TestFolderPageOf_ReportsWhatWasScanned(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	spec, _ := specFromFilter(&tg.DialogFilter{ID: 2, Groups: true})
 	users := []tg.UserClass{&tg.User{ID: 4301, FirstName: "Alice", Contact: true}}
@@ -131,29 +131,123 @@ func TestFolderMembersOf_ReportsWhatWasScanned(t *testing.T) {
 	}
 
 	full := &tg.MessagesDialogs{Dialogs: dialogs, Users: users, Chats: chats}
-	got, scanned, complete := folderMembersOf(full, spec, false, now, "")
-	if len(got) != 1 || got[0].Title != "Group" || got[0].Archived || scanned != 2 || !complete {
-		t.Errorf("full list: got %+v scanned=%d complete=%v", got, scanned, complete)
+	p := folderPageOf(full, spec, false, now, "")
+	if len(p.members) != 1 || p.members[0].Title != "Group" || p.members[0].Archived || p.scanned != 2 || p.total != 2 {
+		t.Errorf("full list: %+v", p)
 	}
-
-	partial := &tg.MessagesDialogsSlice{Count: 500, Dialogs: dialogs, Users: users, Chats: chats}
-	_, scanned, complete = folderMembersOf(partial, spec, false, now, "")
-	if scanned != 2 || complete {
-		t.Errorf("slice of 500: scanned=%d complete=%v, want 2/false", scanned, complete)
+	if p := folderPageOf(&tg.MessagesDialogsSlice{Count: 500, Dialogs: dialogs, Users: users, Chats: chats}, spec, false, now, ""); p.total != 500 {
+		t.Errorf("slice total = %d, want 500", p.total)
 	}
-
-	whole := &tg.MessagesDialogsSlice{Count: 2, Dialogs: dialogs, Users: users, Chats: chats}
-	if _, _, complete = folderMembersOf(whole, spec, false, now, ""); !complete {
-		t.Error("slice holding every dialog reported incomplete")
+	if p := folderPageOf(full, spec, true, now, ""); len(p.members) != 1 || !p.members[0].Archived {
+		t.Errorf("archive page: member not marked archived: %+v", p.members)
 	}
-
-	got, _, _ = folderMembersOf(full, spec, true, now, "")
-	if len(got) != 1 || !got[0].Archived {
-		t.Errorf("archive page: member not marked archived: %+v", got)
+	if p := folderPageOf(&tg.MessagesDialogsNotModified{Count: 9}, spec, false, now, ""); p.total != -1 || p.scanned != 0 {
+		t.Errorf("not-modified: %+v, want nothing observed", p)
 	}
+}
 
-	got, scanned, complete = folderMembersOf(&tg.MessagesDialogsNotModified{Count: 9}, spec, false, now, "")
-	if got != nil || scanned != 0 || complete {
-		t.Errorf("not-modified: got %+v scanned=%d complete=%v, want nothing observed", got, scanned, complete)
+// fakeDialogPages serves count dialogs (basic groups 5000..) in pages,
+// newest first, the way
+// messages.getDialogs answers an offset request.
+type fakeDialogPages struct {
+	count    int
+	requests []*tg.MessagesGetDialogsRequest
+	notMod   bool
+	noDates  bool
+}
+
+func (f *fakeDialogPages) fetch(req *tg.MessagesGetDialogsRequest) (tg.MessagesDialogsClass, error) {
+	f.requests = append(f.requests, req)
+	if f.notMod {
+		return &tg.MessagesDialogsNotModified{Count: f.count}, nil
+	}
+	start := 0
+	if req.OffsetID != 0 {
+		start = req.OffsetID // fixture: top message id == position+1
+	}
+	res := &tg.MessagesDialogsSlice{Count: f.count}
+	for i := start; i < f.count && len(res.Dialogs) < req.Limit; i++ {
+		id := int64(5000 + i)
+		res.Dialogs = append(res.Dialogs, &tg.Dialog{Peer: &tg.PeerChat{ChatID: id}, TopMessage: i + 1})
+		res.Chats = append(res.Chats, &tg.Chat{ID: id, Title: "Group"})
+		if !f.noDates {
+			res.Messages = append(res.Messages, &tg.Message{ID: i + 1, PeerID: &tg.PeerChat{ChatID: id}, Date: 1_700_000_000 - i})
+		}
+	}
+	return res, nil
+}
+
+func TestScanFolderList_PagesToTheBoundAndSaysWhetherItEnded(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	spec, _ := specFromFilter(&tg.DialogFilter{ID: 2, Groups: true})
+	cases := []struct {
+		name         string
+		pages        *fakeDialogPages
+		wantScanned  int
+		wantMembers  int
+		wantComplete bool
+		wantRequests int
+	}{
+		{"list ends on the second page", &fakeDialogPages{count: 150}, 150, 150, true, 2},
+		{"list longer than the bound", &fakeDialogPages{count: 500}, 200, 200, false, 2},
+		{"short list in one page", &fakeDialogPages{count: 30}, 30, 30, true, 1},
+		{"nothing observable", &fakeDialogPages{count: 30, notMod: true}, 0, 0, false, 1},
+		{"no offset for the next page", &fakeDialogPages{count: 150, noDates: true}, 100, 100, false, 1},
+	}
+	for _, c := range cases {
+		got, scan, err := scanFolderList(c.pages.fetch, 0, folderScanMain, spec, false, now, "")
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if scan.Scanned != c.wantScanned || len(got) != c.wantMembers || scan.Complete != c.wantComplete || len(c.pages.requests) != c.wantRequests {
+			t.Errorf("%s: scanned=%d members=%d complete=%v requests=%d; want %d/%d/%v/%d", c.name,
+				scan.Scanned, len(got), scan.Complete, len(c.pages.requests), c.wantScanned, c.wantMembers, c.wantComplete, c.wantRequests)
+		}
+	}
+	p := &fakeDialogPages{count: 150}
+	_, _, _ = scanFolderList(p.fetch, 1, folderScanMain, spec, true, now, "")
+	second := p.requests[1]
+	peer, ok := second.OffsetPeer.(*tg.InputPeerChat)
+	if !ok || peer.ChatID != 5099 || second.OffsetID != 100 || second.OffsetDate != 1_700_000_000-99 || second.Limit != 100 {
+		t.Errorf("second page request = %+v, want offset after dialog 5099", second)
+	}
+	if fid, ok := second.GetFolderID(); !ok || fid != 1 {
+		t.Errorf("archive paging lost the folder id: %v %v", fid, ok)
+	}
+}
+
+func TestFolderSpec_MentionsAndDefaultMutes(t *testing.T) {
+	users, chats := folderFixture()
+	now := time.Unix(1_800_000_000, 0)
+	group := &tg.PeerChat{ChatID: 4401}
+	news := &tg.PeerChannel{ChannelID: 4403}
+	spec, _ := specFromFilter(&tg.DialogFilter{ID: 2, Groups: true, Broadcasts: true, ExcludeMuted: true, ExcludeRead: true})
+	spec.defaultMuted = map[string]bool{"broadcasts": true}
+
+	mutedMention := dlg(group, 1)
+	mutedMention.NotifySettings.SetMuteUntil(int(now.Unix()) + 3600)
+	mutedMention.UnreadMentionsCount = 1
+	readMention := dlg(group, 0)
+	readMention.UnreadMentionsCount = 1
+	explicitUnmute := dlg(news, 2)
+	explicitUnmute.NotifySettings.SetMuteUntil(0)
+
+	cases := []struct {
+		name     string
+		d        *tg.Dialog
+		archived bool
+		want     bool
+	}{
+		{"muted chat with a mention stays in the main list", mutedMention, false, true},
+		{"muted chat with a mention in the archive is dropped", mutedMention, true, false},
+		{"read chat with an unread mention stays", readMention, false, true},
+		{"channel muted by the default is dropped", dlg(news, 2), false, false},
+		{"channel unmuted on its own beats the default", explicitUnmute, false, true},
+		{"group follows its own default (unmuted)", dlg(group, 2), false, true},
+	}
+	for _, c := range cases {
+		if got := spec.contains(c.d, users, chats, c.archived, now); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
 	}
 }
