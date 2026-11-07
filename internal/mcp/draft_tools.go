@@ -37,19 +37,23 @@ type saveDraftResult struct {
 	Cleared          bool   `json:"cleared"`
 	ReplacedExisting bool   `json:"replaced_existing"`
 	Unchanged        bool   `json:"unchanged"`
-	Notice           string `json:"notice"`
+	// TopicID and TopicTitle name the forum topic the draft is in, when
+	// the call named one.
+	TopicID    int    `json:"topic_id,omitempty"`
+	TopicTitle string `json:"topic_title,omitempty"`
+	Notice     string `json:"notice"`
 }
 
 // saveDraftFn is the Telegram call of save_draft; tests replace it through
 // Server.draftSave.
-func (s *Server) saveDraftFn(ctx context.Context, userID int64, peer, text string, overwrite bool) (telegram.DraftResult, error) {
+func (s *Server) saveDraftFn(ctx context.Context, userID int64, peer, text string, overwrite bool, topicID int) (telegram.DraftResult, error) {
 	if s.draftSave != nil {
-		return s.draftSave(ctx, userID, peer, text, overwrite)
+		return s.draftSave(ctx, userID, peer, text, overwrite, topicID)
 	}
 	var out telegram.DraftResult
 	err := s.borrowWithRetry(ctx, "save_draft", userID, func(ctx context.Context, c *gotdtelegram.Client) error {
 		var err error
-		out, err = telegram.SaveDraft(ctx, c, peer, text, overwrite, s.PeerCache, userID)
+		out, err = telegram.SaveDraft(ctx, c, peer, text, overwrite, topicID, s.PeerCache, userID)
 		return err
 	})
 	return out, err
@@ -77,16 +81,22 @@ says how long that draft is: it is text the user typed and would be lost.
 Ask the user first; pass overwrite=true only if they want it replaced.
 An empty text clears the draft, under the same rule.
 
+In a forum supergroup each topic has its own draft: pass topic_id
+(list_topics shows the ids) to leave the draft in that topic. The topic must
+exist and be open, and the rule above applies to that topic's draft.
+
 Inputs (required):
   peer — "@username", "user:<id>", "chat:<id>", or "channel:<id>", as
          list_dialogs shows it.
   text — the draft, plain text, at most 4096 UTF-16 units (most emoji count
          as two); "" clears the draft.
 Inputs (optional):
-  overwrite — replace a different draft already in the chat (default false).`),
+  overwrite — replace a different draft already in the chat (default false).
+  topic_id  — forum topic to leave the draft in (forum supergroups only).`),
 		mcplib.WithString("peer", mcplib.Required(), mcplib.Description("Chat to leave the draft in.")),
 		mcplib.WithString("text", mcplib.Required(), mcplib.Description("Draft text, plain text, at most 4096 UTF-16 units; empty clears the draft.")),
 		mcplib.WithBoolean("overwrite", mcplib.Description("Replace a different unsent draft already in the chat (default false).")),
+		mcplib.WithNumber("topic_id", mcplib.Description("Forum topic to leave the draft in; forum supergroups only.")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
@@ -100,6 +110,10 @@ Inputs (optional):
 		}
 		text := stringArg(args, "text", "")
 		overwrite := boolArg(args, "overwrite", false)
+		topicID, bad := optionalTopicArg(args)
+		if bad != nil {
+			return bad, nil
+		}
 		if peer == "" {
 			return mcplib.NewToolResultError("peer is required"), nil
 		}
@@ -124,7 +138,11 @@ Inputs (optional):
 		if s.isLocalBridgeAccount(ctx, id.UserID) {
 			return mcplib.NewToolResultError("save_draft is not yet supported for local-bridge accounts"), nil
 		}
-		res, err := s.saveDraftFn(ctx, id.UserID, peer, text, overwrite)
+		res, err := s.saveDraftFn(ctx, id.UserID, peer, text, overwrite, topicID)
+		if isTopicRefusal(err) {
+			s.auditRefusal(ctx, id, "save_draft:topic", peerRedacted, err, startedAt, ReasonRefused)
+			return topicRefusalResult("save_draft", topicID, peer, err), nil
+		}
 		var conflict *telegram.DraftConflict
 		if errors.As(err, &conflict) {
 			s.auditRefusal(ctx, id, "save_draft:draft_exists", peerRedacted, err, startedAt, ReasonRefused)
@@ -147,6 +165,8 @@ Inputs (optional):
 			Cleared:          res.Cleared,
 			ReplacedExisting: res.ReplacedExisting,
 			Unchanged:        res.Unchanged,
+			TopicID:          res.TopicID,
+			TopicTitle:       res.TopicTitle,
 			Notice:           notice,
 		})
 	}

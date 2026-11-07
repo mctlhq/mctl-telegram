@@ -1,0 +1,28 @@
+schema: mctl-telegram.product-update/v1
+id: topic-read-and-draft
+kind: changed_behavior
+title: Mark a forum topic read, or leave a draft in one
+summary: >-
+  mark_read and save_draft take an optional topic_id. In a forum supergroup
+  each topic has its own unread counter and its own draft, so mark_read can
+  now mark one topic read up to a message id while the others stay unread,
+  and save_draft can leave a draft in one topic. The topic is checked to
+  exist; a draft needs an open topic, and the rule that a draft the user
+  typed is never replaced without overwrite=true applies to that topic's
+  own draft. Both results name the topic.
+locale: en
+delivery: docs_only
+high_value: false
+tools: [mark_read, save_draft]
+evidence:
+  from: 0.130.0
+  changes:
+    - {tool: mark_read, change: schema}
+    - {tool: save_draft, change: schema}
+status: approved
+provenance:
+  author: mashkovd
+  assisted_by: claude-opus-5-5
+  reviewed_by: mashkovd
+created_at: "2026-11-07"
+reviewed_at: "2026-11-07"

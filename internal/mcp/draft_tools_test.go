@@ -19,13 +19,14 @@ type draftFake struct {
 	peer      string
 	text      string
 	overwrite bool
+	topicID   int
 	result    telegram.DraftResult
 	err       error
 }
 
-func (f *draftFake) save(_ context.Context, _ int64, peer, text string, overwrite bool) (telegram.DraftResult, error) {
+func (f *draftFake) save(_ context.Context, _ int64, peer, text string, overwrite bool, topicID int) (telegram.DraftResult, error) {
 	f.calls++
-	f.peer, f.text, f.overwrite = peer, text, overwrite
+	f.peer, f.text, f.overwrite, f.topicID = peer, text, overwrite, topicID
 	return f.result, f.err
 }
 

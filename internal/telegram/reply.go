@@ -73,13 +73,29 @@ func replyTopicWith(ctx context.Context, api topicByIDInvoker, target *ReplyTarg
 	if target == nil || target.Peer == nil {
 		return nil, errors.New("reply target required")
 	}
+	t, err := lookupTopic(ctx, api, target.Ref, target.Peer, topicID)
+	if err != nil {
+		return nil, err
+	}
+	if t.Closed {
+		return nil, ErrTopicClosed
+	}
+	out := *target
+	out.TopicID, out.TopicTitle = t.ID, t.Title
+	return &out, nil
+}
+
+// lookupTopic returns topicID of the forum peer, after checking that peer
+// is a forum at all. Whether a closed topic is acceptable is the caller's
+// decision: reading one is fine, writing into one is not.
+func lookupTopic(ctx context.Context, api topicByIDInvoker, ref string, peer tg.InputPeerClass, topicID int) (*tg.ForumTopic, error) {
 	if topicID <= 0 {
 		return nil, fmt.Errorf("topic_id must be a positive topic id")
 	}
-	if err := requireForum(ctx, api, target.Ref, target.Peer); err != nil {
+	if err := requireForum(ctx, api, ref, peer); err != nil {
 		return nil, err
 	}
-	res, err := api.MessagesGetForumTopicsByID(ctx, &tg.MessagesGetForumTopicsByIDRequest{Peer: target.Peer, Topics: []int{topicID}})
+	res, err := api.MessagesGetForumTopicsByID(ctx, &tg.MessagesGetForumTopicsByIDRequest{Peer: peer, Topics: []int{topicID}})
 	if err != nil {
 		return nil, topicRPCError("MessagesGetForumTopicsByID", err)
 	}
@@ -87,16 +103,9 @@ func replyTopicWith(ctx context.Context, api topicByIDInvoker, target *ReplyTarg
 		return nil, errors.New("MessagesGetForumTopicsByID: empty reply")
 	}
 	for _, tc := range res.Topics {
-		t, ok := tc.(*tg.ForumTopic)
-		if !ok || t.ID != topicID {
-			continue
+		if t, ok := tc.(*tg.ForumTopic); ok && t.ID == topicID {
+			return t, nil
 		}
-		if t.Closed {
-			return nil, ErrTopicClosed
-		}
-		out := *target
-		out.TopicID, out.TopicTitle = t.ID, t.Title
-		return &out, nil
 	}
 	// The reply answered and does not hold the topic (or holds it as
 	// forumTopicDeleted): Telegram's own statement that it is not there.
