@@ -370,12 +370,13 @@ type folderMembers struct {
 	scan    FolderScan
 }
 
-// scanFolder evaluates spec over the most recent dialogs of the main list
-// and, when the folder can hold archived chats, the archive.
+// newFolderMembers is an empty scan result with its maps allocated.
 func newFolderMembers() *folderMembers {
 	return &folderMembers{users: map[int64]*tg.User{}, chats: map[int64]tg.ChatClass{}}
 }
 
+// scanFolder evaluates spec over the most recent dialogs of the main list
+// and, when the folder can hold archived chats, the archive.
 func scanFolder(fetch func(*tg.MessagesGetDialogsRequest) (tg.MessagesDialogsClass, error), spec folderSpec, now time.Time, query string) (*folderMembers, error) {
 	out := newFolderMembers()
 	if err := scanFolderList(fetch, 0, folderScanMain, spec, false, now, query, out); err != nil {
