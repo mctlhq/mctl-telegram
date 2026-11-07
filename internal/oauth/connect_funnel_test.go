@@ -11,6 +11,7 @@ import (
 type grantCall struct {
 	userID      int64
 	clientID    string
+	clientName  string
 	redirectURI string
 }
 
@@ -20,9 +21,9 @@ type grantRecorder struct {
 	calls []grantCall
 }
 
-func (g *grantRecorder) Granted(_ context.Context, userID int64, clientID, redirectURI string) {
+func (g *grantRecorder) Granted(_ context.Context, userID int64, clientID, clientName, redirectURI string) {
 	g.mu.Lock()
-	g.calls = append(g.calls, grantCall{userID, clientID, redirectURI})
+	g.calls = append(g.calls, grantCall{userID, clientID, clientName, redirectURI})
 	g.mu.Unlock()
 }
 
@@ -40,6 +41,9 @@ func TestToken_AuthCodeRecordsConnectGrant(t *testing.T) {
 	srv := newTestServer(t)
 	rec := &grantRecorder{}
 	srv.WithConnectFunnel(rec)
+	srv.mu.Lock()
+	srv.clients["claude.ai"] = &clientReg{ClientName: "Claude", RedirectURIs: []string{"https://claude.ai/cb"}}
+	srv.mu.Unlock()
 	mux := newMockRouter()
 	srv.Register(mux)
 
@@ -50,7 +54,7 @@ func TestToken_AuthCodeRecordsConnectGrant(t *testing.T) {
 		t.Fatalf("resolve user: %v", err)
 	}
 	got := rec.snapshot()
-	want := []grantCall{{uid, "claude.ai", "https://claude.ai/cb"}}
+	want := []grantCall{{uid, "claude.ai", "Claude", "https://claude.ai/cb"}}
 	if len(got) != 1 || got[0] != want[0] {
 		t.Fatalf("grants = %+v, want %+v", got, want)
 	}

@@ -1740,7 +1740,12 @@ not come back `isError`. A connector that is granted a token and never uses
 it is the shape of the 2026-10-30 "action discovery failed" failure, where
 ChatGPT got a token and then posted to `/` instead of `/mcp`.
 
-- `client` is `claude`, `chatgpt` or `other`, from the redirect URI host.
+- `client` comes from the redirect URI: `claude`, `chatgpt`, `portal` (the
+  Cloudflare MCP portal, `mcp.mctl.ai` and its `dash.cloudflare.com` callback)
+  or, for a loopback redirect, `codex`, `claude_code` or `local_agent` by
+  registered name. `other` is the rest. A registered name is self-declared and
+  only separates loopback clients. Rows and series from before this split carry
+  `other` for all of these, so compare only `claude` and `chatgpt` across it.
   No client id or user id is ever a label.
 - `outcome="ok"`: a successful call within 5 minutes of the grant.
 - `outcome="none_within_window"`: none within 5 minutes. A call that
