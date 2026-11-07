@@ -125,6 +125,28 @@ func TestT9b_RevokedAfterHandoffIssued(t *testing.T) {
 	}
 }
 
+// T9c: revoke can race with the provider write Activity. Its signal may
+// arrive while the workflow is awaiting the Activity result; no exit may
+// bypass the revoke cleanup or produce a usable handoff.
+func TestT9c_RevokedDuringProviderWrite(t *testing.T) {
+	h := newHarness(t, lunch())
+	h.act.AfterProviderWrite = func() {
+		h.cp.Deactivate("tenant-alpha", "principal-alice")
+		h.env.SignalWorkflow(SigRevoked, nil)
+	}
+	h.consentAt(time.Minute, "n1", nil)
+	r := h.run()
+	if r.Status != "cancelled" {
+		t.Fatalf("revocation after provider write: status=%s states=%v", r.Status, r.States)
+	}
+	if h.vault.Has("conn-ref-1") || len(h.vault.Drafts) != 0 {
+		t.Fatal("post-write revoke left connection or order state")
+	}
+	if has(r.States, "handoff_issued") || len(h.cp.Outbox) > 0 {
+		t.Fatalf("handoff issued after revoke: states=%v tokens=%d", r.States, len(h.cp.Outbox))
+	}
+}
+
 // Owner cancel purges the order draft but keeps the install connection.
 func TestCancelKeepsConnection(t *testing.T) {
 	h := newHarness(t, lunch())
