@@ -167,6 +167,11 @@ type loginFlow struct {
 	// after the needPw signal is buffered. The status page reads it, never
 	// step, which is not safe to read from a handler.
 	qrScanned atomic.Bool
+	// delivery is the TL name of the channel Telegram chose for the login
+	// code, set by LoginConfig.OnCodeSent before needCode is signalled, so a
+	// handler that received needCode reads the current value. Empty until
+	// then, and for a login that does not report it.
+	delivery atomic.Value
 	// qrConfirmedAt is when Telegram reported the QR code scanned and the
 	// login confirmed on the phone (LoginConfig.OnQRScanned), as UnixNano;
 	// zero before that. The status page reads it to show the connecting
@@ -470,6 +475,7 @@ func (s *Server) startLoginFlow(uid, wantTgID int64, m loginMethod, sendOptIn bo
 		// cannot forget it. Registered before the login, so it runs before
 		// the flow reports done.
 		loginCfg.HoldSession = func(b []byte) { lf.heldSession = b }
+		loginCfg.OnCodeSent = func(d string) { lf.delivery.Store(d) }
 		defer func() {
 			if lf.heldSession != nil {
 				s.logOutUnusedSession(bgCtx, uid, lf.heldSession, logOutUnsaved)
@@ -869,6 +875,17 @@ func (s *Server) lookupEnable(r *http.Request) (es *enableSession, esTok string,
 // handleEnableStart receives the phone number, launches the MTProto login
 // goroutine, and renders either the SMS-code screen or (on early failure) the
 // phone screen with an error. Re-submitting /start cancels any prior attempt.
+// codeDelivery returns the channel Telegram chose for the login code, or ""
+// when it is not known. Safe on a nil flow: the code step re-renders can run
+// without one.
+func (lf *loginFlow) codeDelivery() string {
+	if lf == nil {
+		return ""
+	}
+	d, _ := lf.delivery.Load().(string)
+	return d
+}
+
 func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	es, esTok, ok := s.lookupEnable(r)
 	if !ok {
@@ -898,6 +915,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 	// catches duplicates.
 	if es.step == stepCode && es.flow != nil {
 		renderEnableCode(w, enableCodePage{
+			Delivery:    es.flow.codeDelivery(),
 			Issuer:      s.cfg.Issuer,
 			EnableToken: esTok,
 			Phone:       es.phone,
@@ -1001,6 +1019,7 @@ func (s *Server) handleEnableStart(w http.ResponseWriter, r *http.Request) {
 		observePhoneStep("ok")
 		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:phone_submitted", Status: "ok"})
 		renderEnableCode(w, enableCodePage{
+			Delivery:    lf.codeDelivery(),
 			Issuer:      s.cfg.Issuer,
 			EnableToken: esTok,
 			Phone:       phone,
@@ -1127,6 +1146,7 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 	code := telegram.LoginCodeDigits(r.FormValue("code"))
 	if code == "" {
 		renderEnableCode(w, enableCodePage{
+			Delivery:    es.flow.codeDelivery(),
 			Issuer:      s.cfg.Issuer,
 			EnableToken: esTok,
 			Phone:       es.phone,
@@ -1159,6 +1179,7 @@ func (s *Server) handleEnableCode(w http.ResponseWriter, r *http.Request) {
 		// connect:failed:*, because the flow is still alive.
 		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:retry:" + rp.Reason, Status: "error", ErrMsg: rp.Reason})
 		renderEnableCode(w, enableCodePage{
+			Delivery:    es.flow.codeDelivery(),
 			Issuer:      s.cfg.Issuer,
 			EnableToken: esTok,
 			Phone:       es.phone,
@@ -1277,6 +1298,7 @@ func (s *Server) handleEnablePassword(w http.ResponseWriter, r *http.Request) {
 		s.store.LogToolCall(r.Context(), db.ToolCall{UserID: es.uid, Tool: "connect:retry:" + rp.Reason, Status: "error", ErrMsg: rp.Reason})
 		es.step = stepCode
 		renderEnableCode(w, enableCodePage{
+			Delivery:    es.flow.codeDelivery(),
 			Issuer:      s.cfg.Issuer,
 			EnableToken: esTok,
 			Phone:       es.phone,

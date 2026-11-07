@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	tdauth "github.com/gotd/td/telegram/auth"
+	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
@@ -25,6 +26,11 @@ import (
 // way. Every code the login received is recorded in codes.
 type retryingLogin struct {
 	goodCode, goodPw string
+	// delivery, when set, is reported through LoginConfig.OnCodeSent before
+	// the first ask, as telegram.Login does.
+	delivery string
+	// startBody is the code screen the first start rendered.
+	startBody string
 
 	mu    sync.Mutex
 	codes []string
@@ -43,6 +49,9 @@ func (l *retryingLogin) fn() LoginFunc {
 		askPassword func(context.Context) (string, error),
 		cfgs ...telegram.LoginConfig,
 	) (int64, string, string, error) {
+		if l.delivery != "" && len(cfgs) > 0 && cfgs[0].OnCodeSent != nil {
+			cfgs[0].OnCodeSent(l.delivery)
+		}
 		promptCtx := ctx
 		for attempt := 1; ; attempt++ {
 			code, err := askCode(promptCtx)
@@ -92,11 +101,12 @@ func startRetryFlow(t *testing.T, l *retryingLogin) (*Server, *chi.Mux, string) 
 	t.Helper()
 	srv, mux := newEnableTestServer(t, l.fn())
 	es := driveToPhone(t, mux)
-	if rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
-		url.Values{"es": {es}, "phone": {"+14155551234"}}); rec.Code != http.StatusOK ||
-		!strings.Contains(rec.Body.String(), "enable_access/code") {
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}})
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "enable_access/code") {
 		t.Fatalf("start did not render the code screen: %d %s", rec.Code, rec.Body.String())
 	}
+	l.startBody = rec.Body.String()
 	return srv, mux, es
 }
 
@@ -232,6 +242,73 @@ func TestEnableCodePage_SaysCodeArrivesInTheApp(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("code screen missing %q: %s", want, body)
 		}
+	}
+	// A phone login on a mobile browser has the app on this same device.
+	if strings.Contains(body, "other device") {
+		t.Errorf("code screen must not assume another device: %s", body)
+	}
+}
+
+// The screen names the channel Telegram actually chose, and never claims one
+// it did not. The names come from the real TL types, so a wrong literal in
+// DeliveryKind fails here rather than silently falling to the generic text.
+func TestEnableCodePage_NamesTheActualDelivery(t *testing.T) {
+	const appText, smsText = "to your\n       <strong>Telegram app</strong>, not by SMS", "by <strong>SMS</strong> to"
+	const callText, emailText = "<strong>phone call</strong>", "<strong>email address</strong>"
+	const fragmentText, genericText = "<strong>Fragment</strong>", "usually arrives"
+	all := []string{appText, smsText, callText, emailText, fragmentText, genericText}
+	for _, tc := range []struct {
+		delivery, want string
+	}{
+		{(&tg.AuthSentCodeTypeApp{}).TypeName(), appText},
+		{(&tg.AuthSentCodeTypeSMS{}).TypeName(), smsText},
+		{(&tg.AuthSentCodeTypeSMSWord{}).TypeName(), smsText},
+		{(&tg.AuthSentCodeTypeSMSPhrase{}).TypeName(), smsText},
+		{(&tg.AuthSentCodeTypeFirebaseSMS{}).TypeName(), smsText},
+		{(&tg.AuthSentCodeTypeCall{}).TypeName(), callText},
+		{(&tg.AuthSentCodeTypeFlashCall{}).TypeName(), callText},
+		{(&tg.AuthSentCodeTypeMissedCall{}).TypeName(), callText},
+		{(&tg.AuthSentCodeTypeEmailCode{}).TypeName(), emailText},
+		{(&tg.AuthSentCodeTypeFragmentSMS{}).TypeName(), fragmentText},
+		{(&tg.AuthSentCodeTypeSetUpEmailRequired{}).TypeName(), genericText},
+		{"unknown", genericText},
+		{"", genericText},
+	} {
+		t.Run(tc.delivery, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			renderEnableCode(rec, enableCodePage{Issuer: "https://tg.mctl.ai", EnableToken: "tok", Phone: "+14155551234", Delivery: tc.delivery})
+			body := rec.Body.String()
+			for _, text := range all {
+				if got, want := strings.Contains(body, text), text == tc.want; got != want {
+					t.Errorf("contains %q = %v, want %v: %s", text, got, want, body)
+				}
+			}
+		})
+	}
+}
+
+// Every render of the code step in a flow keeps the channel the login
+// reported: the first screen and each way back to it.
+func TestEnableCode_DeliveryReachesEveryCodeScreen(t *testing.T) {
+	const want = "<strong>Telegram app</strong>, not by SMS"
+	l := &retryingLogin{goodCode: "12345", delivery: "auth.sentCodeTypeApp"}
+	_, mux, es := startRetryFlow(t, l)
+	if !strings.Contains(l.startBody, want) {
+		t.Errorf("first code screen does not name the app: %s", l.startBody)
+	}
+	for name, form := range map[string]url.Values{
+		"no digits":  {"es": {es}, "code": {"code"}},
+		"wrong code": {"es": {es}, "code": {"54321"}},
+	} {
+		rec := postForm(t, mux, "/oauth/telegram/enable_access/code", form)
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("%s: code screen does not name the app: %s", name, rec.Body.String())
+		}
+	}
+	rec := postForm(t, mux, "/oauth/telegram/enable_access/start",
+		url.Values{"es": {es}, "phone": {"+14155551234"}})
+	if !strings.Contains(rec.Body.String(), want) {
+		t.Errorf("repeated start: code screen does not name the app: %s", rec.Body.String())
 	}
 }
 
