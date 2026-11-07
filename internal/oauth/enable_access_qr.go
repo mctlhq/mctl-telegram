@@ -196,10 +196,13 @@ func (s *Server) handleEnableQRStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// On the code step the send opt-in was already chosen with the phone
-	// number and the QR form there does not carry it.
+	// The QR button submits the phone form, so on the phone step the send
+	// choice is its checkbox, in both modes (the wizard's separate
+	// Permissions screen is gone, #1157). On the code step the choice was
+	// already made with the phone number and the QR form there does not
+	// carry it.
 	sendOptIn := es.sendOptIn
-	if !es.isWizardMode() && es.step == stepPhone {
+	if es.step == stepPhone {
 		sendOptIn = r.FormValue("send_optin") != ""
 	}
 	// The same pre-flight mode gate as handleEnableStart, for the same
