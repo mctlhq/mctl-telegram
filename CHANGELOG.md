@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.127.0](https://github.com/mctlhq/mctl-telegram/compare/0.126.0...0.127.0) (2026-11-07)
+
+
+### Features
+
+* **connectfunnel:** split other into portal, coding and local agents ([f787a6d](https://github.com/mctlhq/mctl-telegram/commit/f787a6d12ac480333570ef263a69f9d256dd0a9c))
+* **connectfunnel:** split other into portal, coding and local agents ([cece40a](https://github.com/mctlhq/mctl-telegram/commit/cece40a4865b389454697752300e8763fc3a48c3))
+* **oauth:** record the code channel on the phone audit row ([e0dadfc](https://github.com/mctlhq/mctl-telegram/commit/e0dadfc6c4c85375c9e8fc2c037752fd3cc1e325))
+* **oauth:** record the code channel on the phone audit row ([1ec5b90](https://github.com/mctlhq/mctl-telegram/commit/1ec5b90b670ae4287f9009fec10af7bfb6892237))
+
+
+### Bug Fixes
+
+* **audit:** a failed chain read is not an empty history ([c637866](https://github.com/mctlhq/mctl-telegram/commit/c6378668063bf5df7c74349b06f87bc9ef9fb688))
+* **audit:** keep the audit row when the request is gone ([a43cf7d](https://github.com/mctlhq/mctl-telegram/commit/a43cf7d3ee711d5dde3ef78c838b3e25cc4f8e9b))
+* **audit:** keep the audit row when the request is gone ([d62a865](https://github.com/mctlhq/mctl-telegram/commit/d62a8650b1033e730ae1b87bbed7ec1471c12cc0))
+* **oauth:** keep handleEnableStart's doc comment attached ([6ce5475](https://github.com/mctlhq/mctl-telegram/commit/6ce54753f090d1029cfab9a99495651049c4ba02))
+* **oauth:** name the channel Telegram chose on the code screen ([fcfcdb5](https://github.com/mctlhq/mctl-telegram/commit/fcfcdb5d20c9fdc273823bf1fde4f2338a3b506a))
+* **oauth:** name the channel Telegram chose on the code screen ([86c0f2d](https://github.com/mctlhq/mctl-telegram/commit/86c0f2d474c833d77757e44233c27d5b84259ec5))
+
 ## [0.126.0](https://github.com/mctlhq/mctl-telegram/compare/0.125.3...0.126.0) (2026-11-07)
 
 
