@@ -525,7 +525,7 @@ var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(
       <li><strong>Other MCP clients:</strong> add a remote MCP server with the MCP URL above;
         the client handles OAuth. <a href="/docs#other-clients-setup">Generic steps</a></li>
     </ul>
-    <p class="meta">Then ask: &#8220;list my recent Telegram chats&#8221;.</p>
+    <p class="meta">Then ask: &#8220;list my recent Telegram chats&#8221;. Need ideas? <a href="/examples">Browse example prompts</a>.</p>
     <p class="note">A new session called &#8220;MCTL Assistant&#8221; will appear in
        your Telegram&#8217;s <strong>Active Sessions</strong> (Settings &#8594; Privacy and Security
        &#8594; Active Sessions). This is normal &#8212; it is the session this connector uses to

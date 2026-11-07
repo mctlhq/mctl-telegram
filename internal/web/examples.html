@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+{{template "ui_head" .}}
+<style>
+  /* Page-specific styling on the shared design tokens. */
+  .example { border: 1px solid var(--border); border-radius: var(--mctl-radius-lg); background: var(--surface); padding: 18px 20px; margin: 16px 0; }
+  .example h3 { font-size: 16px; font-weight: 600; color: var(--text); margin: 0 0 10px; }
+  .example .prompt { margin: 0 0 12px; padding: 12px 14px; background: var(--surface-elevated); border: 1px solid var(--border); border-radius: var(--mctl-radius-md); color: var(--text); font-family: var(--font-mono); font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .example .meta-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 8px; font-size: 13px; color: var(--text-dim); }
+  .example .tools code { margin-right: 4px; }
+  .example .note-line { margin: 8px 0 0; font-size: 13px; color: var(--text-dim); }
+  .example .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }
+  .copy-status { font-size: 13px; color: var(--text-dim); }
+  .copy-status.ok { color: var(--status-ok-text); }
+  .copy-status.fail { color: var(--status-bad-text); }
+</style>
+</head>
+<body>
+
+{{template "ui_topbar" .}}
+
+<main class="mctl-site-container page">
+<div class="mctl-site-prose">
+
+  <section class="hero" style="margin-top: 0;">
+    <div class="eyebrow">
+      <span class="status-dot" aria-hidden="true"></span>
+      <span>Examples</span>
+    </div>
+    <h1>Prompts to <span class="accent">try</span></h1>
+    <p class="lead">Twelve prompts you can paste into Claude, ChatGPT or any MCP client once your Telegram account is connected. They are written and reviewed by hand, they are plain prompts rather than installed assistants, and each one lists the tools it uses and whether it can send anything.</p>
+    <p>Each example is marked either read-only or able to send. A read-only one never sends anything; one that can send says so, and a send still happens only after you confirm it and only if sending is turned on for your account. Nothing on this page reads your chats; the prompts run in your own AI client.</p>
+  </section>
+
+  <nav class="page-nav" aria-label="Example categories">
+    {{range .Categories}}<a href="#{{.Slug}}">{{.Name}}</a>
+    {{end}}
+  </nav>
+
+  {{range .Categories}}
+  <h2 id="{{.Slug}}">{{.Name}}</h2>
+  <p>{{.Intro}}</p>
+  {{range .Examples}}
+  <article class="example" id="{{.ID}}" aria-labelledby="{{.ID}}-title">
+    <h3 id="{{.ID}}-title">{{.Title}}</h3>
+    <p class="prompt" id="{{.ID}}-prompt">{{.Prompt}}</p>
+    <div class="meta-row">
+      <span class="tools">Tools: {{range .Tools}}<code>{{.}}</code> {{end}}</span>
+      {{if .Sends}}<span class="pill pill-write">Can send: needs your explicit confirmation</span>{{else}}<span class="pill pill-read">Read-only: no send consent needed</span>{{end}}
+    </div>
+    {{if .Note}}<p class="note-line">{{.Note}}</p>{{end}}
+    <div class="actions">
+      <button class="btn-secondary copy-prompt" type="button" data-prompt="{{.Prompt}}" aria-describedby="{{.ID}}-status">Copy prompt</button>
+      <span class="copy-status" id="{{.ID}}-status" role="status" aria-live="polite"></span>
+    </div>
+  </article>
+  {{end}}
+  {{end}}
+
+  <h2>About sending</h2>
+  <p>Every account starts read-only. The one sending example drafts a reply with <code>draft_reply</code>, which sends nothing, and only <code>send_reply</code> sends. It needs the confirmation you give in the conversation, the send scope on your connection, sending turned on for your account and a deployment that allows it. If any of those is missing, nothing is sent. More in <a href="/docs">the docs</a> and on <a href="/security">/security</a>.</p>
+
+</div>
+</main>
+
+{{template "ui_footer" .}}
+
+{{template "ui_script" .}}
+<script>
+(function () {
+  var buttons = document.querySelectorAll('.copy-prompt');
+  var timers = new WeakMap();
+  function show(btn, ok) {
+    var status = btn.parentNode.querySelector('.copy-status');
+    if (!status) { return; }
+    status.className = 'copy-status ' + (ok ? 'ok' : 'fail');
+    status.textContent = ok ? 'Copied to clipboard.' : 'Copy failed. The prompt is selected above: press Ctrl+C or Cmd+C.';
+    clearTimeout(timers.get(btn));
+    timers.set(btn, setTimeout(function () {
+      status.className = 'copy-status';
+      status.textContent = '';
+    }, 5000));
+  }
+  function selectPrompt(btn) {
+    var article = btn.closest('article');
+    var el = article && article.querySelector('.prompt');
+    if (!el || !window.getSelection || !document.createRange) { return; }
+    var range = document.createRange();
+    range.selectNodeContents(el);
+    var sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+  function legacyCopy(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    document.body.removeChild(ta);
+    return ok;
+  }
+  function failed(btn) {
+    selectPrompt(btn);
+    show(btn, false);
+  }
+  Array.prototype.forEach.call(buttons, function (btn) {
+    btn.addEventListener('click', function () {
+      var text = btn.getAttribute('data-prompt');
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () {
+          show(btn, true);
+        }, function () {
+          if (legacyCopy(text)) { show(btn, true); } else { failed(btn); }
+        });
+      } else if (legacyCopy(text)) {
+        show(btn, true);
+      } else {
+        failed(btn);
+      }
+    });
+  });
+})();
+</script>
+</body>
+</html>

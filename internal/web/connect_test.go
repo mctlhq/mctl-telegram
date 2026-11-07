@@ -671,3 +671,17 @@ func TestHandleConnect_ThreeStepWizard(t *testing.T) {
 		t.Errorf("success page does not say Step 3 of 3")
 	}
 }
+
+// The wizard's Done step points at the example prompts, and its script-hash
+// CSP is unaffected by the extra link.
+func TestConnectSuccess_LinksToExamples(t *testing.T) {
+	rec := httptest.NewRecorder()
+	renderConnectSuccess(rec, connectSuccessData{ClaudeURL: "https://claude.test", MCPURL: "https://tg.test/mcp"})
+	body := rec.Body.String()
+	if !strings.Contains(body, `<a href="/examples">Browse example prompts</a>`) {
+		t.Fatalf("the Done step must link to /examples:\n%s", body)
+	}
+	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "script-src 'sha256-") {
+		t.Errorf("success CSP lost its script hash: %s", csp)
+	}
+}

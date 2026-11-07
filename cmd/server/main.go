@@ -537,6 +537,7 @@ func main() {
 		MediaUploadBytes:   cfg.MediaUploadMaxBytes,
 		BulkMediaBytes:     cfg.BulkMediaByteCap,
 	}))
+	mux.Get("/examples", web.Examples(cfg.PublicBaseURL, showManage))
 	mux.Get("/demo", web.Demo(cfg.PublicBaseURL, cfg.DemoVideoURL, showManage))
 	mux.Get("/demo/walkthrough.mp4", web.DemoWalkthrough())
 	docsBotAccess, _ := botAccessEnabled(cfg)
