@@ -83,12 +83,13 @@ func TestSendMessage_RequiresToken(t *testing.T) {
 }
 
 func TestSendHTMLMessage_SetsParseModeAndKeepsTextVerbatim(t *testing.T) {
-	var gotPath, gotText, gotParse string
+	var gotPath, gotText, gotParse, gotPreview string
 	var requests int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
 		_ = r.ParseForm()
 		gotPath, gotText, gotParse = r.URL.Path, r.PostForm.Get("text"), r.PostForm.Get("parse_mode")
+		gotPreview = r.PostForm.Get("link_preview_options")
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer srv.Close()
@@ -98,6 +99,9 @@ func TestSendHTMLMessage_SetsParseModeAndKeepsTextVerbatim(t *testing.T) {
 	}
 	if gotPath != "/bot"+token+"/sendMessage" || gotParse != "HTML" || gotText != body || requests != 1 {
 		t.Fatalf("path=%q parse_mode=%q text=%q requests=%d", gotPath, gotParse, gotText, requests)
+	}
+	if gotPreview != `{"is_disabled":true}` {
+		t.Fatalf("link_preview_options = %q, want the link preview disabled", gotPreview)
 	}
 }
 

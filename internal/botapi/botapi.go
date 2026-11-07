@@ -48,12 +48,14 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) err
 // SendHTMLMessage posts text to chatID with parse_mode=HTML. The caller owns
 // validating the markup (broadcast.ParseHTML); Telegram's own refusal comes
 // back as *notify.APIError like any other, and nothing here retries the same
-// text as plain.
+// text as plain. The link preview card is switched off: a broadcast links to
+// the manage page, and a card under every message adds noise, not information.
 func (c *Client) SendHTMLMessage(ctx context.Context, chatID int64, text string) error {
 	return c.call(ctx, "sendMessage", url.Values{
-		"chat_id":    {strconv.FormatInt(chatID, 10)},
-		"text":       {text},
-		"parse_mode": {"HTML"},
+		"chat_id":              {strconv.FormatInt(chatID, 10)},
+		"text":                 {text},
+		"parse_mode":           {"HTML"},
+		"link_preview_options": {`{"is_disabled":true}`},
 	})
 }
 
