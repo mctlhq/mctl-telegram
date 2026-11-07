@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.131.0](https://github.com/mctlhq/mctl-telegram/compare/0.130.0...0.131.0) (2026-11-07)
+
+
+### Features
+
+* **broadcast:** only_telegram_ids narrows a campaign to test accounts ([73de67c](https://github.com/mctlhq/mctl-telegram/commit/73de67c30a08f7e8e218ba115f52fd6b9b2370fc))
+* **broadcast:** only_telegram_ids narrows a campaign to test accounts ([66656b4](https://github.com/mctlhq/mctl-telegram/commit/66656b4f0279002af017564c7e22539d66fb6a00))
+* **mcp:** get_unread_messages takes a chat folder ([3c23f37](https://github.com/mctlhq/mctl-telegram/commit/3c23f379d0dd729bbac31c0555705fce53526f31))
+* **mcp:** get_unread_messages takes a chat folder ([93386a9](https://github.com/mctlhq/mctl-telegram/commit/93386a9b6cc71936d932040b09adfaab43d8bf1b)), closes [#1155](https://github.com/mctlhq/mctl-telegram/issues/1155)
+* **mcp:** mark_read and save_draft take a forum topic ([517115d](https://github.com/mctlhq/mctl-telegram/commit/517115dd2a5594298c01a0d95cdbc73a31f8ef2b))
+* **mcp:** mark_read and save_draft take a forum topic ([6984e49](https://github.com/mctlhq/mctl-telegram/commit/6984e493013e700bfc42f347fe746dee6afeac7c)), closes [#1175](https://github.com/mctlhq/mctl-telegram/issues/1175)
+
+
+### Bug Fixes
+
+* **profiles:** keep folder off get_unread_messages under core profiles ([6d505b5](https://github.com/mctlhq/mctl-telegram/commit/6d505b55a8b8e899a7b5e003b53957c920eb7b57))
+* **telegram:** a topic draft's own reply header is not an attachment ([f93ee37](https://github.com/mctlhq/mctl-telegram/commit/f93ee377336b91c0ebf63e6c9f00e96423e04dff)), closes [#1175](https://github.com/mctlhq/mctl-telegram/issues/1175)
+
 ## [0.130.0](https://github.com/mctlhq/mctl-telegram/compare/0.129.0...0.130.0) (2026-11-07)
 
 
