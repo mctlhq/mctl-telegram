@@ -12,25 +12,29 @@ permissions: {}
 jobs:
   preview:
     runs-on: ubuntu-latest
+    # Main-only; holds DISPATCH_APP_PRIVATE_KEY (#1033).
+    environment: app-dispatch
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
-      # Uses mctl-agents, the backend-only automation App — deliberately
-      # NOT MCTL App (APP_CLIENT_ID). MCTL App is the App customers install
-      # themselves from mctl.ai/#request-access, and it is being narrowed to
-      # contents:read + metadata:read so its published least-privilege
-      # description is actually true (mctlhq/mctl-gitops#761). A GitHub App's
-      # permissions apply to every installation alike, so anything needing
-      # write — like actions:write on mctl-gitops to dispatch below — has to
-      # live on the internal App instead.
+      # Uses mctl-gitops-dispatch, an App that can only dispatch workflows
+      # (actions:write + metadata:read) and is installed on mctl-gitops alone
+      # (mctlhq/mctl-gitops#1033). Its key lives in the main-only `app-dispatch`
+      # environment, so a run from any other branch cannot mint a token.
+      #
+      # It cannot read contents, so the "is the values file there" guard below
+      # reads with the job's own GITHUB_TOKEN instead: mctl-gitops is a public
+      # repository. If it ever goes private, that read answers 404 for lack of
+      # access, which the guard reads as "absent" and skips silently; make the
+      # guard fail closed (or give it a read-capable App) before that happens.
       - name: Generate Platform App token
         id: app
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
-          client-id: ${{ vars.AGENTS_APP_CLIENT_ID }}
-          private-key: ${{ secrets.AGENTS_APP_PRIVATE_KEY }}
+          client-id: ${{ vars.DISPATCH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.DISPATCH_APP_PRIVATE_KEY }}
           owner: mctlhq
           repositories: mctl-gitops
 
@@ -92,11 +96,13 @@ jobs:
       - name: Dispatch agent-worker-managed-preview release-deploy
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
+          # The dispatch App cannot read contents; the guard reads a public repo.
+          READ_TOKEN: ${{ github.token }}
           SHA: ${{ github.sha }}
         run: |
           SHORT_SHA="${SHA::7}"
           VALUES=platform-gitops/services/labs/agent-worker-managed-preview/values.yaml
-          rc=0; .github/scripts/gitops-values-present.sh "$VALUES" || rc=$?
+          rc=0; GH_TOKEN="$READ_TOKEN" .github/scripts/gitops-values-present.sh "$VALUES" || rc=$?
           case "$rc" in
             0)
               gh workflow run release-deploy.yaml \
