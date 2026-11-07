@@ -81,3 +81,46 @@ func TestSendMessage_RequiresToken(t *testing.T) {
 		t.Fatal("empty token must be refused")
 	}
 }
+
+func TestSendHTMLMessage_SetsParseModeAndKeepsTextVerbatim(t *testing.T) {
+	var gotPath, gotText, gotParse string
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		_ = r.ParseForm()
+		gotPath, gotText, gotParse = r.URL.Path, r.PostForm.Get("text"), r.PostForm.Get("parse_mode")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+	const body = `<b>hi</b> <a href="https://example.com/?a=1&amp;b=2">x</a>`
+	if err := (&Client{Token: token, BaseURL: srv.URL}).SendHTMLMessage(context.Background(), 4242, body); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/bot"+token+"/sendMessage" || gotParse != "HTML" || gotText != body || requests != 1 {
+		t.Fatalf("path=%q parse_mode=%q text=%q requests=%d", gotPath, gotParse, gotText, requests)
+	}
+}
+
+// A markup rejection comes back as the typed error and the client does not
+// try the same text again without a parse mode.
+func TestSendHTMLMessage_RejectionIsTypedAndNotRetriedAsPlain(t *testing.T) {
+	var parseModes []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		parseModes = append(parseModes, r.PostForm.Get("parse_mode"))
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"ok":false,"error_code":400,"description":"Bad Request: can't parse entities: Unsupported start tag"}`))
+	}))
+	defer srv.Close()
+	err := (&Client{Token: token, BaseURL: srv.URL}).SendHTMLMessage(context.Background(), 1, "<x>")
+	var apiErr *notify.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != 400 || !strings.Contains(apiErr.Description, "can't parse entities") {
+		t.Fatalf("err = %#v", err)
+	}
+	if len(parseModes) != 1 || parseModes[0] != "HTML" {
+		t.Fatalf("requests with parse modes %v, want exactly one HTML request", parseModes)
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatal("error leaks the bot token")
+	}
+}

@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html/template"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -136,6 +137,15 @@ type broadcastRow struct {
 	// Audience and Outcome are the plain-language readings of Selector and
 	// Preview; the Ok flags are false when the stored JSON could not be
 	// read, in which case the page says so instead of guessing.
+	// Format is how the text is sent: "plain", "html", or "unknown" when the
+	// stored value cannot be read. For html, Rendered is the preview rebuilt
+	// from the parsed document (never from the submitted string), Links lists
+	// every href, and RenderOK is false when the stored HTML no longer
+	// parses -- the page then says so instead of showing nothing.
+	Format       string
+	Rendered     template.HTML
+	Links        []string
+	RenderOK     bool
 	Audience     string
 	AudienceOK   bool
 	Outcome      string
@@ -217,6 +227,27 @@ func (b *BroadcastServer) HandleList(w http.ResponseWriter, r *http.Request) {
 	renderManage(w, http.StatusOK, broadcastTemplate, data)
 }
 
+// describeContent reads the campaign's format and, for html, rebuilds the
+// preview from the parsed document. An unreadable format is "unknown", never
+// "plain": the page must not show a message as plain that the worker would
+// refuse to send.
+func describeContent(c db.BroadcastCampaign) (format string, rendered template.HTML, links []string, ok bool) {
+	f, err := broadcast.CampaignFormat(&c)
+	if err != nil {
+		return "unknown", "", nil, false
+	}
+	if f != broadcast.FormatHTML {
+		return string(f), "", nil, true
+	}
+	doc, err := broadcast.ParseHTML(c.Content)
+	if err != nil {
+		return string(f), "", nil, false
+	}
+	// Preview is assembled from allow-listed tags and escaped text and
+	// hrefs only, so marking it safe does not trust the stored string.
+	return string(f), template.HTML(doc.Preview()), doc.Links(), true //nolint:gosec
+}
+
 func toRow(c db.BroadcastCampaign, rep *broadcast.Report) broadcastRow {
 	row := broadcastRow{
 		ID: c.ID, State: c.State, EndReason: c.EndReason, Category: c.Category,
@@ -226,6 +257,7 @@ func toRow(c db.BroadcastCampaign, rep *broadcast.Report) broadcastRow {
 		ExpiresAt: c.ExpiresAt.UTC().Format("2006-01-02 15:04 UTC"),
 		Report:    rep,
 	}
+	row.Format, row.Rendered, row.Links, row.RenderOK = describeContent(c)
 	row.Audience, row.AudienceOK = describeAudience(c.SelectorJSON)
 	row.Outcome, row.OutcomeOK = describeOutcome(c.PreviewCounts)
 	if c.SourceRef != nil {
@@ -501,6 +533,10 @@ const broadcastExtraCSS = `
   .bc pre { white-space: pre-wrap; word-break: break-word; background: var(--surface-2, #f4f4f4); padding: 10px; border-radius: 6px; }
   .bc code { font-size: 12px; word-break: break-all; }
   .bc .meta { color: var(--text-dim); font-size: 13px; }
+  .bc .rendered { white-space: pre-wrap; word-break: break-word; background: var(--surface-card); border: 1px solid var(--surface-line); padding: 10px; border-radius: 6px; margin: 8px 0; }
+  .bc .rendered a { color: var(--accent); text-decoration: underline; }
+  .bc .rendered pre, .bc .rendered blockquote { margin: 6px 0; }
+  .bc .links { margin: 4px 0 8px 18px; padding: 0; font-size: 13px; word-break: break-all; }
   .bc .who, .bc .result { margin: 6px 0; }
   .bc details { margin: 6px 0; }
   .bc summary { cursor: pointer; color: var(--text-dim); font-size: 13px; }
@@ -521,7 +557,20 @@ var broadcastTemplate = newManageTemplate("broadcasts", strings.Replace(manageHe
     {{range .Pending}}
     <div class="bc">
       <div><strong>{{.Category}}</strong> · <code>{{.ID}}</code> · prepared by user {{.CreatedBy}} via <code>{{.Surface}}</code> at {{.CreatedAt}} · expires {{.ExpiresAt}}</div>
-      <pre>{{.Text}}</pre>
+      {{if eq .Format "html"}}
+        <div class="meta">Format <strong>html</strong>: recipients see this formatted message.</div>
+        {{if .RenderOK}}
+        <div class="rendered">{{.Rendered}}</div>
+        {{if .Links}}<div class="meta">Links in this message (check where each one goes):</div>
+        <ul class="links">{{range .Links}}<li><code>{{.}}</code></li>{{end}}</ul>{{end}}
+        {{else}}<div class="error">The stored HTML could not be parsed; do not approve. The source is below.</div>{{end}}
+        <details><summary>Source HTML</summary><pre>{{.Text}}</pre></details>
+      {{else if eq .Format "plain"}}
+        <pre>{{.Text}}</pre>
+      {{else}}
+        <div class="error">The stored message format could not be read; do not approve.</div>
+        <details><summary>Stored text</summary><pre>{{.Text}}</pre></details>
+      {{end}}
       <div class="who"><strong>Audience:</strong> {{if .AudienceOK}}{{.Audience}}{{else}}Could not read the stored audience; do not approve. See technical details.{{end}}</div>
       <div class="result"><strong>Result:</strong> {{if .OutcomeOK}}{{.Outcome}}{{else}}Could not read the stored preview counts; do not approve. See technical details.{{end}}</div>
       <details><summary>Technical details</summary>

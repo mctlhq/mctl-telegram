@@ -49,6 +49,11 @@ const (
 // Sender is the one outbound capability the worker needs.
 type Sender interface {
 	SendMessage(ctx context.Context, chatID int64, text string) error
+	// SendHTMLMessage sends text with parse_mode=HTML. A Telegram rejection
+	// of the markup is returned as an error like any other refusal; the
+	// worker never retries it as plain text, which would deliver a message
+	// other than the one that was approved.
+	SendHTMLMessage(ctx context.Context, chatID int64, text string) error
 }
 
 // WorkerStore is the subset of *db.Store the worker uses.
@@ -290,7 +295,7 @@ func (w *Worker) startApproved(ctx context.Context, now time.Time) error {
 // hashes the approval was bound to and returns the selector. A mismatch
 // means the row changed after approval; it is never delivered.
 func campaignSelector(c *db.BroadcastCampaign) (Selector, error) {
-	if Hash(c.Content) != c.ContentHash || Hash(c.SelectorJSON) != c.SelectorHash {
+	if !ContentMatches(c) || Hash(c.SelectorJSON) != c.SelectorHash {
 		return Selector{}, db.ErrCampaignMismatch
 	}
 	var sel Selector
@@ -374,6 +379,12 @@ func (w *Worker) deliver(ctx context.Context, d db.BroadcastDelivery, claimedAt 
 		}
 		return finish(db.DeliverySkipped, db.ReasonCancelled)
 	}
+	// campaignSelector already refused a row whose format is unreadable, so
+	// this cannot fail here; checked anyway so a send never guesses a format.
+	format, err := CampaignFormat(c)
+	if err != nil {
+		return finish(db.DeliverySkipped, db.ReasonCancelled)
+	}
 	f, err := w.store.GetBroadcastRecipientFacts(ctx, d.UserID, w.now())
 	if err != nil {
 		if ctx.Err() != nil {
@@ -405,7 +416,12 @@ func (w *Worker) deliver(ctx context.Context, d db.BroadcastDelivery, claimedAt 
 	// may still have been delivered, and would be recorded as
 	// outcome_unknown. sendTimeout bounds it; main waits for it.
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sendTimeout)
-	sendErr := w.sender.SendMessage(sctx, f.TelegramID, c.Content)
+	var sendErr error
+	if format == FormatHTML {
+		sendErr = w.sender.SendHTMLMessage(sctx, f.TelegramID, c.Content)
+	} else {
+		sendErr = w.sender.SendMessage(sctx, f.TelegramID, c.Content)
+	}
 	cancel()
 	return w.record(ctx, d, sendErr)
 }

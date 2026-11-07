@@ -30,7 +30,9 @@ import (
 // MaxTextUnits is Telegram's sendMessage text limit: 4096 characters counted
 // in UTF-16 code units (the unit Telegram's entity offsets use), so a
 // character outside the Basic Multilingual Plane -- most emoji -- costs two.
-// No parse mode is used, so the raw text is what counts. A longer text would
+// For a plain campaign no parse mode is used, so the raw text is what counts
+// (for html, ParseHTML counts the visible text, which is what Telegram
+// counts after parsing entities). A longer text would
 // fail at delivery for every recipient after its single-use approval was
 // already spent, so it is refused at prepare time instead.
 const MaxTextUnits = 4096

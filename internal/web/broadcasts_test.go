@@ -296,6 +296,10 @@ func (r *recordingSender) SendMessage(_ context.Context, chatID int64, text stri
 	return nil
 }
 
+func (r *recordingSender) SendHTMLMessage(ctx context.Context, chatID int64, text string) error {
+	return r.SendMessage(ctx, chatID, text)
+}
+
 // TestBroadcast_EndToEnd walks the whole path: prepared by an assistant,
 // nothing sent; approved by the operator on the page; delivered by the
 // worker exactly to the eligible client, with the approved text.
@@ -604,4 +608,134 @@ func TestBroadcastExtraCSS_UsesOnlyDefinedTokens(t *testing.T) {
 			t.Errorf("broadcastExtraCSS uses %s, which no shared stylesheet defines", m[1])
 		}
 	}
+}
+
+// preparedHTML stands in for prepare_broadcast with format=html.
+func (e *bcEnv) preparedHTML(text string) *broadcast.Preview {
+	e.t.Helper()
+	p, err := e.svc.Prepare(context.Background(), broadcast.Actor{UserID: e.opUID, TelegramID: bcOperator, Surface: "mcp:tgmcp_claude"},
+		broadcast.PrepareRequest{Selector: broadcast.Selector{Category: "maintenance"}, Text: text, Format: broadcast.FormatHTML})
+	if err != nil {
+		e.t.Fatalf("prepare html: %v", err)
+	}
+	return p
+}
+
+// An html campaign is shown the way recipients will see it, with every link
+// target listed so the anchor text cannot hide where it goes, and the exact
+// source kept under a details block.
+func TestBroadcastPage_HTMLCampaignShowsRenderedMessageAndLinks(t *testing.T) {
+	e := newBroadcastEnv(t)
+	p := e.preparedHTML(`<b>Release</b> notes: <a href="https://example.com/notes?a=1&amp;b=2">read more</a>`)
+	body := e.listBody()
+	for _, want := range []string{
+		`Format <strong>html</strong>`,
+		`<div class="rendered"><b>Release</b> notes: <a href="https://example.com/notes?a=1&amp;b=2" rel="noopener noreferrer nofollow">read more</a></div>`,
+		`<li><code>https://example.com/notes?a=1&amp;b=2</code></li>`,
+		`<details><summary>Source HTML</summary>`,
+		`name="content_hash" value="` + p.ContentHash + `"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page missing %q:\n%s", want, body)
+		}
+	}
+}
+
+// Plain campaigns keep their old rendering: text in a pre block, no format
+// banner, and markup-looking text is escaped, not rendered.
+func TestBroadcastPage_PlainCampaignNeverRendersMarkup(t *testing.T) {
+	e := newBroadcastEnv(t)
+	e.prepared(`<b>not bold</b> <script>alert(1)</script>`)
+	body := e.listBody()
+	if strings.Contains(body, "<script>alert(1)</script>") || strings.Contains(body, `class="rendered"`) {
+		t.Fatalf("plain text was rendered as markup:\n%s", body)
+	}
+	if !strings.Contains(body, "&lt;b&gt;not bold&lt;/b&gt;") {
+		t.Fatalf("plain text not shown escaped:\n%s", body)
+	}
+}
+
+// A row altered in the database to hold markup the validator would refuse is
+// never rendered: the page says it cannot be parsed and shows the source
+// escaped. The stored string never reaches the page as HTML.
+func TestBroadcastPage_TamperedHTMLRowIsNotRendered(t *testing.T) {
+	e := newBroadcastEnv(t)
+	p := e.preparedHTML(`<b>fine</b>`)
+	if _, err := e.conn.ExecContext(context.Background(),
+		`UPDATE broadcast_campaigns SET content = ? WHERE id = ?`, `<script>alert(1)</script><b>x</b>`, p.CampaignID); err != nil {
+		t.Fatal(err)
+	}
+	body := e.listBody()
+	if strings.Contains(body, "<script>") {
+		t.Fatalf("tampered content reached the page as markup:\n%s", body)
+	}
+	if !strings.Contains(body, "could not be parsed; do not approve") || strings.Contains(body, `class="rendered"`) {
+		t.Fatalf("tampered row must be reported, not rendered:\n%s", body)
+	}
+}
+
+func TestBroadcastPage_UnknownFormatIsNotShownAsPlain(t *testing.T) {
+	e := newBroadcastEnv(t)
+	p := e.prepared("Hello.")
+	if _, err := e.conn.ExecContext(context.Background(),
+		`UPDATE broadcast_campaigns SET content_format = 'markdownv2' WHERE id = ?`, p.CampaignID); err != nil {
+		t.Fatal(err)
+	}
+	body := e.listBody()
+	if !strings.Contains(body, "message format could not be read; do not approve") {
+		t.Fatalf("unknown format must be reported:\n%s", body)
+	}
+	// The text may appear, but only inside the "Stored text" details block
+	// that follows the warning -- never as the message itself.
+	warn, stored, text := strings.Index(body, "do not approve"), strings.Index(body, "<summary>Stored text</summary>"), strings.Index(body, "<pre>Hello.</pre>")
+	if warn < 0 || stored < warn || text < stored {
+		t.Fatalf("a row with an unreadable format was shown as plain text (warn=%d stored=%d text=%d):\n%s", warn, stored, text, body)
+	}
+	// And the approval itself is refused, so the page warning is not the only guard.
+	if w := e.approve(e.connectIdentity(), p, bcIssuer); w.Code == http.StatusSeeOther {
+		t.Fatal("approved a campaign whose format cannot be read")
+	}
+}
+
+// End to end: prepared as html, approved on the page, delivered through the
+// html send path with the exact approved text.
+func TestBroadcast_HTMLEndToEnd(t *testing.T) {
+	e := newBroadcastEnv(t)
+	body := `<b>Heads up</b>: <a href="https://example.com/x">details</a>`
+	p := e.preparedHTML(body)
+	if w := e.approve(e.connectIdentity(), p, bcIssuer); w.Code != http.StatusSeeOther {
+		t.Fatalf("approve = %d %s", w.Code, w.Body.String())
+	}
+	sender := &htmlRecordingSender{sent: map[int64]string{}}
+	worker := broadcast.NewWorker(e.store, sender, broadcast.WorkerConfig{
+		Policy: e.policy, RatePerSecond: 1000, BatchSize: 50, MaxAttempts: 3,
+		BaseBackoff: time.Minute, MaxBackoff: 10 * time.Minute, Lease: 2 * time.Minute,
+	}, time.Now)
+	if err := worker.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if sender.sent[bcClient] != body || !sender.html {
+		t.Fatalf("sent = %v html=%v, want the approved text via the html path", sender.sent, sender.html)
+	}
+}
+
+type htmlRecordingSender struct {
+	mu   sync.Mutex
+	sent map[int64]string
+	html bool
+}
+
+func (r *htmlRecordingSender) SendMessage(_ context.Context, chatID int64, text string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sent[chatID] = text
+	return nil
+}
+
+func (r *htmlRecordingSender) SendHTMLMessage(_ context.Context, chatID int64, text string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sent[chatID] = text
+	r.html = true
+	return nil
 }
