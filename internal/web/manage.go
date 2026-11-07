@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/assistantinstall"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
@@ -182,15 +183,53 @@ func (s *ManageServer) serveManage(w http.ResponseWriter, r *http.Request, id *a
 	} else {
 		botView = buildBotReachabilityView(reach, s.loginBotUsername)
 	}
+	// The sign-in identity and the client list are read-only context for
+	// "which account is this?" (#749). A failed read hides the identity row
+	// and marks the client list unknown; neither may block the page.
+	var signedIn *signedInView
+	if tgID, username, display, err := s.store.GetLoginIdentity(r.Context(), id.UserID); err != nil {
+		slog.Warn("manage: get login identity", "err", err)
+	} else {
+		signedIn = &signedInView{DisplayName: display, Username: username}
+		if signedIn.Username == "" {
+			signedIn.Username = id.TelegramUsername
+		}
+		// users.telegram_username holds the display name for an account
+		// without a @handle; showing it again as "(@Name)" would claim a
+		// handle the account does not have.
+		if signedIn.Username == signedIn.DisplayName {
+			signedIn.Username = ""
+		}
+		if signedIn.DisplayName == "" && signedIn.Username == "" {
+			if tgID == 0 {
+				tgID = id.TelegramID
+			}
+			signedIn = nil
+			if tgID != 0 {
+				signedIn = &signedInView{TelegramID: tgID}
+			}
+		}
+	}
+	var clients []clientGrantRow
+	clientsUnknown := false
+	if grants, err := s.store.ListActiveClientGrants(r.Context(), id.UserID, time.Now()); err != nil {
+		slog.Warn("manage: list client grants", "err", err)
+		clientsUnknown = true
+	} else {
+		clients = buildClientGrantRows(grants)
+	}
 	renderManage(w, status, manageTemplate, managePageData{
-		Connected:     info.Connected,
-		DisplayName:   info.DisplayName,
-		Username:      info.Username,
-		ConnectedAt:   info.ConnectedAt.Format("2006-01-02 15:04 UTC"),
-		SendEnabled:   info.SendEnabled,
-		CanDisconnect: canDisconnectFromManagePage(id, s.connectClient),
-		CanManage:     canManageAccount(id),
-		IsCanary:      s.canary.Contains(id.TelegramID),
+		SignedIn:       signedIn,
+		Clients:        clients,
+		ClientsUnknown: clientsUnknown,
+		Connected:      info.Connected,
+		DisplayName:    info.DisplayName,
+		Username:       info.Username,
+		ConnectedAt:    info.ConnectedAt.Format("2006-01-02 15:04 UTC"),
+		SendEnabled:    info.SendEnabled,
+		CanDisconnect:  canDisconnectFromManagePage(id, s.connectClient),
+		CanManage:      canManageAccount(id),
+		IsCanary:       s.canary.Contains(id.TelegramID),
 		// The browser sign-in token without account:manage may only turn
 		// notifications off; see HandleSetNotifications.
 		NotificationsReduceOnly: !canManageAccount(id) && isBrowserSignIn(id, s.connectClient),
@@ -311,11 +350,20 @@ func (s *ManageServer) HandleToggleSend(w http.ResponseWriter, r *http.Request) 
 // ----- HTML templates -----
 
 type managePageData struct {
-	Connected   bool
-	DisplayName string
-	Username    string
-	ConnectedAt string
-	SendEnabled bool
+	// SignedIn is the Telegram account this page is signed in as; nil when
+	// it could not be read. It is the same account the connected session
+	// below belongs to, and may differ from the one an AI client used.
+	SignedIn *signedInView
+	// Clients are the AI clients holding a live grant for this account.
+	// ClientsUnknown is true when that list could not be read: an unknown
+	// list is never shown as "no clients".
+	Clients        []clientGrantRow
+	ClientsUnknown bool
+	Connected      bool
+	DisplayName    string
+	Username       string
+	ConnectedAt    string
+	SendEnabled    bool
 	// CanDisconnect and CanManage are the handlers' own checks
 	// (HandleDisconnect, and HandleToggleSend / HandleSetNotifications), so
 	// the page never offers a control the server would refuse.
@@ -338,6 +386,37 @@ type managePageData struct {
 	// Assistant is the assistant section; nil hides it (no install
 	// service on this deployment).
 	Assistant *assistantSectionView
+}
+
+// signedInView names the sign-in identity. TelegramID is set only when
+// neither name was ever captured.
+type signedInView struct {
+	DisplayName string
+	Username    string
+	TelegramID  int64
+}
+
+// clientGrantRow is one AI client in the manage page's client list.
+type clientGrantRow struct {
+	Name     string
+	SignIns  int
+	LastUsed string
+}
+
+func buildClientGrantRows(grants []db.ClientGrant) []clientGrantRow {
+	rows := make([]clientGrantRow, 0, len(grants))
+	for _, g := range grants {
+		name := g.ClientName
+		if name == "" {
+			name = g.ClientID
+		}
+		rows = append(rows, clientGrantRow{
+			Name:     name,
+			SignIns:  g.Families,
+			LastUsed: g.LastIssuedAt.UTC().Format("2006-01-02 15:04 UTC"),
+		})
+	}
+	return rows
 }
 
 // choiceState is whether the client has explicitly chosen product_updates.
@@ -447,8 +526,9 @@ var manageFoot = `    </div>
 
 var manageTemplate = newManageTemplate("manage", manageHead+`    <h1>Manage your Telegram session</h1>
     {{if .Onboarding}}{{if .NotChosen}}<p id="onboarding"><strong>One more step: choose your notifications.</strong> Connecting your account did not subscribe you to anything; product updates stay off until you save your choice. <a href="#notifications">Choose notifications</a></p>{{else if .Chosen}}<p id="onboarding" class="meta">Your notification choices are saved. <a href="#notifications">Review them</a></p>{{else}}<p id="onboarding" class="meta">We could not load your notification choices right now.</p>{{end}}{{end}}
+    {{if .SignedIn}}<div class="field-row" id="signed-in"><span class="field-label">Signed in to this page as</span><span class="field-value">{{if .SignedIn.DisplayName}}{{.SignedIn.DisplayName}}{{end}}{{if .SignedIn.Username}}{{if .SignedIn.DisplayName}} {{end}}(@{{.SignedIn.Username}}){{end}}{{if .SignedIn.TelegramID}}Telegram id {{.SignedIn.TelegramID}}{{end}}</span></div>{{end}}
     {{if .Connected}}
-    <div class="field-row"><span class="field-label">Account</span><span class="field-value">{{if .DisplayName}}{{.DisplayName}}{{else}}(unknown){{end}}{{if .Username}} (@{{.Username}}){{end}}</span></div>
+    <div class="field-row"><span class="field-label">Connected Telegram account</span><span class="field-value">{{if .DisplayName}}{{.DisplayName}}{{else}}(unknown){{end}}{{if .Username}} (@{{.Username}}){{end}}</span></div>
     <div class="field-row"><span class="field-label">Connected at</span><span class="field-value">{{.ConnectedAt}}</span></div>
     <div class="field-row"><span class="field-label">Send messages</span><span class="field-value">{{if .SendEnabled}}Enabled{{else}}Disabled{{end}}</span></div>
     {{if .CanManage}}<form method="POST" action="/telegram/connect/manage/toggle-send" style="display:inline">
@@ -461,6 +541,11 @@ var manageTemplate = newManageTemplate("manage", manageHead+`    <h1>Manage your
     {{else}}
     <p>No active Telegram session found.</p>
     {{end}}
+    <h2 class="notif-heading" id="clients">AI clients with access</h2>
+    {{if .ClientsUnknown}}<p class="meta" id="clients-unknown">We could not load the list of AI clients right now. This does not mean none have access.</p>
+    {{else if .Clients}}{{range .Clients}}<div class="field-row"><span class="field-label">{{.Name}}</span><span class="field-value">{{if gt .SignIns 1}}{{.SignIns}} sign-ins, {{end}}last used {{.LastUsed}}</span></div>
+    {{end}}{{else}}<p class="meta" id="clients-none">No AI client is signed in as this account.</p>{{end}}
+    <p class="meta" id="wrong-account"><strong>Is your AI client missing here, or does it show other chats?</strong> Then it signed in as a different Telegram account than this page. Ask it to run get_my_identity to see which. To switch it, remove the connector's authorization in the client, add it again, and open the sign-in link in a private browser window signed in to the account you want.</p>
     {{if .Bot}}
     <h2 class="notif-heading">Login bot</h2>
     <div class="field-row"><span class="field-label">Reachability</span><span class="field-value">{{.Bot.Label}}</span></div>
