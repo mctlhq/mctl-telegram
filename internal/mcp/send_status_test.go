@@ -252,3 +252,127 @@ func TestGetMySendStatus_SettledVerdictSurvivesAnUnreadableAccountRow(t *testing
 		t.Errorf("connected present (%v) despite an unreadable row", out["connected"])
 	}
 }
+
+// TestGetMySendStatus_ReasonNamesNextStep pins the next-step hints of #1127: a
+// user who signed in without connecting Telegram is told where to connect,
+// and a token issued before an access grant is told to sign in again rather
+// than Reconnect. The shared reason constant stays in front of the hint so
+// the parity with send_message's dry_reason is unchanged.
+func TestGetMySendStatus_ReasonNamesNextStep(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name      string
+		manageURL string
+		clientID  string
+		scopes    []string
+		connect   bool
+		want      []string
+		dontWant  []string
+		exact     string
+	}{
+		{
+			name:      "no session, manage page known",
+			manageURL: "https://tg.test/telegram/connect/manage",
+			clientID:  "claude.ai",
+			scopes:    []string{"telegram:messages:send"},
+			want:      []string{"No Telegram session is connected", "https://tg.test/telegram/connect/manage"},
+			dontWant:  []string{"Reconnect"},
+		},
+		{
+			name:     "no session, no manage page",
+			clientID: "claude.ai",
+			scopes:   []string{"telegram:messages:send"},
+			want:     []string{"No Telegram session is connected", "operator"},
+			dontWant: []string{"https://"},
+		},
+		{
+			name:      "no session and no send scope",
+			manageURL: "https://tg.test/telegram/connect/manage",
+			clientID:  "claude.ai",
+			scopes:    []string{"telegram:messages:read"},
+			want:      []string{"telegram:messages:send scope", "sign in again", "Reconnect", "https://tg.test/telegram/connect/manage"},
+		},
+		{
+			name:      "connected, token predates the grant",
+			manageURL: "https://tg.test/telegram/connect/manage",
+			clientID:  "claude.ai",
+			scopes:    []string{"telegram:messages:read"},
+			connect:   true,
+			want:      []string{"telegram:messages:send scope", "sign in again", "Reconnect"},
+			dontWant:  []string{"No Telegram session"},
+		},
+		{
+			// A worker or device credential has no connector to remove and
+			// sign in with again, so it gets the reason without that step.
+			name:      "connected, device credential without send scope",
+			manageURL: "https://tg.test/telegram/connect/manage",
+			scopes:    []string{"telegram:messages:read"},
+			connect:   true,
+			want:      []string{"telegram:messages:send scope"},
+			dontWant:  []string{"sign in again", "Reconnect", "No Telegram session"},
+		},
+		{
+			// Send scope present and no account row: the verdict comes from
+			// the per-account flag read of a missing row, and the hint must
+			// not start with a stray separator.
+			name:      "no session, exact text",
+			manageURL: "https://tg.test/telegram/connect/manage",
+			clientID:  "claude.ai",
+			scopes:    []string{"telegram:messages:send"},
+			exact:     "per-account send_enabled=false — real sends are not enabled for this account. No Telegram session is connected for this account yet. Connect one at https://tg.test/telegram/connect/manage after signing in with Telegram.",
+		},
+		{
+			// A hint after a hint: no doubled period between them.
+			name:      "no session and no send scope, exact text",
+			manageURL: "https://tg.test/telegram/connect/manage",
+			clientID:  "claude.ai",
+			scopes:    []string{"telegram:messages:read"},
+			exact:     "identity missing telegram:messages:send scope. " + staleTokenHint + " No Telegram session is connected for this account yet. Connect one at https://tg.test/telegram/connect/manage after signing in with Telegram.",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newToolsTestStore(t)
+			var uid int64
+			if tc.connect {
+				uid = seedHostedAccount(t, store, 6060, true)
+			} else {
+				var err error
+				uid, err = store.EnsureUserByTelegramID(ctx, 6061, "nobody", "No Session")
+				if err != nil {
+					t.Fatalf("EnsureUserByTelegramID: %v", err)
+				}
+			}
+			srv := &Server{AllowSend: true, Store: store, ManageURL: tc.manageURL}
+			id := &auth.Identity{UserID: uid, ClientID: tc.clientID, Scopes: tc.scopes}
+			out := parseSendStatus(t, callSendStatus(t, srv, id))
+			reason, _ := out["reason"].(string)
+			if tc.exact != "" && reason != tc.exact {
+				t.Errorf("reason = %q\nwant   %q", reason, tc.exact)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(reason, w) {
+					t.Errorf("reason = %q, want it to contain %q", reason, w)
+				}
+			}
+			for _, dw := range tc.dontWant {
+				if strings.Contains(reason, dw) {
+					t.Errorf("reason = %q, must not contain %q", reason, dw)
+				}
+			}
+		})
+	}
+}
+
+// joinSentences is what keeps the reason readable when a hint follows a
+// reason that is empty or already ends in a period.
+func TestJoinSentences(t *testing.T) {
+	for _, tc := range []struct{ reason, next, want string }{
+		{"", "Next.", "Next."},
+		{"Reason", "Next.", "Reason. Next."},
+		{"Reason.", "Next.", "Reason. Next."},
+	} {
+		if got := joinSentences(tc.reason, tc.next); got != tc.want {
+			t.Errorf("joinSentences(%q, %q) = %q, want %q", tc.reason, tc.next, got, tc.want)
+		}
+	}
+}

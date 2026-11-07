@@ -328,7 +328,7 @@ func TestToolSendMessage_HintOnlyForSendDisabled(t *testing.T) {
 				id := &auth.Identity{UserID: uid, ClientID: "dcr-client", Scopes: []string{"telegram:messages:send"}}
 				return srv, id
 			},
-			wantHint: "Your account has never opted into real sends, and this connection was authorised without account management, so it cannot change that. Reconnect this connector and grant account management, or enable real sends at " + manageURL + " after signing in with Telegram. Call get_my_send_status to confirm this is the reason.",
+			wantHint: "Your account has never opted into real sends, and this connection was authorised without account management, so it cannot change that. Remove this connector's authorization in your client and sign in again, granting account management (Reconnect reuses the old token), or enable real sends at " + manageURL + " after signing in with Telegram. Call get_my_send_status to confirm this is the reason.",
 		},
 		{
 			// A worker or device credential can never gain account:manage;

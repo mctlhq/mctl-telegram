@@ -1109,6 +1109,7 @@ disable it for an authenticated user. It takes no inputs.`),
 		default:
 			out.CanSend, out.Reason = evaluateSendGateAccountFlag(acct.SendEnabled)
 		}
+		out.Reason = s.withNextStepHints(id, out.Reason, acct)
 		return jsonResult(out)
 	}
 	return tool, handler
@@ -2198,8 +2199,9 @@ const reasonSendDisabled = "per-account send_enabled=false — real sends are no
 //
 //   - a caller that can call set_send_consent is told to;
 //   - an OAuth connector narrowed below account:manage (it has a client_id)
-//     can be re-authorised with that permission, or the owner can use the
-//     manage page;
+//     can be authorised again with that permission, by removing the
+//     connector and signing in again since a client's Reconnect reuses the
+//     old token (#1127), or the owner can use the manage page;
 //   - a worker or device credential (no client_id) can never gain the
 //     scope, so only the owner can act, on the manage page.
 //
@@ -2218,7 +2220,7 @@ func (s *Server) sendDisabledHint(id *auth.Identity) string {
 		return prefix + ", and this connection cannot change that. An operator of this server can enable them for the account with set_account_send." + confirm
 	}
 	if id != nil && id.ClientID != "" {
-		return prefix + ", and this connection was authorised without account management, so it cannot change that. Reconnect this connector and grant account management, or enable real sends at " + s.ManageURL + " after signing in with Telegram." + confirm
+		return prefix + ", and this connection was authorised without account management, so it cannot change that. Remove this connector's authorization in your client and sign in again, granting account management (Reconnect reuses the old token), or enable real sends at " + s.ManageURL + " after signing in with Telegram." + confirm
 	}
 	return prefix + ", and this credential can never change that. The account owner can enable real sends at " + s.ManageURL + " after signing in with Telegram." + confirm
 }
@@ -2234,6 +2236,56 @@ func (s *Server) withSendDisabledHint(id *auth.Identity, reason string) string {
 		return reason
 	}
 	return reason + ". " + s.sendDisabledHint(id)
+}
+
+// staleTokenHint is appended to the missing-scope reason of get_my_send_status.
+// A scope granted after the token was issued (set_telegram_access) reaches
+// the caller only through a new token, and an MCP client's "Reconnect"
+// reuses the old one, so the caller is told the one remedy that works (#1127).
+const staleTokenHint = "If access was granted after this connector was authorised, the new scope applies only to a new token: remove this connector's authorization in your client and sign in again. Reconnect reuses the old token."
+
+// noSessionHint names the next step for an identity that signed in but never
+// connected a Telegram account (#1127). The manage page is where the
+// connect flow lives when the server has one; otherwise only the operator
+// can help.
+func (s *Server) noSessionHint() string {
+	if s.ManageURL == "" {
+		return "No Telegram session is connected for this account yet. Ask the operator how to connect one."
+	}
+	return "No Telegram session is connected for this account yet. Connect one at " + s.ManageURL + " after signing in with Telegram."
+}
+
+// withNextStepHints appends, to the verdict reason of get_my_send_status, the
+// next step the caller can take. The reason itself stays the shared
+// constant so the parity with send_message's dry_reason holds for the
+// per-account flag; the hints only follow it. Two states get one:
+//   - a missing send scope, which a later grant cannot fix on the old token;
+//   - a signed-in identity with no connected Telegram account, which no
+//     scope or flag can fix either.
+func (s *Server) withNextStepHints(id *auth.Identity, reason string, acct *db.AccountInfo) string {
+	// Only an OAuth connector (it has a client_id) can be removed and
+	// authorised again; a worker or device credential has no such step.
+	if strings.HasPrefix(reason, "identity missing ") && id != nil && id.ClientID != "" {
+		reason = joinSentences(reason, staleTokenHint)
+	}
+	if acct != nil && !acct.Connected {
+		reason = joinSentences(reason, s.noSessionHint())
+	}
+	return reason
+}
+
+// joinSentences appends next to reason as a further sentence: no separator
+// when reason is empty (can_send=true with no connected account), and no
+// doubled period when reason already ends in one (a hint after a hint).
+func joinSentences(reason, next string) string {
+	switch {
+	case reason == "":
+		return next
+	case strings.HasSuffix(reason, "."):
+		return reason + " " + next
+	default:
+		return reason + ". " + next
+	}
 }
 
 // evaluateSendGateAccountFlag turns the per-account send_enabled flag into the

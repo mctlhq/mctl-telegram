@@ -353,6 +353,44 @@ var connectSuccessTemplate = template.Must(template.New("connectSuccess").Parse(
     </script>
 ` + enableFoot))
 
+// enableNoSessionPage backs the page shown to a sign-in that received an
+// authorization code without an MTProto login because the identity has no
+// telegram:* scope: no access tier yet, or lookup admin only (#1127). It
+// replaces the "Telegram connected" interstitial on that path.
+type enableNoSessionPage struct {
+	// RedirectURL is the client redirect_uri carrying ?code=&state=.
+	RedirectURL string
+	// AppName is the human label for the client ("Claude" / "ChatGPT").
+	AppName string
+	// ManageURL is the absolute URL of the browser manage page.
+	ManageURL string
+	// LookupOnly is true for a lookup-admin identity: it has an access tier,
+	// just not one that reads Telegram, so the operator step does not apply.
+	LookupOnly bool
+}
+
+var enableNoSessionTemplate = template.Must(template.New("enableNoSession").Parse(enableHead + `    <h1>Signed in, but Telegram is not connected yet</h1>
+    {{if .LookupOnly}}<p>This account has admin lookup access only. It can look up users, but it cannot read or send Telegram messages, so no Telegram session was created.</p>
+    {{else}}<p>Signing in with Telegram proved who you are, but this account has no Telegram access yet, so the step that connects your chats was skipped. {{.AppName}} will show the connector as active, and every Telegram tool will refuse until access is granted.</p>
+    <div class="notice">What to do next:
+      <ol>
+        <li>Ask the operator to grant access to this account (the <code>set_telegram_access</code> tool).</li>
+        <li>Then remove this connector&#8217;s authorization in {{.AppName}} and sign in again. &#8220;Reconnect&#8221; keeps the old token, and the old token never gains the new access.</li>
+        <li>The second sign-in offers the QR code or phone step that connects your chats.</li>
+      </ol>
+    </div>
+    {{end}}<p class="meta">Your account page: <a href="{{.ManageURL}}">{{.ManageURL}}</a></p>
+    <a class="btnlink" href="{{.RedirectURL}}">Continue to {{.AppName}}</a>
+    <p class="meta">Continuing completes the sign-in in {{.AppName}} with the self-service tools only (identity, send status, audit log, assistants).</p>
+` + enableFoot))
+
+// renderEnableNoSession shows the no-session page. It carries no script and
+// no auto-redirect on purpose: the user has to read it, and the visible
+// "Continue" link is the only way forward.
+func renderEnableNoSession(w http.ResponseWriter, p enableNoSessionPage) {
+	renderEnable(w, http.StatusOK, enableNoSessionTemplate, p, "")
+}
+
 // enableRefreshHead is enableHead with a meta refresh of .Refresh seconds,
 // for the QR status pages: they poll by reloading, with no JavaScript.
 var enableRefreshHead = strings.Replace(enableHead,
