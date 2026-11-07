@@ -83,9 +83,12 @@ func (s *Store) HideDialog(ctx context.Context, userID int64, peer, title string
 	if r := []rune(title); len(r) > 256 {
 		title = string(r[:256])
 	}
-	// One statement, so two concurrent hides cannot both pass the cap. A
-	// row already present always updates; a new row inserts only while
-	// the account holds fewer than MaxHiddenDialogs.
+	// One statement: a row already present always updates; a new row
+	// inserts only while the account holds fewer than MaxHiddenDialogs.
+	// SQLite serialises writers, so the cap is exact there. On Postgres
+	// under READ COMMITTED two concurrent hides can still both see the old
+	// count; the cap is a soft bound that keeps one account's list small,
+	// and overshooting it by a few rows harms nothing.
 	res, err := s.DB.ExecContext(ctx,
 		`INSERT INTO hidden_dialogs (user_id, peer, title, hidden_at)
 		 SELECT $1, $2, $3, $4
