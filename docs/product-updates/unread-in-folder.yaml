@@ -8,6 +8,8 @@ summary: >-
   unscoped call. The folder is checked over the same window list_dialogs
   uses (the 200 most recent chats and 100 archived ones), and folder_scan
   says whether that covered every chat. It cannot be combined with peer.
+  Connections under a core tool profile (core-readonly, core-reply) do
+  not get folder: those profiles read one named chat at a time.
 locale: en
 delivery: docs_only
 high_value: false
