@@ -251,3 +251,39 @@ func TestLogToolCall_ReasonIsExcludedFromTheHash(t *testing.T) {
 		t.Fatalf("expected Verified=3, got %d", res.Verified)
 	}
 }
+
+// A client that disconnects must not erase the record of what happened: the
+// connect flow's 90 s wait can outlive the browser, and production has no
+// connect:failed:timeout row although the metric beside it counted 25
+// (mctl-telegram#1162).
+func TestLogToolCall_SurvivesAFinishedRequest(t *testing.T) {
+	s := newTestStore(t)
+	uid, err := s.EnsureUser(context.Background(), "alice", "", "test")
+	if err != nil {
+		t.Fatalf("EnsureUser: %v", err)
+	}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+
+	for name, ctx := range map[string]context.Context{"cancelled": cancelled, "expired": expired} {
+		tool := "connect:failed:timeout:" + name
+		s.LogToolCall(ctx, ToolCall{UserID: uid, Tool: tool, Status: "error", ErrMsg: "send code timeout"})
+		var n int
+		if err := s.DB.QueryRow(`SELECT COUNT(*) FROM audit_logs WHERE tool_name = $1`, tool).Scan(&n); err != nil {
+			t.Fatalf("%s: read audit: %v", name, err)
+		}
+		if n != 1 {
+			t.Errorf("%s request: %d rows, want 1", name, n)
+		}
+	}
+	res, err := s.VerifyAuditChain(context.Background(), uid)
+	if err != nil {
+		t.Fatalf("VerifyAuditChain: %v", err)
+	}
+	if !res.OK {
+		t.Errorf("chain broken after detached writes: %+v", res)
+	}
+}
