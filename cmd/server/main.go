@@ -661,13 +661,14 @@ func main() {
 	// the self-connect wizard. Requires auth so only the session owner can
 	// manage their own session.
 	if strings.EqualFold(cfg.AuthMode, "local-jwt") {
-		manageSrv := web.NewManageServer(store, pool, strings.TrimRight(cfg.PublicBaseURL, "/"), cfg.TelegramLoginBotUsername, oauth.ConnectClientID).WithCanaryGuard(cfg.CanaryTelegramIDs).WithAssistants(assistantSvc)
+		manageSrv := web.NewManageServer(store, pool, strings.TrimRight(cfg.PublicBaseURL, "/"), cfg.TelegramLoginBotUsername, oauth.ConnectClientID).WithCanaryGuard(cfg.CanaryTelegramIDs).WithAssistants(assistantSvc).WithAccessTokenTTL(cfg.OAUTHAccessTokenTTL)
 		// Browser navigations get an HTML sign-in page; API clients keep JSON 401.
 		// Auth is still required — only the unauthenticated presentation changes.
 		manageAuth := auth.MiddlewareWithHTML(provider, true, m, resourceMeta, manageSrv.WriteUnauthorized)
 		mux.With(manageAuth).Get("/telegram/connect/manage", manageSrv.HandleManage)
 		mux.With(manageAuth).Post("/telegram/connect/manage/disconnect", manageSrv.HandleDisconnect)
 		mux.With(manageAuth).Post("/telegram/connect/manage/toggle-send", manageSrv.HandleToggleSend)
+		mux.With(manageAuth).Post("/telegram/connect/manage/revoke-client", manageSrv.HandleRevokeClient)
 		mux.With(manageAuth).Post("/telegram/connect/manage/notifications", manageSrv.HandleSetNotifications)
 		if assistantSvc != nil {
 			mux.With(manageAuth).Post("/telegram/connect/manage/assistant/install", manageSrv.HandleAssistantInstall)
