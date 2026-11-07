@@ -113,11 +113,27 @@ func TestManagePage_NoHandleIsNotShownAsOne(t *testing.T) {
 	}
 }
 
+// TestManagePage_NamelessSignInFallsBackToTheID covers an identity with
+// neither a display name nor a handle: the row must still say who is signed
+// in rather than render empty.
+func TestManagePage_NamelessSignInFallsBackToTheID(t *testing.T) {
+	ctx := context.Background()
+	store := newManageTestStore(t)
+	uid, err := store.EnsureUserByTelegramID(ctx, 4205, "", "")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	body := getManageBody(t, NewManageServer(store, nil, "https://tg.test", "", ""), &auth.Identity{UserID: uid, TelegramID: 4205})
+	if !strings.Contains(body, `id="signed-in"`) || !strings.Contains(body, "Telegram id 4205") {
+		t.Error("nameless sign-in does not fall back to the Telegram id")
+	}
+}
+
 func seedGrant(t *testing.T, store *db.Store, tok string, uid int64, client string) {
 	t.Helper()
 	if err := store.SaveRefreshToken(context.Background(), tok, db.RefreshToken{
 		FamilyID: tok, UserID: uid, ClientID: client, ClientName: client,
-		TelegramID: 1, ExpiresAt: time.Now().Add(24 * time.Hour),
+		TelegramID: 4299, ExpiresAt: time.Now().Add(24 * time.Hour),
 	}); err != nil {
 		t.Fatalf("save %s: %v", tok, err)
 	}
