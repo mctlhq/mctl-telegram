@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.137.0](https://github.com/mctlhq/mctl-telegram/compare/0.136.0...0.137.0) (2026-11-08)
+
+
+### Features
+
+* **agents:** issue-1240-spike-finance-assistant-owner-private-de ([8609cea](https://github.com/mctlhq/mctl-telegram/commit/8609cea364a97ee480e0ec6c8834a4d9b710ad6d))
+* **ui:** mirror site.css 0.20.1 and show the active nav item as shared ([2af13c2](https://github.com/mctlhq/mctl-telegram/commit/2af13c24902fd35efdf7d85516febf1c694f237a))
+* **ui:** mirror site.css 0.20.1 and show the active nav item as shared ([5a9b45a](https://github.com/mctlhq/mctl-telegram/commit/5a9b45aad02e683cf6c40dc7b41b9bdf03945531))
+
+
+### Bug Fixes
+
+* **agentworker:** nudge a reply without completion and log finish_reason ([a36c8c1](https://github.com/mctlhq/mctl-telegram/commit/a36c8c116d9789051c2f2805e6f72433759f9a20))
+
 ## [0.136.0](https://github.com/mctlhq/mctl-telegram/compare/0.135.0...0.136.0) (2026-11-08)
 
 
