@@ -175,6 +175,10 @@ type Config struct {
 	OAUTHDCRRedirectURIs []string
 	AutoApproveClients   bool // open registration: every widget login auto-gets the client tier
 	DigestHourUTC        int  // UTC hour (0-23) for the daily new-client digest; default 9
+	// DigestFormat is how the daily digest is sent: "html" (default) or
+	// "plain" (the pre-0.135 behaviour, the switch back if the HTML digest
+	// misbehaves). Anything else aborts the boot.
+	DigestFormat string
 	// BotReceiverEnabled turns on the inbound login-bot update receiver
 	// (issue-619). Default OFF, and deliberately so: getUpdates allows exactly
 	// one consumer per bot token, so enabling it in two environments that
@@ -576,6 +580,7 @@ func Load() (*Config, error) {
 		OAUTHRegisterRatePerMin:         envInt("OAUTH_REGISTER_RATE_PER_MIN", 10),
 		AutoApproveClients:              envBool("AUTO_APPROVE_CLIENTS", false),
 		DigestHourUTC:                   envInt("DIGEST_HOUR_UTC", 9),
+		DigestFormat:                    strings.ToLower(strings.TrimSpace(envOr("DIGEST_FORMAT", "html"))),
 		BotReceiverEnabled:              envBool("BOT_RECEIVER_ENABLED", false),
 		BotStartBridgeToken:             strings.TrimSpace(os.Getenv("BOT_START_BRIDGE_TOKEN")),
 		BroadcastRatePerSec:             envFloat("BROADCAST_RATE_PER_SEC", 10),
@@ -609,6 +614,9 @@ func Load() (*Config, error) {
 	c.DBMaxIdleConns = envInt("DB_MAX_IDLE_CONNS", 0)
 	c.ReplicaID = envOr("REPLICA_ID", envOr("POD_NAME", "unknown"))
 	c.DemoVideoURL = envOr("DEMO_VIDEO_URL", "")
+	if c.DigestFormat != "html" && c.DigestFormat != "plain" {
+		return nil, fmt.Errorf("DIGEST_FORMAT must be html or plain, got %q", c.DigestFormat)
+	}
 	c.EnableAccessQREnabled = envBool("ENABLE_ACCESS_QR_ENABLED", false)
 	c.TelegramAppName = strings.TrimSpace(os.Getenv("TELEGRAM_APP_NAME"))
 	canaryIDs, err := canaryguard.Parse(os.Getenv("CANARY_TELEGRAM_IDS"))

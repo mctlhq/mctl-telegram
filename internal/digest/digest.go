@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/botapi"
+	"github.com/mctlhq/mctl-telegram/internal/broadcast"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/notify"
 )
@@ -27,7 +28,7 @@ const (
 // sends the new-client digest to every recipient via the bot. It is a no-op
 // when botToken is empty or there are no recipients. The goroutine exits when
 // ctx is cancelled. Single-replica only — there is no leader election.
-func StartDailyDigest(ctx context.Context, store *db.Store, botToken string, recipients []int64, hourUTC int, autoApprove bool) {
+func StartDailyDigest(ctx context.Context, store *db.Store, botToken string, recipients []int64, hourUTC int, autoApprove bool, format broadcast.Format) {
 	if botToken == "" || len(recipients) == 0 {
 		slog.Info("daily digest disabled", "reason", "no bot token or recipients")
 		return
@@ -44,11 +45,11 @@ func StartDailyDigest(ctx context.Context, store *db.Store, botToken string, rec
 				t.Stop()
 				return
 			case <-t.C:
-				runDigest(ctx, store, botToken, recipients, autoApprove)
+				runDigest(ctx, store, botToken, recipients, autoApprove, format)
 			}
 		}
 	}()
-	slog.Info("daily digest enabled", "hour_utc", hourUTC, "recipients", len(recipients))
+	slog.Info("daily digest enabled", "hour_utc", hourUTC, "recipients", len(recipients), "format", string(format))
 }
 
 // untilNextHour returns the duration from now to the next occurrence of
@@ -65,7 +66,7 @@ func untilNextHour(now time.Time, hour int) time.Duration {
 // runDigest collects the last-24h clients with a single ListIdentities scan
 // and sends the digest. Errors are logged, never fatal — a digest is
 // best-effort.
-func runDigest(ctx context.Context, store *db.Store, botToken string, recipients []int64, autoApprove bool) {
+func runDigest(ctx context.Context, store *db.Store, botToken string, recipients []int64, autoApprove bool, format broadcast.Format) {
 	qctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -108,14 +109,32 @@ func runDigest(ctx context.Context, store *db.Store, botToken string, recipients
 			src = labels
 		}
 	}
-	msg := buildDigestMessage(newRows, len(all), autoApprove, steps, src)
+	var msg string
+	if format == broadcast.FormatHTML {
+		var buildErr error
+		msg, buildErr = buildDigestHTML(newRows, len(all), autoApprove, steps, src)
+		if buildErr != nil {
+			// Never fall back to plain text here: a digest the renderer
+			// cannot validate is a renderer bug, and it must be visible.
+			// DIGEST_FORMAT=plain switches the sender back.
+			slog.Error("digest: html render failed, nothing sent", "err", buildErr)
+			return
+		}
+	} else {
+		msg = buildDigestMessage(newRows, len(all), autoApprove, steps, src)
+	}
 	if msg == "" {
 		slog.Info("digest: no new clients in the last 24h, skipping send")
 		return
 	}
 	sent := 0
 	for _, chatID := range recipients {
-		sendErr := sendTelegramMessage(botToken, chatID, msg)
+		var sendErr error
+		if format == broadcast.FormatHTML {
+			sendErr = sendTelegramHTML(botToken, chatID, msg)
+		} else {
+			sendErr = sendTelegramMessage(botToken, chatID, msg)
+		}
 		recordReachability(qctx, store, chatID, sendErr)
 		if sendErr != nil {
 			slog.Warn("digest: send failed", "chat_id", chatID, "err", sendErr)
@@ -206,6 +225,61 @@ func buildDigestMessage(rows []db.IdentityRow, total int, autoApprove bool, step
 	return b.String()
 }
 
+// maxDigestRows bounds the scan for how many rows fit; the tag limit of the
+// HTML subset (broadcast.MaxHTMLTags) usually bites first.
+const maxDigestRows = 200
+
+// buildDigestHTML formats the digest in the HTML subset a broadcast uses. Every
+// value that comes from the database or a client (name, tier, session text,
+// acquisition label) is escaped, and the finished body is validated by the same
+// parser that guards an approved broadcast, so a rendering bug is an error here
+// rather than a 400 from Telegram. When all rows do not fit the visible-text or
+// tag limit, the rows that fit are listed and the rest are counted. It returns
+// "" when there are no new clients.
+func buildDigestHTML(rows []db.IdentityRow, total int, autoApprove bool, steps map[int64]db.ConnectStep, src map[int64]string) (string, error) {
+	if len(rows) == 0 {
+		return "", nil
+	}
+	header := fmt.Sprintf("<b>mctl-telegram</b> — %d new client(s) in the last 24h (%d total):\n", len(rows), total)
+	lines := make([]string, 0, len(rows))
+	for _, r := range rows {
+		name := r.Username
+		if name == "" {
+			name = r.DisplayName
+		}
+		if name == "" {
+			name = "(no username)"
+		}
+		tail := fmt.Sprintf(" — tier=%s — %s%s", effectiveTier(r.AccessTier, autoApprove), sessionSuffix(r, steps), reachabilitySuffix(r)+srcSuffix(r, src))
+		lines = append(lines, fmt.Sprintf("• <b>%s</b> — id <code>%d</code>%s\n", broadcast.EscapeHTML(name), r.TelegramID, broadcast.EscapeHTML(tail)))
+	}
+	compose := func(n int) string {
+		var b strings.Builder
+		b.WriteString(header)
+		for _, l := range lines[:n] {
+			b.WriteString(l)
+		}
+		if n < len(lines) {
+			fmt.Fprintf(&b, "…and %d more", len(lines)-n)
+		}
+		return b.String()
+	}
+	fit, best := 0, ""
+	for n := 1; n <= len(lines) && n <= maxDigestRows; n++ {
+		body, err := broadcast.NormalizeContent(broadcast.FormatHTML, compose(n))
+		if err != nil {
+			break
+		}
+		fit, best = n, body
+	}
+	if fit == 0 {
+		// Not even one row validates: report why from the single-row body.
+		_, err := broadcast.NormalizeContent(broadcast.FormatHTML, compose(1))
+		return "", fmt.Errorf("digest html: the first row does not validate: %w", err)
+	}
+	return best, nil
+}
+
 // srcSuffix returns " — src=<label>" for a row with an acquisition label.
 // The label is sanitized again here so a hostile value can neither break the
 // line nor smuggle bidi or control characters into the message.
@@ -279,4 +353,13 @@ func sendTelegramMessage(botToken string, chatID int64, text string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), httpTimeout)
 	defer cancel()
 	return (&botapi.Client{Token: botToken}).SendMessage(ctx, chatID, text)
+}
+
+// sendTelegramHTML is sendTelegramMessage with parse_mode=HTML. A markup
+// rejection comes back as the same typed *notify.APIError and is never retried
+// as plain text.
+func sendTelegramHTML(botToken string, chatID int64, text string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), httpTimeout)
+	defer cancel()
+	return (&botapi.Client{Token: botToken}).SendHTMLMessage(ctx, chatID, text)
 }

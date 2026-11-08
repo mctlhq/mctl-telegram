@@ -3352,6 +3352,19 @@ HTML broadcasts are sent with the link preview card disabled
 (`link_preview_options.is_disabled`), so a link in the text does not add a card
 under the message.
 
+### Daily digest format (`DIGEST_FORMAT`)
+
+The daily new-client digest is sent as HTML by default (bold header, ids in
+`<code>`), using the same validator as an approved broadcast. Every value that
+comes from the database or a client (username, display name, acquisition label,
+revoke reason) is escaped. If many clients joined, the rows that fit Telegram's
+4096-unit limit are listed and the rest are counted ("...and N more").
+
+A body that fails validation is a renderer bug: the digest logs
+`digest: html render failed, nothing sent` at ERROR and sends nothing. It never
+falls back to plain text on its own. Set `DIGEST_FORMAT=plain` to switch the
+sender back to the pre-0.135 plain text; any other value aborts the boot.
+
 If Telegram still rejects the markup at send time, that delivery fails with reason
 `rejected_400`. It is not retried and is never re-sent as plain text, because that
 would deliver a message other than the one that was approved. Delivery of other

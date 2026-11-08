@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/mctlhq/mctl-telegram/internal/broadcast"
 )
 
 // capturingRoundTripper records every request body it sees and always
@@ -59,7 +61,7 @@ func TestRunDigest_ConnectStepLookupFailureDegradesGracefully(t *testing.T) {
 	rt := &capturingRoundTripper{}
 	withStubTransport(t, rt)
 
-	runDigest(ctx, store, "test-token", []int64{999}, false)
+	runDigest(ctx, store, "test-token", []int64{999}, false, broadcast.FormatPlain)
 
 	if !strings.Contains(buf.String(), "digest: last connect step") {
 		t.Errorf("expected a warning naming the failed lookup; log:\n%s", buf.String())

@@ -153,3 +153,16 @@ func TestNormalizeContent(t *testing.T) {
 		t.Fatalf("plain: %q, %v", got, err)
 	}
 }
+
+// EscapeHTML must produce exactly what ParseHTML reads back as the original.
+func TestEscapeHTML_RoundTripsThroughParseHTML(t *testing.T) {
+	for _, in := range []string{`plain`, `a < b && c > "d"`, `<b>x</b>`, `&lt; already`, `it's & 100%`, "line\nbreak"} {
+		d, err := ParseHTML("<b>" + EscapeHTML(in) + "</b>")
+		if err != nil {
+			t.Fatalf("%q: %v", in, err)
+		}
+		if d.Visible != in {
+			t.Fatalf("%q round-tripped to %q", in, d.Visible)
+		}
+	}
+}
