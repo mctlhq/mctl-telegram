@@ -37,6 +37,7 @@ Audiences are distinct. A bridge token or a regular MCP token does not authentic
 | `POST /autopilot/pause` | yes | yes | none |
 | `POST /jobs/{id}/complete` | yes | yes | job, attempt |
 | `POST /jobs/{id}/cost` | yes | yes | job, attempt |
+| `POST /jobs/{id}/retry` | yes | yes | job, attempt |
 
 A request value of zero or absent means "not named" and is not compared; a job token supplies its own conversation when the body omits it. Every refusal by binding is `403 {"error":"credential is bound to another conversation"}`.
 
@@ -60,6 +61,7 @@ A request value of zero or absent means "not named" and is not compared; a job t
 | `POST` | `/jobs/claim` | none | Long-poll claim of the next job. |
 | `POST` | `/jobs/{id}/complete` | `complete_agent_job` | Finish a job. |
 | `POST` | `/jobs/{id}/cost` | none | Worker-only cost report. |
+| `POST` | `/jobs/{id}/retry` | none | Worker-only: the claimed attempt's invocation failed, run the job again soon. |
 
 A route with a tool is gated (`toolGate`): when the caller's tool set holds none of the route's tools the answer is `403 {"error":"tool_not_allowed","tool":"<tool>"}`. For a job token the set is the signed `job_tools`; for an account token it is the installed definition's tools, or every tool when no catalog is configured. A tool set that cannot be resolved is `503 {"error":"tool set unavailable"}`. Routes marked "none" are never gated.
 
@@ -70,6 +72,7 @@ A route with a tool is gated (`toolGate`): when the caller's tool set holds none
 3. **Act.** `POST /leads`, then one of `POST /actions/propose_reply`, `POST /actions/request_owner_approval`, `POST /notify/summary`, or `POST /autopilot/pause`. A reply is only proposed: policy decides, and MCTL, not the worker, sends it.
 4. **Complete.** `POST /jobs/{id}/complete` once, with the attempt from the claim.
 5. **Verify and report.** `GET /jobs/{id}` to confirm the exact attempt reached a terminal status, and `POST /jobs/{id}/cost` with the observed model spend. Both may arrive after the job is terminal.
+6. **Failure.** When the invocation fails without a terminal status, the worker calls `POST /jobs/{id}/retry` so the job runs again after a short delay instead of after the visibility timeout. If the call is not delivered the sweeper returns the job anyway.
 
 ## Claim envelope
 
@@ -111,6 +114,7 @@ Claim errors: `503` `assistant disabled in the registry`, `assistant registry un
 - `POST /autopilot/pause`: body `{"paused": bool}`; an empty body or omitted field means `true`. `200 {"autopilot_paused"}`.
 - `POST /jobs/{id}/complete`: body `{"attempt","status","note","result_action_id","result_lead_id"}`. `status` is `completed`, `failed` or `ignored`. `completed` must link an exact persisted result (`result_action_id` or `result_lead_id`) that belongs to this job and account. `200 {"completed":true}`.
 - `POST /jobs/{id}/cost`: body `{"attempt","cost_usd"}`; `attempt` must be positive and `cost_usd` not negative. `200 {"recorded":true}`. Worker-only: it is not a tool and the model must not be able to call it.
+- `POST /jobs/{id}/retry`: body `{"attempt","outcome"}`; `outcome` is `invocation_failed` or `model_exited_without_completion` (a fixed vocabulary, never free text) and `attempt` must be positive for an account token (a job token supplies it). `200 {"status"}` where status is `pending`, or `dead_letter` when attempts are exhausted. The attempt counts as failed and the delay starts at 5 s and doubles per failed attempt, never longer than the general retry backoff. `409` when the claim is already gone (completed, requeued, re-claimed). Worker-only: not a tool.
 
 ## Binding, fencing, deadlines, retries
 

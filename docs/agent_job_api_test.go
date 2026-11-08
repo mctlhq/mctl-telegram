@@ -97,6 +97,7 @@ func TestRegister_RoutesUnchanged(t *testing.T) {
 		"POST /jobs/claim",
 		"POST /jobs/{id}/complete",
 		"POST /jobs/{id}/cost",
+		"POST /jobs/{id}/retry",
 		"POST /leads",
 		"POST /notify/summary",
 	}

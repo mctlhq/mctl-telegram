@@ -183,7 +183,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	worker := agentworker.NewWorker(client, runner).WithConcurrency(concurrency).WithHealth(health)
+	worker := agentworker.NewWorker(client, runner).WithConcurrency(concurrency).WithHealth(health).
+		WithRequeue(func(job agentworker.JobEnvelope) *agentworker.Client {
+			if !poolMode {
+				return client
+			}
+			if job.JobToken == "" {
+				return nil
+			}
+			return agentworker.NewClient(apiBaseURL, job.JobToken, nil).WithJobScope()
+		})
 
 	healthAddr := os.Getenv("AGENT_HEALTH_ADDR")
 	if healthAddr == "" {

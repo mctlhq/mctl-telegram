@@ -128,6 +128,17 @@ func (q *Queue) Retry(ctx context.Context, jobID int64, attempt int, errMsg stri
 	return status, err
 }
 
+// RequeueFailed is Retry for a failure the worker reported itself: the same
+// attempt accounting and dead-lettering, with the short worker delay instead
+// of the general backoff.
+func (q *Queue) RequeueFailed(ctx context.Context, jobID int64, attempt int, errMsg string) (string, error) {
+	status, err := q.Store.RequeueFailedInvocation(ctx, jobID, attempt, errMsg)
+	if err == nil {
+		q.count(status, 1)
+	}
+	return status, err
+}
+
 // RequeueStale is crash recovery for jobs whose claim outlived the
 // visibility timeout: they return to pending (or dead_letter when attempts
 // are exhausted). Called by the sweeper.

@@ -88,6 +88,7 @@ var routePatterns = []struct {
 	{http.MethodPost, "POST /autopilot/pause", regexp.MustCompile(`^/autopilot/pause$`)},
 	{http.MethodPost, "POST /jobs/{id}/complete", regexp.MustCompile(`^/jobs/[^/]+/complete$`)},
 	{http.MethodPost, "POST /jobs/{id}/cost", regexp.MustCompile(`^/jobs/[^/]+/cost$`)},
+	{http.MethodPost, "POST /jobs/{id}/retry", regexp.MustCompile(`^/jobs/[^/]+/retry$`)},
 	{http.MethodGet, "GET /jobs/{id}", regexp.MustCompile(`^/jobs/[^/]+$`)},
 }
 
@@ -252,6 +253,10 @@ func (k *Task) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		k.costUSD = &cost
 		k.mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
+	case "POST /jobs/{id}/retry":
+		// Requeue of a failed invocation; the eval run is single-shot, so
+		// the fake only acknowledges it.
+		writeJSON(w, map[string]any{"status": "pending"})
 	case "GET /jobs/{id}":
 		if strings.TrimPrefix(r.URL.Path, "/jobs/") != strconv.FormatInt(k.jobID, 10) {
 			http.Error(w, `{"error":"job not found"}`, http.StatusNotFound)

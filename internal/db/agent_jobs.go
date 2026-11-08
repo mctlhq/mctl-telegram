@@ -822,6 +822,41 @@ func (s *Store) RecordAgentJobCost(ctx context.Context, userID, jobID int64, att
 // out by the exponential backoff for its attempt count. Returns the resulting
 // status so the caller can count dead-letters.
 func (s *Store) RetryAgentJob(ctx context.Context, jobID int64, attempt int, errMsg string) (string, error) {
+	return s.retryAgentJob(ctx, jobID, attempt, errMsg, AgentJobBackoff)
+}
+
+// WorkerRetryBackoff is the delay before a job whose invocation the worker
+// itself reported as failed runs again: min(5s * 2^(n-1), AgentJobBackoff(n)).
+// The visibility timeout (minutes) is for a worker that vanished; a worker
+// that is alive and says the run failed does not need to wait for it, and a
+// conversation is blocked meanwhile because claims serialize per
+// conversation. The cap keeps a deterministic failure from being retried
+// faster than the general schedule would allow.
+func WorkerRetryBackoff(attempts int) time.Duration {
+	if attempts < 1 {
+		attempts = 1
+	}
+	d := 5 * time.Second
+	for i := 1; i < attempts && d < time.Minute; i++ {
+		d *= 2
+	}
+	if g := AgentJobBackoff(attempts); g < d {
+		return g
+	}
+	return d
+}
+
+// RequeueFailedInvocation is RetryAgentJob with the short worker-reported
+// delay (WorkerRetryBackoff). Attempt accounting is unchanged: the attempt
+// already counts, the open attempt row is closed as failed, and at
+// max_attempts the job goes to dead_letter exactly as on any retry. The CAS
+// on status and attempt means a worker that lost its claim cannot requeue a
+// newer attempt's job (ErrAgentJobNotFound).
+func (s *Store) RequeueFailedInvocation(ctx context.Context, jobID int64, attempt int, errMsg string) (string, error) {
+	return s.retryAgentJob(ctx, jobID, attempt, errMsg, WorkerRetryBackoff)
+}
+
+func (s *Store) retryAgentJob(ctx context.Context, jobID int64, attempt int, errMsg string, delay func(attempts int) time.Duration) (string, error) {
 	now := time.Now().UTC()
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -843,7 +878,7 @@ func (s *Store) RetryAgentJob(ctx context.Context, jobID int64, attempt int, err
 	}
 
 	status := JobPending
-	nextRun := now.Add(AgentJobBackoff(attempts))
+	nextRun := now.Add(delay(attempts))
 	if attempts >= maxAttempts {
 		status = JobDeadLetter
 		nextRun = now

@@ -228,4 +228,6 @@ func (s *Server) Register(mux registrar) {
 	// NewMCPServer's tool list (internal/agentworker) so the model can never
 	// assert its own spend. See handleReportJobCost's doc comment.
 	post("/jobs/{id}/cost", s.handleReportJobCost)
+	// Worker-only requeue of a failed invocation, also not a tool.
+	post("/jobs/{id}/retry", s.handleRetryJob)
 }

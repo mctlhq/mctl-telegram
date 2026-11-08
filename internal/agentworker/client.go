@@ -472,6 +472,19 @@ func (c *Client) CompleteJob(ctx context.Context, jobID int64, attempt int, stat
 	return c.do(ctx, http.MethodPost, path, legacyBody, nil)
 }
 
+// RetryJob calls POST /jobs/{id}/retry: the invocation of this claimed
+// attempt failed, so the server should put the job back soon rather than wait
+// for the visibility timeout. outcome is the fixed failure class. Not an MCP
+// tool; the model has no path to it. A 409 means the claim is already gone
+// (completed, re-claimed), which is not a failure of this call.
+func (c *Client) RetryJob(ctx context.Context, jobID int64, attempt int, outcome string) error {
+	body := map[string]any{"outcome": outcome}
+	if !c.jobScoped {
+		body["attempt"] = attempt
+	}
+	return c.do(ctx, http.MethodPost, "/jobs/"+strconv.FormatInt(jobID, 10)+"/retry", body, nil)
+}
+
 // ReportJobCost calls POST /jobs/{id}/cost — a worker-only, out-of-band
 // report of the Claude spend observed for this exact claimed attempt. Not an
 // MCP tool: this method is never exposed through agentAPI/NewMCPServer, so

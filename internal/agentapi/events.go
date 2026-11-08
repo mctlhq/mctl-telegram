@@ -836,6 +836,80 @@ func (s *Server) handleJobComplete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"completed": true})
 }
 
+// retryJobRequest is the body of POST /jobs/{id}/retry. Outcome is a fixed
+// vocabulary, not free text, so a worker (or a prompt-injected run that
+// somehow reached it) cannot write arbitrary content into last_error.
+type retryJobRequest struct {
+	Attempt int    `json:"attempt"`
+	Outcome string `json:"outcome"`
+}
+
+// retryOutcomes are the failure classes a worker may report.
+var retryOutcomes = map[string]bool{
+	"invocation_failed":               true,
+	"model_exited_without_completion": true,
+}
+
+// handleRetryJob is POST /jobs/{id}/retry: the worker says the invocation of
+// its claimed attempt failed and the job should run again soon, instead of
+// after the visibility timeout. Worker-only and not a tool. The compare-and-
+// set on status and attempt makes it harmless when late: a job already
+// completed, dead-lettered or re-claimed answers 409.
+func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
+	id, ok := identity(w, r)
+	if !ok {
+		return
+	}
+	jobID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || jobID <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid job id")
+		return
+	}
+	var req retryJobRequest
+	if err := decodeStrict(w, r, &req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if !s.enforceBinding(w, r, id, "retry_agent_job", 0, jobID, req.Attempt) {
+		return
+	}
+	attempt := req.Attempt
+	if jobBound(id) {
+		attempt = id.JobAttempt
+	}
+	if attempt <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "attempt must be positive")
+		return
+	}
+	if !retryOutcomes[req.Outcome] {
+		writeJSONError(w, http.StatusBadRequest, "unknown outcome")
+		return
+	}
+	ctx := r.Context()
+	// Ownership: the job must belong to the caller's account.
+	if _, err := s.Store.GetAgentJob(ctx, id.UserID, jobID); err != nil {
+		if errors.Is(err, db.ErrAgentJobNotFound) {
+			writeJSONError(w, http.StatusNotFound, "job not found")
+			return
+		}
+		logHandlerErr("retry_agent_job", err)
+		writeJSONError(w, http.StatusInternalServerError, "lookup failed")
+		return
+	}
+	status, err := s.Queue.RequeueFailed(ctx, jobID, attempt, req.Outcome)
+	if err != nil {
+		if errors.Is(err, db.ErrAgentJobNotFound) {
+			writeJSONError(w, http.StatusConflict, "job is no longer claimed under that attempt")
+			return
+		}
+		logHandlerErr("retry_agent_job", err)
+		writeJSONError(w, http.StatusInternalServerError, "retry failed")
+		return
+	}
+	s.audit(ctx, id.UserID, "retry_agent_job", "ok", req.Outcome)
+	writeJSON(w, http.StatusOK, map[string]any{"status": status})
+}
+
 // reportJobCostRequest is the body of POST /jobs/{id}/cost. It carries only
 // what the worker observed. The user, job, attempt (from the job token) and
 // runtime (from the job row) are never read from it: decodeStrict rejects a
