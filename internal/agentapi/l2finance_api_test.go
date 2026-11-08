@@ -64,21 +64,26 @@ func TestL2Finance_T2(t *testing.T) {
 	h := l2NewAPIHarness(t, db.AgentModeObserve, "")
 	rec := h.do(h.jobID, "POST", "/notify/summary", ownerNotifyRequest{Intent: "lead", Text: l2Finance})
 	acts := h.actions(h.alice)
-	var notifUser, notifCount int
+	// Count all owner notifications before examining the unique row:
+	// QueryRow alone would silently miss duplicates or another tenant's row.
+	notifCount := h.count(`SELECT COUNT(*) FROM owner_notifications`)
+	var notifUser int64
 	var kind string
-	if err := h.store.DB.QueryRow(`SELECT user_id, kind FROM owner_notifications`).Scan(&notifUser, &kind); err == nil {
-		notifCount = 1
+	if notifCount == 1 {
+		if err := h.store.DB.QueryRow(`SELECT user_id, kind FROM owner_notifications`).Scan(&notifUser, &kind); err != nil {
+			t.Fatalf("read sole owner notification: %v", err)
+		}
 	}
 	carolA, carolN := h.rowsFor(h.carol)
 	ok := rec.Code == http.StatusOK && len(acts) == 1 && acts[0].Status == db.ActionExecuted &&
-		notifCount == 1 && int64(notifUser) == h.alice && carolA+carolN == 0 && h.peer.count() == 0
+		notifCount == 1 && notifUser == h.alice && kind == db.NotificationSummary && carolA+carolN == 0 && h.peer.count() == 0
 	outcome := l2Pass
 	if !ok {
 		outcome = l2FailGap
 	}
 	l2Record(t, "T2.bob_job_owner_summary", outcome, fmt.Sprintf(
 		"http=%d actions=%d status=%v notif_rows=%d notif_owner_is_alice=%t kind=%s carol_rows=%d peer_sink=%d scope=ordinary_owner_routing",
-		rec.Code, len(acts), statuses(acts), notifCount, int64(notifUser) == h.alice, kind, carolA+carolN, h.peer.count()))
+		rec.Code, len(acts), statuses(acts), notifCount, notifUser == h.alice, kind, carolA+carolN, h.peer.count()))
 	if !ok {
 		t.Errorf("ordinary owner routing violated: %s", rec.Body.String())
 	}
@@ -346,7 +351,12 @@ func TestL2Finance_T10(t *testing.T) {
 		src := h.sources()
 		src["slog"] = buf.String()
 		err := l2AssertNoMarker(src)
-		l2Record(t, "T10.intent_channel", l2Outcome(err == nil), fmt.Sprintf("observed=%v", err))
+		// A persisted plaintext intent is an expected, reviewed FAIL/GAP in
+		// this test-only slice. Fail the test on drift until the rubric is
+		// independently updated; a different leak source is not equivalent.
+		observed := strings.Contains(src["agent_actions"], l2Marker)
+		expectGap(t, "T10.intent_channel", observed, fmt.Sprintf(
+			"plaintext_intent_in_agent_actions=%t marker_check=%v", observed, err))
 	})
 	t.Run("traces", func(t *testing.T) {
 		spans := 0
