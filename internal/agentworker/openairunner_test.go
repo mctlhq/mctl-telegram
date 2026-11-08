@@ -263,6 +263,26 @@ func TestOpenAIRunner_TruncatedReplyIsExplicit(t *testing.T) {
 	}
 }
 
+func TestOpenAIRunner_MissingUsageDoesNotPanicTurnLog(t *testing.T) {
+	// A provider may omit "usage" (null or absent). The per-turn log reads the
+	// token count from a value field, so it must log zero and carry on.
+	for _, usage := range []string{``, `,"usage":null`} {
+		var completed atomic.Bool
+		api := completionTestAPI(t, "5", &completed)
+		provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c","type":"function","function":{"name":"complete_agent_job","arguments":"{\"status\":\"ignored\"}"}}]},"finish_reason":"tool_calls"}]` + usage + `}`))
+		}))
+		r := &OpenAIRunner{Client: &OpenAIClient{BaseURL: provider.URL, APIKey: "k", Model: "m", HTTP: provider.Client()}, APIBaseURL: api.URL, MaxTurns: 2}
+		err := r.Run(context.Background(), JobEnvelope{JobID: 5, EventID: "e", Attempt: 1, JobToken: "j", Tools: []string{"get_event", "complete_agent_job"}})
+		provider.Close()
+		api.Close()
+		if err != nil || !completed.Load() {
+			t.Fatalf("usage=%q err=%v completed=%v", usage, err, completed.Load())
+		}
+	}
+}
+
 func TestSummarizeToolCalls_KeepsOnlyNamesAndStatusEnum(t *testing.T) {
 	names, status := summarizeToolCalls([]ToolCall{
 		{Name: "get_event", Arguments: `{"event_id":"secret-body"}`},
