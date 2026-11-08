@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.137.1](https://github.com/mctlhq/mctl-telegram/compare/0.137.0...0.137.1) (2026-11-08)
+
+
+### Bug Fixes
+
+* ship mctl-design 0.20.2 header spacing ([193dd9c](https://github.com/mctlhq/mctl-telegram/commit/193dd9c830e233d55c0b813bf41e9e291d00833e))
+* ship mctl-design 0.20.2 header spacing ([65e027c](https://github.com/mctlhq/mctl-telegram/commit/65e027c71a13ae3485715c11619e427f0571b197))
+
 ## [0.137.0](https://github.com/mctlhq/mctl-telegram/compare/0.136.0...0.137.0) (2026-11-08)
 
 
