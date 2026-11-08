@@ -5,7 +5,7 @@
    * loads it is sourced AFTER this block and overrides every token (equal
    * specificity, later wins). Accent is terracotta; there is no accent picker.
    *
-   * Mirrors @mctlhq/css 0.20.1 (adds the measure, hero rhythm and accent-discipline roles), which is what chrome.go pins. This is a hand-
+   * Mirrors @mctlhq/css 0.20.2 (adds the measure, hero rhythm and accent-discipline roles), which is what chrome.go pins. This is a hand-
    * picked subset, not a copy of the whole sheet: only the tokens these pages
    * actually read, so it stays small enough to inline on the strict-CSP pages.
    * Values are the resolved semantic ones (e.g. --surface-fg-subtle is the AA

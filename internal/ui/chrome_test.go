@@ -30,10 +30,10 @@ func TestFullChrome(t *testing.T) {
 		`<footer class="mctl-site-footer">`,
 		`<div class="mctl-site-container mctl-site-footer__inner">`,
 		`<nav class="mctl-site-footer__links"`,
-		"ui.mctl.ai/0.20.1/mctl.css",
+		"ui.mctl.ai/0.20.2/mctl.css",
 		// global.css and site.css are pinned as a set with mctl.css.
-		"ui.mctl.ai/0.20.1/global.css",
-		"ui.mctl.ai/0.20.1/site.css",
+		"ui.mctl.ai/0.20.2/global.css",
+		"ui.mctl.ai/0.20.2/site.css",
 		"family=Onest:wght@300;400;500;600;700;800",
 		"Instrument+Serif",
 		"JetBrains+Mono",
@@ -175,7 +175,7 @@ func TestButtonsUseAccentFg(t *testing.T) {
 	}
 }
 
-// Accent discipline (@mctlhq/css 0.20.1): the accent is for the primary
+// Accent discipline (@mctlhq/css 0.20.2): the accent is for the primary
 // button and the h1 highlight. Inline code, secondary buttons, step numbers,
 // table keys and the active nav link must not take it.
 func TestAccentKeptForPrimaryAction(t *testing.T) {
