@@ -50,10 +50,20 @@ type Worker struct {
 	// onGateWait, when set, is called as a job starts waiting at the
 	// conversation gate. Tests use it to know the wait has begun.
 	onGateWait func(conv int64)
+	// requeue builds the client that reports a failed invocation; nil means
+	// failures wait for the visibility-timeout sweeper.
+	requeue func(JobEnvelope) *Client
 }
 
 func NewWorker(poller eventPoller, runner Runner) *Worker {
 	return &Worker{poller: poller, runner: runner, concurrency: 1}
+}
+
+// WithRequeue wires the per-job client used to hand a failed invocation back
+// to the server at once. f returns nil when the job has no usable credential.
+func (w *Worker) WithRequeue(f func(JobEnvelope) *Client) *Worker {
+	w.requeue = f
+	return w
 }
 
 // MaxConcurrency is the largest accepted worker concurrency: the server's
@@ -281,11 +291,46 @@ func (w *Worker) runJob(ctx context.Context, gate *convGate, job JobEnvelope) {
 		slog.Warn("agent-worker: job invocation failed",
 			"job_id", job.JobID, "outcome", outcome, "err", err,
 			"assistant", job.Assistant, "assistant_digest", job.AssistantDigest, "install_revision", job.InstallRevision)
+		w.requeueFailed(ctx, job, outcome)
 		return
 	}
 	slog.Info("agent-worker: job invocation finished",
 		"job_id", job.JobID, "outcome", "completed",
 		"assistant", job.Assistant, "assistant_digest", job.AssistantDigest, "install_revision", job.InstallRevision)
+}
+
+// requeueTimeout bounds the requeue call. It runs on its own context: the job
+// context is already past its deadline for a timed-out run.
+const requeueTimeout = 10 * time.Second
+
+// requeueFailed tells the server the claimed attempt failed so it can run
+// again soon. Best effort: when it cannot be delivered (no client wired, a
+// network error, the claim already gone) the job still returns through the
+// visibility-timeout sweeper, so a failure here only costs the delay.
+func (w *Worker) requeueFailed(ctx context.Context, job JobEnvelope, outcome string) {
+	if w.requeue == nil {
+		return
+	}
+	c := w.requeue(job)
+	if c == nil {
+		return
+	}
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), requeueTimeout)
+	defer cancel()
+	status, err := c.RetryJob(rctx, job.JobID, job.Attempt, outcome)
+	if err != nil {
+		slog.Warn("agent-worker: requeue of failed job not delivered; it returns after the visibility timeout",
+			"job_id", job.JobID, "err", err)
+		return
+	}
+	switch status {
+	case "pending":
+		slog.Info("agent-worker: failed job requeued", "job_id", job.JobID, "outcome", outcome)
+	case RetryClaimGone:
+		slog.Info("agent-worker: failed job already left this claim; nothing to requeue", "job_id", job.JobID, "outcome", outcome)
+	default:
+		slog.Info("agent-worker: failed job left to the visibility sweeper", "job_id", job.JobID, "outcome", outcome, "status", status)
+	}
 }
 
 // isFatalAuthError reports whether err is an APIError carrying a 401 or 403

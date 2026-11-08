@@ -350,7 +350,7 @@ func (r *routeRecorder) Post(p string, _ http.HandlerFunc) { r.routes = append(r
 // routes that serve no tool, and every mapped route is registered, so a new
 // route cannot skip the gate by being left out of tools.Endpoints.
 func TestToolGate_EveryRouteIsMappedOrToolless(t *testing.T) {
-	toolless := []string{"GET /events", "GET /jobs/{id}", "POST /jobs/claim", "POST /jobs/{id}/cost"}
+	toolless := []string{"GET /events", "GET /jobs/{id}", "POST /jobs/claim", "POST /jobs/{id}/cost", "POST /jobs/{id}/retry"}
 	var rec routeRecorder
 	New(nil, nil, time.Minute, nil).Register(&rec)
 	for _, route := range rec.routes {

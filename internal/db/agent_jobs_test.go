@@ -934,3 +934,143 @@ func TestRequeueStaleAgentJobs(t *testing.T) {
 		t.Fatalf("counts = %v", counts)
 	}
 }
+
+func TestWorkerRetryBackoff_IsShortAndNeverAboveGeneralBackoff(t *testing.T) {
+	want := []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second, 40 * time.Second, 80 * time.Second}
+	for i, w := range want {
+		n := i + 1
+		got := WorkerRetryBackoff(n)
+		if got != w {
+			t.Errorf("WorkerRetryBackoff(%d) = %v, want %v", n, got, w)
+		}
+		if got > AgentJobBackoff(n) {
+			t.Errorf("WorkerRetryBackoff(%d) = %v exceeds AgentJobBackoff = %v", n, got, AgentJobBackoff(n))
+		}
+	}
+	if got := WorkerRetryBackoff(0); got != 5*time.Second {
+		t.Errorf("WorkerRetryBackoff(0) = %v, want 5s", got)
+	}
+}
+
+func TestRequeueFailedInvocation_ShortDelayForFirstAttemptsOnly(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	jid := seedJob(t, s, uid, "evt:v1:1:1:1")
+	rearm := func() {
+		if _, err := s.DB.ExecContext(ctx,
+			`UPDATE agent_jobs SET next_run_at = $1 WHERE id = $2`, time.Now().UTC().Add(-time.Second), jid); err != nil {
+			t.Fatalf("re-arm: %v", err)
+		}
+	}
+	for attempt := 1; attempt <= WorkerRetryShortAttempts; attempt++ {
+		if _, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1); err != nil {
+			t.Fatalf("claim %d: %v", attempt, err)
+		}
+		status, err := s.RequeueFailedInvocation(ctx, jid, attempt, "invocation_failed")
+		if err != nil || status != JobPending {
+			t.Fatalf("requeue %d = %q, %v; want pending", attempt, status, err)
+		}
+		got, _ := s.GetAgentJob(ctx, uid, jid)
+		// Short: due well before the general 30 s backoff of RetryAgentJob.
+		if attempt == 1 && !got.NextRunAt.Before(time.Now().UTC().Add(15*time.Second)) {
+			t.Fatalf("next_run_at %v not short", got.NextRunAt)
+		}
+		if got.LastError != "invocation_failed" {
+			t.Fatalf("last_error = %q", got.LastError)
+		}
+		rearm()
+	}
+	var failed int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM agent_job_attempts WHERE job_id = $1 AND status = $2`, jid, JobFailed,
+	).Scan(&failed); err != nil || failed != WorkerRetryShortAttempts {
+		t.Fatalf("failed attempt rows = %d, %v; want %d (each attempt still counts)", failed, err, WorkerRetryShortAttempts)
+	}
+
+	// The third failure is left to the sweeper: nothing is written.
+	if _, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1); err != nil {
+		t.Fatalf("claim 3: %v", err)
+	}
+	status, err := s.RequeueFailedInvocation(ctx, jid, WorkerRetryShortAttempts+1, "invocation_failed")
+	if err != nil || status != JobProcessing {
+		t.Fatalf("requeue 3 = %q, %v; want processing (left to sweeper)", status, err)
+	}
+	got, _ := s.GetAgentJob(ctx, uid, jid)
+	if got.Status != JobProcessing {
+		t.Fatalf("status = %q, want processing", got.Status)
+	}
+}
+
+// A worker-reported failure never dead-letters, even on the last attempt.
+func TestRequeueFailedInvocation_NeverSpendsTheLastAttempt(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	jid := seedJob(t, s, uid, "evt:v1:1:1:1")
+	if _, err := s.DB.ExecContext(ctx, `UPDATE agent_jobs SET max_attempts = 1 WHERE id = $1`, jid); err != nil {
+		t.Fatalf("set max_attempts: %v", err)
+	}
+	if _, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	status, err := s.RequeueFailedInvocation(ctx, jid, 1, "invocation_failed")
+	if err != nil || status != JobProcessing {
+		t.Fatalf("requeue = %q, %v; want processing", status, err)
+	}
+	if got, _ := s.GetAgentJob(ctx, uid, jid); got.Status == JobDeadLetter {
+		t.Fatalf("job dead-lettered by a worker-reported failure")
+	}
+}
+
+// After a runtime switch the old runtime's attempt is fenced; the requeue
+// must leave it to the sweeper (which grants one more attempt), not count it.
+func TestRequeueFailedInvocation_RuntimeSwitchLeftToSweeper(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	jid := seedJob(t, s, uid, "evt:v1:1:1:1")
+	setRuntime(t, s, uid, RuntimeOwn)
+	if _, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	setRuntime(t, s, uid, RuntimeManaged)
+	status, err := s.RequeueFailedInvocation(ctx, jid, 1, "invocation_failed")
+	if err != nil || status != JobProcessing {
+		t.Fatalf("requeue = %q, %v; want processing (fenced, left to sweeper)", status, err)
+	}
+	var failed int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM agent_job_attempts WHERE job_id = $1 AND status = $2`, jid, JobFailed,
+	).Scan(&failed); err != nil || failed != 0 {
+		t.Fatalf("failed attempt rows = %d, %v; want 0", failed, err)
+	}
+}
+
+func TestRequeueFailedInvocation_StaleAttemptCannotTouchNewerClaim(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	jid := seedJob(t, s, uid, "evt:v1:1:1:1")
+	if _, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1); err != nil {
+		t.Fatalf("claim 1: %v", err)
+	}
+	if _, err := s.RetryAgentJob(ctx, jid, 1, "x"); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`UPDATE agent_jobs SET next_run_at = $1 WHERE id = $2`, time.Now().UTC().Add(-time.Second), jid); err != nil {
+		t.Fatalf("re-arm: %v", err)
+	}
+	if _, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1); err != nil {
+		t.Fatalf("claim 2: %v", err)
+	}
+	// A late report from attempt 1 must not requeue attempt 2's claim.
+	if _, err := s.RequeueFailedInvocation(ctx, jid, 1, "invocation_failed"); err != ErrAgentJobNotFound {
+		t.Fatalf("stale requeue err = %v, want ErrAgentJobNotFound", err)
+	}
+	got, _ := s.GetAgentJob(ctx, uid, jid)
+	if got.Status != JobProcessing {
+		t.Fatalf("status = %q, want processing (newer claim untouched)", got.Status)
+	}
+}

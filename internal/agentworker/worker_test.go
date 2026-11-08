@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -472,6 +475,84 @@ func TestWorker_Loop_TreatsUsageLimitAndGenericErrorsIdentically(t *testing.T) {
 			}
 			if atomic.LoadInt32(&runner.ran) < 2 {
 				t.Fatalf("runner.ran = %d, want at least 2 (loop must keep polling and running jobs after a CheckResult-class error)", runner.ran)
+			}
+		})
+	}
+}
+
+func requeueTestWorker(runErr error, srvHits *int32, gotBody *atomic.Value) (*Worker, func()) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(srvHits, 1)
+		b, _ := io.ReadAll(r.Body)
+		gotBody.Store(r.URL.Path + " " + string(b))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"pending"}`))
+	}))
+	client := NewClient(srv.URL, "tok", nil)
+	w := NewWorker(&fakePoller{results: []pollResult{{}}}, &fakeRunner{toErr: runErr}).
+		WithRequeue(func(JobEnvelope) *Client { return client })
+	return w, srv.Close
+}
+
+func TestWorker_RunJob_RequeuesFailedInvocation(t *testing.T) {
+	var hits int32
+	var body atomic.Value
+	w, closeSrv := requeueTestWorker(fmt.Errorf("boom: %w", ErrAgentDidNotCompleteJob), &hits, &body)
+	defer closeSrv()
+	w.runJob(context.Background(), &convGate{running: map[int64]*convRun{}}, JobEnvelope{JobID: 7, Attempt: 2, ConversationID: 1})
+	if atomic.LoadInt32(&hits) != 1 {
+		t.Fatalf("requeue calls = %d, want 1", hits)
+	}
+	got, _ := body.Load().(string)
+	if !strings.HasPrefix(got, "/jobs/7/retry ") || !strings.Contains(got, `"model_exited_without_completion"`) || !strings.Contains(got, `"attempt":2`) {
+		t.Fatalf("request = %q", got)
+	}
+}
+
+func TestWorker_RunJob_NoRequeueOnSuccess(t *testing.T) {
+	var hits int32
+	var body atomic.Value
+	w, closeSrv := requeueTestWorker(nil, &hits, &body)
+	defer closeSrv()
+	w.runJob(context.Background(), &convGate{running: map[int64]*convRun{}}, JobEnvelope{JobID: 7, Attempt: 1, ConversationID: 1})
+	if atomic.LoadInt32(&hits) != 0 {
+		t.Fatalf("requeue calls = %d on success, want 0", hits)
+	}
+}
+
+func TestWorker_RunJob_UndeliveredRequeueIsHarmless(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+	}))
+	defer srv.Close()
+	client := NewClient(srv.URL, "tok", nil)
+	w := NewWorker(&fakePoller{results: []pollResult{{}}}, &fakeRunner{toErr: errors.New("x")}).
+		WithRequeue(func(JobEnvelope) *Client { return client })
+	w.runJob(context.Background(), &convGate{running: map[int64]*convRun{}}, JobEnvelope{JobID: 7, Attempt: 1, ConversationID: 1}) // must not panic or block
+}
+
+func TestClient_RetryJob_ReportsStatusAndTreats409AsGone(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		code   int
+		body   string
+		want   string
+		wantEr bool
+	}{
+		{"requeued", http.StatusOK, `{"status":"pending"}`, "pending", false},
+		{"left to sweeper", http.StatusOK, `{"status":"processing"}`, "processing", false},
+		{"claim gone", http.StatusConflict, `{"error":"job is no longer claimed under that attempt"}`, RetryClaimGone, false},
+		{"server error", http.StatusInternalServerError, `{"error":"x"}`, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.code)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			got, err := NewClient(srv.URL, "tok", nil).RetryJob(context.Background(), 1, 1, "invocation_failed")
+			if (err != nil) != tc.wantEr || got != tc.want {
+				t.Fatalf("RetryJob = %q, %v; want %q, err=%v", got, err, tc.want, tc.wantEr)
 			}
 		})
 	}

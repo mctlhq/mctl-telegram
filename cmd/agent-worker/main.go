@@ -183,7 +183,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	worker := agentworker.NewWorker(client, runner).WithConcurrency(concurrency).WithHealth(health)
+	worker := agentworker.NewWorker(client, runner).WithConcurrency(concurrency).WithHealth(health).
+		WithRequeue(requeueClientFunc(client, apiBaseURL, poolMode))
 
 	healthAddr := os.Getenv("AGENT_HEALTH_ADDR")
 	if healthAddr == "" {
@@ -407,4 +408,20 @@ func envFloat(key string, def float64) (float64, error) {
 		return 0, fmt.Errorf("parse %s: %q must not be negative", key, raw)
 	}
 	return f, nil
+}
+
+// requeueClientFunc builds the per-job client that reports a failed
+// invocation. Pool mode must use the job's own token: the pool credential may
+// only claim, so falling back to it would turn the requeue off with a 403. A
+// pool job without a token gets no client.
+func requeueClientFunc(account *agentworker.Client, apiBaseURL string, poolMode bool) func(agentworker.JobEnvelope) *agentworker.Client {
+	return func(job agentworker.JobEnvelope) *agentworker.Client {
+		if !poolMode {
+			return account
+		}
+		if job.JobToken == "" {
+			return nil
+		}
+		return agentworker.NewClient(apiBaseURL, job.JobToken, nil).WithJobScope()
+	}
 }

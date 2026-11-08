@@ -822,6 +822,54 @@ func (s *Store) RecordAgentJobCost(ctx context.Context, userID, jobID int64, att
 // out by the exponential backoff for its attempt count. Returns the resulting
 // status so the caller can count dead-letters.
 func (s *Store) RetryAgentJob(ctx context.Context, jobID int64, attempt int, errMsg string) (string, error) {
+	return s.retryAgentJob(ctx, jobID, attempt, errMsg, AgentJobBackoff, false)
+}
+
+// WorkerRetryBackoff is the delay before a job whose invocation the worker
+// itself reported as failed runs again: min(5s * 2^(n-1), AgentJobBackoff(n)).
+// The visibility timeout (minutes) is for a worker that vanished; a worker
+// that is alive and says the run failed does not need to wait for it, and a
+// conversation is blocked meanwhile because claims serialize per
+// conversation. The cap keeps a deterministic failure from being retried
+// faster than the general schedule would allow.
+func WorkerRetryBackoff(attempts int) time.Duration {
+	if attempts < 1 {
+		attempts = 1
+	}
+	d := 5 * time.Second
+	for i := 1; i < attempts && d < time.Minute; i++ {
+		d *= 2
+	}
+	if g := AgentJobBackoff(attempts); g < d {
+		return g
+	}
+	return d
+}
+
+// WorkerRetryShortAttempts is how many failed attempts a worker-reported
+// failure may requeue quickly. Later failures are left to the visibility
+// sweeper: a provider outage of a few minutes must not burn the whole
+// max_attempts budget in about a minute and dead-letter every in-flight job,
+// which is what the minutes-long sweeper schedule used to prevent.
+const WorkerRetryShortAttempts = 2
+
+// RequeueFailedInvocation is RetryAgentJob with the short worker-reported
+// delay (WorkerRetryBackoff), for the first WorkerRetryShortAttempts failed
+// attempts only. Attempt accounting is unchanged: the attempt already counts,
+// the open attempt row is closed as failed. The CAS on status and attempt
+// means a worker that lost its claim cannot requeue a newer attempt's job
+// (ErrAgentJobNotFound).
+//
+// It writes nothing, and returns JobProcessing, when the job is better left
+// to RequeueStaleAgentJobs: the account switched runtime since the claim
+// (completeRuntimeFence; the sweeper requeues such a job and grants it one
+// more attempt, so a cut-short attempt never exhausts it), or the failure is
+// past WorkerRetryShortAttempts. It never moves a job to dead_letter itself.
+func (s *Store) RequeueFailedInvocation(ctx context.Context, jobID int64, attempt int, errMsg string) (string, error) {
+	return s.retryAgentJob(ctx, jobID, attempt, errMsg, WorkerRetryBackoff, true)
+}
+
+func (s *Store) retryAgentJob(ctx context.Context, jobID int64, attempt int, errMsg string, delay func(attempts int) time.Duration, worker bool) (string, error) {
 	now := time.Now().UTC()
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -830,11 +878,12 @@ func (s *Store) RetryAgentJob(ctx context.Context, jobID int64, attempt int, err
 	defer func() { _ = tx.Rollback() }()
 
 	var attempts, maxAttempts int
+	var fenceOK bool
 	err = tx.QueryRowContext(ctx,
-		`SELECT attempts, max_attempts FROM agent_jobs
+		`SELECT attempts, max_attempts, `+completeRuntimeFence+` FROM agent_jobs
 		  WHERE id = $1 AND status = $2 AND attempts = $3`,
 		jobID, JobProcessing, attempt,
-	).Scan(&attempts, &maxAttempts)
+	).Scan(&attempts, &maxAttempts, &fenceOK)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrAgentJobNotFound
 	}
@@ -842,9 +891,17 @@ func (s *Store) RetryAgentJob(ctx context.Context, jobID int64, attempt int, err
 		return "", fmt.Errorf("select job for retry: %w", err)
 	}
 
+	if worker && (!fenceOK || attempts > WorkerRetryShortAttempts) {
+		return JobProcessing, nil
+	}
 	status := JobPending
-	nextRun := now.Add(AgentJobBackoff(attempts))
+	nextRun := now.Add(delay(attempts))
 	if attempts >= maxAttempts {
+		if worker {
+			// A worker-reported failure never spends the last attempt: the
+			// sweeper decides, as it always did.
+			return JobProcessing, nil
+		}
 		status = JobDeadLetter
 		nextRun = now
 	}
@@ -853,10 +910,17 @@ func (s *Store) RetryAgentJob(ctx context.Context, jobID int64, attempt int, err
 	// processing. Guard on status again and check RowsAffected: a zero count
 	// means we lost that race, so roll back and report it rather than
 	// returning a status we never actually wrote.
+	// The worker variant repeats the runtime fence here: it was read above
+	// without a lock, and a runtime switch in between must not let a fenced
+	// attempt be counted as failed. A zero count is ErrAgentJobNotFound.
+	updateFence := ""
+	if worker {
+		updateFence = " AND " + completeRuntimeFence
+	}
 	res, err := tx.ExecContext(ctx,
 		`UPDATE agent_jobs
 		    SET status = $1, next_run_at = $2, last_error = $3, updated_at = $4
-		  WHERE id = $5 AND status = $6 AND attempts = $7`,
+		  WHERE id = $5 AND status = $6 AND attempts = $7`+updateFence,
 		status, nextRun, nullable(errMsg), now, jobID, JobProcessing, attempt,
 	)
 	if err != nil {

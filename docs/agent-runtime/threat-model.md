@@ -71,7 +71,7 @@ The runtime never sees Telegram session material, other accounts' data, or the r
 
 ## Threats and mitigations
 
-Each mitigation names the code that enforces it. The write routes appear here: `POST /actions/propose_reply`, `POST /leads`, `POST /actions/request_owner_approval`, `POST /notify/summary`, `POST /autopilot/pause`, `POST /jobs/{id}/complete` and `POST /jobs/{id}/cost`.
+Each mitigation names the code that enforces it. The write routes appear here: `POST /actions/propose_reply`, `POST /leads`, `POST /actions/request_owner_approval`, `POST /notify/summary`, `POST /autopilot/pause`, `POST /jobs/{id}/complete`, `POST /jobs/{id}/cost` and `POST /jobs/{id}/retry`.
 
 ### T1 Credential theft
 
@@ -112,6 +112,8 @@ A claim is a lease: `RequeueStaleAgentJobs` returns a stale job to the queue aft
 ### T8 Cost misreporting
 
 `POST /jobs/{id}/cost` is worker-only and not a tool. For an own runtime it affects only the reporter's own account. The managed ledger is server-authoritative (ADR 0008).
+
+`POST /jobs/{id}/retry` is worker-only and not a tool. It can only move the caller's own job from `processing` under the caller's own attempt to `pending` for its first two failed attempts only, through the same compare-and-set as `RetryAgentJob`, so a stale or foreign claim answers 409. It never dead-letters a job and leaves a runtime-fenced job to the sweeper. It spends an attempt, never refunds one, and its `outcome` is a fixed vocabulary, so it cannot write free text into the job row.
 
 ### T9 Denial of service
 
@@ -155,7 +157,7 @@ Each is accepted, has an owner and a trigger for revisiting it. The owner column
 
 ## Route coverage
 
-The test `docs/agent_job_api_test.go` drives `Server.Register` with a recording router. It requires every registered route to appear in this document as `METHOD path` in code formatting, and requires the contract's route table to match the registered routes exactly. The sixteen routes are: `GET /events`, `GET /event/{eventID}`, `GET /conversations/{id}/context`, `GET /conversations/{id}/leads`, `GET /recruiters/{peer}`, `GET /leads/{id}`, `GET /policy`, `GET /jobs/{id}`, `POST /actions/propose_reply`, `POST /leads`, `POST /actions/request_owner_approval`, `POST /notify/summary`, `POST /autopilot/pause`, `POST /jobs/claim`, `POST /jobs/{id}/complete` and `POST /jobs/{id}/cost`.
+The test `docs/agent_job_api_test.go` drives `Server.Register` with a recording router. It requires every registered route to appear in this document as `METHOD path` in code formatting, and requires the contract's route table to match the registered routes exactly. The seventeen routes are: `GET /events`, `GET /event/{eventID}`, `GET /conversations/{id}/context`, `GET /conversations/{id}/leads`, `GET /recruiters/{peer}`, `GET /leads/{id}`, `GET /policy`, `GET /jobs/{id}`, `POST /actions/propose_reply`, `POST /leads`, `POST /actions/request_owner_approval`, `POST /notify/summary`, `POST /autopilot/pause`, `POST /jobs/claim`, `POST /jobs/{id}/complete`, `POST /jobs/{id}/cost` and `POST /jobs/{id}/retry`.
 
 ## Conformance
 
