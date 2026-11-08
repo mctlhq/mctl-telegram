@@ -1,7 +1,8 @@
-// Package digest sends the operator a once-a-day Telegram summary of clients
-// that signed in since the previous digest (24 hours, or 7 days when weekly). It exists so onboarding stays fully
-// hands-off (open auto-approve) while the operator still has daily visibility
-// of who connected.
+// Package digest sends the operator a Telegram summary of clients that signed
+// in since the previous digest: daily (the last 24 hours) or, when a weekday is
+// configured, weekly (the last 7 days). It exists so onboarding stays fully
+// hands-off (open auto-approve) while the operator still has visibility of who
+// connected.
 package digest
 
 import (

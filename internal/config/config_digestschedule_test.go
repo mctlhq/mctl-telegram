@@ -63,7 +63,7 @@ func TestLoadDigestScheduleAndRecipients(t *testing.T) {
 			t.Fatalf("err = %v", err)
 		}
 	})
-	for _, bad := range []string{"0", "-5", "7001,0"} {
+	for _, bad := range []string{"0", "-5", "7001,0", ",", " , ,"} {
 		t.Run("non-positive id "+bad, func(t *testing.T) {
 			t.Setenv("DIGEST_RECIPIENTS", bad)
 			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "DIGEST_RECIPIENTS") {

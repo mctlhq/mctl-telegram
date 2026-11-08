@@ -1316,5 +1316,8 @@ func parseStrictInt64CSV(s string) ([]int64, error) {
 		}
 		out = append(out, n)
 	}
+	if len(out) == 0 {
+		return nil, errors.New("no Telegram ids in the list")
+	}
 	return out, nil
 }
