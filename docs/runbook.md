@@ -3370,6 +3370,21 @@ If Telegram still rejects the markup at send time, that delivery fails with reas
 would deliver a message other than the one that was approved. Delivery of other
 recipients continues.
 
+### Digest schedule and recipients (`DIGEST_WEEKDAY`, `DIGEST_RECIPIENTS`)
+
+By default the digest is daily at `DIGEST_HOUR_UTC` (9) and covers the last 24h.
+Set `DIGEST_WEEKDAY` (`mon`..`sun`, full names accepted) to send it once a week
+on that day at the same hour, covering the last 7 days; the header then reads
+"in the last 7d". Any other value aborts the boot. The digest is skipped when
+there are no new clients in the window.
+
+`DIGEST_RECIPIENTS` is a comma-separated list of Telegram ids that receive the
+digest. Unset, the digest goes to `TG_LOGIN_ADMINS` as before. Listing an id
+here grants no scope, unlike `TG_LOGIN_ADMINS`. A malformed or non-positive id
+aborts the boot rather than dropping a recipient. Each recipient must have
+started the login bot, otherwise Telegram rejects that delivery (recorded as the
+recipient's bot reachability); the others still get it.
+
 ### Lifecycle
 
 `prepared → approved → sending → completed`, with two exits:
