@@ -110,8 +110,18 @@
     color: var(--surface-fg-muted);
     transition: color .2s ease;
   }
-  .site-nav a:hover,
+  .site-nav a:hover { color: var(--surface-fg); }
   .site-nav a.active { color: var(--surface-fg); }
+  .site-nav a[aria-current="page"] { color: var(--surface-fg); }
+  /* Active item as in site.css 0.20: neutral text plus a 2px underline in
+     currentColor (never the accent). Desktop only: in the mobile panel the
+     rows are separated by borders and the colour is enough. */
+  .site-nav a.active:not(.nav-manage),
+  .site-nav a[aria-current="page"]:not(.nav-manage) {
+    text-decoration: underline;
+    text-decoration-thickness: 2px;
+    text-underline-offset: 8px;
+  }
   /* Manage is an account action, not a page: a quiet outlined chip next to
      GitHub rather than one more text link. */
   .site-nav a.nav-manage {
@@ -683,6 +693,8 @@
     .nav-toggle:checked ~ .site-nav { display: flex; }
     .site-nav a { padding: 12px 0; font-size: 1rem; border-bottom: 1px solid var(--border); }
     .site-nav a:last-child { border-bottom: 0; }
+    .site-nav a.active:not(.nav-manage),
+    .site-nav a[aria-current="page"]:not(.nav-manage) { text-decoration: none; }
     .site-nav a.nav-manage { padding: 12px 0; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; }
     .site-nav a.gh-link { gap: 8px; }
     .site-nav a.gh-link::after { content: "GitHub"; }

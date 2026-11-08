@@ -5,7 +5,7 @@
    * loads it is sourced AFTER this block and overrides every token (equal
    * specificity, later wins). Accent is terracotta; there is no accent picker.
    *
-   * Mirrors @mctlhq/css 0.19.0 (adds the measure, hero rhythm and accent-discipline roles), which is what chrome.go pins. This is a hand-
+   * Mirrors @mctlhq/css 0.20.1 (adds the measure, hero rhythm and accent-discipline roles), which is what chrome.go pins. This is a hand-
    * picked subset, not a copy of the whole sheet: only the tokens these pages
    * actually read, so it stays small enough to inline on the strict-CSP pages.
    * Values are the resolved semantic ones (e.g. --surface-fg-subtle is the AA
@@ -28,6 +28,13 @@
     --mctl-radius-sm: 2px;
     --mctl-radius-md: 4px;
     --mctl-radius-lg: 8px;
+    --mctl-radius-pill: 999px;
+    /* Read by site.css 0.20 (burger, drawer, focus ring). */
+    --mctl-motion-duration-fast: 120ms;
+    --mctl-motion-duration-base: 200ms;
+    --mctl-motion-easing-standard: cubic-bezier(0.2, 0, 0, 1);
+    --focus-ring-width: 2px;
+    --focus-ring-offset: 2px;
     --mctl-typography-font-weight-medium: 500;
     --mctl-typography-font-weight-semibold: 600;
 
@@ -102,6 +109,8 @@
     --text-marker-leading: 1.4;
     --text-marker-tracking: 0.12em;
     --text-prose-leading: 1.75;
+    --focus-ring: var(--accent);
+    --overlay-scrim: color-mix(in srgb, var(--surface-bg) 84%, transparent);
   }
   [data-theme='light'] {
     color-scheme: light;

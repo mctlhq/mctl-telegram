@@ -89,7 +89,7 @@ const AnalyticsScript = `<script defer src="https://stats.mctl.ai/insights.js" d
 // tokens.css mirrors the same version's values and site.css is mirrored
 // verbatim, for the strict-CSP pages and as a fallback when the CDN is
 // unreachable.
-const DesignVersion = "0.19.0"
+const DesignVersion = "0.20.1"
 
 // wordmark is the MCTL brand mark: accent "M" + "CTL", as LogoDefault.vue
 // (mctl.ai) and BrandMark.vue (docs.mctl.ai) draw it.

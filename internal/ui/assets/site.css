@@ -1,4 +1,4 @@
-/* @mctlhq/css 0.19.0 — site.css. */
+/* @mctlhq/css 0.20.1 — site.css. */
 /*
  * Public-site layout: the one shell mctl.ai, docs.mctl.ai and tg.mctl.ai
  * share. theme.css already carries the tokens (page width, gutter, header,
@@ -38,6 +38,10 @@
  *     grows down the stack;
  *   - the accent marks the primary action only: the eyebrow and the footer
  *     links are neutral;
+ *   - from 0.20.0 the active nav item is neutral (aria-current="page": text
+ *     colour plus a 2px underline), the header gains an --app variant with
+ *     context, badge and actions slots, and below 768px the nav is a right
+ *     drawer behind a burger (toggle data-nav-open on the header);
  *   - footer: full-bleed, centred.
  */
 
@@ -56,10 +60,21 @@
   top: 0;
   z-index: var(--mctl-z-index-nav);
   height: var(--site-header-height);
+  border-bottom: 1px solid var(--site-header-border);
+}
+
+/* The translucent background and blur live on a pseudo-element, not the
+   header: backdrop-filter on the header itself would make it the containing
+   block of the fixed mobile drawer and clip the drawer to the header's height. */
+.mctl-site-header::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
   background: var(--site-header-bg);
   -webkit-backdrop-filter: blur(var(--site-header-blur));
   backdrop-filter: blur(var(--site-header-blur));
-  border-bottom: 1px solid var(--site-header-border);
 }
 
 .mctl-site-header__inner {
@@ -101,9 +116,296 @@
   text-decoration: none;
 }
 
-.mctl-site-nav a:hover,
+.mctl-site-nav a:hover {
+  color: var(--surface-fg);
+}
+
+/* Active item: neutral text and a 2px underline in the text colour. Never the
+   accent, which marks the primary action only. */
 .mctl-site-nav a[aria-current='page'] {
   color: var(--surface-fg);
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-decoration-color: currentColor;
+  text-underline-offset: 8px;
+}
+
+/* Brand mark: an inline SVG before the wordmark (alice, seerrsense). */
+.mctl-site-brand__mark {
+  flex: none;
+  width: 1.1em;
+  height: 1.1em;
+  margin-right: 8px;
+}
+
+/* Status chip beside the brand or in the actions (BETA). Neutral, not accent. */
+.mctl-site-chip {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid var(--surface-line);
+  border-radius: var(--mctl-radius-pill);
+  color: var(--surface-fg-muted);
+  font-family: var(--font-display);
+  font-size: var(--text-caption-size);
+  letter-spacing: 0.04em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+
+/* ===== App header variant (academy-style) =====
+   .mctl-site-header--app adds three slots next to the shared brand and nav:
+     __context  a context picker after the brand ("/ Course name v"),
+     __badge    a counter pill (open mistakes, unread),
+     __actions  trailing controls (theme toggle, avatar).
+   The brand stops pushing everything right; the nav takes that job instead. */
+.mctl-site-header--app .mctl-site-brand {
+  margin-right: 0;
+}
+
+.mctl-site-header--app .mctl-site-nav {
+  margin-left: auto;
+}
+
+.mctl-site-header__context {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: var(--mctl-radius-md);
+  background: transparent;
+  color: var(--surface-fg-muted);
+  font: inherit;
+  font-family: var(--font-display);
+  font-size: var(--site-nav-size);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.mctl-site-header__context::before {
+  content: '/';
+  color: var(--surface-line);
+}
+
+.mctl-site-header__context:hover {
+  color: var(--surface-fg);
+}
+
+.mctl-site-header__context:focus-visible,
+.mctl-site-burger:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+.mctl-site-badge {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  margin-left: 6px;
+  padding-inline: 6px;
+  border: 1px solid var(--surface-line);
+  border-radius: var(--mctl-radius-pill);
+  color: var(--surface-fg);
+  font-size: var(--text-caption-size);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.mctl-site-header__actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* ===== Mobile navigation: burger + right drawer =====
+   Below 768px a header that contains a .mctl-site-burger turns its nav into a
+   fixed right drawer (70% wide, 300px max) over a scrim; a header without one
+   is untouched. The CSS owns the look only. The consumer owns the behaviour:
+   toggle data-nav-open on the header and keep aria-expanded / aria-controls on
+   the burger in step; close on Escape, on a click outside the nav (the scrim
+   is a ::after, so listen on the header or document), on route change and when
+   the viewport grows past 768px (981px with --drawer-wide); return focus to
+   the burger. */
+.mctl-site-burger {
+  display: none;
+  position: relative;
+  z-index: 3;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--surface-fg);
+  cursor: pointer;
+}
+
+.mctl-site-burger::before,
+.mctl-site-burger::after {
+  content: '';
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  top: 50%;
+  height: 2px;
+  margin-top: -1px;
+  background: currentColor;
+  transition: transform var(--mctl-motion-duration-fast) var(--mctl-motion-easing-standard);
+}
+
+.mctl-site-burger::before {
+  transform: translateY(-4px);
+}
+
+.mctl-site-burger::after {
+  transform: translateY(4px);
+}
+
+.mctl-site-header[data-nav-open] .mctl-site-burger::before {
+  transform: rotate(45deg);
+}
+
+.mctl-site-header[data-nav-open] .mctl-site-burger::after {
+  transform: rotate(-45deg);
+}
+
+/* Opt-in twice over: only a header that contains a .mctl-site-burger gets the
+   drawer or even shows the burger (both need :has(), so a browser without it
+   keeps the inline nav and never shows a dead burger). /site.css floats with
+   main, so a site that has not migrated (a plain inline nav, or its own local
+   burger) keeps its nav exactly as it was. */
+@media (max-width: 767px) {
+  .mctl-site-header:has(.mctl-site-burger) .mctl-site-burger {
+    display: inline-block;
+    margin-left: auto;
+  }
+
+  .mctl-site-header--app:has(.mctl-site-burger) .mctl-site-nav {
+    margin-left: 0;
+  }
+
+  .mctl-site-header:has(.mctl-site-burger) .mctl-site-header__context {
+    max-width: 40vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mctl-site-header:has(.mctl-site-burger) .mctl-site-nav {
+    position: fixed;
+    top: 0;
+    right: 0;
+    z-index: 2;
+    box-sizing: border-box;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 20px;
+    width: 70%;
+    max-width: 300px;
+    height: 100dvh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: calc(var(--site-header-height) + 16px) 24px 24px;
+    background: var(--surface-bg);
+    border-left: 1px solid var(--surface-line);
+    visibility: hidden;
+    transform: translateX(100%);
+    transition:
+      transform var(--mctl-motion-duration-base) var(--mctl-motion-easing-standard),
+      visibility 0s linear var(--mctl-motion-duration-base);
+  }
+
+  .mctl-site-header:has(.mctl-site-burger)[data-nav-open] .mctl-site-nav {
+    visibility: visible;
+    transform: translateX(0);
+    transition-delay: 0s;
+  }
+
+  .mctl-site-header:has(.mctl-site-burger)[data-nav-open]::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    background: var(--overlay-scrim);
+  }
+}
+
+/* Wide variant: the same drawer up to 980px, for apps whose inline nav needs
+   more room than 768px gives it (a course picker, a counter badge, an account
+   menu). Add .mctl-site-header--drawer-wide next to .mctl-site-header and
+   match the consumer's resize listener to (min-width: 981px). A media query
+   cannot read a custom property, so the rules repeat rather than vary. */
+@media (max-width: 980px) {
+  .mctl-site-header--drawer-wide:has(.mctl-site-burger) .mctl-site-burger {
+    display: inline-block;
+    margin-left: auto;
+  }
+
+  .mctl-site-header--drawer-wide.mctl-site-header--app:has(.mctl-site-burger) .mctl-site-nav {
+    margin-left: 0;
+  }
+
+  .mctl-site-header--drawer-wide:has(.mctl-site-burger) .mctl-site-header__context {
+    max-width: 40vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mctl-site-header--drawer-wide:has(.mctl-site-burger) .mctl-site-nav {
+    position: fixed;
+    top: 0;
+    right: 0;
+    z-index: 2;
+    box-sizing: border-box;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 20px;
+    width: 70%;
+    max-width: 300px;
+    height: 100dvh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: calc(var(--site-header-height) + 16px) 24px 24px;
+    background: var(--surface-bg);
+    border-left: 1px solid var(--surface-line);
+    visibility: hidden;
+    transform: translateX(100%);
+    transition:
+      transform var(--mctl-motion-duration-base) var(--mctl-motion-easing-standard),
+      visibility 0s linear var(--mctl-motion-duration-base);
+  }
+
+  .mctl-site-header--drawer-wide:has(.mctl-site-burger)[data-nav-open] .mctl-site-nav {
+    visibility: visible;
+    transform: translateX(0);
+    transition-delay: 0s;
+  }
+
+  .mctl-site-header--drawer-wide:has(.mctl-site-burger)[data-nav-open]::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    background: var(--overlay-scrim);
+  }
+}
+
+/* The motion rules sit after the drawer rules and repeat their selectors:
+   `:has()` adds a class of specificity, so a bare .mctl-site-nav would lose. */
+@media (prefers-reduced-motion: reduce) {
+  .mctl-site-nav,
+  .mctl-site-header:has(.mctl-site-burger) .mctl-site-nav,
+  .mctl-site-header--drawer-wide:has(.mctl-site-burger) .mctl-site-nav,
+  .mctl-site-burger::before,
+  .mctl-site-burger::after {
+    transition: none;
+  }
 }
 
 /* ===== Hero ===== */
