@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -156,6 +157,142 @@ func TestOpenAIRunner_UsesJobTokenOnly(t *testing.T) {
 	r := &OpenAIRunner{Client: &OpenAIClient{BaseURL: "http://invalid", APIKey: "k", Model: "m"}, APIBaseURL: "http://invalid"}
 	if err := r.Run(context.Background(), JobEnvelope{JobID: 1}); !errors.Is(err, errNoJobToken) {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+// completionTestAPI serves the per-job API for the completion tests. The job
+// status stays "processing" until complete_agent_job is called, as on a real
+// server.
+func completionTestAPI(t *testing.T, jobID string, completed *atomic.Bool) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/jobs/"+jobID+"/complete":
+			completed.Store(true)
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && r.URL.Path == "/jobs/"+jobID+"/cost":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/jobs/"+jobID:
+			status := "processing"
+			if completed.Load() {
+				status = "ignored"
+			}
+			writeTestJSON(w, map[string]any{"job_id": 5, "status": status, "attempt": 1})
+		default:
+			t.Fatalf("unexpected agent request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+}
+
+func TestOpenAIRunner_NudgesOnceThenCompletes(t *testing.T) {
+	var completed atomic.Bool
+	api := completionTestAPI(t, "5", &completed)
+	defer api.Close()
+	var calls atomic.Int32
+	var sawNudge atomic.Bool
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if n == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"no reply needed"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3}}`))
+			return
+		}
+		var req struct {
+			Messages []ChatMessage `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if last := req.Messages[len(req.Messages)-1]; last.Role == "user" && last.Content == completionNudge {
+			sawNudge.Store(true)
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c","type":"function","function":{"name":"complete_agent_job","arguments":"{\"status\":\"ignored\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":12,"completion_tokens":4}}`))
+	}))
+	defer provider.Close()
+	r := &OpenAIRunner{Client: &OpenAIClient{BaseURL: provider.URL, APIKey: "k", Model: "m", HTTP: provider.Client()}, APIBaseURL: api.URL, MaxTurns: 4}
+	if err := r.Run(context.Background(), JobEnvelope{JobID: 5, EventID: "e", Attempt: 1, JobToken: "j", Tools: []string{"get_event", "complete_agent_job"}}); err != nil {
+		t.Fatalf("a reply without a tool call must be nudged within the same attempt: %v", err)
+	}
+	if calls.Load() != 2 || !completed.Load() || !sawNudge.Load() {
+		t.Fatalf("provider_calls=%d completed=%v nudge_sent=%v", calls.Load(), completed.Load(), sawNudge.Load())
+	}
+}
+
+func TestOpenAIRunner_NudgesOnlyOnce(t *testing.T) {
+	var completed atomic.Bool
+	api := completionTestAPI(t, "5", &completed)
+	defer api.Close()
+	var calls atomic.Int32
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"still text"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":3}}`))
+	}))
+	defer provider.Close()
+	r := &OpenAIRunner{Client: &OpenAIClient{BaseURL: provider.URL, APIKey: "k", Model: "m", HTTP: provider.Client()}, APIBaseURL: api.URL, MaxTurns: 8}
+	err := r.Run(context.Background(), JobEnvelope{JobID: 5, EventID: "e", Attempt: 1, JobToken: "j", Tools: []string{"get_event", "complete_agent_job"}})
+	if !errors.Is(err, ErrAgentDidNotCompleteJob) {
+		t.Fatalf("err=%v want ErrAgentDidNotCompleteJob after the single nudge", err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("provider calls=%d want exactly 2 (reply, one nudge)", calls.Load())
+	}
+}
+
+func TestOpenAIRunner_TruncatedReplyIsExplicit(t *testing.T) {
+	var completed atomic.Bool
+	api := completionTestAPI(t, "5", &completed)
+	defer api.Close()
+	var calls atomic.Int32
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if calls.Add(1) > 1 {
+			// A later plain "stop" reply must never be reached: it would
+			// mask the truncation as a success.
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"fine"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"cut o"},"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":4096}}`))
+	}))
+	defer provider.Close()
+	r := &OpenAIRunner{Client: &OpenAIClient{BaseURL: provider.URL, APIKey: "k", Model: "m", HTTP: provider.Client()}, APIBaseURL: api.URL, MaxTurns: 8}
+	err := r.Run(context.Background(), JobEnvelope{JobID: 5, EventID: "e", Attempt: 1, JobToken: "j", Tools: []string{"get_event", "complete_agent_job"}})
+	if !errors.Is(err, ErrClaudeReportedError) || !strings.Contains(err.Error(), "error_output_truncated") {
+		t.Fatalf("err=%v want an explicit error_output_truncated result", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("provider calls=%d want 1: a truncated reply is not nudged", calls.Load())
+	}
+}
+
+func TestOpenAIRunner_MissingUsageDoesNotPanicTurnLog(t *testing.T) {
+	// A provider may omit "usage" (null or absent). The per-turn log reads the
+	// token count from a value field, so it must log zero and carry on.
+	for _, usage := range []string{``, `,"usage":null`} {
+		var completed atomic.Bool
+		api := completionTestAPI(t, "5", &completed)
+		provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c","type":"function","function":{"name":"complete_agent_job","arguments":"{\"status\":\"ignored\"}"}}]},"finish_reason":"tool_calls"}]` + usage + `}`))
+		}))
+		r := &OpenAIRunner{Client: &OpenAIClient{BaseURL: provider.URL, APIKey: "k", Model: "m", HTTP: provider.Client()}, APIBaseURL: api.URL, MaxTurns: 2}
+		err := r.Run(context.Background(), JobEnvelope{JobID: 5, EventID: "e", Attempt: 1, JobToken: "j", Tools: []string{"get_event", "complete_agent_job"}})
+		provider.Close()
+		api.Close()
+		if err != nil || !completed.Load() {
+			t.Fatalf("usage=%q err=%v completed=%v", usage, err, completed.Load())
+		}
+	}
+}
+
+func TestSummarizeToolCalls_KeepsOnlyNamesAndStatusEnum(t *testing.T) {
+	names, status := summarizeToolCalls([]ToolCall{
+		{Name: "get_event", Arguments: `{"event_id":"secret-body"}`},
+		{Name: "complete_agent_job", Arguments: `{"status":"ignored"}`},
+	})
+	if len(names) != 2 || names[0] != "get_event" || status != "ignored" {
+		t.Fatalf("names=%v status=%q", names, status)
+	}
+	if _, st := summarizeToolCalls([]ToolCall{{Name: "complete_agent_job", Arguments: `{"status":"free text from the model"}`}}); st != "other" {
+		t.Fatalf("a non-enum status must be reported as other, got %q", st)
 	}
 }
 

@@ -91,6 +91,7 @@ func (r *OpenAIRunner) Run(ctx context.Context, job JobEnvelope) error {
 	costObserved := false
 	usageMissing := false
 	turns := 0
+	nudged := false
 
 	result := func(subtype string, isError bool) *ClaudeResult {
 		res := &ClaudeResult{Type: "result", Subtype: subtype, IsError: isError, NumTurns: turns,
@@ -157,8 +158,34 @@ func (r *OpenAIRunner) Run(ctx context.Context, job JobEnvelope) error {
 			return finish("error_max_budget", true)
 		}
 
+		names, completeStatus := summarizeToolCalls(out.Message.ToolCalls)
+		// Metadata only, never message content. The finish reason and the
+		// tool path are what explain a turn that ended without completing the
+		// job, or a job closed as ignored (mctlhq/mctl-telegram#1130).
+		slog.Info("agent-worker: model turn",
+			"job_id", job.JobID, "attempt", job.Attempt, "turn", turns,
+			"finish_reason", out.FinishReason, "tool_calls", names,
+			"complete_status", completeStatus, "completion_tokens", out.Usage.CompletionTokens)
+
 		msgs = append(msgs, out.Message)
 		if len(out.Message.ToolCalls) == 0 {
+			if !builder.Completed() && out.FinishReason == "length" {
+				// Cut off at the output limit: an explicit failure, not a
+				// model that chose to stop. It is not nudged, because a
+				// later plain "stop" reply would mask the truncation.
+				return finish("error_output_truncated", true)
+			}
+			if !builder.Completed() && !nudged && turns < maxTurns {
+				// A reply with no tool call used to end the run, and the job
+				// then waited out its visibility timeout for a retry that
+				// burned one of its attempts. Ask once, inside the same
+				// attempt, for the missing completion.
+				nudged = true
+				slog.Warn("agent-worker: model replied without completing the job; nudging once",
+					"job_id", job.JobID, "attempt", job.Attempt, "turn", turns, "finish_reason", out.FinishReason)
+				msgs = append(msgs, ChatMessage{Role: "user", Content: completionNudge})
+				continue
+			}
 			return finish("success", false)
 		}
 		for _, call := range out.Message.ToolCalls {
@@ -296,4 +323,32 @@ func toolResultText(res *mcplib.CallToolResult) string {
 		return `{"error":"tool refused"}`
 	}
 	return `{}`
+}
+
+// completionNudge is the fixed follow-up sent once when the model answers
+// without calling any tool. It carries no job or message data.
+const completionNudge = "You have not completed this job. Call complete_agent_job now with the status that fits what you decided; do not answer in plain text."
+
+// summarizeToolCalls returns the tool names of one model turn and, when the
+// turn includes complete_agent_job, its status argument (a short enum). The
+// arguments of every other tool, and any free text, are never read.
+func summarizeToolCalls(calls []ToolCall) (names []string, completeStatus string) {
+	for _, c := range calls {
+		names = append(names, c.Name)
+		if c.Name != "complete_agent_job" {
+			continue
+		}
+		var args struct {
+			Status string `json:"status"`
+		}
+		if json.Unmarshal([]byte(c.Arguments), &args) == nil {
+			switch args.Status {
+			case "completed", "ignored", "failed":
+				completeStatus = args.Status
+			default:
+				completeStatus = "other"
+			}
+		}
+	}
+	return names, completeStatus
 }
