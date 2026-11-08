@@ -179,6 +179,15 @@ type Config struct {
 	// "plain" (the pre-0.135 behaviour, the switch back if the HTML digest
 	// misbehaves). Anything else aborts the boot.
 	DigestFormat string
+	// DigestWeekday makes the digest weekly: "" (default) keeps the daily
+	// digest; a weekday name (mon..sun, full names accepted) sends it once a
+	// week on that day at DigestHourUTC, covering the last 7 days. Anything
+	// else aborts the boot.
+	DigestWeekday string
+	// DigestRecipients is who receives the digest. Unset falls back to
+	// TGLoginAdmins (the pre-existing behaviour). It deliberately does not
+	// grant any scope: being listed here only means "gets the message".
+	DigestRecipients []int64
 	// BotReceiverEnabled turns on the inbound login-bot update receiver
 	// (issue-619). Default OFF, and deliberately so: getUpdates allows exactly
 	// one consumer per bot token, so enabling it in two environments that
@@ -581,6 +590,7 @@ func Load() (*Config, error) {
 		AutoApproveClients:              envBool("AUTO_APPROVE_CLIENTS", false),
 		DigestHourUTC:                   envInt("DIGEST_HOUR_UTC", 9),
 		DigestFormat:                    strings.ToLower(strings.TrimSpace(envOr("DIGEST_FORMAT", "html"))),
+		DigestWeekday:                   strings.ToLower(strings.TrimSpace(os.Getenv("DIGEST_WEEKDAY"))),
 		BotReceiverEnabled:              envBool("BOT_RECEIVER_ENABLED", false),
 		BotStartBridgeToken:             strings.TrimSpace(os.Getenv("BOT_START_BRIDGE_TOKEN")),
 		BroadcastRatePerSec:             envFloat("BROADCAST_RATE_PER_SEC", 10),
@@ -614,6 +624,16 @@ func Load() (*Config, error) {
 	c.DBMaxIdleConns = envInt("DB_MAX_IDLE_CONNS", 0)
 	c.ReplicaID = envOr("REPLICA_ID", envOr("POD_NAME", "unknown"))
 	c.DemoVideoURL = envOr("DEMO_VIDEO_URL", "")
+	if _, _, err := ParseDigestWeekday(c.DigestWeekday); err != nil {
+		return nil, err
+	}
+	if raw := strings.TrimSpace(os.Getenv("DIGEST_RECIPIENTS")); raw != "" {
+		ids, err := parseStrictInt64CSV(raw)
+		if err != nil {
+			return nil, fmt.Errorf("DIGEST_RECIPIENTS: %w", err)
+		}
+		c.DigestRecipients = ids
+	}
 	if c.DigestFormat != "html" && c.DigestFormat != "plain" {
 		return nil, fmt.Errorf("DIGEST_FORMAT must be html or plain, got %q", c.DigestFormat)
 	}
@@ -1262,4 +1282,39 @@ func (c *Config) LoginBotMatchesOIDCClient() (bool, string) {
 		return false, "bot_id_mismatch"
 	}
 	return true, ""
+}
+
+// ParseDigestWeekday maps DIGEST_WEEKDAY to a weekday. ok is false for the
+// empty value (daily digest). A name that is not a weekday is an error, never
+// a silent fall back to daily.
+func ParseDigestWeekday(v string) (day time.Weekday, ok bool, err error) {
+	v = strings.ToLower(strings.TrimSpace(v))
+	if v == "" {
+		return 0, false, nil
+	}
+	for d := time.Sunday; d <= time.Saturday; d++ {
+		name := strings.ToLower(d.String())
+		if v == name || v == name[:3] {
+			return d, true, nil
+		}
+	}
+	return 0, false, fmt.Errorf("DIGEST_WEEKDAY must be empty or a weekday (mon..sun), got %q", v)
+}
+
+// parseStrictInt64CSV parses a comma-separated list of Telegram ids and
+// rejects any malformed entry, so a typo stops startup instead of silently
+// dropping a recipient.
+func parseStrictInt64CSV(s string) ([]int64, error) {
+	var out []int64
+	for _, raw := range splitTrim(s) {
+		if raw == "" {
+			continue
+		}
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || n <= 0 {
+			return nil, fmt.Errorf("invalid Telegram id %q", raw)
+		}
+		out = append(out, n)
+	}
+	return out, nil
 }

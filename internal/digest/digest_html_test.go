@@ -21,7 +21,7 @@ func TestBuildDigestHTML_EscapesHostileValuesAndValidates(t *testing.T) {
 	}
 	steps := map[int64]db.ConnectStep{1002: {RevokedReason: `a<i>&b`}}
 	src := map[int64]string{1001: `<a href="https://evil.example">x</a>`}
-	msg, err := buildDigestHTML(rows, 2, false, steps, src)
+	msg, err := buildDigestHTML(day, rows, 2, false, steps, src)
 	if err != nil {
 		t.Fatalf("buildDigestHTML: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestBuildDigestHTML_EscapesHostileValuesAndValidates(t *testing.T) {
 }
 
 func TestBuildDigestHTML_EmptyIsEmpty(t *testing.T) {
-	msg, err := buildDigestHTML(nil, 0, false, nil, nil)
+	msg, err := buildDigestHTML(day, nil, 0, false, nil, nil)
 	if err != nil || msg != "" {
 		t.Fatalf("got %q, %v", msg, err)
 	}
@@ -63,7 +63,7 @@ func TestBuildDigestHTML_TruncatesInsteadOfFailing(t *testing.T) {
 	for i := 0; i < 150; i++ {
 		rows = append(rows, db.IdentityRow{TelegramID: int64(2000 + i), Username: fmt.Sprintf("user_%d", i)})
 	}
-	msg, err := buildDigestHTML(rows, 150, false, nil, nil)
+	msg, err := buildDigestHTML(day, rows, 150, false, nil, nil)
 	if err != nil {
 		t.Fatalf("buildDigestHTML: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestBuildDigestHTML_TruncatesInsteadOfFailing(t *testing.T) {
 // pins that the HTML and plain bodies describe the same people.
 func TestBuildDigestHTML_SameFactsAsPlain(t *testing.T) {
 	rows := []db.IdentityRow{{TelegramID: 111, Username: "alice", AccessTier: "client", HasSession: true}}
-	html, err := buildDigestHTML(rows, 5, false, nil, nil)
+	html, err := buildDigestHTML(day, rows, 5, false, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestBuildDigestHTML_SameFactsAsPlain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plain := buildDigestMessage(rows, 5, false, nil, nil)
+	plain := buildDigestMessage(day, rows, 5, false, nil, nil)
 	if strings.TrimSpace(doc.Visible) != strings.TrimSpace(plain) {
 		t.Fatalf("visible html text differs from plain:\nhtml:  %q\nplain: %q", doc.Visible, plain)
 	}
@@ -108,7 +108,7 @@ func TestRunDigest_HTMLSendsParseModeHTML(t *testing.T) {
 	}
 	rt := &capturingRoundTripper{}
 	withStubTransport(t, rt)
-	runDigest(ctx, store, "test-token", []int64{999}, false, broadcast.FormatHTML)
+	runDigest(ctx, store, "test-token", []int64{999}, false, broadcast.FormatHTML, day)
 	if len(rt.bodies) != 1 {
 		t.Fatalf("want one send, got %d", len(rt.bodies))
 	}
@@ -140,7 +140,7 @@ func TestRunDigest_PlainSendsNoParseMode(t *testing.T) {
 	}
 	rt := &capturingRoundTripper{}
 	withStubTransport(t, rt)
-	runDigest(ctx, store, "test-token", []int64{999}, false, broadcast.FormatPlain)
+	runDigest(ctx, store, "test-token", []int64{999}, false, broadcast.FormatPlain, day)
 	if len(rt.bodies) != 1 {
 		t.Fatalf("want one send, got %d", len(rt.bodies))
 	}

@@ -61,7 +61,7 @@ func TestRunDigest_ConnectStepLookupFailureDegradesGracefully(t *testing.T) {
 	rt := &capturingRoundTripper{}
 	withStubTransport(t, rt)
 
-	runDigest(ctx, store, "test-token", []int64{999}, false, broadcast.FormatPlain)
+	runDigest(ctx, store, "test-token", []int64{999}, false, broadcast.FormatPlain, day)
 
 	if !strings.Contains(buf.String(), "digest: last connect step") {
 		t.Errorf("expected a warning naming the failed lookup; log:\n%s", buf.String())
