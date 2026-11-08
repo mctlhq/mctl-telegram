@@ -317,12 +317,20 @@ func (w *Worker) requeueFailed(ctx context.Context, job JobEnvelope, outcome str
 	}
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), requeueTimeout)
 	defer cancel()
-	if err := c.RetryJob(rctx, job.JobID, job.Attempt, outcome); err != nil {
+	status, err := c.RetryJob(rctx, job.JobID, job.Attempt, outcome)
+	if err != nil {
 		slog.Warn("agent-worker: requeue of failed job not delivered; it returns after the visibility timeout",
 			"job_id", job.JobID, "err", err)
 		return
 	}
-	slog.Info("agent-worker: failed job requeued", "job_id", job.JobID, "outcome", outcome)
+	switch status {
+	case "pending":
+		slog.Info("agent-worker: failed job requeued", "job_id", job.JobID, "outcome", outcome)
+	case RetryClaimGone:
+		slog.Info("agent-worker: failed job already left this claim; nothing to requeue", "job_id", job.JobID, "outcome", outcome)
+	default:
+		slog.Info("agent-worker: failed job left to the visibility sweeper", "job_id", job.JobID, "outcome", outcome, "status", status)
+	}
 }
 
 // isFatalAuthError reports whether err is an APIError carrying a 401 or 403

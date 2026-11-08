@@ -910,10 +910,17 @@ func (s *Store) retryAgentJob(ctx context.Context, jobID int64, attempt int, err
 	// processing. Guard on status again and check RowsAffected: a zero count
 	// means we lost that race, so roll back and report it rather than
 	// returning a status we never actually wrote.
+	// The worker variant repeats the runtime fence here: it was read above
+	// without a lock, and a runtime switch in between must not let a fenced
+	// attempt be counted as failed. A zero count is ErrAgentJobNotFound.
+	updateFence := ""
+	if worker {
+		updateFence = " AND " + completeRuntimeFence
+	}
 	res, err := tx.ExecContext(ctx,
 		`UPDATE agent_jobs
 		    SET status = $1, next_run_at = $2, last_error = $3, updated_at = $4
-		  WHERE id = $5 AND status = $6 AND attempts = $7`,
+		  WHERE id = $5 AND status = $6 AND attempts = $7`+updateFence,
 		status, nextRun, nullable(errMsg), now, jobID, JobProcessing, attempt,
 	)
 	if err != nil {

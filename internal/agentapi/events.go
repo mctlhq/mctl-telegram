@@ -906,7 +906,7 @@ func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "retry failed")
 		return
 	}
-	s.audit(ctx, id.UserID, "retry_agent_job", "ok", req.Outcome)
+	s.audit(ctx, id.UserID, "retry_agent_job", "ok", req.Outcome+" -> "+status)
 	writeJSON(w, http.StatusOK, map[string]any{"status": status})
 }
 

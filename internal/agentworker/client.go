@@ -475,15 +475,32 @@ func (c *Client) CompleteJob(ctx context.Context, jobID int64, attempt int, stat
 // RetryJob calls POST /jobs/{id}/retry: the invocation of this claimed
 // attempt failed, so the server should put the job back soon rather than wait
 // for the visibility timeout. outcome is the fixed failure class. Not an MCP
-// tool; the model has no path to it. A 409 means the claim is already gone
-// (completed, re-claimed), which is not a failure of this call.
-func (c *Client) RetryJob(ctx context.Context, jobID int64, attempt int, outcome string) error {
+// tool; the model has no path to it. It returns the server's status:
+// "pending" (requeued) or "processing" (nothing changed, left to the
+// visibility sweeper). A 409 means the claim is already gone (completed,
+// re-claimed), which is not a failure of this call: it returns
+// RetryClaimGone and a nil error.
+func (c *Client) RetryJob(ctx context.Context, jobID int64, attempt int, outcome string) (string, error) {
 	body := map[string]any{"outcome": outcome}
 	if !c.jobScoped {
 		body["attempt"] = attempt
 	}
-	return c.do(ctx, http.MethodPost, "/jobs/"+strconv.FormatInt(jobID, 10)+"/retry", body, nil)
+	var out struct {
+		Status string `json:"status"`
+	}
+	err := c.do(ctx, http.MethodPost, "/jobs/"+strconv.FormatInt(jobID, 10)+"/retry", body, &out)
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict {
+		return RetryClaimGone, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return out.Status, nil
 }
+
+// RetryClaimGone is the RetryJob result for a 409: the claim no longer exists.
+const RetryClaimGone = "claim_gone"
 
 // ReportJobCost calls POST /jobs/{id}/cost — a worker-only, out-of-band
 // report of the Claude spend observed for this exact claimed attempt. Not an

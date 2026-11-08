@@ -30,7 +30,7 @@ func TestRequeueClientFunc_PoolModeUsesJobTokenWithoutAttempt(t *testing.T) {
 	if c == nil {
 		t.Fatal("pool job with a job token got no client")
 	}
-	if err := c.RetryJob(context.Background(), 1, 2, "invocation_failed"); err != nil {
+	if _, err := c.RetryJob(context.Background(), 1, 2, "invocation_failed"); err != nil {
 		t.Fatalf("RetryJob: %v", err)
 	}
 	if auth != "Bearer job-token" {

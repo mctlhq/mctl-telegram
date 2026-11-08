@@ -530,3 +530,30 @@ func TestWorker_RunJob_UndeliveredRequeueIsHarmless(t *testing.T) {
 		WithRequeue(func(JobEnvelope) *Client { return client })
 	w.runJob(context.Background(), &convGate{running: map[int64]*convRun{}}, JobEnvelope{JobID: 7, Attempt: 1, ConversationID: 1}) // must not panic or block
 }
+
+func TestClient_RetryJob_ReportsStatusAndTreats409AsGone(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		code   int
+		body   string
+		want   string
+		wantEr bool
+	}{
+		{"requeued", http.StatusOK, `{"status":"pending"}`, "pending", false},
+		{"left to sweeper", http.StatusOK, `{"status":"processing"}`, "processing", false},
+		{"claim gone", http.StatusConflict, `{"error":"job is no longer claimed under that attempt"}`, RetryClaimGone, false},
+		{"server error", http.StatusInternalServerError, `{"error":"x"}`, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.code)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			got, err := NewClient(srv.URL, "tok", nil).RetryJob(context.Background(), 1, 1, "invocation_failed")
+			if (err != nil) != tc.wantEr || got != tc.want {
+				t.Fatalf("RetryJob = %q, %v; want %q, err=%v", got, err, tc.want, tc.wantEr)
+			}
+		})
+	}
+}

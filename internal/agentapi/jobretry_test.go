@@ -3,9 +3,11 @@ package agentapi
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
 
@@ -92,5 +94,73 @@ func TestHandleRetryJob_UnknownJobReturnsNotFound(t *testing.T) {
 	rec := h.do("POST", "/jobs/999999/retry", retryJobRequest{Attempt: 1, Outcome: "invocation_failed"})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+func (h *testHarness) auditDetail(t *testing.T, tool string) string {
+	t.Helper()
+	var d string
+	if err := h.store.DB.QueryRowContext(context.Background(),
+		`SELECT COALESCE(error, '') FROM audit_logs WHERE tool_name = $1 ORDER BY id DESC LIMIT 1`, tool).Scan(&d); err != nil {
+		t.Fatalf("audit row for %s: %v", tool, err)
+	}
+	return d
+}
+
+// The third failed attempt is left to the sweeper: 200 processing, nothing
+// written, and the audit row says so rather than a bare "ok".
+func TestHandleRetryJob_LeftToSweeperIsReportedAndAudited(t *testing.T) {
+	h := newHarness(t)
+	conv := h.seedConversation(555)
+	jobID := h.seedJob("evt:v1:1:555:retry-sweeper", conv.ID)
+	if _, err := h.store.DB.ExecContext(context.Background(),
+		`UPDATE agent_jobs SET max_attempts = 1 WHERE id = $1`, jobID); err != nil {
+		t.Fatalf("max_attempts: %v", err)
+	}
+	attempt := claimAttempt(t, h, jobID)
+
+	rec := h.do("POST", "/jobs/"+itoaTest(jobID)+"/retry", retryJobRequest{Attempt: attempt, Outcome: "invocation_failed"})
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"processing"`) {
+		t.Fatalf("status = %d body=%s, want 200 processing", rec.Code, rec.Body.String())
+	}
+	job, _ := h.store.GetAgentJob(context.Background(), h.userID, jobID)
+	if job.Status != db.JobProcessing {
+		t.Fatalf("status = %q, want processing (untouched)", job.Status)
+	}
+	if d := h.auditDetail(t, "retry_agent_job"); !strings.Contains(d, "processing") {
+		t.Fatalf("audit detail = %q, want the resulting status", d)
+	}
+}
+
+func jobTokenIdentity(h *testHarness, convID, jobID int64, attempt int) *auth.Identity {
+	return &auth.Identity{
+		UserID: h.userID, Subject: "tg:1", TelegramID: 1,
+		JobID: jobID, JobAttempt: attempt, ConversationID: convID,
+	}
+}
+
+// With a job token the attempt comes from the token, so a body without one
+// works; a body naming another attempt or another job is refused by binding.
+func TestHandleRetryJob_JobTokenBinding(t *testing.T) {
+	h := newHarness(t)
+	conv := h.seedConversation(555)
+	jobID := h.seedJob("evt:v1:1:555:retry-token", conv.ID)
+	other := h.seedJob("evt:v1:1:555:retry-token-other", conv.ID)
+	attempt := claimAttempt(t, h, jobID)
+	id := jobTokenIdentity(h, conv.ID, jobID, attempt)
+	path := "/jobs/" + itoaTest(jobID) + "/retry"
+
+	if rec := h.doAs(id, "POST", path, map[string]any{"outcome": "invocation_failed", "attempt": attempt + 1}); rec.Code != http.StatusForbidden {
+		t.Fatalf("mismatched attempt: status = %d, want 403, body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := h.doAs(id, "POST", "/jobs/"+itoaTest(other)+"/retry", map[string]any{"outcome": "invocation_failed"}); rec.Code != http.StatusForbidden {
+		t.Fatalf("other job: status = %d, want 403, body=%s", rec.Code, rec.Body.String())
+	}
+	if job, _ := h.store.GetAgentJob(context.Background(), h.userID, jobID); job.Status != db.JobProcessing {
+		t.Fatalf("status = %q after refused requests, want processing", job.Status)
+	}
+	rec := h.doAs(id, "POST", path, map[string]any{"outcome": "invocation_failed"})
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"pending"`) {
+		t.Fatalf("omitted attempt: status = %d body=%s, want 200 pending", rec.Code, rec.Body.String())
 	}
 }
