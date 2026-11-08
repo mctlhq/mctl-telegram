@@ -1,0 +1,401 @@
+{
+  "$id": "https://mctl.ai/contracts/glovo-mcp-tools/v1alpha1",
+  "title": "Glovo MCP tool contract",
+  "description": "Closed tool surface of the multi-tenant Glovo assistant. glovo_connect_account is a delegated account connection, not an authorization flow of the MCP resource itself.",
+  "protected_resource": {
+    "resource": "https://glovo.mctl.ai/mcp",
+    "scopes_supported": [
+      "glovo:read",
+      "glovo:basket:prepare"
+    ]
+  },
+  "tools": [
+    {
+      "name": "glovo_auth_status",
+      "description": "Report the state of the caller's own Glovo connection.",
+      "required_scope": "glovo:read",
+      "effect": "read",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {},
+        "required": []
+      },
+      "output_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "connection_state": {
+            "type": "string",
+            "enum": [
+              "none",
+              "pending_handoff",
+              "pending_provider",
+              "active",
+              "expired",
+              "failed",
+              "revoked"
+            ]
+          },
+          "connection_id": {
+            "type": "string"
+          },
+          "provider_account_label": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "connection_state"
+        ]
+      }
+    },
+    {
+      "name": "glovo_connect_account",
+      "description": "Start a delegated account connection for the caller. Creates a pending connection only.",
+      "required_scope": "glovo:basket:prepare",
+      "effect": "creates_pending_connection",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "idempotency_key"
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "connection_id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending_handoff"
+            ]
+          },
+          "handoff_url": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "connection_id",
+          "state",
+          "handoff_url",
+          "expires_at"
+        ]
+      }
+    },
+    {
+      "name": "glovo_get_order_history",
+      "description": "List the caller's past orders, newest first.",
+      "required_scope": "glovo:read",
+      "effect": "read",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          },
+          "cursor": {
+            "type": "string"
+          }
+        },
+        "required": []
+      },
+      "output_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "orders": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "order_ref": {
+                  "type": "string"
+                },
+                "store_name": {
+                  "type": "string",
+                  "maxLength": 120
+                },
+                "placed_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "total_label": {
+                  "type": "string",
+                  "maxLength": 40
+                },
+                "item_count": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "order_ref",
+                "store_name",
+                "placed_at",
+                "total_label",
+                "item_count"
+              ]
+            }
+          },
+          "next_cursor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "orders"
+        ]
+      }
+    },
+    {
+      "name": "glovo_preview_reorder",
+      "description": "Preview a reorder of a past order without changing any basket.",
+      "required_scope": "glovo:read",
+      "effect": "read",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "order_ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "order_ref"
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "preview_id": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "maxLength": 120
+                },
+                "quantity": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "name",
+                "quantity"
+              ]
+            }
+          },
+          "unavailable_items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "maxLength": 120
+                },
+                "quantity": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "name",
+                "quantity"
+              ]
+            }
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "preview_id",
+          "items",
+          "unavailable_items",
+          "fingerprint",
+          "expires_at"
+        ]
+      }
+    },
+    {
+      "name": "glovo_get_basket",
+      "description": "Read the caller's current basket.",
+      "required_scope": "glovo:read",
+      "effect": "read",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {},
+        "required": []
+      },
+      "output_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "store_name": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "maxLength": 120
+                },
+                "quantity": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "name",
+                "quantity"
+              ]
+            }
+          },
+          "totals_label": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "fingerprint": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "items",
+          "totals_label",
+          "fingerprint"
+        ]
+      }
+    },
+    {
+      "name": "glovo_prepare_order",
+      "description": "Prepare a basket from a preview and request human approval. Performs no basket write.",
+      "required_scope": "glovo:basket:prepare",
+      "effect": "prepare_only",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "preview_id": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "preview_id",
+          "idempotency_key"
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "order_id": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "consent_request_id": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "order_id",
+          "fingerprint",
+          "consent_request_id",
+          "expires_at"
+        ]
+      }
+    },
+    {
+      "name": "glovo_order_status",
+      "description": "Report the state of a prepared order.",
+      "required_scope": "glovo:read",
+      "effect": "read",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "order_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "order_id"
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "state": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "OUTCOME_UNKNOWN",
+              "observed_placed"
+            ]
+          },
+          "handoff_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "outcome"
+        ]
+      }
+    }
+  ]
+}
