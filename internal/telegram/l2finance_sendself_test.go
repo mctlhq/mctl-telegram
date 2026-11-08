@@ -30,6 +30,7 @@ import (
 const (
 	l2Pass          = "PASS"
 	l2CannotObserve = "CANNOT-OBSERVE"
+	l2Fail          = "FAIL"
 )
 
 const (
@@ -127,14 +128,19 @@ func TestL2Finance_T1WireInputPeerSelf(t *testing.T) {
 		r = res{err: ctx.Err()}
 	}
 	peer, _ := captured.Load().(*tg.InputPeerClass)
-	if peer != nil {
-		if _, self := (*peer).(*tg.InputPeerSelf); self && dials.Load() == 0 {
-			l2Record(t, "T1.wire_input_peer_self", l2Pass, fmt.Sprintf("captured_peer=%T resolver_dials=%d call_err=%v", *peer, dials.Load(), r.err))
-			return
-		}
+	if peer == nil {
+		l2Record(t, "T1.wire_input_peer_self", l2CannotObserve, fmt.Sprintf(
+			"captured=false resolver_dials=%d call_err=%v; middleware did not capture before connection; see T1.source_pin", dials.Load(), r.err))
+		return
 	}
-	l2Record(t, "T1.wire_input_peer_self", l2CannotObserve, fmt.Sprintf(
-		"captured=%t resolver_dials=%d call_err=%v; middleware did not capture before connection; see T1.source_pin", peer != nil, dials.Load(), r.err))
+	_, self := (*peer).(*tg.InputPeerSelf)
+	if !self || dials.Load() != 0 || r.err != nil {
+		l2Record(t, "T1.wire_input_peer_self", l2Fail, fmt.Sprintf(
+			"captured_peer=%T self=%t resolver_dials=%d call_err=%v", *peer, self, dials.Load(), r.err))
+		t.Errorf("T1.wire_input_peer_self: peer=%T self=%t dials=%d err=%v", *peer, self, dials.Load(), r.err)
+		return
+	}
+	l2Record(t, "T1.wire_input_peer_self", l2Pass, fmt.Sprintf("captured_peer=%T resolver_dials=%d call_err=%v", *peer, dials.Load(), r.err))
 }
 
 func TestL2Finance_T1SourcePin(t *testing.T) {
