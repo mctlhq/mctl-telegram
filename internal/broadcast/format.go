@@ -40,6 +40,16 @@ const (
 	maxLinkLen      = 2048
 )
 
+// htmlEscaper escapes exactly the four characters ParseHTML accepts as
+// entities. html.EscapeString is not usable here: it also writes &#39; and
+// &#34;, which ParseHTML refuses.
+var htmlEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;")
+
+// EscapeHTML makes s safe to place inside an HTML broadcast body: every
+// character that ParseHTML would read as markup is written as one of the four
+// supported entities.
+func EscapeHTML(s string) string { return htmlEscaper.Replace(s) }
+
 // ParseFormat maps the wire value to a Format. Empty means plain, so every
 // existing caller keeps its behaviour.
 func ParseFormat(s string) (Format, error) {

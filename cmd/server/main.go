@@ -1193,7 +1193,11 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 	if cfg.TelegramLoginBotToken == "" {
 		slog.Warn("TELEGRAM_LOGIN_BOT_TOKEN unset — the daily new-client digest will not be delivered")
 	}
-	digest.StartDailyDigest(ctx, store, cfg.TelegramLoginBotToken, cfg.TGLoginAdmins, cfg.DigestHourUTC, cfg.AutoApproveClients)
+	digestFormat, err := broadcast.ParseFormat(cfg.DigestFormat)
+	if err != nil {
+		return nil, fmt.Errorf("DIGEST_FORMAT: %w", err)
+	}
+	digest.StartDailyDigest(ctx, store, cfg.TelegramLoginBotToken, cfg.TGLoginAdmins, cfg.DigestHourUTC, cfg.AutoApproveClients, digestFormat)
 	// Broadcast delivery worker (issue-439). It only ever sends campaigns a
 	// human approved, so with no operators configured there is nothing it
 	// could send and it is not started at all. The delivery QUEUE is safe
