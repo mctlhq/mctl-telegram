@@ -1,7 +1,8 @@
-// Package digest sends the operator a once-a-day Telegram summary of clients
-// that signed in over the last 24 hours. It exists so onboarding stays fully
-// hands-off (open auto-approve) while the operator still has daily visibility
-// of who connected.
+// Package digest sends the operator a Telegram summary of clients that signed
+// in since the previous digest: daily (the last 24 hours) or, when a weekday is
+// configured, weekly (the last 7 days). It exists so onboarding stays fully
+// hands-off (open auto-approve) while the operator still has visibility of who
+// connected.
 package digest
 
 import (
@@ -20,36 +21,77 @@ import (
 )
 
 const (
-	lookback    = 24 * time.Hour
+	day         = 24 * time.Hour
 	httpTimeout = 15 * time.Second
 )
 
-// StartDailyDigest launches a goroutine that, once per day at hourUTC:00 UTC,
-// sends the new-client digest to every recipient via the bot. It is a no-op
+// Schedule says when the digest goes out and how far back it looks. The zero
+// Weekday with Weekly=false is the original daily digest at HourUTC; with
+// Weekly=true it goes out once a week on Weekday and covers the last 7 days,
+// so the clients that joined since the previous digest are all in it.
+type Schedule struct {
+	HourUTC int
+	Weekly  bool
+	Weekday time.Weekday
+}
+
+// Window is how far back a digest looks for new clients.
+func (s Schedule) Window() time.Duration {
+	if s.Weekly {
+		return 7 * day
+	}
+	return day
+}
+
+// Until returns the time from now to the next send.
+func (s Schedule) Until(now time.Time) time.Duration {
+	if !s.Weekly {
+		return untilNextHour(now, s.HourUTC)
+	}
+	now = now.UTC()
+	next := time.Date(now.Year(), now.Month(), now.Day(), s.HourUTC, 0, 0, 0, time.UTC)
+	for next.Weekday() != s.Weekday || !next.After(now) {
+		next = next.Add(day)
+	}
+	return next.Sub(now)
+}
+
+// windowLabel renders a lookback window for the message header: "24h" for the
+// daily digest, "7d" for the weekly one.
+func windowLabel(d time.Duration) string {
+	if d == day {
+		return "24h"
+	}
+	return fmt.Sprintf("%dd", int(d/day))
+}
+
+// StartDailyDigest launches a goroutine that, on the schedule (daily, or
+// weekly on one weekday, at HourUTC:00 UTC), sends the new-client digest to
+// every recipient via the bot. It is a no-op
 // when botToken is empty or there are no recipients. The goroutine exits when
 // ctx is cancelled. Single-replica only — there is no leader election.
-func StartDailyDigest(ctx context.Context, store *db.Store, botToken string, recipients []int64, hourUTC int, autoApprove bool, format broadcast.Format) {
+func StartDailyDigest(ctx context.Context, store *db.Store, botToken string, recipients []int64, sched Schedule, autoApprove bool, format broadcast.Format) {
 	if botToken == "" || len(recipients) == 0 {
 		slog.Info("daily digest disabled", "reason", "no bot token or recipients")
 		return
 	}
-	if hourUTC < 0 || hourUTC > 23 {
-		hourUTC = 9
+	if sched.HourUTC < 0 || sched.HourUTC > 23 {
+		sched.HourUTC = 9
 	}
 	go func() {
 		for {
-			wait := untilNextHour(time.Now().UTC(), hourUTC)
+			wait := sched.Until(time.Now().UTC())
 			t := time.NewTimer(wait)
 			select {
 			case <-ctx.Done():
 				t.Stop()
 				return
 			case <-t.C:
-				runDigest(ctx, store, botToken, recipients, autoApprove, format)
+				runDigest(ctx, store, botToken, recipients, autoApprove, format, sched.Window())
 			}
 		}
 	}()
-	slog.Info("daily digest enabled", "hour_utc", hourUTC, "recipients", len(recipients), "format", string(format))
+	slog.Info("daily digest enabled", "hour_utc", sched.HourUTC, "weekly", sched.Weekly, "weekday", sched.Weekday.String(), "recipients", len(recipients), "format", string(format))
 }
 
 // untilNextHour returns the duration from now to the next occurrence of
@@ -66,7 +108,7 @@ func untilNextHour(now time.Time, hour int) time.Duration {
 // runDigest collects the last-24h clients with a single ListIdentities scan
 // and sends the digest. Errors are logged, never fatal — a digest is
 // best-effort.
-func runDigest(ctx context.Context, store *db.Store, botToken string, recipients []int64, autoApprove bool, format broadcast.Format) {
+func runDigest(ctx context.Context, store *db.Store, botToken string, recipients []int64, autoApprove bool, format broadcast.Format, window time.Duration) {
 	qctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -75,7 +117,7 @@ func runDigest(ctx context.Context, store *db.Store, botToken string, recipients
 		slog.Error("digest: list identities", "err", err)
 		return
 	}
-	since := time.Now().UTC().Add(-lookback)
+	since := time.Now().UTC().Add(-window)
 	var newRows []db.IdentityRow
 	for _, r := range all {
 		if r.CreatedAt.After(since) {
@@ -112,7 +154,7 @@ func runDigest(ctx context.Context, store *db.Store, botToken string, recipients
 	var msg string
 	if format == broadcast.FormatHTML {
 		var buildErr error
-		msg, buildErr = buildDigestHTML(newRows, len(all), autoApprove, steps, src)
+		msg, buildErr = buildDigestHTML(window, newRows, len(all), autoApprove, steps, src)
 		if buildErr != nil {
 			// Never fall back to plain text here: a digest the renderer
 			// cannot validate is a renderer bug, and it must be visible.
@@ -121,10 +163,10 @@ func runDigest(ctx context.Context, store *db.Store, botToken string, recipients
 			return
 		}
 	} else {
-		msg = buildDigestMessage(newRows, len(all), autoApprove, steps, src)
+		msg = buildDigestMessage(window, newRows, len(all), autoApprove, steps, src)
 	}
 	if msg == "" {
-		slog.Info("digest: no new clients in the last 24h, skipping send")
+		slog.Info("digest: no new clients in the window, skipping send", "window", windowLabel(window))
 		return
 	}
 	sent := 0
@@ -205,12 +247,12 @@ func effectiveTier(raw string, autoApprove bool) string {
 // was skipped, in which case every row falls back to the plain pre-existing
 // "no session" text. src maps Telegram id to its acquisition label; nil, or
 // an id missing from it, renders no src= suffix.
-func buildDigestMessage(rows []db.IdentityRow, total int, autoApprove bool, steps map[int64]db.ConnectStep, src map[int64]string) string {
+func buildDigestMessage(window time.Duration, rows []db.IdentityRow, total int, autoApprove bool, steps map[int64]db.ConnectStep, src map[int64]string) string {
 	if len(rows) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "mctl-telegram — %d new client(s) in the last 24h (%d total):\n", len(rows), total)
+	fmt.Fprintf(&b, "mctl-telegram — %d new client(s) in the last %s (%d total):\n", len(rows), windowLabel(window), total)
 	for _, r := range rows {
 		name := r.Username
 		if name == "" {
@@ -236,11 +278,11 @@ const maxDigestRows = 200
 // rather than a 400 from Telegram. When all rows do not fit the visible-text or
 // tag limit, the rows that fit are listed and the rest are counted. It returns
 // "" when there are no new clients.
-func buildDigestHTML(rows []db.IdentityRow, total int, autoApprove bool, steps map[int64]db.ConnectStep, src map[int64]string) (string, error) {
+func buildDigestHTML(window time.Duration, rows []db.IdentityRow, total int, autoApprove bool, steps map[int64]db.ConnectStep, src map[int64]string) (string, error) {
 	if len(rows) == 0 {
 		return "", nil
 	}
-	header := fmt.Sprintf("<b>mctl-telegram</b> — %d new client(s) in the last 24h (%d total):\n", len(rows), total)
+	header := fmt.Sprintf("<b>mctl-telegram</b> — %d new client(s) in the last %s (%d total):\n", len(rows), windowLabel(window), total)
 	lines := make([]string, 0, len(rows))
 	for _, r := range rows {
 		name := r.Username

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.136.0](https://github.com/mctlhq/mctl-telegram/compare/0.135.0...0.136.0) (2026-11-08)
+
+
+### Features
+
+* **agents:** issue-1184-spike-poc-glovo-assistant-basket-handoff ([e0e2017](https://github.com/mctlhq/mctl-telegram/commit/e0e2017fcc9cce208a0daf0115f3240bacbb3981))
+* **agents:** issue-1225-spike-runtime-choose-shared-assistant-pr ([36a3129](https://github.com/mctlhq/mctl-telegram/commit/36a31292a625d08d69fe66856af3aee1974ec1b1))
+* **agents:** issue-1227-feat-glovo-multi-tenant-mcp-account-conn ([7a372c0](https://github.com/mctlhq/mctl-telegram/commit/7a372c0527d723ec9edf02817db980f2c8913bdc))
+* **agents:** issue-1227-feat-glovo-multi-tenant-mcp-account-conn ([13179f2](https://github.com/mctlhq/mctl-telegram/commit/13179f2b02af3ae65690f53703c50dff106d87a5))
+* **digest:** weekly schedule and separate recipients ([772aca0](https://github.com/mctlhq/mctl-telegram/commit/772aca0450455852e1b2a22b96ff8cda13f7f8c0))
+* **digest:** weekly schedule and separate recipients ([d44f5cd](https://github.com/mctlhq/mctl-telegram/commit/d44f5cd8f8eb65e8f82c01e9a59de731c1fa9f08))
+* **glovo:** merge reviewed mock Temporal basket-handoff PoC [#1187](https://github.com/mctlhq/mctl-telegram/issues/1187) ([e0e2017](https://github.com/mctlhq/mctl-telegram/commit/e0e2017fcc9cce208a0daf0115f3240bacbb3981))
+
+
+### Bug Fixes
+
+* **digest:** reject an empty DIGEST_RECIPIENTS list; reflow package doc ([0ce9509](https://github.com/mctlhq/mctl-telegram/commit/0ce95091ba553347f4310405e4db3a35c8cd0686))
+
 ## [0.135.0](https://github.com/mctlhq/mctl-telegram/compare/0.134.1...0.135.0) (2026-11-08)
 
 
