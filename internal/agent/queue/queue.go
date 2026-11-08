@@ -128,12 +128,12 @@ func (q *Queue) Retry(ctx context.Context, jobID int64, attempt int, errMsg stri
 	return status, err
 }
 
-// RequeueFailed is Retry for a failure the worker reported itself: the same
-// attempt accounting and dead-lettering, with the short worker delay instead
-// of the general backoff.
+// RequeueFailed is Retry for a failure the worker reported itself, with the
+// short worker delay. It returns db.JobProcessing, changing nothing, when the
+// job is left to the stale-claim sweeper (see RequeueFailedInvocation).
 func (q *Queue) RequeueFailed(ctx context.Context, jobID int64, attempt int, errMsg string) (string, error) {
 	status, err := q.Store.RequeueFailedInvocation(ctx, jobID, attempt, errMsg)
-	if err == nil {
+	if err == nil && status != db.JobProcessing {
 		q.count(status, 1)
 	}
 	return status, err

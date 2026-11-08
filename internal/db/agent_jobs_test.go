@@ -952,46 +952,98 @@ func TestWorkerRetryBackoff_IsShortAndNeverAboveGeneralBackoff(t *testing.T) {
 	}
 }
 
-func TestRequeueFailedInvocation_ShortDelayThenDeadLetter(t *testing.T) {
+func TestRequeueFailedInvocation_ShortDelayForFirstAttemptsOnly(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStoreCrypted(t)
 	uid := seedAgentUser(t, s, "owner")
 	jid := seedJob(t, s, uid, "evt:v1:1:1:1")
-	if _, err := s.DB.ExecContext(ctx, `UPDATE agent_jobs SET max_attempts = 2 WHERE id = $1`, jid); err != nil {
-		t.Fatalf("set max_attempts: %v", err)
+	rearm := func() {
+		if _, err := s.DB.ExecContext(ctx,
+			`UPDATE agent_jobs SET next_run_at = $1 WHERE id = $2`, time.Now().UTC().Add(-time.Second), jid); err != nil {
+			t.Fatalf("re-arm: %v", err)
+		}
 	}
-	if _, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1); err != nil {
-		t.Fatalf("claim 1: %v", err)
-	}
-	status, err := s.RequeueFailedInvocation(ctx, jid, 1, "invocation_failed")
-	if err != nil || status != JobPending {
-		t.Fatalf("requeue 1 = %q, %v; want pending", status, err)
-	}
-	got, _ := s.GetAgentJob(ctx, uid, jid)
-	// Short: due well before the general 30 s backoff of RetryAgentJob.
-	if !got.NextRunAt.Before(time.Now().UTC().Add(15 * time.Second)) {
-		t.Fatalf("next_run_at %v not short", got.NextRunAt)
-	}
-	if got.LastError != "invocation_failed" {
-		t.Fatalf("last_error = %q", got.LastError)
+	for attempt := 1; attempt <= WorkerRetryShortAttempts; attempt++ {
+		if _, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1); err != nil {
+			t.Fatalf("claim %d: %v", attempt, err)
+		}
+		status, err := s.RequeueFailedInvocation(ctx, jid, attempt, "invocation_failed")
+		if err != nil || status != JobPending {
+			t.Fatalf("requeue %d = %q, %v; want pending", attempt, status, err)
+		}
+		got, _ := s.GetAgentJob(ctx, uid, jid)
+		// Short: due well before the general 30 s backoff of RetryAgentJob.
+		if attempt == 1 && !got.NextRunAt.Before(time.Now().UTC().Add(15*time.Second)) {
+			t.Fatalf("next_run_at %v not short", got.NextRunAt)
+		}
+		if got.LastError != "invocation_failed" {
+			t.Fatalf("last_error = %q", got.LastError)
+		}
+		rearm()
 	}
 	var failed int
 	if err := s.DB.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM agent_job_attempts WHERE job_id = $1 AND status = $2`, jid, JobFailed,
-	).Scan(&failed); err != nil || failed != 1 {
-		t.Fatalf("failed attempt rows = %d, %v; want 1 (the attempt still counts)", failed, err)
+	).Scan(&failed); err != nil || failed != WorkerRetryShortAttempts {
+		t.Fatalf("failed attempt rows = %d, %v; want %d (each attempt still counts)", failed, err, WorkerRetryShortAttempts)
 	}
 
-	if _, err := s.DB.ExecContext(ctx,
-		`UPDATE agent_jobs SET next_run_at = $1 WHERE id = $2`, time.Now().UTC().Add(-time.Second), jid); err != nil {
-		t.Fatalf("re-arm: %v", err)
+	// The third failure is left to the sweeper: nothing is written.
+	if _, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1); err != nil {
+		t.Fatalf("claim 3: %v", err)
+	}
+	status, err := s.RequeueFailedInvocation(ctx, jid, WorkerRetryShortAttempts+1, "invocation_failed")
+	if err != nil || status != JobProcessing {
+		t.Fatalf("requeue 3 = %q, %v; want processing (left to sweeper)", status, err)
+	}
+	got, _ := s.GetAgentJob(ctx, uid, jid)
+	if got.Status != JobProcessing {
+		t.Fatalf("status = %q, want processing", got.Status)
+	}
+}
+
+// A worker-reported failure never dead-letters, even on the last attempt.
+func TestRequeueFailedInvocation_NeverSpendsTheLastAttempt(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	jid := seedJob(t, s, uid, "evt:v1:1:1:1")
+	if _, err := s.DB.ExecContext(ctx, `UPDATE agent_jobs SET max_attempts = 1 WHERE id = $1`, jid); err != nil {
+		t.Fatalf("set max_attempts: %v", err)
 	}
 	if _, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1); err != nil {
-		t.Fatalf("claim 2: %v", err)
+		t.Fatalf("claim: %v", err)
 	}
-	status, err = s.RequeueFailedInvocation(ctx, jid, 2, "invocation_failed")
-	if err != nil || status != JobDeadLetter {
-		t.Fatalf("requeue 2 = %q, %v; want dead_letter", status, err)
+	status, err := s.RequeueFailedInvocation(ctx, jid, 1, "invocation_failed")
+	if err != nil || status != JobProcessing {
+		t.Fatalf("requeue = %q, %v; want processing", status, err)
+	}
+	if got, _ := s.GetAgentJob(ctx, uid, jid); got.Status == JobDeadLetter {
+		t.Fatalf("job dead-lettered by a worker-reported failure")
+	}
+}
+
+// After a runtime switch the old runtime's attempt is fenced; the requeue
+// must leave it to the sweeper (which grants one more attempt), not count it.
+func TestRequeueFailedInvocation_RuntimeSwitchLeftToSweeper(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	jid := seedJob(t, s, uid, "evt:v1:1:1:1")
+	setRuntime(t, s, uid, RuntimeOwn)
+	if _, err := s.ClaimAgentJobs(ctx, "r", uid, RuntimeOwn, 1); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	setRuntime(t, s, uid, RuntimeManaged)
+	status, err := s.RequeueFailedInvocation(ctx, jid, 1, "invocation_failed")
+	if err != nil || status != JobProcessing {
+		t.Fatalf("requeue = %q, %v; want processing (fenced, left to sweeper)", status, err)
+	}
+	var failed int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM agent_job_attempts WHERE job_id = $1 AND status = $2`, jid, JobFailed,
+	).Scan(&failed); err != nil || failed != 0 {
+		t.Fatalf("failed attempt rows = %d, %v; want 0", failed, err)
 	}
 }
 

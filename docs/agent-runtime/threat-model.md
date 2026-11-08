@@ -113,7 +113,7 @@ A claim is a lease: `RequeueStaleAgentJobs` returns a stale job to the queue aft
 
 `POST /jobs/{id}/cost` is worker-only and not a tool. For an own runtime it affects only the reporter's own account. The managed ledger is server-authoritative (ADR 0008).
 
-`POST /jobs/{id}/retry` is worker-only and not a tool. It can only move the caller's own job from `processing` under the caller's own attempt to `pending` (or `dead_letter` at `max_attempts`), through the same compare-and-set as `RetryAgentJob`, so a stale or foreign claim answers 409. It spends an attempt, never refunds one, and its `outcome` is a fixed vocabulary, so it cannot write free text into the job row.
+`POST /jobs/{id}/retry` is worker-only and not a tool. It can only move the caller's own job from `processing` under the caller's own attempt to `pending` for its first two failed attempts only, through the same compare-and-set as `RetryAgentJob`, so a stale or foreign claim answers 409. It never dead-letters a job and leaves a runtime-fenced job to the sweeper. It spends an attempt, never refunds one, and its `outcome` is a fixed vocabulary, so it cannot write free text into the job row.
 
 ### T9 Denial of service
 
