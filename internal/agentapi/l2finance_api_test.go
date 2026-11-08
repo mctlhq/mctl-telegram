@@ -357,6 +357,13 @@ func TestL2Finance_T10(t *testing.T) {
 		observed := strings.Contains(src["agent_actions"], l2Marker)
 		expectGap(t, "T10.intent_channel", observed, fmt.Sprintf(
 			"plaintext_intent_in_agent_actions=%t marker_check=%v", observed, err))
+		// Only the reviewed agent_actions.intent leak is expected. A new leak
+		// in any other durable source or in slog must fail the binary, even
+		// while the known intent gap continues to reproduce.
+		delete(src, "agent_actions")
+		if extraErr := l2AssertNoMarker(src); extraErr != nil {
+			t.Errorf("T10.intent_channel: unexpected additional leak: %v", extraErr)
+		}
 	})
 	t.Run("traces", func(t *testing.T) {
 		spans := 0
