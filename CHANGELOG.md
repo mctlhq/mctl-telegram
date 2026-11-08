@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.135.0](https://github.com/mctlhq/mctl-telegram/compare/0.134.1...0.135.0) (2026-11-08)
+
+
+### Features
+
+* **digest:** send the daily digest as validated HTML ([d1ee54c](https://github.com/mctlhq/mctl-telegram/commit/d1ee54cab6aefb28c8f4f14cfebaad93fa9151ec))
+* **digest:** send the daily digest as validated HTML ([723013d](https://github.com/mctlhq/mctl-telegram/commit/723013df60442c61af48674bc4e9dcac8cefc660)), closes [#1223](https://github.com/mctlhq/mctl-telegram/issues/1223)
+
 ## [0.134.1](https://github.com/mctlhq/mctl-telegram/compare/0.134.0...0.134.1) (2026-11-07)
 
 
