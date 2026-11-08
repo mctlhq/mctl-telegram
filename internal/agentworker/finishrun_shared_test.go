@@ -67,14 +67,17 @@ func TestFinishRun_SharedByBothRunners(t *testing.T) {
 		maxTurns   int
 		wantErr    error
 		wantReport bool
+		// openaiCost is what the OpenAI runner reports. A plain-text reply
+		// is nudged once (a second paid turn of 0.25), so it reports 0.5.
+		openaiCost float64
 	}{
-		{"terminal and same attempt", "completed", 1, claudeOK, textReply, 0, nil, true},
-		{"job left non-terminal", "processing", 1, claudeOK, textReply, 0, ErrAgentDidNotCompleteJob, true},
-		{"completed by a different attempt", "completed", 2, claudeOK, textReply, 0, ErrAgentDidNotCompleteJob, true},
-		{"runner reports an error, cost still recorded", "completed", 1, claudeErr, toolReply, 1, ErrClaudeReportedError, true},
+		{"terminal and same attempt", "completed", 1, claudeOK, textReply, 0, nil, true, 0.5},
+		{"job left non-terminal", "processing", 1, claudeOK, textReply, 0, ErrAgentDidNotCompleteJob, true, 0.5},
+		{"completed by a different attempt", "completed", 2, claudeOK, textReply, 0, ErrAgentDidNotCompleteJob, true, 0.5},
+		{"runner reports an error, cost still recorded", "completed", 1, claudeErr, toolReply, 1, ErrClaudeReportedError, true, 0.25},
 	}
 	for _, tc := range cases {
-		check := func(t *testing.T, err error, f *finishRunFake) {
+		check := func(t *testing.T, err error, f *finishRunFake, wantCost float64) {
 			t.Helper()
 			if tc.wantErr == nil && err != nil {
 				t.Fatalf("err=%v want nil", err)
@@ -84,15 +87,15 @@ func TestFinishRun_SharedByBothRunners(t *testing.T) {
 			}
 			f.mu.Lock()
 			defer f.mu.Unlock()
-			if tc.wantReport && (len(f.costs) != 1 || f.costs[0] != 0.25) {
-				t.Fatalf("cost reports=%v want [0.25]", f.costs)
+			if tc.wantReport && (len(f.costs) != 1 || f.costs[0] != wantCost) {
+				t.Fatalf("cost reports=%v want [%v]", f.costs, wantCost)
 			}
 		}
 		t.Run("claude/"+tc.name, func(t *testing.T) {
 			bin, _, _, _ := fakeClaudeScript(t, tc.claudeOut, 0)
 			srv, f := newFinishRunFake(t, tc.status, tc.attempt)
 			inv := &ClaudeInvoker{ClaudeBin: bin, Self: "/bin/agent-worker", APIBaseURL: srv.URL, APIToken: "tok"}
-			check(t, inv.Run(context.Background(), JobEnvelope{JobID: 42, Attempt: 1}), f)
+			check(t, inv.Run(context.Background(), JobEnvelope{JobID: 42, Attempt: 1}), f, 0.25)
 		})
 		t.Run("openai/"+tc.name, func(t *testing.T) {
 			srv, f := newFinishRunFake(t, tc.status, tc.attempt)
@@ -105,7 +108,7 @@ func TestFinishRun_SharedByBothRunners(t *testing.T) {
 				APIBaseURL: srv.URL, MaxTurns: tc.maxTurns, Prices: Prices{InputUSDPerMTok: 1},
 			}
 			job := JobEnvelope{JobID: 42, EventID: "e", Attempt: 1, JobToken: "j", Tools: []string{"get_event", "complete_agent_job"}}
-			check(t, r.Run(context.Background(), job), f)
+			check(t, r.Run(context.Background(), job), f, tc.openaiCost)
 		})
 	}
 }
