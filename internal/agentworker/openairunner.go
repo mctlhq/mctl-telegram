@@ -169,6 +169,12 @@ func (r *OpenAIRunner) Run(ctx context.Context, job JobEnvelope) error {
 
 		msgs = append(msgs, out.Message)
 		if len(out.Message.ToolCalls) == 0 {
+			if !builder.Completed() && out.FinishReason == "length" {
+				// Cut off at the output limit: an explicit failure, not a
+				// model that chose to stop. It is not nudged, because a
+				// later plain "stop" reply would mask the truncation.
+				return finish("error_output_truncated", true)
+			}
 			if !builder.Completed() && !nudged && turns < maxTurns {
 				// A reply with no tool call used to end the run, and the job
 				// then waited out its visibility timeout for a retry that
@@ -179,11 +185,6 @@ func (r *OpenAIRunner) Run(ctx context.Context, job JobEnvelope) error {
 					"job_id", job.JobID, "attempt", job.Attempt, "turn", turns, "finish_reason", out.FinishReason)
 				msgs = append(msgs, ChatMessage{Role: "user", Content: completionNudge})
 				continue
-			}
-			if !builder.Completed() && out.FinishReason == "length" {
-				// Cut off at the output limit: an explicit failure, not a
-				// model that chose to stop.
-				return finish("error_output_truncated", true)
 			}
 			return finish("success", false)
 		}

@@ -241,8 +241,15 @@ func TestOpenAIRunner_TruncatedReplyIsExplicit(t *testing.T) {
 	var completed atomic.Bool
 	api := completionTestAPI(t, "5", &completed)
 	defer api.Close()
+	var calls atomic.Int32
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if calls.Add(1) > 1 {
+			// A later plain "stop" reply must never be reached: it would
+			// mask the truncation as a success.
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"fine"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"cut o"},"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":4096}}`))
 	}))
 	defer provider.Close()
@@ -250,6 +257,9 @@ func TestOpenAIRunner_TruncatedReplyIsExplicit(t *testing.T) {
 	err := r.Run(context.Background(), JobEnvelope{JobID: 5, EventID: "e", Attempt: 1, JobToken: "j", Tools: []string{"get_event", "complete_agent_job"}})
 	if !errors.Is(err, ErrClaudeReportedError) || !strings.Contains(err.Error(), "error_output_truncated") {
 		t.Fatalf("err=%v want an explicit error_output_truncated result", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("provider calls=%d want 1: a truncated reply is not nudged", calls.Load())
 	}
 }
 
