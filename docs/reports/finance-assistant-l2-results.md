@@ -2,6 +2,35 @@ FINANCE_SECURITY_GATE=BLOCKED
 
 # Finance Assistant L2: consolidated hermetic full-suite evidence (slice D, #1251)
 
+## AMEND validation status (PR #1257)
+
+**Not yet a complete full-runner verification on the amended PR HEAD.** The
+62-row table below is the *historical* observed run at `370efd01a8841f909217d06befdfb75932530b3d`,
+not a run of the amended 64-row manifest. It must not be used to claim that the
+amended source has passed the canonical suite. The security gate is BLOCKED.
+
+A source-to-manifest review against #1244's canonical requirements and design
+identified two required T1/T2 distinctions omitted by the earlier
+emitters-derived inventory. Both now have separate test-only emitters and
+mandatory manifest rows:
+
+| #1244 contract | Mandatory case | Required outcome |
+| --- | --- | --- |
+| T1: `/mctl finance` on Alice's Saved Messages | `listener:T1.finance_command` | `NOT-IMPLEMENTED`, after asserting `unknownCommandReply` and zero peer sends |
+| T2: Bob-conversation job queues an Alice owner summary without finance-specific invocation | `agentapi:T2.bob_job_owner_summary` | `FAIL/GAP`, pinned by `expectGap` |
+| T2: ordinary owner delivery does not leak to Carol/peer | `agentapi:T2.ordinary_owner_routing` | `PASS`, separately, never as finance approval |
+
+The committed 64-row `testdata/manifest.txt` maps T1–T10 and negative controls
+M1–M4 to their emitting layers; absent finance functionality remains explicit
+`NOT-IMPLEMENTED` and unobservable layer boundaries remain `CANNOT-OBSERVE`.
+No historical row is silently regraded; the next fresh full runner execution
+must generate 64 results, run `TestGate*` unit tests, tagged vet, two independent
+tagged race runs, the untagged race suite, and the reused-output fail-closed
+regression, all at a pinned amended source revision. If any step fails, the
+result remains `INVALID / BLOCKED` and the report must be refreshed from
+actual evidence, not projected results.
+
+
 Application-security evidence only. `harness_status=COMPLETE` means the harness ran and
 matched its manifest; it is not a security pass. Outcome: `COMPLETE_WITH_GAPS_BLOCKED`.
 mctlhq/.github#325 stays `RESEARCH_ONLY_DEFER`; no pilot is authorised and no gap is fixed here.
@@ -26,10 +55,12 @@ mctlhq/.github#325 stays `RESEARCH_ONLY_DEFER`; no pilot is authorised and no ga
 - Offline: the guards cover `net.DefaultResolver` and `http.DefaultTransport` only. Every one of the
   five packages emits `OFFLINE.default_paths`; `OFFLINE.whole_process` stays `CANNOT-OBSERVE`. The
   suite is not claimed to be fully isolated.
-- The manifest was generated from the current emitters. The line-by-line crosswalk to the #1244
-  T1-T10 / M1-M4 subcases was NOT independently reviewed (the #1244 source was not available to the
-  implementer), so required-but-unimplemented emitters are not yet listed as `MISSING`. This must be
-  done by review before the harness result is treated as complete coverage.
+- Original 62-row evidence used an emitters-derived manifest and was not sufficient to
+  demonstrate the canonical #1244 crosswalk. The AMEND source-mapped that inventory
+  and added mandatory T1 finance-command and T2 finance-invocation distinctions
+  (64 rows in the amended manifest). The new version has NOT been fully executed
+  at the amended HEAD; its coverage and outcome require fresh CI/race evidence.
+  Any future required case without an emitter must be marked `MISSING`.
 - `fixture_id` is the stable synthetic `L2SYNTH-<id>` derived by each package's `l2Record`; it
   proves stability across runs, not independent fixture design.
 - T10 split: `T10.redaction_text` now checks durable sources only; the new `T10.redaction_slog`
