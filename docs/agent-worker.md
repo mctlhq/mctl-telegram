@@ -89,6 +89,13 @@ send gate.
    `complete_agent_job`. A completion without a valid same-user, same-job
    result gets a 409, not a silently-lost job.
 
+   If the model asks for `ignored` after this attempt saved a lead or
+   proposed a reply or approval request, the worker's `complete_agent_job`
+   sends `completed` with those result ids instead: the server cannot link a
+   result to an `ignored` job, and a stored lead on a job reported as having
+   no result is a contradiction. An owner summary alone does not count, so a
+   manipulation alert still closes as `ignored`.
+
 ## Configuration
 
 | Env var | Required | Meaning |

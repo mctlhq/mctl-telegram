@@ -712,3 +712,59 @@ func TestCompleteAgentJob_SuppressedSummaryAloneHasNoResult(t *testing.T) {
 		t.Fatalf("resultActionID = %d after a suppressed summary, want 0", b.resultActionID)
 	}
 }
+
+// TestCompleteAgentJob_IgnoredAfterPersistedResultCompletes covers the soak 2
+// finding: a turn that saved a lead and then asked for ignored is closed as
+// completed with the lead linked, whichever tool persisted the result.
+func TestCompleteAgentJob_IgnoredAfterPersistedResultCompletes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		do   func(b *toolBuilder) *mcplib.CallToolResult
+	}{
+		{"lead", func(b *toolBuilder) *mcplib.CallToolResult {
+			tool, h := b.saveJobLead()
+			return callTool(t, tool, h, map[string]any{"company": "Acme"})
+		}},
+		{"reply", func(b *toolBuilder) *mcplib.CallToolResult {
+			tool, h := b.proposeReply()
+			return callTool(t, tool, h, map[string]any{"intent": "discovery", "text": "Thanks"})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &fakeAPI{}
+			b := &toolBuilder{api: api, job: JobContext{JobID: 42, Attempt: 1, ConversationID: 9}}
+			if res := tc.do(b); res.IsError {
+				t.Fatalf("result tool failed: %#v", res)
+			}
+			tool, h := b.completeAgentJob()
+			if res := callTool(t, tool, h, map[string]any{"status": "ignored"}); res.IsError {
+				t.Fatalf("complete_agent_job failed: %#v", res)
+			}
+			call := api.completeJobCalls[0]
+			if call.status != "completed" || (call.result.ActionID == 0 && call.result.LeadID == 0) {
+				t.Fatalf("call = %#v, want completed with a linked result", call)
+			}
+		})
+	}
+}
+
+// TestCompleteAgentJob_IgnoredWithoutResultStaysIgnored: nothing persisted, or
+// only an owner summary, keeps the model's ignored (spam, manipulation alert).
+func TestCompleteAgentJob_IgnoredWithoutResultStaysIgnored(t *testing.T) {
+	api := &fakeAPI{}
+	b := &toolBuilder{api: api, job: JobContext{JobID: 42, Attempt: 1, ConversationID: 9}}
+	summaryTool, summaryHandler := b.sendOwnerSummary()
+	if res := callTool(t, summaryTool, summaryHandler, map[string]any{
+		"intent": "assistant_manipulation", "text": "manipulation attempt",
+	}); res.IsError {
+		t.Fatalf("send_owner_summary failed: %#v", res)
+	}
+	tool, h := b.completeAgentJob()
+	if res := callTool(t, tool, h, map[string]any{"status": "ignored"}); res.IsError {
+		t.Fatalf("complete_agent_job failed: %#v", res)
+	}
+	call := api.completeJobCalls[0]
+	if call.status != "ignored" || call.result.ActionID != 0 || call.result.LeadID != 0 {
+		t.Fatalf("call = %#v, want plain ignored", call)
+	}
+}
