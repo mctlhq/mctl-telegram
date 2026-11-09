@@ -1,6 +1,7 @@
 package agentapi
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -8,7 +9,9 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
@@ -27,24 +30,75 @@ func (s *Server) denyBinding(w http.ResponseWriter, r *http.Request, id *auth.Id
 	writeJSONError(w, http.StatusForbidden, "credential is bound to another conversation")
 }
 
+// denyBindingCode is denyBinding with a stable typed code (#1267): the audit
+// row's error column reads "conversation binding: <code>: <detail>" (detail
+// holds only numeric ids from the credential and request, never message text)
+// and the denial is counted under that policy.DenyCode. The audit write is
+// checked: when it fails the request is still refused (fail closed) but with a
+// sanitized 500, not the 403 that would imply a recorded denial.
+func (s *Server) denyBindingCode(w http.ResponseWriter, r *http.Request, id *auth.Identity, tool string, code policy.DenyCode, detail string) {
+	s.m.CountPolicyDenial(string(code), metrics.PolicySurfaceToolGate)
+	if err := s.auditChecked(r.Context(), id.UserID, tool, "denied", "conversation binding: "+string(code)+": "+detail); err != nil {
+		writeBindingAuditFailure(w, tool, err)
+		return
+	}
+	writeJSONError(w, http.StatusForbidden, "credential is bound to another conversation")
+}
+
+// auditChecked is audit with the write outcome returned, for refusals that must
+// not be reported as recorded unless the chained row was committed. It uses the
+// same single audit implementation (chain, scrubbing, tenant scoping) as audit.
+func (s *Server) auditChecked(ctx context.Context, userID int64, tool, status, errMsg string) error {
+	if s.Store == nil {
+		return nil
+	}
+	return s.Store.LogToolCallChecked(ctx, db.ToolCall{UserID: userID, Tool: tool, Status: status, ErrMsg: errMsg})
+}
+
+// writeBindingAuditFailure answers a binding refusal whose durable audit write
+// failed: a sanitized 500, never the normal denial (which would imply a record
+// exists). The caller has already stopped before any business effect.
+func writeBindingAuditFailure(w http.ResponseWriter, tool string, err error) {
+	logHandlerErr(tool+"_binding_audit", err)
+	writeJSONError(w, http.StatusInternalServerError, "denial could not be recorded")
+}
+
 // enforceBinding checks the conversation, job and attempt a request names
 // against the credential's binding. A zero request value means "not named"
 // and is not compared. It is a no-op for an account token. It reports
 // whether the request may proceed; when false the response is written.
+// Routes that act (propose, notify, save lead) must also call
+// requireBoundJob: a read route may omit the job, an action may not.
 func (s *Server) enforceBinding(w http.ResponseWriter, r *http.Request, id *auth.Identity, tool string, convID, jobID int64, attempt int) bool {
 	if !jobBound(id) {
 		return true
 	}
 	if convID != 0 && convID != id.ConversationID {
-		s.denyBinding(w, r, id, tool, fmt.Sprintf("token conv=%d request conv=%d", id.ConversationID, convID))
+		s.denyBindingCode(w, r, id, tool, policy.DenyJobBindingMismatch, fmt.Sprintf("token conv=%d request conv=%d", id.ConversationID, convID))
 		return false
 	}
 	if jobID != 0 && jobID != id.JobID {
-		s.denyBinding(w, r, id, tool, fmt.Sprintf("token job=%d request job=%d", id.JobID, jobID))
+		s.denyBindingCode(w, r, id, tool, policy.DenyJobBindingMismatch, fmt.Sprintf("token job=%d request job=%d", id.JobID, jobID))
 		return false
 	}
 	if attempt != 0 && attempt != id.JobAttempt {
-		s.denyBinding(w, r, id, tool, fmt.Sprintf("token attempt=%d request attempt=%d", id.JobAttempt, attempt))
+		s.denyBindingCode(w, r, id, tool, policy.DenyJobBindingMismatch, fmt.Sprintf("token attempt=%d request attempt=%d", id.JobAttempt, attempt))
+		return false
+	}
+	return true
+}
+
+// requireBoundJob refuses an action from a job credential that does not name
+// its own job and attempt. Without it an omitted job_id would skip every job
+// check and land as a standalone, jobless action (#1267). It is a no-op for
+// an account token, whose jobless actions are a supported contract. Call it
+// after enforceBinding; it runs before any business effect.
+func (s *Server) requireBoundJob(w http.ResponseWriter, r *http.Request, id *auth.Identity, tool string, jobID int64, attempt int) bool {
+	if !jobBound(id) {
+		return true
+	}
+	if jobID == 0 || attempt == 0 {
+		s.denyBindingCode(w, r, id, tool, policy.DenyJobBindingMissing, fmt.Sprintf("token job=%d attempt=%d request job=%d attempt=%d", id.JobID, id.JobAttempt, jobID, attempt))
 		return false
 	}
 	return true

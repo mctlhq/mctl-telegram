@@ -384,6 +384,10 @@ var (
 		"intent_never",
 		"audience_excluded",
 		"install_changed",
+		"install_revision_missing",
+		"legacy_install_revision_missing",
+		"job_binding_missing",
+		"job_binding_mismatch",
 		"tool_not_allowed",
 		"unknown",
 	}
@@ -918,7 +922,7 @@ func New() *Registry {
 
 	r.AgentPolicyDenialsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "mctl_agent_policy_denials_total",
-		Help: "Total hard policy denials, labeled by a closed-set denial reason code (bounded: 24 values, see policy.DenyCode) and the consuming surface (bounded: 7 values, see PolicySurface* constants). Never labeled by account, conversation, or peer.",
+		Help: "Total hard policy denials, labeled by a closed-set denial reason code (bounded: 28 values, see policy.DenyCode) and the consuming surface (bounded: 7 values, see PolicySurface* constants). Never labeled by account, conversation, or peer.",
 	}, []string{"reason", "surface"})
 
 	r.AgentJobCostUSDTotal = prometheus.NewCounterVec(prometheus.CounterOpts{

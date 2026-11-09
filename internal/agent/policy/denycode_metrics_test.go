@@ -20,6 +20,7 @@ func TestDenyCodesMatchMetricsList(t *testing.T) {
 		DenyConvStateUnknown, DenySenderBlocked, DenyActionTypeUnknown,
 		DenyPeerMismatch, DenyNoDisclosure, DenyEmptyReply, DenyReplyTooLong,
 		DenyReplyURL, DenyReplyCredentials, DenyReplyNeverField, DenySourceSuperseded, DenyIntentNever, DenyAudienceExcluded, DenyInstallChanged, DenyToolNotAllowed, DenyUnknown,
+		DenyInstallRevisionMissing, DenyLegacyInstallRevisionMissing, DenyJobBindingMissing, DenyJobBindingMismatch,
 	}
 	have := map[string]bool{}
 	for _, r := range metrics.PolicyDenyReasons() {
