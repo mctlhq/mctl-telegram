@@ -306,10 +306,73 @@ func TestPurgeIsTenantFenced(t *testing.T) {
 
 func TestIssueHandoffRevalidates(t *testing.T) {
 	e := testkit.New(t, testkit.Lunch())
+	if _, err := e.Acts.IssueHandoff(ctx, e.Req, e.FP); activities.ErrCode(err) != bridge.CodeApprovalInvalid {
+		t.Fatalf("unapproved handoff: %v", err)
+	}
+	if _, err := e.Acts.MutateBasket(ctx, e.Req, e.FP); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := e.Acts.IssueHandoff(ctx, e.Req, e.FP); err != nil {
 		t.Fatal(err)
+	}
+	for _, changed := range []struct {
+		name string
+		mutate func(*testkit.Env)
+	}{
+		{"wrong_receipt", func(e *testkit.Env) { e.Req.ApprovalRef = "aar_other" }},
+		{"wrong_execution", func(e *testkit.Env) { e.Req.ExecutionRef = "we_other" }},
+		{"wrong_fingerprint", func(e *testkit.Env) { e.FP = "deadbeef" }},
+	} {
+		t.Run(changed.name, func(t *testing.T) {
+			c := testkit.New(t, testkit.Lunch())
+			if _, err := c.Acts.MutateBasket(ctx, c.Req, c.FP); err != nil {
+				t.Fatal(err)
+			}
+			changed.mutate(c)
+			_, err := c.Acts.IssueHandoff(ctx, c.Req, c.FP)
+			wantCode(t, err, bridge.CodeApprovalInvalid)
+		})
 	}
 	e.Bridge.SetState("inst-alpha", fake.ConnRevoked)
 	_, err := e.Acts.IssueHandoff(ctx, e.Req, e.FP)
 	wantCode(t, err, bridge.CodeConnectionRevoked)
+}
+
+// A basket pre-populated outside this execution must never authorize a handoff
+// merely because its fingerprint happens to match. The synthetic ledger entry
+// from read-back has no evidence that this execution consumed an aar_ receipt.
+func TestMatchingBasketWithoutApprovalCannotIssueHandoff(t *testing.T) {
+	for _, tc := range []string{"unconsumed", "wrong", "expired", "replayed"} {
+		t.Run(tc, func(t *testing.T) {
+			e := testkit.New(t, testkit.Lunch())
+			e.Store.SeedCart("tenant-alpha|gcn_alpha1", testkit.Lunch())
+			q, err := e.Store.Client("tenant-alpha|gcn_alpha1").ReadBasket(ctx)
+			if err != nil || q.Fingerprint != e.FP {
+				t.Fatalf("test setup does not have matching basket: quote=%+v err=%v", q, err)
+			}
+			switch tc {
+			case "wrong":
+				e.Req.ApprovalRef = "aar_other"
+			case "expired":
+				e.Bridge.AddReceipt("aar_alpha1", fake.Binding{
+					Execution: e.Req.ExecutionRef, Tenant: e.Req.TenantRef, Owner: e.Req.OwnerRef,
+					Connection: e.Req.ConnectionRef, IntentHash: e.Req.IntentHash, Fingerprint: e.FP,
+					InstallRevision: e.Req.InstallRevision,
+				}, time.Now().Add(-time.Second))
+			case "replayed":
+				if err := e.Bridge.ConsumeApproval(ctx, e.Req, e.FP); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := e.Acts.MutateBasket(ctx, e.Req, e.FP)
+			if err != nil || got.Applied || !got.Deduped {
+				t.Fatalf("matching-basket readback=%+v err=%v", got, err)
+			}
+			_, err = e.Acts.IssueHandoff(ctx, e.Req, e.FP)
+			wantCode(t, err, bridge.CodeApprovalInvalid)
+			if e.Writes() != 0 {
+				t.Fatal("pre-existing basket caused a provider write")
+			}
+		})
+	}
 }
