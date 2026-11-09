@@ -264,6 +264,8 @@ func (a *Activities) MutateBasket(ctx context.Context, req v1alpha1.ProviderRequ
 			return basket.Entry{}, rerr
 		}
 		if rerr == nil && cur.Fingerprint == fingerprint {
+			// Matching state alone does not prove this execution's receipt
+			// was consumed; IssueHandoff requires approved ledger provenance.
 			return basket.Entry{Fingerprint: fingerprint}, nil
 		}
 		if cerr := a.Bridge.ConsumeApproval(ctx, req, fingerprint); cerr != nil {
@@ -283,7 +285,11 @@ func (a *Activities) MutateBasket(ctx context.Context, req v1alpha1.ProviderRequ
 		if a.AfterProviderWrite != nil {
 			a.AfterProviderWrite()
 		}
-		return basket.Entry{Fingerprint: fingerprint}, nil
+		return basket.Entry{
+			Fingerprint:  fingerprint,
+			ExecutionRef: req.ExecutionRef,
+			ApprovalRef:  req.ApprovalRef,
+		}, nil
 	})
 	if err != nil {
 		return MutateResult{}, err
@@ -321,11 +327,23 @@ func (a *Activities) ReadBasket(ctx context.Context, req v1alpha1.ProviderReques
 	return QuoteResult{Fingerprint: q.Fingerprint, Total: q.Total}, nil
 }
 
-// IssueHandoff revalidates scope and returns an opaque marker. The handoff
-// token itself is minted by the control plane and never passes through here.
+// IssueHandoff revalidates live scope and local evidence of receipt
+// consumption, not merely a matching provider basket. This ledger is fake-only;
+// the future control bridge must supply durable approval/effect provenance.
+// The handoff token itself is minted by the control plane, never here.
 func (a *Activities) IssueHandoff(ctx context.Context, req v1alpha1.ProviderRequest, fingerprint string) (string, error) {
+	if err := req.RequireApproval(); err != nil {
+		return "", a.invalid(err)
+	}
 	if err := a.resolve(ctx, req); err != nil {
 		return "", err
+	}
+	if a.Ledger == nil {
+		return "", Refuse(bridge.CodeBridgeUnavailable, nil)
+	}
+	entry, ok := a.Ledger.Get(basket.Key{Tenant: req.TenantRef, Order: req.OrderRef, IntentHash: req.IntentHash})
+	if !ok || entry.Fingerprint != fingerprint || entry.ApprovalRef != req.ApprovalRef || entry.ExecutionRef != req.ExecutionRef {
+		return "", a.refusal(req, bridge.Refuse(bridge.CodeApprovalInvalid))
 	}
 	sum := sha256.Sum256([]byte(req.ExecutionRef + "\x00" + req.OrderRef + "\x00" + fingerprint))
 	obs.Audit(a.Log, obs.EventHandoffIssued, req.ExecutionRef, req.OrderRef, "ok")
