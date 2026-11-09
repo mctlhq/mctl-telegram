@@ -30,5 +30,16 @@ func TestL2Finance_OfflineGuard(t *testing.T) {
 		t.Fatalf("loopback dial: %v", err)
 	}
 	_ = c.Close()
+	// A canceled caller context must still reach the underlying loopback
+	// dialer. Merely forwarding context.Background() would defeat cancellation.
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cancelledConn, cancelledErr := tr.DialContext(canceledCtx, "tcp", srv.Listener.Addr().String())
+	if cancelledConn != nil {
+		_ = cancelledConn.Close()
+	}
+	if !errors.Is(cancelledErr, context.Canceled) {
+		t.Fatalf("canceled loopback dial err = %v, want context.Canceled", cancelledErr)
+	}
 	l2Record(t, "OFFLINE.default_paths", l2Pass, "TEST-NET-1 dial and external DNS refused via http.DefaultTransport and net.DefaultResolver; loopback allowed")
 }
