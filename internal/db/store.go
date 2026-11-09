@@ -2304,6 +2304,17 @@ const auditWriteTimeout = 5 * time.Second
 // it never changes the canonical hash of a row and is invisible to
 // VerifyAuditChain and to db.AuditEntry / ListAuditFor.
 func (s *Store) LogToolCall(ctx context.Context, c ToolCall) {
+	if err := s.LogToolCallChecked(ctx, c); err != nil {
+		slog.Warn("audit: could not write row", "tool", c.Tool, "err", err)
+	}
+}
+
+// LogToolCallChecked is LogToolCall with the write outcome returned: nil only
+// once the chained, scrubbed row is committed. It is the single implementation
+// of the audit insert (same transaction, hash chain, scrubbing and tenant
+// scoping); LogToolCall is its best-effort wrapper. Use it only where a refusal
+// must not be reported as recorded unless the row exists.
+func (s *Store) LogToolCallChecked(ctx context.Context, c ToolCall) error {
 	// The event happened whether or not its caller is still connected, so a
 	// cancelled request must not lose the row. Context values stay.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
@@ -2342,15 +2353,13 @@ func (s *Store) LogToolCall(ctx context.Context, c ToolCall) {
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
-		slog.Warn("audit: could not write row", "tool", tool, "stage", "begin", "err", err)
-		return
+		return fmt.Errorf("audit %s: begin: %w", tool, err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
 	prev, err := previousAuditHash(ctx, tx, userID)
 	if err != nil {
-		slog.Warn("audit: could not write row", "tool", tool, "stage", "select", "err", err)
-		return
+		return fmt.Errorf("audit %s: select: %w", tool, err)
 	}
 	entry := hashAuditEntry(prev, userID, tool, peerRedacted, status, errMsg, sql.NullString{String: callPath, Valid: true}, createdAt, edge)
 
@@ -2361,12 +2370,12 @@ func (s *Store) LogToolCall(ctx context.Context, c ToolCall) {
 		userID, tool, nullable(peerRedacted), status, nullable(errMsg), createdAt, prev, entry, callPath,
 		nullable(edge.RequestID), nullable(edge.Route), nullable(edge.MCPMethod), nullable(edge.MCPName), nullable(edge.ProtocolVersion), nullable(reason),
 	); err != nil {
-		slog.Warn("audit: could not write row", "tool", tool, "stage", "insert", "err", err)
-		return
+		return fmt.Errorf("audit %s: insert: %w", tool, err)
 	}
 	if err := tx.Commit(); err != nil {
-		slog.Warn("audit: could not write row", "tool", tool, "stage", "commit", "err", err)
+		return fmt.Errorf("audit %s: commit: %w", tool, err)
 	}
+	return nil
 }
 
 // AuditChainVerification is the result of recomputing a user's chain.

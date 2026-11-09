@@ -1,6 +1,7 @@
 package agentapi
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
@@ -32,10 +34,33 @@ func (s *Server) denyBinding(w http.ResponseWriter, r *http.Request, id *auth.Id
 // row's error column reads "conversation binding: <code>: <detail>" (detail
 // holds only numeric ids from the credential and request, never message text)
 // and the denial is counted under that policy.DenyCode. The audit write is
-// best-effort, like every handler audit: Store.LogToolCall reports no error.
+// checked: when it fails the request is still refused (fail closed) but with a
+// sanitized 500, not the 403 that would imply a recorded denial.
 func (s *Server) denyBindingCode(w http.ResponseWriter, r *http.Request, id *auth.Identity, tool string, code policy.DenyCode, detail string) {
 	s.m.CountPolicyDenial(string(code), metrics.PolicySurfaceToolGate)
-	s.denyBinding(w, r, id, tool, string(code)+": "+detail)
+	if err := s.auditChecked(r.Context(), id.UserID, tool, "denied", "conversation binding: "+string(code)+": "+detail); err != nil {
+		writeBindingAuditFailure(w, tool, err)
+		return
+	}
+	writeJSONError(w, http.StatusForbidden, "credential is bound to another conversation")
+}
+
+// auditChecked is audit with the write outcome returned, for refusals that must
+// not be reported as recorded unless the chained row was committed. It uses the
+// same single audit implementation (chain, scrubbing, tenant scoping) as audit.
+func (s *Server) auditChecked(ctx context.Context, userID int64, tool, status, errMsg string) error {
+	if s.Store == nil {
+		return nil
+	}
+	return s.Store.LogToolCallChecked(ctx, db.ToolCall{UserID: userID, Tool: tool, Status: status, ErrMsg: errMsg})
+}
+
+// writeBindingAuditFailure answers a binding refusal whose durable audit write
+// failed: a sanitized 500, never the normal denial (which would imply a record
+// exists). The caller has already stopped before any business effect.
+func writeBindingAuditFailure(w http.ResponseWriter, tool string, err error) {
+	logHandlerErr(tool+"_binding_audit", err)
+	writeJSONError(w, http.StatusInternalServerError, "denial could not be recorded")
 }
 
 // enforceBinding checks the conversation, job and attempt a request names

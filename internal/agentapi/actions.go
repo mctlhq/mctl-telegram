@@ -44,7 +44,10 @@ func (s *Server) loadProfile(w http.ResponseWriter, ctx context.Context, userID 
 // policy-denial metric; the response keeps its 400 and message.
 func (s *Server) denyJobBinding(w http.ResponseWriter, ctx context.Context, userID int64, tool, surface, msg string) {
 	s.m.CountPolicyDenial(string(policy.DenyJobBindingMismatch), surface)
-	s.audit(ctx, userID, tool, "denied", "conversation binding: "+string(policy.DenyJobBindingMismatch)+": "+msg)
+	if err := s.auditChecked(ctx, userID, tool, "denied", "conversation binding: "+string(policy.DenyJobBindingMismatch)+": "+msg); err != nil {
+		writeBindingAuditFailure(w, tool, err)
+		return
+	}
 	writeJSONError(w, http.StatusBadRequest, msg)
 }
 

@@ -431,7 +431,7 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 	// this codebase has no precedent for.
 	requireApprovalBypassesUnreviewedAllow := result.Decision == policy.RequireApproval && action.PolicyDecision == db.PolicyAllow
 	if result.Decision == policy.Deny || requireApprovalBypassesUnreviewedAllow {
-		if ok, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionApproved, db.ActionDenied); err != nil {
+		if ok, err := e.denyForPolicy(ctx, action, db.ActionApproved, result); err != nil {
 			return fmt.Errorf("deny stale approval: %w", err)
 		} else if !ok {
 			// Decided elsewhere meanwhile: report that, not this denial.
@@ -636,6 +636,17 @@ func legacyRevisionDenial(r policy.Result) policy.Result {
 	return r
 }
 
+// denyForPolicy terminalizes an action refused by the policy re-evaluation.
+// A legacy zero-revision refusal is persisted with its stable reason through
+// the reason-aware CAS (the action row keeps revision 0); every other denial
+// keeps the status-only transition it always had.
+func (e *Executor) denyForPolicy(ctx context.Context, action db.AgentAction, from string, result policy.Result) (bool, error) {
+	if result.Decision == policy.Deny && result.Code == policy.DenyLegacyInstallRevisionMissing {
+		return e.Store.DenyAgentAction(ctx, action.UserID, action.ID, from, policy.ReasonLegacyInstallRevisionMissing)
+	}
+	return e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, from, db.ActionDenied)
+}
+
 func (e *Executor) recentAgentSends(ctx context.Context, userID, conversationID int64, since time.Time) ([]time.Time, error) {
 	return e.Store.ListRecentAgentOutgoingTimestamps(ctx, userID, conversationID, since)
 }
@@ -815,7 +826,7 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 			// nobody observed (#1029). The retry is still stopped.
 			return e.markDeliveryUnknown(ctx, action, *conv, reasonStoppedAfterAttempt(result.Reasons))
 		}
-		if ok, err := e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, db.ActionExecuting, db.ActionDenied); err != nil {
+		if ok, err := e.denyForPolicy(ctx, action, db.ActionExecuting, result); err != nil {
 			return fmt.Errorf("deny stale approval during recovery: %w", err)
 		} else if !ok {
 			// Decided elsewhere meanwhile: report that, not this denial.

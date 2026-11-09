@@ -3,6 +3,7 @@ package agentapi
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
@@ -136,6 +137,59 @@ func TestZeroJobBinding_NamedNonexistentJobNeverFallsBackToJobless(t *testing.T)
 			}
 		})
 	}
+}
+
+// failAuditWrites makes every audit_logs INSERT abort, simulating a failed
+// durable audit write on the local synthetic DB.
+func (f *zeroFixture) failAuditWrites() {
+	f.h.t.Helper()
+	if _, err := f.h.store.DB.ExecContext(context.Background(),
+		`CREATE TRIGGER fail_audit_insert BEFORE INSERT ON audit_logs BEGIN SELECT RAISE(ABORT, 'synthetic audit failure'); END`); err != nil {
+		f.h.t.Fatalf("install audit failure trigger: %v", err)
+	}
+}
+
+// A binding refusal whose durable audit write fails is still fail-closed (no
+// action, no notification) but answers a sanitized 500, not the normal denial
+// that would imply a record exists.
+func TestZeroJobBinding_AuditWriteFailureIsServerErrorAndFailClosed(t *testing.T) {
+	t.Run("job_binding_missing", func(t *testing.T) {
+		f := newZeroFixture(t, db.AgentModeGuarded)
+		f.failAuditWrites()
+		rec := f.h.doAs(f.jobCred, "POST", "/notify/summary", map[string]any{"intent": "lead", "text": "summary"})
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500, body %s", rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "synthetic audit failure") || strings.Contains(rec.Body.String(), "audit_logs") {
+			t.Fatalf("response leaks the storage error: %s", rec.Body.String())
+		}
+		f.noEffects()
+		if n := f.typedAudits("send_owner_summary", policy.DenyJobBindingMissing); n != 0 {
+			t.Fatalf("audit rows = %d, want 0 (write failed)", n)
+		}
+	})
+	t.Run("job_binding_mismatch", func(t *testing.T) {
+		f := newZeroFixture(t, db.AgentModeGuarded)
+		f.failAuditWrites()
+		rec := f.h.doAs(f.jobCred, "POST", "/notify/summary", map[string]any{
+			"job_id": f.jobID + 1000, "attempt": f.attempt, "intent": "lead", "text": "summary",
+		})
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500, body %s", rec.Code, rec.Body.String())
+		}
+		f.noEffects()
+	})
+	t.Run("named nonexistent job", func(t *testing.T) {
+		f := newZeroFixture(t, db.AgentModeGuarded)
+		f.failAuditWrites()
+		rec := f.h.do("POST", "/actions/propose_reply", map[string]any{
+			"job_id": f.jobID + 1000, "attempt": 1, "intent": "lead", "text": "summary", "conversation_id": f.conv.ID,
+		})
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500, body %s", rec.Code, rec.Body.String())
+		}
+		f.noEffects()
+	})
 }
 
 func TestZeroJobBinding_OwnerJobConversationMismatchDenied(t *testing.T) {
