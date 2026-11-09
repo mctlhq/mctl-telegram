@@ -260,6 +260,19 @@ func (e *Executor) Approve(ctx context.Context, userID int64, code string) error
 	// the owner would only see it vanish (#1018).
 	// Without a profile row there is no revision to compare; the send path
 	// below handles a missing profile as it always has.
+	//
+	// A pending action whose stored revision is 0 predates revision stamping
+	// or was written without one. It is denied as it stands, never rewritten
+	// to the current revision and never grandfathered (#1266).
+	if action.InstallRevision == 0 {
+		if ok, err := e.Store.DenyAgentAction(ctx, userID, action.ID, db.ActionPendingApproval, policy.ReasonLegacyInstallRevisionMissing); err != nil {
+			return fmt.Errorf("deny legacy-revision draft: %w", err)
+		} else if !ok {
+			return ErrLostRace
+		}
+		e.m.CountPolicyDenial(string(policy.DenyLegacyInstallRevisionMissing), metrics.PolicySurfaceExecutorSend)
+		return ErrInstallChanged
+	}
 	profile, err := e.Store.GetAgentProfile(ctx, userID)
 	if err != nil && !errors.Is(err, db.ErrAgentProfileNotFound) {
 		return fmt.Errorf("load profile: %w", err)
@@ -393,6 +406,7 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 		ProtectedField:   protected,
 		InstallRevision:  action.InstallRevision,
 	})
+	result = legacyRevisionDenial(result)
 	if result.Decision == policy.Deny {
 		e.m.CountPolicyDenial(string(result.DenyCode()), metrics.PolicySurfaceExecutorSend)
 	}
@@ -609,6 +623,19 @@ func (e *Executor) send(ctx context.Context, action db.AgentAction) error {
 // it locally — a Codex finding on #307 caught that 50+ newer messages of
 // ANY direction could push a real agent send out of that fixed-size page
 // entirely, silently undercounting the rate limit.
+// legacyRevisionDenial relabels Evaluate's install_revision_missing as the
+// legacy code. In this package the only source of Input.InstallRevision is the
+// stored action row, so a zero there is a persisted legacy revision 0: it is
+// denied through the normal path with its own stable code and reason, never
+// rewritten to the current revision.
+func legacyRevisionDenial(r policy.Result) policy.Result {
+	if r.Decision == policy.Deny && r.Code == policy.DenyInstallRevisionMissing {
+		r.Code = policy.DenyLegacyInstallRevisionMissing
+		r.Reasons = []string{policy.ReasonLegacyInstallRevisionMissing}
+	}
+	return r
+}
+
 func (e *Executor) recentAgentSends(ctx context.Context, userID, conversationID int64, since time.Time) ([]time.Time, error) {
 	return e.Store.ListRecentAgentOutgoingTimestamps(ctx, userID, conversationID, since)
 }
@@ -761,6 +788,7 @@ func (e *Executor) recoverOne(ctx context.Context, action db.AgentAction) error 
 		ProtectedField:   protected,
 		InstallRevision:  action.InstallRevision,
 	})
+	result = legacyRevisionDenial(result)
 	if result.Decision == policy.Deny {
 		// Deliberately NOT counted for the requireApprovalBypassesUnreviewedAllow
 		// escalation computed below — that is a RequireApproval decision, not a

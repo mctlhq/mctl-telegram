@@ -36,6 +36,18 @@ func (s *Server) loadProfile(w http.ResponseWriter, ctx context.Context, userID 
 	return p, true
 }
 
+// denyJobBinding refuses a request whose named job does not exist for the
+// account or does not belong to the named conversation (#1267). It runs before
+// any action row, notification or other business effect. The denial is typed
+// job_binding_mismatch in the audit row ("conversation binding: ...", static
+// text only, no ids that could confirm another tenant's job) and in the
+// policy-denial metric; the response keeps its 400 and message.
+func (s *Server) denyJobBinding(w http.ResponseWriter, ctx context.Context, userID int64, tool, surface, msg string) {
+	s.m.CountPolicyDenial(string(policy.DenyJobBindingMismatch), surface)
+	s.audit(ctx, userID, tool, "denied", "conversation binding: "+string(policy.DenyJobBindingMismatch)+": "+msg)
+	writeJSONError(w, http.StatusBadRequest, msg)
+}
+
 // recentAgentSends returns the timestamps of this conversation's recent
 // agent-sent messages, for the policy engine's per-minute rate check.
 // Deliberately scoped to ONE conversation rather than the whole account: a
@@ -209,6 +221,9 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 	if !s.enforceBinding(w, r, id, "propose_reply", req.ConversationID, req.JobID, req.Attempt) {
 		return
 	}
+	if !s.requireBoundJob(w, r, id, "propose_reply", req.JobID, req.Attempt) {
+		return
+	}
 	if req.ConversationID <= 0 {
 		writeJSONError(w, http.StatusBadRequest, "conversation_id required")
 		return
@@ -233,16 +248,21 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "lookup failed")
 		return
 	}
-	var jobRevision int64
+	// A jobless proposal (account token only; a job credential was refused
+	// above) is judged under the SERVER-VERIFIED current install revision,
+	// read from the profile just loaded, never from the request (#1266). A
+	// profile that holds revision 0 makes Evaluate deny it.
+	jobRevision := profile.InstallRevision
 	if req.JobID != 0 {
 		// The job and the conversation the caller pairs it with must actually
 		// match — otherwise policy evaluates against the wrong conversation's
 		// state/peer and persists a result that cannot validly belong to this
 		// job. GetAgentJob already scopes to id.UserID, so a foreign job_id is
-		// rejected before this check ever runs.
+		// rejected before this check ever runs. A named job never falls back
+		// to the jobless path.
 		job, err := s.Store.GetAgentJob(ctx, id.UserID, req.JobID)
 		if errors.Is(err, db.ErrAgentJobNotFound) {
-			writeJSONError(w, http.StatusBadRequest, "job_id does not exist for this account")
+			s.denyJobBinding(w, ctx, id.UserID, "propose_reply", metrics.PolicySurfaceProposeReply, "job_id does not exist for this account")
 			return
 		}
 		if err != nil {
@@ -251,7 +271,7 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if job.ConversationID != req.ConversationID {
-			writeJSONError(w, http.StatusBadRequest, "job_id does not belong to conversation_id")
+			s.denyJobBinding(w, ctx, id.UserID, "propose_reply", metrics.PolicySurfaceProposeReply, "job_id does not belong to conversation_id")
 			return
 		}
 		jobRevision = job.InstallRevision
@@ -502,6 +522,9 @@ func (s *Server) handleSaveLead(w http.ResponseWriter, r *http.Request) {
 	if !s.enforceBinding(w, r, id, "save_lead", req.ConversationID, req.JobID, req.Attempt) {
 		return
 	}
+	if !s.requireBoundJob(w, r, id, "save_lead", req.JobID, req.Attempt) {
+		return
+	}
 	if req.ConversationID <= 0 {
 		writeJSONError(w, http.StatusBadRequest, "conversation_id required")
 		return
@@ -645,6 +668,9 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 	if !s.enforceBinding(w, r, id, tool, req.ConversationID, req.JobID, req.Attempt) {
 		return
 	}
+	if !s.requireBoundJob(w, r, id, tool, req.JobID, req.Attempt) {
+		return
+	}
 	if strings.TrimSpace(req.Text) == "" {
 		writeJSONError(w, http.StatusBadRequest, "text required")
 		return
@@ -675,6 +701,31 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 		conv = *c
 	}
 
+	// A summary or approval request from a job claimed under an earlier
+	// install revision is refused like a reply (#1018). A jobless call
+	// (account token only) is judged under the SERVER-VERIFIED current
+	// revision from the profile, never one the request supplies (#1266). A
+	// NAMED job is validated first, before any suppression check, action row
+	// or notification, and never falls back to the jobless path (#1267).
+	jobRevision := profile.InstallRevision
+	if req.JobID != 0 {
+		job, err := s.Store.GetAgentJob(ctx, id.UserID, req.JobID)
+		if errors.Is(err, db.ErrAgentJobNotFound) {
+			s.denyJobBinding(w, ctx, id.UserID, tool, policySurfaceForOwnerTool(tool), "job_id does not exist for this account")
+			return
+		}
+		if err != nil {
+			logHandlerErr(tool, err)
+			writeJSONError(w, http.StatusInternalServerError, "lookup failed")
+			return
+		}
+		if req.ConversationID != 0 && job.ConversationID != req.ConversationID {
+			s.denyJobBinding(w, ctx, id.UserID, tool, policySurfaceForOwnerTool(tool), "job_id does not belong to conversation_id")
+			return
+		}
+		jobRevision = job.InstallRevision
+	}
+
 	if actionType == db.ActionTypeOwnerSummary && strings.EqualFold(strings.TrimSpace(req.Intent), IntentAssistantManipulation) {
 		req.Intent = IntentAssistantManipulation
 		req.Text = manipulationAlertBody(conv)
@@ -701,20 +752,6 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 		}
 	}
 
-	// A summary or approval request from a job claimed under an earlier
-	// install revision is refused like a reply (#1018).
-	var jobRevision int64
-	if req.JobID != 0 {
-		job, err := s.Store.GetAgentJob(ctx, id.UserID, req.JobID)
-		if err != nil && !errors.Is(err, db.ErrAgentJobNotFound) {
-			logHandlerErr(tool, err)
-			writeJSONError(w, http.StatusInternalServerError, "lookup failed")
-			return
-		}
-		if err == nil {
-			jobRevision = job.InstallRevision
-		}
-	}
 	result := policy.Evaluate(policy.Input{
 		Profile: *profile, Conversation: conv,
 		Action:     policy.Action{Type: actionType, Intent: req.Intent, Text: req.Text},

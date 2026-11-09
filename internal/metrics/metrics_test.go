@@ -430,8 +430,8 @@ func TestNew_PolicyDenialsZeroBaseline(t *testing.T) {
 	}
 
 	want := len(policyDenyReasons) * len(policySurfaces)
-	if want != 168 {
-		t.Fatalf("label space is %d x %d = %d, want the documented 168 — update the bound in the struct comment and the rule comments if this is deliberate",
+	if want != 196 {
+		t.Fatalf("label space is %d x %d = %d, want the documented 196 — update the bound in the struct comment and the rule comments if this is deliberate",
 			len(policyDenyReasons), len(policySurfaces), want)
 	}
 	if got := len(mf.GetMetric()); got != want {

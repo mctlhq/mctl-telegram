@@ -1550,6 +1550,89 @@ func TestExecutor_Send_RefusesEarlierInstallRevision(t *testing.T) {
 	}
 }
 
+func zeroStoredRevision(t *testing.T, store *db.Store, actionID int64) {
+	t.Helper()
+	if _, err := store.DB.ExecContext(context.Background(), `UPDATE agent_actions SET install_revision = 0 WHERE id = $1`, actionID); err != nil {
+		t.Fatalf("zero stored revision: %v", err)
+	}
+}
+
+// #1266: a persisted pending action whose revision is 0 is denied with its own
+// reason and is never rewritten to the current revision or sent.
+func TestExecutor_Approve_LegacyZeroRevisionDeniedNotRewritten(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	actionID, code := seedPendingApproval(t, store, uid, conv.ID, "Thanks for reaching out!")
+	zeroStoredRevision(t, store, actionID)
+	if err := exec.Approve(ctx, uid, code); !errors.Is(err, ErrInstallChanged) {
+		t.Fatalf("approve err = %v, want ErrInstallChanged", err)
+	}
+	action, err := store.GetAgentAction(ctx, uid, actionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action.Status != db.ActionDenied || len(sender.calls) != 0 {
+		t.Fatalf("status = %q, sends = %d, want denied and none", action.Status, len(sender.calls))
+	}
+	if action.PolicyReasons != policy.ReasonLegacyInstallRevisionMissing {
+		t.Fatalf("policy_reasons = %q, want %q", action.PolicyReasons, policy.ReasonLegacyInstallRevisionMissing)
+	}
+	if action.InstallRevision != 0 {
+		t.Fatalf("stored revision = %d, want it left at 0 (never rewritten)", action.InstallRevision)
+	}
+}
+
+func TestExecutor_Send_LegacyZeroRevisionDeniedNotSent(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+		ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply,
+		Payload: "Thanks for reaching out!", PolicyDecision: db.PolicyRequireApproval,
+		Status: db.ActionApproved,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeroStoredRevision(t, store, actionID)
+	if _, err := exec.ProcessApproved(ctx); err != nil {
+		t.Fatalf("process approved: %v", err)
+	}
+	action, err := store.GetAgentAction(ctx, uid, actionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action.Status != db.ActionDenied || len(sender.calls) != 0 {
+		t.Fatalf("status = %q, sends = %d, want denied and none", action.Status, len(sender.calls))
+	}
+	if action.InstallRevision != 0 {
+		t.Fatalf("stored revision = %d, want it left at 0", action.InstallRevision)
+	}
+}
+
+func TestExecutor_Recover_LegacyZeroRevisionNotResent(t *testing.T) {
+	exec, sender, store, uid, conv := newTestExecutor(t)
+	ctx := context.Background()
+	actionID, _ := seedPendingApproval(t, store, uid, conv.ID, "hi")
+	if ok, err := store.UpdateAgentActionStatus(ctx, uid, actionID, db.ActionPendingApproval, db.ActionApproved); err != nil || !ok {
+		t.Fatalf("approve transition: ok=%v err=%v", ok, err)
+	}
+	reserveActionForRecovery(t, store, uid, actionID, 616161, "hi"+policy.DisclosureSep+"I'm an AI assistant.")
+	zeroStoredRevision(t, store, actionID)
+	if _, err := exec.RecoverStuck(ctx); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	action, err := store.GetAgentAction(ctx, uid, actionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sender.calls) != 0 || action.Status == db.ActionExecuted {
+		t.Fatalf("status = %q, sends = %d, want no resend and not executed", action.Status, len(sender.calls))
+	}
+	if action.InstallRevision != 0 {
+		t.Fatalf("stored revision = %d, want it left at 0", action.InstallRevision)
+	}
+}
+
 // TestExecutor_RecoverStuck_DuplicateRandomIDEndsExecuted is the #1029
 // regression: the first attempt reached Telegram but the process lost the
 // answer, so the recovery retry with the same random_id is refused as a
