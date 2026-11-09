@@ -1,164 +1,86 @@
 FINANCE_SECURITY_GATE=BLOCKED
 
-# Finance Assistant L2: consolidated hermetic full-suite evidence (slice D, #1251)
+# Finance Assistant L2 — canonical full-suite evidence (slice D, #1251)
 
-## AMEND validation status (PR #1257)
+## Current result: NOT YET VERIFIED ON THE AMENDED HEAD
 
-**Not yet a complete full-runner verification on the amended PR HEAD.** The
-62-row table below is the *historical* observed run at `370efd01a8841f909217d06befdfb75932530b3d`,
-not a run of the amended 64-row manifest. It must not be used to claim that the
-amended source has passed the canonical suite. The security gate is BLOCKED.
+- `harness_status=INVALID` — the complete runner has **not** yet executed successfully against
+  the amended 64-row source-mapped manifest.
+- `issue_outcome=CANNOT_OBSERVE_BLOCKED` — no new complete, pinned, trustworthy full-suite
+  result exists for this revision. The test harness may yield a more specific blocked outcome
+  after an actual successful invocation.
+- `FINANCE_SECURITY_GATE=BLOCKED`, regardless of conventional CI status.
+- `RESEARCH_ONLY_DEFER` under mctlhq/.github#325 is unchanged. No pilot, production release,
+  finance policy change, live Telegram or real customer/financial data is authorized.
 
-A source-to-manifest review against #1244's canonical requirements and design
-identified two required T1/T2 distinctions omitted by the earlier
-emitters-derived inventory. Both now have separate test-only emitters and
-mandatory manifest rows:
+**Do not infer PASS from the per-case expected rubric below.** This report is a conservative
+fail-closed placeholder pending an actual executed run; it is not generated test evidence.
+Do not merge PR #1257 solely on the strength of this document.
 
-| #1244 contract | Mandatory case | Required outcome |
-| --- | --- | --- |
-| T1: `/mctl finance` on Alice's Saved Messages | `listener:T1.finance_command` | `NOT-IMPLEMENTED`, after asserting `unknownCommandReply` and zero peer sends |
-| T2: Bob-conversation job queues an Alice owner summary without finance-specific invocation | `agentapi:T2.bob_job_owner_summary` | `FAIL/GAP`, pinned by `expectGap` |
-| T2: ordinary owner delivery does not leak to Carol/peer | `agentapi:T2.ordinary_owner_routing` | `PASS`, separately, never as finance approval |
+## Source-reviewed canonical crosswalk (#1244)
 
-The committed 64-row `testdata/manifest.txt` maps T1–T10 and negative controls
-M1–M4 to their emitting layers; absent finance functionality remains explicit
-`NOT-IMPLEMENTED` and unobservable layer boundaries remain `CANNOT-OBSERVE`.
-No historical row is silently regraded; the next fresh full runner execution
-must generate 64 results, run `TestGate*` unit tests, tagged vet, two independent
-tagged race runs, the untagged race suite, and the reused-output fail-closed
-regression, all at a pinned amended source revision. If any step fails, the
-result remains `INVALID / BLOCKED` and the report must be refreshed from
-actual evidence, not projected results.
+The amended `internal/l2finance/gate/testdata/manifest.txt` contains **64 mandatory
+package-qualified rows** mapped to the acceptance contract in issue #1244 and its canonical
+`issue-1244-spike-test-finance-assistant-l2-owner-pr` requirements/design.
+Every required source-mapped row must be emitted in the next run. The gate rejects missing,
+unexpected or duplicate rows, invalid outcome tokens or revisions, fixture mismatches,
+failed mutation/guard controls, and preflight/test errors.
 
+| #1244 | Coverage and expected rubric — not fresh execution evidence |
+| --- | --- |
+| T1 | `listener:T1.listener_status` + `control:T1.notifier_self_only` + `telegram:T1.source_pin` / `T1.wire_input_peer_self` test owner-only delivery. Newly mandatory `listener:T1.finance_command` must prove unknown finance verb and emit **NOT-IMPLEMENTED**, not PASS. |
+| T2 | `listener:T2.bob_dm` covers Bob's status, approve, and finance-looking DM. `agentapi:T2.ordinary_owner_routing` separately checks ordinary owner-only delivery. **`agentapi:T2.bob_job_owner_summary` must emit FAIL/GAP** for finance origin authorization bypass (via `expectGap`), never PASS. `T2.finance_origin_authorization` remains NOT-IMPLEMENTED. |
+| T3 | `control:T3.per_user`; `agentapi:T3.account_foreign_*`, `T3.job_foreign_conversation`; missing finance source/consent remains NOT-IMPLEMENTED. |
+| T4 | `listener:T4.group_chat`, `T4.channel`, `T4.forwarded`, `T4.saved_peer`, plus spoofed sender validation. |
+| T5 | `listener:T5.1.push_then_history`, `T5.3.cursor_monotonic`, `control:T5.2.random_id`. |
+| T6 | `listener:T6.out_false_push` and `T6.reconnect_replay`; actual `getDifference` integration remains CANNOT-OBSERVE. |
+| T7 | `policy:T7.1`, `T7.2`; `agentapi:T7.3.with_job_id` / `omit_job_id`. Revision-zero and omitted-job vulnerabilities must stay FAIL/GAP while reproduced. |
+| T8 | Policy kill/mode-off and control kill, queued-delivery mode/off, reply-kill and revocation checks. Missing delivery fences stay FAIL/GAP or CANNOT-OBSERVE as appropriate. |
+| T9 | Observe-mode reply behavior, guarded allowlist, absent finance tier (NOT-IMPLEMENTED), executor peer-send boundary (CANNOT-OBSERVE). |
+| T10 | Deny codes, durable action/audit, redaction via production slog handler with **nonzero** synthetic slog bytes, uninstrumented traces (CANNOT-OBSERVE). Durable plaintext intent / missing deny fields remain FAIL/GAP. |
+| M1–M4 | Independent harness-only mutation controls in listener, control, and agentapi; all must detect their injected leaks (not silently PASS). |
+| OFFLINE | All five packages must pass `OFFLINE.default_paths`; **whole-process isolation is not established** and retains CANNOT-OBSERVE. |
 
-Application-security evidence only. `harness_status=COMPLETE` means the harness ran and
-matched its manifest; it is not a security pass. Outcome: `COMPLETE_WITH_GAPS_BLOCKED`.
-mctlhq/.github#325 stays `RESEARCH_ONLY_DEFER`; no pilot is authorised and no gap is fixed here.
+The crosswalk is encoded in both the manifest comments and
+`TestGateCanonicalCrosswalk`, which validates 64 mandatory entries plus
+critical T1–T10 / M1–M4 anchors. The remaining acceptance distinction is
+**run-level evidence**, not an unchecked source mapping.
 
-- Tested source revision: `370efd01a8841f909217d06befdfb75932530b3d` (the report itself is added in the next commit; no tested code differs)
-- Go: `go1.26.10 linux/amd64`
-- Commands (offline: `GOPROXY=off GOSUMDB=off GOFLAGS=-mod=readonly`, credentials unset):
-  - `go test -json -tags l2finance -race -count=1 -run L2Finance ./internal/agent/policy/ ./internal/agent/listener/ ./internal/agent/control/ ./internal/agentapi/ ./internal/telegram/` (run twice)
-  - `L2FINANCE_RESULTS_JSON=<stream> go test -tags l2finance -run TestL2FinanceGate ./internal/l2finance/gate/`
-  - `scripts/l2finance/run.sh [outdir]` wraps these, plus tagged `go vet` and the untagged `go test -race ./...`.
-- Tagged runs 1 and 2: exit 0; sorted `(package,id,outcome,fixture_id,rev)` tuples identical (62 rows).
-- `go vet -tags l2finance` on the five packages and the gate: exit 0.
-- Untagged `go test -race ./...`: NOT completed in the implementation sandbox. The module cache there
-  lacks some dependencies of `internal/web` and `internal/oauth/cimd` and the suite exceeded the
-  time bound, so the full `run.sh` stayed on its BLOCKED sentinel (exit 1) as designed. Run
-  `go mod download` and `scripts/l2finance/run.sh` on a networked machine or via the manual workflow
-  to record it. The per-package untagged results observed (control, executor, listener, policy) were ok.
-- golangci-lint: not configured (no `.golangci*` file, not in build.yml).
+## Required validation before acceptance
 
-## Limitations and open items
+Execute a **fresh**, SHA-pinned, clean-tree
+`scripts/l2finance/run.sh` after a separate `go mod download` preflight. It must run:
 
-- Offline: the guards cover `net.DefaultResolver` and `http.DefaultTransport` only. Every one of the
-  five packages emits `OFFLINE.default_paths`; `OFFLINE.whole_process` stays `CANNOT-OBSERVE`. The
-  suite is not claimed to be fully isolated.
-- Original 62-row evidence used an emitters-derived manifest and was not sufficient to
-  demonstrate the canonical #1244 crosswalk. The AMEND source-mapped that inventory
-  and added mandatory T1 finance-command and T2 finance-invocation distinctions
-  (64 rows in the amended manifest). The new version has NOT been fully executed
-  at the amended HEAD; its coverage and outcome require fresh CI/race evidence.
-  Any future required case without an emitter must be marked `MISSING`.
-- `fixture_id` is the stable synthetic `L2SYNTH-<id>` derived by each package's `l2Record`; it
-  proves stability across runs, not independent fixture design.
-- T10 split: `T10.redaction_text` now checks durable sources only; the new `T10.redaction_slog`
-  sends a synthetic marker through the production redacting handler and is PASS only with
-  `slog_bytes>0`, otherwise CANNOT-OBSERVE. The slice-C `T10.redaction_text` PASS had
-  `slog_bytes=0`; the plaintext-intent FAIL/GAP (`T10.intent_channel`) is unchanged. M4 is now emitted
-  as `PASS` with `detected` in evidence (was `PASS (detected)`).
-- Policy now requires `L2FINANCE_SOURCE_REV` (exit 2 without it), replacing the hardcoded `248db4f`.
-- Continuous CI gap: `build.yml` does not run the `l2finance` tag. The manual
-  `.github/workflows/l2finance-gate.yml` is evidence only, not a required check. Governed follow-up
-  only after owner acceptance.
-- Planned follow-up fix titles (not filed, not implemented): T7.2 "Policy: treat InstallRevision=0 as
-  fence-required"; T7.3.omit_job_id "agentapi: require job_id for owner actions"; T8.* "Honour kill, mode
-  off and revocation after queueing and on reply"; T10.denycode_persisted "Persist deny codes durably";
-  T10.intent_channel "Do not persist plaintext intent"; finance tier and consent (NOT-IMPLEMENTED rows).
-- Earlier slice reports (A partial content replaced here, B and C left in place):
-  `finance-assistant-l2-slice-b.md`, `finance-assistant-l2-slice-c.md`.
+1. Two independent `go test -json -tags l2finance -race -count=1 -run L2Finance` runs over the
+   five application packages, comparing sorted `(package,id,outcome,fixture_id,rev)` tuples.
+2. `go vet -tags l2finance` over the five packages and aggregator.
+3. `go test -tags l2finance -count=1 -run '^TestGate' ./internal/l2finance/gate/`.
+4. The untagged `go test -race -count=1 ./...` comparison.
+5. The `TestL2FinanceGate` aggregator for both tagged streams and the regression
+   `bash scripts/l2finance/test-failclosed.sh` against stale PASS/tuple artifacts.
+6. Publication of the exact, full **64-row** outcome matrix and exit codes, or
+   an `INVALID / BLOCKED` sentinel with nonzero exit on any incomplete step.
 
+During test execution, dependencies must be cached and
+`GOPROXY=off GOSUMDB=off GOFLAGS=-mod=readonly`; integration credentials
+are stripped. These guards are **not** a whole-process egress firewall.
+The `.github/workflows/l2finance-gate.yml` manual evidence job is
+`workflow_dispatch` only and is *not* part of required `build.yml` CI; this
+continuous tagged-regression coverage gap remains open.
 
-- harness_status: `COMPLETE`
-- issue_outcome: `COMPLETE_WITH_GAPS_BLOCKED`
-- source revision: `370efd01a8841f909217d06befdfb75932530b3d`
-- counts: PASS=43, FAIL/GAP=8, NOT-IMPLEMENTED=5, CANNOT-OBSERVE=6
+## Historical evidence, not current outcome
 
-## Aggregator: Results
+The pre-AMEND 62-row report is preserved in the Git history at
+[`mctl-telegram@6731937`](https://github.com/mctlhq/mctl-telegram/blob/673193767baa740143bb07893fe9ef149fc849be/docs/reports/finance-assistant-l2-results.md),
+derived from tested source `370efd01a8841f909217d06befdfb75932530b3d`.
+It reported 43 PASS, 8 FAIL/GAP, 5 NOT-IMPLEMENTED, 6 CANNOT-OBSERVE;
+**those historical numbers and the old T2 PASS classification are not valid
+for the amended 64-case rubric**. No new counts are asserted here.
 
-| Canonical ID | Outcome | Fixture | Evidence |
-| --- | --- | --- | --- |
-| `agentapi:M4` | PASS | `L2SYNTH-M4` | detected: unredacted JSON handler leak reported by the same helper used by T10 |
-| `agentapi:M4.redacted_twin` | PASS | `L2SYNTH-M4.redacted_twin` | production redacting handler returns nil from the same helper |
-| `agentapi:OFFLINE.default_paths` | PASS | `L2SYNTH-OFFLINE.default_paths` | dial_refused=true lookup_refused=true loopback_ok=true |
-| `agentapi:OFFLINE.whole_process` | CANNOT-OBSERVE | `L2SYNTH-OFFLINE.whole_process` | guards cover net.DefaultResolver and http.DefaultTransport only; not a whole-process egress firewall |
-| `agentapi:T10.action_rows` | PASS | `L2SYNTH-T10.action_rows` | rows=3 denied=1 malformed=0 |
-| `agentapi:T10.denycode_persisted` | FAIL/GAP | `L2SYNTH-T10.denycode_persisted` | code=install_changed metric_count=1 durable_in_audit_or_actions=false deny_code_columns=0 |
-| `agentapi:T10.intent_channel` | FAIL/GAP | `L2SYNTH-T10.intent_channel` | plaintext_intent_in_agent_actions=true marker_check=marker found in agent_actions |
-| `agentapi:T10.redaction_slog` | PASS | `L2SYNTH-T10.redaction_slog` | slog_bytes=104 marker redacted |
-| `agentapi:T10.redaction_text` | PASS | `L2SYNTH-T10.redaction_text` | durable_sources_only err=<nil> |
-| `agentapi:T10.traces` | CANNOT-OBSERVE | `L2SYNTH-T10.traces` | spans=0 agentapi_files_importing_otel=0 no exercised instrumentation, empty provider is not a PASS |
-| `agentapi:T2.bob_job_owner_summary` | PASS | `L2SYNTH-T2.bob_job_owner_summary` | http=200 actions=1 status=[executed/allow] notif_rows=1 notif_owner_is_alice=true kind=summary carol_rows=0 peer_sink=0 scope=ordinary_owner_routing |
-| `agentapi:T2.finance_origin_authorization` | NOT-IMPLEMENTED | `L2SYNTH-T2.finance_origin_authorization` | no finance-source label, source consent or finance policy gate exists; finance-looking text treated as ordinary text; no PASS or FAIL inferred |
-| `agentapi:T3.account_foreign_context` | PASS | `L2SYNTH-T3.account_foreign_context` | http=404 |
-| `agentapi:T3.account_foreign_conversation` | PASS | `L2SYNTH-T3.account_foreign_conversation` | notify=404 propose=404 rows_none=true |
-| `agentapi:T3.account_foreign_job` | PASS | `L2SYNTH-T3.account_foreign_job` | http=400 rows_none=true |
-| `agentapi:T3.finance_source_consent` | NOT-IMPLEMENTED | `L2SYNTH-T3.finance_source_consent` | http=400 decodeStrict rejects unknown field; no consent/source concept; no store mocked |
-| `agentapi:T3.job_foreign_conversation` | PASS | `L2SYNTH-T3.job_foreign_conversation` | notify=403 propose=403 context=403 alice_denied_audits=3 rows_none=true |
-| `agentapi:T7.3.omit_job_id` | FAIL/GAP | `L2SYNTH-T7.3.omit_job_id` | http=200 actions=1 notif_rows=1 status=executed decision=allow persisted_job_id=0 persisted_install_revision=2 claimed_job_id=1 |
-| `agentapi:T7.3.with_job_id` | PASS | `L2SYNTH-T7.3.with_job_id` | http=200 decision=deny reasons=["the assistant install changed since this work began"] notif_rows=0 |
-| `agentapi:T9.executor_peer_send` | CANNOT-OBSERVE | `L2SYNTH-T9.executor_peer_send` | delivery after an approved action happens in the executor outside this slice; an inert sink on an API without a sender proves nothing |
-| `agentapi:T9.finance_tier` | NOT-IMPLEMENTED | `L2SYNTH-T9.finance_tier` | http=400 unknown field tier rejected; no finance tier exists |
-| `agentapi:T9.guarded_allowlisted` | PASS | `L2SYNTH-T9.guarded_allowlisted` | http=200 decision=allow status=approved persisted=[approved/allow] api_peer_sink=0; approved is an API policy state, not evidence of delivery |
-| `agentapi:T9.observe_no_peer_send` | PASS | `L2SYNTH-T9.observe_no_peer_send` | http=200 decision=require_approval status=pending_approval persisted=[pending_approval/require_approval] api_peer_sink=0 (API has no sender; not an executor claim) |
-| `control:M2` | PASS | `L2SYNTH-M2` | detected |
-| `control:M3` | PASS | `L2SYNTH-M3` | detected |
-| `control:OFFLINE.default_paths` | PASS | `L2SYNTH-OFFLINE.default_paths` | TEST-NET-1 dial and external DNS refused via http.DefaultTransport and net.DefaultResolver; loopback allowed |
-| `control:T1.notifier_self_only` | PASS | `L2SYNTH-T1.notifier_self_only` | one random_id send to owner; peer sink empty |
-| `control:T3.finance_source` | NOT-IMPLEMENTED | `L2SYNTH-T3.finance_source` | no finance-source field on owner notifications |
-| `control:T3.per_user` | PASS | `L2SYNTH-T3.per_user` | each text delivered only under its own user id |
-| `control:T5.2.random_id` | PASS | `L2SYNTH-T5.2.random_id` | retry reused the persisted random_id; duplicate treated as delivered; row sent |
-| `control:T8.kill` | PASS | `L2SYNTH-T8.kill` | 0 sends and row pending under kill; delivered once after clear |
-| `control:T8.mode_off_after_queue` | FAIL/GAP | `L2SYNTH-T8.mode_off_after_queue` | DeliverPending sent after mode=off; no delivery-time mode check |
-| `control:T8.mode_off_before_queue.delivery` | FAIL/GAP | `L2SYNTH-T8.mode_off_before_queue.delivery` | row inserted directly while mode=off was delivered; queue-time refusal is the policy package's row and is not claimed here |
-| `control:T8.reply_kill` | FAIL/GAP | `L2SYNTH-T8.reply_kill` | Reply sent while GlobalKill is true; Reply is not gated by the kill switch |
-| `control:T8.revoked_after_queue` | FAIL/GAP | `L2SYNTH-T8.revoked_after_queue` | Notifier called the sender after session revocation; no Notifier-level fence |
-| `control:T8.revoked_pool_fence` | CANNOT-OBSERVE | `L2SYNTH-T8.revoked_pool_fence` | production fence is ClientPool.Borrow -> Store.CheckSessionValid beneath the SelfSender; a fake sender bypasses it |
-| `listener:M1` | PASS | `L2SYNTH-M1` | detected |
-| `listener:OFFLINE.default_paths` | PASS | `L2SYNTH-OFFLINE.default_paths` | TEST-NET-1 dial and external DNS refused via http.DefaultTransport and net.DefaultResolver; loopback allowed |
-| `listener:OFFLINE.whole_process` | CANNOT-OBSERVE | `L2SYNTH-OFFLINE.whole_process` | custom net.Dialer, custom transports and gotd internals are not intercepted; no gotd client is constructed |
-| `listener:T1.listener_status` | PASS | `L2SYNTH-T1.listener_status` | one owner reply, one saved_command event, peer sink empty |
-| `listener:T2.bob_dm` | PASS | `L2SYNTH-T2.bob_dm` | not routed; no saved_command event; private_message events=1 |
-| `listener:T2.spoof_from` | PASS | `L2SYNTH-T2.spoof_from` | self peer with foreign from_id not routed |
-| `listener:T4.channel` | PASS | `L2SYNTH-T4.channel` | Out true and false not routed, no event |
-| `listener:T4.forwarded` | PASS | `L2SYNTH-T4.forwarded` | forwarded self message not routed |
-| `listener:T4.group_chat` | PASS | `L2SYNTH-T4.group_chat` | Out true and false not routed, no event |
-| `listener:T4.saved_peer` | PASS | `L2SYNTH-T4.saved_peer` | foreign saved_peer_id not routed |
-| `listener:T5.1.push_then_history` | PASS | `L2SYNTH-T5.1.push_then_history` | 1 reply total; cursor=20 |
-| `listener:T5.3.cursor_monotonic` | PASS | `L2SYNTH-T5.3.cursor_monotonic` | cursor 21 then 23; 22 and 23 routed once each |
-| `listener:T6.gap` | CANNOT-OBSERVE | `L2SYNTH-T6.gap` | updates.Manager getDifference needs a fake MTProto server; not built in this slice |
-| `listener:T6.out_false_push` | PASS | `L2SYNTH-T6.out_false_push` | Out=false self push routed once |
-| `listener:T6.reconnect_replay` | PASS | `L2SYNTH-T6.reconnect_replay` | replay by push and history on a second Listener produced no second reply |
-| `policy:OFFLINE.default_paths` | PASS | `L2SYNTH-OFFLINE.default_paths` | TEST-NET-1 dial and external DNS refused via http.DefaultTransport and net.DefaultResolver; loopback allowed |
-| `policy:T10.denycode` | PASS | `L2SYNTH-T10.denycode` | every deny carries a DenyCode and reasons |
-| `policy:T7.1` | PASS | `L2SYNTH-T7.1` | stale revision -> DenyInstallChanged |
-| `policy:T7.2` | FAIL/GAP | `L2SYNTH-T7.2` | InstallRevision=0 owner summary evaluated allow (policy.go install fence skipped) |
-| `policy:T8.kill` | PASS | `L2SYNTH-T8.kill` | GlobalKill -> DenyGlobalKill |
-| `policy:T8.mode_off_before_queue` | PASS | `L2SYNTH-T8.mode_off_before_queue` | mode off -> DenyModeOff |
-| `policy:T9.finance_tier` | NOT-IMPLEMENTED | `L2SYNTH-T9.finance_tier` | no finance ActionType or never tier in policy |
-| `policy:T9.reply_observe` | PASS | `L2SYNTH-T9.reply_observe` | decision=require_approval code=unknown |
-| `telegram:OFFLINE.default_paths` | PASS | `L2SYNTH-OFFLINE.default_paths` | TEST-NET-1 dial and external DNS refused via http.DefaultTransport and net.DefaultResolver; loopback allowed |
-| `telegram:T1.source_pin` | PASS | `L2SYNTH-T1.source_pin` | source evidence only (not wire): SendToSelf and SendToSelfWithRandomID pass &tg.InputPeerSelf{} in sendself.go |
-| `telegram:T1.wire_input_peer_self` | PASS | `L2SYNTH-T1.wire_input_peer_self` | captured_peer=*tg.InputPeerSelf resolver_dials=0 call_err=<nil> |
+Previously observed blocking areas include revision-zero/omitted-job fencing,
+queued mode-off/kill/revocation gaps, durable DenyCode, plaintext intent,
+and absent finance-specific consent/tier. These are *not* fixed by this
+test-only PR; follow-up product/security changes require separate approval.
 
-## Aggregator: Gap IDs (FAIL/GAP)
-
-- `agentapi:T10.denycode_persisted`
-- `agentapi:T10.intent_channel`
-- `agentapi:T7.3.omit_job_id`
-- `control:T8.mode_off_after_queue`
-- `control:T8.mode_off_before_queue.delivery`
-- `control:T8.reply_kill`
-- `control:T8.revoked_after_queue`
-- `policy:T7.2`
+No merge, runtime implementation, deployment or Finance Assistant pilot
+is authorized by this report.
