@@ -42,7 +42,7 @@ var (
 )
 
 // l2GuardDial allows only loopback TCP/UDP and Unix sockets.
-func l2GuardDial(_ context.Context, network, addr string) (net.Conn, error) {
+func l2GuardDial(ctx context.Context, network, addr string) (net.Conn, error) {
 	if strings.HasPrefix(network, "unix") {
 		return nil, errL2ExternalDial
 	}
@@ -54,7 +54,7 @@ func l2GuardDial(_ context.Context, network, addr string) (net.Conn, error) {
 		return nil, fmt.Errorf("%w: %s", errL2ExternalDial, addr)
 	}
 	var d net.Dialer
-	return d.DialContext(context.Background(), network, addr)
+	return d.DialContext(ctx, network, addr)
 }
 
 func TestMain(m *testing.M) {
