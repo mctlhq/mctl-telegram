@@ -1,0 +1,88 @@
+# Mandatory canonical L2 finance rows: <package>:<id> <kind> <fixture>
+# kind: case (counts toward the gate), control (M1-M4, must PASS), offline (must PASS).
+# fixture: synthetic (stable L2SYNTH-<id> fixture_id required) or none.
+# Source-mapped review against mctl-telegram#1244 and canonical proposal
+# issue-1244-spike-test-finance-assistant-l2-owner-pr/requirements.md and
+# design.md, including the *negative* owner-invocation and absent finance verb:
+# T1 = listener.status + listener.finance_command (NOT-IMPLEMENTED) +
+#      control.notifier_self_only + telegram.source_pin/wire_input_peer_self
+# T2 = listener.bob_dm/spoof_from + agentapi.ordinary_owner_routing +
+#      agentapi.bob_job_owner_summary (FAIL/GAP) + finance_origin_authorization
+# T3 = control.per_user/finance_source + agentapi.account/job isolation +
+#      agentapi.finance_source_consent (NOT-IMPLEMENTED)
+# T4 = listener group/channel/forwarded/saved_peer extraction
+# T5 = listener.push_then_history/cursor_monotonic + control.random_id
+# T6 = listener.out_false_push/reconnect_replay/gap (CANNOT-OBSERVE)
+# T7 = policy.T7.1/T7.2 + agentapi.T7.3.with_job_id/omit_job_id
+# T8 = policy.kill/mode_off_before_queue + control kill/mode_off/revocation/reply
+# T9 = policy.reply_observe/finance_tier + agentapi observe/allowlisted/
+#      finance_tier/executor_peer_send (CANNOT-OBSERVE)
+# T10 = policy.denycode + agentapi action/audit/slog/trace rows
+# M1 = listener, M2/M3 = control, M4 = agentapi (also redacted twin)
+# Mandatory source contract has no unrepresented subcase after the two added
+# rows; any future missing emitter must be marked MISSING (not silently omitted).
+# A line marked MISSING in the 4th column has no emitter and forces INCOMPLETE_BLOCKED.
+agentapi:M4 control synthetic
+agentapi:M4.redacted_twin control synthetic
+agentapi:OFFLINE.default_paths offline synthetic
+agentapi:OFFLINE.whole_process case synthetic
+agentapi:T10.action_rows case synthetic
+agentapi:T10.denycode_persisted case synthetic
+agentapi:T10.intent_channel case synthetic
+agentapi:T10.redaction_slog case synthetic
+agentapi:T10.redaction_text case synthetic
+agentapi:T10.traces case synthetic
+agentapi:T2.bob_job_owner_summary case synthetic
+agentapi:T2.ordinary_owner_routing case synthetic
+agentapi:T2.finance_origin_authorization case synthetic
+agentapi:T3.account_foreign_context case synthetic
+agentapi:T3.account_foreign_conversation case synthetic
+agentapi:T3.account_foreign_job case synthetic
+agentapi:T3.finance_source_consent case synthetic
+agentapi:T3.job_foreign_conversation case synthetic
+agentapi:T7.3.omit_job_id case synthetic
+agentapi:T7.3.with_job_id case synthetic
+agentapi:T9.executor_peer_send case synthetic
+agentapi:T9.finance_tier case synthetic
+agentapi:T9.guarded_allowlisted case synthetic
+agentapi:T9.observe_no_peer_send case synthetic
+control:M2 control synthetic
+control:M3 control synthetic
+control:OFFLINE.default_paths offline synthetic
+control:T1.notifier_self_only case synthetic
+control:T3.finance_source case synthetic
+control:T3.per_user case synthetic
+control:T5.2.random_id case synthetic
+control:T8.kill case synthetic
+control:T8.mode_off_after_queue case synthetic
+control:T8.mode_off_before_queue.delivery case synthetic
+control:T8.reply_kill case synthetic
+control:T8.revoked_after_queue case synthetic
+control:T8.revoked_pool_fence case synthetic
+listener:M1 control synthetic
+listener:OFFLINE.default_paths offline synthetic
+listener:OFFLINE.whole_process case synthetic
+listener:T1.listener_status case synthetic
+listener:T1.finance_command case synthetic
+listener:T2.bob_dm case synthetic
+listener:T2.spoof_from case synthetic
+listener:T4.channel case synthetic
+listener:T4.forwarded case synthetic
+listener:T4.group_chat case synthetic
+listener:T4.saved_peer case synthetic
+listener:T5.1.push_then_history case synthetic
+listener:T5.3.cursor_monotonic case synthetic
+listener:T6.gap case synthetic
+listener:T6.out_false_push case synthetic
+listener:T6.reconnect_replay case synthetic
+policy:OFFLINE.default_paths offline synthetic
+policy:T10.denycode case synthetic
+policy:T7.1 case synthetic
+policy:T7.2 case synthetic
+policy:T8.kill case synthetic
+policy:T8.mode_off_before_queue case synthetic
+policy:T9.finance_tier case synthetic
+policy:T9.reply_observe case synthetic
+telegram:OFFLINE.default_paths offline synthetic
+telegram:T1.source_pin case synthetic
+telegram:T1.wire_input_peer_self case synthetic

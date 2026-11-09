@@ -77,16 +77,17 @@ func TestL2Finance_T2(t *testing.T) {
 	carolA, carolN := h.rowsFor(h.carol)
 	ok := rec.Code == http.StatusOK && len(acts) == 1 && acts[0].Status == db.ActionExecuted &&
 		notifCount == 1 && notifUser == h.alice && kind == db.NotificationSummary && carolA+carolN == 0 && h.peer.count() == 0
-	outcome := l2Pass
 	if !ok {
-		outcome = l2FailGap
+		t.Fatalf("ordinary owner routing changed: %s; review T2 rubric", rec.Body.String())
 	}
-	l2Record(t, "T2.bob_job_owner_summary", outcome, fmt.Sprintf(
-		"http=%d actions=%d status=%v notif_rows=%d notif_owner_is_alice=%t kind=%s carol_rows=%d peer_sink=%d scope=ordinary_owner_routing",
+	l2Record(t, "T2.ordinary_owner_routing", l2Pass, fmt.Sprintf(
+		"http=%d actions=%d status=%v notif_rows=%d notif_owner_is_alice=%t kind=%s carol_rows=%d peer_sink=%d",
 		rec.Code, len(acts), statuses(acts), notifCount, notifUser == h.alice, kind, carolA+carolN, h.peer.count()))
-	if !ok {
-		t.Errorf("ordinary owner routing violated: %s", rec.Body.String())
-	}
+	// #1244 T2 explicitly grades the Bob-conversation owner-summary bypass
+	// as FAIL/GAP against finance owner invocation, even though ordinary
+	// owner routing itself is correct. Never reclassify it as a PASS.
+	expectGap(t, "T2.bob_job_owner_summary", ok,
+		"finance-looking text from Bob-conversation job allowed to queue owner summary without a finance owner-invocation grant")
 	l2Record(t, "T2.finance_origin_authorization", l2NotImplemented,
 		"no finance-source label, source consent or finance policy gate exists; finance-looking text treated as ordinary text; no PASS or FAIL inferred")
 }
@@ -335,11 +336,25 @@ func TestL2Finance_T10(t *testing.T) {
 		l2CaptureSlog(t, audit.NewRedactingHandler(slog.NewJSONHandler(&buf, nil)))
 		h.scenario()
 		src := h.sources()
-		src["slog"] = buf.String()
 		err := l2AssertNoMarker(src)
-		l2Record(t, "T10.redaction_text", l2Outcome(err == nil), fmt.Sprintf("slog_bytes=%d err=%v", buf.Len(), err))
+		l2Record(t, "T10.redaction_text", l2Outcome(err == nil), fmt.Sprintf("durable_sources_only err=%v", err))
 		if err != nil {
 			t.Errorf("leak: %v", err)
+		}
+		// Observable slog redaction: the scenario may emit nothing, so a
+		// synthetic marker is sent through the production redacting handler.
+		// Zero bytes is never a PASS.
+		slog.Info("l2 t10 slog", "text", l2Marker)
+		slogBytes := buf.Len()
+		slogErr := l2AssertNoMarker(map[string]string{"slog": buf.String()})
+		switch {
+		case slogBytes == 0:
+			l2Record(t, "T10.redaction_slog", l2CannotObserve, "slog_bytes=0: no log event reached the redacting handler")
+		case slogErr != nil:
+			l2Record(t, "T10.redaction_slog", l2FailGap, fmt.Sprintf("slog_bytes=%d err=%v", slogBytes, slogErr))
+			t.Errorf("slog leak: %v", slogErr)
+		default:
+			l2Record(t, "T10.redaction_slog", l2Pass, fmt.Sprintf("slog_bytes=%d marker redacted", slogBytes))
 		}
 	})
 	t.Run("intent_channel", func(t *testing.T) {
@@ -413,7 +428,7 @@ func TestL2Finance_M4(t *testing.T) {
 	if err := l2AssertNoMarker(map[string]string{"slog_unredacted": raw.String()}); err == nil {
 		t.Fatal("M4: l2AssertNoMarker did not detect an unredacted marker")
 	}
-	l2Record(t, "M4", l2Pass+" (detected)", "unredacted JSON handler leak reported by the same helper used by T10")
+	l2Record(t, "M4", l2Pass, "detected: unredacted JSON handler leak reported by the same helper used by T10")
 
 	var red bytes.Buffer
 	l2CaptureSlog(t, audit.NewRedactingHandler(slog.NewJSONHandler(&red, nil)))

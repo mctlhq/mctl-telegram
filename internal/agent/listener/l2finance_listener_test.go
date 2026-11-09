@@ -55,13 +55,37 @@ func TestL2Finance_T1_ListenerStatus(t *testing.T) {
 	l2Record(t, "T1.listener_status", l2Pass, "one owner reply, one saved_command event, peer sink empty")
 }
 
+// The canonical #1244 T1 contract distinguishes a working /mctl status
+// command from the finance verb which is not implemented. Do not turn this
+// absence into a security PASS, and fail if the rubric changes silently.
+func TestL2Finance_T1_FinanceCommandNotImplemented(t *testing.T) {
+	h := l2NewHarness(t)
+	l2Push(t, h.l, h.acct, l2SelfMsg(13, true, "/mctl finance"))
+	l2Must(t, l2CheckRoutedOnce(h, 1))
+	l2Must(t, l2CheckSavedEvents(h, 1))
+	reply := h.sink.snapshot()[0].text
+	if !strings.HasPrefix(reply, "Unknown command. Try:\n/mctl status") || strings.Contains(reply, "/mctl finance") {
+		t.Fatalf("finance verb unexpectedly recognized: %q; rubric must be reviewed", reply)
+	}
+	l2Record(t, "T1.finance_command", l2NotImplemented,
+		"owner-only unknownCommandReply observed; no finance command or peer send")
+}
+
 func TestL2Finance_T2_BobDM(t *testing.T) {
 	h := l2NewHarness(t)
-	l2Push(t, h.l, h.acct, &tg.Message{ID: 11, PeerID: &tg.PeerUser{UserID: l2BobTG}, Message: "/mctl status"})
-	l2Must(t, l2CheckNotRouted(h))
+	for i, command := range []string{"/mctl status", "/mctl approve L2SYNTH", "finance digest L2SYNTH"} {
+		l2Push(t, h.l, h.acct, &tg.Message{
+			ID: 11 + i, PeerID: &tg.PeerUser{UserID: l2BobTG}, Message: command,
+		})
+		l2Must(t, l2CheckNotRouted(h))
+	}
 	priv, err := l2CountEvents(h, db.EventKindPrivateMessage)
 	l2Must(t, err)
-	l2Record(t, "T2.bob_dm", l2Pass, "not routed; no saved_command event; private_message events="+itoa(priv))
+	if priv != 3 {
+		t.Fatalf("private_message events = %d, want 3 non-routed Bob DM events", priv)
+	}
+	l2Record(t, "T2.bob_dm", l2Pass,
+		"status, approve and finance-looking Bob DM not routed; zero owner/peer sends; private_message events="+itoa(priv))
 }
 
 func TestL2Finance_T2_SpoofFrom(t *testing.T) {

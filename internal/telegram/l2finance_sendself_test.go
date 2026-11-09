@@ -45,7 +45,7 @@ var (
 	l2RevRe     = regexp.MustCompile(`^[0-9a-f]{40}$`)
 )
 
-func l2GuardDial(_ context.Context, network, addr string) (net.Conn, error) {
+func l2GuardDial(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil || strings.HasPrefix(network, "unix") {
 		return nil, fmt.Errorf("%w: %s", errL2ExternalDial, addr)
@@ -54,7 +54,7 @@ func l2GuardDial(_ context.Context, network, addr string) (net.Conn, error) {
 		return nil, fmt.Errorf("%w: %s", errL2ExternalDial, addr)
 	}
 	var d net.Dialer
-	return d.DialContext(context.Background(), network, addr)
+	return d.DialContext(ctx, network, addr)
 }
 
 func TestMain(m *testing.M) {
@@ -80,7 +80,7 @@ func TestMain(m *testing.M) {
 
 func l2Record(t testing.TB, id, outcome, evidence string) {
 	t.Helper()
-	t.Logf("L2RESULT id=%s outcome=%s rev=%s evidence=%s", id, outcome, l2SourceRev, evidence)
+	t.Logf("L2RESULT id=%s outcome=%s rev=%s evidence=fixture_id=L2SYNTH-%s %s", id, outcome, l2SourceRev, id, evidence)
 }
 
 func TestL2Finance_T1WireInputPeerSelf(t *testing.T) {
