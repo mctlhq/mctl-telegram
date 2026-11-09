@@ -13,7 +13,13 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT" || exit 2
 OUT="${1:-${L2FINANCE_OUT:-$(mktemp -d)}}"
-mkdir -p "$OUT"
+mkdir -p "$OUT" || exit 2
+# No previous run may influence the next one. In particular a stale summary
+# must never mask a failed preflight, and stale tuples must not satisfy cmp.
+rm -f "$OUT"/summary*.md "$OUT"/tuples*.tsv "$OUT"/gate*.log \
+      "$OUT"/gate*.status "$OUT"/results*.json "$OUT"/results*.err \
+      "$OUT"/preflight.err "$OUT"/vet.log "$OUT"/untagged.log \
+      "$OUT"/lint.log "$OUT"/status.md "$OUT"/status.txt || exit 2
 
 PKGS=(./internal/agent/policy/ ./internal/agent/listener/ ./internal/agent/control/ ./internal/agentapi/ ./internal/telegram/)
 HARNESS=INVALID
@@ -21,7 +27,7 @@ GATE=BLOCKED
 ISSUE=CANNOT_OBSERVE_BLOCKED
 FINAL_RC=2
 REV=""
-VET_RC="not-run" UNTAGGED_RC="not-run" LINT="not-run" REPRO="not-run" RUN1_RC="not-run" RUN2_RC="not-run"
+GATE_UNIT_RC="not-run" VET_RC="not-run" UNTAGGED_RC="not-run" LINT="not-run" REPRO="not-run" RUN1_RC="not-run" RUN2_RC="not-run"
 FINALIZED=0
 
 write_sentinel() {
@@ -34,6 +40,7 @@ write_sentinel() {
 		echo "- go: \`$(go version 2>/dev/null || echo unknown)\`"
 		echo "- tagged run 1 exit: \`$RUN1_RC\`; tagged run 2 exit: \`$RUN2_RC\`"
 		echo "- go vet -tags l2finance exit: \`$VET_RC\`"
+		echo "- gate aggregator unit tests exit: \`$GATE_UNIT_RC\`"
 		echo "- untagged go test -race exit: \`$UNTAGGED_RC\`"
 		echo "- golangci-lint: \`$LINT\`"
 		echo "- reproducibility (two tagged runs): \`$REPRO\`"
@@ -45,6 +52,9 @@ write_sentinel() {
 		echo "harness_status=$HARNESS"
 		echo "FINANCE_SECURITY_GATE=$GATE"
 	} >"$OUT/status.txt"
+	# The summary is the artifact CI publishes on failure, including when a
+	# previous run in this directory completed successfully.
+	cp "$OUT/status.md" "$OUT/summary.md"
 }
 
 finalize() {
@@ -104,6 +114,11 @@ RUN1_RC=$?
 go vet -tags l2finance "${PKGS[@]}" ./internal/l2finance/gate/ >"$OUT/vet.log" 2>&1
 VET_RC=$?
 
+# Run the aggregator's own negative and positive controls, not just the
+# integration test TestL2FinanceGate (which is run separately below).
+go test -tags l2finance -count=1 -run '^TestGate' ./internal/l2finance/gate/ >"$OUT/gate-unit.log" 2>&1
+GATE_UNIT_RC=$?
+
 go test -race -count=1 ./... >"$OUT/untagged.log" 2>&1
 UNTAGGED_RC=$?
 
@@ -136,7 +151,7 @@ HARNESS_G="$(sed -n 's/^harness_status=//p' "$OUT/gate1.status")"
 GATE_G="$(sed -n 's/^FINANCE_SECURITY_GATE=//p' "$OUT/gate1.status")"
 
 # Only now may the sentinel be replaced, and only when every step succeeded.
-if [ "$RUN1_RC" = 0 ] && [ "$RUN2_RC" = 0 ] && [ "$VET_RC" = 0 ] && [ "$UNTAGGED_RC" = 0 ] &&
+if [ "$RUN1_RC" = 0 ] && [ "$RUN2_RC" = 0 ] && [ "$VET_RC" = 0 ] && [ "$GATE_UNIT_RC" = 0 ] && [ "$UNTAGGED_RC" = 0 ] &&
 	[ "$GATE1_RC" = 0 ] && [ "$GATE2_RC" = 0 ] && [ "$REPRO" = identical ] &&
 	[ "$HARNESS_G" = COMPLETE ] && [ -n "$ISSUE_G" ] && [ -n "$GATE_G" ]; then
 	HARNESS=$HARNESS_G GATE=$GATE_G ISSUE=$ISSUE_G
