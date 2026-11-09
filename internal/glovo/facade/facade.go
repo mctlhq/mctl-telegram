@@ -153,24 +153,63 @@ func (f *Facade) Handler() http.Handler {
 	return r
 }
 
-// hostGuard rejects requests whose Host does not match the public endpoint
-// (DNS-rebinding protection). In dev mode loopback hosts are also accepted.
-// It is a no-op when no public base URL is configured.
+// parseHostAuthority rejects malformed or ambiguous HTTP Host authorities.
+// In particular, Host is not a URL: userinfo, paths, or query parameters are
+// never allowed. Brackets are required for IPv6 literals.
+func parseHostAuthority(raw string) (host, port string, valid bool) {
+	if raw == "" || strings.ContainsAny(raw, "/\\?#@ \t\r\n") || strings.HasSuffix(raw, ":") {
+		return "", "", false
+	}
+	u, err := url.Parse("http://" + raw)
+	if err != nil || u.User != nil || u.Host != raw || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return "", "", false
+	}
+	host = strings.ToLower(u.Hostname())
+	if host == "" {
+		return "", "", false
+	}
+	port = u.Port()
+	if port != "" {
+		for _, c := range port {
+			if c < '0' || c > '9' {
+				return "", "", false
+			}
+		}
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return "", "", false
+		}
+		port = strconv.Itoa(n)
+	}
+	return host, port, true
+}
+
+// hostGuard requires the public hostname and its effective HTTPS/HTTP port
+// (DNS-rebinding protection). Explicit default ports such as :443 are valid.
+// Dev-only loopback exceptions keep the local MCP harness usable.
 func (f *Facade) hostGuard(next http.Handler) http.Handler {
-	want := ""
-	if u, err := url.Parse(f.opt.Config.PublicBaseURL); err == nil {
-		want = strings.ToLower(u.Host)
+	wantHost, wantPort, defaultPort := "", "", ""
+	if u, err := url.Parse(f.opt.Config.PublicBaseURL); err == nil && u.Host != "" {
+		wantHost = strings.ToLower(u.Hostname())
+		wantPort = u.Port()
+		switch u.Scheme {
+		case "https":
+			defaultPort = "443"
+		case "http":
+			defaultPort = "80"
+		}
+		if wantPort == "" {
+			wantPort = defaultPort
+		}
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if want != "" {
-			h := strings.ToLower(r.Host)
-			ok := h == want
-			if !ok && f.opt.Config.Dev {
-				name := h
-				if hn, _, err := net.SplitHostPort(h); err == nil {
-					name = hn
-				}
-				ok = name == "localhost" || name == "127.0.0.1" || name == "[::1]" || name == "::1"
+		if wantHost != "" {
+			host, port, valid := parseHostAuthority(r.Host)
+			ok := valid && host == wantHost &&
+				(port == wantPort || (port == "" && wantPort == defaultPort))
+			if !ok && valid && f.opt.Config.Dev {
+				ip := net.ParseIP(host)
+				ok = host == "localhost" || (ip != nil && ip.IsLoopback())
 			}
 			if !ok {
 				http.Error(w, "forbidden", http.StatusForbidden)
