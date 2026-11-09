@@ -319,7 +319,6 @@ func TestConverterRejectsCanary(t *testing.T) {
 	}
 }
 
-
 // Matching a pre-existing fake basket must not allow a synthetic handoff
 // without recorded proof that this workflow consumed the bound aar_ receipt.
 func TestMatchingBasketCannotBypassApprovalBeforeHandoff(t *testing.T) {
