@@ -29,6 +29,16 @@ func l2Must(t *testing.T, err error) {
 	}
 }
 
+// l2ExpireClaim forces the lease of a fence-deferred row to expire, the
+// explicit resume step: a blocked row is claimed (leased) and not sent, and is
+// eligible again only after the lease expires.
+func l2ExpireClaim(t *testing.T, h *l2NotifierHarness, id int64) {
+	t.Helper()
+	_, err := h.store.DB.Exec(`UPDATE owner_notifications SET claimed_until = $1 WHERE id = $2`,
+		time.Now().UTC().Add(-time.Minute), id)
+	l2Must(t, err)
+}
+
 func TestL2Finance_T1_NotifierSelfOnly(t *testing.T) {
 	h := l2NewNotifierHarness(t, true)
 	h.queue(t, h.alice, "summary for alice")
@@ -111,6 +121,7 @@ func TestL2Finance_T8_ModeOffAfterQueue(t *testing.T) {
 		t.Fatalf("status under mode off = %q, want pending", got)
 	}
 	h.setMode(t, h.alice, db.AgentModeObserve)
+	l2ExpireClaim(t, h, id)
 	l2Deliver(t, h)
 	l2Must(t, l2CheckOnlyOwnUser(h, map[string]int64{"queued while observe": h.alice}))
 	l2Record(t, "T8.mode_off_after_queue", l2Pass,
@@ -127,6 +138,7 @@ func TestL2Finance_T8_ModeOffBeforeQueueDelivery(t *testing.T) {
 		t.Fatalf("status = %q, want pending", got)
 	}
 	h.setMode(t, h.alice, db.AgentModeGuarded)
+	l2ExpireClaim(t, h, id)
 	l2Deliver(t, h)
 	l2Must(t, l2CheckOnlyOwnUser(h, map[string]int64{"inserted while off": h.alice}))
 	l2Record(t, "T8.mode_off_before_queue.delivery", l2Pass,
@@ -149,6 +161,7 @@ func TestL2Finance_T8_RevokedAfterQueue(t *testing.T) {
 		t.Fatalf("status = %q, want pending", got)
 	}
 	l2Must(t, h.store.SaveSession(ctx, h.alice, []byte("synthetic-session-2"), 9200000+h.alice, "Alice", "alice_tg"))
+	l2ExpireClaim(t, h, id)
 	l2Deliver(t, h)
 	l2Must(t, l2CheckOnlyOwnUser(h, map[string]int64{"queued before revoke": h.alice}))
 	l2Record(t, "T8.revoked_after_queue", l2Pass,

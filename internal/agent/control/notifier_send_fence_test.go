@@ -2,7 +2,9 @@ package control
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -81,6 +83,7 @@ func TestSendFence_ModeOffAfterQueueStaysPendingThenResumes(t *testing.T) {
 	}
 	for _, mode := range []string{db.AgentModeObserve, db.AgentModeGuarded} {
 		fenceSetMode(t, store, uid, mode)
+		fenceExpireClaim(t, store, id) // the blocked row was deferred by lease
 		d, _ := fenceDeliver(t, n)
 		if d != 1 || len(sender.sent) != 1 || fenceStatus(t, store, id) != db.NotificationSent {
 			t.Fatalf("mode %s: delivered=%d sent=%d status=%q, want one sent", mode, d, len(sender.sent), fenceStatus(t, store, id))
@@ -140,6 +143,7 @@ func TestSendFence_HumanInputExemptFromModeNotFromKillOrSession(t *testing.T) {
 		t.Fatal("human_input sent under kill")
 	}
 	killed = false
+	fenceExpireClaim(t, store, id) // session-blocked sweep deferred the row by lease
 	if d, _ := fenceDeliver(t, n); d != 1 || fenceStatus(t, store, id) != db.NotificationSent {
 		t.Fatalf("human_input under mode off with session and no kill must send once, delivered=%d", d)
 	}
@@ -158,6 +162,7 @@ func TestSendFence_RevokedSessionAfterQueueNotSentAndResumes(t *testing.T) {
 		t.Fatalf("sent=%d status=%q, want none and pending", len(sender.sent), fenceStatus(t, store, id))
 	}
 	seedSession(t, store, uid) // reconnect
+	fenceExpireClaim(t, store, id)
 	if d, _ := fenceDeliver(t, n); d != 1 || len(sender.sent) != 1 {
 		t.Fatalf("after reconnect delivered=%d sent=%d, want 1", d, len(sender.sent))
 	}
@@ -233,6 +238,7 @@ func TestSendFence_MidBatchKillStopsLaterNotifications(t *testing.T) {
 		t.Fatalf("first=%q second=%q", fenceStatus(t, store, first), fenceStatus(t, store, second))
 	}
 	killed = false
+	fenceExpireClaim(t, store, second) // blocked mid-batch: deferred by lease
 	if d, _ := fenceDeliver(t, n); d != 1 || len(base.sent) != 2 {
 		t.Fatalf("resume: delivered=%d sent=%v, want second once", d, base.sent)
 	}
@@ -325,6 +331,220 @@ func TestSendFence_ReplyIgnoresModeAndSession(t *testing.T) {
 	fenceSetMode(t, store, uid, db.AgentModeOff)
 	if err := NewNotifier(store, sender).Reply(context.Background(), uid, "status"); err != nil || len(sender.sent) != 1 {
 		t.Fatalf("err=%v sent=%v, want a reply while mode is off and no session", err, sender.sent)
+	}
+}
+
+// fenceAge backdates a row's created_at with a synthetic timestamp so ordering
+// and MaxPendingAge are deterministic without sleeping.
+func fenceAge(t *testing.T, store *db.Store, id int64, age time.Duration) {
+	t.Helper()
+	if _, err := store.DB.Exec(`UPDATE owner_notifications SET created_at = $1 WHERE id = $2`,
+		time.Now().UTC().Add(-age), id); err != nil {
+		t.Fatalf("age row: %v", err)
+	}
+}
+
+// fenceLease reports the persisted claim state of a row.
+func fenceLease(t *testing.T, store *db.Store, id int64) (randomID int64, leased bool) {
+	t.Helper()
+	var rid sql.NullInt64
+	var until sql.NullTime
+	if err := store.DB.QueryRow(`SELECT random_id, claimed_until FROM owner_notifications WHERE id = $1`, id).Scan(&rid, &until); err != nil {
+		t.Fatalf("read lease: %v", err)
+	}
+	return rid.Int64, until.Valid && until.Time.After(time.Now().UTC())
+}
+
+// fenceUser creates a synthetic persona with an observe profile and session.
+func fenceUser(t *testing.T, store *db.Store, name string) int64 {
+	t.Helper()
+	uid, err := store.EnsureUser(context.Background(), name, "", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertAgentProfile(context.Background(), db.AgentProfile{UserID: uid, Mode: db.AgentModeObserve}); err != nil {
+		t.Fatal(err)
+	}
+	seedSession(t, store, uid)
+	return uid
+}
+
+// Reviewed starvation blocker: more than 50 older notifications for a blocked
+// user used to fill the oldest-50 batch on every sweep, unclaimed, so a newer
+// healthy user's notification was never reached. A blocked row is now claimed
+// with the existing lease and not sent, which takes it out of the pending
+// listing until the lease expires.
+func TestSendFence_BlockedOldest50DoesNotStarveHealthyUser(t *testing.T) {
+	_, _, sender, store, alice := newTestRouter(t)
+	bob := fenceUser(t, store, "bob")
+	seedSession(t, store, alice)
+	const blocked = 51
+	ids := make([]int64, 0, blocked)
+	for i := 0; i < blocked; i++ {
+		id := fenceQueue(t, store, alice, db.NotificationSummary, fmt.Sprintf("alice-%d", i))
+		fenceAge(t, store, id, time.Hour+time.Duration(blocked-i)*time.Minute) // older than bob's, oldest first
+		ids = append(ids, id)
+	}
+	bobID := fenceQueue(t, store, bob, db.NotificationSummary, "bob-1")
+	fenceAge(t, store, bobID, time.Minute)
+	fenceSetMode(t, store, alice, db.AgentModeOff)
+	n := NewNotifier(store, sender)
+
+	delivered := 0
+	for sweep := 0; sweep < 3 && fenceStatus(t, store, bobID) != db.NotificationSent; sweep++ {
+		d, _ := fenceDeliver(t, n)
+		delivered += d
+	}
+	if fenceStatus(t, store, bobID) != db.NotificationSent || delivered != 1 {
+		t.Fatalf("healthy user starved: bob status=%q delivered=%d sent=%v", fenceStatus(t, store, bobID), delivered, sender.sent)
+	}
+	if len(sender.sent) != 1 || sender.sent[0] != "bob-1" {
+		t.Fatalf("sent=%v, want only bob-1 and zero blocked-user sends", sender.sent)
+	}
+	rids := map[int64]int64{}
+	for _, id := range ids {
+		rid, leased := fenceLease(t, store, id)
+		if fenceStatus(t, store, id) != db.NotificationPending || !leased || rid == 0 {
+			t.Fatalf("row %d: status=%q leased=%v random_id=%d, want pending, leased, id persisted", id, fenceStatus(t, store, id), leased, rid)
+		}
+		rids[id] = rid
+	}
+
+	// Lease expiry and resume: the same persisted random_ids are reused.
+	for _, id := range ids {
+		fenceExpireClaim(t, store, id)
+	}
+	fenceSetMode(t, store, alice, db.AgentModeObserve)
+	for sweep := 0; sweep < 3 && len(sender.sent) < 1+blocked; sweep++ {
+		fenceDeliver(t, n)
+	}
+	if len(sender.sent) != 1+blocked {
+		t.Fatalf("after resume sent=%d, want %d", len(sender.sent), 1+blocked)
+	}
+	want := map[int64]bool{}
+	for _, rid := range rids {
+		want[rid] = true
+	}
+	for _, rid := range sender.randomIDs[1:] { // [0] is bob's
+		if !want[rid] {
+			t.Fatalf("resumed send used random_id %d not persisted at block time", rid)
+		}
+		delete(want, rid)
+	}
+	if len(want) != 0 {
+		t.Fatalf("persisted random ids never reused: %v", want)
+	}
+}
+
+// MaxPendingAge applies to blocked rows as it did to failing sends: too-old
+// rows are retired (status failed, never sent), not-too-old rows stay pending
+// and leased, and another user's healthy queue progresses. The returned failed
+// count here is retirements; an aged-out row is not a delivered message.
+func TestSendFence_BlockedRowsAgeOutByMaxPendingAge(t *testing.T) {
+	_, _, sender, store, alice := newTestRouter(t) // alice: mode off
+	carol := fenceUser(t, store, "carol")          // carol: session revoked
+	bob := fenceUser(t, store, "bob")              // bob: healthy
+	seedSession(t, store, alice)
+	fenceSetMode(t, store, alice, db.AgentModeOff)
+	if ok, err := store.RevokeActiveSession(context.Background(), carol, "test"); err != nil || !ok {
+		t.Fatalf("revoke: ok=%v err=%v", ok, err)
+	}
+	var old, young []int64
+	for _, uid := range []int64{alice, carol} {
+		o := fenceQueue(t, store, uid, db.NotificationSummary, "old")
+		fenceAge(t, store, o, 25*time.Hour)
+		y := fenceQueue(t, store, uid, db.NotificationSummary, "young")
+		fenceAge(t, store, y, time.Hour)
+		old, young = append(old, o), append(young, y)
+	}
+	b := fenceQueue(t, store, bob, db.NotificationSummary, "bob-1")
+	fenceAge(t, store, b, time.Minute)
+
+	n := NewNotifier(store, sender) // MaxPendingAge 24h
+	d, f := fenceDeliver(t, n)
+	if d != 1 || f != 2 {
+		t.Fatalf("delivered=%d failed=%d, want 1 delivered (bob) and 2 retired", d, f)
+	}
+	if len(sender.sent) != 1 || sender.sent[0] != "bob-1" || fenceStatus(t, store, b) != db.NotificationSent {
+		t.Fatalf("sent=%v: only the healthy user may be sent", sender.sent)
+	}
+	for _, id := range old {
+		if got := fenceStatus(t, store, id); got != db.NotificationFailed {
+			t.Fatalf("old blocked row %d status=%q, want failed (aged out, not sent)", id, got)
+		}
+	}
+	for _, id := range young {
+		rid, leased := fenceLease(t, store, id)
+		if fenceStatus(t, store, id) != db.NotificationPending || !leased || rid == 0 {
+			t.Fatalf("young blocked row %d: status=%q leased=%v rid=%d, want pending and leased", id, fenceStatus(t, store, id), leased, rid)
+		}
+	}
+}
+
+// MaxPendingAge <= 0 keeps its existing meaning: no age limit.
+func TestSendFence_BlockedRowsNeverAgeOutWithoutMaxPendingAge(t *testing.T) {
+	_, _, sender, store, alice := newTestRouter(t)
+	seedSession(t, store, alice)
+	fenceSetMode(t, store, alice, db.AgentModeOff)
+	id := fenceQueue(t, store, alice, db.NotificationSummary, "ancient")
+	fenceAge(t, store, id, 1000*time.Hour)
+	n := NewNotifier(store, sender)
+	n.MaxPendingAge = 0
+	if d, f := fenceDeliver(t, n); d != 0 || f != 0 {
+		t.Fatalf("delivered=%d failed=%d, want 0/0", d, f)
+	}
+	if _, leased := fenceLease(t, store, id); fenceStatus(t, store, id) != db.NotificationPending || !leased || len(sender.sent) != 0 {
+		t.Fatalf("status=%q leased=%v sent=%v, want pending, leased, unsent", fenceStatus(t, store, id), leased, sender.sent)
+	}
+}
+
+// Final send boundary, isolated: the pre-claim fence PASSES, then the state
+// flips as a side effect of the claim itself (a SQLite trigger fires on the
+// claim UPDATE, standing in for a flip that lands between the pre-claim check
+// and the send). Only the final boundary fence can stop the send. The
+// assertion is the forbidden effect, not a call count: the fake sender must
+// record no send and the row must not become sent. Removing the final
+// sendFence call makes the sender record a send and the row go sent.
+func TestSendFence_FinalBoundaryFlipAfterClaimIsNeverSent(t *testing.T) {
+	flips := map[string]struct {
+		trigger string
+		kill    bool
+	}{
+		"mode_off": {trigger: `UPDATE agent_profiles SET mode = 'off' WHERE user_id = NEW.user_id;`},
+		"session_revoked": {trigger: `UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = NEW.user_id AND revoked_at IS NULL;`},
+		"global_kill": {kill: true},
+	}
+	for name, flip := range flips {
+		t.Run(name, func(t *testing.T) {
+			_, _, sender, store, uid := newTestRouter(t)
+			seedSession(t, store, uid)
+			id := fenceQueue(t, store, uid, db.NotificationSummary, "must not leave")
+			n := NewNotifier(store, sender)
+			if flip.trigger != "" {
+				if _, err := store.DB.Exec(`CREATE TRIGGER fence_flip AFTER UPDATE OF claimed_until ON owner_notifications
+					WHEN NEW.claimed_until IS NOT NULL BEGIN ` + flip.trigger + ` END`); err != nil {
+					t.Fatalf("create flip trigger: %v", err)
+				}
+			}
+			if flip.kill {
+				// Kill turns on exactly when the row is claimed; reads state, not a call count.
+				n.GlobalKill = func() bool {
+					var c int
+					_ = store.DB.QueryRow(`SELECT COUNT(*) FROM owner_notifications WHERE id = $1 AND claimed_until IS NOT NULL`, id).Scan(&c)
+					return c > 0
+				}
+			}
+			fenceDeliver(t, n)
+			if len(sender.sent) != 0 || len(sender.randomIDs) != 0 {
+				t.Fatalf("unauthorized send reached the sender after the flip: %v", sender.sent)
+			}
+			if got := fenceStatus(t, store, id); got != db.NotificationPending {
+				t.Fatalf("row status=%q, want pending (a denied send must never mark sent)", got)
+			}
+			if rid, leased := fenceLease(t, store, id); rid == 0 || !leased {
+				t.Fatalf("random_id=%d leased=%v, want claimed row with persisted id", rid, leased)
+			}
+		})
 	}
 }
 

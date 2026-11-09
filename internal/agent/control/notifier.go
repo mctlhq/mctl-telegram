@@ -172,7 +172,8 @@ func (n *Notifier) killFence() error {
 // sendFence is the single send-time authorization recheck for a queued
 // notification. DeliverPending runs it per notification, both before claiming
 // and again immediately before the sender call, so a flip in the middle of a
-// batch is observed. Checks, cheapest and side-effect-free first:
+// batch is observed. A refusal before the claim defers the row by lease (see
+// deferBlocked); a refusal at the final boundary leaves the claimed row. Checks, cheapest and side-effect-free first:
 //
 //  1. live GlobalKill;
 //  2. agent mode, for agent kinds only (summary, approval_request and any
@@ -220,6 +221,9 @@ func (n *Notifier) sendFence(ctx context.Context, userID int64, kind string) err
 // same pattern as the other background sweeps in this codebase. Returns
 // (delivered, failed) counts; a delivery failure for one notification does
 // not stop the batch (the row stays `pending` and is retried next sweep).
+// failed counts failed sends and unverifiable fences, plus blocked or failing
+// rows retired for exceeding MaxPendingAge; a retired row was never delivered.
+// A row blocked by the fence is not counted: it stays pending and leased.
 func (n *Notifier) DeliverPending(ctx context.Context) (delivered, failed int, err error) {
 	if n.GlobalKill != nil && n.GlobalKill() {
 		// Silence ALL owner-facing delivery while the kill switch is on,
@@ -233,11 +237,19 @@ func (n *Notifier) DeliverPending(ctx context.Context) (delivered, failed int, e
 		return 0, 0, fmt.Errorf("list pending notifications: %w", err)
 	}
 	for _, notif := range notifs {
-		// Fence before claiming so a blocked row is neither claimed nor leased
-		// and resumes on the very next sweep once the block clears. A blocked
-		// row stays pending, unclaimed, payload untouched.
+		// A blocked row is deferred by lease, never sent: it is claimed with
+		// the ordinary ClaimLease so it leaves ListPendingOwnerNotifications
+		// until the lease expires. Without that, more than 50 older blocked
+		// rows for one user fill the oldest-50 batch on every sweep and a
+		// newer, healthy user's notification is never reached. The row stays
+		// pending with its random_id persisted and is eligible again after
+		// expiry. An unverifiable fence (database error) is not deferred.
 		if ferr := n.sendFence(ctx, notif.UserID, notif.Kind); ferr != nil {
-			if n.fenceSkip(notif, ferr) {
+			if errors.Is(ferr, ErrSendBlocked) {
+				if n.deferBlocked(ctx, notif, ferr) {
+					failed++
+				}
+			} else if n.fenceSkip(notif, ferr) {
 				failed++
 			}
 			continue
@@ -337,6 +349,39 @@ func (n *Notifier) DeliverPending(ctx context.Context) (delivered, failed int, e
 		delivered++
 	}
 	return delivered, failed, nil
+}
+
+// deferBlocked handles a row the pre-claim fence refused. It claims the row
+// with the existing lease (persisting its random_id) and sends nothing. A lost
+// claim or a claim error leaves the row to whoever owns it or to the next
+// sweep. Only after winning the claim, a row older than MaxPendingAge (when
+// MaxPendingAge > 0) is retired with MarkOwnerNotificationFailed, exactly as a
+// too-old failing send is; the row was never sent, so a retirement is counted
+// as a failure and never as a delivery. It reports whether the row was retired.
+func (n *Notifier) deferBlocked(ctx context.Context, notif db.OwnerNotification, ferr error) (retired bool) {
+	candidate, rerr := newSelfRandomID()
+	if rerr != nil {
+		slog.Warn("notifier: random id generation failed", "notification_id", notif.ID, "err", rerr)
+		return false
+	}
+	_, claimed, cerr := n.Store.ClaimOwnerNotification(ctx, notif.UserID, notif.ID, candidate, n.claimLease())
+	if cerr != nil {
+		slog.Warn("notifier: claim of blocked row failed", "notification_id", notif.ID, "err", cerr)
+		return false
+	}
+	if !claimed {
+		return false
+	}
+	if n.MaxPendingAge > 0 && time.Since(notif.CreatedAt) > n.MaxPendingAge {
+		if merr := n.Store.MarkOwnerNotificationFailed(ctx, notif.UserID, notif.ID); merr != nil {
+			slog.Warn("notifier: mark failed errored", "notification_id", notif.ID, "err", merr)
+			return false
+		}
+		slog.Warn("notifier: blocked notification aged out, retired unsent", "notification_id", notif.ID, "kind", notif.Kind, "err", ferr)
+		return true
+	}
+	slog.Info("notifier: send blocked, row deferred by lease", "notification_id", notif.ID, "kind", notif.Kind, "err", ferr)
+	return false
 }
 
 // fenceSkip logs a fence refusal and reports whether it counts as a failed
