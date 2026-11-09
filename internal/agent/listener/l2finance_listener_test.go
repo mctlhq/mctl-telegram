@@ -55,6 +55,22 @@ func TestL2Finance_T1_ListenerStatus(t *testing.T) {
 	l2Record(t, "T1.listener_status", l2Pass, "one owner reply, one saved_command event, peer sink empty")
 }
 
+// The canonical #1244 T1 contract distinguishes a working /mctl status
+// command from the finance verb which is not implemented. Do not turn this
+// absence into a security PASS, and fail if the rubric changes silently.
+func TestL2Finance_T1_FinanceCommandNotImplemented(t *testing.T) {
+	h := l2NewHarness(t)
+	l2Push(t, h.l, h.acct, l2SelfMsg(13, true, "/mctl finance"))
+	l2Must(t, l2CheckRoutedOnce(h, 1))
+	l2Must(t, l2CheckSavedEvents(h, 1))
+	reply := h.sink.snapshot()[0].text
+	if !strings.HasPrefix(reply, "Unknown command. Try:\n/mctl status") || strings.Contains(reply, "/mctl finance") {
+		t.Fatalf("finance verb unexpectedly recognized: %q; rubric must be reviewed", reply)
+	}
+	l2Record(t, "T1.finance_command", l2NotImplemented,
+		"owner-only unknownCommandReply observed; no finance command or peer send")
+}
+
 func TestL2Finance_T2_BobDM(t *testing.T) {
 	h := l2NewHarness(t)
 	l2Push(t, h.l, h.acct, &tg.Message{ID: 11, PeerID: &tg.PeerUser{UserID: l2BobTG}, Message: "/mctl status"})
