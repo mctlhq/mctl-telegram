@@ -137,8 +137,81 @@ func NewNotifier(store *db.Store, sender SelfSender) *Notifier {
 // command is left unaudited and replays the identical oversized response
 // on every redelivery.
 func (n *Notifier) Reply(ctx context.Context, userID int64, text string) error {
+	// Live kill-switch recheck immediately before the sender (#1269). Only the
+	// kill switch applies to a synchronous owner command reply: mode=off and
+	// session state deliberately do not, so the owner can still run commands
+	// such as /mctl status or a mode change while the assistant is off. A
+	// denied reply is a deterministic error, never a silent drop: the caller
+	// then does not persist its audit dedup row, which is the existing
+	// contract for any failed Reply.
+	if err := n.killFence(); err != nil {
+		return err
+	}
 	_, err := n.Sender.SendToSelf(ctx, userID, truncateForTelegram(text))
 	return err
+}
+
+// ErrSendBlocked marks an owner-facing send refused by the notifier's
+// send-time fence (kill switch on, mode off, no usable session). The refusal
+// is a state, not a failure of the notification: queued rows stay pending.
+var ErrSendBlocked = errors.New("owner send blocked")
+
+// ErrSendFenceUnverifiable means the fence could not read the state it
+// authorizes against (database error). It fails closed exactly like a denial.
+var ErrSendFenceUnverifiable = errors.New("owner send authorization unverifiable")
+
+// killFence reads GlobalKill at call time (never a snapshot). nil GlobalKill
+// means no kill gate, as before.
+func (n *Notifier) killFence() error {
+	if n.GlobalKill != nil && n.GlobalKill() {
+		return fmt.Errorf("%w: global kill switch is on", ErrSendBlocked)
+	}
+	return nil
+}
+
+// sendFence is the single send-time authorization recheck for a queued
+// notification. DeliverPending runs it per notification, both before claiming
+// and again immediately before the sender call, so a flip in the middle of a
+// batch is observed. Checks, cheapest and side-effect-free first:
+//
+//  1. live GlobalKill;
+//  2. agent mode, for agent kinds only (summary, approval_request and any
+//     unknown kind): mode=off, a missing profile and an unreadable profile all
+//     deny. human_input is profile- and mode-independent by design (its code
+//     never consults the agent profile) and skips this step only;
+//  3. a live Telegram session for every kind, the same Store.CheckSessionValid
+//     the ClientPool.Borrow beneath the real sender runs. NOT side-effect-free:
+//     CheckSessionValid revokes an expired, idle or half-login session row
+//     itself. Any error, including a database error, denies.
+//
+// It is not atomic with the send: the checks are database reads and the send
+// is an RPC, so a flip between the last read and the RPC still goes out. The
+// window is one DB round trip wide here; the real sender additionally
+// rechecks the session in Borrow (the lower fence), which narrows but does
+// not remove it either.
+func (n *Notifier) sendFence(ctx context.Context, userID int64, kind string) error {
+	if err := n.killFence(); err != nil {
+		return err
+	}
+	if kind != db.NotificationHumanInput {
+		p, err := n.Store.GetAgentProfile(ctx, userID)
+		switch {
+		case errors.Is(err, db.ErrAgentProfileNotFound):
+			return fmt.Errorf("%w: no agent profile", ErrSendBlocked)
+		case err != nil:
+			return fmt.Errorf("%w: read agent profile: %w", ErrSendFenceUnverifiable, err)
+		case p.Mode == db.AgentModeOff:
+			return fmt.Errorf("%w: agent mode is off", ErrSendBlocked)
+		}
+	}
+	if _, err := n.Store.CheckSessionValid(ctx, userID); err != nil {
+		if errors.Is(err, db.ErrNoActiveSession) || errors.Is(err, db.ErrSessionExpired) ||
+			errors.Is(err, db.ErrSessionUnauthorized) || errors.Is(err, db.ErrSessionRevoked) {
+			return fmt.Errorf("%w: no usable session: %w", ErrSendBlocked, err)
+		}
+		return fmt.Errorf("%w: check session: %w", ErrSendFenceUnverifiable, err)
+	}
+	return nil
 }
 
 // DeliverPending sends every currently-pending owner_notifications row,
@@ -160,6 +233,15 @@ func (n *Notifier) DeliverPending(ctx context.Context) (delivered, failed int, e
 		return 0, 0, fmt.Errorf("list pending notifications: %w", err)
 	}
 	for _, notif := range notifs {
+		// Fence before claiming so a blocked row is neither claimed nor leased
+		// and resumes on the very next sweep once the block clears. A blocked
+		// row stays pending, unclaimed, payload untouched.
+		if ferr := n.sendFence(ctx, notif.UserID, notif.Kind); ferr != nil {
+			if n.fenceSkip(notif, ferr) {
+				failed++
+			}
+			continue
+		}
 		// Claim before sending: two replicas (or two overlapping sweep
 		// ticks) can both list the same pending row, but only one wins the
 		// lease and should actually call SendToSelf for it. A lost claim is
@@ -204,6 +286,18 @@ func (n *Notifier) DeliverPending(ctx context.Context) (delivered, failed int, e
 			failed++
 			continue
 		}
+		// Final boundary recheck, as close to the sender as the code allows:
+		// the claim, the format lookups and earlier notifications in this
+		// batch all took time, and the kill switch, mode or session may have
+		// flipped since the pre-claim check. The row is already claimed and
+		// its random_id persisted; it stays that way (the lease expires on its
+		// own, the same id is reused on resume), and no send is attempted.
+		if ferr := n.sendFence(ctx, notif.UserID, notif.Kind); ferr != nil {
+			if n.fenceSkip(notif, ferr) {
+				failed++
+			}
+			continue
+		}
 		msgID, serr := n.Sender.SendToSelfWithRandomID(ctx, notif.UserID, randomID, text)
 		if errors.Is(serr, executor.ErrAlreadyDelivered) {
 			// A retry of a claimed notification whose earlier send reached
@@ -243,6 +337,19 @@ func (n *Notifier) DeliverPending(ctx context.Context) (delivered, failed int, e
 		delivered++
 	}
 	return delivered, failed, nil
+}
+
+// fenceSkip logs a fence refusal and reports whether it counts as a failed
+// delivery. A deterministic block (ErrSendBlocked) is a pending state and is
+// not counted, like the kill switch at sweep entry; an unverifiable state is
+// counted as failed. Neither marks the row sent or failed.
+func (n *Notifier) fenceSkip(notif db.OwnerNotification, err error) (counted bool) {
+	if errors.Is(err, ErrSendBlocked) {
+		slog.Info("notifier: send blocked, row left pending", "notification_id", notif.ID, "kind", notif.Kind, "err", err)
+		return false
+	}
+	slog.Warn("notifier: send authorization unverifiable, row left pending", "notification_id", notif.ID, "kind", notif.Kind, "err", err)
+	return true
 }
 
 // locateDelivered asks the SelfSender, when it can, for the id of a

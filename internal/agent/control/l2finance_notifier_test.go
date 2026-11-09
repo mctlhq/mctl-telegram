@@ -4,6 +4,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -102,35 +103,56 @@ func TestL2Finance_T8_Kill(t *testing.T) {
 
 func TestL2Finance_T8_ModeOffAfterQueue(t *testing.T) {
 	h := l2NewNotifierHarness(t, true)
-	h.queue(t, h.alice, "queued while observe")
+	id := h.queue(t, h.alice, "queued while observe")
 	h.setMode(t, h.alice, db.AgentModeOff)
 	l2Deliver(t, h)
-	expectGap(t, "T8.mode_off_after_queue", len(h.sink.snapshot()) == 1,
-		"DeliverPending sent after mode=off; no delivery-time mode check")
+	l2Must(t, l2CheckNoSend(h))
+	if got := h.status(t, id); got != db.NotificationPending {
+		t.Fatalf("status under mode off = %q, want pending", got)
+	}
+	h.setMode(t, h.alice, db.AgentModeObserve)
+	l2Deliver(t, h)
+	l2Must(t, l2CheckOnlyOwnUser(h, map[string]int64{"queued while observe": h.alice}))
+	l2Record(t, "T8.mode_off_after_queue", l2Pass,
+		"0 sends and row pending under mode=off; delivered once after mode restored")
 }
 
 func TestL2Finance_T8_ModeOffBeforeQueueDelivery(t *testing.T) {
 	h := l2NewNotifierHarness(t, true)
 	h.setMode(t, h.alice, db.AgentModeOff)
-	h.queue(t, h.alice, "inserted while off")
+	id := h.queue(t, h.alice, "inserted while off")
 	l2Deliver(t, h)
-	expectGap(t, "T8.mode_off_before_queue.delivery", len(h.sink.snapshot()) == 1,
-		"row inserted directly while mode=off was delivered; queue-time refusal is the policy package's row and is not claimed here")
+	l2Must(t, l2CheckNoSend(h))
+	if got := h.status(t, id); got != db.NotificationPending {
+		t.Fatalf("status = %q, want pending", got)
+	}
+	h.setMode(t, h.alice, db.AgentModeGuarded)
+	l2Deliver(t, h)
+	l2Must(t, l2CheckOnlyOwnUser(h, map[string]int64{"inserted while off": h.alice}))
+	l2Record(t, "T8.mode_off_before_queue.delivery", l2Pass,
+		"row inserted directly while mode=off: 0 sends, pending; delivered once after mode restored; queue-time refusal is the policy package's row and is not claimed here")
 }
 
 func TestL2Finance_T8_RevokedAfterQueue(t *testing.T) {
 	h := l2NewNotifierHarness(t, true)
 	ctx := context.Background()
 	l2Must(t, h.store.SaveSession(ctx, h.alice, []byte("synthetic-session"), 100, "Alice", "alice_tg"))
-	h.queue(t, h.alice, "queued before revoke")
+	id := h.queue(t, h.alice, "queued before revoke")
 	revoked, err := h.store.RevokeActiveSession(ctx, h.alice, "l2finance")
 	l2Must(t, err)
 	if !revoked {
 		t.Fatal("RevokeActiveSession revoked nothing; fixture session missing")
 	}
 	l2Deliver(t, h)
-	expectGap(t, "T8.revoked_after_queue", len(h.sink.snapshot()) == 1,
-		"Notifier called the sender after session revocation; no Notifier-level fence")
+	l2Must(t, l2CheckNoSend(h))
+	if got := h.status(t, id); got != db.NotificationPending {
+		t.Fatalf("status = %q, want pending", got)
+	}
+	l2Must(t, h.store.SaveSession(ctx, h.alice, []byte("synthetic-session-2"), 9200000+h.alice, "Alice", "alice_tg"))
+	l2Deliver(t, h)
+	l2Must(t, l2CheckOnlyOwnUser(h, map[string]int64{"queued before revoke": h.alice}))
+	l2Record(t, "T8.revoked_after_queue", l2Pass,
+		"Notifier-level fence: 0 sender calls after revocation, row pending; delivered once after a new session. Lower pool fence is separate (T8.revoked_pool_fence)")
 }
 
 func TestL2Finance_T8_RevokedPoolFence(t *testing.T) {
@@ -141,9 +163,18 @@ func TestL2Finance_T8_RevokedPoolFence(t *testing.T) {
 func TestL2Finance_T8_ReplyKill(t *testing.T) {
 	h := l2NewNotifierHarness(t, true)
 	h.killOn.Store(true)
+	err := h.router.HandleSavedText(context.Background(), SavedMeta{UserID: h.alice}, "/mctl status")
+	if !errors.Is(err, ErrSendBlocked) {
+		t.Fatalf("HandleSavedText under kill err = %v, want ErrSendBlocked", err)
+	}
+	l2Must(t, l2CheckNoSend(h))
+	h.killOn.Store(false)
 	l2Must(t, h.router.HandleSavedText(context.Background(), SavedMeta{UserID: h.alice}, "/mctl status"))
-	expectGap(t, "T8.reply_kill", len(h.sink.snapshot()) == 1,
-		"Reply sent while GlobalKill is true; Reply is not gated by the kill switch")
+	if n := len(h.sink.snapshot()); n != 1 {
+		t.Fatalf("sends after kill cleared = %d, want 1", n)
+	}
+	l2Record(t, "T8.reply_kill", l2Pass,
+		"Reply denied with ErrSendBlocked and 0 sends under GlobalKill; one reply after kill cleared")
 }
 
 // M2: the kill hook is omitted although the switch is on. The T8.kill helper

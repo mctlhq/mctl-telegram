@@ -51,6 +51,7 @@ func notificationRow(t *testing.T, store *db.Store, id int64) (status string, ms
 // failed.
 func TestNotifier_DeliverPending_DuplicateRetryIsDelivered(t *testing.T) {
 	_, _, _, store, uid := newTestRouter(t)
+	seedSession(t, store, uid)
 	ctx := context.Background()
 	notifID, err := store.InsertOwnerNotification(ctx, db.OwnerNotification{
 		UserID: uid, Kind: db.NotificationSummary, Body: "summary for Alice",
@@ -84,6 +85,7 @@ func TestNotifier_DeliverPending_DuplicateRetryIsDelivered(t *testing.T) {
 // its id is stored as unknown (NULL), never as a fake 0.
 func TestNotifier_DeliverPending_DuplicateWithoutLocatedIDStoresNull(t *testing.T) {
 	_, _, _, store, uid := newTestRouter(t)
+	seedSession(t, store, uid)
 	ctx := context.Background()
 	notifID, err := store.InsertOwnerNotification(ctx, db.OwnerNotification{
 		UserID: uid, Kind: db.NotificationSummary, Body: "summary for Bob",
