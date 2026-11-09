@@ -44,12 +44,12 @@ a tenant: the tenant comes from the caller's token and mctl-api only.
 ## Routes and probes
 
 
-The ingress **must preserve the original HTTP Host authority** on \`/mcp\`
+The ingress **must preserve the original HTTP Host authority** on `/mcp`
 requests. The facade rejects foreign/malformed Host values with HTTP 403 to
-prevent DNS rebinding. For the production resource \`https://glovo.mctl.ai/mcp\`,
-both \`Host: glovo.mctl.ai\` and \`Host: glovo.mctl.ai:443\` are accepted;
+prevent DNS rebinding. For the production resource `https://glovo.mctl.ai/mcp`,
+both `Host: glovo.mctl.ai` and `Host: glovo.mctl.ai:443` are accepted;
 other ports, unrelated hosts and loopback are refused. Loopback hosts are
-allowed only with explicit \`GLOVO_MCP_DEV=true\`, never in production.
+allowed only with explicit `GLOVO_MCP_DEV=true`, never in production.
 
 
 `/mcp`, `/.well-known/oauth-protected-resource` (and `/mcp` alias), `/healthz`,
