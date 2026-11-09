@@ -61,12 +61,21 @@ finalize() {
 	local rc=$?
 	[ "$FINALIZED" = 1 ] && return
 	FINALIZED=1
-	# An unexpected exit (set by a failing step or a signal) keeps the sentinel.
-	if [ "$FINAL_RC" != 0 ] && [ "$ISSUE" != "COMPLETE_WITH_PASS" ] && [ "$ISSUE" != "COMPLETE_WITH_GAPS_BLOCKED" ]; then
-		HARNESS=INVALID GATE=BLOCKED
+	# Persist fail-closed status on *every* abnormal exit, including a signal
+	# after a success-path summary was assembled. Never publish a stale PASS.
+	if [ "$rc" != 0 ] && { [ "$FINAL_RC" = 0 ] || [ "$FINAL_RC" = 2 ]; }; then
+		FINAL_RC=$rc
 	fi
-	[ -s "$OUT/summary.md" ] || write_sentinel
-	[ "$FINAL_RC" = 2 ] && [ "$rc" != 0 ] && FINAL_RC=$rc
+	if [ "$FINAL_RC" != 0 ]; then
+		HARNESS=INVALID GATE=BLOCKED
+		case "$ISSUE" in
+			COMPLETE_WITH_PASS|COMPLETE_WITH_GAPS_BLOCKED) ISSUE=CANNOT_OBSERVE_BLOCKED ;;
+		esac
+		write_sentinel || FINAL_RC=2
+	elif [ ! -s "$OUT/summary.md" ]; then
+		HARNESS=INVALID GATE=BLOCKED ISSUE=CANNOT_OBSERVE_BLOCKED FINAL_RC=2
+		write_sentinel || FINAL_RC=2
+	fi
 	cat "$OUT/status.txt" 2>/dev/null
 	exit "$FINAL_RC"
 }
