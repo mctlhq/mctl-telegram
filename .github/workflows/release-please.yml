@@ -212,6 +212,66 @@ jobs:
               ;;
           esac
 
+  # Release-tagged image of the Glovo MCP facade (cmd/glovo-mcp,
+  # Dockerfile.glovo-mcp). Modelled on agent-worker-release: this guard is the
+  # separately approved release gate. No services/labs/glovo-mcp/values.yaml
+  # exists in mctl-gitops, so every release emits the skip notice and
+  # publishes no ghcr.io/mctlhq/mctl-glovo-mcp image. Absence (HTTP 404)
+  # skips; any read that could not be observed fails.
+  glovo-mcp-release:
+    needs: release-please
+    if: ${{ !cancelled() && needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    environment: app-dispatch
+    permissions:
+      contents: read
+    steps:
+      - name: Generate Platform App token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.DISPATCH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.DISPATCH_APP_PRIVATE_KEY }}
+          owner: mctlhq
+          repositories: mctl-gitops
+
+      - name: Check out the guard script at the released tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - name: Dispatch glovo-mcp release-deploy
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          READ_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          VALUES=platform-gitops/services/labs/glovo-mcp/values.yaml
+          rc=0; GH_TOKEN="$READ_TOKEN" .github/scripts/gitops-values-present.sh "$VALUES" || rc=$?
+          case "$rc" in
+            0)
+              gh workflow run release-deploy.yaml \
+                --repo mctlhq/mctl-gitops \
+                --ref main \
+                -f repo=mctlhq/mctl-telegram \
+                -f git_ref="$TAG" \
+                -f image_name=ghcr.io/mctlhq/mctl-glovo-mcp \
+                -f image_tag="$TAG" \
+                -f dockerfile_path=Dockerfile.glovo-mcp \
+                -f team_name=labs \
+                -f component_name=glovo-mcp
+              ;;
+            3)
+              echo "::notice::$VALUES not on mctl-gitops main; skipping glovo-mcp dispatch"
+              ;;
+            *)
+              echo "::error::could not read $VALUES on mctl-gitops main (rc=$rc)"
+              exit 1
+              ;;
+          esac
+
   # The live round trip against real Telegram (#854) runs once per release,
   # on the tag just cut, and never on a schedule: it spends the CI account's
   # flood budget, which the production canary shares. Its own job so that a
