@@ -548,3 +548,63 @@ func TestNoTelegramSurface(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+
+func TestHostGuardNormalizesDefaultPort(t *testing.T) {
+	// An authenticated public client must not be blocked just because a proxy
+	// preserves the explicit HTTPS port. Foreign or ambiguous Host authorities
+	// must be rejected before any authentication or mctl-api work.
+	for _, dev := range []bool{false, true} {
+		mode := "production"
+		if dev {
+			mode = "development"
+		}
+		t.Run(mode, func(t *testing.T) {
+			r := newRig(t, func(c *config.Config) { c.Dev = dev })
+			cases := []struct {
+				name, host string
+				want       int
+			}{
+				{"public", "glovo.mctl.ai", http.StatusUnauthorized},
+				{"public_default_port", "glovo.mctl.ai:443", http.StatusUnauthorized},
+				{"public_case", "GLOVO.MCTL.AI:443", http.StatusUnauthorized},
+				{"foreign", "evil.example", http.StatusForbidden},
+				{"foreign_suffix", "glovo.mctl.ai.evil.example", http.StatusForbidden},
+				{"wrong_port", "glovo.mctl.ai:8443", http.StatusForbidden},
+				{"http_port", "glovo.mctl.ai:80", http.StatusForbidden},
+				{"non_numeric_port", "glovo.mctl.ai:bad", http.StatusForbidden},
+				{"zero_port", "glovo.mctl.ai:0", http.StatusForbidden},
+				{"empty_port", "glovo.mctl.ai:", http.StatusForbidden},
+				{"userinfo", "glovo.mctl.ai@evil.example", http.StatusForbidden},
+				{"path_in_host", "glovo.mctl.ai/mcp", http.StatusForbidden},
+				{"loopback_hostname", "localhost:8080", http.StatusForbidden},
+				{"loopback_ipv4", "127.0.0.1:8080", http.StatusForbidden},
+				{"loopback_ipv6", "[::1]:8080", http.StatusForbidden},
+				{"unbracketed_ipv6", "::1", http.StatusForbidden},
+			}
+			if dev {
+				for i := range cases {
+					if strings.HasPrefix(cases[i].name, "loopback_") {
+						cases[i].want = http.StatusUnauthorized
+					}
+				}
+			}
+			for _, tc := range cases {
+				for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodDelete} {
+					t.Run(tc.name+"/"+method, func(t *testing.T) {
+						req := httptest.NewRequest(method, "https://glovo.mctl.ai/mcp", nil)
+						req.Host = tc.host
+						rr := httptest.NewRecorder()
+						r.f.Handler().ServeHTTP(rr, req)
+						if rr.Code != tc.want {
+							t.Fatalf("Host=%q %s: status=%d, want=%d (body=%q)", tc.host, method, rr.Code, tc.want, rr.Body.String())
+						}
+					})
+				}
+			}
+			if len(r.fake.Calls()) != 0 {
+				t.Fatalf("Host/authentication checks contacted mctl-api")
+			}
+		})
+	}
+}
