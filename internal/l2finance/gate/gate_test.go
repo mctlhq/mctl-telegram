@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -146,7 +147,7 @@ func evaluate(man []manifestRow, stream io.Reader, pinnedRev string) result {
 			problem("unclassified L2RESULT line in %s: %q", e.Package, line)
 			continue
 		}
-		r := row{Pkg: filepath.Base(e.Package), ID: m[1], Outcome: m[2], Rev: m[3], Evidence: m[4], Fixture: "missing"}
+		r := row{Pkg: path.Base(e.Package), ID: m[1], Outcome: m[2], Rev: m[3], Evidence: m[4], Fixture: "missing"}
 		if fm := fixRe.FindStringSubmatch(r.Evidence); fm != nil {
 			r.Fixture = fm[1]
 		}
@@ -306,12 +307,12 @@ func TestL2FinanceGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("manifest: %v", err)
 	}
-	var stream io.Reader = bytes.NewReader(nil)
-	if f, err := os.Open(path); err == nil {
-		defer f.Close()
-		stream = f
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open L2 finance results %q: %v", path, err)
 	}
-	res := evaluate(man, stream, os.Getenv("L2FINANCE_SOURCE_REV"))
+	defer f.Close()
+	res := evaluate(man, f, os.Getenv("L2FINANCE_SOURCE_REV"))
 	if p := os.Getenv("L2FINANCE_SUMMARY_MD"); p != "" {
 		if err := os.WriteFile(p, []byte(res.markdown()), 0o644); err != nil {
 			t.Fatal(err)
