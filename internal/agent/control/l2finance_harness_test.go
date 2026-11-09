@@ -77,7 +77,7 @@ func TestMain(m *testing.M) {
 
 func l2Record(t testing.TB, id, outcome, evidence string) {
 	t.Helper()
-	t.Logf("L2RESULT id=%s outcome=%s rev=%s evidence=%s", id, outcome, l2SourceRev, evidence)
+	t.Logf("L2RESULT id=%s outcome=%s rev=%s evidence=fixture_id=L2SYNTH-%s %s", id, outcome, l2SourceRev, id, evidence)
 }
 
 // expectGap records FAIL/GAP when the unsafe behaviour is observed and fails

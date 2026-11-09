@@ -335,11 +335,25 @@ func TestL2Finance_T10(t *testing.T) {
 		l2CaptureSlog(t, audit.NewRedactingHandler(slog.NewJSONHandler(&buf, nil)))
 		h.scenario()
 		src := h.sources()
-		src["slog"] = buf.String()
 		err := l2AssertNoMarker(src)
-		l2Record(t, "T10.redaction_text", l2Outcome(err == nil), fmt.Sprintf("slog_bytes=%d err=%v", buf.Len(), err))
+		l2Record(t, "T10.redaction_text", l2Outcome(err == nil), fmt.Sprintf("durable_sources_only err=%v", err))
 		if err != nil {
 			t.Errorf("leak: %v", err)
+		}
+		// Observable slog redaction: the scenario may emit nothing, so a
+		// synthetic marker is sent through the production redacting handler.
+		// Zero bytes is never a PASS.
+		slog.Info("l2 t10 slog", "text", l2Marker)
+		slogBytes := buf.Len()
+		slogErr := l2AssertNoMarker(map[string]string{"slog": buf.String()})
+		switch {
+		case slogBytes == 0:
+			l2Record(t, "T10.redaction_slog", l2CannotObserve, "slog_bytes=0: no log event reached the redacting handler")
+		case slogErr != nil:
+			l2Record(t, "T10.redaction_slog", l2FailGap, fmt.Sprintf("slog_bytes=%d err=%v", slogBytes, slogErr))
+			t.Errorf("slog leak: %v", slogErr)
+		default:
+			l2Record(t, "T10.redaction_slog", l2Pass, fmt.Sprintf("slog_bytes=%d marker redacted", slogBytes))
 		}
 	})
 	t.Run("intent_channel", func(t *testing.T) {
@@ -413,7 +427,7 @@ func TestL2Finance_M4(t *testing.T) {
 	if err := l2AssertNoMarker(map[string]string{"slog_unredacted": raw.String()}); err == nil {
 		t.Fatal("M4: l2AssertNoMarker did not detect an unredacted marker")
 	}
-	l2Record(t, "M4", l2Pass+" (detected)", "unredacted JSON handler leak reported by the same helper used by T10")
+	l2Record(t, "M4", l2Pass, "detected: unredacted JSON handler leak reported by the same helper used by T10")
 
 	var red bytes.Buffer
 	l2CaptureSlog(t, audit.NewRedactingHandler(slog.NewJSONHandler(&red, nil)))

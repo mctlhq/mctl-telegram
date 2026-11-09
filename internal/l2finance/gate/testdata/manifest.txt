@@ -1,0 +1,68 @@
+# Mandatory canonical L2 finance rows: <package>:<id> <kind> <fixture>
+# kind: case (counts toward the gate), control (M1-M4, must PASS), offline (must PASS).
+# fixture: synthetic (stable L2SYNTH-<id> fixture_id required) or none.
+# Crosswalk to #1244 T1-T10 / M1-M4 is NOT independently reviewed: rows come from
+# current emitters, so missing emitters (if any) are not yet represented. See the report.
+# A line marked MISSING in the 4th column has no emitter and forces INCOMPLETE_BLOCKED.
+agentapi:M4 control synthetic
+agentapi:M4.redacted_twin control synthetic
+agentapi:OFFLINE.default_paths offline synthetic
+agentapi:OFFLINE.whole_process case synthetic
+agentapi:T10.action_rows case synthetic
+agentapi:T10.denycode_persisted case synthetic
+agentapi:T10.intent_channel case synthetic
+agentapi:T10.redaction_slog case synthetic
+agentapi:T10.redaction_text case synthetic
+agentapi:T10.traces case synthetic
+agentapi:T2.bob_job_owner_summary case synthetic
+agentapi:T2.finance_origin_authorization case synthetic
+agentapi:T3.account_foreign_context case synthetic
+agentapi:T3.account_foreign_conversation case synthetic
+agentapi:T3.account_foreign_job case synthetic
+agentapi:T3.finance_source_consent case synthetic
+agentapi:T3.job_foreign_conversation case synthetic
+agentapi:T7.3.omit_job_id case synthetic
+agentapi:T7.3.with_job_id case synthetic
+agentapi:T9.executor_peer_send case synthetic
+agentapi:T9.finance_tier case synthetic
+agentapi:T9.guarded_allowlisted case synthetic
+agentapi:T9.observe_no_peer_send case synthetic
+control:M2 control synthetic
+control:M3 control synthetic
+control:OFFLINE.default_paths offline synthetic
+control:T1.notifier_self_only case synthetic
+control:T3.finance_source case synthetic
+control:T3.per_user case synthetic
+control:T5.2.random_id case synthetic
+control:T8.kill case synthetic
+control:T8.mode_off_after_queue case synthetic
+control:T8.mode_off_before_queue.delivery case synthetic
+control:T8.reply_kill case synthetic
+control:T8.revoked_after_queue case synthetic
+control:T8.revoked_pool_fence case synthetic
+listener:M1 control synthetic
+listener:OFFLINE.default_paths offline synthetic
+listener:OFFLINE.whole_process case synthetic
+listener:T1.listener_status case synthetic
+listener:T2.bob_dm case synthetic
+listener:T2.spoof_from case synthetic
+listener:T4.channel case synthetic
+listener:T4.forwarded case synthetic
+listener:T4.group_chat case synthetic
+listener:T4.saved_peer case synthetic
+listener:T5.1.push_then_history case synthetic
+listener:T5.3.cursor_monotonic case synthetic
+listener:T6.gap case synthetic
+listener:T6.out_false_push case synthetic
+listener:T6.reconnect_replay case synthetic
+policy:OFFLINE.default_paths offline synthetic
+policy:T10.denycode case synthetic
+policy:T7.1 case synthetic
+policy:T7.2 case synthetic
+policy:T8.kill case synthetic
+policy:T8.mode_off_before_queue case synthetic
+policy:T9.finance_tier case synthetic
+policy:T9.reply_observe case synthetic
+telegram:OFFLINE.default_paths offline synthetic
+telegram:T1.source_pin case synthetic
+telegram:T1.wire_input_peer_self case synthetic
