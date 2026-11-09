@@ -7,6 +7,7 @@ import (
 
 	"go.temporal.io/sdk/converter"
 
+	"github.com/mctlhq/mctl-telegram/provider/glovo/internal/bridge"
 	"github.com/mctlhq/mctl-telegram/provider/glovo/internal/bridge/fake"
 	"github.com/mctlhq/mctl-telegram/provider/glovo/internal/fakestore"
 	"github.com/mctlhq/mctl-telegram/provider/glovo/internal/leakcheck"
@@ -314,5 +315,40 @@ func TestConverterRejectsCanary(t *testing.T) {
 	}
 	if _, err := dc.ToPayloads("opaque-ref-1"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+
+// Matching a pre-existing fake basket must not allow a synthetic handoff
+// without recorded proof that this workflow consumed the bound aar_ receipt.
+func TestMatchingBasketCannotBypassApprovalBeforeHandoff(t *testing.T) {
+	for _, tc := range []string{"unconsumed", "wrong", "expired", "replayed"} {
+		t.Run(tc, func(t *testing.T) {
+			h := newHarness(t, lunch())
+			h.Store.SeedCart(h.conn, lunch())
+			switch tc {
+			case "wrong":
+				h.snap.Req.ApprovalRef = "aar_unrelated"
+			case "expired":
+				h.Bridge.AddReceipt("aar_alpha1", fake.Binding{
+					Execution: h.Req.ExecutionRef, Tenant: h.Req.TenantRef,
+					Owner: h.Req.OwnerRef, Connection: h.Req.ConnectionRef,
+					IntentHash: h.Req.IntentHash, Fingerprint: h.FP,
+					InstallRevision: h.Req.InstallRevision,
+				}, time.Now().Add(-time.Second))
+			case "replayed":
+				if err := h.Bridge.ConsumeApproval(context.Background(), h.Req, h.FP); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h.consentAt(time.Minute, "approve-existing-basket", func(s *ConsentSignal) {
+				s.ReplaceExisting = true
+			})
+			r := h.run()
+			if r.Status != bridge.CodeApprovalInvalid || has(r.States, "handoff_issued") ||
+				has(r.States, "handoff_opened") || h.Writes() != 0 {
+				t.Fatalf("receipt=%s status=%s states=%v writes=%d", tc, r.Status, r.States, h.Writes())
+			}
+		})
 	}
 }
