@@ -1,8 +1,26 @@
 # Mandatory canonical L2 finance rows: <package>:<id> <kind> <fixture>
 # kind: case (counts toward the gate), control (M1-M4, must PASS), offline (must PASS).
 # fixture: synthetic (stable L2SYNTH-<id> fixture_id required) or none.
-# Crosswalk to #1244 T1-T10 / M1-M4 is NOT independently reviewed: rows come from
-# current emitters, so missing emitters (if any) are not yet represented. See the report.
+# Source-mapped review against mctl-telegram#1244 and canonical proposal
+# issue-1244-spike-test-finance-assistant-l2-owner-pr/requirements.md and
+# design.md, including the *negative* owner-invocation and absent finance verb:
+# T1 = listener.status + listener.finance_command (NOT-IMPLEMENTED) +
+#      control.notifier_self_only + telegram.source_pin/wire_input_peer_self
+# T2 = listener.bob_dm/spoof_from + agentapi.ordinary_owner_routing +
+#      agentapi.bob_job_owner_summary (FAIL/GAP) + finance_origin_authorization
+# T3 = control.per_user/finance_source + agentapi.account/job isolation +
+#      agentapi.finance_source_consent (NOT-IMPLEMENTED)
+# T4 = listener group/channel/forwarded/saved_peer extraction
+# T5 = listener.push_then_history/cursor_monotonic + control.random_id
+# T6 = listener.out_false_push/reconnect_replay/gap (CANNOT-OBSERVE)
+# T7 = policy.T7.1/T7.2 + agentapi.T7.3.with_job_id/omit_job_id
+# T8 = policy.kill/mode_off_before_queue + control kill/mode_off/revocation/reply
+# T9 = policy.reply_observe/finance_tier + agentapi observe/allowlisted/
+#      finance_tier/executor_peer_send (CANNOT-OBSERVE)
+# T10 = policy.denycode + agentapi action/audit/slog/trace rows
+# M1 = listener, M2/M3 = control, M4 = agentapi (also redacted twin)
+# Mandatory source contract has no unrepresented subcase after the two added
+# rows; any future missing emitter must be marked MISSING (not silently omitted).
 # A line marked MISSING in the 4th column has no emitter and forces INCOMPLETE_BLOCKED.
 agentapi:M4 control synthetic
 agentapi:M4.redacted_twin control synthetic
@@ -15,6 +33,7 @@ agentapi:T10.redaction_slog case synthetic
 agentapi:T10.redaction_text case synthetic
 agentapi:T10.traces case synthetic
 agentapi:T2.bob_job_owner_summary case synthetic
+agentapi:T2.ordinary_owner_routing case synthetic
 agentapi:T2.finance_origin_authorization case synthetic
 agentapi:T3.account_foreign_context case synthetic
 agentapi:T3.account_foreign_conversation case synthetic
@@ -44,6 +63,7 @@ listener:M1 control synthetic
 listener:OFFLINE.default_paths offline synthetic
 listener:OFFLINE.whole_process case synthetic
 listener:T1.listener_status case synthetic
+listener:T1.finance_command case synthetic
 listener:T2.bob_dm case synthetic
 listener:T2.spoof_from case synthetic
 listener:T4.channel case synthetic
