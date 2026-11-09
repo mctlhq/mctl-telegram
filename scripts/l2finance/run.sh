@@ -81,6 +81,11 @@ command -v go >/dev/null || fail CANNOT_OBSERVE_BLOCKED "go not found"
 
 unset TG_API_ID TG_API_HASH DATABASE_URL GITHUB_TOKEN GH_TOKEN
 export L2FINANCE_SOURCE_REV="$REV"
+# Resolve the pinned toolchain once, while the environment is still normal
+# (toolchain switching verifies through the checksum database), then lock down.
+GOROOT_RESOLVED="$(go env GOROOT 2>/dev/null)"
+[ -x "$GOROOT_RESOLVED/bin/go" ] || fail CANNOT_OBSERVE_BLOCKED "cannot resolve the Go toolchain"
+export PATH="$GOROOT_RESOLVED/bin:$PATH" GOTOOLCHAIN=local
 export GOPROXY=off GOSUMDB=off GOFLAGS=-mod=readonly
 
 # Verify dependencies resolve from the cache with downloads disabled.
