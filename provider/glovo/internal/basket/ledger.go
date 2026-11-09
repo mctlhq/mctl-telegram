@@ -7,7 +7,14 @@ import "sync"
 type Key struct{ Tenant, Order, IntentHash string }
 
 // Entry is the recorded outcome of an applied effect.
-type Entry struct{ Fingerprint string }
+// A ledger entry is handoff-authoritative only if ConsumeApproval succeeded
+// for this exact execution and receipt before the provider effect. Merely
+// observing a pre-existing matching basket does not establish consent.
+type Entry struct {
+	Fingerprint  string
+	ExecutionRef string
+	ApprovalRef  string
+}
 
 type slot struct {
 	mu    sync.Mutex
