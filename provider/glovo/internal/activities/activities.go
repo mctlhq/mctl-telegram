@@ -143,11 +143,14 @@ func (a *Activities) admit(tenant string) (func(), error) {
 
 func (a *Activities) breakerOpen() bool { return a.Breaker != nil && !a.Breaker.Allow() }
 
+// breakerHeld is a non-consuming check; client() does the probe-admitting Allow.
+func (a *Activities) breakerHeld() bool { return a.Breaker != nil && a.Breaker.IsOpen() }
+
 func (a *Activities) note(err error) {
 	if a.Breaker != nil {
 		a.Breaker.Record(errors.Is(err, fakestore.ErrRateLimited))
 		if a.Metrics != nil {
-			if a.Breaker.Allow() {
+			if !a.Breaker.IsOpen() {
 				a.Metrics.BreakerOpn.Set(0)
 			} else {
 				a.Metrics.BreakerOpn.Set(1)
@@ -226,7 +229,7 @@ func (a *Activities) MutateBasket(ctx context.Context, req v1alpha1.ProviderRequ
 	if err := req.RequireApproval(); err != nil {
 		return MutateResult{}, a.invalid(err)
 	}
-	if (a.Disabled != nil && a.Disabled()) || a.breakerOpen() {
+	if (a.Disabled != nil && a.Disabled()) || a.breakerHeld() {
 		code := bridge.CodeProviderDisabled
 		if a.Disabled == nil || !a.Disabled() {
 			code = bridge.CodeProviderUnavail

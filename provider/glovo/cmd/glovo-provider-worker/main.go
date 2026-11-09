@@ -89,7 +89,7 @@ func run(ctx context.Context, env []string, dial dialer) error {
 		Breaker: breaker, Limiter: fairness.NewLimiter(4),
 		Disabled: func() bool { return cfg.Disabled }, Log: log, Metrics: metrics,
 	}
-	hs := &health.State{Disabled: acts.Disabled, BreakerOpen: func() bool { return !breaker.Allow() }}
+	hs := &health.State{Disabled: acts.Disabled, BreakerOpen: func() bool { return breaker.IsOpen() }}
 	srv := health.NewServer(cfg.HealthAddr, hs, metrics.Registry)
 	srvErr := make(chan error, 1)
 	go func() {
