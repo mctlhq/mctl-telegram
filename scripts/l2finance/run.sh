@@ -12,8 +12,16 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT" || exit 2
+# Capture original dirtiness before creating the output directory, which may
+# be a fresh untracked directory inside the worktree for a relative argument.
+# Recheck tracked files just before tests, so generated output is the only
+# newly accepted untracked path.
+PREFLIGHT_TREE_STATUS="$(git status --porcelain 2>/dev/null || printf 'git-status-failed\\n')"
 OUT="${1:-${L2FINANCE_OUT:-$(mktemp -d)}}"
 mkdir -p "$OUT" || exit 2
+# Gate test binaries run from package directories, not the repo root. Always
+# supply them an absolute path for the results JSON and summary artifacts.
+OUT="$(cd "$OUT" && pwd -P)" || exit 2
 # No previous run may influence the next one. In particular a stale summary
 # must never mask a failed preflight, and stale tuples must not satisfy cmp.
 rm -f "$OUT"/summary*.md "$OUT"/tuples*.tsv "$OUT"/gate*.log \
@@ -95,7 +103,7 @@ fail() { # fail <issue> <message>
 git rev-parse HEAD >/dev/null 2>&1 || fail CANNOT_OBSERVE_BLOCKED "not a git work tree"
 REV="$(git rev-parse HEAD)"
 [[ "$REV" =~ ^[0-9a-f]{40}$ ]] || fail CANNOT_OBSERVE_BLOCKED "revision is not 40-hex"
-[ -z "$(git status --porcelain)" ] || fail CANNOT_OBSERVE_BLOCKED "work tree is not clean; commit first so the pinned sha is the tested code"
+[ -z "$PREFLIGHT_TREE_STATUS" ] && [ -z "$(git status --porcelain --untracked-files=no)" ] || fail CANNOT_OBSERVE_BLOCKED "work tree is not clean; commit first so the pinned sha is the tested code"
 command -v go >/dev/null || fail CANNOT_OBSERVE_BLOCKED "go not found"
 
 unset TG_API_ID TG_API_HASH DATABASE_URL GITHUB_TOKEN GH_TOKEN
