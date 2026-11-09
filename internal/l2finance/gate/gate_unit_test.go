@@ -5,6 +5,7 @@ package gate
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
@@ -149,5 +150,55 @@ func TestGateManifestParse(t *testing.T) {
 		if _, err := parseManifest(strings.NewReader(bad)); err == nil {
 			t.Fatalf("manifest %q accepted", bad)
 		}
+	}
+}
+
+// TestGateCanonicalCrosswalk pins the source-derived #1244 coverage so an
+// emitter and its manifest row cannot both disappear unnoticed on a rerun.
+// The manifest itself contains the complete source-to-layer mapping.
+func TestGateCanonicalCrosswalk(t *testing.T) {
+	f, err := os.Open("testdata/manifest.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	m, err := parseManifest(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]manifestRow{}
+	for _, r := range m {
+		got[r.Key] = r
+	}
+	mandatory := []string{
+		"listener:T1.listener_status",
+		"listener:T1.finance_command",
+		"control:T1.notifier_self_only",
+		"listener:T2.bob_dm",
+		"agentapi:T2.bob_job_owner_summary",
+		"agentapi:T2.ordinary_owner_routing",
+		"agentapi:T2.finance_origin_authorization",
+		"agentapi:T3.finance_source_consent",
+		"listener:T4.forwarded",
+		"listener:T5.1.push_then_history",
+		"listener:T6.reconnect_replay",
+		"policy:T7.2",
+		"agentapi:T7.3.omit_job_id",
+		"control:T8.revoked_after_queue",
+		"agentapi:T9.finance_tier",
+		"agentapi:T10.redaction_slog",
+		"agentapi:T10.intent_channel",
+		"listener:M1",
+		"control:M2",
+		"control:M3",
+		"agentapi:M4",
+	}
+	for _, key := range mandatory {
+		if row, ok := got[key]; !ok || row.Missing {
+			t.Errorf("mandatory #1244 crosswalk row missing or has no emitter: %s", key)
+		}
+	}
+	if len(got) != 64 {
+		t.Errorf("canonical #1244 manifest rows = %d, want reviewed 64", len(got))
 	}
 }
