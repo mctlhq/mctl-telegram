@@ -69,6 +69,25 @@ mctl-agents#1043. Local refusal codes beyond ADR 0010: `approval_invalid`,
 `provider_disabled`, `provider_unavailable`, `tenant_busy`, `invalid_request`,
 `write_unverified`, `write_failed`.
 
+### Approval provenance required for handoff
+
+The fake worker does not equate a matching provider basket fingerprint with
+approval. `IssueHandoff` requires a ledger entry bound to the same tenant,
+order, intent hash, execution (`we_`), approval receipt (`aar_`) and basket
+fingerprint. Only a successful `ConsumeApproval` followed by a verified
+synthetic basket effect can create that handoff-authoritative ledger entry.
+An already-matching cart may be deduped without another provider write, but
+does **not** authorize a handoff if no consumed-receipt evidence exists.
+Requests with wrong, expired or replayed receipts cannot advance to handoff
+through that path. Tests exercise this from `MutateBasket` through the
+Temporal workflow's handoff boundary.
+
+The current fake ledger is **in-memory**, not proof of production-safe
+recovery. On worker restart or ambiguous reconciliation, an unverified
+pre-existing basket must fail closed without a handoff. The future
+`mctl-api#954` / `#957` bridge contract must supply durable, owner-bound,
+idempotent approval/effect provenance (including crash and revocation tests)
+before this worker can be integrated or deployed.
 ## Gates still blocking deployment
 
 G2, G3 and G5 of ADR 0010 remain open: the production bridge
