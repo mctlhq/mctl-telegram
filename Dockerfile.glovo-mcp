@@ -1,0 +1,38 @@
+# Glovo MCP facade (cmd/glovo-mcp): an independent binary and image, built
+# from this repository but sharing nothing with the Telegram server image. It
+# holds no secrets, no Temporal client and no Glovo access; see
+# docs/glovo-mcp.md. Only what the binary needs is copied in.
+FROM golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS builder
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY cmd/glovo-mcp ./cmd/glovo-mcp
+COPY internal ./internal
+
+ARG APP_VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux \
+    go build -trimpath -ldflags="-s -w -X main.version=${APP_VERSION}" \
+    -o /mctl-glovo-mcp ./cmd/glovo-mcp
+
+FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+
+ARG APP_VERSION=dev
+LABEL org.opencontainers.image.title="mctl-glovo-mcp" \
+      org.opencontainers.image.description="Glovo MCP facade (OAuth-protected resource, hands every tool to mctl-api)" \
+      org.opencontainers.image.source="https://github.com/mctlhq/mctl-telegram" \
+      org.opencontainers.image.version="${APP_VERSION}"
+
+RUN apk add --no-cache ca-certificates && \
+    addgroup -g 1000 app && \
+    adduser -D -u 1000 -G app app
+
+COPY --from=builder /mctl-glovo-mcp /usr/local/bin/mctl-glovo-mcp
+
+USER 1000:1000
+
+EXPOSE 8080
+
+ENTRYPOINT ["mctl-glovo-mcp"]

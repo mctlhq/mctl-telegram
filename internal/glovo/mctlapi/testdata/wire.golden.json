@@ -1,0 +1,12 @@
+{
+  "wire_version": "glovo-facade-mctl-api/v1alpha1",
+  "operations": [
+    {"op": "connection", "method": "GET",  "path": "/connection",       "body": null},
+    {"op": "connect",    "method": "POST", "path": "/connections",      "body": {"idempotency_key": "k1"}},
+    {"op": "orders",     "method": "POST", "path": "/orders:list",      "body": {"limit": 5}},
+    {"op": "preview",    "method": "POST", "path": "/previews",         "body": {"order_ref": "ref_alice_1"}},
+    {"op": "basket",     "method": "GET",  "path": "/basket",           "body": null},
+    {"op": "prepare",    "method": "POST", "path": "/orders:prepare",   "body": {"preview_id": "$preview_id", "idempotency_key": "k2"}},
+    {"op": "order",      "method": "GET",  "path": "/orders/$order_id", "body": null}
+  ]
+}

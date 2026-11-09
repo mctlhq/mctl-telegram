@@ -89,3 +89,7 @@ token use. 5. Every signal and schedule fire.
 - T15 no regression of `tg.mctl.ai` descriptors
 - T16 duplicate actions and idempotency
 - T0 `go test ./docs/...` contract test
+
+## Implementation
+
+The facade binary, its candidate wire protocol and its runbook are described in `docs/glovo-mcp.md` and `docs/contracts/glovo-facade-mctl-api.md`. The wire protocol is a harness candidate until mctl-api#957 freezes the real matrix.
