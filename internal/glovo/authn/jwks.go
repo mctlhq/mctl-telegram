@@ -27,6 +27,9 @@ type jwksCache struct {
 	client *http.Client
 	now    func() time.Time
 
+	// flight serializes refreshes so concurrent callers share one fetch.
+	flight sync.Mutex
+
 	mu          sync.Mutex
 	set         jose.JSONWebKeySet
 	loaded      bool
@@ -95,24 +98,41 @@ func (c *jwksCache) key(ctx context.Context, kid string) (*jose.JSONWebKey, erro
 	loaded, stale := c.loaded, c.now().Sub(c.fetchedAt) > jwksTTL
 	c.mu.Unlock()
 	if !loaded || stale {
-		if err := c.refresh(ctx); err != nil && !loaded {
+		if err := c.refreshThrottled(ctx); err != nil && !loaded {
 			return nil, err
 		}
 	}
 	if k := c.lookup(kid); k != nil {
 		return k, nil
 	}
-	c.mu.Lock()
-	canRefetch := c.now().Sub(c.lastAttempt) >= jwksMinRefetch
-	c.mu.Unlock()
-	if canRefetch {
-		if err := c.refresh(ctx); err == nil {
-			if k := c.lookup(kid); k != nil {
-				return k, nil
-			}
+	if err := c.refreshThrottled(ctx); err == nil {
+		if k := c.lookup(kid); k != nil {
+			return k, nil
 		}
 	}
 	return nil, nil
+}
+
+var errJWKSBackoff = errors.New("jwks refresh throttled")
+
+// refreshThrottled collapses concurrent refreshes into one and allows at most
+// one attempt per jwksMinRefetch, successful or not. A caller that waited on
+// another refresh re-checks the cache and does not fetch again.
+func (c *jwksCache) refreshThrottled(ctx context.Context) error {
+	c.flight.Lock()
+	defer c.flight.Unlock()
+	c.mu.Lock()
+	now := c.now()
+	fresh := c.loaded && now.Sub(c.fetchedAt) <= jwksTTL
+	recent := !c.lastAttempt.IsZero() && now.Sub(c.lastAttempt) < jwksMinRefetch
+	c.mu.Unlock()
+	if recent {
+		if fresh {
+			return nil
+		}
+		return errJWKSBackoff
+	}
+	return c.refresh(ctx)
 }
 
 func (c *jwksCache) lookup(kid string) *jose.JSONWebKey {

@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"slices"
 	"strconv"
@@ -146,10 +147,38 @@ func (f *Facade) Handler() http.Handler {
 	r.Get("/metrics", f.metricsHandler)
 	r.Get("/.well-known/oauth-protected-resource", f.meta.ServeHTTP)
 	r.Get(authn.MetadataPath, f.meta.ServeHTTP)
-	r.Method(http.MethodPost, "/mcp", http.HandlerFunc(f.serveMCP))
-	r.Method(http.MethodGet, "/mcp", http.HandlerFunc(f.serveMCP))
-	r.Method(http.MethodDelete, "/mcp", http.HandlerFunc(f.serveMCP))
+	r.Method(http.MethodPost, "/mcp", f.hostGuard(http.HandlerFunc(f.serveMCP)))
+	r.Method(http.MethodGet, "/mcp", f.hostGuard(http.HandlerFunc(f.serveMCP)))
+	r.Method(http.MethodDelete, "/mcp", f.hostGuard(http.HandlerFunc(f.serveMCP)))
 	return r
+}
+
+// hostGuard rejects requests whose Host does not match the public endpoint
+// (DNS-rebinding protection). In dev mode loopback hosts are also accepted.
+// It is a no-op when no public base URL is configured.
+func (f *Facade) hostGuard(next http.Handler) http.Handler {
+	want := ""
+	if u, err := url.Parse(f.opt.Config.PublicBaseURL); err == nil {
+		want = strings.ToLower(u.Host)
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if want != "" {
+			h := strings.ToLower(r.Host)
+			ok := h == want
+			if !ok && f.opt.Config.Dev {
+				name := h
+				if hn, _, err := net.SplitHostPort(h); err == nil {
+					name = hn
+				}
+				ok = name == "localhost" || name == "127.0.0.1" || name == "[::1]" || name == "::1"
+			}
+			if !ok {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (f *Facade) requestID(next http.Handler) http.Handler {
