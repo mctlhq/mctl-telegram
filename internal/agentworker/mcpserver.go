@@ -103,6 +103,10 @@ type toolBuilder struct {
 	// either id.
 	resultActionID int64
 	resultLeadID   int64
+	// persistedResult is true once this attempt durably saved a lead or
+	// proposed a reply or approval request. An owner summary does not count:
+	// a manipulation alert is deliberately closed as ignored.
+	persistedResult bool
 }
 
 // Completed reports whether complete_agent_job has succeeded. It uses the
@@ -288,6 +292,7 @@ func (b *toolBuilder) proposeReply() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 				return toolErr(err), nil
 			}
 			b.resultActionID = out.ActionID
+			b.persistedResult = true
 			return jsonResult(out)
 		})
 	}
@@ -336,6 +341,7 @@ func (b *toolBuilder) saveJobLead() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 				return toolErr(err), nil
 			}
 			b.resultLeadID = leadID
+			b.persistedResult = true
 			return jsonResult(map[string]any{"lead_id": leadID})
 		})
 	}
@@ -360,6 +366,7 @@ func (b *toolBuilder) requestOwnerApproval() (mcplib.Tool, mcpserver.ToolHandler
 				return toolErr(err), nil
 			}
 			b.resultActionID = out.ActionID
+			b.persistedResult = true
 			return jsonResult(out)
 		})
 	}
@@ -440,6 +447,14 @@ func (b *toolBuilder) completeAgentJob() (mcplib.Tool, mcpserver.ToolHandlerFunc
 			status := stringArg(args, "status", "")
 			if status == "" {
 				return mcplib.NewToolResultError("status is required"), nil
+			}
+			// A model sometimes saves a lead and then asks for ignored, which
+			// contradicts the assistant contract (completed once a result is
+			// persisted) and leaves a stored lead on a job reported as having
+			// none. The server cannot link a result to an ignored job, so close
+			// it as completed here, where the persisted ids are known.
+			if status == "ignored" && b.persistedResult {
+				status = "completed"
 			}
 			result := JobResultRef{}
 			if status == "completed" {
