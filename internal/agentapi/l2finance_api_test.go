@@ -77,16 +77,17 @@ func TestL2Finance_T2(t *testing.T) {
 	carolA, carolN := h.rowsFor(h.carol)
 	ok := rec.Code == http.StatusOK && len(acts) == 1 && acts[0].Status == db.ActionExecuted &&
 		notifCount == 1 && notifUser == h.alice && kind == db.NotificationSummary && carolA+carolN == 0 && h.peer.count() == 0
-	outcome := l2Pass
 	if !ok {
-		outcome = l2FailGap
+		t.Fatalf("ordinary owner routing changed: %s; review T2 rubric", rec.Body.String())
 	}
-	l2Record(t, "T2.bob_job_owner_summary", outcome, fmt.Sprintf(
-		"http=%d actions=%d status=%v notif_rows=%d notif_owner_is_alice=%t kind=%s carol_rows=%d peer_sink=%d scope=ordinary_owner_routing",
+	l2Record(t, "T2.ordinary_owner_routing", l2Pass, fmt.Sprintf(
+		"http=%d actions=%d status=%v notif_rows=%d notif_owner_is_alice=%t kind=%s carol_rows=%d peer_sink=%d",
 		rec.Code, len(acts), statuses(acts), notifCount, notifUser == h.alice, kind, carolA+carolN, h.peer.count()))
-	if !ok {
-		t.Errorf("ordinary owner routing violated: %s", rec.Body.String())
-	}
+	// #1244 T2 explicitly grades the Bob-conversation owner-summary bypass
+	// as FAIL/GAP against finance owner invocation, even though ordinary
+	// owner routing itself is correct. Never reclassify it as a PASS.
+	expectGap(t, "T2.bob_job_owner_summary", ok,
+		"finance-looking text from Bob-conversation job allowed to queue owner summary without a finance owner-invocation grant")
 	l2Record(t, "T2.finance_origin_authorization", l2NotImplemented,
 		"no finance-source label, source consent or finance policy gate exists; finance-looking text treated as ordinary text; no PASS or FAIL inferred")
 }
