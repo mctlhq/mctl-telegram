@@ -549,7 +549,6 @@ func TestNoTelegramSurface(t *testing.T) {
 	}
 }
 
-
 func TestHostGuardNormalizesDefaultPort(t *testing.T) {
 	// An authenticated public client must not be blocked just because a proxy
 	// preserves the explicit HTTPS port. Foreign or ambiguous Host authorities
