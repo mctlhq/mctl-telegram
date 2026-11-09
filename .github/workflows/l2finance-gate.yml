@@ -1,0 +1,54 @@
+name: l2finance-gate
+
+# Manual EVIDENCE job for the Finance Assistant L2 matrix (#1244, #1251). It is
+# not a security approval and not a required check. A green job only means the
+# harness ran; read FINANCE_SECURITY_GATE on the first line of the summary.
+# Tagged (l2finance) tests are not part of build.yml, so there is no continuous
+# CI coverage of them; that gap is recorded in the report and needs separate,
+# owner-approved governance.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.10"
+      - name: preflight - module download (the only networked step)
+        run: go mod download
+      - name: verify reused-output fail-closed behavior
+        run: bash scripts/l2finance/test-failclosed.sh
+      - name: run L2 finance gate
+        run: bash scripts/l2finance/run.sh "$RUNNER_TEMP/l2finance"
+      - name: publish summary
+        if: always()
+        run: |
+          out="$RUNNER_TEMP/l2finance"
+          mkdir -p "$out"
+          if [ -s "$out/summary.md" ]; then
+            cp "$out/summary.md" "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "FINANCE_SECURITY_GATE=BLOCKED"
+              echo
+              echo "- harness_status: \`INVALID\`"
+              echo "- issue_outcome: \`CANNOT_OBSERVE_BLOCKED\`"
+              echo "- the runner did not produce a summary"
+            } | tee "$out/summary.md" >>"$GITHUB_STEP_SUMMARY"
+          fi
+      - name: upload artifact
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: l2finance-gate
+          path: ${{ runner.temp }}/l2finance
+          if-no-files-found: warn
