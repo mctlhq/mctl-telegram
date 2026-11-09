@@ -47,7 +47,7 @@ func TestFailedApplyRecordsNothing(t *testing.T) {
 
 func TestKeysAreTenantScoped(t *testing.T) {
 	l := NewLedger()
-	l.Do(Key{"a", "o", "h"}, func() (Entry, error) { return Entry{"x"}, nil })
+	l.Do(Key{"a", "o", "h"}, func() (Entry, error) { return Entry{Fingerprint: "x"}, nil })
 	if _, ok := l.Get(Key{"b", "o", "h"}); ok {
 		t.Fatal("ledger entry leaked across tenants")
 	}
