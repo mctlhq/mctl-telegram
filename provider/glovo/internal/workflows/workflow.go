@@ -137,7 +137,10 @@ func GlovoOrderWorkflow(ctx workflow.Context, snap Snapshot) (Result, error) {
 			_ = workflow.ExecuteActivity(dctx, a.ExpireHandoff, req).Get(dctx, nil)
 			purge(true)
 			set(StateRevoked)
-		case code == bridge.CodeBridgeUnavailable || code == bridge.CodeInvalidRequest:
+		case code == bridge.CodeBridgeUnavailable || code == bridge.CodeInvalidRequest ||
+			code == bridge.CodeApprovalInvalid || code == bridge.CodeApprovalExpired ||
+			code == bridge.CodeApprovalReplayed || code == bridge.CodeIntentMismatch ||
+			code == bridge.CodeTenantBusy:
 			set(code)
 		default:
 			set(StateProviderUnavl)
@@ -242,7 +245,9 @@ func GlovoOrderWorkflow(ctx workflow.Context, snap Snapshot) (Result, error) {
 			set(OutcomeUnknown)
 			return res, nil
 		case code == bridge.CodeStaleInstall || revokingCodes[code] || code == bridge.CodeBridgeUnavailable ||
-			code == bridge.CodeInvalidRequest:
+			code == bridge.CodeInvalidRequest || code == bridge.CodeApprovalInvalid ||
+			code == bridge.CodeApprovalExpired || code == bridge.CodeApprovalReplayed ||
+			code == bridge.CodeIntentMismatch || code == bridge.CodeTenantBusy:
 			return refused(err)
 		}
 		set(StateProviderUnavl)
