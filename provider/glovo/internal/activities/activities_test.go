@@ -316,7 +316,7 @@ func TestIssueHandoffRevalidates(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, changed := range []struct {
-		name string
+		name   string
 		mutate func(*testkit.Env)
 	}{
 		{"wrong_receipt", func(e *testkit.Env) { e.Req.ApprovalRef = "aar_other" }},
