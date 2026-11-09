@@ -382,3 +382,37 @@ jobs:
           cache-from: type=gha,scope=agent-worker
           cache-to: type=gha,mode=max,scope=agent-worker
 
+  # The Glovo MCP facade ships as its own image (Dockerfile.glovo-mcp). Built
+  # with no push; the container is then run with the default configuration, in
+  # which the kill switch is off: /healthz answers 200 and /mcp answers 503.
+  # The facade-versus-fake-mctl-api integration suite runs in the required
+  # "test" job above (go test -race ./...). A green result here proves the
+  # image builds and starts, NOT that it works against the real mctl-api: that
+  # join is mctl-api#957 and stays a separate gate.
+  docker-glovo-mcp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile.glovo-mcp
+          push: false
+          load: true
+          tags: mctl-glovo-mcp:ci
+          cache-from: type=gha,scope=glovo-mcp
+          cache-to: type=gha,mode=max,scope=glovo-mcp
+      - name: Probe the image with the default (disabled) configuration
+        run: |
+          set -eu
+          docker run -d --name glovo-mcp -p 18080:8080 mctl-glovo-mcp:ci
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -fsS http://127.0.0.1:18080/healthz >/dev/null; then break; fi
+            sleep 1
+          done
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/healthz)" = 200
+          test "$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18080/mcp)" = 503
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/readyz)" = 503
+          test "$(docker inspect -f '{{.Config.User}}' mctl-glovo-mcp:ci)" = 1000:1000
+          docker rm -f glovo-mcp >/dev/null

@@ -131,6 +131,8 @@ func TestGlovoDocsHaveNoCredentialShapes(t *testing.T) {
 		"adr/0010-glovo-multitenant-connections.md",
 		"contracts/glovo-mcp-tools.json",
 		"agent-runtime/glovo-threat-model.md",
+		"contracts/glovo-facade-mctl-api.md",
+		"glovo-mcp.md",
 	}
 	pats := []*regexp.Regexp{
 		regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+`),

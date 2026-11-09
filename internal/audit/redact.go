@@ -135,6 +135,11 @@ var sensitiveKeys = map[string]struct{}{
 	"content":          {},
 	"campaign_content": {},
 	"broadcast_text":   {},
+	// Glovo MCP facade: the forwarded user token, the mctl-api scope handle
+	// and the single-use handoff link are bearer-equivalent.
+	"subject_token": {},
+	"handoff_url":   {},
+	"scope_ref":     {},
 	// sub, client_id, jti and exp (attributed auth failures, issue-668) are
 	// DELIBERATELY absent from this list, for the same reason as
 	// credential_domain_id above: none of the four is a secret. They are
