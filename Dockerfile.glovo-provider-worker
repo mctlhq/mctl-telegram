@@ -1,0 +1,35 @@
+# Private fake-provider Glovo Temporal worker (cmd/glovo-provider-worker in the
+# nested module provider/glovo). Deliberately NOT the public server image
+# (Dockerfile) and NOT the agent-worker image (Dockerfile.agent-worker): it
+# contains no Telegram code, no shell and no real provider adapter. Nothing
+# publishes or deploys this image; see docs/runbooks/glovo-provider-worker.md.
+FROM golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS builder
+
+# Only the nested module is copied: the root module (Telegram code, secrets
+# handling) never enters this build context layer.
+WORKDIR /src/provider/glovo
+COPY provider/glovo/go.mod provider/glovo/go.sum ./
+RUN go mod download
+COPY provider/glovo/ ./
+
+ARG APP_VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux \
+    go build -trimpath -ldflags="-s -w -buildid= -X main.version=${APP_VERSION}" \
+    -o /glovo-provider-worker ./cmd/glovo-provider-worker
+
+# Digest-pinned distroless static runtime: no shell, no package manager.
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
+
+LABEL org.opencontainers.image.title="mctl-telegram-glovo-provider-worker" \
+      org.opencontainers.image.description="Private fake-provider Glovo Temporal worker (no real provider adapter)" \
+      org.opencontainers.image.source="https://github.com/mctlhq/mctl-telegram" \
+      org.opencontainers.image.licenses="MIT"
+
+COPY --from=builder /glovo-provider-worker /usr/local/bin/glovo-provider-worker
+
+USER 1000:1000
+ENV FAKE_ONLY=true
+# Internal health and metrics port only; no ingress is defined anywhere.
+EXPOSE 8081
+
+ENTRYPOINT ["/usr/local/bin/glovo-provider-worker"]
