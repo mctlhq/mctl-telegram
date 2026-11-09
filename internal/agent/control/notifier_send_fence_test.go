@@ -510,9 +510,9 @@ func TestSendFence_FinalBoundaryFlipAfterClaimIsNeverSent(t *testing.T) {
 		trigger string
 		kill    bool
 	}{
-		"mode_off": {trigger: `UPDATE agent_profiles SET mode = 'off' WHERE user_id = NEW.user_id;`},
+		"mode_off":        {trigger: `UPDATE agent_profiles SET mode = 'off' WHERE user_id = NEW.user_id;`},
 		"session_revoked": {trigger: `UPDATE telegram_accounts SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = NEW.user_id AND revoked_at IS NULL;`},
-		"global_kill": {kill: true},
+		"global_kill":     {kill: true},
 	}
 	for name, flip := range flips {
 		t.Run(name, func(t *testing.T) {
