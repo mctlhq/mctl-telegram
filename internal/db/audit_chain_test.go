@@ -366,3 +366,86 @@ func TestPreviousAuditHash_FailedReadIsNotGenesis(t *testing.T) {
 		t.Errorf("failed read returned %x and no error", prev)
 	}
 }
+
+// deny_code (#1271) is hashed only when non-NULL, behind its own marker, so
+// every row written before the column hashes exactly as it did.
+func TestHashAuditEntry_DenyCodeBlockIsOptionalAndDistinct(t *testing.T) {
+	prev := make([]byte, sha256.Size)
+	at := time.Unix(1_700_000_000, 0).UTC()
+	cp := sql.NullString{String: "", Valid: true}
+	edge := auditEdge{RequestID: "r", Route: "portal"}
+
+	base := hashAuditEntry(prev, 7, "t", "p", "denied", "e", cp, at, edge)
+	if got := hashAuditEntryWithDenyCode(prev, 7, "t", "p", "denied", "e", cp, at, edge, sql.NullString{}); !bytes.Equal(got, base) {
+		t.Fatal("a NULL deny_code must hash exactly like the pre-column encoding")
+	}
+	code := hashAuditEntryWithDenyCode(prev, 7, "t", "p", "denied", "e", cp, at, edge, sql.NullString{String: "mode_off", Valid: true})
+	other := hashAuditEntryWithDenyCode(prev, 7, "t", "p", "denied", "e", cp, at, edge, sql.NullString{String: "mode_on", Valid: true})
+	empty := hashAuditEntryWithDenyCode(prev, 7, "t", "p", "denied", "e", cp, at, edge, sql.NullString{Valid: true})
+	if bytes.Equal(code, base) || bytes.Equal(code, other) || bytes.Equal(empty, base) {
+		t.Fatal("deny_code must change the hash: set vs NULL, one code vs another, empty vs NULL")
+	}
+	// Without a correlation block the code block still cannot collide with it.
+	noEdge := hashAuditEntry(prev, 7, "t", "p", "denied", "e", cp, at, auditEdge{})
+	noEdgeCode := hashAuditEntryWithDenyCode(prev, 7, "t", "p", "denied", "e", cp, at, auditEdge{}, sql.NullString{String: "mode_off", Valid: true})
+	if bytes.Equal(noEdge, noEdgeCode) {
+		t.Fatal("deny_code must change the hash with no correlation block too")
+	}
+}
+
+func TestVerifyAuditChain_MixedLegacyAndDenyCodeRowsVerify(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	uid, _ := s.EnsureUser(ctx, "alice", "", "test")
+
+	s.LogToolCall(ctx, ToolCall{UserID: uid, Tool: "old_before", Status: "ok"})
+	s.LogToolCall(ctx, ToolCall{UserID: uid, Tool: "denied_tool", Status: "denied", ErrMsg: "tool gate: x", DenyCode: "tool_not_allowed"})
+	s.LogToolCall(ctx, ToolCall{UserID: uid, Tool: "old_after", Status: "ok"})
+	s.LogToolCall(ctx, ToolCall{UserID: uid, Tool: "denied_again", Status: "denied", DenyCode: "unknown"})
+
+	res, err := s.VerifyAuditChain(ctx, uid)
+	if err != nil || !res.OK || res.Verified != 4 {
+		t.Fatalf("mixed chain: %+v err=%v", res, err)
+	}
+	var stored []sql.NullString
+	rows, err := s.DB.QueryContext(ctx, `SELECT deny_code FROM audit_logs WHERE user_id = $1 ORDER BY id`, uid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var c sql.NullString
+		if err := rows.Scan(&c); err != nil {
+			t.Fatal(err)
+		}
+		stored = append(stored, c)
+	}
+	if len(stored) != 4 || stored[0].Valid || !stored[1].Valid || stored[2].Valid || stored[3].String != "unknown" {
+		t.Fatalf("stored codes = %+v", stored)
+	}
+}
+
+func TestVerifyAuditChain_DenyCodeTamperingIsDetected(t *testing.T) {
+	for name, set := range map[string]string{
+		"modified code":              `UPDATE audit_logs SET deny_code = 'mode_on' WHERE tool_name = 'denied_tool'`,
+		"code removed":               `UPDATE audit_logs SET deny_code = NULL WHERE tool_name = 'denied_tool'`,
+		"code added to a legacy row": `UPDATE audit_logs SET deny_code = 'mode_off' WHERE tool_name = 'plain'`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			s := newTestStore(t)
+			uid, _ := s.EnsureUser(ctx, "alice", "", "test")
+			s.LogToolCall(ctx, ToolCall{UserID: uid, Tool: "plain", Status: "ok"})
+			s.LogToolCall(ctx, ToolCall{UserID: uid, Tool: "denied_tool", Status: "denied", DenyCode: "mode_off"})
+			s.LogToolCall(ctx, ToolCall{UserID: uid, Tool: "tail", Status: "ok"})
+			mustVerify(t, s, uid)
+			if _, err := s.DB.ExecContext(ctx, set); err != nil {
+				t.Fatalf("tamper: %v", err)
+			}
+			res, err := s.VerifyAuditChain(ctx, uid)
+			if err != nil || res.OK || res.FirstBadID == 0 {
+				t.Fatalf("tampering undetected: %+v err=%v", res, err)
+			}
+		})
+	}
+}

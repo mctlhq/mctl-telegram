@@ -1550,6 +1550,95 @@ func TestExecutor_Send_RefusesEarlierInstallRevision(t *testing.T) {
 	}
 }
 
+// assertDeniedWithCode checks the durable half of a denial (#1271): the action
+// carries the stable code and exactly one same-transaction audit row names it.
+func assertDeniedWithCode(t *testing.T, store *db.Store, uid, actionID int64, want string) {
+	t.Helper()
+	action, err := store.GetAgentAction(context.Background(), uid, actionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if action.Status != db.ActionDenied || action.DenyCode != want {
+		t.Fatalf("status=%q deny_code=%q, want denied/%q", action.Status, action.DenyCode, want)
+	}
+	var n int
+	if err := store.DB.QueryRow(
+		`SELECT count(*) FROM audit_logs WHERE user_id = $1 AND tool_name = $2 AND status = 'denied' AND deny_code = $3`,
+		uid, db.AuditToolActionDenied, want).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("denial audit rows with code %q = %d err=%v, want 1", want, n, err)
+	}
+	if res, err := store.VerifyAuditChain(context.Background(), uid); err != nil || !res.OK {
+		t.Fatalf("audit chain: %+v err=%v", res, err)
+	}
+}
+
+func TestExecutor_Denials_PersistTheStableCodeDurably(t *testing.T) {
+	t.Run("approve under an earlier install revision", func(t *testing.T) {
+		exec, _, store, uid, conv := newTestExecutor(t)
+		ctx := context.Background()
+		actionID, code := seedPendingApproval(t, store, uid, conv.ID, "Thanks for reaching out!")
+		if err := store.UpdateAgentProfileFields(ctx, uid, db.AgentProfileUpdate{BumpInstallRevision: true}); err != nil {
+			t.Fatal(err)
+		}
+		if err := exec.Approve(ctx, uid, code); !errors.Is(err, ErrInstallChanged) {
+			t.Fatalf("approve err = %v", err)
+		}
+		assertDeniedWithCode(t, store, uid, actionID, string(policy.DenyInstallChanged))
+	})
+	t.Run("approve legacy zero revision", func(t *testing.T) {
+		exec, _, store, uid, conv := newTestExecutor(t)
+		actionID, code := seedPendingApproval(t, store, uid, conv.ID, "Thanks for reaching out!")
+		zeroStoredRevision(t, store, actionID)
+		if err := exec.Approve(context.Background(), uid, code); !errors.Is(err, ErrInstallChanged) {
+			t.Fatalf("approve err = %v", err)
+		}
+		assertDeniedWithCode(t, store, uid, actionID, string(policy.DenyLegacyInstallRevisionMissing))
+	})
+	t.Run("send-time kill switch keeps the policy code", func(t *testing.T) {
+		exec, _, store, uid, conv := newTestExecutor(t)
+		actionID, code := seedPendingApproval(t, store, uid, conv.ID, "hi")
+		exec.GlobalKill = func() bool { return true }
+		if err := exec.Approve(context.Background(), uid, code); err == nil {
+			t.Fatal("expected policy-deny error")
+		}
+		assertDeniedWithCode(t, store, uid, actionID, string(policy.DenyGlobalKill))
+	})
+	t.Run("send-time legacy zero revision", func(t *testing.T) {
+		exec, _, store, uid, conv := newTestExecutor(t)
+		ctx := context.Background()
+		actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+			ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply,
+			Payload: "Thanks for reaching out!", PolicyDecision: db.PolicyRequireApproval, Status: db.ActionApproved,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		zeroStoredRevision(t, store, actionID)
+		if _, err := exec.ProcessApproved(ctx); err != nil {
+			t.Fatal(err)
+		}
+		assertDeniedWithCode(t, store, uid, actionID, string(policy.DenyLegacyInstallRevisionMissing))
+	})
+	t.Run("send-time earlier install revision", func(t *testing.T) {
+		exec, _, store, uid, conv := newTestExecutor(t)
+		ctx := context.Background()
+		actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
+			ConversationID: conv.ID, UserID: uid, ActionType: db.ActionTypeReply,
+			Payload: "Thanks for reaching out!", PolicyDecision: db.PolicyRequireApproval, Status: db.ActionApproved,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.UpdateAgentProfileFields(ctx, uid, db.AgentProfileUpdate{BumpInstallRevision: true}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := exec.ProcessApproved(ctx); err != nil {
+			t.Fatal(err)
+		}
+		assertDeniedWithCode(t, store, uid, actionID, string(policy.DenyInstallChanged))
+	})
+}
+
 func zeroStoredRevision(t *testing.T, store *db.Store, actionID int64) {
 	t.Helper()
 	if _, err := store.DB.ExecContext(context.Background(), `UPDATE agent_actions SET install_revision = 0 WHERE id = $1`, actionID); err != nil {

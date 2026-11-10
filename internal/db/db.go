@@ -196,6 +196,15 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 		"TEXT", "TEXT"); err != nil {
 		return err
 	}
+	// deny_code on audit_logs (#1271): the stable machine code of a denial,
+	// NULL on every row written before it and on every non-denial row. Unlike
+	// reason it IS folded into the row hash, but only when non-NULL (marker
+	// 0x02, see hashAuditEntry), so NULL rows hash exactly as before. No
+	// default and no backfill, for the same reason as call_path above.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "audit_logs", "deny_code",
+		"TEXT", "TEXT"); err != nil {
+		return err
+	}
 	// Correlation columns on audit_logs (mctl-telegram#617 Slice 2). They
 	// record how the call arrived: edge_request_id is Cf-Ray, edge_route is
 	// portal/direct decided by Cf-Worker, and mcp_method / mcp_name /

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 )
@@ -74,6 +75,28 @@ func (s *Server) audit(ctx context.Context, userID int64, tool, status, errMsg s
 		return
 	}
 	s.Store.LogToolCall(ctx, db.ToolCall{UserID: userID, Tool: tool, Status: status, ErrMsg: errMsg})
+}
+
+// Error texts of audit-only refusals (#1271). Each is a function of the code
+// alone: ids and other detail never enter the stored text (they go to the
+// log), and the structured deny_code column is the record. The prefixes are
+// the ones the audit queries already match on.
+func auditErrBinding(code policy.DenyCode) string {
+	return "conversation binding: " + string(code) + ": denied"
+}
+
+func auditErrToolGate(code policy.DenyCode) string { return "tool gate: " + string(code) }
+
+// auditDenied is the checked audit of a refusal that created no action row:
+// the chained row carries the stable code in deny_code. Nil only once the row
+// is committed (or when there is no store).
+func (s *Server) auditDenied(ctx context.Context, userID int64, tool, errMsg string, code policy.DenyCode) error {
+	if s.Store == nil {
+		return nil
+	}
+	return s.Store.LogToolCallChecked(ctx, db.ToolCall{
+		UserID: userID, Tool: tool, Status: "denied", ErrMsg: errMsg, DenyCode: string(code),
+	})
 }
 
 func logHandlerErr(tool string, err error) {

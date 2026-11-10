@@ -261,7 +261,7 @@ func assertDeleteBeforeReserveApproved(t *testing.T, f *supersessionFixture) {
 	if ok || !errors.As(err, &se) || se.Kind != SourceDeleted {
 		t.Fatalf("reserve: ok=%v err=%v, want SourceSupersededError(deleted)", ok, err)
 	}
-	if ok, err := f.s.DenyAgentActionWithReason(context.Background(), f.uid, a.ID, ActionApproved, SourceSupersededReason(se.Kind)); err != nil || !ok {
+	if ok, err := f.s.DenyAgentActionWithReason(context.Background(), f.uid, a.ID, ActionApproved, SourceSupersededReason(se.Kind), DenyCodeSourceSuperseded); err != nil || !ok {
 		t.Fatalf("deny: ok=%v err=%v", ok, err)
 	}
 	if st, reasons := f.actionRow(t, a.ID); st != ActionDenied || reasons != ReasonSourceDeleted {
