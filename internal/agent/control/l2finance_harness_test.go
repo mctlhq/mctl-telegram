@@ -216,6 +216,11 @@ func l2NewNotifierHarness(t *testing.T, wireKill bool) *l2NotifierHarness {
 		}); err != nil {
 			t.Fatalf("seed profile: %v", err)
 		}
+		// Synthetic active session: DeliverPending rechecks for a live
+		// session before each send, as ClientPool.Borrow does.
+		if err := store.SaveSession(ctx, uid, []byte("synthetic-session"), 9100000+uid, "Alice", "alice_tg"); err != nil {
+			t.Fatalf("seed session: %v", err)
+		}
 		*dst = uid
 	}
 	h.setSender(h.sink, wireKill)

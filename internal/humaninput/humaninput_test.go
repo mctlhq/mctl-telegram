@@ -327,6 +327,12 @@ func newEnv(t *testing.T) *env {
 	if err := store.UpsertHumanInputActor(ctx, uid, aliceTGID); err != nil {
 		t.Fatalf("enroll: %v", err)
 	}
+	// DeliverPending rechecks for a live session before every send, as the
+	// ClientPool beneath the real sender does. Synthetic active session only;
+	// no agent profile is needed (human_input is profile-independent).
+	if err := store.SaveSession(ctx, uid, []byte("synthetic-session"), aliceTGID, "Alice", "alice"); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
 	api := newFakeMCTL(t)
 	e := &env{store: store, uid: uid, api: api, client: workctx.NewClient(api.srv.URL, "tok", "tenant", nil), sender: &fakeSender{}, approver: &recordingApprover{}}
 	e.notifier = control.NewNotifier(store, e.sender)
@@ -1036,6 +1042,9 @@ func TestTwoRespondentsPlatformDecides(t *testing.T) {
 	}
 	if err := e.store.UpsertHumanInputActor(ctx, bobUID, bobTGID); err != nil {
 		t.Fatal(err)
+	}
+	if err := e.store.SaveSession(ctx, bobUID, []byte("synthetic-session"), bobTGID, "Bob", "bob"); err != nil {
+		t.Fatalf("seed session: %v", err)
 	}
 	req := choiceReq(reqA, "h1")
 	e.api.publish(aliceTGID, req)

@@ -44,6 +44,7 @@ func TestNotifier_Reply_TruncatesOversizedText(t *testing.T) {
 // action's linked peer.
 func TestNotifier_DeliverPending_ApprovalIdentifiesRecipient(t *testing.T) {
 	_, _, sender, store, uid := newTestRouter(t)
+	seedSession(t, store, uid)
 	ctx := context.Background()
 	conv, err := store.EnsureConversation(ctx, uid, 555, "peer_username", "Jane Recruiter")
 	if err != nil {
@@ -83,6 +84,7 @@ func TestNotifier_DeliverPending_ApprovalIdentifiesRecipient(t *testing.T) {
 // rather than generating and discarding a candidate.
 func TestNotifier_DeliverPending_UsesAndPersistsRandomID(t *testing.T) {
 	_, _, sender, store, uid := newTestRouter(t)
+	seedSession(t, store, uid)
 	ctx := context.Background()
 	notifID, err := store.InsertOwnerNotification(ctx, db.OwnerNotification{
 		UserID: uid, Kind: db.NotificationSummary, Body: "hello",
@@ -116,6 +118,7 @@ func TestNotifier_DeliverPending_UsesAndPersistsRandomID(t *testing.T) {
 
 func TestNotifier_DeliverPending_FormatsApprovalWithCode(t *testing.T) {
 	_, _, sender, store, uid := newTestRouter(t)
+	seedSession(t, store, uid)
 	ctx := context.Background()
 	conv, err := store.EnsureConversation(ctx, uid, 555, "peer", "Peer")
 	if err != nil {
@@ -157,6 +160,7 @@ func TestNotifier_DeliverPending_FormatsApprovalWithCode(t *testing.T) {
 
 func TestNotifier_DeliverPending_SummaryDeliveredAsIs(t *testing.T) {
 	_, _, sender, store, uid := newTestRouter(t)
+	seedSession(t, store, uid)
 	ctx := context.Background()
 	if _, err := store.InsertOwnerNotification(ctx, db.OwnerNotification{
 		UserID: uid, Kind: db.NotificationSummary, Body: "Daily digest: 3 new recruiters.",
@@ -182,6 +186,7 @@ func TestNotifier_DeliverPending_SummaryDeliveredAsIs(t *testing.T) {
 // delivers normally once the switch is off again.
 func TestNotifier_DeliverPending_KillSwitchSilencesQueuedDelivery(t *testing.T) {
 	_, _, sender, store, uid := newTestRouter(t)
+	seedSession(t, store, uid)
 	ctx := context.Background()
 	if _, err := store.InsertOwnerNotification(ctx, db.OwnerNotification{
 		UserID: uid, Kind: db.NotificationSummary, Body: "hello",
@@ -223,6 +228,7 @@ func TestNotifier_DeliverPending_KillSwitchSilencesQueuedDelivery(t *testing.T) 
 // by claiming the row out from under DeliverPending before calling it.
 func TestNotifier_DeliverPending_SkipsAlreadyClaimedRow(t *testing.T) {
 	_, _, sender, store, uid := newTestRouter(t)
+	seedSession(t, store, uid)
 	ctx := context.Background()
 	notifID, err := store.InsertOwnerNotification(ctx, db.OwnerNotification{
 		UserID: uid, Kind: db.NotificationSummary, Body: "hello",
@@ -256,6 +262,7 @@ func TestNotifier_DeliverPending_SkipsAlreadyClaimedRow(t *testing.T) {
 // ListPendingOwnerNotifications scan forever.
 func TestNotifier_DeliverPending_ClaimExpiresAndBecomesRetryable(t *testing.T) {
 	_, _, sender, store, uid := newTestRouter(t)
+	seedSession(t, store, uid)
 	ctx := context.Background()
 	notifID, err := store.InsertOwnerNotification(ctx, db.OwnerNotification{
 		UserID: uid, Kind: db.NotificationSummary, Body: "hello",
@@ -286,6 +293,7 @@ func TestNotifier_DeliverPending_ClaimExpiresAndBecomesRetryable(t *testing.T) {
 // healthy accounts' notifications.
 func TestNotifier_DeliverPending_RetiresPermanentlyFailingNotification(t *testing.T) {
 	_, _, sender, store, uid := newTestRouter(t)
+	seedSession(t, store, uid)
 	ctx := context.Background()
 	sender.err = errNotifySendFailed
 	notifID, err := store.InsertOwnerNotification(ctx, db.OwnerNotification{
@@ -335,6 +343,7 @@ var errNotifySendFailed = &notifySendErr{"send failed"}
 // mechanism for them in the first place.
 func TestNotifier_DeliverPending_OwnerApprovalRequestFormattedAsRequest(t *testing.T) {
 	_, _, sender, store, uid := newTestRouter(t)
+	seedSession(t, store, uid)
 	ctx := context.Background()
 	actionID, err := store.InsertAgentAction(ctx, db.AgentAction{
 		UserID: uid, ActionType: db.ActionTypeOwnerApproval,
@@ -372,6 +381,7 @@ func TestNotifier_DeliverPending_OwnerApprovalRequestFormattedAsRequest(t *testi
 // when the agent's text alone fills a Telegram message.
 func TestNotifier_DeliverPending_OwnerInputSaysHowToAct(t *testing.T) {
 	_, _, sender, store, uid := newTestRouter(t)
+	seedSession(t, store, uid)
 	ctx := context.Background()
 	conv, err := store.EnsureConversation(ctx, uid, 555, "alice", "Alice")
 	if err != nil {
@@ -421,6 +431,7 @@ func TestNotifier_DeliverPending_OwnerInputSaysHowToAct(t *testing.T) {
 // until MaxPendingAge, so the owner would never receive it for a full day.
 func TestNotifier_DeliverPending_TruncatesOversizedSummary(t *testing.T) {
 	_, _, sender, store, uid := newTestRouter(t)
+	seedSession(t, store, uid)
 	ctx := context.Background()
 	huge := strings.Repeat("x", maxTelegramMessageLen+500)
 	if _, err := store.InsertOwnerNotification(ctx, db.OwnerNotification{
@@ -448,6 +459,7 @@ func TestNotifier_DeliverPending_TruncatesOversizedSummary(t *testing.T) {
 // near the limit — leaving the owner with no visible way to act on it.
 func TestNotifier_DeliverPending_TruncatesDraftButKeepsApprovalCommands(t *testing.T) {
 	_, _, sender, store, uid := newTestRouter(t)
+	seedSession(t, store, uid)
 	ctx := context.Background()
 	conv, err := store.EnsureConversation(ctx, uid, 555, "peer", "Peer")
 	if err != nil {
@@ -496,6 +508,7 @@ func TestNotifier_DeliverPending_TruncatesDraftButKeepsApprovalCommands(t *testi
 // failure.
 func TestNotifier_DeliverPending_TransientFormatErrorStaysPending(t *testing.T) {
 	_, _, sender, store, uid := newTestRouter(t)
+	seedSession(t, store, uid)
 	ctx := context.Background()
 	conv, err := store.EnsureConversation(ctx, uid, 555, "peer", "Peer")
 	if err != nil {
@@ -551,6 +564,7 @@ func TestNotifier_DeliverPending_TransientFormatErrorStaysPending(t *testing.T) 
 
 func TestNotifier_DeliverPending_MarksSentAndIsIdempotent(t *testing.T) {
 	_, _, sender, store, uid := newTestRouter(t)
+	seedSession(t, store, uid)
 	ctx := context.Background()
 	notifID, err := store.InsertOwnerNotification(ctx, db.OwnerNotification{
 		UserID: uid, Kind: db.NotificationSummary, Body: "hello",
@@ -586,6 +600,7 @@ func TestNotifier_DeliverPending_MarksSentAndIsIdempotent(t *testing.T) {
 // draft with no stored reason gets no "Held because" line.
 func TestNotifier_DeliverPending_ApprovalSaysWhyHeld(t *testing.T) {
 	_, _, sender, store, uid := newTestRouter(t)
+	seedSession(t, store, uid)
 	ctx := context.Background()
 	conv, err := store.EnsureConversation(ctx, uid, 555, "bob", "Bob")
 	if err != nil {
