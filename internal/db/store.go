@@ -2388,7 +2388,7 @@ func insertAuditTx(ctx context.Context, tx *sql.Tx, c ToolCall) error {
 
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO audit_logs(user_id, tool_name, peer_redacted, status, error, created_at, prev_hash, entry_hash, call_path,
-		 	edge_request_id, edge_route, mcp_method, mcp_name, protocol_version, reason, deny_code)
+			edge_request_id, edge_route, mcp_method, mcp_name, protocol_version, reason, deny_code)
 		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
 		userID, tool, nullable(peerRedacted), status, nullable(errMsg), createdAt, prev, entry, callPath,
 		nullable(edge.RequestID), nullable(edge.Route), nullable(edge.MCPMethod), nullable(edge.MCPName), nullable(edge.ProtocolVersion), nullable(reason), nullable(c.DenyCode),
@@ -2423,7 +2423,7 @@ type AuditChainVerification struct {
 func (s *Store) VerifyAuditChain(ctx context.Context, userID int64) (AuditChainVerification, error) {
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT id, tool_name, peer_redacted, status, error, created_at, prev_hash, entry_hash, call_path,
-		 	edge_request_id, edge_route, mcp_method, mcp_name, protocol_version, deny_code
+			edge_request_id, edge_route, mcp_method, mcp_name, protocol_version, deny_code
 		 FROM audit_logs
 		 WHERE user_id = $1
 		 ORDER BY id ASC`,

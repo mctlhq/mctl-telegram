@@ -49,10 +49,11 @@ func (s *Server) toolGate(route string, h http.HandlerFunc) http.HandlerFunc {
 		if err != nil {
 			logHandlerErr(served[0], err)
 			// Not a policy decision: the set could not be resolved, so the
-			// code is unknown. The answer is 503 whether or not the audit row
-			// lands, so a failed write is only logged.
+			// code is unknown. The normal 503 is only answered once that
+			// audit row is committed; a failed write is the sanitized 500.
 			if aerr := s.auditDenied(r.Context(), id.UserID, served[0], "tool gate: "+errToolSetUnknown.Error(), policy.DenyUnknown); aerr != nil {
-				logHandlerErr(served[0]+"_toolgate_audit", aerr)
+				writeBindingAuditFailure(w, served[0], aerr)
+				return
 			}
 			writeJSONError(w, http.StatusServiceUnavailable, "tool set unavailable")
 			return

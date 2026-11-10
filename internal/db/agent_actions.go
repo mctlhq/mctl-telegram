@@ -123,6 +123,10 @@ type AgentAction struct {
 // policy.DenyUnknown; internal/db does not import the policy package.
 const DenyCodeUnknown = "unknown"
 
+// DenyCodeInstallChanged is the deny code of an action left over from an
+// earlier assistant install revision. It equals policy.DenyInstallChanged.
+const DenyCodeInstallChanged = "install_changed"
+
 // DenyCodeSourceSuperseded is the deny code of a draft withdrawn because its
 // source message was edited or deleted. It equals policy.DenySourceSuperseded.
 const DenyCodeSourceSuperseded = "source_message_superseded"
@@ -1891,7 +1895,10 @@ func (s *Store) HasExecutedOwnerSummarySince(ctx context.Context, userID, conver
 // instead of saying the assistant changed. The approve-time check denies
 // them with that explanation, and approval expiry clears the rest.
 func (s *Store) DenyActionsFromEarlierInstalls(ctx context.Context, userID int64, reason string) (int64, error) {
-	denied, err := s.denyActionsTx(ctx, DenyCodeUnknown,
+	// The SQL itself proves the revision is stale, so the stable code is
+	// install_changed on the action and on its audit row, whatever reason text
+	// the caller passes.
+	denied, err := s.denyActionsTx(ctx, DenyCodeInstallChanged,
 		`UPDATE agent_actions
 		    SET status = $1, approval_code = NULL, approval_code_hash = NULL,
 		        approval_code_encrypted = NULL, policy_reasons = $2, updated_at = $3, deny_code = $7
@@ -1900,7 +1907,7 @@ func (s *Store) DenyActionsFromEarlierInstalls(ctx context.Context, userID int64
 		    AND install_revision < (SELECT install_revision FROM agent_profiles WHERE user_id = $4)
 		  RETURNING id, user_id`,
 		ActionDenied, reason, time.Now().UTC(), userID,
-		ActionProposed, ActionApproved, DenyCodeUnknown,
+		ActionProposed, ActionApproved, DenyCodeInstallChanged,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("deny actions from earlier installs: %w", err)

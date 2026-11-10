@@ -375,7 +375,7 @@ func TestDenyCode_EveryBulkPathWritesOneAuditRowPerAction(t *testing.T) {
 		if err != nil || n != 2 {
 			t.Fatalf("denied %d err=%v, want 2", n, err)
 		}
-		assertBulk(t, s, uid, acts, DenyCodeUnknown)
+		assertBulk(t, s, uid, acts, DenyCodeInstallChanged)
 	})
 
 	t.Run("retention sweep", func(t *testing.T) {
@@ -391,6 +391,51 @@ func TestDenyCode_EveryBulkPathWritesOneAuditRowPerAction(t *testing.T) {
 		}
 		assertBulk(t, s, uid, acts, DenyCodeUnknown)
 	})
+}
+
+// Only rows the sweep actually transitioned (stale revision, proposed or
+// approved) get install_changed and an audit row; a current-revision row and a
+// replay get neither; an audit failure rolls the whole sweep back.
+func TestDenyCode_EarlierInstallSweepCodesOnlyTransitionedRows(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStoreCrypted(t)
+	uid := seedAgentUser(t, s, "owner")
+	acts := approvedActions(t, newSupersessionFixture(t, s, uid), 10, 3)
+	if _, err := s.DB.Exec(`INSERT INTO agent_profiles(user_id, install_revision) VALUES($1, 5)`, uid); err != nil {
+		t.Fatal(err)
+	}
+	// acts[2] is current: it must not be swept.
+	if _, err := s.DB.Exec(`UPDATE agent_actions SET install_revision = 5 WHERE id = $1`, acts[2].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	failDenialAudits(t, s, "")
+	if n, err := s.DenyActionsFromEarlierInstalls(ctx, uid, "install changed"); err == nil || n != 0 {
+		t.Fatalf("n=%d err=%v, want rollback on a failed audit", n, err)
+	}
+	for _, a := range acts {
+		if got, _ := s.GetAgentAction(ctx, uid, a.ID); got.Status != ActionApproved || got.DenyCode != "" {
+			t.Fatalf("action %d changed despite a failed audit: %+v", a.ID, got)
+		}
+	}
+	if _, err := s.DB.Exec(`DROP TRIGGER deny_audit_fail`); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := s.DenyActionsFromEarlierInstalls(ctx, uid, "install changed")
+	if err != nil || n != 2 {
+		t.Fatalf("denied %d err=%v, want 2", n, err)
+	}
+	assertBulk(t, s, uid, acts[:2], DenyCodeInstallChanged)
+	if got, _ := s.GetAgentAction(ctx, uid, acts[2].ID); got.Status != ActionApproved || got.DenyCode != "" {
+		t.Fatalf("current-revision action touched: %+v", got)
+	}
+	if n, err := s.DenyActionsFromEarlierInstalls(ctx, uid, "install changed"); err != nil || n != 0 {
+		t.Fatalf("replay denied %d err=%v, want 0", n, err)
+	}
+	if rows := denyAuditRows(t, s, uid); len(rows) != 2 {
+		t.Fatalf("audit rows = %d, want 2 (replay adds none)", len(rows))
+	}
 }
 
 // assertBulk checks that each action is denied with code and has exactly one

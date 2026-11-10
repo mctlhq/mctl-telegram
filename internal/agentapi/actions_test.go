@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
@@ -140,6 +141,119 @@ func TestDenyJobBindingAudit_IsTypedCheckedAndHasConstantError(t *testing.T) {
 	if err := h.store.DB.QueryRow(`SELECT count(*) FROM agent_actions WHERE user_id = $1`, h.userID).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("agent_actions rows = %d err=%v", n, err)
 	}
+}
+
+// Owner-facing denial (kill switch) and its replay: the same-transaction
+// agent_action_denied row is the only audit record. The response keeps its
+// reasons, and no tool audit row (which would carry the reason prose) is
+// written, on the first call or the replay.
+func TestHandleOwnerFacing_DeniedReplayWritesOnlyTheTransitionAudit(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeObserve)
+	conv := h.seedConversation(555)
+	jobID := h.seedJob("evt:v1:1:555:notify-denied-audit", conv.ID)
+	claimed, err := h.store.ClaimAgentJobs(context.Background(), "test-replica", h.userID, db.RuntimeOwn, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: jobs=%+v err=%v", claimed, err)
+	}
+	req := ownerNotifyRequest{JobID: jobID, Attempt: claimed[0].Attempts, Text: "Daily digest"}
+	h.srv.GlobalKill = true
+	for i := 0; i < 2; i++ {
+		rec := h.do("POST", "/notify/summary", req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("call %d status = %d, body=%s", i, rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Decision string   `json:"decision"`
+			Reasons  []string `json:"reasons"`
+		}
+		decodeBody(t, rec, &body)
+		if body.Decision != db.PolicyDeny || len(body.Reasons) == 0 {
+			t.Fatalf("call %d body = %+v, want deny with reasons", i, body)
+		}
+	}
+	var persisted string
+	if err := h.store.DB.QueryRow(`SELECT policy_reasons FROM agent_actions WHERE user_id = $1`, h.userID).Scan(&persisted); err != nil || persisted == "" {
+		t.Fatalf("policy_reasons = %q err=%v", persisted, err)
+	}
+	rows, err := h.store.DB.Query(`SELECT tool_name, status, COALESCE(error, '') FROM audit_logs WHERE user_id = $1 ORDER BY id`, h.userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	n := 0
+	for rows.Next() {
+		var tool, status, errMsg string
+		if err := rows.Scan(&tool, &status, &errMsg); err != nil {
+			t.Fatal(err)
+		}
+		n++
+		if tool != db.AuditToolActionDenied || status != "denied" || errMsg != "agent action denied" {
+			t.Fatalf("audit row %d = %q/%q/%q, want only the transition row with constant text", n, tool, status, errMsg)
+		}
+	}
+	if n != 1 {
+		t.Fatalf("audit rows = %d, want exactly 1 (no replay duplicate)", n)
+	}
+	var notifs int
+	if err := h.store.DB.QueryRow(`SELECT count(*) FROM owner_notifications WHERE user_id = $1`, h.userID).Scan(&notifs); err != nil || notifs != 0 {
+		t.Fatalf("notifications = %d err=%v", notifs, err)
+	}
+}
+
+func TestHandleOwnerFacing_DenialAuditFailureRollsBackAndIsServerError(t *testing.T) {
+	h := newHarness(t)
+	h.seedProfile(db.AgentModeObserve)
+	h.srv.GlobalKill = true
+	if _, err := h.store.DB.Exec(`CREATE TRIGGER owner_audit_fail BEFORE INSERT ON audit_logs
+		BEGIN SELECT RAISE(ABORT, 'audit write refused'); END`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = h.store.DB.Exec(`DROP TRIGGER IF EXISTS owner_audit_fail`) })
+	rec := h.do("POST", "/notify/summary", ownerNotifyRequest{Text: "Daily digest"})
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500, body=%s", rec.Code, rec.Body.String())
+	}
+	var actions, notifs int
+	if err := h.store.DB.QueryRow(`SELECT count(*) FROM agent_actions WHERE user_id = $1`, h.userID).Scan(&actions); err != nil || actions != 0 {
+		t.Fatalf("actions = %d err=%v, want rollback", actions, err)
+	}
+	if err := h.store.DB.QueryRow(`SELECT count(*) FROM owner_notifications WHERE user_id = $1`, h.userID).Scan(&notifs); err != nil || notifs != 0 {
+		t.Fatalf("notifications = %d err=%v", notifs, err)
+	}
+}
+
+func TestToolGate_UnknownToolSetAuditIsCheckedBeforeTheNormal503(t *testing.T) {
+	t.Run("audit committed then 503", func(t *testing.T) {
+		f := newGateFixture(t, "no-such-assistant")
+		rec := f.saveLead(f.h.id, jobEnvelope{})
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503, body=%s", rec.Code, rec.Body.String())
+		}
+		if denied, _ := f.h.auditCodes("save_job_lead"); len(denied) != 1 || denied[0] != string(policy.DenyUnknown) {
+			t.Fatalf("durable unknown-code audit = %v, want exactly one", denied)
+		}
+	})
+	t.Run("audit failure is the sanitized 500, handler stopped", func(t *testing.T) {
+		f := newGateFixture(t, "no-such-assistant")
+		if _, err := f.h.store.DB.Exec(`CREATE TRIGGER gate_audit_fail BEFORE INSERT ON audit_logs
+			BEGIN SELECT RAISE(ABORT, 'synthetic audit failure'); END`); err != nil {
+			t.Fatal(err)
+		}
+		rec := f.saveLead(f.h.id, jobEnvelope{})
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500, body=%s", rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "synthetic audit failure") || strings.Contains(rec.Body.String(), "audit_logs") {
+			t.Fatalf("response leaks the storage error: %s", rec.Body.String())
+		}
+		for _, table := range []string{"audit_logs", "job_leads", "agent_actions"} {
+			var n int
+			if err := f.h.store.DB.QueryRow(`SELECT count(*) FROM `+table+` WHERE user_id = $1`, f.h.userID).Scan(&n); err != nil || n != 0 {
+				t.Fatalf("%s rows = %d err=%v, want 0", table, n, err)
+			}
+		}
+	})
 }
 
 func TestDenyBindingCode_AuditFailureIsNotReportedAsRecorded(t *testing.T) {

@@ -26,10 +26,14 @@ recorded", never "allowed".
   `autopilot_paused`, `install_changed`, `legacy_install_revision_missing`,
   `job_binding_mismatch`, `tool_not_allowed`).
 - A denial with no policy code stores `unknown`: retention sweep, owner
-  takeover and install sweeps, send-gate and Telegram-refusal paths, a
-  `RequireApproval` escalation at send time. `internal/db` does not import the
-  policy package; it holds the two literals it needs (`unknown`,
-  `source_message_superseded`) and takes every other code as a string.
+  takeover sweep, send-gate and Telegram-refusal paths, a `RequireApproval`
+  escalation at send time, an unresolvable tool set at the tool gate.
+  `internal/db` does not import the policy package; it holds the three
+  literals it needs (`unknown`, `source_message_superseded`,
+  `install_changed`) and takes every other code as a string.
+- The earlier-install sweep (`DenyActionsFromEarlierInstalls`) stores
+  `install_changed`: its SQL proves the action's revision is stale, so the
+  stable code is kept on the action and on its audit row.
 - Draft withdrawn because its source message was edited or deleted:
   `source_message_superseded`.
 - `delivery_unknown`, `rejected`, `expired` and every non-terminal status never
@@ -53,7 +57,10 @@ returned row, in that transaction (`denyActionsTx`). Consequences:
 - An action inserted already `denied` (`propose_reply` and the owner-facing
   tools on a policy deny) is audited in the insert transaction. A job-tied
   redelivery that hits the `(job_id, action_type)` unique index returns the
-  existing row and audits nothing.
+  existing row and audits nothing. The owner-facing handlers write no tool
+  audit row for a persisted denial, first call or replay: the
+  `agent_action_denied` row is the only record, and the response reasons are
+  unchanged.
 - The audit INSERT is one tx-aware helper (`insertAuditTx`) shared with
   `LogToolCallChecked`, so scrubbing, tenant scope, correlation fields and
   timestamps are identical. It uses the caller's context, so a cancelled caller
@@ -63,7 +70,9 @@ Audit-only refusals (job binding, tool gate) create no action row. They write a
 checked audit row with the typed code and a fixed error text derived from the
 code alone (`conversation binding: <code>: denied`, `tool gate: <code>`); the
 numeric ids that used to follow are logged instead. If that write fails the
-request answers with the sanitized 500, never the normal refusal.
+request answers with the sanitized 500, never the normal refusal. This holds
+for the tool gate's unknown-tool-set case too: the normal 503 is answered only
+after its `unknown` audit row has committed.
 `propose_reply` no longer writes a successful `ok` audit row for a call whose
 persisted action is `denied`.
 

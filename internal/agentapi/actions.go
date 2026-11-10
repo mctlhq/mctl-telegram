@@ -823,7 +823,9 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 		persistedReasons = strings.Split(persisted.PolicyReasons, "; ")
 	}
 	if persisted.Status == db.ActionDenied {
-		s.audit(ctx, id.UserID, tool, "denied", persisted.PolicyReasons)
+		// No tool audit row: the agent_action_denied row written in the
+		// transition's own transaction is the authoritative record, and a
+		// tool row would carry the reason prose and duplicate on replay.
 		writeJSON(w, http.StatusOK, map[string]any{
 			"action_id": actionID, "decision": persisted.PolicyDecision, "reasons": persistedReasons,
 		})
