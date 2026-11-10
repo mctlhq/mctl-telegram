@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mctl.ai/schemas/bridge/v1alpha1/command.schema.json",
+  "title": "Bridge command (mctl-api -> provider worker), v1alpha1 proposal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "command_id", "execution_id", "work_item_id", "kind", "attempt",
+    "tenant_ref", "principal_ref", "order_ref", "connection_ref", "intent_hash",
+    "issuer", "audience", "nonce", "issued_at", "expires_at", "ttl_seconds",
+    "cancel_requested", "payload"
+  ],
+  "properties": {
+    "schema_version": {"const": "bridge.mctl.ai/v1alpha1"},
+    "command_id": {"type": "string", "pattern": "^cmd_[A-Za-z0-9]{26}$"},
+    "execution_id": {"type": "string", "pattern": "^we_[A-Za-z0-9]{16,40}$"},
+    "work_item_id": {"type": "string", "pattern": "^wi_[A-Za-z0-9]{16,40}$"},
+    "kind": {"enum": ["quote", "place_order_fake", "cancel_order_fake", "read_status"]},
+    "attempt": {"type": "integer", "minimum": 1, "maximum": 100},
+    "tenant_ref": {"type": "string", "pattern": "^tnr_[A-Za-z0-9]{16,40}$"},
+    "principal_ref": {"type": "string", "pattern": "^prr_[A-Za-z0-9]{16,40}$"},
+    "order_ref": {"type": "string", "pattern": "^ordr_[A-Za-z0-9]{16,40}$"},
+    "connection_ref": {"type": "string", "pattern": "^gcn_[A-Za-z0-9]{16,40}$"},
+    "approval_ref": {"type": "string", "pattern": "^aar_[A-Za-z0-9]{16,40}$"},
+    "intent_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "issuer": {"const": "mctl-api"},
+    "audience": {"type": "string", "pattern": "^provider:[a-z0-9-]{1,32}$"},
+    "nonce": {"type": "string", "pattern": "^[A-Za-z0-9_-]{22}$"},
+    "issued_at": {"type": "string", "format": "date-time", "maxLength": 40},
+    "expires_at": {"type": "string", "format": "date-time", "maxLength": 40},
+    "ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 900},
+    "lease_token": {"type": "string", "pattern": "^lt_[A-Za-z0-9_-]{16,64}$"},
+    "cancel_requested": {"type": "boolean"},
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 8,
+      "properties": {
+        "item_codes": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {"type": "string", "maxLength": 64}
+        },
+        "quantity_total": {"type": "integer", "minimum": 0, "maximum": 100},
+        "note": {"type": "string", "maxLength": 256}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"kind": {"enum": ["place_order_fake", "cancel_order_fake"]}}},
+      "then": {"required": ["approval_ref"]}
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "schema_version": "bridge.mctl.ai/v1alpha1",
+  "command_id": "cmd_01HZZZZZZZZZZZZZZZZZZZZZZZ",
+  "execution_id": "we_0123456789abcdef0123",
+  "work_item_id": "wi_0123456789abcdef0123",
+  "kind": "place_order_fake",
+  "attempt": 1,
+  "tenant_ref": "tnr_0123456789abcdef0123",
+  "principal_ref": "prr_0123456789abcdef0123",
+  "order_ref": "ordr_0123456789abcdef0123",
+  "connection_ref": "gcn_0123456789abcdef0123",
+  "approval_ref": "aar_0123456789abcdef0123",
+  "intent_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "issuer": "mctl-api",
+  "audience": "provider:glovo",
+  "nonce": "AAAAAAAAAAAAAAAAAAAAAA",
+  "issued_at": "2026-11-08T10:00:00Z",
+  "expires_at": "2026-11-08T10:10:00Z",
+  "ttl_seconds": 600,
+  "lease_token": "lt_0123456789abcdef0123",
+  "cancel_requested": false,
+  "payload": {"item_codes": ["FAKE-1"], "quantity_total": 1}
+}

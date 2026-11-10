@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mctl.ai/schemas/bridge/v1alpha2/claim-response.schema.json",
+  "title": "Bridge claim response (mctl-api -> provider worker), v1alpha1 and claim/v1alpha2 envelopes",
+  "description": "The envelope version is independent of each command's schema_version. The v1alpha1 envelope carries v1alpha1 commands only and is byte for byte what mctl-api writes today. The claim/v1alpha2 envelope may also carry v1alpha2 read commands and the v1alpha2 place_order_fake.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "commands"
+  ],
+  "properties": {
+    "schema_version": {
+      "enum": [
+        "bridge.mctl.ai/v1alpha1",
+        "bridge.mctl.ai/claim/v1alpha2"
+      ]
+    },
+    "commands": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 10,
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "schema_version"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": "bridge.mctl.ai/v1alpha1"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "commands": {
+            "items": {
+              "$ref": "https://mctl.ai/schemas/bridge/v1alpha1/command.schema.json"
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "commands": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "https://mctl.ai/schemas/bridge/v1alpha1/command.schema.json"
+                },
+                {
+                  "$ref": "read-command.schema.json"
+                },
+                {
+                  "$ref": "command-place-order-fake.schema.json"
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
+}
