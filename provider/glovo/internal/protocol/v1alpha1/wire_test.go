@@ -180,3 +180,52 @@ func TestParseClaimResponse(t *testing.T) {
 		}
 	}
 }
+
+// The basket invariants the schema cannot express are refused at parse time.
+func TestV2BasketRulesRefused(t *testing.T) {
+	v2 := fixture(t, "v1alpha2/command-place-order-fake.valid.json")
+	line := func(code string, qty, price int) map[string]any {
+		return map[string]any{"item_code": code, "quantity": qty, "unit_price_minor": price}
+	}
+	with := func(f func(p map[string]any)) []byte {
+		return mutate(t, v2, func(m map[string]any) { f(m["payload"].(map[string]any)) })
+	}
+	cases := map[string][]byte{
+		"duplicate item": with(func(p map[string]any) {
+			p["lines"] = []any{line("FAKE-1", 1, 500), line("FAKE-1", 1, 500)}
+			p["subtotal_minor"], p["total_minor"] = 1000, 1249
+		}),
+		"unsorted lines": with(func(p map[string]any) {
+			p["lines"] = []any{line("FAKE-2", 1, 500), line("FAKE-1", 1, 500)}
+			p["subtotal_minor"], p["total_minor"] = 1000, 1249
+		}),
+		"subtotal mismatch": with(func(p map[string]any) { p["subtotal_minor"] = 499; p["total_minor"] = 748 }),
+		"total mismatch":    with(func(p map[string]any) { p["total_minor"] = 750 }),
+	}
+	for name, raw := range cases {
+		if _, _, err := ParseCommand(raw); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// Two sorted unique lines with right arithmetic still parse.
+	ok := with(func(p map[string]any) {
+		p["lines"] = []any{line("FAKE-1", 2, 500), line("FAKE-2", 1, 250)}
+		p["subtotal_minor"], p["total_minor"] = 1250, 1499
+	})
+	if _, _, err := ParseCommand(ok); err != nil {
+		t.Fatalf("a valid two-line basket: %v", err)
+	}
+}
+
+// The Kind check is a defence in depth in front of the schema; this pins it
+// on its own by giving the v2 schema a document it would otherwise accept.
+func TestV2KindCheckIsPinned(t *testing.T) {
+	v2 := fixture(t, "v1alpha2/command-place-order-fake.valid.json")
+	for _, k := range []string{KindCancelOrder, KindQuote, KindReadStatus} {
+		raw := mutate(t, v2, func(m map[string]any) { m["kind"] = k })
+		_, _, err := ParseCommand(raw)
+		if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "place_order_fake only") {
+			t.Errorf("%s: want the kind refusal, got %v", k, err)
+		}
+	}
+}

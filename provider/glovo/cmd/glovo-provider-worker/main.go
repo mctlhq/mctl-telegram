@@ -83,12 +83,22 @@ func run(ctx context.Context, env []string) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	pollDone := make(chan struct{})
-	go func() { _ = p.Run(runCtx); close(pollDone) }()
+	var pollErr error
+	go func() { pollErr = p.Run(runCtx); close(pollDone) }() // pollErr is read only after pollDone is closed
 
 	var runErr error
 	select {
 	case <-ctx.Done():
 	case runErr = <-srvErr:
+	case <-pollDone:
+		// The poller stopped on its own while the health server is still up:
+		// exit so the orchestrator restarts the pod instead of leaving a
+		// worker that answers /livez but polls nothing.
+		if pollErr != nil {
+			runErr = fmt.Errorf("poller stopped: %w", pollErr)
+		} else {
+			runErr = errors.New("poller stopped unexpectedly")
+		}
 	}
 	log.Info("shutting down")
 	hs.SetShuttingDown()

@@ -117,7 +117,9 @@ func (e *Executor) RunRead(ctx context.Context, c v1alpha1.Command) Situation {
 		_, err := cl.ReadCart(ctx) // authenticates the fake session; status itself is local
 		e.record(err)
 		if err == nil {
-			e.Store.OrderStatus(c.OrderRef)
+			if _, ok := e.Store.OrderStatus(c.OrderRef); !ok {
+				err = fakestore.ErrNoOrder
+			}
 		}
 		return classifyStore(err)
 	}

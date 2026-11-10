@@ -149,8 +149,8 @@ func TestReadAndWritePaths(t *testing.T) {
 	if s := e.RunRead(ctx, bad); s != SitStoreRejected {
 		t.Fatalf("unknown item: %s", s)
 	}
-	if s := e.RunRead(ctx, mk("read_status", "cmd_s")); s != SitReadOK {
-		t.Fatalf("read_status: %s", s)
+	if s := e.RunRead(ctx, mk("read_status", "cmd_s")); s != SitStoreRejected {
+		t.Fatalf("read_status of an order that does not exist: %s", s)
 	}
 	store.SetTransientReads(1)
 	if s := e.RunRead(ctx, mk("quote", "cmd_q3")); s != SitStoreTransient {
@@ -166,6 +166,9 @@ func TestReadAndWritePaths(t *testing.T) {
 	}
 	if !e.HasPriorEffect(place) {
 		t.Fatal("effect record expected")
+	}
+	if s := e.RunRead(ctx, mk("read_status", "cmd_s2")); s != SitReadOK {
+		t.Fatalf("read_status of a placed order: %s", s)
 	}
 	if s := e.RunWrite(ctx, mk("cancel_order_fake", "cmd_c")); s != SitApplied {
 		t.Fatalf("cancel: %s", s)

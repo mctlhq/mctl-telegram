@@ -84,4 +84,12 @@ func (l *Limiter) TryAcquire(tenant string) bool {
 	return true
 }
 
-func (l *Limiter) Release(tenant string) { l.mu.Lock(); l.used[tenant]--; l.mu.Unlock() }
+func (l *Limiter) Release(tenant string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.used[tenant] <= 1 {
+		delete(l.used, tenant)
+		return
+	}
+	l.used[tenant]--
+}

@@ -308,9 +308,10 @@ func (p *Poller) Handle(ctx context.Context, claimedAt time.Time, claimVersion s
 	}
 	p.permitMetric("granted")
 	sit := p.Exec.RunWrite(leaseCtx, cmd)
-	if sit == executor.SitAmbiguousWrite {
+	switch sit {
+	case executor.SitAmbiguousWrite:
 		obs.Audit(p.log(), obs.EventMutationUnknown, cmd.ExecutionID, cmd.OrderRef, "ambiguous_write")
-	} else if sit == executor.SitApplied {
+	case executor.SitApplied:
 		obs.Audit(p.log(), obs.EventMutationApplied, cmd.ExecutionID, cmd.OrderRef, "applied")
 	}
 	submit(sit)

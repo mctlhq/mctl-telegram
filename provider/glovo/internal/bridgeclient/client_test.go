@@ -191,3 +191,21 @@ func TestCredentialRereadAndRedacted(t *testing.T) {
 		t.Fatal("oversized credential must fail")
 	}
 }
+
+// The command id is escaped once: a character that needs escaping must reach
+// the server as %XX, not as %25XX.
+func TestCommandIDIsEscapedOnce(t *testing.T) {
+	var got atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store(r.RequestURI)
+		http.Error(w, `{"error":"x"}`, http.StatusNotFound)
+	}))
+	defer srv.Close()
+	origin, _ := bridgeclient.ParseOrigin(srv.URL)
+	c := bridgeclient.New(origin, fileCred(t, canary), nil)
+	_, _ = c.WritePermit(context.Background(), "cmd a/b", "lt_0123456789abcdef0123")
+	uri, _ := got.Load().(string)
+	if !strings.HasSuffix(uri, "/cmd%20a%2Fb/write-permit") {
+		t.Fatalf("request URI = %q, want the id escaped exactly once", uri)
+	}
+}

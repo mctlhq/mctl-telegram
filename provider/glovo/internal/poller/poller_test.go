@@ -176,13 +176,21 @@ func withLease(d map[string]any) map[string]any {
 func TestHappyPathPerKind(t *testing.T) {
 	r := newRig(t)
 	q := r.f.Enqueue(bridgefake.Command("quote"))
-	s := r.f.Enqueue(bridgefake.Command("read_status"))
 	place := bridgefake.Command("place_order_fake")
 	p := r.f.Enqueue(place)
 	r.start()
 	r.expect(r.result(q), "succeeded", "none", "none")
-	r.expect(r.result(s), "succeeded", "none", "none")
 	r.expect(r.result(p), "succeeded", "applied", "none")
+	// read_status reads the fake order of order_ref: a placed order succeeds,
+	// an order that does not exist is a rejection, not a silent success.
+	status := bridgefake.Command("read_status")
+	status["order_ref"] = place["order_ref"]
+	s := r.f.Enqueue(status)
+	r.expect(r.result(s), "succeeded", "none", "none")
+	unknown := bridgefake.Command("read_status")
+	unknown["order_ref"] = "ordr_0000000000000000none"
+	u := r.f.Enqueue(unknown)
+	r.expect(r.result(u), "failed_terminal", "none", "provider_rejected")
 	if r.f.Count("permit") != 1 {
 		t.Fatalf("permit calls = %d after place", r.f.Count("permit"))
 	}
@@ -570,7 +578,7 @@ func TestFailClosed(t *testing.T) {
 
 	r2 := newRig(t)
 	r2.f.FailNext("result", bridgefake.Fault{Status: 401, Body: `{"error":"unauthorized"}`})
-	id = r2.f.Enqueue(bridgefake.Command("quote"))
+	r2.f.Enqueue(bridgefake.Command("quote"))
 	r2.start()
 	r2.waitFor("result post", func() bool { return r2.f.Count("result") == 1 })
 	r2.settle()

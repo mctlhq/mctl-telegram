@@ -339,6 +339,9 @@ func ParseCommand(raw json.RawMessage) (Command, Envelope, error) {
 		if err := strictDecode(w.Payload, &b); err != nil {
 			return fail(err)
 		}
+		if err := checkBasketRules(b); err != nil {
+			return fail(err)
+		}
 		c.Basket = &b
 	} else if err := strictDecode(w.Payload, &c.Payload); err != nil {
 		return fail(err)
@@ -397,4 +400,31 @@ func ParseClaimResponse(body []byte) (ClaimResponse, error) {
 		return ClaimResponse{}, fmt.Errorf("%w: too many commands", ErrInvalid)
 	}
 	return ClaimResponse{SchemaVersion: w.SchemaVersion, Commands: cmds}, nil
+}
+
+// checkBasketRules enforces what the approval-basket schema cannot express
+// (the v1alpha2 README: every consumer must check these): lines sorted
+// ascending by a unique item_code, and the subtotal and total arithmetic.
+// Unsorted input is refused, never re-sorted: the digest the owner approved
+// covers the order of the lines.
+func checkBasketRules(b Basket) error {
+	var sub int64
+	for i, l := range b.Lines {
+		if i > 0 {
+			switch {
+			case l.ItemCode == b.Lines[i-1].ItemCode:
+				return fmt.Errorf("%w: duplicate item_code", ErrInvalid)
+			case l.ItemCode < b.Lines[i-1].ItemCode:
+				return fmt.Errorf("%w: lines are not sorted by item_code", ErrInvalid)
+			}
+		}
+		sub += int64(l.Quantity) * int64(l.UnitPriceMinor)
+	}
+	if sub != int64(b.SubtotalMinor) {
+		return fmt.Errorf("%w: subtotal_minor does not match the lines", ErrInvalid)
+	}
+	if sub+int64(b.DeliveryFeeMinor)+int64(b.ServiceFeeMinor)-int64(b.DiscountMinor) != int64(b.TotalMinor) {
+		return fmt.Errorf("%w: total_minor does not match the parts", ErrInvalid)
+	}
+	return nil
 }

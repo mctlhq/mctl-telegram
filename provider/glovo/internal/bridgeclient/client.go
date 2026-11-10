@@ -65,7 +65,14 @@ func New(origin *url.URL, cred CredentialSource, hc *http.Client) *Client {
 
 func (c *Client) do(ctx context.Context, path string, body []byte) ([]byte, error) {
 	u := *c.base
-	u.Path = path
+	// path is already escaped (the command id goes through url.PathEscape), so
+	// keep Path as its decoded form and RawPath as the wire form; assigning the
+	// escaped string to Path alone would double-escape every %.
+	if dec, derr := url.PathUnescape(path); derr == nil {
+		u.Path, u.RawPath = dec, path
+	} else {
+		u.Path = path
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
@@ -88,7 +95,7 @@ func (c *Client) do(ctx context.Context, path string, body []byte) ([]byte, erro
 		}
 		return nil, errors.New("bridgeclient: transport error")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, MaxBodyBytes))
 	if err != nil {
 		return nil, errors.New("bridgeclient: transport error reading body")
@@ -119,7 +126,7 @@ func validCode(s string) bool {
 		return false
 	}
 	for _, r := range s {
-		if !(r == '_' || (r >= 'a' && r <= 'z')) {
+		if r != '_' && (r < 'a' || r > 'z') {
 			return false
 		}
 	}

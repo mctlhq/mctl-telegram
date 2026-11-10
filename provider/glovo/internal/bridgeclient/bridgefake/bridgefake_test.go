@@ -35,7 +35,7 @@ func (x *h) post(path, auth string, body any) (int, map[string]any, http.Header)
 	if err != nil {
 		x.t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(resp.Body)
 	var m map[string]any
 	_ = json.Unmarshal(raw, &m)
