@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mctl.ai/schemas/bridge/v1alpha1/result.schema.json",
+  "title": "Bridge result (provider worker -> mctl-api), v1alpha1 proposal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "command_id", "execution_id", "lease_token", "attempt",
+    "worker_identity", "outcome", "provider_effect", "completed_at"
+  ],
+  "properties": {
+    "schema_version": {"const": "bridge.mctl.ai/v1alpha1"},
+    "command_id": {"type": "string", "pattern": "^cmd_[A-Za-z0-9]{26}$"},
+    "execution_id": {"type": "string", "pattern": "^we_[A-Za-z0-9]{16,40}$"},
+    "lease_token": {"type": "string", "pattern": "^lt_[A-Za-z0-9_-]{16,64}$"},
+    "attempt": {"type": "integer", "minimum": 1, "maximum": 100},
+    "worker_identity": {"type": "string", "pattern": "^provider:[a-z0-9-]{1,32}$"},
+    "outcome": {
+      "enum": ["succeeded", "failed_retryable", "failed_terminal", "cancelled", "approval_refused"]
+    },
+    "provider_effect": {"enum": ["none", "applied", "unknown"]},
+    "result_ref": {"type": "string", "pattern": "^res_[A-Za-z0-9]{16,40}$"},
+    "error_code": {
+      "enum": ["none", "stale_lease", "expired", "approval_refused", "provider_unavailable",
+               "provider_rejected", "internal"]
+    },
+    "error_detail": {"type": "string", "maxLength": 256},
+    "completed_at": {"type": "string", "format": "date-time", "maxLength": 40}
+  }
+}

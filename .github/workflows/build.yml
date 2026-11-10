@@ -88,6 +88,14 @@ jobs:
       - name: Test Glovo PoC nested module with race detector
         working-directory: test/glovo-poc
         run: go test -race -count=1 ./...
+      # Private fake-provider command-bridge worker module; offline, no Glovo
+      # account, no Temporal. Its boundary tests shell out to `go list`.
+      - name: Vet Glovo provider worker nested module
+        working-directory: provider/glovo
+        run: go vet ./...
+      - name: Test Glovo provider worker nested module with race detector
+        working-directory: provider/glovo
+        run: go test -race -count=1 ./...
       # The Postgres-backed tests degrade to a skip, not a failure, when
       # TEST_DATABASE_URL is missing or the service container never came up --
       # so the step above stays green either way and the coverage this job
@@ -416,3 +424,46 @@ jobs:
           test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/readyz)" = 503
           test "$(docker inspect -f '{{.Config.User}}' mctl-glovo-mcp:ci)" = 1000:1000
           docker rm -f glovo-mcp >/dev/null
+
+  # Builds the private fake-provider command-bridge worker image WITHOUT pushing
+  # it: no registry login and no push anywhere in this job. A separate,
+  # non-required job so the required `test` and `docker` check names are
+  # unchanged. Nothing releases or deploys this image.
+  docker-glovo-provider-worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile.glovo-provider-worker
+          push: false
+          load: true
+          tags: glovo-provider-worker:ci
+          cache-from: type=gha,scope=glovo-provider-worker
+          cache-to: type=gha,mode=max,scope=glovo-provider-worker
+      - name: Image runs as non-root
+        run: |
+          user="$(docker image inspect glovo-provider-worker:ci --format '{{.Config.User}}')"
+          echo "image user: ${user}"
+          case "${user}" in ""|0|0:*|root|root:*) echo "image must not run as root"; exit 1 ;; esac
+      - name: Refuses to start without FAKE_ONLY
+        run: |
+          if docker run --rm -e FAKE_ONLY= glovo-provider-worker:ci; then
+            echo "worker started without FAKE_ONLY=true"; exit 1
+          fi
+      - name: Refuses to start with a Glovo session credential in the environment
+        run: |
+          if docker run --rm -e GLOVO_SESSION_TOKEN=synthetic glovo-provider-worker:ci; then
+            echo "worker started with GLOVO_SESSION_TOKEN set"; exit 1
+          fi
+      - name: Refuses to start with a Temporal setting in the environment
+        run: |
+          set +e
+          out="$(docker run --rm -e TEMPORAL_HOSTPORT=localhost:7233 glovo-provider-worker:ci 2>&1)"
+          rc=$?
+          set -e
+          echo "${out}"
+          if [ "${rc}" -eq 0 ]; then echo "worker started with TEMPORAL_HOSTPORT set"; exit 1; fi
+          echo "${out}" | grep -q TEMPORAL_HOSTPORT
