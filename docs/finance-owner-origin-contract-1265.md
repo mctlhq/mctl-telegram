@@ -9,11 +9,30 @@ implementation. Every new schema, token, permission or owner UX below is
 `RESEARCH_ONLY_DEFER`. This document does not approve finance runtime, pilot,
 production, real Telegram accounts, finance records, egress or deployment.
 
+> **EVIDENCE WARNING (flagged, not corrected).** `docs/reports/finance-assistant-l2-slice-c.md`
+> line 31 (pinned source `5fb1de8952e12e975df5366ade45f8aa95aa0220`, line 12) records
+> `T2.bob_job_owner_summary` as **PASS** ("Ordinary owner routing only"). That is
+> inconsistent with the canonical current behavior: `TestL2Finance_T2` in
+> `internal/agentapi/l2finance_api_test.go` records the same row as **FAIL/GAP** via
+> `expectGap`, and the results report grades it FAIL/GAP. The PASS in slice-c must not be
+> cited as evidence of any finance-origin pass. What passes today is the separate row
+> `T2.ordinary_owner_routing`. That pinned historical report and every matrix row are left
+> unedited by this document; the lead permitted flagging instead of correction.
+
 Source revision read: `origin/main` = `0a8d29fc572ad945d38245af2bc49344dd9704fc`
 (fetched 2026-11-10). Evidence report read: `docs/reports/finance-assistant-l2-results.md`,
 which records its own tested HEAD `b9ba5ebfb36a6ff4907786fbb341342f42f1fac7` (workflow run
 #42620545631). Code facts below were read at the `origin/main` revision, not re-run.
-No tests, mutations or network were used for this document.
+No tests or mutations were run. `git fetch` was used to obtain the revision above; no
+other network egress occurred. No chronology between the two hashes above is inferred
+from the hashes themselves.
+
+Evidence status of counts used here: the 43 PASS / 9 FAIL-GAP / 6 NOT-IMPLEMENTED /
+6 CANNOT-OBSERVE aggregate quoted in section 2 is the **historical aggregate of the
+pinned results report only**. The lead reports that current main after #1275 has 49 PASS /
+3 FAIL-GAP / 6 NOT-IMPLEMENTED / 6 CANNOT-OBSERVE, with the three remaining gaps being
+`T10.denycode_persisted`, `T10.intent_channel` and `T2.bob_job_owner_summary`. That
+current figure is relayed by the lead and was **not measured locally** for this document.
 
 ## 1. Problem
 
@@ -69,8 +88,9 @@ All paths are at `origin/main` 0a8d29fc.
   4. `propose_reply` pending-approval notifications (control notifier doc comment).
   5. `internal/humaninput/poller.go` direct `InsertOwnerNotification` of
      human-input follow-ups: no action row, no job. Out of scope here.
-  6. The server-owned `assistant_manipulation` alert: fixed text that never quotes
-     the sender; must remain exempt from any finance gate (it carries no finance data).
+  6. The server-owned `assistant_manipulation` alert: the current request intent
+     selects a fixed server body that does not quote the sender. Whether it is exempt
+     from a finance gate is PENDING (D9, section 5); it is not an accepted requirement.
   `internal/agent/schedule/schedule.go` contains no summary call (grep); not confirmed
   beyond that.
 - Canonical L2 behavior (`internal/agentapi/l2finance_api_test.go`, `TestL2Finance_T2`,
@@ -82,8 +102,9 @@ All paths are at `origin/main` 0a8d29fc.
   ("finance-looking text from Bob-conversation job allowed to queue owner summary
   without a finance owner-invocation grant"). `T2.finance_origin_authorization` is
   recorded NOT-IMPLEMENTED ("no finance-source label, source consent or finance policy
-  gate exists"). Matrix in `finance-assistant-l2-results.md`: 64 rows, PASS 43,
-  FAIL/GAP 9, NOT-IMPLEMENTED 6, CANNOT-OBSERVE 6. The gate manifest
+  gate exists"). Matrix in `finance-assistant-l2-results.md` (historical pinned report
+  only; see the evidence status note at the top for the lead-reported current counts):
+  64 rows, PASS 43, FAIL/GAP 9, NOT-IMPLEMENTED 6, CANNOT-OBSERVE 6. The gate manifest
   (`internal/l2finance/gate/testdata/manifest.txt`) lists `agentapi:T2.bob_job_owner_summary`
   and `agentapi:T2.ordinary_owner_routing`.
 - Existing discovery (`docs/reports/finance-assistant-owner-private-discovery.md`)
@@ -98,11 +119,10 @@ Missing context: the text of issues #1265, #1271, #1272, #1244 and .github#325 w
 available offline; this document relies on the task statement for them. #1271/#1272
 code is not assumed.
 
-Documentation inconsistency (observed, not edited): `docs/reports/finance-assistant-l2-slice-c.md`
-(pinned `5fb1de89`) lists `T2.bob_job_owner_summary` as PASS "Ordinary owner routing
-only". That conflicts with the results report and the current test, which grade it
-FAIL/GAP and forbid reclassification. The results report and test are treated as
-canonical; the slice-c row predates them and must not be used as evidence of a pass.
+Documentation inconsistency: see the EVIDENCE WARNING at the top of this document
+(`finance-assistant-l2-slice-c.md` line 31 PASS versus canonical FAIL/GAP). The results
+report and the current test are treated as canonical. Whether slice-c predates them is
+not established here, since chronology is not inferred from hashes.
 
 ## 3. What counts as evidence of origin and consent
 
@@ -169,10 +189,39 @@ completeness; not recommended.
 
 ## 5. Behavior rules (apply to all options)
 
-- Non-finance routing is unchanged. An install without the declaration, and every
-  non-finance caller in section 2 (jobless account-token summaries, approval
-  requests, manipulation alerts, humaninput follow-ups), keep today's behavior byte
-  for byte. The new check is a no-op unless the declaration is present.
+- Applicability by install and action kind (PENDING; supersedes any "unchanged for
+  everyone" reading). The new check is a no-op **only for an install without the
+  declaration**: such an install keeps today's behavior byte for byte, for every caller
+  in section 2. For a **declared** install, the check applies to the endpoint, not to a
+  proven finance classification: `/notify/summary` is a generic endpoint, and use of it
+  does not establish that the work is non-finance. Per action kind under a declared
+  install (each is a compatibility loss, and each is a PENDING choice):
+  - job-bound `send_owner_summary` from third-party-origin job: denied (Option 1) or
+    needs a grant (Option 2). Loss: peer-triggered summaries stop, including ones that
+    were not finance work, because the install flag is coarse (D1).
+  - jobless account-token summary: denied as unproven origin (D6). Loss: a general
+    daily summary stops under a declared install.
+  - `request_owner_approval` and `propose_reply` approval notifications: through the
+    same handler, so the same job-origin rule would apply (D2/D9). Loss: peer-triggered
+    approval requests stop under a declared install. Whether to exempt them is not
+    decided here.
+  - `assistant_manipulation` alert and humaninput follow-ups: see the exemption
+    choice below (D9) and note that humaninput does not pass through this handler.
+  Section 5 therefore does not promise that jobless or approval behavior is unchanged
+  under a declared install; it promises that only for undeclared installs.
+- Manipulation alert exemption is a PENDING choice (D9), not an accepted requirement.
+  Facts: the alert is selected by the current request's intent, and the server writes a
+  fixed body that does not quote the sender; sanitization of text is not source
+  authorization. Choice (a), recommended if exempting: exempt only when the server
+  itself derives the alert condition from a trustworthy persisted signal and emits its
+  fixed body; allowed data is the fixed body only; no request text, sender text or
+  model-supplied string may flow through the exemption, and an arbitrary-text request
+  carrying the manipulation intent must still be evaluated as an ordinary summary. A
+  trustworthy server-side derivation is **not known to exist today**: the current
+  trigger is the request intent, which the model controls. This document does not
+  invent such a signal. If none is approved, choice (b) is no exemption: the alert is
+  denied like any peer-origin summary under a declared install, at the cost of losing
+  the alert for declared installs.
 - No finance declassification: the check keys on server-persisted install
   declaration and event kinds, never on text, `intent`, or a client flag. A request
   cannot lower its own classification. A conversation or job whose origin cannot be
@@ -184,6 +233,20 @@ completeness; not recommended.
   deny. A denial is durable (an `agent_actions` row with `denied`, typed reason,
   and a checked audit write) before any notification or other effect. If the durable
   denial cannot be written, answer 500 and take no action (matches `denyBindingCode`).
+- Owner-purpose binding and origin handling (PENDING proposals, D10). `saved_command`
+  proves the owner authored the message. It does not prove the owner invoked
+  finance-purpose work, nor consented to every source the job later reads. Proposed
+  options for binding purpose: (a) the owner-origin allowance applies only if the job's
+  `saved_command` text carries an explicit enumerated purpose token that the control
+  parser validates and persists with the event; (b) owner-origin is allowed for any
+  `saved_command` under the declared install (weaker; the owner's declaration is the
+  only purpose evidence). Either way source reads by an owner-origin job are not
+  consent to third-party sources. Origin handling is closed over its inputs: origin is
+  owner-origin only if the origin set is non-empty, every event row is present, readable
+  and of a recognized kind `saved_command`, and the job is not coalesced with any other
+  kind. Missing event, empty origin set, unsupported or unknown kind, and a coalesced
+  set containing any non-`saved_command` event are all third-party-origin; unknown
+  never becomes an authorizable source and never silently counts as owner-origin.
 - Jobless account-token calls cannot carry job origin. Under a finance-declared
   install a jobless summary is treated as unproven origin and denied unless Option 2
   later grants it explicitly (PENDING).
@@ -214,9 +277,10 @@ removed and re-added; owner-summary with `ConversationID` of a different convers
 than the job; foreign-tenant job id; DB error on any lookup; audit write failure; queued
 row surviving a revocation; notifier restart mid-claim.
 
-Positive/regression cases: non-finance install unchanged; declared install with
-owner-origin `saved_command` job allowed; assistant-manipulation alert still allowed;
-jobless summary on a non-declared install unchanged.
+Positive/regression cases: undeclared install unchanged; declared install with
+owner-origin `saved_command` job allowed (subject to D10 purpose binding);
+jobless summary on an undeclared install unchanged. The manipulation alert case depends
+on the D9 choice and is not asserted as allowed here.
 
 ## 6. Dependencies
 
@@ -262,9 +326,21 @@ bare targeted `go test` commands, offline, no live data.
   are unaffected on non-declared installs.
 - Legacy and in-flight jobs and rows under a declared install fail closed (denied or
   not sent) rather than being grandfathered.
-- Rollback: disable by clearing the declaration (behavior reverts to today) or by
-  reverting the code; additive schema is left in place. A rolled-back state is the
-  current known FAIL/GAP, not a pass.
+- Safe revocation versus rollback (PENDING, D11). Two different operations:
+  - Safe revocation (tightening): bumping the revision, revoking a grant, or removing
+    a grant must only make sends stricter. Proposed: a queued row binds monotonically
+    to the declaration and grant revision it was queued under; at send time a row whose
+    binding is stale or missing under a declared install is not sent, and there is no
+    automatic downgrade of a row to a weaker state.
+  - Deliberate operator rollback to the old unsafe behavior: clearing the declaration
+    or reverting the code. Clearing the declaration cannot both preserve "no
+    declassification" and silently disable the fence; it does disable it. It must
+    therefore be an explicit operator act, not something a request, job or model can
+    trigger, and queued bound rows are decided by D11 (drop, or send under the
+    operator's explicit instruction), not silently sent.
+  - An operator rollback reopens the known GAP (`T2.bob_job_owner_summary`
+    FAIL/GAP). It is not a security pass.
+- Additive schema is left in place on rollback.
 
 ## 9. Evidence rules
 
@@ -272,6 +348,10 @@ bare targeted `go test` commands, offline, no live data.
   stays FAIL/GAP and `T2.finance_origin_authorization` stays NOT-IMPLEMENTED until
   real implementation proof from a fresh tagged run at the implementing HEAD.
   `ordinary_owner_routing` stays PASS and must not be relabeled.
+- The opt-in declaration does not close the original, unchanged canonical T2 case,
+  which has no declaration: `T2.bob_job_owner_summary` stays FAIL/GAP for that
+  scenario unless a separately approved evidence or contract change says otherwise.
+  New declared-install cases alone do not satisfy the original acceptance.
 - Any new rows, or any change in the meaning of an existing row, needs separate owner
   approval and a new fixture ID; none are approved here. Nothing in this document
   claims a finance-origin row passes.
@@ -290,6 +370,12 @@ bare targeted `go test` commands, offline, no live data.
 | D6 | Jobless account-token summaries under a declared install | Deny (origin unproven) | Allow if the owner grants explicitly | Deny may break a general daily summary for finance-declared installs; allow reopens an origin-free path |
 | D7 | Row/evidence changes | No change to the 64 rows; any new row separately approved | Add rows in the same implementation PR | Keeps evidence comparable across revisions versus faster coverage |
 | D8 | Sequencing with #1271/#1272 | Implement after they merge and rebase | Land in parallel and resolve conflicts | Sequencing avoids rewriting shared notifier/actions paths; parallel is faster but risks semantic conflict |
+| D9 | Manipulation alert (and approval-notification) exemption under a declared install | No exemption for arbitrary text; exempt only a server-derived fixed body if a trustworthy signal is separately approved | No exemption at all | Exemption keeps the alert but needs a trusted derivation that does not exist today; none loses the alert for declared installs |
+| D10 | Owner-purpose binding for `saved_command` and closed origin handling | Explicit enumerated purpose token validated by control parser; unknown/empty/coalesced origin is third-party | Any `saved_command` under a declared install counts as owner-purpose | Token is stricter but adds owner syntax; the alternative relies on the declaration alone |
+| D11 | Revocation versus rollback semantics and queued-row binding | Monotonic row binding, no automatic downgrade; rollback is an explicit operator act | Revision check only, no row binding | Binding costs a column; without it a rollback or bump cannot be told apart from a stale row |
+
+All of D1-D11 remain PENDING OPERATOR DECISION; none is chosen or approved by this
+document. D1-D8 are the original set, D9-D11 are added by this revision.
 
 Stop point: this is a proposal. Owner exact-content approval is required before any
 implementation. No push, PR, merge, activation or release follows from this document.
