@@ -70,11 +70,11 @@ var version = "dev"
 // dbConnectRetryInterval/dbConnectRetryTimeout bound the startup database
 // connection wait (see db.OpenWithRetry). A short fixed interval recovers
 // the common case (a netpol race that resolves in well under a second, per
-// mctl-gitops#866) almost as fast as a tight loop, while the total timeout
-// keeps a genuinely unreachable database failing fast on the order of
-// minutes, not hanging indefinitely.
+// mctl-gitops#866, #1108) almost as fast as a tight loop without adding 2 s of
+// rollout dead time, while the total timeout keeps a genuinely unreachable
+// database failing fast on the order of minutes, not hanging indefinitely.
 const (
-	dbConnectRetryInterval = 2 * time.Second
+	dbConnectRetryInterval = 250 * time.Millisecond
 	dbConnectRetryTimeout  = 2 * time.Minute
 )
 
