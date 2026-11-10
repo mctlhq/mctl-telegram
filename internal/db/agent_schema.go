@@ -217,6 +217,12 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 			return err
 		}
 	}
+	// agent_actions.deny_code (#1271): the stable code of the denial that moved
+	// the action to denied. NULL on legacy denied rows (no backfill) and on
+	// every action that is not denied.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "agent_actions", "deny_code", "TEXT", "TEXT"); err != nil {
+		return err
+	}
 	// agent_profiles.assistant_definition_digest: the digest of the
 	// definition the current revision was installed from ('' before any
 	// install).

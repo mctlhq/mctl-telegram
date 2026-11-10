@@ -48,13 +48,22 @@ func (s *Server) toolGate(route string, h http.HandlerFunc) http.HandlerFunc {
 		set, err := s.toolSet(r.Context(), id)
 		if err != nil {
 			logHandlerErr(served[0], err)
-			s.audit(r.Context(), id.UserID, served[0], "denied", "tool gate: "+errToolSetUnknown.Error())
+			// Not a policy decision: the set could not be resolved, so the
+			// code is unknown. The answer is 503 whether or not the audit row
+			// lands, so a failed write is only logged.
+			if aerr := s.auditDenied(r.Context(), id.UserID, served[0], "tool gate: "+errToolSetUnknown.Error(), policy.DenyUnknown); aerr != nil {
+				logHandlerErr(served[0]+"_toolgate_audit", aerr)
+			}
 			writeJSONError(w, http.StatusServiceUnavailable, "tool set unavailable")
 			return
 		}
 		if !slices.ContainsFunc(served, func(t string) bool { return slices.Contains(set, t) }) {
-			s.audit(r.Context(), id.UserID, served[0], "denied", "tool gate: "+string(policy.DenyToolNotAllowed))
 			s.m.CountPolicyDenial(string(policy.DenyToolNotAllowed), metrics.PolicySurfaceToolGate)
+			// Checked: the denial is only reported once its row is committed.
+			if aerr := s.auditDenied(r.Context(), id.UserID, served[0], auditErrToolGate(policy.DenyToolNotAllowed), policy.DenyToolNotAllowed); aerr != nil {
+				writeBindingAuditFailure(w, served[0], aerr)
+				return
+			}
 			writeJSON(w, http.StatusForbidden, map[string]string{
 				"error": string(policy.DenyToolNotAllowed),
 				"tool":  served[0],

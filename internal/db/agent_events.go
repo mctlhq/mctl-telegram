@@ -215,15 +215,18 @@ func (s *Store) SweepAgentMessageBodies(ctx context.Context, retention time.Dura
 	// reserved after its content is gone. Executing actions are deliberately
 	// excluded: their persisted-random-ID recovery must terminalize them
 	// before retention may clear their content.
-	if _, err := s.DB.ExecContext(ctx,
+	// Each retired action gets its own audit row in the same transaction as
+	// its transition (#1271); the retention reason has no policy code.
+	if _, err := s.denyActionsTx(ctx, DenyCodeUnknown,
 		`UPDATE agent_actions
 		    SET status = $1, policy_reasons = $2,
 		        approval_code = NULL, approval_code_hash = NULL,
-		        approval_code_encrypted = NULL, updated_at = $3
+		        approval_code_encrypted = NULL, updated_at = $3, deny_code = $8
 		  WHERE created_at < $4 AND updated_at < $4
-		    AND status IN ($5,$6,$7)`,
+		    AND status IN ($5,$6,$7)
+		  RETURNING id, user_id`,
 		ActionDenied, "content expired by retention sweep", time.Now().UTC(), cutoff,
-		ActionProposed, ActionPendingApproval, ActionApproved,
+		ActionProposed, ActionPendingApproval, ActionApproved, DenyCodeUnknown,
 	); err != nil {
 		return total, fmt.Errorf("retire actions with expired content: %w", err)
 	}

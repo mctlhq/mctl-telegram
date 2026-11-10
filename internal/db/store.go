@@ -2247,6 +2247,9 @@ type ToolCall struct {
 	ErrMsg       string
 	CallPath     string // "local" for relay-forwarded calls, "" for hosted
 	Reason       string // operator-only; never hashed (see hashAuditEntry)
+	// DenyCode is the stable denial code (#1271); empty is stored as NULL.
+	// Unlike Reason it is hashed when set.
+	DenyCode string
 }
 
 // previousAuditHash returns the hash a user's next audit row chains from. Only
@@ -2319,8 +2322,34 @@ func (s *Store) LogToolCallChecked(ctx context.Context, c ToolCall) error {
 	// cancelled request must not lose the row. Context values stay.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
 	defer cancel()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("audit %s: begin: %w", c.Tool, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := insertAuditTx(ctx, tx, c); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("audit %s: commit: %w", c.Tool, err)
+	}
+	return nil
+}
+
+// insertAuditTx writes one chained, scrubbed audit row inside the caller's
+// transaction, so a state change and its audit row can commit or roll back
+// together (#1271). It is the only audit INSERT: LogToolCallChecked wraps it
+// in its own transaction. It does not commit, and it uses the caller's ctx
+// (no cancellation shield): a cancelled caller rolls both writes back.
+//
+// Concurrency: like the standalone path it reads the user's previous hash
+// without a user-level lock, so two concurrent writers for one user can
+// chain from the same predecessor. That pre-existing race is deliberately not
+// addressed here; same-transaction atomicity is not writer serialization.
+func insertAuditTx(ctx context.Context, tx *sql.Tx, c ToolCall) error {
 	userID, tool, peerRedacted, status := c.UserID, c.Tool, c.PeerRedacted, c.Status
 	errMsg, callPath, reason := c.ErrMsg, c.CallPath, c.Reason
+	denyCode := sql.NullString{String: c.DenyCode, Valid: c.DenyCode != ""}
 	createdAt := time.Now().UTC()
 	// The error column is free text, and peer-resolution failures format the
 	// caller's peer verbatim (`peer "channel:<id>" could not be accessed`,
@@ -2351,29 +2380,20 @@ func (s *Store) LogToolCallChecked(ctx context.Context, c ToolCall) error {
 		MCPName:         ec.MCPName,
 		ProtocolVersion: ec.ProtocolVersion,
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("audit %s: begin: %w", tool, err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
 	prev, err := previousAuditHash(ctx, tx, userID)
 	if err != nil {
 		return fmt.Errorf("audit %s: select: %w", tool, err)
 	}
-	entry := hashAuditEntry(prev, userID, tool, peerRedacted, status, errMsg, sql.NullString{String: callPath, Valid: true}, createdAt, edge)
+	entry := hashAuditEntryWithDenyCode(prev, userID, tool, peerRedacted, status, errMsg, sql.NullString{String: callPath, Valid: true}, createdAt, edge, denyCode)
 
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO audit_logs(user_id, tool_name, peer_redacted, status, error, created_at, prev_hash, entry_hash, call_path,
-		 	edge_request_id, edge_route, mcp_method, mcp_name, protocol_version, reason)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+		 	edge_request_id, edge_route, mcp_method, mcp_name, protocol_version, reason, deny_code)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
 		userID, tool, nullable(peerRedacted), status, nullable(errMsg), createdAt, prev, entry, callPath,
-		nullable(edge.RequestID), nullable(edge.Route), nullable(edge.MCPMethod), nullable(edge.MCPName), nullable(edge.ProtocolVersion), nullable(reason),
+		nullable(edge.RequestID), nullable(edge.Route), nullable(edge.MCPMethod), nullable(edge.MCPName), nullable(edge.ProtocolVersion), nullable(reason), nullable(c.DenyCode),
 	); err != nil {
 		return fmt.Errorf("audit %s: insert: %w", tool, err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("audit %s: commit: %w", tool, err)
 	}
 	return nil
 }
@@ -2403,7 +2423,7 @@ type AuditChainVerification struct {
 func (s *Store) VerifyAuditChain(ctx context.Context, userID int64) (AuditChainVerification, error) {
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT id, tool_name, peer_redacted, status, error, created_at, prev_hash, entry_hash, call_path,
-		 	edge_request_id, edge_route, mcp_method, mcp_name, protocol_version
+		 	edge_request_id, edge_route, mcp_method, mcp_name, protocol_version, deny_code
 		 FROM audit_logs
 		 WHERE user_id = $1
 		 ORDER BY id ASC`,
@@ -2432,9 +2452,10 @@ func (s *Store) VerifyAuditChain(ctx context.Context, userID int64) (AuditChainV
 			mcpMethod sql.NullString
 			mcpName   sql.NullString
 			protoVer  sql.NullString
+			denyCode  sql.NullString
 		)
 		if err := rows.Scan(&id, &tool, &peer, &status, &errCol, &createdAt, &prevHash, &entryHash, &callPath,
-			&edgeID, &edgeRoute, &mcpMethod, &mcpName, &protoVer); err != nil {
+			&edgeID, &edgeRoute, &mcpMethod, &mcpName, &protoVer, &denyCode); err != nil {
 			return AuditChainVerification{}, fmt.Errorf("scan audit: %w", err)
 		}
 		edge := auditEdge{
@@ -2463,7 +2484,7 @@ func (s *Store) VerifyAuditChain(ctx context.Context, userID int64) (AuditChainV
 				Reason:     "prev_hash does not chain to the previous entry's entry_hash",
 			}, nil
 		}
-		recomputed := hashAuditEntry(prevHash, userID, tool, peer.String, status, errCol.String, callPath, createdAt, edge)
+		recomputed := hashAuditEntryWithDenyCode(prevHash, userID, tool, peer.String, status, errCol.String, callPath, createdAt, edge, denyCode)
 		if !bytesEqual(recomputed, entryHash) {
 			return AuditChainVerification{
 				OK:         false,

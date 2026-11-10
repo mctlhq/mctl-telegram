@@ -1,7 +1,6 @@
 package agentapi
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -11,7 +10,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/mctlhq/mctl-telegram/internal/agent/policy"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
-	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
@@ -25,8 +23,14 @@ import (
 func jobBound(id *auth.Identity) bool { return id != nil && id.JobID != 0 }
 
 // denyBinding writes the 403 and audits the refusal as "denied".
+//
+// The audit write is checked and typed job_binding_mismatch (#1271); reason is
+// no longer stored, the code carries the refusal.
 func (s *Server) denyBinding(w http.ResponseWriter, r *http.Request, id *auth.Identity, tool, reason string) {
-	s.audit(r.Context(), id.UserID, tool, "denied", "conversation binding: "+reason)
+	if err := s.auditDenied(r.Context(), id.UserID, tool, auditErrBinding(policy.DenyJobBindingMismatch), policy.DenyJobBindingMismatch); err != nil {
+		writeBindingAuditFailure(w, tool, err)
+		return
+	}
 	writeJSONError(w, http.StatusForbidden, "credential is bound to another conversation")
 }
 
@@ -38,21 +42,14 @@ func (s *Server) denyBinding(w http.ResponseWriter, r *http.Request, id *auth.Id
 // sanitized 500, not the 403 that would imply a recorded denial.
 func (s *Server) denyBindingCode(w http.ResponseWriter, r *http.Request, id *auth.Identity, tool string, code policy.DenyCode, detail string) {
 	s.m.CountPolicyDenial(string(code), metrics.PolicySurfaceToolGate)
-	if err := s.auditChecked(r.Context(), id.UserID, tool, "denied", "conversation binding: "+string(code)+": "+detail); err != nil {
+	// Ids stay out of the audit text (#1271); the typed code is the durable
+	// record and the numeric-only detail goes to the log.
+	slog.Warn("agentapi binding refused", "tool", tool, "code", string(code), "detail", detail)
+	if err := s.auditDenied(r.Context(), id.UserID, tool, auditErrBinding(code), code); err != nil {
 		writeBindingAuditFailure(w, tool, err)
 		return
 	}
 	writeJSONError(w, http.StatusForbidden, "credential is bound to another conversation")
-}
-
-// auditChecked is audit with the write outcome returned, for refusals that must
-// not be reported as recorded unless the chained row was committed. It uses the
-// same single audit implementation (chain, scrubbing, tenant scoping) as audit.
-func (s *Server) auditChecked(ctx context.Context, userID int64, tool, status, errMsg string) error {
-	if s.Store == nil {
-		return nil
-	}
-	return s.Store.LogToolCallChecked(ctx, db.ToolCall{UserID: userID, Tool: tool, Status: status, ErrMsg: errMsg})
 }
 
 // writeBindingAuditFailure answers a binding refusal whose durable audit write
