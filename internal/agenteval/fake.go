@@ -71,6 +71,10 @@ func NewTask(t *Target, f Fixture, jobID int64, token string) *Task {
 
 // routePatterns map the fake's paths onto the agent API's route patterns,
 // the keys of tools.Endpoints.
+// evalInstallRevision is the one install revision the dry run judges every
+// fixture under (see the policy.Evaluate call in the guarded-send check).
+const evalInstallRevision = 1
+
 var routePatterns = []struct {
 	method, pattern string
 	re              *regexp.Regexp
@@ -374,9 +378,14 @@ func (k *Task) dryRun(body map[string]any) {
 	if engaged {
 		conv.OwnerEngagedAt = now
 	}
+	// The dry run has no install to age: judge every fixture under one
+	// explicit, nonzero revision. Evaluate denies revision 0 (#1266).
+	profile := k.target.profile
+	profile.InstallRevision = evalInstallRevision
 	result := policy.Evaluate(policy.Input{
-		Profile:      k.target.profile,
-		Conversation: conv,
+		Profile:         profile,
+		InstallRevision: evalInstallRevision,
+		Conversation:    conv,
 		Action: policy.Action{
 			Type: db.ActionTypeReply, Intent: intent, Text: text, PeerTGID: evalPeerTGID,
 		},

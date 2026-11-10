@@ -26,12 +26,19 @@ func TestL2Finance_T7_1_StaleRevisionDenied(t *testing.T) {
 	l2Record(t, "T7.1", l2Pass, "stale revision -> DenyInstallChanged")
 }
 
-func TestL2Finance_T7_2_RevisionZeroSkipsFence(t *testing.T) {
+func TestL2Finance_T7_2_RevisionZeroDenied(t *testing.T) {
 	in := l2OwnerSummaryInput()
 	in.InstallRevision = 0
 	got := Evaluate(in)
-	expectGap(t, "T7.2", got.Decision == Allow,
-		"InstallRevision=0 owner summary evaluated "+string(got.Decision)+" (policy.go install fence skipped)")
+	if got.Decision != Deny || got.DenyCode() != DenyInstallRevisionMissing || len(got.Reasons) == 0 {
+		t.Fatalf("T7.2: InstallRevision=0 owner summary decision=%s code=%s, want deny/%s", got.Decision, got.DenyCode(), DenyInstallRevisionMissing)
+	}
+	// Revision 0 on a profile that also holds 0 must not match itself.
+	in.Profile.InstallRevision = 0
+	if got := Evaluate(in); got.Decision != Deny || got.DenyCode() != DenyInstallRevisionMissing {
+		t.Fatalf("T7.2: revision 0 vs profile 0 decision=%s code=%s, want deny/%s", got.Decision, got.DenyCode(), DenyInstallRevisionMissing)
+	}
+	l2Record(t, "T7.2", l2Pass, "InstallRevision=0 -> DenyInstallRevisionMissing (also when the profile revision is 0)")
 }
 
 func TestL2Finance_T8_KillAndModeOff(t *testing.T) {

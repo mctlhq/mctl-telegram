@@ -18,10 +18,12 @@ func baseInput() Input {
 			MaxMsgsPerMinute:   2,
 			MaxReplyChars:      1200,
 			IntentAllowlist:    "greet,request_company,request_salary_range",
+			InstallRevision:    1,
 		},
-		Conversation: db.Conversation{UserID: 7, PeerTGID: 555, State: db.ConversationActive},
-		Action:       Action{Type: db.ActionTypeReply, Intent: "request_company", Text: "Could you tell me the company name?", PeerTGID: 555},
-		Now:          time.Now(),
+		Conversation:    db.Conversation{UserID: 7, PeerTGID: 555, State: db.ConversationActive},
+		Action:          Action{Type: db.ActionTypeReply, Intent: "request_company", Text: "Could you tell me the company name?", PeerTGID: 555},
+		Now:             time.Now(),
+		InstallRevision: 1,
 	}
 }
 

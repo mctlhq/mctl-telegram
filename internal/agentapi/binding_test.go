@@ -198,7 +198,24 @@ func TestBinding_OwnConversationMatchesAccountToken(t *testing.T) {
 		}
 	}
 	// conversation_id omitted: the token's conversation is used.
-	rec := f.h.doAs(f.jobIdentity, "POST", "/leads", map[string]any{"company": "Own"})
+	// The job and attempt are named: a job credential may omit the
+	// conversation, never its job. Claim so job A is the live attempt.
+	jobs, err := f.h.store.ClaimAgentJobs(context.Background(), "bind", f.h.userID, db.RuntimeOwn, 2)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	attempt := 0
+	for _, j := range jobs {
+		if j.ID == f.jobA {
+			attempt = j.Attempts
+		}
+	}
+	if attempt == 0 {
+		t.Fatalf("job A was not claimed: %+v", jobs)
+	}
+	id := *f.jobIdentity
+	id.JobAttempt = attempt
+	rec := f.h.doAs(&id, "POST", "/leads", map[string]any{"company": "Own", "job_id": f.jobA, "attempt": attempt})
 	if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
 		t.Errorf("save_lead without conversation_id: %d %s", rec.Code, rec.Body.String())
 	}

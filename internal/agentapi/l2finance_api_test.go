@@ -62,7 +62,7 @@ func (h *l2APIHarness) bump() {
 
 func TestL2Finance_T2(t *testing.T) {
 	h := l2NewAPIHarness(t, db.AgentModeObserve, "")
-	rec := h.do(h.jobID, "POST", "/notify/summary", ownerNotifyRequest{Intent: "lead", Text: l2Finance})
+	rec := h.do(h.jobID, "POST", "/notify/summary", ownerNotifyRequest{JobID: h.jobA.ID, Attempt: h.jobA.Attempts, Intent: "lead", Text: l2Finance})
 	acts := h.actions(h.alice)
 	// Count all owner notifications before examining the unique row:
 	// QueryRow alone would silently miss duplicates or another tenant's row.
@@ -180,23 +180,22 @@ func TestL2Finance_T73(t *testing.T) {
 		h := l2NewAPIHarness(t, db.AgentModeGuarded, "")
 		h.bump()
 		rec := h.do(h.jobID, "POST", "/notify/summary", ownerNotifyRequest{Intent: "lead", Text: l2Finance})
-		var raw map[string]any
-		decodeBody(t, rec, &raw)
 		acts := h.actions(h.alice)
 		_, n := h.rowsFor(h.alice)
-		observed := rec.Code == 200 && len(acts) == 1 && acts[0].Status == db.ActionExecuted && n == 1
-		ev := fmt.Sprintf("http=%d actions=%d notif_rows=%d", rec.Code, len(acts), n)
-		if len(acts) == 1 {
-			ev += fmt.Sprintf(" status=%s decision=%s persisted_job_id=%d persisted_install_revision=%d claimed_job_id=%d", acts[0].Status, acts[0].Decision, acts[0].JobID, acts[0].InstallRev, h.jobA.ID)
+		audited := h.count(`SELECT COUNT(*) FROM audit_logs WHERE user_id = $1 AND tool_name = 'send_owner_summary' AND status = 'denied' AND error LIKE 'conversation binding: job_binding_missing:%'`, h.alice)
+		ok := rec.Code == http.StatusForbidden && len(acts) == 0 && n == 0 && audited == 1
+		l2Record(t, "T7.3.omit_job_id", l2Outcome(ok), fmt.Sprintf(
+			"http=%d actions=%d notif_rows=%d typed_denied_audits=%d claimed_job_id=%d", rec.Code, len(acts), n, audited, h.jobA.ID))
+		if !ok {
+			t.Errorf("job-bound summary without job_id was not denied before effects: http=%d actions=%d notif_rows=%d typed_denied_audits=%d", rec.Code, len(acts), n, audited)
 		}
-		expectGap(t, "T7.3.omit_job_id", observed, ev)
 	})
 }
 
 func TestL2Finance_T9(t *testing.T) {
 	t.Run("observe_no_peer_send", func(t *testing.T) {
 		h := l2NewAPIHarness(t, db.AgentModeObserve, "")
-		rec := h.do(h.jobID, "POST", "/actions/propose_reply", proposeReplyRequest{Intent: "discovery", Text: l2Finance})
+		rec := h.do(h.jobID, "POST", "/actions/propose_reply", proposeReplyRequest{JobID: h.jobA.ID, Attempt: h.jobA.Attempts, Intent: "discovery", Text: l2Finance})
 		var resp actionResponse
 		decodeBody(t, rec, &resp)
 		acts := h.actions(h.alice)
@@ -209,7 +208,7 @@ func TestL2Finance_T9(t *testing.T) {
 	})
 	t.Run("guarded_allowlisted", func(t *testing.T) {
 		h := l2NewAPIHarness(t, db.AgentModeGuarded, "discovery")
-		rec := h.do(h.jobID, "POST", "/actions/propose_reply", proposeReplyRequest{Intent: "discovery", Text: l2Finance})
+		rec := h.do(h.jobID, "POST", "/actions/propose_reply", proposeReplyRequest{JobID: h.jobA.ID, Attempt: h.jobA.Attempts, Intent: "discovery", Text: l2Finance})
 		var resp actionResponse
 		decodeBody(t, rec, &resp)
 		acts := h.actions(h.alice)
@@ -361,8 +360,8 @@ func TestL2Finance_T10(t *testing.T) {
 		h := l2NewAPIHarness(t, db.AgentModeGuarded, "discovery")
 		var buf bytes.Buffer
 		l2CaptureSlog(t, audit.NewRedactingHandler(slog.NewJSONHandler(&buf, nil)))
-		h.do(h.jobID, "POST", "/notify/summary", ownerNotifyRequest{Intent: l2Marker, Text: "synthetic text"})
-		h.do(h.jobID, "POST", "/actions/propose_reply", proposeReplyRequest{Intent: l2Marker, Text: "synthetic text"})
+		h.do(h.jobID, "POST", "/notify/summary", ownerNotifyRequest{JobID: h.jobA.ID, Attempt: h.jobA.Attempts, Intent: l2Marker, Text: "synthetic text"})
+		h.do(h.jobID, "POST", "/actions/propose_reply", proposeReplyRequest{JobID: h.jobA.ID, Attempt: h.jobA.Attempts, Intent: l2Marker, Text: "synthetic text"})
 		src := h.sources()
 		src["slog"] = buf.String()
 		err := l2AssertNoMarker(src)

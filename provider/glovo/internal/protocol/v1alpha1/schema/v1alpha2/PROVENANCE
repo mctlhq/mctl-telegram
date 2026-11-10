@@ -1,0 +1,9 @@
+repo: mctlhq/mctl-agents
+source_path: docs/contracts/bridge/v1alpha2/
+vendored_from_commit: 46ccddcec15077a188e5a80089b57d030d056e16
+pull_request: 1059 (the merge commit is to be named here when it is known; until then the pin is the commit above and the digests below)
+command-place-order-fake.schema.json sha256: 38008bfce9887bfb86c610ee37578b41e33b91cc71f439b13e743c3aa253dc8a
+approval-basket.schema.json sha256: da86bae104d86cdab17b77070d460ecf9d733c271491480ada01fc2ff1b38fb3
+claim-response.schema.json sha256: 5f50415d7ec2ba063c5967f2ca6fa70e75f45c419108eb3bf596a149fac70b4f
+note: the schema files, SHA256SUMS and the three fixtures are byte-for-byte copies and must never be edited here.
+note: claim-response.schema.json references read-command.schema.json, which this provider does not vendor (it handles no v1alpha2 read command); the claim envelope is checked in wire.go and the file is pinned only.

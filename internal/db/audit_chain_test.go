@@ -289,6 +289,53 @@ func TestLogToolCall_SurvivesAFinishedRequest(t *testing.T) {
 	}
 }
 
+// LogToolCallChecked is the same implementation as LogToolCall: its row is
+// chained, scrubbed and tenant-scoped, and a failed write is returned while the
+// void wrapper still swallows it.
+func TestLogToolCallChecked_ChainedScrubbedAndReportsFailure(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	alice, _ := s.EnsureUser(ctx, "alice", "", "test")
+	bob, _ := s.EnsureUser(ctx, "bob", "", "test")
+
+	s.LogToolCall(ctx, ToolCall{UserID: alice, Tool: "first", Status: "ok"})
+	if err := s.LogToolCallChecked(ctx, ToolCall{UserID: alice, Tool: "second", Status: "denied",
+		ErrMsg: `peer "@alice_handle" not found`}); err != nil {
+		t.Fatalf("checked write: %v", err)
+	}
+	if err := s.LogToolCallChecked(ctx, ToolCall{UserID: bob, Tool: "other", Status: "ok"}); err != nil {
+		t.Fatalf("checked write (bob): %v", err)
+	}
+	var errCol string
+	if err := s.DB.QueryRow(`SELECT error FROM audit_logs WHERE user_id = $1 AND tool_name = 'second'`, alice).Scan(&errCol); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if errCol == "" || bytes.Contains([]byte(errCol), []byte("@alice_handle")) {
+		t.Fatalf("error column = %q, want scrubbed", errCol)
+	}
+	for _, uid := range []int64{alice, bob} {
+		res, err := s.VerifyAuditChain(ctx, uid)
+		if err != nil || !res.OK {
+			t.Fatalf("chain for %d: %+v %v", uid, res, err)
+		}
+	}
+	if res, _ := s.VerifyAuditChain(ctx, alice); res.Verified != 2 {
+		t.Fatalf("alice verified = %d, want 2 (wrapper row and checked row share one chain)", res.Verified)
+	}
+
+	if _, err := s.DB.Exec(`CREATE TRIGGER fail_audit_insert BEFORE INSERT ON audit_logs BEGIN SELECT RAISE(ABORT, 'synthetic audit failure'); END`); err != nil {
+		t.Fatalf("trigger: %v", err)
+	}
+	if err := s.LogToolCallChecked(ctx, ToolCall{UserID: alice, Tool: "third", Status: "ok"}); err == nil {
+		t.Fatal("checked write reported success although the insert failed")
+	}
+	s.LogToolCall(ctx, ToolCall{UserID: alice, Tool: "third", Status: "ok"}) // wrapper stays void and non-fatal
+	var n int
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM audit_logs WHERE tool_name = 'third'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("rows after failed writes = %d err=%v, want 0", n, err)
+	}
+}
+
 // A failed read of the chain head is not an empty history: reporting it as the
 // genesis hash would write a row that forks the user's chain.
 func TestPreviousAuditHash_FailedReadIsNotGenesis(t *testing.T) {

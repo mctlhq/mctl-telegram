@@ -1,0 +1,8 @@
+repo: mctlhq/mctl-agents
+pull_request: 1045 (issue 1043)
+reviewed_head: b230c0f571a64e3ca41da9b270abbbad16ca5187
+merge_commit: 14645f93fd4eb425a3ac5adeae497209431b8342
+source_path: docs/spikes/1043/
+command.schema.json sha256: b857f62b817887f56e5fea785c36f57ede44a5647da7c5cfd7e9d5069656dae1
+result.schema.json sha256: c91bb86e973aec1c43b8af1b0743c90d23d389cfdd81e9e5b8ab6042a729354f
+note: the schema files are byte-for-byte copies and must never be edited here.

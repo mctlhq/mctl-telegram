@@ -1,0 +1,13 @@
+{
+  "schema_version": "bridge.mctl.ai/v1alpha1",
+  "command_id": "cmd_01HZZZZZZZZZZZZZZZZZZZZZZZ",
+  "execution_id": "we_0123456789abcdef0123",
+  "lease_token": "lt_0123456789abcdef0123",
+  "attempt": 1,
+  "worker_identity": "provider:glovo",
+  "outcome": "succeeded",
+  "provider_effect": "applied",
+  "result_ref": "res_0123456789abcdef0123",
+  "error_code": "none",
+  "completed_at": "2026-11-08T10:01:00Z"
+}

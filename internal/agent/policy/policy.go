@@ -75,9 +75,10 @@ type Input struct {
 	// the source is current or the action is not tied to a job.
 	SourceSuperseded string
 	// InstallRevision is the install revision the action's work was created
-	// under (its job's, or the stored action's). 0 means not applicable,
-	// e.g. a proposal without a job, which is judged under the current
-	// install anyway (#1018).
+	// under (its job's, or the stored action's). It must be nonzero: Evaluate
+	// denies 0 (DenyInstallRevisionMissing). A caller with no job, such as a
+	// standalone proposal, passes the SERVER-VERIFIED current profile
+	// revision, never a value taken from the request (#1018, #1266).
 	InstallRevision int64
 	// ForkPromoted reports that the private fork the profile runs is
 	// promoted for guarded mode (P4.3, #1044). Until the promotion step
@@ -126,6 +127,19 @@ const (
 	DenyAudienceExcluded  DenyCode = "audience_excluded"
 	DenyInstallChanged    DenyCode = "install_changed"
 	DenySourceSuperseded  DenyCode = "source_message_superseded"
+	// DenyInstallRevisionMissing: Evaluate got InstallRevision 0. Distinct
+	// from DenyInstallChanged, which is a nonzero stale revision (#1266).
+	DenyInstallRevisionMissing DenyCode = "install_revision_missing"
+	// DenyLegacyInstallRevisionMissing: a persisted pending action carries
+	// install revision 0. It is denied, never rewritten or upgraded. Returned
+	// by the executor's approve/send/recover paths, not by Evaluate.
+	DenyLegacyInstallRevisionMissing DenyCode = "legacy_install_revision_missing"
+	// DenyJobBindingMissing and DenyJobBindingMismatch are returned by the
+	// agent API's binding gate, not by Evaluate: a job credential omitted its
+	// job (or attempt), or named a job/conversation that does not match the
+	// credential or does not exist for the account (#1267).
+	DenyJobBindingMissing  DenyCode = "job_binding_missing"
+	DenyJobBindingMismatch DenyCode = "job_binding_mismatch"
 	// DenyToolNotAllowed is not returned by Evaluate: the agent API's tool
 	// gate counts it when a request reaches a tool outside the caller's
 	// tool set (internal/agent/tools.Endpoints).
@@ -145,6 +159,15 @@ const ReasonAutopilotPaused = "autopilot paused for this account"
 // ReasonInstallChanged is the reason an install-revision denial carries.
 // Exported so the executor and /mctl approve can recognise it.
 const ReasonInstallChanged = "the assistant install changed since this work began"
+
+// ReasonInstallRevisionMissing is the reason an Evaluate input without an
+// install revision carries.
+const ReasonInstallRevisionMissing = "no install revision to judge this work against"
+
+// ReasonLegacyInstallRevisionMissing is the reason stored on a pending action
+// whose persisted install revision is 0. Exported so the executor and
+// /mctl approve can recognise it.
+const ReasonLegacyInstallRevisionMissing = "this draft has no recorded assistant install revision"
 
 // Result contains the policy decision and user-facing/audit reasons.
 type Result struct {
@@ -411,7 +434,12 @@ func Evaluate(in Input) Result {
 	// Work from an earlier install revision ran under another assistant or
 	// other settings; nothing it produced may act (#1018). Checked before
 	// every other rule so no approval can release it.
-	if in.InstallRevision != 0 && in.InstallRevision != in.Profile.InstallRevision {
+	// Revision 0 is never a valid input, whatever the profile holds: callers
+	// without a job pass the server-verified current revision (#1266).
+	if in.InstallRevision == 0 {
+		return deny(DenyInstallRevisionMissing, ReasonInstallRevisionMissing)
+	}
+	if in.InstallRevision != in.Profile.InstallRevision {
 		return deny(DenyInstallChanged, ReasonInstallChanged)
 	}
 	switch in.Profile.Mode {
