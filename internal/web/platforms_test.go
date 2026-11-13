@@ -57,6 +57,11 @@ func TestPlatforms_ServesHTML(t *testing.T) {
 		// footer twin of the topbar entry
 		`<a href="/platforms">Platforms</a>`,
 		`class="table-scroll"`,
+		"Try it before approval",
+		"accepts a loopback redirect",
+		`"token_endpoint_auth_signing_alg": "ES256"`,
+		"an inline <code>jwks</code> is refused",
+		"sends are not idempotent",
 	} {
 		if !strings.Contains(body, must) {
 			t.Fatalf("/platforms missing %q", must)
