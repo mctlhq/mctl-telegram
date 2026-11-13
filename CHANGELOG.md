@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.138.1](https://github.com/mctlhq/mctl-telegram/compare/0.138.0...0.138.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* **auth:** accept application/jwk-set+json from the cluster JWKS ([73fb04e](https://github.com/mctlhq/mctl-telegram/commit/73fb04eaa3caffd88e609a8e10092b303012faff))
+* **auth:** accept application/jwk-set+json from the cluster JWKS ([7ea50bb](https://github.com/mctlhq/mctl-telegram/commit/7ea50bba23af0c083e93d4ffcc9e93ae716a5bdd))
+
 ## [0.138.0](https://github.com/mctlhq/mctl-telegram/compare/0.137.1...0.138.0) (2026-11-13)
 
 
