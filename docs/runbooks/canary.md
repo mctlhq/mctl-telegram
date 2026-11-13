@@ -54,9 +54,11 @@ failure pushes `0` and increments
   broken, or TLS cert expired. Cross-check with
   `mctl_telegram_up`-style readiness metrics for the server.
 - **`mcp_init`** — MCP session initialization failed; the server returned
-  a non-200 status or did not include an `Mcp-Session-Id` header. Usually
-  indicates the MCP handler is unhealthy even though HTTP is up.
-- **`list_dialogs`** — bearer token rotated or expired; MCP layer is
+  a non-200 status or did not include an `Mcp-Session-Id` header. A **401**
+  here is an authentication problem: see "Canary authentication" below. Any
+  other status usually means the MCP handler is unhealthy even though HTTP
+  is up.
+- **`list_dialogs`** — MCP layer is
   unhealthy; `FLOOD_WAIT_*` from Telegram (the canary logs
   `flood_wait=true` in its slog output and increments
   `mctl_telegram_canary_step_failure_total{step="list_dialogs"}`).
@@ -66,58 +68,27 @@ failure pushes `0` and increments
 
 ## Mitigation
 
-- **Token expiring / expired** — you should hear about this a week
-  early: `mctl_telegram_canary_token_expires_in_seconds` reports the
-  remaining lifetime on every run and `MctlTelegramCanaryTokenExpiring`
-  fires under 7 days. Mint a new token via `POST
-  /api/mcp/worker-token` (admin-scoped, requires `admin:users`; see
-  `internal/workertoken`) and put it in the `mctl-telegram-canary`
-  Secret's `bearer_token` key. The next CronJob run will pick it up;
-  no CronJob or Deployment change is needed.
+- **Canary authentication** — since 0.138.1 the prod canary presents its
+  projected Kubernetes ServiceAccount token (`CANARY_BEARER_TOKEN_FILE`,
+  audience `tg.mctl.ai/canary`), not a minted worker token. kubelet issues and
+  rotates it, so there is nothing to remint, renew or revoke, and a
+  `revoke_worker_token` by the canary's `telegram_id` does not affect it. The
+  server admits it through `internal/auth/k8ssa`, configured by `MCP_K8S_SA_*`
+  in the gitops values. On a 401 at `mcp_init`, the server log line
+  `auth failed ... err="kubernetes service account token: ..."` names the
+  reason:
+  - `signing keys: fetch jwks: ...`: the server cannot read the cluster JWKS
+    (`/openid/v1/jwks`, e.g. an API server outage or NetworkPolicy egress). The
+    token is refused, never let through, until the keys can be read.
+  - an audience, subject or lifetime error: the CronJob's projected volume
+    and `MCP_K8S_SA_AUDIENCE` / `MCP_K8S_SA_SUBJECT` disagree.
+  - `token is not bound to a pod`: something other than a pod's projected
+    volume produced the token.
 
-  The metric is **absent**, not zero, when the token carries no
-  readable `exp` claim — an opaque or malformed credential leaves the
-  series out entirely rather than publishing a 0 that would read as
-  "already expired". A canary that is failing with no expiry series is
-  therefore an auth problem, not an expiry one.
-
-- **Renewal stopped working** — the canary renews its own token when
-  less than a third of its lifetime remains (derived from the token's own
-  `iat`/`exp`, so a 30-day token renews with 10 days left and a 90-day one
-  with 30; `CANARY_TOKEN_RENEW_THRESHOLD` overrides it), by calling `POST /api/mcp/worker-token/renew` and patching the
-  result back into the Secret. A failure there is deliberately **not** a
-  red canary: the run continues on the still-valid token and only
-  increments `mctl_telegram_canary_step_failure_total{step="token_renew"}`,
-  so watch that series rather than `mctl_telegram_canary_success`:
-
-  ```promql
-  mctl_telegram_canary_step_failure_total{step="token_renew"} > 0
-  ```
-
-  The pod log carries the reason verbatim, including the server's own
-  message. Two failures are worth naming:
-  - `PATCH secret returned HTTP 403 ... is forbidden` — the ServiceAccount
-    or its Role/RoleBinding is missing. Renewal is enabled by
-    `CANARY_TOKEN_SECRET_NAME`; if that is set without the RBAC, every
-    run past the threshold logs this.
-  - `renewal window exhausted; an administrator must mint a new worker
-    token` — the credential has hit its absolute ceiling of one year from
-    the moment a human first minted it. Renewal deliberately cannot lift
-    this; mint a fresh token through `POST /api/mcp/worker-token` as
-    above. This is the one scheduled manual step that remains, and the
-    expiry gauge plus `MctlTelegramCanaryTokenExpiring` give the usual
-    week of warning before it bites.
-
-  Renewal never changes identity or scopes — the endpoint copies both from
-  the presented token — so a renewed canary keeps probing as the same
-  account with the same read-only rights.
-- **The canary's token itself leaked** (e.g. the `mctl-telegram-canary`
-  Secret was exposed) — revoke it with the `revoke_worker_token` MCP tool
-  (`admin:users` scope) by `jti` (from the most recent "worker token
-  minted"/"worker token renewed" log line) or by the canary's `telegram_id`,
-  then mint a fresh token and patch it into the Secret as above. See
-  [Revoking a leaked worker token](../runbook.md#revokingaleakedworkertoken)
-  in the main runbook for the full mechanics and the propagation-delay bound.
+  Moving the canary to another Telegram account means changing
+  `CANARY_TELEGRAM_IDS`, `MCP_K8S_SA_TELEGRAM_ID` and the CronJob's
+  `CANARY_TG_USER_ID` together; the server refuses to start if the SA's id is
+  not a canary id.
 - **The canary account was disconnected** (`list_dialogs` fails while
   `mcp_init` passes, and the server logs a revoked session for the canary's
   user). The account has to be re-linked: sign in at
