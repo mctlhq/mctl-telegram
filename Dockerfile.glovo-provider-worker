@@ -3,7 +3,7 @@
 # (Dockerfile) and NOT the agent-worker image (Dockerfile.agent-worker): it
 # contains no Telegram code, no shell and no real provider adapter. Nothing
 # publishes or deploys this image; see docs/runbooks/glovo-provider-worker.md.
-FROM golang:1.26.10-alpine@sha256:9ce231b28998b32e116927c61aa5c406183061d4f3f2d61b292c88e7f6bdf7ca AS builder
+FROM golang:1.26.11-alpine@sha256:ae52b5bc6ed045a9ed26ab03dc19327a802a9cc9aa8b27ed57f5c6b60579b0bb AS builder
 
 # Only the nested module is copied: the root module (Telegram code, secrets
 # handling) never enters this build context layer.
