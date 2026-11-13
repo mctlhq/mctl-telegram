@@ -129,6 +129,10 @@ func Wrap(next auth.Provider, cfg Config) (*Provider, error) {
 	return &Provider{cfg: cfg, next: next}, nil
 }
 
+// Unwrap implements auth.Wrapper so auth metrics keep the wrapped provider's
+// label. Refusals of cluster tokens are rare (one canary) and share it.
+func (p *Provider) Unwrap() auth.Provider { return p.next }
+
 // kubernetesClaims is the private "kubernetes.io" claim of a projected token.
 type kubernetesClaims struct {
 	K8s struct {

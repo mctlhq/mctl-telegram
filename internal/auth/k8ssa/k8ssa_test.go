@@ -265,3 +265,13 @@ func TestWrap_ValidatesConfig(t *testing.T) {
 		}
 	}
 }
+
+// Wrapping must not change the auth-failure metric label of /mcp: the k8ssa
+// provider reports the label of the provider it wraps.
+func TestUnwrap_ReturnsNextProvider(t *testing.T) {
+	p, next, _ := newProvider(t, &fakeKeys{})
+	var w auth.Wrapper = p
+	if w.Unwrap() != auth.Provider(next) {
+		t.Fatal("Unwrap must return the wrapped provider")
+	}
+}

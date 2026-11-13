@@ -216,9 +216,19 @@ func classifyAuthError(msg string) string {
 // Used as the "provider" label in auth failure metrics. The result is derived
 // from the concrete type name so it stays stable across deployments without
 // requiring each Provider to implement an extra interface.
+// Wrapper is a provider that sits in front of another one and delegates most
+// requests to it. Metrics label a wrapper by the provider it wraps, so adding a
+// narrow front provider does not collapse the per-provider breakdown.
+type Wrapper interface {
+	Unwrap() Provider
+}
+
 func providerName(p Provider) string {
 	if p == nil {
 		return "unknown"
+	}
+	if w, ok := p.(Wrapper); ok {
+		return providerName(w.Unwrap())
 	}
 	// %T yields something like "*localjwt.Provider" or "*sharedhmac.Provider".
 	t := strings.ToLower(fmt.Sprintf("%T", p))
