@@ -44,6 +44,12 @@ type ClusterKeys struct {
 	mu        sync.Mutex
 	set       *jose.JSONWebKeySet
 	fetchedAt time.Time
+	// failedAt and lastErr back off after a failed fetch. Without them an
+	// empty or stale cache plus an erroring API server would turn every
+	// request carrying the cluster iss, which is read before verification,
+	// into another API server request.
+	failedAt time.Time
+	lastErr  error
 }
 
 // NewClusterKeys builds a key source for the cluster this process runs in.
@@ -86,11 +92,19 @@ func (c *ClusterKeys) Keys(ctx context.Context, refresh bool) (*jose.JSONWebKeyS
 	if fresh && (!refresh || now.Sub(c.fetchedAt) < minRefresh) {
 		return c.set, nil
 	}
+	if c.lastErr != nil && now.Sub(c.failedAt) < minRefresh {
+		if fresh {
+			// A forced refresh failed recently; keep serving the good set.
+			return c.set, nil
+		}
+		return nil, fmt.Errorf("jwks fetch failed %s ago, not retrying yet: %w", now.Sub(c.failedAt).Round(time.Second), c.lastErr)
+	}
 	set, err := c.fetch(ctx)
 	if err != nil {
+		c.failedAt, c.lastErr = now, err
 		return nil, err
 	}
-	c.set, c.fetchedAt = set, now
+	c.set, c.fetchedAt, c.lastErr = set, now, nil
 	return set, nil
 }
 

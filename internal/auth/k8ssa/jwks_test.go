@@ -87,3 +87,44 @@ func TestClusterKeys_FailedReadIsError(t *testing.T) {
 		t.Fatal("missing own token must be an error")
 	}
 }
+
+// A failed fetch must back off: an attacker-controlled stream of tokens with
+// the cluster iss cannot turn an erroring API server into one request per call.
+func TestClusterKeys_BacksOffAfterFailure(t *testing.T) {
+	var status, hits atomic.Int32
+	var gotAuth atomic.Value
+	srv := jwksServer(t, &status, &hits, &gotAuth)
+	defer srv.Close()
+	status.Store(http.StatusServiceUnavailable)
+	now := t0
+	c := newClusterKeys(srv.Client(), srv.URL, tokenFile(t), func() time.Time { return now })
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		if set, err := c.Keys(ctx, i%2 == 1); err == nil || set != nil {
+			t.Fatalf("call %d: a failed read must stay an error", i)
+		}
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("want 1 fetch inside the backoff window, got %d", hits.Load())
+	}
+	status.Store(0)
+	now = now.Add(minRefresh + time.Second)
+	if set, err := c.Keys(ctx, false); err != nil || len(set.Keys) != 1 {
+		t.Fatalf("after backoff a healthy server must be read again: %v", err)
+	}
+	if hits.Load() != 2 {
+		t.Fatalf("want 2 fetches, got %d", hits.Load())
+	}
+	// A failed forced refresh keeps serving the cached good set.
+	now = now.Add(minRefresh + time.Second)
+	status.Store(http.StatusServiceUnavailable)
+	if set, err := c.Keys(ctx, true); err == nil || set != nil {
+		t.Fatalf("the failing refresh itself reports its error, got %v", err)
+	}
+	if set, err := c.Keys(ctx, true); err != nil || len(set.Keys) != 1 {
+		t.Fatalf("inside backoff a fresh cached set must still be served: %v", err)
+	}
+	if hits.Load() != 3 {
+		t.Fatalf("want 3 fetches, got %d", hits.Load())
+	}
+}
