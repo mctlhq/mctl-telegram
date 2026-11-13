@@ -32,6 +32,11 @@ var version = "dev"
 type config struct {
 	baseURL     string
 	bearerToken string
+	// tokenFile is CANARY_BEARER_TOKEN_FILE: a projected ServiceAccount token
+	// that kubelet rotates. When set, bearerToken is re-read from it at the
+	// start of every run, and expiry reporting and self-renewal are off:
+	// both exist only for the minted worker token.
+	tokenFile   string
 	tgUserID    string
 	timeout     time.Duration
 	mcpPath     string
@@ -72,8 +77,18 @@ func loadConfig() (*config, error) {
 	}
 
 	cfg.bearerToken = os.Getenv("CANARY_BEARER_TOKEN")
-	if cfg.bearerToken == "" {
-		return nil, errors.New("CANARY_BEARER_TOKEN is required")
+	cfg.tokenFile = strings.TrimSpace(os.Getenv("CANARY_BEARER_TOKEN_FILE"))
+	switch {
+	case cfg.bearerToken != "" && cfg.tokenFile != "":
+		return nil, errors.New("set either CANARY_BEARER_TOKEN or CANARY_BEARER_TOKEN_FILE, not both")
+	case cfg.tokenFile != "":
+		tok, err := readTokenFile(cfg.tokenFile)
+		if err != nil {
+			return nil, err
+		}
+		cfg.bearerToken = tok
+	case cfg.bearerToken == "":
+		return nil, errors.New("CANARY_BEARER_TOKEN or CANARY_BEARER_TOKEN_FILE is required")
 	}
 
 	cfg.tgUserID = os.Getenv("CANARY_TG_USER_ID")
@@ -117,8 +132,26 @@ func loadConfig() (*config, error) {
 		return nil, err
 	}
 	cfg.renew = renewCfg
+	if cfg.tokenFile != "" && renewCfg.enabled {
+		return nil, errors.New("CANARY_TOKEN_SECRET_NAME renews a minted worker token; it cannot be combined with CANARY_BEARER_TOKEN_FILE")
+	}
 
 	return cfg, nil
+}
+
+// readTokenFile reads a projected ServiceAccount token. An empty file is an
+// error: kubelet writes the token before the container starts, so empty means
+// the volume is wrong, not that the probe should run unauthenticated.
+func readTokenFile(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("CANARY_BEARER_TOKEN_FILE: %w", err)
+	}
+	tok := strings.TrimSpace(string(b))
+	if tok == "" {
+		return "", fmt.Errorf("CANARY_BEARER_TOKEN_FILE %s is empty", path)
+	}
+	return tok, nil
 }
 
 // newCanaryMetrics creates and registers the three canary metric families on a
@@ -448,7 +481,22 @@ func run(ctx context.Context, cfg *config, met *canaryMetrics) bool {
 	// expiry from a distant problem into a scheduled one: the canary cannot
 	// renew itself yet (#421), so without this gauge the first symptom would be
 	// a permanently red canary on the expiry date.
-	if exp, okExp := tokenExpiry(cfg.bearerToken); okExp {
+	if cfg.tokenFile != "" {
+		// kubelet rotates the projected token in place; re-read it so a
+		// long-running process never presents a stale one. No expiry gauge:
+		// a projected token lives minutes by design, and the minutes-scale
+		// value would trip the worker-token expiry alert.
+		tok, err := readTokenFile(cfg.tokenFile)
+		if err != nil {
+			log.Error("probe failed", "step", "mcp_init", "err", err)
+			met.stepFailures.WithLabelValues("mcp_init").Inc()
+			met.success.Set(0)
+			met.duration.Observe(time.Since(start).Seconds())
+			return false
+		}
+		cfg.bearerToken = tok
+		log.Info("token source", "kind", "projected service account token")
+	} else if exp, okExp := tokenExpiry(cfg.bearerToken); okExp {
 		// Register, not MustRegister: registration happens here rather than at
 		// construction, so a second run() against the same registry — a daemon
 		// loop, or simply two calls in one test — would otherwise panic on
