@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.138.0](https://github.com/mctlhq/mctl-telegram/compare/0.137.1...0.138.0) (2026-11-13)
+
+
+### Features
+
+* **agent:** requeue a failed managed invocation at once ([5fb1de8](https://github.com/mctlhq/mctl-telegram/commit/5fb1de8952e12e975df5366ade45f8aa95aa0220))
+* **agent:** requeue a failed managed invocation at once ([f523f01](https://github.com/mctlhq/mctl-telegram/commit/f523f017f1bcb516103440559e42fd3d91acfa99))
+* **agents:** issue-1235-feat-glovo-m1c-deployable-oauth-mcp-faca ([27c671d](https://github.com/mctlhq/mctl-telegram/commit/27c671d20092c543721fa8de939b3abe21acbd5a))
+* **agents:** issue-1235-feat-glovo-m1c-deployable-oauth-mcp-faca ([d414348](https://github.com/mctlhq/mctl-telegram/commit/d4143485a923b75c090d98e2e8c39036882bb4c4))
+* **agents:** issue-1249-test-finance-l2-b-saved-messages-notifie ([c4b2927](https://github.com/mctlhq/mctl-telegram/commit/c4b2927a51197e2e887900272f3056122710c071))
+* **agents:** issue-1251-test-finance-l2-d-hermetic-full-suite-ev ([69db4fb](https://github.com/mctlhq/mctl-telegram/commit/69db4fb1555264671a076d3622a1f3b8fb951ae8))
+* **agents:** issue-1255-test-finance-l2-c-recovery-canonical-dev ([d5b3a7d](https://github.com/mctlhq/mctl-telegram/commit/d5b3a7d16e19d275ad994bf6df189402ab987f9c))
+* **agents:** issue-1262-feat-glovo-re-platform-fake-provider-wor ([976afa3](https://github.com/mctlhq/mctl-telegram/commit/976afa32ff2fb1e8a3fed196ba288a16b2e4dbd2))
+* **agents:** issue-1262-feat-glovo-re-platform-fake-provider-wor ([2d55fca](https://github.com/mctlhq/mctl-telegram/commit/2d55fca64ea33ef1993875214fbc870f8bccdc64))
+* **auth:** admit the canary with its projected ServiceAccount token ([d827438](https://github.com/mctlhq/mctl-telegram/commit/d82743846232fd6aa5bcafbbe2a4c705eed72d7c))
+* **auth:** admit the canary with its projected ServiceAccount token ([f3d64d5](https://github.com/mctlhq/mctl-telegram/commit/f3d64d5fd985f0b2ab9099b4c2ba5414db7881be))
+
+
+### Bug Fixes
+
+* **agent:** defer fence-blocked owner notifications by lease so they cannot starve other users ([9453263](https://github.com/mctlhq/mctl-telegram/commit/9453263d68fed6d41462a6f79e7a3de65f39cdee))
+* **agent:** deny zero install revision and omitted job binding ([63e9a43](https://github.com/mctlhq/mctl-telegram/commit/63e9a4346c08693a0d5666226afb5f7bb8186cd5))
+* **agent:** fence owner notifier sends on kill, mode and session at send time ([f145fa6](https://github.com/mctlhq/mctl-telegram/commit/f145fa68d4e0445ac6e4cc85c2717675dbb7b29d)), closes [#1268](https://github.com/mctlhq/mctl-telegram/issues/1268) [#1269](https://github.com/mctlhq/mctl-telegram/issues/1269) [#1270](https://github.com/mctlhq/mctl-telegram/issues/1270)
+* **agent:** keep the failed-invocation requeue inside the retry budget ([610452d](https://github.com/mctlhq/mctl-telegram/commit/610452ded77b78a3ee281c8958ec945ff4ef7296))
+* **agent:** persist legacy revision reason and checked binding-denial audit ([5750578](https://github.com/mctlhq/mctl-telegram/commit/5750578349a66f8e6f480655c1c2210014dd6fab))
+* **agent:** reject zero revisions and missing job binding before effects ([641ce02](https://github.com/mctlhq/mctl-telegram/commit/641ce029609e07cc7084f06ddafa855d5bc9f15a))
+* **agents:** address P1/P2 codex findings on issue-1235-feat-glovo-m1c-deployable-oauth-mcp-faca ([28ba3ae](https://github.com/mctlhq/mctl-telegram/commit/28ba3ae2eecac026543cd75583b2b7c4f05e8c6d))
+* **agents:** address P1/P2 codex findings on issue-1255-test-finance-l2-c-recovery-canonical-dev ([2306479](https://github.com/mctlhq/mctl-telegram/commit/23064798103ddbf35c9e4b068f0d23d22d761a9e))
+* **agent:** tighten the failed-invocation requeue after review ([9a8e2d4](https://github.com/mctlhq/mctl-telegram/commit/9a8e2d4fcc0bb6556caaafcc26361c26fe02cd8c))
+* **agentworker:** close a turn as completed when it already saved a result ([d0f0b5d](https://github.com/mctlhq/mctl-telegram/commit/d0f0b5d2407caa06ac1e811c244ba2e02b25d5c0))
+* **agentworker:** close a turn as completed when it already saved a result ([5e9185d](https://github.com/mctlhq/mctl-telegram/commit/5e9185d901872c70cc8bed629d68a5a38368b619))
+* **auth:** a cancelled caller does not start the JWKS backoff ([2510df7](https://github.com/mctlhq/mctl-telegram/commit/2510df7d66260206169fab36e1f28162c9ee3f72))
+* **auth:** back off after a failed cluster JWKS fetch ([7a3ee62](https://github.com/mctlhq/mctl-telegram/commit/7a3ee62bf03038b52389e055f53ee3d3575d54f0))
+* **auth:** keep the wrapped provider's label on auth failure metrics ([dead263](https://github.com/mctlhq/mctl-telegram/commit/dead26319be81c22a8fb26a590852cf3072ac846))
+* **control:** fence queued sends and defer blocked rows by lease ([0a8d29f](https://github.com/mctlhq/mctl-telegram/commit/0a8d29fc572ad945d38245af2bc49344dd9704fc))
+* **finance-l2:** normalize artifact paths and preserve clean-tree preflight ([6494783](https://github.com/mctlhq/mctl-telegram/commit/64947835a67d47d11f85bef7e028ae593aa31e5e))
+* **finance-l2:** persist fail-closed sentinel on abnormal runner exits ([1e632b8](https://github.com/mctlhq/mctl-telegram/commit/1e632b82f960d1a99a5b9d0d3801c35aeb900a79))
+* **glovo-provider:** basket rules, read_status, path escaping, poller exit ([a3ca50f](https://github.com/mctlhq/mctl-telegram/commit/a3ca50fcf19aad9090baf09e81b4e961d36fcacd))
+* **glovo:** normalize and validate MCP Host authority including HTTPS default port ([90d1bd0](https://github.com/mctlhq/mctl-telegram/commit/90d1bd01e6e736c0ff261f43406292611fc84c43))
+* **server:** shorten dbConnectRetryInterval from 2s to 250ms ([ebfdd43](https://github.com/mctlhq/mctl-telegram/commit/ebfdd4309af09b948f305c1eab4c2a64fb924f07))
+* **server:** shorten dbConnectRetryInterval from 2s to 250ms ([#1108](https://github.com/mctlhq/mctl-telegram/issues/1108)) ([646e6a1](https://github.com/mctlhq/mctl-telegram/commit/646e6a175b3296fb5be47ac027ba5e4f5c7c88a2))
+
 ## [0.137.1](https://github.com/mctlhq/mctl-telegram/compare/0.137.0...0.137.1) (2026-11-08)
 
 
