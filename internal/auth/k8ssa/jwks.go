@@ -101,7 +101,12 @@ func (c *ClusterKeys) Keys(ctx context.Context, refresh bool) (*jose.JSONWebKeyS
 	}
 	set, err := c.fetch(ctx)
 	if err != nil {
-		c.failedAt, c.lastErr = now, err
+		// A caller that cancelled or timed out its own request says nothing
+		// about the API server; letting it start the backoff would let any
+		// client lock everyone else out for minRefresh.
+		if ctx.Err() == nil {
+			c.failedAt, c.lastErr = now, err
+		}
 		return nil, err
 	}
 	c.set, c.fetchedAt, c.lastErr = set, now, nil

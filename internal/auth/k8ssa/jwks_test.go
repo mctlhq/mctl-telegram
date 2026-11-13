@@ -128,3 +128,20 @@ func TestClusterKeys_BacksOffAfterFailure(t *testing.T) {
 		t.Fatalf("want 3 fetches, got %d", hits.Load())
 	}
 }
+
+// A caller cancelling its own request must not start the backoff.
+func TestClusterKeys_CancelledCallerDoesNotBackOff(t *testing.T) {
+	var status, hits atomic.Int32
+	var gotAuth atomic.Value
+	srv := jwksServer(t, &status, &hits, &gotAuth)
+	defer srv.Close()
+	c := newClusterKeys(srv.Client(), srv.URL, tokenFile(t), func() time.Time { return t0 })
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.Keys(cancelled, false); err == nil {
+		t.Fatal("a cancelled fetch must fail")
+	}
+	if set, err := c.Keys(context.Background(), false); err != nil || len(set.Keys) != 1 {
+		t.Fatalf("the next caller must fetch, not inherit a backoff: %v", err)
+	}
+}
