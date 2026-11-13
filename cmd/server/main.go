@@ -33,6 +33,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/assistantregistry"
 	"github.com/mctlhq/mctl-telegram/internal/audit"
 	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/auth/k8ssa"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localdev"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/auth/sharedhmac"
@@ -873,7 +874,12 @@ func main() {
 	// MCPMiddleware: the one route that admits a profiled credential,
 	// because internal/mcp enforces the profile on every tool. Every other
 	// auth.Middleware route refuses it.
-	mcpHandler := auth.MCPMiddleware(provider, cfg.AuthRequired, m, resourceMeta)(
+	mcpProvider, err := withK8sSA(cfg, store, provider)
+	if err != nil {
+		slog.Error("k8s service account auth init failed; refusing to start", "err", err)
+		os.Exit(1)
+	}
+	mcpHandler := auth.MCPMiddleware(mcpProvider, cfg.AuthRequired, m, resourceMeta)(
 		limiter.Middleware()(mcpSrv.HTTPHandler()),
 	)
 	// OriginGuard runs before auth: a present browser Origin must be on the
@@ -1616,4 +1622,30 @@ func botChatProbe(requested bool, token string) func(context.Context, int64) err
 	}
 	c := &botapi.Client{Token: token}
 	return c.GetChat
+}
+
+// withK8sSA puts the ServiceAccount provider in front of /mcp's provider when
+// MCP_K8S_SA_SUBJECT is configured, and returns provider unchanged otherwise.
+// It is applied to /mcp only: no other route admits a ServiceAccount token.
+func withK8sSA(cfg *config.Config, store *db.Store, provider auth.Provider) (auth.Provider, error) {
+	if cfg.K8sSASubject == "" {
+		return provider, nil
+	}
+	keys, err := k8ssa.NewClusterKeys(10 * time.Second)
+	if err != nil {
+		return nil, err
+	}
+	p, err := k8ssa.Wrap(provider, k8ssa.Config{
+		Issuer:     cfg.K8sSAIssuer,
+		Audience:   cfg.K8sSAAudience,
+		Subject:    cfg.K8sSASubject,
+		TelegramID: cfg.K8sSATelegramID,
+		Keys:       keys,
+		Store:      store,
+	})
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("k8s service account auth enabled on /mcp", "subject", cfg.K8sSASubject, "audience", cfg.K8sSAAudience, "issuer", cfg.K8sSAIssuer)
+	return p, nil
 }

@@ -280,6 +280,15 @@ type Config struct {
 	// malformed value is a startup error, because a typo would leave the
 	// canary unguarded.
 	CanaryTelegramIDs canaryguard.Set
+	// K8sSA* admit one in-cluster workload (the canary) to /mcp with its
+	// projected ServiceAccount token instead of a minted worker token
+	// (internal/auth/k8ssa). Off unless MCP_K8S_SA_SUBJECT is set. The
+	// Telegram id must be on CANARY_TELEGRAM_IDS, so this path can only ever
+	// act as a guarded probe account, and its scopes are read-only in code.
+	K8sSASubject    string // MCP_K8S_SA_SUBJECT, system:serviceaccount:<ns>:<name>
+	K8sSAAudience   string // MCP_K8S_SA_AUDIENCE, dedicated token audience
+	K8sSAIssuer     string // MCP_K8S_SA_ISSUER, default the in-cluster issuer
+	K8sSATelegramID int64  // MCP_K8S_SA_TELEGRAM_ID
 	// Reviewer/demo auth-mode for the ChatGPT App Directory review. When
 	// DemoReviewerEnabled is true the /oauth/authorize page offers a
 	// password-gated "reviewer access" path that authenticates as a single
@@ -644,6 +653,9 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("CANARY_TELEGRAM_IDS: %w", err)
 	}
 	c.CanaryTelegramIDs = canaryIDs
+	if err := loadK8sSA(c); err != nil {
+		return nil, err
+	}
 	c.DemoReviewerEnabled = envBool("DEMO_REVIEWER_ENABLED", false)
 	c.DemoReviewerUsername = os.Getenv("DEMO_REVIEWER_USERNAME")
 	c.DemoReviewerPassword = os.Getenv("DEMO_REVIEWER_PASSWORD")
@@ -1320,4 +1332,42 @@ func parseStrictInt64CSV(s string) ([]int64, error) {
 		return nil, errors.New("no Telegram ids in the list")
 	}
 	return out, nil
+}
+
+// defaultK8sSAIssuer is the service-account token issuer of a cluster that
+// keeps the Kubernetes default (--service-account-issuer).
+const defaultK8sSAIssuer = "https://kubernetes.default.svc.cluster.local"
+
+// loadK8sSA reads MCP_K8S_SA_*. Setting any of them without the subject, or
+// the subject without the rest, is a startup error rather than a silently
+// disabled probe path.
+func loadK8sSA(c *Config) error {
+	c.K8sSASubject = strings.TrimSpace(os.Getenv("MCP_K8S_SA_SUBJECT"))
+	c.K8sSAAudience = strings.TrimSpace(os.Getenv("MCP_K8S_SA_AUDIENCE"))
+	c.K8sSAIssuer = strings.TrimSpace(os.Getenv("MCP_K8S_SA_ISSUER"))
+	rawID := strings.TrimSpace(os.Getenv("MCP_K8S_SA_TELEGRAM_ID"))
+	if c.K8sSASubject == "" {
+		if c.K8sSAAudience != "" || c.K8sSAIssuer != "" || rawID != "" {
+			return errors.New("MCP_K8S_SA_AUDIENCE/ISSUER/TELEGRAM_ID are set but MCP_K8S_SA_SUBJECT is not")
+		}
+		return nil
+	}
+	if c.K8sSAIssuer == "" {
+		c.K8sSAIssuer = defaultK8sSAIssuer
+	}
+	if c.K8sSAAudience == "" {
+		return errors.New("MCP_K8S_SA_AUDIENCE is required with MCP_K8S_SA_SUBJECT")
+	}
+	if c.K8sSAAudience == c.K8sSAIssuer || strings.Contains(c.K8sSAAudience, "kubernetes.default.svc") {
+		return fmt.Errorf("MCP_K8S_SA_AUDIENCE %q looks like the API server's own audience; use a dedicated one", c.K8sSAAudience)
+	}
+	id, err := strconv.ParseInt(rawID, 10, 64)
+	if err != nil || id <= 0 {
+		return fmt.Errorf("MCP_K8S_SA_TELEGRAM_ID must be a positive integer, got %q", rawID)
+	}
+	if !c.CanaryTelegramIDs.Contains(id) {
+		return fmt.Errorf("MCP_K8S_SA_TELEGRAM_ID %d must be listed in CANARY_TELEGRAM_IDS", id)
+	}
+	c.K8sSATelegramID = id
+	return nil
 }
