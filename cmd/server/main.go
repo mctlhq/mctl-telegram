@@ -524,6 +524,7 @@ func main() {
 	mux.Get("/terms", web.Terms(cfg.PublicBaseURL, showManage))
 	mux.Get("/platforms", web.Platforms(cfg.PublicBaseURL, cfg.MCPPath, authServer, showManage, web.PlatformFacts{
 		AllowSend:          cfg.AllowSend,
+		OpenSignup:         cfg.AutoApproveClients,
 		CIMDAccept:         cfg.OAUTHCIMDAccept,
 		CIMDAdvertise:      cfg.OAUTHCIMDAdvertise,
 		RateLimitPerUser:   cfg.RateLimitPerUser,

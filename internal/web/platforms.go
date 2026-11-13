@@ -19,7 +19,11 @@ var platformsTmpl = ui.New("platforms", platformsHTML)
 // the running config rather than from the page text, so the page cannot
 // promise a limit or a CIMD status the deployment does not have.
 type PlatformFacts struct {
-	AllowSend          bool
+	AllowSend bool
+	// OpenSignup is AUTO_APPROVE_CLIENTS: a new Telegram sign-in gets
+	// tool access without an operator grant. The pre-approval trial the
+	// page describes only works while it is on.
+	OpenSignup         bool
 	CIMDAccept         bool
 	CIMDAdvertise      bool
 	RateLimitPerUser   int
