@@ -40,10 +40,22 @@
   <h3>Client ID Metadata Document (preferred)</h3>
   <ul>
     <li>Your <code>client_id</code> is an https URL on your own domain, and your redirect URIs come from the JSON document served there. You change callbacks by editing your document, not by asking us.</li>
-    <li>The document must name its own URL as <code>client_id</code>, carry no <code>client_secret</code>, list 1 to 20 https <code>redirect_uris</code>, and use <code>token_endpoint_auth_method</code> <code>none</code> or <code>private_key_jwt</code> (RS256 or ES256, with <code>jwks_uri</code> on the same host).</li>
+    <li>The document must name its own URL as <code>client_id</code>, carry no <code>client_secret</code>, list 1 to 20 https <code>redirect_uris</code>, and use <code>token_endpoint_auth_method</code> <code>none</code> or <code>private_key_jwt</code>. For <code>private_key_jwt</code>, <code>token_endpoint_auth_signing_alg</code> (RS256 or ES256) is required and the keys are published at a <code>jwks_uri</code> on the same host; an inline <code>jwks</code> is refused. Loopback callbacks must use <code>127.0.0.1</code> or <code>[::1]</code>, not <code>localhost</code>; other http and custom-scheme entries are dropped.</li>
     <li>Fetches are bounded: 64 KiB body, 10-second timeout, and <code>Cache-Control</code> honored between 30 seconds and 24 hours. A document that cannot be fetched gives a retryable <code>server_error</code>; a CIMD client is never silently downgraded to DCR.</li>
     <li>For <code>private_key_jwt</code>, the assertion's <code>aud</code> is the issuer <code>{{.AuthServer}}</code> or <code>{{.AuthServer}}/oauth/token</code>, lifetime at most 5 minutes, <code>jti</code> single-use.</li>
   </ul>
+  <p>A minimal document for <code>private_key_jwt</code>, served at its own <code>client_id</code> URL:</p>
+<pre><code id="cimd-example">{
+  "client_id": "https://platform.example/oauth/client-metadata.json",
+  "client_name": "Example Platform",
+  "redirect_uris": ["https://platform.example/oauth/callback"],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "token_endpoint_auth_method": "private_key_jwt",
+  "token_endpoint_auth_signing_alg": "ES256",
+  "jwks_uri": "https://platform.example/oauth/jwks.json"
+}</code></pre>
+  <p>For a public client, set <code>token_endpoint_auth_method</code> to <code>none</code> and leave out the last two fields.</p>
   <div class="note"><strong>On this deployment:</strong>
     {{if .CIMDAccept}}CIMD is accepted for approved hosts.{{else}}CIMD is not enabled.{{end}}
     {{if .CIMDAdvertise}}Discovery advertises it (<code>client_id_metadata_document_supported</code>).{{else}}Discovery does not advertise it yet, so a client that checks <code>client_id_metadata_document_supported</code> before using a URL <code>client_id</code> will register with DCR instead.{{end}}</div>
@@ -54,7 +66,18 @@
     <li>Registration is limited to {{.RegisterRatePerMin}} attempts per minute per source IP. A registration is kept for up to 24 hours, and the oldest ones are dropped sooner once the server reaches its cap on dynamic registrations, so register when a user connects rather than once at install.</li>
   </ul>
 
-  <p>To have a host approved, write to <a href="mailto:support@mctl.ai">support@mctl.ai</a> with the host, whether you use CIMD or DCR, and your expected number of users.</p>
+  <h3>Try it before approval</h3>
+  <p>Host approval is not needed to evaluate the service. Dynamic Client Registration accepts a loopback redirect such as <code>http://127.0.0.1:8765/callback</code> on any port, so an engineer can register a client from a local machine and sign in with their own Telegram account.
+  {{- if .OpenSignup}} New accounts get tool access on sign-in on this deployment, so the trial needs nothing from us.
+  {{- else}} New accounts on this deployment start without tool access: ask <a href="mailto:support@mctl.ai">support@mctl.ai</a> to enable the account you will test with.{{end}}
+  Redirects on your own domain, and any CIMD <code>client_id</code>, need the host approved.</p>
+  <p>To have a host approved, write to <a href="mailto:support@mctl.ai">support@mctl.ai</a> with:</p>
+  <ul>
+    <li>the host your redirect URIs (or CIMD document) live on;</li>
+    <li>whether you use CIMD or DCR;</li>
+    <li>your expected number of users;</li>
+    <li>whether you want a restricted tool profile (below).</li>
+  </ul>
 
   <h2>Endpoints and discovery</h2>
   <div class="table-scroll">
@@ -135,7 +158,7 @@
     </tbody>
   </table>
   </div>
-  <p>These are internal objectives with burn-rate alerting, not a contractual SLA. A canary checks OAuth discovery and a read-only tool call every 10 minutes. The service runs as a single replica, so a deploy is a short interruption.</p>
+  <p>These are internal objectives with burn-rate alerting, not a contractual SLA. A canary checks OAuth discovery and a read-only tool call every 10 minutes. The service runs as a single replica, so a deploy is a short interruption. Retry token requests and read tools with backoff when the connection drops or the server is briefly unavailable; Telegram flood limits arrive as tool errors with their own retry delay (see below). Do not blindly retry a send whose outcome you did not see: <code>send_message</code>, <code>send_media</code> and <code>forward_messages</code> are not idempotent, so re-read the chat first. <code>send_reply</code> is the exception: its confirmation token sends at most once, so repeating it with the same token cannot send twice.</p>
   <div class="note"><strong>To be published:</strong> a public status page and the terms of a service-level agreement for platforms.</div>
 
   <h2>Errors your client will see</h2>
