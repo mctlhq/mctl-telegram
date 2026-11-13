@@ -384,15 +384,17 @@ The synthetic canary probe (`cmd/canary`) verifies the live service end-to-end. 
 
 2. Complete the browser-based setup flow by visiting `GET /telegram/connect` while signed in as the canary. This links the session to an authenticated identity in the database.
 
-3. Issue a read-only bearer token with the `set_telegram_access` admin MCP tool:
+3. Give the canary a credential. In Kubernetes, prefer its projected
+   ServiceAccount token: set `MCP_K8S_SA_SUBJECT`, `MCP_K8S_SA_AUDIENCE` and
+   `MCP_K8S_SA_TELEGRAM_ID` on the server (the id must be in
+   `CANARY_TELEGRAM_IDS`), mount a `serviceAccountToken` projected volume with
+   that audience into the canary pod, and point `CANARY_BEARER_TOKEN_FILE` at
+   it. The server grants that identity read-only scopes fixed in code, and
+   there is nothing to mint, store or renew. Outside Kubernetes, mint a
+   read-only worker token with `POST /api/mcp/worker-token` and pass it as
+   `CANARY_BEARER_TOKEN`.
 
-   ```
-   set_telegram_access(tg_user_id="<canary-account-id>", scopes="telegram:dialogs:read,telegram:messages:read")
-   ```
-
-   The token must carry exactly `telegram:dialogs:read,telegram:messages:read` and must **not** include `telegram:messages:send`.
-
-4. Pass `tg_user_id` and `bearer_token` to the canary probe via environment variables or a Kubernetes Secret.
+4. Pass `CANARY_TG_USER_ID` (used in logs) to the canary as well.
 
 5. Schedule the canary against your deployment. tg.mctl.ai runs it every ten
    minutes; whatever interval you pick, size the alert windows against it —

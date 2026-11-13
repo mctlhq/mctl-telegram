@@ -10,7 +10,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,8 +33,8 @@ type config struct {
 	bearerToken string
 	// tokenFile is CANARY_BEARER_TOKEN_FILE: a projected ServiceAccount token
 	// that kubelet rotates. When set, bearerToken is re-read from it at the
-	// start of every run, and expiry reporting and self-renewal are off:
-	// both exist only for the minted worker token.
+	// start of every run. This is how the prod canary authenticates;
+	// CANARY_BEARER_TOKEN remains for local and ad-hoc runs.
 	tokenFile   string
 	tgUserID    string
 	timeout     time.Duration
@@ -47,9 +46,6 @@ type config struct {
 	oidcHost    string
 	pushgateway string
 	metricsAddr string
-	// renew is nil when the caller built a config by hand (tests); run()
-	// treats nil and disabled identically.
-	renew *renewConfig
 }
 
 // canaryMetrics holds the three Prometheus metric families for the canary.
@@ -57,11 +53,8 @@ type canaryMetrics struct {
 	success      prometheus.Gauge
 	duration     prometheus.Histogram
 	stepFailures *prometheus.CounterVec
-	// tokenExpiresIn is created in newCanaryMetrics but registered in run(),
-	// once there is a real deadline to report — see the rationale there.
-	tokenExpiresIn prometheus.Gauge
 	// loginPathSuccess is registered in main() only when the login-path
-	// probes are enabled, for the same reason as tokenExpiresIn.
+	// probes are enabled: a registered but unset gauge would push 0.
 	loginPathSuccess prometheus.Gauge
 	registry         *prometheus.Registry
 }
@@ -127,13 +120,11 @@ func loadConfig() (*config, error) {
 		cfg.metricsAddr = ":9090"
 	}
 
-	renewCfg, err := loadRenewConfig()
-	if err != nil {
-		return nil, err
-	}
-	cfg.renew = renewCfg
-	if cfg.tokenFile != "" && renewCfg.enabled {
-		return nil, errors.New("CANARY_TOKEN_SECRET_NAME renews a minted worker token; it cannot be combined with CANARY_BEARER_TOKEN_FILE")
+	// Self-renewal of a minted worker token (#421) was removed once the
+	// canary moved to a projected ServiceAccount token. Refuse the old switch
+	// loudly rather than run a deployment that still expects renewal.
+	if os.Getenv("CANARY_TOKEN_SECRET_NAME") != "" {
+		return nil, errors.New("CANARY_TOKEN_SECRET_NAME is no longer supported: token self-renewal was removed; use CANARY_BEARER_TOKEN_FILE with a projected ServiceAccount token")
 	}
 
 	return cfg, nil
@@ -175,50 +166,15 @@ func newCanaryMetrics() *canaryMetrics {
 		Help: "1 if the named step failed in the last canary run, 0 if it succeeded. Pushgateway replace semantics mean this reflects the most recent run only; use the instant value (> 0) rather than rate() for triage queries.",
 	}, []string{"step"})
 
-	// Deliberately NOT registered here. A registered gauge that is never set
-	// pushes 0, and 0 on this metric reads as "the token expired" — the exact
-	// false alarm the metric exists to avoid. run() registers it only once it
-	// has a real deadline to report; when the token carries no readable exp
-	// the series is simply absent, which the CanaryAbsent-style alert already
-	// covers.
-	tokenExpiresIn := prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "mctl_telegram_canary_token_expires_in_seconds",
-		Help: "Seconds until CANARY_BEARER_TOKEN expires. Negative once past exp. Absent when the token carries no readable exp claim.",
-	})
-
 	reg.MustRegister(success, duration, stepFailures)
 
 	return &canaryMetrics{
 		success:          success,
 		duration:         duration,
 		stepFailures:     stepFailures,
-		tokenExpiresIn:   tokenExpiresIn,
 		loginPathSuccess: newLoginPathSuccessGauge(),
 		registry:         reg,
 	}
-}
-
-// tokenExpiry reads the exp claim out of a JWT WITHOUT verifying it. The
-// canary holds no signing key and has no business validating its own
-// credential — the server does that on every call, and a forged exp would only
-// mislead this one gauge. Returns ok=false for anything unparseable so the
-// caller can leave the metric absent rather than publish a wrong deadline.
-func tokenExpiry(token string) (time.Time, bool) {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return time.Time{}, false
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return time.Time{}, false
-	}
-	var claims struct {
-		Exp int64 `json:"exp"`
-	}
-	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp <= 0 {
-		return time.Time{}, false
-	}
-	return time.Unix(claims.Exp, 0).UTC(), true
 }
 
 // oauthMetadataResponse contains the fields we validate in the OAuth AS metadata.
@@ -476,16 +432,9 @@ func run(ctx context.Context, cfg *config, met *canaryMetrics) bool {
 	start := time.Now()
 	ok := true
 
-	// Report how much life the bearer token has left. Since mctl-telegram#412
-	// the token is deliberately bounded (30d default, 90d ceiling), which turns
-	// expiry from a distant problem into a scheduled one: the canary cannot
-	// renew itself yet (#421), so without this gauge the first symptom would be
-	// a permanently red canary on the expiry date.
 	if cfg.tokenFile != "" {
 		// kubelet rotates the projected token in place; re-read it so a
-		// long-running process never presents a stale one. No expiry gauge:
-		// a projected token lives minutes by design, and the minutes-scale
-		// value would trip the worker-token expiry alert.
+		// long-running process never presents a stale one.
 		tok, err := readTokenFile(cfg.tokenFile)
 		if err != nil {
 			log.Error("probe failed", "step", "mcp_init", "err", err)
@@ -496,38 +445,6 @@ func run(ctx context.Context, cfg *config, met *canaryMetrics) bool {
 		}
 		cfg.bearerToken = tok
 		log.Info("token source", "kind", "projected service account token")
-	} else if exp, okExp := tokenExpiry(cfg.bearerToken); okExp {
-		// Register, not MustRegister: registration happens here rather than at
-		// construction, so a second run() against the same registry — a daemon
-		// loop, or simply two calls in one test — would otherwise panic on
-		// duplicate registration. An already-registered gauge is the expected
-		// steady state, not an error.
-		if regErr := met.registry.Register(met.tokenExpiresIn); regErr != nil {
-			if _, dup := regErr.(prometheus.AlreadyRegisteredError); !dup {
-				log.Error("token expiry metric registration failed", "err", regErr)
-			}
-		}
-		met.tokenExpiresIn.Set(time.Until(exp).Seconds())
-		log.Info("token lifetime", "expires_at", exp.Format(time.RFC3339))
-
-		// Renew before the credential gets close to lapsing (#421). This runs
-		// first so the rest of the probe uses the fresh token and cannot race
-		// its own expiry mid-run. It is fail-open by design: on any error the
-		// run continues with the existing token, which is still valid — the
-		// threshold guarantees that. See renew.go for why that is safe.
-		if threshold := renewThresholdFor(cfg); threshold > 0 && time.Until(exp) < threshold {
-			log.Info("token renewal due", "expires_at", exp.Format(time.RFC3339), "threshold", threshold)
-			if newTok, newExp, err := renewToken(ctx, cfg, log); err != nil {
-				log.Error("probe failed", "step", "token_renew", "err", err)
-				met.stepFailures.WithLabelValues("token_renew").Inc()
-			} else {
-				cfg.bearerToken = newTok
-				met.tokenExpiresIn.Set(time.Until(newExp).Seconds())
-				log.Info("probe ok", "step", "token_renew", "expires_at", newExp.Format(time.RFC3339))
-			}
-		}
-	} else {
-		log.Warn("token lifetime unknown, expiry metric omitted")
 	}
 
 	client := &http.Client{Timeout: cfg.timeout}

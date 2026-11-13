@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -53,10 +55,9 @@ func TestLoadConfig_TokenSourceErrors(t *testing.T) {
 		"empty file": func(t *testing.T) {
 			t.Setenv("CANARY_BEARER_TOKEN_FILE", writeTokenFile(t, " \n"))
 		},
-		"file with renewal": func(t *testing.T) {
+		"removed renewal switch": func(t *testing.T) {
 			t.Setenv("CANARY_BEARER_TOKEN_FILE", writeTokenFile(t, "projected"))
 			t.Setenv("CANARY_TOKEN_SECRET_NAME", "mctl-telegram-canary")
-			t.Setenv("CANARY_TOKEN_SECRET_NAMESPACE", "labs")
 		},
 	}
 	for name, setup := range cases {
@@ -70,9 +71,16 @@ func TestLoadConfig_TokenSourceErrors(t *testing.T) {
 	}
 }
 
+// jwtWithExp builds an unsigned-but-well-formed JWT carrying only exp. The
+// canary never inspects its own token, so the content only has to differ.
+func jwtWithExp(exp time.Time) string {
+	payload, _ := json.Marshal(map[string]int64{"exp": exp.Unix()})
+	return "aGRy." + base64.RawURLEncoding.EncodeToString(payload) + ".c2ln"
+}
+
 // The projected token is rotated by kubelet in place: every run must present
-// what the file holds now, and must not report it as an expiring worker token.
-func TestRun_TokenFileIsReReadAndHasNoExpiryGauge(t *testing.T) {
+// what the file holds now.
+func TestRun_TokenFileIsReRead(t *testing.T) {
 	var lastAuth atomic.Value
 	srv := newFakeServer(t, validOAuthHandler, func(w http.ResponseWriter, r *http.Request) {
 		lastAuth.Store(r.Header.Get("Authorization"))
@@ -92,15 +100,6 @@ func TestRun_TokenFileIsReReadAndHasNoExpiryGauge(t *testing.T) {
 	}
 	if got, _ := lastAuth.Load().(string); got != "Bearer "+rotated {
 		t.Fatalf("run must present the rotated file token, got %q", got)
-	}
-	families, err := met.registry.Gather()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, f := range families {
-		if f.GetName() == "mctl_telegram_canary_token_expires_in_seconds" {
-			t.Fatal("expiry gauge must stay absent for a projected token")
-		}
 	}
 }
 
