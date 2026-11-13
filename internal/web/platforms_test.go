@@ -61,7 +61,8 @@ func TestPlatforms_ServesHTML(t *testing.T) {
 		"accepts a loopback redirect",
 		`"token_endpoint_auth_signing_alg": "ES256"`,
 		"an inline <code>jwks</code> is refused",
-		"sends are not idempotent",
+		"are not idempotent, so re-read the chat first",
+		"<code>send_reply</code> is the exception",
 	} {
 		if !strings.Contains(body, must) {
 			t.Fatalf("/platforms missing %q", must)
@@ -175,5 +176,21 @@ func TestPlatforms_ManagePageOnlyWhenMounted(t *testing.T) {
 	}
 	if body := render(false); strings.Contains(body, "/telegram/connect/manage") {
 		t.Fatal("without the manage page, /platforms must not link to it")
+	}
+}
+
+// The pre-approval trial only works while new sign-ins get tool access, so
+// the page must follow AUTO_APPROVE_CLIENTS rather than promise it.
+func TestPlatforms_TrialFollowsOpenSignup(t *testing.T) {
+	f := testPlatformFacts()
+	f.OpenSignup = true
+	open := renderPlatforms(t, f)
+	if !strings.Contains(open, "the trial needs nothing from us") || strings.Contains(open, "start without tool access") {
+		t.Fatal("open signup: page should promise a self-service trial")
+	}
+	f.OpenSignup = false
+	closed := renderPlatforms(t, f)
+	if strings.Contains(closed, "the trial needs nothing from us") || !strings.Contains(closed, "start without tool access") {
+		t.Fatal("closed signup: page must not promise a self-service trial")
 	}
 }
