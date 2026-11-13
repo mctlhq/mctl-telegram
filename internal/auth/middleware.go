@@ -212,10 +212,6 @@ func classifyAuthError(msg string) string {
 	}
 }
 
-// providerName returns a human-readable label for the Provider implementation.
-// Used as the "provider" label in auth failure metrics. The result is derived
-// from the concrete type name so it stays stable across deployments without
-// requiring each Provider to implement an extra interface.
 // Wrapper is a provider that sits in front of another one and delegates most
 // requests to it. Metrics label a wrapper by the provider it wraps, so adding a
 // narrow front provider does not collapse the per-provider breakdown.
@@ -223,6 +219,10 @@ type Wrapper interface {
 	Unwrap() Provider
 }
 
+// providerName returns a human-readable label for the Provider implementation.
+// Used as the "provider" label in auth failure metrics. The result is derived
+// from the concrete type name so it stays stable across deployments; only a
+// Wrapper implements an extra interface, and it is labelled by what it wraps.
 func providerName(p Provider) string {
 	if p == nil {
 		return "unknown"
