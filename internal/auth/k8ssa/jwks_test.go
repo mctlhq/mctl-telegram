@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,10 +24,17 @@ func jwksServer(t *testing.T, status *atomic.Int32, hits *atomic.Int32, gotAuth 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
 		gotAuth.Store(r.Header.Get("Authorization"))
+		// Like the API server's /openid/v1/jwks: 406 unless the client
+		// accepts application/jwk-set+json.
+		if a := r.Header.Get("Accept"); !strings.Contains(a, "application/jwk-set+json") && !strings.Contains(a, "*/*") {
+			w.WriteHeader(http.StatusNotAcceptable)
+			return
+		}
 		if s := status.Load(); s != 0 {
 			w.WriteHeader(int(s))
 			return
 		}
+		w.Header().Set("Content-Type", "application/jwk-set+json")
 		_, _ = w.Write(body)
 	}))
 }

@@ -123,7 +123,10 @@ func (c *ClusterKeys) fetch(ctx context.Context) (*jose.JSONWebKeySet, error) {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(tok)))
-	req.Header.Set("Accept", "application/json")
+	// The API server serves keys as application/jwk-set+json and answers 406
+	// to an Accept that excludes it, such as plain application/json
+	// (observed in prod on 2026-11-13).
+	req.Header.Set("Accept", "application/jwk-set+json, application/json;q=0.9")
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch jwks: %w", err)
