@@ -8,36 +8,50 @@ implemented before that.
 
 Main source SHA inspected: `b341c520d60f516fc6a1ee56514ab9372bfe5f8e`
 (`origin/main` at fetch time, 2026-11-14). Every `path:line` below is at that
-SHA. No network, vendor login, vendor account or live vendor UI was used.
+SHA. No vendor login, vendor account, install, licence purchase or live vendor
+UI was used, and no vendor network fetch was made by the author of this
+document.
 
 ## 0. Evidence limitations (read first)
 
-This comparison is INCOMPLETE on the vendor side, on purpose.
+This comparison is bounded on the vendor side, on purpose.
 
-- The task allowed no network access. The repo holds no vendor material
-  (`git grep -i -E 'elevenlabs|elevenagents|affectui|elizaos'` matches nothing
-  at the SHA above). Source snapshots were requested from the orchestrator
-  (question q-1e7fdbc2); at the time of writing none had arrived.
-- Therefore every ElevenAgents, affectUI and elizaOS row in section 3 is
-  `UNTESTED`. Nothing in this document is an observed vendor screenshot or a
-  verified vendor behaviour. The issue's vendor claims are pointers to look
-  at, not findings.
-- No statement is made about any vendor's license, React readiness, pricing,
-  or feature availability. Those need a snapshot of the upstream README,
-  LICENSE and docs, with URL and retrieval date, before they can appear.
-- The MCTL side (sections 1, 2, 4-8) is `VERIFIED` against source at the SHA
-  above by reading it. Nothing was run; no tests were executed (docs only).
+- The repo holds no vendor material (`git grep -i -E
+  'elevenlabs|elevenagents|affectui|elizaos'` matched nothing at the SHA
+  above). The vendor notes in section 3 were relayed by the orchestrator on
+  2026-11-14 as paraphrases, not full snapshots, from mutable `main`
+  branches that are not pinned to a commit. This document cites those relayed
+  notes without claiming its own fetch or live observation.
+- Nothing here is an observed vendor screenshot or an observed vendor UI
+  behaviour. No screenshot is included or implied. Every "actual UI" cell is
+  `UNTESTED`.
+- Claims about a vendor's licence, framework or feature set are limited to
+  what the relayed notes say, attributed with URL and date. A root `LICENSE`
+  file does not cover Pro assets, dependencies or other trees.
+- The MCTL side (sections 1, 2, 4-8) is `VERIFIED` by reading source at the
+  SHA above. Nothing was run and no tests were executed (docs only). Claims
+  about no-JS and accessibility come from source inspection (templates, CSP
+  headers, tests as written), not from runtime or screen-reader testing.
 
 Evidence labels used: `VERIFIED` (read in this repo at the SHA),
-`VENDOR-DOCUMENTED` (stated in a vendor snapshot supplied to this task: none
-yet), `UNTESTED` (named as a lead only).
+`VENDOR-DOCUMENTED` (stated in a relayed vendor note, with URL and date; says
+nothing about the real UI), `UNTESTED` (actual vendor UI not observed),
+`UNKNOWN` (inaccessible, no claim possible).
 
 ## 1. Current server-rendered inventory
 
-Two surfaces exist, both only with `AGENT_ENABLED`
-(`internal/config/config.go:390`, `cmd/server/main.go:658`, `:680-681`; the
-exact guard expression was not re-derived here, the spec states the same,
-`docs/assistants/spec.md:741`).
+Two surfaces exist. Route guards, read from `cmd/server/main.go`:
+
+- `/assistants` is mounted at `:658` inside `if cfg.AgentEnabled` (`:633`),
+  with no auth-mode condition and no auth middleware (public).
+- The manage assistant routes (`:680-681`) are mounted inside
+  `if strings.EqualFold(cfg.AuthMode, "local-jwt")` (`:666`) AND
+  `if assistantSvc != nil` (`:679`). `assistantSvc` is only assigned inside
+  `cfg.AgentEnabled` (`:652`), so the effective guard is
+  `AgentEnabled && AuthMode == local-jwt`, wrapped in `manageAuth` (`:670`).
+  The GET `/telegram/connect/manage` page itself is mounted in local-jwt mode
+  regardless of `AgentEnabled` (`:671`); only the assistant section needs the
+  service.
 
 ### 1.1 `/assistants` (public, read-only) - SHIPPED
 
@@ -60,8 +74,9 @@ exact guard expression was not re-derived here, the spec states the same,
   catalog (`assistants.go:186-188`, `:209-226`). `Cache-Control: no-store`.
   CSP is `chromeCSP` (`internal/web/headers.go:45`), which includes
   `script-src 'self' 'unsafe-inline' https://stats.mctl.ai` for the shared
-  chrome; the page itself needs no JavaScript.
-- No-JS: fully usable; it is a read-only document.
+  chrome; by source inspection the page itself needs no JavaScript.
+- No-JS: by source inspection it is a read-only document with no script
+  dependency; not runtime-tested.
 
 ### 1.2 Assistant section of `/telegram/connect/manage` (account) - SHIPPED
 
@@ -118,9 +133,14 @@ schedule, disclosure), `fork_assistant` / `update_fork` / `delete_fork`
 
 ### 1.4 Where approvals live today
 
-Agent-action approval is NOT a web page. The owner approves in the Telegram
-bot chat: `/mctl approve <code>` and `/mctl reject <code>`
-(`internal/agent/control/notifier.go:507`, `router.go:74`;
+Agent-action approval is NOT a web page and NOT a bot chat. `/mctl approve
+<code>` and `/mctl reject <code>` are commands the owner types in their own
+Telegram Saved Messages; they are read by the connected user-account listener
+(`router.go:27,380` describe the Saved Messages dispatch;
+`notifier.go:46,76` write pending-approval notices into Saved Messages).
+They therefore work only while that listener is running for the account; this
+document did not verify listener liveness behaviour beyond reading those
+comments (`internal/agent/control/notifier.go:507`, `router.go:74`;
 `executor.Approve`/`Reject`, `internal/agent/executor/executor.go:224,309`).
 The only web approval surface in the repo is for broadcasts
 (`internal/web/broadcasts.go`), which is unrelated to assistant replies.
@@ -144,22 +164,43 @@ unpause, assistant, takeover (`router.go:74`).
 
 ## 3. Side-by-side (vendor columns are leads only)
 
-Date of MCTL evidence: 2026-11-14, SHA above. Vendor columns: all `UNTESTED`,
-no snapshot supplied, no URL was opened.
+Date of MCTL evidence: 2026-11-14, SHA above. Vendor evidence: notes read by
+the orchestrator on 2026-11-14 and relayed as paraphrases; mutable `main`,
+not pinned; no screenshots; actual UI of every vendor `UNTESTED`.
 
-| Dimension | ElevenAgents (elevenlabs.io/docs/eleven-agents/overview) | affectUI (affectui.com/docs, github.com/flohoeller/affectui) | elizaOS catalog (github.com/elizaOS/eliza) | MCTL today (VERIFIED) |
+### 3.1 Vendor matrix (relayed notes)
+
+| Vendor | Source URL (relayed 2026-11-14) | VENDOR-DOCUMENTED (per relayed note) | Actual UI |
+|---|---|---|---|
+| ElevenAgents | https://elevenlabs.io/docs/eleven-agents/overview | Docs describe workflow, prompt, model, tools and authentication configuration, plus testing, analytics and retention. Exact AgentType and FirstMessage UI fields: not verified. | UNTESTED |
+| affectUI (docs) | https://affectui.com/docs | Describes agent approval and activity patterns; distinguishes a free MIT tier from a Pro tier. | UNTESTED |
+| affectUI (repo) | https://raw.githubusercontent.com/flohoeller/affectui/main/README.md | README advertises React 19; free ToolCallCard and DecisionInbox; Pro AgentInbox, Tree and TraceWaterfall. | UNTESTED |
+| affectUI (licence) | https://raw.githubusercontent.com/flohoeller/affectui/main/LICENSE | Root LICENSE is MIT, copyright 2026 Florian Hoeller. Does not by itself cover Pro assets or dependencies. | n/a |
+| elizaOS (repo) | https://raw.githubusercontent.com/elizaOS/eliza/main/README.md | TypeScript core, app, plugins and native bridges; capabilities are conditional on OS, plugins, permissions and providers; no third-party registry submissions currently. | UNTESTED |
+| elizaOS (licence) | https://raw.githubusercontent.com/elizaOS/eliza/main/LICENSE | Root LICENSE is MIT, 2026 Shaw Walters / elizaOS contributors. Not all assets are necessarily covered. | n/a |
+| elizaOS (core) | https://raw.githubusercontent.com/elizaOS/eliza/main/packages/core/README.md | Describes runtime authorization and effect settlement, and a browser read-only task activity reader with stale fencing; no authority from display. | UNTESTED |
+| elizaOS character files | (docs inaccessible) | Field and schema: UNKNOWN. No claim made. | UNKNOWN |
+
+Reading the notes against section 4: the vendor documents that its approval
+and activity views are display-only, and a browser reader is read-only with
+stale fencing. That is consistent with the rule here that a display never
+carries authority. It is a documented claim, not an observed behaviour.
+
+### 3.2 Comparison
+
+| Dimension | ElevenAgents | affectUI | elizaOS | MCTL today (VERIFIED) |
 |---|---|---|---|---|
-| Builder shape | UNTESTED | UNTESTED | UNTESTED | catalog page + manage forms; two server-rendered pages; no wizard |
-| Prompt / persona authoring in UI | UNTESTED | UNTESTED | UNTESTED | definition authored in repo; owner notes via MCP only; forks via MCP |
-| First-message concept | UNTESTED | UNTESTED | UNTESTED | none |
-| Test before activate | UNTESTED | UNTESTED | UNTESTED | none for owners; install starts paused and not listening; mode `observe` queues every reply for approval |
-| Tool / capability picker | UNTESTED | UNTESTED | UNTESTED | none; tools fixed by definition, fork may take a subset |
-| Approval / activity view | UNTESTED | UNTESTED | UNTESTED | Telegram `/mctl` only |
-| Component licence, framework | UNTESTED, not stated | UNTESTED, not stated | UNTESTED, not stated | Go `html/template`, no JS on manage page |
+| Builder shape | documented config: workflow, prompt, model, tools, auth; UI UNTESTED | component library, not a builder (per README note) | runtime plus plugins; UI UNTESTED | catalog page + manage forms; two server-rendered pages; no wizard |
+| Prompt / persona authoring in UI | prompt configuration documented; UI UNTESTED | not stated | character files: UNKNOWN | definition authored in repo; owner notes via MCP only; forks via MCP |
+| First-message concept | FirstMessage field not verified | not stated | UNKNOWN | none |
+| Test before activate | testing documented; UI UNTESTED | not stated | not stated | none for owners; install starts paused and not listening; mode `observe` queues every reply for approval |
+| Tool / capability picker | tools configuration documented; UI UNTESTED | ToolCallCard (display) | capabilities conditional on OS/plugins/permissions/providers | none; tools fixed by definition, fork may take a subset |
+| Approval / activity view | analytics and retention documented | DecisionInbox free, AgentInbox/Tree/TraceWaterfall Pro | read-only task activity reader | Telegram Saved Messages `/mctl` only |
+| Licence, framework | not stated | MIT root, React 19, Pro not covered | MIT root, TypeScript, not all assets | Go `html/template`, no script on manage page (source inspection) |
 
-The only use of this table is to decide which vendor pages to snapshot next.
-No pattern below is claimed to come from any vendor; wireframes are original
-and derived from MCTL source.
+The table informs which patterns to study next. No wireframe below is claimed
+to come from any vendor; wireframes are original and derived from MCTL source.
+No React or vendor component is proposed.
 
 ## 4. Separation the UI must keep
 
@@ -197,17 +238,37 @@ source (`:471-493`); autopilot paused (`:503`).
 
 ### 4.2 Allowed automatically / Requires approval / Denied
 
-The three lists in any UI must be computed from the same inputs as
+Configured allowlists versus effective action-time authority. What the
+settings page shows (`Settings.Mode`, `AutoIntents`, `NeverIntents`, limits)
+is configuration. It is NOT permission. Settings + `guarded` + `AutoIntents`
+containing an intent does not mean an action is allowed: at action time the
+server may still withhold or deny because the assistant is paused, not
+listening, the global kill is set, the install revision is stale, or the
+context check fails (conversation taken over, blocked sender, excluded
+audience, superseded source, rate or hours). A page may say "configured to
+reply on its own for: X, when nothing below applies"; it must never say "X is
+allowed".
+
+Scope of the gates: the checks in 4.1 are evaluated by `policy.Evaluate` for a
+proposed REPLY to a counterpart. Owner-facing messages (the pending-approval
+notice, `/mctl` command replies, Saved Messages notices) are a separate
+channel and are not subject to the reply gates (disclosure, URL, length,
+audience). This document makes no claim that those gates apply to them.
+
+The three lists in any UI must be derived from the same inputs as
 `Evaluate`, not be UI-only switches:
 
-- Allowed automatically: only when mode is `guarded` AND no approval reason
-  fires AND no denial fires. Reasons that downgrade to approval
+- Allowed automatically (conditional): only when mode is `guarded` AND no
+  approval reason fires AND no denial fires, at the moment of the action.
+  Reasons that downgrade to approval
   (`policy.go:615-629`): observe mode (and guarded on an unpromoted fork),
   autonomous turn budget exhausted, intent not in allowlist, rate limit,
   within working hours, working hours unreadable, a protected owner field
   echoed before the owner engaged.
-- Requires approval: the above, released only by `/mctl approve <code>` for
-  that exact action at the current revision.
+- Requires approval: the above, released only by `/mctl approve <code>`
+  (typed in the owner's Saved Messages, read by the account listener) for that
+  exact action at the current revision. If the listener is not running the
+  command is not read; this document did not verify that failure mode.
 - Denied: platform list above. Owner approval cannot release these.
 
 The "budget-exhausted" state is therefore not a denial: it becomes
@@ -398,7 +459,8 @@ Accessibility:
   (error). Today the notice is a plain div (`:430`); small hardening, a
   backlog item.
 - Touch targets >= 44 px; text zoom 200 % must not clip a form.
-- No-JS is the baseline and the only mode tested.
+- No-JS is the baseline design. This is a source-inspection claim; no
+  runtime, browser or screen-reader test was run by this spike.
 - Screen reader: tables get `<caption>` and `<th scope>`; the "Authority"
   panel is a `<section aria-labelledby>`.
 
@@ -433,6 +495,22 @@ Security:
 - First Message: see 5.5.
 - Error messages never echo submitted values (`manage_assistant.go:398`).
 
+### 5.4 Authority panel (read-only, all flows)
+
+| Group | Content | Backing |
+|---|---|---|
+| Assistant defaults | default mode/limits/tiers of `name@version` | `CatalogDefaults`, `CatalogIntent` |
+| Your limits | mode, turns, msgs/min, chars, working hours, audience, sender counts | `Settings` fields |
+| Platform rules (fixed) | list from 4.1, static text | `policy.go` constants; text kept honest by the explicit cases in 9.1 |
+| Configured to reply on its own | `AutoIntents` when mode=guarded else "none: observe mode asks you first"; always with "when nothing below applies" | `Settings.AutoIntents`, `Mode` |
+| Requires approval | observe, budget, not-on-list, rate, hours | `Reason*` constants |
+| Denied | `NeverIntents` + fixed platform list | `Settings.NeverIntents` |
+
+Today the manage section already shows "Replies on its own" and "Never"
+(`manage_assistant.go:445-446`) but prints the intent names even in observe
+mode, where nothing is auto-sent. That mismatch is the smallest honest
+improvement (section 9).
+
 ### 5.5 First Message (defined here, not buildable today)
 
 No such concept exists. If added, it is only the opening line the assistant
@@ -443,23 +521,8 @@ rather than "First message", and it is shown only with the sentence "Used only
 when someone writes to you first." Whether a definition field is the right
 place is a #1022/#1026 decision. REQUIRES NEW CONTRACT (schema change in
 `assistants/schemas/*.json`, owner #1022). Recommendation: do not build in the
-first slice.
-
-### 5.4 Authority panel (read-only, all flows)
-
-| Group | Content | Backing |
-|---|---|---|
-| Assistant defaults | default mode/limits/tiers of `name@version` | `CatalogDefaults`, `CatalogIntent` |
-| Your limits | mode, turns, msgs/min, chars, working hours, audience, sender counts | `Settings` fields |
-| Platform rules (fixed) | list from 4.1, static text | `policy.go` constants; text must be kept in sync by a test (below) |
-| Allowed automatically | `AutoIntents` when mode=guarded else "none: observe mode asks you first" | `Settings.AutoIntents`, `Mode` |
-| Requires approval | observe, budget, not-on-list, rate, hours | `Reason*` constants |
-| Denied | `NeverIntents` + fixed platform list | `Settings.NeverIntents` |
-
-Today the manage section already shows "Replies on its own" and "Never"
-(`manage_assistant.go:445-446`) but prints the intent names even in observe
-mode, where nothing is auto-sent. That mismatch is the smallest honest
-improvement (section 9).
+first slice. The vendor FirstMessage field is not verified (section 3.1), so
+this is not modelled on it.
 
 ## 8. Constraints honoured
 
@@ -482,37 +545,52 @@ improvement (section 9).
 Recommended: ITERATE_CURRENT_UI. Reason: nearly every wished-for control in
 flows A-C maps to REQUIRES NEW CONTRACT owned by another issue, while the
 safety-relevant honesty gap is small and local. The vendor comparison cannot
-change this until snapshots exist; it is not the basis of the recommendation.
-This is a PROPOSAL. The operator's exact-content verdict is required before
-any implementation.
+change this; it is not the basis of the recommendation. ITERATE_CURRENT_UI
+remains PENDING OWNER: it is a recommendation only, and no approval, implicit
+or otherwise, is assumed. This is a PROPOSAL. The operator's exact-content
+verdict is required before any implementation.
 
 ### 9.1 The one smallest slice (proposed, no code now)
 
-"Effective authority" block in the existing manage assistant section: group
-the already-loaded `Settings` into Allowed automatically / Requires approval /
-Denied, with the fixed platform rules, and state plainly that observe mode
-auto-sends nothing.
+A "Configured authority" copy block in the existing manage assistant section.
+It is copy over already-loaded `Settings`, NOT a new authority engine: it
+computes nothing that `policy.Evaluate` computes and grants nothing. It groups
+settings into "Configured to reply on its own" / "Requires approval" /
+"Denied" with the fixed platform rules, uses honest conditional wording
+("when nothing below applies"; see 4.2), and states plainly that observe mode
+auto-sends nothing and that paused, not-listening, kill switch, stale revision
+or a failed context check withhold replies regardless of these settings.
 
 - Provisional files: `internal/web/manage_assistant.go` (view + template
   text), `internal/web/manage_assistant_test.go`. No handler, route, schema,
   store, policy or dependency change.
 - Inputs: `assistantinstall.Settings` only; wording for approval reasons from
-  `policy.OwnerHoldReasons` (exported already).
+  `policy.OwnerHoldReasons` (exported already). Whether each `Reason*` is an
+  approval or a denial must be read from `policy.go` when the slice is
+  written, not assumed here.
 - Acceptance tests (red before, green after):
-  1. observe mode with `AutoIntents=[discovery]`: page shows "Allowed
-     automatically: none" and "every reply needs your approval". Red today:
+  1. observe mode with `AutoIntents=[discovery]`: page shows "Configured to
+     reply on its own: none" and "every reply needs your approval". Red today:
      page prints "Replies on its own: discovery".
-  2. guarded mode: shows the intent under Allowed automatically and lists the
-     approval reasons (budget, rate, hours, not-on-list).
+  2. guarded mode: shows the intent as configured, with the conditional
+     wording, and lists the approval reasons (budget, rate, hours,
+     not-on-list). Also guarded + paused and guarded + not listening: the
+     page states replies are withheld; it never says "allowed".
   3. `NeverIntents` shown under Denied with "approval cannot release".
   4. Fixed platform list includes install-revision change and kill switch.
   5. Output still contains no values/notes/instructions; no `script` element;
      response CSP unchanged (existing tests keep passing).
-  6. Drift guard: a test asserts every `policy.Reason*` constant appears in
-     the rendered "Requires approval" text via `OwnerHoldReasons`, so a new
-     reason added in policy cannot be missing from the page.
-- Meaningful mutations (each must fail a test): render AutoIntents under
-  Allowed while mode is observe; drop `NeverIntents` from Denied; drop one
+  6. Explicit hold-reason cases and negative guards (replaces any "all
+     `policy.Reason*` constants appear under approval" test, which is wrong:
+     some reasons are denials, not approvals). One case per approval reason
+     the page claims (observe mode, turn budget, intent not on list, rate
+     limit, working hours, hours unreadable), each asserting the
+     `OwnerHoldReasons` wording. Negative guards: denial reasons (kill, user
+     mismatch, revision changed, `never` intent, takeover, blocked sender)
+     must NOT appear under "Requires approval"; the page must not contain the
+     word "allowed" for a configured intent.
+- Meaningful mutations (each must fail a test): render AutoIntents as
+  configured-to-reply while mode is observe; claim "allowed" while paused; drop `NeverIntents` from Denied; drop one
   fixed platform rule; omit the "revision" rule; mark the panel as editable
   (a form control inside it); print DisclosureText unescaped.
 - Effort: small (about 0.5 day). Depends on nothing. Risk: copy drift, covered
@@ -522,7 +600,7 @@ auto-sends nothing.
 
 | P | Item | Files (provisional) | Effort | Depends on |
 |---|---|---|---|---|
-| 1 | Effective authority block (9.1) | `internal/web/manage_assistant{,_test}.go` | S | none |
+| 1 | Configured authority copy block (9.1) | `internal/web/manage_assistant{,_test}.go` | S | none |
 | 2 | Notice `role` hardening, labels/captions pass | same | XS | 1 |
 | 3 | Read-only recent activity list (account scope) | `internal/web/manage_activity.go` (+db read) | M | #1026 contract; cross-user negative test |
 | 4 | Synthetic policy simulator (no model, no sends) | `internal/web/manage_assistant_simulate.go`, uses `policy.Evaluate` | M | #1026, #1044 fixtures; pure, no I/O |
@@ -538,9 +616,10 @@ call (mutation: call `Propose` must fail).
 
 ## 10. What is missing to finish this research
 
-1. Source snapshots (text, URL, retrieval date) of the four upstream
-   references; then fill section 3 with VENDOR-DOCUMENTED rows and verify
-   licence statements from the actual LICENSE files.
+1. Pinned snapshots (commit SHA, own fetch, retrieval date) of the upstream
+   references to replace the relayed paraphrases in section 3.1, plus the
+   inaccessible elizaOS character-files docs, and an actual-UI walk-through
+   if the owner wants one (needs vendor account permission not granted here).
 2. Operator confirmation of the issue numbers in section 6 (taken from the
    task text, not re-verified).
 3. Optional: a human walk-through of the live pages on a staging account with
