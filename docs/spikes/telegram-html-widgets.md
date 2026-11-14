@@ -39,8 +39,12 @@ Sources:
 
 1. https://core.telegram.org/bots/widgets (current page, 2026-11-14)
 2. https://core.telegram.org/bots/api-changelog (section dated 2026-11-09, Bot API 10.4)
-3. https://github.com/TelegramMessenger/widget-sandbox README.md (mutable `main`, no commit pin)
-4. https://github.com/TelegramMessenger/widget-sandbox docs/sdk-v1.md (mutable `main`, no commit pin)
+3. https://raw.githubusercontent.com/TelegramMessenger/widget-sandbox/main/README.md
+4. https://raw.githubusercontent.com/TelegramMessenger/widget-sandbox/main/docs/sdk-v1.md
+
+Sources 3 and 4 were retrieved by the orchestrator on 2026-11-14 from the
+mutable `main` branch. They are not pinned to a commit or tag, so they can change
+under the same URL.
 
 ### 3.1 Capability matrix
 
@@ -147,14 +151,17 @@ where the proposal depends on them it says so.
 | Bot chat id to user mapping | Present as known-chat check (`Registry.isKnownChat`) and `/start` records | Mapping of chat to tenant principal beyond this is UNKNOWN to this spike |
 | Work item ref | Present: `WorkItemID`, `WorkRef` (derived from local `work_item_bindings`) | `owner/repo#n` display |
 | Request id, hash, version | Present for Human Input only | Not for run status |
-| Agent run id / run status | Not found by search of agent schema, control and workctx client | Absent here; ownership vs mctl-agent unobserved |
-| DevLoop evidence (HEAD sha, check results) | Not found | Absent here |
-| Tenant / chat / run / principal correlation tuple | No single record | Would be new |
-| Freshness / timestamp | `created_at`, `expires_at` exist on Human Input only | No run-status freshness |
+| Agent run id / run status | Not found in the files searched in this repository (agent schema, control and workctx client; targeted searches, not an exhaustive audit) | No run read model located here; which service owns it is unknown to this spike |
+| DevLoop evidence (HEAD sha, check results) | Not found in the same searches | No evidence read model located here |
+| Tenant / chat / run / principal correlation tuple | No single record found | Would be new |
+| Freshness / timestamp | `created_at`, `expires_at` exist on Human Input only | No run-status freshness field located |
 
-Ownership of run status and evidence is expected to be mctl-agent / mctl-api
-(unobserved). This repo must not become a second source of truth: the card must
-render a server-provided read model, never compute status itself.
+Because no run read model was located, this spike makes no claim that a status
+card exists or can be built today. The owner of run status and evidence is an
+open question (section 13); no owning service is assumed. Whoever owns it, this
+repo must not become a second source of truth: a card must render a read model
+supplied by that owner, never compute status itself. That read model contract
+is **unresolved** (section 8.1).
 
 ### 4.5 Overlap with other work
 
@@ -171,8 +178,16 @@ render a server-provided read model, never compute status itself.
 - **B. Constrained read-only refresh/details callback.** A adds a `widget_query`
   (max 64 bytes) that returns refreshed read-only details through
   `answerWidgetQuery`.
-- **C. Existing plain HTML / Rich Message / link.** `SendHTMLMessage` or Rich
-  Messages with a link to the existing web page. No new capability.
+- **C. Existing plain text / link / HTML message (no widget).** Two distinct
+  parts, not to be conflated:
+  - C1, source-proven: `SendMessage` (plain) and `SendHTMLMessage`
+    (`parse_mode=HTML`, previews disabled) exist in `internal/botapi/botapi.go`
+    (section 4.1) and can carry text and a link. This is existing sender
+    capability only. It is not an existing status card: no run read model was
+    located (section 4.4), so there is nothing yet to put in it.
+  - C2, unimplemented and unverified: Rich Messages (#1217/#1224). No
+    implementing code or docs were found here (section 4.5); their behavior,
+    client coverage and fit are unknown and are not assumed.
 
 | Dimension | A | B | C |
 |---|---|---|---|
@@ -180,12 +195,13 @@ render a server-provided read model, never compute status itself.
 | Build effort | Medium: new sender method, renderer, size gate | High: A plus a new update kind, handler, auth, rate limits, receiver change | Low |
 | Security surface | Small: output only | Larger: new inbound untrusted channel | Smallest (existing) |
 | Cost / ops | Low | Moderate (query traffic, rate limiting) | Lowest |
-| Reliability | Depends on client support and edit rate | Same plus contested-doc risk (3.3) | Highest: works on every client |
-| Compat risk | Unmeasured | Unmeasured plus doc drift | None |
+| Reliability | Depends on client support and edit rate | Same plus contested-doc risk (3.3) | C1 uses a long-existing send path; client rendering of it was not measured here. C2 unknown |
+| Compat risk | Unmeasured | Unmeasured plus doc drift | Unmeasured; not asserted to be nil |
 
-Recommendation: C is the baseline and must exist in every option as the
-fallback. A is the only candidate worth a future pilot. B stays deferred until
-the doc drift is resolved and A has run clean.
+Recommendation: a text-and-link fallback (C1) should accompany every option, but
+it still needs a status read model to carry (section 8.1) and its client
+behavior is unmeasured. A is the only candidate worth a future pilot. B stays
+deferred until the doc drift is resolved and A has run clean.
 
 ## 6. Client compatibility matrix (no client was run)
 
@@ -209,8 +225,9 @@ the whole meaning of the card by itself (section 8).
 | Model text / prompt injection | Run summary or commit message containing instructions or fake UI | Render only allowlisted, typed fields (enums, ids, timestamps, short sanitized labels) using the `humaninput` approach: sanitize, cap, indent. No free-form model prose in the card. |
 | Profile / validator failure | Widget rejected by client validators (allowlists, SDK version) | Offline validator run before send (section 11); failure means send the fallback only. |
 | Cross-chat leak | Card or `public_data` shown to the wrong chat; `public_data` visibility UNKNOWN | Send only to the bound private DM; verify chat-to-principal binding at send time; no tenant data in `public_data`. |
-| Replay / stale | Old `widget_query` or old card replayed | Every query carries a short opaque reference (<= 64 bytes) resolved server-side to (tenant, chat, run, version); reject unknown, expired or superseded references; answer with an explicit stale state. |
-| Stale evidence | Card shows an old HEAD as current | Show evidence timestamp and HEAD; mark stale after a TTL; unknown is shown as unknown (section 8). |
+| Replay / stale | Old `widget_query` or old card replayed | Every query carries a short opaque reference (<= 64 bytes) resolved internally to (tenant, chat, run), bound-checked before any fetch (8.5); unknown and mismatch give one generic error; version ordering depends on the unresolved 8.1 contract. |
+| Stale evidence | Card shows an old HEAD as current | Show `as_of` and abbreviated HEAD; mark stale past `expires_at`; unknown is shown as unknown. Depends on the unresolved 8.1 contract. |
+| Forged provenance | Payload or caller claims `provenance=server` | The label is not authentication; require trusted authenticated read transport and tenant ownership (8.1). |
 | Size | Card exceeds 32768 B or 4096 B compressed | Budget and hard gate (section 8); over budget means fallback. |
 | Flood / rate | Rapid edits or queries | Per-run edit coalescing, per-principal query rate limit, vendor limits UNKNOWN so assume strict. |
 | Privacy | Customer content in card | Allowlisted fields only; no message bodies, phone numbers or secrets (project safety rules; extend `internal/audit/redact.go` for new field names). |
@@ -219,7 +236,13 @@ the whole meaning of the card by itself (section 8).
 
 ## 8. Read-only AgentRunStatus / DevLoopEvidence card
 
-### 8.1 Payload (server-provided read model, rendered by this repo)
+### 8.1 Proposed read model (a requirement on a future upstream, not an existing API)
+
+This is the **authoritative proposed** shape a card would need. No upstream API
+providing it has been located or is claimed to exist (section 4.4); this
+document does not invent one. Until an owner defines and ships a contract with
+these properties, the contract is **UNRESOLVED**, and all behavior that depends
+on the version, expiry or identity fields below is **deferred**, not specified.
 
 All fields typed and allowlisted. Anything missing renders as `unknown`, never
 as a default success.
@@ -227,15 +250,29 @@ as a default success.
 | Field | Type | Rule |
 |---|---|---|
 | `ref` | string <= 120 | `owner/repo#n` display ref |
+| `run_id` | opaque string | Run identity. Required: without it no stale, replay or correlation rule is decidable |
+| `version` | integer, monotonic per `run_id` | Required. Ordering for edits and stale detection (8.5) |
 | `run_state` | enum: queued, running, waiting_input, succeeded, failed, cancelled, unknown | Unrecognized value renders `unknown` |
-| `head_sha` | 7 to 12 hex | Shown abbreviated; absent renders `HEAD unknown` |
-| `checks` | enum: passing, failing, pending, unknown | Never inferred locally |
-| `evidence_at` | RFC 3339 UTC | Rendered as absolute UTC, plus "stale" past TTL |
-| `provenance` | enum: server, unverified | Only `server` displays as a fact |
+| `head_sha` | full immutable commit id, 40 hex (SHA-1) or 64 hex (SHA-256) | Required for evidence. The full value is what is stored and compared; abbreviation (first 7 to 12) is for display only. Absent or not full length renders `HEAD unknown` |
+| `checks` | enum: passing, failing, pending, unknown | Never inferred locally. Meaningful only for the `head_sha` it came with |
+| `as_of` | RFC 3339 UTC | Required: when the owner produced this version |
+| `expires_at` | RFC 3339 UTC | Required: after this instant the data must not display as current. Whether the owner supplies it or a TTL is defined elsewhere is UNRESOLVED; this repo does not pick a TTL |
+| `provenance` | enum: server, unverified | A label only. It is **not authentication** (below) |
 | `detail_url` | https URL <= 200 | Same acceptance test as `humaninput.Render` links |
-| `ref_token` | opaque <= 64 B | Only if option B |
+| `ref_token` | opaque <= 64 B | Only if option B (8.5) |
 
 The card contains no question text, no model prose, no logs.
+
+**Trust requirement.** `provenance=server` proves nothing by itself: it is a
+field inside a payload. A status may display as fact only if it arrived over a
+trusted, authenticated read transport from the owning service, and that service
+asserted tenant ownership of the run for the principal bound to the target chat.
+A caller-supplied flag, request field or header is never proof of provenance.
+The authentication mechanism and the ownership check are part of the unresolved
+upstream contract; this document does not design them.
+
+If the contract stays unresolved, no stale, version or TTL behavior is
+specified here, and the verdict stays DEFER_COMPATIBILITY.
 
 ### 8.2 Size budget
 
@@ -253,8 +290,8 @@ Plain-text caption and message, no color-only meaning, meaning carried by words:
 ```
 Run status: <run_state>
 Work: <ref>
-HEAD: <head_sha | unknown> (checks: <checks>)
-As of: <evidence_at UTC | unknown>
+HEAD: <abbreviated head_sha | unknown> (checks: <checks>)
+As of: <as_of UTC | unknown>
 Details: <detail_url>
 ```
 
@@ -270,18 +307,20 @@ screen-reader behavior of the widget itself are UNKNOWN and NOT_RUN.
 
 ### 8.5 Ordered rules for update, auth, rate, cancel, stale and reference failure
 
-Evaluate in this order; first failing rule decides:
+Design requirements only; no handler or callback is implemented or proposed for
+implementation here. Evaluate in this order; first failing rule decides:
 
 1. **Parse**: update decodes into the narrow struct; unknown or oversize means drop and count (no content logged).
-2. **Known chat**: `isKnownChat` fails means drop (existing behavior).
-3. **Auth / binding**: chat maps to exactly the principal that owns the referenced run; otherwise answer a generic denial, no detail.
-4. **Reference**: `ref_token` resolves; unknown or malformed means answer "no longer available".
-5. **Rate**: per-principal and per-run limits; exceeded means answer "try later", no server work.
-6. **Cancel / terminal**: run terminal or cancelled means answer the terminal state once, then stop updating the card.
-7. **Stale**: reference version is older than current means answer the current state, never the old one.
-8. **Freshness**: evidence past TTL means include stale marker; unavailable server read means `unknown`, never cached success.
-9. **Reply**: answer within the vendor's response window (UNKNOWN); on timeout the client falls back to its own failure behavior.
-10. **Edit**: card edits coalesced and ordered by run version; an edit with a lower version than the stored one is discarded.
+2. **Known chat (cheap filter, not authority)**: `isKnownChat` failing means drop (existing behavior). Passing it grants nothing: a known chat is not proof of any right to a run.
+3. **Resolve reference internally**: `ref_token` is resolved server-side, inside this service, to a stored (tenant, chat, run) record. No upstream data is fetched at this step.
+4. **Bind before fetch**: verify that the authenticated viewer, the originating chat, the owning principal and the run all match that record. Only after this succeeds may any detail be fetched from the owner.
+5. **Indistinguishable failure**: an unknown, malformed, expired or mismatched reference, and any binding mismatch, all produce the same generic answer, identical in text, timing class and side effects, so a caller cannot learn whether a reference or run exists.
+6. **Rate**: per-principal and per-run limits; exceeded means answer "try later", with no upstream work.
+7. **Fetch**: read the run through the authenticated transport of 8.1. Unavailable read means `unknown`, never a cached success.
+8. **Terminal**: terminal or cancelled run means answer the terminal state once, then stop updating the card.
+9. **Version and freshness**: these rules depend on `run_id`, `version` and `expires_at` from 8.1. A reference or card version below the current version is answered with the current state, never the old one; data past `expires_at` is marked stale. If the 8.1 contract is unresolved, these two rules are deferred and nothing is displayed as current.
+10. **Reply**: answer within the vendor's response window (UNKNOWN); on timeout the client falls back to its own failure behavior.
+11. **Edit**: edits are ordered by `version`; an edit with a version lower than or equal to the stored one is discarded. Coalescing is allowed but must keep the highest version.
 
 ## 9. Authorization boundary
 
@@ -314,7 +353,8 @@ Negative / mutation plan:
 
 - Inject `<script>`, `</`, quotes and bidi controls in `ref` and `detail_url`: must be rejected or escaped.
 - Oversize ref, evidence and URL: must trip the budget and yield fallback only.
-- Mutation: remove the escape step; remove the size gate; make `unknown` default to `succeeded`; drop the stale TTL. Each mutation must fail at least one test.
+- Short or non-hex `head_sha`: must render `HEAD unknown`; abbreviation only at display.
+- Mutation: remove the escape step; remove the size gate; make `unknown` default to `succeeded`; drop the `expires_at` check (only once the 8.1 contract is resolved). Each mutation must fail at least one test.
 - Property: output never contains a field outside the allowlist.
 
 No sender, no `allowed_updates` change, no handler is part of this slice.
@@ -329,7 +369,7 @@ production-server choices are owner decisions.
 
 ## 13. Open questions for the owner
 
-1. Is mctl-agent or mctl-api the source of run status and DevLoop evidence, and are the section 8.1 fields available there?
+1. Which service owns run status and DevLoop evidence, does it (or will it) expose the section 8.1 read model (full HEAD, run id, monotonic version, as_of/expires_at) over an authenticated transport with tenant ownership, and who defines that contract?
 2. Is a bot DM the intended audience, given Human Input today goes to Saved Messages (user account)?
 3. Are pinned vendor sources and a test-bot budget available for gate 0 and 2?
 
@@ -338,4 +378,6 @@ production-server choices are owner decisions.
 - Telegram facts come from orchestrator-relayed, paraphrased notes dated 2026-11-14, not full page copies; exact parameter lists and limits not in those notes are UNKNOWN.
 - The widget-sandbox sources were unpinned `main`.
 - Nothing about client behavior was observed.
-- Facts about mctl-api, mctl-agent and mctl-gitops are unobserved.
+- Facts about mctl-api, mctl-agent and mctl-gitops are unobserved, and no service is assumed to own run status.
+- Absence findings in section 4 come from targeted searches of this repository, not an exhaustive audit, and say nothing about other repositories.
+- The section 8.1 read model is a requirement on a future upstream, not an existing API.
