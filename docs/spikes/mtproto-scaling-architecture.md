@@ -53,7 +53,7 @@ Repository (OBSERVED unless marked):
 | Production strategy is `Recreate` at one replica, required for correctness as well as MTProto | `docs/runbook.md:233-257,3171-3177`; ADR 0005 |
 | `AUTH_KEY_DUPLICATED` is classified as a revoked-session code and revokes the loaded row | `clientpool.go:28-36`; `docs/troubleshooting.md:218-232` |
 | A preview account was found rejected with `AUTH_KEY_DUPLICATED` after a Deployment-strategy change; a fresh OAuth reconnect cleared it | `docs/reports/communication-agent-c1.md:74-83,150-158` (REPORTED; the cause is not established there) |
-| Measured RSS: about 30 MB baseline, about 58 MB at 100 idle sessions, about 2.8 MB per session; 3 MB used for planning | `docs/hpa.md:17-26` (REPORTED; amd64, Go 1.25, idle only) |
+| RSS reported as about 30 MB baseline and about 58 MB at 100 idle sessions, with a stated per-session figure of 2.8 MB and 3 MB used for planning. The document is internally inconsistent: (58 - 30) / 100 = 0.28 MB per session, ten times lower than the stated 2.8 MB. Which is right is UNKNOWN; neither is re-measured here | `docs/hpa.md:17-26` (REPORTED; amd64, Go 1.25, idle only) |
 | About 40 users in the live-login study window | `docs/runbook.md:3667` (REPORTED) |
 | Service availability targets: tool 99.5% (3 h 36 min per 30 days), OAuth 99.9% | `docs/slo.md:156-165` |
 | Pool-full and flood-wait metrics exist; the pool cap is currently unset, so saturation is unmonitored | `internal/metrics/metrics.go:736-756`; `docs/hpa.md:120-126` |
@@ -153,8 +153,9 @@ Observed gaps that matter before any scale step:
 ## 5. Owner lifecycle design (applies to options B and C)
 
 Goal: at most one live client per `user_id` across processes, with
-fail-closed behaviour and a bounded, observable overlap window. This section
-is design only.
+fail-closed behaviour and a minimized, observable overlap window. This is a
+goal, not a property the design is shown to achieve (see 6.1). This section
+is design only, and PROPOSED pending the owner.
 
 ### 5.1 Lease record
 
@@ -179,17 +180,21 @@ stateDiagram-v2
     Active --> Fenced: renew CAS lost / epoch changed
     Fenced --> Released: cancel at once, no new RPC
     Active --> Dead: process dies
-    Dead --> Unowned: lease TTL elapses, then a new epoch may start
+    Dead --> Unowned: takeover rule UNRESOLVED (6.1), expiry alone is not proof
 ```
 
-Rules:
-- Start a new owner only when the previous lease is `released`, or expired
-  plus a grace equal to the worst measured teardown time (section 6.4).
-- A holder that cannot renew (database partition, long GC pause, clock skew)
-  must self-fence at `expires_at - safety_margin` by its own monotonic timer:
-  stop issuing RPCs and cancel the client, without needing the database.
-- Every outgoing tool RPC checks "lease still held at local fence time"
-  before it starts, and the caller maps a fenced result to a retryable error.
+Rules (PROPOSED, pending owner; none of these is shown sufficient, see 6.1):
+- Start a new owner when the previous lease is `released` after an awaited
+  `Run` exit. Taking over an EXPIRED lease without a confirmed exit of the old
+  owner is an UNRESOLVED case (section 6.1); expiry plus a grace period is a
+  heuristic, not a proof.
+- A holder that cannot renew should stop issuing RPCs and cancel its client
+  at a locally derived deadline, without needing the database. The deadline
+  is derived as in 6.2, not by comparing database time with a monotonic clock.
+- Every outgoing tool RPC checks "local deadline not passed" before it
+  starts, and the caller maps a refused result to a retryable error. This
+  reduces the chance of an RPC under an expired lease; it does not prevent it
+  (6.1).
 
 ### 5.3 Normal handoff
 
@@ -213,44 +218,105 @@ sequenceDiagram
 
 | Case | What the lease can do | What it cannot do | Missing guard to add before trusting it |
 |---|---|---|---|
-| Owner dies | Expires after TTL; successor starts after grace | Close the dead pod's socket if the pod is alive but partitioned | Self-fence timer in the owner (5.2) |
-| Network partition from DB, Telegram still reachable | Nothing: the holder keeps an open socket | Stop an already-open Telegram socket. PostgreSQL fencing is advisory to the holder, not to Telegram | Self-fence timer strictly shorter than TTL; overlap gauge |
-| Clock skew | Use database time for expiry; holder uses a monotonic timer for its own deadline | Make two pod clocks agree | Margin >= measured skew; alert on large renew latency |
+| Owner dies, or is believed dead | Expires after TTL | Distinguish "dead" from "paused, partitioned or slow". A successor started on expiry may overlap a live old owner | UNRESOLVED: safe takeover needs independent evidence that the old owner has terminated (6.1); no mechanism is proposed or approved here |
+| Network partition from DB, Telegram still reachable | Nothing: the holder keeps an open socket | Stop an already-open Telegram socket. A database lease is advisory to the holder, not to Telegram | Local deadline (6.2) reduces but does not bound the window; overlap proxies (6.5) |
+| Process pause across expiry (GC stop, SIGSTOP, VM or container freeze, CPU starvation) | Lease expires in the database | A cooperative local timer cannot fire while the process is paused. On resume, a stale socket and an in-flight RPC may act before the timer or the renew loop runs | UNRESOLVED (6.1) |
+| Clock skew | Expiry is judged in database time | Make two pod clocks agree | Derive the local deadline per 6.2; alert on large renew latency |
 | Stale release | CAS on epoch makes a late release by an old epoch a no-op | | Epoch in every write, including the audit row |
 | Revoke (user disconnect, `RemoveAtomic`) | Move to draining; `RemoveAtomic` already holds a mutex across the DB revoke | Cancel is not awaited (G2) | Await `Run` exit before `released` |
 | Drain on SIGTERM | Mark draining, stop acquiring | Existing `Shutdown` is cancel-only (G3) | Await `Run` exit within the 10 s shutdown budget or record that it did not |
 | In-flight RPC at fence time | Fence rejects new RPCs | Recall an RPC already on the wire | Non-idempotent mutations (send, pin) already go through `ConfirmStore` single-shot; the fenced owner must not retry them elsewhere |
 | Rollout | Lease keeps ownership single across old and new pods if both run | Replace `Recreate` safely on its own | See section 10, step 3 |
 
-Open observation points that any later implementation must expose, read-only:
-overlap gauge (clients per user across pods, from the lease table plus pool
-gauge), teardown duration histogram (cancel to `Run` return), renew latency
-and failures, fence events, CAS conflicts.
+Observation points a later implementation could expose, read-only, with their
+limits stated in 6.5: pool size, lease rows, teardown duration histogram
+(cancel to `Run` return), renew latency and failures, refused-RPC events, CAS
+conflicts.
 
-## 6. What a stale lease cannot prevent, and how to bound it
+## 6. What a lease cannot prove, and what stays unresolved
 
-6.1 The lease is a database fact. A Telegram socket opened under an old epoch
-stays open until the process cancels it. The only effective stop is local:
-the holder's own timer and cancel. Therefore the design is "lease for
-coordination, local fence for safety", never "lease for safety".
+6.1 Limits of lease, timer and grace (FACT by construction unless marked).
+- A lease is a database fact. A Telegram socket opened under an old epoch
+  stays open until that process closes it.
+- A cooperative local timer is code in the same process. If the process is
+  paused across `expires_at` (GC stop-the-world, SIGSTOP, VM or container
+  freeze, CPU starvation, a stalled node), the timer cannot run during the
+  pause. On resume, the open socket and any RPC already queued or in flight
+  can proceed before the timer callback or renew loop is scheduled. A
+  successor may by then hold a newer epoch and a live client.
+- A grace period based on measured p99 teardown is not a hard upper bound:
+  p99 leaves the tail, and a pause is a separate, unbounded delay. Teardown
+  measured on healthy cancels says nothing about a process that is not
+  running.
+- An RPC already on the wire cannot be recalled by anything in this design.
+- Uncertain death: a missed renew is indistinguishable from a dead owner, a
+  slow owner and a partitioned owner. Expiry is therefore not evidence that
+  the old owner has stopped.
+- Consequence: lease plus timer plus grace do NOT by themselves prove at most
+  one live Telegram client per user. This document claims no such proof.
+- Status: safe takeover of an expired lease is UNRESOLVED unless termination
+  of the old owner (process exit, socket closed, or equivalent) is
+  independently established. No fencing or termination mechanism is proposed
+  as approved here; whether one exists, and what it costs, is an open owner
+  question. Clean handoff (release after awaited `Run` exit, 5.3) is the only
+  path in this document with an explicit termination event, and it does not
+  cover crashes or pauses.
+- Possible outcomes of this gap are UNKNOWN (HYPOTHESIS only): a brief
+  duplicate client may be harmless, may cause errors, or may revoke the key
+  (`AUTH_KEY_DUPLICATED` is a terminal revocation signal in this repository).
 
-6.2 Two overlap windows exist even in a clean handoff: the old owner's
+6.2 Deriving a local deadline conservatively (PROPOSED).
+- Database absolute time and a pod monotonic clock must not be compared
+  directly: they have different origins and the monotonic clock is not
+  meaningful across processes.
+- Instead the holder records a monotonic instant `t_send` immediately before
+  sending an acquire or renew request, and the response gives the lease
+  duration `TTL` (a relative value, not an absolute timestamp). The local
+  deadline is `t_send + TTL - margin`. Using `t_send`, not the response time,
+  makes the deadline conservative: it counts the full request latency
+  against the holder. `margin` must cover monotonic drift over `TTL`; its
+  value is NOT_RUN.
+- A renew that fails or returns late never extends the deadline. Only a
+  successful response measured from its own `t_send` does.
+- This yields a conservative bound only while the process is actually
+  running. It does nothing for 6.1 pause cases, and does not make takeover
+  safe.
+
+6.3 Two overlap windows exist even in a clean handoff: the old owner's
 cancel-to-`Run`-return time, and the new owner's connect time. Both must be
-measured (NOT_RUN) before the grace in 5.2 is chosen.
+measured (NOT_RUN). What Telegram does on overlap is UNKNOWN from the
+repository and is not inferred from vendor text. An isolated, owner-approved
+single-account test in a later wave could observe it; this spike authorizes
+none.
 
-6.3 What Telegram does on overlap is UNKNOWN from the repository and is not
-inferred from vendor text. A single-account, isolated, owner-approved test in
-a later wave could observe it; this spike authorizes none.
+6.4 Grace value: NOT_RUN. Any grace is a heuristic that shortens the window
+for a healthy old owner. It is not a guarantee and is not used as proof.
 
-6.4 Grace value: NOT_RUN. Placeholder policy only: grace is the measured p99
-teardown time plus the renew interval; do not hard-code a guess.
+6.5 What the overlap observations can and cannot show (PROPOSED).
+- A lease row shows who the database believes owns a user. It does not show
+  open sockets.
+- The aggregate pool gauge shows entries or clients per pod. It does not
+  identify which user, and summing across pods does not establish per-user
+  overlap.
+- Per-user cross-pod socket overlap is therefore NOT directly observable from
+  a lease row plus an aggregate gauge. Proxies: a per-user, per-pod "client
+  running" indicator joined with the lease owner at the same time; a pool
+  size above cap during local teardown (G2); a CAS conflict count; a
+  refused-RPC count. Each is a proxy.
+- Blind spots: a stale, expired owner whose pod is paused or partitioned
+  and cannot report; a pod that crashed and reports nothing; scrape
+  intervals longer than the overlap window; the other-DC and media
+  connections (DEP-UNVERIFIED); and clients Telegram still sees as connected
+  after the pod's own view has closed them.
+- A zero overlap reading is therefore evidence of absence only for the
+  sampled, reporting pods.
 
 ## 7. Separate the health and availability planes
 
 | Plane | Question | Today | Needed |
 |---|---|---|---|
 | Liveness | Is the process alive | `/healthz` 200 | Keep |
-| Readiness | May the process receive traffic | `/readyz` identical to liveness (G1) | DB reachable, migrations applied, not draining. Must not depend on Telegram |
+| Readiness | May the process receive traffic | `/readyz` identical to liveness (G1) | PROPOSED, needs its own owner approval because it changes routing: DB reachable, migrations applied, not draining. Must not depend on Telegram |
 | Authenticated MCP availability | Can an authenticated caller list tools and call non-Telegram tools | Covered by tool SLI (`slo.md`) | Unchanged |
 | Session availability | Can this user's key be borrowed now | `mctl_sessions_borrow_total` results incl. `no_session`, `flood_wait`, `call_error` | Add `not_owner`, `fenced`, `draining` results |
 | Degraded | Service up, some sessions unavailable | Implicit | Explicit: pool full, owner moving, lease store down (read-only tools may continue) |
@@ -305,25 +371,31 @@ connection) before any HTTP fan-out in A or C; this spike does not move it.
 
 ## 9. Capacity: assumptions versus measurements
 
-No new measurement exists. REPORTED: 2.8 MB per idle session
-(`hpa.md:17-26`).
+No new measurement exists. REPORTED in `hpa.md:17-26`: 30 MB baseline, 58 MB
+at 100 idle sessions, and a per-session figure that does not match them.
 
-| Scenario | Connected users (assumption) | Concurrently live clients (assumption, not measured) | Memory at 3 MB planning figure | Verdict |
+The 3 MB figure below is an UNVALIDATED conservative scenario only. It is not
+measured capacity and not a proven upper bound: the source document is
+inconsistent (2.8 MB stated, 0.28 MB by its own arithmetic, section 2), idle
+only, and excludes active calls, media, listeners and extra-DC state, so real
+per-client memory could exceed it.
+
+| Scenario | Connected users (assumption) | Concurrently live clients (assumption, not measured) | Memory at 3 MB scenario figure | Verdict |
 |---|---|---|---|---|
 | 500 | 500 | UNKNOWN | about 1.5 GB if all live | The 1 GiB tier cap of 270 would bind (`hpa.md:30-34`); idle GC lowers live count by an unmeasured amount |
 | 1000 | 1000 | UNKNOWN | about 3 GB if all live | Exceeds the largest documented tier |
 | 5000 | 5000 | UNKNOWN | about 15 GB if all live | Not one pod under any documented tier |
 | Pinned listeners | Subset | Always live | Counts in full | Listener users do not idle out |
 
-The product of users and 3 MB is an upper bound on a stated, unmeasured
-assumption, not a prediction. Idle-only RSS also ignores active-call memory,
-media buffers (a 768Mi stopgap exists, `runbook.md:3499`), update-stream load
-for listeners, and gotd extra-DC state.
+The product of users and 3 MB is an arithmetic scenario, not a bound and not
+a prediction. Idle-only RSS also ignores active-call memory, media buffers (a
+768Mi stopgap exists, `runbook.md:3499`), update-stream load for listeners,
+and gotd extra-DC state.
 
 | Dimension | Known | UNKNOWN / NOT_RUN |
 |---|---|---|
 | Sockets per DC | Not observed | Sockets per client, per DC, media vs main, at 100/500/1000 live (DEP-UNVERIFIED) |
-| Memory | 2.8 MB idle (REPORTED) | Under active calls, listeners, media, at 500+ |
+| Memory | Idle figure REPORTED inconsistently (2.8 vs 0.28 MB per session) | Which idle figure is right; under active calls, listeners, media, at 500+ |
 | Goroutines | Two per client by construction (`clientpool.go:512-513`); gotd adds more (DEP-UNVERIFIED) | Total per live client |
 | CPU | | Handshake CPU per cold start; steady-state per call |
 | Bursts and fairness | One global mutex `p.mu` guards the map and is held during the DB revoke in `revokeRejected` and `RemoveAtomic` | Mutex contention at burst; one tenant's DB stall blocking others |
@@ -334,30 +406,40 @@ for listeners, and gotd extra-DC state.
 
 ## 10. Recommendation
 
-Smallest zero-downtime step first, then a separately gated scale path. All of
-it needs later owner approval; none of it is authorized by this document.
+Every step below is PROPOSED and pending the owner. A sequence is suggested,
+not decided. None of it is authorized by this document.
 
-Step 0 (read-only, no behaviour change): instrument and decide.
-- Make `/readyz` distinct from `/healthz` (DB reachable, not draining).
-- Add read-only metrics: clients per user (should be 0 or 1), pool size above
-  cap (overlap), cancel-to-`Run`-return duration, socket and goroutine counts
-  per client, DB statements per Borrow.
-- Capture the measurements in section 9 as telemetry from the existing single
-  replica. This turns the UNKNOWN cells into data without a load test.
+Step 0a (passive telemetry, no behaviour change): instrument and decide.
+- Add read-only metrics: per-user client-running indicator, pool size above
+  cap, cancel-to-`Run`-return duration, socket and goroutine counts per
+  client, DB statements per Borrow. Read their limits in 6.5.
+- Capture the section 9 measurements from the existing single replica. This
+  turns UNKNOWN cells into data without a load test. Rollout of even this
+  change restarts the pod and is itself a blackout under `Recreate`.
 
-Step 1 (smallest zero-downtime change): option A for HTTP only. Keep one
-MTProto owner and `Recreate` for it, but split a stateless HTTP tier so that a
-web/OAuth/static rollout no longer blacks out the service. This does not
-change key ownership and does not touch `api_id`. It addresses the part of
-#1108 that is not Telegram work.
+Step 0b (readiness change, separate approval): make `/readyz` distinct from
+`/healthz` (DB reachable, not draining). This is not passive. It changes
+routing and rollout behaviour: a wrongly failing probe removes the only pod
+from service. It needs its own owner approval, its own rollback and must not
+be bundled with 0a.
+
+Step 1 (PROPOSED smallest zero-downtime change for non-Telegram traffic):
+option A for HTTP only. Keep one MTProto owner and `Recreate` for it, and
+split a stateless HTTP tier so that a web/OAuth/static rollout no longer
+blacks out those paths. An HTTP-only split does NOT remove the MTProto-owner
+rollout blackout: every owner rollout still stops the one pod holding all
+keys and Telegram work is unavailable until the new one starts. It does not
+change key ownership and does not touch `api_id`. It addresses only the part
+of #1108 that is not Telegram work.
 
 Step 2 (gated on step 0 data and an owner decision): fix the teardown gaps G2
 and G3 in the single owner: await `Run` exit before an entry is considered
 gone and before `acquire` may rebuild, and make `Shutdown` wait within its
 budget. This is a prerequisite for any lease, and is useful alone.
 
-Step 3 (separately gated scale path): lease, epoch and local fence (section
-5), then option C for co-located owners with verified routing, because it
+Step 3 (separately gated scale path, blocked on the UNRESOLVED takeover
+limitation in 6.1 for any crash or pause case): lease, epoch and local
+deadline (section 5), then option C for co-located owners with verified routing, because it
 reuses the existing binary and the sticky manifests as a hint only. Move to
 option B only if step 0 data shows one pod's memory or one egress identity is
 the limit. Replace `Recreate` last, only after the overlap gauge has stayed at
@@ -373,8 +455,12 @@ zero under a handoff test the owner approves.
   not on the readiness path; a request can be served by a non-owner.
 - No-go for any design that depends on additional `api_id`s, per-IP spreading
   to avoid limits, or a claimed exclusivity not shown in a primary source.
-- If a primary source later shows a stricter concurrency rule for a key, only
-  the grace and fence margins change; the lease design stays.
+- If a primary source later shows a stricter concurrency rule for a key, the
+  effect is UNKNOWN. It may be more than a change of timer margins: it may
+  invalidate the lease design or the option choice, and would require
+  re-review of this whole document.
+- No-go for step 3 takeover of expired leases until termination of the old
+  owner can be independently established (6.1).
 
 ### Rollback
 
@@ -413,21 +499,39 @@ Files a later change would likely touch:
 - `docs/hpa.md`, `docs/runbook.md`, ADR 0005 supersession note
 
 Tests a later change would need: lease CAS races (two acquirers, stale
-release, epoch bump); self-fence at TTL without DB; teardown-awaited before
-rebuild; `acquire` blocked while an old `Run` is unwinding; readiness false
-on DB loss and true on Telegram loss; confirm/media routed to the owner;
+release, epoch bump); local deadline refusal without DB; teardown-awaited
+before rebuild; `acquire` blocked while an old `Run` is unwinding; readiness
+false on DB loss and true on Telegram loss; confirm/media routed to the owner;
 Local Bridge users never entering the lease path.
 
-Mutations a later change would perform: add one lease table; add metrics;
+Changes a later change would perform: add one lease table; add metrics;
 change `Recreate` only at step 3. No schema, config or secret change is
 made by this spike.
+
+### 12.1 Proposed mutation checks (not run; no code or mutation exists)
+
+Each row names a guard a later implementation would have, the temporary
+mutation (remove or weaken the guard), and the negative test that must FAIL
+under it. A guard with no failing test is untested. The run procedure would
+be: commit, mutate, run the named test, expect failure, restore.
+
+| Guard removed | Negative test that must fail | Failure shown |
+|---|---|---|
+| Epoch compare-and-set on acquire and renew (plain upsert instead) | Two concurrent acquirers for one user, then renew with the losing epoch | Both believe they own, or the loser's renew succeeds |
+| Awaited `Run` exit before release and before `acquire` may rebuild (cancel-only, as today) | Test client whose `Run` blocks after cancel; assert no second client starts and no release is written until it returns | A second client starts while the first is still unwinding |
+| Stale-release guard (release not conditioned on epoch) | Owner A at epoch N is superseded by epoch N+1, then A's late release arrives | The newer owner's row is released or cleared |
+| Expired-lease RPC gate (no deadline check before an RPC) | Fake clock past the local deadline; issue a tool RPC | RPC reaches the fake transport instead of a retryable refusal |
+| Wrong-owner routing check (serve on any pod) | Request for a user whose lease names another pod | A client is opened locally instead of a forward or typed refusal |
+
+Limits: the expired-lease gate test uses a fake clock and cannot reproduce a
+real process pause (6.1); passing it does not show the pause case is safe.
 
 ## 13. Proposed isolated benchmark and read-only telemetry (needs later approval)
 
 Nothing below is run or authorized now.
 
-Read-only telemetry on the existing replica (step 0): the metrics in
-section 10, plus process fd count, goroutine count, `p.mu` wait, DB statements
+Passive telemetry on the existing replica (step 0a; readiness, step 0b, is a
+separate approval): the metrics in section 10, plus process fd count, goroutine count, `p.mu` wait, DB statements
 per Borrow, and pool size over time. No new Telegram traffic.
 
 Isolated benchmark (later approval, owner-chosen accounts and environment):
@@ -445,6 +549,22 @@ Isolated benchmark (later approval, owner-chosen accounts and environment):
 
 ## 14. Evidence gaps and pending decisions
 
+Acceptance checklist (INCOMPLETE; every box open; #1282 is not closed by this
+document and nothing here may be read as closing it):
+
+- [ ] Vendor primary verification: Telegram pages read in full and quoted
+  from a snapshot, specifically the rule for concurrent use of one permanent
+  key. Current material is a VENDOR-PARAPHRASE. A stricter rule than assumed
+  may invalidate the design, not only change margins.
+- [ ] Dependency internals: `gotd/td v0.163.0` connection model, per-DC
+  keys, and `Run` teardown behaviour read from source or measured.
+- [ ] gitops live configuration: replica count, strategy, limits and probes
+  in mctl-gitops confirmed from that repository.
+- [ ] Issue-status evidence: titles and state of #1115, #145, #126, #568,
+  #1108 confirmed from the tracker.
+- [ ] Safe-takeover question (6.1) answered by the owner.
+- [ ] `docs/hpa.md` memory figure inconsistency resolved by measurement.
+
 Evidence gaps:
 1. Exact Telegram rule for concurrent use of one permanent key (UNKNOWN; needs
    a specific source on `/api/auth` and `/api/datacenter` beyond the excerpts).
@@ -457,7 +577,8 @@ Evidence gaps:
    IP for this workload (UNKNOWN).
 
 Pending owner decisions:
-1. Is step 0 telemetry approved to run on the existing replica?
+1. Is step 0a passive telemetry approved to run on the existing replica, and
+   separately, is the step 0b readiness change approved?
 2. Is the HTTP/MTProto split (step 1) wanted before the lease work, or is the
    `Recreate` blackout accepted at current SLO targets?
 3. Is a Telegram test environment or single test account approved for the
