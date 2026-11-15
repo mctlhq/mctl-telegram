@@ -140,9 +140,11 @@ type Config struct {
 	OAUTHRegisterRatePerMin int
 	// OAUTHAllowedImplicitHosts is the redirect_uri hostname allowlist applied
 	// both to unregistered client_ids and to every redirect_uri supplied at
-	// RFC 7591 dynamic registration. Empty ⇒ the built-in default in
-	// internal/oauth (claude.ai, claude.com, chatgpt.com, localhost,
-	// 127.0.0.1) applies, so an unset variable changes nothing.
+	// RFC 7591 dynamic registration. Entries may include a path prefix
+	// ("host/path-prefix") to restrict multi-tenant redirect hosts to specific
+	// namespaces. Empty ⇒ the built-in default in internal/oauth (claude.ai,
+	// claude.com, chatgpt.com, localhost, 127.0.0.1) applies, so an unset
+	// variable changes nothing.
 	//
 	// Configurable because onboarding a new MCP client (an AI assistant with
 	// its own hosted callback domain) is otherwise a code change and a

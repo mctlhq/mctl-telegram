@@ -37,6 +37,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path"
 	"sort"
 	"strings"
 	"sync"
@@ -3483,18 +3484,34 @@ func (s *Server) validateImplicitRedirectURI(raw string) error {
 	host := u.Hostname()
 	hostWithPort := u.Host
 	for _, allowed := range s.cfg.AllowedImplicitHosts {
-		// If the allowlist entry specifies a port, require an exact host:port
-		// match so that port-level separation is respected. Without a port in the
-		// entry, any port on the named host is permitted.
-		if strings.Contains(allowed, ":") {
-			if hostWithPort == allowed {
-				return nil
+		// An entry may be a hostname ("claude.ai"), host:port ("localhost:8080"),
+		// or host/path-prefix ("oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-")
+		// for multi-tenant redirect hosts where only specific path namespaces are trusted.
+		allowedHost, pathPrefix, hasPath := strings.Cut(allowed, "/")
+		if strings.Contains(allowedHost, ":") {
+			if !strings.EqualFold(hostWithPort, allowedHost) {
+				continue
 			}
 		} else {
-			if host == allowed {
-				return nil
+			if !strings.EqualFold(host, allowedHost) {
+				continue
 			}
 		}
+		if hasPath {
+			cleanPath := path.Clean("/" + strings.TrimPrefix(u.Path, "/"))
+			wantPrefix := "/" + strings.TrimPrefix(pathPrefix, "/")
+			if strings.HasSuffix(wantPrefix, "/") || strings.HasSuffix(wantPrefix, "-") {
+				trimmed := strings.TrimSuffix(wantPrefix, "/")
+				if cleanPath != trimmed && !strings.HasPrefix(cleanPath, wantPrefix) {
+					continue
+				}
+			} else {
+				if cleanPath != wantPrefix && !strings.HasPrefix(cleanPath, wantPrefix+"/") {
+					continue
+				}
+			}
+		}
+		return nil
 	}
 	// Loopback addresses are accepted even when not explicitly listed in
 	// AllowedImplicitHosts — the implicit deny on a non-loopback host

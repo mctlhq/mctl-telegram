@@ -113,3 +113,50 @@ func TestValidateImplicitRedirectURIRejectsTheSameShapes(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateImplicitRedirectURIPathPrefix(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) {
+		c.AllowImplicitClient = true
+		c.AllowedImplicitHosts = []string{
+			"claude.ai",
+			"oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-",
+			"example.com/oauth/callback",
+			"example.test:8443/auth/",
+		}
+	})
+
+	// Valid path prefix cases
+	for _, uri := range []string{
+		"https://claude.ai/anything",
+		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-281712b859b6752b580bc9da",
+		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-anotherhash",
+		"https://example.com/oauth/callback",
+		"https://example.com/oauth/callback/",
+		"https://example.com/oauth/callback/sub",
+		"https://example.test:8443/auth/callback",
+		"https://example.test:8443/auth/",
+		"http://localhost:3000/callback",
+	} {
+		if err := srv.validateImplicitRedirectURI(uri); err != nil {
+			t.Errorf("validateImplicitRedirectURI unexpectedly rejected %q: %v", uri, err)
+		}
+	}
+
+	// Invalid / rejected cases
+	for _, uri := range []string{
+		"https://oauth-redirect.googleusercontent.com/r/attacker_project",
+		"https://oauth-redirect.googleusercontent.com/r/",
+		"https://oauth-redirect.googleusercontent.com/",
+		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-foo/../../evil",
+		"https://evil.com/r/user_bound_custom-mcp-281712b859b6752b580bc9da",
+		"https://example.com/oauth/callback_evil",
+		"https://example.com/oauth",
+		"https://example.com/",
+		"https://example.test:8443/evil",
+		"https://example.test:9443/auth/callback",
+	} {
+		if err := srv.validateImplicitRedirectURI(uri); err == nil {
+			t.Errorf("validateImplicitRedirectURI unexpectedly accepted %q", uri)
+		}
+	}
+}
