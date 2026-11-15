@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.139.0](https://github.com/mctlhq/mctl-telegram/compare/0.138.1...0.139.0) (2026-11-15)
+
+
+### Features
+
+* **oauth:** support path-prefix allowlisting in AllowedImplicitHosts ([292c0a9](https://github.com/mctlhq/mctl-telegram/commit/292c0a99967ce20337d13d599cd85ce5a7213c30))
+* **oauth:** support path-prefix allowlisting in AllowedImplicitHosts ([33e25f5](https://github.com/mctlhq/mctl-telegram/commit/33e25f545a43197ec1de67f571fd01da694f473c))
+
+
+### Bug Fixes
+
+* **oauth:** address review findings on path-prefix redirect validation ([1231059](https://github.com/mctlhq/mctl-telegram/commit/1231059c60aaac3e0b3f12ec2af7cad7aa08f047))
+
 ## [0.138.1](https://github.com/mctlhq/mctl-telegram/compare/0.138.0...0.138.1) (2026-11-13)
 
 
