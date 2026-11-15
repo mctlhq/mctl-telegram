@@ -128,7 +128,7 @@ func TestValidateImplicitRedirectURIPathPrefix(t *testing.T) {
 	// Valid path prefix cases
 	for _, uri := range []string{
 		"https://claude.ai/anything",
-		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-281712b859b6752b580bc9da",
+		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-synthetic0123456789abcdef",
 		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-anotherhash",
 		"https://example.com/oauth/callback",
 		"https://example.com/oauth/callback/",
@@ -144,14 +144,18 @@ func TestValidateImplicitRedirectURIPathPrefix(t *testing.T) {
 
 	// Invalid / rejected cases
 	for _, uri := range []string{
+		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-", // bare prefix without suffix
 		"https://oauth-redirect.googleusercontent.com/r/attacker_project",
 		"https://oauth-redirect.googleusercontent.com/r/",
 		"https://oauth-redirect.googleusercontent.com/",
 		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-foo/../../evil",
-		"https://evil.com/r/user_bound_custom-mcp-281712b859b6752b580bc9da",
+		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-foo/%2e%2e/evil",
+		"https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-foo/./sub",
+		"https://evil.com/r/user_bound_custom-mcp-synthetic0123456789abcdef",
 		"https://example.com/oauth/callback_evil",
 		"https://example.com/oauth",
 		"https://example.com/",
+		"https://example.test:8443/auth", // missing trailing slash when prefix has trailing slash
 		"https://example.test:8443/evil",
 		"https://example.test:9443/auth/callback",
 	} {

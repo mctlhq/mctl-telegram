@@ -3498,11 +3498,22 @@ func (s *Server) validateImplicitRedirectURI(raw string) error {
 			}
 		}
 		if hasPath {
+			// Reject dot-segments and URL-encoded dots to prevent path-traversal evasion.
+			if strings.Contains(u.Path, "/.") || strings.HasPrefix(u.Path, "./") || strings.HasPrefix(u.Path, "../") ||
+				strings.Contains(raw, "%2e") || strings.Contains(raw, "%2E") {
+				continue
+			}
 			cleanPath := path.Clean("/" + strings.TrimPrefix(u.Path, "/"))
+			if strings.HasSuffix(u.Path, "/") && cleanPath != "/" {
+				cleanPath += "/"
+			}
 			wantPrefix := "/" + strings.TrimPrefix(pathPrefix, "/")
 			if strings.HasSuffix(wantPrefix, "/") || strings.HasSuffix(wantPrefix, "-") {
-				trimmed := strings.TrimSuffix(wantPrefix, "/")
-				if cleanPath != trimmed && !strings.HasPrefix(cleanPath, wantPrefix) {
+				if !strings.HasPrefix(cleanPath, wantPrefix) {
+					continue
+				}
+				// A delimiter-terminated prefix like "-" requires a non-empty suffix.
+				if strings.HasSuffix(wantPrefix, "-") && cleanPath == wantPrefix {
 					continue
 				}
 			} else {
