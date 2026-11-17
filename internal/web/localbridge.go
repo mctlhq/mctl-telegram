@@ -237,9 +237,9 @@ type localBridgeData struct {
 
 func localBridgeHref(slug localBridgeSlug) string {
 	if slug == localBridgeOverview {
-		return "/docs/local-bridge"
+		return PathLocalBridge
 	}
-	return "/docs/local-bridge/" + string(slug)
+	return PathLocalBridge + "/" + string(slug)
 }
 
 func localBridgeNavItems(active localBridgeSlug) []localBridgeNav {
@@ -286,6 +286,9 @@ func LocalBridge(publicBaseURL string, showManage bool) http.HandlerFunc {
 				NavActive:     "docs",
 				PublicBaseURL: base,
 				ShowManage:    showManage,
+				// The slug's own href, so /docs/local-bridge/quickstart/
+				// (parseLocalBridgeSlug trims the slash) names the slashless URL.
+				CanonicalPath: localBridgeHref(slug),
 			},
 			Body:    body,
 			Pages:   localBridgeNavItems(slug),

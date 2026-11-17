@@ -26,7 +26,7 @@ func Docs(publicBaseURL, mcpPath, authServer string, showManage, botAccessReques
 		authServer = base
 	}
 	data := landingData{
-		Data:         ui.Data{Title: "MCTL — Telegram MCP Server & AI Integration Docs", Description: "Connect Telegram to Claude Desktop, ChatGPT, and AI agents via Model Context Protocol (MCP). Tool reference, OAuth authentication, and local bridge setup.", NavActive: "docs", PublicBaseURL: base, ShowManage: showManage},
+		Data:         ui.Data{Title: "MCTL — Telegram MCP Server & AI Integration Docs", Description: "Connect Telegram to Claude Desktop, ChatGPT, and AI agents via Model Context Protocol (MCP). Tool reference, OAuth authentication, and local bridge setup.", NavActive: "docs", PublicBaseURL: base, ShowManage: showManage, CanonicalPath: PathDocs},
 		MCPURL:       base + mcpPath,
 		WellKnownURL: base + "/.well-known/oauth-protected-resource",
 		AuthServer:   authServer,

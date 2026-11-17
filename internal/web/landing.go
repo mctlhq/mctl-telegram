@@ -125,7 +125,7 @@ func Landing(publicBaseURL, mcpPath, authServer string, showManage bool, opts ..
 			NavActive:     "home",
 			PublicBaseURL: base,
 			ShowManage:    showManage,
-			CanonicalPath: "/",
+			CanonicalPath: PathLanding,
 		},
 		MCPURL:       base + mcpPath,
 		WellKnownURL: base + "/.well-known/oauth-protected-resource",

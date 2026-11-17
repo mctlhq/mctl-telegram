@@ -53,6 +53,7 @@ func Security(publicBaseURL string, showManage bool) http.HandlerFunc {
 		NavActive:     "security",
 		PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
 		ShowManage:    showManage,
+		CanonicalPath: PathSecurity,
 	})
 }
 

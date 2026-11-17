@@ -199,7 +199,7 @@ func TestExamples_LinkedFromLandingSitemapAndConnectDone(t *testing.T) {
 		t.Error("landing does not link /examples")
 	}
 	rec := httptest.NewRecorder()
-	Sitemap("https://tg.example.test")(rec, httptest.NewRequest("GET", "/sitemap.xml", nil))
+	newPublicMux(t, false).ServeHTTP(rec, httptest.NewRequest("GET", "/sitemap.xml", nil))
 	if !strings.Contains(rec.Body.String(), "<loc>https://tg.example.test/examples</loc>") {
 		t.Error("sitemap does not list /examples")
 	}

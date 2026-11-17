@@ -65,9 +65,9 @@ type Data struct {
 	Title         string // <title> text
 	Description   string // social-share / meta description; falls back to a default when empty
 	NavActive     string // "docs" | "platforms" | "assistants" | "examples" | "demo" | "manage" highlight a header link; "home" | "security" | "privacy" | "terms" | "" highlight none (those pages are linked from the footer and the landing hero)
-	PublicBaseURL string // shown in the footer, and used as the og:url / og:image origin
+	PublicBaseURL string // shown in the footer, and used as the og:image origin
 	ShowManage    bool   // set true only when /telegram/connect/manage is mounted (local-jwt auth mode)
-	CanonicalPath string // when set, emits <link rel="canonical"> at PublicBaseURL+CanonicalPath
+	CanonicalPath string // when set, emits <link rel="canonical"> at PublicBaseURL+CanonicalPath; og:url is the same URL, or the site root when unset
 	NoIndex       bool   // when set, emits <meta name="robots" content="noindex, follow">
 }
 
@@ -112,7 +112,7 @@ var defs = `
 <meta property="og:site_name" content="MCTL Assistant">
 <meta property="og:title" content="{{.Title}}">
 <meta property="og:description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarize unread chats, draft replies, and search your history — no extra apps.{{end}}">
-<meta property="og:url" content="{{.PublicBaseURL}}">
+<meta property="og:url" content="{{.PublicBaseURL}}{{if .CanonicalPath}}{{.CanonicalPath}}{{else}}/{{end}}">
 <meta property="og:image" content="{{.PublicBaseURL}}/og.png?v=3">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">

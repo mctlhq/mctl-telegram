@@ -193,7 +193,7 @@ func Assistants(svc *assistantinstall.Service, publicBaseURL string, showManage 
 		Description:   "Assistants you can install on your Telegram account: what each one does, the values it asks for and its defaults.",
 		PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
 		ShowManage:    showManage,
-		CanonicalPath: "/assistants",
+		CanonicalPath: PathAssistants,
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		data := assistantsData{Data: base}

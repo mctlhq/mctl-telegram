@@ -346,3 +346,19 @@ func TestNoIndexRobotsTag(t *testing.T) {
 		t.Error("page with NoIndex: false must emit discover robots tag")
 	}
 }
+
+// og:url names the page itself, the same URL as its canonical; a page with
+// no canonical path is the site root, written with its trailing slash.
+func TestOGURLFollowsCanonical(t *testing.T) {
+	page := `<!doctype html><html lang="en"><head>{{template "ui_head" .}}</head><body></body></html>`
+	for _, tc := range []struct{ path, want string }{
+		{"/docs/local-bridge/quickstart", "https://tg.mctl.ai/docs/local-bridge/quickstart"},
+		{"/", "https://tg.mctl.ai/"},
+		{"", "https://tg.mctl.ai/"},
+	} {
+		out := render(t, "og", page, Data{Title: "T", PublicBaseURL: "https://tg.mctl.ai", CanonicalPath: tc.path})
+		if want := `<meta property="og:url" content="` + tc.want + `">`; strings.Count(out, `property="og:url"`) != 1 || !strings.Contains(out, want) {
+			t.Errorf("CanonicalPath %q: want %s", tc.path, want)
+		}
+	}
+}

@@ -509,7 +509,6 @@ func main() {
 	mux.Get("/.well-known/oauth-protected-resource"+cfg.MCPPath, prmHandler)
 	mux.Get("/.well-known/openai-apps-challenge", web.OpenAIAppsChallenge())
 	mux.Get("/robots.txt", web.RobotsTxt(cfg.PublicBaseURL))
-	mux.Get("/sitemap.xml", web.Sitemap(cfg.PublicBaseURL))
 	mux.Get("/favicon.svg", web.Favicon())
 	mux.Get("/favicon.ico", web.FaviconICO())
 	mux.Get("/apple-touch-icon.png", web.AppleTouchIcon())
@@ -518,41 +517,11 @@ func main() {
 	// numbers and nothing per user. Served from the sampler's cache, so a
 	// burst of requests never reaches the database.
 	mux.Get("/api/stats", web.StatsJSON(statsCache))
-	// "/" itself is registered after the MCP mount below: it serves the
-	// landing page and, for a client configured with the bare origin, MCP.
-	mux.Get("/security", web.Security(cfg.PublicBaseURL, showManage))
-	mux.Get("/privacy", web.Privacy(cfg.PublicBaseURL, showManage))
-	mux.Get("/terms", web.Terms(cfg.PublicBaseURL, showManage))
-	mux.Get("/platforms", web.Platforms(cfg.PublicBaseURL, cfg.MCPPath, authServer, showManage, web.PlatformFacts{
-		AllowSend:          cfg.AllowSend,
-		OpenSignup:         cfg.AutoApproveClients,
-		CIMDAccept:         cfg.OAUTHCIMDAccept,
-		CIMDAdvertise:      cfg.OAUTHCIMDAdvertise,
-		RateLimitPerUser:   cfg.RateLimitPerUser,
-		RegisterRatePerMin: cfg.OAUTHRegisterRatePerMin,
-		PeerSendCap:        audit.PeerSendCap,
-		PeerCleanupCap:     audit.PeerCleanupCap,
-		PeerWindow:         audit.PeerWindow,
-		AccessTokenTTL:     cfg.OAUTHAccessTokenTTL,
-		RefreshTokenTTL:    cfg.OAUTHRefreshTokenTTL,
-		MediaMaxBytes:      cfg.MediaDownloadMaxBytes,
-		MediaUploadBytes:   cfg.MediaUploadMaxBytes,
-		BulkMediaBytes:     cfg.BulkMediaByteCap,
-	}))
-	mux.Get("/demo", web.Demo(cfg.PublicBaseURL, cfg.DemoVideoURL, showManage))
-	mux.Get("/examples", web.Examples(cfg.PublicBaseURL, showManage))
+	// The public content pages, "/" included, and sitemap.xml are mounted
+	// together from one route table by web.MountPublic, below the MCP mount
+	// (the root handler wraps MCP). /demo/walkthrough.mp4 is an asset.
 	mux.Get("/demo/walkthrough.mp4", web.DemoWalkthrough())
 	docsBotAccess, _ := botAccessEnabled(cfg)
-	mux.Get("/docs", web.Docs(cfg.PublicBaseURL, cfg.MCPPath, authServer, showManage, docsBotAccess))
-	localBridge := web.LocalBridge(cfg.PublicBaseURL, showManage)
-	mux.Get("/docs/local-bridge", localBridge)
-	mux.Get("/docs/local-bridge/*", localBridge)
-	// The approved product-update feed, rendered for docs and web (issue-683
-	// task 10): the same loaded Feed that the broadcasts page's
-	// "Prepare from digest" action renders from, so docs, web and Telegram
-	// all read the same reviewed bytes.
-	mux.Get("/docs/product-updates", web.ProductUpdates(
-		productupdate.RenderDocs(productUpdates.Feed), productUpdates.Err, cfg.PublicBaseURL, showManage))
 
 	// Shared across every localjwt.Provider this process constructs (plain
 	// MCP, bridge, agent) so a worker token revoked via revoke_worker_token
@@ -654,8 +623,8 @@ func main() {
 		assistantSvc.Managed = assistantinstall.ManagedRuntime{Enabled: cfg.ManagedRuntimeEnabled, MaxAccounts: cfg.ManagedRuntimeMaxAccounts}
 		slog.Info("managed runtime", "enabled", cfg.ManagedRuntimeEnabled, "max_accounts", cfg.ManagedRuntimeMaxAccounts)
 		slog.Info("assistant forks", "enabled", cfg.AssistantForksEnabled)
-		// The public catalog page: the same entries as list_assistants.
-		mux.Get("/assistants", web.Assistants(assistantSvc, cfg.PublicBaseURL, showManage))
+		// The public catalog page (the same entries as list_assistants) is
+		// mounted by web.MountPublic, which mounts it while assistantSvc is set.
 		ui.SetAssistantsMounted(true)
 		web.SetAssistantsMounted(true)
 	}
@@ -895,8 +864,37 @@ func main() {
 	// sessions carry across. Belt-and-braces alongside config.Load's own
 	// MCP_PATH validation: a Config built directly must not be able to put
 	// the MCP mount itself on "/".
-	root := web.RootMCP(web.Landing(cfg.PublicBaseURL, cfg.MCPPath, authServer, showManage, web.WithStats(statsCache)), guarded, m.CountRootMCPRequest)
-	mux.Get("/", root.ServeHTTP)
+	root := web.MountPublic(mux, web.PublicDeps{
+		PublicBaseURL: cfg.PublicBaseURL,
+		MCPPath:       cfg.MCPPath,
+		AuthServer:    authServer,
+		ShowManage:    showManage,
+		Platform: web.PlatformFacts{
+			AllowSend:          cfg.AllowSend,
+			OpenSignup:         cfg.AutoApproveClients,
+			CIMDAccept:         cfg.OAUTHCIMDAccept,
+			CIMDAdvertise:      cfg.OAUTHCIMDAdvertise,
+			RateLimitPerUser:   cfg.RateLimitPerUser,
+			RegisterRatePerMin: cfg.OAUTHRegisterRatePerMin,
+			PeerSendCap:        audit.PeerSendCap,
+			PeerCleanupCap:     audit.PeerCleanupCap,
+			PeerWindow:         audit.PeerWindow,
+			AccessTokenTTL:     cfg.OAUTHAccessTokenTTL,
+			RefreshTokenTTL:    cfg.OAUTHRefreshTokenTTL,
+			MediaMaxBytes:      cfg.MediaDownloadMaxBytes,
+			MediaUploadBytes:   cfg.MediaUploadMaxBytes,
+			BulkMediaBytes:     cfg.BulkMediaByteCap,
+		},
+		DemoVideoURL:      cfg.DemoVideoURL,
+		DocsBotAccess:     docsBotAccess,
+		ProductUpdates:    productupdate.RenderDocs(productUpdates.Feed),
+		ProductUpdatesErr: productUpdates.Err,
+		Assistants:        assistantSvc,
+		LandingOptions:    []web.LandingOption{web.WithStats(statsCache)},
+		Root: func(landing http.Handler) http.Handler {
+			return web.RootMCP(landing, guarded, m.CountRootMCPRequest)
+		},
+	})
 	if strings.Trim(cfg.MCPPath, "/") != "" {
 		mux.Post("/", root.ServeHTTP)
 		mux.Delete("/", root.ServeHTTP)
