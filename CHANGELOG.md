@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.139.1](https://github.com/mctlhq/mctl-telegram/compare/0.139.0...0.139.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* **seo:** derive sitemap, canonical and og:url from one route table ([39e0b70](https://github.com/mctlhq/mctl-telegram/commit/39e0b70216fd81a00c05d29d37d2e3aab1bf6e7a))
+* **seo:** derive sitemap, canonical and og:url from one route table ([4c8b9ca](https://github.com/mctlhq/mctl-telegram/commit/4c8b9ca6031421631e4dd6891692d67f845c7dd2))
+
 ## [0.139.0](https://github.com/mctlhq/mctl-telegram/compare/0.138.1...0.139.0) (2026-11-15)
 
 
