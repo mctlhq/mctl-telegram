@@ -70,6 +70,7 @@ func Demo(publicBaseURL, demoVideoURL string, showManage bool) http.HandlerFunc 
 			NavActive:     "demo",
 			PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
 			ShowManage:    showManage,
+			CanonicalPath: PathDemo,
 		},
 		VideoKind: kind,
 		EmbedURL:  template.URL(embed),

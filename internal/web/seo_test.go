@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/go-chi/chi/v5"
 )
 
 func TestRobotsTxt(t *testing.T) {
@@ -43,7 +45,8 @@ func TestRobotsTxt(t *testing.T) {
 }
 
 func TestSitemap(t *testing.T) {
-	handler := Sitemap("https://tg.mctl.ai")
+	handler := chi.NewRouter()
+	MountPublic(handler, PublicDeps{PublicBaseURL: "https://tg.mctl.ai", MCPPath: "/mcp", Platform: testPlatformFacts()})
 	req := httptest.NewRequest(http.MethodGet, "/sitemap.xml", nil)
 	rec := httptest.NewRecorder()
 

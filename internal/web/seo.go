@@ -4,10 +4,12 @@ import (
 	"encoding/xml"
 	"net/http"
 	"strings"
+	"time"
 )
 
 type urlEntry struct {
 	Loc        string  `xml:"loc"`
+	LastMod    string  `xml:"lastmod,omitempty"`
 	ChangeFreq string  `xml:"changefreq,omitempty"`
 	Priority   float32 `xml:"priority,omitempty"`
 }
@@ -41,38 +43,30 @@ func RobotsTxt(publicBaseURL string) http.HandlerFunc {
 	}
 }
 
-// Sitemap serves sitemap.xml listing public, indexed pages.
-func Sitemap(publicBaseURL string) http.HandlerFunc {
+// sitemapHandler serves sitemap.xml from the public route table: every
+// indexable page, with a lastmod only where the page carries a content date.
+func sitemapHandler(publicBaseURL string, pages []publicPage) http.HandlerFunc {
 	base := strings.TrimRight(publicBaseURL, "/")
 	if base == "" {
 		base = "https://tg.mctl.ai"
 	}
 
-	routes := []struct {
-		path       string
-		changefreq string
-		priority   float32
-	}{
-		{"/", "weekly", 1.0},
-		{"/docs", "weekly", 0.8},
-		{"/platforms", "weekly", 0.8},
-		{"/demo", "monthly", 0.7},
-		{"/examples", "monthly", 0.7},
-		{"/security", "monthly", 0.5},
-		{"/docs/local-bridge", "monthly", 0.6},
-		{"/docs/product-updates", "weekly", 0.7},
-	}
-
 	set := urlSet{
-		URLs: make([]urlEntry, 0, len(routes)),
+		URLs: make([]urlEntry, 0, len(pages)),
 	}
-	for _, rt := range routes {
-		loc := base + rt.path
-		set.URLs = append(set.URLs, urlEntry{
-			Loc:        loc,
-			ChangeFreq: rt.changefreq,
-			Priority:   rt.priority,
-		})
+	for _, p := range pages {
+		if !p.Index {
+			continue
+		}
+		e := urlEntry{
+			Loc:        base + p.Path,
+			ChangeFreq: p.ChangeFreq,
+			Priority:   p.Priority,
+		}
+		if !p.LastMod.IsZero() {
+			e.LastMod = p.LastMod.Format(time.DateOnly)
+		}
+		set.URLs = append(set.URLs, e)
 	}
 
 	data, err := xml.MarshalIndent(set, "", "  ")

@@ -101,6 +101,7 @@ func Examples(publicBaseURL string, showManage bool) http.HandlerFunc {
 			NavActive:     "examples",
 			PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
 			ShowManage:    showManage,
+			CanonicalPath: PathExamples,
 		},
 		Categories: exampleCategories,
 	}

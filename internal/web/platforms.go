@@ -68,7 +68,7 @@ func Platforms(publicBaseURL, mcpPath, authServer string, showManage bool, f Pla
 			NavActive:     "platforms",
 			PublicBaseURL: base,
 			ShowManage:    showManage,
-			CanonicalPath: "/platforms",
+			CanonicalPath: PathPlatforms,
 		},
 		MCPURL:        base + mcpPath,
 		WellKnownURL:  base + "/.well-known/oauth-protected-resource",

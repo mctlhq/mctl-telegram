@@ -53,6 +53,7 @@ func ProductUpdates(groups []productupdate.ReleaseGroup, loadErr error, publicBa
 			NavActive:     "docs",
 			PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
 			ShowManage:    showManage,
+			CanonicalPath: PathProductUpdates,
 		},
 		LoadErr: loadErr != nil,
 	}
