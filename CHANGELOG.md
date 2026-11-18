@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.139.2](https://github.com/mctlhq/mctl-telegram/compare/0.139.1...0.139.2) (2026-11-18)
+
+
+### Bug Fixes
+
+* **web:** noindex header on auth/API routes, shorten home description ([ba1f89b](https://github.com/mctlhq/mctl-telegram/commit/ba1f89bb25021508c7872a9af71a939a63814f35))
+* **web:** noindex header on auth/API routes, shorten home description ([186e82c](https://github.com/mctlhq/mctl-telegram/commit/186e82c8f5399bb2018cd313749cb9afd8c516fb))
+
 ## [0.139.1](https://github.com/mctlhq/mctl-telegram/compare/0.139.0...0.139.1) (2026-11-17)
 
 
