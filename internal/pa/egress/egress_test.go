@@ -711,6 +711,9 @@ func TestS1E4_DiscoveryIsAnonymousGET(t *testing.T) {
 		"get with body": mk(http.MethodGet, strings.NewReader("x"), "", ""),
 		"authorization": mk(http.MethodGet, nil, "Authorization", "Bearer t"),
 		"cookie":        mk(http.MethodGet, nil, "Cookie", "a=b"),
+		"api key":       mk(http.MethodGet, nil, "X-Api-Key", "k"),
+		"dpop":          mk(http.MethodGet, nil, "DPoP", "proof"),
+		"custom":        mk(http.MethodGet, nil, "X-Forwarded-For", "10.0.0.1"),
 	}
 	for name, req := range bad {
 		resp, err := c.Do(req)
@@ -727,6 +730,15 @@ func TestS1E4_DiscoveryIsAnonymousGET(t *testing.T) {
 	if _, err := do(t, c, "https://"+hostMCP+"/.well-known/x"); err != nil {
 		t.Fatalf("anonymous GET: %v", err)
 	}
+	ok := mk(http.MethodGet, nil, "Accept", "application/json")
+	ok.Header.Set("User-Agent", "mctl-pa")
+	ok.Header.Set("MCP-Protocol-Version", "2025-06-18")
+	ok.Header.Set("Accept-Encoding", "gzip")
+	resp0, err := c.Do(ok)
+	if err != nil {
+		t.Fatalf("allowlisted headers: %v", err)
+	}
+	_ = resp0.Body.Close()
 	// The same headers are fine on a non-discovery client.
 	m := h.client(t, Config{Purpose: PurposeToken})
 	resp, err := m.Do(mk(http.MethodPost, strings.NewReader("x"), "Authorization", "Basic x"))
@@ -747,6 +759,17 @@ func TestS1E3_MappedDeniedPrefixNormalised(t *testing.T) {
 	_, err := New(Config{Purpose: PurposeMCP, AllowedHosts: []string{hostMCP}, DeniedPrefixes: []netip.Prefix{netip.MustParsePrefix("::ffff:0:0/80")}})
 	if !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("short mapped prefix: want ErrInvalidConfig, got %v", err)
+	}
+	// The NAT64 form is normalised the same way: 64:ff9b::5db8:d800/120 is
+	// 93.184.216.0/24, and must deny the native and mapped answers too.
+	for _, ans := range []string{publicV4, "::ffff:" + publicV4} {
+		h2 := newHarness(t, okHandler())
+		h2.res.seq[hostMCP] = nil
+		h2.res.set(hostMCP, ans)
+		c2 := h2.client(t, Config{DeniedPrefixes: []netip.Prefix{netip.MustParsePrefix("64:ff9b::5db8:d800/120")}})
+		if _, err := do(t, c2, "https://"+hostMCP+"/"); !errors.Is(err, ErrNonPublic) {
+			t.Errorf("%s under a NAT64 prefix: want ErrNonPublic, got %v", ans, err)
+		}
 	}
 }
 

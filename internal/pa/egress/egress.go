@@ -81,6 +81,8 @@ var (
 	errUserinfoInRequest = errors.New("egress: credentials in the URL are not allowed")
 )
 
+var nat64Prefix = netip.MustParsePrefix("64:ff9b::/96")
+
 // MaxDiscoveryHops is the number of redirects a discovery request may follow.
 const MaxDiscoveryHops = 2
 
@@ -92,8 +94,8 @@ type Purpose int
 //
 // PurposeDiscovery is for unauthenticated GET (or HEAD) requests for public
 // metadata documents only. Because it follows redirects, the transport
-// refuses any other method, a request body, and an Authorization or Cookie
-// header on a discovery client, on the first request and on every hop.
+// refuses any other method, a request body, and any header outside
+// discoveryHeaders, on the first request and on every hop.
 const (
 	PurposeDiscovery Purpose = iota + 1
 	PurposeRegistration
@@ -238,15 +240,20 @@ func newClient(cfg Config, h hooks) (*http.Client, error) {
 		if !pfx.IsValid() {
 			return nil, fmt.Errorf("%w: bad denied prefix %v", ErrInvalidConfig, pfx)
 		}
-		// An IPv4-mapped prefix (::ffff:a.b.c.d/n) would never match the
-		// native IPv4 answers a resolver returns, so it is stored as the
-		// IPv4 prefix it denotes. One shorter than /96 does not denote an
-		// IPv4 range and is refused rather than left to fail open.
-		if pfx.Addr().Is4In6() {
-			if pfx.Bits() < 96 {
-				return nil, fmt.Errorf("%w: IPv4-mapped denied prefix %v is shorter than /96", ErrInvalidConfig, pfx)
-			}
-			pfx = netip.PrefixFrom(pfx.Addr().Unmap(), pfx.Bits()-96)
+		// An IPv4-mapped (::ffff:a.b.c.d/n) or NAT64 (64:ff9b::a.b.c.d/n)
+		// prefix would never match the native IPv4 answers a resolver
+		// returns, so one of /96 or longer is stored as the IPv4 prefix it
+		// denotes; mapped and NAT64 answers are unwrapped before matching,
+		// so they still hit it. A mapped prefix shorter than /96 does not
+		// denote an IPv4 range and is refused rather than left to fail open.
+		// A NAT64-range prefix shorter than /96 is an ordinary IPv6 range
+		// (it reaches outside 64:ff9b::/96) and is kept as given: it matches
+		// the raw answers it covers.
+		addr := pfx.Addr().WithZone("")
+		if pfx.Bits() >= 96 && (addr.Is4In6() || nat64Prefix.Contains(addr)) {
+			pfx = netip.PrefixFrom(netsafe.Unwrap(addr), pfx.Bits()-96)
+		} else if addr.Is4In6() {
+			return nil, fmt.Errorf("%w: IPv4-mapped denied prefix %v is shorter than /96", ErrInvalidConfig, pfx)
 		}
 		p.denied = append(p.denied, pfx.Masked())
 	}
@@ -476,12 +483,24 @@ func checkDiscoveryRequest(req *http.Request) error {
 	if req.Body != nil && req.Body != http.NoBody {
 		return fmt.Errorf("%w: request body", ErrDiscoveryRequest)
 	}
-	for _, h := range []string{"Authorization", "Cookie", "Proxy-Authorization"} {
-		if req.Header.Get(h) != "" {
+	for h := range req.Header {
+		if !discoveryHeaders[http.CanonicalHeaderKey(h)] {
 			return fmt.Errorf("%w: %s header", ErrDiscoveryRequest, h)
 		}
 	}
 	return nil
+}
+
+// discoveryHeaders is the allowlist of request headers on a discovery
+// client. Referer is on it because http.Client sets it itself on each
+// redirect hop (to the previous, already allowlisted URL). Accept-Encoding
+// is normally added by the transport below this check.
+var discoveryHeaders = map[string]bool{
+	"Accept":               true,
+	"Accept-Encoding":      true,
+	"User-Agent":           true,
+	"Mcp-Protocol-Version": true,
+	"Referer":              true,
 }
 
 // CloseIdleConnections lets http.Client.CloseIdleConnections reach the base

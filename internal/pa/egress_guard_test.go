@@ -71,6 +71,9 @@ var forbiddenSelectors = map[string]map[string]bool{
 	},
 	"net":        {"Dial": true, "DialTimeout": true},
 	"crypto/tls": {"Dial": true, "DialWithDialer": true},
+	// netsafe.Client is a public-address client without the per-server
+	// allowlist; PurposeAddr and Unwrap stay usable.
+	modulePath + "/internal/netsafe": {"Client": true},
 }
 
 // forbiddenTypes maps an import path to the types that may not be built by
@@ -82,10 +85,50 @@ var forbiddenTypes = map[string]map[string]bool{
 
 // forbiddenImports are import paths (and everything below them) whose use
 // falls back to an unguarded client.
+//
+// The list comes from a sweep of go.mod and internal/ (#1330 review): every
+// direct dependency and every in-repo package that builds its own
+// http.Client, falls back to http.DefaultClient, or dials a socket. Not
+// listed: github.com/jackc/pgx and modernc.org/sqlite (database
+// connections from operator config, not catalog egress) and
+// github.com/gotd/td/tg (types only).
 var forbiddenImports = []string{
-	"golang.org/x/oauth2",
-	"github.com/mark3labs/mcp-go/client",
-	"net/http/httputil",
+	// Third-party clients that default to their own or the default client.
+	"golang.org/x/oauth2",                     // http.DefaultClient unless ctx carries oauth2.HTTPClient
+	"github.com/coreos/go-oidc",               // oidc.NewProvider: oauth2 ctx client, else DefaultClient
+	"github.com/mark3labs/mcp-go/client",      // own client unless transport.WithHTTPClient
+	"github.com/coder/websocket",              // websocket.Dial: DefaultClient unless opts.HTTPClient
+	"golang.org/x/net/http2",                  // its own Transport and dialer
+	"golang.org/x/net/websocket",              // dials directly
+	"golang.org/x/net/proxy",                  // dialers by design
+	"net/http/httputil",                       // reverse proxy on DefaultTransport
+	"github.com/gotd/td/telegram",             // MTProto client, dials Telegram DCs
+	"github.com/prometheus/client_golang/api", // HTTP API client
+	// In-repo packages that build or default to their own client or dial.
+	modulePath + "/internal/mcpprobe",          // MCP probe client
+	modulePath + "/internal/oauth/cimd",        // defaults to netsafe.Client
+	modulePath + "/internal/agentworker",       // http.DefaultClient fallback
+	modulePath + "/internal/assistantregistry", // http.DefaultClient fallback
+	modulePath + "/internal/workctx",           // http.DefaultClient fallback
+	modulePath + "/internal/botapi",            // http.DefaultClient fallback
+	modulePath + "/internal/bot",               // long-poll client
+	modulePath + "/internal/auth/k8ssa",        // JWKS client
+	modulePath + "/internal/auth/telegramoidc", // go-oidc provider client
+	modulePath + "/internal/glovo/authn",       // JWKS client
+	modulePath + "/internal/glovo/mctlapi",     // API client
+	modulePath + "/internal/events",            // Valkey dialer
+	modulePath + "/internal/telegram",          // MTProto pool and media fetch client
+	modulePath + "/internal/localbridgetest",   // test client with cookie jar
+}
+
+const modulePath = "github.com/mctlhq/mctl-telegram"
+
+// watchedForDotImport reports whether a dot-import of path would hide a
+// watched identifier from the selector checks.
+func watchedForDotImport(path string) bool {
+	_, sel := forbiddenSelectors[path]
+	_, typ := forbiddenTypes[path]
+	return sel || typ
 }
 
 func importForbidden(path string) bool {
@@ -112,6 +155,10 @@ func scanHTTPUse(fset *token.FileSet, f *ast.File) []string {
 		}
 		if importForbidden(path) {
 			report(imp, "import "+strconv.Quote(path))
+		} else if imp.Name != nil && imp.Name.Name == "." && watchedForDotImport(path) {
+			// A dot-import makes Client, Get, Dial ... bare identifiers the
+			// selector checks cannot see.
+			report(imp, "dot-import "+strconv.Quote(path))
 		}
 		name := path[strings.LastIndexByte(path, '/')+1:]
 		if path == "crypto/tls" {
@@ -141,7 +188,24 @@ func scanHTTPUse(fset *token.FileSet, f *ast.File) []string {
 		}
 		return path, sel.Sel.Name, true
 	}
-	isForbiddenType := func(e ast.Expr) (string, bool) {
+	// isForbiddenType reports a by-value forbidden type, looking through
+	// containers that hold values ([N]T, []T, map[K]V, chan T, (T)). A
+	// pointer is not looked through: *http.Client is the allowed form.
+	var isForbiddenType func(e ast.Expr) (string, bool)
+	isForbiddenType = func(e ast.Expr) (string, bool) {
+		switch x := e.(type) {
+		case *ast.ArrayType:
+			return isForbiddenType(x.Elt)
+		case *ast.MapType:
+			if t, ok := isForbiddenType(x.Key); ok {
+				return t, true
+			}
+			return isForbiddenType(x.Value)
+		case *ast.ChanType:
+			return isForbiddenType(x.Value)
+		case *ast.ParenExpr:
+			return isForbiddenType(x.X)
+		}
 		path, name, ok := pkgSel(e)
 		if ok && forbiddenTypes[path][name] {
 			return path + "." + name, true
@@ -168,6 +232,12 @@ func scanHTTPUse(fset *token.FileSet, f *ast.File) []string {
 			// var c http.Client: a usable zero value on the default transport.
 			if t, ok := isForbiddenType(x.Type); ok {
 				report(x, "var of type "+t)
+			}
+		case *ast.TypeSpec:
+			// type C = http.Client, type C http.Client: a by-value client
+			// under another name.
+			if t, ok := isForbiddenType(x.Type); ok {
+				report(x, "type over "+t)
 			}
 		case *ast.Field:
 			// A struct field, parameter or result of type http.Client by
@@ -220,32 +290,66 @@ func TestPAEgressGuard(t *testing.T) {
 // including under an import alias, and ordinary net/http use is not.
 func TestPAEgressGuardDetects(t *testing.T) {
 	bad := map[string]string{
-		"default client":     `package x; import "net/http"; var c = http.DefaultClient`,
-		"default transport":  `package x; import "net/http"; var t = http.DefaultTransport`,
-		"get":                `package x; import "net/http"; func f() { http.Get("https://a") }`,
-		"post":               `package x; import "net/http"; func f() { http.Post("https://a", "", nil) }`,
-		"head":               `package x; import "net/http"; func f() { http.Head("https://a") }`,
-		"postform":           `package x; import "net/http"; func f() { http.PostForm("https://a", nil) }`,
-		"client literal":     `package x; import "net/http"; var c = &http.Client{}`,
-		"transport literal":  `package x; import "net/http"; var t = http.Transport{}`,
-		"new client":         `package x; import "net/http"; var c = new(http.Client)`,
-		"aliased":            `package x; import h "net/http"; var c = h.Client{Timeout: 1}`,
-		"method value":       `package x; import "net/http"; var g = http.Get`,
-		"zero-value var":     `package x; import "net/http"; func f(u string) { var c http.Client; c.Get(u) }`,
-		"struct field":       `package x; import "net/http"; type s struct{ c http.Client }`,
-		"transport field":    `package x; import "net/http"; type s struct{ t http.Transport }`,
-		"param by value":     `package x; import "net/http"; func f(c http.Client) {}`,
-		"net.Dial":           `package x; import "net"; func f() { net.Dial("tcp", "a:443") }`,
-		"net.DialTimeout":    `package x; import "net"; func f() { net.DialTimeout("tcp", "a:443", 0) }`,
-		"tls.Dial":           `package x; import "crypto/tls"; func f() { tls.Dial("tcp", "a:443", nil) }`,
-		"tls.DialWithDialer": `package x; import "crypto/tls"; func f() { tls.DialWithDialer(nil, "tcp", "a:443", nil) }`,
-		"net.Dialer literal": `package x; import "net"; var d = &net.Dialer{}`,
-		"httputil":           `package x; import "net/http/httputil"; var _ = httputil.NewSingleHostReverseProxy`,
-		"oauth2":             `package x; import "golang.org/x/oauth2"; func f(c *oauth2.Config) { c.Exchange(nil, "") }`,
-		"oauth2 subpackage":  `package x; import "golang.org/x/oauth2/clientcredentials"; var _ clientcredentials.Config`,
-		"mcp-go transport":   `package x; import "github.com/mark3labs/mcp-go/client/transport"; var _ = transport.NewStreamableHTTP`,
-		"mcp-go client":      `package x; import "github.com/mark3labs/mcp-go/client"; var _ = client.NewStreamableHttpClient`,
-		"aliased oauth2":     `package x; import o "golang.org/x/oauth2"; var _ o.Config`,
+		"default client":             `package x; import "net/http"; var c = http.DefaultClient`,
+		"default transport":          `package x; import "net/http"; var t = http.DefaultTransport`,
+		"get":                        `package x; import "net/http"; func f() { http.Get("https://a") }`,
+		"post":                       `package x; import "net/http"; func f() { http.Post("https://a", "", nil) }`,
+		"head":                       `package x; import "net/http"; func f() { http.Head("https://a") }`,
+		"postform":                   `package x; import "net/http"; func f() { http.PostForm("https://a", nil) }`,
+		"client literal":             `package x; import "net/http"; var c = &http.Client{}`,
+		"transport literal":          `package x; import "net/http"; var t = http.Transport{}`,
+		"new client":                 `package x; import "net/http"; var c = new(http.Client)`,
+		"aliased":                    `package x; import h "net/http"; var c = h.Client{Timeout: 1}`,
+		"method value":               `package x; import "net/http"; var g = http.Get`,
+		"zero-value var":             `package x; import "net/http"; func f(u string) { var c http.Client; c.Get(u) }`,
+		"struct field":               `package x; import "net/http"; type s struct{ c http.Client }`,
+		"transport field":            `package x; import "net/http"; type s struct{ t http.Transport }`,
+		"param by value":             `package x; import "net/http"; func f(c http.Client) {}`,
+		"net.Dial":                   `package x; import "net"; func f() { net.Dial("tcp", "a:443") }`,
+		"net.DialTimeout":            `package x; import "net"; func f() { net.DialTimeout("tcp", "a:443", 0) }`,
+		"tls.Dial":                   `package x; import "crypto/tls"; func f() { tls.Dial("tcp", "a:443", nil) }`,
+		"tls.DialWithDialer":         `package x; import "crypto/tls"; func f() { tls.DialWithDialer(nil, "tcp", "a:443", nil) }`,
+		"net.Dialer literal":         `package x; import "net"; var d = &net.Dialer{}`,
+		"httputil":                   `package x; import "net/http/httputil"; var _ = httputil.NewSingleHostReverseProxy`,
+		"oauth2":                     `package x; import "golang.org/x/oauth2"; func f(c *oauth2.Config) { c.Exchange(nil, "") }`,
+		"oauth2 subpackage":          `package x; import "golang.org/x/oauth2/clientcredentials"; var _ clientcredentials.Config`,
+		"mcp-go transport":           `package x; import "github.com/mark3labs/mcp-go/client/transport"; var _ = transport.NewStreamableHTTP`,
+		"mcp-go client":              `package x; import "github.com/mark3labs/mcp-go/client"; var _ = client.NewStreamableHttpClient`,
+		"aliased oauth2":             `package x; import o "golang.org/x/oauth2"; var _ o.Config`,
+		"go-oidc":                    `package x; import "github.com/coreos/go-oidc/v3/oidc"; var _ = oidc.NewProvider`,
+		"coder websocket":            `package x; import "github.com/coder/websocket"; var _ = websocket.Dial`,
+		"x/net http2":                `package x; import "golang.org/x/net/http2"; var _ http2.Transport`,
+		"x/net websocket":            `package x; import "golang.org/x/net/websocket"; var _ = websocket.Dial`,
+		"x/net proxy":                `package x; import "golang.org/x/net/proxy"; var _ = proxy.FromEnvironment`,
+		"gotd telegram":              `package x; import "github.com/gotd/td/telegram"; var _ telegram.Options`,
+		"prometheus api":             `package x; import "github.com/prometheus/client_golang/api"; var _ api.Config`,
+		"internal mcpprobe":          `package x; import "github.com/mctlhq/mctl-telegram/internal/mcpprobe"; var _ = mcpprobe.X`,
+		"internal oauth/cimd":        `package x; import "github.com/mctlhq/mctl-telegram/internal/oauth/cimd"; var _ = cimd.X`,
+		"internal agentworker":       `package x; import "github.com/mctlhq/mctl-telegram/internal/agentworker"; var _ = agentworker.X`,
+		"internal assistantregistry": `package x; import "github.com/mctlhq/mctl-telegram/internal/assistantregistry"; var _ = assistantregistry.X`,
+		"internal workctx":           `package x; import "github.com/mctlhq/mctl-telegram/internal/workctx"; var _ = workctx.X`,
+		"internal botapi":            `package x; import "github.com/mctlhq/mctl-telegram/internal/botapi"; var _ = botapi.X`,
+		"internal bot":               `package x; import "github.com/mctlhq/mctl-telegram/internal/bot"; var _ = bot.X`,
+		"internal auth/k8ssa":        `package x; import "github.com/mctlhq/mctl-telegram/internal/auth/k8ssa"; var _ = k8ssa.X`,
+		"internal auth/telegramoidc": `package x; import "github.com/mctlhq/mctl-telegram/internal/auth/telegramoidc"; var _ = telegramoidc.X`,
+		"internal glovo/authn":       `package x; import "github.com/mctlhq/mctl-telegram/internal/glovo/authn"; var _ = authn.X`,
+		"internal glovo/mctlapi":     `package x; import "github.com/mctlhq/mctl-telegram/internal/glovo/mctlapi"; var _ = mctlapi.X`,
+		"internal events":            `package x; import "github.com/mctlhq/mctl-telegram/internal/events"; var _ = events.X`,
+		"internal telegram":          `package x; import "github.com/mctlhq/mctl-telegram/internal/telegram"; var _ = telegram.X`,
+		"internal localbridgetest":   `package x; import "github.com/mctlhq/mctl-telegram/internal/localbridgetest"; var _ = localbridgetest.X`,
+		"netsafe.Client":             `package x; import "github.com/mctlhq/mctl-telegram/internal/netsafe"; var _ = netsafe.Client`,
+		"dot http":                   `package x; import . "net/http"`,
+		"dot net":                    `package x; import . "net"`,
+		"dot tls":                    `package x; import . "crypto/tls"`,
+		"dot netsafe":                `package x; import . "github.com/mctlhq/mctl-telegram/internal/netsafe"`,
+		"type alias":                 `package x; import "net/http"; type C = http.Client`,
+		"defined type":               `package x; import "net/http"; type C http.Transport`,
+		"slice var":                  `package x; import "net/http"; var cs []http.Client`,
+		"array field":                `package x; import "net/http"; type s struct{ cs [2]http.Client }`,
+		"map value":                  `package x; import "net/http"; var m map[string]http.Client`,
+		"map key":                    `package x; import "net"; var m map[net.Dialer]int`,
+		"chan param":                 `package x; import "net/http"; func f(c chan http.Transport) {}`,
+		"paren type":                 `package x; import "net/http"; var c (http.Client)`,
 	}
 	for name, src := range bad {
 		fset := token.NewFileSet()
@@ -267,6 +371,10 @@ func TestPAEgressGuardDetects(t *testing.T) {
 		`package x; import "net"; func f(ip net.IP, a net.Addr) { _ = net.ParseIP("1.1.1.1") }`,
 		`package x; import "crypto/tls"; var _ = tls.VersionTLS12; var c *tls.Config`,
 		`package x; import "github.com/mark3labs/mcp-go/mcp"; var _ mcp.Tool`,
+		`package x; import "net/http"; var cs []*http.Client; var m map[string]*http.Client; type P = *http.Client`,
+		`package x; import "github.com/mctlhq/mctl-telegram/internal/netsafe"; var _ = netsafe.PublicAddr; var _ = netsafe.Unwrap`,
+		`package x; import "github.com/mctlhq/mctl-telegram/internal/telegramx"; var _ = telegramx.A`,
+		`package x; import . "strings"; var _ = ToLower`,
 	}
 	for i, src := range good {
 		fset := token.NewFileSet()
