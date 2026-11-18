@@ -1,0 +1,195 @@
+package connection
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"slices"
+	"strings"
+)
+
+// allowedScopes is the exact Phase 1 scope set per server (threat model T8).
+// The effective scope of every token must EQUAL this set: not a superset,
+// not a subset.
+//
+// tg: the two read scopes, matching the per-client scope ceiling of #1326
+// (internal/oauth ScopeCeilingByClientID). alice: iot:view only (owner
+// decision 2026-11-18 on #1314).
+var allowedScopes = map[Server][]string{
+	ServerTG:    {"telegram:dialogs:read", "telegram:messages:read"},
+	ServerAlice: {"iot:view"},
+}
+
+// AllowedScopes returns a copy of the allowed scope set for server, sorted.
+func AllowedScopes(server Server) ([]string, bool) {
+	s, ok := allowedScopes[server]
+	if !ok {
+		return nil, false
+	}
+	out := slices.Clone(s)
+	slices.Sort(out)
+	return out, true
+}
+
+// CanonicalScope is the stored form of an allowed set: sorted, single-space
+// joined.
+func CanonicalScope(server Server) (string, bool) {
+	s, ok := AllowedScopes(server)
+	if !ok {
+		return "", false
+	}
+	return strings.Join(s, " "), true
+}
+
+// TokenSet is the parsed part of a token response that the store keeps.
+type TokenSet struct {
+	AccessToken  Secret
+	RefreshToken Secret
+	// ExpiresIn is seconds, 0 when the server did not say.
+	ExpiresIn int64
+}
+
+// tokenSetWire is the sealed form. It is only ever marshalled into a DEK
+// seal and never logged.
+type tokenSetWire struct {
+	AccessToken  string `json:"a"`
+	RefreshToken string `json:"r,omitempty"`
+	ExpiresIn    int64  `json:"e,omitempty"`
+}
+
+func (t TokenSet) marshal() ([]byte, error) {
+	return json.Marshal(tokenSetWire{
+		AccessToken:  t.AccessToken.Reveal(),
+		RefreshToken: t.RefreshToken.Reveal(),
+		ExpiresIn:    t.ExpiresIn,
+	})
+}
+
+func unmarshalTokenSet(b []byte) (TokenSet, error) {
+	var w tokenSetWire
+	if err := json.Unmarshal(b, &w); err != nil || w.AccessToken == "" {
+		return TokenSet{}, fmt.Errorf("%w: sealed token set", ErrUnreadable)
+	}
+	return TokenSet{AccessToken: NewSecret(w.AccessToken), RefreshToken: NewSecret(w.RefreshToken), ExpiresIn: w.ExpiresIn}, nil
+}
+
+// ScopeCheck is the outcome of VerifyTokenResponse. Tokens is set whenever
+// the response carried a usable access token, even if the scope check
+// failed, so the caller can revoke what the server issued.
+type ScopeCheck struct {
+	Tokens TokenSet
+	// Granted is the canonical granted scope; set only when Err is nil.
+	Granted string
+	Err     error
+}
+
+// VerifyTokenResponse parses an OAuth token response (RFC 6749 section 5.1)
+// and checks, fail-closed, that its effective scope equals the server's
+// allowed set (threat model T8, S1-T9, S1-T10):
+//
+//   - a missing "scope" field fails: the server did not report the
+//     effective scope, and "probably the requested one" is not an answer;
+//   - a non-string, empty, badly delimited, duplicated or out-of-charset
+//     value fails as unparseable;
+//   - an extra scope or a missing scope fails.
+//
+// Every failure wraps ErrScopeMismatch or ErrTokenResponse.
+func VerifyTokenResponse(server Server, raw []byte) ScopeCheck {
+	allowed, ok := AllowedScopes(server)
+	if !ok {
+		return ScopeCheck{Err: fmt.Errorf("%w: unknown server", ErrScopeMismatch)}
+	}
+	var fields map[string]json.RawMessage
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if err := dec.Decode(&fields); err != nil || fields == nil {
+		return ScopeCheck{Err: fmt.Errorf("%w: not a JSON object", ErrTokenResponse)}
+	}
+	var out ScopeCheck
+	access, ok := jsonString(fields["access_token"])
+	if !ok || access == "" {
+		return ScopeCheck{Err: fmt.Errorf("%w: no access_token", ErrTokenResponse)}
+	}
+	out.Tokens.AccessToken = NewSecret(access)
+	if rt, present := fields["refresh_token"]; present {
+		v, ok := jsonString(rt)
+		if !ok {
+			out.Err = fmt.Errorf("%w: refresh_token is not a string", ErrTokenResponse)
+			return out
+		}
+		out.Tokens.RefreshToken = NewSecret(v)
+	}
+	if tt, present := fields["token_type"]; present {
+		v, ok := jsonString(tt)
+		if !ok || !strings.EqualFold(v, "bearer") {
+			out.Err = fmt.Errorf("%w: token_type is not bearer", ErrTokenResponse)
+			return out
+		}
+	}
+	if ei, present := fields["expires_in"]; present {
+		var n int64
+		if err := json.Unmarshal(ei, &n); err != nil || n < 0 {
+			out.Err = fmt.Errorf("%w: expires_in is not a non-negative integer", ErrTokenResponse)
+			return out
+		}
+		out.Tokens.ExpiresIn = n
+	}
+	scopeRaw, present := fields["scope"]
+	if !present {
+		out.Err = fmt.Errorf("%w: no scope field", ErrScopeMismatch)
+		return out
+	}
+	scope, ok := jsonString(scopeRaw)
+	if !ok {
+		out.Err = fmt.Errorf("%w: scope is not a string", ErrScopeMismatch)
+		return out
+	}
+	got, err := parseScope(scope)
+	if err != nil {
+		out.Err = err
+		return out
+	}
+	if !slices.Equal(got, allowed) {
+		out.Err = fmt.Errorf("%w: got %d scopes, want exactly the %d allowed", ErrScopeMismatch, len(got), len(allowed))
+		return out
+	}
+	out.Granted = strings.Join(got, " ")
+	return out
+}
+
+// parseScope parses an RFC 6749 section 3.3 scope value strictly: tokens
+// separated by exactly one space, each from the scope-token charset, no
+// duplicates. It returns the tokens sorted.
+func parseScope(s string) ([]string, error) {
+	if s == "" {
+		return nil, fmt.Errorf("%w: empty scope", ErrScopeMismatch)
+	}
+	parts := strings.Split(s, " ")
+	for _, p := range parts {
+		if p == "" {
+			return nil, fmt.Errorf("%w: unparseable scope delimiter", ErrScopeMismatch)
+		}
+		for i := 0; i < len(p); i++ {
+			c := p[i]
+			// scope-token = 1*( %x21 / %x23-5B / %x5D-7E )
+			if c < 0x21 || c == 0x22 || c == 0x5C || c > 0x7E {
+				return nil, fmt.Errorf("%w: unparseable scope character", ErrScopeMismatch)
+			}
+		}
+	}
+	slices.Sort(parts)
+	if len(slices.Compact(slices.Clone(parts))) != len(parts) {
+		return nil, fmt.Errorf("%w: duplicated scope", ErrScopeMismatch)
+	}
+	return parts, nil
+}
+
+func jsonString(raw json.RawMessage) (string, bool) {
+	if raw == nil {
+		return "", false
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return "", false
+	}
+	return s, true
+}

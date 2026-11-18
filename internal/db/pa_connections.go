@@ -1,0 +1,359 @@
+package db
+
+// pa_connections.go is the Personal Assistant connection store (issue
+// #1314, threat model T2/T3). It implements connection.Store; the state
+// machine and the secret handling live in internal/pa/connection, and this
+// file enforces the same rules again at the row: every write is a
+// compare-and-set on (principal, id, state, authority_revision), and an
+// illegal edge is refused before the row is touched.
+//
+// Timestamps are unix milliseconds (BIGINT) rather than the dialect's time
+// type, so the refresh-lease comparison is plain integer arithmetic in both
+// SQLite and Postgres.
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
+)
+
+var _ connection.Store = (*Store)(nil)
+
+// paConnectionsSchema returns the DDL for pa_connections. No secret column
+// holds plaintext: wrapped_dek is wrapped by the KEK named in kek_id, and
+// sealed_code / sealed_tokens are sealed by that DEK. Entering expired,
+// failed or revoked sets all three to NULL.
+func paConnectionsSchema(pg bool) []string {
+	intT, blobT := "INTEGER", "BLOB"
+	if pg {
+		intT, blobT = "BIGINT", "BYTEA"
+	}
+	return []string{
+		`CREATE TABLE IF NOT EXISTS pa_connections (
+			id TEXT PRIMARY KEY,
+			principal ` + intT + ` NOT NULL,
+			server TEXT NOT NULL,
+			state TEXT NOT NULL,
+			account_id TEXT NOT NULL DEFAULT '',
+			granted_scope TEXT NOT NULL DEFAULT '',
+			authority_revision ` + intT + ` NOT NULL,
+			token_generation ` + intT + ` NOT NULL DEFAULT 0,
+			kek_id TEXT NOT NULL,
+			wrapped_dek ` + blobT + `,
+			sealed_code ` + blobT + `,
+			sealed_tokens ` + blobT + `,
+			failure_reason TEXT NOT NULL DEFAULT '',
+			refresh_lease_owner TEXT NOT NULL DEFAULT '',
+			refresh_lease_until_ms ` + intT + ` NOT NULL DEFAULT 0,
+			created_at_ms ` + intT + ` NOT NULL,
+			updated_at_ms ` + intT + ` NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_pa_connections_principal ON pa_connections(principal, created_at_ms)`,
+	}
+}
+
+func migratePAConnections(ctx context.Context, dbConn *sql.DB, pg bool) error {
+	for _, s := range paConnectionsSchema(pg) {
+		if _, err := dbConn.ExecContext(ctx, s); err != nil {
+			return fmt.Errorf("migrate pa_connections: %w", err)
+		}
+	}
+	return nil
+}
+
+const paConnCols = `id, principal, server, state, account_id, granted_scope,
+	authority_revision, token_generation, failure_reason, created_at_ms, updated_at_ms`
+
+const paConnSealedCols = paConnCols + `, kek_id, wrapped_dek, sealed_code, sealed_tokens`
+
+type paRowScanner interface {
+	Scan(dest ...any) error
+}
+
+// scanPAConn reads one row. A state or server value this build does not
+// know is unreadable, never "some state that is not active" (I9).
+func scanPAConn(r paRowScanner, sealed *connection.Sealed) (connection.Connection, error) {
+	var (
+		c                connection.Connection
+		server, state    string
+		createdMS, updMS int64
+	)
+	dest := []any{&c.ID, &c.Principal, &server, &state, &c.AccountID, &c.GrantedScope,
+		&c.AuthorityRevision, &c.TokenGeneration, &c.FailureReason, &createdMS, &updMS}
+	if sealed != nil {
+		dest = append(dest, &sealed.KEKID, &sealed.WrappedDEK, &sealed.SealedCode, &sealed.SealedTokens)
+	}
+	if err := r.Scan(dest...); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return connection.Connection{}, connection.ErrNotFound
+		}
+		return connection.Connection{}, fmt.Errorf("%w: scan: %v", connection.ErrUnreadable, err)
+	}
+	c.Server, c.State = connection.Server(server), connection.State(state)
+	if !c.State.Valid() || !c.Server.Valid() || c.Principal <= 0 || c.AuthorityRevision <= 0 {
+		return connection.Connection{}, fmt.Errorf("%w: row %s has an invalid state, server or counter", connection.ErrUnreadable, c.ID)
+	}
+	c.CreatedAt, c.UpdatedAt = time.UnixMilli(createdMS).UTC(), time.UnixMilli(updMS).UTC()
+	return c, nil
+}
+
+type paQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func getPAConn(ctx context.Context, q paQuerier, principal int64, id string, sealed *connection.Sealed) (connection.Connection, error) {
+	cols := paConnCols
+	if sealed != nil {
+		cols = paConnSealedCols
+	}
+	return scanPAConn(q.QueryRowContext(ctx,
+		`SELECT `+cols+` FROM pa_connections WHERE principal = $1 AND id = $2`, principal, id), sealed)
+}
+
+// CreatePAConnection inserts a new pending_link row.
+func (s *Store) CreatePAConnection(ctx context.Context, c connection.Connection, sealed connection.Sealed) error {
+	if c.ID == "" || c.Principal <= 0 || !c.Server.Valid() || c.State != connection.StatePendingLink ||
+		c.AuthorityRevision != 1 || c.TokenGeneration != 0 || sealed.KEKID == "" || len(sealed.WrappedDEK) == 0 ||
+		len(sealed.SealedCode) != 0 || len(sealed.SealedTokens) != 0 {
+		return fmt.Errorf("%w: a new connection is pending_link at revision 1 with only a wrapped dek", connection.ErrInvalidTransition)
+	}
+	now := time.Now().UTC().UnixMilli()
+	_, err := s.DB.ExecContext(ctx,
+		`INSERT INTO pa_connections(id, principal, server, state, authority_revision, token_generation,
+			kek_id, wrapped_dek, created_at_ms, updated_at_ms)
+		 VALUES($1, $2, $3, $4, 1, 0, $5, $6, $7, $7)`,
+		c.ID, c.Principal, string(c.Server), string(c.State), sealed.KEKID, sealed.WrappedDEK, now)
+	if err != nil {
+		return fmt.Errorf("create pa connection: %w", err)
+	}
+	return nil
+}
+
+// GetPAConnection reads the principal's row without secret material.
+func (s *Store) GetPAConnection(ctx context.Context, principal int64, id string) (connection.Connection, error) {
+	return getPAConn(ctx, s.DB, principal, id, nil)
+}
+
+// GetPAConnectionSealed reads the principal's row with its sealed material.
+func (s *Store) GetPAConnectionSealed(ctx context.Context, principal int64, id string) (connection.Connection, connection.Sealed, error) {
+	var sealed connection.Sealed
+	c, err := getPAConn(ctx, s.DB, principal, id, &sealed)
+	if err != nil {
+		return connection.Connection{}, connection.Sealed{}, err
+	}
+	return c, sealed, nil
+}
+
+// ListPAConnections returns the principal's rows only. A failure on any row
+// fails the whole read: a shorter list is not a valid answer.
+func (s *Store) ListPAConnections(ctx context.Context, principal int64) ([]connection.Connection, error) {
+	rows, err := s.DB.QueryContext(ctx,
+		`SELECT `+paConnCols+` FROM pa_connections WHERE principal = $1 ORDER BY created_at_ms, id`, principal)
+	if err != nil {
+		return nil, fmt.Errorf("%w: list: %v", connection.ErrUnreadable, err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := []connection.Connection{}
+	for rows.Next() {
+		c, err := scanPAConn(rows, nil)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("%w: list: %v", connection.ErrUnreadable, err)
+	}
+	return out, nil
+}
+
+// missOrConflict tells a compare-and-set that matched no row apart: no row
+// for (principal, id) is ErrNotFound, anything else lost the race.
+func missOrConflict(ctx context.Context, q paQuerier, principal int64, id string) error {
+	var one int
+	err := q.QueryRowContext(ctx, `SELECT 1 FROM pa_connections WHERE principal = $1 AND id = $2`, principal, id).Scan(&one)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return connection.ErrNotFound
+	case err != nil:
+		return fmt.Errorf("%w: %v", connection.ErrUnreadable, err)
+	}
+	return connection.ErrConflict
+}
+
+// TransitionPAConnection applies t (see connection.Transition).
+func (s *Store) TransitionPAConnection(ctx context.Context, principal int64, id string, t connection.Transition) (connection.Connection, error) {
+	if err := t.Validate(); err != nil {
+		return connection.Connection{}, err
+	}
+	now := time.Now().UTC().UnixMilli()
+	set := `state = $1, authority_revision = authority_revision + 1, updated_at_ms = $2,
+		refresh_lease_owner = '', refresh_lease_until_ms = 0`
+	args := []any{string(t.To), now, principal, id, string(t.From), t.ExpectRevision}
+	switch {
+	case t.To == connection.StatePendingReturn:
+		set += `, sealed_code = $7`
+		args = append(args, t.SealedCode)
+	case t.To == connection.StatePendingConfirm:
+		set += `, account_id = $7, granted_scope = $8, sealed_tokens = $9, sealed_code = NULL`
+		args = append(args, t.AccountID, t.GrantedScope, t.SealedTokens)
+	case t.To.WipesSecrets():
+		set += `, wrapped_dek = NULL, sealed_code = NULL, sealed_tokens = NULL, failure_reason = $7`
+		args = append(args, t.Reason)
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return connection.Connection{}, fmt.Errorf("pa connection transition: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `UPDATE pa_connections SET `+set+`
+		WHERE principal = $3 AND id = $4 AND state = $5 AND authority_revision = $6`, args...)
+	if err != nil {
+		return connection.Connection{}, fmt.Errorf("pa connection transition: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return connection.Connection{}, fmt.Errorf("pa connection transition: rows affected: %w", err)
+	}
+	if n != 1 {
+		return connection.Connection{}, missOrConflict(ctx, tx, principal, id)
+	}
+	c, err := getPAConn(ctx, tx, principal, id, nil)
+	if err != nil {
+		return connection.Connection{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return connection.Connection{}, fmt.Errorf("pa connection transition: commit: %w", err)
+	}
+	return c, nil
+}
+
+// RevokePAConnection revokes the row from any state (see connection.Store).
+func (s *Store) RevokePAConnection(ctx context.Context, principal int64, id, reason string) (connection.Connection, connection.Sealed, bool, error) {
+	for attempt := 0; attempt < 5; attempt++ {
+		c, before, already, err := s.revokePAConnOnce(ctx, principal, id, reason)
+		if errors.Is(err, connection.ErrConflict) {
+			continue
+		}
+		return c, before, already, err
+	}
+	return connection.Connection{}, connection.Sealed{}, false, connection.ErrConflict
+}
+
+func (s *Store) revokePAConnOnce(ctx context.Context, principal int64, id, reason string) (connection.Connection, connection.Sealed, bool, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return connection.Connection{}, connection.Sealed{}, false, fmt.Errorf("pa connection revoke: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	// The CAS below also pins token_generation: a rotation committed between
+	// this read and the update would otherwise leave `before` holding the
+	// superseded tokens, and the caller would revoke those remotely while the
+	// live ones were wiped locally and never revoked.
+	var before connection.Sealed
+	cur, err := getPAConn(ctx, tx, principal, id, &before)
+	if err != nil {
+		return connection.Connection{}, connection.Sealed{}, false, err
+	}
+	if cur.State == connection.StateRevoked {
+		return cur, connection.Sealed{}, true, nil
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE pa_connections
+		SET state = $1, authority_revision = authority_revision + 1, updated_at_ms = $2,
+			wrapped_dek = NULL, sealed_code = NULL, sealed_tokens = NULL, failure_reason = $3,
+			refresh_lease_owner = '', refresh_lease_until_ms = 0
+		WHERE principal = $4 AND id = $5 AND state = $6 AND authority_revision = $7
+		  AND token_generation = $8`,
+		string(connection.StateRevoked), time.Now().UTC().UnixMilli(), reason,
+		principal, id, string(cur.State), cur.AuthorityRevision, cur.TokenGeneration)
+	if err != nil {
+		return connection.Connection{}, connection.Sealed{}, false, fmt.Errorf("pa connection revoke: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return connection.Connection{}, connection.Sealed{}, false, fmt.Errorf("pa connection revoke: rows affected: %w", err)
+	}
+	if n != 1 {
+		return connection.Connection{}, connection.Sealed{}, false, connection.ErrConflict
+	}
+	c, err := getPAConn(ctx, tx, principal, id, nil)
+	if err != nil {
+		return connection.Connection{}, connection.Sealed{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return connection.Connection{}, connection.Sealed{}, false, fmt.Errorf("pa connection revoke: commit: %w", err)
+	}
+	return c, before, false, nil
+}
+
+// ClaimPAConnectionRefresh takes the refresh lease (see connection.Store).
+func (s *Store) ClaimPAConnectionRefresh(ctx context.Context, principal int64, id string, generation int64, owner string, now, until time.Time) (bool, error) {
+	if owner == "" || !until.After(now) {
+		return false, errors.New("pa connection: refresh lease needs an owner and a future expiry")
+	}
+	res, err := s.DB.ExecContext(ctx, `UPDATE pa_connections
+		SET refresh_lease_owner = $1, refresh_lease_until_ms = $2
+		WHERE principal = $3 AND id = $4 AND state = $5 AND token_generation = $6
+		  AND refresh_lease_until_ms <= $7`,
+		owner, until.UnixMilli(), principal, id, string(connection.StateActive), generation, now.UnixMilli())
+	if err != nil {
+		return false, fmt.Errorf("pa connection refresh lease: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("pa connection refresh lease: rows affected: %w", err)
+	}
+	return n == 1, nil
+}
+
+// ReleasePAConnectionRefresh drops owner's lease.
+func (s *Store) ReleasePAConnectionRefresh(ctx context.Context, principal int64, id, owner string) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE pa_connections
+		SET refresh_lease_owner = '', refresh_lease_until_ms = 0
+		WHERE principal = $1 AND id = $2 AND refresh_lease_owner = $3`, principal, id, owner)
+	if err != nil {
+		return fmt.Errorf("pa connection refresh release: %w", err)
+	}
+	return nil
+}
+
+// RotatePAConnectionTokens applies r (see connection.Rotation).
+func (s *Store) RotatePAConnectionTokens(ctx context.Context, principal int64, id string, r connection.Rotation) (connection.Connection, error) {
+	if len(r.SealedTokens) == 0 || r.LeaseOwner == "" || r.GrantedScope == "" {
+		return connection.Connection{}, fmt.Errorf("%w: rotation needs tokens, a lease owner and the granted scope", connection.ErrInvalidTransition)
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return connection.Connection{}, fmt.Errorf("pa connection rotate: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `UPDATE pa_connections
+		SET sealed_tokens = $1, token_generation = token_generation + 1, updated_at_ms = $2,
+			refresh_lease_owner = '', refresh_lease_until_ms = 0
+		WHERE principal = $3 AND id = $4 AND state = $5 AND authority_revision = $6
+		  AND token_generation = $7 AND granted_scope = $8 AND refresh_lease_owner = $9`,
+		r.SealedTokens, time.Now().UTC().UnixMilli(), principal, id, string(connection.StateActive),
+		r.ExpectRevision, r.ExpectGeneration, r.GrantedScope, r.LeaseOwner)
+	if err != nil {
+		return connection.Connection{}, fmt.Errorf("pa connection rotate: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return connection.Connection{}, fmt.Errorf("pa connection rotate: rows affected: %w", err)
+	}
+	if n != 1 {
+		return connection.Connection{}, missOrConflict(ctx, tx, principal, id)
+	}
+	c, err := getPAConn(ctx, tx, principal, id, nil)
+	if err != nil {
+		return connection.Connection{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return connection.Connection{}, fmt.Errorf("pa connection rotate: commit: %w", err)
+	}
+	return c, nil
+}
