@@ -115,12 +115,20 @@ func identityOf(t *testing.T, srv *Server, access string) *auth.Identity {
 }
 
 // refusedForReadOnly are the tools S1-T8 names: the operator lookups, an
-// operator write, the credential mint, every broadcast tool and the send.
+// operator write, the credential mint, every broadcast tool, the message
+// writes (send, edit, forward, delete, pin) and the account-destroying
+// tools (account:manage).
 var refusedForReadOnly = []string{
 	"list_telegram_identities", "get_user_audit_log", "set_telegram_access", "mint_worker_token",
 	"prepare_broadcast", "list_broadcasts", "get_broadcast", "cancel_broadcast",
-	"send_message",
+	"send_message", "edit_message", "forward_messages", "delete_messages", "pin_message",
+	"disconnect_telegram_account", "delete_telegram_account",
 }
+
+// allowedForReadOnly are the reads the two-scope ceiling exists to keep:
+// telegram:dialogs:read (list_dialogs, list_folders) and
+// telegram:messages:read (list_topics, get_messages, search_messages).
+var allowedForReadOnly = []string{"list_dialogs", "list_folders", "list_topics", "get_messages", "search_messages"}
 
 // toolRefusedByScope reports whether tg's tool-scope filter refused the call
 // before any handler ran. mcp-go answers a filtered tool with a JSON-RPC
@@ -140,10 +148,13 @@ func toolRefusedByScope(t *testing.T, s *mcp.Server, id *auth.Identity, tool str
 // tool-scope enforcement then refuses every admin, broadcast and send tool
 // for that token, while the same admin through claude.ai is not refused.
 func TestScopeCeiling_S1T8_AdminGetsOnlyReadsAtTokenEndpoint(t *testing.T) {
-	srv := newTestServer(t, withDanaInEveryAdminMembership, withCeilingClient)
+	srv := newTestServer(t, withDanaInEveryAdminMembership, withCeilingClient, func(c *Config) {
+		c.LookupAdminTelegramIDs[bobTelegramID] = true // the allowed-reads negative control
+	})
 	mux := newMockRouter()
 	srv.Register(mux)
 	seedSession(t, srv, danaTelegramID)
+	seedSession(t, srv, bobTelegramID)
 
 	if _, entitled, err := srv.ResolveScopes(context.Background(), danaTelegramID); err != nil || !slices.Equal(entitled, adminEntitlement) {
 		t.Fatalf("precondition: Dana's entitlement = %v, %v; want %v", entitled, err, adminEntitlement)
@@ -165,6 +176,11 @@ func TestScopeCeiling_S1T8_AdminGetsOnlyReadsAtTokenEndpoint(t *testing.T) {
 		if toolRefusedByScope(t, tools, id, "get_my_identity") {
 			t.Errorf("requested %q: ceiling token was refused get_my_identity, which needs no scope", requested)
 		}
+		for _, tool := range allowedForReadOnly {
+			if toolRefusedByScope(t, tools, id, tool) {
+				t.Errorf("requested %q: ceiling token was refused %s, which its two reads allow", requested, tool)
+			}
+		}
 	}
 
 	// Positive control: without the ceiling the same admin reaches every
@@ -175,6 +191,17 @@ func TestScopeCeiling_S1T8_AdminGetsOnlyReadsAtTokenEndpoint(t *testing.T) {
 	for _, tool := range refusedForReadOnly {
 		if toolRefusedByScope(t, tools, admin, tool) {
 			t.Errorf("control: an unbounded admin token was refused %s by tool scopes", tool)
+		}
+	}
+
+	// Negative control for the allowed reads: a token without them (Bob,
+	// lookup admin only, through claude.ai: admin:users:read) is refused
+	// each one, so "allowed" above is the reads' doing and not a filter
+	// that lets every tool through.
+	bob := identityOf(t, srv, tokenFor(t, srv, mux, bobTelegramID, "bob", "claude.ai", "https://claude.ai/cb", "")["access_token"].(string))
+	for _, tool := range allowedForReadOnly {
+		if !toolRefusedByScope(t, tools, bob, tool) {
+			t.Errorf("control: a token without the reads was not refused %s", tool)
 		}
 	}
 }
