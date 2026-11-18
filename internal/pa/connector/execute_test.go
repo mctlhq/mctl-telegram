@@ -298,11 +298,13 @@ func TestS1U1_NoBodyOrTokenInAuditOrLogs(t *testing.T) {
 // nothing can be recorded; with one, the refusal is one refused entry.
 func TestExecuteRefusesInvalidCall(t *testing.T) {
 	cases := map[string]func(c *Call){
-		"zero policy":          func(c *Call) { c.Policy = pa.Policy{} },
-		"unbound connection":   func(c *Call) { c.ConnectionID = "conn-b" },
-		"empty connection":     func(c *Call) { c.ConnectionID = "" },
-		"unknown taint":        func(c *Call) { c.Taint = "" },
-		"taint from the model": func(c *Call) { c.Taint = "trusted" },
+		"zero policy":              func(c *Call) { c.Policy = pa.Policy{} },
+		"unbound connection":       func(c *Call) { c.ConnectionID = "conn-b" },
+		"empty connection":         func(c *Call) { c.ConnectionID = "" },
+		"unknown taint":            func(c *Call) { c.Taint = "" },
+		"taint from the model":     func(c *Call) { c.Taint = "trusted" },
+		"unbound and empty taint":  func(c *Call) { c.ConnectionID = "conn-b"; c.Taint = "" },
+		"unbound and unsafe taint": func(c *Call) { c.ConnectionID = "conn-b"; c.Taint = "a b=c" },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

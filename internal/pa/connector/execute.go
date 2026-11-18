@@ -213,17 +213,20 @@ func (x *Executor) Execute(ctx context.Context, surface *catalog.Surface, call C
 		Approver:   call.Approver,
 	}
 
-	// From here the principal is known, so every refusal is audited.
+	// From here the principal is known, so every refusal is audited. The
+	// taint is normalised first so that any refusal entry below is
+	// recordable: an unknown taint must not make FormatRecord drop the row.
+	taintOK := call.Taint == TaintClean || call.Taint == TaintExternal
+	if !taintOK {
+		base.Taint = taintInvalid
+	}
 	conn, ok := call.Policy.Connection(call.ConnectionID)
 	if !ok || call.ConnectionID == "" {
 		base.ConnectionID = unboundConnection
 		return Result{}, x.refuse(ctx, base, now, fmt.Errorf("%w: connection not bound to the run", ErrInvalidCall))
 	}
 	base.ConnectionID, base.AuthorityRevision = conn.ConnectionID, conn.AuthorityRevision
-	switch call.Taint {
-	case TaintClean, TaintExternal:
-	default:
-		base.Taint = taintInvalid
+	if !taintOK {
 		return Result{}, x.refuse(ctx, base, now, fmt.Errorf("%w: unknown taint", ErrInvalidCall))
 	}
 
