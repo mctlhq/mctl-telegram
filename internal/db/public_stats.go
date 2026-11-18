@@ -35,10 +35,13 @@ type PublicStats struct {
 // call. connect:* rows are login steps, local_bridge_* rows are the daemon's
 // keepalive (one device produced ~10k of them in a week), and "POST /..."
 // rows are web form submissions recorded through the same audit path.
+// pa:* rows are the Personal Assistant's connector audit (internal/pa/connector):
+// a PA read of tg is already counted by tg's own row for that call.
 const publicToolFilter = `status = 'ok'
 	   AND tool_name NOT LIKE 'connect%'
 	   AND tool_name NOT LIKE 'local_bridge%'
-	   AND tool_name NOT LIKE 'POST %'`
+	   AND tool_name NOT LIKE 'POST %'
+	   AND tool_name NOT LIKE 'pa:%'`
 
 // PublicStatsQuery runs the aggregate queries behind PublicStats.
 //

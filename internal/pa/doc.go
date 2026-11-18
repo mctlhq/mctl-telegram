@@ -18,6 +18,10 @@
 //   - MemoryStore, an interface with a no-op implementation only;
 //   - a getWebhookInfo health helper.
 //
+// Subpackages: egress (T9 outbound client), catalog (the T8 catalog pin and
+// tools/list drift check, #1315) and connector (the executor's pin check and
+// fail-closed T12 audit path, #1315; dispatch itself is a later slice).
+//
 // Nothing here calls a model, a tool or an MCP server, and nothing sends a
 // message. Everything is inert unless PA_ENABLED is explicitly true; see
 // cmd/server.
