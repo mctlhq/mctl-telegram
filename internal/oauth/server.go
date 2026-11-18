@@ -446,6 +446,13 @@ type Config struct {
 	// surface its scopes allow. The profile only narrows that surface; it is
 	// not a scope and grants nothing. In the server binary this comes from
 	// MCP_CLIENT_PROFILES, validated by toolprofile.ParseBindings.
+	//
+	// The same table carries per-client scope ceilings
+	// (ScopeCeilingByClientID, #1326): an allowlist, keyed by exact
+	// client_id, that bounds every token minted for that client on the code
+	// exchange and on refresh, membership-granted admin scopes included. A
+	// client without a ceiling keeps today's grant. New refuses a ceiling
+	// that names a scope this server can never grant.
 	ClientProfiles toolprofile.Bindings
 	// CIMD resolves an https URL client_id as an OAuth Client ID Metadata
 	// Document (mctl-telegram#773). Nil (the default) means CIMD is off and a
@@ -919,6 +926,23 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 			return nil, fmt.Errorf("oauth: tool profile binding for redirect_uri %q can never match an authorization: %w", uri, err)
 		}
 	}
+	// A scope ceiling is an allowlist the operator relies on to keep a
+	// client's tokens narrow. An entry this server never grants matches
+	// nothing, so it is almost certainly a typo of a scope the operator
+	// meant to allow; refuse to start rather than run on a guess (#1326).
+	// An empty ceiling cannot reach here through ParseBindings; one built
+	// in code is refused too, since "no scopes at all" is not what an
+	// absent ceiling means.
+	for id, ceiling := range cfg.ClientProfiles.ScopeCeilingByClientID {
+		if len(ceiling) == 0 {
+			return nil, fmt.Errorf("oauth: scope ceiling for client_id %q is empty", id)
+		}
+		for _, sc := range ceiling {
+			if !grantableScope(sc) {
+				return nil, fmt.Errorf("oauth: scope ceiling for client_id %q names %q, which this server never grants", id, sc)
+			}
+		}
+	}
 	return s, nil
 }
 
@@ -1078,6 +1102,12 @@ func (s *Server) ExchangeConnect(ctx context.Context, code, verifier, clientID, 
 	// Same bound as handleTokenAuthCode, so the two exchange paths mint the
 	// same token for the same code even though this one is discarded.
 	scopes = narrowGrant(scopes, entry.Scope)
+	// The self-connect client cannot be given a ceiling through
+	// MCP_CLIENT_PROFILES (its client_id is reserved), so this is a no-op
+	// in any deployed configuration. It is here so that every exchange
+	// path applies the ceiling in the same place, and mintAccessToken
+	// refuses a token that skipped it.
+	groups, scopes, _ = s.applyClientScopeCeiling(clientID, groups, scopes)
 	tok, err := s.mintAccessToken(tokenOrigin{ClientID: clientID, RedirectURI: entry.RedirectURI, RedirectURIKnown: true},
 		entry.TelegramID, entry.TelegramUsername, groups, scopes)
 	if err != nil {
@@ -2524,6 +2554,9 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	// identity's entire entitlement and the log line below was the only place
 	// the difference showed (#607).
 	scopes = narrowGrant(scopes, entry.Scope)
+	// Then the client's scope ceiling, if it has one (#1326). It is the
+	// only bound that also strips membership-granted scopes and groups.
+	groups, scopes, ceilingApplied := s.applyClientScopeCeiling(clientID, groups, scopes)
 	tok, err := s.mintAccessToken(tokenOrigin{ClientID: clientID, RedirectURI: entry.RedirectURI, RedirectURIKnown: true},
 		entry.TelegramID, entry.TelegramUsername, groups, scopes)
 	if err != nil {
@@ -2556,6 +2589,7 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		"requested_scope", entry.Scope,
 		"granted_scope", strings.Join(scopes, " "),
 		"groups", strings.Join(groups, ","),
+		"scope_ceiling_applied", ceilingApplied,
 	)
 	clientName := s.clientDisplayName(r.Context(), clientID)
 	refreshTok, err := s.issueRefreshToken(r.Context(), entry.CreatedAt, db.RefreshToken{
@@ -2676,6 +2710,7 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 		return graceServerError
 	}
 	groups, scopes = boundRefreshGrant(groups, scopes, child.Scope)
+	groups, scopes, _ = s.applyClientScopeCeiling(child.ClientID, groups, scopes)
 	stillValid, vErr := s.refreshGrantStillValid(r.Context(), scopes, child.FamilyID, child.TelegramID)
 	if vErr != nil {
 		writeTokenError(w, "server_error", "could not verify refresh authorization", http.StatusInternalServerError)
@@ -2804,6 +2839,19 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	groups, scopes = boundRefreshGrant(groups, scopes, rt.Scope)
+	// The ceiling is re-applied on every refresh, not only frozen into the
+	// family at the code exchange: a family issued before the ceiling was
+	// configured, or before it was tightened, is bounded by the current
+	// ceiling from its next refresh on (#1326).
+	groups, scopes, ceilingApplied := s.applyClientScopeCeiling(rt.ClientID, groups, scopes)
+	if ceilingApplied {
+		s.logger().Info("oauth: token refresh_token grant",
+			"client_id", rt.ClientID,
+			"user_id", rt.UserID,
+			"granted_scope", strings.Join(scopes, " "),
+			"scope_ceiling_applied", true,
+		)
+	}
 	stillValid, err := s.refreshGrantStillValid(r.Context(), scopes, rt.FamilyID, rt.TelegramID)
 	if err != nil {
 		writeTokenError(w, "server_error", "could not verify refresh authorization", http.StatusInternalServerError)
@@ -3056,7 +3104,19 @@ func writeRevokeSuccess(w http.ResponseWriter) {
 // next refresh, and no grant path can mint around it. It returns
 // errProfileUnresolvable, and mints nothing, when the profile cannot be
 // determined (see profileFor).
+//
+// Scope-ceiling policy: for the same reason, this is where the ceiling is
+// asserted rather than applied. Every grant path applies it itself
+// (applyClientScopeCeiling) so that the token response, the log line and
+// the stored refresh scope all show the bounded grant; a path that forgot
+// would mint a token wider than its client's ceiling, so the mint refuses
+// it with errScopeCeilingViolated instead (#1326).
 func (s *Server) mintAccessToken(origin tokenOrigin, tgID int64, tgUsername string, groups, scopes []string) (string, error) {
+	if ceiling, ok := s.cfg.ClientProfiles.ScopeCeiling(origin.ClientID); ok && !withinScopeCeiling(ceiling, groups, scopes) {
+		s.logger().Error("oauth: refusing to mint a token wider than its client's scope ceiling",
+			"client_id", origin.ClientID, "scopes", strings.Join(scopes, " "), "groups", len(groups))
+		return "", errScopeCeilingViolated
+	}
 	profile, err := s.profileFor(origin)
 	if err != nil {
 		return "", err
@@ -3075,6 +3135,20 @@ func (s *Server) mintAccessToken(origin tokenOrigin, tgID int64, tgUsername stri
 		ClientID:         origin.ClientID,
 		Profile:          profile,
 	}, s.cfg.AccessTokenTTL)
+}
+
+// errScopeCeilingViolated: a grant path reached the mint without applying
+// its client's scope ceiling. It is a bug, never a client error.
+var errScopeCeilingViolated = errors.New("access token exceeds the client's scope ceiling")
+
+// applyClientScopeCeiling applies clientID's scope ceiling, if it has one,
+// to a grant that ResolveScopes and narrowGrant or boundRefreshGrant have
+// already settled. applied reports whether a ceiling was configured, not
+// whether it removed anything, so the log shows every bounded grant.
+func (s *Server) applyClientScopeCeiling(clientID string, groups, scopes []string) (outGroups, outScopes []string, applied bool) {
+	ceiling, ok := s.cfg.ClientProfiles.ScopeCeiling(clientID)
+	outGroups, outScopes = applyScopeCeiling(ceiling, ok, groups, scopes)
+	return outGroups, outScopes, ok
 }
 
 // tokenOrigin is what a token's tool profile is resolved from: the client it

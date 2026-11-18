@@ -174,7 +174,18 @@ type Binding struct {
 	// family, so the binding is re-resolved at every refresh like a
 	// client_id binding.
 	RedirectURI string `json:"redirect_uri,omitempty"`
-	Profile     string `json:"profile"`
+	// Profile is the tool profile the client is bound to. It may be omitted
+	// only on a client_id record that carries a ScopeCeiling.
+	Profile string `json:"profile,omitempty"`
+	// ScopeCeiling, when present, is the allowlist of OAuth scopes any
+	// access token minted for this client_id may carry (mctl-telegram#1326,
+	// threat model T8). The authorization server intersects every grant
+	// with it, membership-granted scopes (admin:users, admin:users:read,
+	// admin:broadcast) included, and mints the token with no groups. It is
+	// accepted on client_id records only. A pointer, so that an absent key
+	// (no ceiling, today's behaviour) and an empty list (refused as
+	// malformed) stay distinguishable.
+	ScopeCeiling *[]string `json:"scope_ceiling,omitempty"`
 }
 
 // Bindings is the decoded MCP_CLIENT_PROFILES table.
@@ -183,10 +194,24 @@ type Bindings struct {
 	ByClientID map[string]string
 	// ByRedirectURI maps an exact redirect_uri to a profile name.
 	ByRedirectURI map[string]string
+	// ScopeCeilingByClientID maps an exact client_id to the allowlist of
+	// scopes its tokens may carry. A client_id absent from it has no
+	// ceiling. A present entry is never empty (ParseBindings refuses that).
+	ScopeCeilingByClientID map[string][]string
 }
 
 // Empty reports whether the table restricts no client at all.
-func (b Bindings) Empty() bool { return len(b.ByClientID) == 0 && len(b.ByRedirectURI) == 0 }
+func (b Bindings) Empty() bool {
+	return len(b.ByClientID) == 0 && len(b.ByRedirectURI) == 0 && len(b.ScopeCeilingByClientID) == 0
+}
+
+// ScopeCeiling returns the scope allowlist bound to the exact clientID, and
+// whether one is bound. It deliberately has no redirect_uri fallback: the
+// ceiling is keyed by client_id alone.
+func (b Bindings) ScopeCeiling(clientID string) ([]string, bool) {
+	c, ok := b.ScopeCeilingByClientID[clientID]
+	return c, ok
+}
 
 // Resolve returns the profile bound to a token minted for clientID from an
 // authorization whose redirect_uri was redirectURI, or "" when neither is
@@ -209,9 +234,16 @@ func (b Bindings) Resolve(clientID, redirectURI string) string {
 
 // ParseBindings decodes MCP_CLIENT_PROFILES, a JSON array of
 // {"client_id": "...", "profile": "..."} and
-// {"redirect_uri": "...", "profile": "..."} records. An empty value yields
-// an empty table: no client is restricted, which is the behaviour before
-// profiles existed.
+// {"redirect_uri": "...", "profile": "..."} records. A client_id record may
+// also carry "scope_ceiling": [...], with or without a profile. An empty
+// value yields an empty table: no client is restricted, which is the
+// behaviour before profiles existed.
+//
+// A scope_ceiling is refused when it is empty, sits on a redirect_uri
+// record, or has an entry that is blank, contains whitespace or repeats.
+// Whether each entry names a scope the server can grant is checked by the
+// authorization server at construction, since this package cannot know the
+// scope set.
 //
 // It fails closed on everything else that is not a valid table: unknown
 // keys, a record naming both or neither of client_id and redirect_uri, a
@@ -220,7 +252,7 @@ func (b Bindings) Resolve(clientID, redirectURI string) string {
 // data. The operator who set the variable is relying on the restriction, so
 // a typo must stop the server rather than leave a client unrestricted.
 func ParseBindings(raw string) (*Bindings, error) {
-	out := &Bindings{ByClientID: map[string]string{}, ByRedirectURI: map[string]string{}}
+	out := &Bindings{ByClientID: map[string]string{}, ByRedirectURI: map[string]string{}, ScopeCeilingByClientID: map[string][]string{}}
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return out, nil
@@ -240,6 +272,9 @@ func ParseBindings(raw string) (*Bindings, error) {
 			return nil, fmt.Errorf("record %d: names both client_id and redirect_uri; a record binds exactly one of them", i)
 		case b.RedirectURI != "":
 			uri := b.RedirectURI
+			if b.ScopeCeiling != nil {
+				return nil, fmt.Errorf("record %d: redirect_uri %q carries a scope_ceiling; a scope ceiling is keyed by client_id only", i, uri)
+			}
 			if strings.TrimSpace(uri) != uri {
 				return nil, fmt.Errorf("record %d: redirect_uri %q has surrounding whitespace; it is matched byte-for-byte", i, uri)
 			}
@@ -264,14 +299,52 @@ func ParseBindings(raw string) (*Bindings, error) {
 			if why, reserved := reservedClientIDs[id]; reserved {
 				return nil, fmt.Errorf("record %d: client_id %q cannot be bound: %s", i, id, why)
 			}
-			if _, ok := Lookup(b.Profile); !ok {
-				return nil, fmt.Errorf("record %d (%s): unknown profile %q (known: %s)", i, id, b.Profile, strings.Join(Names(), ", "))
+			// A ceiling-only record needs no profile; every other record
+			// does, with the same error as before ceilings existed.
+			if b.ScopeCeiling == nil || b.Profile != "" {
+				if _, ok := Lookup(b.Profile); !ok {
+					return nil, fmt.Errorf("record %d (%s): unknown profile %q (known: %s)", i, id, b.Profile, strings.Join(Names(), ", "))
+				}
 			}
-			if _, dup := out.ByClientID[id]; dup {
+			_, dupProfile := out.ByClientID[id]
+			_, dupCeiling := out.ScopeCeilingByClientID[id]
+			if dupProfile || dupCeiling {
 				return nil, fmt.Errorf("record %d: duplicate client_id %q", i, id)
 			}
-			out.ByClientID[id] = b.Profile
+			if b.ScopeCeiling != nil {
+				ceiling, err := parseScopeCeiling(*b.ScopeCeiling)
+				if err != nil {
+					return nil, fmt.Errorf("record %d (%s): scope_ceiling: %w", i, id, err)
+				}
+				out.ScopeCeilingByClientID[id] = ceiling
+			}
+			if b.Profile != "" {
+				out.ByClientID[id] = b.Profile
+			}
 		}
+	}
+	return out, nil
+}
+
+// parseScopeCeiling validates one scope_ceiling list. It refuses an empty
+// list rather than reading it as "no scopes": an operator who meant to
+// remove the ceiling deletes the key, and one who meant "nothing" has a
+// typo somewhere. Either way the server must not start on a guess.
+func parseScopeCeiling(raw []string) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, errors.New("is empty; name at least one scope, or remove the key to set no ceiling")
+	}
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, sc := range raw {
+		if f := strings.Fields(sc); len(f) != 1 || f[0] != sc {
+			return nil, fmt.Errorf("entry %q is not a single scope token", sc)
+		}
+		if _, dup := seen[sc]; dup {
+			return nil, fmt.Errorf("duplicate scope %q", sc)
+		}
+		seen[sc] = struct{}{}
+		out = append(out, sc)
 	}
 	return out, nil
 }

@@ -42,6 +42,20 @@ func TestParseBindings(t *testing.T) {
 		"fragment redirect_uri":   {`[{"redirect_uri":"https://town.example.test/cb#x","profile":"core-readonly"}]`, "not an absolute URL"},
 		"redirect unknown prof":   {`[{"redirect_uri":"https://town.example.test/cb","profile":"core-readnoly"}]`, `unknown profile "core-readnoly"`},
 		"duplicate redirect_uri":  {`[{"redirect_uri":"https://town.example.test/cb","profile":"core-readonly"},{"redirect_uri":"https://town.example.test/cb","profile":"core-reply"}]`, "duplicate redirect_uri"},
+
+		// Scope ceilings (#1326).
+		"empty ceiling":             {`[{"client_id":"pa.example","scope_ceiling":[]}]`, "scope_ceiling: is empty"},
+		"null ceiling":              {`[{"client_id":"pa.example","scope_ceiling":null}]`, `unknown profile ""`},
+		"ceiling not a list":        {`[{"client_id":"pa.example","scope_ceiling":"telegram:dialogs:read"}]`, "decode"},
+		"ceiling blank entry":       {`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read",""]}]`, `entry "" is not a single scope token`},
+		"ceiling space-joined":      {`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read telegram:messages:read"]}]`, "is not a single scope token"},
+		"ceiling padded entry":      {`[{"client_id":"pa.example","scope_ceiling":[" telegram:dialogs:read"]}]`, "is not a single scope token"},
+		"ceiling duplicate entry":   {`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read","telegram:dialogs:read"]}]`, "duplicate scope"},
+		"ceiling on redirect_uri":   {`[{"redirect_uri":"https://pa.example.test/cb","profile":"core-readonly","scope_ceiling":["telegram:dialogs:read"]}]`, "keyed by client_id only"},
+		"ceiling with bad profile":  {`[{"client_id":"pa.example","profile":"core-readnoly","scope_ceiling":["telegram:dialogs:read"]}]`, `unknown profile "core-readnoly"`},
+		"ceiling duplicate client":  {`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read"]},{"client_id":"pa.example","profile":"core-readonly"}]`, "duplicate client_id"},
+		"ceiling duplicate client2": {`[{"client_id":"pa.example","profile":"core-readonly"},{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read"]}]`, "duplicate client_id"},
+		"ceiling reserved client":   {`[{"client_id":"mctl_self_connect","scope_ceiling":["telegram:dialogs:read"]}]`, "cannot be bound"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, err := ParseBindings(tc.raw)
@@ -169,5 +183,36 @@ func TestProfileOnlyToolsAreListedByAProfile(t *testing.T) {
 	}
 	if ProfileOnly("send_message") || !ProfileOnly("send_reply") || !ProfileOnly("draft_reply") {
 		t.Fatal("ProfileOnly disagrees with the reply tools")
+	}
+}
+
+// TestParseBindings_ScopeCeiling: a client_id record may carry a ceiling with
+// or without a profile, and a record without one leaves the client with no
+// ceiling at all.
+func TestParseBindings_ScopeCeiling(t *testing.T) {
+	got, err := ParseBindings(`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read","telegram:messages:read"]},` +
+		`{"client_id":"both.example","profile":"core-readonly","scope_ceiling":["telegram:dialogs:read"]},` +
+		`{"client_id":"claude.ai","profile":"core-readonly"}]`)
+	if err != nil {
+		t.Fatalf("valid table: %v", err)
+	}
+	if c, ok := got.ScopeCeiling("pa.example"); !ok || strings.Join(c, " ") != "telegram:dialogs:read telegram:messages:read" {
+		t.Fatalf("pa.example ceiling = %v, %v", c, ok)
+	}
+	if _, bound := got.ByClientID["pa.example"]; bound {
+		t.Fatalf("a ceiling-only record bound a profile: %v", got.ByClientID)
+	}
+	if c, ok := got.ScopeCeiling("both.example"); !ok || len(c) != 1 || got.ByClientID["both.example"] != CoreReadonly {
+		t.Fatalf("both.example = ceiling %v %v, profile %q", c, ok, got.ByClientID["both.example"])
+	}
+	if c, ok := got.ScopeCeiling("claude.ai"); ok {
+		t.Fatalf("a profile-only record has a ceiling: %v", c)
+	}
+	if got.Empty() {
+		t.Fatal("a table with ceilings reports Empty")
+	}
+	ceilingOnly, err := ParseBindings(`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read"]}]`)
+	if err != nil || ceilingOnly.Empty() {
+		t.Fatalf("ceiling-only table = %v, %v; want non-empty", ceilingOnly, err)
 	}
 }

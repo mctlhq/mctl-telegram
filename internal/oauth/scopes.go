@@ -1,6 +1,9 @@
 package oauth
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // DCRNegotiableScopes is the scope set advertised to Dynamic Client
 // Registration clients (ChatGPT/codex, claude.ai) via both RFC 8414
@@ -92,4 +95,65 @@ func narrowGrant(entitled []string, requested string) []string {
 		}
 	}
 	return out
+}
+
+// membershipScopes are the scopes ResolveScopes grants by membership alone
+// (TG_LOGIN_ADMINS, TG_LOGIN_LOOKUP_ADMINS, BROADCAST_OPERATORS). No client
+// can ask for them and narrowGrant keeps them, which is why a per-client
+// scope ceiling exists (#1326).
+var membershipScopes = []string{
+	"admin:users",
+	"admin:users:read",
+	"admin:broadcast",
+}
+
+// grantableScope reports whether ResolveScopes can ever grant sc. A scope
+// ceiling naming anything else is refused at construction: it would match
+// nothing, and the likeliest cause is a typo that leaves the operator's
+// intended scope out of the client's tokens without anyone noticing.
+// TestGrantableScopesCoverResolveScopes pins this list to ResolveScopes.
+func grantableScope(sc string) bool {
+	return slices.Contains(DCRNegotiableScopes, sc) || slices.Contains(membershipScopes, sc)
+}
+
+// applyScopeCeiling bounds a grant by a client's scope ceiling (#1326,
+// threat model T8). It runs after ResolveScopes and narrowGrant on the code
+// exchange and after boundRefreshGrant on refresh, so it sees the grant
+// those already settled and only removes from it.
+//
+// Unlike narrowGrant, it makes no exception for membership-granted scopes:
+// the ceiling is an allowlist, so admin:users, admin:users:read,
+// admin:broadcast and any scope added later are stripped unless the
+// ceiling names them. It also drops groups. No authorization decision in
+// this server reads a local-jwt token's groups today (see the audit in
+// #1326's PR), but a tier label such as "platform-admins" in a token that a
+// ceiling bounds to reads would be authority waiting for its first reader.
+//
+// With hasCeiling false it returns its inputs untouched: a client without a
+// ceiling keeps today's grant exactly. Order follows scopes.
+func applyScopeCeiling(ceiling []string, hasCeiling bool, groups, scopes []string) ([]string, []string) {
+	if !hasCeiling {
+		return groups, scopes
+	}
+	out := make([]string, 0, len(scopes))
+	for _, sc := range scopes {
+		if slices.Contains(ceiling, sc) {
+			out = append(out, sc)
+		}
+	}
+	return nil, out
+}
+
+// withinScopeCeiling reports whether a token about to be minted respects
+// the ceiling: no groups, and no scope outside it.
+func withinScopeCeiling(ceiling []string, groups, scopes []string) bool {
+	if len(groups) > 0 {
+		return false
+	}
+	for _, sc := range scopes {
+		if !slices.Contains(ceiling, sc) {
+			return false
+		}
+	}
+	return true
 }
