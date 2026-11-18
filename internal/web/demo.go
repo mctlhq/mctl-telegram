@@ -65,7 +65,7 @@ func Demo(publicBaseURL, demoVideoURL string, showManage bool) http.HandlerFunc 
 	kind, embed := classifyDemoVideo(demoVideoURL)
 	data := demoData{
 		Data: ui.Data{
-			Title:         "MCTL — demo",
+			Title:         "MCTL — Telegram MCP demo: summarize, draft and send",
 			Description:   "Demo walkthrough for MCTL, a remote MCP server for searching, summarizing, drafting, and sending Telegram messages with confirmation.",
 			NavActive:     "demo",
 			PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),

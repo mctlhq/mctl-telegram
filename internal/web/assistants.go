@@ -188,7 +188,7 @@ func groupThousands(n int) string {
 // an explicit "catalog unavailable" notice, never an empty catalog.
 func Assistants(svc *assistantinstall.Service, publicBaseURL string, showManage bool) http.HandlerFunc {
 	base := ui.Data{
-		Title:         "MCTL — assistants",
+		Title:         "MCTL — Installable Telegram assistants for your account",
 		NavActive:     "assistants",
 		Description:   "Assistants you can install on your Telegram account: what each one does, the values it asks for and its defaults.",
 		PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
