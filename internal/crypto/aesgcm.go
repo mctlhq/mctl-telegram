@@ -200,6 +200,21 @@ func deriveUserKey(master []byte, userID int64) ([]byte, error) {
 	return deriveKey(master, userID, hkdfInfo)
 }
 
+// DeriveSubkey runs the same HKDF-SHA256 derivation as the session blobs
+// (salt = userID big-endian, info = the caller's domain label) and returns a
+// 32-byte key. It refuses anything but a 32-byte master and an empty info:
+// unlike SealForUser it has no local-dev plaintext fallback, so a caller can
+// never end up "encrypting" with an empty key.
+func DeriveSubkey(master []byte, userID int64, info string) ([]byte, error) {
+	if len(master) != 32 {
+		return nil, fmt.Errorf("derive subkey: master key must be 32 bytes, got %d", len(master))
+	}
+	if info == "" {
+		return nil, errors.New("derive subkey: info label required")
+	}
+	return deriveKey(master, userID, info)
+}
+
 func deriveKey(master []byte, userID int64, info string) ([]byte, error) {
 	salt := make([]byte, 8)
 	binary.BigEndian.PutUint64(salt, uint64(userID))

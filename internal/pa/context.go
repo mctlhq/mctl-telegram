@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+
+	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 )
 
 // Trigger is what started a run. ADR 0011 names three; Phase 1 creates only
@@ -17,9 +19,10 @@ const (
 )
 
 // ConsentDataFlowV1 is the consent text version every Phase 1 run requires
-// (threat model T13). The consent record itself lands in a later slice; the
-// context only carries which version the run was admitted under.
-const ConsentDataFlowV1 = "pa-data-flow/v1"
+// (threat model T13). The consent record and its text live in
+// internal/pa/convo; the context only carries which version the run was
+// admitted under.
+const ConsentDataFlowV1 = convo.ConsentVersion
 
 // ConnectionRevision binds a run to one connection at one authority revision
 // (threat model T2, I4). A dispatch whose connection has moved past this
