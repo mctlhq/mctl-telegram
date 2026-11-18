@@ -641,11 +641,88 @@ func TestScopeCeiling_TokenCannotMintAWorkerToken(t *testing.T) {
 	}
 
 	ceiling := tokenFor(t, srv, mux, danaTelegramID, "dana_tg", ceilingClientID, ceilingCallback, "")
-	if rec := post(ceiling["access_token"].(string)); rec.Code != http.StatusForbidden {
-		t.Fatalf("ceiling token at /api/mcp/worker-token = %d %s, want 403", rec.Code, rec.Body.String())
+	// The body pins which gate refused it: the handler's admin-scope check,
+	// not some unrelated 403 earlier in the chain.
+	if rec := post(ceiling["access_token"].(string)); rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "admin scope required") {
+		t.Fatalf("ceiling token at /api/mcp/worker-token = %d %s, want 403 admin scope required", rec.Code, rec.Body.String())
 	}
 	admin := tokenFor(t, srv, mux, danaTelegramID, "dana_tg", "claude.ai", "https://claude.ai/cb", "")
 	if rec := post(admin["access_token"].(string)); rec.Code == http.StatusForbidden || rec.Code == http.StatusUnauthorized {
 		t.Fatalf("control: unbounded admin token at /api/mcp/worker-token = %d %s, want admitted past the scope check", rec.Code, rec.Body.String())
+	}
+}
+
+const refreshGrantLine = "oauth: token refresh_token grant"
+
+// TestScopeCeiling_RefreshGrantIsLoggedOnlyWhenATokenIsIssued: the refresh
+// audit line saying "grant" is written only after the token is minted and
+// the family rotated. Three ceiling refreshes, against one captured log:
+//   - one the mint refuses after the ceiling has bounded a non-empty grant
+//     (a family that predates redirect_uri storage while a redirect_uri
+//     profile binding exists: errProfileUnresolvable);
+//   - one refused for an empty bounded grant, which logs its own Warn;
+//   - one that succeeds, the control proving the line is written at all.
+func TestScopeCeiling_RefreshGrantIsLoggedOnlyWhenATokenIsIssued(t *testing.T) {
+	srv := newTestServer(t, withDanaInEveryAdminMembership, withCeilingClient, func(c *Config) {
+		c.ClientProfiles.ByRedirectURI = map[string]string{"https://other.example.test/cb": "core-readonly"}
+		c.AutoApproveClients = false
+	})
+	mux := newMockRouter()
+	srv.Register(mux)
+	logs := captureServerLogFor(t, srv)
+
+	// Refused by the mint, after the ceiling applied.
+	_, unknown := seedCeilingFamily(t, srv, danaTelegramID, "dana_tg", "dana-unknown-redirect", ceilingTwoRead)
+	unknown.RedirectURI, unknown.RedirectURIKnown = "", false
+	unknownPlain := "dana-unknown-redirect-legacy-token"
+	if err := srv.store.SaveRefreshToken(context.Background(), unknownPlain, unknown); err != nil {
+		t.Fatalf("save refresh token: %v", err)
+	}
+	status, body := refreshResp(t, mux, unknownPlain, ceilingClientID)
+	if status != http.StatusBadRequest || jsonField(t, body, "error_description") != profileUnresolvableDescription {
+		t.Fatalf("refresh of a family without a stored redirect_uri = %d %s, want 400 %q", status, body, profileUnresolvableDescription)
+	}
+	if strings.Contains(logs.String(), refreshGrantLine) {
+		t.Fatalf("a refresh the mint refused logged a grant:\n%s", logs.String())
+	}
+
+	// Refused for an empty bounded grant.
+	empty, _ := seedCeilingFamily(t, srv, aliceTelegramID, "alice", "alice-empty-ceiling", "")
+	status, body = refreshResp(t, mux, empty, ceilingClientID)
+	assertCeilingRefusal(t, "empty bounded refresh", status, body, "invalid_grant")
+	if strings.Contains(logs.String(), refreshGrantLine) {
+		t.Fatalf("an empty-grant refusal logged a grant:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "nothing within the client's scope ceiling") {
+		t.Fatalf("the empty-grant refusal logged no warning:\n%s", logs.String())
+	}
+
+	// Control: a refresh that issues a token logs the grant, once.
+	ok, _ := seedCeilingFamily(t, srv, danaTelegramID, "dana_tg", "dana-ok", ceilingTwoRead)
+	if status, body = refreshResp(t, mux, ok, ceilingClientID); status != http.StatusOK {
+		t.Fatalf("control refresh = %d %s, want 200", status, body)
+	}
+	if got := strings.Count(logs.String(), refreshGrantLine); got != 1 {
+		t.Fatalf("a successful ceiling refresh logged %d grant lines, want 1:\n%s", got, logs.String())
+	}
+}
+
+// TestScopeCeiling_GraceEmptyRefusalIsLogged: the grace-replay path warns
+// on an empty bounded grant like the other three paths.
+func TestScopeCeiling_GraceEmptyRefusalIsLogged(t *testing.T) {
+	srv := newTestServer(t, withCeilingClient, func(c *Config) { c.AutoApproveClients = false })
+	mux := newMockRouter()
+	srv.Register(mux)
+	logs := captureServerLogFor(t, srv)
+	plain, rt := seedCeilingFamily(t, srv, aliceTelegramID, "alice", "alice-grace-warn", "")
+	if err := srv.store.RotateRefreshToken(context.Background(), plain, deriveSuccessorRefreshToken(srv.cfg.JWTSecret, plain), rt); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	status, body := refreshResp(t, mux, plain, ceilingClientID)
+	assertCeilingRefusal(t, "grace replay", status, body, "invalid_grant")
+	out := logs.String()
+	if !strings.Contains(out, "nothing within the client's scope ceiling") || !strings.Contains(out, "path=grace_replay") ||
+		!strings.Contains(out, "family_id=alice-grace-warn") || !strings.Contains(out, "client_id="+ceilingClientID) {
+		t.Fatalf("grace-replay empty refusal not logged with client_id, family_id and path:\n%s", out)
 	}
 }

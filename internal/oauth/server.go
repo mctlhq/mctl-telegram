@@ -2726,6 +2726,8 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 	groups, scopes = boundRefreshGrant(groups, scopes, child.Scope)
 	groups, scopes, ceilingApplied := s.applyClientScopeCeiling(child.ClientID, groups, scopes)
 	if ceilingApplied && len(scopes) == 0 {
+		s.logger().Warn("oauth: refresh refused: nothing within the client's scope ceiling",
+			"client_id", child.ClientID, "family_id", familyID, "path", "grace_replay")
 		writeTokenError(w, "invalid_grant", ceilingLeavesNoScopeDescription, http.StatusBadRequest)
 		return graceRejectedSoft
 	}
@@ -2750,7 +2752,8 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 		writeTokenError(w, "server_error", "could not mint token", http.StatusInternalServerError)
 		return graceServerError
 	}
-	s.logger().Info("oauth refresh token grace-window replay: re-issuing existing successor", "family_id", familyID)
+	s.logger().Info("oauth refresh token grace-window replay: re-issuing existing successor", "family_id", familyID,
+		"scope_ceiling_applied", ceilingApplied)
 	writeTokenJSON(w, tok, candidate, int(s.cfg.AccessTokenTTL.Seconds()), scopes)
 	return graceRecovered
 }
@@ -2873,14 +2876,6 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		writeTokenError(w, "invalid_grant", ceilingLeavesNoScopeDescription, http.StatusBadRequest)
 		return
 	}
-	if ceilingApplied {
-		s.logger().Info("oauth: token refresh_token grant",
-			"client_id", rt.ClientID,
-			"user_id", rt.UserID,
-			"granted_scope", strings.Join(scopes, " "),
-			"scope_ceiling_applied", true,
-		)
-	}
 	stillValid, err := s.refreshGrantStillValid(r.Context(), scopes, rt.FamilyID, rt.TelegramID)
 	if err != nil {
 		writeTokenError(w, "server_error", "could not verify refresh authorization", http.StatusInternalServerError)
@@ -2974,6 +2969,17 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		}
 		writeTokenError(w, "server_error", "could not rotate refresh token", http.StatusInternalServerError)
 		return
+	}
+	// Logged only once the token is minted and the family rotated, like the
+	// code-exchange grant line: an audit line saying "grant" must mean a
+	// token was issued, so a refused or failed refresh never writes one.
+	if ceilingApplied {
+		s.logger().Info("oauth: token refresh_token grant",
+			"client_id", rt.ClientID,
+			"user_id", rt.UserID,
+			"granted_scope", strings.Join(scopes, " "),
+			"scope_ceiling_applied", true,
+		)
 	}
 	writeTokenJSON(w, tok, newRefresh, int(s.cfg.AccessTokenTTL.Seconds()), scopes)
 }
