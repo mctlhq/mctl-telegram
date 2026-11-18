@@ -201,3 +201,19 @@ func TestTimeoutFailsClosed(t *testing.T) {
 		t.Fatal("slow response must fail")
 	}
 }
+
+func TestUnwrap(t *testing.T) {
+	cases := map[string]string{
+		"::ffff:10.0.0.1":  "10.0.0.1",
+		"64:ff9b::a00:1":   "10.0.0.1",
+		"fe80::1%eth0":     "fe80::1",
+		"8.8.8.8":          "8.8.8.8",
+		"2606:4700::1111":  "2606:4700::1111",
+		"64:ff9b:1::a00:1": "64:ff9b:1::a00:1", // local-use NAT64 is refused whole, not unwrapped
+	}
+	for in, want := range cases {
+		if got := Unwrap(netip.MustParseAddr(in)); got != netip.MustParseAddr(want) {
+			t.Errorf("Unwrap(%s) = %s, want %s", in, got, want)
+		}
+	}
+}
