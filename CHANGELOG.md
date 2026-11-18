@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.139.3](https://github.com/mctlhq/mctl-telegram/compare/0.139.2...0.139.3) (2026-11-18)
+
+
+### Bug Fixes
+
+* **web:** match font fallback metrics to stop mobile CLS on home ([2437e37](https://github.com/mctlhq/mctl-telegram/commit/2437e37a7186ef338bfd0ff03d100fa07f45130b))
+* **web:** match font fallback metrics to stop mobile CLS on home ([bcd70d8](https://github.com/mctlhq/mctl-telegram/commit/bcd70d8e26f776c6b1e4606ee61f7328d713aa82))
+
 ## [0.139.2](https://github.com/mctlhq/mctl-telegram/compare/0.139.1...0.139.2) (2026-11-18)
 
 
