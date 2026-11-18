@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.139.5](https://github.com/mctlhq/mctl-telegram/compare/0.139.4...0.139.5) (2026-11-18)
+
+
+### Bug Fixes
+
+* **seo:** no home JSON-LD on pages without a canonical path ([84c3810](https://github.com/mctlhq/mctl-telegram/commit/84c38104753d6fb347d6ce711e52fe1ab25c5a7b))
+* **seo:** no home JSON-LD on pages without a canonical path ([33bb986](https://github.com/mctlhq/mctl-telegram/commit/33bb986d50dab5826540623ad67eebc24a34b4b8))
+
 ## [0.139.4](https://github.com/mctlhq/mctl-telegram/compare/0.139.3...0.139.4) (2026-11-18)
 
 
