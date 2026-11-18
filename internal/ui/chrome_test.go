@@ -362,3 +362,27 @@ func TestOGURLFollowsCanonical(t *testing.T) {
 		}
 	}
 }
+
+// The web fonts load with display=swap, so the system fallback is what first
+// paints. Its glyph widths and line metrics must be matched to the web font,
+// or the hero re-wraps on swap and the page below it jumps (mobile CLS 0.134
+// on the home page, PageSpeed Insights 2026-11-18). The font stacks must name
+// the metric-matched faces, and those faces must carry the overrides.
+func TestFontFallbacksMatchMetrics(t *testing.T) {
+	for _, s := range []string{
+		"font-family: 'Onest Fallback';",
+		"font-family: 'JetBrains Mono Fallback';",
+		"--font-display: 'Onest', 'Onest Fallback',",
+		"--font-mono: 'JetBrains Mono', 'JetBrains Mono Fallback',",
+	} {
+		if !strings.Contains(componentsCSS, s) {
+			t.Errorf("components CSS missing %q", s)
+		}
+	}
+	if n := strings.Count(componentsCSS, "size-adjust:"); n < 2 {
+		t.Errorf("want size-adjust on both fallback faces, found %d", n)
+	}
+	if n := strings.Count(componentsCSS, "ascent-override:"); n < 2 {
+		t.Errorf("want ascent-override on both fallback faces, found %d", n)
+	}
+}
