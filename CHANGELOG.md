@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.139.4](https://github.com/mctlhq/mctl-telegram/compare/0.139.3...0.139.4) (2026-11-18)
+
+
+### Bug Fixes
+
+* **seo:** descriptive page titles and page-specific JSON-LD ([9c4ff7c](https://github.com/mctlhq/mctl-telegram/commit/9c4ff7c2cc1607837d8cd7c6cb72d733eeb205dd))
+* **seo:** descriptive page titles and page-specific JSON-LD ([1a258f1](https://github.com/mctlhq/mctl-telegram/commit/1a258f152421efd5f7125603c9d8a6bbb9d00223))
+
 ## [0.139.3](https://github.com/mctlhq/mctl-telegram/compare/0.139.2...0.139.3) (2026-11-18)
 
 
