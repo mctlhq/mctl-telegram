@@ -960,6 +960,17 @@ func sqliteSchema() []string {
 			outcome TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_bot_updates_pending ON bot_updates(update_id) WHERE processed_at IS NULL`,
+		// Personal Assistant bot webhook deliveries (issue #1313, threat
+		// model T4). A separate table from bot_updates because the PA is a
+		// different bot and update_id is only unique per bot. The primary key
+		// is the deduplication: a Telegram retry of an update that was
+		// already handled hits ON CONFLICT DO NOTHING and never causes a
+		// second run or a second budget charge. Only the id and the time are
+		// stored -- no chat id, no principal, no content.
+		`CREATE TABLE IF NOT EXISTS pa_updates (
+			update_id INTEGER PRIMARY KEY,
+			received_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
 		// Broadcast campaigns (issue-439). One row per prepared broadcast;
 		// the row is also the approval record. content_hash and
 		// selector_hash are what a human approval is bound to -- see
@@ -1317,6 +1328,12 @@ func pgSchema() []string {
 			outcome TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_bot_updates_pending ON bot_updates(update_id) WHERE processed_at IS NULL`,
+		// PA bot webhook deliveries (issue #1313) -- see the sqliteSchema
+		// comment on this table.
+		`CREATE TABLE IF NOT EXISTS pa_updates (
+			update_id BIGINT PRIMARY KEY,
+			received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
 		// Broadcast campaigns (issue-439) -- see the sqliteSchema comment on
 		// this table for why the row is also the approval record.
 		`CREATE TABLE IF NOT EXISTS broadcast_campaigns (
