@@ -1107,7 +1107,10 @@ func (s *Server) ExchangeConnect(ctx context.Context, code, verifier, clientID, 
 	// in any deployed configuration. It is here so that every exchange
 	// path applies the ceiling in the same place, and mintAccessToken
 	// refuses a token that skipped it.
-	groups, scopes, _ = s.applyClientScopeCeiling(clientID, groups, scopes)
+	groups, scopes, ceilingApplied := s.applyClientScopeCeiling(clientID, groups, scopes)
+	if ceilingApplied && len(scopes) == 0 {
+		return "", errors.New("invalid_scope: " + ceilingLeavesNoScopeDescription)
+	}
 	tok, err := s.mintAccessToken(tokenOrigin{ClientID: clientID, RedirectURI: entry.RedirectURI, RedirectURIKnown: true},
 		entry.TelegramID, entry.TelegramUsername, groups, scopes)
 	if err != nil {
@@ -2557,6 +2560,17 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	// Then the client's scope ceiling, if it has one (#1326). It is the
 	// only bound that also strips membership-granted scopes and groups.
 	groups, scopes, ceilingApplied := s.applyClientScopeCeiling(clientID, groups, scopes)
+	// A ceiling client whose bounded grant is empty gets no token at all.
+	// Elsewhere an empty grant is a deliberate, working state (#584), but
+	// a ceiling client exists to hold exactly its ceiling, and a scopeless
+	// token would only fail later at the first tool call, or pass an
+	// executor check that forgot the empty case.
+	if ceilingApplied && len(scopes) == 0 {
+		s.logger().Warn("oauth: token authorization_code grant refused: nothing within the client's scope ceiling",
+			"client_id", clientID, "requested_scope", entry.Scope)
+		writeTokenError(w, "invalid_scope", ceilingLeavesNoScopeDescription, http.StatusBadRequest)
+		return
+	}
 	tok, err := s.mintAccessToken(tokenOrigin{ClientID: clientID, RedirectURI: entry.RedirectURI, RedirectURIKnown: true},
 		entry.TelegramID, entry.TelegramUsername, groups, scopes)
 	if err != nil {
@@ -2710,7 +2724,11 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 		return graceServerError
 	}
 	groups, scopes = boundRefreshGrant(groups, scopes, child.Scope)
-	groups, scopes, _ = s.applyClientScopeCeiling(child.ClientID, groups, scopes)
+	groups, scopes, ceilingApplied := s.applyClientScopeCeiling(child.ClientID, groups, scopes)
+	if ceilingApplied && len(scopes) == 0 {
+		writeTokenError(w, "invalid_grant", ceilingLeavesNoScopeDescription, http.StatusBadRequest)
+		return graceRejectedSoft
+	}
 	stillValid, vErr := s.refreshGrantStillValid(r.Context(), scopes, child.FamilyID, child.TelegramID)
 	if vErr != nil {
 		writeTokenError(w, "server_error", "could not verify refresh authorization", http.StatusInternalServerError)
@@ -2844,6 +2862,17 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	// configured, or before it was tightened, is bounded by the current
 	// ceiling from its next refresh on (#1326).
 	groups, scopes, ceilingApplied := s.applyClientScopeCeiling(rt.ClientID, groups, scopes)
+	if ceilingApplied && len(scopes) == 0 {
+		// Refused before refreshGrantStillValid: that check lets a family
+		// that never held a grant keep refreshing scopeless (#584), which a
+		// ceiling client must not do. The family is left intact, so a
+		// later change to the ceiling or the principal's tier needs no
+		// fresh sign-in.
+		s.logger().Warn("oauth: refresh refused: nothing within the client's scope ceiling",
+			"client_id", rt.ClientID, "family_id", rt.FamilyID)
+		writeTokenError(w, "invalid_grant", ceilingLeavesNoScopeDescription, http.StatusBadRequest)
+		return
+	}
 	if ceilingApplied {
 		s.logger().Info("oauth: token refresh_token grant",
 			"client_id", rt.ClientID,
@@ -3140,6 +3169,10 @@ func (s *Server) mintAccessToken(origin tokenOrigin, tgID int64, tgUsername stri
 // errScopeCeilingViolated: a grant path reached the mint without applying
 // its client's scope ceiling. It is a bug, never a client error.
 var errScopeCeilingViolated = errors.New("access token exceeds the client's scope ceiling")
+
+// ceilingLeavesNoScopeDescription is the token-endpoint error a ceiling
+// client gets when its bounded grant is empty.
+const ceilingLeavesNoScopeDescription = "this account holds no scope within this client's scope ceiling"
 
 // applyClientScopeCeiling applies clientID's scope ceiling, if it has one,
 // to a grant that ResolveScopes and narrowGrant or boundRefreshGrant have

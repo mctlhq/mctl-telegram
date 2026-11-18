@@ -145,9 +145,11 @@ func applyScopeCeiling(ceiling []string, hasCeiling bool, groups, scopes []strin
 }
 
 // withinScopeCeiling reports whether a token about to be minted respects
-// the ceiling: no groups, and no scope outside it.
+// the ceiling: no groups, at least one scope, and no scope outside it. Every
+// grant path refuses an empty bounded grant itself with a client-facing
+// error; the empty case here is the backstop for one that did not.
 func withinScopeCeiling(ceiling []string, groups, scopes []string) bool {
-	if len(groups) > 0 {
+	if len(groups) > 0 || len(scopes) == 0 {
 		return false
 	}
 	for _, sc := range scopes {

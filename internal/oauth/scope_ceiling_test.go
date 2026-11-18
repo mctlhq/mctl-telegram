@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/mcp"
 	"github.com/mctlhq/mctl-telegram/internal/toolprofile"
+	"github.com/mctlhq/mctl-telegram/internal/workertoken"
 )
 
 // Scope ceiling tests (#1326, threat model T8). The ceiling client stands in
@@ -366,6 +368,9 @@ func TestScopeCeiling_MintRefusesATokenWiderThanTheCeiling(t *testing.T) {
 		"extra scope":   {nil, adminEntitlement},
 		"tier groups":   {[]string{"platform-admins", "admins"}, strings.Fields(ceilingTwoRead)},
 		"unknown scope": {nil, []string{"telegram:dialogs:read", "future:scope"}},
+		// The backstop for a grant path that forgot its own empty check.
+		"no scope":  {nil, nil},
+		"empty set": {nil, []string{}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := srv.mintAccessToken(origin, danaTelegramID, "dana_tg", tc.groups, tc.scopes); !errors.Is(err, errScopeCeilingViolated) {
@@ -441,5 +446,179 @@ func TestGrantableScopesCoverResolveScopes(t *testing.T) {
 				t.Errorf("tg %d is granted %q, which grantableScope does not know", tg, sc)
 			}
 		}
+	}
+}
+
+const (
+	// bobTelegramID is Bob, a member of TG_LOGIN_LOOKUP_ADMINS only: his
+	// whole entitlement is admin:users:read. The id is Bob's lookup-admin
+	// role elsewhere in this package (refresh_test.go).
+	bobTelegramID int64 = 777000222
+	// aliceTelegramID is Alice, in no tier at all. The id is Alice's
+	// scopeless principal in refresh_test.go.
+	aliceTelegramID int64 = 777000555
+)
+
+// codeExchangeFor is tokenFor without the success assertion: it returns the
+// token endpoint's recorder for the code exchange.
+func codeExchangeFor(t *testing.T, srv *Server, mux *mockRouter, tg int64, username, clientID, redirectURI string) *httptest.ResponseRecorder {
+	t.Helper()
+	authFake(srv).identity = &telegramoidc.Identity{TelegramID: tg, Username: username}
+	verifier, challenge := pkceVerifierAndChallenge()
+	state := stateFromAuthorizeFor(t, mux, challenge, clientID, redirectURI)
+	code := authCodeRedirect(t, callbackWithState(t, mux, state)).Query().Get("code")
+	if code == "" {
+		t.Fatal("no authorization code")
+	}
+	return doTokenRequest(t, mux, url.Values{
+		"grant_type": {"authorization_code"}, "code": {code}, "client_id": {clientID},
+		"redirect_uri": {redirectURI}, "code_verifier": {verifier},
+	})
+}
+
+func assertCeilingRefusal(t *testing.T, where string, status int, body []byte, wantError string) {
+	t.Helper()
+	if status != http.StatusBadRequest || jsonField(t, body, "error") != wantError ||
+		jsonField(t, body, "error_description") != ceilingLeavesNoScopeDescription {
+		t.Fatalf("%s = %d %s, want 400 %s %q", where, status, body, wantError, ceilingLeavesNoScopeDescription)
+	}
+	if strings.Contains(string(body), "access_token") {
+		t.Fatalf("%s: a refusal carried a token: %s", where, body)
+	}
+}
+
+// TestScopeCeiling_LookupAdminGetsNoTokenAtCodeExchange: Bob's entitlement
+// (admin:users:read) intersects the read ceiling to nothing. The outcome is
+// defined, not a scopeless token: the code exchange answers invalid_scope.
+// Through claude.ai, without a ceiling, Bob keeps today's grant.
+func TestScopeCeiling_LookupAdminGetsNoTokenAtCodeExchange(t *testing.T) {
+	srv := newTestServer(t, withCeilingClient, func(c *Config) {
+		c.LookupAdminTelegramIDs = map[int64]bool{bobTelegramID: true}
+	})
+	mux := newMockRouter()
+	srv.Register(mux)
+	seedSession(t, srv, bobTelegramID)
+
+	rec := codeExchangeFor(t, srv, mux, bobTelegramID, "bob", ceilingClientID, ceilingCallback)
+	assertCeilingRefusal(t, "lookup admin code exchange", rec.Code, rec.Body.Bytes(), "invalid_scope")
+
+	resp := tokenFor(t, srv, mux, bobTelegramID, "bob", "claude.ai", "https://claude.ai/cb", "")
+	if got := resp["scope"]; got != "admin:users:read" {
+		t.Fatalf("control: Bob through claude.ai scope = %v, want admin:users:read", got)
+	}
+}
+
+// TestScopeCeiling_LookupAdminGetsNoTokenAtInProcessExchange is the same on
+// ExchangeConnect, whose ceiling is built in code (see
+// TestScopeCeiling_S1T8_InProcessExchangeIsBounded).
+func TestScopeCeiling_LookupAdminGetsNoTokenAtInProcessExchange(t *testing.T) {
+	srv := newTestServer(t, func(c *Config) {
+		c.LookupAdminTelegramIDs = map[int64]bool{bobTelegramID: true}
+		c.ClientProfiles.ScopeCeilingByClientID = map[string][]string{ConnectClientID: strings.Fields(ceilingTwoRead)}
+	})
+	mux := newMockRouter()
+	srv.Register(mux)
+	seedSession(t, srv, bobTelegramID)
+	authFake(srv).identity = &telegramoidc.Identity{TelegramID: bobTelegramID, Username: "bob"}
+
+	verifier, challenge := pkceVerifierAndChallenge()
+	connectRedirect := testIssuer + "/telegram/connect/done"
+	state := stateFromAuthorizeFor(t, mux, challenge, ConnectClientID, connectRedirect)
+	code := authCodeRedirect(t, callbackWithState(t, mux, state)).Query().Get("code")
+	tok, err := srv.ExchangeConnect(context.Background(), code, verifier, ConnectClientID, connectRedirect)
+	if err == nil || !strings.Contains(err.Error(), "invalid_scope") || tok != "" {
+		t.Fatalf("ExchangeConnect = %q, %v; want no token and invalid_scope", tok, err)
+	}
+}
+
+// seedCeilingFamily stores a refresh-token family for the ceiling client.
+func seedCeilingFamily(t *testing.T, srv *Server, tg int64, username, family, scope string) (string, db.RefreshToken) {
+	t.Helper()
+	uid, err := srv.store.EnsureUserByTelegramID(context.Background(), tg, username, "")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	rt := db.RefreshToken{
+		FamilyID: family, UserID: uid, ClientID: ceilingClientID, TelegramID: tg, TelegramUsername: username,
+		Scope: scope, RedirectURI: ceilingCallback, RedirectURIKnown: true, ExpiresAt: time.Now().Add(time.Hour),
+	}
+	plain := family + "-token"
+	if err := srv.store.SaveRefreshToken(context.Background(), plain, rt); err != nil {
+		t.Fatalf("save refresh token: %v", err)
+	}
+	return plain, rt
+}
+
+// TestScopeCeiling_RefreshWithNothingWithinTheCeilingIsRefused pins the
+// refresh outcome when the bounded grant is empty:
+//   - Bob's family from before the ceiling, holding admin:users:read;
+//   - Alice's family that never held a scope. Without a ceiling such a
+//     family keeps refreshing scopeless (#584); for a ceiling client it is
+//     refused, so this case is what the ceiling's own empty check decides.
+//
+// Both answer invalid_grant with the ceiling's description and no token.
+func TestScopeCeiling_RefreshWithNothingWithinTheCeilingIsRefused(t *testing.T) {
+	srv := newTestServer(t, withCeilingClient, func(c *Config) {
+		c.LookupAdminTelegramIDs = map[int64]bool{bobTelegramID: true}
+		c.AutoApproveClients = false
+	})
+	mux := newMockRouter()
+	srv.Register(mux)
+
+	bob, _ := seedCeilingFamily(t, srv, bobTelegramID, "bob", "bob-lookup-family", "admin:users:read")
+	status, body := refreshResp(t, mux, bob, ceilingClientID)
+	assertCeilingRefusal(t, "lookup admin refresh", status, body, "invalid_grant")
+
+	alice, _ := seedCeilingFamily(t, srv, aliceTelegramID, "alice", "alice-scopeless-family", "")
+	status, body = refreshResp(t, mux, alice, ceilingClientID)
+	assertCeilingRefusal(t, "scopeless family refresh", status, body, "invalid_grant")
+}
+
+// TestScopeCeiling_GraceReplayWithNothingWithinTheCeilingIsRefused is the
+// same on the grace-window replay path, with Alice's scopeless family.
+func TestScopeCeiling_GraceReplayWithNothingWithinTheCeilingIsRefused(t *testing.T) {
+	srv := newTestServer(t, withCeilingClient, func(c *Config) { c.AutoApproveClients = false })
+	mux := newMockRouter()
+	srv.Register(mux)
+	plain, rt := seedCeilingFamily(t, srv, aliceTelegramID, "alice", "alice-grace-family", "")
+	if err := srv.store.RotateRefreshToken(context.Background(), plain, deriveSuccessorRefreshToken(srv.cfg.JWTSecret, plain), rt); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	status, body := refreshResp(t, mux, plain, ceilingClientID)
+	assertCeilingRefusal(t, "scopeless grace replay", status, body, "invalid_grant")
+}
+
+// TestScopeCeiling_TokenCannotMintAWorkerToken: a ceiling token, even for
+// Dana in every admin membership, is refused at the HTTP worker-token mint
+// (403) through the same middleware and handler the server mounts, while
+// Dana's unbounded claude.ai token is admitted there.
+func TestScopeCeiling_TokenCannotMintAWorkerToken(t *testing.T) {
+	srv := newTestServer(t, withDanaInEveryAdminMembership, withCeilingClient)
+	mux := newMockRouter()
+	srv.Register(mux)
+	seedSession(t, srv, danaTelegramID)
+
+	p, err := localjwt.NewProvider(srv.store, localjwt.ProviderConfig{Secret: []byte(testJWTSecret), ExpectedIssuer: testIssuer})
+	if err != nil {
+		t.Fatalf("provider: %v", err)
+	}
+	mint := auth.Middleware(p, true, nil, auth.ResourceMetadata{})(workertoken.NewHandler([]byte(testJWTSecret), testIssuer, ""))
+	post := func(access string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "/api/mcp/worker-token",
+			strings.NewReader(`{"telegram_id":`+strconv.FormatInt(danaTelegramID, 10)+`,"scopes":["telegram:dialogs:read"]}`))
+		r.Header.Set("Authorization", "Bearer "+access)
+		r.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		mint.ServeHTTP(rec, r)
+		return rec
+	}
+
+	ceiling := tokenFor(t, srv, mux, danaTelegramID, "dana_tg", ceilingClientID, ceilingCallback, "")
+	if rec := post(ceiling["access_token"].(string)); rec.Code != http.StatusForbidden {
+		t.Fatalf("ceiling token at /api/mcp/worker-token = %d %s, want 403", rec.Code, rec.Body.String())
+	}
+	admin := tokenFor(t, srv, mux, danaTelegramID, "dana_tg", "claude.ai", "https://claude.ai/cb", "")
+	if rec := post(admin["access_token"].(string)); rec.Code == http.StatusForbidden || rec.Code == http.StatusUnauthorized {
+		t.Fatalf("control: unbounded admin token at /api/mcp/worker-token = %d %s, want admitted past the scope check", rec.Code, rec.Body.String())
 	}
 }
