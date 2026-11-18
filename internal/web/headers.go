@@ -56,9 +56,12 @@ func SecurityHeaders(publicBaseURL string) func(http.Handler) http.Handler {
 
 // chromeCSP is the Content-Security-Policy for the shared-chrome content pages
 // (landing, docs, security, privacy, terms, demo, Local Bridge docs, product
-// updates). The chrome inlines its pre-paint theme script and toggle script
-// and every page inlines its own <style>, hence 'unsafe-inline' on both
-// script-src and style-src; the rest is the exact set of origins the chrome
+// updates). Every script is a same-origin file under /assets/ (see
+// ui.AssetHandler) or the Umami tracker, so script-src carries NO
+// 'unsafe-inline': an injected inline <script> or on* handler does not run.
+// JSON-LD blocks stay inline; they are data, not executed. Every page still
+// inlines its own <style> and uses style attributes, hence 'unsafe-inline' on
+// style-src until those are moved out in a separate change. The rest is the exact set of origins the chrome
 // loads from: ui.mctl.ai (design CSS, favicon), Google Fonts, and the Umami
 // analytics script at stats.mctl.ai. Two directives are deliberately wider
 // than that exact set, both for /demo: media-src admits any https origin
@@ -67,7 +70,7 @@ func SecurityHeaders(publicBaseURL string) func(http.Handler) http.Handler {
 // produce (YouTube, Loom). frame-ancestors 'none' replaces X-Frame-Options;
 // these pages are never meant to be embedded.
 const chromeCSP = "default-src 'none'; " +
-	"script-src 'self' 'unsafe-inline' https://stats.mctl.ai; " +
+	"script-src 'self' https://stats.mctl.ai; " +
 	"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://ui.mctl.ai; " +
 	"font-src https://fonts.gstatic.com; " +
 	"img-src 'self' data: https://ui.mctl.ai; " +

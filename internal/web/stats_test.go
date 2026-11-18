@@ -168,7 +168,7 @@ func TestLanding_StatsStripOnlyWhenSampled(t *testing.T) {
 		`data-stat="sessions_connected">60<`,
 		`datetime="2026-11-01T12:30:00Z"`,
 		`12:30 UTC`,
-		`fetch('/api/stats'`,
+		`src="` + ui.AssetURL("landing.js") + `"`,
 	} {
 		if !strings.Contains(body, must) {
 			t.Errorf("landing with stats missing %q", must)
@@ -188,6 +188,21 @@ func TestLanding_StatsStripOnlyWhenSampled(t *testing.T) {
 	Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true).ServeHTTP(plain, httptest.NewRequest("GET", "/", nil))
 	if strings.Contains(plain.Body.String(), `id="stats"`) {
 		t.Error("strip rendered without WithStats")
+	}
+}
+
+// The refresh logic moved out of the page into /assets/landing.<hash>.js; the
+// served file, not the HTML, must carry it.
+func TestLandingScript_RefreshesStatsFromAPI(t *testing.T) {
+	rec := httptest.NewRecorder()
+	ui.AssetHandler().ServeHTTP(rec, httptest.NewRequest("GET", ui.AssetURL("landing.js"), nil))
+	if rec.Code != 200 {
+		t.Fatalf("landing.js: status %d", rec.Code)
+	}
+	for _, must := range []string{`fetch('/api/stats'`, `data-stat`, `stats-updated`, `copy-mcp-url`, `connect-tabs`} {
+		if !strings.Contains(rec.Body.String(), must) {
+			t.Errorf("landing.js lost %q", must)
+		}
 	}
 }
 

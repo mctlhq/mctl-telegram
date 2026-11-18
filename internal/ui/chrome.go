@@ -21,7 +21,8 @@
 //     ui.mctl.ai/<version>/{mctl,global,site}.css + Google Fonts as progressive
 //     enhancement and runs the light/dark toggle JS (the choice persists in
 //     localStorage; with nothing stored the page is dark, like the sibling
-//     sites), plus the self-hosted Umami page-view counter (AnalyticsScript).
+//     sites; the theme and toggle scripts are same-origin files, see
+//     assets.go, so the page CSP needs no 'unsafe-inline' for scripts), plus the self-hosted Umami page-view counter (AnalyticsScript).
 //     The mobile nav menu is CSS-only and works without JS.
 //   - "lite"  — OAuth-flow pages served under a strict CSP
 //     (default-src 'none'; style-src 'unsafe-inline'; img-src https://ui.mctl.ai).
@@ -158,7 +159,7 @@ var defs = `
 <link rel="stylesheet" href="https://ui.mctl.ai/` + DesignVersion + `/mctl.css">
 <link rel="stylesheet" href="https://ui.mctl.ai/` + DesignVersion + `/global.css">
 <link rel="stylesheet" href="https://ui.mctl.ai/` + DesignVersion + `/site.css">
-<script>` + prepaintJS + `</script>
+<script src="{{asset "prepaint.js"}}"></script>
 ` + AnalyticsScript + `
 <style>` + componentsCSS + `</style>{{end}}
 
@@ -209,7 +210,7 @@ var defs = `
     </div>
   </footer>{{end}}
 
-{{define "ui_script"}}<script>` + toggleJS + `</script>{{end}}
+{{define "ui_script"}}<script defer src="{{asset "toggle.js"}}"></script>{{end}}
 
 {{define "ui_head_lite"}}<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -303,6 +304,7 @@ func SetAssistantsMounted(on bool) { assistantsMounted.Store(on) }
 var base = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"assistantsMounted": assistantsMounted.Load,
 	"fmtCount":          FormatCount,
+	"asset":             AssetURL,
 }).Parse(defs))
 
 // FormatCount renders an integer with comma thousands separators ("57,339").

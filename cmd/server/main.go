@@ -513,6 +513,9 @@ func main() {
 	mux.Get("/favicon.ico", web.FaviconICO())
 	mux.Get("/apple-touch-icon.png", web.AppleTouchIcon())
 	mux.Get("/og.png", web.OGImage())
+	// Content-hashed same-origin scripts for the chrome pages (CSP script-src
+	// has no 'unsafe-inline'); see ui.AssetHandler.
+	mux.Handle(ui.AssetPrefix+"*", ui.AssetHandler())
 	// Deployment-wide usage counts, no auth: the body holds four aggregate
 	// numbers and nothing per user. Served from the sampler's cache, so a
 	// burst of requests never reaches the database.
