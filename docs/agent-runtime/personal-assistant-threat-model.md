@@ -131,9 +131,14 @@ Preview end-to-end evals are separate (see [Acceptance evals](#acceptance-evals)
 5. **Confirm.** The bot posts "Connect <server> account <stable identifier>? [Confirm] [Cancel]" in the principal's private chat.
    - It becomes `active` only on a `callback_query` with `from.id == principal` within 10 minutes. Otherwise it becomes `failed`.
 
+6. **Account-owner binding, where the server can prove it.** Steps 1–5 bind the connection to the Telegram user who opens the completion link. A server whose accounts are themselves Telegram identities must also prove that the account belongs to the principal:
+   - **`tg`.** Before `pending_confirm`, the executor calls `get_my_identity` with the new token. The returned login `telegram_id` must equal the principal. A mismatch, a zero or missing id, or a failed call moves the connection to `failed` and revokes the token (I9). For `tg`, the forwarding case below is therefore **closed**, not residual.
+   - **Servers without a Telegram-bound identity (`alice`, and later Glovo).** No such proof exists. The forwarding case below stays a residual risk. It needs an explicit, recorded owner acceptance **per server** before linking for that server is enabled, even on preview. Until then, `PA_SERVER_<NAME>_ENABLED` stays off for it.
+   - Before the completion link is shown, the callback page names the Telegram account the server account will be linked to, as a masked name and id. The user must press "This is my Telegram account" first. This adds friction to the social-engineering path. It does not close it.
+
 **Why this holds.**
 - In case (a), the victim completes the provider login, but step 4 opens the Mini App in the victim's Telegram. The victim's `initData` does not match the attacker's principal, so the code is never exchanged.
-- **What step 4 actually checks** is the Telegram user who opens the completion link, not the person who did the provider login. The completion code is a bearer value. If the victim's browser cannot hand off to Telegram and the victim sends the link to the attacker ("send me the link to finish setup"), the attacker, who is the principal, can complete the flow. That is a residual risk (see the end of this document). It is reduced by the 5-minute TTL, the warning on the callback page, and `prompt=consent` showing the victim that they are granting access.
+- **What step 4 actually checks** is the Telegram user who opens the completion link, not the person who did the provider login. The completion code is a bearer value. If the victim's browser cannot hand off to Telegram and the victim sends the link to the attacker ("send me the link to finish setup"), the attacker, who is the principal, can complete the flow. For `tg`, step 6 closes this case. For servers without a Telegram-bound identity, it is a residual risk that needs per-server owner acceptance (see the end of this document). It is reduced by the 5-minute TTL, the confirmation and warning on the callback page, and `prompt=consent` showing the victim that they are granting access.
 - In case (b), the attacker would have to complete step 4 as the victim, which needs the victim's Telegram session.
 - A stable identifier on the card defeats display-name spoofing as a defence in depth.
 
@@ -150,6 +155,8 @@ Preview end-to-end evals are separate (see [Acceptance evals](#acceptance-evals)
 - S1-L10: the card shows the stable identifier, not the display name.
 - S1-L11: a completion code opened by the principal succeeds even when the provider login was done by someone else. This test documents the exact scope of the step 4 check (see the residual risk), so nobody reads more into it.
 - S1-L12: a completion code passed as a URL parameter instead of the signed `start_param` is ignored.
+- S1-L13: a `tg` connection whose `get_my_identity` returns a different `telegram_id`, a zero id or an error never reaches `pending_confirm`. The token is revoked.
+- S1-L14: linking for a server without a recorded owner acceptance of the T1 residual risk is refused while its flag is off.
 
 ### T2 Connection state, revisions, scope escalation and revocation
 
@@ -216,7 +223,7 @@ A crash between steps 1 and 3 leaves a `dispatching` record. On restart, that re
 - The KEK is a non-exportable Vault transit key. Only the mctl-telegram service role can call unwrap.
 - An operator with database and `kubectl` access does not get plaintext tokens.
 - A Vault administrator could grant themselves unwrap. That is a residual risk, made visible by the Vault audit log.
-- If transit is not available when Phase 1 starts, the KEK is a Vault KV secret, and the claim above is withdrawn for that period: an operator with Vault read and database access can then unseal tokens. The ADR records which option was taken.
+- Vault transit is **mandatory in production**. A Vault KV key is not an equivalent substitute. It is allowed only on preview, with synthetic or owner-only accounts, and the operator-access claim above is withdrawn there. A production deployment with a KV KEK fails its startup check.
 - Revocation destroys the wrapper. As ADR 0010 states, this is data deletion. It is crypto-erasure only where backup retention of the wrapper is bounded.
 
 **In use.**
@@ -416,9 +423,22 @@ Read tools are auto from Phase 1: `alice_list_devices`, `alice_get_device_state`
 
 Reads are `auto`, which departs from the #1048 default "approve by default". The justification is that reads in Phase 1 go only to MCTL's own `tg` server or to device metadata at Yandex, and the read results reach only the principal and the model provider under consent. The departure is limited to pinned read tools.
 
-**Scopes and audience.**
-- Phase 1 requests read-only OAuth scopes wherever a server offers them.
-  - `tg` must issue a read-only token for the PA client. If its authorization server cannot, the read-only boundary rests on the pin alone. In that case this is recorded as a residual risk and needs an explicit owner decision before Phase 1.
+**Scopes and audience: the strict read-only token contract.**
+
+The pin alone is not the read-only boundary. The token itself must carry no authority beyond the pinned reads, **including for admin principals**.
+
+- **Requested scopes.** Phase 1 requests an exact per-server scope set. For `tg` that is `telegram:dialogs:read telegram:messages:read`.
+- **Implicit privileged scopes.** `tg` grants `admin:users`, `admin:users:read` and `admin:broadcast` by membership. Its `narrowGrant` deliberately keeps them even when a client asks only for reads. A PA token for an admin principal would therefore carry admin authority today. Phase 1 therefore requires a change in `tg`'s authorization server, before any PA linking:
+  - a **per-client scope ceiling**, keyed by the PA client id, that is an allowlist (`telegram:dialogs:read`, `telegram:messages:read`);
+  - every scope outside the ceiling is stripped, implicit and membership-granted scopes included, and so are any scopes added later;
+  - the ceiling applies to authorization-code and refresh grants alike;
+  - a client id without a ceiling record gets today's behaviour, so existing clients are unaffected.
+- **Effective-scope verification in the executor, fail-closed.**
+  - After every code exchange and every refresh, the effective scope (the token response `scope`) must **equal** the server's allowed set.
+  - An extra scope, a missing `scope` field or an unparseable value moves the connection to `failed` and revokes the token (I9). It is never "probably fine".
+  - A server that cannot report the effective scope is not linkable in Phase 1.
+- **Downstream authorization is the real fence.** `tg` enforces scopes per tool (`internal/mcp/toolscopes.go`). With the ceiling, admin and write tools are refused **by `tg` itself** for a PA token, even for an admin principal and even if the pin or executor had a bug.
+- **Alice.** Its scope model is verified when Phase 1 starts and recorded in the ADR. If it cannot issue a narrower token, its token is broader than Phase 1 needs. In that case the boundary for `alice` rests on the pin and the executor, and Alice linking needs an explicit owner decision.
 - Authorization and token requests carry an RFC 8707 `resource` per server.
 - A server that ignores `resource` is recorded in the ADR. Its tokens are used only against that one pinned host.
 
@@ -430,6 +450,10 @@ Reads are `auto`, which departs from the #1048 default "approve by default". The
 - S1-T5: a `tools/list` error shows the tools as unavailable, never as an empty set.
 - S1-T6: a tool outside the pin is refused even if the model names it.
 - S1-T7: the model receives catalog descriptions, not server descriptions.
+- S1-T8: an **admin** principal (a member of `TG_LOGIN_ADMINS` and `BROADCAST_OPERATORS`) links `tg`. The token carries exactly the two read scopes, and `tg` itself refuses `list_telegram_identities`, `set_telegram_access`, the broadcast tools and `send_message` with that token. This runs against the real `tg` authorization server code, not a fake.
+- S1-T9: a token response with an extra scope, no `scope` field, or an unparseable `scope` fails the connection and revokes the token.
+- S1-T10: a refresh that returns a wider scope fails the connection.
+- S1-T11: a client id without a ceiling record keeps today's grant. This is the regression guard for existing clients.
 
 ### T9 Egress, SSRF and redirects (from Phase 1)
 
@@ -580,6 +604,6 @@ These run on preview after deployment, against dedicated test accounts on `tg` a
 - An external action that was already dispatched cannot be rolled back (T2). The result can be `outcome_unknown`.
 - Downstream servers may not support token revocation. MCTL's revocation is effective, but the token may remain valid at the server until it expires. The ADR lists this per server.
 - A Vault administrator can grant themselves unwrap on the KEK (T3).
-- If `tg` cannot issue read-only tokens, the Phase 1 read-only boundary rests on the pin and the executor alone (T8).
-- Linking (T1) binds the account to the Telegram user who opens the completion link. A victim who forwards that link to an attacker within 5 minutes links their own account to the attacker.
+- `alice` may not offer narrower scopes. Its Phase 1 boundary then rests on the pin and the executor (T8). That needs an owner decision before Alice linking.
+- For servers without a Telegram-bound identity (`alice`, Glovo), linking (T1) binds the account to the Telegram user who opens the completion link. A victim who confirms on the callback page and then forwards the link to an attacker within 5 minutes links their own account to the attacker. This is **not accepted by default**: each such server needs a recorded owner acceptance before its linking is enabled (S1-L14). It does not apply to `tg`, which is closed by T1 step 6.
 - The bot token is a high-value secret: whoever holds it can forge `initData`. Rotation invalidates every pending link (T3).

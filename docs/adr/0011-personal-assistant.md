@@ -53,9 +53,12 @@ This record is Phase 0 of the Personal Assistant epic (#1312). Refs #1048, the s
   2. the authorization request, with PKCE `S256`, a single-use `state`, RFC 8707 `resource`, and `prompt=consent` where supported;
   3. a callback that checks `state`, the redirect and RFC 9207 `iss`, stores the code **without** exchanging it, and redirects to a Mini App deep link carrying a single-use completion code;
   4. a second `initData` check, which must match the principal, before the code exchange;
-  5. a confirm card in the bot chat showing a stable unique account identifier.
+  5. a confirm card in the bot chat showing a stable unique account identifier;
+  6. for `tg`, an account-owner check: `get_my_identity` on the new token must return the principal's `telegram_id`, otherwise the connection fails.
 
-  Step 4 binds the account to the Telegram user who opens the completion link. That user must be the principal who started the flow. The check does not prove who did the provider login: a victim who forwards the completion link to the attacker within its 5-minute TTL links their own account. That is a stated residual risk, and the callback page warns against it.
+  Steps 1–5 bind the account to the Telegram user who opens the completion link. They do not prove who did the provider login.
+  - For `tg`, step 6 closes that gap.
+  - For servers without a Telegram-bound identity (`alice`, Glovo), a victim who forwards the completion link to the attacker within its 5-minute TTL links their own account. That is a residual risk. It is **not accepted by this ADR**: each such server needs a recorded owner acceptance before its linking flag is turned on.
 - **State machine.** The threat model T2 and this record use the same text:
 
       pending_link -> pending_oauth -> pending_return -> pending_confirm -> active
@@ -67,9 +70,13 @@ This record is Phase 0 of the Personal Assistant epic (#1312). Refs #1048, the s
   - `token_generation` changes with token rotation. Nothing binds to it.
 
   Refresh is single-flight per connection.
-- **Scopes.** Phase 1 uses read-only scopes wherever the server offers them. If `tg` cannot issue a read-only token for the PA client, the read-only boundary rests on the pin and the executor alone. That needs an explicit owner decision before Phase 1.
+- **Scopes: strict read-only token contract** (threat model T8).
+  - `tg`'s `narrowGrant` keeps the membership-granted `admin:users`, `admin:users:read` and `admin:broadcast` even for a read-only request. Before any PA linking, `tg` gains a per-client scope ceiling for the PA client id: an allowlist of `telegram:dialogs:read` and `telegram:messages:read` that strips every other scope, implicit ones included, on both code and refresh grants.
+  - The executor verifies, after every exchange and refresh, that the effective scope equals the allowed set. An extra, missing or unparseable scope fails the connection and revokes the token.
+  - `tg` itself refuses admin and write tools for a PA token, including for admin principals. The pin is defence in depth, not the boundary.
+  - If `alice` cannot narrow its scopes, Alice linking needs an owner decision.
 - **Secrets.**
-  - Each connection has its own DEK, wrapped by a non-exportable Vault transit key that only the service role can use. If transit is unavailable, a Vault KV key is used, and the stated limits on what an operator can reach do not hold.
+  - Each connection has its own DEK, wrapped by a non-exportable Vault transit key that only the service role can use. Transit is mandatory in production; a KV key is allowed only on preview with synthetic or owner-only accounts, and a production start with a KV KEK fails.
   - Leak procedures cover the database plus KEK, DCR client credentials, the bot token and the webhook secret (threat model T3).
 - **Dispatch.** No transaction is held open across an outbound call.
   1. A pre-dispatch transaction re-reads the connection state and authority revision. For a write, it also consumes the receipt and records `dispatching`, then commits.
@@ -168,7 +175,7 @@ This record is Phase 0 of the Personal Assistant epic (#1312). Refs #1048, the s
 | Phase | Content | Gate to enter | Gate to leave |
 |---|---|---|---|
 | 0 Architecture and governance | This record, the threat model, epic #1312, draft issues | — | Owner accepts the threat model and this record |
-| 1 Read-only MVP | Bot loop and execution context; ingress filter; linking for `tg` and `alice`; catalog pin and drift denial; egress policy; output hardening; read tools only; consent, ledger, audit, switches; leak runbook | Owner GO, plus the `tg` read-only scope decision | S1 green, then preview deployment (owner GO), then evals R1–R6, then owner GO |
+| 1 Read-only MVP | Bot loop and execution context; ingress filter; linking for `tg` and `alice`; catalog pin and drift denial; egress policy; output hardening; read tools only; consent, ledger, audit, switches; leak runbook | Owner GO; `tg` per-client scope ceiling merged first; per-server owner acceptance of the T1 residual before `alice` linking | S1 green, then preview deployment (owner GO), then evals R1–R6, then owner GO |
 | 2 Safe actions | Approval engine; standing permissions; taint; Alice actions and the `disclosure` class | Owner GO | S2 green, then writes enabled on preview, then evals A1–A7, then owner GO |
 | 3 Private pilot | Owner plus 1–3 test users behind an allowlist; telemetry; revocation, injection, budget and leak drills; the `/assistants` card | Owner GO | Pilot report, then a separate GO to expand |
 | 4 Expansion | Glovo after its C2 GO; memory; routines. Custom MCP by URL stays with #1048. | One addendum and review per item | — |
