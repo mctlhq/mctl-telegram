@@ -5,6 +5,25 @@ import (
 	"strings"
 )
 
+// NoIndexValue is the X-Robots-Tag value; it matches the NoIndex meta tag
+// emitted by internal/ui ("noindex, follow").
+const NoIndexValue = "noindex, follow"
+
+// noIndexPrefixes are the auth, session, callback and JSON-API route trees
+// that must never appear in a search index. They mirror the Disallow lines in
+// robots.txt (see RobotsTxt). A Disallow alone does not remove an indexed URL
+// and stops Google from seeing a noindex, so the header is the removal signal.
+var noIndexPrefixes = []string{"/oauth/", "/telegram/connect", "/auth/", "/api/"}
+
+func noIndexPath(p string) bool {
+	for _, pre := range noIndexPrefixes {
+		if strings.HasPrefix(p, pre) {
+			return true
+		}
+	}
+	return false
+}
+
 // SecurityHeaders sets the transport-level hardening headers every response
 // from this server should carry, independent of which handler produced it.
 // They are deliberately content-neutral: nothing here constrains what a page
@@ -25,6 +44,11 @@ func SecurityHeaders(publicBaseURL string) func(http.Handler) http.Handler {
 			}
 			h.Set("X-Content-Type-Options", "nosniff")
 			h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+			// Set before the handler runs so it covers every status code,
+			// including 4xx/5xx and non-HTML bodies a meta tag cannot reach.
+			if noIndexPath(r.URL.Path) {
+				h.Set("X-Robots-Tag", NoIndexValue)
+			}
 			next.ServeHTTP(w, r)
 		})
 	}
