@@ -89,6 +89,23 @@ func mustPrefixes(s ...string) []netip.Prefix {
 
 var nat64 = netip.MustParsePrefix("64:ff9b::/96")
 
+// Unwrap returns the address ip stands for: the zone is dropped, and the
+// IPv4-mapped (::ffff:0:0/96) and NAT64 (64:ff9b::/96) forms are replaced by
+// the IPv4 address they carry. Callers that add their own denied ranges on
+// top of PublicAddr match them against Unwrap(ip), so a mapped form of a
+// denied IPv4 address cannot slip past.
+func Unwrap(ip netip.Addr) netip.Addr {
+	ip = ip.WithZone("")
+	if ip.Is4In6() {
+		return ip.Unmap()
+	}
+	if ip.Is6() && nat64.Contains(ip) {
+		b := ip.As16()
+		return netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})
+	}
+	return ip
+}
+
 // PublicAddr reports whether ip is a public unicast address. IPv4-mapped
 // IPv6 and NAT64 (64:ff9b::/96) forms are unwrapped and judged as the IPv4
 // address they carry.
@@ -96,13 +113,7 @@ func PublicAddr(ip netip.Addr) bool {
 	if !ip.IsValid() {
 		return false
 	}
-	ip = ip.WithZone("")
-	if ip.Is4In6() {
-		ip = ip.Unmap()
-	} else if ip.Is6() && nat64.Contains(ip) {
-		b := ip.As16()
-		ip = netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})
-	}
+	ip = Unwrap(ip)
 	if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast() ||
 		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() {
 		return false
