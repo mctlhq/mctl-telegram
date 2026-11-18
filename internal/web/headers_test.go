@@ -115,3 +115,71 @@ func TestLanding_CanonicalAndSingleDescription(t *testing.T) {
 		t.Errorf("landing must have exactly one meta description, got %d", n)
 	}
 }
+
+// Auth, session and API routes carry X-Robots-Tag on every status code; public
+// pages and operational endpoints do not.
+func TestSecurityHeaders_NoIndexRoutes(t *testing.T) {
+	for _, code := range []int{http.StatusOK, http.StatusBadRequest, http.StatusInternalServerError} {
+		h := SecurityHeaders("https://tg.mctl.ai")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(code)
+		}))
+		for _, p := range []string{
+			"/oauth/authorize?client_id=x", "/oauth/telegram/callback", "/oauth/token",
+			"/telegram/connect", "/telegram/connect/done", "/telegram/connect/manage",
+			"/auth/login", "/api/stats", "/api/account/me",
+		} {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("GET", p, nil))
+			if got := rec.Header().Get("X-Robots-Tag"); got != "noindex, follow" {
+				t.Errorf("%s status %d: X-Robots-Tag = %q, want %q", p, code, got, "noindex, follow")
+			}
+		}
+	}
+}
+
+func TestSecurityHeaders_IndexablePagesHaveNoRobotsHeader(t *testing.T) {
+	h := SecurityHeaders("https://tg.mctl.ai")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	for _, p := range []string{"/", "/docs", "/platforms", "/mcp", "/healthz", "/.well-known/oauth-authorization-server"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", p, nil))
+		if got := rec.Header().Get("X-Robots-Tag"); got != "" {
+			t.Errorf("%s: unexpected X-Robots-Tag %q", p, got)
+		}
+	}
+}
+
+// The header set must cover every tree robots.txt disallows for auth/API use.
+func TestNoIndexPrefixesCoverRobotsDisallow(t *testing.T) {
+	rec := httptest.NewRecorder()
+	RobotsTxt("https://tg.mctl.ai").ServeHTTP(rec, httptest.NewRequest("GET", "/robots.txt", nil))
+	for _, p := range []string{"/oauth/", "/telegram/connect", "/auth/", "/api/"} {
+		if !strings.Contains(rec.Body.String(), "Disallow: "+p+"\n") {
+			t.Errorf("robots.txt no longer disallows %s; revisit noIndexPrefixes", p)
+		}
+		if !noIndexPath(p) {
+			t.Errorf("%s not covered by noIndexPrefixes", p)
+		}
+	}
+}
+
+// Home meta description stays within the ~160 char SERP limit.
+func TestLandingDescriptionLength(t *testing.T) {
+	rec := httptest.NewRecorder()
+	Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true).ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	body := rec.Body.String()
+	const marker = `<meta name="description" content="`
+	i := strings.Index(body, marker)
+	if i < 0 {
+		t.Fatal("no meta description")
+	}
+	rest := body[i+len(marker):]
+	desc := rest[:strings.Index(rest, `"`)]
+	if n := len([]rune(desc)); n > 160 {
+		t.Errorf("description is %d chars, want <= 160", n)
+	}
+	for _, m := range []string{`og:description" content="` + desc, `twitter:description" content="` + desc} {
+		if !strings.Contains(body, m) {
+			t.Errorf("missing %q", m)
+		}
+	}
+}
