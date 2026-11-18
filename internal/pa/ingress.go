@@ -151,10 +151,8 @@ func filterMessage(updateID int64, raw json.RawMessage) (VerifiedUpdate, string)
 	if !ok {
 		return VerifiedUpdate{}, DropMalformed
 	}
-	for _, r := range messageRejectKeys {
-		if _, present := fields[r.key]; present {
-			return VerifiedUpdate{}, r.outcome
-		}
+	if outcome := rejectMessageKeys(fields); outcome != "" {
+		return VerifiedUpdate{}, outcome
 	}
 	principal, messageID, outcome := privateSender(fields, fields)
 	if outcome != "" {
@@ -195,6 +193,12 @@ func filterCallback(updateID int64, raw json.RawMessage) (VerifiedUpdate, string
 	msg, ok := decodeObject(msgRaw)
 	if !ok {
 		return VerifiedUpdate{}, DropMalformed
+	}
+	// The button's message gets the same field checks as a message update:
+	// a button on a business, sender_chat or via_bot message is not one this
+	// bot put in the principal's own chat.
+	if outcome := rejectMessageKeys(msg); outcome != "" {
+		return VerifiedUpdate{}, outcome
 	}
 	// The sender is the callback's from (who pressed the button); the chat is
 	// the one the button's message is in. Both must be the same private chat.
@@ -251,6 +255,17 @@ func privateSender(fromObj, msgObj map[string]json.RawMessage) (Principal, int64
 		}
 	}
 	return Principal{telegramID: from.ID}, messageID, ""
+}
+
+// rejectMessageKeys returns the drop outcome of the first messageRejectKeys
+// field present in a message object, or "".
+func rejectMessageKeys(msg map[string]json.RawMessage) string {
+	for _, r := range messageRejectKeys {
+		if _, present := msg[r.key]; present {
+			return r.outcome
+		}
+	}
+	return ""
 }
 
 func decodeObject(raw json.RawMessage) (map[string]json.RawMessage, bool) {

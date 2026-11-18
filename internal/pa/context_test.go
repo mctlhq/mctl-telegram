@@ -132,6 +132,29 @@ func TestNoopMemoryStore(t *testing.T) {
 	}
 }
 
+// A zero or half-built context is invalid, and the memory store refuses it
+// rather than acting for principal 0.
+func TestExecutionContext_ZeroIsInvalid(t *testing.T) {
+	if (ExecutionContext{}).Valid() {
+		t.Fatal("zero ExecutionContext reports valid")
+	}
+	ec, err := NewInteractive(verified(t, aliceID), "conv", nil, BudgetReservation{ID: "h"}, ConsentDataFlowV1)
+	if err != nil || !ec.Valid() {
+		t.Fatalf("constructed context: valid=%v err=%v", ec.Valid(), err)
+	}
+	var m MemoryStore = NoopMemoryStore{}
+	ctx := context.Background()
+	if _, err := m.Recall(ctx, ExecutionContext{}); !errors.Is(err, ErrInvalidContext) {
+		t.Fatalf("Recall(zero) error = %v, want ErrInvalidContext", err)
+	}
+	if err := m.Remember(ctx, ExecutionContext{}, MemoryItem{}); !errors.Is(err, ErrInvalidContext) {
+		t.Fatalf("Remember(zero) error = %v, want ErrInvalidContext", err)
+	}
+	if err := m.Forget(ctx, ExecutionContext{}); !errors.Is(err, ErrInvalidContext) {
+		t.Fatalf("Forget(zero) error = %v, want ErrInvalidContext", err)
+	}
+}
+
 func TestProvenanceEffective(t *testing.T) {
 	for p, want := range map[Provenance]Provenance{
 		ProvenanceUser:     ProvenanceUser,

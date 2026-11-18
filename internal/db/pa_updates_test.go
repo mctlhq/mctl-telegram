@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"sync"
 	"testing"
 )
 
@@ -51,4 +52,69 @@ func assertPAUpdateDedup(t *testing.T, s *Store) {
 	if err != nil || !ok || runs != 2 {
 		t.Fatalf("retry after failure: ok=%v err=%v runs=%d, want true nil 2", ok, err, runs)
 	}
+}
+
+// TestPAUpdates_ConcurrentDuplicates: N concurrent deliveries of one
+// update_id run fn at most once. On Postgres every call succeeds and exactly
+// one runs. SQLite may answer a contended writer with SQLITE_BUSY, which the
+// webhook turns into a 503 and a Telegram retry; it must never be a second
+// run.
+func TestPAUpdates_ConcurrentDuplicates(t *testing.T) {
+	t.Run("sqlite", func(t *testing.T) {
+		runs, errs := concurrentPAAccepts(t, newTestStore(t), 601, 16)
+		if runs > 1 {
+			t.Fatalf("runs = %d, want at most 1", runs)
+		}
+		if runs == 0 && errs == 0 {
+			t.Fatal("no run and no error: the update was swallowed")
+		}
+	})
+	t.Run("postgres", func(t *testing.T) {
+		dsn := os.Getenv("TEST_DATABASE_URL")
+		if dsn == "" {
+			t.Skip("TEST_DATABASE_URL not set")
+		}
+		s := newPostgresTestStore(t, dsn)
+		t.Cleanup(func() { _, _ = s.DB.Exec(`DELETE FROM pa_updates`) })
+		runs, errs := concurrentPAAccepts(t, s, 601, 16)
+		if runs != 1 || errs != 0 {
+			t.Fatalf("runs=%d errors=%d, want exactly 1 run and no errors", runs, errs)
+		}
+	})
+}
+
+func concurrentPAAccepts(t *testing.T, s *Store, updateID int64, n int) (runs, errs int) {
+	t.Helper()
+	var (
+		mu    sync.Mutex
+		wg    sync.WaitGroup
+		start = make(chan struct{})
+	)
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			ran := false
+			ok, err := s.AcceptPAUpdate(context.Background(), updateID, func(context.Context, *sql.Tx) error {
+				ran = true
+				return nil
+			})
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs++
+				return
+			}
+			if ok != ran {
+				t.Errorf("accepted=%v but fn ran=%v", ok, ran)
+			}
+			if ok {
+				runs++
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	return runs, errs
 }

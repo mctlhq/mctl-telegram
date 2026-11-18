@@ -8,7 +8,7 @@ import (
 // Synthetic Bot API tokens. Neither id is a real bot; both are checked with
 // git grep to mean nothing else in this repository.
 const (
-	testPABotToken    = "7000000001:pa-test-token-not-real"
+	testPABotToken    = "7000000001:pa-test-token-not-real-0123456789"
 	testLoginBotToken = "7000000002:login-test-token-not-real"
 	testPASecret      = "pa_webhook_secret_for_tests_only_0123456789"
 )
@@ -68,6 +68,8 @@ func TestLoadPA_Enabled(t *testing.T) {
 		{"no token", "", testPASecret, "", "PA_BOT_TOKEN"},
 		{"malformed token", "not-a-token", testPASecret, "", "PA_BOT_TOKEN"},
 		{"token without secret half", "7000000001:", testPASecret, "", "PA_BOT_TOKEN"},
+		{"token secret half too short", "7000000001:short-half", testPASecret, "", "PA_BOT_TOKEN"},
+		{"token secret half outside alphabet", "7000000001:pa-test-token-not-real-012345678!", testPASecret, "", "PA_BOT_TOKEN"},
 		{"same bot as login bot", testPABotToken, testPASecret, "7000000001:other-half", "different bot"},
 		{"no secret", testPABotToken, "", "", "PA_WEBHOOK_SECRET"},
 		{"short secret", testPABotToken, strings.Repeat("s", MinPAWebhookSecretLen-1), "", "PA_WEBHOOK_SECRET"},

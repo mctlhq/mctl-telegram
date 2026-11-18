@@ -559,6 +559,10 @@ type Config struct {
 // refused at boot rather than accepted on the public webhook.
 const MinPAWebhookSecretLen = 32
 
+// paBotTokenFormat is the shape of a Bot API token: numeric bot id, a colon,
+// and a secret half of at least 30 URL-safe characters.
+var paBotTokenFormat = regexp.MustCompile(`^[0-9]+:[A-Za-z0-9_-]{30,}$`)
+
 // paWebhookSecretChars is Telegram's documented secret_token alphabet.
 var paWebhookSecretChars = regexp.MustCompile(`^[A-Za-z0-9_-]{1,256}$`)
 
@@ -573,7 +577,7 @@ func loadPA(c *Config) error {
 	c.PABotToken = os.Getenv("PA_BOT_TOKEN")
 	c.PAWebhookSecret = os.Getenv("PA_WEBHOOK_SECRET")
 	paID, ok := BotIDFromToken(c.PABotToken)
-	if !ok || len(c.PABotToken) <= len(paID)+1 {
+	if !ok || !paBotTokenFormat.MatchString(c.PABotToken) {
 		return errors.New("PA_ENABLED=true requires PA_BOT_TOKEN to be a Bot API token")
 	}
 	if loginID, ok := BotIDFromToken(c.TelegramLoginBotToken); ok && loginID == paID {

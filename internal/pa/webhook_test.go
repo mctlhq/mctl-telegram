@@ -203,6 +203,23 @@ func TestWebhook_MethodAndSize(t *testing.T) {
 	}
 }
 
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("connection reset") }
+
+// A body read failure that is not the size cap is a 400, not a 413.
+func TestWebhook_ReadErrorIsBadRequest(t *testing.T) {
+	runs := &runRecorder{}
+	wh := newWebhook(t, newStore(t), runs, nil)
+	req := httptest.NewRequest(http.MethodPost, WebhookPath, failingReader{})
+	req.Header.Set(SecretHeader, testSecret)
+	w := httptest.NewRecorder()
+	wh.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest || runs.count() != 0 {
+		t.Fatalf("status=%d runs=%d, want 400 and no run", w.Code, runs.count())
+	}
+}
+
 func TestNewWebhookHandler_RequiresEverything(t *testing.T) {
 	store := newStore(t)
 	for _, cfg := range []WebhookConfig{
@@ -236,5 +253,38 @@ func TestWebhook_S1X_IngressIsolation(t *testing.T) {
 	}
 	if got := runs.runs[1].Principal().TelegramID(); got != bobID {
 		t.Fatalf("run 1 principal = %d, want Bob", got)
+	}
+}
+
+// Concurrent webhook deliveries of one update_id: at most one run, and every
+// other delivery is a 200 duplicate or a 503 that Telegram will retry (SQLite
+// can answer a contended writer with BUSY). Postgres exactness is asserted in
+// internal/db TestPAUpdates_ConcurrentDuplicates.
+func TestWebhook_ConcurrentDuplicates(t *testing.T) {
+	runs := &runRecorder{}
+	wh := newWebhook(t, newStore(t), runs, nil)
+	body := privateMessage(80, aliceID, "")
+	const n = 16
+	codes := make(chan int, n)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			codes <- deliver(wh, testSecret, body)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(codes)
+	for c := range codes {
+		if c != http.StatusOK && c != http.StatusServiceUnavailable {
+			t.Fatalf("status %d, want 200 or 503", c)
+		}
+	}
+	if runs.count() > 1 {
+		t.Fatalf("runs = %d, want at most 1", runs.count())
 	}
 }

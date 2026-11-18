@@ -56,14 +56,25 @@ var _ MemoryStore = NoopMemoryStore{}
 
 // Recall returns no items: there is no memory, which is the true answer, not
 // a masked failure.
-func (NoopMemoryStore) Recall(context.Context, ExecutionContext) ([]MemoryItem, error) {
+func (NoopMemoryStore) Recall(_ context.Context, ec ExecutionContext) ([]MemoryItem, error) {
+	if !ec.Valid() {
+		return nil, ErrInvalidContext
+	}
 	return nil, nil
 }
 
 // Remember stores nothing and says so.
-func (NoopMemoryStore) Remember(context.Context, ExecutionContext, MemoryItem) error {
+func (NoopMemoryStore) Remember(_ context.Context, ec ExecutionContext, _ MemoryItem) error {
+	if !ec.Valid() {
+		return ErrInvalidContext
+	}
 	return ErrMemoryDisabled
 }
 
 // Forget has nothing to delete.
-func (NoopMemoryStore) Forget(context.Context, ExecutionContext) error { return nil }
+func (NoopMemoryStore) Forget(_ context.Context, ec ExecutionContext) error {
+	if !ec.Valid() {
+		return ErrInvalidContext
+	}
+	return nil
+}

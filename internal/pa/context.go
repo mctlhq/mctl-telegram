@@ -92,6 +92,17 @@ func NewInteractive(u VerifiedUpdate, conversationID string, conns []ConnectionR
 	}, nil
 }
 
+// Valid reports whether c was built by a constructor. The zero
+// ExecutionContext is invalid, and every consumer must refuse it.
+func (c ExecutionContext) Valid() bool {
+	return !c.principal.IsZero() && c.trigger != "" && c.conversationID != "" &&
+		c.budget.ID != "" && c.consentVersion != ""
+}
+
+// ErrInvalidContext is returned by anything handed a zero or half-built
+// ExecutionContext.
+var ErrInvalidContext = errors.New("pa: invalid execution context")
+
 // Trigger is for audit records and metrics labels only. Tiering, provenance,
 // approval and limits code takes a Policy instead, which has no trigger.
 func (c ExecutionContext) Trigger() Trigger { return c.trigger }

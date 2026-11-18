@@ -1679,7 +1679,10 @@ func mountPA(mux chi.Router, cfg *config.Config, store *db.Store) (bool, error) 
 	if err != nil {
 		return false, err
 	}
-	mux.Method(http.MethodPost, pa.WebhookPath, h)
+	// Handle, not Method(POST): the handler checks the secret before the
+	// method, so a GET without the secret is a 401 like any other request
+	// and the router does not reveal the endpoint with a 405.
+	mux.Handle(pa.WebhookPath, h)
 	slog.Info("pa bot webhook enabled", "path", pa.WebhookPath, "handler", "inert")
 	return true, nil
 }

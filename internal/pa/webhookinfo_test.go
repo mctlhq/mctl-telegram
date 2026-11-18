@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const fakeToken = "7000000001:pa-test-token-not-real"
+const fakeToken = "7000000001:pa-test-token-not-real-0123456789"
 
 func infoServer(t *testing.T, status int, body string) *httptest.Server {
 	t.Helper()

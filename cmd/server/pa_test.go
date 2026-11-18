@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -68,16 +69,41 @@ func TestMountPA_InertByDefault(t *testing.T) {
 		t.Fatalf("PA_ENABLED unset: status = %d, want 404", code)
 	}
 
-	on := &config.Config{PAEnabled: true, PAWebhookSecret: testPASecret, PABotToken: "7000000001:pa-test-token-not-real"}
+	on := &config.Config{PAEnabled: true, PAWebhookSecret: testPASecret, PABotToken: "7000000001:pa-test-token-not-real-0123456789"}
 	mux = chi.NewRouter()
 	mounted, err = mountPA(mux, on, store)
 	if err != nil || !mounted {
 		t.Fatalf("PA_ENABLED on: mounted=%v err=%v", mounted, err)
 	}
-	if r := paRoutes(mux); len(r) != 1 || r[0] != "POST "+pa.WebhookPath {
-		t.Fatalf("PA_ENABLED on: routes = %v", r)
+	routes := paRoutes(mux)
+	if !slices.Contains(routes, "POST "+pa.WebhookPath) {
+		t.Fatalf("PA_ENABLED on: routes = %v, want POST %s", routes, pa.WebhookPath)
+	}
+	for _, r := range routes {
+		if !strings.HasSuffix(r, " "+pa.WebhookPath) {
+			t.Fatalf("PA_ENABLED on: unexpected route %q", r)
+		}
 	}
 	if code := post(mux); code != http.StatusOK {
 		t.Fatalf("PA_ENABLED on: status = %d, want 200 (malformed update dropped)", code)
+	}
+
+	// Through the mounted router, the secret is checked before the method:
+	// any method without the secret is a 401, never a router 405 that would
+	// confirm the endpoint exists.
+	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodHead, http.MethodDelete} {
+		req := httptest.NewRequest(method, pa.WebhookPath, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("%s without secret: status = %d, want 401", method, w.Code)
+		}
+		req = httptest.NewRequest(method, pa.WebhookPath, nil)
+		req.Header.Set(pa.SecretHeader, testPASecret)
+		w = httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s with secret: status = %d, want 405", method, w.Code)
+		}
 	}
 }

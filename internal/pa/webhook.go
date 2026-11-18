@@ -28,6 +28,7 @@ const (
 	OutcomeBadSecret    = "bad_secret"
 	OutcomeBadMethod    = "bad_method"
 	OutcomeTooLarge     = "too_large"
+	OutcomeReadError    = "read_error"
 	OutcomeDedupError   = "dedup_error"
 	OutcomeHandlerError = "handler_error"
 )
@@ -118,8 +119,14 @@ func (h *webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxUpdateBody))
 	if err != nil {
-		h.count(OutcomeTooLarge)
-		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			h.count(OutcomeTooLarge)
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			return
+		}
+		h.count(OutcomeReadError)
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
