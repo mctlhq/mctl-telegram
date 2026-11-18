@@ -328,9 +328,13 @@ type Config struct {
 	// ClientProfiles binds OAuth clients to restricted tool profiles
 	// (docs/design/core-profiles.md), from MCP_CLIENT_PROFILES: a JSON array
 	// of {"client_id","profile"} and {"redirect_uri","profile"} records,
-	// each matched exactly. Empty (the default) restricts no client. A
-	// malformed table or an unknown profile aborts startup
-	// (toolprofile.ParseBindings).
+	// each matched exactly. A client_id record may also carry a
+	// "scope_ceiling" list, with or without a profile: the allowlist of
+	// scopes that client's tokens may carry (#1326). Empty (the default)
+	// restricts no client. A malformed table, an unknown profile or a
+	// malformed ceiling aborts startup (toolprofile.ParseBindings; a
+	// ceiling naming a scope the server never grants is refused by
+	// oauth.New).
 	ClientProfiles toolprofile.Bindings
 	// MediaDownloadMaxBytes caps get_media downloads. 0 means no cap (use with
 	// care). Default 20 MiB. Set via MEDIA_DOWNLOAD_MAX_BYTES.
