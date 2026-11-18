@@ -2,145 +2,192 @@
 
 Status: Proposed
 
-Phase 0 of the Personal Assistant epic. Refs #1048, the security owner for user MCP connectors, and #1088, the managed runtime. The threat model is [`docs/agent-runtime/personal-assistant-threat-model.md`](../agent-runtime/personal-assistant-threat-model.md). This record takes effect only once that threat model is accepted. **Accepting this record authorizes no code, deployment, flag, image or `agents:intake`.** Each phase below needs its own owner GO.
+This record is Phase 0 of the Personal Assistant epic (#1312). Refs #1048, the security owner for user MCP connectors, and #1088, the managed runtime. The threat model is [`docs/agent-runtime/personal-assistant-threat-model.md`](../agent-runtime/personal-assistant-threat-model.md); this record takes effect only after that threat model is accepted, and where the two disagree the threat model is authoritative.
+
+**Accepting this record authorizes nothing to run.** It authorizes no code, deployment, flag, image or `agents:intake`. Each phase below needs its own owner GO.
 
 ## Context
 
-- **Demand.** General-purpose assistants already let a user plug MCP servers into a chat bot. The owner connected one of them, reached through a Telegram bot, to MCTL's `tg` and `alice` servers. It played music on a kitchen speaker, set the volume, and read a Telegram chat aloud through Alice. Every one of those actions went through a third party that MCTL does not govern. That includes reading a private chat and speaking it in a room.
-- **The catalog cannot do this today.** `/assistants` in mctl-telegram is an auto-reply assistant that runs as the user's own MTProto account. Its tool set is closed: 11 tools (`internal/agent/tools/tools.go`), enforced per job (`internal/agentapi/toolgate.go`). It cannot call external MCP servers, and MCTL stores no delegated downstream tokens.
-- **The pieces it would need already exist:**
-  - the managed runtime: pool worker, OpenAI-compatible runner, consent, ledger with reservation caps (ADR 0008, #1089, #1090, #1092);
+- **Demand.** General-purpose assistants already let a user plug MCP servers into a chat bot. The owner connected one of them, reached through a Telegram bot, to MCTL's `tg` and `alice` servers. It played music on a kitchen speaker, set the volume, and read a Telegram chat aloud through Alice. Every one of those actions went through a third party that MCTL does not govern, including reading a private chat and speaking it in a room.
+- **The catalog cannot do this today.** `/assistants` in mctl-telegram is an auto-reply assistant that runs as the user's own MTProto account. It has a closed set of 11 tools (`internal/agent/tools/tools.go`), enforced per job (`internal/agentapi/toolgate.go`, #1041). It cannot call external MCP servers, and MCTL stores no delegated downstream tokens.
+- **The pieces exist:**
+  - the managed runtime: pool worker, OpenAI-compatible runner, ledger with reservation caps (ADR 0008, #1089, #1090, #1092);
   - the send gate and audit chain (ADR 0002, ADR 0003);
   - the tool-surface contract (ADR 0007);
+  - the job-bound capability boundary (#1041);
   - the connection and approval model of ADR 0010;
-  - a Bot API integration (`internal/bot`, today only login and notifications).
-- **Governance precondition.** #1048 requires a threat model before any connector design, a per-call approval binding, an egress policy and a revocation story. This record is that design, for a narrow first consumer.
+  - Bot API plumbing (`internal/bot`, today login and notifications only).
+- **Governance precondition.** #1048 requires a threat model before any connector design, a per-call approval binding, an egress policy and a revocation story. This record is that design for a narrow first consumer: catalog servers only.
 
 ## Decision
 
 ### Product shape
 
-- **One dedicated Bot API bot, private chats only.** The user writes to it in natural language.
-- **Bot token.** The bot has its own token, separate from the login bot, so the blast radius is separate. The token is held in Vault and delivered through an ExternalSecret.
-- **Placement.** It lives in mctl-telegram as a new package next to `internal/bot` and `internal/agentworker`. It is not an `AssistantInstall` and does not change the auto-reply assistants.
-- **Discoverability.** `/assistants` shows it as a "Personal assistant" card, but only from Phase 3 (see Phases).
-- **Phase 1 servers:** `tg` and `alice`.
-- **Later servers:** Glovo comes later through ADR 0010 and the C2 pilot scope, never checkout or payment. Custom servers by URL come later through their own addendum.
+- **Bot.** One dedicated Bot API bot, private chats only, with its own token. It is not the login bot, so the blast radius is separate. The token is held in Vault and delivered through an ExternalSecret. Joining groups is disabled.
+- **Location.** It lives in mctl-telegram as a new package next to `internal/bot` and `internal/agentworker`. It is not an `AssistantInstall`, and it does not change the auto-reply assistants.
+- **Catalog listing.** `/assistants` shows a "Personal assistant" card only from Phase 3.
+- **Phase 1 servers:** `tg` and `alice`, read tools only.
+- **Later servers.** Glovo comes later through ADR 0010 and the C2 pilot scope, and never gets checkout or payment. Custom servers by URL stay with #1048.
 
 ### Execution
 
-- **Runtime.** The model runs on the managed runtime of ADR 0008 (the OpenAI-compatible runner through the AI gateway) under consent `managed-data-flow/v1`, with the per-principal budget reserved at claim.
-- **Connector executor.** The worker never holds a downstream credential. It proposes tool calls. The mctl-telegram server makes every MCP call after its checks. This keeps the T4 runtime invariant ("the runtime holds no credential", [threat-model.md](../agent-runtime/threat-model.md)).
-- **One execution context.** Every run carries an `ExecutionContext`:
-  - principal
-  - trigger: `interactive`, `scheduled` or `event`
-  - conversation id
-  - the bound connection revisions
-  - budget reservation
-  - consent version
+- **Runtime and consent.** The model runs on the managed runtime of ADR 0008 under a **PA-specific consent**, `pa-data-flow/v1` (threat model T13). That consent is stored per principal. If it is missing or unreadable, the run is refused.
+- **Connector executor.** The worker never holds a downstream credential. It proposes tool calls with a PA job token (`aud=pa-job`), which carries the principal and the signed tool set, following the #1041 pattern. The mctl-telegram server makes every MCP call after its checks. Principal, connection and revision come from the job row, never from the request.
+- **Execution context.** Every run carries an `ExecutionContext`:
+  - principal;
+  - trigger: `interactive`, `scheduled` or `event`;
+  - conversation id;
+  - bound connection authority revisions;
+  - budget reservation;
+  - consent version.
 
-  Tiering, taint, approvals, audit and limits read only the context, never the trigger. Phase 1 creates only `interactive`. Scheduled and event-triggered runs (routines) can be added later without a second tool loop, and with the same consent, permissions and audit.
-- **Conversation state** has an explicit TTL (default 24 hours). It is deleted by `/new`, `/forget`, by expiry, and when the last connection is removed.
-- **Long-term memory** is a separate store behind its own interface, with only a no-op implementation until an addendum defines it. Anything stored later keeps its provenance, so external content stays external (threat model T5).
+  Tiering, provenance, approvals, audit and limits read only the context, never the trigger. Phase 1 creates only `interactive` runs. Routines (scheduled and event-triggered runs) can be added later without a second loop, with the same consent, permissions and audit.
+- **Conversation state.** It has an explicit TTL (default 24 hours) and records provenance on every fragment from Phase 1 on. It is deleted by `/new`, by `/forget`, by expiry, and when the last connection is removed. State without provenance marks is never loaded.
+- **Long-term memory.** It is a separate store behind its own interface. Until an addendum defines it, only a no-op implementation exists. Anything stored later keeps its provenance.
 
 ### Connections
 
-- **The bot is an OAuth client of each catalog server.** It uses CIMD where the server serves it and DCR otherwise. The redirect URI is pinned. The catalog pins one issuer per server.
-- **Linking** follows threat model T1:
-  - a Telegram Mini App entry, verified by `initData` HMAC, `auth_date` and principal match;
-  - a single-use link token;
-  - authorization code with PKCE `S256`;
-  - a bound single-use `state`;
-  - RFC 9207 `iss` checks;
-  - a final confirmation card in the bot chat showing the downstream account identity.
+- **OAuth client.** The bot is an OAuth client of each catalog server: CIMD where served, DCR otherwise. Each server has its own redirect URI and one pinned issuer.
+- **Linking is cookie-free** (threat model T1):
+  1. a Mini App start, verified by raw `initData` against the PA bot's token, with a single-use link token;
+  2. the authorization request, with PKCE `S256`, a single-use `state`, RFC 8707 `resource`, and `prompt=consent` where supported;
+  3. a callback that checks `state`, the redirect and RFC 9207 `iss`, stores the code **without** exchanging it, and redirects to a Mini App deep link carrying a single-use completion code;
+  4. a second `initData` check, which must match the principal, before the code exchange;
+  5. a confirm card in the bot chat showing a stable unique account identifier.
 
-  A browser cookie never establishes identity.
-- **State machine:** `pending_link -> pending_oauth -> pending_confirm -> active -> expired | failed | revoked`. `revoked` is terminal. A reconnect creates a new connection id. Every change increments the connection `revision`.
-- **Scope escalation** always requires a fresh authorization and a fresh confirm, and produces a new revision. Refresh never widens scope. Scopes are the minimum per server.
-- **Secrets.** Each connection has its own DEK, wrapped under a KEK that is separate from the session keys and has a rotation procedure. Refresh-token rotation is used where offered. A reuse or `invalid_grant` ends the connection and never falls back silently.
-- **Revocation.** `/disconnect` revokes locally first, then remotely:
+  Whoever completes the provider login must be the same Telegram user who started the flow.
+- **State machine.** The threat model T2 and this record use the same text:
+
+      pending_link -> pending_oauth -> pending_return -> pending_confirm -> active
+      active -> expired; any non-terminal -> failed; any -> revoked (terminal)
+
+  `expired`, `failed` and `revoked` are never re-activated. A reconnect, including any scope escalation, runs the whole flow again and creates a new connection id.
+- **Two counters.**
+  - `authority_revision` changes with scope, identity, confirmation, disable or revocation. Jobs, approvals and standing permissions bind to it.
+  - `token_generation` changes with token rotation. Nothing binds to it.
+
+  Refresh is single-flight per connection.
+- **Scopes.** Phase 1 uses read-only scopes wherever the server offers them. If `tg` cannot issue a read-only token for the PA client, the read-only boundary rests on the pin and the executor alone. That needs an explicit owner decision before Phase 1.
+- **Secrets.**
+  - Each connection has its own DEK, wrapped by a non-exportable Vault transit key that only the service role can use. If transit is unavailable, a Vault KV key is used, and the stated limits on what an operator can reach do not hold.
+  - Leak procedures cover the database plus KEK, DCR client credentials, the bot token and the webhook secret (threat model T3).
+- **Dispatch.** Each dispatch runs under a per-connection lease. Under the lease, the server re-reads the connection state and authority revision, and consumes the write's receipt in the same transaction. Any mismatch or read error refuses the call.
+- **`/disconnect`** revokes locally first:
   1. set `revoked` and bump the revision;
-  2. destroy the DEK wrapper;
-  3. cancel queued jobs, pending approvals and in-flight calls;
-  4. call the server's revocation endpoint (best-effort).
+  2. cancel the in-flight call;
+  3. destroy the DEK wrapper;
+  4. cancel queued jobs, approvals and standing permissions;
+  5. then call remote revocation, best-effort.
 
-  Cancelling an action already dispatched to a server is best-effort, not a rollback. A late result is discarded and audited `fenced`, and the user is told the action may already have happened.
-- **Execution-time fencing.** Immediately before each dispatch, the server re-reads the connection in the same transaction that consumes a write's approval receipt. It refuses unless the connection is `active` at the bound revision. A read failure refuses.
+  Cancelling an action already dispatched is best-effort, not a rollback. A late result is discarded and audited `fenced`. A write whose outcome cannot be observed (timeout, transport error, 5xx) is recorded `outcome_unknown` and never auto-retried. In both cases the user is told the effect may already have happened.
 
-### Tools, tiers and approvals
+### Tools, tiers, approvals
 
-- **A committed catalog pins each server's allowed tools** as `{name, input schema hash, annotations, tier, class}`. It is reviewed like the ADR 0007 snapshot. A new, renamed or changed tool is denied until the pin is updated by a PR. A failed `tools/list` is an error, not an empty set.
-- **Tiers:**
+- **Catalog pin.** A committed catalog pins each server's allowed tools:
+  - name;
+  - input schema hash and description hash;
+  - annotations;
+  - tier, class and lowerable.
 
-  | Tier | Meaning |
+  The model sees catalog-authored descriptions, never server descriptions. A new, renamed or changed tool is denied until a reviewed PR updates the pin. A failed `tools/list` is an error, never an empty set. The Phase 1 pin is listed in threat model T8.
+- **Tiers and classes:**
+
+  | Tier or class | Meaning |
   |---|---|
-  | `auto` | Read tools. Writes only where `lowerable` and lowered by the principal, from Phase 2. |
-  | `approve` | Default for every write. |
-  | `never` | Telegram writes, deletes, account and session tools, checkout or payment. These need their own addendum. |
+  | `auto` | Pinned read tools only. This departs from #1048's "approve by default", for the reasons given in threat model T8. |
+  | `approve` | Default for every write. A tool marked `lowerable` can be run without a card under a standing permission. |
+  | `disclosure` (class) | `alice_say_phrase` and `alice_send_command`, assigned per tool. Always a card showing the target device and the full text. Never lowerable. Text capped at 1000 characters. |
+  | `never` | Telegram writes, deletes, account and session tools, checkout or payment, and every unpinned tool. |
 
-  The class `disclosure` covers `alice_say_phrase` and free-text `alice_send_command`. It is **always approve, never lowerable**. Its card shows the target device and the full text, the text is capped, and the approval binds both.
-- **Phase 1 has no write path.** Write tools are not in the tool set at all.
+  Lowering is limited to playback, volume, light, and device control of types `light` and `media_device`. Appliances such as heaters, kettles, ovens, locks and sockets, and `trigger_scenario`, are never lowerable. The `trigger_scenario` card shows the scenario's steps.
+- **Phase 1 has no write path.** Write tools are not in the signed tool set.
 - **Approval binding:**
-  - principal
-  - connection id
-  - connection revision
-  - server
-  - tool
-  - schema hash
-  - canonical args hash
-  - conversation id
-  - expiry (5 minutes)
-  - idempotency key
+  - principal;
+  - connection id and authority revision;
+  - server and tool;
+  - schema and description hashes;
+  - canonical args hash of the exact arguments sent;
+  - conversation id;
+  - expiry of 5 minutes;
+  - server-generated idempotency key.
 
-  The receipt is single use. At dispatch, the current schema is checked against both the pin and the approval. The approval is an inline button verified as `from.id == principal`.
-- **Taint.** Context fragments are `user` or `external`. Once external content is in a run's context, every write in that run needs a card. Taint resets only with `/new`, TTL expiry or state deletion, never through model or tool text. A reset never weakens a `disclosure` or non-lowerable gate.
+  The receipt is single use. At dispatch, the tool definition is fetched fresh and compared with the pin and the approval. A failed fetch refuses.
+- **Standing permissions.** Granted only through a server-side bot control (`/permissions`, or the card button) with a verified `callback_query`. Bound to the authority revision. Audited and revocable. The model cannot create, widen or renew one.
+- **Provenance and taint** (threat model T5):
+  - `user` is only `message.text` the principal typed, with no forward origin. Everything else is `external`, including unknown or unreadable provenance.
+  - Any external fragment taints the run, and every write in a tainted run needs a card.
+  - Taint resets only on `/new`, on TTL expiry or on state deletion. Context-window eviction never resets it, and nothing a model or a tool writes resets it.
+  - A reset never weakens a `disclosure` gate or a non-lowerable gate.
 
-### Egress, limits, audit, switches
+### Ingress, output, egress, limits, audit, switches
 
-- **Egress (from Phase 1).** HTTPS only, per-server host allowlists, the address checked after DNS resolution and pinned for the dial, private ranges denied, no redirects except re-checked OAuth discovery hops, and size and time caps. This covers discovery, CIMD and DCR, the token and revocation endpoints and the MCP transport.
-- **Limits.** Message 4096 characters, tool output 64 KiB, 8 tool calls per run, approval card 4 KiB, Alice phrase 1000 characters, plus a per-principal rate limit. An exhausted budget holds the request with a message.
-- **Audit.** Every call is recorded in the ADR 0003 chain with digests only, never bodies. `/log` shows a principal their own entries.
-- **Switches.** `PA_ENABLED`, `PA_EXTERNAL_TOOLS_ENABLED`, `PA_WRITES_ENABLED` and `PA_SERVER_<NAME>_ENABLED` are independent and fail-closed. Disabling a single principal is an admin action. Rollback means switching the flags off, then rolling back the image.
+- **Ingress** (threat model T4):
+  - constant-time webhook secret check;
+  - `allowed_updates` limited to `message` and `callback_query`;
+  - business, group, `sender_chat` and `via_bot` updates rejected, and any update where `chat.id != from.id`;
+  - deduplication on `update_id`;
+  - `getWebhookInfo` monitoring.
+- **Output** (threat model T14). Every bot message has link previews disabled and is plain text. URLs that are not in user-provenance text are neutralised. Model-authored markup and URL buttons are stripped.
+- **Egress** (from Phase 1, threat model T9). It covers discovery, DCR, the token and revocation endpoints, and the MCP transport:
+  - HTTPS only;
+  - per-server host allowlists;
+  - the address checked after DNS resolution and pinned for the dial, with private, IPv6 unique-local and mapped ranges denied;
+  - proxy variables ignored;
+  - no redirects, except re-checked discovery hops;
+  - size and time caps.
+- **Limits.**
+  - Message: 4096 characters.
+  - Tool output: 64 KiB.
+  - Tool calls per run: 8.
+  - Approval card: 4 KiB.
+  - Alice phrase: 1000 characters.
+  - Rate limit per principal.
+
+  When the budget is exhausted, the request is held with a message.
+- **Audit.** Every call is written to the ADR 0003 chain before dispatch, digests only. If that append fails, the call is refused. `/log` shows a principal their own entries.
+- **Switches.** `PA_ENABLED`, `PA_EXTERNAL_TOOLS_ENABLED`, `PA_WRITES_ENABLED` and `PA_SERVER_<NAME>_ENABLED` are independent and fail-closed. An admin can also disable a single principal. Rollback is: flags off, then image rollback.
 
 ### Phases and gates
 
 | Phase | Content | Gate to enter | Gate to leave |
 |---|---|---|---|
-| 0 Architecture and governance | This record, the threat model, epic, draft issues | — | Owner accepts threat model and ADR |
-| 1 Read-only MVP | Bot loop and execution context, linking for `tg` and `alice`, catalog pin and drift denial, egress policy, read tools only, consent, ledger, audit, switches | Owner GO | Security suite S1 green, then preview deployment (owner GO), then preview evals R1–R6, then owner GO |
-| 2 Safe actions | Approval engine, taint, Alice media, volume, light and device control (`approve`), `disclosure` class | Owner GO | Security suite S2 green, then writes enabled on preview, then evals A1–A7, then owner GO |
-| 3 Private pilot | Owner plus 1–3 test users behind an allowlist, telemetry, revocation, injection and budget drills, `/assistants` card and connect page | Owner GO | Pilot report, then a separate GO to expand |
-| 4 Expansion | Glovo after its C2 GO; custom MCP by URL (closes the #1048 egress and admin-review items); memory; routines | One addendum and review per item | — |
+| 0 Architecture and governance | This record, the threat model, epic #1312, draft issues | — | Owner accepts the threat model and this record |
+| 1 Read-only MVP | Bot loop and execution context; ingress filter; linking for `tg` and `alice`; catalog pin and drift denial; egress policy; output hardening; read tools only; consent, ledger, audit, switches; leak runbook | Owner GO, plus the `tg` read-only scope decision | S1 green, then preview deployment (owner GO), then evals R1–R6, then owner GO |
+| 2 Safe actions | Approval engine; standing permissions; taint; Alice actions and the `disclosure` class | Owner GO | S2 green, then writes enabled on preview, then evals A1–A7, then owner GO |
+| 3 Private pilot | Owner plus 1–3 test users behind an allowlist; telemetry; revocation, injection, budget and leak drills; the `/assistants` card | Owner GO | Pilot report, then a separate GO to expand |
+| 4 Expansion | Glovo after its C2 GO; memory; routines. Custom MCP by URL stays with #1048. | One addendum and review per item | — |
 
-S1 and S2 run in CI with no deployment and do not depend on preview evals. Each test is mutation-verified.
+S1 and S2 run in CI with no deployment, and neither depends on preview evals. A checked-in manifest maps every test ID to a test. CI fails on a missing ID, and each ID has a recorded mutation run.
 
 ## Consequences
 
-**Gains:**
+**Gains**
 - The user gets the Town-style experience on MCTL's own servers.
 - Credentials stay in one audited place.
-- Writes are approved per call, with a binding that survives replay, rotation and drift.
-- Reading a private chat aloud is an explicit, visible decision, not a side effect.
+- Every write is either approved per call or covered by a standing permission the principal granted outside the model. Approvals survive replay, rotation and drift.
+- Speaking a private chat aloud is always an explicit, visible decision.
 - Routines and memory can be added without a second loop.
 
-**Costs:**
-- A new bot, a new OAuth client registration per server and a new KEK to operate.
-- Every downstream schema change needs a catalog PR before the tool works again.
-- Approval cards add a tap to every write. That friction is deliberate.
-- Everything the bot reads reaches the model provider. This is accepted through consent, and the user is told.
-- Some servers may not support token revocation. Their tokens stay valid at the server until they expire, though MCTL can no longer use them.
+**Costs**
+- A new bot to operate, with a new OAuth client registration per server, a new KEK, and a leak runbook.
+- Every downstream schema or description change needs a catalog PR before the tool works again.
+- Approval cards add a tap to most writes. That friction is deliberate.
+- Everything the bot reads reaches the model provider. The user consents to this, and is told.
+- Some servers may not support token revocation or RFC 8707 `resource`. Each case is recorded per server.
 
-**Dependencies:**
-- the ADR 0008 managed runtime in the target environment;
-- the #1092 ledger;
-- the #1048 gates, which this record satisfies for catalog servers only.
+**Dependencies**
+- The ADR 0008 managed runtime in the target environment.
+- The #1092 ledger.
+- The #1041 pattern for the signed tool set.
+- The #1048 gates, which this record satisfies for catalog servers only.
 
 ## Alternatives
 
-- **Route it through the mcp.mctl.ai portal.** Rejected. The portal is a Cloudflare client-side aggregator with no server-to-server API, and it would put a second identity system in front of every call.
-- **Extend `AssistantInstall`.** Rejected. Auto-reply assistants act on inbound third-party messages as the user's account. This bot acts on the principal's own requests across systems. Merging them would put both security models in one surface.
-- **Use the Saved Messages `/mctl` control channel.** Rejected. It only works for users with a connected MTProto account, and it has no inline approval buttons.
-- **Let the worker hold downstream tokens.** Rejected. That breaks the runtime credential invariant and puts tokens in front of the model provider's trust boundary.
+- **Route it through the mcp.mctl.ai portal.** Rejected. The portal is a Cloudflare client-side aggregator with no server-to-server API.
+- **Extend `AssistantInstall`.** Rejected. Auto-reply assistants act on inbound third-party messages as the user's account. This bot acts on the principal's own requests across systems. Merging them would mix two security models in one surface.
+- **Use the Saved Messages `/mctl` control channel.** Rejected. It only works with a connected MTProto account, and it has no inline approval buttons.
+- **Let the worker hold downstream tokens.** Rejected. That breaks the runtime credential invariant.
+- **Link accounts with a browser cookie.** Rejected. A cookie does not prove Telegram identity, and it does not survive the hop between webview and system browser. The second `initData` check does both.
 - **Wait for mcp-gateway line I** (mctl-api as the single authorization server). Not chosen. Each server already serves CIMD or DCR. Moving to mctl-api audiences later is a token-source change behind the connection record, not a redesign.
-- **Allow custom MCP servers by URL from the start.** Rejected for Phase 1. It is the widest SSRF and admin-review surface in #1048, and it needs its own addendum.
-- **Recommend third-party assistants instead.** Rejected as the answer, though client recipes may still be published. It leaves the cross-system disclosure ungoverned.
+- **Allow custom MCP servers by URL from the start.** Rejected for Phase 1. It is the widest SSRF and admin-review surface in #1048.
+- **Recommend third-party assistants instead.** Rejected as the answer, though client recipes may still be published. That route leaves the cross-system disclosure ungoverned.
