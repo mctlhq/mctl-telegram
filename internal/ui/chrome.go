@@ -121,7 +121,7 @@ var defs = `
 <meta name="twitter:title" content="{{.Title}}">
 <meta name="twitter:description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarize unread chats, draft replies, and search your history — no extra apps.{{end}}">
 <meta name="twitter:image" content="{{.PublicBaseURL}}/og.png?v=3">
-<script type="application/ld+json">
+{{if or (eq .CanonicalPath "") (eq .CanonicalPath "/")}}<script type="application/ld+json">
 {
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
@@ -137,7 +137,20 @@ var defs = `
     "url": "https://mctl.ai"
   }
 }
-</script>
+</script>{{else}}<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebPage",
+  "name": "{{.Title}}",
+  "url": "{{.PublicBaseURL}}{{.CanonicalPath}}",
+  "description": "{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant via MCP{{end}}",
+  "isPartOf": {
+    "@type": "WebSite",
+    "name": "MCTL Assistant",
+    "url": "{{.PublicBaseURL}}"
+  }
+}
+</script>{{end}}
 <style>` + tokensCSS + siteCSS + `</style>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

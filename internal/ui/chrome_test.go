@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bytes"
+	"encoding/json"
 	"regexp"
 	"strings"
 	"testing"
@@ -384,5 +385,52 @@ func TestFontFallbacksMatchMetrics(t *testing.T) {
 	}
 	if n := strings.Count(componentsCSS, "ascent-override:"); n < 2 {
 		t.Errorf("want ascent-override on both fallback faces, found %d", n)
+	}
+}
+
+// jsonLDBlocks returns the parsed JSON-LD objects in the rendered head, so a
+// test fails on invalid JSON instead of passing on a substring match.
+func jsonLDBlocks(t *testing.T, html string) []map[string]any {
+	t.Helper()
+	re := regexp.MustCompile(`(?s)<script type="application/ld\+json">(.*?)</script>`)
+	var out []map[string]any
+	for _, m := range re.FindAllStringSubmatch(html, -1) {
+		var v map[string]any
+		if err := json.Unmarshal([]byte(m[1]), &v); err != nil {
+			t.Fatalf("JSON-LD does not parse: %v\n%s", err, m[1])
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+func TestJSONLDIsPageSpecific(t *testing.T) {
+	page := `<!doctype html><html lang="en"><head>{{template "ui_head" .}}</head><body></body></html>`
+
+	home := jsonLDBlocks(t, render(t, "home", page, Data{
+		Title: "Home", PublicBaseURL: "https://tg.mctl.ai", CanonicalPath: "/",
+	}))
+	if len(home) != 1 || home[0]["@type"] != "SoftwareApplication" {
+		t.Fatalf("home should carry one SoftwareApplication block, got %v", home)
+	}
+
+	inner := jsonLDBlocks(t, render(t, "inner", page, Data{
+		Title: "MCTL — demo", Description: "A demo & walkthrough.",
+		PublicBaseURL: "https://tg.mctl.ai", CanonicalPath: "/demo",
+	}))
+	if len(inner) != 1 {
+		t.Fatalf("inner page should carry one JSON-LD block, got %d", len(inner))
+	}
+	if inner[0]["@type"] != "WebPage" {
+		t.Errorf("inner page @type = %v, want WebPage (not the app markup repeated)", inner[0]["@type"])
+	}
+	if inner[0]["url"] != "https://tg.mctl.ai/demo" {
+		t.Errorf("inner page url = %v, want its own canonical URL", inner[0]["url"])
+	}
+	if inner[0]["name"] != "MCTL — demo" {
+		t.Errorf("inner page name = %v, want its title", inner[0]["name"])
+	}
+	if inner[0]["description"] != "A demo & walkthrough." {
+		t.Errorf("inner page description = %v, want its own description", inner[0]["description"])
 	}
 }

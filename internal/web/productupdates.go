@@ -48,7 +48,7 @@ type productUpdatesData struct {
 func ProductUpdates(groups []productupdate.ReleaseGroup, loadErr error, publicBaseURL string, showManage bool) http.HandlerFunc {
 	data := productUpdatesData{
 		Data: ui.Data{
-			Title:         "MCTL — product updates",
+			Title:         "MCTL — Telegram MCP product updates and release notes",
 			Description:   "Reviewed product updates for MCTL, grouped by release: new tools, changed behavior and deprecations.",
 			NavActive:     "docs",
 			PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),

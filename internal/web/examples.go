@@ -96,7 +96,7 @@ type examplesData struct {
 func Examples(publicBaseURL string, showManage bool) http.HandlerFunc {
 	data := examplesData{
 		Data: ui.Data{
-			Title:         "MCTL — examples",
+			Title:         "MCTL — Telegram MCP prompt examples for Claude and ChatGPT",
 			Description:   "Prompts to try once your Telegram account is connected to Claude, ChatGPT or another MCP client: catch up, search, extract, organise, media and replies.",
 			NavActive:     "examples",
 			PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),

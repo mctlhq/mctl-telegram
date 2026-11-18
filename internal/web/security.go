@@ -48,7 +48,7 @@ var (
 // nothing user-specific here, only the deployment-wide security policy.
 func Security(publicBaseURL string, showManage bool) http.HandlerFunc {
 	return chromePage(securityTmpl, "security", ui.Data{
-		Title:         "MCTL — security model",
+		Title:         "MCTL — Telegram MCP security model and session encryption",
 		Description:   "How MCTL protects your Telegram session: AES-256-GCM encryption at rest, per-user keys, no message logging, and a draft-by-default send gate.",
 		NavActive:     "security",
 		PublicBaseURL: strings.TrimRight(publicBaseURL, "/"),
