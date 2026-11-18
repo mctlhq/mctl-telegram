@@ -388,6 +388,24 @@ func TestConnection_S1C7_LateResultFenced(t *testing.T) {
 			t.Fatalf("fenced audit = %+v", evs)
 		}
 
+		// A late code-exchange result after /disconnect is discarded: never
+		// stored, and what the server issued is revoked.
+		pend := e.toPendingReturn(t, alice, connection.ServerTG)
+		if _, err := e.m.Disconnect(ctx, alice, pend.ID); err != nil {
+			t.Fatal(err)
+		}
+		_, err = e.m.CompleteExchange(ctx, alice, pend.ID, pend.AuthorityRevision, "acct-alice",
+			tokenResponse("fake-at-late", "fake-rt-late", tgScope))
+		if !errors.Is(err, connection.ErrConflict) {
+			t.Fatalf("late exchange: err %v, want ErrConflict", err)
+		}
+		if r := e.revoker.revoked(); !slices.Contains(r, "fake-at-late") || !slices.Contains(r, "fake-rt-late") {
+			t.Fatal("late exchange tokens were not revoked")
+		}
+		if got, _ := e.m.Get(ctx, alice, pend.ID); got.State != connection.StateRevoked {
+			t.Fatalf("late exchange changed the revoked row: %s", got.State)
+		}
+
 		// A post-call re-read that fails is fenced too, never "fine".
 		fs := &failingStore{Store: s}
 		e2 := newEnvWithStore(t, s, fs)
@@ -558,7 +576,8 @@ func TestConnection_S1T9_ExchangeScopeCheck(t *testing.T) {
 }
 
 // TestConnection_S1T10_RefreshWiderScopeFails is S1-T10: a refresh that
-// returns a wider scope fails the connection and revokes what it issued.
+// returns a wider scope fails the connection and revokes both what it issued
+// and the original tokens.
 func TestConnection_S1T10_RefreshWiderScopeFails(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, s *db.Store) {
 		ctx := context.Background()
@@ -579,6 +598,11 @@ func TestConnection_S1T10_RefreshWiderScopeFails(t *testing.T) {
 				}
 				if r := e.revoker.revoked(); !slices.Contains(r, "fake-at-wide") || !slices.Contains(r, "fake-rt-wide") {
 					t.Fatal("the widened tokens were not revoked")
+				}
+				// The original tokens are wiped locally by the move to failed;
+				// they must be revoked at the server too, not orphaned.
+				if r := e.revoker.revoked(); !slices.Contains(r, "fake-rt-1-"+c.ID) || !slices.Contains(r, "fake-at-1-"+c.ID) {
+					t.Fatal("the original tokens were not revoked")
 				}
 				if _, _, err := e.m.AccessToken(ctx, alice, c.ID, c.AuthorityRevision); err == nil {
 					t.Fatal("connection still usable after a widened refresh")

@@ -272,15 +272,24 @@ func (m *Manager) AuthorizationCode(ctx context.Context, principal int64, id str
 // effective scope must equal the allowed set (T8, S1-T9). Any failure of
 // that check moves the connection to failed and revokes what the server
 // issued; the returned error wraps ErrScopeMismatch or ErrTokenResponse.
+// If the connection left pending_return meanwhile (ErrConflict), or the
+// final store write fails, the issued tokens are revoked and never stored.
+// Only when the row cannot be read at all (ErrUnreadable, ErrNotFound) is
+// the server unknown here; the caller then revokes the response itself.
 func (m *Manager) CompleteExchange(ctx context.Context, principal int64, id string, expectRevision int64, accountID string, tokenResponse []byte) (Connection, error) {
 	c, s, err := m.store.GetPAConnectionSealed(ctx, principal, id)
 	if err != nil {
 		return Connection{}, readErr(err)
 	}
-	if c.State != StatePendingReturn || c.AuthorityRevision != expectRevision {
-		return Connection{}, fmt.Errorf("%w: exchange needs pending_return at the expected revision", ErrConflict)
-	}
 	check := VerifyTokenResponse(c.Server, tokenResponse)
+	if c.State != StatePendingReturn || c.AuthorityRevision != expectRevision {
+		// The connection moved (for example a /disconnect) while the code was
+		// being exchanged: what the server issued is never stored, and is
+		// revoked.
+		return Connection{}, errors.Join(
+			fmt.Errorf("%w: exchange needs pending_return at the expected revision", ErrConflict),
+			m.revokeTokens(ctx, c.Server, check.Tokens))
+	}
 	if check.Err == nil && accountID == "" {
 		check.Err = fmt.Errorf("%w: no stable account id", ErrTokenResponse)
 	}
@@ -296,10 +305,15 @@ func (m *Manager) CompleteExchange(ctx context.Context, principal int64, id stri
 	if err != nil {
 		return m.failAndRevoke(ctx, c, check.Tokens, "exchange_seal", err)
 	}
-	return m.store.TransitionPAConnection(ctx, principal, id, Transition{
+	out, err := m.store.TransitionPAConnection(ctx, principal, id, Transition{
 		From: StatePendingReturn, To: StatePendingConfirm, ExpectRevision: expectRevision,
 		AccountID: accountID, GrantedScope: check.Granted, SealedTokens: blob,
 	})
+	if err != nil {
+		// Not stored, so never usable by MCTL; revoke it at the server too.
+		return Connection{}, errors.Join(err, m.revokeTokens(ctx, c.Server, check.Tokens))
+	}
+	return out, nil
 }
 
 // Confirm moves pending_confirm -> active. The callback_query check (from.id
@@ -451,15 +465,40 @@ func (m *Manager) AccessToken(ctx context.Context, principal int64, id string, b
 //   - Only TokenGeneration moves; AuthorityRevision does not.
 //   - If the connection changed while the refresh was on the wire, the new
 //     tokens are revoked and discarded (ErrFenced).
+//   - The flight is detached from every caller: once the server has rotated
+//     the tokens, storing (or revoking) them must not depend on whether the
+//     caller that started the flight is still waiting. A cancelled caller
+//     stops waiting and gets its ctx error; the flight runs to the end.
+//   - fn runs under a deadline that ends before the lease does, so another
+//     replica cannot take the lease and present the same refresh token while
+//     this one is still on the wire.
 func (m *Manager) Refresh(ctx context.Context, principal int64, id string, fn RefreshFunc) (Connection, error) {
 	key := strconv.FormatInt(principal, 10) + "|" + id
-	v, err, _ := m.refreshes.Do(key, func() (any, error) {
-		return m.refresh(ctx, principal, id, fn)
+	ch := m.refreshes.DoChan(key, func() (any, error) {
+		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), flightBound*m.lease)
+		defer cancel()
+		return m.refresh(fctx, principal, id, fn)
 	})
-	if err != nil {
-		return Connection{}, err
+	select {
+	case r := <-ch:
+		if r.Err != nil {
+			return Connection{}, r.Err
+		}
+		return r.Val.(Connection), nil
+	case <-ctx.Done():
+		return Connection{}, ctx.Err()
 	}
-	return v.(Connection), nil
+}
+
+// flightBound caps a whole refresh flight at this many leases: the call
+// itself ends before one lease is up, the rest is store writes and remote
+// revocation of what could not be stored.
+const flightBound = 3
+
+// callBudget is how long fn may take: the lease minus a margin left for
+// storing the rotation before the lease runs out.
+func (m *Manager) callBudget() time.Duration {
+	return m.lease - m.lease/4
 }
 
 func (m *Manager) refresh(ctx context.Context, principal int64, id string, fn RefreshFunc) (Connection, error) {
@@ -471,6 +510,7 @@ func (m *Manager) refresh(ctx context.Context, principal int64, id string, fn Re
 		return Connection{}, err
 	}
 	now := m.now().UTC()
+	claimed := time.Now()
 	ok, err := m.store.ClaimPAConnectionRefresh(ctx, principal, id, c.TokenGeneration, m.owner, now, now.Add(m.lease))
 	if err != nil {
 		return Connection{}, readErr(err)
@@ -489,7 +529,9 @@ func (m *Manager) refresh(ctx context.Context, principal int64, id string, fn Re
 		release()
 		return Connection{}, fmt.Errorf("%w: no refresh token", ErrUnreadable)
 	}
-	raw, err := fn(ctx, c.Server, old.RefreshToken)
+	callCtx, cancelCall := context.WithDeadline(ctx, claimed.Add(m.callBudget()))
+	raw, err := fn(callCtx, c.Server, old.RefreshToken)
+	cancelCall()
 	switch {
 	case errors.Is(err, ErrRefreshTokenReuse):
 		_, _, _, rerr := m.store.RevokePAConnection(ctx, principal, id, "refresh_token_reuse")
@@ -510,8 +552,11 @@ func (m *Manager) refresh(ctx context.Context, principal int64, id string, fn Re
 		check.Err = fmt.Errorf("%w: refresh changed the granted scope", ErrScopeMismatch)
 	}
 	if check.Err != nil {
+		// Both sets go: the new tokens carry the wrong grant, and the old ones
+		// are wiped locally by the move to failed, so leaving them live at the
+		// server would orphan them.
 		_, ferr := m.failAndRevoke(ctx, c, check.Tokens, "refresh_scope_check", check.Err)
-		return Connection{}, ferr
+		return Connection{}, errors.Join(ferr, m.revokeTokens(ctx, c.Server, old))
 	}
 	next := check.Tokens
 	if next.RefreshToken.Empty() {
@@ -533,11 +578,17 @@ func (m *Manager) refresh(ctx context.Context, principal int64, id string, fn Re
 		GrantedScope: c.GrantedScope, LeaseOwner: m.owner, SealedTokens: blob,
 	})
 	if err != nil {
-		// The connection moved while the refresh was on the wire (revoked,
-		// failed, expired): what the server just issued is never stored or
-		// used, and is revoked.
+		// What the server just issued is never used unstored: it is revoked.
+		// A CAS miss means the connection moved while the refresh was on the
+		// wire (revoked, failed, expired, or another rotation): ErrFenced.
+		// Any other store error is reported as itself, not as a fence.
 		release()
-		return Connection{}, errors.Join(ErrFenced, err, m.revokeTokens(ctx, c.Server, check.Tokens))
+		if errors.Is(err, ErrConflict) || errors.Is(err, ErrNotFound) {
+			err = errors.Join(ErrFenced, err)
+		} else {
+			err = fmt.Errorf("pa connection: store rotation: %w", err)
+		}
+		return Connection{}, errors.Join(err, m.revokeTokens(ctx, c.Server, check.Tokens))
 	}
 	return out, nil
 }
@@ -596,21 +647,41 @@ type Call struct {
 	once          sync.Once
 }
 
-// BeginCall passes the gate and registers a cancellable call context.
+// BeginCall registers a cancellable call context and then passes the gate.
+// Registering first means a Disconnect that commits between the two still
+// cancels this call; a refused call is deregistered.
 func (m *Manager) BeginCall(ctx context.Context, principal int64, id string, boundRevision int64) (*Call, error) {
-	c, err := m.Authorize(ctx, principal, id, boundRevision)
-	if err != nil {
-		return nil, err
-	}
 	cctx, cancel := context.WithCancel(ctx)
-	call := &Call{Ctx: cctx, m: m, principal: principal, id: id, server: c.Server, boundRevision: boundRevision, cancel: cancel}
+	call := &Call{Ctx: cctx, m: m, principal: principal, id: id, boundRevision: boundRevision, cancel: cancel}
 	m.mu.Lock()
 	if m.inflight[id] == nil {
 		m.inflight[id] = map[*Call]context.CancelFunc{}
 	}
 	m.inflight[id][call] = cancel
 	m.mu.Unlock()
+	c, err := m.Authorize(cctx, principal, id, boundRevision)
+	if err != nil {
+		call.deregister()
+		return nil, err
+	}
+	call.server = c.Server
 	return call, nil
+}
+
+// deregister removes the call from the in-flight registry and cancels its
+// context, once.
+func (c *Call) deregister() {
+	c.once.Do(func() {
+		c.m.mu.Lock()
+		if calls := c.m.inflight[c.id]; calls != nil {
+			delete(calls, c)
+			if len(calls) == 0 {
+				delete(c.m.inflight, c.id)
+			}
+		}
+		c.m.mu.Unlock()
+		c.cancel()
+	})
 }
 
 func (m *Manager) cancelInflight(id string) {
@@ -628,17 +699,7 @@ func (m *Manager) cancelInflight(id string) {
 // must be discarded: Finish records a fenced event and returns an error
 // wrapping ErrFenced (S1-C7). A nil error means the result may be used.
 func (c *Call) Finish(ctx context.Context) error {
-	c.once.Do(func() {
-		c.m.mu.Lock()
-		if calls := c.m.inflight[c.id]; calls != nil {
-			delete(calls, c)
-			if len(calls) == 0 {
-				delete(c.m.inflight, c.id)
-			}
-		}
-		c.m.mu.Unlock()
-		c.cancel()
-	})
+	c.deregister()
 	conn, err := c.m.store.GetPAConnection(ctx, c.principal, c.id)
 	reason := ""
 	switch {

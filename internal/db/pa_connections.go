@@ -250,6 +250,10 @@ func (s *Store) revokePAConnOnce(ctx context.Context, principal int64, id, reaso
 		return connection.Connection{}, connection.Sealed{}, false, fmt.Errorf("pa connection revoke: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	// The CAS below also pins token_generation: a rotation committed between
+	// this read and the update would otherwise leave `before` holding the
+	// superseded tokens, and the caller would revoke those remotely while the
+	// live ones were wiped locally and never revoked.
 	var before connection.Sealed
 	cur, err := getPAConn(ctx, tx, principal, id, &before)
 	if err != nil {
@@ -262,9 +266,10 @@ func (s *Store) revokePAConnOnce(ctx context.Context, principal int64, id, reaso
 		SET state = $1, authority_revision = authority_revision + 1, updated_at_ms = $2,
 			wrapped_dek = NULL, sealed_code = NULL, sealed_tokens = NULL, failure_reason = $3,
 			refresh_lease_owner = '', refresh_lease_until_ms = 0
-		WHERE principal = $4 AND id = $5 AND state = $6 AND authority_revision = $7`,
+		WHERE principal = $4 AND id = $5 AND state = $6 AND authority_revision = $7
+		  AND token_generation = $8`,
 		string(connection.StateRevoked), time.Now().UTC().UnixMilli(), reason,
-		principal, id, string(cur.State), cur.AuthorityRevision)
+		principal, id, string(cur.State), cur.AuthorityRevision, cur.TokenGeneration)
 	if err != nil {
 		return connection.Connection{}, connection.Sealed{}, false, fmt.Errorf("pa connection revoke: %w", err)
 	}

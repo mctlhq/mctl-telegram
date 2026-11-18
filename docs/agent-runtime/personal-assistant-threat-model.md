@@ -224,6 +224,7 @@ A crash between steps 1 and 3 leaves a `dispatching` record. On restart, that re
 - An operator with database and `kubectl` access does not get plaintext tokens.
 - A Vault administrator could grant themselves unwrap. That is a residual risk, made visible by the Vault audit log.
 - Vault transit is **mandatory in production**. A Vault KV key is not an equivalent substitute. It is allowed only on preview, with synthetic or owner-only accounts, and the operator-access claim above is withdrawn there. A production deployment with a KV KEK fails its startup check.
+  - In code (`connection.LocalKEKTiers`), a local KEK is accepted on `ENV` = preview plus the non-deployed developer and test tiers of `config.LocalTiers` (local, local-dev, localdev, dev, development, test, ci). Those tiers exist so unit tests and local runs can work without Vault. They hold no real accounts, and no deployed environment sets them. Every other value is refused, including an unset `ENV`, which is what production has.
 - Revocation destroys the wrapper. As ADR 0010 states, this is data deletion. It is crypto-erasure only where backup retention of the wrapper is bounded.
 
 **In use.**

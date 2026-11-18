@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
@@ -246,4 +247,19 @@ func (f *failingStore) ListPAConnections(ctx context.Context, p int64) ([]connec
 		return nil, errInjected
 	}
 	return f.Store.ListPAConnections(ctx, p)
+}
+
+// withLease rebuilds e's manager with a refresh lease of d.
+func (e *env) withLease(t *testing.T, d time.Duration) {
+	t.Helper()
+	kek, err := connection.NewLocalKEK(testKEKKey, "test")
+	if err != nil {
+		t.Fatalf("kek: %v", err)
+	}
+	e.m, err = connection.NewManager(connection.Config{
+		Store: e.store, KEK: kek, Revoker: e.revoker, Auditor: e.auditor, RefreshLease: d,
+	})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
 }
