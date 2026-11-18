@@ -20,6 +20,8 @@ package egress
 // example.com and *.example.com.
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/x509"
 	"errors"
@@ -570,6 +572,9 @@ func TestNewValidatesConfig(t *testing.T) {
 		{Purpose: PurposeMCP, AllowedHosts: []string{"10.0.0.1"}},
 		{Purpose: PurposeMCP, AllowedHosts: []string{"10.1"}},
 		{Purpose: PurposeMCP, AllowedHosts: []string{"2130706433"}},
+		{Purpose: PurposeMCP, AllowedHosts: []string{"0x7f000001"}},
+		{Purpose: PurposeMCP, AllowedHosts: []string{"a.0x7F"}},
+		{Purpose: PurposeMCP, AllowedHosts: []string{"10.0x1"}},
 		{Purpose: PurposeMCP, AllowedHosts: []string{hostMCP, "127.0.0.1"}},
 		{Purpose: PurposeMCP, AllowedHosts: []string{hostMCP}, DeniedPrefixes: []netip.Prefix{{}}},
 	}
@@ -642,5 +647,130 @@ func TestS1E2E3_DialLayer(t *testing.T) {
 	}
 	if h.res.count(hostEvil) != 0 {
 		t.Fatal("foreign host resolved")
+	}
+}
+
+// S1-E5: a compressed body is capped after decompression: a small gzip
+// payload that inflates past the cap fails with ErrTooLarge.
+func TestS1E5_GzipBombCapped(t *testing.T) {
+	const max = 4096
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, _ = zw.Write(bytes.Repeat([]byte("a"), 64*max))
+	_ = zw.Close()
+	if buf.Len() >= max {
+		t.Fatalf("fixture not a bomb: %d compressed bytes", buf.Len())
+	}
+	h := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Length", fmt.Sprint(buf.Len()))
+		_, _ = w.Write(buf.Bytes())
+	}))
+	c := h.client(t, Config{MaxBodyBytes: max})
+	b, err := do(t, c, "https://"+hostMCP+"/")
+	if !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("want ErrTooLarge, got %v (%d bytes)", err, len(b))
+	}
+	if len(b) > max {
+		t.Fatalf("read %d bytes past a %d cap", len(b), max)
+	}
+}
+
+// S1-E4: a 304, or any 3xx http.Client would not follow, fails for every
+// purpose, discovery included.
+func TestS1E4_NonRedirect3xxRefused(t *testing.T) {
+	for _, code := range []int{http.StatusNotModified, http.StatusMultipleChoices, http.StatusUseProxy} {
+		h := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Location", "https://"+hostMCP+"/x")
+			w.WriteHeader(code)
+		}))
+		for _, p := range []Purpose{PurposeDiscovery, PurposeMCP} {
+			c := h.client(t, Config{Purpose: p})
+			if _, err := do(t, c, "https://"+hostMCP+"/"); !errors.Is(err, ErrRedirect) {
+				t.Errorf("%d %v: want ErrRedirect, got %v", code, p, err)
+			}
+		}
+	}
+}
+
+// S1-E4: a discovery client, which follows redirects, carries no
+// credentials and sends only bodiless GET or HEAD requests.
+func TestS1E4_DiscoveryIsAnonymousGET(t *testing.T) {
+	h := newHarness(t, okHandler())
+	c := h.client(t, Config{Purpose: PurposeDiscovery})
+	mk := func(method string, body io.Reader, hdr, val string) *http.Request {
+		req, _ := http.NewRequestWithContext(context.Background(), method, "https://"+hostMCP+"/.well-known/x", body)
+		if hdr != "" {
+			req.Header.Set(hdr, val)
+		}
+		return req
+	}
+	bad := map[string]*http.Request{
+		"post":          mk(http.MethodPost, strings.NewReader("x"), "", ""),
+		"put":           mk(http.MethodPut, nil, "", ""),
+		"get with body": mk(http.MethodGet, strings.NewReader("x"), "", ""),
+		"authorization": mk(http.MethodGet, nil, "Authorization", "Bearer t"),
+		"cookie":        mk(http.MethodGet, nil, "Cookie", "a=b"),
+	}
+	for name, req := range bad {
+		resp, err := c.Do(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		if !errors.Is(err, ErrDiscoveryRequest) {
+			t.Errorf("%s: want ErrDiscoveryRequest, got %v", name, err)
+		}
+	}
+	if n := len(h.dials()); n != 0 {
+		t.Fatalf("refused discovery requests dialled %d times", n)
+	}
+	if _, err := do(t, c, "https://"+hostMCP+"/.well-known/x"); err != nil {
+		t.Fatalf("anonymous GET: %v", err)
+	}
+	// The same headers are fine on a non-discovery client.
+	m := h.client(t, Config{Purpose: PurposeToken})
+	resp, err := m.Do(mk(http.MethodPost, strings.NewReader("x"), "Authorization", "Basic x"))
+	if err != nil {
+		t.Fatalf("token POST: %v", err)
+	}
+	_ = resp.Body.Close()
+}
+
+// S1-E3: a denied prefix given in IPv4-mapped form denies the native IPv4
+// answers too; a mapped prefix shorter than /96 is refused at config time.
+func TestS1E3_MappedDeniedPrefixNormalised(t *testing.T) {
+	h := newHarness(t, okHandler())
+	c := h.client(t, Config{DeniedPrefixes: []netip.Prefix{netip.MustParsePrefix("::ffff:93.184.216.0/120")}})
+	if _, err := do(t, c, "https://"+hostMCP+"/"); !errors.Is(err, ErrNonPublic) {
+		t.Fatalf("native answer under a mapped prefix: want ErrNonPublic, got %v", err)
+	}
+	_, err := New(Config{Purpose: PurposeMCP, AllowedHosts: []string{hostMCP}, DeniedPrefixes: []netip.Prefix{netip.MustParsePrefix("::ffff:0:0/80")}})
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("short mapped prefix: want ErrInvalidConfig, got %v", err)
+	}
+}
+
+func TestNewRejectsOverridesAboveCeiling(t *testing.T) {
+	for p, ceil := range ceilingLimits {
+		def := defaultLimits[p]
+		if def.timeout > ceil.timeout || def.maxBody > ceil.maxBody {
+			t.Errorf("%v: default above ceiling", p)
+		}
+		bad := []Config{
+			{Timeout: ceil.timeout + time.Nanosecond},
+			{Timeout: -time.Second},
+			{MaxBodyBytes: ceil.maxBody + 1},
+			{MaxBodyBytes: -1},
+		}
+		for i, cfg := range bad {
+			cfg.Purpose, cfg.AllowedHosts = p, []string{hostMCP}
+			if _, err := New(cfg); !errors.Is(err, ErrInvalidConfig) {
+				t.Errorf("%v case %d: want ErrInvalidConfig, got %v", p, i, err)
+			}
+		}
+		c, err := New(Config{Purpose: p, AllowedHosts: []string{hostMCP}, Timeout: ceil.timeout, MaxBodyBytes: ceil.maxBody})
+		if err != nil || c.Timeout != ceil.timeout {
+			t.Errorf("%v at ceiling: %v", p, err)
+		}
 	}
 }

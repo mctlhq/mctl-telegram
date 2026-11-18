@@ -77,6 +77,7 @@ var (
 	ErrTooManyRedirects  = errors.New("egress: too many discovery redirects")
 	ErrNoAddress         = errors.New("egress: host resolved to no address")
 	ErrInvalidConfig     = errors.New("egress: invalid config")
+	ErrDiscoveryRequest  = errors.New("egress: discovery is for unauthenticated GET requests only")
 	errUserinfoInRequest = errors.New("egress: credentials in the URL are not allowed")
 )
 
@@ -88,6 +89,11 @@ const MaxDiscoveryHops = 2
 type Purpose int
 
 // Purposes. Only PurposeDiscovery follows redirects.
+//
+// PurposeDiscovery is for unauthenticated GET (or HEAD) requests for public
+// metadata documents only. Because it follows redirects, the transport
+// refuses any other method, a request body, and an Authorization or Cookie
+// header on a discovery client, on the first request and on every hop.
 const (
 	PurposeDiscovery Purpose = iota + 1
 	PurposeRegistration
@@ -120,12 +126,26 @@ type limits struct {
 
 // defaultLimits are the per-purpose caps. OAuth documents are small; the MCP
 // transport carries tools/list and tool results, which T10 caps further.
+//
+// The PurposeMCP total timeout bounds the whole exchange, body included, so
+// a long streamable-HTTP/SSE response is cut at 30s. A caller that needs a
+// longer stream raises Timeout up to the ceiling below.
 var defaultLimits = map[Purpose]limits{
 	PurposeDiscovery:    {timeout: 5 * time.Second, maxBody: 64 << 10},
 	PurposeRegistration: {timeout: 10 * time.Second, maxBody: 64 << 10},
 	PurposeToken:        {timeout: 10 * time.Second, maxBody: 64 << 10},
 	PurposeRevocation:   {timeout: 10 * time.Second, maxBody: 16 << 10},
 	PurposeMCP:          {timeout: 30 * time.Second, maxBody: 1 << 20},
+}
+
+// ceilingLimits bound the Config overrides: a value above the ceiling is
+// refused with ErrInvalidConfig rather than silently clamped.
+var ceilingLimits = map[Purpose]limits{
+	PurposeDiscovery:    {timeout: 10 * time.Second, maxBody: 256 << 10},
+	PurposeRegistration: {timeout: 30 * time.Second, maxBody: 256 << 10},
+	PurposeToken:        {timeout: 30 * time.Second, maxBody: 256 << 10},
+	PurposeRevocation:   {timeout: 30 * time.Second, maxBody: 64 << 10},
+	PurposeMCP:          {timeout: 5 * time.Minute, maxBody: 8 << 20},
 }
 
 // Config configures one client.
@@ -178,6 +198,13 @@ func newClient(cfg Config, h hooks) (*http.Client, error) {
 	if !ok {
 		return nil, fmt.Errorf("%w: unknown purpose %v", ErrInvalidConfig, cfg.Purpose)
 	}
+	ceil := ceilingLimits[cfg.Purpose]
+	if cfg.Timeout < 0 || cfg.Timeout > ceil.timeout {
+		return nil, fmt.Errorf("%w: %s timeout %v outside (0, %v]", ErrInvalidConfig, cfg.Purpose, cfg.Timeout, ceil.timeout)
+	}
+	if cfg.MaxBodyBytes < 0 || cfg.MaxBodyBytes > ceil.maxBody {
+		return nil, fmt.Errorf("%w: %s body cap %d outside (0, %d]", ErrInvalidConfig, cfg.Purpose, cfg.MaxBodyBytes, ceil.maxBody)
+	}
 	if cfg.Timeout > 0 {
 		lim.timeout = cfg.Timeout
 	}
@@ -200,8 +227,8 @@ func newClient(cfg Config, h hooks) (*http.Client, error) {
 			return nil, fmt.Errorf("%w: bad allowlist entry %q", ErrInvalidConfig, raw)
 		}
 		// The catalog pins host names. An IP literal, or a name whose last
-		// label is numeric (which some resolvers read as a shorthand IPv4
-		// literal such as "10.1"), is refused outright.
+		// label is numeric or hex (which resolvers and the WHATWG URL parser
+		// read as an IPv4 literal, such as "10.1" or "0x7f.1"), is refused.
 		if _, err := netip.ParseAddr(host); err == nil || numericLastLabel(host) {
 			return nil, fmt.Errorf("%w: allowlist entry %q is an IP literal", ErrInvalidConfig, raw)
 		}
@@ -210,6 +237,16 @@ func newClient(cfg Config, h hooks) (*http.Client, error) {
 	for _, pfx := range cfg.DeniedPrefixes {
 		if !pfx.IsValid() {
 			return nil, fmt.Errorf("%w: bad denied prefix %v", ErrInvalidConfig, pfx)
+		}
+		// An IPv4-mapped prefix (::ffff:a.b.c.d/n) would never match the
+		// native IPv4 answers a resolver returns, so it is stored as the
+		// IPv4 prefix it denotes. One shorter than /96 does not denote an
+		// IPv4 range and is refused rather than left to fail open.
+		if pfx.Addr().Is4In6() {
+			if pfx.Bits() < 96 {
+				return nil, fmt.Errorf("%w: IPv4-mapped denied prefix %v is shorter than /96", ErrInvalidConfig, pfx)
+			}
+			pfx = netip.PrefixFrom(pfx.Addr().Unmap(), pfx.Bits()-96)
 		}
 		p.denied = append(p.denied, pfx.Masked())
 	}
@@ -244,6 +281,15 @@ func numericLastLabel(host string) bool {
 	last := host[strings.LastIndexByte(host, '.')+1:]
 	if last == "" {
 		return false
+	}
+	if strings.HasPrefix(last, "0x") {
+		last = last[2:]
+		for _, r := range last {
+			if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+				return false
+			}
+		}
+		return true
 	}
 	for _, r := range last {
 		if r < '0' || r > '9' {
@@ -381,7 +427,11 @@ type policyTransport struct {
 }
 
 func (t *policyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if err := t.p.checkURL(req.URL); err != nil {
+	err := t.p.checkURL(req.URL)
+	if err == nil && t.p.purpose == PurposeDiscovery {
+		err = checkDiscoveryRequest(req)
+	}
+	if err != nil {
 		if req.Body != nil {
 			_ = req.Body.Close()
 		}
@@ -391,7 +441,12 @@ func (t *policyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 && t.p.purpose != PurposeDiscovery {
+	// Every 3xx counts, 304 included: no client here sends a conditional
+	// request, so a 304 is never a legitimate answer and must not reach the
+	// caller as an empty success. Discovery may see only the redirect codes
+	// http.Client follows; anything else in 3xx fails there too.
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 &&
+		(t.p.purpose != PurposeDiscovery || !followable(resp.StatusCode)) {
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf("%w: %s answered %d", ErrRedirect, t.p.purpose, resp.StatusCode)
 	}
@@ -401,6 +456,32 @@ func (t *policyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	resp.Body = &capBody{rc: resp.Body, left: t.p.maxBody}
 	return resp, nil
+}
+
+func followable(code int) bool {
+	switch code {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther,
+		http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		return true
+	}
+	return false
+}
+
+// checkDiscoveryRequest keeps a redirect-following client to anonymous
+// reads, so no credential can be carried to a hop.
+func checkDiscoveryRequest(req *http.Request) error {
+	if req.Method != http.MethodGet && req.Method != http.MethodHead && req.Method != "" {
+		return fmt.Errorf("%w: method %s", ErrDiscoveryRequest, req.Method)
+	}
+	if req.Body != nil && req.Body != http.NoBody {
+		return fmt.Errorf("%w: request body", ErrDiscoveryRequest)
+	}
+	for _, h := range []string{"Authorization", "Cookie", "Proxy-Authorization"} {
+		if req.Header.Get(h) != "" {
+			return fmt.Errorf("%w: %s header", ErrDiscoveryRequest, h)
+		}
+	}
+	return nil
 }
 
 // CloseIdleConnections lets http.Client.CloseIdleConnections reach the base
