@@ -308,6 +308,11 @@ func TestS1T5_StaleObservationRefused(t *testing.T) {
 	if _, err := s.Authorize("list_dialogs", t0.Add(ReadListingTTL)); err != nil {
 		t.Fatalf("Authorize at the TTL edge = %v", err)
 	}
+	// An observation stamped after now (clock skew, a bad caller) is not
+	// treated as fresh.
+	if _, err := s.Authorize("list_dialogs", t0.Add(-time.Second)); !errors.Is(err, ErrListingStale) {
+		t.Fatalf("Authorize before the observation = %v, want ErrListingStale", err)
+	}
 }
 
 // S1-T5 (unknown server): a server outside the catalog is unavailable.
@@ -409,6 +414,21 @@ func TestS1T7_ModelGetsCatalogDescriptions(t *testing.T) {
 			if strings.Contains(string(encoded), serverDesc[mt.Name]) {
 				t.Errorf("%s/%s: server description reached the model", server, mt.Name)
 			}
+		}
+	}
+}
+
+// canonicalJSON refuses anything after the value, including a stray closing
+// bracket, which a check for "another value follows" misses.
+func TestCanonicalJSONRefusesTrailingData(t *testing.T) {
+	for _, in := range []string{`{"a":1}}`, `{"a":1}]`, `{"a":1} {"b":2}`, `{"a":1} x`, `{"a":1},`} {
+		if _, err := canonicalJSON([]byte(in)); err == nil {
+			t.Errorf("canonicalJSON(%q) accepted trailing data", in)
+		}
+	}
+	for _, in := range []string{`{"a":1}`, " {\"a\":1} \n"} {
+		if _, err := canonicalJSON([]byte(in)); err != nil {
+			t.Errorf("canonicalJSON(%q) = %v", in, err)
 		}
 	}
 }

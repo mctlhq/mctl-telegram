@@ -65,8 +65,10 @@ type DeniedTool struct {
 }
 
 // ModelTool is what the model is shown for one usable tool: the catalog's
-// own description and the pinned input schema. Server descriptions never
-// reach the model (threat model T8, "tool poisoning").
+// own description and the pinned input schema. Tool-level server
+// descriptions never reach the model (threat model T8, "tool poisoning");
+// the property descriptions inside the pinned schema are server-authored
+// but frozen by pin review.
 type ModelTool struct {
 	Name        string
 	Description string
@@ -160,7 +162,8 @@ func (s *Surface) fresh(now time.Time) error {
 	if s.err != nil {
 		return s.err
 	}
-	if now.Sub(s.observedAt) > ReadListingTTL {
+	// An observation stamped in the future is not trusted to be fresh.
+	if s.observedAt.After(now) || now.Sub(s.observedAt) > ReadListingTTL {
 		return ErrListingStale
 	}
 	return nil

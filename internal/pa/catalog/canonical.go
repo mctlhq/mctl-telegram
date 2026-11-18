@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 )
 
 // canonicalJSON re-encodes a JSON value so that two encodings of the same
@@ -35,10 +36,10 @@ func canonicalJSON(raw []byte) ([]byte, error) {
 	if err := dec.Decode(&v); err != nil {
 		return nil, err
 	}
-	if dec.More() {
-		return nil, errors.New("trailing data after JSON value")
-	}
-	if _, err := dec.Token(); err == nil {
+	// Only a clean EOF ends the input. A closing bracket or any other
+	// token after the value makes Token return a syntax error, which is
+	// trailing data too.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, errors.New("trailing data after JSON value")
 	}
 	var buf bytes.Buffer

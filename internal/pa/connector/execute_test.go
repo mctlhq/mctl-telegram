@@ -237,7 +237,7 @@ func TestS1U3_FailedResultAppendAlerts(t *testing.T) {
 	dispatch, n := fakeDispatch(ev, "out", nil)
 	x := newExecutor(sink)
 	var alerted []Entry
-	x.OnResultAppendFailure = func(e Entry, _ error) { alerted = append(alerted, e) }
+	x.OnAuditAppendFailure = func(e Entry, _ error) { alerted = append(alerted, e) }
 	res, err := x.Execute(context.Background(), tgSurface(t), readCall(t, `{}`), dispatch)
 	if err != nil || string(res.Output) != "out" || *n != 1 {
 		t.Fatalf("res = %q, err = %v, dispatches = %d", res.Output, err, *n)
@@ -294,7 +294,8 @@ func TestS1U1_NoBodyOrTokenInAuditOrLogs(t *testing.T) {
 	}
 }
 
-// Execute refuses an incomplete call before recording or sending anything.
+// Execute refuses an incomplete call and sends nothing. Without a principal
+// nothing can be recorded; with one, the refusal is one refused entry.
 func TestExecuteRefusesInvalidCall(t *testing.T) {
 	cases := map[string]func(c *Call){
 		"zero policy":          func(c *Call) { c.Policy = pa.Policy{} },
@@ -311,8 +312,17 @@ func TestExecuteRefusesInvalidCall(t *testing.T) {
 			call := readCall(t, `{}`)
 			mutate(&call)
 			_, err := newExecutor(sink).Execute(context.Background(), tgSurface(t), call, dispatch)
-			if !errors.Is(err, ErrInvalidCall) || *n != 0 || len(ev.list()) != 0 {
+			want := []string{"append:result:refused"}
+			if name == "zero policy" {
+				want = nil
+			}
+			if !errors.Is(err, ErrInvalidCall) || *n != 0 || !slices.Equal(ev.list(), want) {
 				t.Fatalf("err = %v, dispatches = %d, events = %v", err, *n, ev.list())
+			}
+			for _, e := range sink.entries {
+				if _, err := FormatRecord(e); err != nil {
+					t.Fatalf("refusal entry is not recordable: %v (%+v)", err, e)
+				}
 			}
 		})
 	}
@@ -345,5 +355,83 @@ func TestUnavailableServerRefusesCall(t *testing.T) {
 	_, err = newExecutor(&fakeSink{ev: ev}).Execute(context.Background(), s, readCall(t, `{}`), dispatch)
 	if !errors.Is(err, catalog.ErrServerUnavailable) || *n != 0 {
 		t.Fatalf("err = %v, dispatches = %d", err, *n)
+	}
+}
+
+// S1-U2 (panic): a dispatch that panics still gets its result entry, as
+// outcome_unknown, and the panic propagates.
+func TestS1U2_PanickingDispatchStillRecordsResult(t *testing.T) {
+	ev := &events{}
+	sink := &fakeSink{ev: ev}
+	dispatch := func(context.Context) (Result, error) {
+		ev.add("dispatch")
+		panic("transport bug")
+	}
+	func() {
+		defer func() {
+			if r := recover(); r != "transport bug" {
+				t.Fatalf("recovered %v, want the dispatch panic", r)
+			}
+		}()
+		_, _ = newExecutor(sink).Execute(context.Background(), tgSurface(t), readCall(t, `{}`), dispatch)
+	}()
+	want := []string{"append:pre_dispatch:dispatching", "dispatch", "append:result:outcome_unknown"}
+	if got := ev.list(); !slices.Equal(got, want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+}
+
+// ctxSink fails an append whose context is already done, like a store
+// whose first query honours cancellation.
+type ctxSink struct{ fakeSink }
+
+func (s *ctxSink) Append(ctx context.Context, e Entry) error {
+	if err := ctx.Err(); err != nil {
+		s.ev.add("append-failed:" + string(e.Phase))
+		return err
+	}
+	return s.fakeSink.Append(ctx, e)
+}
+
+// S1-U2 (cancellation): a run cancelled while the call is in flight still
+// gets the call's result entry; a refusal on a cancelled run is still
+// recorded; a call on an already-cancelled run is refused before dispatch.
+func TestS1U2_CancelledRunStillRecordsResult(t *testing.T) {
+	ev := &events{}
+	sink := &ctxSink{fakeSink{ev: ev}}
+	ctx, cancel := context.WithCancel(context.Background())
+	dispatch := func(ctx context.Context) (Result, error) {
+		ev.add("dispatch")
+		cancel()
+		return Result{}, ctx.Err()
+	}
+	_, err := newExecutor(sink).Execute(ctx, tgSurface(t), readCall(t, `{}`), dispatch)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	want := []string{"append:pre_dispatch:dispatching", "dispatch", "append:result:outcome_unknown"}
+	if got := ev.list(); !slices.Equal(got, want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+
+	// Refusal on the now-cancelled context: still recorded.
+	ev2 := &events{}
+	sink2 := &ctxSink{fakeSink{ev: ev2}}
+	call := readCall(t, `{}`)
+	call.Tool = "send_message"
+	d2, n2 := fakeDispatch(ev2, "", nil)
+	if _, err := newExecutor(sink2).Execute(ctx, tgSurface(t), call, d2); !errors.Is(err, catalog.ErrNotPinned) || *n2 != 0 {
+		t.Fatalf("err = %v, dispatches = %d", err, *n2)
+	}
+	if got := ev2.list(); !slices.Equal(got, []string{"append:result:refused"}) {
+		t.Fatalf("refusal events = %v", got)
+	}
+
+	// A permitted call on the cancelled context fails closed at the
+	// pre-dispatch append.
+	ev3 := &events{}
+	d3, n3 := fakeDispatch(ev3, "", nil)
+	if _, err := newExecutor(&ctxSink{fakeSink{ev: ev3}}).Execute(ctx, tgSurface(t), readCall(t, `{}`), d3); !errors.Is(err, ErrAuditUnavailable) || *n3 != 0 {
+		t.Fatalf("err = %v, dispatches = %d", err, *n3)
 	}
 }

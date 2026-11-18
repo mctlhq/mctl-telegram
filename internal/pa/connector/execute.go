@@ -157,10 +157,13 @@ type Executor struct {
 	Sink Sink
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
-	// OnResultAppendFailure is called when the result entry could not be
-	// appended after a dispatch, to raise the alert threat model T12
-	// requires. The failure is also logged. nil means log only.
-	OnResultAppendFailure func(e Entry, err error)
+	// OnAuditAppendFailure is called when an entry that records something
+	// already decided could not be appended: the result entry after a
+	// dispatch, or the refused entry of a refusal. It raises the alert
+	// threat model T12 requires. The failure is also logged. nil means log
+	// only. A failed pre-dispatch append does not call it: that refuses the
+	// call instead.
+	OnAuditAppendFailure func(e Entry, err error)
 }
 
 func (x *Executor) now() time.Time {
@@ -172,30 +175,27 @@ func (x *Executor) now() time.Time {
 
 // Execute is the only way a PA tool call is dispatched:
 //
-//  1. the call must name a principal and a connection bound to the run;
-//  2. the pin authorizes the tool against the server's current surface; a
-//     refusal is audited as a single refused entry and nothing is sent;
+//  1. the call must name a principal; without one nothing is recorded;
+//  2. the connection must be bound to the run, the taint known, and the pin
+//     must authorize the tool against the server's current surface; any
+//     refusal here is audited as a single refused entry and nothing is sent;
 //  3. a pre-dispatch entry is appended; if that fails, the call is refused
 //     with ErrAuditUnavailable and dispatch never runs;
 //  4. dispatch runs once;
-//  5. a result entry is appended; if that fails, the alert hook fires, and
-//     the dispatch result is still returned, since the call already ran.
+//  5. a result entry is appended, also when dispatch panics; if that fails,
+//     the alert hook fires, and the dispatch result is still returned, since
+//     the call already ran.
+//
+// Result and refusal entries are appended on a context detached from ctx's
+// cancellation: a run cancelled mid-dispatch still gets its result row.
 func (x *Executor) Execute(ctx context.Context, surface *catalog.Surface, call Call, dispatch Dispatch) (Result, error) {
 	if x == nil || x.Sink == nil || surface == nil || dispatch == nil {
 		return Result{}, fmt.Errorf("%w: executor not configured", ErrInvalidCall)
 	}
 	principal := call.Policy.Principal()
 	if principal.IsZero() {
+		// Without a principal there is no chain to record the refusal in.
 		return Result{}, fmt.Errorf("%w: no principal", ErrInvalidCall)
-	}
-	conn, ok := call.Policy.Connection(call.ConnectionID)
-	if !ok || call.ConnectionID == "" {
-		return Result{}, fmt.Errorf("%w: connection not bound to the run", ErrInvalidCall)
-	}
-	switch call.Taint {
-	case TaintClean, TaintExternal:
-	default:
-		return Result{}, fmt.Errorf("%w: unknown taint", ErrInvalidCall)
 	}
 	callID, err := newCallID()
 	if err != nil {
@@ -203,38 +203,66 @@ func (x *Executor) Execute(ctx context.Context, surface *catalog.Surface, call C
 	}
 	now := x.now()
 	base := Entry{
-		CallID:            callID,
-		Principal:         principal.TelegramID(),
-		ConnectionID:      conn.ConnectionID,
-		AuthorityRevision: conn.AuthorityRevision,
-		Server:            surface.Server(),
-		Tool:              recordableName(call.Tool),
-		ArgsSHA256:        digest(call.Args),
-		Taint:             call.Taint,
-		ApprovalID:        call.ApprovalID,
-		Approver:          call.Approver,
+		CallID:     callID,
+		Principal:  principal.TelegramID(),
+		Server:     surface.Server(),
+		Tool:       recordableName(call.Tool),
+		ArgsSHA256: digest(call.Args),
+		Taint:      call.Taint,
+		ApprovalID: call.ApprovalID,
+		Approver:   call.Approver,
+	}
+
+	// From here the principal is known, so every refusal is audited.
+	conn, ok := call.Policy.Connection(call.ConnectionID)
+	if !ok || call.ConnectionID == "" {
+		base.ConnectionID = unboundConnection
+		return Result{}, x.refuse(ctx, base, now, fmt.Errorf("%w: connection not bound to the run", ErrInvalidCall))
+	}
+	base.ConnectionID, base.AuthorityRevision = conn.ConnectionID, conn.AuthorityRevision
+	switch call.Taint {
+	case TaintClean, TaintExternal:
+	default:
+		base.Taint = taintInvalid
+		return Result{}, x.refuse(ctx, base, now, fmt.Errorf("%w: unknown taint", ErrInvalidCall))
 	}
 
 	grant, authErr := surface.Authorize(call.Tool, now)
 	if authErr != nil {
-		refused := base
-		refused.Phase, refused.Status, refused.At = PhaseResult, StatusRefused, now
-		if err := x.Sink.Append(ctx, refused); err != nil {
-			// The call is refused either way; the missing row is an
-			// alert, like a failed result append.
-			x.alert(refused, err)
-		}
-		return Result{}, authErr
+		return Result{}, x.refuse(ctx, base, now, authErr)
 	}
 	base.Tier, base.Class = grant.Tier, grant.Class
 
+	// The pre-dispatch append keeps the live context: if the run is already
+	// cancelled, refusing the call is the right outcome.
 	pre := base
 	pre.Phase, pre.Status, pre.At = PhasePreDispatch, StatusDispatching, now
 	if err := x.Sink.Append(ctx, pre); err != nil {
 		return Result{}, fmt.Errorf("%w: %w", ErrAuditUnavailable, err)
 	}
 
-	res, dispatchErr := dispatch(ctx)
+	return x.dispatchRecorded(ctx, base, dispatch)
+}
+
+// dispatchRecorded runs dispatch once and appends its result entry. The
+// result entry is written even if dispatch panics or exits the goroutine
+// (as outcome_unknown); a panic is then re-raised.
+func (x *Executor) dispatchRecorded(ctx context.Context, base Entry, dispatch Dispatch) (res Result, dispatchErr error) {
+	completed := false
+	defer func() {
+		if completed {
+			return
+		}
+		r := recover()
+		post := base
+		post.Phase, post.At, post.Status = PhaseResult, x.now(), StatusOutcomeUnknown
+		x.appendDetached(ctx, post)
+		if r != nil {
+			panic(r)
+		}
+	}()
+	res, dispatchErr = dispatch(ctx)
+	completed = true
 
 	post := base
 	post.Phase, post.At, post.Cost = PhaseResult, x.now(), res.Cost
@@ -249,18 +277,48 @@ func (x *Executor) Execute(ctx context.Context, surface *catalog.Surface, call C
 	default:
 		post.Status = StatusOutcomeUnknown
 	}
-	if err := x.Sink.Append(ctx, post); err != nil {
-		x.alert(post, err)
-	}
+	x.appendDetached(ctx, post)
 	return res, dispatchErr
 }
+
+// refuse records a refusal as a single result entry and returns cause. The
+// call is refused whether or not the entry could be written; a missing
+// entry raises the alert.
+func (x *Executor) refuse(ctx context.Context, base Entry, at time.Time, cause error) error {
+	refused := base
+	refused.Phase, refused.Status, refused.At = PhaseResult, StatusRefused, at
+	x.appendDetached(ctx, refused)
+	return cause
+}
+
+// auditDetachTimeout bounds a result or refusal append that no longer
+// follows the run's cancellation.
+const auditDetachTimeout = 5 * time.Second
+
+// appendDetached appends an entry describing something that already
+// happened (a dispatch, a refusal). The run's cancellation must not lose it,
+// so the append runs on a context detached from ctx's cancellation, with its
+// own deadline. A failure raises the alert.
+func (x *Executor) appendDetached(ctx context.Context, e Entry) {
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditDetachTimeout)
+	defer cancel()
+	if err := x.Sink.Append(dctx, e); err != nil {
+		x.alert(e, err)
+	}
+}
+
+// Markers recorded for a refused call whose own values are not recordable.
+const (
+	unboundConnection = "unbound"
+	taintInvalid      = Taint("invalid")
+)
 
 func (x *Executor) alert(e Entry, err error) {
 	slog.Error("pa connector: audit append failed",
 		"call_id", e.CallID, "server", e.Server, "tool", e.Tool,
 		"phase", string(e.Phase), "status", string(e.Status), "err", err)
-	if x.OnResultAppendFailure != nil {
-		x.OnResultAppendFailure(e, err)
+	if x.OnAuditAppendFailure != nil {
+		x.OnAuditAppendFailure(e, err)
 	}
 }
 

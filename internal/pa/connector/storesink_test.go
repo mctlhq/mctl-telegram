@@ -160,3 +160,49 @@ func TestFormatRecordRefusesUnsafeIdentifiers(t *testing.T) {
 		}
 	}
 }
+
+// S1-U2 through the real store: a run cancelled while the call is in flight
+// still writes both rows. The principal lookup of the result append must not
+// run on the cancelled context.
+func TestStoreSink_CancelledRunWritesBothRows(t *testing.T) {
+	store := newStore(t)
+	userID, err := store.EnsureUserByTelegramID(context.Background(), aliceID, "alice", "Alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	x := &Executor{Sink: StoreSink{Store: store}, Now: func() time.Time { return t0 }}
+	var alerts int
+	x.OnAuditAppendFailure = func(Entry, error) { alerts++ }
+	ctx, cancel := context.WithCancel(context.Background())
+	dispatch := func(ctx context.Context) (Result, error) {
+		cancel()
+		return Result{}, ctx.Err()
+	}
+	if _, err := x.Execute(ctx, tgSurface(t), readCall(t, `{}`), dispatch); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	rows := readRows(t, store, userID)
+	if len(rows) != 2 || rows[1].status != string(StatusOutcomeUnknown) || alerts != 0 {
+		t.Fatalf("rows = %+v, alerts = %d", rows, alerts)
+	}
+}
+
+// zeroStore resolves every principal to user id 0, which no users row has.
+type zeroStore struct{ logged int }
+
+func (z *zeroStore) UserIDByTelegramID(context.Context, int64) (int64, error) { return 0, nil }
+func (z *zeroStore) LogToolCallChecked(context.Context, db.ToolCall) error {
+	z.logged++
+	return nil
+}
+
+// StoreSink refuses a lookup that returns no user instead of writing a row
+// with user_id 0.
+func TestStoreSink_ZeroUserIDRefused(t *testing.T) {
+	z := &zeroStore{}
+	e := Entry{CallID: "c1", Phase: PhasePreDispatch, Principal: aliceID, Server: "tg", Tool: "get_messages",
+		ConnectionID: "conn-a", AuthorityRevision: 1, ArgsSHA256: digest(nil), Taint: TaintClean, Status: StatusDispatching}
+	if err := (StoreSink{Store: z}).Append(context.Background(), e); !errors.Is(err, ErrUnrecordable) || z.logged != 0 {
+		t.Fatalf("err = %v, logged = %d", err, z.logged)
+	}
+}

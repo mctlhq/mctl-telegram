@@ -29,7 +29,14 @@
 //     It is an error state, never an empty tool set (I9);
 //   - a tool outside the pin is refused even when the model names it;
 //   - the model receives the catalog's descriptions and the pinned schemas,
-//     never the server's descriptions, which are only hashed.
+//     never the server's tool descriptions, which are only hashed. The
+//     property descriptions inside a pinned input_schema are server-authored
+//     text, but they are committed in pin.json, reviewed there, and any
+//     change to them changes the schema hash and denies the tool.
+//
+// Only name, description, inputSchema and annotations are compared. A
+// tool's title, outputSchema and _meta are not, because none of them is
+// given to the model or used by the executor.
 //
 // The pin is regenerated from its upstream sources with
 //
