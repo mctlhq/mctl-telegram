@@ -125,6 +125,26 @@ var sensitiveKeys = map[string]struct{}{
 	"pabottoken":        {},
 	"pa_webhook_secret": {},
 	"pawebhooksecret":   {},
+	// PA connections (issue #1314, threat model T3): downstream OAuth tokens,
+	// the authorization code and PKCE verifier, the per-server DCR client
+	// credentials, and the DEK/KEK material that seals them. "code" and
+	// "client_secret" are already above. Values held in a
+	// connection.Secret also render as "[redacted]" under any key.
+	"access_token":              {},
+	"refresh_token":             {},
+	"id_token":                  {},
+	"authorization_code":        {},
+	"code_verifier":             {},
+	"completion_code":           {},
+	"link_token":                {},
+	"registration_access_token": {},
+	"dek":                       {},
+	"wrapped_dek":               {},
+	"sealed_code":               {},
+	"sealed_tokens":             {},
+	"pa_kek_local_key":          {},
+	"x-vault-token":             {},
+	"vault_token":               {},
 	// send_media byte sources. file_base64 is file contents; file_path is a
 	// local filesystem path. Neither may appear in slog.
 	"file_base64": {},
