@@ -35,6 +35,29 @@ const (
 	ProblemLastErrorRecent = "delivery_error"
 )
 
+// botAPITimeout bounds one Bot API call made by this package. A variable
+// only so a test can shorten it.
+var botAPITimeout = 10 * time.Second
+
+// errRedirect refuses every redirect: the Bot API never redirects, and a
+// redirect would carry the token-bearing request to another host.
+var errRedirect = errors.New("bot api redirect refused")
+
+// boundedClient returns a copy of hc (or of a fresh client when hc is nil)
+// that never follows a redirect and always has a timeout. http.DefaultClient
+// has neither, so it is never used as is.
+func boundedClient(hc *http.Client) *http.Client {
+	var c http.Client
+	if hc != nil {
+		c = *hc
+	}
+	if c.Timeout <= 0 || c.Timeout > botAPITimeout {
+		c.Timeout = botAPITimeout
+	}
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return errRedirect }
+	return &c
+}
+
 // GetWebhookInfo reads the bot's webhook state. Any failure -- transport,
 // non-200, ok:false, malformed body -- is an error, never a zero WebhookInfo
 // that would read as "no webhook" (I9). The token never appears in an error.
@@ -45,9 +68,7 @@ func GetWebhookInfo(ctx context.Context, hc *http.Client, baseURL, token string)
 	if baseURL == "" {
 		baseURL = DefaultBotAPIBaseURL
 	}
-	if hc == nil {
-		hc = http.DefaultClient
-	}
+	hc = boundedClient(hc)
 	endpoint := strings.TrimRight(baseURL, "/") + "/bot" + token + "/getWebhookInfo"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {

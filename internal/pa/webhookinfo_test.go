@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -94,5 +95,64 @@ func TestCheckWebhook(t *testing.T) {
 				t.Fatalf("problems = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// A redirect is refused and never followed: following it would send the
+// token-bearing request to another host.
+func TestGetWebhookInfo_RefusesRedirects(t *testing.T) {
+	var hit atomic.Bool
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hit.Store(true)
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"url":"x"}}`))
+	}))
+	t.Cleanup(target.Close)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/elsewhere", http.StatusFound)
+	}))
+	t.Cleanup(redirector.Close)
+
+	for _, hc := range []*http.Client{nil, redirector.Client()} {
+		_, err := GetWebhookInfo(context.Background(), hc, redirector.URL, fakeToken)
+		if err == nil {
+			t.Fatal("redirect accepted")
+		}
+		if strings.Contains(err.Error(), fakeToken) {
+			t.Fatalf("error leaks the token: %v", err)
+		}
+	}
+	if hit.Load() {
+		t.Fatal("redirect target was contacted")
+	}
+}
+
+// A hanging Bot API is bounded by the package timeout even with a nil client
+// or a caller client that has no timeout of its own.
+func TestGetWebhookInfo_Timeout(t *testing.T) {
+	old := botAPITimeout
+	botAPITimeout = 100 * time.Millisecond
+	t.Cleanup(func() { botAPITimeout = old })
+	hang := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(hang.Close)
+
+	for _, hc := range []*http.Client{nil, {}} {
+		done := make(chan error, 1)
+		go func() {
+			_, err := GetWebhookInfo(context.Background(), hc, hang.URL, fakeToken)
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatal("hanging server produced no error")
+			}
+		case <-time.After(5 * time.Second):
+			// Fail rather than wait: the call is unbounded. The hanging
+			// handler is released when hang.Close cancels the connection.
+			hang.CloseClientConnections()
+			t.Fatal("call not bounded by the package timeout")
+		}
 	}
 }
