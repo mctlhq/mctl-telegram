@@ -1,4 +1,36 @@
   /*
+   * Metric-matched fallbacks for the two web fonts (font-display: swap).
+   * Without them the system fallback has different glyph widths and line
+   * metrics, so when Onest / JetBrains Mono arrive the hero text re-wraps
+   * and everything below it (the usage strip) jumps: mobile CLS 0.134 on
+   * the home page (PageSpeed Insights, 2026-11-18). The overrides are
+   * derived from the font files against Arial / Courier New (frequency-
+   * weighted average glyph width, hhea ascent and descent). They apply only
+   * while the web font is not yet loaded. Declared here, after the CDN
+   * sheets, so the stacks below win over the ones in mctl.css.
+   */
+  @font-face {
+    font-family: 'Onest Fallback';
+    src: local('Arial'), local('Liberation Sans'), local('Helvetica'), local('Arimo');
+    size-adjust: 108%;
+    ascent-override: 90%;
+    descent-override: 28%;
+    line-gap-override: 0%;
+  }
+  @font-face {
+    font-family: 'JetBrains Mono Fallback';
+    src: local('Courier New'), local('Liberation Mono'), local('Cousine');
+    size-adjust: 100%;
+    ascent-override: 102%;
+    descent-override: 30%;
+    line-gap-override: 0%;
+  }
+  :root {
+    --font-display: 'Onest', 'Onest Fallback', system-ui, -apple-system, sans-serif;
+    --font-mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  /*
    * Palette is sourced entirely from the mctl design system (ui.mctl.ai/mctl.css,
    * or the inline fallback in tokens.css). These pages keep their own short
    * variable names but alias them onto the mctl semantic tokens, so dark/light
