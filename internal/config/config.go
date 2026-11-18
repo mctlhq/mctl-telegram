@@ -538,6 +538,51 @@ type Config struct {
 	// per enrolled actor. Default 30s, minimum 10s. Set via
 	// HUMAN_INPUT_POLL_INTERVAL.
 	HumanInputPollInterval time.Duration
+	// PAEnabled is the Personal Assistant master kill switch (issue #1313,
+	// threat model T11). Fail-closed: unset, empty or unparseable means off,
+	// and with it off no PA route is registered, no PA bot token is read and
+	// nothing PA-related starts. Set via PA_ENABLED.
+	PAEnabled bool
+	// PABotToken is the dedicated PA Bot API token (PA_BOT_TOKEN). It has no
+	// default, is read only when PAEnabled is true, and must belong to a
+	// different bot than TELEGRAM_LOGIN_BOT_TOKEN: the PA bot is its own
+	// trust boundary (ADR 0011).
+	PABotToken string
+	// PAWebhookSecret is the secret_token Telegram echoes in
+	// X-Telegram-Bot-Api-Secret-Token on every webhook delivery
+	// (PA_WEBHOOK_SECRET). No default; read only when PAEnabled is true.
+	PAWebhookSecret string
+}
+
+// MinPAWebhookSecretLen is the shortest PA_WEBHOOK_SECRET Load accepts.
+// Telegram allows 1-256 characters; anything short enough to guess is
+// refused at boot rather than accepted on the public webhook.
+const MinPAWebhookSecretLen = 32
+
+// paWebhookSecretChars is Telegram's documented secret_token alphabet.
+var paWebhookSecretChars = regexp.MustCompile(`^[A-Za-z0-9_-]{1,256}$`)
+
+// loadPA reads the PA settings. With PA_ENABLED off it reads nothing else, so
+// a stray PA_BOT_TOKEN in an environment that has not enabled the PA cannot
+// be picked up by anything. Errors never contain the token or the secret.
+func loadPA(c *Config) error {
+	c.PAEnabled = envBool("PA_ENABLED", false)
+	if !c.PAEnabled {
+		return nil
+	}
+	c.PABotToken = os.Getenv("PA_BOT_TOKEN")
+	c.PAWebhookSecret = os.Getenv("PA_WEBHOOK_SECRET")
+	paID, ok := BotIDFromToken(c.PABotToken)
+	if !ok || len(c.PABotToken) <= len(paID)+1 {
+		return errors.New("PA_ENABLED=true requires PA_BOT_TOKEN to be a Bot API token")
+	}
+	if loginID, ok := BotIDFromToken(c.TelegramLoginBotToken); ok && loginID == paID {
+		return errors.New("PA_BOT_TOKEN must belong to a different bot than TELEGRAM_LOGIN_BOT_TOKEN")
+	}
+	if len(c.PAWebhookSecret) < MinPAWebhookSecretLen || !paWebhookSecretChars.MatchString(c.PAWebhookSecret) {
+		return fmt.Errorf("PA_ENABLED=true requires PA_WEBHOOK_SECRET of %d-256 characters from [A-Za-z0-9_-]", MinPAWebhookSecretLen)
+	}
+	return nil
 }
 
 func Load() (*Config, error) {
@@ -759,6 +804,9 @@ func Load() (*Config, error) {
 		if c.HumanInputPollInterval < MinHumanInputPollInterval {
 			return nil, fmt.Errorf("HUMAN_INPUT_POLL_INTERVAL must be at least %s, got %s", MinHumanInputPollInterval, c.HumanInputPollInterval)
 		}
+	}
+	if err := loadPA(c); err != nil {
+		return nil, err
 	}
 	c.ToolFilter = envOr("MCP_TOOL_FILTER", "all")
 	if c.OAUTHCIMDAdvertise && !c.OAUTHCIMDAccept {

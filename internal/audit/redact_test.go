@@ -221,3 +221,17 @@ func TestRedactAttr_HumanInputContentKeys(t *testing.T) {
 		})
 	}
 }
+
+func TestRedactAttr_PABotKeys(t *testing.T) {
+	for _, k := range []string{"pa_bot_token", "PA_BOT_TOKEN", "PABotToken", "pa_webhook_secret", "PA_WEBHOOK_SECRET", "PAWebhookSecret"} {
+		t.Run(k, func(t *testing.T) {
+			got := redactAttr(slog.String(k, "pa-secret-value-abcdefghijklmnop"))
+			if got.Value.Kind() != slog.KindString || !strings.HasPrefix(got.Value.String(), "[redacted len=") {
+				t.Fatalf("key %q was not redacted: %v", k, got)
+			}
+			if strings.Contains(got.Value.String(), "pa-secret-value") {
+				t.Fatalf("key %q leaked its value: %v", k, got)
+			}
+		})
+	}
+}
