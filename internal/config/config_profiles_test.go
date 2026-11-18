@@ -40,6 +40,32 @@ func TestLoadClientProfiles(t *testing.T) {
 			t.Fatalf("ClientProfiles = %+v", cfg.ClientProfiles)
 		}
 	})
+	t.Run("scope ceiling record", func(t *testing.T) {
+		t.Setenv("MCP_CLIENT_PROFILES", `[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read","telegram:messages:read"]}]`)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error: %v", err)
+		}
+		if c, ok := cfg.ClientProfiles.ScopeCeiling("pa.example"); !ok || strings.Join(c, " ") != "telegram:dialogs:read telegram:messages:read" {
+			t.Fatalf("ScopeCeiling = %v, %v", c, ok)
+		}
+	})
+	t.Run("malformed scope ceiling fails fast", func(t *testing.T) {
+		for _, raw := range []string{
+			`[{"client_id":"pa.example","scope_ceiling":[]}]`,
+			`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read telegram:messages:read"]}]`,
+			`[{"redirect_uri":"https://pa.example.test/cb","profile":"core-readonly","scope_ceiling":["telegram:dialogs:read"]}]`,
+			`[{"client_id":"pa.example","profile":"core-readonly","scope_ceiling":null}]`,
+			`[{"client_id":"pa.example","profile":"core-readonly","scope_ceiling":["telegram:dialogs:read"],"scope_ceiling":null}]`,
+			`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read"],"client_id":"other.example"}]`,
+			`[{"client_id":"pa.example","profile":"core-readonly","scope_ceiling":["telegram:dialogs:read"],"SCOPE_CEILING":null}]`,
+		} {
+			t.Setenv("MCP_CLIENT_PROFILES", raw)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "MCP_CLIENT_PROFILES") {
+				t.Fatalf("Load() with %s = %v, want the table refusal", raw, err)
+			}
+		}
+	})
 	t.Run("malformed table fails fast", func(t *testing.T) {
 		t.Setenv("MCP_CLIENT_PROFILES", `[{"client_id":"x","redirect_uri":"https://platform.example.test/cb","profile":"core-readonly"}]`)
 		_, err := Load()

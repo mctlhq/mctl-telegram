@@ -134,6 +134,44 @@ service outage unless new authorization-code flows also fail.
 - The profile is stamped into each access token (`prf`) at code exchange
   and at every refresh, so a binding change reaches existing connections at
   their next refresh (access token lifetime at most).
+- **Scope ceilings (#1326).** A `client_id` record may carry
+  `"scope_ceiling": ["telegram:dialogs:read", "telegram:messages:read"]`,
+  with or without a `profile`. It is an allowlist: every access token
+  minted for that exact `client_id`, at the code exchange and at every
+  refresh, carries only the scopes it names, and no groups. Unlike the
+  client's `scope` request, it also strips the membership-granted
+  `admin:users`, `admin:users:read` and `admin:broadcast`, so an admin
+  signing in through a read-only client gets a read-only token. It is
+  re-applied at each refresh, so adding or tightening it reaches existing
+  connections at their next refresh. It is keyed by `client_id` only: a
+  `redirect_uri` record with a ceiling, a `null` or empty list, a blank,
+  padded, space-joined or repeated entry, a repeated JSON key (a second
+  `scope_ceiling` or `client_id` in one record) and a key spelled other
+  than exactly `client_id`, `redirect_uri`, `profile`, `scope_ceiling`
+  stop the server at startup
+  (`MCP_CLIENT_PROFILES: record N: ...`), and so does an entry naming a
+  scope the server never grants (`oauth init failed: ... scope ceiling for
+  client_id ...`). A client without a ceiling keeps its grant exactly. The
+  code-exchange log line carries `scope_ceiling_applied`; a bounded refresh
+  logs `oauth: token refresh_token grant` with the same field. A principal
+  holding nothing within the ceiling (for example a lookup admin, whose
+  only scope is `admin:users:read`) gets no token: the code exchange
+  answers `invalid_scope` and a refresh `invalid_grant`, both with
+  "this account holds no scope within this client's scope ceiling"; the
+  refresh family is left intact.
+
+  The Personal Assistant client record MUST carry both a profile and the
+  ceiling, e.g.
+  `{"client_id": "<pa client id>", "profile": "core-readonly",
+  "scope_ceiling": ["telegram:dialogs:read", "telegram:messages:read"]}`.
+  The ceiling bounds the scopes; the profile is defence in depth that
+  confines the token to the MCP endpoint (see below), so it cannot reach
+  `/api/mcp/worker-token`, `/api/account` or the bridge even if a later
+  change widened a scope. Its registered callback host must be neither on
+  `OAUTH_ALLOWED_IMPLICIT_HOSTS` nor a loopback host (`localhost`,
+  `127.0.0.1`, `[::1]`): either would let a client other than the PA
+  register a redirect on the same host and obtain codes outside the
+  ceiling's intent.
 - A profiled token is admitted only on the MCP endpoint. Every other
   authenticated route (`/api/account`, `/api/mcp/worker-token`,
   `/api/bridge/token`, `/telegram/connect/manage`, ...) answers 403 and
