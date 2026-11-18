@@ -119,6 +119,12 @@ var sensitiveKeys = map[string]struct{}{
 	// env name and the Go field name, both matched case-insensitively.
 	"bot_start_bridge_token": {},
 	"botstartbridgetoken":    {},
+	// Personal Assistant bot (issue #1313): its own Bot API token and the
+	// webhook secret_token, under the env names and the Go field names.
+	"pa_bot_token":      {},
+	"pabottoken":        {},
+	"pa_webhook_secret": {},
+	"pawebhooksecret":   {},
 	// send_media byte sources. file_base64 is file contents; file_path is a
 	// local filesystem path. Neither may appear in slog.
 	"file_base64": {},
