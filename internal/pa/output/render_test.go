@@ -73,7 +73,7 @@ func TestS1O2_URLNeutralisation(t *testing.T) {
 		{"bot command with bot mention", "send /start@Evil_bot",
 			"send /start[@]Evil_bot"},
 		{"email", "mail carol@attacker.example",
-			"mail carol@attacker[.]example"},
+			"mail carol[@]attacker[.]example"},
 		{"ipv4", "fetch 203.0.113.9:8080/x",
 			"fetch 203[.]0[.]113[.]9[:]8080/x"},
 		{"mention inside url", "https://a.example/@EvilBot",
@@ -90,8 +90,9 @@ func TestS1O2_URLNeutralisation(t *testing.T) {
 			"I asked [@]alicehelperbot"},
 		{"human mention untouched", "Bob is @bob_example",
 			"Bob is @bob_example"},
-		{"plain prose untouched", "Dana sent 3 messages, e.g. about 2*3.",
-			"Dana sent 3 messages, e.g. about 2*3."},
+		{"plain prose untouched", "Dana sent 3.5 messages (1,234.5 bytes), about 2*3.",
+			"Dana sent 3.5 messages (1,234.5 bytes), about 2*3."},
+		{"dotted prose defanged", "e.g. this", "e[.]g. this"},
 	}
 	for _, c := range cases {
 		got := Render(c.model, allow).String()
@@ -152,8 +153,99 @@ func TestS1O3_MarkupStripped(t *testing.T) {
 }
 
 func TestServerTextBypassesRender(t *testing.T) {
-	const tpl Template = "Consent saved. Send /consent withdraw to revoke."
-	if got := ServerText(tpl).String(); got != string(tpl) {
+	const want = "Consent saved. Send /consent withdraw to revoke."
+	if got := ServerText(tpl(want)).String(); got != want {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// noLiveDot is an independent check that does not use findCandidates: once
+// "[.]" is removed, no dot-class character may sit between two characters
+// that are neither spaces nor newlines.
+func noLiveDot(out string) bool {
+	r := []rune(strings.ReplaceAll(out, "[.]", ""))
+	for i := 1; i+1 < len(r); i++ {
+		if isDot(r[i]) && !isBoundary(r[i-1]) && !isBoundary(r[i+1]) {
+			return false
+		}
+	}
+	return true
+}
+
+// S1-O2: scheme-less domains whose label ends in a character that is not a
+// letter, digit or mark. Telegram accepts any non-separator code point from
+// U+00C0 up, and ~ below it, as a domain symbol (is_domain_symbol), and
+// links every one of these.
+func TestS1O2_DomainSymbolsBeyondLetters(t *testing.T) {
+	inputs := []string{
+		"evil\U0001F600.ws/?d=SECRET",
+		"i\u2665.ws/x?d=SECRET",
+		"a.b\U0001F600.com/?d=SECRET",
+		"evil\u2010.com/?d=SECRET",
+		"evil~.com/?d=SECRET",
+		"evil\u00b7.com/?d=SECRET",
+		"x evil_.com/?d=SECRET y",
+	}
+	for _, in := range inputs {
+		got := Render(in, UserText{}).String()
+		if got == in || !noLiveDot(got) {
+			t.Errorf("%q passed as %q", in, got)
+		}
+		if bad := liveLinks(got, UserText{}); len(bad) != 0 {
+			t.Errorf("%q -> %q: live tokens %q", in, got, bad)
+		}
+	}
+}
+
+// S1-O2: a link the principal typed cannot be extended by characters
+// Telegram keeps inside the link: an apostrophe, a backtick, full-width
+// punctuation, or a tab (normalised to a space, which ends the link).
+func TestS1O2_UserURLCannotBeExtended(t *testing.T) {
+	allow := AllowFromUserText("see https://a.example/x", "or a.example/y", "https://docs.example.org/guide?id=7")
+	cases := []struct{ model, want string }{
+		{"https://docs.example.org/guide?id=7'&d=x", "https[:]//docs[.]example[.]org/guide?id=7'&d=x"},
+		{"https://a.example/x'?d=SECRET", "https[:]//a[.]example/x'?d=SECRET"},
+		{"https://a.example/x`SECRET", "https[:]//a[.]example/xSECRET"}, // backtick also stripped as markup
+		{"https://a.example/x\uff0c\u3002\uff0c\uff0e\uff61", "https[:]//a[.]example/x\uff0c[.]\uff0c[.][.]"},
+		{"a.example/y'SECRET", "a[.]example/y'SECRET"},
+		{"https://a.example/x)SECRET", "https[:]//a[.]example/x)SECRET"},
+		{"https://a.example/x\tSECRET", "https://a.example/x SECRET"},
+		{"https://a.example/x'", "https://a.example/x'"},
+		{"(https://a.example/x)", "(https://a.example/x)"},
+		{"(https://a.example/x(1))", "(https[:]//a[.]example/x(1))"},
+		{"'https://a.example/x'", "'https://a.example/x'"},
+	}
+	for _, c := range cases {
+		if got := Render(c.model, allow).String(); got != c.want {
+			t.Errorf("%q:\n got %q\nwant %q", c.model, got, c.want)
+		}
+	}
+}
+
+// S1-O2: splitting into Bot API sized parts cannot leave a live token: each
+// part is neutralised again, so the tail of a long user link cut at the
+// limit is defanged in its own part.
+func TestS1O2_SplitCannotCreateLink(t *testing.T) {
+	long := "https://a.example/" + strings.Repeat("q", maxTextUTF16-len("https://a.example/")) + "1.2.3.4/?d=SECRET"
+	allow := AllowFromUserText(long)
+	for _, model := range []string{
+		long,
+		strings.Repeat("x", maxTextUTF16-1) + "a1.2.3.4/?d=SECRET",
+	} {
+		txt := Render(model, allow)
+		if len(txt.parts) < 2 {
+			t.Fatalf("want a split, got %d parts", len(txt.parts))
+		}
+		for i, p := range txt.parts {
+			if utf16Len(p) > maxTextUTF16 {
+				t.Errorf("part %d too long", i)
+			}
+			if bad := liveLinks(p, allow); len(bad) != 0 {
+				t.Errorf("part %d has live tokens %q", i, bad)
+			}
+			if strings.HasPrefix(p, "1.2.3.4") {
+				t.Errorf("part %d starts with a live IPv4 link: %q", i, p[:20])
+			}
+		}
 	}
 }

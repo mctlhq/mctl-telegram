@@ -77,7 +77,7 @@ func TestS1O1_EverySendDisablesPreviews(t *testing.T) {
 		kb   Keyboard
 	}{
 		{Render("see https://docs.example.org/a", allow), nil},
-		{ServerText("Consent required."), Keyboard{{{Label: "Agree", Data: "c:1"}}}},
+		{ServerText(tpl("Consent required.")), Keyboard{{{Label: tpl("Agree"), Data: "c:1"}}}},
 		{Render(strings.Repeat("Bob wrote a long message. ", 400), UserText{}), nil},
 	}
 	for _, sd := range sends {
@@ -115,8 +115,8 @@ func TestS1O3_PlainTextAndNoURLButtons(t *testing.T) {
 	if err := s.Send(ctx, aliceChat, model, nil); err != nil {
 		t.Fatal(err)
 	}
-	kb := Keyboard{{{Label: "Yes", Data: "a:1"}, {Label: "No", Data: "a:2"}}, {{Label: "Cancel", Data: "a:3"}}}
-	if err := s.Send(ctx, aliceChat, ServerText("Confirm?"), kb); err != nil {
+	kb := Keyboard{{{Label: tpl("Yes"), Data: "a:1"}, {Label: tpl("No"), Data: "a:2"}}, {{Label: tpl("Cancel"), Data: "a:3"}}}
+	if err := s.Send(ctx, aliceChat, ServerText(tpl("Confirm?")), kb); err != nil {
 		t.Fatal(err)
 	}
 	allowedTop := map[string]bool{"chat_id": true, "text": true, "link_preview_options": true, "reply_markup": true}
@@ -157,16 +157,16 @@ func TestSendRefusesBadInput(t *testing.T) {
 	if err := s.Send(ctx, aliceChat, Render(" \n ", UserText{}), nil); !errors.Is(err, ErrEmptyText) {
 		t.Errorf("blank Text: %v", err)
 	}
-	if err := s.Send(ctx, -100200, ServerText("x"), nil); !errors.Is(err, ErrInvalidChat) {
+	if err := s.Send(ctx, -100200, ServerText(tpl("x")), nil); !errors.Is(err, ErrInvalidChat) {
 		t.Errorf("group chat id: %v", err)
 	}
 	for _, kb := range []Keyboard{
 		{{}},
-		{{{Label: "", Data: "a"}}},
-		{{{Label: "x", Data: ""}}},
-		{{{Label: "x", Data: strings.Repeat("d", maxCallbackData+1)}}},
+		{{{Label: tpl(""), Data: "a"}}},
+		{{{Label: tpl("x"), Data: ""}}},
+		{{{Label: tpl("x"), Data: strings.Repeat("d", maxCallbackData+1)}}},
 	} {
-		if err := s.Send(ctx, aliceChat, ServerText("x"), kb); !errors.Is(err, ErrInvalidKeyboard) {
+		if err := s.Send(ctx, aliceChat, ServerText(tpl("x")), kb); !errors.Is(err, ErrInvalidKeyboard) {
 			t.Errorf("keyboard %v: %v", kb, err)
 		}
 	}
@@ -198,7 +198,7 @@ func TestSendFailuresAreErrors(t *testing.T) {
 		f.mu.Lock()
 		f.reply = r
 		f.mu.Unlock()
-		err := s.Send(ctx, aliceChat, ServerText("x"), nil)
+		err := s.Send(ctx, aliceChat, ServerText(tpl("x")), nil)
 		if err == nil {
 			t.Errorf("%s: want error", name)
 			continue
@@ -212,14 +212,14 @@ func TestSendFailuresAreErrors(t *testing.T) {
 		}
 	}
 	s.base = "http://127.0.0.1:1"
-	if err := s.Send(ctx, aliceChat, ServerText("x"), nil); err == nil || strings.Contains(err.Error(), testToken) {
+	if err := s.Send(ctx, aliceChat, ServerText(tpl("x")), nil); err == nil || strings.Contains(err.Error(), testToken) {
 		t.Errorf("transport failure: %v", err)
 	}
 }
 
 func TestAnswerCallbackHasNoURL(t *testing.T) {
 	f, s := newFake(t)
-	if err := s.AnswerCallback(context.Background(), "cbq-1", "Saved."); err != nil {
+	if err := s.AnswerCallback(context.Background(), "cbq-1", tpl("Saved.")); err != nil {
 		t.Fatal(err)
 	}
 	c := f.calls[0]
@@ -231,7 +231,7 @@ func TestAnswerCallbackHasNoURL(t *testing.T) {
 			t.Errorf("unexpected field %q", k)
 		}
 	}
-	if err := s.AnswerCallback(context.Background(), "", ""); err == nil {
+	if err := s.AnswerCallback(context.Background(), "", Template{}); err == nil {
 		t.Error("empty callback id accepted")
 	}
 }
@@ -249,7 +249,7 @@ func TestNewSenderUsesEgress(t *testing.T) {
 	}
 	// The egress client refuses any host but the Bot API host.
 	s.base = "https://attacker.example"
-	err = s.Send(context.Background(), aliceChat, ServerText("x"), nil)
+	err = s.Send(context.Background(), aliceChat, ServerText(tpl("x")), nil)
 	if err == nil || !strings.Contains(err.Error(), "allowlist") {
 		t.Fatalf("egress client must refuse a non-Bot-API host, got %v", err)
 	}

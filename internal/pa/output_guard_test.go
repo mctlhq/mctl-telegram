@@ -30,8 +30,10 @@ package pa
 //   - import another Telegram client (internal/botapi, internal/bot,
 //     internal/telegram, internal/notify, internal/broadcast, or a
 //     third-party Bot API library);
-//   - convert a non-literal value to output.Template, which is how model
-//     text would skip output.Render.
+//
+// output.Template has an unexported field, so no code outside the output
+// package can make one; inside it, TestTemplatesAreLiteralRegistry keeps
+// every Template a string literal in templates.go.
 //
 // String literals joined with + are folded before the check. A method name
 // assembled at run time (fmt.Sprintf, a byte slice) is not caught; review
@@ -94,8 +96,6 @@ var forbiddenBotImports = []string{
 // "/bot123456:ABC...".
 var inlineTokenPath = regexp.MustCompile(`/bot\d+:`)
 
-const outputImport = modulePath + "/internal/pa/output"
-
 // foldString returns the value of a string literal or of string literals
 // joined with +.
 func foldString(e ast.Expr) (string, bool) {
@@ -129,7 +129,6 @@ func scanBotAPIUse(fset *token.FileSet, f *ast.File, rel string) []string {
 	report := func(n ast.Node, what string) {
 		out = append(out, fset.Position(n.Pos()).String()+": "+what)
 	}
-	outputName := ""
 	for _, imp := range f.Imports {
 		path, err := strconv.Unquote(imp.Path.Value)
 		if err != nil {
@@ -138,15 +137,6 @@ func scanBotAPIUse(fset *token.FileSet, f *ast.File, rel string) []string {
 		for _, p := range forbiddenBotImports {
 			if path == p || strings.HasPrefix(path, p+"/") {
 				report(imp, "import "+strconv.Quote(path))
-			}
-		}
-		if path == outputImport {
-			outputName = "output"
-			if imp.Name != nil {
-				outputName = imp.Name.Name
-			}
-			if outputName == "." {
-				report(imp, "dot-import of internal/pa/output hides Template conversions")
 			}
 		}
 	}
@@ -180,16 +170,6 @@ func scanBotAPIUse(fset *token.FileSet, f *ast.File, rel string) []string {
 		case *ast.BasicLit:
 			if s, ok := foldString(x); ok {
 				checkString(x, s)
-			}
-		case *ast.CallExpr:
-			sel, ok := x.Fun.(*ast.SelectorExpr)
-			if !ok || outputName == "" || sel.Sel.Name != "Template" || len(x.Args) != 1 {
-				return true
-			}
-			if id, ok := sel.X.(*ast.Ident); ok && id.Name == outputName {
-				if _, lit := foldString(x.Args[0]); !lit {
-					report(x, "output.Template conversion of a non-literal value")
-				}
 			}
 		}
 		return true
@@ -253,11 +233,6 @@ func TestS1O1_GuardDetects(t *testing.T) {
 		"bot import":               `package x; import "github.com/mctlhq/mctl-telegram/internal/bot"; var _ = bot.X`,
 		"telegram import":          `package x; import "github.com/mctlhq/mctl-telegram/internal/telegram"; var _ = telegram.X`,
 		"third-party bot lib":      `package x; import tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"; var _ = tgbotapi.X`,
-		"template of variable":     `package x; import "github.com/mctlhq/mctl-telegram/internal/pa/output"; func f(s string) output.Text { return output.ServerText(output.Template(s)) }`,
-		"aliased template":         `package x; import o "github.com/mctlhq/mctl-telegram/internal/pa/output"; func f(s string) o.Template { return o.Template(s) }`,
-		"dot-import output":        `package x; import . "github.com/mctlhq/mctl-telegram/internal/pa/output"`,
-		"template in button":       `package x; import "github.com/mctlhq/mctl-telegram/internal/pa/output"; func f(s string) output.Button { return output.Button{Label: output.Template(s)} }`,
-		"template of sprintf":      `package x; import ("fmt"; "github.com/mctlhq/mctl-telegram/internal/pa/output"); var t = output.Template(fmt.Sprint(1))`,
 		"method in struct tag-ish": `package x; var m = map[string]string{"method": "copyMessage"}`,
 	}
 	for name, src := range bad {
@@ -271,8 +246,6 @@ func TestS1O1_GuardDetects(t *testing.T) {
 		}
 	}
 	good := []struct{ rel, src string }{
-		{"handler.go", `package x; import "github.com/mctlhq/mctl-telegram/internal/pa/output"; const c output.Template = "Hi"; var t = output.ServerText(c)`},
-		{"handler.go", `package x; import "github.com/mctlhq/mctl-telegram/internal/pa/output"; var t = output.ServerText(output.Template("Hi " + "there"))`},
 		{"handler.go", `package x; var m = "message"; var c = "callback_query"; var p = "/pa/bot/webhook"`},
 		{"webhookinfo.go", `package x; func f(b, t string) string { return b + "/bot" + t + "/getWebhookInfo" }`},
 		{senderFile, `package x; const m = "sendMessage"; func f(t string) string { return "https://api.telegram.org/bot" + t + "/" + m }`},
