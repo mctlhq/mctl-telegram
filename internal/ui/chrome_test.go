@@ -20,7 +20,9 @@ func render(t *testing.T, name, page string, data Data) string {
 func TestFullChrome(t *testing.T) {
 	page := `<!doctype html><html lang="en"><head>{{template "ui_head" .}}</head>` +
 		`<body>{{template "ui_topbar" .}}<main class="mctl-site-container"></main>{{template "ui_footer" .}}{{template "ui_script" .}}</body></html>`
-	out := render(t, "full", page, Data{Title: "T", NavActive: "docs", PublicBaseURL: "https://tg.mctl.ai"})
+	// CanonicalPath "/" because the SoftwareApplication block (with the
+	// organization id asserted below) is the landing page only.
+	out := render(t, "full", page, Data{Title: "T", NavActive: "docs", PublicBaseURL: "https://tg.mctl.ai", CanonicalPath: "/"})
 
 	for _, s := range []string{
 		// Shared public-site shell (site.css): full-bleed header and footer,
@@ -432,5 +434,21 @@ func TestJSONLDIsPageSpecific(t *testing.T) {
 	}
 	if inner[0]["description"] != "A demo & walkthrough." {
 		t.Errorf("inner page description = %v, want its own description", inner[0]["description"])
+	}
+}
+
+func TestJSONLDWithoutCanonicalPathIsNotTheHomeBlock(t *testing.T) {
+	page := `<!doctype html><html lang="en"><head>{{template "ui_head" .}}</head><body></body></html>`
+	blocks := jsonLDBlocks(t, render(t, "nocanon", page, Data{
+		Title: "Some page", PublicBaseURL: "https://tg.mctl.ai",
+	}))
+	if len(blocks) != 1 {
+		t.Fatalf("want one JSON-LD block, got %d", len(blocks))
+	}
+	if blocks[0]["@type"] != "WebPage" {
+		t.Errorf("@type = %v, want WebPage: a page with no canonical path is not the landing page", blocks[0]["@type"])
+	}
+	if _, has := blocks[0]["url"]; has {
+		t.Errorf("url = %v, want it omitted rather than the site root", blocks[0]["url"])
 	}
 }

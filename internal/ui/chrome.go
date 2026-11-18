@@ -121,7 +121,7 @@ var defs = `
 <meta name="twitter:title" content="{{.Title}}">
 <meta name="twitter:description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarize unread chats, draft replies, and search your history — no extra apps.{{end}}">
 <meta name="twitter:image" content="{{.PublicBaseURL}}/og.png?v=3">
-{{if or (eq .CanonicalPath "") (eq .CanonicalPath "/")}}<script type="application/ld+json">
+{{if eq .CanonicalPath "/"}}<script type="application/ld+json">
 {
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
@@ -142,8 +142,8 @@ var defs = `
   "@context": "https://schema.org",
   "@type": "WebPage",
   "name": "{{.Title}}",
-  "url": "{{.PublicBaseURL}}{{.CanonicalPath}}",
-  "description": "{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant via MCP{{end}}",
+  {{if .CanonicalPath}}"url": "{{.PublicBaseURL}}{{.CanonicalPath}}",
+  {{end}}  "description": "{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant via MCP{{end}}",
   "isPartOf": {
     "@type": "WebSite",
     "name": "MCTL Assistant",
