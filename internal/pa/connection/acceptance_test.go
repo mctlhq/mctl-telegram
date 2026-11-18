@@ -446,7 +446,7 @@ func TestConnection_S1C8_ScopeEscalationNeedsNewConnection(t *testing.T) {
 		// A rotation cannot change the granted scope either.
 		_, err = s.RotatePAConnectionTokens(ctx, alice, c.ID, connection.Rotation{
 			ExpectRevision: c.AuthorityRevision, ExpectGeneration: c.TokenGeneration,
-			GrantedScope: tgScope + " admin:users", LeaseOwner: "x", SealedTokens: []byte("x"),
+			GrantedScope: tgScope + " admin:users", LeaseOwner: "x", SealedTokens: []byte("x"), Now: time.Now(),
 		})
 		if !errors.Is(err, connection.ErrConflict) {
 			t.Fatalf("rotation with a different scope: err %v, want ErrConflict", err)

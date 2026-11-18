@@ -198,14 +198,18 @@ func (t Transition) Validate() error {
 // Rotation replaces the sealed tokens of an active connection after a
 // refresh. The store applies it only if the row is still active at
 // ExpectRevision and ExpectGeneration, still has GrantedScope, and is leased
-// to LeaseOwner. It bumps TokenGeneration, never AuthorityRevision, and
-// releases the lease.
+// to LeaseOwner with a lease that has not ended at Now. It bumps
+// TokenGeneration, never AuthorityRevision, and releases the lease.
 type Rotation struct {
 	ExpectRevision   int64
 	ExpectGeneration int64
 	GrantedScope     string
 	LeaseOwner       string
 	SealedTokens     []byte
+	// Now is the manager's clock at the store write; the lease must end
+	// after it. It is the same clock that set the lease, so the check does
+	// not depend on how this replica's clock compares with the database's.
+	Now time.Time
 }
 
 // Errors. None carries a token, a scope value from a server or a user value.

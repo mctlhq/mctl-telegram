@@ -232,6 +232,12 @@ func (s *Store) TransitionPAConnection(ctx context.Context, principal int64, id 
 	return c, nil
 }
 
+// paRevokeAfterRead is a test seam: when set, revokePAConnOnce calls it
+// between its read and its compare-and-set update, inside the transaction,
+// so a test can land a rotation in exactly that window. It is nil outside
+// tests.
+var paRevokeAfterRead func(ctx context.Context, tx *sql.Tx)
+
 // RevokePAConnection revokes the row from any state (see connection.Store).
 func (s *Store) RevokePAConnection(ctx context.Context, principal int64, id, reason string) (connection.Connection, connection.Sealed, bool, error) {
 	for attempt := 0; attempt < 5; attempt++ {
@@ -261,6 +267,9 @@ func (s *Store) revokePAConnOnce(ctx context.Context, principal int64, id, reaso
 	}
 	if cur.State == connection.StateRevoked {
 		return cur, connection.Sealed{}, true, nil
+	}
+	if paRevokeAfterRead != nil {
+		paRevokeAfterRead(ctx, tx)
 	}
 	res, err := tx.ExecContext(ctx, `UPDATE pa_connections
 		SET state = $1, authority_revision = authority_revision + 1, updated_at_ms = $2,
@@ -323,8 +332,8 @@ func (s *Store) ReleasePAConnectionRefresh(ctx context.Context, principal int64,
 
 // RotatePAConnectionTokens applies r (see connection.Rotation).
 func (s *Store) RotatePAConnectionTokens(ctx context.Context, principal int64, id string, r connection.Rotation) (connection.Connection, error) {
-	if len(r.SealedTokens) == 0 || r.LeaseOwner == "" || r.GrantedScope == "" {
-		return connection.Connection{}, fmt.Errorf("%w: rotation needs tokens, a lease owner and the granted scope", connection.ErrInvalidTransition)
+	if len(r.SealedTokens) == 0 || r.LeaseOwner == "" || r.GrantedScope == "" || r.Now.IsZero() {
+		return connection.Connection{}, fmt.Errorf("%w: rotation needs tokens, a lease owner, the granted scope and the lease clock", connection.ErrInvalidTransition)
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -335,9 +344,10 @@ func (s *Store) RotatePAConnectionTokens(ctx context.Context, principal int64, i
 		SET sealed_tokens = $1, token_generation = token_generation + 1, updated_at_ms = $2,
 			refresh_lease_owner = '', refresh_lease_until_ms = 0
 		WHERE principal = $3 AND id = $4 AND state = $5 AND authority_revision = $6
-		  AND token_generation = $7 AND granted_scope = $8 AND refresh_lease_owner = $9`,
+		  AND token_generation = $7 AND granted_scope = $8 AND refresh_lease_owner = $9
+		  AND refresh_lease_until_ms > $10`,
 		r.SealedTokens, time.Now().UTC().UnixMilli(), principal, id, string(connection.StateActive),
-		r.ExpectRevision, r.ExpectGeneration, r.GrantedScope, r.LeaseOwner)
+		r.ExpectRevision, r.ExpectGeneration, r.GrantedScope, r.LeaseOwner, r.Now.UnixMilli())
 	if err != nil {
 		return connection.Connection{}, fmt.Errorf("pa connection rotate: %w", err)
 	}
