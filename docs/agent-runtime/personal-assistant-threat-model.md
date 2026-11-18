@@ -90,7 +90,7 @@ Which Telegram and owner data can leave MCTL as tool arguments, and to where.
 
 | Server | Operator of the endpoint | Arguments that can carry Telegram or owner content | Phase |
 |---|---|---|---|
-| `tg` | MCTL itself (reached through its public host) | Chat ids, search queries, message ids. They stay inside MCTL. | 1 (reads only) |
+| `tg` | MCTL itself (reached through its public host) | Chat ids, search queries, message ids. They go to MCTL's `tg` service, which forwards them to Telegram over MTProto in order to answer. | 1 (reads only) |
 | `alice` | Yandex, through mctl-alice | Device and room ids (read tools). | 1 |
 | `alice` | Yandex, through mctl-alice | Phrase text (`alice_say_phrase`), command text (`alice_send_command`), media search queries (`alice_media_control`), free-text device values. These reach Yandex and, for speech, everyone in the room. | 2 (approve or disclosure, see T6) |
 
@@ -122,8 +122,8 @@ Preview end-to-end evals are separate (see [Acceptance evals](#acceptance-evals)
 2. **Provider login.** It runs in the system browser (opened with `openLink`) or in the webview. MCTL relies on neither.
 3. **Callback.** It can arrive in any browser.
    - The server checks `state`, the redirect URI and, where the server sends it, RFC 9207 `iss`. A server that does not send `iss` gets its own redirect URI and exactly one pinned issuer.
-   - It stores the authorization code server-side and does **not** exchange it yet. The connection moves to `pending_return`.
-   - It mints a single-use completion code with a 5-minute TTL, bound to that state, and redirects the browser to the bot's Mini App deep link `https://t.me/<bot>/<app>?startapp=<completion code>`. The page sends `Referrer-Policy: no-referrer`.
+   - It stores the authorization code server-side, sealed with the connection's DEK, and does **not** exchange it yet. The connection moves to `pending_return`. The catalog records each server's authorization-code lifetime; a server whose codes expire too fast for the hop back to Telegram gets an immediate exchange, with tokens sealed and unusable until step 4 succeeds.
+   - It mints a single-use completion code with a 5-minute TTL, bound to that state, and redirects the browser to the bot's Mini App deep link `https://t.me/<bot>/<app>?startapp=<completion code>`. The server reads the completion code only from the signed `start_param` inside `initData`, never from a URL parameter. If the browser cannot hand off to Telegram, the page shows the downstream account and the warning "never send this link to anyone: it links your <server> account to a Telegram user". Every `/pa/` page, including the Mini App start page, sends `Referrer-Policy: no-referrer`.
 4. **Return to Telegram.** The deep link opens the Mini App in the Telegram account of whoever is holding the browser.
    - The server verifies `initData` again, and requires `user.id` to equal the principal bound to the state.
    - Only then does it exchange the code, with the PKCE verifier, and read a stable unique account identifier from a pinned source: the account id or a masked login, never a display name.
@@ -133,7 +133,7 @@ Preview end-to-end evals are separate (see [Acceptance evals](#acceptance-evals)
 
 **Why this holds.**
 - In case (a), the victim completes the provider login, but step 4 opens the Mini App in the victim's Telegram. The victim's `initData` does not match the attacker's principal, so the code is never exchanged.
-- The attacker never holds the completion code: it went to the victim's browser and was consumed or expired there.
+- **What step 4 actually checks** is the Telegram user who opens the completion link, not the person who did the provider login. The completion code is a bearer value. If the victim's browser cannot hand off to Telegram and the victim sends the link to the attacker ("send me the link to finish setup"), the attacker, who is the principal, can complete the flow. That is a residual risk (see the end of this document). It is reduced by the 5-minute TTL, the warning on the callback page, and `prompt=consent` showing the victim that they are granting access.
 - In case (b), the attacker would have to complete step 4 as the victim, which needs the victim's Telegram session.
 - A stable identifier on the card defeats display-name spoofing as a defence in depth.
 
@@ -148,6 +148,8 @@ Preview end-to-end evals are separate (see [Acceptance evals](#acceptance-evals)
 - S1-L8: the connection is unusable in every `pending_*` state.
 - S1-L9: a confirm `callback_query` from another user, or after expiry, is refused.
 - S1-L10: the card shows the stable identifier, not the display name.
+- S1-L11: a completion code opened by the principal succeeds even when the provider login was done by someone else. This test documents the exact scope of the step 4 check (see the residual risk), so nobody reads more into it.
+- S1-L12: a completion code passed as a URL parameter instead of the signed `start_param` is ignored.
 
 ### T2 Connection state, revisions, scope escalation and revocation
 
@@ -170,12 +172,15 @@ Preview end-to-end evals are separate (see [Acceptance evals](#acceptance-evals)
 
 **Scope escalation.** It always needs a fresh authorization and a fresh confirm, which means a new connection id (above). A connection never gains scope through refresh.
 
-**Execution-time check and dispatch lease (I4).**
-- Before every dispatch, the executor takes a per-connection dispatch lease, implemented as a row lock or an advisory lock held until the outbound call returns or times out.
-- Under the lease it re-reads the connection, and for a write it consumes the approval receipt in the same transaction. It refuses unless `state == active` and `authority_revision` equals the bound revision. A read error refuses (I9).
+**Execution-time check and dispatch (I4).** No database transaction is held open across an outbound call.
+1. **Pre-dispatch transaction.** The executor re-reads the connection and refuses unless `state == active` and `authority_revision` equals the bound revision; a read error refuses (I9). For a write, in the same transaction, it consumes the approval receipt and inserts a `dispatching` record. The transaction then **commits**.
+2. **Call.** The outbound call runs with a cancellable context registered under the connection id. `/disconnect` never waits for it.
+3. **Post-dispatch check.** The executor re-reads `authority_revision` and state. If either changed, or the read fails, the result is discarded and audited `fenced`. Otherwise the `dispatching` record becomes `ok`, or `outcome_unknown` after a timeout, transport error or 5xx.
+
+A crash between steps 1 and 3 leaves a `dispatching` record. On restart, that record becomes `outcome_unknown`. It is never re-dispatched, because the receipt is already consumed.
 
 **`/disconnect`:**
-1. sets `revoked` and bumps `authority_revision` without waiting for the lease, so no new dispatch can start;
+1. sets `revoked` and bumps `authority_revision`, which does not wait for any in-flight call, so no new dispatch can pass step 1;
 2. cancels the in-flight call's context;
 3. destroys the per-connection DEK wrapper;
 4. cancels queued jobs, pending approvals and standing permissions bound to the connection;
@@ -201,6 +206,8 @@ Preview end-to-end evals are separate (see [Acceptance evals](#acceptance-evals)
 - S2-C9: a pending approval and a standing permission are cancelled by `/disconnect`.
 - S2-C10: an approval bound to an old `authority_revision` is refused.
 - S2-C11: a write with a transport timeout becomes `outcome_unknown` and is not retried.
+- S2-C12: a crash between commit and result leaves `outcome_unknown` after restart and causes no second dispatch.
+- S2-C13: `/disconnect` during an in-flight call completes without waiting, and the result is `fenced`.
 
 ### T3 Credential theft and leak response
 
@@ -219,9 +226,9 @@ Preview end-to-end evals are separate (see [Acceptance evals](#acceptance-evals)
 **Leak runbook.** This is part of the Phase 1 deliverable. It is tested as a drill in Phase 3.
 - **Database plus KEK:**
   - disable `PA_EXTERNAL_TOOLS_ENABLED`;
-  - rotate the KEK;
   - mark every connection `revoked`;
-  - call each server's revocation endpoint for every token;
+  - call each server's revocation endpoint for every token, which needs the old KEK to unwrap them;
+  - only then rotate the KEK, keeping the old key decrypt-only until revocation has finished;
   - notify the affected principals.
 - **DCR `client_secret` or `registration_access_token`:**
   - delete or rotate the client registration at the server;
@@ -326,23 +333,28 @@ Eviction from the model's context window never resets taint. Neither do model ou
 | `alice_say_phrase` | disclosure | approve | never | Target device (home, room, name, id) and the full text. Warns that everyone in the room will hear it. |
 | `alice_send_command` | disclosure | approve | never | Target device and the full command text. |
 | `alice_media_control` | write | approve | yes (playback controls only) | Device and action. A free-text search query carries the query, capped at 64 characters. A query from external content needs a card. |
-| `alice_set_volume` | write | approve | yes | Device and the exact value sent, in device units. |
+| `alice_set_volume` | write | approve | yes, up to a volume ceiling stored in the permission | Device and the exact value sent, in device units. |
 | `alice_set_light` | write | approve | yes | Device and the exact values. |
-| `alice_control_device`, `alice_control_room` | write | approve | only for device types `light` and `media_device` | Device and action. Every other device type (heaters, kettles, ovens, locks, sockets) is approve, never lowerable. |
+| `alice_control_device` | write | approve | only for device ids listed in the permission, and only if the device type is `light` or `media_device` | Device and action. Every other device type (heaters, kettles, ovens, locks, sockets, relays, and any type the user can relabel) is approve, never lowerable. |
+| `alice_control_room` | write | approve | never | The room and every device that will be affected. |
 | `alice_trigger_scenario` | write | approve | never | The scenario's steps, read from the server. If they cannot be read, the call is refused. |
 
 Read tools are auto from Phase 1: `alice_list_devices`, `alice_get_device_state`, `alice_get_home_summary`, `alice_get_device_history`.
 
+**Device type.** The device type comes from Yandex, and a user can relabel it. It is therefore never the only basis for lowering:
+- Lowering also requires the device id to be listed in the permission.
+- The type is read fresh at dispatch. An unknown or unreadable type means the call is not lowerable (I9).
+
 **Limits and binding.**
 - `disclosure` text is capped at 1000 characters. Longer text is refused, with an offer to split it into parts, each approved separately.
-- An approval binds the device id and the hash of the **exact arguments sent**. The executor never transforms arguments. For example, the model converts "55" into the device's 1–10 scale before the card is shown.
+- An approval binds the device id and the hash of the **exact arguments sent**. The executor never transforms arguments. For example, the model converts "55" into the device's 1–10 scale before the card is shown. That conversion depends on the model reading the device's range correctly, and it is acceptable only because the card shows the final value the principal approves.
 
 **Tests.**
 - S2-D1: `disclosure` tools never run without a card, whatever the taint, standing permissions or settings.
 - S2-D2: changed text, device or value after approval is refused.
 - S2-D3: text over the cap is refused.
 - S2-D4: the card renders the full text and the device.
-- S2-D5: a standing permission cannot be granted for a non-allowlisted device type, nor for `trigger_scenario`.
+- S2-D5: a standing permission cannot be granted for a non-allowlisted device type, an unlisted device id, `alice_control_room` or `trigger_scenario`. A type change or an unreadable type at dispatch brings the card back.
 - S2-D6: the `trigger_scenario` card shows the steps, and an unreadable scenario is refused.
 - S2-D7: the executor sends exactly the approved arguments.
 
@@ -366,8 +378,9 @@ Read tools are auto from Phase 1: `alice_list_devices`, `alice_get_device_state`
 - A mismatch refuses, even if the approval was valid when issued.
 
 **Standing permissions (lowering).**
-- Granted only through a server-side bot control: a `/permissions` command or the button on an approval card. It needs a `callback_query` with `from.id == principal`.
-- Bound to the principal, the connection, its `authority_revision` and one `lowerable` tool, with the device-type limits of T6.
+- Granted only through the `/permissions` command, which the server handles directly and the model never sees. The grant is confirmed with a `callback_query` with `from.id == principal`. Approval cards produced in a run never offer "always allow", so injection cannot farm a grant out of a run of plausible cards.
+- The grant screen shows the full scope: tool, device ids, value ceiling and expiry.
+- Bound to the principal, the connection, its `authority_revision`, one `lowerable` tool and the listed device ids, with the limits of T6. It expires after 30 days at most.
 - Audited, visible in `/permissions`, and revocable there. Revoked automatically by `/disconnect` or by any revision change.
 - No model-proposed call and no tool can create, widen or renew one.
 
@@ -382,7 +395,8 @@ Read tools are auto from Phase 1: `alice_list_devices`, `alice_get_device_state`
 - S2-A6: a failed fresh `tools/list` at dispatch is refused.
 - S2-A7: a double tap dispatches once.
 - S2-A8: the model cannot create a standing permission. No tool or route reachable from the worker does it.
-- S2-A9: a standing permission dies with its revision.
+- S2-A9: a standing permission dies with its revision and at expiry.
+- S2-A10: no approval card offers a grant. Grants come only from `/permissions`.
 
 ### T8 Tool surface, scopes and audience
 
@@ -478,11 +492,14 @@ CIMD documents are fetched by the authorization server from MCTL. They are not M
 
 An admin command can also disable a single principal.
 
+All of these, plus consent, are checked again at **every dispatch**, not only at ingress, so a `pa-job` token already in flight cannot keep calling after a switch turns off.
+
 **Rollback.** Turn off the flags, then roll back the image. Connections stay sealed and unused. Deleting them is a separate, explicit action.
 
 **Tests.**
 - S1-F1: each flag disables exactly its own layer.
 - S1-F2: a missing flag means off.
+- S1-F4: switching off `PA_EXTERNAL_TOOLS_ENABLED`, a server flag, the principal or consent during a run refuses the run's next dispatch.
 - S2-F3: turning `PA_WRITES_ENABLED` off while an approval is pending refuses it at dispatch.
 
 ### T12 Audit
@@ -508,6 +525,7 @@ Message bodies and tool outputs are never logged, only digests. `/log` shows a p
 - The text names the provider class, the data categories and the retention.
 - It is stored per principal, separately from `AssistantInstall`.
 - It is asked once before the first run, and again whenever the text version changes.
+- `/consent withdraw` withdraws it at any time: no further model calls, and the conversation state is deleted.
 
 A missing or unreadable consent refuses the run.
 
@@ -515,6 +533,7 @@ A missing or unreadable consent refuses the run.
 - S1-N1: no model call happens without consent.
 - S1-N2: an unreadable consent record refuses the run.
 - S1-N3: a new consent version requires consent again.
+- S1-N4: `/consent withdraw` stops every further model call and deletes the conversation state.
 
 ### T14 Output exfiltration through the bot's own messages
 
@@ -523,11 +542,12 @@ A missing or unreadable consent refuses the run.
 **Mitigations.**
 - Every bot message is sent with `link_preview_options.is_disabled = true`.
 - Bot messages are plain text: no `parse_mode` markup authored by the model, and no URL buttons authored by the model. Inline keyboards come only from server templates.
-- URLs in model output that did not appear in `user`-provenance text are neutralised before sending, for example rendered as `example[.]com/...` without a scheme. Neutralised text is never clickable.
+- URLs in model output are neutralised before sending unless the **exact full URL** appeared in `user`-provenance text. A host-only match is not enough: a query string can be appended. Neutralised URLs are rendered so that no Telegram client auto-links them, for example `example[.]com/...` with no scheme.
+- Detection covers scheme-less domains, IDN and punycode forms, `t.me` and `tg://` links (including `?start=` payloads to other bots) and mentions of other bots.
 
 **Tests.**
 - S1-O1: every send carries the disabled-preview option.
-- S1-O2: a model-authored URL not in user text is neutralised.
+- S1-O2: a model-authored URL not in user text is neutralised. So are a user host with an appended query, a scheme-less domain, a punycode domain and a `t.me/<bot>?start=` link.
 - S1-O3: model-authored markup and URL buttons are stripped.
 
 ## Acceptance evals
@@ -561,4 +581,5 @@ These run on preview after deployment, against dedicated test accounts on `tg` a
 - Downstream servers may not support token revocation. MCTL's revocation is effective, but the token may remain valid at the server until it expires. The ADR lists this per server.
 - A Vault administrator can grant themselves unwrap on the KEK (T3).
 - If `tg` cannot issue read-only tokens, the Phase 1 read-only boundary rests on the pin and the executor alone (T8).
+- Linking (T1) binds the account to the Telegram user who opens the completion link. A victim who forwards that link to an attacker within 5 minutes links their own account to the attacker.
 - The bot token is a high-value secret: whoever holds it can forge `initData`. Rotation invalidates every pending link (T3).

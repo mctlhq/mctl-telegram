@@ -41,7 +41,7 @@ This record is Phase 0 of the Personal Assistant epic (#1312). Refs #1048, the s
   - budget reservation;
   - consent version.
 
-  Tiering, provenance, approvals, audit and limits read only the context, never the trigger. Phase 1 creates only `interactive` runs. Routines (scheduled and event-triggered runs) can be added later without a second loop, with the same consent, permissions and audit.
+  Tiering, provenance, approvals, audit and limits read only the context, never the trigger. Phase 1 creates only `interactive` runs. `/consent withdraw` stops all model calls and deletes the state. Routines (scheduled and event-triggered runs) can be added later without a second loop, with the same consent, permissions and audit.
 - **Conversation state.** It has an explicit TTL (default 24 hours) and records provenance on every fragment from Phase 1 on. It is deleted by `/new`, by `/forget`, by expiry, and when the last connection is removed. State without provenance marks is never loaded.
 - **Long-term memory.** It is a separate store behind its own interface. Until an addendum defines it, only a no-op implementation exists. Anything stored later keeps its provenance.
 
@@ -55,7 +55,7 @@ This record is Phase 0 of the Personal Assistant epic (#1312). Refs #1048, the s
   4. a second `initData` check, which must match the principal, before the code exchange;
   5. a confirm card in the bot chat showing a stable unique account identifier.
 
-  Whoever completes the provider login must be the same Telegram user who started the flow.
+  Step 4 binds the account to the Telegram user who opens the completion link. That user must be the principal who started the flow. The check does not prove who did the provider login: a victim who forwards the completion link to the attacker within its 5-minute TTL links their own account. That is a stated residual risk, and the callback page warns against it.
 - **State machine.** The threat model T2 and this record use the same text:
 
       pending_link -> pending_oauth -> pending_return -> pending_confirm -> active
@@ -71,7 +71,12 @@ This record is Phase 0 of the Personal Assistant epic (#1312). Refs #1048, the s
 - **Secrets.**
   - Each connection has its own DEK, wrapped by a non-exportable Vault transit key that only the service role can use. If transit is unavailable, a Vault KV key is used, and the stated limits on what an operator can reach do not hold.
   - Leak procedures cover the database plus KEK, DCR client credentials, the bot token and the webhook secret (threat model T3).
-- **Dispatch.** Each dispatch runs under a per-connection lease. Under the lease, the server re-reads the connection state and authority revision, and consumes the write's receipt in the same transaction. Any mismatch or read error refuses the call.
+- **Dispatch.** No transaction is held open across an outbound call.
+  1. A pre-dispatch transaction re-reads the connection state and authority revision. For a write, it also consumes the receipt and records `dispatching`, then commits.
+  2. The call runs with a cancellable context.
+  3. A post-dispatch re-read decides the outcome: `ok`, `fenced` or `outcome_unknown`.
+
+  A mismatch or read error at either check refuses the call or fences the result. After a crash, a leftover `dispatching` record becomes `outcome_unknown` and is never re-dispatched.
 - **`/disconnect`** revokes locally first:
   1. set `revoked` and bump the revision;
   2. cancel the in-flight call;
@@ -99,7 +104,13 @@ This record is Phase 0 of the Personal Assistant epic (#1312). Refs #1048, the s
   | `disclosure` (class) | `alice_say_phrase` and `alice_send_command`, assigned per tool. Always a card showing the target device and the full text. Never lowerable. Text capped at 1000 characters. |
   | `never` | Telegram writes, deletes, account and session tools, checkout or payment, and every unpinned tool. |
 
-  Lowering is limited to playback, volume, light, and device control of types `light` and `media_device`. Appliances such as heaters, kettles, ovens, locks and sockets, and `trigger_scenario`, are never lowerable. The `trigger_scenario` card shows the scenario's steps.
+  Lowering is limited to:
+  - playback;
+  - volume, up to a ceiling;
+  - light;
+  - device control, only for device ids listed in the permission and of type `light` or `media_device`. The type is read fresh at dispatch, and an unknown type is not lowerable.
+
+  The following are never lowerable: appliances, relays, sockets, `alice_control_room` and `trigger_scenario`. The `trigger_scenario` card shows the scenario's steps.
 - **Phase 1 has no write path.** Write tools are not in the signed tool set.
 - **Approval binding:**
   - principal;
@@ -112,7 +123,12 @@ This record is Phase 0 of the Personal Assistant epic (#1312). Refs #1048, the s
   - server-generated idempotency key.
 
   The receipt is single use. At dispatch, the tool definition is fetched fresh and compared with the pin and the approval. A failed fetch refuses.
-- **Standing permissions.** Granted only through a server-side bot control (`/permissions`, or the card button) with a verified `callback_query`. Bound to the authority revision. Audited and revocable. The model cannot create, widen or renew one.
+- **Standing permissions.**
+  - Granted only through `/permissions`, never from an approval card, and confirmed with a verified `callback_query`.
+  - The grant shows the tool, device ids, value ceiling and expiry (at most 30 days).
+  - Bound to the authority revision.
+  - Audited and revocable.
+  - The model cannot create, widen or renew one.
 - **Provenance and taint** (threat model T5):
   - `user` is only `message.text` the principal typed, with no forward origin. Everything else is `external`, including unknown or unreadable provenance.
   - Any external fragment taints the run, and every write in a tainted run needs a card.
@@ -127,7 +143,7 @@ This record is Phase 0 of the Personal Assistant epic (#1312). Refs #1048, the s
   - business, group, `sender_chat` and `via_bot` updates rejected, and any update where `chat.id != from.id`;
   - deduplication on `update_id`;
   - `getWebhookInfo` monitoring.
-- **Output** (threat model T14). Every bot message has link previews disabled and is plain text. URLs that are not in user-provenance text are neutralised. Model-authored markup and URL buttons are stripped.
+- **Output** (threat model T14). Every bot message has link previews disabled and is plain text. Any URL whose exact full form is not in user-provenance text is neutralised, including scheme-less, punycode and `t.me` links. Model-authored markup and URL buttons are stripped.
 - **Egress** (from Phase 1, threat model T9). It covers discovery, DCR, the token and revocation endpoints, and the MCP transport:
   - HTTPS only;
   - per-server host allowlists;
@@ -145,7 +161,7 @@ This record is Phase 0 of the Personal Assistant epic (#1312). Refs #1048, the s
 
   When the budget is exhausted, the request is held with a message.
 - **Audit.** Every call is written to the ADR 0003 chain before dispatch, digests only. If that append fails, the call is refused. `/log` shows a principal their own entries.
-- **Switches.** `PA_ENABLED`, `PA_EXTERNAL_TOOLS_ENABLED`, `PA_WRITES_ENABLED` and `PA_SERVER_<NAME>_ENABLED` are independent and fail-closed. An admin can also disable a single principal. Rollback is: flags off, then image rollback.
+- **Switches.** `PA_ENABLED`, `PA_EXTERNAL_TOOLS_ENABLED`, `PA_WRITES_ENABLED` and `PA_SERVER_<NAME>_ENABLED` are independent and fail-closed. An admin can also disable a single principal. Every switch, the per-principal disable and consent are re-checked at every dispatch. Rollback is: flags off, then image rollback.
 
 ### Phases and gates
 
