@@ -57,6 +57,10 @@ func TestPublicStatsQuery_CountsAndExclusions(t *testing.T) {
 	seedAuditRow(t, s, alice, "connect:success", "ok", now.Add(-3*time.Hour))
 	seedAuditRow(t, s, alice, "local_bridge_device_refresh", "ok", now.Add(-time.Minute))
 	seedAuditRow(t, s, alice, "POST /telegram/connect/manage/notifications", "ok", now.Add(-time.Minute))
+	// Personal Assistant connector rows: the tg read they describe is
+	// counted by tg's own row. Carol has no other call, so counting this
+	// would also move ActiveUsers30d.
+	seedAuditRow(t, s, carol, "pa:tg/list_dialogs", "ok", now.Add(-time.Minute))
 	for i := 0; i < 50; i++ {
 		seedAuditRow(t, s, dana, "get_messages", "ok", now.Add(-time.Duration(i)*time.Minute))
 	}
@@ -92,10 +96,10 @@ func TestPublicStatsQuery_CountsAndExclusions(t *testing.T) {
 		t.Errorf("AccountsTotal = %d, want 3 (alice, bob, carol; dana is canary, legacy row has no telegram id)", got.AccountsTotal)
 	}
 	if got.ToolCallsTotal != 4 {
-		t.Errorf("ToolCallsTotal = %d, want 4 (3 alice + 1 bob; error, connect, bridge, POST and canary excluded)", got.ToolCallsTotal)
+		t.Errorf("ToolCallsTotal = %d, want 4 (3 alice + 1 bob; error, connect, bridge, POST, pa and canary excluded)", got.ToolCallsTotal)
 	}
 	if got.ActiveUsers30d != 1 {
-		t.Errorf("ActiveUsers30d = %d, want 1 (alice; bob is 40 days old, dana is canary)", got.ActiveUsers30d)
+		t.Errorf("ActiveUsers30d = %d, want 1 (alice; bob is 40 days old, dana is canary, carol has only a pa row)", got.ActiveUsers30d)
 	}
 	if got.SessionsConnected != 2 {
 		t.Errorf("SessionsConnected = %d, want 2 (alice live, carol live but idle; bob revoked, dana canary)", got.SessionsConnected)
