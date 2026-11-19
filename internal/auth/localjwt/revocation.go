@@ -32,6 +32,11 @@ const DefaultRevocationCacheTTL = 10 * time.Second
 // failure path too.
 const MaxRevocationSnapshotAge = MaxRevocationCacheTTL
 
+// ErrRevocationSnapshotTooOld is returned when no snapshot younger than
+// MaxRevocationSnapshotAge is available: the latest refresh failed, or the
+// read that produced the newest snapshot took longer than the bound.
+var ErrRevocationSnapshotTooOld = errors.New("revocation cache snapshot is older than its bound")
+
 // RevocationCache is an in-memory, mutex-protected view of
 // worker_token_revocations, lazily refreshed from
 // db.Store.ListWorkerTokenRevocations at most once per TTL window. Modeled on
@@ -58,12 +63,11 @@ type RevocationCache struct {
 
 	mu        sync.Mutex
 	populated bool
-	// lastRefresh is when the applied snapshot finished loading; it drives
-	// the TTL. readStartedAt is when that same snapshot's read BEGAN, and is
-	// what decides whether an arriving snapshot is newer than the applied
-	// one. The two are different clocks and the distinction is load-bearing:
-	// see refresh.
-	lastRefresh   time.Time
+	// readStartedAt is when the applied snapshot's read BEGAN. It decides
+	// whether an arriving snapshot is newer than the applied one (see
+	// refresh), when the next refresh is due (TTL) and how old the served
+	// snapshot is (MaxRevocationSnapshotAge). A snapshot's freshness is when
+	// it looked at the database, not when its query happened to return.
 	readStartedAt time.Time
 	jtis          map[string]struct{}
 	blanket       map[int64]time.Time // telegram_id -> most recent blanket revoked_at
@@ -120,7 +124,12 @@ func (c *RevocationCache) IsBlanketRevoked(ctx context.Context, telegramID int64
 
 func (c *RevocationCache) check(ctx context.Context, jti string, checkJti bool, telegramID int64, issuedAt time.Time) (bool, error) {
 	c.mu.Lock()
-	stale := !c.populated || c.now().Sub(c.lastRefresh) >= c.ttl
+	// Staleness and the age bound both count from when the applied
+	// snapshot's read began. Counting staleness from when the read finished
+	// would leave a window, as long as the read took, in which no refresh
+	// is attempted yet the snapshot is already past the bound: a spurious
+	// refusal with no refresh failure behind it.
+	stale := !c.populated || c.now().Sub(c.readStartedAt) >= c.ttl
 	wasPopulated := c.populated
 	c.mu.Unlock()
 
@@ -136,7 +145,7 @@ func (c *RevocationCache) check(ctx context.Context, jti string, checkJti bool, 
 		return false, errors.New("revocation cache never populated")
 	}
 	if age := c.now().Sub(c.readStartedAt); age > MaxRevocationSnapshotAge {
-		return false, fmt.Errorf("revocation cache snapshot is %s old, over the %s bound, and refresh is failing", age.Round(time.Second), MaxRevocationSnapshotAge)
+		return false, fmt.Errorf("%w: %s old, bound %s", ErrRevocationSnapshotTooOld, age.Round(time.Millisecond), MaxRevocationSnapshotAge)
 	}
 	if checkJti {
 		if _, ok := c.jtis[jti]; ok {
@@ -172,7 +181,9 @@ func (c *RevocationCache) refresh(ctx context.Context) error {
 	readStartedAt := c.now()
 	rows, err := c.store.ListWorkerTokenRevocations(ctx)
 	if err != nil {
-		if c.onRefreshError != nil {
+		// A request the client abandoned is not a store failure; counting
+		// it would make the metric follow traffic rather than outages.
+		if c.onRefreshError != nil && ctx.Err() == nil {
 			c.onRefreshError()
 		}
 		return fmt.Errorf("refresh worker token revocation cache: %w", err)
@@ -194,7 +205,7 @@ func (c *RevocationCache) refresh(ctx context.Context) error {
 	// one did. Without this, a slow lazy refresh that started before a
 	// revocation was recorded can land after the forced refresh that
 	// followed it, overwrite the denylist with pre-revocation data, and
-	// stamp lastRefresh so the cache looks current — handing a just-evicted
+	// mark the cache current — handing a just-evicted
 	// daemon a clean reconnect for a whole TTL window. That is precisely the
 	// containment this cache exists to provide.
 	//
@@ -215,6 +226,5 @@ func (c *RevocationCache) refresh(ctx context.Context) error {
 	c.blanket = blanket
 	c.populated = true
 	c.readStartedAt = readStartedAt
-	c.lastRefresh = c.now()
 	return nil
 }

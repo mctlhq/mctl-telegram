@@ -2,6 +2,7 @@ package localjwt
 
 import (
 	"context"
+	"errors"
 	"net/http/httptest"
 	"sync"
 	"sync/atomic"
@@ -250,7 +251,7 @@ func TestRevocationCache_SnapshotOlderThanBoundFailsClosed(t *testing.T) {
 	for _, after := range []time.Duration{MaxRevocationSnapshotAge + time.Millisecond, time.Hour} {
 		cache.now = func() time.Time { return base.Add(after) }
 		revoked, err := cache.IsRevoked(ctx, "jti-late", 1, base)
-		if err == nil {
+		if !errors.Is(err, ErrRevocationSnapshotTooOld) {
 			t.Fatalf("snapshot %s old with refresh failing: want error, got revoked=%v", after, revoked)
 		}
 		if _, err := cache.IsBlanketRevoked(ctx, 1, base); err == nil {
@@ -302,8 +303,41 @@ func TestProvider_StaleRevocationSnapshotPastBoundRejects(t *testing.T) {
 		t.Fatalf("within the bound the last good snapshot must still authenticate: %v", err)
 	}
 	cache.now = func() time.Time { return base.Add(MaxRevocationSnapshotAge + time.Second) }
-	if err := auth(); err == nil {
-		t.Fatal("past the bound with refresh failing, Authenticate must refuse")
+	if err := auth(); !errors.Is(err, ErrRevocationSnapshotTooOld) {
+		t.Fatalf("past the bound with refresh failing, Authenticate must refuse for the snapshot age, got %v", err)
+	}
+}
+
+// TestRevocationCache_SlowReadAtMaxTTLDoesNotRefuse covers the window the
+// first version of #1346's fix opened: with the TTL at its 15s maximum and a
+// read that takes 3s, staleness counted from the read's end would skip the
+// refresh between start+15s and start+18s while the age bound (from the
+// read's start) already refused. With a healthy store, no check may fail.
+func TestRevocationCache_SlowReadAtMaxTTLDoesNotRefuse(t *testing.T) {
+	store := newTestLocaljwtStore(t)
+	ctx := context.Background()
+	base := time.Now()
+	cache := NewRevocationCache(store, MaxRevocationCacheTTL)
+	// The populating read takes 3s: the first clock reading (its start) is
+	// base, every later one during the read is base+3s.
+	calls := 0
+	cache.now = func() time.Time {
+		calls++
+		if calls == 1 {
+			return base
+		}
+		return base.Add(3 * time.Second)
+	}
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("populate: %v", err)
+	}
+	var cur time.Time
+	cache.now = func() time.Time { return cur }
+	for _, at := range []time.Duration{14 * time.Second, 16 * time.Second, 17 * time.Second, 40 * time.Second} {
+		cur = base.Add(at)
+		if _, err := cache.IsRevoked(ctx, "jti-x", 1, base); err != nil {
+			t.Fatalf("healthy store at +%s: unexpected error %v", at, err)
+		}
 	}
 }
 
@@ -710,5 +744,29 @@ func TestRevocationCache_TiedReadStartApplies(t *testing.T) {
 	}
 	if !revoked {
 		t.Error("a forced refresh that began in the same clock tick as the applied snapshot was discarded; the revocation it carried never took effect")
+	}
+}
+
+// TestRevocationCache_CancelledRequestNotCountedAsRefreshFailure keeps the
+// refresh-failure counter about the store: a refresh that fails because the
+// caller's context was cancelled is not counted, one on a live context is.
+func TestRevocationCache_CancelledRequestNotCountedAsRefreshFailure(t *testing.T) {
+	store := newBrokenLocaljwtStore(t, "cancelled_ctx")
+	cache := NewRevocationCache(store, DefaultRevocationCacheTTL)
+	failures := 0
+	cache.SetRefreshErrorHook(func() { failures++ })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := cache.Refresh(ctx); err == nil {
+		t.Fatal("refresh on a closed store must fail")
+	}
+	if failures != 0 {
+		t.Fatalf("a cancelled request was counted as a store failure (%d)", failures)
+	}
+	if err := cache.Refresh(context.Background()); err == nil {
+		t.Fatal("refresh on a closed store must fail")
+	}
+	if failures != 1 {
+		t.Fatalf("a store failure on a live context must be counted once, got %d", failures)
 	}
 }
