@@ -256,6 +256,10 @@ func TestListingCacheOrderedByStart(t *testing.T) {
 // increase() sees the first failure of each reason.
 func TestListingFailuresPreInitialized(t *testing.T) {
 	e := newSurfaceEnv(t)
+	// Counted before any lookup: GetMetricWithLabelValues creates series.
+	if n := testutil.CollectAndCount(e.reg.PAPinListingFailures); n != 2*len(ListingFailureReasons) {
+		t.Fatalf("%d failure series, want %d", n, 2*len(ListingFailureReasons))
+	}
 	for _, server := range []string{"tg", "alice"} {
 		for _, reason := range ListingFailureReasons {
 			c, err := e.reg.PAPinListingFailures.GetMetricWithLabelValues(server, reason)
@@ -266,8 +270,5 @@ func TestListingFailuresPreInitialized(t *testing.T) {
 				t.Fatalf("%s/%s = %v, want 0", server, reason, v)
 			}
 		}
-	}
-	if n := testutil.CollectAndCount(e.reg.PAPinListingFailures); n != 2*len(ListingFailureReasons) {
-		t.Fatalf("%d failure series, want %d", n, 2*len(ListingFailureReasons))
 	}
 }
