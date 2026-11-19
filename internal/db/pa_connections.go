@@ -122,6 +122,9 @@ func (s *Store) CreatePAConnection(ctx context.Context, c connection.Connection,
 		return fmt.Errorf("%w: a new connection is pending_link at revision 1 with only a wrapped dek", connection.ErrInvalidTransition)
 	}
 	now := time.Now().UTC().UnixMilli()
+	if !c.CreatedAt.IsZero() {
+		now = c.CreatedAt.UTC().UnixMilli()
+	}
 	_, err := s.DB.ExecContext(ctx,
 		`INSERT INTO pa_connections(id, principal, server, state, authority_revision, token_generation,
 			kek_id, wrapped_dek, created_at_ms, updated_at_ms)
@@ -191,6 +194,9 @@ func (s *Store) TransitionPAConnection(ctx context.Context, principal int64, id 
 		return connection.Connection{}, err
 	}
 	now := time.Now().UTC().UnixMilli()
+	if !t.At.IsZero() {
+		now = t.At.UTC().UnixMilli()
+	}
 	set := `state = $1, authority_revision = authority_revision + 1, updated_at_ms = $2,
 		refresh_lease_owner = '', refresh_lease_until_ms = 0`
 	args := []any{string(t.To), now, principal, id, string(t.From), t.ExpectRevision}
@@ -232,6 +238,12 @@ func (s *Store) TransitionPAConnection(ctx context.Context, principal int64, id 
 	return c, nil
 }
 
+// paRevokeAfterRead is a test seam: when set, revokePAConnOnce calls it
+// between its read and its compare-and-set update, inside the transaction,
+// so a test can land a rotation in exactly that window. It is nil outside
+// tests.
+var paRevokeAfterRead func(ctx context.Context, tx *sql.Tx)
+
 // RevokePAConnection revokes the row from any state (see connection.Store).
 func (s *Store) RevokePAConnection(ctx context.Context, principal int64, id, reason string) (connection.Connection, connection.Sealed, bool, error) {
 	for attempt := 0; attempt < 5; attempt++ {
@@ -261,6 +273,9 @@ func (s *Store) revokePAConnOnce(ctx context.Context, principal int64, id, reaso
 	}
 	if cur.State == connection.StateRevoked {
 		return cur, connection.Sealed{}, true, nil
+	}
+	if paRevokeAfterRead != nil {
+		paRevokeAfterRead(ctx, tx)
 	}
 	res, err := tx.ExecContext(ctx, `UPDATE pa_connections
 		SET state = $1, authority_revision = authority_revision + 1, updated_at_ms = $2,
@@ -323,8 +338,8 @@ func (s *Store) ReleasePAConnectionRefresh(ctx context.Context, principal int64,
 
 // RotatePAConnectionTokens applies r (see connection.Rotation).
 func (s *Store) RotatePAConnectionTokens(ctx context.Context, principal int64, id string, r connection.Rotation) (connection.Connection, error) {
-	if len(r.SealedTokens) == 0 || r.LeaseOwner == "" || r.GrantedScope == "" {
-		return connection.Connection{}, fmt.Errorf("%w: rotation needs tokens, a lease owner and the granted scope", connection.ErrInvalidTransition)
+	if len(r.SealedTokens) == 0 || r.LeaseOwner == "" || r.GrantedScope == "" || r.Now.IsZero() {
+		return connection.Connection{}, fmt.Errorf("%w: rotation needs tokens, a lease owner, the granted scope and the lease clock", connection.ErrInvalidTransition)
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -335,9 +350,10 @@ func (s *Store) RotatePAConnectionTokens(ctx context.Context, principal int64, i
 		SET sealed_tokens = $1, token_generation = token_generation + 1, updated_at_ms = $2,
 			refresh_lease_owner = '', refresh_lease_until_ms = 0
 		WHERE principal = $3 AND id = $4 AND state = $5 AND authority_revision = $6
-		  AND token_generation = $7 AND granted_scope = $8 AND refresh_lease_owner = $9`,
+		  AND token_generation = $7 AND granted_scope = $8 AND refresh_lease_owner = $9
+		  AND refresh_lease_until_ms > $10`,
 		r.SealedTokens, time.Now().UTC().UnixMilli(), principal, id, string(connection.StateActive),
-		r.ExpectRevision, r.ExpectGeneration, r.GrantedScope, r.LeaseOwner)
+		r.ExpectRevision, r.ExpectGeneration, r.GrantedScope, r.LeaseOwner, r.Now.UnixMilli())
 	if err != nil {
 		return connection.Connection{}, fmt.Errorf("pa connection rotate: %w", err)
 	}
@@ -356,4 +372,45 @@ func (s *Store) RotatePAConnectionTokens(ctx context.Context, principal int64, i
 		return connection.Connection{}, fmt.Errorf("pa connection rotate: commit: %w", err)
 	}
 	return c, nil
+}
+
+// StalePAConnection identifies a pending connection for the stale sweep.
+type StalePAConnection struct {
+	Principal         int64
+	ID                string
+	AuthorityRevision int64
+}
+
+// StalePendingPAConnections lists up to limit connections still in a
+// pending_* state whose last transition is at or before updatedBefore,
+// oldest first. Linking never leaves a connection in one pending state for
+// longer than that step's secret lives, so such a row was stranded (for
+// example a store error after a secret was consumed). The linking sweeper
+// fails it and revokes whatever tokens it holds.
+func (s *Store) StalePendingPAConnections(ctx context.Context, updatedBefore time.Time, limit int) ([]StalePAConnection, error) {
+	if limit <= 0 {
+		return nil, errors.New("pa connection: stale listing needs a positive limit")
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT principal, id, authority_revision FROM pa_connections
+		WHERE state IN ($1, $2, $3, $4) AND updated_at_ms <= $5
+		ORDER BY updated_at_ms, id LIMIT $6`,
+		string(connection.StatePendingLink), string(connection.StatePendingOAuth),
+		string(connection.StatePendingReturn), string(connection.StatePendingConfirm),
+		updatedBefore.UnixMilli(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("pa connection: list stale: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := []StalePAConnection{}
+	for rows.Next() {
+		var c StalePAConnection
+		if err := rows.Scan(&c.Principal, &c.ID, &c.AuthorityRevision); err != nil {
+			return nil, fmt.Errorf("pa connection: list stale: scan: %w", err)
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("pa connection: list stale: %w", err)
+	}
+	return out, nil
 }

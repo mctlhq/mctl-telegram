@@ -215,7 +215,7 @@ func (m *Manager) List(ctx context.Context, principal int64) ([]Connection, erro
 
 // StartOAuth moves pending_link -> pending_oauth.
 func (m *Manager) StartOAuth(ctx context.Context, principal int64, id string, expectRevision int64) (Connection, error) {
-	return m.store.TransitionPAConnection(ctx, principal, id, Transition{
+	return m.transition(ctx, principal, id, Transition{
 		From: StatePendingLink, To: StatePendingOAuth, ExpectRevision: expectRevision,
 	})
 }
@@ -239,7 +239,7 @@ func (m *Manager) StoreAuthorizationCode(ctx context.Context, principal int64, i
 	if err != nil {
 		return Connection{}, err
 	}
-	return m.store.TransitionPAConnection(ctx, principal, id, Transition{
+	return m.transition(ctx, principal, id, Transition{
 		From: StatePendingOAuth, To: StatePendingReturn, ExpectRevision: expectRevision, SealedCode: blob,
 	})
 }
@@ -266,17 +266,41 @@ func (m *Manager) AuthorizationCode(ctx context.Context, principal int64, id str
 	return NewSecret(string(pt)), nil
 }
 
-// CompleteExchange records the result of the code exchange (threat model T1
-// step 4): pending_return -> pending_confirm with the stable account id, the
-// granted scope and the sealed tokens. Before anything is stored, the
-// effective scope must equal the allowed set (T8, S1-T9). Any failure of
-// that check moves the connection to failed and revokes what the server
-// issued; the returned error wraps ErrScopeMismatch or ErrTokenResponse.
-// If the connection left pending_return meanwhile (ErrConflict), or the
-// final store write fails, the issued tokens are revoked and never stored.
-// Only when the row cannot be read at all (ErrUnreadable, ErrNotFound) is
-// the server unknown here; the caller then revokes the response itself.
+// AccountResolver reads the stable account identifier of a freshly issued
+// token from the server's pinned source (threat model T1 step 4) and, where
+// the server can prove it, checks that the account belongs to the principal
+// (T1 step 6, S1-L13). It runs after the scope check and before anything is
+// stored. Any error, or an empty id, fails the connection and revokes the
+// issued tokens; the connection never reaches pending_confirm.
+type AccountResolver func(ctx context.Context, server Server, tokens TokenSet) (accountID string, err error)
+
+// CompleteExchange is CompleteExchangeWith for a caller that already knows
+// the stable account id.
 func (m *Manager) CompleteExchange(ctx context.Context, principal int64, id string, expectRevision int64, accountID string, tokenResponse []byte) (Connection, error) {
+	return m.CompleteExchangeWith(ctx, principal, id, expectRevision, tokenResponse,
+		func(context.Context, Server, TokenSet) (string, error) { return accountID, nil })
+}
+
+// CompleteExchangeWith records the result of the code exchange (threat
+// model T1 step 4): pending_return -> pending_confirm with the stable
+// account id, the granted scope and the sealed tokens.
+//
+//   - Before anything is stored, the effective scope must equal the allowed
+//     set (T8, S1-T9). A failure moves the connection to failed and revokes
+//     what the server issued; the error wraps ErrScopeMismatch or
+//     ErrTokenResponse.
+//   - Then resolve reads the account id with the new tokens. Its error, or
+//     an empty id, also fails the connection and revokes the tokens (S1-L13).
+//   - If the connection left pending_return meanwhile (ErrConflict), or the
+//     final store write fails, the issued tokens are revoked and never
+//     stored.
+//   - Only when the row cannot be read at all (ErrUnreadable, ErrNotFound)
+//     is the server unknown here. The caller must then revoke the response
+//     itself with RevokeTokenResponse; the linking flow does.
+func (m *Manager) CompleteExchangeWith(ctx context.Context, principal int64, id string, expectRevision int64, tokenResponse []byte, resolve AccountResolver) (Connection, error) {
+	if resolve == nil {
+		return Connection{}, errors.New("pa connection: exchange needs an account resolver")
+	}
 	c, s, err := m.store.GetPAConnectionSealed(ctx, principal, id)
 	if err != nil {
 		return Connection{}, readErr(err)
@@ -290,11 +314,15 @@ func (m *Manager) CompleteExchange(ctx context.Context, principal int64, id stri
 			fmt.Errorf("%w: exchange needs pending_return at the expected revision", ErrConflict),
 			m.revokeTokens(ctx, c.Server, check.Tokens))
 	}
-	if check.Err == nil && accountID == "" {
-		check.Err = fmt.Errorf("%w: no stable account id", ErrTokenResponse)
-	}
 	if check.Err != nil {
 		return m.failAndRevoke(ctx, c, check.Tokens, "exchange_scope_check", check.Err)
+	}
+	accountID, err := resolve(ctx, c.Server, check.Tokens)
+	if err == nil && accountID == "" {
+		err = fmt.Errorf("%w: no stable account id", ErrTokenResponse)
+	}
+	if err != nil {
+		return m.failAndRevoke(ctx, c, check.Tokens, "exchange_account_check", err)
 	}
 	dek, err := m.unwrap(ctx, s)
 	if err != nil {
@@ -305,7 +333,7 @@ func (m *Manager) CompleteExchange(ctx context.Context, principal int64, id stri
 	if err != nil {
 		return m.failAndRevoke(ctx, c, check.Tokens, "exchange_seal", err)
 	}
-	out, err := m.store.TransitionPAConnection(ctx, principal, id, Transition{
+	out, err := m.transition(ctx, principal, id, Transition{
 		From: StatePendingReturn, To: StatePendingConfirm, ExpectRevision: expectRevision,
 		AccountID: accountID, GrantedScope: check.Granted, SealedTokens: blob,
 	})
@@ -316,11 +344,23 @@ func (m *Manager) CompleteExchange(ctx context.Context, principal int64, id stri
 	return out, nil
 }
 
+// RevokeTokenResponse revokes, best-effort, every token in a raw token
+// response at server. It is the caller's half of the CompleteExchange
+// contract: when the row could not be read, the manager does not know the
+// server, so the caller that does revokes what was issued. A response that
+// carries no usable access token revokes nothing and returns nil.
+func (m *Manager) RevokeTokenResponse(ctx context.Context, server Server, tokenResponse []byte) error {
+	if !server.Valid() {
+		return errors.New("pa connection: revoke for an unknown server")
+	}
+	return m.revokeTokens(ctx, server, VerifyTokenResponse(server, tokenResponse).Tokens)
+}
+
 // Confirm moves pending_confirm -> active. The callback_query check (from.id
 // == principal within 10 minutes) is the linking slice's; this is the store
 // edge it ends in.
 func (m *Manager) Confirm(ctx context.Context, principal int64, id string, expectRevision int64) (Connection, error) {
-	return m.store.TransitionPAConnection(ctx, principal, id, Transition{
+	return m.transition(ctx, principal, id, Transition{
 		From: StatePendingConfirm, To: StateActive, ExpectRevision: expectRevision,
 	})
 }
@@ -331,16 +371,49 @@ func (m *Manager) Fail(ctx context.Context, principal int64, id string, expectRe
 	if err != nil {
 		return Connection{}, readErr(err)
 	}
-	return m.store.TransitionPAConnection(ctx, principal, id, Transition{
+	return m.transition(ctx, principal, id, Transition{
 		From: c.State, To: StateFailed, ExpectRevision: expectRevision, Reason: reason,
 	})
+}
+
+// Abandon moves a pending_* connection still at expectRevision to failed
+// and revokes, best-effort, any tokens it already holds (an unanswered or
+// expired confirm card, T1 step 5). The local move happens first and never
+// waits for the remote revocation; a remote failure is reported in
+// RemoteErr. A connection that moved on is ErrConflict and is left alone.
+func (m *Manager) Abandon(ctx context.Context, principal int64, id string, expectRevision int64, reason string) (DisconnectResult, error) {
+	c, s, err := m.store.GetPAConnectionSealed(ctx, principal, id)
+	if err != nil {
+		return DisconnectResult{}, readErr(err)
+	}
+	if !c.State.Pending() || c.AuthorityRevision != expectRevision {
+		return DisconnectResult{}, fmt.Errorf("%w: abandon needs a pending connection at the expected revision", ErrConflict)
+	}
+	var ts TokenSet
+	var openErr error
+	if len(s.SealedTokens) > 0 {
+		ts, openErr = m.openTokens(ctx, c, s)
+	}
+	out, err := m.transition(ctx, principal, id, Transition{
+		From: c.State, To: StateFailed, ExpectRevision: expectRevision, Reason: reason,
+	})
+	if err != nil {
+		return DisconnectResult{}, err
+	}
+	res := DisconnectResult{Connection: out}
+	if openErr != nil {
+		res.RemoteErr = fmt.Errorf("pa connection: tokens for remote revocation: %w", openErr)
+		return res, nil
+	}
+	res.RemoteErr = m.revokeTokens(ctx, c.Server, ts)
+	return res, nil
 }
 
 // failAndRevoke moves c to failed and revokes the tokens a server issued
 // under a response that did not pass the check. It always returns cause
 // (joined with any store error): the caller must not proceed.
 func (m *Manager) failAndRevoke(ctx context.Context, c Connection, issued TokenSet, reason string, cause error) (Connection, error) {
-	_, terr := m.store.TransitionPAConnection(ctx, c.Principal, c.ID, Transition{
+	_, terr := m.transition(ctx, c.Principal, c.ID, Transition{
 		From: c.State, To: StateFailed, ExpectRevision: c.AuthorityRevision, Reason: reason,
 	})
 	rerr := m.revokeTokens(ctx, c.Server, issued)
@@ -398,6 +471,13 @@ func (m *Manager) openTokens(ctx context.Context, c Connection, s Sealed) (Token
 		return TokenSet{}, err
 	}
 	defer zero(dek)
+	return openTokensWithDEK(dek, c, s)
+}
+
+func openTokensWithDEK(dek []byte, c Connection, s Sealed) (TokenSet, error) {
+	if len(s.SealedTokens) == 0 {
+		return TokenSet{}, fmt.Errorf("%w: no sealed tokens", ErrUnreadable)
+	}
 	pt, err := openWithDEK(dek, s.SealedTokens, aad(c.Principal, c.ID, purposeTokens))
 	if err != nil {
 		return TokenSet{}, err
@@ -469,9 +549,14 @@ func (m *Manager) AccessToken(ctx context.Context, principal int64, id string, b
 //     the tokens, storing (or revoking) them must not depend on whether the
 //     caller that started the flight is still waiting. A cancelled caller
 //     stops waiting and gets its ctx error; the flight runs to the end.
-//   - fn runs under a deadline that ends before the lease does, so another
-//     replica cannot take the lease and present the same refresh token while
-//     this one is still on the wire.
+//   - One clock (m.now) times the whole flight. fn runs under a deadline
+//     that ends a quarter lease before the lease does, so another replica
+//     cannot take the lease and present the same refresh token while this
+//     one is still on the wire. The steps after fn reuse the DEK opened
+//     before it (no second KEK round trip) and are bounded by the lease end:
+//     the rotation is stored only while the lease is still held by that
+//     clock, and the store re-checks the lease end in the same CAS. Past it,
+//     the issued tokens are revoked and the result is ErrFenced.
 func (m *Manager) Refresh(ctx context.Context, principal int64, id string, fn RefreshFunc) (Connection, error) {
 	key := strconv.FormatInt(principal, 10) + "|" + id
 	ch := m.refreshes.DoChan(key, func() (any, error) {
@@ -501,6 +586,13 @@ func (m *Manager) callBudget() time.Duration {
 	return m.lease - m.lease/4
 }
 
+// untilByClock converts an instant on m.now's clock into a duration from
+// m.now's present, so every deadline in a refresh flight comes from that one
+// clock even though contexts count it down on the wall clock.
+func (m *Manager) untilByClock(t time.Time) time.Duration {
+	return t.Sub(m.now())
+}
+
 func (m *Manager) refresh(ctx context.Context, principal int64, id string, fn RefreshFunc) (Connection, error) {
 	c, s, err := m.store.GetPAConnectionSealed(ctx, principal, id)
 	if err != nil {
@@ -510,8 +602,8 @@ func (m *Manager) refresh(ctx context.Context, principal int64, id string, fn Re
 		return Connection{}, err
 	}
 	now := m.now().UTC()
-	claimed := time.Now()
-	ok, err := m.store.ClaimPAConnectionRefresh(ctx, principal, id, c.TokenGeneration, m.owner, now, now.Add(m.lease))
+	leaseEnd := now.Add(m.lease)
+	ok, err := m.store.ClaimPAConnectionRefresh(ctx, principal, id, c.TokenGeneration, m.owner, now, leaseEnd)
 	if err != nil {
 		return Connection{}, readErr(err)
 	}
@@ -520,7 +612,20 @@ func (m *Manager) refresh(ctx context.Context, principal int64, id string, fn Re
 	}
 	release := func() { _ = m.store.ReleasePAConnectionRefresh(context.WithoutCancel(ctx), principal, id, m.owner) }
 
-	old, err := m.openTokens(ctx, c, s)
+	if len(s.SealedTokens) == 0 {
+		release()
+		return Connection{}, fmt.Errorf("%w: no sealed tokens", ErrUnreadable)
+	}
+	// The DEK is opened once, before the call, and reused to seal the
+	// rotation: the post-call steps then need no KEK round trip that could
+	// run past the lease.
+	dek, err := m.unwrap(ctx, s)
+	if err != nil {
+		release()
+		return Connection{}, err
+	}
+	defer zero(dek)
+	old, err := openTokensWithDEK(dek, c, s)
 	if err != nil {
 		release()
 		return Connection{}, err
@@ -529,7 +634,7 @@ func (m *Manager) refresh(ctx context.Context, principal int64, id string, fn Re
 		release()
 		return Connection{}, fmt.Errorf("%w: no refresh token", ErrUnreadable)
 	}
-	callCtx, cancelCall := context.WithDeadline(ctx, claimed.Add(m.callBudget()))
+	callCtx, cancelCall := context.WithTimeout(ctx, m.untilByClock(now.Add(m.callBudget())))
 	raw, err := fn(callCtx, c.Server, old.RefreshToken)
 	cancelCall()
 	switch {
@@ -538,7 +643,7 @@ func (m *Manager) refresh(ctx context.Context, principal int64, id string, fn Re
 		m.cancelInflight(id)
 		return Connection{}, errors.Join(err, rerr, m.revokeTokens(ctx, c.Server, old))
 	case errors.Is(err, ErrInvalidGrant):
-		_, terr := m.store.TransitionPAConnection(ctx, principal, id, Transition{
+		_, terr := m.transition(ctx, principal, id, Transition{
 			From: StateActive, To: StateExpired, ExpectRevision: c.AuthorityRevision, Reason: "invalid_grant",
 		})
 		return Connection{}, errors.Join(err, terr)
@@ -562,26 +667,33 @@ func (m *Manager) refresh(ctx context.Context, principal int64, id string, fn Re
 	if next.RefreshToken.Empty() {
 		next.RefreshToken = old.RefreshToken
 	}
-	dek, err := m.unwrap(ctx, s)
-	if err != nil {
-		release()
-		return Connection{}, errors.Join(err, m.revokeTokens(ctx, c.Server, check.Tokens))
-	}
-	defer zero(dek)
 	blob, err := m.sealTokens(dek, c, next)
 	if err != nil {
 		release()
 		return Connection{}, errors.Join(err, m.revokeTokens(ctx, c.Server, check.Tokens))
 	}
-	out, err := m.store.RotatePAConnectionTokens(ctx, principal, id, Rotation{
-		ExpectRevision: c.AuthorityRevision, ExpectGeneration: c.TokenGeneration,
-		GrantedScope: c.GrantedScope, LeaseOwner: m.owner, SealedTokens: blob,
-	})
+	// Past the lease end (by the same clock that set it), another replica
+	// may already hold the lease: storing now could race its refresh. The
+	// store write itself is bounded by the lease end too, and its CAS
+	// re-checks the lease end against the same clock.
+	storeAt := m.now().UTC()
+	var out Connection
+	if !storeAt.Before(leaseEnd) {
+		err = fmt.Errorf("%w: refresh lease ran out before the rotation was stored", ErrConflict)
+	} else {
+		sctx, cancelStore := context.WithTimeout(ctx, m.untilByClock(leaseEnd))
+		out, err = m.store.RotatePAConnectionTokens(sctx, principal, id, Rotation{
+			ExpectRevision: c.AuthorityRevision, ExpectGeneration: c.TokenGeneration,
+			GrantedScope: c.GrantedScope, LeaseOwner: m.owner, SealedTokens: blob, Now: storeAt,
+		})
+		cancelStore()
+	}
 	if err != nil {
 		// What the server just issued is never used unstored: it is revoked.
 		// A CAS miss means the connection moved while the refresh was on the
-		// wire (revoked, failed, expired, or another rotation): ErrFenced.
-		// Any other store error is reported as itself, not as a fence.
+		// wire (revoked, failed, expired, another rotation, or the lease ran
+		// out): ErrFenced. Any other store error is reported as itself, not
+		// as a fence.
 		release()
 		if errors.Is(err, ErrConflict) || errors.Is(err, ErrNotFound) {
 			err = errors.Join(ErrFenced, err)
@@ -718,4 +830,10 @@ func (c *Call) Finish(ctx context.Context) error {
 		BoundRevision: c.boundRevision, Reason: reason,
 	})
 	return errors.Join(fmt.Errorf("%w: %s", ErrFenced, reason), aerr)
+}
+
+// transition stamps t with the Manager's clock and applies it.
+func (m *Manager) transition(ctx context.Context, principal int64, id string, t Transition) (Connection, error) {
+	t.At = m.now().UTC()
+	return m.store.TransitionPAConnection(ctx, principal, id, t)
 }

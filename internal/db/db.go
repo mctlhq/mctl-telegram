@@ -530,6 +530,10 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 	if err := migratePAConnections(ctx, dbConn, pg); err != nil {
 		return err
 	}
+	// Personal Assistant linking secrets (issue #1314); DDL in pa_linking.go.
+	if err := migratePALinking(ctx, dbConn, pg); err != nil {
+		return err
+	}
 	// Personal Assistant consent and conversation state (issue #1313
 	// slice b); DDL in pa_convo.go.
 	if err := migratePAConvo(ctx, dbConn, pg); err != nil {
