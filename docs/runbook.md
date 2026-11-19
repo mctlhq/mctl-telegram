@@ -3937,6 +3937,9 @@ can fire. The rules are in `deploy/alerts/mctl-telegram.rules.yaml`
 (group `mctl-telegram-pa`) and are not deployed yet: porting them to the
 mctl-gitops vm-rules is part of enabling the PA (#1318).
 
+- **Webhook URL.** `PA_ENABLED=true` without a valid `PA_WEBHOOK_URL`
+  refuses to start; there is no fallback to polling (owner decision on
+  #1313, 2026-11-20).
 - **Monitor.** Every 5 minutes the server reads `getWebhookInfo` with
   `PA_BOT_TOKEN` and compares it with `PA_WEBHOOK_URL` and the expected
   `allowed_updates` (`message`, `callback_query`). It exports
@@ -3965,7 +3968,8 @@ mctl-gitops vm-rules is part of enabling the PA (#1318).
   that may have reached Telegram (a connection dropped after the request
   was written, an unreadable or malformed answer) makes the row `unknown`,
   and so does a row still `sending` when its lease runs out: it is never
-  sent again, because a duplicate is worse than a gap. A long reply goes out
+  sent again, because a duplicate is worse than a gap (owner decision on
+  #1313, 2026-11-20: a lost reply is an accepted residual risk). A long reply goes out
   in parts and `sent_parts` records each part Telegram accepted, so a retry
   resumes after them. A reply whose conversation was closed, forgotten or
   withdrawn before it went out is dropped with it; `/forget` also deletes
@@ -4004,7 +4008,9 @@ firing.
 ### MctlPAWebhookSecretRejected
 
 Telegram's latest delivery error is our 401: the `secret_token` it was
-given differs from `PA_WEBHOOK_SECRET` (usually a secret rotated in Vault
+given differs from `PA_WEBHOOK_SECRET`. Telegram never reports the configured
+secret, so this is inferred from a recent 401 in `last_error_message`; the
+owner accepted the heuristic on #1313 (2026-11-20) (usually a secret rotated in Vault
 without re-registering the webhook). Re-register with the current secret;
 `mctl_pa_updates_total{outcome="bad_secret"}` rises at the same time.
 
@@ -4017,7 +4023,9 @@ the pod; `mctl_pa_updates_total` by outcome shows what the webhook answers.
 <a id="mctlpawebhookbacklog"></a>
 ### MctlPAWebhookBacklog
 
-More than 100 updates are waiting at Telegram for 15 minutes. Usually it
+More than 100 updates are waiting at Telegram for 15 minutes. This
+threshold and the bad-secret one below were confirmed by the owner on #1313
+(2026-11-20) and are revisited once there is real traffic. Usually it
 follows delivery errors; once they stop, Telegram drains the queue.
 
 <a id="mctlpawebhookbadsecretburst"></a>
@@ -4034,8 +4042,11 @@ webhook refuses them before reading the body.
 `unknown`: a send may have reached Telegram (connection lost after the
 request went out, an unreadable answer, or the pod died mid-send) and is
 not resent; ask the principal whether it arrived if it matters. `refused`
-(a Bot API 4xx: the principal blocked the bot or deleted the chat) is
-counted but does not fire this alert. `claim_error`: `pa_outbox` could not be read; nothing was sent and
+(a Bot API 4xx other than 429) is counted but does not fire this alert. It
+is meant for a principal who blocked the bot or deleted the chat, but today
+it also catches other 4xx (a request we built wrong, a revoked bot token), so
+those do not page: a known defect tracked in #1343, not expected behaviour.
+Until it is fixed, check `refused` rates by hand after a bot token change. `claim_error`: `pa_outbox` could not be read; nothing was sent and
 the rows stay due. Inspect rows by principal with `Store.PAOutboxRows`;
 rows carry no message text.
 

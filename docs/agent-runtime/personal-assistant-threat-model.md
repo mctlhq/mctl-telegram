@@ -524,6 +524,10 @@ CIMD documents are fetched by the authorization server from MCTL. They are not M
 
 **Budget.** Budget is reserved at claim through the ADR 0008 ledger (#1092). An exhausted budget means the request is held and the user gets a message. It is never silently dropped.
 
+**Settlement and the last turn (owner decisions on #1313, 2026-11-19, confirmed 2026-11-20).** A further model call is made only while the run's known spend is under its limit, but the call that crosses it still completes, its answer is sent and its real cost is reported. The server settles exactly `max(floor, min(reported, 4 x reservation))`: the floor is `PA_MIN_TURN_COST_USD` per turn the server admitted, and the factor is `jobs.SettleFactor`. `AGENT_OPENAI_MAX_OUTPUT_TOKENS` bounds what that last call can add. Principal and global caps are therefore soft: admission reserves one job's amount, so a cap can be exceeded by up to 3 x reservation per concurrently settling job.
+
+**Per-run call cap (owner decision on #1315, 2026-11-20).** A call the ledger admitted and a later connection check refused still counts toward the cap of 8. This fails closed: a refused call cannot be retried for free.
+
 **Tests.**
 - S1-R1: each size limit is enforced.
 - S1-R2: the tool-call cap stops the loop.
@@ -571,6 +575,8 @@ at most one hour ago, or revoked. A forged or foreign token, one expired
 longer ago, and one whose revocation state could not be read
 (`token_unverifiable`) are counted in `mctl_pa_dispatch_total` but written to
 nobody's chain: their principal claim is not evidence, or nothing was decided.
+The owner accepted this on #1315 (2026-11-20): the metric is the only record
+of such a refusal.
 Refusals are written to a principal's chain under two bounds per minute: 30
 general refusals (`bad_request`, `flag_off`, `tool_cap`, ...) and, separately,
 300 security refusals (`connection_unbound`, `tool_not_in_set`, `job_stale`
@@ -610,6 +616,8 @@ Message bodies and tool outputs are never logged, only digests. `/log` shows a p
 - `/consent withdraw` withdraws it at any time: no further model calls, and the conversation state is deleted.
 
 A missing or unreadable consent refuses the run.
+
+**Provider (owner decision on #1313, 2026-11-20).** `pa-data-flow/v1` names the provider: the managed pool's model on Nebius, reached through Cloudflare AI Gateway, and links /privacy. PA Phase 1 runs only with `AGENT_RUNNER=openai`, where the worker calls the model in-process with no tools of its own; the `claude` runner is refused in PA mode. Using the same provider is not enough to keep this consent: any other runner or relay keeps v1 only if the actual data flow is unchanged (no new recipient, no telemetry carrying user data, no path around Cloudflare AI Gateway). A claude runner through NConnect is research only (#1344) and is not authorized by this document.
 
 **Tests.**
 - S1-N1: no model call happens without consent.
@@ -661,6 +669,9 @@ These run on preview after deployment, against dedicated test accounts on `tg` a
 - The model provider sees everything the bot reads. This is accepted through `pa-data-flow/v1` and stated to the user before the first run.
 - The principal can approve a harmful card. The card shows the full arguments, the external marks and the device. This mitigates the risk but does not remove it.
 - An external action that was already dispatched cannot be rolled back (T2). The result can be `outcome_unknown`.
+- A bot reply can be lost but is never duplicated (T14, S1-O4). An outbox send that may have reached Telegram, or that outlived its lease, becomes `unknown` and is not resent. Accepted by the owner on #1313 (2026-11-20).
+- Revoking a pa-job token's pool credential takes effect within the worker-token revocation cache TTL (`WorkerTokenRevocationCacheTTL`): 10s by default, clamped to at most 15s. Accepted by the owner on #1315 (2026-11-20).
+- Every dispatched call is recorded with `taint=external`, because the server cannot prove a run clean. This is conservative, not a gap; accepted on #1315 (2026-11-20).
 - Downstream servers may not support token revocation. MCTL's revocation is effective, but the token may remain valid at the server until it expires. The ADR lists this per server.
 - A Vault administrator can grant themselves unwrap on the KEK (T3).
 - `alice` may not offer narrower scopes. Its Phase 1 boundary then rests on the pin and the executor (T8). That needs an owner decision before Alice linking.
