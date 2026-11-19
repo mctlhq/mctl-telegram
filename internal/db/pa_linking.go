@@ -276,7 +276,8 @@ func (s *Store) RetirePALinkSecret(ctx context.Context, kind PALinkKind, hash st
 // only when that lookup positively finds no user. An existing user of any
 // provider, including one known only through telegram_accounts, is returned
 // unchanged: inserting a second row for it would make every later lookup of
-// that Telegram id ambiguous. A failed lookup is an error, never "no user".
+// that Telegram id ambiguous. A legacy "tg:<id>" row without
+// telegram_login_id is backfilled and returned, not duplicated. A failed lookup is an error, never "no user".
 // A row created here has provider "pa", which tells PA-only principals apart
 // from tg-mcp logins. No display name or username is stored.
 func (s *Store) EnsurePAUser(ctx context.Context, tgID int64) (int64, error) {
@@ -294,6 +295,16 @@ func (s *Store) EnsurePAUser(ctx context.Context, tgID int64) (int64, error) {
 		return id, nil
 	case !errors.Is(err, ErrUserNotFound):
 		return 0, fmt.Errorf("pa user: resolve: %w", err)
+	}
+	// A legacy tg-mcp row may carry the synthetic login without having been
+	// backfilled with telegram_login_id (the shape EnsureUserByTelegramID
+	// falls back to). Backfill it so it is this principal's row; the INSERT
+	// below would otherwise hit its github_login and do nothing.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE users SET telegram_login_id = $1 WHERE github_login = $2 AND telegram_login_id IS NULL`,
+		tgID, fmt.Sprintf("tg:%d", tgID),
+	); err != nil {
+		return 0, fmt.Errorf("pa user: backfill legacy row: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO users(github_login, provider, telegram_login_id)

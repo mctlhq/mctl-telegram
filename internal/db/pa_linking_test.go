@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"os"
@@ -271,6 +272,34 @@ func TestEnsurePAUser_PromotedByEnsureUserByTelegramID(t *testing.T) {
 		var provider string
 		if err := s.DB.QueryRow(`SELECT provider FROM users WHERE id = $1`, id).Scan(&provider); err != nil || provider != "tg-mcp" {
 			t.Fatalf("provider %q %v, want tg-mcp", provider, err)
+		}
+	})
+}
+
+// A legacy tg-mcp row that carries the synthetic login but was never
+// backfilled with telegram_login_id is this principal's row: EnsurePAUser
+// backfills and returns it, and leaves its provider alone.
+func TestEnsurePAUser_LegacySyntheticLoginBackfilled(t *testing.T) {
+	paLinkDialects(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		p := paLinkPrincipal(t, s)
+		login := "tg:" + strconv.FormatInt(p, 10)
+		legacy, err := s.EnsureUser(ctx, login, "", "tg-mcp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _, _ = s.DB.Exec(`DELETE FROM users WHERE id = $1`, legacy) })
+		got, err := s.EnsurePAUser(ctx, p)
+		if err != nil || got != legacy {
+			t.Fatalf("EnsurePAUser = %d, %v; want the legacy row %d", got, err, legacy)
+		}
+		var provider string
+		var tg sql.NullInt64
+		if err := s.DB.QueryRow(`SELECT provider, telegram_login_id FROM users WHERE id = $1`, legacy).Scan(&provider, &tg); err != nil {
+			t.Fatal(err)
+		}
+		if provider != "tg-mcp" || !tg.Valid || tg.Int64 != p {
+			t.Fatalf("legacy row: provider %q, telegram_login_id %v", provider, tg)
 		}
 	})
 }
