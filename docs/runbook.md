@@ -4117,7 +4117,9 @@ fresh successful one: a connection whose last good listing drifted keeps
 `mctl_pa_pin_drift` at 1 for the 5-minute window even if it then answers
 errors. Both the gauges and the 60s listing cache are ordered by when a
 read started: a slow read that finishes late neither replaces nor drops a
-newer listing, so calls authorize against the listing the gauges report.
+newer listing, and the call that made the slow read is authorized against
+the newer cached listing rather than its own, so calls authorize against
+the listing the gauges report.
 
 ### PA refusal audit bound
 
