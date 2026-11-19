@@ -41,11 +41,7 @@ func TestRunbookMetricNamesRegistered(t *testing.T) {
 		t.Fatalf("failed to read runbook.md: %v", err)
 	}
 
-	metricsData, err := os.ReadFile("../internal/metrics/metrics.go")
-	if err != nil {
-		t.Fatalf("failed to read internal/metrics/metrics.go: %v", err)
-	}
-	metricsSource := string(metricsData)
+	metricsSource := readGoSources(t, "../internal/metrics")
 
 	re := regexp.MustCompile(`mctl_[a-z_]+`)
 	names := re.FindAllString(string(runbookData), -1)
@@ -59,7 +55,7 @@ func TestRunbookMetricNamesRegistered(t *testing.T) {
 		if strings.Contains(metricsSource, baseSeriesName(name)) {
 			continue
 		}
-		t.Errorf("metric name %q found in runbook.md but not in internal/metrics/metrics.go", name)
+		t.Errorf("metric name %q found in runbook.md but not in internal/metrics", name)
 	}
 }
 
@@ -79,4 +75,31 @@ func baseSeriesName(name string) string {
 		}
 	}
 	return name
+}
+
+// readGoSources concatenates the non-test Go files of dir, so a metric or
+// env name is found whichever file of the package registers or reads it.
+func readGoSources(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	var b strings.Builder
+	for _, e := range entries {
+		n := e.Name()
+		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(dir + "/" + n)
+		if err != nil {
+			t.Fatalf("read %s/%s: %v", dir, n, err)
+		}
+		b.Write(data)
+		b.WriteByte('\n')
+	}
+	if b.Len() == 0 {
+		t.Fatalf("no Go sources in %s", dir)
+	}
+	return b.String()
 }

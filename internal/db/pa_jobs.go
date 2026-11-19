@@ -266,6 +266,11 @@ func (s *Store) ExpirePAJobs(ctx context.Context, now time.Time) ([]jobs.Notice,
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("expire pa jobs: rows: %w", err)
 	}
+	for _, n := range notices {
+		if err := enqueuePANotice(ctx, tx, n, nowMS); err != nil {
+			return nil, fmt.Errorf("expire pa jobs: %w", err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE pa_usage SET status = $1, updated_at_ms = $2
 		  WHERE status = $3 AND job_id IN (SELECT id FROM pa_jobs WHERE status <> $4)`,
@@ -458,6 +463,9 @@ func (s *Store) backoffPAJob(ctx context.Context, j jobs.Job, now time.Time, det
 	if deterministic || failures >= jobs.MaxClaimFailures {
 		_, err = tx.ExecContext(ctx, `UPDATE pa_jobs SET status = $1 WHERE id = $2`, string(jobs.StatusCancelled), j.ID)
 		notice = &jobs.Notice{Principal: j.Principal, JobID: j.ID, Kind: jobs.NoticeRunFailed}
+		if err == nil {
+			err = enqueuePANotice(ctx, tx, *notice, now.UnixMilli())
+		}
 	} else {
 		// retry_at, not held_until: a budget hold is never moved.
 		_, err = tx.ExecContext(ctx, `UPDATE pa_jobs SET retry_at_ms = $1 WHERE id = $2`,
@@ -570,15 +578,19 @@ func (s *Store) claimPicked(ctx context.Context, req jobs.ClaimRequest, pg bool,
 			string(jobs.StatusCancelled), nowMS, j.ID); err != nil {
 			return jobs.ClaimResult{}, fmt.Errorf("claim pa job: cancel: %w", err)
 		}
-		if err := tx.Commit(); err != nil {
-			return jobs.ClaimResult{}, fmt.Errorf("claim pa job: commit: %w", err)
-		}
 		res := jobs.ClaimResult{Outcome: jobs.ClaimCancelled, Job: j}
 		res.Job.Status = jobs.StatusCancelled
 		// Consent still stands, the conversation does not: the request
-		// (perhaps held for days) is dropped, and the principal is told.
+		// (perhaps held for days) is dropped, and the principal is told,
+		// through the outbox in this transaction.
 		if errors.Is(err, jobs.ErrConversationGone) {
 			res.Notices = []jobs.Notice{{Principal: j.Principal, JobID: j.ID, Kind: jobs.NoticeDropped}}
+			if err := enqueuePANotice(ctx, tx, res.Notices[0], nowMS); err != nil {
+				return jobs.ClaimResult{}, fmt.Errorf("claim pa job: %w", err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return jobs.ClaimResult{}, fmt.Errorf("claim pa job: commit: %w", err)
 		}
 		return res, nil
 	}
@@ -602,6 +614,14 @@ func (s *Store) claimPicked(ctx context.Context, req jobs.ClaimRequest, pg bool,
 			return jobs.ClaimResult{}, fmt.Errorf("claim pa job: hold: %w", err)
 		}
 		res.Job.Status = jobs.StatusHeld
+		if res.Notify {
+			// Once per held job (hold_notified), in the hold's transaction.
+			if err := enqueuePAOutbox(ctx, tx, jobs.OutboxItem{
+				Principal: j.Principal, JobID: j.ID, Kind: jobs.OutboxBudgetHold,
+			}, nowMS); err != nil {
+				return jobs.ClaimResult{}, fmt.Errorf("claim pa job: %w", err)
+			}
+		}
 	case jobs.ClaimClaimed:
 		attempt := j.Attempts + 1
 		var resID int64
@@ -798,6 +818,14 @@ func runGate(ctx context.Context, tx *sql.Tx, gate jobs.Gate, j jobs.Job, now ti
 	if cerr := cancelOne(ctx, tx, j, now.UnixMilli()); cerr != nil {
 		return cerr
 	}
+	if errors.Is(err, jobs.ErrConversationGone) {
+		// The request is dropped and the principal is owed a notice: it is
+		// written with the cancellation, so it cannot be lost after it.
+		if cerr := enqueuePANotice(ctx, tx, jobs.Notice{Principal: j.Principal, JobID: j.ID, Kind: jobs.NoticeDropped},
+			now.UnixMilli()); cerr != nil {
+			return cerr
+		}
+	}
 	if cerr := tx.Commit(); cerr != nil {
 		return fmt.Errorf("cancel pa job: commit: %w", cerr)
 	}
@@ -872,6 +900,11 @@ func (s *Store) ReleasePAClaim(ctx context.Context, ref jobs.Ref, mode jobs.Rele
 		        retry_at_ms = $2, claim_failures = $3, updated_at_ms = $4 WHERE id = $5`,
 		string(next), retryAt, failures, now.UnixMilli(), j.ID); err != nil {
 		return nil, fmt.Errorf("release pa claim: %w", err)
+	}
+	if notice != nil {
+		if err := enqueuePANotice(ctx, tx, *notice, now.UnixMilli()); err != nil {
+			return nil, fmt.Errorf("release pa claim: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("release pa claim: commit: %w", err)

@@ -452,6 +452,12 @@ func main() {
 		slog.Error("pa state", "err", err)
 		os.Exit(1)
 	}
+	// PA webhook monitor (T4): reads getWebhookInfo every 5 minutes and
+	// exports what it saw; also only when PA_ENABLED is true.
+	if _, err := startPAWebhookMonitor(ctx, cfg, m, ""); err != nil {
+		slog.Error("pa webhook monitor", "err", err)
+		os.Exit(1)
+	}
 	// Active session gauge sampler: refreshes mctl_sessions_active every minute.
 	go func() {
 		ticker := time.NewTicker(time.Minute)
@@ -921,7 +927,7 @@ func main() {
 
 	// Personal Assistant bot webhook (issue #1313). Inert unless PA_ENABLED
 	// is explicitly true: with it off no PA route exists at all.
-	if _, err := mountPA(mux, cfg, store); err != nil {
+	if _, err := mountPA(mux, cfg, store, m); err != nil {
 		slog.Error("pa webhook", "err", err)
 		os.Exit(1)
 	}
@@ -1672,7 +1678,7 @@ func withK8sSA(cfg *config.Config, store *db.Store, provider auth.Provider) (aut
 // lands, verified updates go to pa.InertHandler: deduplicated and dropped,
 // with no model call, tool call or message. Split out of main so a test can
 // assert that nothing is registered while the flag is off.
-func mountPA(mux chi.Router, cfg *config.Config, store *db.Store) (bool, error) {
+func mountPA(mux chi.Router, cfg *config.Config, store *db.Store, counter pa.Counter) (bool, error) {
 	if !cfg.PAEnabled {
 		slog.Info("pa bot disabled", "reason", "PA_ENABLED not true")
 		return false, nil
@@ -1682,6 +1688,9 @@ func mountPA(mux chi.Router, cfg *config.Config, store *db.Store) (bool, error) 
 		Dedup:    store,
 		Handler:  pa.InertHandler,
 		Failures: store,
+		// Counts every delivery outcome, bad_secret included: a secret
+		// mismatch with Telegram shows here as well as in getWebhookInfo.
+		Counter: counter,
 	})
 	if err != nil {
 		return false, err

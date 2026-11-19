@@ -37,19 +37,72 @@ type sentMessage struct {
 }
 
 type sendRecorder struct {
-	mu   sync.Mutex
+	mu sync.Mutex
+	// sent has one entry per completed send: the parts it sent, joined.
 	sent []sentMessage
-	fail error
+	// parts has one entry per delivered part, completed send or not.
+	parts []sentMessage
+	// fail fails every part, or only part failAt (1-based) when set.
+	fail   error
+	failAt int
+	// before runs outside the lock before each part (1-based); it can
+	// block, cancel or fail the part.
+	before func(ctx context.Context, chat int64, part int) error
 }
 
-func (s *sendRecorder) Send(_ context.Context, chatID int64, t output.Text, _ output.Keyboard) error {
+func (s *sendRecorder) SendFrom(ctx context.Context, chatID int64, t output.Text, _ output.Keyboard, from int, sent func(int) error) error {
+	var b strings.Builder
+	for i := from; i < t.Parts(); i++ {
+		s.mu.Lock()
+		before := s.before
+		s.mu.Unlock()
+		if before != nil {
+			if err := before(ctx, chatID, i+1); err != nil {
+				return err
+			}
+		}
+		s.mu.Lock()
+		err := s.fail
+		if s.failAt > 0 && s.failAt != i+1 {
+			err = nil
+		}
+		if err == nil {
+			s.parts = append(s.parts, sentMessage{chatID, t.Part(i)})
+			b.WriteString(t.Part(i))
+		}
+		s.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		if sent != nil {
+			if err := sent(i + 1); err != nil {
+				return err
+			}
+		}
+	}
+	s.mu.Lock()
+	s.sent = append(s.sent, sentMessage{chatID, b.String()})
+	s.mu.Unlock()
+	return nil
+}
+
+// sentTo is sender.to once the deliveries the request paths started are
+// done (the worker end-to-end tests go through a real HTTP server).
+func (h *runLoopHarness) sentTo(chat int64) []string {
+	h.loop.WaitDeliveries()
+	return h.sender.to(chat)
+}
+
+func (s *sendRecorder) partsTo(chat int64) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.fail != nil {
-		return s.fail
+	var out []string
+	for _, m := range s.parts {
+		if m.chat == chat {
+			out = append(out, m.text)
+		}
 	}
-	s.sent = append(s.sent, sentMessage{chatID, t.String()})
-	return nil
+	return out
 }
 
 func (s *sendRecorder) to(chat int64) []string {
@@ -95,7 +148,13 @@ func withStore(wrap func(*db.Store) RunLoopStore) rlOption {
 
 func newRunLoopHarness(t *testing.T, opts ...rlOption) *runLoopHarness {
 	t.Helper()
-	store := newStore(t)
+	return newRunLoopHarnessOn(t, newStore(t), opts...)
+}
+
+// newRunLoopHarnessOn is newRunLoopHarness on a given store (Postgres
+// variants pass newPostgresStore).
+func newRunLoopHarnessOn(t *testing.T, store *db.Store, opts ...rlOption) *runLoopHarness {
+	t.Helper()
 	h := &runLoopHarness{sender: &sendRecorder{}}
 	iss, err := localjwt.NewIssuer(runLoopSecret, runLoopIssuer)
 	if err != nil {
@@ -159,6 +218,9 @@ func (h *runLoopHarness) post(route, token string, body any) *httptest.ResponseR
 	mux := http.NewServeMux()
 	h.loop.Mount(mux)
 	mux.ServeHTTP(w, req)
+	// The request paths deliver after their response; the tests read the
+	// outbox once that delivery is done.
+	h.loop.WaitDeliveries()
 	return w
 }
 
@@ -216,7 +278,7 @@ func TestRunLoop_HappyPath(t *testing.T) {
 	w := h.post(RouteReply, c.Token, replyRequest{
 		Text: "See https://example.org/a and https://evil.example/x", CostUSD: &cost,
 	})
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"delivered":true`) {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"queued":true`) {
 		t.Fatalf("reply: %d %s", w.Code, w.Body)
 	}
 	sent := h.sender.to(aliceID)
@@ -339,6 +401,7 @@ func TestRunLoop_S1R1NonASCIIReply(t *testing.T) {
 		mux := http.NewServeMux()
 		h.loop.Mount(mux)
 		mux.ServeHTTP(w, req)
+		h.loop.WaitDeliveries()
 		return w
 	}
 	t.Run("fits", func(t *testing.T) {

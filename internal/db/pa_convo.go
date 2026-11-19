@@ -276,6 +276,9 @@ func (s *Store) ForgetPAConversations(ctx context.Context, tx *sql.Tx, principal
 		jobs.StatusPending, jobs.StatusHeld, jobs.StatusClaimed); err != nil {
 		return err
 	}
+	if err := deletePAOutboxNotices(ctx, tx, principal); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pa_fragments WHERE principal = $1`, principal); err != nil {
 		return fmt.Errorf("forget pa conversations: fragments: %w", err)
 	}
@@ -477,6 +480,9 @@ func (s *Store) SweepPAState(ctx context.Context, now, updatesBefore time.Time) 
 		{new(int64), `DELETE FROM pa_jobs WHERE status IN ('done', 'cancelled', 'expired') AND updated_at_ms < $1`, []any{updatesBefore.UnixMilli()}},
 		{new(int64), `DELETE FROM pa_usage WHERE status <> 'reserved' AND created_at_ms < $1`, []any{now.Add(-PAUsageRetention).UnixMilli()}},
 		{new(int64), `DELETE FROM pa_rate WHERE window_start_ms < $1`, []any{updatesBefore.UnixMilli()}},
+		// Outbox rows that will not be sent again (#1313 slice d2). A
+		// pending or sending row is kept whatever its age.
+		{new(int64), `DELETE FROM pa_outbox WHERE status NOT IN ('pending', 'sending') AND updated_at_ms < $1`, []any{updatesBefore.UnixMilli()}},
 	}
 	for _, st := range steps {
 		res, err := tx.ExecContext(ctx, st.q, st.args...)

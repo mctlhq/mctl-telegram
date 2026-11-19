@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	"github.com/mctlhq/mctl-telegram/internal/config"
+	"github.com/mctlhq/mctl-telegram/internal/pa"
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/sweeper"
 )
@@ -28,5 +29,31 @@ func startPAState(ctx context.Context, cfg *config.Config, store convo.Store) (b
 		slog.Warn("pa state: purged unmarked fragments", "rows", n)
 	}
 	go sweeper.PAState(ctx, store)
+	return true, nil
+}
+
+// paWebhookMetrics is what the getWebhookInfo monitor exports to
+// (*metrics.Registry).
+type paWebhookMetrics interface {
+	pa.WebhookGauges
+	StartPAWebhookMonitor()
+}
+
+// startPAWebhookMonitor starts the periodic getWebhookInfo check (issue
+// #1313 slice d2, T4) when PA_ENABLED is true, and does nothing otherwise:
+// with the PA off there is no webhook to watch, and no metric that could
+// read as unreadable. It only reads; it never registers the webhook.
+func startPAWebhookMonitor(ctx context.Context, cfg *config.Config, m paWebhookMetrics, baseURL string) (bool, error) {
+	if !cfg.PAEnabled {
+		return false, nil
+	}
+	mon, err := pa.NewWebhookMonitor(pa.WebhookMonitorConfig{
+		BaseURL: baseURL, Token: cfg.PABotToken, ExpectedURL: cfg.PAWebhookURL, Gauges: m,
+	})
+	if err != nil {
+		return false, err
+	}
+	m.StartPAWebhookMonitor()
+	go mon.Run(ctx)
 	return true, nil
 }

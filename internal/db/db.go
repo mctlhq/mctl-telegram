@@ -545,6 +545,9 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 	if err := migratePAJobs(ctx, dbConn, pg); err != nil {
 		return err
 	}
+	if err := migratePAOutbox(ctx, dbConn, pg); err != nil {
+		return err
+	}
 	return dropLegacyColumns(ctx, dbConn, pg)
 }
 

@@ -99,6 +99,17 @@ func run() error {
 	if runnerName == "" {
 		runnerName = "claude"
 	}
+	paMode, err := envBoolStrict("AGENT_WORKER_PA")
+	if err != nil {
+		return err
+	}
+	if paMode {
+		w, err := paWorkerFromEnv(runnerName, apiToken)
+		if err != nil {
+			return err
+		}
+		return serveLoop(m, credentialDomainID, w.Health, "pa", w.BaseURL, w.Loop)
+	}
 	poolMode, err := envBoolStrict("AGENT_POOL_MODE")
 	if err != nil {
 		return err
@@ -121,31 +132,11 @@ func run() error {
 			Metrics:      m,
 		}
 	case "openai":
-		model, err := requireEnv("AGENT_MODEL")
-		if err != nil {
-			return err
-		}
-		openAIBaseURL, err := requireEnv("AGENT_OPENAI_BASE_URL")
-		if err != nil {
-			return err
-		}
-		openAIAPIKey, err := requireEnv("AGENT_OPENAI_API_KEY")
-		if err != nil {
-			return err
-		}
-		inputPrice, err := requiredEnvFloat("MODEL_INPUT_USD_PER_MTOK")
-		if err != nil {
-			return err
-		}
-		outputPrice, err := requiredEnvFloat("MODEL_OUTPUT_USD_PER_MTOK")
+		oc, prices, err := openAIClientFromEnv()
 		if err != nil {
 			return err
 		}
 		maxTurns, err := envPositiveInt("AGENT_MAX_TURNS", 12)
-		if err != nil {
-			return err
-		}
-		maxOutputTokens, err := envPositiveInt("AGENT_OPENAI_MAX_OUTPUT_TOKENS", 0)
 		if err != nil {
 			return err
 		}
@@ -154,25 +145,16 @@ func run() error {
 			return err
 		}
 		runner = &agentworker.OpenAIRunner{
-			Client: &agentworker.OpenAIClient{
-				BaseURL:         openAIBaseURL,
-				APIKey:          openAIAPIKey,
-				GatewayToken:    os.Getenv("AGENT_GATEWAY_TOKEN"),
-				Model:           model,
-				UserAgent:       "mctl-telegram-agent-worker/" + version,
-				MaxOutputTokens: maxOutputTokens,
-			},
+			Client:       oc,
 			APIBaseURL:   apiBaseURL,
 			APIToken:     apiToken,
 			PoolMode:     poolMode,
 			SystemPrompt: os.Getenv("AGENT_SYSTEM_PROMPT"),
 			MaxTurns:     maxTurns,
 			MaxBudgetUSD: maxBudgetUSD,
-			Prices: agentworker.Prices{
-				InputUSDPerMTok: inputPrice, OutputUSDPerMTok: outputPrice,
-			},
-			MinInterval: minInterval,
-			Metrics:     m,
+			Prices:       prices,
+			MinInterval:  minInterval,
+			Metrics:      m,
 		}
 	default:
 		return fmt.Errorf("AGENT_RUNNER must be claude or openai, got %q", runnerName)
@@ -185,7 +167,12 @@ func run() error {
 	}
 	worker := agentworker.NewWorker(client, runner).WithConcurrency(concurrency).WithHealth(health).
 		WithRequeue(requeueClientFunc(client, apiBaseURL, poolMode))
+	return serveLoop(m, credentialDomainID, health, runnerName, apiBaseURL, worker.Loop)
+}
 
+// serveLoop runs the health server and loop until SIGTERM or the loop
+// returns.
+func serveLoop(m *metrics.Registry, credentialDomainID string, health *agentworker.Health, runnerName, apiBaseURL string, loop func(context.Context) error) error {
 	healthAddr := os.Getenv("AGENT_HEALTH_ADDR")
 	if healthAddr == "" {
 		healthAddr = ":8080"
@@ -213,7 +200,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	slog.Info("agent-worker: starting poll loop", "version", version, "runner", runnerName, "api_base_url", apiBaseURL, "health_addr", healthAddr)
-	loopErr := worker.Loop(ctx)
+	loopErr := loop(ctx)
 	slog.Info("agent-worker: stopped")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

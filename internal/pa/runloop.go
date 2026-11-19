@@ -40,6 +40,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
@@ -66,14 +67,18 @@ const maxReplyBody = 6*output.MaxParts*4096 + 4<<10
 // RunLoopStore is what the run loop persists through (*db.Store).
 type RunLoopStore interface {
 	jobs.Store
+	jobs.OutboxStore
 	convo.Store
 	AdmitPAMessage(ctx context.Context, tx *sql.Tx, principal int64, now time.Time, limit int, window time.Duration) (jobs.RateDecision, error)
 	PAConversationOpen(ctx context.Context, tx *sql.Tx, principal int64, conversationID string, now time.Time) error
 }
 
-// BotSender sends a rendered message (*output.Sender).
+// BotSender sends a rendered message (*output.Sender). SendFrom resumes a
+// message after the parts already delivered and reports each delivered
+// part; it wraps output.ErrOutcomeUnknown around any failure that may have
+// reached Telegram.
 type BotSender interface {
-	Send(ctx context.Context, chatID int64, text output.Text, kb output.Keyboard) error
+	SendFrom(ctx context.Context, chatID int64, text output.Text, kb output.Keyboard, from int, sent func(delivered int) error) error
 }
 
 // PoolAuthenticator authenticates the worker pool (*localjwt.PoolProvider).
@@ -122,6 +127,8 @@ type RunLoopConfig struct {
 	// Lease is how long a claim and its token live (jobs.DefaultLease).
 	Lease time.Duration
 	Now   func() time.Time
+	// Metrics counts outbox outcomes. Optional.
+	Metrics OutboxCounter
 }
 
 // RunLoop serves the run-loop routes and implements RunEnqueuer and
@@ -138,6 +145,9 @@ type RunLoop struct {
 	budget   jobs.Budget
 	lease    time.Duration
 	now      func() time.Time
+	metrics  OutboxCounter
+	// pending tracks the deliveries request paths started (deliverAfter).
+	pending sync.WaitGroup
 	// readTools is every tool the pin admits without approval, as
 	// "server/tool". Phase 1 has no other kind (catalog.LoadPin), and a
 	// resolver that offers anything else fails the claim.
@@ -185,7 +195,7 @@ func NewRunLoop(cfg RunLoopConfig) (*RunLoop, error) {
 	return &RunLoop{
 		store: cfg.Store, sealer: cfg.Sealer, pool: cfg.Pool, minter: cfg.Minter, verifier: cfg.Verifier,
 		sender: cfg.Sender, tools: cfg.Tools, limits: cfg.Limits, budget: cfg.Budget, lease: lease, now: now,
-		readTools: read,
+		readTools: read, metrics: cfg.Metrics,
 	}, nil
 }
 
@@ -378,10 +388,19 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 	res, err := l.store.ClaimPAJob(ctx, jobs.ClaimRequest{
 		Now: now, Lease: l.lease, Budget: l.budget, Gate: l.gate, Build: l.build,
 	})
-	// Committed before this point; owed whether or not the claim succeeded.
+	// Committed to the outbox with the state change; owed whether or not
+	// the claim succeeded.
+	principals := make([]int64, 0, len(res.Notices)+1)
 	for _, n := range res.Notices {
-		l.notify(ctx, n)
+		principals = append(principals, n.Principal)
 	}
+	if err == nil && res.Outcome == jobs.ClaimHeld && res.Notify {
+		principals = append(principals, res.Job.Principal)
+	}
+	// Sent after this response, never before it: the claim is committed,
+	// and the token it carries must reach the worker whatever Telegram
+	// does.
+	defer l.deliverAfter(ctx, principals...)
 	if err != nil {
 		stop(w, err)
 		return
@@ -389,13 +408,9 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 	switch res.Outcome {
 	case jobs.ClaimClaimed:
 	case jobs.ClaimHeld:
-		if res.Notify {
-			// After the commit, once per held job; no model call was or
-			// will be made for it until the window resets (S1-R3).
-			if err := l.sender.Send(ctx, res.Job.Principal, output.ServerText(output.TextBudgetHold), nil); err != nil {
-				slog.Warn("pa budget hold notice not sent", "job_id", res.Job.ID, "scope", res.Scope)
-			}
-		}
+		// The hold notice, once per held job, was written to the outbox
+		// with the hold and is delivered after this response; no model call was or will be
+		// made for this job until the window resets (S1-R3).
 		w.WriteHeader(http.StatusNoContent)
 		return
 	default:
@@ -574,7 +589,9 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 			typed = append(typed, f.Text)
 		}
 	}
-	out, err := output.Render(req.Text, output.AllowFromUserText(typed...))
+	// Rendered here only to refuse an answer too long to send; the outbox
+	// renders the stored answer again when it sends it.
+	_, err = output.Render(req.Text, output.AllowFromUserText(typed...))
 	if overflow {
 		err = output.ErrTooLong
 	}
@@ -583,7 +600,7 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, output.ErrTooLong):
 		// Fail closed: a short server text, never a truncated answer. The
 		// answer the principal never saw is not kept as conversation state.
-		out, record = output.ServerText(output.TextReplyTooLong), false
+		record = false
 	case err != nil:
 		writeJSON(w, http.StatusBadRequest, stopResponse{Stop: "invalid"})
 		return
@@ -600,37 +617,32 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 	}
 	j, err := l.store.FinishPAJob(ctx, ref, jobs.FinishRequest{
 		Now: l.now(), CostUSD: cost, MinTurnUSD: l.budget.MinTurnUSD, Gate: l.gate,
+		// The answer is stored as conversation state and queued in the
+		// outbox in the finish transaction; the send happens after the
+		// commit, through the outbox, which renders it again from the
+		// stored fragment (T14).
 		Record: func(ctx context.Context, tx *sql.Tx, j jobs.Job) error {
-			if !record {
-				return nil
+			item := jobs.OutboxItem{Principal: j.Principal, JobID: j.ID, Kind: jobs.OutboxReplyTooLong}
+			if record {
+				seq, err := l.appendAssistant(ctx, tx, j, req.Text)
+				if err != nil {
+					return err
+				}
+				item = jobs.OutboxItem{Principal: j.Principal, JobID: j.ID, Kind: jobs.OutboxReply,
+					ConversationID: j.ConversationID, FragmentSeq: seq}
 			}
-			return l.appendAssistant(ctx, tx, j, req.Text)
+			return l.store.EnqueuePAOutbox(ctx, tx, item, l.now())
 		},
 	})
 	if err != nil {
 		l.stopRun(ctx, w, ref, err)
 		return
 	}
-	// After the commit: the send is never inside a transaction.
-	if err := l.sender.Send(ctx, j.Principal, out, nil); err != nil {
-		slog.Warn("pa reply not delivered", "job_id", j.ID)
-		writeJSON(w, http.StatusOK, map[string]bool{"delivered": false})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"delivered": true})
-}
-
-// notify sends a notice owed after a committed state change. Like the hold
-// notice it is sent once, after the commit; a failed send is logged and
-// not retried (the outbox for run-loop notices is deferred to d2).
-func (l *RunLoop) notify(ctx context.Context, n jobs.Notice) {
-	t := output.TextRunFailed
-	if n.Kind == jobs.NoticeDropped {
-		t = output.TextRequestDropped
-	}
-	if err := l.sender.Send(ctx, n.Principal, output.ServerText(t), nil); err != nil {
-		slog.Warn("pa job notice not sent", "job_id", n.JobID)
-	}
+	// After the commit and after this response: the send is never inside a
+	// transaction and never holds up the worker. A failed send leaves the
+	// row due again; the worker's part is done either way.
+	writeJSON(w, http.StatusOK, map[string]bool{"queued": true})
+	l.deliverAfter(ctx, j.Principal)
 }
 
 // release undoes a claim whose token was never handed out and sends the
@@ -642,24 +654,24 @@ func (l *RunLoop) release(ctx context.Context, ref jobs.Ref, mode jobs.ReleaseMo
 		return
 	}
 	if n != nil {
-		l.notify(ctx, *n)
+		l.deliverAfter(ctx, n.Principal)
 	}
 }
 
 // appendAssistant stores the model's answer as an external-marked
 // assistant fragment: model output is never user provenance (T5).
-func (l *RunLoop) appendAssistant(ctx context.Context, tx *sql.Tx, j jobs.Job, text string) error {
+func (l *RunLoop) appendAssistant(ctx context.Context, tx *sql.Tx, j jobs.Job, text string) (int64, error) {
 	seq, err := l.store.NextPAFragmentSeq(ctx, tx, j.Principal, j.ConversationID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	sf, err := l.sealer.Seal(j.Principal, j.ConversationID, seq,
 		convo.NewFragment(convo.KindAssistant, convo.ProvenanceExternal, text))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	sf.CreatedAt = l.now()
-	return l.store.AppendPAFragment(ctx, tx, sf)
+	return seq, l.store.AppendPAFragment(ctx, tx, sf)
 }
 
 // PAJob is a verified pa-job credential, for the tool executor (#1315).
@@ -719,6 +731,7 @@ func (l *RunLoop) stopRun(ctx context.Context, w http.ResponseWriter, ref jobs.R
 // sent once.
 func (l *RunLoop) droppedNotice(ctx context.Context, ref jobs.Ref, err error) {
 	if errors.Is(err, jobs.ErrConversationGone) {
-		l.notify(ctx, jobs.Notice{Principal: ref.Principal, JobID: ref.JobID, Kind: jobs.NoticeDropped})
+		// The store wrote the notice with the cancellation.
+		l.deliverAfter(ctx, ref.Principal)
 	}
 }

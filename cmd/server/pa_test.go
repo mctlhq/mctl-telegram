@@ -58,7 +58,7 @@ func TestMountPA_InertByDefault(t *testing.T) {
 		t.Fatal("PA_ENABLED unset loaded as enabled")
 	}
 	mux := chi.NewRouter()
-	mounted, err := mountPA(mux, cfg, store)
+	mounted, err := mountPA(mux, cfg, store, nil)
 	if err != nil || mounted {
 		t.Fatalf("PA_ENABLED unset: mounted=%v err=%v, want false nil", mounted, err)
 	}
@@ -71,7 +71,7 @@ func TestMountPA_InertByDefault(t *testing.T) {
 
 	on := &config.Config{PAEnabled: true, PAWebhookSecret: testPASecret, PABotToken: "7000000001:pa-test-token-not-real-0123456789"}
 	mux = chi.NewRouter()
-	mounted, err = mountPA(mux, on, store)
+	mounted, err = mountPA(mux, on, store, nil)
 	if err != nil || !mounted {
 		t.Fatalf("PA_ENABLED on: mounted=%v err=%v", mounted, err)
 	}

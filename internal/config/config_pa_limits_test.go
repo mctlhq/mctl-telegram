@@ -15,6 +15,7 @@ func TestLoadPA_Limits(t *testing.T) {
 		t.Setenv("PA_ENABLED", "true")
 		t.Setenv("PA_BOT_TOKEN", testPABotToken)
 		t.Setenv("PA_WEBHOOK_SECRET", testPASecret)
+		t.Setenv("PA_WEBHOOK_URL", testPAWebhookURL)
 		t.Setenv("TELEGRAM_LOGIN_BOT_TOKEN", testLoginBotToken)
 	}
 	t.Run("defaults", func(t *testing.T) {
