@@ -47,7 +47,9 @@ package connector
 //
 // Steps 6 to 8 run under one deadline (DispatcherConfig.CallTimeout).
 // Refusals are audited at most refusalAuditBurst times per principal per
-// refusalAuditWindow; beyond that they are counted only.
+// refusalAuditWindow; beyond that they are counted only, and one summary
+// row records how many were left out. Security-relevant refusals
+// (alwaysAudited) are always written. The bound is in memory, per replica.
 //
 // The worker gets the tool result or a fixed refusal label; never a token,
 // never error text.
@@ -130,13 +132,30 @@ const PinRefreshInterval = 30 * time.Second
 
 // Refusal audit bound: a worker cannot write more than refusalAuditBurst
 // refusals per refusalAuditWindow into one principal's chain. Past it, a
-// refusal is still refused and counted (status refused_unaudited).
+// refusal is still refused and counted (status refused_unaudited), and
+// when the window closes one refusals_suppressed row carries the count.
+// The windows live in memory, so the bound is per replica and restarts
+// with the process.
 const (
 	refusalAuditWindow     = time.Minute
 	refusalAuditBurst      = 30
 	maxRefusalPrincipals   = 4096
 	statusRefusedUnaudited = "refused_unaudited"
 )
+
+// alwaysAudited are the refusals that are evidence of a worker probing
+// another principal's connections, tools outside its set, a stale job or a
+// bad token. They bypass the bound (and do not use it up), so a worker
+// cannot spend the window on bad_request and then probe unrecorded.
+var alwaysAudited = map[string]bool{
+	ReasonConnectionUnbound: true,
+	ReasonToolNotInSet:      true,
+	ReasonJobStale:          true,
+	ReasonTokenExpired:      true,
+	ReasonTokenRevoked:      true,
+	ReasonTokenInvalid:      true,
+	ReasonTokenUnverifiable: true,
+}
 
 // DispatcherConfig wires a Dispatcher. Every field but Metrics and Now is
 // required.
@@ -169,18 +188,30 @@ type Dispatcher struct {
 	refusals   map[int64]*auditWindow
 }
 
-// pinObservation is one connection's last tools/list read: ok is false
-// when it could not be read or parsed.
+// pinObservation is one connection's tools/list history: the last
+// listing that was read and parsed (okAt, drift, denied) and, separately,
+// the last failure. A failure never overwrites a successful listing: a
+// server that alternates a drifted listing with errors keeps reporting the
+// drift while the listing is fresh. Times are when the listing started,
+// so a slow read that finishes late cannot replace a newer one.
 type pinObservation struct {
-	at     time.Time
-	ok     bool
+	okAt   time.Time
 	drift  bool
 	denied map[string]int
+	failAt time.Time
 }
 
 type auditWindow struct {
-	start time.Time
-	n     int
+	start      time.Time
+	n          int
+	suppressed int
+}
+
+// suppressedRefusals is one principal's count of refusals left out of its
+// chain in a closed window.
+type suppressedRefusals struct {
+	principal int64
+	n         int
 }
 
 type listingKey struct {
@@ -526,9 +557,12 @@ func (d *Dispatcher) surface(ctx context.Context, ep MCPEndpoint, token connecti
 	}
 	pages, err := ep.ListTools(ctx, token)
 	if errors.Is(err, ErrMCPUnauthorized) {
+		// The connection's token, not the server: no observation, but
+		// the window still moves for every server.
 		d.countListingFailure(server, "unauthorized")
 		d.mu.Lock()
 		delete(d.listings, key)
+		d.refreshPinsLocked(d.now())
 		d.mu.Unlock()
 		return nil, false
 	}
@@ -555,9 +589,16 @@ func (d *Dispatcher) surface(ctx context.Context, ep MCPEndpoint, token connecti
 			delete(d.listings, k)
 		}
 	}
-	d.observations[key] = pinObservation{at: now, ok: ok, drift: drift, denied: denied}
+	o := d.observations[key]
+	switch {
+	case ok && !now.Before(o.okAt):
+		o.okAt, o.drift, o.denied = now, drift, denied
+	case !ok && now.After(o.failAt):
+		o.failAt = now
+	}
+	d.observations[key] = o
 	d.pinServers[server] = true
-	d.refreshPinsLocked(now)
+	d.refreshPinsLocked(d.now())
 	return s, true
 }
 
@@ -633,7 +674,8 @@ func (d *Dispatcher) RefreshPins() {
 }
 
 // Run calls RefreshPins every interval (PinRefreshInterval if 0) until ctx
-// ends. Whoever serves RouteTool must also run this.
+// ends, and writes the refusals_suppressed rows of closed refusal windows.
+// Whoever serves RouteTool must also run this.
 func (d *Dispatcher) Run(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = PinRefreshInterval
@@ -646,6 +688,7 @@ func (d *Dispatcher) Run(ctx context.Context, interval time.Duration) {
 			return
 		case <-t.C:
 			d.RefreshPins()
+			d.recordSuppressed(ctx, d.closedRefusalWindows())
 		}
 	}
 }
@@ -665,12 +708,13 @@ func (d *Dispatcher) refreshPinsLocked(now time.Time) {
 		per[server] = &agg{denied: map[string]int{}}
 	}
 	for k, o := range d.observations {
-		if now.Sub(o.at) > PinObservationWindow {
+		fresh := !o.okAt.IsZero() && now.Sub(o.okAt) <= PinObservationWindow
+		if !fresh && now.Sub(o.failAt) > PinObservationWindow {
 			delete(d.observations, k)
 			continue
 		}
 		a := per[k.server]
-		if a == nil || !o.ok {
+		if a == nil || !fresh {
 			continue
 		}
 		a.seen = true
@@ -709,37 +753,83 @@ func (d *Dispatcher) refuse(w http.ResponseWriter, r *http.Request, ref Refusal,
 		server = invalidServer
 	}
 	status := string(StatusRefused)
-	if ref.Principal > 0 && !d.allowRefusalAudit(ref.Principal) {
-		status = statusRefusedUnaudited
-	} else {
+	audit := true
+	if ref.Principal > 0 {
+		var closed []suppressedRefusals
+		audit, closed = d.allowRefusalAudit(ref.Principal, ref.Reason)
+		d.recordSuppressed(r.Context(), closed)
+	}
+	if audit {
 		d.cfg.Executor.RecordRefusal(r.Context(), ref, d.pinned)
+	} else {
+		status = statusRefusedUnaudited
 	}
 	d.count(server, status, ref.Reason)
 	writeJSON(w, code, refusalResponse{Stop: ref.Reason})
 }
 
-// allowRefusalAudit reports whether one more refusal may be written to
+// allowRefusalAudit reports whether a refusal for reason may be written to
 // principal's chain in the current window (refusalAuditBurst per
-// refusalAuditWindow). It bounds what a looping or hostile worker can
-// append: every request it sends is still refused and counted.
-func (d *Dispatcher) allowRefusalAudit(principal int64) bool {
+// refusalAuditWindow; alwaysAudited reasons always, without using the
+// bound). It bounds what a looping or hostile worker can append: every
+// request it sends is still refused and counted. It also returns the
+// closed windows whose suppressed count is still to be written.
+func (d *Dispatcher) allowRefusalAudit(principal int64, reason string) (bool, []suppressedRefusals) {
 	now := d.now()
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	var closed []suppressedRefusals
 	w := d.refusals[principal]
 	if w == nil || now.Sub(w.start) >= refusalAuditWindow {
+		if w != nil && w.suppressed > 0 {
+			closed = append(closed, suppressedRefusals{principal, w.suppressed})
+		}
 		if w == nil && len(d.refusals) >= maxRefusalPrincipals {
-			for p, old := range d.refusals {
-				if now.Sub(old.start) >= refusalAuditWindow {
-					delete(d.refusals, p)
-				}
-			}
+			closed = append(closed, d.closeRefusalWindowsLocked(now)...)
 		}
 		w = &auditWindow{start: now}
 		d.refusals[principal] = w
 	}
+	if alwaysAudited[reason] {
+		return true, closed
+	}
 	w.n++
-	return w.n <= refusalAuditBurst
+	if w.n > refusalAuditBurst {
+		w.suppressed++
+		return false, closed
+	}
+	return true, closed
+}
+
+// closedRefusalWindows drops the closed refusal windows and returns the
+// suppressed counts still to be written.
+func (d *Dispatcher) closedRefusalWindows() []suppressedRefusals {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.closeRefusalWindowsLocked(d.now())
+}
+
+func (d *Dispatcher) closeRefusalWindowsLocked(now time.Time) []suppressedRefusals {
+	var closed []suppressedRefusals
+	for p, w := range d.refusals {
+		if now.Sub(w.start) < refusalAuditWindow {
+			continue
+		}
+		if w.suppressed > 0 {
+			closed = append(closed, suppressedRefusals{p, w.suppressed})
+		}
+		delete(d.refusals, p)
+	}
+	return closed
+}
+
+// recordSuppressed writes one refusals_suppressed row per closed window.
+func (d *Dispatcher) recordSuppressed(ctx context.Context, closed []suppressedRefusals) {
+	for _, c := range closed {
+		d.cfg.Executor.RecordRefusal(ctx, Refusal{
+			Principal: c.principal, Reason: ReasonRefusalsSuppressed, Suppressed: int64(c.n),
+		}, d.pinned)
+	}
 }
 
 func (d *Dispatcher) count(server, status, reason string) {

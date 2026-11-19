@@ -467,7 +467,9 @@ one aged out of the window (also while idle: the gauges of every server are
 recomputed on each refresh, at least every 30s), the drift and denied-tool
 series are removed and `mctl_pa_pin_listing_unknown{server}` is 1: an
 unobserved listing is never reported as clean, a drift seen long ago does not
-keep the alert firing, and one connection's
+keep the alert firing, a failure never erases a fresh successful listing (a
+server alternating drift and errors keeps drift at 1), observations are
+ordered by when the listing started, and one connection's
 failure cannot hide drift another connection saw. A server refusing one
 connection's token on `tools/list` is that connection's problem: the call is
 refused as `server_refused` and counted in
@@ -570,7 +572,11 @@ longer ago, and one whose revocation state could not be read
 nobody's chain: their principal claim is not evidence, or nothing was decided.
 Refusals are written at most 30 per principal per minute; past that a worker's
 further refusals are still refused and counted (status `refused_unaudited`),
-so a looping or hostile worker cannot flood a chain.
+so a looping or hostile worker cannot flood a chain. When the window closes,
+one `refusals_suppressed` row records how many were left out. Probes that
+matter are always written and do not use up the bound: `connection_unbound`,
+`tool_not_in_set`, `job_stale` and every `token_*` refusal. The bound is
+kept in memory, so it is per replica and resets on restart.
 
 After the call, the connection is re-read (S1-C7) and so is the job row: a
 result that arrives after the job was cancelled, its consent withdrawn or its

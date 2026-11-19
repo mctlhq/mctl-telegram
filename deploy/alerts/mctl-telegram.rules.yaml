@@ -884,3 +884,22 @@ spec:
               tools/list of it could be read or parsed in the last 5 minutes,
               so pin drift is unknown and those calls are refused.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpapinlistingunknown"
+
+        - alert: MctlPAPinListingUnauthorized
+          # #1341 round 3: a refused token on tools/list is not "listing
+          # unknown" (it is one connection's problem), so it needs its own
+          # signal. 401s on a server for 30 minutes mean either users whose
+          # connection broke or a server that stopped accepting our tokens.
+          expr: |
+            sum by (server) (increase(mctl_pa_pin_listing_failures_total{reason="unauthorized"}[15m])) > 0
+          for: 30m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "PA catalog server {{ $labels.server }} keeps refusing connection tokens"
+            description: >
+              tools/list on {{ $labels.server }} has answered 401 to
+              Personal Assistant connection tokens for 30 minutes. Those
+              calls are refused as server_refused.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpapinlistingunauthorized"

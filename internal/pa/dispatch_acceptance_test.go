@@ -885,7 +885,9 @@ func isPostgres(s *db.Store) bool {
 // TestDispatch_PinDrift (S1-T1..S1-T6 at the dispatcher, owner decision
 // 2026-11-19): a pinned tool whose description changed is denied and the
 // drift gauge reads 1; other tools keep working. A listing that cannot be
-// read makes the server unavailable and the drift unknown, never 0.
+// read makes the server unavailable; it does not erase the drift a fresh
+// listing showed (#1341 round 3), and once no listing is fresh the drift
+// is unknown, never 0.
 func TestDispatch_PinDrift(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, s *db.Store) {
 		e := newDispatchEnv(t, s)
@@ -914,6 +916,14 @@ func TestDispatch_PinDrift(t *testing.T) {
 		e.tg.listErr = errors.New("connection reset")
 		e.tg.mu.Unlock()
 		e.wantRefusal(e.call(token, req("tg", "get_messages", "")), http.StatusServiceUnavailable, connector.ReasonServerUnavailable, alice, 3)
+		if d, u := testutil.ToFloat64(e.reg.PAPinDrift.WithLabelValues("tg")), testutil.ToFloat64(e.reg.PAPinListingUnknown.WithLabelValues("tg")); d != 1 || u != 0 {
+			t.Fatalf("after a failure on a fresh drift: drift %v unknown %v, want 1 0", d, u)
+		}
+		// The drifted listing leaves the window; only failures remain
+		// (Bob's run: Alice's job is stale by then).
+		e.h.Advance(connector.PinObservationWindow)
+		bobToken, _ := e.run(bob)
+		e.wantRefusal(e.call(bobToken, req("tg", "get_messages", "")), http.StatusServiceUnavailable, connector.ReasonServerUnavailable, bob, 0)
 		if got := testutil.ToFloat64(e.reg.PAPinListingUnknown.WithLabelValues("tg")); got != 1 {
 			t.Fatalf("listing unknown = %v, want 1", got)
 		}
@@ -1331,9 +1341,48 @@ func TestDispatch_RefusalAuditBounded(t *testing.T) {
 		if got := testutil.ToFloat64(e.reg.PADispatchTotal.WithLabelValues("invalid-server", "refused_unaudited", connector.ReasonBadRequest)); got != 5 {
 			t.Fatalf("unaudited refusals counted %v, want 5", got)
 		}
+		// Security-relevant refusals are written past the bound.
+		e.wantRefusal(e.call(token, req("tg", "list_dialogs", "conn-not-bound")), http.StatusForbidden, connector.ReasonConnectionUnbound, alice, burst)
 		bobToken, _ := e.run(bob)
 		e.wantRefusal(e.call(bobToken, `{`), http.StatusBadRequest, connector.ReasonBadRequest, bob, 0)
+		// The next window opens with one summary row for the five left out.
 		e.h.Advance(time.Minute)
-		e.wantRefusal(e.call(token, `{`), http.StatusBadRequest, connector.ReasonBadRequest, alice, burst)
+		e.wantRefusal(e.call(token, `{`), http.StatusBadRequest, connector.ReasonBadRequest, alice, burst+2)
+		rows := e.audit(alice)
+		if sum := rows[burst+1]; sum.status != "refused" || !strings.HasSuffix(sum.peer, " reason=refusals_suppressed suppressed=5") {
+			t.Fatalf("summary row %+v", sum)
+		}
 	})
+}
+
+// TestDispatch_RefusalAuditBoundExempt: a worker that spends the window on
+// bad_request still has every probe of another connection, a tool outside
+// its set or a stale job written to the chain.
+func TestDispatch_RefusalAuditBoundExempt(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newDispatchEnv(t, s)
+		token, _ := e.run(alice)
+		for i := 0; i < 40; i++ {
+			e.call(token, `{`)
+		}
+		n := len(e.audit(alice))
+		e.wantRefusal(e.call(token, req("tg", "send_message", "")), http.StatusForbidden, connector.ReasonToolNotInSet, alice, n)
+		e.wantRefusal(e.call(token, req("tg", "list_dialogs", "conn-not-bound")), http.StatusForbidden, connector.ReasonConnectionUnbound, alice, n+1)
+	})
+}
+
+// N15: the token refusals the job gate passes through are the dispatcher's
+// own labels, so token_unverifiable reaches the 503 branch and is never
+// answered as an invalid token.
+func TestTokenRefusalLabelsMatch(t *testing.T) {
+	for jwt, want := range map[localjwt.PAJobRefusal]string{
+		localjwt.PAJobRefusedExpired:      connector.ReasonTokenExpired,
+		localjwt.PAJobRefusedRevoked:      connector.ReasonTokenRevoked,
+		localjwt.PAJobRefusedUnverifiable: connector.ReasonTokenUnverifiable,
+		localjwt.PAJobRefusedInvalid:      connector.ReasonTokenInvalid,
+	} {
+		if string(jwt) != want {
+			t.Errorf("localjwt %q != connector %q", jwt, want)
+		}
+	}
 }

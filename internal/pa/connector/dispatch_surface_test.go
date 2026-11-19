@@ -7,15 +7,20 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 	"github.com/mctlhq/mctl-telegram/internal/pa"
+	"github.com/mctlhq/mctl-telegram/internal/pa/catalog"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 )
 
@@ -27,6 +32,9 @@ type tokenEP struct {
 	pages  map[string][]byte
 	errs   map[string]error
 	lists  map[string]int
+	// block holds the next ListTools of a token (its page is read before
+	// it waits) until the channel is closed.
+	block map[string]chan struct{}
 }
 
 func (e *tokenEP) Server() string {
@@ -38,12 +46,18 @@ func (e *tokenEP) Server() string {
 
 func (e *tokenEP) ListTools(_ context.Context, tok connection.Secret) ([][]byte, error) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.lists[tok.Reveal()]++
-	if err := e.errs[tok.Reveal()]; err != nil {
+	err, page := e.errs[tok.Reveal()], e.pages[tok.Reveal()]
+	ch := e.block[tok.Reveal()]
+	delete(e.block, tok.Reveal())
+	e.mu.Unlock()
+	if ch != nil {
+		<-ch
+	}
+	if err != nil {
 		return nil, err
 	}
-	return [][]byte{e.pages[tok.Reveal()]}, nil
+	return [][]byte{page}, nil
 }
 
 func (e *tokenEP) CallTool(context.Context, connection.Secret, string, json.RawMessage) ([]byte, error) {
@@ -77,7 +91,14 @@ type surfaceEnv struct {
 	ep    *tokenEP
 	alice *tokenEP
 	reg   *metrics.Registry
+	clock sync.Mutex
 	now   time.Time
+}
+
+func (e *surfaceEnv) advance(d time.Duration) {
+	e.clock.Lock()
+	e.now = e.now.Add(d)
+	e.clock.Unlock()
 }
 
 func newSurfaceEnv(t *testing.T) *surfaceEnv {
@@ -94,7 +115,11 @@ func newSurfaceEnv(t *testing.T) *surfaceEnv {
 		Executor:  newExecutor(&fakeSink{ev: &events{}}),
 		Flags:     func() (Flags, error) { return Flags{}, nil },
 		Metrics:   e.reg,
-		Now:       func() time.Time { return e.now },
+		Now: func() time.Time {
+			e.clock.Lock()
+			defer e.clock.Unlock()
+			return e.now
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -249,6 +274,152 @@ func TestPinGaugesAgeOut(t *testing.T) {
 	want("drift aged out by Run", 0, 0, 1)
 }
 
+func driftedTG(t *testing.T) []byte {
+	return tgListing(t, func(tools []map[string]any) []map[string]any {
+		for _, tool := range tools {
+			if tool["name"] == "get_messages" {
+				tool["description"] = "changed"
+			}
+		}
+		return tools
+	})
+}
+
+// gaugeOf reads one server's drift and unknown gauges; -1 when the series
+// is absent.
+func gaugeOf(t *testing.T, reg *metrics.Registry, server string) (drift, unknown float64) {
+	t.Helper()
+	read := func(c prometheus.Collector) float64 {
+		ch := make(chan prometheus.Metric, 16)
+		c.Collect(ch)
+		close(ch)
+		v := -1.0
+		for m := range ch {
+			var pb dto.Metric
+			if err := m.Write(&pb); err != nil {
+				t.Fatal(err)
+			}
+			for _, l := range pb.GetLabel() {
+				if l.GetName() == "server" && l.GetValue() == server {
+					v = pb.GetGauge().GetValue()
+				}
+			}
+		}
+		return v
+	}
+	return read(reg.PAPinDrift), read(reg.PAPinListingUnknown)
+}
+
+// TestPinFailureKeepsFreshDrift (P2-A of the #1341 round-2 review): a
+// connection's own failed listing does not erase the drift it saw while
+// that drift is fresh. A server alternating a drifted listing with 500s
+// keeps drift=1; it never flaps to 0 or to absent.
+func TestPinFailureKeepsFreshDrift(t *testing.T) {
+	e := newSurfaceEnv(t)
+	e.ep.pages["tok-carol"] = tgListing(t, nil)
+	e.ep.pages["tok-alice"] = driftedTG(t)
+	e.observe("carol", 1)
+	e.observe("alice", 1)
+	if d, u := gaugeOf(t, e.reg, "tg"); d != 1 || u != 0 {
+		t.Fatalf("carol clean + alice drift: drift %v unknown %v", d, u)
+	}
+	for i := 0; i < 4; i++ {
+		e.advance(catalog.ReadListingTTL + time.Second)
+		if i%2 == 0 {
+			e.ep.errs["tok-alice"] = errors.New("500")
+		} else {
+			delete(e.ep.errs, "tok-alice")
+		}
+		e.observe("alice", 1)
+		if d, u := gaugeOf(t, e.reg, "tg"); d != 1 || u != 0 {
+			t.Fatalf("step %d: drift %v unknown %v, want 1 0", i, d, u)
+		}
+	}
+
+	// Alice alone: drift, then only failures. Drift holds while fresh,
+	// then becomes unknown (drift absent), never 0.
+	e2 := newSurfaceEnv(t)
+	e2.ep.pages["tok-alice"] = driftedTG(t)
+	e2.observe("alice", 1)
+	e2.ep.errs["tok-alice"] = errors.New("500")
+	e2.advance(catalog.ReadListingTTL + time.Second)
+	e2.observe("alice", 1)
+	if d, u := gaugeOf(t, e2.reg, "tg"); d != 1 || u != 0 {
+		t.Fatalf("alice alone after a 500: drift %v unknown %v", d, u)
+	}
+	e2.advance(PinObservationWindow)
+	e2.observe("alice", 1)
+	if d, u := gaugeOf(t, e2.reg, "tg"); d != -1 || u != 1 {
+		t.Fatalf("only failures in the window: drift %v unknown %v, want absent 1", d, u)
+	}
+}
+
+// TestPinObservationOrderedByStart: a listing that started earlier but
+// finished later does not replace a newer one of the same connection.
+func TestPinObservationOrderedByStart(t *testing.T) {
+	e := newSurfaceEnv(t)
+	e.ep.pages["tok-c1"] = driftedTG(t)
+	release := make(chan struct{})
+	e.ep.block = map[string]chan struct{}{"tok-c1": release}
+	done := make(chan struct{})
+	go func() { e.observe("c1", 1); close(done) }()
+	for {
+		e.ep.mu.Lock()
+		started := e.ep.lists["tok-c1"] == 1
+		e.ep.mu.Unlock()
+		if started {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// The slow (drifted) read is on the wire; a newer read is clean.
+	e.ep.mu.Lock()
+	e.ep.pages["tok-c1"] = tgListing(t, nil)
+	e.ep.mu.Unlock()
+	e.advance(time.Second)
+	e.observe("c1", 1)
+	close(release)
+	<-done
+	if d, _ := gaugeOf(t, e.reg, "tg"); d != 0 {
+		t.Fatalf("drift %v: the older read replaced the newer one", d)
+	}
+}
+
+// N6: a server's gauges use only its own observations.
+func TestPinGaugesPerServer(t *testing.T) {
+	e := newSurfaceEnv(t)
+	page, err := os.ReadFile(filepath.Join("..", "catalog", "testdata", "alice.tools.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.alice.pages["tok-a1"] = []byte(strings.Replace(string(page), `"description": "`, `"description": "changed `, 1))
+	e.ep.pages["tok-c1"] = tgListing(t, nil)
+	e.d.surface(context.Background(), e.alice, connection.NewSecret("tok-a1"), pa.ConnectionRevision{ConnectionID: "a1", AuthorityRevision: 1})
+	e.observe("c1", 1)
+	if d, u := gaugeOf(t, e.reg, "alice"); d != 1 || u != 0 {
+		t.Fatalf("alice drift %v unknown %v, want 1 0", d, u)
+	}
+	if d, u := gaugeOf(t, e.reg, "tg"); d != 0 || u != 0 {
+		t.Fatalf("tg drift %v unknown %v, want 0 0", d, u)
+	}
+}
+
+// P2-B: with only refused tokens after a clean listing, the window still
+// moves: past it the server reads unknown, not a stale 0.
+func TestPinGaugesOnlyUnauthorizedAgesOut(t *testing.T) {
+	e := newSurfaceEnv(t)
+	e.ep.pages["tok-carol"] = tgListing(t, nil)
+	e.ep.errs["tok-dana"] = ErrMCPUnauthorized
+	e.observe("carol", 1)
+	for i := 0; i < 12; i++ {
+		e.advance(time.Minute)
+		e.observe("dana", 1)
+	}
+	if d, u := gaugeOf(t, e.reg, "tg"); d != -1 || u != 1 {
+		t.Fatalf("after 12 minutes of 401s: drift %v unknown %v, want absent 1", d, u)
+	}
+}
+
 // A refused token alone never raises "listing unknown".
 func TestPinGaugesRefusedTokenIsNotUnknown(t *testing.T) {
 	e := newSurfaceEnv(t)
@@ -370,5 +541,67 @@ func TestAnswerExecuteError(t *testing.T) {
 		if w.Code != c.code || got.Stop != c.stop {
 			t.Errorf("%v: %d %q, want %d %q", c.err, w.Code, got.Stop, c.code, c.stop)
 		}
+	}
+}
+
+// lockedSink is a sink safe to append to from Run's goroutine.
+type lockedSink struct {
+	mu      sync.Mutex
+	entries []Entry
+}
+
+func (s *lockedSink) Append(_ context.Context, e Entry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.entries = append(s.entries, e)
+	return nil
+}
+
+func (s *lockedSink) suppressed() []Entry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Entry
+	for _, e := range s.entries {
+		if e.Reason == ReasonRefusalsSuppressed {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// A principal that stops after its window overflowed still gets its
+// summary row: Run writes it once the window closes.
+func TestRunWritesSuppressedSummary(t *testing.T) {
+	e := newSurfaceEnv(t)
+	sink := &lockedSink{}
+	e.d.cfg.Executor = &Executor{Sink: sink, Now: time.Now}
+	for i := 0; i < refusalAuditBurst+3; i++ {
+		e.d.refuse(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, RouteTool, nil),
+			Refusal{Principal: 555, Reason: ReasonBadRequest}, http.StatusBadRequest)
+	}
+	if n := len(sink.suppressed()); n != 0 {
+		t.Fatalf("%d summaries while the window is open", n)
+	}
+	e.advance(refusalAuditWindow)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { e.d.Run(ctx, 5*time.Millisecond); close(done) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for len(sink.suppressed()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	got := sink.suppressed()
+	if len(got) != 1 || got[0].Principal != 555 || got[0].Suppressed != 3 || got[0].Status != StatusRefused {
+		t.Fatalf("summaries %+v", got)
+	}
+	rec, err := FormatRecord(Entry{CallID: "c", Phase: PhaseResult, Principal: 555, Server: "tg", Tool: "t", ConnectionID: "-x", ArgsSHA256: "a", Taint: TaintExternal, Status: StatusRefused, Reason: ReasonRefusalsSuppressed, Suppressed: 3})
+	if err != nil || !strings.HasSuffix(rec, " reason=refusals_suppressed suppressed=3") {
+		t.Fatalf("record %q err %v", rec, err)
+	}
+	plain, _ := FormatRecord(Entry{CallID: "c", Phase: PhaseResult, Principal: 555, Server: "tg", Tool: "t", ConnectionID: "-x", ArgsSHA256: "a", Taint: TaintExternal, Status: StatusRefused, Reason: ReasonBadRequest})
+	if strings.Contains(plain, "suppressed") {
+		t.Fatalf("plain record carries a count: %q", plain)
 	}
 }

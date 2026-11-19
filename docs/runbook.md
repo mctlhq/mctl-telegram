@@ -3974,5 +3974,24 @@ health and the egress logs of the `mcp` purpose;
 `mctl_pa_pin_listing_failures_total{server="<server>"}` breaks the failures
 down by reason. A server refusing one user's token (`reason="unauthorized"`)
 does not raise this alert: that user's calls are refused as `server_refused`
-and the user has to reconnect. The alert clears on the next successful
-listing.
+and the user has to reconnect (see MctlPAPinListingUnauthorized). The alert
+clears on the next successful listing. A failed listing never erases a
+fresh successful one: a connection whose last good listing drifted keeps
+`mctl_pa_pin_drift` at 1 for the 5-minute window even if it then answers
+errors.
+
+<a id="mctlpapinlistingunauthorized"></a>
+### MctlPAPinListingUnauthorized
+
+`mctl_pa_pin_listing_failures_total{server,reason="unauthorized"}` has grown
+for 30 minutes: the server answers 401 to PA connection tokens on
+`tools/list`, and those calls are refused as `server_refused`. One user with
+a broken connection fires this only if they keep retrying; several users at
+once usually means the server stopped accepting our tokens (key rotation,
+changed audience, revoked client).
+
+1. Compare with the server's own auth logs and its last release.
+2. If only some connections are refused, those users reconnect; nothing is
+   wrong with the server.
+3. If every connection is refused, treat it like an outage of the server and
+   check the token exchange configuration before anything else.

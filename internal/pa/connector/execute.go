@@ -156,7 +156,10 @@ type Entry struct {
 	// Reason is the fixed label of a refusal (a Reason* constant), empty
 	// otherwise. Never error text.
 	Reason string
-	At     time.Time
+	// Suppressed is the number of refusals a refusals_suppressed summary
+	// stands for; 0 on every other entry.
+	Suppressed int64
+	At         time.Time
 }
 
 // Sink appends audit entries to the hash-chained log. Append returns nil
@@ -376,6 +379,9 @@ const (
 	ReasonFenced           = "fenced"
 	ReasonServerRefused    = "server_refused"
 	ReasonOutcomeUnknown   = "outcome_unknown"
+	// ReasonRefusalsSuppressed is the summary row of a refusal-audit
+	// window that left refusals out; Entry.Suppressed is their count.
+	ReasonRefusalsSuppressed = "refusals_suppressed"
 )
 
 // PinRefusalReason maps a catalog Authorize error to its reason. An error
@@ -409,6 +415,8 @@ type Refusal struct {
 	AuthorityRevision int64
 	Args              []byte
 	Reason            string
+	// Suppressed is the count on a refusals_suppressed summary.
+	Suppressed int64
 }
 
 // RecordRefusal appends a single refused entry for r in the principal's
@@ -450,6 +458,7 @@ func (x *Executor) RecordRefusal(ctx context.Context, r Refusal, servers func(st
 		Taint:             TaintExternal,
 		Status:            StatusRefused,
 		Reason:            reason,
+		Suppressed:        max(r.Suppressed, 0),
 		At:                x.now(),
 	}
 	x.appendDetached(ctx, e)

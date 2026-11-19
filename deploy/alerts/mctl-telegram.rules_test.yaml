@@ -722,3 +722,27 @@ tests:
               summary: "PA catalog server tg tools/list cannot be observed"
               description: "Personal Assistant calls reach tg, but no tools/list of it could be read or parsed in the last 5 minutes, so pin drift is unknown and those calls are refused.\n"
               runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpapinlistingunknown"
+
+  # Unauthorized listings: steady 401s on tg fire after 30m; one 401 on
+  # alice (a single expired connection) never does.
+  - interval: 1m
+    input_series:
+      - series: 'mctl_pa_pin_listing_failures_total{server="tg",reason="unauthorized"}'
+        values: '0+1x60'
+      - series: 'mctl_pa_pin_listing_failures_total{server="alice",reason="unauthorized"}'
+        values: '0 1 1x58'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MctlPAPinListingUnauthorized
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: MctlPAPinListingUnauthorized
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: mctl-telegram
+              server: tg
+            exp_annotations:
+              summary: "PA catalog server tg keeps refusing connection tokens"
+              description: "tools/list on tg has answered 401 to Personal Assistant connection tokens for 30 minutes. Those calls are refused as server_refused.\n"
+              runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpapinlistingunauthorized"

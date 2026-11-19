@@ -139,8 +139,12 @@ func (e *Endpoint) open(ctx context.Context, token connection.Secret) (*session,
 // does not keep one session per call. Best effort: a server without
 // session termination answers 405, and nothing the caller does depends on
 // the answer.
+//
+// A cancelled ctx (fence, revoke or deadline) skips it: the bearer must not
+// go out again after the call was stopped, and the server expires the
+// session on its own.
 func (s *session) close(ctx context.Context) {
-	if s.id == "" {
+	if s.id == "" || ctx.Err() != nil {
 		return
 	}
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionCloseTimeout)

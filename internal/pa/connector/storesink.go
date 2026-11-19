@@ -148,5 +148,11 @@ func FormatRecord(e Entry) (string, error) {
 		b.WriteByte('=')
 		b.WriteString(v)
 	}
+	// Only a refusals_suppressed summary carries a count; every other
+	// record keeps its pa/v1 shape byte for byte.
+	if e.Suppressed > 0 {
+		b.WriteString(" suppressed=")
+		b.WriteString(strconv.FormatInt(e.Suppressed, 10))
+	}
 	return b.String(), nil
 }

@@ -34,6 +34,8 @@ type fakeServer struct {
 	// notifyStatus forces the status of notifications (0 = 202).
 	notifyStatus int
 	deletes      []string // session ids of DELETE requests
+	// onCall runs when tools/call arrives (under the lock).
+	onCall func()
 }
 
 func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -85,6 +87,9 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		result = f.pages[i]
 	case "tools/call":
+		if f.onCall != nil {
+			f.onCall()
+		}
 		result = `{"content":[{"type":"text","text":"ok"}]}`
 	default:
 		w.WriteHeader(http.StatusNotFound)
@@ -209,6 +214,18 @@ func TestEndpoint_CallTool(t *testing.T) {
 	// The DELETE carries the connection's bearer like every request.
 	if last := f.bearers[len(f.bearers)-1]; last != "Bearer fake-at-client-test" {
 		t.Fatalf("delete bearer %q", last)
+	}
+}
+
+// A call whose context was cancelled (fence, revoke, deadline) does not
+// send the bearer again to end the session.
+func TestEndpoint_NoSessionCloseAfterCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := &fakeServer{onCall: cancel}
+	_, _ = testEndpoint(t, f).CallTool(ctx, tok, "list_dialogs", json.RawMessage(`{}`))
+	if len(f.deletes) != 0 {
+		t.Fatalf("DELETE sent after cancel: %v", f.deletes)
 	}
 }
 
