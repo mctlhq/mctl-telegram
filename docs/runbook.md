@@ -4008,11 +4008,12 @@ firing.
 ### MctlPAWebhookSecretRejected
 
 Telegram's latest delivery error is our 401: the `secret_token` it was
-given differs from `PA_WEBHOOK_SECRET`. Telegram never reports the configured
-secret, so this is inferred from a recent 401 in `last_error_message`; the
-owner accepted the heuristic on #1313 (2026-11-20) (usually a secret rotated in Vault
+given differs from `PA_WEBHOOK_SECRET` (usually a secret rotated in Vault
 without re-registering the webhook). Re-register with the current secret;
 `mctl_pa_updates_total{outcome="bad_secret"}` rises at the same time.
+Telegram never reports the configured secret, so this alert is inferred
+from a recent 401 in `last_error_message`; the owner accepted that heuristic
+on #1313 (2026-11-20).
 
 <a id="mctlpawebhookdeliveryerrors"></a>
 ### MctlPAWebhookDeliveryErrors
