@@ -1313,6 +1313,29 @@ func TestPAJobs_StoreFaultOfOneJobDoesNotHoldTheQueue(t *testing.T) {
 	})
 }
 
+// TestPAJobs_StoreFaultOnEveryTry: more due jobs than maxClaimTries, each
+// meeting a store fault. The loop runs out of tries, not out of jobs, and
+// still answers with the fault, never ClaimNone, with nothing recorded.
+// Mutation: drop the fault return after the loop.
+func TestPAJobs_StoreFaultOnEveryTry(t *testing.T) {
+	f := newPAFixture(t, newTestStore(t))
+	for i := range maxClaimTries + 2 {
+		f.enqueue(int64(9100+i), fmt.Sprintf("c%d", i))
+	}
+	gate := func(context.Context, *sql.Tx, jobs.Job, time.Time) error {
+		return fmt.Errorf("%w: %w: consent: timeout", jobs.ErrUnreadable, jobs.ErrStoreFault)
+	}
+	r, err := f.s.ClaimPAJob(context.Background(), jobs.ClaimRequest{Now: f.now, Lease: time.Minute, Budget: f.b, Gate: gate, Build: paBuild()})
+	if !errors.Is(err, jobs.ErrStoreFault) {
+		t.Fatalf("every try faulted: %+v, %v; want a store fault", r, err)
+	}
+	var touched int
+	_ = f.s.DB.QueryRow(`SELECT COUNT(*) FROM pa_jobs WHERE claim_failures <> 0 OR retry_at_ms <> 0 OR status <> 'pending'`).Scan(&touched)
+	if touched != 0 {
+		t.Fatalf("%d jobs changed by store faults", touched)
+	}
+}
+
 // TestPAJobs_ReReadTellsStoreFaultFromRowFault (C14): the job re-read
 // under the principal lock classifies a row that does not scan as this
 // job's failure (counted, the queue moves on) and a failed query as a store
