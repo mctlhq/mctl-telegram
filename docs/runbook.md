@@ -4085,13 +4085,32 @@ unknown (the drift and denied-tool series are removed, never 0) and PA calls
 to the server are refused as `server_unavailable`. Check the server's own
 health and the egress logs of the `mcp` purpose;
 `mctl_pa_pin_listing_failures_total{server="<server>"}` breaks the failures
-down by reason. A server refusing one user's token (`reason="unauthorized"`)
+down by reason: `unavailable` (the read failed) or `invalid` (it was read but
+did not parse); either one alone raises the alert. Every reason of every
+configured server exists at 0 from the dispatcher's start, so the first
+failure is an increase. A server refusing one user's token (`reason="unauthorized"`)
 does not raise this alert: that user's calls are refused as `server_refused`
 and the user has to reconnect (see MctlPAPinListingUnauthorized). The alert
 clears on the next successful listing. A failed listing never erases a
 fresh successful one: a connection whose last good listing drifted keeps
 `mctl_pa_pin_drift` at 1 for the 5-minute window even if it then answers
-errors.
+errors. Both the gauges and the 60s listing cache are ordered by when a
+read started: a slow read that finishes late neither replaces nor drops a
+newer listing, so calls authorize against the listing the gauges report.
+
+### PA refusal audit bound
+
+Refusals are written to the principal's audit chain at most 30 general
+(`bad_request`, `flag_off`, `tool_cap`, ...) and, separately, 300 security
+(`connection_unbound`, `tool_not_in_set`, `job_stale`, `token_*`) per
+principal per minute per replica. The first refusal of each reason in a
+minute is always written. Past the bounds, refusals are counted as
+`mctl_pa_dispatch_total{status="refused_unaudited"}` and the closed window
+writes a `refusals_suppressed` or `refusals_suppressed_security` row with
+the count (` suppressed=N` in the record). A steady
+`refused_unaudited` rate for security reasons means a worker is probing at
+line rate: find the principal from its `refusals_suppressed_security` rows
+and stop its runs.
 
 <a id="mctlpapinlistingunauthorized"></a>
 ### MctlPAPinListingUnauthorized
@@ -4102,6 +4121,12 @@ for 30 minutes: the server answers 401 to PA connection tokens on
 a broken connection fires this only if they keep retrying; several users at
 once usually means the server stopped accepting our tokens (key rotation,
 changed audience, revoked client).
+
+The alert is per server on purpose, not per connection and not on a count of
+distinct connections: connection ids are private and unbounded, so they are
+not a metric label. A single user retrying a broken connection for 30
+minutes does fire it. That is a real, user-visible failure (every call they
+make is refused), and step 2 sorts it out.
 
 1. Compare with the server's own auth logs and its last release.
 2. If only some connections are refused, those users reconnect; nothing is

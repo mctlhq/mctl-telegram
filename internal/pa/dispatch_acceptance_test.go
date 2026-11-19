@@ -1356,18 +1356,49 @@ func TestDispatch_RefusalAuditBounded(t *testing.T) {
 }
 
 // TestDispatch_RefusalAuditBoundExempt: a worker that spends the window on
-// bad_request still has every probe of another connection, a tool outside
-// its set or a stale job written to the chain.
+// bad_request still has its probes of another connection or a tool outside
+// its set written to the chain; and a worker that floods probes (tool_not_in_set
+// is decided before the per-run call cap) writes at most the security
+// bound, the rest summed in one refusals_suppressed_security row. The
+// per-reason table for all seven security reasons is in
+// connector.TestRefusalSecurityBound.
 func TestDispatch_RefusalAuditBoundExempt(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, s *db.Store) {
 		e := newDispatchEnv(t, s)
 		token, _ := e.run(alice)
-		for i := 0; i < 40; i++ {
+		const burst, securityBurst = 30, 300
+		for i := 0; i < burst+10; i++ {
 			e.call(token, `{`)
 		}
 		n := len(e.audit(alice))
-		e.wantRefusal(e.call(token, req("tg", "send_message", "")), http.StatusForbidden, connector.ReasonToolNotInSet, alice, n)
-		e.wantRefusal(e.call(token, req("tg", "list_dialogs", "conn-not-bound")), http.StatusForbidden, connector.ReasonConnectionUnbound, alice, n+1)
+		e.wantRefusal(e.call(token, req("tg", "list_dialogs", "conn-not-bound")), http.StatusForbidden, connector.ReasonConnectionUnbound, alice, n)
+		for i := 0; i < securityBurst+5; i++ {
+			if a := e.call(token, req("tg", "send_message", "")); a.Stop != connector.ReasonToolNotInSet {
+				t.Fatalf("probe %d: %+v", i, a)
+			}
+		}
+		rows := e.audit(alice)
+		if got := len(rows) - n; got != securityBurst {
+			t.Fatalf("%d security rows written, want %d (connection_unbound + %d tool_not_in_set)", got, securityBurst, securityBurst-1)
+		}
+		if got := testutil.ToFloat64(e.reg.PADispatchTotal.WithLabelValues("tg", "refused_unaudited", connector.ReasonToolNotInSet)); got != 6 {
+			t.Fatalf("unaudited probes counted %v, want 6", got)
+		}
+		// The next window opens with one summary row per class.
+		e.h.Advance(time.Minute)
+		e.call(token, `{`)
+		var general, security int
+		for _, r := range e.audit(alice)[len(rows):] {
+			switch {
+			case strings.HasSuffix(r.peer, " reason=refusals_suppressed suppressed=10"):
+				general++
+			case strings.HasSuffix(r.peer, " reason=refusals_suppressed_security suppressed=6"):
+				security++
+			}
+		}
+		if general != 1 || security != 1 {
+			t.Fatalf("summaries: general %d security %d, want 1 and 1", general, security)
+		}
 	})
 }
 

@@ -382,6 +382,10 @@ const (
 	// ReasonRefusalsSuppressed is the summary row of a refusal-audit
 	// window that left refusals out; Entry.Suppressed is their count.
 	ReasonRefusalsSuppressed = "refusals_suppressed"
+	// ReasonRefusalsSuppressedSecurity is the summary row of the separate
+	// bound on security refusals (connection_unbound, tool_not_in_set,
+	// job_stale, token_*).
+	ReasonRefusalsSuppressedSecurity = "refusals_suppressed_security"
 )
 
 // PinRefusalReason maps a catalog Authorize error to its reason. An error

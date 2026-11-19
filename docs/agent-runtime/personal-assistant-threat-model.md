@@ -571,13 +571,21 @@ at most one hour ago, or revoked. A forged or foreign token, one expired
 longer ago, and one whose revocation state could not be read
 (`token_unverifiable`) are counted in `mctl_pa_dispatch_total` but written to
 nobody's chain: their principal claim is not evidence, or nothing was decided.
-Refusals are written at most 30 per principal per minute; past that a worker's
-further refusals are still refused and counted (status `refused_unaudited`),
-so a looping or hostile worker cannot flood a chain. When the window closes,
-one `refusals_suppressed` row records how many were left out. Probes that
-matter are always written and do not use up the bound: `connection_unbound`,
-`tool_not_in_set`, `job_stale` and every `token_*` refusal. The bound is
-kept in memory, so it is per replica and resets on restart.
+Refusals are written to a principal's chain under two bounds per minute: 30
+general refusals (`bad_request`, `flag_off`, `tool_cap`, ...) and, separately,
+300 security refusals (`connection_unbound`, `tool_not_in_set`, `job_stale`
+and every `token_*` refusal). A worker can send those probes at line rate:
+`tool_not_in_set` is decided before the per-run call cap, `job_stale` and
+`token_*` after the run. The classes do not share a bound, so a worker cannot
+spend the window on `bad_request` and then probe unrecorded, and probes cannot
+use up the general bound. The first refusal of each reason in a window is
+written past either bound, so a flood of one probe cannot hide another. Past
+the bounds a refusal is still refused and counted (status
+`refused_unaudited`), so a looping or hostile worker cannot flood a chain:
+it writes at most 330 rows plus one per distinct reason a minute. When the
+window closes, one summary row per class records how many were left out:
+`refusals_suppressed` (general) and `refusals_suppressed_security`. The
+bound is kept in memory, so it is per replica and resets on restart.
 
 After the call, the connection is re-read (S1-C7) and so is the job row: a
 result that arrives after the job was cancelled, its consent withdrawn or its

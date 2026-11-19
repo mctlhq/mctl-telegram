@@ -42,7 +42,9 @@ type paMetrics struct {
 	PAPinDeniedTools *prometheus.GaugeVec
 	// PAPinListingFailures counts failed tools/list reads by server and
 	// reason: unauthorized (the server refused one connection's token, a
-	// problem of that connection, not of the listing) or unavailable.
+	// problem of that connection, not of the listing), unavailable (the
+	// read failed) or invalid (the listing did not parse). Every reason of
+	// every configured server exists at 0 from the dispatcher's start.
 	PAPinListingFailures *prometheus.CounterVec
 	// PADispatchTotal counts dispatcher outcomes: an executed call's status
 	// (reason "") or a refusal's reason (status "refused").
@@ -104,6 +106,14 @@ func (r *Registry) PAPinUnknown(server string) {
 // CountPAListingFailure counts one failed tools/list read.
 func (r *Registry) CountPAListingFailure(server, reason string) {
 	r.PAPinListingFailures.WithLabelValues(server, reason).Inc()
+}
+
+// PreparePAListingFailures creates server's listing-failure series at 0,
+// so that increase() sees the first failure.
+func (r *Registry) PreparePAListingFailures(server string, reasons []string) {
+	for _, reason := range reasons {
+		r.PAPinListingFailures.WithLabelValues(server, reason).Add(0)
+	}
 }
 
 // CountPADispatch counts one dispatcher outcome.

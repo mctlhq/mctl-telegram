@@ -49,7 +49,10 @@ package connector
 // Refusals are audited at most refusalAuditBurst times per principal per
 // refusalAuditWindow; beyond that they are counted only, and one summary
 // row records how many were left out. Security-relevant refusals
-// (alwaysAudited) are always written. The bound is in memory, per replica.
+// (securityReasons) have their own, larger bound (securityAuditBurst) and
+// summary row, so bad_request traffic cannot use it up; the first refusal
+// of each reason in a window is always written. The bound is in memory,
+// per replica.
 //
 // The worker gets the tool result or a fixed refusal label; never a token,
 // never error text.
@@ -113,6 +116,9 @@ type Metrics interface {
 	PAPinObserved(server string, drift bool, denied map[string]int, reasons []string)
 	PAPinUnknown(server string)
 	CountPAListingFailure(server, reason string)
+	// PreparePAListingFailures creates server's failure series at 0 for
+	// every reason, so the first failure is an increase, not a new series.
+	PreparePAListingFailures(server string, reasons []string)
 	CountPADispatch(server, status, reason string)
 }
 
@@ -131,23 +137,45 @@ const PinObservationWindow = 5 * time.Minute
 const PinRefreshInterval = 30 * time.Second
 
 // Refusal audit bound: a worker cannot write more than refusalAuditBurst
-// refusals per refusalAuditWindow into one principal's chain. Past it, a
-// refusal is still refused and counted (status refused_unaudited), and
-// when the window closes one refusals_suppressed row carries the count.
-// The windows live in memory, so the bound is per replica and restarts
-// with the process.
+// general and securityAuditBurst security refusals per refusalAuditWindow
+// into one principal's chain, plus the first refusal of each reason (a
+// closed set). Past it, a refusal is still refused and counted (status
+// refused_unaudited), and when the window closes one summary row per
+// class carries the count: refusals_suppressed for general reasons,
+// refusals_suppressed_security for securityReasons. The windows live in
+// memory, so the bound is per replica and restarts with the process.
 const (
 	refusalAuditWindow     = time.Minute
 	refusalAuditBurst      = 30
-	maxRefusalPrincipals   = 4096
+	securityAuditBurst     = 300
 	statusRefusedUnaudited = "refused_unaudited"
 )
 
-// alwaysAudited are the refusals that are evidence of a worker probing
+// Reasons of mctl_pa_pin_listing_failures_total: the server refused the
+// connection's token, the read failed, or the listing did not parse.
+const (
+	listingUnauthorized = "unauthorized"
+	listingUnavailable  = "unavailable"
+	listingInvalid      = "invalid"
+)
+
+// ListingFailureReasons is the closed reason label set of
+// mctl_pa_pin_listing_failures_total.
+var ListingFailureReasons = []string{listingUnauthorized, listingUnavailable, listingInvalid}
+
+// maxRefusalPrincipals bounds the open windows. A new principal past it
+// first closes every window that has ended, writing their summaries. A
+// variable so tests can lower it.
+var maxRefusalPrincipals = 4096
+
+// securityReasons are the refusals that are evidence of a worker probing
 // another principal's connections, tools outside its set, a stale job or a
-// bad token. They bypass the bound (and do not use it up), so a worker
-// cannot spend the window on bad_request and then probe unrecorded.
-var alwaysAudited = map[string]bool{
+// bad token. They are bounded separately (securityAuditBurst) and do not
+// use the general bound, so a worker cannot spend the window on
+// bad_request and then probe unrecorded; nor can it flood the chain with
+// probes, which a worker can send at line rate (tool_not_in_set is decided
+// before the per-run call cap, job_stale and token_* after the run).
+var securityReasons = map[string]bool{
 	ReasonConnectionUnbound: true,
 	ReasonToolNotInSet:      true,
 	ReasonJobStale:          true,
@@ -179,7 +207,7 @@ type Dispatcher struct {
 	cfg DispatcherConfig
 
 	mu           sync.Mutex
-	listings     map[listingKey]*catalog.Surface
+	listings     map[listingKey]cachedSurface
 	observations map[listingKey]pinObservation
 	// pinServers are the servers whose gauges were ever published; each
 	// is recomputed on every refresh, so none keeps a value no fresh
@@ -201,17 +229,51 @@ type pinObservation struct {
 	failAt time.Time
 }
 
+// auditWindow is one principal's refusal window, per class (general,
+// security). seen holds the reasons already written once in it.
 type auditWindow struct {
 	start      time.Time
-	n          int
-	suppressed int
+	n          [2]int
+	suppressed [2]int
+	seen       map[string]bool
 }
 
-// suppressedRefusals is one principal's count of refusals left out of its
-// chain in a closed window.
+const (
+	classGeneral = iota
+	classSecurity
+)
+
+var (
+	classBurst   = [2]int{refusalAuditBurst, securityAuditBurst}
+	classSummary = [2]string{ReasonRefusalsSuppressed, ReasonRefusalsSuppressedSecurity}
+)
+
+// suppressedRefusals is one principal's count of refusals of one class
+// left out of its chain in a closed window.
 type suppressedRefusals struct {
 	principal int64
+	reason    string
 	n         int
+}
+
+// summaries returns w's suppressed counts still to be written.
+func (w *auditWindow) summaries(principal int64) []suppressedRefusals {
+	var out []suppressedRefusals
+	for c, n := range w.suppressed {
+		if n > 0 {
+			out = append(out, suppressedRefusals{principal, classSummary[c], n})
+		}
+	}
+	return out
+}
+
+// cachedSurface is a successful listing and when it started. Like
+// pinObservation, the cache is ordered by start time: a slow read that
+// finishes late neither replaces nor deletes a newer listing, so calls
+// authorize against the same listing the gauges report.
+type cachedSurface struct {
+	s  *catalog.Surface
+	at time.Time
 }
 
 type listingKey struct {
@@ -231,8 +293,13 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 			return nil, fmt.Errorf("pa connector: endpoint %q is not a catalog server", name)
 		}
 	}
+	if cfg.Metrics != nil {
+		for name := range cfg.Endpoints {
+			cfg.Metrics.PreparePAListingFailures(name, ListingFailureReasons)
+		}
+	}
 	return &Dispatcher{
-		cfg: cfg, listings: map[listingKey]*catalog.Surface{},
+		cfg: cfg, listings: map[listingKey]cachedSurface{},
 		observations: map[listingKey]pinObservation{}, pinServers: map[string]bool{},
 		refusals: map[int64]*auditWindow{},
 	}, nil
@@ -548,7 +615,7 @@ func (d *Dispatcher) surface(ctx context.Context, ep MCPEndpoint, token connecti
 	key := listingKey{server: server, connection: bound.ConnectionID, revision: bound.AuthorityRevision}
 	now := d.now()
 	d.mu.Lock()
-	s = d.listings[key]
+	s = d.listings[key].s
 	d.mu.Unlock()
 	if s != nil && s.Err() == nil {
 		if _, err := s.ModelTools(now); err == nil {
@@ -559,21 +626,21 @@ func (d *Dispatcher) surface(ctx context.Context, ep MCPEndpoint, token connecti
 	if errors.Is(err, ErrMCPUnauthorized) {
 		// The connection's token, not the server: no observation, but
 		// the window still moves for every server.
-		d.countListingFailure(server, "unauthorized")
+		d.countListingFailure(server, listingUnauthorized)
 		d.mu.Lock()
-		delete(d.listings, key)
+		d.uncacheLocked(key, now)
 		d.refreshPinsLocked(d.now())
 		d.mu.Unlock()
 		return nil, false
 	}
 	if err != nil {
-		d.countListingFailure(server, "unavailable")
+		d.countListingFailure(server, listingUnavailable)
 		slog.Warn("pa connector: tools/list failed", "server", server, "err", err)
 	}
 	s = d.cfg.Pin.Observe(server, pages, err, now)
 	drift, denied, ok := PinDrift(s)
 	if !ok && err == nil {
-		d.countListingFailure(server, "invalid")
+		d.countListingFailure(server, listingInvalid)
 	}
 	if drift {
 		d.logDrift(server, s)
@@ -581,14 +648,18 @@ func (d *Dispatcher) surface(ctx context.Context, ep MCPEndpoint, token connecti
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if s.Err() == nil {
-		d.listings[key] = s
+		if !now.Before(d.listings[key].at) {
+			d.listings[key] = cachedSurface{s: s, at: now}
+		}
 	} else {
-		delete(d.listings, key)
+		d.uncacheLocked(key, now)
 	}
-	// Drop expired observations so the map does not grow with old
-	// revisions.
+	// Drop expired listings so the map does not grow with old revisions.
+	// Expiry is judged at the current time, not at this read's start: a
+	// listing that started after a slow read is not "from the future".
+	current := d.now()
 	for k, v := range d.listings {
-		if _, err := v.ModelTools(now); err != nil {
+		if _, err := v.s.ModelTools(current); err != nil {
 			delete(d.listings, k)
 		}
 	}
@@ -603,6 +674,14 @@ func (d *Dispatcher) surface(ctx context.Context, ep MCPEndpoint, token connecti
 	d.pinServers[server] = true
 	d.refreshPinsLocked(d.now())
 	return s, true
+}
+
+// uncacheLocked drops key's cached listing unless it started after a
+// failed read that started at.
+func (d *Dispatcher) uncacheLocked(key listingKey, at time.Time) {
+	if c, ok := d.listings[key]; ok && !c.at.After(at) {
+		delete(d.listings, key)
+	}
 }
 
 func (d *Dispatcher) countListingFailure(server, reason string) {
@@ -772,9 +851,9 @@ func (d *Dispatcher) refuse(w http.ResponseWriter, r *http.Request, ref Refusal,
 }
 
 // allowRefusalAudit reports whether a refusal for reason may be written to
-// principal's chain in the current window (refusalAuditBurst per
-// refusalAuditWindow; alwaysAudited reasons always, without using the
-// bound). It bounds what a looping or hostile worker can append: every
+// principal's chain in the current window: the first of each reason
+// always, then up to its class's burst (refusalAuditBurst, or
+// securityAuditBurst for securityReasons) per refusalAuditWindow. It bounds what a looping or hostile worker can append: every
 // request it sends is still refused and counted. It also returns the
 // closed windows whose suppressed count is still to be written.
 func (d *Dispatcher) allowRefusalAudit(principal int64, reason string) (bool, []suppressedRefusals) {
@@ -784,21 +863,26 @@ func (d *Dispatcher) allowRefusalAudit(principal int64, reason string) (bool, []
 	var closed []suppressedRefusals
 	w := d.refusals[principal]
 	if w == nil || now.Sub(w.start) >= refusalAuditWindow {
-		if w != nil && w.suppressed > 0 {
-			closed = append(closed, suppressedRefusals{principal, w.suppressed})
+		if w != nil {
+			closed = append(closed, w.summaries(principal)...)
 		}
 		if w == nil && len(d.refusals) >= maxRefusalPrincipals {
 			closed = append(closed, d.closeRefusalWindowsLocked(now)...)
 		}
-		w = &auditWindow{start: now}
+		w = &auditWindow{start: now, seen: map[string]bool{}}
 		d.refusals[principal] = w
 	}
-	if alwaysAudited[reason] {
+	c := classGeneral
+	if securityReasons[reason] {
+		c = classSecurity
+	}
+	w.n[c]++
+	if !w.seen[reason] {
+		w.seen[reason] = true
 		return true, closed
 	}
-	w.n++
-	if w.n > refusalAuditBurst {
-		w.suppressed++
+	if w.n[c] > classBurst[c] {
+		w.suppressed[c]++
 		return false, closed
 	}
 	return true, closed
@@ -818,19 +902,17 @@ func (d *Dispatcher) closeRefusalWindowsLocked(now time.Time) []suppressedRefusa
 		if now.Sub(w.start) < refusalAuditWindow {
 			continue
 		}
-		if w.suppressed > 0 {
-			closed = append(closed, suppressedRefusals{p, w.suppressed})
-		}
+		closed = append(closed, w.summaries(p)...)
 		delete(d.refusals, p)
 	}
 	return closed
 }
 
-// recordSuppressed writes one refusals_suppressed row per closed window.
+// recordSuppressed writes one summary row per class of each closed window.
 func (d *Dispatcher) recordSuppressed(ctx context.Context, closed []suppressedRefusals) {
 	for _, c := range closed {
 		d.cfg.Executor.RecordRefusal(ctx, Refusal{
-			Principal: c.principal, Reason: ReasonRefusalsSuppressed, Suppressed: int64(c.n),
+			Principal: c.principal, Reason: c.reason, Suppressed: int64(c.n),
 		}, d.pinned)
 	}
 }
