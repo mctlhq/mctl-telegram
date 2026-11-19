@@ -19,7 +19,12 @@ func testKey() []byte { return bytes.Repeat([]byte{0x42}, 32) }
 // pinnedConsent maps every consent version this build has ever shipped to
 // the SHA-256 of its text. A version's text never changes once shipped.
 var pinnedConsent = map[string]string{
-	"pa-data-flow/v1": "5d0ccd843d794f73c42ddf7423651e1d197a126c58b48dde45cacebf3e3489de",
+	// Re-pinned in place on 2026-11-19 (owner decision: name Nebius and
+	// Cloudflare AI Gateway) without a version bump: PA_ENABLED has never
+	// been on, so no consent to the earlier v1 text was ever stored and
+	// nobody is held to a text they did not see. Once a consent exists,
+	// a text change needs a new version.
+	"pa-data-flow/v1": "3f17dd0710ee22d18cec23bbf8a35633bf5a9018626b3a07797930792120718f",
 }
 
 // TestConsentTextPinnedToVersion_S1N3 is the CI half of S1-N3: changing the
@@ -36,7 +41,7 @@ func TestConsentTextPinnedToVersion_S1N3(t *testing.T) {
 	}
 	// T13: the text names the provider class, the data categories and the
 	// retention.
-	for _, must := range []string{ConsentVersion, "AI model provider", "messages you write", "forward", "24 hours", "/consent withdraw", "/forget", "/new"} {
+	for _, must := range []string{ConsentVersion, "AI model provider", "Nebius", "Cloudflare AI Gateway", "/privacy", "messages you write", "forward", "24 hours", "/consent withdraw", "/forget", "/new"} {
 		if !strings.Contains(ConsentText, must) {
 			t.Errorf("consent text does not mention %q", must)
 		}
