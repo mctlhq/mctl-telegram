@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -216,6 +219,77 @@ func TestToolResultIsError(t *testing.T) {
 	for _, in := range []string{"", "null", "[]", `"x"`, `{"isError":"yes"}`, "{"} {
 		if _, err := toolResultIsError([]byte(in)); !errors.Is(err, ErrMCPProtocol) {
 			t.Errorf("%q accepted: %v", in, err)
+		}
+	}
+}
+
+// refusingJobs refuses every token with a fixed refusal.
+type refusingJobs struct {
+	noJobs
+	tr pa.TokenRefusal
+}
+
+func (j refusingJobs) AuthenticateAttributed(*http.Request) (pa.PAJob, pa.TokenRefusal, error) {
+	return pa.PAJob{}, j.tr, errors.New("refused")
+}
+
+// A refused token is answered with its closed label: expired and revoked
+// as such, an unreadable revocation state as 503 token_unverifiable, any
+// other label as token_invalid. Only an attributed refusal is recorded.
+func TestTokenRefusalAnswers(t *testing.T) {
+	cases := []struct {
+		tr       pa.TokenRefusal
+		code     int
+		stop     string
+		recorded bool
+	}{
+		{pa.TokenRefusal{Principal: 555, Reason: ReasonTokenExpired}, http.StatusUnauthorized, ReasonTokenExpired, true},
+		{pa.TokenRefusal{Principal: 555, Reason: ReasonTokenRevoked}, http.StatusUnauthorized, ReasonTokenRevoked, true},
+		{pa.TokenRefusal{Reason: ReasonTokenUnverifiable}, http.StatusServiceUnavailable, ReasonTokenUnverifiable, false},
+		{pa.TokenRefusal{Principal: 555, Reason: "made_up"}, http.StatusUnauthorized, ReasonTokenInvalid, true},
+		{pa.TokenRefusal{}, http.StatusUnauthorized, ReasonTokenInvalid, false},
+	}
+	for _, c := range cases {
+		sink := &fakeSink{ev: &events{}}
+		d, err := NewDispatcher(DispatcherConfig{
+			Jobs: refusingJobs{tr: c.tr}, Connections: noConns{}, Pin: loadPin(t),
+			Executor: newExecutor(sink), Flags: func() (Flags, error) { return Flags{}, nil },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		d.ServeHTTP(w, httptest.NewRequest(http.MethodPost, RouteTool, strings.NewReader(`{}`)))
+		var got refusalResponse
+		_ = json.Unmarshal(w.Body.Bytes(), &got)
+		if w.Code != c.code || got.Stop != c.stop || (len(sink.entries) == 1) != c.recorded {
+			t.Errorf("%+v: %d %q, %d entries", c.tr, w.Code, got.Stop, len(sink.entries))
+		}
+	}
+}
+
+// answerExecuteError keeps an unbound connection apart from an invalid
+// call: only the first is the worker's choice of connection.
+func TestAnswerExecuteError(t *testing.T) {
+	d := newSurfaceEnv(t).d
+	for _, c := range []struct {
+		err  error
+		code int
+		stop string
+	}{
+		{fmt.Errorf("%w: %w", ErrInvalidCall, ErrUnboundConnection), http.StatusForbidden, ReasonConnectionUnbound},
+		{fmt.Errorf("%w: no principal", ErrInvalidCall), http.StatusInternalServerError, ReasonInternal},
+		{fmt.Errorf("%w: x", ErrAuditUnavailable), http.StatusServiceUnavailable, ReasonAuditUnavailable},
+		{fmt.Errorf("%w: x", ErrDispatchFenced), http.StatusConflict, ReasonFenced},
+		{fmt.Errorf("%w: x", ErrDispatchRefused), http.StatusBadGateway, ReasonServerRefused},
+		{errors.New("reset"), http.StatusBadGateway, ReasonOutcomeUnknown},
+	} {
+		w := httptest.NewRecorder()
+		d.answerExecuteError(w, "tg", c.err)
+		var got refusalResponse
+		_ = json.Unmarshal(w.Body.Bytes(), &got)
+		if w.Code != c.code || got.Stop != c.stop {
+			t.Errorf("%v: %d %q, want %d %q", c.err, w.Code, got.Stop, c.code, c.stop)
 		}
 	}
 }
