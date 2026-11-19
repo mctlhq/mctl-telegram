@@ -33,6 +33,7 @@ func paOutboxSchema(pg bool) []string {
 			fragment_seq ` + intT + ` NOT NULL DEFAULT 0,
 			status TEXT NOT NULL,
 			attempts ` + intT + ` NOT NULL DEFAULT 0,
+			sent_parts ` + intT + ` NOT NULL DEFAULT 0,
 			next_at_ms ` + intT + ` NOT NULL,
 			lease_until_ms ` + intT + ` NOT NULL DEFAULT 0,
 			created_at_ms ` + intT + ` NOT NULL,
@@ -85,14 +86,14 @@ func (s *Store) EnqueuePAOutbox(ctx context.Context, tx *sql.Tx, item jobs.Outbo
 	return enqueuePAOutbox(ctx, tx, item, now.UnixMilli())
 }
 
-const paOutboxColumns = `id, principal, job_id, kind, conversation_id, fragment_seq, attempts, status, next_at_ms`
+const paOutboxColumns = `id, principal, job_id, kind, conversation_id, fragment_seq, attempts, sent_parts, status, next_at_ms`
 
 func scanPAOutbox(row interface{ Scan(...any) error }) (jobs.OutboxItem, error) {
 	var it jobs.OutboxItem
 	var kind, status string
 	var nextMS int64
 	if err := row.Scan(&it.ID, &it.Principal, &it.JobID, &kind, &it.ConversationID, &it.FragmentSeq,
-		&it.Attempts, &status, &nextMS); err != nil {
+		&it.Attempts, &it.SentParts, &status, &nextMS); err != nil {
 		return jobs.OutboxItem{}, err
 	}
 	// An unknown kind is handed to the deliverer as is: it refuses to send
@@ -160,6 +161,9 @@ func (s *Store) ClaimPAOutbox(ctx context.Context, req jobs.OutboxClaimRequest) 
 	if err := rows.Err(); err != nil {
 		return jobs.OutboxClaimResult{}, jobsStoreFault("outbox: due rows", err)
 	}
+	if s.paOutboxAfterSelect != nil {
+		s.paOutboxAfterSelect()
+	}
 	leaseMS := req.Now.Add(req.Lease).UnixMilli()
 	for _, id := range ids {
 		// Conditional on still pending: of two concurrent deliverers, one
@@ -186,7 +190,7 @@ func (s *Store) ClaimPAOutbox(ctx context.Context, req jobs.OutboxClaimRequest) 
 func (s *Store) CompletePAOutbox(ctx context.Context, item jobs.OutboxItem, c jobs.OutboxCompletion) error {
 	next := item.NextAt.UnixMilli()
 	switch c.Status {
-	case jobs.OutboxSent, jobs.OutboxFailed, jobs.OutboxDropped:
+	case jobs.OutboxSent, jobs.OutboxFailed, jobs.OutboxDropped, jobs.OutboxUnknown:
 	case jobs.OutboxPending:
 		if c.RetryAt.IsZero() {
 			return fmt.Errorf("%w: outbox retry without a time", jobs.ErrInvalid)
@@ -211,6 +215,43 @@ func (s *Store) CompletePAOutbox(ctx context.Context, item jobs.OutboxItem, c jo
 	}
 	if n != 1 {
 		return jobs.ErrOutboxStale
+	}
+	return nil
+}
+
+// RecordPAOutboxParts implements jobs.OutboxStore. The count only grows,
+// and only while the row is sending under this attempt.
+func (s *Store) RecordPAOutboxParts(ctx context.Context, item jobs.OutboxItem, parts int, now time.Time) error {
+	if item.ID <= 0 || item.Attempts <= 0 || parts <= 0 || now.IsZero() {
+		return fmt.Errorf("%w: outbox parts", jobs.ErrInvalid)
+	}
+	r, err := s.DB.ExecContext(ctx,
+		`UPDATE pa_outbox SET sent_parts = $1, updated_at_ms = $2
+		  WHERE id = $3 AND status = $4 AND attempts = $5 AND sent_parts < $1`,
+		parts, now.UnixMilli(), item.ID, string(jobs.OutboxSending), item.Attempts)
+	if err != nil {
+		return jobsStoreFault("outbox: parts", err)
+	}
+	n, err := r.RowsAffected()
+	if err != nil {
+		return jobsStoreFault("outbox: parts count", err)
+	}
+	if n != 1 {
+		return jobs.ErrOutboxStale
+	}
+	return nil
+}
+
+// deletePAOutboxNotices deletes the principal's pending notice rows in tx
+// (/forget and consent withdrawal): a notice about a request the principal
+// asked to forget is not sent afterwards. A pending reply stays, and is
+// dropped when it comes due because its fragment is gone; a row that is
+// sending is left to finish.
+func deletePAOutboxNotices(ctx context.Context, tx *sql.Tx, principal int64) error {
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM pa_outbox WHERE principal = $1 AND status = $2 AND kind <> $3`,
+		principal, string(jobs.OutboxPending), string(jobs.OutboxReply)); err != nil {
+		return fmt.Errorf("forget pa outbox notices: %w", err)
 	}
 	return nil
 }

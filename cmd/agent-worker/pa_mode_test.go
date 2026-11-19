@@ -32,6 +32,9 @@ func TestRun_PAModeFailsClosedPerSetting(t *testing.T) {
 		{"AGENT_PA_BASE_URL", "https://example.org/api/agent/v1", "AGENT_PA_BASE_URL"},
 		{"AGENT_PA_BASE_URL", "https://user:pw@example.org", "AGENT_PA_BASE_URL"},
 		{"AGENT_PA_BASE_URL", "https://example.org?x=1", "AGENT_PA_BASE_URL"},
+		{"AGENT_PA_BASE_URL", "http://tg.example.org", "AGENT_PA_BASE_URL"},
+		{"AGENT_PA_BASE_URL", "http://mctl-telegram.svc.example.org", "AGENT_PA_BASE_URL"},
+		{"AGENT_PA_BASE_URL", "http://10.0.0.7:8080", "AGENT_PA_BASE_URL"},
 		{"AGENT_MODEL", "", "AGENT_MODEL"},
 		{"AGENT_OPENAI_API_KEY", "", "AGENT_OPENAI_API_KEY"},
 		{"MODEL_INPUT_USD_PER_MTOK", "0", "MODEL_INPUT_USD_PER_MTOK"},
@@ -69,5 +72,26 @@ func TestPAWorkerFromEnv(t *testing.T) {
 	if w.BaseURL != "https://example.org/" || w.PoolToken != "pool-token" || w.Health == nil ||
 		w.Prices.InputUSDPerMTok != 1 || w.Prices.OutputUSDPerMTok != 2 || w.Concurrency != 1 {
 		t.Fatalf("worker = %+v", w)
+	}
+}
+
+// TestValidatePABaseURL_PlainHTTP: http only to cluster-local or loopback
+// hosts, which carry the credential no further than the cluster.
+func TestValidatePABaseURL_PlainHTTP(t *testing.T) {
+	for raw, ok := range map[string]bool{
+		"https://tg.example.org":                                    true,
+		"http://mctl-telegram.mctl-telegram.svc":                    true,
+		"http://mctl-telegram.mctl-telegram.svc.cluster.local:8080": true,
+		"http://localhost:8080":                                     true,
+		"http://127.0.0.1:1":                                        true,
+		"http://[::1]:1":                                            true,
+		"http://tg.example.org":                                     false,
+		"http://svc.example.org":                                    false,
+		"http://example.svc.evil.org":                               false,
+		"http://10.0.0.7":                                           false,
+	} {
+		if err := validatePABaseURL(raw); (err == nil) != ok {
+			t.Errorf("%s: err = %v, want ok %v", raw, err, ok)
+		}
 	}
 }

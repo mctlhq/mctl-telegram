@@ -28,6 +28,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -317,12 +318,9 @@ func (w *PAWorker) Run(ctx context.Context, c *PAClaim) (PAOutcome, error) {
 		if tokens > maxContext {
 			return PAAbandoned, errors.New("pa worker: context over the limit")
 		}
-		if err := w.turn(ctx, c.Token, tokens); err != nil {
-			return paStopOutcome(err), err
-		}
-		res, err := w.chat(ctx, msgs)
+		res, out, err := w.chat(ctx, c.Token, tokens, msgs)
 		if err != nil {
-			return PAAbandoned, err
+			return out, err
 		}
 		if res.UsageReported {
 			cost += w.Prices.Cost(res.Usage)
@@ -334,8 +332,11 @@ func (w *PAWorker) Run(ctx context.Context, c *PAClaim) (PAOutcome, error) {
 		if len(res.Message.ToolCalls) > 0 {
 			// No tool was offered (#1315 brings the server-side executor),
 			// so a tool call is refused here and counts toward the cap.
+			// The cap is inclusive, as on the server (AdmitPAToolCall
+			// admits a call while fewer than MaxToolCalls were made):
+			// max_tool_calls = 8 allows eight.
 			toolCalls += len(res.Message.ToolCalls)
-			if toolCalls >= maxTools {
+			if toolCalls > maxTools {
 				return PAAbandoned, errors.New("pa worker: tool-call cap reached")
 			}
 			// Another model call is only made while the spend so far is
@@ -409,20 +410,26 @@ func (w *PAWorker) reply(ctx context.Context, token, text string, cost *float64)
 	}
 }
 
-// chat calls the model with the retry rules of the agent runner: 429 and
-// 5xx are retried within the run's deadline.
-func (w *PAWorker) chat(ctx context.Context, msgs []ChatMessage) (*ChatResult, error) {
+// chat makes one model call: /turn, then the provider, as one pair per
+// provider attempt, so every call the provider may bill was admitted by
+// the server first. 429 and 5xx from the provider are retried, at most
+// paModelAttempts attempts within the run's deadline. A refused /turn
+// ends the run with the outcome it calls for.
+func (w *PAWorker) chat(ctx context.Context, token string, tokens int, msgs []ChatMessage) (*ChatResult, PAOutcome, error) {
 	backoff := time.Second
 	var last error
-	for attempt := 0; attempt < 4; attempt++ {
+	for attempt := 0; attempt < paModelAttempts; attempt++ {
+		if err := w.turn(ctx, token, tokens); err != nil {
+			return nil, paStopOutcome(err), err
+		}
 		res, err := w.Model.ChatNoTools(ctx, msgs)
 		if err == nil {
-			return res, nil
+			return res, "", nil
 		}
 		last = err
 		var pe *ProviderError
 		if !errors.As(err, &pe) || (pe.Status != 429 && (pe.Status < 500 || pe.Status > 599)) {
-			return nil, err
+			return nil, PAAbandoned, err
 		}
 		wait := pe.RetryAfter
 		if wait <= 0 {
@@ -430,14 +437,18 @@ func (w *PAWorker) chat(ctx context.Context, msgs []ChatMessage) (*ChatResult, e
 			backoff = min(backoff*2, 8*time.Second)
 		}
 		if dl, ok := ctx.Deadline(); ok && time.Until(dl) <= wait {
-			return nil, last
+			return nil, PAAbandoned, last
 		}
 		if err := waitContext(ctx, wait); err != nil {
-			return nil, err
+			return nil, PAAbandoned, err
 		}
 	}
-	return nil, last
+	return nil, PAAbandoned, last
 }
+
+// paModelAttempts bounds the provider attempts (each behind its own /turn)
+// of one model call.
+const paModelAttempts = 4
 
 func paStopOutcome(err error) PAOutcome {
 	var he *paHTTPError
@@ -466,8 +477,14 @@ func paMessages(frags []paFragment) []ChatMessage {
 	return msgs
 }
 
-// paExternalBlock wraps external text. A closing tag inside the text is
-// defused so the text cannot end its own block.
+// paExternalTag matches anything that could open or close an
+// external_data block, in any case and with any whitespace after the "<"
+// or the "/": "<external_data", "</EXTERNAL_DATA", "< / External_Data".
+var paExternalTag = regexp.MustCompile(`(?i)<\s*(/?)\s*external_data`)
+
+// paExternalBlock wraps external text. Every opening or closing tag inside
+// the text is defused, whatever its case, so the text can neither end its
+// own block nor fake a new one.
 func paExternalBlock(f paFragment) string {
 	kind := strings.Map(func(r rune) rune {
 		if r >= 'a' && r <= 'z' || r == '_' {
@@ -475,7 +492,9 @@ func paExternalBlock(f paFragment) string {
 		}
 		return -1
 	}, f.Kind)
-	text := strings.ReplaceAll(f.Text, "</external_data", "<\\/external_data")
+	text := paExternalTag.ReplaceAllStringFunc(f.Text, func(m string) string {
+		return "&lt;" + m[1:]
+	})
 	return `<external_data kind="` + kind + `">` + "\n" + text + "\n</external_data>"
 }
 

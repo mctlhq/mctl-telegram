@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/mctlhq/mctl-telegram/internal/config"
 )
 
 // SetWebhookRequest is what SetWebhook registers.
@@ -60,8 +62,8 @@ func SetWebhook(ctx context.Context, hc *http.Client, baseURL, token string, req
 	if err := ValidateWebhookURL(req.URL); err != nil {
 		return err
 	}
-	if len(req.Secret) < 32 {
-		return errors.New("pa setWebhook: secret shorter than 32 characters")
+	if !config.ValidPAWebhookSecret(req.Secret) {
+		return fmt.Errorf("pa setWebhook: secret must be %d-256 characters from [A-Za-z0-9_-]", config.MinPAWebhookSecretLen)
 	}
 	if baseURL == "" {
 		baseURL = DefaultBotAPIBaseURL

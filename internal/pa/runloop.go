@@ -40,6 +40,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
@@ -72,9 +73,12 @@ type RunLoopStore interface {
 	PAConversationOpen(ctx context.Context, tx *sql.Tx, principal int64, conversationID string, now time.Time) error
 }
 
-// BotSender sends a rendered message (*output.Sender).
+// BotSender sends a rendered message (*output.Sender). SendFrom resumes a
+// message after the parts already delivered and reports each delivered
+// part; it wraps output.ErrOutcomeUnknown around any failure that may have
+// reached Telegram.
 type BotSender interface {
-	Send(ctx context.Context, chatID int64, text output.Text, kb output.Keyboard) error
+	SendFrom(ctx context.Context, chatID int64, text output.Text, kb output.Keyboard, from int, sent func(delivered int) error) error
 }
 
 // PoolAuthenticator authenticates the worker pool (*localjwt.PoolProvider).
@@ -136,6 +140,8 @@ type RunLoop struct {
 	lease    time.Duration
 	now      func() time.Time
 	metrics  OutboxCounter
+	// pending tracks the deliveries request paths started (deliverAfter).
+	pending sync.WaitGroup
 	// readTools is every tool the pin admits without approval, as
 	// "server/tool". Phase 1 has no other kind (catalog.LoadPin), and a
 	// resolver that offers anything else fails the claim.
@@ -382,10 +388,10 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 	if err == nil && res.Outcome == jobs.ClaimHeld && res.Notify {
 		principals = append(principals, res.Job.Principal)
 	}
-	slices.Sort(principals)
-	for _, p := range slices.Compact(principals) {
-		l.deliver(ctx, p)
-	}
+	// Sent after this response, never before it: the claim is committed,
+	// and the token it carries must reach the worker whatever Telegram
+	// does.
+	defer l.deliverAfter(ctx, principals...)
 	if err != nil {
 		stop(w, err)
 		return
@@ -394,7 +400,7 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 	case jobs.ClaimClaimed:
 	case jobs.ClaimHeld:
 		// The hold notice, once per held job, was written to the outbox
-		// with the hold and delivered above; no model call was or will be
+		// with the hold and is delivered after this response; no model call was or will be
 		// made for this job until the window resets (S1-R3).
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -620,18 +626,11 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 		l.stopRun(ctx, w, ref, err)
 		return
 	}
-	// After the commit: the send is never inside a transaction. A failed
-	// send leaves the row due again; the worker's part is done either way.
-	delivered := false
-	for _, d := range l.deliver(ctx, j.Principal) {
-		if d.item.JobID == j.ID && (d.item.Kind == jobs.OutboxReply || d.item.Kind == jobs.OutboxReplyTooLong) {
-			delivered = d.status == jobs.OutboxSent
-		}
-	}
-	if !delivered {
-		slog.Warn("pa reply not delivered yet", "job_id", j.ID)
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"delivered": delivered})
+	// After the commit and after this response: the send is never inside a
+	// transaction and never holds up the worker. A failed send leaves the
+	// row due again; the worker's part is done either way.
+	writeJSON(w, http.StatusOK, map[string]bool{"queued": true})
+	l.deliverAfter(ctx, j.Principal)
 }
 
 // release undoes a claim whose token was never handed out and sends the
@@ -643,7 +642,7 @@ func (l *RunLoop) release(ctx context.Context, ref jobs.Ref, mode jobs.ReleaseMo
 		return
 	}
 	if n != nil {
-		l.deliver(ctx, n.Principal)
+		l.deliverAfter(ctx, n.Principal)
 	}
 }
 
@@ -721,6 +720,6 @@ func (l *RunLoop) stopRun(ctx context.Context, w http.ResponseWriter, ref jobs.R
 func (l *RunLoop) droppedNotice(ctx context.Context, ref jobs.Ref, err error) {
 	if errors.Is(err, jobs.ErrConversationGone) {
 		// The store wrote the notice with the cancellation.
-		l.deliver(ctx, ref.Principal)
+		l.deliverAfter(ctx, ref.Principal)
 	}
 }

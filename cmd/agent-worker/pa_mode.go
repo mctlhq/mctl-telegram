@@ -7,8 +7,10 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
+	"strings"
 
 	"github.com/mctlhq/mctl-telegram/internal/agentworker"
 )
@@ -101,5 +103,20 @@ func validatePABaseURL(raw string) error {
 		(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return errors.New("AGENT_PA_BASE_URL must be an http(s) origin with no path, query or userinfo")
 	}
+	// The pool credential and every job token travel to this origin:
+	// plain http only inside the cluster or to the loopback.
+	if u.Scheme == "http" && !paClusterLocal(u.Hostname()) {
+		return errors.New("AGENT_PA_BASE_URL must be https unless the host is cluster-local (*.svc, *.svc.cluster.local) or loopback")
+	}
 	return nil
+}
+
+// paClusterLocal reports a Kubernetes service name or a loopback host.
+func paClusterLocal(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "localhost" || strings.HasSuffix(host, ".svc") || strings.HasSuffix(host, ".svc.cluster.local") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

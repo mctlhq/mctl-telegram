@@ -3,8 +3,6 @@ package config
 import (
 	"strings"
 	"testing"
-
-	"github.com/mctlhq/mctl-telegram/internal/pa"
 )
 
 // Synthetic Bot API tokens. Neither id is a real bot; both are checked with
@@ -134,12 +132,6 @@ func TestLoadPA_WebhookURL(t *testing.T) {
 				t.Fatalf("Load() = %v, want a PA_WEBHOOK_URL refusal", err)
 			}
 		})
-	}
-}
-
-func TestPAWebhookPathMatches(t *testing.T) {
-	if paWebhookPath != pa.WebhookPath {
-		t.Fatalf("config %q, pa %q", paWebhookPath, pa.WebhookPath)
 	}
 }
 

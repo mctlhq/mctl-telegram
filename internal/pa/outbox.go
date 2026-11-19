@@ -10,7 +10,10 @@ package pa
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
+	"slices"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
@@ -25,10 +28,17 @@ type OutboxCounter interface {
 
 // Outbox outcome labels.
 const (
-	OutboxOutcomeSent    = "sent"
-	OutboxOutcomeRetry   = "retry"
-	OutboxOutcomeFailed  = "failed"
+	OutboxOutcomeSent  = "sent"
+	OutboxOutcomeRetry = "retry"
+	// OutboxOutcomeFailed: out of attempts, or a row that cannot be built.
+	OutboxOutcomeFailed = "failed"
+	// OutboxOutcomeRefused: the Bot API refused the message for good (the
+	// principal blocked the bot, the chat is gone). A principal's choice,
+	// not an operational fault, so it is counted apart from failed.
+	OutboxOutcomeRefused = "refused"
 	OutboxOutcomeDropped = "dropped"
+	// OutboxOutcomeUnknown: the send may have reached Telegram and its
+	// answer was not read, or the row outlived its lease. Not sent again.
 	OutboxOutcomeUnknown = "unknown"
 	// OutboxOutcomeStale: the send finished after the row's lease, which
 	// had already marked it unknown.
@@ -46,73 +56,87 @@ var outboxTemplates = map[jobs.OutboxKind]output.Template{
 	jobs.OutboxRequestDropped: output.TextRequestDropped,
 }
 
-// outboxSendTimeout bounds one send of one row (up to output.MaxParts
-// messages); it is well inside jobs.OutboxLease, so a send that returns
-// is completed before its lease could mark it unknown.
-const outboxSendTimeout = 45 * time.Second
+const (
+	// outboxSendTimeout bounds building and sending one claimed row (up to
+	// output.MaxParts messages). A row is claimed right before its own
+	// send, so with outboxRecordTimeout for its bookkeeping it ends well
+	// inside jobs.OutboxLease: a send that returns is completed before its
+	// lease could mark it unknown.
+	outboxSendTimeout = 45 * time.Second
+	// outboxRecordTimeout bounds one bookkeeping write of a row.
+	outboxRecordTimeout = 10 * time.Second
+	// outboxRequestDeadline bounds the delivery a request path starts after
+	// its response: it stops claiming further rows past it. The send of a
+	// claimed row runs to its own timeout.
+	outboxRequestDeadline = time.Minute
+)
 
 // delivery is the outcome of one claimed row.
 type delivery struct {
-	item   jobs.OutboxItem
-	status jobs.OutboxStatus
+	item    jobs.OutboxItem
+	status  jobs.OutboxStatus
+	outcome string
 }
 
-// deliver sends the due outbox rows of principal (0: every principal) and
-// records each outcome. It never returns an error: a row that was not sent
-// stays due, and the background pass (RunOutbox) retries it.
+// deliver sends the due outbox rows of principal (0: every principal), at
+// most jobs.OutboxBatch of them, and records each outcome. Each row is
+// claimed right before its own send, so its lease covers that send only.
+// ctx decides whether another row is claimed; a claimed row is built,
+// sent and completed on a context detached from it (WithoutCancel plus its
+// own timeouts), so a caller that goes away never cuts a send off midway.
+// deliver never returns an error: a row that was not sent stays due, and
+// the background pass (RunOutbox) retries it.
 func (l *RunLoop) deliver(ctx context.Context, principal int64) []delivery {
-	res, err := l.store.ClaimPAOutbox(ctx, jobs.OutboxClaimRequest{
-		Now: l.now(), Lease: jobs.OutboxLease, Principal: principal, Limit: jobs.OutboxBatch,
-	})
-	if err != nil {
-		slog.Warn("pa outbox not readable", "err", err)
-		l.count(OutboxOutcomeClaimError)
-		return nil
-	}
-	for range res.Unknown {
-		l.count(OutboxOutcomeUnknown)
-	}
-	if res.Unknown > 0 {
-		slog.Warn("pa outbox rows outlived their send lease; not sent again", "rows", res.Unknown)
-	}
-	out := make([]delivery, 0, len(res.Items))
-	for _, it := range res.Items {
-		c := l.sendItem(ctx, it)
-		// The outcome is recorded even when the caller's request is gone:
-		// a sent row left in sending would become unknown.
-		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		err := l.store.CompletePAOutbox(cctx, it, c)
-		cancel()
-		outcome := outboxOutcome(c.Status)
-		switch {
-		case errors.Is(err, jobs.ErrOutboxStale):
-			outcome = OutboxOutcomeStale
-		case err != nil:
-			// The row stays sending and becomes unknown after its lease:
-			// it is not sent twice.
-			slog.Warn("pa outbox outcome not recorded", "job_id", it.JobID, "kind", string(it.Kind), "err", err)
+	var out []delivery
+	for len(out) < jobs.OutboxBatch && ctx.Err() == nil {
+		res, err := l.store.ClaimPAOutbox(ctx, jobs.OutboxClaimRequest{
+			Now: l.now(), Lease: jobs.OutboxLease, Principal: principal, Limit: 1,
+		})
+		if err != nil {
+			slog.Warn("pa outbox not readable", "err", err)
+			l.count(OutboxOutcomeClaimError)
+			return out
 		}
-		l.count(outcome)
-		if c.Status != jobs.OutboxSent {
-			slog.Warn("pa outbox row not sent", "job_id", it.JobID, "kind", string(it.Kind),
-				"attempt", it.Attempts, "outcome", outcome)
+		for range res.Unknown {
+			l.count(OutboxOutcomeUnknown)
 		}
-		out = append(out, delivery{item: it, status: c.Status})
+		if res.Unknown > 0 {
+			slog.Warn("pa outbox rows outlived their send lease; not sent again", "rows", res.Unknown)
+		}
+		if len(res.Items) == 0 {
+			return out
+		}
+		for _, it := range res.Items {
+			out = append(out, l.deliverItem(context.WithoutCancel(ctx), it))
+		}
 	}
 	return out
 }
 
-func outboxOutcome(s jobs.OutboxStatus) string {
-	switch s {
-	case jobs.OutboxSent:
-		return OutboxOutcomeSent
-	case jobs.OutboxPending:
-		return OutboxOutcomeRetry
-	case jobs.OutboxDropped:
-		return OutboxOutcomeDropped
-	default:
-		return OutboxOutcomeFailed
+// deliverItem sends one claimed row and records its outcome.
+func (l *RunLoop) deliverItem(ctx context.Context, it jobs.OutboxItem) delivery {
+	sctx, cancel := context.WithTimeout(ctx, outboxSendTimeout)
+	c, outcome := l.sendItem(sctx, it)
+	cancel()
+	// The outcome is recorded on its own deadline: a sent row left in
+	// sending would become unknown.
+	cctx, cancel := context.WithTimeout(ctx, outboxRecordTimeout)
+	err := l.store.CompletePAOutbox(cctx, it, c)
+	cancel()
+	switch {
+	case errors.Is(err, jobs.ErrOutboxStale):
+		outcome = OutboxOutcomeStale
+	case err != nil:
+		// The row stays sending and becomes unknown after its lease: it is
+		// not sent twice.
+		slog.Warn("pa outbox outcome not recorded", "job_id", it.JobID, "kind", string(it.Kind), "err", err)
 	}
+	l.count(outcome)
+	if c.Status != jobs.OutboxSent {
+		slog.Warn("pa outbox row not sent", "job_id", it.JobID, "kind", string(it.Kind),
+			"attempt", it.Attempts, "outcome", outcome)
+	}
+	return delivery{item: it, status: c.Status, outcome: outcome}
 }
 
 func (l *RunLoop) count(outcome string) {
@@ -122,7 +146,7 @@ func (l *RunLoop) count(outcome string) {
 }
 
 // sendItem builds and sends one claimed row and says what to record.
-func (l *RunLoop) sendItem(ctx context.Context, it jobs.OutboxItem) jobs.OutboxCompletion {
+func (l *RunLoop) sendItem(ctx context.Context, it jobs.OutboxItem) (jobs.OutboxCompletion, string) {
 	now := l.now()
 	var text output.Text
 	switch {
@@ -134,58 +158,96 @@ func (l *RunLoop) sendItem(ctx context.Context, it jobs.OutboxItem) jobs.OutboxC
 		case errors.Is(err, convo.ErrNotFound):
 			// Closed (/new), forgotten (/forget), withdrawn or expired
 			// before delivery: the answer goes with its conversation.
-			return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxDropped}
+			return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxDropped}, OutboxOutcomeDropped
 		case errors.Is(err, convo.ErrStoreFault):
+			// Could not read the answer: that says nothing about it, and
+			// nothing was sent. It is due again.
 			return l.retry(it, now, 0)
 		default:
 			// A fragment that does not open will not open later (T5).
-			return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxFailed}
+			return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxFailed}, OutboxOutcomeFailed
 		}
 	default:
 		tpl, ok := outboxTemplates[it.Kind]
 		if !ok {
-			return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxFailed}
+			return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxFailed}, OutboxOutcomeFailed
 		}
 		text = output.ServerText(tpl)
 	}
-	sctx, cancel := context.WithTimeout(ctx, outboxSendTimeout)
-	defer cancel()
-	err := l.sender.Send(sctx, it.Principal, text, nil)
-	if err == nil {
-		return jobs.OutboxCompletion{Now: l.now(), Status: jobs.OutboxSent}
+	if it.SentParts >= text.Parts() {
+		// Every part was delivered on an earlier attempt and only the
+		// completion was lost.
+		return jobs.OutboxCompletion{Now: l.now(), Status: jobs.OutboxSent}, OutboxOutcomeSent
 	}
-	if permanentSendError(err) {
-		return jobs.OutboxCompletion{Now: l.now(), Status: jobs.OutboxFailed}
-	}
+	err := l.sender.SendFrom(ctx, it.Principal, text, nil, it.SentParts, func(parts int) error {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outboxRecordTimeout)
+		defer cancel()
+		if err := l.store.RecordPAOutboxParts(rctx, it, parts, l.now()); err != nil {
+			// A delivered part that is not recorded would be sent again
+			// by a retry: the row cannot be retried.
+			return fmt.Errorf("%w: part %d delivered, not recorded: %w", output.ErrOutcomeUnknown, parts, err)
+		}
+		return nil
+	})
+	return l.sendOutcome(it, err)
+}
+
+// sendOutcome classifies a send. Only a failure known to have left the
+// message undelivered is retried: one before the request was written, or
+// an explicit Bot API 429 or 5xx. A 4xx is the principal's choice and is
+// final. Every other failure may have delivered the message, so the row
+// becomes unknown and is never sent again (send-once).
+func (l *RunLoop) sendOutcome(it jobs.OutboxItem, err error) (jobs.OutboxCompletion, string) {
+	now := l.now()
 	var api *output.APIError
-	wait := time.Duration(0)
-	if errors.As(err, &api) && api.RetryAfter > 0 {
-		wait = time.Duration(api.RetryAfter) * time.Second
+	switch {
+	case err == nil:
+		return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxSent}, OutboxOutcomeSent
+	case errors.Is(err, output.ErrOutcomeUnknown):
+		return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxUnknown}, OutboxOutcomeUnknown
+	case permanentSendError(err):
+		return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxFailed}, OutboxOutcomeRefused
+	case errors.As(err, &api):
+		if api.Status != http.StatusTooManyRequests && (api.Status < 500 || api.Status > 599) {
+			return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxUnknown}, OutboxOutcomeUnknown
+		}
+		return l.retry(it, now, time.Duration(api.RetryAfter)*time.Second)
+	case isLocalSendError(err):
+		return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxFailed}, OutboxOutcomeFailed
+	default:
+		// Failed before the request was written (dial, TLS, egress
+		// refusal, a context that ended first): nothing reached Telegram.
+		return l.retry(it, now, 0)
 	}
-	return l.retry(it, l.now(), wait)
 }
 
 // retry schedules the row again, or fails it once it used its attempts.
-func (l *RunLoop) retry(it jobs.OutboxItem, now time.Time, wait time.Duration) jobs.OutboxCompletion {
+func (l *RunLoop) retry(it jobs.OutboxItem, now time.Time, wait time.Duration) (jobs.OutboxCompletion, string) {
 	if it.Attempts >= jobs.OutboxMaxAttempts {
-		return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxFailed}
+		return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxFailed}, OutboxOutcomeFailed
 	}
 	wait = max(wait, jobs.OutboxBackoff(it.Attempts))
-	return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxPending, RetryAt: now.Add(wait)}
+	return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxPending, RetryAt: now.Add(wait)}, OutboxOutcomeRetry
 }
 
-// permanentSendError reports a send that would fail the same way again: a
-// message Sender refuses to build, or a Bot API 4xx other than a flood wait
-// (blocked by the user, chat not found).
+// permanentSendError reports a Bot API 4xx other than a flood wait (the
+// principal blocked the bot, the chat is gone): sending again would be
+// refused the same way.
 func permanentSendError(err error) bool {
+	var api *output.APIError
+	return errors.As(err, &api) && api.Status >= 400 && api.Status < 500 && api.Status != http.StatusTooManyRequests
+}
+
+// isLocalSendError reports a message Sender refused to build, before any
+// request: it would be refused the same way again.
+func isLocalSendError(err error) bool {
 	for _, e := range []error{output.ErrEmptyText, output.ErrInvalidChat, output.ErrInvalidKeyboard,
-		output.ErrPartTooLong, output.ErrTooLong} {
+		output.ErrPartTooLong, output.ErrTooLong, output.ErrInvalidConfig} {
 		if errors.Is(err, e) {
 			return true
 		}
 	}
-	var api *output.APIError
-	return errors.As(err, &api) && api.Status >= 400 && api.Status < 500 && api.Status != 429
+	return false
 }
 
 // renderReply renders the stored answer of a reply row: the fragment it
@@ -205,7 +267,10 @@ func (l *RunLoop) renderReply(ctx context.Context, it jobs.OutboxItem) (output.T
 			return output.Text{}, err
 		}
 		text, prov := f.Text()
-		if prov == convo.ProvenanceUser {
+		// The allow-list is what the principal typed before the answer,
+		// as when the reply was accepted: the rendering, and so the parts
+		// a retry resumes after, do not change with later messages.
+		if prov == convo.ProvenanceUser && row.Seq < it.FragmentSeq {
 			typed = append(typed, text)
 		}
 		if row.Seq == it.FragmentSeq {
@@ -229,8 +294,9 @@ func (l *RunLoop) renderReply(ctx context.Context, it jobs.OutboxItem) (output.T
 const OutboxInterval = 15 * time.Second
 
 // RunOutbox delivers due outbox rows of every principal until ctx ends.
-// The request paths deliver their own rows at once; this pass retries the
-// ones whose send failed and marks rows that outlived their lease unknown.
+// The request paths start delivering their own rows after their response;
+// this pass retries the ones whose send failed and marks rows that
+// outlived their lease unknown.
 func (l *RunLoop) RunOutbox(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = OutboxInterval
@@ -242,8 +308,40 @@ func (l *RunLoop) RunOutbox(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			for len(l.deliver(ctx, 0)) == jobs.OutboxBatch && ctx.Err() == nil {
-			}
+			l.outboxPass(ctx)
 		}
 	}
 }
+
+// outboxPass delivers due rows of every principal. A full batch may have
+// left due rows behind, so it keeps going until a batch comes back short.
+func (l *RunLoop) outboxPass(ctx context.Context) {
+	for len(l.deliver(ctx, 0)) == jobs.OutboxBatch && ctx.Err() == nil {
+	}
+}
+
+// deliverAfter delivers the principals' due rows in the background, on a
+// context detached from the request (WithoutCancel) with its own deadline,
+// so a request path never waits on Telegram and a worker that hangs up
+// never cuts a send off. Rows it does not reach stay due for RunOutbox.
+func (l *RunLoop) deliverAfter(ctx context.Context, principals ...int64) {
+	if len(principals) == 0 {
+		return
+	}
+	ps := slices.Clone(principals)
+	slices.Sort(ps)
+	ps = slices.Compact(ps)
+	l.pending.Add(1)
+	go func() {
+		defer l.pending.Done()
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outboxRequestDeadline)
+		defer cancel()
+		for _, p := range ps {
+			l.deliver(dctx, p)
+		}
+	}()
+}
+
+// WaitDeliveries waits for the deliveries the request paths started, for
+// a graceful shutdown and for tests.
+func (l *RunLoop) WaitDeliveries() { l.pending.Wait() }

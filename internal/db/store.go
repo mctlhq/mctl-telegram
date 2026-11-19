@@ -30,6 +30,11 @@ type Store struct {
 	Crypt   *crypto.AESGCM
 	metrics *metrics.Registry
 
+	// paOutboxAfterSelect, when set (tests only), runs inside ClaimPAOutbox
+	// between reading the due rows and claiming them, to force a
+	// concurrent claim into that window.
+	paOutboxAfterSelect func()
+
 	// sessionEnded receives sessions a user ended; see WithSessionEnded.
 	sessionEnded func(userID int64, session []byte)
 

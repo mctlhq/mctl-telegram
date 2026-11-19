@@ -15,7 +15,7 @@ var PAWebhookProblems = []string{"url_changed", "allowed_updates_changed", "deli
 
 // PAOutboxOutcomes is the closed outcome label set of mctl_pa_outbox_total
 // (the pa.OutboxOutcome* constants).
-var PAOutboxOutcomes = []string{"sent", "retry", "failed", "dropped", "unknown", "stale", "claim_error"}
+var PAOutboxOutcomes = []string{"sent", "retry", "failed", "refused", "dropped", "unknown", "stale", "claim_error"}
 
 // PAUpdateOutcomes is the closed outcome label set of
 // mctl_pa_updates_total (the pa.Outcome* constants of the webhook).

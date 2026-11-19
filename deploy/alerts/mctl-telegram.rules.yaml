@@ -845,18 +845,20 @@ spec:
       rules:
         - alert: MctlPAWebhookInfoUnreadable
           # Could not observe is not healthy (I9): a failed getWebhookInfo
-          # sets up to 0, never leaves the last good state in place.
-          expr: mctl_pa_webhook_info_up == 0
-          for: 15m
+          # sets up to 0, never leaves the last good state in place. The
+          # average catches a monitor that fails every other check, which
+          # `up == 0 for 15m` never would.
+          expr: avg_over_time(mctl_pa_webhook_info_up[30m]) < 0.8
+          for: 5m
           labels:
             severity: warning
             service: mctl-telegram
           annotations:
-            summary: "PA bot getWebhookInfo has been unreadable for 15 minutes"
+            summary: "PA bot getWebhookInfo is often unreadable"
             description: >
-              The PA webhook monitor could not read getWebhookInfo for three
-              checks running. The webhook state (URL, allowed_updates,
-              delivery errors) is unknown, not healthy.
+              More than a fifth of the getWebhookInfo checks in the last 30
+              minutes failed, in a row or on and off. The webhook state (URL,
+              allowed_updates, delivery errors) is unknown, not healthy.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookinfounreadable"
 
         - alert: MctlPAWebhookInfoStale
@@ -874,8 +876,11 @@ spec:
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookinfostale"
 
         - alert: MctlPAWebhookMisconfigured
+          # max_over_time: a URL that flips back and forth between checks,
+          # or an unreadable check in between (which clears the problem
+          # series), must not restart the clock.
           expr: |
-            max by (problem) (mctl_pa_webhook_problem{problem=~"url_changed|allowed_updates_changed"}) == 1
+            max by (problem) (max_over_time(mctl_pa_webhook_problem{problem=~"url_changed|allowed_updates_changed"}[15m])) == 1
           for: 10m
           labels:
             severity: critical
@@ -884,8 +889,9 @@ spec:
             summary: "PA bot webhook {{ $labels.problem }}"
             description: >
               getWebhookInfo reports a webhook URL other than PA_WEBHOOK_URL,
-              or allowed_updates other than message and callback_query, on
-              two checks running. Updates may be going to someone else.
+              or allowed_updates other than message and callback_query, at
+              checks across 10 minutes, steadily or on and off. Updates may be
+              going to someone else.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookmisconfigured"
 
         - alert: MctlPAWebhookSecretRejected
@@ -944,6 +950,8 @@ spec:
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookbadsecretburst"
 
         - alert: MctlPAOutboxUndelivered
+          # "refused" (Telegram's 4xx: the principal blocked the bot or
+          # deleted the chat) is the principal's choice, not ours to page on.
           expr: |
             sum by (outcome) (increase(mctl_pa_outbox_total{outcome=~"failed|unknown|claim_error"}[30m])) > 0
           labels:

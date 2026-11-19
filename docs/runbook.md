@@ -3952,18 +3952,31 @@ mctl-gitops vm-rules is part of enabling the PA (#1318).
   (a guard test enforces that).
 - **Outbox.** Every PA reply and notice (budget hold, run failed, request
   dropped, answer too long) is written to `pa_outbox` in the transaction of
-  the state change that owes it, then sent. A failed send is retried with
-  backoff (15s doubling, at most 10m, 8 attempts). A Bot API 4xx other than
-  429 (the user blocked the bot, chat not found) fails the row at once. A
-  reply whose conversation was closed, forgotten or withdrawn before it went
-  out is dropped with it. A row still `sending` 2 minutes after its claim
-  becomes `unknown` and is never sent again: whether Telegram got it is not
-  known, and a duplicate is worse than a gap.
+  the state change that owes it. Delivery starts after the request that
+  wrote the row has been answered, on a context of its own, so neither a
+  slow Telegram nor a worker that hangs up delays or cuts it off; the
+  background pass (every 15s) retries whatever is left due. Each row is
+  claimed right before its own send, so its 2-minute lease covers one send.
+  Send-once: only a failure known to have left the message undelivered is
+  retried (a failure before the request was written, or an explicit Bot API
+  429 or 5xx, honouring `retry_after`), with backoff (15s doubling, at most
+  10m, 8 attempts). A Bot API 4xx other than 429 (the user blocked the bot,
+  chat not found) fails the row at once and is counted `refused`. Anything
+  that may have reached Telegram (a connection dropped after the request
+  was written, an unreadable or malformed answer) makes the row `unknown`,
+  and so does a row still `sending` when its lease runs out: it is never
+  sent again, because a duplicate is worse than a gap. A long reply goes out
+  in parts and `sent_parts` records each part Telegram accepted, so a retry
+  resumes after them. A reply whose conversation was closed, forgotten or
+  withdrawn before it went out is dropped with it; `/forget` also deletes
+  the principal's pending notices.
 
 <a id="mctlpawebhookinfounreadable"></a>
 ### MctlPAWebhookInfoUnreadable
 
-`mctl_pa_webhook_info_up == 0` for 15 minutes. The server log has
+More than a fifth of the checks in the last 30 minutes were unreadable
+(`avg_over_time(mctl_pa_webhook_info_up[30m]) < 0.8` for 5 minutes),
+in a row or on and off. The server log has
 `pa webhook info unreadable` with the reason (`refused (HTTP 401)` means
 the bot token is revoked; a transport error means egress to
 api.telegram.org is failing). Until it reads again the webhook state is
@@ -3983,7 +3996,9 @@ open an issue.
 `PA_WEBHOOK_URL`. Treat it as a possible token compromise: rotate
 `PA_BOT_TOKEN` with BotFather, then re-register the webhook (#1318).
 `allowed_updates_changed`: the webhook was registered with another update
-list; re-register it with the operator helper.
+list; re-register it with the operator helper. The alert takes the
+maximum over 15 minutes, so a URL that flips between checks keeps it
+firing.
 
 <a id="mctlpawebhooksecretrejected"></a>
 ### MctlPAWebhookSecretRejected
@@ -4015,8 +4030,11 @@ webhook refuses them before reading the body.
 <a id="mctlpaoutboxundelivered"></a>
 ### MctlPAOutboxUndelivered
 
-`failed`: a message used its attempts or was refused for good.
-`unknown`: a send outlived its lease (the pod died mid-send) and is not
-resent. `claim_error`: `pa_outbox` could not be read; nothing was sent and
+`failed`: a message used its attempts, or could not be built.
+`unknown`: a send may have reached Telegram (connection lost after the
+request went out, an unreadable answer, or the pod died mid-send) and is
+not resent; ask the principal whether it arrived if it matters. `refused`
+(a Bot API 4xx: the principal blocked the bot or deleted the chat) is
+counted but does not fire this alert. `claim_error`: `pa_outbox` could not be read; nothing was sent and
 the rows stay due. Inspect rows by principal with `Store.PAOutboxRows`;
 rows carry no message text.

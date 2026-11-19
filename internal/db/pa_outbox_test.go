@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"os"
-	"sync"
 	"testing"
 	"time"
 
@@ -116,6 +115,8 @@ func runPAOutboxSuite(t *testing.T, s *Store) {
 			{Principal: paAlice, JobID: 1, Kind: "other"},
 			{Principal: 0, JobID: 1, Kind: jobs.OutboxRunFailed},
 			{Principal: paAlice, JobID: 1, Kind: jobs.OutboxReply},
+			{Principal: paAlice, JobID: 1, Kind: jobs.OutboxReply, ConversationID: "c", FragmentSeq: 0},
+			{Principal: paAlice, JobID: 1, Kind: jobs.OutboxReply, FragmentSeq: 3},
 			{Principal: paAlice, JobID: 1, Kind: jobs.OutboxRunFailed, ConversationID: "c", FragmentSeq: 1},
 		} {
 			if err := s.EnqueuePAOutbox(ctx, tx, it, now); !errors.Is(err, jobs.ErrInvalid) {
@@ -218,7 +219,7 @@ func runPAOutboxSuite(t *testing.T, s *Store) {
 		it := jobs.OutboxItem{ID: 1, Attempts: 1}
 		for _, c := range []jobs.OutboxCompletion{
 			{Now: now, Status: jobs.OutboxSending},
-			{Now: now, Status: jobs.OutboxUnknown},
+			{Now: now, Status: "other"},
 			{Now: now, Status: jobs.OutboxPending},
 			{Status: jobs.OutboxSent},
 		} {
@@ -232,7 +233,12 @@ func runPAOutboxSuite(t *testing.T, s *Store) {
 		paOutboxReset(t, s)
 		j := paJobID(t, 5)
 		old := now.Add(-72 * time.Hour)
-		outboxEnqueue(t, s, old, true, notice(paCarol, j, jobs.OutboxRunFailed), notice(paCarol, j, jobs.OutboxBudgetHold))
+		outboxEnqueue(t, s, old, true, notice(paCarol, j, jobs.OutboxRunFailed), notice(paCarol, j, jobs.OutboxBudgetHold),
+			notice(paBob, j+1, jobs.OutboxRunFailed))
+		// Bob's row is mid-send: claimed, never completed.
+		if n := len(outboxClaim(t, s, old, paBob).Items); n != 1 {
+			t.Fatalf("claimed %d of Bob's rows", n)
+		}
 		it := outboxClaim(t, s, old, paCarol).Items[0]
 		if err := s.CompletePAOutbox(ctx, it, jobs.OutboxCompletion{Now: old, Status: jobs.OutboxSent}); err != nil {
 			t.Fatal(err)
@@ -243,6 +249,79 @@ func runPAOutboxSuite(t *testing.T, s *Store) {
 		rows := outboxRows(t, s, paCarol)
 		if len(rows) != 1 || rows[0].Status != jobs.OutboxPending {
 			t.Fatalf("after the sweep: %+v, want only the pending row", rows)
+		}
+		if rows := outboxRows(t, s, paBob); len(rows) != 1 || rows[0].Status != jobs.OutboxSending {
+			t.Fatalf("after the sweep: Bob %+v, want the sending row kept", rows)
+		}
+	})
+
+	t.Run("delivered parts are recorded while sending, and only grow", func(t *testing.T) {
+		paOutboxReset(t, s)
+		outboxEnqueue(t, s, now, true, notice(paAlice, paJobID(t, 7), jobs.OutboxBudgetHold))
+		it := outboxClaim(t, s, now, paAlice).Items[0]
+		if err := s.RecordPAOutboxParts(ctx, it, 2, now); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.RecordPAOutboxParts(ctx, it, 1, now); !errors.Is(err, jobs.ErrOutboxStale) {
+			t.Fatalf("shrinking the count: %v, want ErrOutboxStale", err)
+		}
+		if err := s.RecordPAOutboxParts(ctx, it, 0, now); !errors.Is(err, jobs.ErrInvalid) {
+			t.Fatalf("zero parts: %v, want ErrInvalid", err)
+		}
+		other := it
+		other.Attempts++
+		if err := s.RecordPAOutboxParts(ctx, other, 3, now); !errors.Is(err, jobs.ErrOutboxStale) {
+			t.Fatalf("another attempt: %v, want ErrOutboxStale", err)
+		}
+		if err := s.CompletePAOutbox(ctx, it, jobs.OutboxCompletion{Now: now, Status: jobs.OutboxPending, RetryAt: now}); err != nil {
+			t.Fatal(err)
+		}
+		again := outboxClaim(t, s, now, paAlice).Items
+		if len(again) != 1 || again[0].SentParts != 2 || again[0].Attempts != 2 {
+			t.Fatalf("retry claim = %+v, want 2 parts kept on attempt 2", again)
+		}
+		if err := s.RecordPAOutboxParts(ctx, it, 3, now); !errors.Is(err, jobs.ErrOutboxStale) {
+			t.Fatalf("the old attempt after a new claim: %v, want ErrOutboxStale", err)
+		}
+	})
+
+	t.Run("an unknown outcome is final", func(t *testing.T) {
+		paOutboxReset(t, s)
+		outboxEnqueue(t, s, now, true, notice(paAlice, paJobID(t, 8), jobs.OutboxBudgetHold))
+		it := outboxClaim(t, s, now, paAlice).Items[0]
+		if err := s.CompletePAOutbox(ctx, it, jobs.OutboxCompletion{Now: now, Status: jobs.OutboxUnknown}); err != nil {
+			t.Fatal(err)
+		}
+		if again := outboxClaim(t, s, now.Add(24*time.Hour), paAlice); len(again.Items) != 0 {
+			t.Fatalf("an unknown row was claimed again: %+v", again)
+		}
+	})
+
+	t.Run("forget deletes pending notices only", func(t *testing.T) {
+		paOutboxReset(t, s)
+		j := paJobID(t, 9)
+		outboxEnqueue(t, s, now, true, notice(paAlice, j, jobs.OutboxRunFailed), notice(paAlice, j, jobs.OutboxBudgetHold),
+			jobs.OutboxItem{Principal: paAlice, JobID: j, Kind: jobs.OutboxReply, ConversationID: "c-forget", FragmentSeq: 2},
+			notice(paBob, j+1, jobs.OutboxRunFailed))
+		// Alice's oldest row is mid-send.
+		sending := outboxClaim(t, s, now, paAlice).Items[0]
+		tx, err := s.DB.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ForgetPAConversations(ctx, tx, paAlice); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		rows := outboxRows(t, s, paAlice)
+		if len(rows) != 2 || rows[0].ID != sending.ID || rows[1].Kind != jobs.OutboxReply {
+			t.Fatalf("after forget: %+v, want the sending row and the pending reply", rows)
+		}
+		if n := len(outboxRows(t, s, paBob)); n != 1 {
+			t.Fatalf("Bob has %d rows after Alice's forget", n)
 		}
 	})
 
@@ -366,30 +445,36 @@ func paNoticesInOutbox(t *testing.T, s *Store) {
 }
 
 // paOutboxConcurrentClaim: deliverers racing for one row claim it once.
+// paOutboxConcurrentClaim forces the race the conditional claim guards
+// against: a second deliverer claims the row after the first one read it
+// as due and before the first one claims it. Only one of them may get it.
 func paOutboxConcurrentClaim(t *testing.T, s *Store) {
 	paOutboxReset(t, s)
 	now := time.Now().UTC()
 	outboxEnqueue(t, s, now, true, notice(paCarol, paJobID(t, 6), jobs.OutboxRunFailed))
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	claimed := 0
-	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			res, err := s.ClaimPAOutbox(context.Background(), jobs.OutboxClaimRequest{
-				Now: now, Lease: jobs.OutboxLease, Principal: paCarol, Limit: 10,
-			})
-			if err != nil {
-				return
-			}
-			mu.Lock()
-			claimed += len(res.Items)
-			mu.Unlock()
-		}()
+	req := jobs.OutboxClaimRequest{Now: now, Lease: jobs.OutboxLease, Principal: paCarol, Limit: 10}
+	var inner jobs.OutboxClaimResult
+	var innerErr error
+	ran := false
+	s.paOutboxAfterSelect = func() {
+		if ran {
+			return
+		}
+		ran = true
+		inner, innerErr = s.ClaimPAOutbox(context.Background(), req)
 	}
-	wg.Wait()
-	if claimed != 1 {
-		t.Fatalf("row claimed %d times, want 1", claimed)
+	t.Cleanup(func() { s.paOutboxAfterSelect = nil })
+	outer, err := s.ClaimPAOutbox(context.Background(), req)
+	if err != nil || innerErr != nil {
+		t.Fatalf("claims failed: outer %v, inner %v", err, innerErr)
+	}
+	if !ran {
+		t.Fatal("the interleave did not happen")
+	}
+	if len(inner.Items) != 1 || len(outer.Items) != 0 {
+		t.Fatalf("inner claimed %d, outer %d: want the row claimed once, by the inner claim", len(inner.Items), len(outer.Items))
+	}
+	if rows := outboxRows(t, s, paCarol); len(rows) != 1 || rows[0].Attempts != 1 {
+		t.Fatalf("rows = %+v, want one claim recorded", rows)
 	}
 }

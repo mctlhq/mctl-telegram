@@ -21,9 +21,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptrace"
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"unicode/utf16"
 	"unicode/utf8"
 
@@ -57,6 +59,13 @@ var (
 	// ErrPartTooLong means a Text part is over the Bot API limit. Render and
 	// ServerText never produce one, so it marks a bug, not bad input.
 	ErrPartTooLong = errors.New("pa output: message part over the Bot API limit")
+	// ErrOutcomeUnknown means the request may have reached the Bot API and
+	// its answer was not read: a transport failure after the request was
+	// written (including a cancelled or expired context), a body that
+	// could not be read, or an answer that is not a Bot API envelope.
+	// Whether the message was delivered is not known, so it must not be
+	// sent again (send-once, S1-O4).
+	ErrOutcomeUnknown = errors.New("pa output: Bot API outcome unknown")
 )
 
 // Button is one inline keyboard button. It can only carry callback data:
@@ -139,6 +148,16 @@ type answerCallbackRequest struct {
 // the last one. Every message has link previews disabled. It stops at the
 // first failure.
 func (s *Sender) Send(ctx context.Context, chatID int64, text Text, kb Keyboard) error {
+	return s.SendFrom(ctx, chatID, text, kb, 0, nil)
+}
+
+// SendFrom sends the parts of text from index from on, and calls sent with
+// the number of parts delivered so far after each part the Bot API
+// accepted, so that a retry can resume after the last delivered part
+// instead of sending the earlier ones again. An error from sent stops the
+// send and is returned as is. Every part is checked before the first one
+// is sent: a part that would be refused never leaves earlier parts behind.
+func (s *Sender) SendFrom(ctx context.Context, chatID int64, text Text, kb Keyboard, from int, sent func(delivered int) error) error {
 	if chatID <= 0 {
 		// The PA serves private chats only, whose id is the user id.
 		return ErrInvalidChat
@@ -148,6 +167,9 @@ func (s *Sender) Send(ctx context.Context, chatID int64, text Text, kb Keyboard)
 	}
 	if len(text.parts) > MaxParts {
 		return ErrTooLong
+	}
+	if from < 0 || from > len(text.parts) {
+		return fmt.Errorf("%w: resume at part %d of %d", ErrInvalidConfig, from, len(text.parts))
 	}
 	markup, err := kb.wire()
 	if err != nil {
@@ -160,9 +182,11 @@ func (s *Sender) Send(ctx context.Context, chatID int64, text Text, kb Keyboard)
 		if n := utf16Len(p); n > maxTextUTF16 {
 			return fmt.Errorf("%w: part %d is %d UTF-16 units, limit %d", ErrPartTooLong, i, n, maxTextUTF16)
 		}
+	}
+	for i := from; i < len(text.parts); i++ {
 		req := sendMessageRequest{
 			ChatID:             chatID,
-			Text:               p,
+			Text:               text.parts[i],
 			LinkPreviewOptions: linkPreviewOptions{IsDisabled: true},
 		}
 		if i == len(text.parts)-1 {
@@ -170,6 +194,11 @@ func (s *Sender) Send(ctx context.Context, chatID int64, text Text, kb Keyboard)
 		}
 		if err := s.call(ctx, methodSendMessage, req); err != nil {
 			return err
+		}
+		if sent != nil {
+			if err := sent(i + 1); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -216,12 +245,22 @@ func (kb Keyboard) wire() (*wireMarkup, error) {
 
 // call posts one Bot API method. Any failure -- transport, non-200, ok:false,
 // malformed body -- is an error (I9). The token never appears in an error.
+//
+// Only two failures say the message was not delivered: one before the
+// request was written, and an explicit ok:false answer (*APIError). Every
+// other failure wraps ErrOutcomeUnknown.
 func (s *Sender) call(ctx context.Context, method string, body any) error {
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("pa output %s: encode: %w", method, err)
 	}
 	endpoint := strings.TrimRight(s.base, "/") + "/bot" + s.token + "/" + method
+	// wrote is set once the request headers went out: from then on the Bot
+	// API may act on the request even if no answer comes back.
+	var wrote atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		WroteHeaders: func() { wrote.Store(true) },
+	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("pa output %s: build request failed", method)
@@ -234,30 +273,37 @@ func (s *Sender) call(ctx context.Context, method string, body any) error {
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
+		if wrote.Load() {
+			return fmt.Errorf("%w: pa output %s: request failed after it was sent: %s", ErrOutcomeUnknown, method, s.redact(err.Error()))
+		}
 		return fmt.Errorf("pa output %s: request failed: %s", method, s.redact(err.Error()))
 	}
 	defer resp.Body.Close()
 	raw, err := egress.ReadBody(resp)
 	if err != nil {
-		return fmt.Errorf("pa output %s: read body: %s", method, s.redact(err.Error()))
+		return fmt.Errorf("%w: pa output %s: read body: %s", ErrOutcomeUnknown, method, s.redact(err.Error()))
 	}
 	var env struct {
-		OK          bool   `json:"ok"`
+		OK          *bool  `json:"ok"`
 		ErrorCode   int    `json:"error_code"`
 		Description string `json:"description"`
 		Parameters  *struct {
 			RetryAfter int `json:"retry_after"`
 		} `json:"parameters"`
 	}
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return fmt.Errorf("pa output %s: malformed response (HTTP %d)", method, resp.StatusCode)
+	if err := json.Unmarshal(raw, &env); err != nil || env.OK == nil {
+		return fmt.Errorf("%w: pa output %s: malformed response (HTTP %d)", ErrOutcomeUnknown, method, resp.StatusCode)
 	}
-	if resp.StatusCode != http.StatusOK || !env.OK {
+	switch {
+	case !*env.OK:
 		retry := 0
 		if env.Parameters != nil {
 			retry = env.Parameters.RetryAfter
 		}
 		return &APIError{Method: method, Status: resp.StatusCode, Code: env.ErrorCode, Description: s.redact(env.Description), RetryAfter: retry}
+	case resp.StatusCode != http.StatusOK:
+		// ok:true on an error status is not an answer the Bot API gives.
+		return fmt.Errorf("%w: pa output %s: ok:true with HTTP %d", ErrOutcomeUnknown, method, resp.StatusCode)
 	}
 	return nil
 }

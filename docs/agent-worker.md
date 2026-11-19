@@ -182,7 +182,7 @@ only answers PA claims when `PA_ENABLED` is set there.
 | Variable | Required | Meaning |
 |---|---|---|
 | `AGENT_WORKER_PA` | no | `true` selects the PA loop. Anything but `true`/`false` refuses to start. |
-| `AGENT_PA_BASE_URL` | in PA mode | mctl-telegram origin (`https://host`, no path); the PA routes are `/api/pa/v1/jobs/{claim,turn,reply}`. |
+| `AGENT_PA_BASE_URL` | in PA mode | mctl-telegram origin (`https://host`, no path); the PA routes are `/api/pa/v1/jobs/{claim,turn,reply}`. Plain `http` only for a cluster-local host (`*.svc`, `*.svc.cluster.local`) or loopback: the pool credential and job tokens travel to it. |
 | `AGENT_RUNNER` | `openai` | The PA mode runs the model in-process with no tools; `claude` is refused. |
 | `AGENT_OPENAI_MAX_OUTPUT_TOKENS` | in PA mode | Bounds what the last model call can add past the job's cost limit. |
 | `MODEL_INPUT_USD_PER_MTOK`, `MODEL_OUTPUT_USD_PER_MTOK` | positive in PA mode | A zero price would report every run as free. |
@@ -192,11 +192,14 @@ routes use the per-job token the claim returns. The loop:
 
 1. Claim. `204` means nothing is due; `401`/`403` stops the worker (readiness
    goes false); anything else is retried after `PollInterval`.
-2. Before every model call, `POST /turn` with the estimated context size
-   (bytes / 4). Any refusal ends the run; `503` is retried until the run's
-   deadline, which is 20 seconds before the lease ends.
+2. Before every provider attempt, `POST /turn` with the estimated context
+   size (bytes / 4); a provider 429 or 5xx is retried (at most 4 attempts),
+   each attempt behind its own `/turn`, so every call the provider may bill
+   was admitted first. Any refusal ends the run; `503` is retried until the
+   run's deadline, which is 20 seconds before the lease ends.
 3. The worker's own ceilings apply on top of the claim's limits: at most 8
-   tool calls and 32,000 context tokens. No tools are offered to the model
+   tool calls and 32,000 context tokens. The tool cap is inclusive, as on
+   the server: a cap of N allows N tool calls. No tools are offered to the model
    until the server-side executor exists (#1315); a tool call is answered
    with "no tools" and counts toward the cap. A further model call is made
    only while the run's known spend is under `max_job_cost_usd`.

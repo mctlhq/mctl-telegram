@@ -2,6 +2,7 @@ package pa
 
 import (
 	"context"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -18,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/config"
 	"github.com/mctlhq/mctl-telegram/internal/metrics"
 )
 
@@ -125,10 +127,18 @@ func TestWebhookMonitor(t *testing.T) {
 			t.Fatalf("unreadable %d %q exported as readable: %+v", bad.status, bad.body, o)
 		}
 	}
-	// The 401 seen at the last readable check (21 minutes back now), still
-	// the latest error, is not new; one during the unreadable checks is.
+	// An error that happened during the unreadable checks, 12 minutes
+	// back and so older than one interval, is still news: the window runs
+	// from the last readable check, not from one interval back.
 	now = now.Add(5 * time.Minute)
-	info.set(http.StatusOK, infoJSON(monitorURL, 0, now.Add(-21*time.Minute).Unix(), "Wrong response from the webhook: 401 Unauthorized"))
+	info.set(http.StatusOK, infoJSON(monitorURL, 0, now.Add(-12*time.Minute).Unix(), "Wrong response from the webhook: 502 Bad Gateway"))
+	if o := m.Check(context.Background()); !slices.Equal(o.Problems, []string{ProblemLastErrorRecent}) {
+		t.Fatalf("error during the unreadable stretch missed: %+v", o)
+	}
+	// The error seen at the last readable check, still the latest error,
+	// is not new.
+	now = now.Add(5 * time.Minute)
+	info.set(http.StatusOK, infoJSON(monitorURL, 0, now.Add(-17*time.Minute).Unix(), "Wrong response from the webhook: 502 Bad Gateway"))
 	if o := m.Check(context.Background()); len(o.Problems) != 0 {
 		t.Fatalf("old error re-reported: %+v", o)
 	}
@@ -190,7 +200,7 @@ func TestPAMetricLabels(t *testing.T) {
 	if !slices.Equal(sorted(WebhookProblems()), sorted(metrics.PAWebhookProblems)) {
 		t.Fatalf("problems %v vs metrics %v", WebhookProblems(), metrics.PAWebhookProblems)
 	}
-	outbox := []string{OutboxOutcomeSent, OutboxOutcomeRetry, OutboxOutcomeFailed, OutboxOutcomeDropped,
+	outbox := []string{OutboxOutcomeSent, OutboxOutcomeRetry, OutboxOutcomeFailed, OutboxOutcomeRefused, OutboxOutcomeDropped,
 		OutboxOutcomeUnknown, OutboxOutcomeStale, OutboxOutcomeClaimError}
 	if !slices.Equal(sorted(outbox), sorted(metrics.PAOutboxOutcomes)) {
 		t.Fatalf("outbox outcomes %v vs metrics %v", outbox, metrics.PAOutboxOutcomes)
@@ -266,6 +276,8 @@ func TestSetWebhook_Refusals(t *testing.T) {
 		{"userinfo", SetWebhookRequest{URL: "https://u:p@pa.example/pa/bot/webhook", Secret: secret}},
 		{"other path", SetWebhookRequest{URL: "https://pa.example/hook", Secret: secret}},
 		{"short secret", SetWebhookRequest{URL: monitorURL, Secret: "short"}},
+		{"secret outside the alphabet", SetWebhookRequest{URL: monitorURL, Secret: strings.Repeat("a", 31) + "!"}},
+		{"secret over 256", SetWebhookRequest{URL: monitorURL, Secret: strings.Repeat("a", 257)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hits.Store(0)
@@ -291,6 +303,24 @@ func TestSetWebhook_Refusals(t *testing.T) {
 		}))
 		defer srv.Close()
 		err := SetWebhook(context.Background(), srv.Client(), srv.URL, fakeToken, SetWebhookRequest{URL: monitorURL, Secret: secret})
+		if err == nil || strings.Contains(err.Error(), fakeToken) || strings.Contains(err.Error(), secret) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("ok without a true result", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"ok":true,"result":false}`))
+		}))
+		defer srv.Close()
+		if err := SetWebhook(context.Background(), srv.Client(), srv.URL, fakeToken, SetWebhookRequest{URL: monitorURL, Secret: secret}); err == nil {
+			t.Fatal("result:false was taken for success")
+		}
+	})
+	t.Run("a transport error naming the credentials is redacted", func(t *testing.T) {
+		hc := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("proxy refused bot" + fakeToken + " with secret_token=" + secret)
+		})}
+		err := SetWebhook(context.Background(), hc, "https://api.telegram.test", fakeToken, SetWebhookRequest{URL: monitorURL, Secret: secret})
 		if err == nil || strings.Contains(err.Error(), fakeToken) || strings.Contains(err.Error(), secret) {
 			t.Fatalf("err = %v", err)
 		}
@@ -353,5 +383,17 @@ func TestSetWebhookNotCalledByServer(t *testing.T) {
 	}
 	if len(calls) != 0 {
 		t.Fatalf("setWebhook referenced outside its helper: %v", calls)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestWebhookPathMatchesConfig: PA_WEBHOOK_URL is validated against the
+// path the webhook is served on.
+func TestWebhookPathMatchesConfig(t *testing.T) {
+	if WebhookPath != config.PAWebhookPath {
+		t.Fatalf("pa %q, config %q", WebhookPath, config.PAWebhookPath)
 	}
 }

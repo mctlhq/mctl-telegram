@@ -3,6 +3,7 @@ package pa
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -39,9 +40,17 @@ func (h *runLoopHarness) failSends(err error) {
 
 var floodWait = &output.APIError{Method: "sendMessage", Status: 429, Code: 429, RetryAfter: 3}
 
+// notWritten is a send that failed before its request was written (the
+// dial was refused): nothing reached Telegram, so it is retried.
+var notWritten = errors.New("pa output sendMessage: request failed: dial tcp: connection refused")
+
+// cutOff is a send whose request was written and whose answer was never
+// read (the connection was reset): it may have been delivered.
+var cutOff = fmt.Errorf("%w: pa output sendMessage: request failed after it was sent: connection reset by peer", output.ErrOutcomeUnknown)
+
 // TestRunLoop_ReplySurvivesFailedSend: the answer is committed with the
-// job; a failed send answers delivered:false, and the background pass
-// sends it once, rendered again from the stored fragment.
+// job and queued; a send refused with a flood wait leaves it due, and the
+// background pass sends it once, rendered again from the stored fragment.
 func TestRunLoop_ReplySurvivesFailedSend(t *testing.T) {
 	counts := outboxCounts{}
 	h := newRunLoopHarness(t, withOutboxCounter(counts))
@@ -50,7 +59,7 @@ func TestRunLoop_ReplySurvivesFailedSend(t *testing.T) {
 	c := h.mustClaim()
 	h.failSends(floodWait)
 	w := h.post(RouteReply, c.Token, replyRequest{Text: "See https://example.org/a and https://evil.example/x"})
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"delivered":false`) {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"queued":true`) {
 		t.Fatalf("reply: %d %s", w.Code, w.Body)
 	}
 	if js, _ := h.jobStatus(c.JobID); js != "done" || h.outboxStatus(jobs.OutboxReply) != "pending" {
@@ -75,7 +84,8 @@ func TestRunLoop_ReplySurvivesFailedSend(t *testing.T) {
 }
 
 // TestRunLoop_NoticesSurviveFailedSend: the hold, run-failed and dropped
-// notices are retried after a failed send.
+// notices are retried after a send that failed before its request was
+// written.
 func TestRunLoop_NoticesSurviveFailedSend(t *testing.T) {
 	h := newRunLoopHarness(t, withBudget(jobs.Budget{PerJobUSD: 0.25, PrincipalDayUSD: 0.25, PrincipalMonthUSD: 20, GlobalDayUSD: 20}))
 	h.consent(aliceID)
@@ -84,7 +94,7 @@ func TestRunLoop_NoticesSurviveFailedSend(t *testing.T) {
 	if w := h.post(RouteReply, c.Token, replyRequest{Text: "done"}); w.Code != http.StatusOK {
 		t.Fatalf("reply: %d", w.Code)
 	}
-	h.failSends(errors.New("connection reset"))
+	h.failSends(notWritten)
 	h.text(aliceID, "two")
 	if _, code := h.claim(); code != http.StatusNoContent {
 		t.Fatalf("claim: %d", code)
@@ -165,14 +175,14 @@ func TestRunLoop_OutboxPermanentFailure(t *testing.T) {
 	}
 }
 
-// TestRunLoop_OutboxGivesUp: transient failures are retried up to
-// OutboxMaxAttempts, then the row fails.
+// TestRunLoop_OutboxGivesUp: failures known to have sent nothing are
+// retried up to OutboxMaxAttempts, then the row fails.
 func TestRunLoop_OutboxGivesUp(t *testing.T) {
 	h := newRunLoopHarness(t)
 	h.consent(aliceID)
 	h.text(aliceID, "hello")
 	c := h.mustClaim()
-	h.failSends(errors.New("connection reset"))
+	h.failSends(notWritten)
 	if w := h.post(RouteReply, c.Token, replyRequest{Text: "an answer"}); w.Code != http.StatusOK {
 		t.Fatalf("reply: %d", w.Code)
 	}
@@ -230,21 +240,58 @@ func TestRunLoop_OutboxUnreadableIsNotEmpty(t *testing.T) {
 	}
 }
 
-func TestPermanentSendError(t *testing.T) {
+// TestSendOutcome: only a failure known to have sent nothing is retried;
+// a refusal is final; everything that may have reached Telegram is
+// unknown and never sent again (S1-O4).
+func TestSendOutcome(t *testing.T) {
+	h := newRunLoopHarness(t)
+	now := h.now
+	it := jobs.OutboxItem{ID: 1, Principal: aliceID, JobID: 1, Kind: jobs.OutboxRunFailed, Attempts: 1}
 	for _, tc := range []struct {
-		err  error
-		want bool
+		name    string
+		err     error
+		status  jobs.OutboxStatus
+		outcome string
+		wait    time.Duration
 	}{
-		{&output.APIError{Status: 403}, true},
-		{&output.APIError{Status: 400}, true},
-		{&output.APIError{Status: 429, RetryAfter: 1}, false},
-		{&output.APIError{Status: 502}, false},
-		{output.ErrInvalidChat, true},
-		{errors.New("dial tcp: timeout"), false},
-		{context.DeadlineExceeded, false},
+		{"accepted", nil, jobs.OutboxSent, OutboxOutcomeSent, 0},
+		{"cut off after the write", cutOff, jobs.OutboxUnknown, OutboxOutcomeUnknown, 0},
+		{"context ended after the write", fmt.Errorf("%w: context deadline exceeded", output.ErrOutcomeUnknown), jobs.OutboxUnknown, OutboxOutcomeUnknown, 0},
+		{"blocked by the user", &output.APIError{Status: 403, Code: 403}, jobs.OutboxFailed, OutboxOutcomeRefused, 0},
+		{"chat not found", &output.APIError{Status: 400, Code: 400}, jobs.OutboxFailed, OutboxOutcomeRefused, 0},
+		{"flood wait under the backoff", floodWait, jobs.OutboxPending, OutboxOutcomeRetry, jobs.OutboxBackoff(1)},
+		{"flood wait over the backoff", &output.APIError{Status: 429, RetryAfter: 100}, jobs.OutboxPending, OutboxOutcomeRetry, 100 * time.Second},
+		{"bot api 502", &output.APIError{Status: 502}, jobs.OutboxPending, OutboxOutcomeRetry, jobs.OutboxBackoff(1)},
+		{"ok false on a 200", &output.APIError{Status: 200, Code: 400}, jobs.OutboxUnknown, OutboxOutcomeUnknown, 0},
+		{"refused before building", output.ErrInvalidChat, jobs.OutboxFailed, OutboxOutcomeFailed, 0},
+		{"too long", output.ErrTooLong, jobs.OutboxFailed, OutboxOutcomeFailed, 0},
+		{"part too long", output.ErrPartTooLong, jobs.OutboxFailed, OutboxOutcomeFailed, 0},
+		{"failed before the write", notWritten, jobs.OutboxPending, OutboxOutcomeRetry, jobs.OutboxBackoff(1)},
+		{"context ended before the write", context.DeadlineExceeded, jobs.OutboxPending, OutboxOutcomeRetry, jobs.OutboxBackoff(1)},
 	} {
-		if got := permanentSendError(tc.err); got != tc.want {
-			t.Errorf("%v: %v, want %v", tc.err, got, tc.want)
+		c, outcome := h.loop.sendOutcome(it, tc.err)
+		if c.Status != tc.status || outcome != tc.outcome {
+			t.Errorf("%s: %s/%s, want %s/%s", tc.name, c.Status, outcome, tc.status, tc.outcome)
+		}
+		if tc.status == jobs.OutboxPending && !c.RetryAt.Equal(now.Add(tc.wait)) {
+			t.Errorf("%s: retry at +%s, want +%s", tc.name, c.RetryAt.Sub(now), tc.wait)
+		}
+	}
+	last := it
+	last.Attempts = jobs.OutboxMaxAttempts
+	if c, outcome := h.loop.sendOutcome(last, floodWait); c.Status != jobs.OutboxFailed || outcome != OutboxOutcomeFailed {
+		t.Errorf("last attempt: %s/%s, want failed", c.Status, outcome)
+	}
+}
+
+// TestOutboxBackoff pins the schedule: 15s doubling, capped at 10m.
+func TestOutboxBackoff(t *testing.T) {
+	for n, want := range map[int]time.Duration{
+		1: 15 * time.Second, 2: 30 * time.Second, 5: 4 * time.Minute, 6: 8 * time.Minute,
+		7: 10 * time.Minute, 8: 10 * time.Minute, 40: 10 * time.Minute,
+	} {
+		if got := jobs.OutboxBackoff(n); got != want {
+			t.Errorf("OutboxBackoff(%d) = %s, want %s", n, got, want)
 		}
 	}
 }

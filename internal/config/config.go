@@ -598,6 +598,13 @@ var paBotTokenFormat = regexp.MustCompile(`^[0-9]+:[A-Za-z0-9_-]{30,}$`)
 // paWebhookSecretChars is Telegram's documented secret_token alphabet.
 var paWebhookSecretChars = regexp.MustCompile(`^[A-Za-z0-9_-]{1,256}$`)
 
+// ValidPAWebhookSecret reports whether s is a PA_WEBHOOK_SECRET Load
+// accepts: MinPAWebhookSecretLen to 256 characters of Telegram's
+// secret_token alphabet. pa.SetWebhook checks the same rule.
+func ValidPAWebhookSecret(s string) bool {
+	return len(s) >= MinPAWebhookSecretLen && paWebhookSecretChars.MatchString(s)
+}
+
 // loadPA reads the PA settings. With PA_ENABLED off it reads nothing else, so
 // a stray PA_BOT_TOKEN in an environment that has not enabled the PA cannot
 // be picked up by anything. Errors never contain the token or the secret.
@@ -615,7 +622,7 @@ func loadPA(c *Config) error {
 	if loginID, ok := BotIDFromToken(c.TelegramLoginBotToken); ok && loginID == paID {
 		return errors.New("PA_BOT_TOKEN must belong to a different bot than TELEGRAM_LOGIN_BOT_TOKEN")
 	}
-	if len(c.PAWebhookSecret) < MinPAWebhookSecretLen || !paWebhookSecretChars.MatchString(c.PAWebhookSecret) {
+	if !ValidPAWebhookSecret(c.PAWebhookSecret) {
 		return fmt.Errorf("PA_ENABLED=true requires PA_WEBHOOK_SECRET of %d-256 characters from [A-Za-z0-9_-]", MinPAWebhookSecretLen)
 	}
 	c.PAWebhookURL = os.Getenv("PA_WEBHOOK_URL")
@@ -1517,9 +1524,10 @@ func loadK8sSA(c *Config) error {
 	return nil
 }
 
-// paWebhookPath is pa.WebhookPath (config does not import internal/pa;
-// TestPAWebhookPathMatches keeps the two equal).
-const paWebhookPath = "/pa/bot/webhook"
+// PAWebhookPath is pa.WebhookPath. config does not import internal/pa
+// (internal/pa imports config for ValidPAWebhookSecret);
+// pa.TestWebhookPathMatchesConfig keeps the two equal.
+const PAWebhookPath = "/pa/bot/webhook"
 
 // validatePAWebhookURL accepts an absolute https URL with a host, the PA
 // webhook path, and no userinfo, query or fragment. The value is never
@@ -1540,8 +1548,8 @@ func validatePAWebhookURL(raw string) error {
 		return errors.New("userinfo is not allowed")
 	case u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.ContainsAny(raw, "?#"):
 		return errors.New("query and fragment are not allowed")
-	case u.Path != paWebhookPath:
-		return errors.New("path must be " + paWebhookPath)
+	case u.Path != PAWebhookPath:
+		return errors.New("path must be " + PAWebhookPath)
 	}
 	return nil
 }

@@ -276,6 +276,9 @@ func (s *Store) ForgetPAConversations(ctx context.Context, tx *sql.Tx, principal
 		jobs.StatusPending, jobs.StatusHeld, jobs.StatusClaimed); err != nil {
 		return err
 	}
+	if err := deletePAOutboxNotices(ctx, tx, principal); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pa_fragments WHERE principal = $1`, principal); err != nil {
 		return fmt.Errorf("forget pa conversations: fragments: %w", err)
 	}

@@ -93,7 +93,7 @@ func TestWorkerE2E_Reply(t *testing.T) {
 	if len(m.inputs) != 1 || m.inputs[0][1].Role != "user" || !strings.Contains(m.inputs[0][1].Content, "example.org/a") {
 		t.Fatalf("model input = %+v", m.inputs)
 	}
-	sent := h.sender.to(aliceID)
+	sent := h.sentTo(aliceID)
 	if len(sent) != 1 || !strings.Contains(sent[0], "https://example.org/a") || strings.Contains(sent[0], "evil.example") {
 		t.Fatalf("sent = %q", sent)
 	}
@@ -150,14 +150,14 @@ func TestWorkerE2E_ToolCapEndsRun(t *testing.T) {
 	if out != agentworker.PAAbandoned || err == nil {
 		t.Fatalf("run = %s, %v", out, err)
 	}
-	if len(h.sender.to(aliceID)) != 0 {
+	if len(h.sentTo(aliceID)) != 0 {
 		t.Fatal("something was sent for an unfinished run")
 	}
 	h.now = h.now.Add(jobs.DefaultLease + time.Second)
 	if c2, err := w.Claim(context.Background()); c2 != nil || err != nil {
 		t.Fatalf("claim after expiry = %v, %v", c2, err)
 	}
-	sent := h.sender.to(aliceID)
+	sent := h.sentTo(aliceID)
 	if len(sent) != 1 || sent[0] != output.ServerText(output.TextRunFailed).String() {
 		t.Fatalf("sent %q, want one run-failed notice", sent)
 	}
@@ -182,7 +182,7 @@ func TestWorkerE2E_StaleTokenStops(t *testing.T) {
 	if out != agentworker.PAStopped || err == nil || len(m.inputs) != 1 {
 		t.Fatalf("replayed run = %s, %v, model calls %d", out, err, len(m.inputs))
 	}
-	if len(h.sender.to(aliceID)) != 1 {
+	if len(h.sentTo(aliceID)) != 1 {
 		t.Fatal("a replayed run sent a second reply")
 	}
 }
