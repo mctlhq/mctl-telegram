@@ -30,6 +30,11 @@ type paCollectors struct {
 	updates *prometheus.CounterVec
 	outbox  *prometheus.CounterVec
 	checks  *prometheus.CounterVec
+	// problemChecks counts readable checks per problem found. The problem
+	// gauge holds the last check's value until the next one, so its
+	// samples count scrapes, not checks; alerts that need "seen at two
+	// checks" count increments of this instead.
+	problemChecks *prometheus.CounterVec
 	// up, ok and lastOK have no labels but are vectors so that they do
 	// not exist at all until the monitor starts: with PA_ENABLED off there
 	// is no webhook to watch, and a 0 would read as "unreadable".
@@ -55,6 +60,10 @@ func newPACollectors() *paCollectors {
 			Name: "mctl_pa_webhook_info_checks_total",
 			Help: "getWebhookInfo checks by result: ok, problem or unreadable.",
 		}, []string{"result"}),
+		problemChecks: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "mctl_pa_webhook_problem_checks_total",
+			Help: "Readable getWebhookInfo checks that found the problem. Exists from the monitor start.",
+		}, []string{"problem"}),
 		up: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "mctl_pa_webhook_info_up",
 			Help: "1 when the last getWebhookInfo read succeeded, 0 when it failed (state unknown, never healthy). Absent while the monitor is not running.",
@@ -93,7 +102,7 @@ func newPACollectors() *paCollectors {
 }
 
 func (c *paCollectors) collectors() []prometheus.Collector {
-	return []prometheus.Collector{c.updates, c.outbox, c.checks, c.up, c.ok, c.lastOK, c.problem, c.pending, c.lastErr}
+	return []prometheus.Collector{c.updates, c.outbox, c.checks, c.problemChecks, c.up, c.ok, c.lastOK, c.problem, c.pending, c.lastErr}
 }
 
 // CountPAUpdate counts one webhook delivery. Satisfies pa.Counter.
@@ -132,6 +141,7 @@ func (r *Registry) ObservePAWebhookInfo(readable bool, problems []string, pendin
 		v := 0.0
 		if found[p] {
 			v = 1
+			c.problemChecks.WithLabelValues(p).Inc()
 		}
 		c.problem.WithLabelValues(p).Set(v)
 	}
@@ -151,4 +161,7 @@ func (r *Registry) StartPAWebhookMonitor() {
 	r.pa.lastOK.WithLabelValues().Set(0)
 	r.pa.up.WithLabelValues().Set(0)
 	r.pa.ok.WithLabelValues().Set(0)
+	for _, p := range PAWebhookProblems {
+		r.pa.problemChecks.WithLabelValues(p).Add(0)
+	}
 }

@@ -3944,7 +3944,9 @@ mctl-gitops vm-rules is part of enabling the PA (#1318).
   `PA_BOT_TOKEN` and compares it with `PA_WEBHOOK_URL` and the expected
   `allowed_updates` (`message`, `callback_query`). It exports
   `mctl_pa_webhook_info_up` (1 readable, 0 not), `mctl_pa_webhook_info_ok`,
-  `mctl_pa_webhook_problem{problem}`, `mctl_pa_webhook_pending_updates`,
+  `mctl_pa_webhook_problem{problem}`,
+  `mctl_pa_webhook_problem_checks_total{problem}` (readable checks that
+  found the problem), `mctl_pa_webhook_pending_updates`,
   `mctl_pa_webhook_info_last_error_timestamp_seconds` and
   `mctl_pa_webhook_info_last_success_timestamp_seconds`. A failed read sets
   `up` and `ok` to 0 and withdraws the per-state series: an unreadable
@@ -4000,9 +4002,14 @@ open an issue.
 `PA_WEBHOOK_URL`. Treat it as a possible token compromise: rotate
 `PA_BOT_TOKEN` with BotFather, then re-register the webhook (#1318).
 `allowed_updates_changed`: the webhook was registered with another update
-list; re-register it with the operator helper. The alert takes the
-maximum over 15 minutes, so a URL that flips between checks keeps it
-firing.
+list; re-register it with the operator helper. The alert fires once two
+checks within 20 minutes have seen the same problem, counted by
+`mctl_pa_webhook_problem_checks_total{problem}`: one bad check stays
+silent, while a URL that flips between checks, or an unreadable check in
+between, still fires on the second bad one. It counts checks rather than
+samples of `mctl_pa_webhook_problem`, which holds one check's value for
+the whole 5-minute interval and so shows a single check as several
+samples.
 
 <a id="mctlpawebhooksecretrejected"></a>
 ### MctlPAWebhookSecretRejected
