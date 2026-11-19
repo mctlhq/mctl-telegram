@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"slices"
 	"strings"
@@ -136,7 +137,10 @@ func ParsePin(raw []byte) (*Pin, error) {
 	if err := dec.Decode(&p); err != nil {
 		return nil, fmt.Errorf("%w: decode: %v", ErrInvalidPin, err)
 	}
-	if dec.More() {
+	// Only a clean EOF ends the pin. dec.More reports false for a stray
+	// closing bracket ("{...}]"), so it would let that through; Token
+	// returns a syntax error for it instead (#1331 follow-up).
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("%w: trailing data", ErrInvalidPin)
 	}
 	if err := p.Validate(); err != nil {

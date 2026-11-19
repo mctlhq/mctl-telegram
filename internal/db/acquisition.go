@@ -196,11 +196,15 @@ func (s *Store) AcquisitionReport(ctx context.Context, since time.Time) ([]Acqui
 	if pg {
 		day = `(l.created_at AT TIME ZONE 'UTC')::date`
 	}
+	// pa:* rows are the Personal Assistant's connector audit: a call the
+	// assistant made for the user is not the user using the connector, so
+	// it counts neither as activation nor as a return visit (as in
+	// public_stats.go).
 	rows, err := s.DB.QueryContext(ctx,
 		`WITH per_user AS (
 		     SELECT u.id AS uid, `+acquisitionLabelSQL+` AS label,
-		            (SELECT COUNT(*) FROM audit_logs l WHERE l.user_id = u.id) AS calls,
-		            (SELECT COUNT(DISTINCT `+day+`) FROM audit_logs l WHERE l.user_id = u.id) AS days
+		            (SELECT COUNT(*) FROM audit_logs l WHERE l.user_id = u.id AND l.tool_name NOT LIKE 'pa:%') AS calls,
+		            (SELECT COUNT(DISTINCT `+day+`) FROM audit_logs l WHERE l.user_id = u.id AND l.tool_name NOT LIKE 'pa:%') AS days
 		     FROM users u
 		     LEFT JOIN user_acquisition a ON a.user_id = u.id
 		     LEFT JOIN acquisition_capture_epoch e ON e.id = 1
