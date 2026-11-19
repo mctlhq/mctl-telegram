@@ -206,13 +206,104 @@ func TestRevocationCache_StaleRefreshErrorServesLastKnownGood(t *testing.T) {
 	if err := store.DB.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	cache.now = func() time.Time { return time.Now().Add(time.Hour) }
+	// Past the TTL (stale, so a refresh is attempted and fails) but within
+	// MaxRevocationSnapshotAge of the snapshot's read.
+	cache.now = func() time.Time { return time.Now().Add(MaxRevocationSnapshotAge - time.Second) }
 	revoked, err := cache.IsRevoked(ctx, "jti-c", 1, time.Now())
 	if err != nil {
 		t.Fatalf("a populated cache must serve its last-known-good snapshot on a later refresh error, got err: %v", err)
 	}
 	if !revoked {
 		t.Fatal("last-known-good snapshot lost jti-c")
+	}
+}
+
+// TestRevocationCache_SnapshotOlderThanBoundFailsClosed is the regression
+// test for #1346: once refreshes keep failing, a snapshot older than
+// MaxRevocationSnapshotAge must produce an error, never "not revoked". The
+// token checked here was revoked AFTER the snapshot was taken, which is
+// exactly the case the old behaviour let through for the whole outage.
+func TestRevocationCache_SnapshotOlderThanBoundFailsClosed(t *testing.T) {
+	store := newTestLocaljwtStore(t)
+	ctx := context.Background()
+	base := time.Now()
+	failures := 0
+	cache := NewRevocationCache(store, DefaultRevocationCacheTTL)
+	cache.SetRefreshErrorHook(func() { failures++ })
+	cache.now = func() time.Time { return base }
+	if revoked, err := cache.IsRevoked(ctx, "jti-late", 1, base); err != nil || revoked {
+		t.Fatalf("initial populate: revoked=%v err=%v", revoked, err)
+	}
+	// Revoked after the snapshot; the store then becomes unreadable, so no
+	// refresh can ever observe the revocation.
+	if err := store.RevokeWorkerToken(ctx, "jti-late", 1, "", 0); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if err := store.DB.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	cache.now = func() time.Time { return base.Add(MaxRevocationSnapshotAge) }
+	if _, err := cache.IsRevoked(ctx, "jti-late", 1, base); err != nil {
+		t.Fatalf("at exactly the bound the snapshot is still served, got err: %v", err)
+	}
+	for _, after := range []time.Duration{MaxRevocationSnapshotAge + time.Millisecond, time.Hour} {
+		cache.now = func() time.Time { return base.Add(after) }
+		revoked, err := cache.IsRevoked(ctx, "jti-late", 1, base)
+		if err == nil {
+			t.Fatalf("snapshot %s old with refresh failing: want error, got revoked=%v", after, revoked)
+		}
+		if _, err := cache.IsBlanketRevoked(ctx, 1, base); err == nil {
+			t.Fatalf("IsBlanketRevoked with a snapshot %s old: want error", after)
+		}
+	}
+	if failures == 0 {
+		t.Fatal("refresh error hook was never called")
+	}
+}
+
+// TestProvider_StaleRevocationSnapshotPastBoundRejects asserts the bound at
+// the Authenticate level, so it fails if a caller ever swallows the error.
+// The cache reads its own store, which is closed; the provider's store stays
+// healthy, so the only possible reason for a rejection is the revocation
+// check. The within-bound case is the control: the same token authenticates.
+func TestProvider_StaleRevocationSnapshotPastBoundRejects(t *testing.T) {
+	ctx := context.Background()
+	userStore := newTestLocaljwtStore(t)
+	revStore := newTestLocaljwtStore(t)
+	base := time.Now()
+	cache := NewRevocationCache(revStore, DefaultRevocationCacheTTL)
+	cache.now = func() time.Time { return base }
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("populate: %v", err)
+	}
+	if err := revStore.DB.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	p, err := NewProvider(userStore, ProviderConfig{
+		Secret: testSecret, ExpectedIssuer: testIssuer, RevocationCache: cache,
+	})
+	if err != nil {
+		t.Fatalf("new provider: %v", err)
+	}
+	iss, _ := NewIssuer(testSecret, testIssuer)
+	tok, err := iss.Mint(Claims{Subject: "tg:7", TelegramID: 7, Jti: "jti-bound"}, time.Hour)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	auth := func() error {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.Header.Set("Authorization", "Bearer "+tok)
+		_, err := p.Authenticate(r)
+		return err
+	}
+	cache.now = func() time.Time { return base.Add(MaxRevocationSnapshotAge - time.Second) }
+	if err := auth(); err != nil {
+		t.Fatalf("within the bound the last good snapshot must still authenticate: %v", err)
+	}
+	cache.now = func() time.Time { return base.Add(MaxRevocationSnapshotAge + time.Second) }
+	if err := auth(); err == nil {
+		t.Fatal("past the bound with refresh failing, Authenticate must refuse")
 	}
 }
 

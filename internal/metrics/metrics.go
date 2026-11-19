@@ -119,6 +119,12 @@ type Registry struct {
 	EventsPublishFailuresTotal prometheus.Counter
 	EventsOutboxBacklog        prometheus.Gauge
 
+	// WorkerTokenRevocationRefreshFailuresTotal counts failed reloads of the
+	// worker-token revocation cache. A populated cache serves its last good
+	// snapshot for at most localjwt.MaxRevocationSnapshotAge; past that,
+	// worker-token checks fail as unverifiable (#1346).
+	WorkerTokenRevocationRefreshFailuresTotal prometheus.Counter
+
 	// Enable_access login flow (in-browser phone -> SMS -> 2FA).
 	// LoginPhoneStepTotal counts phone-step outcomes, labeled by result:
 	// "ok" (SendCode returned and the code screen was shown), "timeout"
@@ -1017,6 +1023,10 @@ func New() *Registry {
 		Name: "mctl_events_publish_failures_total",
 		Help: "Failed attempts to publish an event envelope; the row stays in the outbox.",
 	})
+	r.WorkerTokenRevocationRefreshFailuresTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "mctl_worker_token_revocation_refresh_failures_total",
+		Help: "Failed reloads of the worker-token revocation cache; a snapshot older than its bound refuses worker tokens.",
+	})
 	r.EventsOutboxBacklog = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "mctl_events_outbox_backlog",
 		Help: "Event envelopes committed but not yet published.",
@@ -1030,6 +1040,7 @@ func New() *Registry {
 		r.EventsPublishedTotal,
 		r.EventsPublishFailuresTotal,
 		r.EventsOutboxBacklog,
+		r.WorkerTokenRevocationRefreshFailuresTotal,
 		r.HTTPRequestsTotal,
 		r.AuthFailuresTotal,
 		r.RateLimitEventsTotal,
