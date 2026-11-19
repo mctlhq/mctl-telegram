@@ -15,8 +15,10 @@
 // Package egress builds the HTTP clients the Personal Assistant uses for
 // every outbound request it makes to a catalog MCP server: OAuth
 // authorization-server metadata discovery, dynamic client registration, the
-// token and revocation endpoints, and the MCP transport. It implements the
-// egress policy of threat model T9
+// token and revocation endpoints, and the MCP transport. The bot's own Bot
+// API sends (internal/pa/output, threat model T14) use it too, with
+// PurposeBotAPI and the Bot API host as the only allowed host. It implements
+// the egress policy of threat model T9
 // (docs/agent-runtime/personal-assistant-threat-model.md):
 //
 //   - HTTPS on port 443 only.
@@ -102,6 +104,9 @@ const (
 	PurposeToken
 	PurposeRevocation
 	PurposeMCP
+	// PurposeBotAPI is for the bot's own Telegram Bot API calls
+	// (internal/pa/output). The caller allows only the Bot API host.
+	PurposeBotAPI
 )
 
 func (p Purpose) String() string {
@@ -116,6 +121,8 @@ func (p Purpose) String() string {
 		return "revocation"
 	case PurposeMCP:
 		return "mcp"
+	case PurposeBotAPI:
+		return "botapi"
 	default:
 		return fmt.Sprintf("purpose(%d)", int(p))
 	}
@@ -138,6 +145,7 @@ var defaultLimits = map[Purpose]limits{
 	PurposeToken:        {timeout: 10 * time.Second, maxBody: 64 << 10},
 	PurposeRevocation:   {timeout: 10 * time.Second, maxBody: 16 << 10},
 	PurposeMCP:          {timeout: 30 * time.Second, maxBody: 1 << 20},
+	PurposeBotAPI:       {timeout: 10 * time.Second, maxBody: 64 << 10},
 }
 
 // ceilingLimits bound the Config overrides: a value above the ceiling is
@@ -148,6 +156,7 @@ var ceilingLimits = map[Purpose]limits{
 	PurposeToken:        {timeout: 30 * time.Second, maxBody: 256 << 10},
 	PurposeRevocation:   {timeout: 30 * time.Second, maxBody: 64 << 10},
 	PurposeMCP:          {timeout: 5 * time.Minute, maxBody: 8 << 20},
+	PurposeBotAPI:       {timeout: 30 * time.Second, maxBody: 256 << 10},
 }
 
 // Config configures one client.
