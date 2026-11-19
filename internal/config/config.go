@@ -525,7 +525,8 @@ type Config struct {
 	ManagedBudgetUSDPerAccountMonth float64
 	// ManagedClaimNotAfter (MANAGED_CLAIM_NOT_AFTER, RFC 3339, optional) ends
 	// managed claims at that instant, so a time-boxed run stops spending without
-	// depending on anyone being there to stop it. Zero means no cutoff.
+	// depending on anyone being there to stop it. Zero means no cutoff. It
+	// ends PA claims too (PABudget; owner decision 2026-11-19).
 	ManagedClaimNotAfter      time.Time
 	ManagedBudgetUSDGlobalDay float64
 	// WorkItemTenant is the single configured mctl-api tenant every
@@ -571,7 +572,8 @@ type Config struct {
 	//   PA_MAX_CONTEXT_TOKENS (32000);
 	//   PA_BUDGET_USD_JOB / _DAY / _MONTH (0.25 / 2 / 20), the per-run
 	//   reservation and the per-principal caps. The platform-wide daily cap
-	//   is MANAGED_BUDGET_USD_GLOBAL_DAY, shared with the managed runtime.
+	//   is MANAGED_BUDGET_USD_GLOBAL_DAY, shared with the managed runtime;
+	//   PA_MIN_TURN_COST_USD (0.005), the settlement floor per model turn.
 	// Active jobs per principal (1) and tool calls per run (8) are fixed.
 	PARateMessages     int
 	PARateWindow       time.Duration
@@ -579,6 +581,17 @@ type Config struct {
 	PABudgetUSDJob     float64
 	PABudgetUSDDay     float64
 	PABudgetUSDMonth   float64
+	PAMinTurnUSD       float64
+}
+
+// PABudget is the PA run loop's budget: the PA caps, the global day shared
+// with the managed runtime, and MANAGED_CLAIM_NOT_AFTER, which ends PA
+// claims as it ends managed ones.
+func (c *Config) PABudget() jobs.Budget {
+	return jobs.Budget{
+		PerJobUSD: c.PABudgetUSDJob, PrincipalDayUSD: c.PABudgetUSDDay, PrincipalMonthUSD: c.PABudgetUSDMonth,
+		GlobalDayUSD: c.ManagedBudgetUSDGlobalDay, MinTurnUSD: c.PAMinTurnUSD, ClaimNotAfter: c.ManagedClaimNotAfter,
+	}
 }
 
 // MinPAWebhookSecretLen is the shortest PA_WEBHOOK_SECRET Load accepts.
@@ -628,6 +641,7 @@ func loadPALimits(c *Config) error {
 	c.PARateMessages, c.PARateWindow = jobs.DefaultRateMessages, jobs.DefaultRateWindow
 	c.PAMaxContextTokens = jobs.DefaultMaxContextTokens
 	c.PABudgetUSDJob, c.PABudgetUSDDay, c.PABudgetUSDMonth = jobs.DefaultBudgetJobUSD, jobs.DefaultBudgetDayUSD, jobs.DefaultBudgetMonthUSD
+	c.PAMinTurnUSD = jobs.DefaultMinTurnUSD
 	for _, iv := range []struct {
 		key string
 		dst *int
@@ -650,7 +664,8 @@ func loadPALimits(c *Config) error {
 	for _, fv := range []struct {
 		key string
 		dst *float64
-	}{{"PA_BUDGET_USD_JOB", &c.PABudgetUSDJob}, {"PA_BUDGET_USD_DAY", &c.PABudgetUSDDay}, {"PA_BUDGET_USD_MONTH", &c.PABudgetUSDMonth}} {
+	}{{"PA_BUDGET_USD_JOB", &c.PABudgetUSDJob}, {"PA_BUDGET_USD_DAY", &c.PABudgetUSDDay}, {"PA_BUDGET_USD_MONTH", &c.PABudgetUSDMonth},
+		{"PA_MIN_TURN_COST_USD", &c.PAMinTurnUSD}} {
 		if v := os.Getenv(fv.key); v != "" {
 			f, err := strconv.ParseFloat(v, 64)
 			if err != nil || !(f > 0) || math.IsInf(f, 0) {
@@ -664,9 +679,18 @@ func loadPALimits(c *Config) error {
 	}
 	// The global day window is MANAGED_BUDGET_USD_GLOBAL_DAY, shared with
 	// the managed runtime; a PA job dearer than it would be held forever.
-	// MANAGED_CLAIM_NOT_AFTER is managed-only: PA_ENABLED is the PA switch.
 	if c.PABudgetUSDJob > c.ManagedBudgetUSDGlobalDay {
 		return errors.New("PA_BUDGET_USD_JOB must not exceed MANAGED_BUDGET_USD_GLOBAL_DAY")
+	}
+	// No job settles more than jobs.MaxSettleUSD, an unreported one
+	// included, which settles at the reservation.
+	if c.PABudgetUSDJob > jobs.MaxSettleUSD {
+		return fmt.Errorf("PA_BUDGET_USD_JOB must not exceed %v", jobs.MaxSettleUSD)
+	}
+	// The floor of a run at its turn cap (one turn per tool call plus the
+	// answer) must fit the reservation it is settled against.
+	if c.PAMinTurnUSD*float64(jobs.DefaultMaxToolCalls+1) > c.PABudgetUSDJob+1e-9 {
+		return fmt.Errorf("PA_MIN_TURN_COST_USD x %d turns must not exceed PA_BUDGET_USD_JOB", jobs.DefaultMaxToolCalls+1)
 	}
 	return nil
 }

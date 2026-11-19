@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -151,9 +152,27 @@ func ref(j jobs.Job) jobs.Ref {
 
 func (f *paFixture) finish(j jobs.Job, cost float64) {
 	f.t.Helper()
-	if _, err := f.s.FinishPAJob(context.Background(), ref(j), jobs.FinishRequest{Now: f.now, CostUSD: cost, Gate: okGate}); err != nil {
+	if _, err := f.s.FinishPAJob(context.Background(), ref(j), jobs.FinishRequest{Now: f.now, CostUSD: cost, MinTurnUSD: f.b.MinTurnUSD, Gate: okGate}); err != nil {
 		f.t.Fatal(err)
 	}
+}
+
+func (f *paFixture) turn(j jobs.Job) {
+	f.t.Helper()
+	if _, err := f.s.AdmitPATurn(context.Background(), ref(j), jobs.TurnRequest{
+		Now: f.now, ContextTokens: 1, MaxContextTokens: 100, MaxTurns: 9, Gate: okGate,
+	}); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func firstPAJob(t *testing.T, s *Store, principal int64) int64 {
+	t.Helper()
+	var id int64
+	if err := s.DB.QueryRow(`SELECT MIN(id) FROM pa_jobs WHERE principal = $1`, principal).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
 }
 
 func (f *paFixture) status(id int64) (string, string) {
@@ -177,7 +196,7 @@ func newPAFixture(t *testing.T, s *Store) *paFixture {
 		now = now.Add(-time.Hour)
 	}
 	return &paFixture{t: t, s: s, now: now, b: jobs.Budget{
-		PerJobUSD: 0.25, PrincipalDayUSD: 2, PrincipalMonthUSD: 20, GlobalDayUSD: 1e6,
+		PerJobUSD: 0.25, PrincipalDayUSD: 2, PrincipalMonthUSD: 20, GlobalDayUSD: 1e6, MinTurnUSD: 0.005,
 	}}
 }
 
@@ -487,20 +506,26 @@ func runPAJobsSuite(t *testing.T, s *Store) {
 		f := newPAFixture(t, s)
 		f.enqueue(paAlice, "c1")
 		j := f.claim().Job
-		// A store fault on the fragment load: due again at once, nothing
-		// counted.
+		// A store fault on the fragment load: nothing counted, due again
+		// after the first backoff step, so the job does not stay at the
+		// head of the queue while its fault recurs.
 		n, err := s.ReleasePAClaim(context.Background(), ref(j), jobs.ReleaseRetry, f.now)
 		if err != nil || n != nil {
 			t.Fatalf("retry: notice %+v err %v", n, err)
 		}
 		var failures int
-		_ = s.DB.QueryRow(`SELECT claim_failures FROM pa_jobs WHERE id = $1`, j.ID).Scan(&failures)
-		if failures != 0 {
-			t.Fatalf("a retry counted %d failures", failures)
+		var retryAt int64
+		_ = s.DB.QueryRow(`SELECT claim_failures, retry_at_ms FROM pa_jobs WHERE id = $1`, j.ID).Scan(&failures, &retryAt)
+		if failures != 0 || retryAt != f.now.Add(jobs.ClaimBackoff(1)).UnixMilli() {
+			t.Fatalf("a retry counted %d failures, retry at %d", failures, retryAt)
 		}
+		if again := f.claim(); again.Outcome != jobs.ClaimNone {
+			t.Fatalf("a retried job claimed before its retry time: %+v", again)
+		}
+		f.now = f.now.Add(jobs.ClaimBackoff(1))
 		j = f.claim().Job
 		if j.ID == 0 {
-			t.Fatal("a retried job was not due at once")
+			t.Fatal("a retried job was not due after the first backoff step")
 		}
 		n, err = s.ReleasePAClaim(context.Background(), ref(j), jobs.ReleaseBackoff, f.now)
 		if err != nil || n != nil {
@@ -742,17 +767,135 @@ func runPAJobsSuite(t *testing.T, s *Store) {
 		}
 	})
 
-	t.Run("a reported cost settles at most the reservation", func(t *testing.T) {
+	// Owner decisions 2026-11-19 (2, 3): a run settles
+	// max(turns x floor, min(reported, 4 x reservation, $1)); the raw
+	// report is kept as reported_cost_usd.
+	t.Run("settlement is bounded by 4x the reservation and floored per turn", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			perJob   float64
+			reported float64
+			turns    int
+			want     float64
+		}{
+			{"below the reservation", 0.25, 0.07, 1, 0.07},
+			{"between the reservation and 4x", 0.25, 0.6, 1, 0.6},
+			{"exactly 4x", 0.25, 1.0, 1, 1.0},
+			{"above 4x", 0.25, 1e9, 1, 1.0},
+			{"above 4x of a small reservation", 0.1, 0.5, 1, 0.4},
+			{"never above $1", 0.3, 1.1, 1, 1.0},
+			{"zero with three turns charges the floor", 0.25, 0, 3, 0.015},
+			{"zero with no turn admitted charges one turn", 0.25, 0, 0, 0.005},
+			{"a report above the floor is not raised", 0.25, 0.02, 3, 0.02},
+			{"unreported settles at the reservation", 0.25, -1, 3, 0.25},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f := newPAFixture(t, s)
+				f.b.PerJobUSD = tc.perJob
+				f.enqueue(paAlice, "c1")
+				j := f.claim().Job
+				for range tc.turns {
+					f.turn(j)
+				}
+				before := globalDayNow(t, s, f.now)
+				f.finish(j, tc.reported)
+				var cost float64
+				var reported sql.NullFloat64
+				if err := s.DB.QueryRow(`SELECT cost_usd, reported_cost_usd FROM pa_usage WHERE job_id = $1`, j.ID).Scan(&cost, &reported); err != nil {
+					t.Fatal(err)
+				}
+				if math.Abs(cost-tc.want) > 1e-9 {
+					t.Fatalf("settled %v, want %v", cost, tc.want)
+				}
+				if tc.reported >= 0 && (!reported.Valid || reported.Float64 != tc.reported) {
+					t.Fatalf("reported_cost_usd = %+v, want the raw %v", reported, tc.reported)
+				}
+				if tc.reported < 0 && reported.Valid {
+					t.Fatalf("an unreported cost stored as %v", reported.Float64)
+				}
+				// The global day shared with the managed runtime moves by
+				// the settlement, not the reservation.
+				if got := globalDayNow(t, s, f.now) - before; math.Abs(got-(tc.want-tc.perJob)) > 1e-6 {
+					t.Fatalf("global day moved by %v at settlement, want %v", got, tc.want-tc.perJob)
+				}
+			})
+		}
+	})
+
+	// Owner decision 2026-11-19 (3): runs that report $0 still spend the
+	// floor, so they reach the principal's day cap and are held.
+	t.Run("repeated zero-cost runs reach the day cap", func(t *testing.T) {
+		f := newPAFixture(t, s)
+		for i := range 200 {
+			f.enqueue(paAlice, "c1")
+			r := f.claim()
+			if r.Outcome == jobs.ClaimHeld {
+				if r.Scope != jobs.ScopePrincipalDay {
+					t.Fatalf("held on %s, want the principal day", r.Scope)
+				}
+				// 3 turns x 0.005: held once less than one reservation is left.
+				if want := int(math.Ceil((f.b.PrincipalDayUSD - f.b.PerJobUSD) / 0.015)); i != want {
+					t.Fatalf("held after %d zero-cost runs, want %d", i, want)
+				}
+				return
+			}
+			if r.Outcome != jobs.ClaimClaimed {
+				t.Fatalf("run %d: %+v", i, r)
+			}
+			for range 3 {
+				f.turn(r.Job)
+			}
+			f.finish(r.Job, 0)
+		}
+		t.Fatal("200 zero-cost runs never reached the day cap")
+	})
+
+	t.Run("finish refuses a missing turn floor", func(t *testing.T) {
 		f := newPAFixture(t, s)
 		f.enqueue(paAlice, "c1")
 		j := f.claim().Job
-		f.finish(j, 1e9)
-		var cost, reported float64
-		if err := s.DB.QueryRow(`SELECT cost_usd, reported_cost_usd FROM pa_usage WHERE job_id = $1`, j.ID).Scan(&cost, &reported); err != nil {
-			t.Fatal(err)
+		_, err := s.FinishPAJob(context.Background(), ref(j), jobs.FinishRequest{Now: f.now, CostUSD: 0, Gate: okGate})
+		if !errors.Is(err, jobs.ErrInvalid) {
+			t.Fatalf("finish without a floor: %v", err)
 		}
-		if cost != 0.25 || reported != 1e9 {
-			t.Fatalf("cost %v reported %v, want 0.25 and the report kept", cost, reported)
+		if js, us := f.status(j.ID); js != "claimed" || us != "reserved" {
+			t.Fatalf("a refused finish changed the job: %s %s", js, us)
+		}
+	})
+
+	// Owner decision 2026-11-19 (1): MANAGED_CLAIM_NOT_AFTER ends PA claims
+	// as it ends managed ones: nothing is picked, reserved, held or backed
+	// off at or after the instant.
+	t.Run("claims end at ClaimNotAfter", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			offset time.Duration
+			want   jobs.ClaimOutcome
+		}{
+			{"before", time.Second, jobs.ClaimClaimed},
+			{"at", 0, jobs.ClaimNone},
+			{"after", -time.Second, jobs.ClaimNone},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f := newPAFixture(t, s)
+				f.b.ClaimNotAfter = f.now.Add(tc.offset)
+				f.enqueue(paAlice, "c1")
+				r := f.claim()
+				if r.Outcome != tc.want {
+					t.Fatalf("claim = %+v, want %v", r, tc.want)
+				}
+				var reserved, failures, retry int
+				_ = s.DB.QueryRow(`SELECT COUNT(*) FROM pa_usage WHERE principal = $1`, paAlice).Scan(&reserved)
+				_ = s.DB.QueryRow(`SELECT COALESCE(SUM(claim_failures), 0), COALESCE(SUM(retry_at_ms), 0) FROM pa_jobs WHERE principal = $1`, paAlice).Scan(&failures, &retry)
+				if tc.want == jobs.ClaimNone {
+					if reserved != 0 || failures != 0 || retry != 0 {
+						t.Fatalf("past the cutoff: %d reservations, %d failures, retry %d", reserved, failures, retry)
+					}
+					if js, _ := f.status(firstPAJob(t, s, paAlice)); js != "pending" {
+						t.Fatalf("past the cutoff the job is %s, want pending", js)
+					}
+				}
+			})
 		}
 	})
 
@@ -896,7 +1039,7 @@ func TestPAJobs_ManagedCandidatesSeePASpend(t *testing.T) {
 	if got, err := s.ListManagedClaimCandidates(ctx, budgetNow, 5, nil, 10); err != nil || len(got) != 1 {
 		t.Fatalf("before PA spend: %+v err %v", got, err)
 	}
-	f := &paFixture{t: t, s: s, now: budgetNow, b: jobs.Budget{PerJobUSD: 0.6, PrincipalDayUSD: 2, PrincipalMonthUSD: 20, GlobalDayUSD: 1.0}}
+	f := &paFixture{t: t, s: s, now: budgetNow, b: jobs.Budget{PerJobUSD: 0.6, PrincipalDayUSD: 2, PrincipalMonthUSD: 20, GlobalDayUSD: 1.0, MinTurnUSD: 0.005}}
 	paReset(t, s)
 	f.enqueue(paAlice, "c1")
 	if r := f.claim(); r.Outcome != jobs.ClaimClaimed {
@@ -966,6 +1109,80 @@ func TestPAJobsPostgresSharesManagedBudgetLock(t *testing.T) {
 	}
 }
 
+// TestPAJobsPostgresFinishTakesManagedBudgetLock: a settlement may exceed
+// its reservation (up to 4x), so it is written under the #1092 lock that
+// every managed and PA claim decides the shared global day under.
+// Mutation: FinishPAJob through beginRunning (no budget lock).
+func TestPAJobsPostgresFinishTakesManagedBudgetLock(t *testing.T) {
+	ctx := context.Background()
+	s := newFreshSchemaPostgresStore(t)
+	f := newPAFixture(t, s)
+	f.enqueue(paAlice, "c1")
+	j := f.claim().Job
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, managedBudgetLockKey); err != nil {
+		t.Fatal(err)
+	}
+	errc := make(chan error, 1)
+	go func() {
+		_, err := s.FinishPAJob(ctx, ref(j), jobs.FinishRequest{Now: f.now, CostUSD: 1, MinTurnUSD: f.b.MinTurnUSD, Gate: okGate})
+		errc <- err
+	}()
+	select {
+	case err := <-errc:
+		t.Fatalf("finish did not wait for the managed budget lock: %v", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("finish never completed")
+	}
+	if js, _ := f.status(j.ID); js != "done" {
+		t.Fatalf("job %s after the finish", js)
+	}
+}
+
+// TestPAJobs_FinishLocksBudgetBeforePrincipal: on every dialect the finish
+// takes the managed budget lock, and before the principal lock, the order
+// a claim takes them in (the other order could deadlock against a claim).
+// The principal lock stamps locked_at_ms with the wall clock, so a budget
+// lock taken first, and followed by a pause, is strictly earlier.
+// Mutations: no budget lock in FinishPAJob; the budget lock after the job
+// is loaded.
+func TestPAJobs_FinishLocksBudgetBeforePrincipal(t *testing.T) {
+	s := newTestStore(t)
+	f := newPAFixture(t, s)
+	f.enqueue(paAlice, "c1")
+	j := f.claim().Job
+	var budgetMS int64
+	s.budgetLockHook = func(int64) {
+		budgetMS = time.Now().UnixMilli()
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := s.FinishPAJob(context.Background(), ref(j), jobs.FinishRequest{Now: f.now, CostUSD: 0.1, MinTurnUSD: f.b.MinTurnUSD, Gate: okGate}); err != nil {
+		t.Fatal(err)
+	}
+	var lockedMS int64
+	if err := s.DB.QueryRow(`SELECT locked_at_ms FROM pa_principal_locks WHERE principal = $1`, paAlice).Scan(&lockedMS); err != nil {
+		t.Fatal(err)
+	}
+	if budgetMS == 0 || lockedMS <= budgetMS {
+		t.Fatalf("budget lock at %d, principal lock at %d: want the budget lock taken, and first", budgetMS, lockedMS)
+	}
+}
+
 // TestPAJobs_BackoffWriteErrorFails: a backoff that cannot be written is
 // an error (503), never a quiet ClaimNone and never a claim of the next
 // job while the failed one stays due.
@@ -1023,5 +1240,161 @@ func TestPAConvo_StoreFaultVsRowFault(t *testing.T) {
 	_ = s.DB.Close()
 	if _, err := s.LoadPAFragments(ctx, paAlice, "c1", time.Now()); !errors.Is(err, convo.ErrStoreFault) {
 		t.Fatalf("a load that cannot begin: %v, want a store fault", err)
+	}
+}
+
+// paJobState is (claim_failures, retry_at_ms, status) of a job.
+func paJobState(t *testing.T, s *Store, id int64) (int, int64, string) {
+	t.Helper()
+	var failures int
+	var retry int64
+	var status string
+	if err := s.DB.QueryRow(`SELECT claim_failures, retry_at_ms, status FROM pa_jobs WHERE id = $1`, id).Scan(&failures, &retry, &status); err != nil {
+		t.Fatal(err)
+	}
+	return failures, retry, status
+}
+
+// TestPAJobs_StoreFaultOfOneJobDoesNotHoldTheQueue: a store fault met
+// while claiming Alice's job records nothing against it and the claim moves
+// on to Bob; a fault met on every job is a store-wide fault and an error
+// (503), never a quiet ClaimNone, again with nothing recorded.
+// Mutations: return a post-pick store fault without the job (loop stops);
+// return ClaimNone at the end of the loop although a fault was met.
+func TestPAJobs_StoreFaultOfOneJobDoesNotHoldTheQueue(t *testing.T) {
+	ctx := context.Background()
+	faultFor := func(who ...int64) jobs.Gate {
+		return func(_ context.Context, _ *sql.Tx, j jobs.Job, _ time.Time) error {
+			if slices.Contains(who, j.Principal) {
+				return fmt.Errorf("%w: %w: consent: timeout", jobs.ErrUnreadable, jobs.ErrStoreFault)
+			}
+			return nil
+		}
+	}
+	claim := func(f *paFixture, gate jobs.Gate) (jobs.ClaimResult, error) {
+		return f.s.ClaimPAJob(ctx, jobs.ClaimRequest{Now: f.now, Lease: time.Minute, Budget: f.b, Gate: gate, Build: paBuild()})
+	}
+	t.Run("one job", func(t *testing.T) {
+		f := newPAFixture(t, newTestStore(t))
+		f.enqueue(paAlice, "c1")
+		f.now = f.now.Add(time.Millisecond)
+		f.enqueue(paBob, "c2")
+		alice := firstPAJob(t, f.s, paAlice)
+		r, err := claim(f, faultFor(paAlice))
+		if err != nil || r.Outcome != jobs.ClaimClaimed || r.Job.Principal != paBob {
+			t.Fatalf("claim behind Alice's fault = %+v, %v; want Bob claimed", r, err)
+		}
+		// Only Alice is due now: her fault is the answer, not ClaimNone.
+		if _, err := claim(f, faultFor(paAlice)); !errors.Is(err, jobs.ErrStoreFault) {
+			t.Fatalf("claim with only Alice's fault left: %v, want a store fault", err)
+		}
+		if n, retry, st := paJobState(t, f.s, alice); n != 0 || retry != 0 || st != "pending" {
+			t.Fatalf("Alice after store faults: %d failures, retry %d, %s; want untouched", n, retry, st)
+		}
+	})
+	t.Run("store-wide", func(t *testing.T) {
+		f := newPAFixture(t, newTestStore(t))
+		f.enqueue(paAlice, "c1")
+		f.enqueue(paBob, "c2")
+		_, err := claim(f, faultFor(paAlice, paBob))
+		if !errors.Is(err, jobs.ErrStoreFault) {
+			t.Fatalf("a fault on every job: %v, want a store fault", err)
+		}
+		for _, p := range []int64{paAlice, paBob} {
+			if n, retry, st := paJobState(t, f.s, firstPAJob(t, f.s, p)); n != 0 || retry != 0 || st != "pending" {
+				t.Fatalf("principal %d after a store-wide fault: %d failures, retry %d, %s", p, n, retry, st)
+			}
+		}
+		var usage int
+		_ = f.s.DB.QueryRow(`SELECT COUNT(*) FROM pa_usage`).Scan(&usage)
+		if usage != 0 {
+			t.Fatalf("%d reservations after a store-wide fault", usage)
+		}
+	})
+}
+
+// TestPAJobs_ReReadTellsStoreFaultFromRowFault (C14): the job re-read
+// under the principal lock classifies a row that does not scan as this
+// job's failure (counted, the queue moves on) and a failed query as a store
+// fault (nothing counted, an error).
+// Mutation: invert or drop the isRowFault branch in claimOnce.
+func TestPAJobs_ReReadTellsStoreFaultFromRowFault(t *testing.T) {
+	t.Run("row fault", func(t *testing.T) {
+		f := newPAFixture(t, newTestStore(t))
+		f.enqueue(paAlice, "c1")
+		f.now = f.now.Add(time.Millisecond)
+		f.enqueue(paBob, "c2")
+		alice := firstPAJob(t, f.s, paAlice)
+		// SQLite keeps the text; only the full re-read scans turns.
+		if _, err := f.s.DB.Exec(`UPDATE pa_jobs SET turns = 'x' WHERE id = $1`, alice); err != nil {
+			t.Fatal(err)
+		}
+		if r := f.claim(); r.Outcome != jobs.ClaimClaimed || r.Job.Principal != paBob {
+			t.Fatalf("claim behind Alice's broken row = %+v, want Bob", r)
+		}
+		if n, retry, _ := paJobState(t, f.s, alice); n != 1 || retry == 0 {
+			t.Fatalf("Alice's broken row: %d failures, retry %d; want it counted and backed off", n, retry)
+		}
+	})
+	t.Run("store fault", func(t *testing.T) {
+		f := newPAFixture(t, newTestStore(t))
+		f.enqueue(paAlice, "c1")
+		alice := firstPAJob(t, f.s, paAlice)
+		// The pick does not read tool_set; the re-read does, and fails as
+		// a query, not as a scan.
+		if _, err := f.s.DB.Exec(`ALTER TABLE pa_jobs RENAME COLUMN tool_set TO tool_set_gone`); err != nil {
+			t.Fatal(err)
+		}
+		_, err := f.s.ClaimPAJob(context.Background(), jobs.ClaimRequest{Now: f.now, Lease: time.Minute, Budget: f.b, Gate: okGate, Build: paBuild()})
+		if !errors.Is(err, jobs.ErrStoreFault) {
+			t.Fatalf("a failed re-read: %v, want a store fault", err)
+		}
+		if n, retry, st := paJobState(t, f.s, alice); n != 0 || retry != 0 || st != "pending" {
+			t.Fatalf("Alice after a failed re-read: %d failures, retry %d, %s; want untouched", n, retry, st)
+		}
+	})
+}
+
+// TestPAConversationOpen_StoreFault (C15): a conversation check that cannot
+// read is a store fault, which a claim does not count, never ErrGone (that
+// would cancel the job) and never a bare unreadable (that would back it
+// off).
+// Mutation: jobsUnreadable for jobsStoreFault in PAConversationOpen.
+func TestPAConversationOpen_StoreFault(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	if _, err := s.DB.Exec(`ALTER TABLE pa_conversations RENAME TO pa_conversations_gone`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	err = s.PAConversationOpen(ctx, tx, paAlice, "c1", time.Now())
+	if !errors.Is(err, jobs.ErrStoreFault) || errors.Is(err, jobs.ErrGone) {
+		t.Fatalf("a failed conversation read: %v, want a store fault", err)
+	}
+}
+
+// TestLoadPAFragments_ScanErrorIsRowFault (C19): a fragment row that does
+// not scan is that conversation's broken state (the run is cancelled), not
+// a store fault (which would retry it forever).
+// Mutation: storeFault for rowRead at the fragment scan.
+func TestLoadPAFragments_ScanErrorIsRowFault(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	now := time.Now()
+	if _, err := s.DB.Exec(`INSERT INTO pa_conversations(id, principal, created_at_ms, expires_at_ms) VALUES('c1', $1, $2, $3)`,
+		paAlice, now.UnixMilli(), now.Add(time.Hour).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO pa_fragments(conversation_id, seq, principal, kind, sealed, created_at_ms)
+		VALUES('c1', 1, $1, 'user', x'00', 'not a number')`, paAlice); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.LoadPAFragments(ctx, paAlice, "c1", now)
+	if !errors.Is(err, convo.ErrUnreadable) || errors.Is(err, convo.ErrStoreFault) {
+		t.Fatalf("a fragment row that does not scan: %v, want a row fault", err)
 	}
 }

@@ -94,6 +94,12 @@ type JobVerifier interface {
 // ToolResolver returns the connections a principal's run is bound to and
 // the tool set ("server/tool") they expose, inside the claim transaction.
 // Phase 1 ships NoTools until connections (#1314) are wired.
+//
+// Error contract: a failed read of the store (begin, query, rows, lock,
+// timeout) must wrap jobs.ErrStoreFault; the claim then records nothing
+// against the job. Any other error is taken as this job's own failure and
+// backed off (counted toward jobs.MaxClaimFailures), and one wrapping
+// jobs.ErrInvalid cancels the job.
 type ToolResolver func(ctx context.Context, tx *sql.Tx, principal int64) ([]ConnectionRevision, []string, error)
 
 // NoTools binds no connection and exposes no tool.
@@ -150,7 +156,10 @@ var ErrRunLoopConfig = errors.New("pa: run loop needs a store, sealer, pool, min
 func NewRunLoop(cfg RunLoopConfig) (*RunLoop, error) {
 	if cfg.Store == nil || cfg.Sealer == nil || cfg.Pool == nil || cfg.Minter == nil || cfg.Verifier == nil ||
 		cfg.Sender == nil || cfg.Tools == nil || !cfg.Limits.Valid() || !cfg.Budget.Valid() ||
-		cfg.Budget.PerJobUSD > cfg.Budget.PrincipalDayUSD || cfg.Lease < 0 || cfg.Lease > localjwt.MaxPAJobTTL {
+		cfg.Budget.PerJobUSD > cfg.Budget.PrincipalDayUSD || cfg.Lease < 0 || cfg.Lease > localjwt.MaxPAJobTTL ||
+		// The per-turn floor of a run at its turn cap must fit the
+		// reservation, or the floor alone would settle above it.
+		cfg.Budget.MinTurnUSD*float64(cfg.Limits.MaxToolCalls+1) > cfg.Budget.PerJobUSD+1e-9 {
 		return nil, ErrRunLoopConfig
 	}
 	pin, err := catalog.LoadPin()
@@ -419,7 +428,9 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 		Principal: j.Principal, JobID: j.ID, Attempt: j.Attempts, ContextDigest: j.ContextDigest, Tools: j.ToolSet,
 	}, id.Jti, id.OriginalIssuedAt, ttl)
 	if err != nil {
-		l.release(ctx, ref, jobs.ReleaseBackoff, now)
+		// A signer outage is the server's fault, not the job's: it counts
+		// no failure (as the managed pool's ReleaseUnissued).
+		l.release(ctx, ref, jobs.ReleaseRetry, now)
 		stop(w, err)
 		return
 	}
@@ -581,13 +592,14 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 	if req.CostUSD != nil {
 		cost = *req.CostUSD
 		if cost > l.budget.PerJobUSD {
-			// FinishPAJob settles at most the reservation and records the
-			// reported figure; the overrun is worth a look.
+			// FinishPAJob settles at most jobs.SettleFactor x the
+			// reservation and records the reported figure; the overrun is
+			// worth a look.
 			slog.Warn("pa reported cost above the reservation", "job_id", ref.JobID)
 		}
 	}
 	j, err := l.store.FinishPAJob(ctx, ref, jobs.FinishRequest{
-		Now: l.now(), CostUSD: cost, Gate: l.gate,
+		Now: l.now(), CostUSD: cost, MinTurnUSD: l.budget.MinTurnUSD, Gate: l.gate,
 		Record: func(ctx context.Context, tx *sql.Tx, j jobs.Job) error {
 			if !record {
 				return nil

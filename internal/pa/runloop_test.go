@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
@@ -83,6 +85,10 @@ func withLimits(l jobs.Limits) rlOption {
 	return func(c *RunLoopConfig, _ *runLoopHarness) { c.Limits = l }
 }
 
+func withMinter(m JobMinter) rlOption {
+	return func(c *RunLoopConfig, _ *runLoopHarness) { c.Minter = m }
+}
+
 func withStore(wrap func(*db.Store) RunLoopStore) rlOption {
 	return func(c *RunLoopConfig, h *runLoopHarness) { c.Store = wrap(c.Store.(*db.Store)) }
 }
@@ -115,7 +121,7 @@ func newRunLoopHarness(t *testing.T, opts ...rlOption) *runLoopHarness {
 			return h.conns[p], h.tools, nil
 		},
 		Limits: jobs.DefaultLimits(),
-		Budget: jobs.Budget{PerJobUSD: 0.25, PrincipalDayUSD: 2, PrincipalMonthUSD: 20, GlobalDayUSD: 20},
+		Budget: jobs.Budget{PerJobUSD: 0.25, PrincipalDayUSD: 2, PrincipalMonthUSD: 20, GlobalDayUSD: 20, MinTurnUSD: 0.005},
 		Now:    func() time.Time { return h.now },
 	}
 	for _, o := range opts {
@@ -369,7 +375,8 @@ func TestRunLoop_S1R1NonASCIIReply(t *testing.T) {
 }
 
 // TestRunLoop_ReportedCostCapped: one absurd cost_usd cannot fill the
-// global day window shared with the managed runtime.
+// global day window shared with the managed runtime: it settles at
+// jobs.SettleFactor x the reservation, with the report kept.
 func TestRunLoop_ReportedCostCapped(t *testing.T) {
 	h := newRunLoopHarness(t)
 	h.consent(aliceID)
@@ -386,9 +393,170 @@ func TestRunLoop_ReportedCostCapped(t *testing.T) {
 	if err := h.convoHarness.store.DB.QueryRow(`SELECT cost_usd, reported_cost_usd FROM pa_usage WHERE job_id = $1`, c.JobID).Scan(&cost, &reported); err != nil {
 		t.Fatal(err)
 	}
-	if cost != 0.25 || reported != huge {
-		t.Fatalf("settled at %v (reported %v), want the reservation with the report kept", cost, reported)
+	if cost != 1.0 || reported != huge {
+		t.Fatalf("settled at %v (reported %v), want 4x the reservation with the report kept", cost, reported)
 	}
+}
+
+// TestRunLoop_TurnFloor: a run that reports $0 settles the server-side
+// floor for the turns it took through /turn (owner decision 2026-11-19).
+// Mutation: drop MinTurnUSD from the reply's FinishRequest.
+func TestRunLoop_TurnFloor(t *testing.T) {
+	h := newRunLoopHarness(t)
+	h.consent(aliceID)
+	h.text(aliceID, "hello")
+	c := h.mustClaim()
+	for i := range 3 {
+		if w := h.post(RouteTurn, c.Token, turnRequest{ContextTokens: 10}); w.Code != http.StatusOK {
+			t.Fatalf("turn %d: %d", i+1, w.Code)
+		}
+	}
+	zero := 0.0
+	if w := h.post(RouteReply, c.Token, replyRequest{Text: "ok", CostUSD: &zero}); w.Code != http.StatusOK {
+		t.Fatalf("reply: %d", w.Code)
+	}
+	var cost, reported float64
+	if err := h.convoHarness.store.DB.QueryRow(`SELECT cost_usd, reported_cost_usd FROM pa_usage WHERE job_id = $1`, c.JobID).Scan(&cost, &reported); err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(cost-0.015) > 1e-9 || reported != 0 {
+		t.Fatalf("settled %v (reported %v), want 3 turns x 0.005 with the report kept", cost, reported)
+	}
+}
+
+// TestRunLoop_ClaimNotAfter: MANAGED_CLAIM_NOT_AFTER (Budget.ClaimNotAfter)
+// ends PA claims with the refusal a managed claim gives past it: nothing
+// handed out (204), nothing reserved, counted or backed off, nobody told.
+func TestRunLoop_ClaimNotAfter(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		offset time.Duration
+		want   int
+	}{
+		{"before", time.Second, http.StatusOK},
+		{"at", 0, http.StatusNoContent},
+		{"after", -time.Second, http.StatusNoContent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRunLoopHarness(t)
+			h.consent(aliceID)
+			h.text(aliceID, "hello")
+			sent := len(h.sender.to(aliceID))
+			// Relative to the harness clock, which exists only now.
+			h.loop.budget.ClaimNotAfter = h.now.Add(tc.offset)
+			if _, code := h.claim(); code != tc.want {
+				t.Fatalf("claim: %d, want %d", code, tc.want)
+			}
+			if tc.want != http.StatusNoContent {
+				return
+			}
+			if h.count(`SELECT count(*) FROM pa_usage`) != 0 ||
+				h.count(`SELECT count(*) FROM pa_jobs WHERE status = 'pending' AND claim_failures = 0 AND retry_at_ms = 0`) != 1 ||
+				len(h.sender.to(aliceID)) != sent {
+				t.Fatal("a claim past the cutoff reserved, counted, backed off or sent something")
+			}
+		})
+	}
+}
+
+// aliceFragmentsDown fails every fragment load of Alice's with a store
+// fault, and no one else's.
+type aliceFragmentsDown struct{ *db.Store }
+
+func (a aliceFragmentsDown) LoadPAFragments(ctx context.Context, p int64, c string, now time.Time) ([]convo.SealedFragment, error) {
+	if p == aliceID {
+		return nil, storeFault
+	}
+	return a.Store.LoadPAFragments(ctx, p, c, now)
+}
+
+// TestRunLoop_RecurringFaultDoesNotHoldTheQueue: Alice's fragment load
+// keeps failing as a store fault. Each attempt counts nothing, but moves
+// her job one backoff step out, so Bob's run is claimed meanwhile.
+// Mutation: ReleaseRetry without a retry_at.
+func TestRunLoop_RecurringFaultDoesNotHoldTheQueue(t *testing.T) {
+	h := newRunLoopHarness(t, withStore(func(s *db.Store) RunLoopStore { return aliceFragmentsDown{s} }))
+	h.consent(aliceID)
+	h.consent(bobID)
+	h.text(aliceID, "hello")
+	h.text(bobID, "hello")
+	if _, code := h.claim(); code != http.StatusServiceUnavailable {
+		t.Fatalf("Alice's claim: %d", code)
+	}
+	c := h.mustClaim()
+	var principal int64
+	if err := h.convoHarness.store.DB.QueryRow(`SELECT principal FROM pa_jobs WHERE id = $1`, c.JobID).Scan(&principal); err != nil {
+		t.Fatal(err)
+	}
+	if principal != bobID {
+		t.Fatalf("claimed principal %d, want Bob behind Alice's fault", principal)
+	}
+	if h.count(`SELECT count(*) FROM pa_jobs WHERE principal = $1 AND status = 'pending' AND claim_failures = 0`, aliceID) != 1 {
+		t.Fatal("Alice's store fault was counted")
+	}
+}
+
+type failingMinter struct{}
+
+func (failingMinter) MintPAJob(localjwt.PAJob, string, int64, time.Duration) (string, error) {
+	return "", errors.New("signer down")
+}
+
+// TestRunLoop_MintFailureCountsNothing: a signer outage is a server fault:
+// the claim is released as a retry, so repeated outages never cancel a
+// request (P3, as the managed pool's ReleaseUnissued).
+// Mutation: ReleaseBackoff on a Mint failure.
+func TestRunLoop_MintFailureCountsNothing(t *testing.T) {
+	h := newRunLoopHarness(t, withMinter(failingMinter{}))
+	h.consent(aliceID)
+	h.text(aliceID, "hello")
+	for i := range jobs.MaxClaimFailures + 1 {
+		if _, code := h.claim(); code == http.StatusOK {
+			t.Fatalf("claim %d without a signer succeeded", i+1)
+		}
+		h.now = h.now.Add(jobs.ClaimBackoff(jobs.MaxClaimFailures))
+	}
+	if h.count(`SELECT count(*) FROM pa_jobs WHERE status = 'pending' AND claim_failures = 0`) != 1 ||
+		h.count(`SELECT count(*) FROM pa_usage`) != 0 {
+		t.Fatal("signer outages counted against the job or left a reservation")
+	}
+}
+
+// TestNewRunLoop_RefusesTurnFloorAboveReservation: the floor of a run at
+// its turn cap (tool calls + 1) must fit the reservation, and a zero floor
+// is no floor.
+func TestNewRunLoop_RefusesTurnFloorAboveReservation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		floor float64
+		ok    bool
+	}{
+		{"zero", 0, false},
+		{"above", 0.03, false}, // 9 x 0.03 = 0.27 > 0.25
+		{"fits", 0.025, true},  // 9 x 0.025 = 0.225
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := RunLoopConfig{
+				Store: newStore(t), Sealer: mustSealer(t), Pool: noPool{}, Minter: failingMinter{}, Verifier: noVerifier{},
+				Sender: &sendRecorder{}, Tools: NoTools, Limits: jobs.DefaultLimits(),
+				Budget: jobs.Budget{PerJobUSD: 0.25, PrincipalDayUSD: 2, PrincipalMonthUSD: 20, GlobalDayUSD: 20, MinTurnUSD: tc.floor},
+			}
+			_, err := NewRunLoop(cfg)
+			if tc.ok != (err == nil) {
+				t.Fatalf("floor %v: %v", tc.floor, err)
+			}
+		})
+	}
+}
+
+type noPool struct{}
+
+func (noPool) Authenticate(*http.Request) (*auth.Identity, error) { return nil, errors.New("no") }
+
+type noVerifier struct{}
+
+func (noVerifier) VerifyRequest(*http.Request) (localjwt.PAJob, error) {
+	return localjwt.PAJob{}, errors.New("no")
 }
 
 func utf8Valid(b []byte) bool { return strings.ToValidUTF8(string(b), "�") == string(b) }
@@ -429,7 +597,7 @@ func TestRunLoop_S1R2(t *testing.T) {
 // TestRunLoop_S1R3 is S1-R3: an exhausted budget gives a hold message and no
 // model call: no token, no reservation, one message.
 func TestRunLoop_S1R3(t *testing.T) {
-	h := newRunLoopHarness(t, withBudget(jobs.Budget{PerJobUSD: 0.25, PrincipalDayUSD: 0.25, PrincipalMonthUSD: 20, GlobalDayUSD: 20}))
+	h := newRunLoopHarness(t, withBudget(jobs.Budget{PerJobUSD: 0.25, PrincipalDayUSD: 0.25, PrincipalMonthUSD: 20, GlobalDayUSD: 20, MinTurnUSD: 0.005}))
 	h.consent(aliceID)
 	h.text(aliceID, "one")
 	c := h.mustClaim()
@@ -468,7 +636,7 @@ func TestRunLoop_S1R3(t *testing.T) {
 // expires is dropped (with a notice) when the conversation goes, not when
 // the month window resets.
 func TestRunLoop_HeldDroppedBeforeWindowResets(t *testing.T) {
-	h := newRunLoopHarness(t, withBudget(jobs.Budget{PerJobUSD: 0.25, PrincipalDayUSD: 0.25, PrincipalMonthUSD: 0.25, GlobalDayUSD: 20}))
+	h := newRunLoopHarness(t, withBudget(jobs.Budget{PerJobUSD: 0.25, PrincipalDayUSD: 0.25, PrincipalMonthUSD: 0.25, GlobalDayUSD: 20, MinTurnUSD: 0.005}))
 	h.consent(aliceID)
 	h.text(aliceID, "one")
 	c := h.mustClaim()
@@ -662,7 +830,7 @@ func TestRunLoop_S1I1(t *testing.T) {
 // TestRunLoop_S1X2Budget is the budget part of S1-X2: Bob's runs are not
 // held by Alice's spend.
 func TestRunLoop_S1X2Budget(t *testing.T) {
-	h := newRunLoopHarness(t, withBudget(jobs.Budget{PerJobUSD: 0.25, PrincipalDayUSD: 0.25, PrincipalMonthUSD: 20, GlobalDayUSD: 20}))
+	h := newRunLoopHarness(t, withBudget(jobs.Budget{PerJobUSD: 0.25, PrincipalDayUSD: 0.25, PrincipalMonthUSD: 20, GlobalDayUSD: 20, MinTurnUSD: 0.005}))
 	h.consent(aliceID)
 	h.consent(bobID)
 	h.text(aliceID, "one")
@@ -977,12 +1145,15 @@ func TestRunLoop_StoreFaultsChangeNothing(t *testing.T) {
 		if _, code := h.claim(); code != http.StatusServiceUnavailable {
 			t.Fatalf("claim with a failed fragment load: %d", code)
 		}
-		if got := h.count(`SELECT count(*) FROM pa_jobs WHERE status = 'pending' AND claim_failures = 0 AND retry_at_ms = 0`); got != 1 {
-			t.Fatal("a store fault changed the job")
+		// Nothing counted; due again after the first backoff step.
+		retryAt := h.now.Add(jobs.ClaimBackoff(1)).UnixMilli()
+		if got := h.count(fmt.Sprintf(`SELECT count(*) FROM pa_jobs WHERE status = 'pending' AND claim_failures = 0 AND retry_at_ms = %d`, retryAt)); got != 1 {
+			t.Fatal("a store fault counted a failure or was not retried after the first backoff step")
 		}
 		if h.count(`SELECT count(*) FROM pa_usage`) != 0 || len(h.sender.to(aliceID)) != 0 {
 			t.Fatal("a store fault left usage or sent a notice")
 		}
+		h.now = h.now.Add(jobs.ClaimBackoff(1))
 		if c := h.mustClaim(); c.Token == "" {
 			t.Fatal("not claimed once the store recovered")
 		}

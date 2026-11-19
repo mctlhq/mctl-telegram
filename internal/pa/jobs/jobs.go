@@ -71,6 +71,16 @@ const (
 	DefaultBudgetJobUSD     = 0.25
 	DefaultBudgetDayUSD     = 2
 	DefaultBudgetMonthUSD   = 20
+	// DefaultMinTurnUSD is the server-side cost floor per model turn
+	// (PA_MIN_TURN_COST_USD; owner decision 2026-11-19).
+	DefaultMinTurnUSD = 0.005
+	// SettleFactor bounds a settlement at this multiple of the reservation
+	// (owner decision 2026-11-19): a run may cost more than reserved, but
+	// a buggy report cannot settle without bound.
+	SettleFactor = 4
+	// MaxSettleUSD is the most one job ever settles, whatever the report
+	// and the reservation (4 x the default 0.25 reservation).
+	MaxSettleUSD = 1.0
 	// DefaultLease is how long a claimed job and its pa-job token live.
 	DefaultLease = 5 * time.Minute
 	// MaxMessageChars is the Telegram maximum for one message, applied to
@@ -111,15 +121,43 @@ type Budget struct {
 	PrincipalDayUSD   float64
 	PrincipalMonthUSD float64
 	GlobalDayUSD      float64
+	// MinTurnUSD is the cost floor per model turn the server admitted
+	// (PA_MIN_TURN_COST_USD): a run settles at least that much per turn,
+	// whatever the worker reports.
+	MinTurnUSD float64
+	// ClaimNotAfter, when set, ends PA claims at that instant, exactly as
+	// MANAGED_CLAIM_NOT_AFTER ends managed ones (owner decision 2026-11-19).
+	ClaimNotAfter time.Time
 }
 
 // Valid reports whether every cap is positive. A budget with a zero cap is
 // not "unlimited": the run loop refuses to start with it.
 func (b Budget) Valid() bool {
 	// A job dearer than any window could never be claimed: it would be
-	// held at every reset, without end.
+	// held at every reset, without end. A reservation above MaxSettleUSD
+	// would settle more than any job may.
 	return b.PerJobUSD > 0 && b.PerJobUSD <= b.PrincipalDayUSD && b.PrincipalDayUSD <= b.PrincipalMonthUSD &&
-		b.PerJobUSD <= b.GlobalDayUSD
+		b.PerJobUSD <= b.GlobalDayUSD && b.PerJobUSD <= MaxSettleUSD &&
+		b.MinTurnUSD > 0 && b.MinTurnUSD <= b.PerJobUSD
+}
+
+// ClaimsEnded reports whether ClaimNotAfter has passed at now.
+func (b Budget) ClaimsEnded(now time.Time) bool {
+	return !b.ClaimNotAfter.IsZero() && !now.Before(b.ClaimNotAfter)
+}
+
+// Settle is what a finished run of turns admitted turns counts against the
+// windows: the reported cost (the reservation when unreported, a negative
+// reported) bounded by SettleFactor x the reservation and MaxSettleUSD, and
+// never below minTurn per admitted turn. A finished run made at least one
+// model call, so the floor counts at least one turn. The floor is what the
+// server itself observed; the report is only the worker's word.
+func Settle(reported, reserved float64, turns int, minTurn float64) float64 {
+	cost := reserved
+	if reported >= 0 {
+		cost = min(reported, SettleFactor*reserved, MaxSettleUSD)
+	}
+	return max(cost, float64(max(turns, 1))*minTurn)
 }
 
 // Job is one pa_jobs row.
@@ -310,8 +348,10 @@ const (
 	// ReleaseBackoff: a failure of this job's own state; it counts toward
 	// MaxClaimFailures and the job is due again after ClaimBackoff.
 	ReleaseBackoff
-	// ReleaseRetry: a store fault, nothing learned about the job; it is
-	// due again at once and no failure is counted.
+	// ReleaseRetry: a store or server fault, nothing learned about the
+	// job; no failure is counted, and it is due again after the first
+	// ClaimBackoff step, so a fault that recurs for this one job cannot
+	// keep it the oldest due job.
 	ReleaseRetry
 )
 
@@ -354,7 +394,9 @@ type FinishRequest struct {
 	// CostUSD is the reported cost; a negative value means "not reported"
 	// and settles at the full reservation.
 	CostUSD float64
-	Gate    Gate
+	// MinTurnUSD is Budget.MinTurnUSD, the per-turn floor (see Settle).
+	MinTurnUSD float64
+	Gate       Gate
 	// Record runs in the finish transaction after the gate, to store the
 	// reply as conversation state.
 	Record func(ctx context.Context, tx *sql.Tx, j Job) error
