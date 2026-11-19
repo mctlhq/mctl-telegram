@@ -1,0 +1,194 @@
+package connector
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
+)
+
+// fakeServer is a minimal MCP Streamable HTTP server. The tests reach it
+// with the httptest TLS client: egress refuses loopback by design, and is
+// tested on its own in internal/pa/egress.
+type fakeServer struct {
+	mu       sync.Mutex
+	sse      bool
+	pages    []string // tools/list result objects, chained by cursor
+	status   int      // forced status for every request, 0 = normal
+	bearers  []string
+	sessions []string
+	methods  []string
+	badID    bool
+}
+
+func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bearers = append(f.bearers, r.Header.Get("Authorization"))
+	f.sessions = append(f.sessions, r.Header.Get("Mcp-Session-Id"))
+	if f.status != 0 {
+		w.WriteHeader(f.status)
+		return
+	}
+	body, _ := io.ReadAll(r.Body)
+	var m struct {
+		ID     *int64          `json:"id"`
+		Method string          `json:"method"`
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(body, &m); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	f.methods = append(f.methods, m.Method)
+	if m.ID == nil {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	var result string
+	switch m.Method {
+	case "initialize":
+		w.Header().Set("Mcp-Session-Id", "sess-1")
+		result = `{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"fake","version":"1"}}`
+	case "tools/list":
+		var p struct {
+			Cursor string `json:"cursor"`
+		}
+		_ = json.Unmarshal(m.Params, &p)
+		i := 0
+		if p.Cursor != "" {
+			_, _ = fmt.Sscanf(p.Cursor, "c%d", &i)
+		}
+		result = f.pages[i]
+	case "tools/call":
+		result = `{"content":[{"type":"text","text":"ok"}]}`
+	default:
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	id := *m.ID
+	if f.badID {
+		id += 100
+	}
+	msg := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":%s}`, id, result)
+	if f.sse {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n")
+		_, _ = fmt.Fprintf(w, "event: message\ndata: %s\n\n", msg)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = io.WriteString(w, msg)
+}
+
+func testEndpoint(t *testing.T, f *fakeServer) *Endpoint {
+	t.Helper()
+	srv := httptest.NewTLSServer(f)
+	t.Cleanup(srv.Close)
+	return &Endpoint{server: "tg", url: srv.URL, client: srv.Client()}
+}
+
+var tok = connection.NewSecret("fake-at-client-test")
+
+func TestEndpoint_ListToolsPaginatesJSONAndSSE(t *testing.T) {
+	for _, sse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("sse=%v", sse), func(t *testing.T) {
+			f := &fakeServer{sse: sse, pages: []string{
+				`{"tools":[{"name":"a"}],"nextCursor":"c1"}`,
+				`{"tools":[{"name":"b"}]}`,
+			}}
+			pages, err := testEndpoint(t, f).ListTools(context.Background(), tok)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(pages) != 2 || !strings.Contains(string(pages[1]), `"b"`) {
+				t.Fatalf("pages %q", pages)
+			}
+			want := []string{"initialize", "notifications/initialized", "tools/list", "tools/list"}
+			if strings.Join(f.methods, ",") != strings.Join(want, ",") {
+				t.Fatalf("methods %v", f.methods)
+			}
+			for i, b := range f.bearers {
+				if b != "Bearer fake-at-client-test" {
+					t.Fatalf("request %d bearer %q", i, b)
+				}
+				if i > 0 && f.sessions[i] != "sess-1" {
+					t.Fatalf("request %d without the session id", i)
+				}
+			}
+		})
+	}
+}
+
+// A listing that keeps handing out cursors is a failed read, not a
+// truncated list (I9).
+func TestEndpoint_EndlessPaginationFails(t *testing.T) {
+	pages := make([]string, maxListPages+1)
+	for i := range pages {
+		pages[i] = fmt.Sprintf(`{"tools":[],"nextCursor":"c%d"}`, i+1)
+	}
+	if _, err := testEndpoint(t, &fakeServer{pages: pages}).ListTools(context.Background(), tok); !errors.Is(err, ErrMCPProtocol) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestEndpoint_Failures(t *testing.T) {
+	cases := map[string]struct {
+		f    *fakeServer
+		want error
+	}{
+		"401":        {&fakeServer{status: http.StatusUnauthorized}, ErrMCPUnauthorized},
+		"403":        {&fakeServer{status: http.StatusForbidden}, ErrMCPUnauthorized},
+		"500":        {&fakeServer{status: http.StatusInternalServerError}, ErrMCPProtocol},
+		"wrong id":   {&fakeServer{badID: true, pages: []string{`{"tools":[]}`}}, ErrMCPProtocol},
+		"sse no msg": {&fakeServer{sse: true, badID: true, pages: []string{`{"tools":[]}`}}, ErrMCPProtocol},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			ep := testEndpoint(t, c.f)
+			if _, err := ep.ListTools(context.Background(), tok); !errors.Is(err, c.want) {
+				t.Fatalf("list err = %v, want %v", err, c.want)
+			}
+			if _, err := ep.CallTool(context.Background(), tok, "list_dialogs", json.RawMessage(`{}`)); !errors.Is(err, c.want) {
+				t.Fatalf("call err = %v, want %v", err, c.want)
+			}
+		})
+	}
+}
+
+func TestEndpoint_CallTool(t *testing.T) {
+	f := &fakeServer{}
+	out, err := testEndpoint(t, f).CallTool(context.Background(), tok, "list_dialogs", json.RawMessage(`{"limit":5}`))
+	if err != nil || !strings.Contains(string(out), `"ok"`) {
+		t.Fatalf("out %q err %v", out, err)
+	}
+}
+
+// Errors never carry the bearer.
+func TestEndpoint_ErrorsDoNotCarryTheToken(t *testing.T) {
+	ep := &Endpoint{server: "tg", url: "https://127.0.0.1:1/", client: http.DefaultClient}
+	_, err := ep.ListTools(context.Background(), tok)
+	if err == nil || strings.Contains(err.Error(), "fake-at") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestNewEndpoint_RefusesNonHTTPS(t *testing.T) {
+	for _, u := range []string{"http://tg.example/mcp", "https://tg.example:8443/mcp", "https://user@tg.example/mcp", "tg.example/mcp", ""} {
+		if _, err := NewEndpoint("tg", u); err == nil {
+			t.Errorf("%q accepted", u)
+		}
+	}
+	ep, err := NewEndpoint("tg", "https://tg.example/mcp")
+	if err != nil || ep.Server() != "tg" || ep.client == nil {
+		t.Fatalf("ep %v err %v", ep, err)
+	}
+}

@@ -674,24 +674,108 @@ func (l *RunLoop) Authenticate(r *http.Request) (PAJob, error) {
 	}, nil
 }
 
+// Principal returns the principal the job's token was minted for.
+func (j PAJob) Principal() int64 { return j.ref.Principal }
+
+// TokenRefusal says why a request's pa-job token was refused, for the
+// executor's audit record (#1315).
+type TokenRefusal struct {
+	// Principal is the principal of a token this server minted and then
+	// refused (expired, revoked), so the refusal can be audited in their
+	// chain. 0 when the token cannot be attributed: a bad signature, a
+	// malformed payload, another audience.
+	Principal int64
+	// Reason is a fixed label (localjwt.PAJobRefusal values).
+	Reason string
+}
+
+// attributingVerifier is the optional part of JobVerifier that
+// AuthenticateAttributed needs (*localjwt.PAJobVerifier implements it).
+type attributingVerifier interface {
+	VerifyRequestAttributed(r *http.Request) (localjwt.PAJob, int64, localjwt.PAJobRefusal, error)
+}
+
+// AuthenticateAttributed is Authenticate that also describes a refusal.
+// A verifier without attribution refuses with Principal 0.
+func (l *RunLoop) AuthenticateAttributed(r *http.Request) (PAJob, TokenRefusal, error) {
+	av, ok := l.verifier.(attributingVerifier)
+	if !ok {
+		j, err := l.Authenticate(r)
+		if err != nil {
+			return PAJob{}, TokenRefusal{Reason: string(localjwt.PAJobRefusedInvalid)}, err
+		}
+		return j, TokenRefusal{}, nil
+	}
+	pj, principal, reason, err := av.VerifyRequestAttributed(r)
+	if err != nil {
+		return PAJob{}, TokenRefusal{Principal: principal, Reason: string(reason)}, ErrNoJob
+	}
+	return PAJob{
+		ref:   jobs.Ref{Principal: pj.Principal, JobID: pj.JobID, Attempt: pj.Attempt, Digest: pj.ContextDigest},
+		tools: pj.Tools,
+	}, TokenRefusal{}, nil
+}
+
 // AdmitPAToolCall is the executor's gate before it dispatches server/tool
 // for job (#1315): the tool must be in the signed tool set of the token AND
 // of the job row (S1-I1), a pinned read, under the tool-call cap (S1-R2),
 // with the reservation live and consent and the conversation still valid.
 // It counts the call; a refused call is not counted.
 func (l *RunLoop) AdmitPAToolCall(ctx context.Context, job PAJob, server, tool string) error {
+	_, err := l.AdmitToolCall(ctx, job, server, tool)
+	return err
+}
+
+// AdmitToolCall is AdmitPAToolCall returning the run's Policy, rebuilt from
+// the job row the admission just read (threat model T4, I10: "principal,
+// connection and authority revision come from the job row"). The row's
+// execution context must hash to the digest the row and the token carry; a
+// context that does not is unreadable state and refuses (I9).
+func (l *RunLoop) AdmitToolCall(ctx context.Context, job PAJob, server, tool string) (Policy, error) {
 	if !job.ref.Valid() {
-		return ErrNoJob
+		return Policy{}, ErrNoJob
 	}
 	name := server + "/" + tool
 	if server == "" || tool == "" || !slices.Contains(job.tools, name) || !l.readTools[name] {
-		return jobs.ErrToolNotInSet
+		return Policy{}, jobs.ErrToolNotInSet
 	}
-	_, err := l.store.AdmitPAToolCall(ctx, job.ref, jobs.ToolCallRequest{
+	j, err := l.store.AdmitPAToolCall(ctx, job.ref, jobs.ToolCallRequest{
 		Now: l.now(), Tool: name, MaxToolCalls: l.limits.MaxToolCalls, Gate: l.gate,
 	})
 	l.droppedNotice(ctx, job.ref, err)
-	return err
+	if err != nil {
+		return Policy{}, err
+	}
+	return policyFromJob(j, job.ref)
+}
+
+// policyFromJob rebuilds the Policy of a running job from its row. The
+// stored execution context is checked against the digest of the row and
+// of the token, and against the row's own principal, job and attempt.
+func policyFromJob(j jobs.Job, ref jobs.Ref) (Policy, error) {
+	sum := sha256.Sum256(j.ExecutionContext)
+	if len(j.ExecutionContext) == 0 || hex.EncodeToString(sum[:]) != j.ContextDigest || j.ContextDigest != ref.Digest ||
+		j.Principal != ref.Principal || j.ID != ref.JobID || j.Attempts != ref.Attempt {
+		return Policy{}, fmt.Errorf("%w: execution context does not match the job", jobs.ErrUnreadable)
+	}
+	dec := json.NewDecoder(strings.NewReader(string(j.ExecutionContext)))
+	dec.DisallowUnknownFields()
+	var rc runContext
+	if err := dec.Decode(&rc); err != nil {
+		return Policy{}, fmt.Errorf("%w: execution context: %v", jobs.ErrUnreadable, err)
+	}
+	// The trigger is not read here (TestNoTriggerCalls): the digest already
+	// proves this is the context the claim built, and the claim builds
+	// interactive runs only.
+	if rc.V != 1 || rc.Principal != j.Principal || rc.JobID != j.ID || rc.Attempt != j.Attempts ||
+		rc.ConversationID != j.ConversationID {
+		return Policy{}, fmt.Errorf("%w: execution context names another run", jobs.ErrUnreadable)
+	}
+	ec, err := restoreInteractive(j, rc.Connections, BudgetReservation{ID: rc.Budget})
+	if err != nil {
+		return Policy{}, fmt.Errorf("%w: execution context: %v", jobs.ErrUnreadable, err)
+	}
+	return ec.Policy(), nil
 }
 
 // stopRun is stop for a step that ran the gate: a job cancelled because its

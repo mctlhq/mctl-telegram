@@ -456,6 +456,16 @@ The pin alone is not the read-only boundary. The token itself must carry no auth
 - S1-T10: a refresh that returns a wider scope fails the connection.
 - S1-T11: a client id without a ceiling record keeps today's grant. This is the regression guard for existing clients.
 
+**Drift signal (#1315).** Each dispatch observes the live `tools/list`
+(cached at most 60s per connection and authority revision) and sets
+`mctl_pa_pin_drift{server}` to 1 when a pinned tool changed or disappeared, 0
+when every pinned tool matches. Unpinned extras, such as `tg`'s write tools or
+a gateway's `tg_`-prefixed names, are denied but are not drift. A listing that
+cannot be read or parsed removes the drift series and sets
+`mctl_pa_pin_listing_unknown{server}` to 1: an unobserved listing is never
+reported as clean. Alerts `MctlPAPinDrift` and `MctlPAPinListingUnknown` cover
+both; see the runbook.
+
 ### T9 Egress, SSRF and redirects (from Phase 1)
 
 **Scope.** These rules cover every outbound request MCTL makes:
@@ -533,7 +543,18 @@ All of these, plus consent, are checked again at **every dispatch**, not only at
 - principal, connection id, `authority_revision`, server and tool;
 - args digest, tier, class and taint;
 - approval or permission id, and approver;
-- result status (`ok`, `refused`, `fenced`, `outcome_unknown`) and cost.
+- result status (`ok`, `refused`, `fenced`, `outcome_unknown`) and cost;
+- for a refusal, a closed `reason` code (for example `connection_unbound`,
+  `revision_mismatch`, `tool_changed`, `token_expired`). Every field taken from
+  worker input is normalised to a fixed marker before it is recorded, so a
+  hostile value can neither enter the record nor make the append drop it.
+
+Implementation (#1315): the dispatcher at `POST /api/pa/v1/jobs/tool` writes
+these entries through `internal/pa/connector`. A refusal is recorded only when
+the token is attributable to a principal (our signature, our issuer, the
+`pa-job` audience). A forged or foreign token is counted in
+`mctl_pa_dispatch_total` but written to nobody's chain, since its principal
+claim is not evidence.
 
 Message bodies and tool outputs are never logged, only digests. `/log` shows a principal their own entries.
 

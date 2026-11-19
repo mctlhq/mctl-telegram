@@ -67,6 +67,7 @@ type runLoopHarness struct {
 	loop   *RunLoop
 	sender *sendRecorder
 	issuer *localjwt.Issuer
+	cache  *localjwt.RevocationCache
 	pool   string
 	tools  []string
 	conns  map[int64][]ConnectionRevision
@@ -89,7 +90,11 @@ func withStore(wrap func(*db.Store) RunLoopStore) rlOption {
 
 func newRunLoopHarness(t *testing.T, opts ...rlOption) *runLoopHarness {
 	t.Helper()
-	store := newStore(t)
+	return newRunLoopHarnessOn(t, newStore(t), opts...)
+}
+
+func newRunLoopHarnessOn(t *testing.T, store *db.Store, opts ...rlOption) *runLoopHarness {
+	t.Helper()
 	h := &runLoopHarness{sender: &sendRecorder{}}
 	iss, err := localjwt.NewIssuer(runLoopSecret, runLoopIssuer)
 	if err != nil {
@@ -97,6 +102,7 @@ func newRunLoopHarness(t *testing.T, opts ...rlOption) *runLoopHarness {
 	}
 	h.issuer = iss
 	cache := localjwt.NewRevocationCache(store, time.Minute)
+	h.cache = cache
 	pool, err := localjwt.NewPoolProvider(localjwt.PoolProviderConfig{Secret: runLoopSecret, ExpectedIssuer: runLoopIssuer, RevocationCache: cache})
 	if err != nil {
 		t.Fatal(err)

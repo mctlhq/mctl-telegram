@@ -1,0 +1,571 @@
+// Copyright 2025 MCTL Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package connector
+
+// dispatch.go is the server-side dispatcher of PA read tools (#1315 slice
+// 2, threat model T2, T4, T8, T11, T12). The worker proposes a call with
+// its pa-job token; everything that decides whether the call runs, and as
+// whom, is server state:
+//
+//  1. the pa-job token is verified (signature, audience, expiry,
+//     revocation). A refused token of ours is audited in its principal's
+//     chain; one that cannot be attributed is counted only;
+//  2. the request is parsed: server, tool, optional connection id,
+//     arguments (a JSON object);
+//  3. the flags are re-read: PA_EXTERNAL_TOOLS_ENABLED and the server's
+//     PA_SERVER_<NAME>_ENABLED (S1-F4); a flag that cannot be read is off;
+//  4. the job row admits the call (RunLoop.AdmitToolCall): signed tool set
+//     of token and row, pinned read, cap, live reservation, consent,
+//     conversation. The Policy comes from that row (I2, I10);
+//  5. the connection is one the run bound, on the requested server (S1-X3),
+//     and its stored grant is exactly the server's allowed scope;
+//  6. the connection is re-checked at the bound authority revision and its
+//     access token opened server-side (I1, I4);
+//  7. the server's tools/list (cached at most catalog.ReadListingTTL per
+//     connection and revision) is compared with the pin; drift, an
+//     unpinned tool or a non-read is denied (I7), a failed listing is
+//     unavailable, never empty (I9). The drift signal is exported;
+//  8. Executor.Execute audits and dispatches through egress (I8); the
+//     connection is re-checked after the call and a changed one fences the
+//     result (S1-C7).
+//
+// The worker gets the tool result or a fixed refusal label; never a token,
+// never error text.
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"sort"
+	"sync"
+	"time"
+
+	"github.com/mctlhq/mctl-telegram/internal/pa"
+	"github.com/mctlhq/mctl-telegram/internal/pa/catalog"
+	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
+	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
+)
+
+// RouteTool is the dispatcher's route, next to the run loop's job routes.
+const RouteTool = "/api/pa/v1/jobs/tool"
+
+// maxToolRequestBytes bounds a tool request body.
+const maxToolRequestBytes = 64 << 10
+
+// JobGate is the run loop's half of the dispatcher (*pa.RunLoop).
+type JobGate interface {
+	AuthenticateAttributed(r *http.Request) (pa.PAJob, pa.TokenRefusal, error)
+	AdmitToolCall(ctx context.Context, job pa.PAJob, server, tool string) (pa.Policy, error)
+}
+
+// Connections is the connection manager's half (*connection.Manager).
+type Connections interface {
+	Get(ctx context.Context, principal int64, id string) (connection.Connection, error)
+	BeginCall(ctx context.Context, principal int64, id string, boundRevision int64) (*connection.Call, error)
+	AccessToken(ctx context.Context, principal int64, id string, boundRevision int64) (connection.Secret, connection.Connection, error)
+}
+
+// Flags are the switches re-read at every dispatch (threat model T11).
+type Flags struct {
+	ExternalTools bool
+	Servers       map[string]bool
+}
+
+// MCPEndpoint is one catalog server's MCP surface. *Endpoint is the only
+// production implementation: it reaches the server through
+// internal/pa/egress (I8).
+type MCPEndpoint interface {
+	Server() string
+	ListTools(ctx context.Context, token connection.Secret) ([][]byte, error)
+	CallTool(ctx context.Context, token connection.Secret, tool string, args json.RawMessage) ([]byte, error)
+}
+
+// Metrics is what the dispatcher exports (*metrics.Registry).
+type Metrics interface {
+	PAPinObserved(server string, drift bool, denied map[string]int, reasons []string)
+	PAPinUnknown(server string)
+	CountPADispatch(server, status, reason string)
+}
+
+// DispatcherConfig wires a Dispatcher. Every field but Metrics and Now is
+// required.
+type DispatcherConfig struct {
+	Jobs        JobGate
+	Connections Connections
+	Pin         *catalog.Pin
+	Endpoints   map[string]MCPEndpoint
+	Executor    *Executor
+	// Flags is called once per request. An error refuses the call.
+	Flags   func() (Flags, error)
+	Metrics Metrics
+	Now     func() time.Time
+}
+
+// Dispatcher serves RouteTool.
+type Dispatcher struct {
+	cfg DispatcherConfig
+
+	mu       sync.Mutex
+	listings map[listingKey]*catalog.Surface
+}
+
+type listingKey struct {
+	server, connection string
+	revision           int64
+}
+
+// NewDispatcher refuses an incomplete configuration, and an endpoint for a
+// server the pin does not have.
+func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
+	if cfg.Jobs == nil || cfg.Connections == nil || cfg.Pin == nil || cfg.Executor == nil ||
+		cfg.Executor.Sink == nil || cfg.Flags == nil {
+		return nil, errors.New("pa connector: dispatcher needs jobs, connections, a pin, an executor and flags")
+	}
+	for name, ep := range cfg.Endpoints {
+		if _, ok := cfg.Pin.Servers[name]; !ok || ep == nil || ep.Server() != name {
+			return nil, fmt.Errorf("pa connector: endpoint %q is not a catalog server", name)
+		}
+	}
+	return &Dispatcher{cfg: cfg, listings: map[listingKey]*catalog.Surface{}}, nil
+}
+
+// Mount registers RouteTool.
+func (d *Dispatcher) Mount(mux interface{ Handle(string, http.Handler) }) {
+	mux.Handle(RouteTool, d)
+}
+
+func (d *Dispatcher) now() time.Time {
+	if d.cfg.Now != nil {
+		return d.cfg.Now()
+	}
+	return time.Now()
+}
+
+func (d *Dispatcher) pinned(server string) bool {
+	_, ok := d.cfg.Pin.Servers[server]
+	return ok
+}
+
+// toolRequest is the worker's proposal.
+type toolRequest struct {
+	Server       string          `json:"server"`
+	Tool         string          `json:"tool"`
+	ConnectionID string          `json:"connection_id"`
+	Arguments    json.RawMessage `json:"arguments"`
+}
+
+// toolResponse is the answer to an executed call. Output is the tool's
+// JSON-RPC result as text, capped at jobs.MaxToolOutputBytes. It is
+// external content whatever it holds (T5).
+type toolResponse struct {
+	Status    string `json:"status"`
+	Output    string `json:"output,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
+}
+
+type refusalResponse struct {
+	Stop string `json:"stop"`
+}
+
+// refusal is a decided "no": its reason and HTTP status.
+type refusal struct {
+	reason string
+	code   int
+}
+
+func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	job, tr, err := d.cfg.Jobs.AuthenticateAttributed(r)
+	if err != nil {
+		reason := tr.Reason
+		switch reason {
+		case ReasonTokenExpired, ReasonTokenRevoked:
+		default:
+			reason = ReasonTokenInvalid
+		}
+		// Only a token this server minted names a chain to write to.
+		d.cfg.Executor.RecordRefusal(r.Context(), Refusal{Principal: tr.Principal, Reason: reason}, d.pinned)
+		d.count(invalidServer, string(StatusRefused), reason)
+		writeJSON(w, http.StatusUnauthorized, refusalResponse{Stop: reason})
+		return
+	}
+	principal := job.Principal()
+
+	var req toolRequest
+	body := http.MaxBytesReader(w, r.Body, maxToolRequestBytes)
+	dec := json.NewDecoder(body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil || !atEOF(dec) || !jsonObject(req.Arguments) {
+		d.refuse(w, r, Refusal{Principal: principal, Server: req.Server, Tool: req.Tool,
+			ConnectionID: req.ConnectionID, Reason: ReasonBadRequest}, http.StatusBadRequest)
+		return
+	}
+	base := Refusal{Principal: principal, Server: req.Server, Tool: req.Tool, ConnectionID: req.ConnectionID, Args: req.Arguments}
+
+	if !d.pinned(req.Server) {
+		d.refuse(w, r, with(base, ReasonUnknownServer), http.StatusForbidden)
+		return
+	}
+	flags, err := d.cfg.Flags()
+	if err != nil || !flags.ExternalTools || !flags.Servers[req.Server] {
+		d.refuse(w, r, with(base, ReasonFlagOff), http.StatusForbidden)
+		return
+	}
+
+	policy, err := d.cfg.Jobs.AdmitToolCall(r.Context(), job, req.Server, req.Tool)
+	if err != nil {
+		ref := jobRefusal(err)
+		d.refuse(w, r, with(base, ref.reason), ref.code)
+		return
+	}
+
+	bound, ref := d.resolveConnection(r.Context(), policy, req.Server, req.ConnectionID)
+	if ref != nil {
+		d.refuse(w, r, with(base, ref.reason), ref.code)
+		return
+	}
+	base.ConnectionID, base.AuthorityRevision = bound.ConnectionID, bound.AuthorityRevision
+
+	call, err := d.cfg.Connections.BeginCall(r.Context(), principal, bound.ConnectionID, bound.AuthorityRevision)
+	if err != nil {
+		ref := connectionRefusal(err)
+		d.refuse(w, r, with(base, ref.reason), ref.code)
+		return
+	}
+	dispatched := false
+	defer func() {
+		if !dispatched {
+			call.Abandon()
+		}
+	}()
+	token, _, err := d.cfg.Connections.AccessToken(call.Ctx, principal, bound.ConnectionID, bound.AuthorityRevision)
+	if err != nil {
+		ref := connectionRefusal(err)
+		d.refuse(w, r, with(base, ref.reason), ref.code)
+		return
+	}
+
+	ep := d.cfg.Endpoints[req.Server]
+	if ep == nil {
+		d.refuse(w, r, with(base, ReasonServerUnavailable), http.StatusServiceUnavailable)
+		return
+	}
+	surface := d.surface(call.Ctx, ep, token, bound)
+
+	res, err := d.cfg.Executor.Execute(call.Ctx, surface, Call{
+		Policy:       policy,
+		ConnectionID: bound.ConnectionID,
+		Tool:         req.Tool,
+		Args:         req.Arguments,
+		// The dispatcher cannot prove a run clean: everything the model
+		// saw may have come from a tool. Phase 1 has reads only, so this
+		// only labels the record.
+		Taint: TaintExternal,
+	}, func(ctx context.Context) (Result, error) {
+		dispatched = true
+		out, cerr := ep.CallTool(ctx, token, req.Tool, req.Arguments)
+		// The post-dispatch check runs whatever the call returned: a
+		// result that arrives after the connection changed is discarded.
+		if ferr := call.Finish(context.WithoutCancel(ctx)); ferr != nil {
+			return Result{}, fmt.Errorf("%w: %w", ErrDispatchFenced, ferr)
+		}
+		if errors.Is(cerr, ErrMCPUnauthorized) {
+			return Result{}, fmt.Errorf("%w: %w", ErrDispatchRefused, cerr)
+		}
+		if cerr != nil {
+			return Result{}, cerr
+		}
+		return Result{Output: out}, nil
+	})
+	if err != nil {
+		d.answerExecuteError(w, req.Server, err)
+		return
+	}
+	out, truncated := jobs.TruncateToolOutput(res.Output)
+	d.count(req.Server, string(StatusOK), "")
+	writeJSON(w, http.StatusOK, toolResponse{Status: string(StatusOK), Output: string(out), Truncated: truncated})
+}
+
+// answerExecuteError maps an Execute error to the worker's answer. The
+// executor has already audited it.
+func (d *Dispatcher) answerExecuteError(w http.ResponseWriter, server string, err error) {
+	var reason string
+	code := http.StatusForbidden
+	status := StatusRefused
+	switch {
+	case errors.Is(err, ErrAuditUnavailable):
+		reason, code = "audit_unavailable", http.StatusServiceUnavailable
+	case errors.Is(err, ErrDispatchFenced):
+		reason, code, status = "fenced", http.StatusConflict, StatusFenced
+	case errors.Is(err, ErrDispatchRefused):
+		reason, code = "server_refused", http.StatusBadGateway
+	case errors.Is(err, ErrInvalidCall):
+		reason = ReasonConnectionUnbound
+	case errors.Is(err, catalog.ErrServerUnavailable), errors.Is(err, catalog.ErrListingStale):
+		reason, code = PinRefusalReason(err), http.StatusServiceUnavailable
+	case errors.Is(err, catalog.ErrNotPinned), errors.Is(err, catalog.ErrToolChanged),
+		errors.Is(err, catalog.ErrNoWritePath), errors.Is(err, catalog.ErrUnknownServer):
+		reason = PinRefusalReason(err)
+	default:
+		// The call was dispatched and its outcome is unknown.
+		reason, code, status = "outcome_unknown", http.StatusBadGateway, StatusOutcomeUnknown
+	}
+	d.count(server, string(status), reason)
+	writeJSON(w, code, refusalResponse{Stop: reason})
+}
+
+// resolveConnection picks the run's bound connection for server. A named
+// connection must be bound to the run (S1-X3: a connection of another
+// principal, or one the run did not bind, is refused). Without a name the
+// run must have exactly one bound connection on server. A connection that
+// cannot be read refuses the call; it is never skipped (I9).
+func (d *Dispatcher) resolveConnection(ctx context.Context, policy pa.Policy, server, id string) (pa.ConnectionRevision, *refusal) {
+	principal := policy.Principal().TelegramID()
+	var candidates []pa.ConnectionRevision
+	if id != "" {
+		cr, ok := policy.Connection(id)
+		if !ok {
+			return pa.ConnectionRevision{}, &refusal{ReasonConnectionUnbound, http.StatusForbidden}
+		}
+		candidates = []pa.ConnectionRevision{cr}
+	} else {
+		candidates = policy.Connections()
+	}
+	var match []pa.ConnectionRevision
+	for _, cr := range candidates {
+		c, err := d.cfg.Connections.Get(ctx, principal, cr.ConnectionID)
+		if err != nil {
+			ref := connectionRefusal(err)
+			return pa.ConnectionRevision{}, &ref
+		}
+		if string(c.Server) != server {
+			continue
+		}
+		want, ok := connection.CanonicalScope(c.Server)
+		if !ok || c.GrantedScope != want {
+			return pa.ConnectionRevision{}, &refusal{ReasonScopeMismatch, http.StatusForbidden}
+		}
+		match = append(match, cr)
+	}
+	switch len(match) {
+	case 0:
+		return pa.ConnectionRevision{}, &refusal{ReasonConnectionUnbound, http.StatusForbidden}
+	case 1:
+		return match[0], nil
+	}
+	return pa.ConnectionRevision{}, &refusal{ReasonConnectionAmbiguous, http.StatusBadRequest}
+}
+
+// surface returns the pin's view of ep's current listing for this
+// connection, read at most catalog.ReadListingTTL ago. Only a successful
+// observation is cached: a failure is retried by the next call, and until
+// then the server is unavailable.
+func (d *Dispatcher) surface(ctx context.Context, ep MCPEndpoint, token connection.Secret, bound pa.ConnectionRevision) *catalog.Surface {
+	server := ep.Server()
+	key := listingKey{server: server, connection: bound.ConnectionID, revision: bound.AuthorityRevision}
+	now := d.now()
+	d.mu.Lock()
+	s := d.listings[key]
+	d.mu.Unlock()
+	if s != nil && s.Err() == nil {
+		if _, err := s.ModelTools(now); err == nil {
+			return s
+		}
+	}
+	pages, err := ep.ListTools(ctx, token)
+	if err != nil {
+		slog.Warn("pa connector: tools/list failed", "server", server, "err", err)
+	}
+	s = d.cfg.Pin.Observe(server, pages, err, now)
+	d.recordPin(server, s)
+	d.mu.Lock()
+	if s.Err() == nil {
+		d.listings[key] = s
+	} else {
+		delete(d.listings, key)
+	}
+	// Drop expired observations so the map does not grow with old
+	// revisions.
+	for k, v := range d.listings {
+		if _, err := v.ModelTools(now); err != nil {
+			delete(d.listings, k)
+		}
+	}
+	d.mu.Unlock()
+	return s
+}
+
+// denyReasons is every deny reason the drift gauges carry.
+var denyReasons = []string{
+	string(catalog.DenyNotPinned), string(catalog.DenyMissing), string(catalog.DenyChangedSchema),
+	string(catalog.DenyChangedDescription), string(catalog.DenyChangedAnnotations),
+}
+
+// PinDrift reports whether s shows drift: a pinned tool that is missing or
+// changed. A tool the server lists but the pin does not have is denied
+// (not_pinned) but is not drift: tg lists its write tools too. ok is false
+// when s has no listing (could not observe), which is never "no drift".
+func PinDrift(s *catalog.Surface) (drift bool, denied map[string]int, ok bool) {
+	if s == nil || s.Err() != nil {
+		return false, nil, false
+	}
+	denied = map[string]int{}
+	for _, dt := range s.Denied() {
+		for _, r := range dt.Reasons {
+			denied[string(r)]++
+			if r != catalog.DenyNotPinned {
+				drift = true
+			}
+		}
+	}
+	return drift, denied, true
+}
+
+// GatewayPrefixed reports whether s looks like a listing read through the
+// mctl gateway rather than from the server itself: every pinned tool is
+// missing and the server lists the pinned names under the gateway's
+// "<server>_" prefix. Such a listing is still denied in full (the pin
+// knows no prefixed name); this only names the misconfiguration in logs.
+func GatewayPrefixed(s *catalog.Surface, pin *catalog.Pin) bool {
+	if s == nil || s.Err() != nil || pin == nil {
+		return false
+	}
+	sp, ok := pin.Servers[s.Server()]
+	if !ok || len(sp.Tools) == 0 {
+		return false
+	}
+	denied := map[string][]catalog.DenyReason{}
+	for _, dt := range s.Denied() {
+		denied[dt.Name] = dt.Reasons
+	}
+	prefix := s.Server() + "_"
+	for name := range sp.Tools {
+		if r := denied[name]; len(r) != 1 || r[0] != catalog.DenyMissing {
+			return false
+		}
+		if r := denied[prefix+name]; len(r) != 1 || r[0] != catalog.DenyNotPinned {
+			return false
+		}
+	}
+	return true
+}
+
+func (d *Dispatcher) recordPin(server string, s *catalog.Surface) {
+	drift, denied, ok := PinDrift(s)
+	if !ok {
+		if d.cfg.Metrics != nil {
+			d.cfg.Metrics.PAPinUnknown(server)
+		}
+		return
+	}
+	if drift {
+		names := make([]string, 0)
+		for _, dt := range s.Denied() {
+			if len(dt.Reasons) != 1 || dt.Reasons[0] != catalog.DenyNotPinned {
+				names = append(names, dt.Name)
+			}
+		}
+		sort.Strings(names)
+		slog.Warn("pa connector: pin drift", "server", server, "tools", names,
+			"gateway_prefixed", GatewayPrefixed(s, d.cfg.Pin))
+	}
+	if d.cfg.Metrics != nil {
+		d.cfg.Metrics.PAPinObserved(server, drift, denied, denyReasons)
+	}
+}
+
+func (d *Dispatcher) refuse(w http.ResponseWriter, r *http.Request, ref Refusal, code int) {
+	d.cfg.Executor.RecordRefusal(r.Context(), ref, d.pinned)
+	server := ref.Server
+	if !d.pinned(server) {
+		server = invalidServer
+	}
+	d.count(server, string(StatusRefused), ref.Reason)
+	writeJSON(w, code, refusalResponse{Stop: ref.Reason})
+}
+
+func (d *Dispatcher) count(server, status, reason string) {
+	if d.cfg.Metrics != nil {
+		d.cfg.Metrics.CountPADispatch(server, status, reason)
+	}
+}
+
+func with(r Refusal, reason string) Refusal {
+	r.Reason = reason
+	return r
+}
+
+// jobRefusal maps a job-ledger admission error. Anything it does not know,
+// a ledger read error included, refuses as unreadable (I9).
+func jobRefusal(err error) refusal {
+	switch {
+	case errors.Is(err, jobs.ErrToolNotInSet):
+		return refusal{ReasonToolNotInSet, http.StatusForbidden}
+	case errors.Is(err, jobs.ErrToolCap):
+		return refusal{ReasonToolCap, http.StatusConflict}
+	case errors.Is(err, jobs.ErrBudget):
+		return refusal{ReasonBudget, http.StatusConflict}
+	case errors.Is(err, jobs.ErrNotFound), errors.Is(err, jobs.ErrStale), errors.Is(err, pa.ErrNoJob):
+		return refusal{ReasonJobStale, http.StatusConflict}
+	case errors.Is(err, jobs.ErrGone):
+		return refusal{ReasonJobGone, http.StatusConflict}
+	case errors.Is(err, jobs.ErrInvalid):
+		return refusal{ReasonBadRequest, http.StatusBadRequest}
+	}
+	return refusal{ReasonJobUnreadable, http.StatusServiceUnavailable}
+}
+
+// connectionRefusal maps a connection gate error. Unknown errors are
+// unreadable, never a pass.
+func connectionRefusal(err error) refusal {
+	switch {
+	case errors.Is(err, connection.ErrRevisionMismatch):
+		return refusal{ReasonRevisionMismatch, http.StatusConflict}
+	case errors.Is(err, connection.ErrNotActive), errors.Is(err, connection.ErrNotFound):
+		return refusal{ReasonConnectionInactive, http.StatusForbidden}
+	case errors.Is(err, connection.ErrScopeMismatch):
+		return refusal{ReasonScopeMismatch, http.StatusForbidden}
+	}
+	return refusal{ReasonConnectionUnreadable, http.StatusServiceUnavailable}
+}
+
+// atEOF reports whether dec has nothing left but whitespace. dec.More
+// would accept a stray closing bracket.
+func atEOF(dec *json.Decoder) bool {
+	_, err := dec.Token()
+	return errors.Is(err, io.EOF)
+}
+
+// jsonObject reports whether raw is a JSON object (tools/call arguments).
+func jsonObject(raw json.RawMessage) bool {
+	t := bytes.TrimSpace(raw)
+	return len(t) >= 2 && t[0] == '{' && json.Valid(t)
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
+}

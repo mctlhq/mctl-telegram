@@ -134,6 +134,7 @@ func FormatRecord(e Entry) (string, error) {
 		{"status", string(e.Status), true},
 		{"result", e.ResultSHA256, false},
 		{"cost", strconv.FormatInt(e.Cost, 10), true},
+		{"reason", e.Reason, false},
 	}
 	var b strings.Builder
 	b.WriteString(auditRecordVersion)

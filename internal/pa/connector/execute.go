@@ -143,7 +143,10 @@ type Entry struct {
 	// ResultSHA256 is set on an ok result entry.
 	ResultSHA256 string
 	Cost         int64
-	At           time.Time
+	// Reason is the fixed label of a refusal (a Reason* constant), empty
+	// otherwise. Never error text.
+	Reason string
+	At     time.Time
 }
 
 // Sink appends audit entries to the hash-chained log. Append returns nil
@@ -209,8 +212,8 @@ func (x *Executor) Execute(ctx context.Context, surface *catalog.Surface, call C
 		Tool:       recordableName(call.Tool),
 		ArgsSHA256: digest(call.Args),
 		Taint:      call.Taint,
-		ApprovalID: call.ApprovalID,
-		Approver:   call.Approver,
+		ApprovalID: recordable(call.ApprovalID, invalidMarker),
+		Approver:   recordable(call.Approver, invalidMarker),
 	}
 
 	// From here the principal is known, so every refusal is audited. The
@@ -222,16 +225,18 @@ func (x *Executor) Execute(ctx context.Context, surface *catalog.Surface, call C
 	}
 	conn, ok := call.Policy.Connection(call.ConnectionID)
 	if !ok || call.ConnectionID == "" {
-		base.ConnectionID = unboundConnection
+		base.ConnectionID, base.Reason = unboundConnection, ReasonConnectionUnbound
 		return Result{}, x.refuse(ctx, base, now, fmt.Errorf("%w: connection not bound to the run", ErrInvalidCall))
 	}
 	base.ConnectionID, base.AuthorityRevision = conn.ConnectionID, conn.AuthorityRevision
 	if !taintOK {
+		base.Reason = ReasonTaintInvalid
 		return Result{}, x.refuse(ctx, base, now, fmt.Errorf("%w: unknown taint", ErrInvalidCall))
 	}
 
 	grant, authErr := surface.Authorize(call.Tool, now)
 	if authErr != nil {
+		base.Reason = PinRefusalReason(authErr)
 		return Result{}, x.refuse(ctx, base, now, authErr)
 	}
 	base.Tier, base.Class = grant.Tier, grant.Class
@@ -314,7 +319,133 @@ func (x *Executor) appendDetached(ctx context.Context, e Entry) {
 const (
 	unboundConnection = "unbound"
 	taintInvalid      = Taint("invalid")
+	// invalidMarker replaces an optional identifier (approval id, approver)
+	// that came from worker or model input and is outside the record's
+	// alphabet, so the refusal is still recorded instead of dropped.
+	invalidMarker = "invalid"
+	// invalidServer replaces a server name that is not in the catalog.
+	invalidServer = "invalid-server"
+	// noConnection marks a refusal decided before a connection was resolved.
+	noConnection = "none"
 )
+
+// Refusal reasons recorded in Entry.Reason. A closed set: the record never
+// carries error text.
+const (
+	ReasonTokenExpired         = "token_expired"
+	ReasonTokenRevoked         = "token_revoked"
+	ReasonTokenInvalid         = "token_invalid"
+	ReasonBadRequest           = "bad_request"
+	ReasonFlagOff              = "flag_off"
+	ReasonToolNotInSet         = "tool_not_in_set"
+	ReasonToolCap              = "tool_cap"
+	ReasonBudget               = "budget"
+	ReasonJobStale             = "job_stale"
+	ReasonJobGone              = "job_gone"
+	ReasonJobUnreadable        = "job_unreadable"
+	ReasonConnectionUnbound    = "connection_unbound"
+	ReasonConnectionAmbiguous  = "connection_ambiguous"
+	ReasonConnectionInactive   = "connection_not_active"
+	ReasonRevisionMismatch     = "revision_mismatch"
+	ReasonConnectionUnreadable = "connection_unreadable"
+	ReasonScopeMismatch        = "scope_mismatch"
+	ReasonServerUnavailable    = "server_unavailable"
+	ReasonUnknownServer        = "unknown_server"
+	ReasonListingStale         = "listing_stale"
+	ReasonNotPinned            = "not_pinned"
+	ReasonToolChanged          = "tool_changed"
+	ReasonNoWritePath          = "no_write_path"
+	ReasonTaintInvalid         = "taint_invalid"
+	ReasonInternal             = "internal"
+)
+
+// PinRefusalReason maps a catalog Authorize error to its reason. An error
+// it does not know is ReasonInternal, never a pass.
+func PinRefusalReason(err error) string {
+	switch {
+	case errors.Is(err, catalog.ErrServerUnavailable):
+		return ReasonServerUnavailable
+	case errors.Is(err, catalog.ErrUnknownServer):
+		return ReasonUnknownServer
+	case errors.Is(err, catalog.ErrListingStale):
+		return ReasonListingStale
+	case errors.Is(err, catalog.ErrNotPinned):
+		return ReasonNotPinned
+	case errors.Is(err, catalog.ErrToolChanged):
+		return ReasonToolChanged
+	case errors.Is(err, catalog.ErrNoWritePath):
+		return ReasonNoWritePath
+	}
+	return ReasonInternal
+}
+
+// Refusal is a call refused before Execute could run: the token, the
+// request, a flag, the job ledger or the connection said no. Every field
+// may come from the worker; RecordRefusal normalises each one.
+type Refusal struct {
+	Principal         int64
+	Server            string
+	Tool              string
+	ConnectionID      string
+	AuthorityRevision int64
+	Args              []byte
+	Reason            string
+}
+
+// RecordRefusal appends a single refused entry for r in the principal's
+// chain (threat model T12: "every call and refusal"). Server, tool and
+// connection are normalised to the record's alphabet, with fixed markers
+// in place of anything else, so a hostile value can neither enter the
+// record nor make the sink drop the row. A principal <= 0 has no chain and
+// is not recorded. A failed append raises the alert hook.
+func (x *Executor) RecordRefusal(ctx context.Context, r Refusal, servers func(string) bool) {
+	if x == nil || x.Sink == nil || r.Principal <= 0 {
+		return
+	}
+	callID, err := newCallID()
+	if err != nil {
+		slog.Error("pa connector: refusal call id", "err", err)
+		return
+	}
+	server := invalidServer
+	if servers != nil && servers(r.Server) {
+		server = r.Server
+	}
+	conn := noConnection
+	if r.ConnectionID != "" {
+		conn = recordable(r.ConnectionID, unboundConnection)
+	}
+	reason := r.Reason
+	if !reasonRE.MatchString(reason) {
+		reason = ReasonInternal
+	}
+	e := Entry{
+		CallID:            callID,
+		Phase:             PhaseResult,
+		Principal:         r.Principal,
+		ConnectionID:      conn,
+		AuthorityRevision: max(r.AuthorityRevision, 0),
+		Server:            server,
+		Tool:              recordableName(r.Tool),
+		ArgsSHA256:        digest(r.Args),
+		Taint:             TaintExternal,
+		Status:            StatusRefused,
+		Reason:            reason,
+		At:                x.now(),
+	}
+	x.appendDetached(ctx, e)
+}
+
+var reasonRE = regexp.MustCompile(`^[a-z_]{1,40}$`)
+
+// recordable returns v if it is in the record's alphabet (or empty), and
+// marker otherwise.
+func recordable(v, marker string) string {
+	if v == "" || safeToken.MatchString(v) {
+		return v
+	}
+	return marker
+}
 
 func (x *Executor) alert(e Entry, err error) {
 	slog.Error("pa connector: audit append failed",
