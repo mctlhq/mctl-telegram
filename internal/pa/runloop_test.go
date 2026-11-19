@@ -766,7 +766,7 @@ func TestRunLoop_ReadErrorsFailClosed(t *testing.T) {
 			if _, code := h.claim(); code != http.StatusNoContent {
 				t.Fatalf("claim with an unreadable %s: %d", name, code)
 			}
-			if n := h.count(`SELECT count(*) FROM pa_jobs WHERE claim_failures = 1 AND held_until_ms > 0`); n != 1 {
+			if n := h.count(`SELECT count(*) FROM pa_jobs WHERE claim_failures = 1 AND retry_at_ms > 0`); n != 1 {
 				t.Fatal("the failed claim was not backed off")
 			}
 			if len(h.sender.to(aliceID)) != 0 {
@@ -939,4 +939,99 @@ func mustSealer(t *testing.T) *convo.Sealer {
 		t.Fatal(err)
 	}
 	return s
+}
+
+// storeFault is the error the db store returns for a failed read
+// (db.storeFault): nothing was observed about the row.
+var storeFault = fmt.Errorf("%w: %w: begin: driver: bad connection", convo.ErrUnreadable, convo.ErrStoreFault)
+
+// flakyFragments fails the next n fragment loads with a store fault.
+type flakyFragments struct {
+	*db.Store
+	n *int
+}
+
+func (f flakyFragments) LoadPAFragments(ctx context.Context, p int64, c string, now time.Time) ([]convo.SealedFragment, error) {
+	if *f.n > 0 {
+		*f.n--
+		return nil, storeFault
+	}
+	return f.Store.LoadPAFragments(ctx, p, c, now)
+}
+
+// faultedConsent: every consent read is a store fault.
+type faultedConsent struct{ *db.Store }
+
+func (faultedConsent) GetPAConsent(context.Context, *sql.Tx, int64) (convo.ConsentRecord, error) {
+	return convo.ConsentRecord{}, storeFault
+}
+
+// TestRunLoop_StoreFaultsChangeNothing: one DB hiccup must not cancel a
+// request ("could not observe" is not "observed bad").
+func TestRunLoop_StoreFaultsChangeNothing(t *testing.T) {
+	t.Run("fragment load", func(t *testing.T) {
+		n := 1
+		h := newRunLoopHarness(t, withStore(func(s *db.Store) RunLoopStore { return flakyFragments{s, &n} }))
+		h.consent(aliceID)
+		h.text(aliceID, "hello")
+		if _, code := h.claim(); code != http.StatusServiceUnavailable {
+			t.Fatalf("claim with a failed fragment load: %d", code)
+		}
+		if got := h.count(`SELECT count(*) FROM pa_jobs WHERE status = 'pending' AND claim_failures = 0 AND retry_at_ms = 0`); got != 1 {
+			t.Fatal("a store fault changed the job")
+		}
+		if h.count(`SELECT count(*) FROM pa_usage`) != 0 || len(h.sender.to(aliceID)) != 0 {
+			t.Fatal("a store fault left usage or sent a notice")
+		}
+		if c := h.mustClaim(); c.Token == "" {
+			t.Fatal("not claimed once the store recovered")
+		}
+	})
+	t.Run("gate over many polls", func(t *testing.T) {
+		h := newRunLoopHarness(t, withStore(func(s *db.Store) RunLoopStore { return faultedConsent{s} }))
+		h.consent(aliceID)
+		h.text(aliceID, "hello")
+		for range 2 * jobs.MaxClaimFailures {
+			h.now = h.now.Add(10 * time.Minute)
+			if _, code := h.claim(); code != http.StatusServiceUnavailable {
+				t.Fatalf("claim under a consent store fault: %d", code)
+			}
+		}
+		if got := h.count(`SELECT count(*) FROM pa_jobs WHERE status = 'pending' AND claim_failures = 0`); got != 1 {
+			t.Fatal("a sustained store fault counted against the job")
+		}
+		if len(h.sender.to(aliceID)) != 0 {
+			t.Fatal("a store fault sent a notice")
+		}
+	})
+}
+
+// closingFinish closes the conversation after RunningPAJob passed and
+// before the finish transaction runs.
+type closingFinish struct{ *db.Store }
+
+func (c closingFinish) FinishPAJob(ctx context.Context, ref jobs.Ref, req jobs.FinishRequest) (jobs.Job, error) {
+	if _, err := c.DB.ExecContext(ctx, `UPDATE pa_conversations SET closed_at_ms = 1 WHERE principal = $1`, ref.Principal); err != nil {
+		return jobs.Job{}, err
+	}
+	return c.Store.FinishPAJob(ctx, ref, req)
+}
+
+// TestRunLoop_FinishGate is M13 at finish time: state that changes after
+// the reply's first check is caught by the gate in the finish transaction.
+func TestRunLoop_FinishGate(t *testing.T) {
+	h := newRunLoopHarness(t, withStore(func(s *db.Store) RunLoopStore { return closingFinish{s} }))
+	h.consent(aliceID)
+	h.text(aliceID, "hello")
+	c := h.mustClaim()
+	if w := h.post(RouteReply, c.Token, replyRequest{Text: "secret"}); w.Code != http.StatusConflict {
+		t.Fatalf("reply: %d", w.Code)
+	}
+	sent := h.sender.to(aliceID)
+	if len(sent) != 1 || sent[0] != output.ServerText(output.TextRequestDropped).String() {
+		t.Fatalf("sent %q, want only the dropped notice", sent)
+	}
+	if js, us := h.jobStatus(c.JobID); js != "cancelled" || us != "held" {
+		t.Fatalf("job %s usage %s", js, us)
+	}
 }

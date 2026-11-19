@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
@@ -61,6 +62,7 @@ func paJobsSchema(pg bool) []string {
 			held_until_ms ` + intT + ` NOT NULL DEFAULT 0,
 			hold_notified ` + intT + ` NOT NULL DEFAULT 0,
 			claim_failures ` + intT + ` NOT NULL DEFAULT 0,
+			retry_at_ms ` + intT + ` NOT NULL DEFAULT 0,
 			created_at_ms ` + intT + ` NOT NULL,
 			updated_at_ms ` + intT + ` NOT NULL
 		)`,
@@ -111,6 +113,31 @@ func migratePAJobs(ctx context.Context, dbConn *sql.DB, pg bool) error {
 
 func jobsUnreadable(op string, err error) error {
 	return fmt.Errorf("%w: %s: %v", jobs.ErrUnreadable, op, err)
+}
+
+// jobsStoreFault is jobsUnreadable for a failure of the store itself (a
+// query, begin, lock or timeout): nothing was observed about the row.
+func jobsStoreFault(op string, err error) error {
+	return fmt.Errorf("%w: %w: %s: %v", jobs.ErrUnreadable, jobs.ErrStoreFault, op, err)
+}
+
+// errRowDecode marks a row that was read but does not decode.
+var errRowDecode = errors.New("row does not decode")
+
+// isRowFault tells a row that was read but does not scan or decode (the
+// row's own fault, which recurs) from a failed read (the store's fault).
+// database/sql reports a column conversion failure as "sql: Scan error
+// on column ..."; every other Scan error is the query's.
+func isRowFault(err error) bool {
+	return errors.Is(err, errRowDecode) || strings.HasPrefix(err.Error(), "sql: Scan error")
+}
+
+// rowOrStoreFault classifies err from reading one row.
+func rowOrStoreFault(op string, err error) error {
+	if isRowFault(err) {
+		return jobsUnreadable(op, err)
+	}
+	return jobsStoreFault(op, err)
 }
 
 // AdmitPAMessage implements jobs.Store. It runs under the principal lock
@@ -253,32 +280,36 @@ func (s *Store) ExpirePAJobs(ctx context.Context, now time.Time) ([]jobs.Notice,
 
 const paJobColumns = `id, principal, conversation_id, update_id, consent_version, status, attempts, turns,
 	tool_calls, execution_context, context_digest, tool_set, lease_until_ms, held_until_ms, created_at_ms,
-	hold_notified, claim_failures`
+	hold_notified, claim_failures, retry_at_ms`
 
 func scanPAJob(row interface{ Scan(...any) error }) (jobs.Job, error) {
 	var (
 		j                         jobs.Job
 		status, ec, tools         string
 		leaseMS, heldMS, createMS int64
+		retryMS                   int64
 		holdNotified              int
 	)
 	if err := row.Scan(&j.ID, &j.Principal, &j.ConversationID, &j.UpdateID, &j.ConsentVersion, &status,
 		&j.Attempts, &j.Turns, &j.ToolCalls, &ec, &j.ContextDigest, &tools, &leaseMS, &heldMS, &createMS,
-		&holdNotified, &j.ClaimFailures); err != nil {
+		&holdNotified, &j.ClaimFailures, &retryMS); err != nil {
 		return jobs.Job{}, err
+	}
+	if retryMS > 0 {
+		j.RetryAt = time.UnixMilli(retryMS).UTC()
 	}
 	j.Status = jobs.Status(status)
 	switch j.Status {
 	case jobs.StatusPending, jobs.StatusHeld, jobs.StatusClaimed, jobs.StatusDone, jobs.StatusCancelled, jobs.StatusExpired:
 	default:
-		return jobs.Job{}, fmt.Errorf("unknown job status")
+		return jobs.Job{}, fmt.Errorf("%w: unknown job status", errRowDecode)
 	}
 	if ec != "" {
 		j.ExecutionContext = []byte(ec)
 	}
 	if tools != "" {
 		if err := json.Unmarshal([]byte(tools), &j.ToolSet); err != nil {
-			return jobs.Job{}, fmt.Errorf("tool set: %w", err)
+			return jobs.Job{}, fmt.Errorf("%w: tool set: %v", errRowDecode, err)
 		}
 	}
 	if leaseMS > 0 {
@@ -344,6 +375,9 @@ func (s *Store) ClaimPAJob(ctx context.Context, req jobs.ClaimRequest) (jobs.Cla
 	if err != nil {
 		return jobs.ClaimResult{}, err
 	}
+	// A store fault (anything that is not a *paJobFailure) ends the loop
+	// with an error and changes nothing: the next job would meet the same
+	// fault, and a fault says nothing about the job.
 	var tried []int64
 	for range maxClaimTries {
 		res, err := s.claimOnce(ctx, req, pg, tried)
@@ -373,6 +407,9 @@ func (s *Store) ClaimPAJob(ctx context.Context, req jobs.ClaimRequest) (jobs.Cla
 // is due again after ClaimBackoff, or cancelled (with a notice) when the
 // failure is deterministic or the job failed MaxClaimFailures times. Only a
 // queued job is touched; one that changed meanwhile is left alone.
+//
+// The increment is conditional on the failure count the claim observed,
+// so concurrent claimers that failed on the same row count it once.
 func (s *Store) backoffPAJob(ctx context.Context, j jobs.Job, now time.Time, deterministic bool) (*jobs.Notice, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -382,8 +419,8 @@ func (s *Store) backoffPAJob(ctx context.Context, j jobs.Job, now time.Time, det
 	var failures int
 	err = tx.QueryRowContext(ctx,
 		`UPDATE pa_jobs SET claim_failures = claim_failures + 1, updated_at_ms = $1
-		  WHERE id = $2 AND status IN ($3, $4) RETURNING claim_failures`,
-		now.UnixMilli(), j.ID, string(jobs.StatusPending), string(jobs.StatusHeld)).Scan(&failures)
+		  WHERE id = $2 AND status IN ($3, $4) AND claim_failures = $5 RETURNING claim_failures`,
+		now.UnixMilli(), j.ID, string(jobs.StatusPending), string(jobs.StatusHeld), j.ClaimFailures).Scan(&failures)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, tx.Commit()
 	}
@@ -395,8 +432,8 @@ func (s *Store) backoffPAJob(ctx context.Context, j jobs.Job, now time.Time, det
 		_, err = tx.ExecContext(ctx, `UPDATE pa_jobs SET status = $1 WHERE id = $2`, string(jobs.StatusCancelled), j.ID)
 		notice = &jobs.Notice{Principal: j.Principal, JobID: j.ID, Kind: jobs.NoticeRunFailed}
 	} else {
-		// Never shortens a budget hold that ends later.
-		_, err = tx.ExecContext(ctx, `UPDATE pa_jobs SET held_until_ms = CASE WHEN held_until_ms > $1 THEN held_until_ms ELSE $1 END WHERE id = $2`,
+		// retry_at, not held_until: a budget hold is never moved.
+		_, err = tx.ExecContext(ctx, `UPDATE pa_jobs SET retry_at_ms = $1 WHERE id = $2`,
 			now.Add(jobs.ClaimBackoff(failures)).UnixMilli(), j.ID)
 	}
 	if err != nil {
@@ -423,13 +460,14 @@ func (s *Store) claimOnce(ctx context.Context, req jobs.ClaimRequest, pg bool, s
 		return jobs.ClaimResult{}, err
 	}
 	nowMS := req.Now.UnixMilli()
-	// Due: queued, and past any hold or claim backoff (held_until_ms is 0
-	// for a job never held or backed off). A held job whose conversation
-	// closed or expired is due at once: it is dropped with a notice now,
-	// not when the budget window resets (the hold notice promises that).
+	// Due: queued, past any claim backoff (retry_at_ms) and past any budget
+	// hold (held_until_ms; both 0 when unset). A held job whose
+	// conversation closed or expired is due before its hold ends: it is
+	// dropped with a notice now, not when the budget window resets (the
+	// hold notice promises that). A backoff applies to that case too.
 	// Jobs that already failed in this call are skipped.
-	q := `SELECT j.id, j.principal FROM pa_jobs j
-	  WHERE j.status IN ($1, $2)
+	q := `SELECT j.id, j.principal, j.claim_failures FROM pa_jobs j
+	  WHERE j.status IN ($1, $2) AND j.retry_at_ms <= $3
 	    AND (j.held_until_ms <= $3 OR (j.status = $2 AND NOT EXISTS (
 	         SELECT 1 FROM pa_conversations v WHERE v.id = j.conversation_id AND v.principal = j.principal
 	            AND v.closed_at_ms = 0 AND v.expires_at_ms > $3)))
@@ -440,12 +478,13 @@ func (s *Store) claimOnce(ctx context.Context, req jobs.ClaimRequest, pg bool, s
 		q += fmt.Sprintf(" AND j.id <> $%d", len(args))
 	}
 	var id, principal int64
-	err = tx.QueryRowContext(ctx, q+` ORDER BY j.created_at_ms, j.id LIMIT 1`, args...).Scan(&id, &principal)
+	var failures int
+	err = tx.QueryRowContext(ctx, q+` ORDER BY j.created_at_ms, j.id LIMIT 1`, args...).Scan(&id, &principal, &failures)
 	if errors.Is(err, sql.ErrNoRows) {
 		return jobs.ClaimResult{Outcome: jobs.ClaimNone}, nil
 	}
 	if err != nil {
-		return jobs.ClaimResult{}, jobsUnreadable("claim: pick", err)
+		return jobs.ClaimResult{}, jobsStoreFault("claim: pick", err)
 	}
 	// Serialise with the principal's webhook updates (withdrawal, /forget),
 	// then read the job again under that lock.
@@ -459,12 +498,17 @@ func (s *Store) claimOnce(ctx context.Context, req jobs.ClaimRequest, pg bool, s
 	j, err := scanPAJob(tx.QueryRowContext(ctx,
 		`SELECT `+paJobColumns+` FROM pa_jobs WHERE id = $1 AND principal = $2`+lock, id, principal))
 	if err != nil {
-		// The row was due a moment ago: one that does not scan is this
-		// job's broken state.
-		return jobs.ClaimResult{}, &paJobFailure{job: jobs.Job{ID: id, Principal: principal}, err: jobsUnreadable("claim: job", err)}
+		// The row was due a moment ago: one that was read and does not
+		// scan or decode is this job's broken state; a failed read is not.
+		if !isRowFault(err) {
+			return jobs.ClaimResult{}, jobsStoreFault("claim: job", err)
+		}
+		return jobs.ClaimResult{}, &paJobFailure{job: jobs.Job{ID: id, Principal: principal, ClaimFailures: failures},
+			err: jobsUnreadable("claim: job", err)}
 	}
 	early := j.HeldUntil.After(req.Now)
-	if (j.Status != jobs.StatusPending && j.Status != jobs.StatusHeld) || (early && j.Status != jobs.StatusHeld) {
+	if (j.Status != jobs.StatusPending && j.Status != jobs.StatusHeld) || (early && j.Status != jobs.StatusHeld) ||
+		j.RetryAt.After(req.Now) {
 		// Changed between the pick and the lock.
 		if err := tx.Commit(); err != nil {
 			return jobs.ClaimResult{}, fmt.Errorf("claim pa job: commit: %w", err)
@@ -472,7 +516,14 @@ func (s *Store) claimOnce(ctx context.Context, req jobs.ClaimRequest, pg bool, s
 		return jobs.ClaimResult{Outcome: jobs.ClaimNone}, nil
 	}
 	if err := req.Gate(ctx, tx, j, req.Now); err != nil {
+		if errors.Is(err, jobs.ErrStoreFault) {
+			// Nothing observed about this job: refuse, change nothing.
+			return jobs.ClaimResult{}, err
+		}
 		if !errors.Is(err, jobs.ErrGone) {
+			// A consent row that does not read, or an error the gate did
+			// not classify: this job's own failure, backed off so it
+			// cannot hold up the queue.
 			return jobs.ClaimResult{}, &paJobFailure{job: j, err: err}
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE pa_jobs SET status = $1, updated_at_ms = $2 WHERE id = $3`,
@@ -528,8 +579,11 @@ func (s *Store) claimOnce(ctx context.Context, req jobs.ClaimRequest, pg bool, s
 			// A job that cannot be built (ErrInvalid: a tool outside the
 			// read-only catalog, a context that does not validate) fails
 			// the same way on every attempt and is cancelled; any other
-			// build error is backed off. The rollback drops the
-			// reservation either way.
+			// build error is backed off, except a store fault, which
+			// changes nothing. The rollback drops the reservation.
+			if errors.Is(err, jobs.ErrStoreFault) {
+				return jobs.ClaimResult{}, err
+			}
 			return jobs.ClaimResult{}, &paJobFailure{job: j, deterministic: errors.Is(err, jobs.ErrInvalid), err: err}
 		}
 		if len(ecJSON) == 0 || digest == "" {
@@ -545,7 +599,8 @@ func (s *Store) claimOnce(ctx context.Context, req jobs.ClaimRequest, pg bool, s
 		}
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE pa_jobs SET status = $1, attempts = $2, turns = 0, tool_calls = 0, execution_context = $3,
-			        context_digest = $4, tool_set = $5, lease_until_ms = $6, held_until_ms = 0, updated_at_ms = $7
+			        context_digest = $4, tool_set = $5, lease_until_ms = $6, held_until_ms = 0, retry_at_ms = 0,
+			        updated_at_ms = $7
 			  WHERE id = $8`,
 			string(jobs.StatusClaimed), attempt, string(ecJSON), digest, string(toolsJSON),
 			j.LeaseUntil.UnixMilli(), nowMS, j.ID); err != nil {
@@ -708,14 +763,15 @@ func cancelOne(ctx context.Context, tx *sql.Tx, j jobs.Job, nowMS int64) error {
 }
 
 // ReleasePAClaim implements jobs.Store. The reservation is deleted (the
-// token never left the server, so no model call was made). Without requeue
-// the job is cancelled with a notice. With requeue it is backed off like a
-// failed claim, so a job that keeps failing after its claim cannot stay the
-// oldest due job; when another job of the principal is already queued,
-// that job will read the same conversation, and this one is cancelled
-// quietly.
-func (s *Store) ReleasePAClaim(ctx context.Context, ref jobs.Ref, requeue bool, now time.Time) (*jobs.Notice, error) {
-	if !ref.Valid() || now.IsZero() {
+// token never left the server, so no model call was made), then by mode:
+// ReleaseCancel cancels with a notice; ReleaseBackoff counts a failure
+// and backs the job off like a failed claim (cancelled with a notice at
+// MaxClaimFailures); ReleaseRetry (a store fault) makes it due again at
+// once and counts nothing. When another job of the principal is already
+// queued, that job will read the same conversation, and this one is
+// cancelled quietly instead of requeued.
+func (s *Store) ReleasePAClaim(ctx context.Context, ref jobs.Ref, mode jobs.ReleaseMode, now time.Time) (*jobs.Notice, error) {
+	if !ref.Valid() || now.IsZero() || mode < jobs.ReleaseCancel || mode > jobs.ReleaseRetry {
 		return nil, fmt.Errorf("%w: release", jobs.ErrInvalid)
 	}
 	tx, j, err := s.beginRunning(ctx, ref, now)
@@ -727,26 +783,32 @@ func (s *Store) ReleasePAClaim(ctx context.Context, ref jobs.Ref, requeue bool, 
 		j.ID, j.Attempts, jobs.UsageReserved); err != nil {
 		return nil, fmt.Errorf("release pa claim: usage: %w", err)
 	}
-	next, heldUntil := jobs.StatusCancelled, int64(0)
+	next, retryAt := jobs.StatusCancelled, int64(0)
 	var notice *jobs.Notice
-	failures := j.ClaimFailures + 1
+	failures := j.ClaimFailures
+	if mode == jobs.ReleaseBackoff {
+		failures++
+	}
 	switch {
-	case !requeue || failures >= jobs.MaxClaimFailures:
+	case mode == jobs.ReleaseCancel || failures >= jobs.MaxClaimFailures:
 		notice = &jobs.Notice{Principal: j.Principal, JobID: j.ID, Kind: jobs.NoticeRunFailed}
 	default:
 		var queued int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pa_jobs WHERE principal = $1 AND status IN ($2, $3)`,
 			j.Principal, string(jobs.StatusPending), string(jobs.StatusHeld)).Scan(&queued); err != nil {
-			return nil, jobsUnreadable("release: queued", err)
+			return nil, jobsStoreFault("release: queued", err)
 		}
 		if queued == 0 {
-			next, heldUntil = jobs.StatusPending, now.Add(jobs.ClaimBackoff(failures)).UnixMilli()
+			next = jobs.StatusPending
+			if mode == jobs.ReleaseBackoff {
+				retryAt = now.Add(jobs.ClaimBackoff(failures)).UnixMilli()
+			}
 		}
 	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE pa_jobs SET status = $1, lease_until_ms = 0, execution_context = '', context_digest = '', tool_set = '',
-		        held_until_ms = $2, claim_failures = $3, updated_at_ms = $4 WHERE id = $5`,
-		string(next), heldUntil, failures, now.UnixMilli(), j.ID); err != nil {
+		        retry_at_ms = $2, claim_failures = $3, updated_at_ms = $4 WHERE id = $5`,
+		string(next), retryAt, failures, now.UnixMilli(), j.ID); err != nil {
 		return nil, fmt.Errorf("release pa claim: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -936,7 +998,7 @@ func (s *Store) PAConversationOpen(ctx context.Context, tx *sql.Tx, principal in
 		return jobs.ErrConversationGone
 	}
 	if err != nil {
-		return jobsUnreadable("conversation", err)
+		return jobsStoreFault("conversation", err)
 	}
 	return nil
 }

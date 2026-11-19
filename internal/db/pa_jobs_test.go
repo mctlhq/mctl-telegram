@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 )
 
@@ -38,6 +39,33 @@ func TestPAJobsPostgres(t *testing.T) {
 	s := newPostgresTestStore(t, dsn)
 	runPAJobsSuite(t, s)
 	t.Run("concurrent claims share one global window", func(t *testing.T) { paConcurrentGlobal(t, s) })
+	t.Run("concurrent claimers count one failure once", func(t *testing.T) { paConcurrentFailure(t, s) })
+}
+
+// paConcurrentFailure: claimers that fail on the same job at the same
+// instant record one failure, not one each.
+func paConcurrentFailure(t *testing.T, s *Store) {
+	f := newPAFixture(t, s)
+	f.enqueue(paAlice, "c1")
+	gate := func(context.Context, *sql.Tx, jobs.Job, time.Time) error { return errors.New("alice's row") }
+	var wg sync.WaitGroup
+	for range 6 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = s.ClaimPAJob(context.Background(), jobs.ClaimRequest{
+				Now: f.now, Lease: time.Minute, Budget: f.b, Gate: gate, Build: paBuild(),
+			})
+		}()
+	}
+	wg.Wait()
+	var n int
+	if err := s.DB.QueryRow(`SELECT claim_failures FROM pa_jobs WHERE principal = $1`, paAlice).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("claim_failures = %d after one failure instant, want 1", n)
+	}
 }
 
 func paReset(t *testing.T, s *Store) {
@@ -459,7 +487,22 @@ func runPAJobsSuite(t *testing.T, s *Store) {
 		f := newPAFixture(t, s)
 		f.enqueue(paAlice, "c1")
 		j := f.claim().Job
-		n, err := s.ReleasePAClaim(context.Background(), ref(j), true, f.now)
+		// A store fault on the fragment load: due again at once, nothing
+		// counted.
+		n, err := s.ReleasePAClaim(context.Background(), ref(j), jobs.ReleaseRetry, f.now)
+		if err != nil || n != nil {
+			t.Fatalf("retry: notice %+v err %v", n, err)
+		}
+		var failures int
+		_ = s.DB.QueryRow(`SELECT claim_failures FROM pa_jobs WHERE id = $1`, j.ID).Scan(&failures)
+		if failures != 0 {
+			t.Fatalf("a retry counted %d failures", failures)
+		}
+		j = f.claim().Job
+		if j.ID == 0 {
+			t.Fatal("a retried job was not due at once")
+		}
+		n, err = s.ReleasePAClaim(context.Background(), ref(j), jobs.ReleaseBackoff, f.now)
 		if err != nil || n != nil {
 			t.Fatalf("requeue: notice %+v err %v", n, err)
 		}
@@ -472,7 +515,7 @@ func runPAJobsSuite(t *testing.T, s *Store) {
 		}
 		f.now = f.now.Add(jobs.ClaimBackoff(1) + time.Second)
 		j = f.claim().Job
-		n, err = s.ReleasePAClaim(context.Background(), ref(j), false, f.now)
+		n, err = s.ReleasePAClaim(context.Background(), ref(j), jobs.ReleaseCancel, f.now)
 		if err != nil || n == nil || n.Kind != jobs.NoticeRunFailed || n.Principal != paAlice {
 			t.Fatalf("release for good: notice %+v err %v", n, err)
 		}
@@ -546,10 +589,85 @@ func runPAJobsSuite(t *testing.T, s *Store) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var held int64
-		_ = s.DB.QueryRow(`SELECT held_until_ms FROM pa_jobs WHERE principal = $1`, paAlice).Scan(&held)
-		if held != until.UnixMilli() {
-			t.Fatalf("held until %v, want the hold's %v kept", time.UnixMilli(held).UTC(), until)
+		var held, retry int64
+		_ = s.DB.QueryRow(`SELECT held_until_ms, retry_at_ms FROM pa_jobs WHERE principal = $1`, paAlice).Scan(&held, &retry)
+		if held != until.UnixMilli() || retry <= f.now.UnixMilli() {
+			t.Fatalf("held until %v retry %v, want the hold kept and a backoff set", time.UnixMilli(held).UTC(), retry)
+		}
+		// The backoff applies to the gone-conversation pick too: polls
+		// during it do not count more failures.
+		for range 3 {
+			_, _ = s.ClaimPAJob(context.Background(), jobs.ClaimRequest{
+				Now: f.now, Lease: time.Minute, Budget: f.b, Build: paBuild(),
+				Gate: func(context.Context, *sql.Tx, jobs.Job, time.Time) error { return errors.New("unreadable") },
+			})
+		}
+		var n int
+		_ = s.DB.QueryRow(`SELECT claim_failures FROM pa_jobs WHERE principal = $1`, paAlice).Scan(&n)
+		if n != 1 {
+			t.Fatalf("claim_failures = %d after polls inside the backoff, want 1", n)
+		}
+	})
+
+	// A store fault (nothing observed about the job) changes no state and
+	// counts nothing, however long it lasts; only a row fault does.
+	t.Run("store faults never count against a job", func(t *testing.T) {
+		f := newPAFixture(t, s)
+		f.enqueue(paAlice, "c1")
+		fault := fmt.Errorf("%w: %w: consent: driver: bad connection", jobs.ErrUnreadable, jobs.ErrStoreFault)
+		for _, step := range []struct {
+			name  string
+			gate  jobs.Gate
+			build jobs.Build
+		}{
+			{"gate", func(context.Context, *sql.Tx, jobs.Job, time.Time) error { return fault }, paBuild()},
+			{"build", okGate, func(context.Context, *sql.Tx, jobs.Job, int64) ([]byte, string, []string, error) {
+				return nil, "", nil, fault
+			}},
+		} {
+			for range 10 {
+				f.now = f.now.Add(10 * time.Minute)
+				r, err := s.ClaimPAJob(context.Background(), jobs.ClaimRequest{
+					Now: f.now, Lease: time.Minute, Budget: f.b, Gate: step.gate, Build: step.build,
+				})
+				if !errors.Is(err, jobs.ErrStoreFault) || len(r.Notices) != 0 {
+					t.Fatalf("%s: claim = %+v err %v, want the store fault and no notice", step.name, r, err)
+				}
+			}
+			var n int
+			var retry int64
+			var st string
+			_ = s.DB.QueryRow(`SELECT status, claim_failures, retry_at_ms FROM pa_jobs WHERE principal = $1`, paAlice).Scan(&st, &n, &retry)
+			if st != "pending" || n != 0 || retry != 0 {
+				t.Fatalf("%s: after 10 faulted polls: %s failures %d retry %d", step.name, st, n, retry)
+			}
+			if rows, _ := s.PAUsageFor(context.Background(), paAlice); len(rows) != 0 {
+				t.Fatalf("%s: a faulted claim left usage %+v", step.name, rows)
+			}
+		}
+	})
+
+	t.Run("a transient build error is backed off, not cancelled", func(t *testing.T) {
+		f := newPAFixture(t, s)
+		f.enqueue(paAlice, "c1")
+		flaky := func(context.Context, *sql.Tx, jobs.Job, int64) ([]byte, string, []string, error) {
+			return nil, "", nil, errors.New("resolver timed out")
+		}
+		r, err := s.ClaimPAJob(context.Background(), jobs.ClaimRequest{
+			Now: f.now, Lease: time.Minute, Budget: f.b, Gate: okGate, Build: flaky,
+		})
+		if err != nil || r.Outcome != jobs.ClaimNone || len(r.Notices) != 0 {
+			t.Fatalf("claim = %+v err %v", r, err)
+		}
+		var st string
+		var n int
+		_ = s.DB.QueryRow(`SELECT status, claim_failures FROM pa_jobs WHERE principal = $1`, paAlice).Scan(&st, &n)
+		if st != "pending" || n != 1 {
+			t.Fatalf("after a transient build error: %s failures %d", st, n)
+		}
+		f.now = f.now.Add(jobs.ClaimBackoff(1) + time.Second)
+		if c := f.claim(); c.Outcome != jobs.ClaimClaimed {
+			t.Fatalf("retry after the backoff = %+v", c)
 		}
 	})
 
@@ -845,5 +963,65 @@ func TestPAJobsPostgresSharesManagedBudgetLock(t *testing.T) {
 		t.Fatal(err)
 	case <-time.After(10 * time.Second):
 		t.Fatal("PA claim never finished")
+	}
+}
+
+// TestPAJobs_BackoffWriteErrorFails: a backoff that cannot be written is
+// an error (503), never a quiet ClaimNone and never a claim of the next
+// job while the failed one stays due.
+func TestPAJobs_BackoffWriteErrorFails(t *testing.T) {
+	s := newTestStore(t)
+	f := newPAFixture(t, s)
+	f.enqueue(paAlice, "c1")
+	f.now = f.now.Add(time.Millisecond)
+	f.enqueue(paBob, "c2")
+	if _, err := s.DB.Exec(`CREATE TRIGGER pa_no_backoff BEFORE UPDATE OF claim_failures ON pa_jobs
+		BEGIN SELECT RAISE(ABORT, 'backoff write refused'); END`); err != nil {
+		t.Fatal(err)
+	}
+	gate := func(_ context.Context, _ *sql.Tx, j jobs.Job, _ time.Time) error {
+		if j.Principal == paAlice {
+			return errors.New("alice's row")
+		}
+		return nil
+	}
+	r, err := s.ClaimPAJob(context.Background(), jobs.ClaimRequest{
+		Now: f.now, Lease: time.Minute, Budget: f.b, Gate: gate, Build: paBuild(),
+	})
+	if err == nil || r.Outcome == jobs.ClaimClaimed {
+		t.Fatalf("claim with a failed backoff write = %+v err %v", r, err)
+	}
+}
+
+// TestPAConvo_StoreFaultVsRowFault: a failed read is a store fault; a row
+// that was read and does not scan is the row's fault.
+func TestPAConvo_StoreFaultVsRowFault(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	if _, err := s.DB.Exec(`INSERT INTO pa_consents(principal, version, text_sha256, state, updated_at_ms)
+		VALUES($1, 'v', 'h', 'accepted', 'not a number')`, paAlice); err != nil {
+		t.Fatal(err)
+	}
+	read := func() error {
+		tx, err := s.DB.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		_, err = s.GetPAConsent(ctx, tx, paAlice)
+		return err
+	}
+	if err := read(); !errors.Is(err, convo.ErrUnreadable) || errors.Is(err, convo.ErrStoreFault) {
+		t.Fatalf("a row that does not scan: %v, want a row fault", err)
+	}
+	if _, err := s.DB.Exec(`ALTER TABLE pa_consents RENAME TO pa_consents_gone`); err != nil {
+		t.Fatal(err)
+	}
+	if err := read(); !errors.Is(err, convo.ErrStoreFault) {
+		t.Fatalf("a failed consent query: %v, want a store fault", err)
+	}
+	_ = s.DB.Close()
+	if _, err := s.LoadPAFragments(ctx, paAlice, "c1", time.Now()); !errors.Is(err, convo.ErrStoreFault) {
+		t.Fatalf("a load that cannot begin: %v, want a store fault", err)
 	}
 }

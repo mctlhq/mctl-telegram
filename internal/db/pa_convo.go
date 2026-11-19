@@ -105,6 +105,21 @@ func unreadable(op string, err error) error {
 	return fmt.Errorf("%w: %s: %v", convo.ErrUnreadable, op, err)
 }
 
+// storeFault is unreadable for a failed read (query, begin, rows):
+// nothing was observed about the row.
+func storeFault(op string, err error) error {
+	return fmt.Errorf("%w: %w: %s: %v", convo.ErrUnreadable, convo.ErrStoreFault, op, err)
+}
+
+// rowRead classifies an error from reading one row: a row that was read
+// and does not scan is the row's fault, anything else the store's.
+func rowRead(op string, err error) error {
+	if isRowFault(err) {
+		return unreadable(op, err)
+	}
+	return storeFault(op, err)
+}
+
 // GetPAConsent implements convo.Store.
 func (s *Store) GetPAConsent(ctx context.Context, tx *sql.Tx, principal int64) (convo.ConsentRecord, error) {
 	if tx == nil || principal <= 0 {
@@ -122,7 +137,7 @@ func (s *Store) GetPAConsent(ctx context.Context, tx *sql.Tx, principal int64) (
 		return convo.ConsentRecord{}, convo.ErrNotFound
 	}
 	if err != nil {
-		return convo.ConsentRecord{}, unreadable("consent", err)
+		return convo.ConsentRecord{}, rowRead("consent", err)
 	}
 	rec.State = convo.ConsentState(state)
 	if rec.Principal != principal || rec.Version == "" || rec.TextSHA256 == "" ||
@@ -328,7 +343,7 @@ func (s *Store) LoadPAFragments(ctx context.Context, principal int64, conversati
 	}
 	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, unreadable("load fragments: begin", err)
+		return nil, storeFault("load fragments: begin", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	var open int
@@ -340,14 +355,14 @@ func (s *Store) LoadPAFragments(ctx context.Context, principal int64, conversati
 		return nil, convo.ErrNotFound
 	}
 	if err != nil {
-		return nil, unreadable("load fragments: conversation", err)
+		return nil, storeFault("load fragments: conversation", err)
 	}
 	rows, err := tx.QueryContext(ctx,
 		`SELECT conversation_id, seq, principal, kind, provenance, sealed, created_at_ms
 		 FROM pa_fragments WHERE conversation_id = $1 AND principal = $2 ORDER BY seq`,
 		conversationID, principal)
 	if err != nil {
-		return nil, unreadable("load fragments", err)
+		return nil, storeFault("load fragments", err)
 	}
 	defer rows.Close()
 	var out []convo.SealedFragment
@@ -358,14 +373,14 @@ func (s *Store) LoadPAFragments(ctx context.Context, principal int64, conversati
 			createdMS  int64
 		)
 		if err := rows.Scan(&f.ConversationID, &f.Seq, &f.Principal, &kind, &prov, &f.Sealed, &createdMS); err != nil {
-			return nil, unreadable("load fragments: scan", err)
+			return nil, rowRead("load fragments: scan", err)
 		}
 		f.Kind, f.Provenance = convo.Kind(kind), convo.Provenance(prov)
 		f.CreatedAt = time.UnixMilli(createdMS).UTC()
 		out = append(out, f)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, unreadable("load fragments: rows", err)
+		return nil, storeFault("load fragments: rows", err)
 	}
 	return out, nil
 }

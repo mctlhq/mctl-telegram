@@ -219,6 +219,8 @@ func (l *RunLoop) gate(ctx context.Context, tx *sql.Tx, j jobs.Job, now time.Tim
 	switch {
 	case errors.Is(err, convo.ErrNotFound):
 		return jobs.ErrGone
+	case errors.Is(err, convo.ErrStoreFault):
+		return fmt.Errorf("%w: %w: consent: %v", jobs.ErrUnreadable, jobs.ErrStoreFault, err)
 	case err != nil:
 		return fmt.Errorf("%w: consent: %v", jobs.ErrUnreadable, err)
 	case !convo.Satisfied(rec) || rec.Version != j.ConsentVersion || j.ConsentVersion != convo.ConsentVersion:
@@ -398,9 +400,16 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 		// Unmarked or unreadable state is never loaded (T5). A sealed row
 		// that does not open will not open on the next attempt either, so
 		// the job is cancelled; a store hiccup puts it back.
-		deterministic := errors.Is(err, convo.ErrUnmarked) || errors.Is(err, convo.ErrUnreadable) ||
-			errors.Is(err, convo.ErrNotFound)
-		l.release(ctx, ref, !deterministic, now)
+		// A failed read (store fault) says nothing about the job: it is
+		// due again at once and counts no failure.
+		mode := jobs.ReleaseBackoff
+		switch {
+		case errors.Is(err, convo.ErrStoreFault):
+			mode = jobs.ReleaseRetry
+		case errors.Is(err, convo.ErrUnmarked) || errors.Is(err, convo.ErrUnreadable) || errors.Is(err, convo.ErrNotFound):
+			mode = jobs.ReleaseCancel
+		}
+		l.release(ctx, ref, mode, now)
 		stop(w, err)
 		return
 	}
@@ -410,7 +419,7 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 		Principal: j.Principal, JobID: j.ID, Attempt: j.Attempts, ContextDigest: j.ContextDigest, Tools: j.ToolSet,
 	}, id.Jti, id.OriginalIssuedAt, ttl)
 	if err != nil {
-		l.release(ctx, ref, true, now)
+		l.release(ctx, ref, jobs.ReleaseBackoff, now)
 		stop(w, err)
 		return
 	}
@@ -614,8 +623,8 @@ func (l *RunLoop) notify(ctx context.Context, n jobs.Notice) {
 
 // release undoes a claim whose token was never handed out and sends the
 // notice it may owe.
-func (l *RunLoop) release(ctx context.Context, ref jobs.Ref, requeue bool, now time.Time) {
-	n, err := l.store.ReleasePAClaim(ctx, ref, requeue, now)
+func (l *RunLoop) release(ctx context.Context, ref jobs.Ref, mode jobs.ReleaseMode, now time.Time) {
+	n, err := l.store.ReleasePAClaim(ctx, ref, mode, now)
 	if err != nil {
 		slog.Warn("pa claim not released", "job_id", ref.JobID, "err", err)
 		return

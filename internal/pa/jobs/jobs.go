@@ -146,6 +146,9 @@ type Job struct {
 	HoldNotified bool
 	// ClaimFailures counts failed claims of this job (ClaimBackoff).
 	ClaimFailures int
+	// RetryAt is when a backed-off job is due again. It is separate from
+	// HeldUntil, so a backoff never moves a budget hold either way.
+	RetryAt time.Time
 }
 
 // Ref names one attempt of one job, as a verified pa-job token does. Every
@@ -187,6 +190,12 @@ var (
 	// ErrUnreadable wraps every failure to read or interpret a row. It is
 	// never treated as absence, as zero spent or as allowed (I9).
 	ErrUnreadable = errors.New("pa jobs: state unreadable")
+	// ErrStoreFault marks an ErrUnreadable that is the store's, not the
+	// row's: a query, begin, lock or timeout failed, so nothing was
+	// observed about the job. A claim that meets one changes no state,
+	// counts no failure against the job and stops (503); only a row fault
+	// (a row that does not scan, decode or open) counts against its job.
+	ErrStoreFault = errors.New("pa jobs: store fault")
 	// ErrInvalid is a call the store refuses before touching a row.
 	ErrInvalid = errors.New("pa jobs: invalid request")
 )
@@ -291,6 +300,21 @@ type Notice struct {
 	Kind      NoticeKind
 }
 
+// ReleaseMode says what ReleasePAClaim does with the job.
+type ReleaseMode int
+
+const (
+	// ReleaseCancel: the failure would recur; the job is cancelled with a
+	// notice.
+	ReleaseCancel ReleaseMode = iota
+	// ReleaseBackoff: a failure of this job's own state; it counts toward
+	// MaxClaimFailures and the job is due again after ClaimBackoff.
+	ReleaseBackoff
+	// ReleaseRetry: a store fault, nothing learned about the job; it is
+	// due again at once and no failure is counted.
+	ReleaseRetry
+)
+
 // MaxClaimFailures is how many failed claims of one job (a per-job read or
 // build error) are backed off before the job is cancelled with a notice.
 const MaxClaimFailures = 5
@@ -347,12 +371,10 @@ type Store interface {
 	// job, reserving budget, in one transaction.
 	ClaimPAJob(ctx context.Context, req ClaimRequest) (ClaimResult, error)
 	// ReleasePAClaim undoes a claim whose token never left the server:
-	// the reservation is deleted and the job returns to pending (requeue)
-	// or is cancelled (a deterministic failure, which would recur).
-	// With requeue the job is backed off like a failed claim (and
-	// cancelled after MaxClaimFailures); the returned notice, if any, is
-	// for the principal.
-	ReleasePAClaim(ctx context.Context, ref Ref, requeue bool, now time.Time) (*Notice, error)
+	// the reservation is deleted and the job is retried, backed off or
+	// cancelled (see ReleaseMode). The returned notice, if any, is for the
+	// principal.
+	ReleasePAClaim(ctx context.Context, ref Ref, mode ReleaseMode, now time.Time) (*Notice, error)
 	// RunningPAJob reads the job of ref, refusing one that is not running
 	// under exactly this attempt and context, and runs gate; like every
 	// step it cancels the job when the gate reports ErrGone.
