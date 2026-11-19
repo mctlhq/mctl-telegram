@@ -376,6 +376,39 @@ func (m *Manager) Fail(ctx context.Context, principal int64, id string, expectRe
 	})
 }
 
+// Abandon moves a pending_* connection still at expectRevision to failed
+// and revokes, best-effort, any tokens it already holds (an unanswered or
+// expired confirm card, T1 step 5). The local move happens first and never
+// waits for the remote revocation; a remote failure is reported in
+// RemoteErr. A connection that moved on is ErrConflict and is left alone.
+func (m *Manager) Abandon(ctx context.Context, principal int64, id string, expectRevision int64, reason string) (DisconnectResult, error) {
+	c, s, err := m.store.GetPAConnectionSealed(ctx, principal, id)
+	if err != nil {
+		return DisconnectResult{}, readErr(err)
+	}
+	if !c.State.Pending() || c.AuthorityRevision != expectRevision {
+		return DisconnectResult{}, fmt.Errorf("%w: abandon needs a pending connection at the expected revision", ErrConflict)
+	}
+	var ts TokenSet
+	var openErr error
+	if len(s.SealedTokens) > 0 {
+		ts, openErr = m.openTokens(ctx, c, s)
+	}
+	out, err := m.store.TransitionPAConnection(ctx, principal, id, Transition{
+		From: c.State, To: StateFailed, ExpectRevision: expectRevision, Reason: reason,
+	})
+	if err != nil {
+		return DisconnectResult{}, err
+	}
+	res := DisconnectResult{Connection: out}
+	if openErr != nil {
+		res.RemoteErr = fmt.Errorf("pa connection: tokens for remote revocation: %w", openErr)
+		return res, nil
+	}
+	res.RemoteErr = m.revokeTokens(ctx, c.Server, ts)
+	return res, nil
+}
+
 // failAndRevoke moves c to failed and revokes the tokens a server issued
 // under a response that did not pass the check. It always returns cause
 // (joined with any store error): the caller must not proceed.
