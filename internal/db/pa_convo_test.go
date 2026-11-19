@@ -212,8 +212,19 @@ func TestPAState_SweepAndPurge(t *testing.T) {
 			oldID, now.Add(-49*time.Hour), newID, now.Add(-47*time.Hour))
 		must(t, err)
 
+		// Lock rows: Alice's unused for 49h, Bob's used 47h ago.
+		_, err = s.DB.Exec(`INSERT INTO pa_principal_locks(principal, locked_at_ms) VALUES($1, $2), ($3, $4)`,
+			alice, now.Add(-49*time.Hour).UnixMilli(), bob, now.Add(-47*time.Hour).UnixMilli())
+		must(t, err)
+
 		r, err := s.SweepPAState(ctx, now, now.Add(-48*time.Hour))
 		must(t, err)
+		if n := countRows(t, s, `SELECT count(*) FROM pa_principal_locks WHERE principal = $1`, alice); n != 0 {
+			t.Fatalf("stale lock row survived the sweep: %d", n)
+		}
+		if n := countRows(t, s, `SELECT count(*) FROM pa_principal_locks WHERE principal = $1`, bob); n != 1 {
+			t.Fatalf("fresh lock row swept: %d left", n)
+		}
 		if r.Conversations < 1 || r.Fragments < 1 || r.Callbacks < 1 || r.Updates < 1 {
 			t.Fatalf("sweep = %+v, want each class swept", r)
 		}

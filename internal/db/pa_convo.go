@@ -415,13 +415,21 @@ func (s *Store) PurgeUnmarkedPAState(ctx context.Context) (int64, error) {
 // and its fragments go together.
 func (s *Store) SweepPAState(ctx context.Context, now, updatesBefore time.Time) (convo.SweepResult, error) {
 	var r convo.SweepResult
+	// Stale lock rows go first, in their own statement and transaction: a
+	// handler takes its principal's lock row before touching conversations,
+	// so a sweep that held conversation rows and then waited for a lock row
+	// could deadlock with it. The sweep transaction below holds no lock row.
+	// Lock rows carry no state; one unused for the dedup window goes.
+	if _, err := s.DB.ExecContext(ctx, `DELETE FROM pa_principal_locks WHERE locked_at_ms < $1`,
+		updatesBefore.UnixMilli()); err != nil {
+		return r, fmt.Errorf("sweep pa state: locks: %w", err)
+	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return r, fmt.Errorf("sweep pa state: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	nowMS := now.UnixMilli()
-	var locks int64
 	steps := []struct {
 		dst  *int64
 		q    string
@@ -432,8 +440,6 @@ func (s *Store) SweepPAState(ctx context.Context, now, updatesBefore time.Time) 
 		{&r.Conversations, `DELETE FROM pa_conversations WHERE closed_at_ms > 0 OR expires_at_ms <= $1`, []any{nowMS}},
 		{&r.Callbacks, `DELETE FROM pa_callbacks WHERE expires_at_ms <= $1`, []any{nowMS}},
 		{&r.Updates, `DELETE FROM pa_updates WHERE received_at < $1`, []any{updatesBefore.UTC()}},
-		// Lock rows carry no state; one unused for the dedup window goes.
-		{&locks, `DELETE FROM pa_principal_locks WHERE locked_at_ms < $1`, []any{updatesBefore.UnixMilli()}},
 	}
 	for _, st := range steps {
 		res, err := tx.ExecContext(ctx, st.q, st.args...)

@@ -180,3 +180,17 @@ func TestSealer_RefusesBadInput(t *testing.T) {
 		t.Errorf("fragment at the bound: %v", err)
 	}
 }
+
+// TestKind_Valid: every listed kind is valid, and nothing else is.
+func TestKind_Valid(t *testing.T) {
+	for _, k := range Kinds() {
+		if !k.Valid() {
+			t.Errorf("%q not valid", k)
+		}
+	}
+	for _, k := range []Kind{"", "sticker", "TEXT"} {
+		if k.Valid() {
+			t.Errorf("%q valid", k)
+		}
+	}
+}

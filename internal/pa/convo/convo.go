@@ -17,6 +17,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"time"
 )
 
@@ -61,19 +62,13 @@ const (
 	KindTool Kind = "tool"
 )
 
-// Valid reports whether k is a kind this build knows.
 // Kinds lists every valid Kind, for stores that must find rows of any other.
 func Kinds() []Kind {
 	return []Kind{KindText, KindCaption, KindReply, KindQuote, KindAssistant, KindTool}
 }
 
-func (k Kind) Valid() bool {
-	switch k {
-	case KindText, KindCaption, KindReply, KindQuote, KindAssistant, KindTool:
-		return true
-	}
-	return false
-}
+// Valid reports whether k is a kind this build knows.
+func (k Kind) Valid() bool { return slices.Contains(Kinds(), k) }
 
 // Fragment is one marked piece of conversation text. Its fields are
 // unexported: the text cannot be read without its mark.
