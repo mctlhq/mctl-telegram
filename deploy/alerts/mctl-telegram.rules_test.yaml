@@ -876,6 +876,40 @@ tests:
           summary: 'PA outbox: failed in the last 30 minutes'
           description: "A PA reply or notice was not delivered (failed after its retries, or its outcome is unknown and it is not resent), or the outbox could not be read at all.\n"
           runbook_url: https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpaoutboxundelivered
+  # PA: an unknown outbox outcome fires
+  - interval: 1m
+    input_series:
+    - series: mctl_pa_outbox_total{outcome="unknown"}
+      values: 0 0 0 1 1 1 1 1 1 1
+    alert_rule_test:
+    - eval_time: 5m
+      alertname: MctlPAOutboxUndelivered
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          service: mctl-telegram
+          outcome: unknown
+        exp_annotations:
+          summary: 'PA outbox: unknown in the last 30 minutes'
+          description: "A PA reply or notice was not delivered (failed after its retries, or its outcome is unknown and it is not resent), or the outbox could not be read at all.\n"
+          runbook_url: https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpaoutboxundelivered
+  # PA: an unreadable outbox fires
+  - interval: 1m
+    input_series:
+    - series: mctl_pa_outbox_total{outcome="claim_error"}
+      values: 0 0 0 1 1 1 1 1 1 1
+    alert_rule_test:
+    - eval_time: 5m
+      alertname: MctlPAOutboxUndelivered
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          service: mctl-telegram
+          outcome: claim_error
+        exp_annotations:
+          summary: 'PA outbox: claim_error in the last 30 minutes'
+          description: "A PA reply or notice was not delivered (failed after its retries, or its outcome is unknown and it is not resent), or the outbox could not be read at all.\n"
+          runbook_url: https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpaoutboxundelivered
   # PA: retries and sends are silent
   - interval: 1m
     input_series:

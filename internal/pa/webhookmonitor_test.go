@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -248,16 +249,18 @@ func TestSetWebhook(t *testing.T) {
 
 func TestSetWebhook_Refusals(t *testing.T) {
 	const secret = "pa_webhook_secret_for_tests_only_0123456789"
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"ok":false,"description":"Unauthorized"}`))
+	// Local refusals go to a server that would accept anything: each must
+	// be refused before any request is made.
+	var hits atomic.Int32
+	accepting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
 	}))
-	t.Cleanup(srv.Close)
+	t.Cleanup(accepting.Close)
 	for _, tc := range []struct {
 		name string
 		req  SetWebhookRequest
 	}{
-		{"refused by telegram", SetWebhookRequest{URL: monitorURL, Secret: secret}},
 		{"http url", SetWebhookRequest{URL: "http://pa.example/pa/bot/webhook", Secret: secret}},
 		{"query", SetWebhookRequest{URL: monitorURL + "?a=1", Secret: secret}},
 		{"userinfo", SetWebhookRequest{URL: "https://u:p@pa.example/pa/bot/webhook", Secret: secret}},
@@ -265,15 +268,33 @@ func TestSetWebhook_Refusals(t *testing.T) {
 		{"short secret", SetWebhookRequest{URL: monitorURL, Secret: "short"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := SetWebhook(context.Background(), srv.Client(), srv.URL, fakeToken, tc.req)
-			if err == nil {
-				t.Fatal("accepted")
+			hits.Store(0)
+			err := SetWebhook(context.Background(), accepting.Client(), accepting.URL, fakeToken, tc.req)
+			if err == nil || hits.Load() != 0 {
+				t.Fatalf("err = %v, requests sent %d", err, hits.Load())
 			}
 			if strings.Contains(err.Error(), fakeToken) || strings.Contains(err.Error(), secret) {
 				t.Fatalf("error leaks a credential: %v", err)
 			}
 		})
 	}
+	t.Run("valid request reaches the accepting server", func(t *testing.T) {
+		hits.Store(0)
+		if err := SetWebhook(context.Background(), accepting.Client(), accepting.URL, fakeToken, SetWebhookRequest{URL: monitorURL, Secret: secret}); err != nil || hits.Load() != 1 {
+			t.Fatalf("err = %v, requests %d", err, hits.Load())
+		}
+	})
+	t.Run("refused by telegram", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"ok":false,"description":"Unauthorized"}`))
+		}))
+		defer srv.Close()
+		err := SetWebhook(context.Background(), srv.Client(), srv.URL, fakeToken, SetWebhookRequest{URL: monitorURL, Secret: secret})
+		if err == nil || strings.Contains(err.Error(), fakeToken) || strings.Contains(err.Error(), secret) {
+			t.Fatalf("err = %v", err)
+		}
+	})
 	t.Run("transport error does not leak", func(t *testing.T) {
 		err := SetWebhook(context.Background(), nil, "http://127.0.0.1:1", fakeToken, SetWebhookRequest{URL: monitorURL, Secret: secret})
 		if err == nil || strings.Contains(err.Error(), fakeToken) || strings.Contains(err.Error(), secret) {

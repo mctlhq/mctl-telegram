@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func paEnv(t *testing.T) {
@@ -13,7 +14,7 @@ func paEnv(t *testing.T) {
 		"AGENT_PA_BASE_URL": "http://127.0.0.1:1",
 		"AGENT_MODEL":       "m", "AGENT_OPENAI_BASE_URL": "http://127.0.0.1:1", "AGENT_OPENAI_API_KEY": "k",
 		"MODEL_INPUT_USD_PER_MTOK": "1", "MODEL_OUTPUT_USD_PER_MTOK": "2",
-		"AGENT_OPENAI_MAX_OUTPUT_TOKENS": "1024",
+		"AGENT_OPENAI_MAX_OUTPUT_TOKENS": "1024", "AGENT_HEALTH_ADDR": "127.0.0.1:0",
 	} {
 		t.Setenv(k, v)
 	}
@@ -41,7 +42,16 @@ func TestRun_PAModeFailsClosedPerSetting(t *testing.T) {
 		t.Run(tc.key+"="+tc.val, func(t *testing.T) {
 			paEnv(t)
 			t.Setenv(tc.key, tc.val)
-			err := run()
+			// A setting that is not refused starts the worker, which never
+			// returns: that is a failure, reported instead of a hang.
+			done := make(chan error, 1)
+			go func() { done <- run() }()
+			var err error
+			select {
+			case err = <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("run() started instead of refusing %s", tc.key)
+			}
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err=%v want an error naming %s", err, tc.want)
 			}
