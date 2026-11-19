@@ -907,6 +907,22 @@ tests:
           summary: Telegram keeps failing to deliver PA webhook updates
           description: "Most getWebhookInfo checks in the last 30 minutes found a new delivery error. Updates are queuing at Telegram.\n"
           runbook_url: https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookdeliveryerrors
+  # PA: errors at a little over half the checks fire
+  - interval: 1m
+    input_series:
+    - series: mctl_pa_webhook_problem{problem="delivery_error"}
+      values: 1 1 1 1 1 1 0 0 0 0 0 1 1 1 1 1 1 0 0 0 0 0 1 1 1 1 1 1 0 0 0 0 0 1 1 1 1 1 1 0 0 0 0 0 1 1 1 1 1 1 0 0 0 0 0
+    alert_rule_test:
+    - eval_time: 38m
+      alertname: MctlPAWebhookDeliveryErrors
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+          service: mctl-telegram
+        exp_annotations:
+          summary: Telegram keeps failing to deliver PA webhook updates
+          description: "Most getWebhookInfo checks in the last 30 minutes found a new delivery error. Updates are queuing at Telegram.\n"
+          runbook_url: https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookdeliveryerrors
   # PA: an occasional error is silent
   - interval: 1m
     input_series:

@@ -418,27 +418,145 @@ func TestOutbox_UnrecordedPartIsUnknown(t *testing.T) {
 	}
 }
 
-// TestOutbox_ReplyMustBeExternalAssistant (D4): a reply row naming the
-// principal's own fragment is never sent as a bot message.
+// replyRowFor appends a fragment of the given kind and provenance to
+// Alice's open conversation and queues a reply row naming it.
+func (h *runLoopHarness) replyRowFor(kind convo.Kind, prov convo.Provenance, text string, job int64) {
+	h.t.Helper()
+	var convID string
+	if err := h.convoHarness.store.DB.QueryRow(`SELECT id FROM pa_conversations WHERE principal = $1`, aliceID).Scan(&convID); err != nil {
+		h.t.Fatal(err)
+	}
+	ctx := context.Background()
+	tx, err := h.convoHarness.store.DB.Begin()
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	seq, err := h.store.NextPAFragmentSeq(ctx, tx, aliceID, convID)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	sf, err := h.loop.sealer.Seal(aliceID, convID, seq, convo.NewFragment(kind, prov, text))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	sf.CreatedAt = h.now
+	if err := h.store.AppendPAFragment(ctx, tx, sf); err != nil {
+		h.t.Fatal(err)
+	}
+	if err := h.store.EnqueuePAOutbox(ctx, tx, jobs.OutboxItem{Principal: aliceID, JobID: job, Kind: jobs.OutboxReply,
+		ConversationID: convID, FragmentSeq: seq}, h.now); err != nil {
+		h.t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// TestOutbox_ReplyMustBeExternalAssistant (D4): a reply row goes out only
+// when it names an assistant fragment that is marked external. Each half
+// of the check is pinned on its own: an assistant fragment claiming the
+// user's voice, and external text that is not an answer.
 func TestOutbox_ReplyMustBeExternalAssistant(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kind convo.Kind
+		prov convo.Provenance
+		sent bool
+	}{
+		{"external assistant answer", convo.KindAssistant, convo.ProvenanceExternal, true},
+		{"assistant fragment in the user's voice", convo.KindAssistant, convo.ProvenanceUser, false},
+		{"external text that is not an answer", convo.KindText, convo.ProvenanceExternal, false},
+		{"the principal's own text", convo.KindText, convo.ProvenanceUser, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRunLoopHarness(t)
+			h.consent(aliceID)
+			h.text(aliceID, "hello")
+			h.replyRowFor(tc.kind, tc.prov, "an answer", 4242)
+			h.loop.deliver(context.Background(), 0)
+			st, _ := h.outboxRow(aliceID, jobs.OutboxReply)
+			if sent := h.sender.to(aliceID); tc.sent != (len(sent) == 1) || (tc.sent && st != "sent") || (!tc.sent && st != "failed") {
+				t.Fatalf("row %s, sent %d messages; want sent %v", st, len(sent), tc.sent)
+			}
+		})
+	}
+}
+
+// TestOutbox_RetryRendersAsFirstAttempt (D5): the allow-list is what the
+// principal typed before the answer. A link the principal types after a
+// failed first attempt does not change what the retry renders, so the
+// parts a retry resumes after are the parts the first attempt sent.
+func TestOutbox_RetryRendersAsFirstAttempt(t *testing.T) {
 	h := newRunLoopHarness(t)
 	h.consent(aliceID)
-	h.text(aliceID, "my own words")
+	h.text(aliceID, "hello")
 	c := h.mustClaim()
+	const link = "https://example.org/report"
+	answer := "see " + link
+	want, err := output.Render(answer, output.AllowFromUserText("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if later, _ := output.Render(answer, output.AllowFromUserText("hello", link)); later.String() == want.String() {
+		t.Fatal("the probe needs a link the allow-list changes")
+	}
 	h.failSends(floodWait)
-	if w := h.post(RouteReply, c.Token, replyRequest{Text: "an answer"}); w.Code != http.StatusOK {
+	if w := h.post(RouteReply, c.Token, replyRequest{Text: answer}); w.Code != http.StatusOK {
 		t.Fatalf("reply: %d", w.Code)
 	}
 	h.failSends(nil)
-	if _, err := h.convoHarness.store.DB.Exec(`UPDATE pa_outbox SET fragment_seq =
-		(SELECT MIN(seq) FROM pa_fragments WHERE principal = $1) WHERE principal = $1 AND kind = $2`,
-		aliceID, string(jobs.OutboxReply)); err != nil {
+	h.text(aliceID, link)
+	h.now = h.now.Add(jobs.OutboxBackoff(1))
+	h.loop.deliver(context.Background(), aliceID)
+	if sent := h.sender.to(aliceID); len(sent) != 1 || sent[0] != want.String() {
+		t.Fatalf("sent %q, want the answer rendered as at its first attempt", sent)
+	}
+}
+
+// TestOutbox_RowAheadOfItsRendering: a row that recorded more parts than
+// its text now has was fully delivered; it is completed as sent, not
+// failed for a resume point past the end.
+func TestOutbox_RowAheadOfItsRendering(t *testing.T) {
+	h := newRunLoopHarness(t)
+	h.enqueueNotice(aliceID, 1, jobs.OutboxRunFailed)
+	ctx := context.Background()
+	res, err := h.store.ClaimPAOutbox(ctx, jobs.OutboxClaimRequest{Now: h.now, Lease: jobs.OutboxLease, Principal: aliceID, Limit: 1})
+	if err != nil || len(res.Items) != 1 {
+		t.Fatalf("claim: %v %d", err, len(res.Items))
+	}
+	it := res.Items[0]
+	if err := h.store.RecordPAOutboxParts(ctx, it, 2, h.now); err != nil {
 		t.Fatal(err)
 	}
-	h.now = h.now.Add(jobs.OutboxBackoff(1))
-	h.loop.deliver(context.Background(), 0)
-	if st, _ := h.outboxRow(aliceID, jobs.OutboxReply); st != "failed" || len(h.sender.to(aliceID)) != 0 {
-		t.Fatalf("row %s, sent %q: a user fragment must never go out as a reply", st, h.sender.to(aliceID))
+	if err := h.store.CompletePAOutbox(ctx, it, jobs.OutboxCompletion{Now: h.now, Status: jobs.OutboxPending, RetryAt: h.now}); err != nil {
+		t.Fatal(err)
+	}
+	h.loop.deliver(ctx, 0)
+	if st, _ := h.outboxRow(aliceID, jobs.OutboxRunFailed); st != "sent" || len(h.sender.to(aliceID)) != 0 {
+		t.Fatalf("row %s, sent %d: want sent with nothing resent", st, len(h.sender.to(aliceID)))
+	}
+}
+
+// TestOutbox_SendOutlivesItsCaller (P2-2c): the context deliver is given
+// decides only whether another row is claimed. A caller that goes away
+// mid-send (RunOutbox at shutdown) does not cut the send off.
+func TestOutbox_SendOutlivesItsCaller(t *testing.T) {
+	h := newRunLoopHarness(t)
+	h.enqueueNotice(aliceID, 1, jobs.OutboxRunFailed)
+	h.enqueueNotice(aliceID, 2, jobs.OutboxRequestDropped)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.setBefore(func(sctx context.Context, _ int64, _ int) error {
+		cancel()
+		return sctx.Err()
+	})
+	h.loop.deliver(ctx, aliceID)
+	if st, _ := h.outboxRow(aliceID, jobs.OutboxRunFailed); st != "sent" || len(h.sender.to(aliceID)) != 1 {
+		t.Fatalf("row %s, sent %d: want the send in flight completed", st, len(h.sender.to(aliceID)))
+	}
+	if st, _ := h.outboxRow(aliceID, jobs.OutboxRequestDropped); st != "pending" {
+		t.Fatalf("second row %s: a caller that left claims no more rows", st)
 	}
 }
 
