@@ -292,6 +292,23 @@ func TestParsePinRefusesUnknownFields(t *testing.T) {
 	}
 }
 
+// TestParsePinRefusesTrailingData: only a clean EOF ends the pin. A stray
+// closing bracket is the case dec.More() let through (#1331 follow-up).
+func TestParsePinRefusesTrailingData(t *testing.T) {
+	if _, err := ParsePin(pinJSON); err != nil {
+		t.Fatalf("committed pin: %v", err)
+	}
+	if _, err := ParsePin(append(append([]byte{}, pinJSON...), "\n\t "...)); err != nil {
+		t.Fatalf("trailing whitespace refused: %v", err)
+	}
+	for _, tail := range []string{"]", "}", "{}", "null", "x", ",{}"} {
+		raw := append(append([]byte{}, pinJSON...), tail...)
+		if _, err := ParsePin(raw); !errors.Is(err, ErrInvalidPin) {
+			t.Errorf("trailing %q: ParsePin = %v, want ErrInvalidPin", tail, err)
+		}
+	}
+}
+
 // TestCommittedPinAcceptsItsUpstream: the committed pin, observed against
 // its own upstream listings, makes every pinned tool usable. This is the
 // "green on a converged input" half of the drift detector; surface_test.go

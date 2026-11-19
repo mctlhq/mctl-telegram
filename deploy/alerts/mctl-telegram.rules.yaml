@@ -964,3 +964,74 @@ spec:
               retries, or its outcome is unknown and it is not resent), or the
               outbox could not be read at all.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpaoutboxundelivered"
+
+    - name: mctl-telegram-pa-catalog
+      rules:
+        - alert: MctlPAPinDrift
+          # #1315: a PA catalog server's live tools/list no longer matches the
+          # committed pin for a pinned tool (changed or missing). The
+          # dispatcher already denies the drifted tools (threat model I7);
+          # this is the human signal that the pin needs a reviewed update or
+          # the server was tampered with. Extra unpinned tools (tg's writes)
+          # are not drift. The gauge is absent, not 0, while the listing is
+          # unknown: MctlPAPinListingUnknown covers that case.
+          expr: |
+            max by (server) (mctl_pa_pin_drift) > 0
+          for: 5m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "PA catalog server {{ $labels.server }} differs from the committed pin"
+            description: >
+              The live tools/list of {{ $labels.server }} differs from the
+              committed pin for at least one pinned tool. Those tools are
+              denied to Personal Assistant runs until the listing matches or
+              the pin is updated through a reviewed PR.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpapindrift"
+
+        - alert: MctlPAPinListingUnknown
+          # Could not observe is not observed clean: with no fresh listing
+          # (failed, unparsable, or aged out of the 5-minute window) drift is
+          # unknown, the drift gauge is absent, and calls are refused as
+          # server_unavailable. An idle server also ages into unknown; that
+          # is true but not actionable, so the alert needs listing attempts
+          # that failed in the same 15 minutes. Refusals that never reach
+          # tools/list (flag_off, tool_not_in_set, job_stale, tool_cap) do
+          # not count: a server switched off is not an unobservable one.
+          # The idle case is decided here, explicitly, not by leaving a
+          # stale 0 in the drift gauge.
+          expr: |
+            max by (server) (mctl_pa_pin_listing_unknown) > 0
+              and on (server)
+            sum by (server) (increase(mctl_pa_pin_listing_failures_total{reason!="unauthorized"}[15m])) > 0
+          for: 15m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "PA catalog server {{ $labels.server }} tools/list cannot be observed"
+            description: >
+              Personal Assistant calls try to list {{ $labels.server }}, but
+              no tools/list of it could be read or parsed in the last 5
+              minutes, so pin drift is unknown and those calls are refused.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpapinlistingunknown"
+
+        - alert: MctlPAPinListingUnauthorized
+          # #1341 round 3: a refused token on tools/list is not "listing
+          # unknown" (it is one connection's problem), so it needs its own
+          # signal. 401s on a server for 30 minutes mean either users whose
+          # connection broke or a server that stopped accepting our tokens.
+          expr: |
+            sum by (server) (increase(mctl_pa_pin_listing_failures_total{reason="unauthorized"}[15m])) > 0
+          for: 30m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "PA catalog server {{ $labels.server }} keeps refusing connection tokens"
+            description: >
+              tools/list on {{ $labels.server }} has answered 401 to
+              Personal Assistant connection tokens for 30 minutes. Those
+              calls are refused as server_refused.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpapinlistingunauthorized"

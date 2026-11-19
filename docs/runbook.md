@@ -4038,3 +4038,98 @@ not resent; ask the principal whether it arrived if it matters. `refused`
 counted but does not fire this alert. `claim_error`: `pa_outbox` could not be read; nothing was sent and
 the rows stay due. Inspect rows by principal with `Store.PAOutboxRows`;
 rows carry no message text.
+
+## Personal Assistant catalog pin (issue #1315)
+
+The PA dispatcher compares each catalog server's live `tools/list` with the
+committed pin (`internal/pa/catalog/pin.json`) before every call, cached at
+most 60s per connection and authority revision. A pinned tool whose
+descriptor changed or disappeared is denied (`tool_changed`); a tool the pin
+does not know is denied (`not_pinned`) and is not drift. Everything here is
+inert unless `PA_ENABLED` and `PA_EXTERNAL_TOOLS_ENABLED` are both on.
+
+<a id="mctlpapindrift"></a>
+### MctlPAPinDrift
+
+`mctl_pa_pin_drift{server}` has read 1 for 5 minutes. The drifted tools are
+already refused, so there is no data exposure to stop; the work is deciding
+whether the change is legitimate.
+
+1. Break the denials down by reason:
+   `mctl_pa_pin_denied_tools{server="<server>"}` and
+   `sum by (reason) (rate(mctl_pa_dispatch_total{server="<server>",status="refused"}[15m]))`.
+2. If every pinned name is denied and the live names carry a `tg_` prefix,
+   the endpoint points at the MCP gateway instead of tg directly. Fix the
+   endpoint configuration; do not pin the prefixed names.
+3. If the upstream release changed a descriptor on purpose, update the pin
+   through a reviewed PR
+   (`go test ./internal/pa/catalog -run TestPinMatchesUpstream -update-pin`). Do not loosen the comparison.
+4. If nobody released the server, treat it as tampering: disable the
+   server's flag (`PA_SERVER_<NAME>_ENABLED=false`) and investigate.
+
+<a id="mctlpapinlistingunknown"></a>
+### MctlPAPinListingUnknown
+
+`mctl_pa_pin_listing_unknown{server}` has read 1 for 15 minutes while PA calls
+reached the server: no connection has read the server's `tools/list`
+successfully in the last 5 minutes (each connection's last observation
+counts; the gauges aggregate them). Observations age out even with no
+traffic, so an idle server also reads unknown; the alert expression leaves
+that case out by requiring failed listing attempts
+(`mctl_pa_pin_listing_failures_total` with a reason other than
+`unauthorized`) in the same 15 minutes, rather than letting a stale 0 stand
+in for a listing. Calls refused before the listing step (`flag_off`,
+`tool_not_in_set`, `job_stale`, `tool_cap`) do not count, so switching a
+server off does not raise this alert. Drift is
+unknown (the drift and denied-tool series are removed, never 0) and PA calls
+to the server are refused as `server_unavailable`. Check the server's own
+health and the egress logs of the `mcp` purpose;
+`mctl_pa_pin_listing_failures_total{server="<server>"}` breaks the failures
+down by reason: `unavailable` (the read failed) or `invalid` (it was read but
+did not parse); either one alone raises the alert. Every reason of every
+configured server exists at 0 from the dispatcher's start, so the first
+failure is an increase. A server refusing one user's token (`reason="unauthorized"`)
+does not raise this alert: that user's calls are refused as `server_refused`
+and the user has to reconnect (see MctlPAPinListingUnauthorized). The alert
+clears on the next successful listing. A failed listing never erases a
+fresh successful one: a connection whose last good listing drifted keeps
+`mctl_pa_pin_drift` at 1 for the 5-minute window even if it then answers
+errors. Both the gauges and the 60s listing cache are ordered by when a
+read started: a slow read that finishes late neither replaces nor drops a
+newer listing, so calls authorize against the listing the gauges report.
+
+### PA refusal audit bound
+
+Refusals are written to the principal's audit chain at most 30 general
+(`bad_request`, `flag_off`, `tool_cap`, ...) and, separately, 300 security
+(`connection_unbound`, `tool_not_in_set`, `job_stale`, `token_*`) per
+principal per minute per replica. The first refusal of each reason in a
+minute is always written. Past the bounds, refusals are counted as
+`mctl_pa_dispatch_total{status="refused_unaudited"}` and the closed window
+writes a `refusals_suppressed` or `refusals_suppressed_security` row with
+the count (` suppressed=N` in the record). A steady
+`refused_unaudited` rate for security reasons means a worker is probing at
+line rate: find the principal from its `refusals_suppressed_security` rows
+and stop its runs.
+
+<a id="mctlpapinlistingunauthorized"></a>
+### MctlPAPinListingUnauthorized
+
+`mctl_pa_pin_listing_failures_total{server,reason="unauthorized"}` has grown
+for 30 minutes: the server answers 401 to PA connection tokens on
+`tools/list`, and those calls are refused as `server_refused`. One user with
+a broken connection fires this only if they keep retrying; several users at
+once usually means the server stopped accepting our tokens (key rotation,
+changed audience, revoked client).
+
+The alert is per server on purpose, not per connection and not on a count of
+distinct connections: connection ids are private and unbounded, so they are
+not a metric label. A single user retrying a broken connection for 30
+minutes does fire it. That is a real, user-visible failure (every call they
+make is refused), and step 2 sorts it out.
+
+1. Compare with the server's own auth logs and its last release.
+2. If only some connections are refused, those users reconnect; nothing is
+   wrong with the server.
+3. If every connection is refused, treat it like an outage of the server and
+   check the token exchange configuration before anything else.

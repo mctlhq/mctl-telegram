@@ -806,6 +806,11 @@ func (m *Manager) cancelInflight(id string) {
 	}
 }
 
+// Abandon ends a call that never dispatched: the executor refused it
+// before anything was sent. It only deregisters; there is no result to
+// fence. A call that did dispatch must use Finish.
+func (c *Call) Abandon() { c.deregister() }
+
 // Finish is the post-dispatch check. It re-reads the connection; if the
 // state left active, the revision moved, or the read failed, the result
 // must be discarded: Finish records a fenced event and returns an error

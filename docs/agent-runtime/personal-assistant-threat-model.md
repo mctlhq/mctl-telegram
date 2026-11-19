@@ -457,6 +457,27 @@ The pin alone is not the read-only boundary. The token itself must carry no auth
 - S1-T10: a refresh that returns a wider scope fails the connection.
 - S1-T11: a client id without a ceiling record keeps today's grant. This is the regression guard for existing clients.
 
+**Drift signal (#1315).** Each dispatch observes the live `tools/list`
+(cached at most 60s per connection and authority revision). Listings are read
+per connection, so the server's gauges aggregate the last observation of every
+connection made in the past 5 minutes: `mctl_pa_pin_drift{server}` is 1 when
+any of them shows a pinned tool changed or missing, 0 when all match. Unpinned
+extras, such as `tg`'s write tools or a gateway's `tg_`-prefixed names, are
+denied but are not drift. When none of them could be read or parsed, or the last
+one aged out of the window (also while idle: the gauges of every server are
+recomputed on each refresh, at least every 30s), the drift and denied-tool
+series are removed and `mctl_pa_pin_listing_unknown{server}` is 1: an
+unobserved listing is never reported as clean, a drift seen long ago does not
+keep the alert firing, a failure never erases a fresh successful listing (a
+server alternating drift and errors keeps drift at 1), observations are
+ordered by when the listing started, and one connection's
+failure cannot hide drift another connection saw. A server refusing one
+connection's token on `tools/list` is that connection's problem: the call is
+refused as `server_refused` and counted in
+`mctl_pa_pin_listing_failures_total{reason="unauthorized"}`, never as an
+unknown listing. Alerts `MctlPAPinDrift` and `MctlPAPinListingUnknown` cover
+both; see the runbook.
+
 ### T9 Egress, SSRF and redirects (from Phase 1)
 
 **Scope.** These rules cover every outbound request MCTL makes:
@@ -534,7 +555,42 @@ All of these, plus consent, are checked again at **every dispatch**, not only at
 - principal, connection id, `authority_revision`, server and tool;
 - args digest, tier, class and taint;
 - approval or permission id, and approver;
-- result status (`ok`, `refused`, `fenced`, `outcome_unknown`) and cost.
+- result status (`ok`, `tool_error`, `refused`, `fenced`, `outcome_unknown`)
+  and cost; `tool_error` is a call the server ran and answered with an MCP
+  tool error (`isError`);
+- for a refusal, a closed `reason` code (for example `connection_unbound`,
+  `revision_mismatch`, `tool_changed`, `token_expired`). Every field taken from
+  worker input is normalised to a fixed marker before it is recorded, so a
+  hostile value can neither enter the record nor make the append drop it.
+
+Implementation (#1315): the dispatcher at `POST /api/pa/v1/jobs/tool` writes
+these entries through `internal/pa/connector`. A refusal is recorded only when
+the token is attributable to a principal (our signature, our issuer, the
+`pa-job` audience, the pa-job shape) and refused for a decided reason: expired
+at most one hour ago, or revoked. A forged or foreign token, one expired
+longer ago, and one whose revocation state could not be read
+(`token_unverifiable`) are counted in `mctl_pa_dispatch_total` but written to
+nobody's chain: their principal claim is not evidence, or nothing was decided.
+Refusals are written to a principal's chain under two bounds per minute: 30
+general refusals (`bad_request`, `flag_off`, `tool_cap`, ...) and, separately,
+300 security refusals (`connection_unbound`, `tool_not_in_set`, `job_stale`
+and every `token_*` refusal). A worker can send those probes at line rate:
+`tool_not_in_set` is decided before the per-run call cap, `job_stale` and
+`token_*` after the run. The classes do not share a bound, so a worker cannot
+spend the window on `bad_request` and then probe unrecorded, and probes cannot
+use up the general bound. The first refusal of each reason in a window is
+written past either bound, so a flood of one probe cannot hide another. Past
+the bounds a refusal is still refused and counted (status
+`refused_unaudited`), so a looping or hostile worker cannot flood a chain:
+it writes at most 330 rows plus one per distinct reason a minute. When the
+window closes, one summary row per class records how many were left out:
+`refusals_suppressed` (general) and `refusals_suppressed_security`. The
+bound is kept in memory, so it is per replica and resets on restart.
+
+After the call, the connection is re-read (S1-C7) and so is the job row: a
+result that arrives after the job was cancelled, its consent withdrawn or its
+conversation closed is discarded (`fenced`). One deadline (60s by default)
+bounds opening the token, `tools/list` and `tools/call`.
 
 Message bodies and tool outputs are never logged, only digests. `/log` shows a principal their own entries.
 

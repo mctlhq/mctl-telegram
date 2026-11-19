@@ -1067,3 +1067,128 @@ tests:
     - eval_time: 5m
       alertname: MctlPAOutboxUndelivered
       exp_alerts: []
+
+  # PA pin drift (#1315): drift fires after 5m; a matching listing (0) and
+  # an absent series (listing unknown) never fire the drift alert, while the
+  # unknown gauge fires its own alert after 15m.
+  - interval: 1m
+    input_series:
+      - series: 'mctl_pa_pin_drift{server="tg"}'
+        values: '1x10'
+      - series: 'mctl_pa_pin_drift{server="alice"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: MctlPAPinDrift
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: MctlPAPinDrift
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: mctl-telegram
+              server: tg
+            exp_annotations:
+              summary: "PA catalog server tg differs from the committed pin"
+              description: "The live tools/list of tg differs from the committed pin for at least one pinned tool. Those tools are denied to Personal Assistant runs until the listing matches or the pin is updated through a reviewed PR.\n"
+              runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpapindrift"
+
+  # Unknown fires only while listing attempts fail: tg is unknown with
+  # failed listings; alice is unknown and switched off, its calls refused
+  # as flag_off before any listing, which must not fire.
+  - interval: 1m
+    input_series:
+      - series: 'mctl_pa_pin_listing_unknown{server="tg"}'
+        values: '1x20'
+      - series: 'mctl_pa_pin_listing_unknown{server="alice"}'
+        values: '1x20'
+      - series: 'mctl_pa_pin_listing_failures_total{server="tg",reason="unavailable"}'
+        values: '0+2x20'
+      - series: 'mctl_pa_pin_listing_failures_total{server="alice",reason="unauthorized"}'
+        values: '0+1x20'
+      - series: 'mctl_pa_dispatch_total{server="alice",status="refused",reason="flag_off"}'
+        values: '0+3x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: MctlPAPinDrift
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: MctlPAPinListingUnknown
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: MctlPAPinListingUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: mctl-telegram
+              server: tg
+            exp_annotations:
+              summary: "PA catalog server tg tools/list cannot be observed"
+              description: "Personal Assistant calls try to list tg, but no tools/list of it could be read or parsed in the last 5 minutes, so pin drift is unknown and those calls are refused.\n"
+              runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpapinlistingunknown"
+
+  # A6: listings that are read but do not parse (reason="invalid", and no
+  # other failure) are unobservable too and fire Unknown.
+  - interval: 1m
+    input_series:
+      - series: 'mctl_pa_pin_listing_unknown{server="alice"}'
+        values: '1x20'
+      - series: 'mctl_pa_pin_listing_failures_total{server="alice",reason="invalid"}'
+        values: '0+1x20'
+      - series: 'mctl_pa_pin_listing_failures_total{server="alice",reason="unavailable"}'
+        values: '0x20'
+      - series: 'mctl_pa_pin_listing_failures_total{server="alice",reason="unauthorized"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: MctlPAPinListingUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: mctl-telegram
+              server: alice
+            exp_annotations:
+              summary: "PA catalog server alice tools/list cannot be observed"
+              description: "Personal Assistant calls try to list alice, but no tools/list of it could be read or parsed in the last 5 minutes, so pin drift is unknown and those calls are refused.\n"
+              runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpapinlistingunknown"
+
+  # Unauthorized listings: steady 401s on tg fire once they have lasted the
+  # full 30m (pending at 30m, firing at 32m); one 401 on alice (a single
+  # expired connection that stopped retrying) never does. A steady stream
+  # from one connection does fire: see the runbook for why the alert is per
+  # server, not per connection.
+  - interval: 1m
+    input_series:
+      - series: 'mctl_pa_pin_listing_failures_total{server="tg",reason="unauthorized"}'
+        values: '0+1x60'
+      - series: 'mctl_pa_pin_listing_failures_total{server="alice",reason="unauthorized"}'
+        values: '0 1 1x58'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: MctlPAPinListingUnauthorized
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: MctlPAPinListingUnauthorized
+        exp_alerts: []
+      - eval_time: 32m
+        alertname: MctlPAPinListingUnauthorized
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: mctl-telegram
+              server: tg
+            exp_annotations:
+              summary: "PA catalog server tg keeps refusing connection tokens"
+              description: "tools/list on tg has answered 401 to Personal Assistant connection tokens for 30 minutes. Those calls are refused as server_refused.\n"
+              runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpapinlistingunauthorized"
+      - eval_time: 50m
+        alertname: MctlPAPinListingUnauthorized
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: mctl-telegram
+              server: tg
+            exp_annotations:
+              summary: "PA catalog server tg keeps refusing connection tokens"
+              description: "tools/list on tg has answered 401 to Personal Assistant connection tokens for 30 minutes. Those calls are refused as server_refused.\n"
+              runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpapinlistingunauthorized"

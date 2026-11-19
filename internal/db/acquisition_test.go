@@ -106,9 +106,16 @@ func TestHardDeleteAccount_PurgesAcquisition(t *testing.T) {
 	}
 }
 
+// TestAcquisitionLabelsAndReport runs on SQLite and, with
+// TEST_DATABASE_URL, on Postgres: the report's per-day expression differs
+// per dialect.
 func TestAcquisitionLabelsAndReport(t *testing.T) {
+	t.Run("sqlite", func(t *testing.T) { testAcquisitionLabelsAndReport(t, newTestStore(t)) })
+	t.Run("postgres", func(t *testing.T) { testAcquisitionLabelsAndReport(t, newFreshSchemaPostgresStore(t)) })
+}
+
+func testAcquisitionLabelsAndReport(t *testing.T, s *Store) {
 	ctx := context.Background()
-	s := newTestStore(t)
 	mk := func(tg int64, a *Acquisition) int64 {
 		uid, err := s.EnsureUserByTelegramCapture(ctx, captureFor(tg, a))
 		if err != nil {
@@ -153,7 +160,17 @@ func TestAcquisitionLabelsAndReport(t *testing.T) {
 	ins(alice, now.Add(-30*time.Hour))
 	ins(bob, now)
 	ins(bob, now.Add(-time.Minute))
-	_, _, _ = carol, dana, notRecorded
+	// PA connector rows are calls the assistant made, not the user using
+	// the connector: bob's on another day must not make him a 2+ day user,
+	// and carol's must not make her an activated one (#1331 follow-up).
+	insPA := func(uid int64, ts time.Time) {
+		if _, err := s.DB.Exec(`INSERT INTO audit_logs(user_id, tool_name, status, call_path, created_at) VALUES($1,'pa:tg/list_dialogs','ok','pa',$2)`, uid, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insPA(bob, now.Add(-50*time.Hour))
+	insPA(carol, now)
+	_, _ = dana, notRecorded
 
 	rep, err := s.AcquisitionReport(ctx, now.Add(-7*24*time.Hour))
 	if err != nil {
@@ -169,7 +186,7 @@ func TestAcquisitionLabelsAndReport(t *testing.T) {
 	if b := got["dir.example"]; b.Signups != 1 || b.ToolCallUsers != 1 || b.Active2PlusDays != 0 {
 		t.Errorf("dir bucket %+v", b)
 	}
-	if b := got["direct"]; b.Signups != 1 || b.ToolCallUsers != 0 {
+	if b := got["direct"]; b.Signups != 1 || b.ToolCallUsers != 0 || b.Active2PlusDays != 0 {
 		t.Errorf("direct bucket %+v", b)
 	}
 }

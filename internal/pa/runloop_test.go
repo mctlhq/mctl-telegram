@@ -122,6 +122,7 @@ type runLoopHarness struct {
 	loop   *RunLoop
 	sender *sendRecorder
 	issuer *localjwt.Issuer
+	cache  *localjwt.RevocationCache
 	pool   string
 	tools  []string
 	conns  map[int64][]ConnectionRevision
@@ -162,6 +163,7 @@ func newRunLoopHarnessOn(t *testing.T, store *db.Store, opts ...rlOption) *runLo
 	}
 	h.issuer = iss
 	cache := localjwt.NewRevocationCache(store, time.Minute)
+	h.cache = cache
 	pool, err := localjwt.NewPoolProvider(localjwt.PoolProviderConfig{Secret: runLoopSecret, ExpectedIssuer: runLoopIssuer, RevocationCache: cache})
 	if err != nil {
 		t.Fatal(err)
