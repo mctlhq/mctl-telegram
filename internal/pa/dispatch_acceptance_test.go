@@ -14,6 +14,8 @@ package pa_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -133,6 +135,8 @@ type fakeMCP struct {
 	onCall  func()
 	callErr error
 	out     []byte // tools/call result; nil = a short text result
+	// block makes tools/call wait for its context (or a 5s safety stop).
+	block bool
 }
 
 func (f *fakeMCP) Server() string { return f.server }
@@ -148,14 +152,22 @@ func (f *fakeMCP) ListTools(_ context.Context, tok connection.Secret) ([][]byte,
 	return slices.Clone(f.pages), nil
 }
 
-func (f *fakeMCP) CallTool(_ context.Context, tok connection.Secret, tool string, args json.RawMessage) ([]byte, error) {
+func (f *fakeMCP) CallTool(ctx context.Context, tok connection.Secret, tool string, args json.RawMessage) ([]byte, error) {
 	f.mu.Lock()
 	f.bearers = append(f.bearers, tok.Reveal())
 	f.calls = append(f.calls, tool)
-	hook, err, out := f.onCall, f.callErr, f.out
+	hook, err, out, block := f.onCall, f.callErr, f.out, f.block
 	f.mu.Unlock()
 	if hook != nil {
 		hook()
+	}
+	if block {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(5 * time.Second):
+			return nil, errors.New("fake: not cancelled")
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -232,12 +244,15 @@ func (s *failingSink) Append(ctx context.Context, e connector.Entry) error {
 	return s.inner.Append(ctx, e)
 }
 
-// failingConns fails connection reads while fail is set.
+// failingConns fails connection reads while fail is set. lie, when set,
+// rewrites the server of a listed connection (a corrupted or inconsistent
+// read), to prove the dispatcher's own check behind the listing.
 type failingConns struct {
 	*connection.Manager
 	fail  atomic.Bool
 	mu    sync.Mutex
 	calls []*connection.Call
+	lie   map[string]connection.Server
 }
 
 // BeginCall records every call the dispatcher opens, so a test can check
@@ -258,11 +273,20 @@ func (f *failingConns) opened() []*connection.Call {
 	return slices.Clone(f.calls)
 }
 
-func (f *failingConns) Get(ctx context.Context, p int64, id string) (connection.Connection, error) {
+func (f *failingConns) List(ctx context.Context, p int64) ([]connection.Connection, error) {
 	if f.fail.Load() {
-		return connection.Connection{}, fmt.Errorf("%w: injected", connection.ErrUnreadable)
+		return nil, fmt.Errorf("%w: injected", connection.ErrUnreadable)
 	}
-	return f.Manager.Get(ctx, p, id)
+	cs, err := f.Manager.List(ctx, p)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range cs {
+		if srv, ok := f.lie[cs[i].ID]; ok {
+			cs[i].Server = srv
+			cs[i].GrantedScope = tgScope
+		}
+	}
+	return cs, err
 }
 
 // failingJobs fails the ledger admission while fail is set.
@@ -294,6 +318,7 @@ type dispatchEnv struct {
 	flagErr atomic.Bool
 	connA   connection.Connection
 	connB   connection.Connection
+	cfg     connector.DispatcherConfig
 }
 
 func newDispatchEnv(t *testing.T, store *db.Store) *dispatchEnv {
@@ -333,7 +358,7 @@ func newDispatchEnv(t *testing.T, store *db.Store) *dispatchEnv {
 	e.flags.Store(&connector.Flags{ExternalTools: true, Servers: map[string]bool{"tg": true, "alice": false}})
 	e.conns = &failingConns{Manager: e.mgr}
 	e.jobs = &failingJobs{RunLoop: e.h.Loop()}
-	e.d, err = connector.NewDispatcher(connector.DispatcherConfig{
+	e.cfg = connector.DispatcherConfig{
 		Jobs: e.jobs, Connections: e.conns, Pin: pin,
 		Endpoints: map[string]connector.MCPEndpoint{"tg": e.tg, "alice": e.alice},
 		Executor:  &connector.Executor{Sink: e.sink, Now: e.h.Now},
@@ -344,11 +369,22 @@ func newDispatchEnv(t *testing.T, store *db.Store) *dispatchEnv {
 			return *e.flags.Load(), nil
 		},
 		Metrics: e.reg, Now: e.h.Now,
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
+	e.reconfigure(nil)
 	return e
+}
+
+// reconfigure rebuilds the dispatcher with its config changed by mutate.
+func (e *dispatchEnv) reconfigure(mutate func(*connector.DispatcherConfig)) {
+	e.t.Helper()
+	if mutate != nil {
+		mutate(&e.cfg)
+	}
+	d, err := connector.NewDispatcher(e.cfg)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	e.d = d
 }
 
 type noRevoker struct{}
@@ -359,9 +395,21 @@ func (noRevoker) Revoke(context.Context, connection.Server, connection.Secret, c
 
 func (e *dispatchEnv) activeTG(principal int64, account string) connection.Connection {
 	e.t.Helper()
+	return e.active(principal, connection.ServerTG, account, tgScope)
+}
+
+// activeAlice is an active connection to the alice server; its access
+// token is "fake-at-" + account like tg's.
+func (e *dispatchEnv) activeAlice(principal int64, account string) connection.Connection {
+	e.t.Helper()
+	return e.active(principal, connection.ServerAlice, account, "iot:view")
+}
+
+func (e *dispatchEnv) active(principal int64, server connection.Server, account, scope string) connection.Connection {
+	e.t.Helper()
 	ctx := context.Background()
 	m := e.mgr
-	c, err := m.Begin(ctx, principal, connection.ServerTG)
+	c, err := m.Begin(ctx, principal, server)
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -371,7 +419,7 @@ func (e *dispatchEnv) activeTG(principal int64, account string) connection.Conne
 	if c, err = m.StoreAuthorizationCode(ctx, principal, c.ID, c.AuthorityRevision, connection.NewSecret("fake-code-"+c.ID)); err != nil {
 		e.t.Fatal(err)
 	}
-	resp := `{"access_token":"fake-at-` + account + `","token_type":"Bearer","expires_in":3600,"refresh_token":"fake-rt-` + account + `","scope":"` + tgScope + `"}`
+	resp := `{"access_token":"fake-at-` + account + `","token_type":"Bearer","expires_in":3600,"refresh_token":"fake-rt-` + account + `","scope":"` + scope + `"}`
 	if c, err = m.CompleteExchange(ctx, principal, c.ID, c.AuthorityRevision, account, []byte(resp)); err != nil {
 		e.t.Fatal(err)
 	}
@@ -958,7 +1006,7 @@ func TestDispatch_OutputCap(t *testing.T) {
 		e := newDispatchEnv(t, s)
 		token, _ := e.run(alice)
 		e.tg.mu.Lock()
-		e.tg.out = bytes.Repeat([]byte("x"), jobs.MaxToolOutputBytes+1024)
+		e.tg.out = []byte(`{"content":[{"type":"text","text":"` + strings.Repeat("x", jobs.MaxToolOutputBytes+1024) + `"}]}`)
 		e.tg.mu.Unlock()
 		a := e.call(token, req("tg", "list_dialogs", ""))
 		if a.code != http.StatusOK || !a.Truncated || len(a.Output) > jobs.MaxToolOutputBytes ||
@@ -1036,5 +1084,256 @@ func TestDispatch_TamperedContext(t *testing.T) {
 		if _, bearers, _ := e.tg.snapshot(); len(bearers) != 0 {
 			t.Fatal("a token was opened")
 		}
+		// The admission counted the call before the context was checked:
+		// a refused call still uses a slot (fail closed, owner question b).
+		if n := e.toolCalls(jobID); n != 1 {
+			t.Fatalf("tool_calls = %d, want 1", n)
+		}
+	})
+}
+
+// TestDispatch_ContextNamesAnotherConversation (I2/I10): a context whose
+// digest checks out (row and token re-signed to match) but that names
+// another conversation than the job row is unreadable, never used.
+func TestDispatch_ContextNamesAnotherConversation(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newDispatchEnv(t, s)
+		_, jobID := e.run(alice)
+		var ec string
+		if err := s.DB.QueryRow(`SELECT execution_context FROM pa_jobs WHERE id = $1`, jobID).Scan(&ec); err != nil {
+			t.Fatal(err)
+		}
+		dec := json.NewDecoder(strings.NewReader(ec))
+		dec.UseNumber()
+		var m map[string]any
+		if err := dec.Decode(&m); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := m["conversation_id"]; !ok {
+			t.Fatal("context has no conversation_id")
+		}
+		m["conversation_id"] = "another-conversation"
+		edited, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(edited)
+		digest := hex.EncodeToString(sum[:])
+		if _, err := s.DB.Exec(`UPDATE pa_jobs SET execution_context = $1, context_digest = $2 WHERE id = $3`, string(edited), digest, jobID); err != nil {
+			t.Fatal(err)
+		}
+		token, err := e.h.Issuer().MintPAJob(localjwt.PAJob{
+			Principal: alice, JobID: jobID, Attempt: 1, ContextDigest: digest,
+			Tools: []string{"tg/get_messages", "tg/list_dialogs"},
+		}, "pool-jti", time.Now().Add(-time.Minute).Unix(), time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.wantRefusal(e.call(token, req("tg", "list_dialogs", "")), http.StatusServiceUnavailable, connector.ReasonJobUnreadable, alice, 0)
+		e.noDispatch()
+	})
+}
+
+// TestDispatch_CrossProviderToken (P2 of the #1341 review): a run bound to
+// tg and alice that names its alice connection on a tg tool is refused
+// before any call is opened; the alice token never reaches tg. Without a
+// name, only the tg connection counts.
+func TestDispatch_CrossProviderToken(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newDispatchEnv(t, s)
+		iot := e.activeAlice(alice, "acct-alice-iot")
+		e.h.SetConns(map[int64][]pa.ConnectionRevision{alice: {
+			{ConnectionID: e.connA.ID, AuthorityRevision: e.connA.AuthorityRevision},
+			{ConnectionID: iot.ID, AuthorityRevision: iot.AuthorityRevision},
+		}})
+		e.flags.Store(&connector.Flags{ExternalTools: true, Servers: map[string]bool{"tg": true, "alice": true}})
+		token, _ := e.run(alice)
+
+		e.wantRefusal(e.call(token, req("tg", "list_dialogs", iot.ID)), http.StatusForbidden, connector.ReasonConnectionUnbound, alice, 0)
+		if n := len(e.conns.opened()); n != 0 {
+			t.Fatalf("%d calls opened on the alice connection", n)
+		}
+		e.noDispatch()
+
+		if a := e.call(token, req("tg", "list_dialogs", "")); a.code != http.StatusOK {
+			t.Fatalf("tg call %+v", a)
+		}
+		_, bearers, _ := e.tg.snapshot()
+		for _, b := range bearers {
+			if b != "fake-at-acct-alice" {
+				t.Fatalf("tg saw bearer %q", b)
+			}
+		}
+		if _, ab, _ := e.alice.snapshot(); len(ab) != 0 {
+			t.Fatalf("alice reached: %d requests", len(ab))
+		}
+	})
+}
+
+// TestDispatch_TokenServerChecked: behind the listing, the connection whose
+// token was opened must be on the requested server. Here the listing lies
+// (an alice connection reported as tg); the token's own row says alice, so
+// the call is refused and nothing reaches tg.
+func TestDispatch_TokenServerChecked(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newDispatchEnv(t, s)
+		iot := e.activeAlice(alice, "acct-alice-iot")
+		e.h.SetConns(map[int64][]pa.ConnectionRevision{alice: {{ConnectionID: iot.ID, AuthorityRevision: iot.AuthorityRevision}}})
+		e.conns.lie = map[string]connection.Server{iot.ID: connection.ServerTG}
+		token, _ := e.run(alice)
+		e.wantRefusal(e.call(token, req("tg", "list_dialogs", "")), http.StatusForbidden, connector.ReasonConnectionUnbound, alice, 0)
+		if _, bearers, lists := e.tg.snapshot(); len(bearers) != 0 || lists != 0 {
+			t.Fatalf("tg reached: %d bearers, %d lists", len(bearers), lists)
+		}
+	})
+}
+
+// TestDispatch_AmbiguousConnection: two bound connections on the server and
+// no name is refused, never resolved to the first one. Naming one works,
+// with that connection's token.
+func TestDispatch_AmbiguousConnection(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newDispatchEnv(t, s)
+		second := e.activeTG(alice, "acct-alice-2")
+		e.h.SetConns(map[int64][]pa.ConnectionRevision{alice: {
+			{ConnectionID: e.connA.ID, AuthorityRevision: e.connA.AuthorityRevision},
+			{ConnectionID: second.ID, AuthorityRevision: second.AuthorityRevision},
+		}})
+		token, _ := e.run(alice)
+		e.wantRefusal(e.call(token, req("tg", "list_dialogs", "")), http.StatusBadRequest, connector.ReasonConnectionAmbiguous, alice, 0)
+		e.noDispatch()
+		if a := e.call(token, req("tg", "list_dialogs", second.ID)); a.code != http.StatusOK {
+			t.Fatalf("named call %+v", a)
+		}
+		if _, bearers, _ := e.tg.snapshot(); len(bearers) == 0 || bearers[len(bearers)-1] != "fake-at-acct-alice-2" {
+			t.Fatalf("bearers %v", bearers)
+		}
+	})
+}
+
+// TestDispatch_CallTimeout: one deadline bounds the dispatch. A server that
+// never answers ends as outcome_unknown when it runs out, and the call is
+// deregistered.
+func TestDispatch_CallTimeout(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newDispatchEnv(t, s)
+		e.reconfigure(func(c *connector.DispatcherConfig) { c.CallTimeout = 200 * time.Millisecond })
+		token, _ := e.run(alice)
+		e.tg.mu.Lock()
+		e.tg.block = true
+		e.tg.mu.Unlock()
+		start := time.Now()
+		a := e.call(token, req("tg", "list_dialogs", ""))
+		if el := time.Since(start); el > 3*time.Second {
+			t.Fatalf("call took %v", el)
+		}
+		if a.code != http.StatusBadGateway || a.Stop != connector.ReasonOutcomeUnknown {
+			t.Fatalf("answer %+v", a)
+		}
+		for i, c := range e.conns.opened() {
+			if c.Ctx.Err() == nil {
+				t.Fatalf("call %d still registered", i)
+			}
+		}
+	})
+}
+
+// TestDispatch_JobStoppedFencesResult: the job row is re-read after the
+// call. Consent withdrawn while the call was on the wire fences the result:
+// the worker gets no output.
+func TestDispatch_JobStoppedFencesResult(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newDispatchEnv(t, s)
+		token, _ := e.run(alice)
+		e.tg.onCall = func() { e.h.Text(alice, "/consent withdraw") }
+		a := e.call(token, req("tg", "list_dialogs", ""))
+		if a.code != http.StatusConflict || a.Stop != connector.ReasonFenced || a.Output != "" || strings.Contains(a.raw, "result of") {
+			t.Fatalf("answer %+v", a)
+		}
+		rows := e.audit(alice)
+		if last := rows[len(rows)-1]; last.status != "fenced" {
+			t.Fatalf("last row %+v", last)
+		}
+	})
+}
+
+// TestDispatch_PanicLeavesNoCall: a panicking tools/call still runs the
+// post-dispatch checks, so the call is deregistered, and its result is
+// recorded as outcome_unknown.
+func TestDispatch_PanicLeavesNoCall(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newDispatchEnv(t, s)
+		token, _ := e.run(alice)
+		e.tg.onCall = func() { panic("fake server panic") }
+		func() {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Fatal("panic swallowed")
+				}
+			}()
+			e.call(token, req("tg", "list_dialogs", ""))
+		}()
+		calls := e.conns.opened()
+		if len(calls) != 1 || calls[0].Ctx.Err() == nil {
+			t.Fatalf("call left registered (%d opened)", len(calls))
+		}
+		rows := e.audit(alice)
+		if last := rows[len(rows)-1]; last.status != "outcome_unknown" {
+			t.Fatalf("last row %+v", last)
+		}
+	})
+}
+
+// TestDispatch_ToolErrorStatus: an MCP tool error (isError) reaches the
+// worker as tool_error with its output, and is recorded as tool_error, not
+// ok. A result that is not an object is a protocol failure.
+func TestDispatch_ToolErrorStatus(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newDispatchEnv(t, s)
+		token, _ := e.run(alice)
+		e.tg.mu.Lock()
+		e.tg.out = []byte(`{"content":[{"type":"text","text":"no such chat"}],"isError":true}`)
+		e.tg.mu.Unlock()
+		a := e.call(token, req("tg", "list_dialogs", ""))
+		if a.code != http.StatusOK || a.Status != "tool_error" || !strings.Contains(a.Output, "no such chat") {
+			t.Fatalf("answer %+v", a)
+		}
+		rows := e.audit(alice)
+		if last := rows[len(rows)-1]; last.status != "tool_error" {
+			t.Fatalf("last row %+v", last)
+		}
+		e.tg.mu.Lock()
+		e.tg.out = []byte(`["not","an","object"]`)
+		e.tg.mu.Unlock()
+		if a := e.call(token, req("tg", "get_messages", "")); a.Stop != connector.ReasonOutcomeUnknown || a.Output != "" {
+			t.Fatalf("non-object result %+v", a)
+		}
+	})
+}
+
+// TestDispatch_RefusalAuditBounded: a worker looping on refused requests
+// writes at most a bounded number of refusals per minute into the
+// principal's chain; the rest are refused and counted only. Another
+// principal is unaffected, and the window resets.
+func TestDispatch_RefusalAuditBounded(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newDispatchEnv(t, s)
+		token, _ := e.run(alice)
+		const burst = 30
+		for i := 0; i < burst+5; i++ {
+			if a := e.call(token, `{`); a.Stop != connector.ReasonBadRequest {
+				t.Fatalf("request %d: %+v", i, a)
+			}
+		}
+		if n := len(e.audit(alice)); n != burst {
+			t.Fatalf("%d refusals audited, want %d", n, burst)
+		}
+		if got := testutil.ToFloat64(e.reg.PADispatchTotal.WithLabelValues("invalid-server", "refused_unaudited", connector.ReasonBadRequest)); got != 5 {
+			t.Fatalf("unaudited refusals counted %v, want 5", got)
+		}
+		bobToken, _ := e.run(bob)
+		e.wantRefusal(e.call(bobToken, `{`), http.StatusBadRequest, connector.ReasonBadRequest, bob, 0)
+		e.h.Advance(time.Minute)
+		e.wantRefusal(e.call(token, `{`), http.StatusBadRequest, connector.ReasonBadRequest, alice, burst)
 	})
 }

@@ -457,13 +457,19 @@ The pin alone is not the read-only boundary. The token itself must carry no auth
 - S1-T11: a client id without a ceiling record keeps today's grant. This is the regression guard for existing clients.
 
 **Drift signal (#1315).** Each dispatch observes the live `tools/list`
-(cached at most 60s per connection and authority revision) and sets
-`mctl_pa_pin_drift{server}` to 1 when a pinned tool changed or disappeared, 0
-when every pinned tool matches. Unpinned extras, such as `tg`'s write tools or
-a gateway's `tg_`-prefixed names, are denied but are not drift. A listing that
-cannot be read or parsed removes the drift series and sets
-`mctl_pa_pin_listing_unknown{server}` to 1: an unobserved listing is never
-reported as clean. Alerts `MctlPAPinDrift` and `MctlPAPinListingUnknown` cover
+(cached at most 60s per connection and authority revision). Listings are read
+per connection, so the server's gauges aggregate the last observation of every
+connection made in the past 5 minutes: `mctl_pa_pin_drift{server}` is 1 when
+any of them shows a pinned tool changed or missing, 0 when all match. Unpinned
+extras, such as `tg`'s write tools or a gateway's `tg_`-prefixed names, are
+denied but are not drift. When none of them could be read or parsed, the drift
+and denied-tool series are removed and `mctl_pa_pin_listing_unknown{server}`
+is 1: an unobserved listing is never reported as clean, and one connection's
+failure cannot hide drift another connection saw. A server refusing one
+connection's token on `tools/list` is that connection's problem: the call is
+refused as `server_refused` and counted in
+`mctl_pa_pin_listing_failures_total{reason="unauthorized"}`, never as an
+unknown listing. Alerts `MctlPAPinDrift` and `MctlPAPinListingUnknown` cover
 both; see the runbook.
 
 ### T9 Egress, SSRF and redirects (from Phase 1)
@@ -543,7 +549,9 @@ All of these, plus consent, are checked again at **every dispatch**, not only at
 - principal, connection id, `authority_revision`, server and tool;
 - args digest, tier, class and taint;
 - approval or permission id, and approver;
-- result status (`ok`, `refused`, `fenced`, `outcome_unknown`) and cost;
+- result status (`ok`, `tool_error`, `refused`, `fenced`, `outcome_unknown`)
+  and cost; `tool_error` is a call the server ran and answered with an MCP
+  tool error (`isError`);
 - for a refusal, a closed `reason` code (for example `connection_unbound`,
   `revision_mismatch`, `tool_changed`, `token_expired`). Every field taken from
   worker input is normalised to a fixed marker before it is recorded, so a
@@ -552,9 +560,19 @@ All of these, plus consent, are checked again at **every dispatch**, not only at
 Implementation (#1315): the dispatcher at `POST /api/pa/v1/jobs/tool` writes
 these entries through `internal/pa/connector`. A refusal is recorded only when
 the token is attributable to a principal (our signature, our issuer, the
-`pa-job` audience). A forged or foreign token is counted in
-`mctl_pa_dispatch_total` but written to nobody's chain, since its principal
-claim is not evidence.
+`pa-job` audience, the pa-job shape) and refused for a decided reason: expired
+at most one hour ago, or revoked. A forged or foreign token, one expired
+longer ago, and one whose revocation state could not be read
+(`token_unverifiable`) are counted in `mctl_pa_dispatch_total` but written to
+nobody's chain: their principal claim is not evidence, or nothing was decided.
+Refusals are written at most 30 per principal per minute; past that a worker's
+further refusals are still refused and counted (status `refused_unaudited`),
+so a looping or hostile worker cannot flood a chain.
+
+After the call, the connection is re-read (S1-C7) and so is the job row: a
+result that arrives after the job was cancelled, its consent withdrawn or its
+conversation closed is discarded (`fenced`). One deadline (60s by default)
+bounds opening the token, `tools/list` and `tools/call`.
 
 Message bodies and tool outputs are never logged, only digests. `/log` shows a principal their own entries.
 

@@ -731,6 +731,11 @@ func (l *RunLoop) AdmitPAToolCall(ctx context.Context, job PAJob, server, tool s
 // connection and authority revision come from the job row"). The row's
 // execution context must hash to the digest the row and the token carry; a
 // context that does not is unreadable state and refuses (I9).
+//
+// The call is counted by the admission, before the context is checked: a
+// call refused for an unreadable or tampered context has used one of the
+// run's tool-call slots. That fails closed (owner question (b) on #1341:
+// an admitted-then-refused call counts toward the cap).
 func (l *RunLoop) AdmitToolCall(ctx context.Context, job PAJob, server, tool string) (Policy, error) {
 	if !job.ref.Valid() {
 		return Policy{}, ErrNoJob
@@ -747,6 +752,21 @@ func (l *RunLoop) AdmitToolCall(ctx context.Context, job PAJob, server, tool str
 		return Policy{}, err
 	}
 	return policyFromJob(j, job.ref)
+}
+
+// StillRunning re-reads job's row after a tool call returned: the job must
+// still be running under the same attempt and context, with consent and
+// the conversation still valid (the same gate as the admission). A job
+// cancelled, consent withdrawn or a conversation closed while the call was
+// on the wire is an error, and the dispatcher discards the result. A read
+// error is an error too (I9).
+func (l *RunLoop) StillRunning(ctx context.Context, job PAJob) error {
+	if !job.ref.Valid() {
+		return ErrNoJob
+	}
+	_, err := l.store.RunningPAJob(ctx, job.ref, l.now(), l.gate)
+	l.droppedNotice(ctx, job.ref, err)
+	return err
 }
 
 // policyFromJob rebuilds the Policy of a running job from its row. The

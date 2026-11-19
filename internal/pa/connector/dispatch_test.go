@@ -167,6 +167,13 @@ func loadPin(t *testing.T) *catalog.Pin {
 // by mutate when it is not nil.
 func observeTG(t *testing.T, mutate func([]map[string]any) []map[string]any) *catalog.Surface {
 	t.Helper()
+	return loadPin(t).Observe("tg", [][]byte{tgListing(t, mutate)}, nil, t0)
+}
+
+// tgListing is tg's tools/list page: the committed descriptors, changed by
+// mutate when it is not nil.
+func tgListing(t *testing.T, mutate func([]map[string]any) []map[string]any) []byte {
+	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "tool-descriptors.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -188,7 +195,7 @@ func observeTG(t *testing.T, mutate func([]map[string]any) []map[string]any) *ca
 	if err != nil {
 		t.Fatal(err)
 	}
-	return loadPin(t).Observe("tg", [][]byte{page}, nil, t0)
+	return page
 }
 
 // GatewayPrefixed names only a listing whose pinned names all moved under

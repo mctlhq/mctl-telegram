@@ -16,9 +16,9 @@ package connector
 
 // mcpclient.go is the minimal MCP Streamable HTTP client the dispatcher
 // uses to reach a catalog server (#1315): initialize, tools/list and
-// tools/call, nothing else. Every request goes through an internal/pa/egress
-// client (threat model T9, I8): HTTPS only, the endpoint's host only, no
-// redirects, bounded bodies. The bearer is the connection's access token,
+// tools/call, nothing else; each session is ended with DELETE. Every
+// request goes through an internal/pa/egress client (threat model T9, I8):
+// HTTPS only, the endpoint's host only, no redirects, bounded bodies. The bearer is the connection's access token,
 // opened server-side for this one call (I1); it is never logged and never
 // returned.
 
@@ -36,6 +36,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 	"github.com/mctlhq/mctl-telegram/internal/pa/egress"
@@ -47,6 +48,10 @@ const mcpProtocolVersion = "2025-06-18"
 // maxListPages bounds a paginated tools/list. A server that keeps handing
 // out cursors past it is a failed read, not a shorter list.
 const maxListPages = 20
+
+// sessionCloseTimeout bounds the DELETE that ends a session. It runs even
+// when the request's own deadline has passed.
+const sessionCloseTimeout = 5 * time.Second
 
 var (
 	// ErrMCPProtocol wraps every malformed or unexpected server response:
@@ -124,9 +129,34 @@ func (e *Endpoint) open(ctx context.Context, token connection.Secret) (*session,
 	}
 	s.id = hdr.Get("Mcp-Session-Id")
 	if err := s.notify(ctx, "notifications/initialized"); err != nil {
+		s.close(ctx)
 		return nil, err
 	}
 	return s, nil
+}
+
+// close ends the session with DELETE (MCP Streamable HTTP), so the server
+// does not keep one session per call. Best effort: a server without
+// session termination answers 405, and nothing the caller does depends on
+// the answer.
+func (s *session) close(ctx context.Context) {
+	if s.id == "" {
+		return
+	}
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionCloseTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(cctx, http.MethodDelete, s.e.url, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+s.token.Reveal())
+	req.Header.Set("Mcp-Session-Id", s.id)
+	req.Header.Set("Mcp-Protocol-Version", mcpProtocolVersion)
+	resp, err := s.e.client.Do(req)
+	if err != nil {
+		return
+	}
+	drain(resp)
 }
 
 // ListTools returns every page of the server's tools/list, each the
@@ -137,6 +167,7 @@ func (e *Endpoint) ListTools(ctx context.Context, token connection.Secret) ([][]
 	if err != nil {
 		return nil, err
 	}
+	defer s.close(ctx)
 	var pages [][]byte
 	cursor := ""
 	for range maxListPages {
@@ -169,6 +200,7 @@ func (e *Endpoint) CallTool(ctx context.Context, token connection.Secret, tool s
 	if err != nil {
 		return nil, err
 	}
+	defer s.close(ctx)
 	res, _, err := s.call(ctx, "tools/call", map[string]any{"name": tool, "arguments": args})
 	return res, err
 }

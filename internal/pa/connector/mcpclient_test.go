@@ -27,6 +27,13 @@ type fakeServer struct {
 	sessions []string
 	methods  []string
 	badID    bool
+	// nullResult answers every request with "result": null.
+	nullResult bool
+	// noContentType sends the JSON body without a Content-Type.
+	noContentType bool
+	// notifyStatus forces the status of notifications (0 = 202).
+	notifyStatus int
+	deletes      []string // session ids of DELETE requests
 }
 
 func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -34,6 +41,11 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 	f.bearers = append(f.bearers, r.Header.Get("Authorization"))
 	f.sessions = append(f.sessions, r.Header.Get("Mcp-Session-Id"))
+	if r.Method == http.MethodDelete {
+		f.deletes = append(f.deletes, r.Header.Get("Mcp-Session-Id"))
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if f.status != 0 {
 		w.WriteHeader(f.status)
 		return
@@ -50,6 +62,10 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	f.methods = append(f.methods, m.Method)
 	if m.ID == nil {
+		if f.notifyStatus != 0 {
+			w.WriteHeader(f.notifyStatus)
+			return
+		}
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
@@ -74,6 +90,9 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
+	if f.nullResult {
+		result = "null"
+	}
 	id := *m.ID
 	if f.badID {
 		id += 100
@@ -85,7 +104,11 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprintf(w, "event: message\ndata: %s\n\n", msg)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	if f.noContentType {
+		w.Header()["Content-Type"] = nil
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+	}
 	_, _ = io.WriteString(w, msg)
 }
 
@@ -113,6 +136,9 @@ func TestEndpoint_ListToolsPaginatesJSONAndSSE(t *testing.T) {
 				t.Fatalf("pages %q", pages)
 			}
 			want := []string{"initialize", "notifications/initialized", "tools/list", "tools/list"}
+			if len(f.deletes) != 1 || f.deletes[0] != "sess-1" {
+				t.Fatalf("session not ended: %v", f.deletes)
+			}
 			if strings.Join(f.methods, ",") != strings.Join(want, ",") {
 				t.Fatalf("methods %v", f.methods)
 			}
@@ -150,6 +176,13 @@ func TestEndpoint_Failures(t *testing.T) {
 		"500":        {&fakeServer{status: http.StatusInternalServerError}, ErrMCPProtocol},
 		"wrong id":   {&fakeServer{badID: true, pages: []string{`{"tools":[]}`}}, ErrMCPProtocol},
 		"sse no msg": {&fakeServer{sse: true, badID: true, pages: []string{`{"tools":[]}`}}, ErrMCPProtocol},
+		// A null result is a failed read, not an empty listing (I9).
+		"null result": {&fakeServer{nullResult: true, pages: []string{`{"tools":[]}`}}, ErrMCPProtocol},
+		// No content type: the body cannot be trusted to be either form.
+		"no content type": {&fakeServer{noContentType: true, pages: []string{`{"tools":[]}`}}, ErrMCPProtocol},
+		// The server refused notifications/initialized: no session.
+		"notify refused": {&fakeServer{notifyStatus: http.StatusBadRequest, pages: []string{`{"tools":[]}`}}, ErrMCPProtocol},
+		"notify 401":     {&fakeServer{notifyStatus: http.StatusUnauthorized, pages: []string{`{"tools":[]}`}}, ErrMCPUnauthorized},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -169,6 +202,24 @@ func TestEndpoint_CallTool(t *testing.T) {
 	out, err := testEndpoint(t, f).CallTool(context.Background(), tok, "list_dialogs", json.RawMessage(`{"limit":5}`))
 	if err != nil || !strings.Contains(string(out), `"ok"`) {
 		t.Fatalf("out %q err %v", out, err)
+	}
+	if len(f.deletes) != 1 || f.deletes[0] != "sess-1" {
+		t.Fatalf("session not ended: %v", f.deletes)
+	}
+	// The DELETE carries the connection's bearer like every request.
+	if last := f.bearers[len(f.bearers)-1]; last != "Bearer fake-at-client-test" {
+		t.Fatalf("delete bearer %q", last)
+	}
+}
+
+// A session whose notifications/initialized was refused is ended too.
+func TestEndpoint_SessionEndedOnFailedOpen(t *testing.T) {
+	f := &fakeServer{notifyStatus: http.StatusBadRequest}
+	if _, err := testEndpoint(t, f).CallTool(context.Background(), tok, "list_dialogs", json.RawMessage(`{}`)); err == nil {
+		t.Fatal("refused notification accepted")
+	}
+	if len(f.deletes) != 1 {
+		t.Fatalf("session not ended: %v", f.deletes)
 	}
 }
 

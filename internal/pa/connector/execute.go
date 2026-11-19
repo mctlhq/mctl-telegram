@@ -69,6 +69,10 @@ const (
 	StatusRefused        Status = "refused"
 	StatusFenced         Status = "fenced"
 	StatusOutcomeUnknown Status = "outcome_unknown"
+	// StatusToolError: the server ran the call and answered with a tool
+	// error (MCP isError). The output is the error result, still external
+	// content.
+	StatusToolError Status = "tool_error"
 )
 
 // Errors a dispatch closure returns to classify its failure. Any other
@@ -84,8 +88,11 @@ var (
 
 // Errors from Execute. None carries argument, output or token text.
 var (
-	// ErrInvalidCall: the call is incomplete; nothing was recorded or sent.
+	// ErrInvalidCall: the call is incomplete; nothing was sent.
 	ErrInvalidCall = errors.New("pa connector: invalid call")
+	// ErrUnboundConnection wraps ErrInvalidCall for a call whose connection
+	// is not one the run bound. It was audited as connection_unbound.
+	ErrUnboundConnection = errors.New("pa connector: connection not bound to the run")
 	// ErrAuditUnavailable: the pre-dispatch audit append failed, so the
 	// call was refused and nothing was sent (threat model T12, I9).
 	ErrAuditUnavailable = errors.New("pa connector: audit append failed; call refused")
@@ -115,6 +122,9 @@ type Call struct {
 // only its digest is audited.
 type Result struct {
 	Output []byte
+	// ToolError marks an MCP tool error result (isError): the call ran and
+	// failed. It is recorded as tool_error, not ok.
+	ToolError bool
 	// Cost is the call's cost in ledger units, 0 if none.
 	Cost int64
 }
@@ -226,7 +236,7 @@ func (x *Executor) Execute(ctx context.Context, surface *catalog.Surface, call C
 	conn, ok := call.Policy.Connection(call.ConnectionID)
 	if !ok || call.ConnectionID == "" {
 		base.ConnectionID, base.Reason = unboundConnection, ReasonConnectionUnbound
-		return Result{}, x.refuse(ctx, base, now, fmt.Errorf("%w: connection not bound to the run", ErrInvalidCall))
+		return Result{}, x.refuse(ctx, base, now, fmt.Errorf("%w: %w", ErrInvalidCall, ErrUnboundConnection))
 	}
 	base.ConnectionID, base.AuthorityRevision = conn.ConnectionID, conn.AuthorityRevision
 	if !taintOK {
@@ -275,6 +285,9 @@ func (x *Executor) dispatchRecorded(ctx context.Context, base Entry, dispatch Di
 	post := base
 	post.Phase, post.At, post.Cost = PhaseResult, x.now(), res.Cost
 	switch {
+	case dispatchErr == nil && res.ToolError:
+		post.Status = StatusToolError
+		post.ResultSHA256 = digest(res.Output)
 	case dispatchErr == nil:
 		post.Status = StatusOK
 		post.ResultSHA256 = digest(res.Output)
@@ -335,6 +348,7 @@ const (
 	ReasonTokenExpired         = "token_expired"
 	ReasonTokenRevoked         = "token_revoked"
 	ReasonTokenInvalid         = "token_invalid"
+	ReasonTokenUnverifiable    = "token_unverifiable"
 	ReasonBadRequest           = "bad_request"
 	ReasonFlagOff              = "flag_off"
 	ReasonToolNotInSet         = "tool_not_in_set"
@@ -357,6 +371,11 @@ const (
 	ReasonNoWritePath          = "no_write_path"
 	ReasonTaintInvalid         = "taint_invalid"
 	ReasonInternal             = "internal"
+	// Outcomes of a call that reached Execute, as the worker sees them.
+	ReasonAuditUnavailable = "audit_unavailable"
+	ReasonFenced           = "fenced"
+	ReasonServerRefused    = "server_refused"
+	ReasonOutcomeUnknown   = "outcome_unknown"
 )
 
 // PinRefusalReason maps a catalog Authorize error to its reason. An error

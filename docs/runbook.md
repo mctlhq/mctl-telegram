@@ -3960,8 +3960,14 @@ whether the change is legitimate.
 <a id="mctlpapinlistingunknown"></a>
 ### MctlPAPinListingUnknown
 
-`mctl_pa_pin_listing_unknown{server}` has read 1 for 15 minutes: the last
-`tools/list` failed or did not parse. Drift is unknown (the drift gauge is
-removed, never 0) and every PA call to the server is refused as
-`server_unavailable`. Check the server's own health and the egress logs of
-the `mcp` purpose; the alert clears on the next successful listing.
+`mctl_pa_pin_listing_unknown{server}` has read 1 for 15 minutes: no connection
+has read the server's `tools/list` successfully in the last 5 minutes (each
+connection's last observation counts; the gauges aggregate them). Drift is
+unknown (the drift and denied-tool series are removed, never 0) and PA calls
+to the server are refused as `server_unavailable`. Check the server's own
+health and the egress logs of the `mcp` purpose;
+`mctl_pa_pin_listing_failures_total{server="<server>"}` breaks the failures
+down by reason. A server refusing one user's token (`reason="unauthorized"`)
+does not raise this alert: that user's calls are refused as `server_refused`
+and the user has to reconnect. The alert clears on the next successful
+listing.

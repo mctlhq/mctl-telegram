@@ -22,19 +22,28 @@ import "github.com/prometheus/client_golang/prometheus"
 
 // paMetrics are the PA collectors, embedded in Registry.
 type paMetrics struct {
-	// PAPinDrift is 1 while the last observed tools/list of a server
+	// Listings are read per connection; the dispatcher aggregates the
+	// fresh observations of every connection of a server before it sets
+	// these gauges, so one connection cannot hide another's.
+	//
+	// PAPinDrift is 1 while any fresh observed tools/list of a server
 	// differs from the committed pin for at least one pinned tool (missing,
-	// changed schema, description or annotations), 0 when it matches. It
-	// has no series while the listing could not be observed: a failed read
-	// is not "no drift" (I9); PAPinListingUnknown says so instead.
+	// changed schema, description or annotations), 0 when they all match.
+	// It has no series while no listing of the server could be observed: a
+	// failed read is not "no drift" (I9); PAPinListingUnknown says so.
 	PAPinDrift *prometheus.GaugeVec
-	// PAPinListingUnknown is 1 while the last tools/list of a server could
-	// not be read or parsed, 0 once one was.
+	// PAPinListingUnknown is 1 while no fresh tools/list of a server could
+	// be read or parsed, 0 once one was.
 	PAPinListingUnknown *prometheus.GaugeVec
 	// PAPinDeniedTools counts, per server and deny reason, the tools of the
-	// last observed listing the pin denies. not_pinned is expected (tg lists
-	// its write tools too) and is not drift.
+	// fresh observed listings the pin denies (the largest count of any
+	// connection). not_pinned is expected (tg lists its write tools too)
+	// and is not drift. No series while the listing is unknown.
 	PAPinDeniedTools *prometheus.GaugeVec
+	// PAPinListingFailures counts failed tools/list reads by server and
+	// reason: unauthorized (the server refused one connection's token, a
+	// problem of that connection, not of the listing) or unavailable.
+	PAPinListingFailures *prometheus.CounterVec
 	// PADispatchTotal counts dispatcher outcomes: an executed call's status
 	// (reason "") or a refusal's reason (status "refused").
 	PADispatchTotal *prometheus.CounterVec
@@ -54,12 +63,16 @@ func newPAMetrics(reg *prometheus.Registry) paMetrics {
 			Name: "mctl_pa_pin_denied_tools",
 			Help: "Tools of the last observed PA catalog listing the pin denies, by server and deny reason.",
 		}, []string{"server", "reason"}),
+		PAPinListingFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "mctl_pa_pin_listing_failures_total",
+			Help: "Failed PA catalog tools/list reads, by server and reason (unauthorized, unavailable).",
+		}, []string{"server", "reason"}),
 		PADispatchTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mctl_pa_dispatch_total",
 			Help: "PA connector dispatcher outcomes, by server, status and refusal reason.",
 		}, []string{"server", "status", "reason"}),
 	}
-	reg.MustRegister(m.PAPinDrift, m.PAPinListingUnknown, m.PAPinDeniedTools, m.PADispatchTotal)
+	reg.MustRegister(m.PAPinDrift, m.PAPinListingUnknown, m.PAPinDeniedTools, m.PAPinListingFailures, m.PADispatchTotal)
 	return m
 }
 
@@ -80,10 +93,17 @@ func (r *Registry) PAPinObserved(server string, drift bool, denied map[string]in
 }
 
 // PAPinUnknown records that server's listing could not be observed. The
-// drift series is removed rather than set to 0.
+// drift and denied-tool series are removed rather than set to 0 or left at
+// their last counts.
 func (r *Registry) PAPinUnknown(server string) {
 	r.PAPinDrift.DeleteLabelValues(server)
+	r.PAPinDeniedTools.DeletePartialMatch(prometheus.Labels{"server": server})
 	r.PAPinListingUnknown.WithLabelValues(server).Set(1)
+}
+
+// CountPAListingFailure counts one failed tools/list read.
+func (r *Registry) CountPAListingFailure(server, reason string) {
+	r.PAPinListingFailures.WithLabelValues(server, reason).Inc()
 }
 
 // CountPADispatch counts one dispatcher outcome.

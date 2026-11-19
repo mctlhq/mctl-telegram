@@ -166,8 +166,12 @@ const (
 	// PAJobRefusedExpired: a pa-job token of ours that is past its expiry.
 	PAJobRefusedExpired PAJobRefusal = "token_expired"
 	// PAJobRefusedRevoked: a pa-job token of ours whose pool credential or
-	// principal was revoked, or whose revocation state could not be read.
+	// principal was revoked.
 	PAJobRefusedRevoked PAJobRefusal = "token_revoked"
+	// PAJobRefusedUnverifiable: the revocation state could not be read. The
+	// token is refused, but nothing was decided about it: it is neither
+	// "revoked" nor attributed (I9).
+	PAJobRefusedUnverifiable PAJobRefusal = "token_unverifiable"
 	// PAJobRefusedInvalid: any other refusal.
 	PAJobRefusedInvalid PAJobRefusal = "token_invalid"
 )
@@ -186,34 +190,43 @@ func (v *PAJobVerifier) VerifyRequestAttributed(r *http.Request) (PAJob, int64, 
 	return v.VerifyAttributed(r.Context(), tok)
 }
 
+// PAJobAttributionGrace bounds how long after its expiry a pa-job token
+// is still attributed. A worker replaying a long-dead token cannot keep
+// writing refusals into the principal's chain: past the grace the refusal
+// is counted only.
+const PAJobAttributionGrace = time.Hour
+
 // VerifyAttributed is Verify. On a refusal it also returns the principal
 // the token was minted for, so the refusal can be audited in that
 // principal's chain (threat model T12, #1315), and a refusal label.
 //
-// A principal is returned only for a token this server signed (signature
-// valid, payload decoded, our issuer) that has the pa-job audience and a
-// consistent principal: an expired or revoked pa-job token of ours. For
-// anything else (a bad signature, a malformed payload, another audience,
-// a token of another issuer) it is 0: the claims of a token whose
-// signature did not check out are attacker-controlled and are never used
-// to pick a chain to write to.
+// A principal is returned only for a well-formed pa-job token this server
+// signed (signature valid, payload decoded, our issuer, the pa-job shape:
+// exact audience, consistent principal, job and digest) that was refused
+// for a decided reason: expired at most PAJobAttributionGrace ago, or
+// revoked. For anything else it is 0: a bad signature, a malformed payload
+// or shape, another audience, another issuer (their claims are
+// attacker-controlled or not ours to trust), and a revocation state that
+// could not be read (nothing was decided).
 func (v *PAJobVerifier) VerifyAttributed(ctx context.Context, tok string) (PAJob, int64, PAJobRefusal, error) {
 	c, err := VerifyWithClaims(tok, v.secret, v.issuer)
 	if err != nil {
 		principal := attributablePAPrincipal(c, v.issuer)
-		reason := PAJobRefusedInvalid
-		if principal != 0 && c.ExpiresAt > 0 && time.Now().Unix() > c.ExpiresAt {
-			reason = PAJobRefusedExpired
+		if principal == 0 || c.ExpiresAt <= 0 || time.Now().Unix() <= c.ExpiresAt {
+			return PAJob{}, 0, PAJobRefusedInvalid, err
 		}
-		return PAJob{}, principal, reason, err
+		if time.Now().Unix() > c.ExpiresAt+int64(PAJobAttributionGrace/time.Second) {
+			principal = 0
+		}
+		return PAJob{}, principal, PAJobRefusedExpired, err
 	}
 	j, err := checkPAJobShape(c)
 	if err != nil {
-		return PAJob{}, attributablePAPrincipal(c, v.issuer), PAJobRefusedInvalid, err
+		return PAJob{}, 0, PAJobRefusedInvalid, err
 	}
 	revoked, err := v.revocationCache.IsRevoked(ctx, c.Jti, c.TelegramID, originAnchor(c))
 	if err != nil {
-		return PAJob{}, j.Principal, PAJobRefusedRevoked, fmt.Errorf("check pa-job token revocation: %w", err)
+		return PAJob{}, 0, PAJobRefusedUnverifiable, fmt.Errorf("check pa-job token revocation: %w", err)
 	}
 	if revoked {
 		return PAJob{}, j.Principal, PAJobRefusedRevoked, errors.New("pa-job token revoked")
@@ -223,24 +236,26 @@ func (v *PAJobVerifier) VerifyAttributed(ctx context.Context, tok string) (PAJob
 
 // attributablePAPrincipal returns the principal of claims c that
 // VerifyWithClaims handed back (signature valid, payload decoded), if c is
-// one of our pa-job tokens: our issuer, exactly the pa-job audience, and a
-// principal that subject and telegram id agree on. Otherwise 0.
+// a well-formed pa-job token of ours: our issuer and checkPAJobShape (exact
+// pa-job audience, a principal that subject and telegram id agree on, a
+// job, a digest, a jti). Otherwise 0.
 func attributablePAPrincipal(c *Claims, issuer string) int64 {
-	if c == nil || c.Issuer != issuer || c.PAPrincipal <= 0 || c.TelegramID != c.PAPrincipal ||
-		c.Subject != PAJobSubjectPrefix+strconv.FormatInt(c.PAPrincipal, 10) {
+	if c == nil || c.Issuer != issuer {
 		return 0
 	}
-	aud := c.Audience
-	if aud == nil {
-		var err error
-		if aud, err = audienceList(c.AudienceRaw); err != nil {
+	cc := *c
+	if cc.Audience == nil {
+		aud, err := audienceList(cc.AudienceRaw)
+		if err != nil {
 			return 0
 		}
+		cc.Audience = aud
 	}
-	if len(aud) != 1 || aud[0] != PAJobAudience {
+	j, err := checkPAJobShape(&cc)
+	if err != nil {
 		return 0
 	}
-	return c.PAPrincipal
+	return j.Principal
 }
 
 // Verify checks signature, issuer, expiry, exact audience, shape and
