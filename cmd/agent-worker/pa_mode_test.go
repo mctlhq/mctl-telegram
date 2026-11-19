@@ -88,7 +88,13 @@ func TestValidatePABaseURL_PlainHTTP(t *testing.T) {
 		"http://tg.example.org":                                     false,
 		"http://svc.example.org":                                    false,
 		"http://example.svc.evil.org":                               false,
-		"http://10.0.0.7":                                           false,
+		// The suffix is a whole label: a host that merely ends in "svc"
+		// is not cluster-local (#1343, mutant HasSuffix(host, "svc")).
+		"http://evilsvc":                    false,
+		"http://x.notsvc":                   false,
+		"http://x.notsvc.cluster.local":     false,
+		"http://evilsvc.cluster.local:8080": false,
+		"http://10.0.0.7":                   false,
 	} {
 		if err := validatePABaseURL(raw); (err == nil) != ok {
 			t.Errorf("%s: err = %v, want ok %v", raw, err, ok)
