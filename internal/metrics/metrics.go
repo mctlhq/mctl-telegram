@@ -15,6 +15,8 @@ import (
 // single instance constructed by New() into each subsystem; never use the
 // global prometheus.DefaultRegisterer.
 type Registry struct {
+	paMetrics
+
 	// Prometheus is the underlying registry used to serve /metrics.
 	Prometheus *prometheus.Registry
 
@@ -1083,6 +1085,7 @@ func New() *Registry {
 		r.MediaGateRejectionsTotal,
 		r.MediaInflight,
 	)
+	r.paMetrics = newPAMetrics(reg)
 
 	// Give every agent counter an alert reads through increase() a zero
 	// baseline, before any work is accepted. A CounterVec creates its

@@ -3928,3 +3928,40 @@ row of a fork write names `fork:<name>@<version> <digest>`. A claim that
 answers `500 assistant instructions unavailable` for a fork account means
 the pinned fork version or its base snapshot is missing: the owner
 reinstalls a version that exists (`list_assistants` shows them).
+
+## Personal Assistant catalog pin (issue #1315)
+
+The PA dispatcher compares each catalog server's live `tools/list` with the
+committed pin (`internal/pa/catalog/pin.json`) before every call, cached at
+most 60s per connection and authority revision. A pinned tool whose
+descriptor changed or disappeared is denied (`tool_changed`); a tool the pin
+does not know is denied (`not_pinned`) and is not drift. Everything here is
+inert unless `PA_ENABLED` and `PA_EXTERNAL_TOOLS_ENABLED` are both on.
+
+<a id="mctlpapindrift"></a>
+### MctlPAPinDrift
+
+`mctl_pa_pin_drift{server}` has read 1 for 5 minutes. The drifted tools are
+already refused, so there is no data exposure to stop; the work is deciding
+whether the change is legitimate.
+
+1. Break the denials down by reason:
+   `mctl_pa_pin_denied_tools{server="<server>"}` and
+   `sum by (reason) (rate(mctl_pa_dispatch_total{server="<server>",status="refused"}[15m]))`.
+2. If every pinned name is denied and the live names carry a `tg_` prefix,
+   the endpoint points at the MCP gateway instead of tg directly. Fix the
+   endpoint configuration; do not pin the prefixed names.
+3. If the upstream release changed a descriptor on purpose, update the pin
+   through a reviewed PR
+   (`go test ./internal/pa/catalog -run TestPinMatchesUpstream -update-pin`). Do not loosen the comparison.
+4. If nobody released the server, treat it as tampering: disable the
+   server's flag (`PA_SERVER_<NAME>_ENABLED=false`) and investigate.
+
+<a id="mctlpapinlistingunknown"></a>
+### MctlPAPinListingUnknown
+
+`mctl_pa_pin_listing_unknown{server}` has read 1 for 15 minutes: the last
+`tools/list` failed or did not parse. Drift is unknown (the drift gauge is
+removed, never 0) and every PA call to the server is refused as
+`server_unavailable`. Check the server's own health and the egress logs of
+the `mcp` purpose; the alert clears on the next successful listing.

@@ -2,6 +2,7 @@ package docs
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -41,11 +42,24 @@ func TestRunbookMetricNamesRegistered(t *testing.T) {
 		t.Fatalf("failed to read runbook.md: %v", err)
 	}
 
-	metricsData, err := os.ReadFile("../internal/metrics/metrics.go")
-	if err != nil {
-		t.Fatalf("failed to read internal/metrics/metrics.go: %v", err)
+	// Every non-test source file of the metrics package registers series
+	// (metrics.go, pa.go, ...).
+	sources, err := filepath.Glob("../internal/metrics/*.go")
+	if err != nil || len(sources) == 0 {
+		t.Fatalf("failed to list internal/metrics sources: %v", err)
 	}
-	metricsSource := string(metricsData)
+	var metricsBuf strings.Builder
+	for _, src := range sources {
+		if strings.HasSuffix(src, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", src, err)
+		}
+		metricsBuf.Write(data)
+	}
+	metricsSource := metricsBuf.String()
 
 	re := regexp.MustCompile(`mctl_[a-z_]+`)
 	names := re.FindAllString(string(runbookData), -1)
@@ -59,7 +73,7 @@ func TestRunbookMetricNamesRegistered(t *testing.T) {
 		if strings.Contains(metricsSource, baseSeriesName(name)) {
 			continue
 		}
-		t.Errorf("metric name %q found in runbook.md but not in internal/metrics/metrics.go", name)
+		t.Errorf("metric name %q found in runbook.md but not in internal/metrics", name)
 	}
 }
 

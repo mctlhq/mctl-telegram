@@ -665,3 +665,53 @@ tests:
               summary: "Provider rate limits are failing a large share of agent jobs"
               description: "More than 2 agent jobs in the last hour, and more than 20 percent of finished jobs, ended on a usage limit or an exhausted provider 429 retry loop."
               runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlagentproviderratelimithigh"
+
+  # PA pin drift (#1315): drift fires after 5m; a matching listing (0) and
+  # an absent series (listing unknown) never fire the drift alert, while the
+  # unknown gauge fires its own alert after 15m.
+  - interval: 1m
+    input_series:
+      - series: 'mctl_pa_pin_drift{server="tg"}'
+        values: '1x10'
+      - series: 'mctl_pa_pin_drift{server="alice"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: MctlPAPinDrift
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: MctlPAPinDrift
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: mctl-telegram
+              server: tg
+            exp_annotations:
+              summary: "PA catalog server tg differs from the committed pin"
+              description: "The live tools/list of tg differs from the committed pin for at least one pinned tool. Those tools are denied to Personal Assistant runs until the listing matches or the pin is updated through a reviewed PR.\n"
+              runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpapindrift"
+
+  - interval: 1m
+    input_series:
+      - series: 'mctl_pa_pin_listing_unknown{server="tg"}'
+        values: '1x20'
+      - series: 'mctl_pa_pin_listing_unknown{server="alice"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: MctlPAPinDrift
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: MctlPAPinListingUnknown
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: MctlPAPinListingUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              service: mctl-telegram
+              server: tg
+            exp_annotations:
+              summary: "PA catalog server tg tools/list cannot be observed"
+              description: "The last tools/list of tg could not be read or parsed, so pin drift is unknown and Personal Assistant calls to it are refused.\n"
+              runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpapinlistingunknown"

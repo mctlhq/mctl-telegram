@@ -835,3 +835,46 @@ spec:
               Budget erosion is sustained but not critical. File a reliability ticket.
               See docs/slo.md for the error-budget policy and recovery criteria.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/slo.md"
+
+    - name: mctl-telegram-pa-catalog
+      rules:
+        - alert: MctlPAPinDrift
+          # #1315: a PA catalog server's live tools/list no longer matches the
+          # committed pin for a pinned tool (changed or missing). The
+          # dispatcher already denies the drifted tools (threat model I7);
+          # this is the human signal that the pin needs a reviewed update or
+          # the server was tampered with. Extra unpinned tools (tg's writes)
+          # are not drift. The gauge is absent, not 0, while the listing is
+          # unknown: MctlPAPinListingUnknown covers that case.
+          expr: |
+            max by (server) (mctl_pa_pin_drift) > 0
+          for: 5m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "PA catalog server {{ $labels.server }} differs from the committed pin"
+            description: >
+              The live tools/list of {{ $labels.server }} differs from the
+              committed pin for at least one pinned tool. Those tools are
+              denied to Personal Assistant runs until the listing matches or
+              the pin is updated through a reviewed PR.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpapindrift"
+
+        - alert: MctlPAPinListingUnknown
+          # Could not observe is not observed clean: a listing that failed or
+          # did not parse leaves drift unknown, and every call to the server
+          # is refused as server_unavailable meanwhile.
+          expr: |
+            max by (server) (mctl_pa_pin_listing_unknown) > 0
+          for: 15m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "PA catalog server {{ $labels.server }} tools/list cannot be observed"
+            description: >
+              The last tools/list of {{ $labels.server }} could not be read
+              or parsed, so pin drift is unknown and Personal Assistant calls
+              to it are refused.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpapinlistingunknown"
