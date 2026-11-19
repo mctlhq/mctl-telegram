@@ -173,6 +173,42 @@ the durable terminal-state verification. Unset `AGENT_RUNNER` is exactly the
   and reads the same provider variables. CI never sets `AGENT_C1_EVAL=1`, so it
   makes no model calls.
 
+### Personal Assistant mode: `AGENT_WORKER_PA=1` (#1313)
+
+The same image and pool credential run Personal Assistant jobs instead of
+agent jobs when `AGENT_WORKER_PA=true`. It is off by default, and the server
+only answers PA claims when `PA_ENABLED` is set there.
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `AGENT_WORKER_PA` | no | `true` selects the PA loop. Anything but `true`/`false` refuses to start. |
+| `AGENT_PA_BASE_URL` | in PA mode | mctl-telegram origin (`https://host`, no path); the PA routes are `/api/pa/v1/jobs/{claim,turn,reply}`. |
+| `AGENT_RUNNER` | `openai` | The PA mode runs the model in-process with no tools; `claude` is refused. |
+| `AGENT_OPENAI_MAX_OUTPUT_TOKENS` | in PA mode | Bounds what the last model call can add past the job's cost limit. |
+| `MODEL_INPUT_USD_PER_MTOK`, `MODEL_OUTPUT_USD_PER_MTOK` | positive in PA mode | A zero price would report every run as free. |
+
+`AGENT_API_TOKEN` is the pool credential for the claim; the turn and reply
+routes use the per-job token the claim returns. The loop:
+
+1. Claim. `204` means nothing is due; `401`/`403` stops the worker (readiness
+   goes false); anything else is retried after `PollInterval`.
+2. Before every model call, `POST /turn` with the estimated context size
+   (bytes / 4). Any refusal ends the run; `503` is retried until the run's
+   deadline, which is 20 seconds before the lease ends.
+3. The worker's own ceilings apply on top of the claim's limits: at most 8
+   tool calls and 32,000 context tokens. No tools are offered to the model
+   until the server-side executor exists (#1315); a tool call is answered
+   with "no tools" and counts toward the cap. A further model call is made
+   only while the run's known spend is under `max_job_cost_usd`.
+4. `POST /reply` with the answer and the run's cost. When a model call did
+   not report usage, the cost is omitted and the server settles the run at
+   its full reservation. A `409 stale` after a retried reply means an earlier
+   attempt landed.
+
+The worker never sends a Telegram message: the server renders the reply and
+sends it through its outbox. A run the worker abandons ends when the lease
+does, and the server then sends the principal the run-failed notice.
+
 ### Turn coalescing: rollout order
 
 When the server runs with `AGENT_TURN_QUIET` set, a claim returns one job per
