@@ -145,9 +145,12 @@ func (b Budget) ClaimsEnded(now time.Time) bool {
 
 // Settle is what a finished run of turns model turns counts against the
 // windows: the reported cost (the reservation when unreported, a negative
-// reported) bounded by SettleFactor x the reservation, and never below minTurn per admitted turn. A finished run made at least one
-// model call, so the floor counts at least one turn. The floor is what the
-// server itself observed; the report is only the worker's word.
+// reported) bounded by SettleFactor x the reservation, and never below
+// minTurn per model turn the server observed (FinishPAJob passes
+// max(turns admitted, tool calls admitted + 1)). A finished run made at
+// least one model call, so the floor counts at least one turn. The floor
+// is what the server itself observed; the report is only the worker's
+// word.
 func Settle(reported, reserved float64, turns int, minTurn float64) float64 {
 	cost := reserved
 	if reported >= 0 {
