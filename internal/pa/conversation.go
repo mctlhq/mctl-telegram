@@ -143,6 +143,13 @@ func (c *Conversations) HandleUpdate(ctx context.Context, tx *sql.Tx, u Verified
 	if p.IsZero() {
 		return ErrNoPrincipal
 	}
+	// Serialise this principal's updates before reading anything. Without
+	// it a message that read consent=accepted could commit its conversation
+	// after a concurrent /consent withdraw or /forget had already committed,
+	// leaving state the withdrawal never saw (S1-N4).
+	if err := c.store.LockPAPrincipal(ctx, tx, p.TelegramID()); err != nil {
+		return err
+	}
 	switch u.Kind() {
 	case KindCallbackQuery:
 		return c.handleCallback(ctx, tx, u)
@@ -243,7 +250,10 @@ func (c *Conversations) handleCallback(ctx context.Context, tx *sql.Tx, u Verifi
 		return err
 	}
 	if !strings.HasPrefix(action, actionConsentAcceptPrefix) {
-		return fmt.Errorf("pa: unknown callback action")
+		// An action this build does not know: the id is consumed and the
+		// press answered, never an error, which would roll the consume back
+		// and have Telegram redeliver the update forever.
+		return c.reply(ctx, tx, p, ReplyUnknownButton, "")
 	}
 	if action != consentAcceptAction() {
 		// The text changed after the prompt was shown: ask again.

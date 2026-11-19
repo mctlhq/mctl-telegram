@@ -2,6 +2,7 @@ package pa
 
 import (
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -70,31 +71,8 @@ func TestNoTriggerCalls(t *testing.T) {
 		if rel == "internal/pa/context.go" {
 			sawDefinition = true
 		}
-		for _, decl := range f.Decls {
-			enclosing := ""
-			if fn, ok := decl.(*ast.FuncDecl); ok {
-				enclosing = fn.Name.Name
-				// The method's own declaration name is an Ident, not a
-				// selector, so declaring Trigger is not a use of it.
-			}
-			key := rel + ":" + enclosing
-			ast.Inspect(decl, func(n ast.Node) bool {
-				sel, ok := n.(*ast.SelectorExpr)
-				if !ok {
-					return true
-				}
-				switch sel.Sel.Name {
-				case "Trigger":
-					if !triggerMethodAllowlist[key] {
-						t.Errorf("%s: %s uses .Trigger; gate code must take a Policy", fset.Position(sel.Pos()), describe(enclosing))
-					}
-				case "trigger":
-					if !triggerFieldAllowlist[key] {
-						t.Errorf("%s: %s reads the trigger field; only NewInteractive, Trigger and Valid may", fset.Position(sel.Pos()), describe(enclosing))
-					}
-				}
-				return true
-			})
+		for _, v := range triggerViolations(fset, f, rel) {
+			t.Error(v)
 		}
 		return nil
 	})
@@ -103,6 +81,78 @@ func TestNoTriggerCalls(t *testing.T) {
 	}
 	if checked < 50 || !sawDefinition {
 		t.Fatalf("parsed %d files (definition seen: %v): the walk did not cover the module, so the check would pass vacuously", checked, sawDefinition)
+	}
+}
+
+// triggerViolations returns every forbidden use of the trigger in f, whose
+// module-relative path is rel:
+//
+//   - a selector .Trigger outside triggerMethodAllowlist;
+//   - a selector .trigger, or a composite-literal key trigger (as in
+//     ExecutionContext{trigger: x}, which sets the field without a
+//     selector), outside triggerFieldAllowlist.
+func triggerViolations(fset *token.FileSet, f *ast.File, rel string) []string {
+	var out []string
+	for _, decl := range f.Decls {
+		enclosing := ""
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			enclosing = fn.Name.Name
+			// The method's own declaration name is an Ident, not a
+			// selector, so declaring Trigger is not a use of it.
+		}
+		key := rel + ":" + enclosing
+		ast.Inspect(decl, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.SelectorExpr:
+				switch n.Sel.Name {
+				case "Trigger":
+					if !triggerMethodAllowlist[key] {
+						out = append(out, fmt.Sprintf("%s: %s uses .Trigger; gate code must take a Policy", fset.Position(n.Pos()), describe(enclosing)))
+					}
+				case "trigger":
+					if !triggerFieldAllowlist[key] {
+						out = append(out, fmt.Sprintf("%s: %s reads the trigger field; only NewInteractive, Trigger and Valid may", fset.Position(n.Pos()), describe(enclosing)))
+					}
+				}
+			case *ast.KeyValueExpr:
+				if id, ok := n.Key.(*ast.Ident); ok && id.Name == "trigger" && !triggerFieldAllowlist[key] {
+					out = append(out, fmt.Sprintf("%s: %s sets the trigger field in a literal; only NewInteractive may", fset.Position(n.Pos()), describe(enclosing)))
+				}
+			}
+			return true
+		})
+	}
+	return out
+}
+
+// TestTriggerViolations_Detects proves the checker both ways: each forbidden
+// form is reported, and the allowlisted definition is not.
+func TestTriggerViolations_Detects(t *testing.T) {
+	bad := map[string]string{
+		"call":         `func f(ec ExecutionContext) { _ = ec.Trigger() }`,
+		"method value": `func f(ec ExecutionContext) { g := ec.Trigger; _ = g }`,
+		"method expr":  `var g = ExecutionContext.Trigger`,
+		"field read":   `func f(ec ExecutionContext) { _ = ec.trigger }`,
+		"literal key":  `func f() { _ = ExecutionContext{trigger: TriggerInteractive} }`,
+		"pkg literal":  `var ec = ExecutionContext{trigger: "x"}`,
+	}
+	for name, src := range bad {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, "x.go", "package pa\n"+src, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v := triggerViolations(fset, f, "internal/x/x.go"); len(v) == 0 {
+			t.Errorf("%s: not reported", name)
+		}
+	}
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "context.go", "package pa\nfunc NewInteractive() ExecutionContext { return ExecutionContext{trigger: TriggerInteractive} }", parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := triggerViolations(fset, f, "internal/pa/context.go"); len(v) != 0 {
+		t.Errorf("allowlisted constructor reported: %v", v)
 	}
 }
 

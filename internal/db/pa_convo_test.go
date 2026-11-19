@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,6 +35,7 @@ func paConvoDialects(t *testing.T, body func(t *testing.T, s *Store, alice, bob 
 				`DELETE FROM pa_conversations WHERE principal IN ($1, $2)`,
 				`DELETE FROM pa_callbacks WHERE principal IN ($1, $2)`,
 				`DELETE FROM pa_consents WHERE principal IN ($1, $2)`,
+				`DELETE FROM pa_principal_locks WHERE principal IN ($1, $2)`,
 			} {
 				_, _ = s.DB.Exec(q, alice, bob)
 			}
@@ -299,4 +301,85 @@ func TestPAFragments_KeyedByPrincipal(t *testing.T) {
 			t.Fatalf("bob loaded alice's conversation: %v", err)
 		}
 	})
+}
+
+// TestPAPrincipalLock_SerialisesWithdraw (S1-N4, concurrency): a message
+// transaction that read consent=accepted and wrote a conversation, racing
+// /consent withdraw or /forget in a second transaction. With both taking
+// LockPAPrincipal first, the second waits for the first, then sees and
+// deletes its rows. Without the lock (Postgres, READ COMMITTED) the second
+// commits at once and the message's conversation survives it. SQLite
+// serialises writers by itself, so only Postgres can show the race.
+func TestPAPrincipalLock_SerialisesWithdraw(t *testing.T) {
+	for _, op := range []string{"withdraw", "forget"} {
+		t.Run(op, func(t *testing.T) {
+			paConvoDialects(t, func(t *testing.T, s *Store, alice, _ int64) {
+				if strings.HasSuffix(t.Name(), "/sqlite") {
+					t.Skip("SQLite serialises writers; the race needs Postgres")
+				}
+				ctx := context.Background()
+				must(t, inTx(t, s, func(tx *sql.Tx) error {
+					return s.AcceptPAConsent(ctx, tx, alice, convo.ConsentVersion, convo.ConsentTextSHA256(), t0)
+				}))
+				// T1: the message, up to just before commit.
+				t1, err := s.DB.BeginTx(ctx, nil)
+				must(t, err)
+				defer func() { _ = t1.Rollback() }()
+				must(t, s.LockPAPrincipal(ctx, t1, alice))
+				rec, err := s.GetPAConsent(ctx, t1, alice)
+				must(t, err)
+				if !convo.Satisfied(rec) {
+					t.Fatal("consent not satisfied")
+				}
+				convID := "conv-race-" + op + "-" + strconv.FormatInt(alice, 10)
+				c, err := s.OpenPAConversation(ctx, t1, alice, convID, t0, 24*time.Hour)
+				must(t, err)
+				must(t, s.AppendPAFragment(ctx, t1, convo.SealedFragment{ConversationID: c.ID, Seq: 1, Principal: alice,
+					Kind: convo.KindText, Provenance: convo.ProvenanceUser, Sealed: []byte{1, 2, 3}, CreatedAt: t0}))
+
+				// T2: the command, in its own transaction.
+				done := make(chan error, 1)
+				go func() {
+					done <- func() error {
+						tx, err := s.DB.BeginTx(ctx, nil)
+						if err != nil {
+							return err
+						}
+						defer func() { _ = tx.Rollback() }()
+						if err := s.LockPAPrincipal(ctx, tx, alice); err != nil {
+							return err
+						}
+						if op == "withdraw" {
+							err = s.WithdrawPAConsent(ctx, tx, alice, t0.Add(time.Second))
+						} else {
+							err = s.ForgetPAConversations(ctx, tx, alice)
+						}
+						if err != nil {
+							return err
+						}
+						return tx.Commit()
+					}()
+				}()
+				select {
+				case err := <-done:
+					t.Fatalf("%s committed (err=%v) while the message transaction was still open", op, err)
+				case <-time.After(time.Second):
+				}
+				must(t, t1.Commit())
+				select {
+				case err := <-done:
+					must(t, err)
+				case <-time.After(10 * time.Second):
+					t.Fatalf("%s never finished after the message committed", op)
+				}
+				frags, err := s.LoadPAFragments(ctx, alice, c.ID, t0.Add(2*time.Second))
+				if err == nil && len(frags) > 0 {
+					t.Fatalf("the racing message's conversation survives %s: %d fragments", op, len(frags))
+				}
+				if !errors.Is(err, convo.ErrNotFound) {
+					t.Fatalf("load after %s: err = %v, want ErrNotFound", op, err)
+				}
+			})
+		})
+	}
 }

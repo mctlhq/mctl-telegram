@@ -167,6 +167,10 @@ type SweepResult struct {
 // change and the update's dedup row commit or roll back together. Every
 // lookup is keyed by principal (I10).
 type Store interface {
+	// LockPAPrincipal takes a lock on principal held until tx ends, so
+	// updates of one principal apply one after another. Callers take it
+	// before any other read in tx.
+	LockPAPrincipal(ctx context.Context, tx *sql.Tx, principal int64) error
 	// GetPAConsent returns ErrNotFound only when no row exists, and wraps
 	// ErrUnreadable for every other failure.
 	GetPAConsent(ctx context.Context, tx *sql.Tx, principal int64) (ConsentRecord, error)

@@ -73,6 +73,13 @@ func paConvoSchema(pg bool) []string {
 			PRIMARY KEY (conversation_id, seq)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_pa_fragments_principal ON pa_fragments(principal)`,
+		// One row per principal whose upsert is the per-principal update
+		// lock: a concurrent upsert of the same key waits for the holder's
+		// transaction on Postgres, and SQLite serialises writers anyway.
+		`CREATE TABLE IF NOT EXISTS pa_principal_locks (
+			principal BIGINT PRIMARY KEY,
+			locked_at_ms BIGINT NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS pa_callbacks (
 			principal ` + intT + ` NOT NULL,
 			id TEXT NOT NULL,
@@ -200,10 +207,32 @@ func (s *Store) OpenPAConversation(ctx context.Context, tx *sql.Tx, principal in
 	return c, nil
 }
 
-// ClosePAConversations implements convo.Store (/new).
+// LockPAPrincipal implements convo.Store.
+func (s *Store) LockPAPrincipal(ctx context.Context, tx *sql.Tx, principal int64) error {
+	if tx == nil || principal <= 0 {
+		return fmt.Errorf("%w: lock principal", convo.ErrInvalid)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO pa_principal_locks(principal, locked_at_ms) VALUES($1, $2)
+		 ON CONFLICT (principal) DO UPDATE SET locked_at_ms = excluded.locked_at_ms`,
+		principal, time.Now().UnixMilli()); err != nil {
+		return fmt.Errorf("lock pa principal: %w", err)
+	}
+	return nil
+}
+
+// ClosePAConversations implements convo.Store (/new). The open
+// conversation's fragments are deleted in the same statement set, so /new
+// leaves no text behind; the sweep later removes the closed row itself.
 func (s *Store) ClosePAConversations(ctx context.Context, tx *sql.Tx, principal int64, now time.Time) error {
 	if tx == nil || principal <= 0 {
 		return fmt.Errorf("%w: close conversation", convo.ErrInvalid)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM pa_fragments WHERE principal = $1 AND conversation_id IN
+			(SELECT id FROM pa_conversations WHERE principal = $1 AND closed_at_ms = 0)`,
+		principal); err != nil {
+		return fmt.Errorf("close pa conversation: fragments: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE pa_conversations SET closed_at_ms = $1 WHERE principal = $2 AND closed_at_ms = 0`,
@@ -392,6 +421,7 @@ func (s *Store) SweepPAState(ctx context.Context, now, updatesBefore time.Time) 
 	}
 	defer func() { _ = tx.Rollback() }()
 	nowMS := now.UnixMilli()
+	var locks int64
 	steps := []struct {
 		dst  *int64
 		q    string
@@ -402,6 +432,8 @@ func (s *Store) SweepPAState(ctx context.Context, now, updatesBefore time.Time) 
 		{&r.Conversations, `DELETE FROM pa_conversations WHERE closed_at_ms > 0 OR expires_at_ms <= $1`, []any{nowMS}},
 		{&r.Callbacks, `DELETE FROM pa_callbacks WHERE expires_at_ms <= $1`, []any{nowMS}},
 		{&r.Updates, `DELETE FROM pa_updates WHERE received_at < $1`, []any{updatesBefore.UTC()}},
+		// Lock rows carry no state; one unused for the dedup window goes.
+		{&locks, `DELETE FROM pa_principal_locks WHERE locked_at_ms < $1`, []any{updatesBefore.UnixMilli()}},
 	}
 	for _, st := range steps {
 		res, err := tx.ExecContext(ctx, st.q, st.args...)

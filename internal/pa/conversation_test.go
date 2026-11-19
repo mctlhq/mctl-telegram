@@ -83,16 +83,27 @@ type convoHarness struct {
 
 func newConvoHarness(t *testing.T) *convoHarness {
 	t.Helper()
-	h := &convoHarness{t: t, store: newStore(t), runs: &enqueueRecorder{}, replies: &replyRecorder{},
+	return newConvoHarnessOn(t, newStore(t), nil, 1000)
+}
+
+// newConvoHarnessOn builds the harness over store, with runs (nil means a
+// recorder only) and update ids starting after firstUpdate.
+func newConvoHarnessOn(t *testing.T, store *db.Store, runs RunEnqueuer, firstUpdate int64) *convoHarness {
+	t.Helper()
+	h := &convoHarness{t: t, store: store, runs: &enqueueRecorder{}, replies: &replyRecorder{},
 		now: time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)}
-	h.nextID.Store(1000)
+	h.nextID.Store(firstUpdate)
+	var enq RunEnqueuer = h.runs
+	if runs != nil {
+		enq = runs
+	}
 	sealer, err := convo.NewSealer(bytes.Repeat([]byte{7}, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.conv, err = NewConversations(ConversationsConfig{
 		Store: h.store, Sealer: sealer, TTL: DefaultConversationTTL,
-		Runs: h.runs, Replies: h.replies, Now: func() time.Time { return h.now },
+		Runs: enq, Replies: h.replies, Now: func() time.Time { return h.now },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -307,6 +318,36 @@ func TestConversations_S1N3(t *testing.T) {
 	}
 }
 
+// TestConversations_UnknownCallbackAction: a button whose stored action this
+// build does not know is consumed and answered, never an error that would
+// roll the consume back and have Telegram redeliver the press forever.
+func TestConversations_UnknownCallbackAction(t *testing.T) {
+	h := newConvoHarness(t)
+	tx, err := h.store.DB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.CreatePACallback(context.Background(), tx, aliceID, "future-button",
+		"pin_message:42", h.now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if code := h.press(aliceID, "future-button"); code != http.StatusOK {
+		t.Fatalf("press: %d, want 200", code)
+	}
+	if got := h.replies.last(aliceID).reply; got != ReplyUnknownButton {
+		t.Fatalf("reply %q, want %q", got, ReplyUnknownButton)
+	}
+	if n := h.count(`SELECT COUNT(*) FROM pa_callbacks WHERE principal = $1`, aliceID); n != 0 {
+		t.Fatalf("the button was not consumed: %d rows", n)
+	}
+	if n := h.count(`SELECT COUNT(*) FROM pa_consents WHERE principal = $1`, aliceID); n != 0 {
+		t.Fatal("an unknown action recorded consent")
+	}
+}
+
 // TestConversations_S1N4 is S1-N4: /consent withdraw stops every further
 // model call and deletes the conversation state.
 func TestConversations_S1N4(t *testing.T) {
@@ -454,6 +495,9 @@ func TestConversations_Commands(t *testing.T) {
 	h.text(aliceID, "/new")
 	if got := h.replies.last(aliceID).reply; got != ReplyNewConversation {
 		t.Fatalf("reply %q", got)
+	}
+	if n := h.fragments(aliceID); n != 0 {
+		t.Fatalf("/new left %d fragments of the closed conversation", n)
 	}
 	if _, err := h.load(aliceID, first); !errors.Is(err, convo.ErrNotFound) {
 		t.Fatalf("closed conversation still loads: %v", err)
