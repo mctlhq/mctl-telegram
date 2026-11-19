@@ -14,6 +14,67 @@ const (
 	testPAWebhookURL  = "https://pa.example/pa/bot/webhook"
 )
 
+// Synthetic server secrets an enabled PA is built from (#1343).
+const (
+	testEncryptionKey = "0707070707070707070707070707070707070707070707070707070707070707"
+	testSigningKey    = "pa-config-test-signing-key-not-real-0123456789"
+)
+
+// setPAServerSecrets sets the server secrets an enabled PA requires.
+func setPAServerSecrets(t *testing.T) {
+	t.Helper()
+	t.Setenv("ENCRYPTION_KEY", testEncryptionKey)
+	t.Setenv("AUTH_MODE", "local-jwt")
+	t.Setenv("OAUTH_JWT_SIGNING_KEY", testSigningKey)
+}
+
+// TestLoadPA_ServerSecrets: an enabled PA refuses to load without
+// ENCRYPTION_KEY (conversation-state sealer) or the OAuth signing key (pool
+// and pa-job tokens), naming the variable and never its value. With the PA
+// off neither is required.
+func TestLoadPA_ServerSecrets(t *testing.T) {
+	enable := func(t *testing.T) {
+		t.Setenv("PA_ENABLED", "true")
+		setPAServerSecrets(t)
+		t.Setenv("PA_BOT_TOKEN", testPABotToken)
+		t.Setenv("PA_WEBHOOK_SECRET", testPASecret)
+		t.Setenv("PA_WEBHOOK_URL", testPAWebhookURL)
+		t.Setenv("TELEGRAM_LOGIN_BOT_TOKEN", testLoginBotToken)
+	}
+	t.Run("control", func(t *testing.T) {
+		enable(t)
+		if _, err := Load(); err != nil {
+			t.Fatalf("Load() error: %v", err)
+		}
+	})
+	for _, tc := range []struct{ name, unset, want string }{
+		{"no encryption key", "ENCRYPTION_KEY", "ENCRYPTION_KEY"},
+		{"no signing key", "OAUTH_JWT_SIGNING_KEY", "OAUTH_JWT_SIGNING_KEY"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			enable(t)
+			t.Setenv(tc.unset, "")
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Load() error = %v, want refusal naming %s", err, tc.want)
+			}
+			for _, secret := range []string{testEncryptionKey, testSigningKey} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatalf("Load() error echoes a credential: %v", err)
+				}
+			}
+		})
+	}
+	t.Run("off ignores them", func(t *testing.T) {
+		t.Setenv("PA_ENABLED", "false")
+		t.Setenv("ENCRYPTION_KEY", "")
+		t.Setenv("OAUTH_JWT_SIGNING_KEY", "")
+		if _, err := Load(); err != nil {
+			t.Fatalf("Load() error with PA off: %v", err)
+		}
+	})
+}
+
 // TestLoadPA_FailClosed covers the PA master switch (threat model T11,
 // S1-F2 in spirit for this one flag): anything but an explicit true is off,
 // and off means the PA settings are not even read.
@@ -52,6 +113,7 @@ func TestLoadPA_FailClosed(t *testing.T) {
 func TestLoadPA_Enabled(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {
 		t.Setenv("PA_ENABLED", "true")
+		setPAServerSecrets(t)
 		t.Setenv("PA_BOT_TOKEN", testPABotToken)
 		t.Setenv("PA_WEBHOOK_SECRET", testPASecret)
 		t.Setenv("PA_WEBHOOK_URL", testPAWebhookURL)
@@ -81,6 +143,7 @@ func TestLoadPA_Enabled(t *testing.T) {
 	for _, tc := range refusals {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("PA_ENABLED", "true")
+			setPAServerSecrets(t)
 			t.Setenv("PA_BOT_TOKEN", tc.token)
 			t.Setenv("PA_WEBHOOK_SECRET", tc.secret)
 			t.Setenv("PA_WEBHOOK_URL", testPAWebhookURL)
@@ -104,6 +167,7 @@ func TestLoadPA_Enabled(t *testing.T) {
 func TestLoadPA_WebhookURL(t *testing.T) {
 	enable := func(t *testing.T, u string) {
 		t.Setenv("PA_ENABLED", "true")
+		setPAServerSecrets(t)
 		t.Setenv("PA_BOT_TOKEN", testPABotToken)
 		t.Setenv("PA_WEBHOOK_SECRET", testPASecret)
 		t.Setenv("TELEGRAM_LOGIN_BOT_TOKEN", testLoginBotToken)

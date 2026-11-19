@@ -11,6 +11,7 @@ import (
 func TestLoadPA_ConversationTTL(t *testing.T) {
 	enable := func(t *testing.T) {
 		t.Setenv("PA_ENABLED", "true")
+		setPAServerSecrets(t)
 		t.Setenv("PA_BOT_TOKEN", testPABotToken)
 		t.Setenv("PA_WEBHOOK_SECRET", testPASecret)
 		t.Setenv("PA_WEBHOOK_URL", testPAWebhookURL)
