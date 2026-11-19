@@ -168,7 +168,10 @@ func (w budgetWindow) slots(perJob float64, withInflight bool) int {
 
 // usageSums returns the durable (settled cost plus held reservations) and the
 // in-flight (reserved) managed usage created at or after since. userID 0
-// means every account.
+// means every account, and then the Personal Assistant ledger (pa_usage) is
+// added: the platform-wide daily window is one window for both runtimes
+// (issue #1313, owner decision 2026-11-18). A failure to read either ledger
+// is an error, never zero spend.
 func usageSums(ctx context.Context, tx *sql.Tx, since time.Time, userID int64) (durable, inflight float64, err error) {
 	q := `SELECT COALESCE(SUM(CASE WHEN status = 'settled' THEN COALESCE(cost_usd, 0)
 	                               WHEN status = 'held' THEN reserved_usd ELSE 0 END), 0),
@@ -182,7 +185,14 @@ func usageSums(ctx context.Context, tx *sql.Tx, since time.Time, userID int64) (
 	if err := tx.QueryRowContext(ctx, q, args...).Scan(&durable, &inflight); err != nil {
 		return 0, 0, fmt.Errorf("sum managed usage: %w", err)
 	}
-	return durable, inflight, nil
+	if userID > 0 {
+		return durable, inflight, nil
+	}
+	pd, pi, err := paWindowSums(ctx, tx, since.UnixMilli(), 0)
+	if err != nil {
+		return 0, 0, err
+	}
+	return durable + pd, inflight + pi, nil
 }
 
 // reserveBudget returns how many jobs of userID this claim may still take
@@ -490,9 +500,13 @@ func (s *Store) budgetCandidateFilter(now time.Time, start int) (string, []any) 
 	m := strconv.Itoa(start + 1)
 	o := strconv.Itoa(start + 2)
 	p := strconv.Itoa(start + 3)
+	q := strconv.Itoa(start + 4)
 	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	// The global day sums both ledgers, as usageSums does (#1313).
 	return `AND (ap.budget_paused_until IS NULL OR ap.budget_paused_until <= $` + n + `)
 		    AND (SELECT COALESCE(SUM(COALESCE(u.cost_usd, u.reserved_usd)), 0) FROM agent_usage u
-		          WHERE u.runtime = 'managed' AND u.created_at >= $` + m + `) + $` + o + ` <= $` + p + ` + 1e-9`,
-		[]any{now.UTC(), dayStart, s.budget.PerJobUSD, s.budget.GlobalDayUSD}
+		          WHERE u.runtime = 'managed' AND u.created_at >= $` + m + `)
+		      + (SELECT COALESCE(SUM(COALESCE(pu.cost_usd, pu.reserved_usd)), 0) FROM pa_usage pu
+		          WHERE pu.created_at_ms >= $` + q + `) + $` + o + ` <= $` + p + ` + 1e-9`,
+		[]any{now.UTC(), dayStart, s.budget.PerJobUSD, s.budget.GlobalDayUSD, dayStart.UnixMilli()}
 }

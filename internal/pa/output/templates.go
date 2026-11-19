@@ -33,4 +33,11 @@ func tpl(s string) Template { return Template{s: s} }
 var (
 	// LabelCancel is a generic Cancel button label.
 	LabelCancel = tpl("Cancel")
+
+	// TextBudgetHold is sent once per held run when a spending limit is
+	// reached (#1313 slice d1, S1-R3): no model call was made.
+	TextBudgetHold = tpl("The assistant has reached its spending limit for now. Your message is kept and will be answered when the limit resets.")
+	// TextReplyTooLong replaces a model reply that does not fit the message
+	// limit. The reply is never truncated (#1313 slice d1).
+	TextReplyTooLong = tpl("The answer was too long to send. Please ask for a shorter answer.")
 )

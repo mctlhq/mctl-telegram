@@ -1678,9 +1678,10 @@ func mountPA(mux chi.Router, cfg *config.Config, store *db.Store) (bool, error) 
 		return false, nil
 	}
 	h, err := pa.NewWebhookHandler(pa.WebhookConfig{
-		Secret:  cfg.PAWebhookSecret,
-		Dedup:   store,
-		Handler: pa.InertHandler,
+		Secret:   cfg.PAWebhookSecret,
+		Dedup:    store,
+		Handler:  pa.InertHandler,
+		Failures: store,
 	})
 	if err != nil {
 		return false, err

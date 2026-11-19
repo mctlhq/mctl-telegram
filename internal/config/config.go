@@ -15,6 +15,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/canaryguard"
 	"github.com/mctlhq/mctl-telegram/internal/oauth/cimd"
+	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 	"github.com/mctlhq/mctl-telegram/internal/toolprofile"
 )
 
@@ -561,6 +562,23 @@ type Config struct {
 	// consent text promises it). Read only when PAEnabled is true; an
 	// unparseable or out-of-range value refuses to start.
 	PAConversationTTL time.Duration
+	// PA run-loop limits (issue #1313 slice d1; owner decisions
+	// 2026-11-18). Read only when PAEnabled is true; an unparseable or
+	// non-positive value refuses to start instead of falling back to a
+	// default, because a limit that silently reverted is not a limit.
+	//   PA_RATE_MESSAGES per PA_RATE_WINDOW per principal (20 per 1h; the
+	//   window counts consent prompts and commands too);
+	//   PA_MAX_CONTEXT_TOKENS (32000);
+	//   PA_BUDGET_USD_JOB / _DAY / _MONTH (0.25 / 2 / 20), the per-run
+	//   reservation and the per-principal caps. The platform-wide daily cap
+	//   is MANAGED_BUDGET_USD_GLOBAL_DAY, shared with the managed runtime.
+	// Active jobs per principal (1) and tool calls per run (8) are fixed.
+	PARateMessages     int
+	PARateWindow       time.Duration
+	PAMaxContextTokens int
+	PABudgetUSDJob     float64
+	PABudgetUSDDay     float64
+	PABudgetUSDMonth   float64
 }
 
 // MinPAWebhookSecretLen is the shortest PA_WEBHOOK_SECRET Load accepts.
@@ -602,6 +620,47 @@ func loadPA(c *Config) error {
 			return errors.New("PA_CONVERSATION_TTL must be a duration between 1m and 24h")
 		}
 		c.PAConversationTTL = d
+	}
+	return loadPALimits(c)
+}
+
+func loadPALimits(c *Config) error {
+	c.PARateMessages, c.PARateWindow = jobs.DefaultRateMessages, jobs.DefaultRateWindow
+	c.PAMaxContextTokens = jobs.DefaultMaxContextTokens
+	c.PABudgetUSDJob, c.PABudgetUSDDay, c.PABudgetUSDMonth = jobs.DefaultBudgetJobUSD, jobs.DefaultBudgetDayUSD, jobs.DefaultBudgetMonthUSD
+	for _, iv := range []struct {
+		key string
+		dst *int
+	}{{"PA_RATE_MESSAGES", &c.PARateMessages}, {"PA_MAX_CONTEXT_TOKENS", &c.PAMaxContextTokens}} {
+		if v := os.Getenv(iv.key); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n <= 0 {
+				return fmt.Errorf("%s must be a positive integer", iv.key)
+			}
+			*iv.dst = n
+		}
+	}
+	if v := os.Getenv("PA_RATE_WINDOW"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < time.Minute || d > 24*time.Hour {
+			return errors.New("PA_RATE_WINDOW must be a duration between 1m and 24h")
+		}
+		c.PARateWindow = d
+	}
+	for _, fv := range []struct {
+		key string
+		dst *float64
+	}{{"PA_BUDGET_USD_JOB", &c.PABudgetUSDJob}, {"PA_BUDGET_USD_DAY", &c.PABudgetUSDDay}, {"PA_BUDGET_USD_MONTH", &c.PABudgetUSDMonth}} {
+		if v := os.Getenv(fv.key); v != "" {
+			f, err := strconv.ParseFloat(v, 64)
+			if err != nil || !(f > 0) || math.IsInf(f, 0) {
+				return fmt.Errorf("%s must be a positive number", fv.key)
+			}
+			*fv.dst = f
+		}
+	}
+	if c.PABudgetUSDJob > c.PABudgetUSDDay || c.PABudgetUSDDay > c.PABudgetUSDMonth {
+		return errors.New("PA budgets must satisfy PA_BUDGET_USD_JOB <= PA_BUDGET_USD_DAY <= PA_BUDGET_USD_MONTH")
 	}
 	return nil
 }

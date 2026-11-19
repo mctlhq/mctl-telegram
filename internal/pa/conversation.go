@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
+	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 )
 
 // DefaultConversationTTL and MaxConversationTTL bound PA_CONVERSATION_TTL.
@@ -41,6 +43,12 @@ const (
 	ReplyNewConversation  Reply = "new_conversation"
 	ReplyForgotten        Reply = "forgotten"
 	ReplyUnknownButton    Reply = "unknown_button"
+	// ReplyRateLimited is queued once per rate window, on the first
+	// message over the limit (#1313 slice d1).
+	ReplyRateLimited Reply = "rate_limited"
+	// ReplyMessageTooLong refuses a message part over jobs.MaxMessageChars;
+	// nothing of the message is stored (S1-R1).
+	ReplyMessageTooLong Reply = "message_too_long"
 )
 
 // ReplyQueue records a reply in the update's transaction, so it is sent
@@ -69,6 +77,12 @@ type RunEnqueuer interface {
 	EnqueueRun(ctx context.Context, tx *sql.Tx, req RunRequest) error
 }
 
+// Limiter counts each update of a principal against its rate window, in
+// the update's transaction (#1313 slice d1, T10). *RunLoop implements it.
+type Limiter interface {
+	AdmitMessage(ctx context.Context, tx *sql.Tx, p Principal) (jobs.RateDecision, error)
+}
+
 // Errors from the conversation layer. None carries text or ids.
 var (
 	// ErrConsentRequired: no consent, a withdrawn one, or one to another
@@ -78,7 +92,7 @@ var (
 	// is refused; this is never treated as either consent or its absence.
 	ErrConsentUnreadable = errors.New("pa: consent record unreadable")
 	// ErrConversationsConfig reports an unusable ConversationsConfig.
-	ErrConversationsConfig = errors.New("pa: conversations need a store, a sealer and a TTL of at most 24h")
+	ErrConversationsConfig = errors.New("pa: conversations need a store, a sealer, a TTL of at most 24h, and a limiter with a run loop")
 )
 
 // Command names handled server-side (PR #1329 decision for slice b). They
@@ -106,6 +120,9 @@ type ConversationsConfig struct {
 	Runs RunEnqueuer
 	// Replies is optional until slice (c) provides the sender.
 	Replies ReplyQueue
+	// Limiter is the per-principal rate window. Required with Runs: a run
+	// loop without a rate limit is refused.
+	Limiter Limiter
 	// Now defaults to time.Now.
 	Now func() time.Time
 }
@@ -119,6 +136,7 @@ type Conversations struct {
 	ttl     time.Duration
 	runs    RunEnqueuer
 	replies ReplyQueue
+	limiter Limiter
 	now     func() time.Time
 }
 
@@ -126,14 +144,15 @@ var _ Handler = (*Conversations)(nil)
 
 // NewConversations builds the handler.
 func NewConversations(cfg ConversationsConfig) (*Conversations, error) {
-	if cfg.Store == nil || cfg.Sealer == nil || cfg.TTL <= 0 || cfg.TTL > MaxConversationTTL {
+	if cfg.Store == nil || cfg.Sealer == nil || cfg.TTL <= 0 || cfg.TTL > MaxConversationTTL ||
+		(cfg.Runs != nil && cfg.Limiter == nil) {
 		return nil, ErrConversationsConfig
 	}
 	now := cfg.Now
 	if now == nil {
 		now = time.Now
 	}
-	return &Conversations{store: cfg.Store, sealer: cfg.Sealer, ttl: cfg.TTL, runs: cfg.Runs, replies: cfg.Replies, now: now}, nil
+	return &Conversations{store: cfg.Store, sealer: cfg.Sealer, ttl: cfg.TTL, runs: cfg.Runs, replies: cfg.Replies, limiter: cfg.Limiter, now: now}, nil
 }
 
 // HandleUpdate implements Handler. Any error rolls back the update's dedup
@@ -150,6 +169,21 @@ func (c *Conversations) HandleUpdate(ctx context.Context, tx *sql.Tx, u Verified
 	if err := c.store.LockPAPrincipal(ctx, tx, p.TelegramID()); err != nil {
 		return err
 	}
+	// The rate window counts every update, consent prompts and button
+	// presses included (#1313 slice d1), except the two that delete the
+	// principal's data: /forget and /consent withdraw always go through.
+	if c.limiter != nil && !erasure(u) {
+		d, err := c.limiter.AdmitMessage(ctx, tx, p)
+		if err != nil {
+			return err
+		}
+		if !d.Allowed {
+			if d.Notify {
+				return c.reply(ctx, tx, p, ReplyRateLimited, "")
+			}
+			return nil
+		}
+	}
 	switch u.Kind() {
 	case KindCallbackQuery:
 		return c.handleCallback(ctx, tx, u)
@@ -165,6 +199,13 @@ func (c *Conversations) handleMessage(ctx context.Context, tx *sql.Tx, u Verifie
 	frags := u.Fragments()
 	if cmd, arg, ok := userCommand(frags); ok {
 		return c.handleCommand(ctx, tx, p, cmd, arg)
+	}
+	// Size before anything is stored (S1-R1): a part over the Telegram
+	// maximum is refused whole, not cut.
+	for _, f := range frags {
+		if text, _ := f.Text(); utf16Len(text) > jobs.MaxMessageChars {
+			return c.reply(ctx, tx, p, ReplyMessageTooLong, "")
+		}
 	}
 	// Consent first: without it nothing is stored and nothing runs (S1-N1).
 	version, err := c.requireConsent(ctx, tx, p)
@@ -368,6 +409,25 @@ func userCommand(frags []convo.Fragment) (cmd, arg string, ok bool) {
 		return "", "", false
 	}
 	return "", "", false
+}
+
+// erasure reports whether u is /forget or /consent withdraw from the
+// principal, which the rate window never blocks.
+func erasure(u VerifiedUpdate) bool {
+	if u.Kind() != KindMessage {
+		return false
+	}
+	cmd, arg, ok := userCommand(u.Fragments())
+	return ok && (cmd == CommandForget || (cmd == CommandConsent && arg == "withdraw"))
+}
+
+// utf16Len counts UTF-16 code units, as Telegram does for its limits.
+func utf16Len(s string) int {
+	n := 0
+	for _, r := range s {
+		n += utf16.RuneLen(r)
+	}
+	return n
 }
 
 // newOpaqueID returns 128 random bits, base64url: 22 bytes, well within the

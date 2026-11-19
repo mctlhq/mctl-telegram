@@ -67,7 +67,11 @@ func newStore(t *testing.T) *db.Store {
 
 func newWebhook(t *testing.T, dedup Deduper, h Handler, c Counter) http.Handler {
 	t.Helper()
-	wh, err := NewWebhookHandler(WebhookConfig{Secret: testSecret, Dedup: dedup, Handler: h, Counter: c})
+	fr, ok := dedup.(FailureRecorder)
+	if !ok {
+		fr = newStore(t)
+	}
+	wh, err := NewWebhookHandler(WebhookConfig{Secret: testSecret, Dedup: dedup, Handler: h, Counter: c, Failures: fr})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,9 +227,10 @@ func TestWebhook_ReadErrorIsBadRequest(t *testing.T) {
 func TestNewWebhookHandler_RequiresEverything(t *testing.T) {
 	store := newStore(t)
 	for _, cfg := range []WebhookConfig{
-		{Dedup: store, Handler: InertHandler},
-		{Secret: testSecret, Handler: InertHandler},
-		{Secret: testSecret, Dedup: store},
+		{Dedup: store, Handler: InertHandler, Failures: store},
+		{Secret: testSecret, Handler: InertHandler, Failures: store},
+		{Secret: testSecret, Dedup: store, Failures: store},
+		{Secret: testSecret, Dedup: store, Handler: InertHandler},
 	} {
 		if _, err := NewWebhookHandler(cfg); !errors.Is(err, ErrWebhookConfig) {
 			t.Errorf("NewWebhookHandler(%+v) error = %v, want ErrWebhookConfig", cfg.Secret != "", err)

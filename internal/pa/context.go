@@ -6,6 +6,7 @@ import (
 	"slices"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
+	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 )
 
 // Trigger is what started a run. ADR 0011 names three; Phase 1 creates only
@@ -150,4 +151,19 @@ func (p Policy) Connection(id string) (ConnectionRevision, bool) {
 		}
 	}
 	return ConnectionRevision{}, false
+}
+
+// restoreInteractive rebuilds the context of a claimed run from its job
+// row (#1313 slice d1, threat model T4: "principal, connection and revision
+// come from the job row"). The row was written in the webhook transaction
+// from a Filter principal, so this is the same principal carried across the
+// commit, never one read from a worker request, a token alone or model
+// output. It goes through NewInteractive, so it validates exactly as an
+// interactive context does and sets the trigger nowhere else.
+func restoreInteractive(j jobs.Job, conns []ConnectionRevision, budget BudgetReservation) (ExecutionContext, error) {
+	if j.Principal <= 0 {
+		return ExecutionContext{}, ErrNoPrincipal
+	}
+	return NewInteractive(VerifiedUpdate{principal: Principal{telegramID: j.Principal}},
+		j.ConversationID, conns, budget, j.ConsentVersion)
 }

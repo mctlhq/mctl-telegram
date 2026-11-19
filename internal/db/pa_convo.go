@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
+	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 )
 
 var _ convo.Store = (*Store)(nil)
@@ -247,6 +248,12 @@ func (s *Store) ForgetPAConversations(ctx context.Context, tx *sql.Tx, principal
 	if tx == nil || principal <= 0 {
 		return fmt.Errorf("%w: forget conversations", convo.ErrInvalid)
 	}
+	// Queued and running jobs go with the conversations they would read
+	// (#1313 slice d1); a running job's reservation is held, not refunded.
+	if err := cancelPAJobs(ctx, tx, principal, time.Now().UnixMilli(),
+		jobs.StatusPending, jobs.StatusHeld, jobs.StatusClaimed); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pa_fragments WHERE principal = $1`, principal); err != nil {
 		return fmt.Errorf("forget pa conversations: fragments: %w", err)
 	}
@@ -440,6 +447,14 @@ func (s *Store) SweepPAState(ctx context.Context, now, updatesBefore time.Time) 
 		{&r.Conversations, `DELETE FROM pa_conversations WHERE closed_at_ms > 0 OR expires_at_ms <= $1`, []any{nowMS}},
 		{&r.Callbacks, `DELETE FROM pa_callbacks WHERE expires_at_ms <= $1`, []any{nowMS}},
 		{&r.Updates, `DELETE FROM pa_updates WHERE received_at < $1`, []any{updatesBefore.UTC()}},
+		// Run-loop rows (#1313 slice d1): failure counters past the dedup
+		// window, finished jobs past it, and ledger rows past every budget
+		// window (a month plus a margin). Discarded counts: SweepResult is
+		// convo's and has no field for them.
+		{new(int64), `DELETE FROM pa_update_failures WHERE updated_at_ms < $1`, []any{updatesBefore.UnixMilli()}},
+		{new(int64), `DELETE FROM pa_jobs WHERE status IN ('done', 'cancelled', 'expired') AND updated_at_ms < $1`, []any{updatesBefore.UnixMilli()}},
+		{new(int64), `DELETE FROM pa_usage WHERE status <> 'reserved' AND created_at_ms < $1`, []any{now.Add(-PAUsageRetention).UnixMilli()}},
+		{new(int64), `DELETE FROM pa_rate WHERE window_start_ms < $1`, []any{updatesBefore.UnixMilli()}},
 	}
 	for _, st := range steps {
 		res, err := tx.ExecContext(ctx, st.q, st.args...)
