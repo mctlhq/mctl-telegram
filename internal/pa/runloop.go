@@ -57,9 +57,17 @@ const (
 	RouteReply = "/api/pa/v1/jobs/reply"
 )
 
-// maxReplyBody bounds a reply request: a model answer that needs more than
-// output.MaxParts messages is refused by Render anyway.
-const maxReplyBody = 64 << 10
+// maxReplyBody bounds a reply request. It is sized from the Render limit
+// so that any answer Render could accept fits even fully \uXXXX-escaped
+// (6 bytes per UTF-16 unit), plus room for the rest of the JSON. A body
+// over it is a too-long answer, handled like output.ErrTooLong.
+const maxReplyBody = 6*output.MaxParts*4096 + 4<<10
+
+// maxCostMultiple caps a reported cost at this multiple of the per-job
+// reservation. The cost counts in the global day window shared with the
+// managed runtime, so an absurd value from the worker must not exhaust it;
+// a modest overrun is still counted in full.
+const maxCostMultiple = 4
 
 // RunLoopStore is what the run loop persists through (*db.Store).
 type RunLoopStore interface {
@@ -391,7 +399,7 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 		// the job is cancelled; a store hiccup puts it back.
 		deterministic := errors.Is(err, convo.ErrUnmarked) || errors.Is(err, convo.ErrUnreadable) ||
 			errors.Is(err, convo.ErrNotFound)
-		if rerr := l.store.ReleasePAClaim(ctx, ref, !deterministic); rerr != nil {
+		if rerr := l.store.ReleasePAClaim(ctx, ref, !deterministic, now); rerr != nil {
 			slog.Warn("pa claim not released", "job_id", j.ID, "err", rerr)
 		}
 		stop(w, err)
@@ -403,7 +411,7 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 		Principal: j.Principal, JobID: j.ID, Attempt: j.Attempts, ContextDigest: j.ContextDigest, Tools: j.ToolSet,
 	}, id.Jti, id.OriginalIssuedAt, ttl)
 	if err != nil {
-		if rerr := l.store.ReleasePAClaim(ctx, ref, true); rerr != nil {
+		if rerr := l.store.ReleasePAClaim(ctx, ref, true, now); rerr != nil {
 			slog.Warn("pa claim not released", "job_id", j.ID, "err", rerr)
 		}
 		stop(w, err)
@@ -514,10 +522,17 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 	}
 	var req replyRequest
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxReplyBody))
-	if err == nil {
+	var tooBig *http.MaxBytesError
+	overflow := errors.As(err, &tooBig)
+	switch {
+	case overflow:
+		// Too long to have rendered: the same fail-closed path as
+		// output.ErrTooLong, with the cost unreported.
+		req = replyRequest{}
+	case err == nil:
 		err = json.Unmarshal(body, &req)
 	}
-	if err != nil || strings.TrimSpace(req.Text) == "" || (req.CostUSD != nil && !(*req.CostUSD >= 0)) {
+	if !overflow && (err != nil || strings.TrimSpace(req.Text) == "" || (req.CostUSD != nil && !(*req.CostUSD >= 0))) {
 		writeJSON(w, http.StatusBadRequest, stopResponse{Stop: "invalid"})
 		return
 	}
@@ -543,6 +558,9 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	out, err := output.Render(req.Text, output.AllowFromUserText(typed...))
+	if overflow {
+		err = output.ErrTooLong
+	}
 	record := true
 	switch {
 	case errors.Is(err, output.ErrTooLong):
@@ -556,6 +574,10 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 	cost := -1.0
 	if req.CostUSD != nil {
 		cost = *req.CostUSD
+		if limit := maxCostMultiple * l.budget.PerJobUSD; cost > limit {
+			slog.Warn("pa reported cost capped", "job_id", ref.JobID)
+			cost = limit
+		}
 	}
 	j, err := l.store.FinishPAJob(ctx, ref, jobs.FinishRequest{
 		Now: l.now(), CostUSD: cost, Gate: l.gate,

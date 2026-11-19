@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -305,6 +306,85 @@ func TestRunLoop_S1R1(t *testing.T) {
 			t.Fatal("an answer the principal never saw was kept")
 		}
 	})
+}
+
+// TestRunLoop_S1R1NonASCIIReply: the reply body cap is never what refuses
+// an answer. Escaped Cyrillic that Render would accept is delivered; one
+// past the body cap gets the same server text as ErrTooLong.
+func TestRunLoop_S1R1NonASCIIReply(t *testing.T) {
+	escaped := func(text string, cost *float64) []byte {
+		var b strings.Builder
+		b.WriteString(`{"text":"`)
+		for _, r := range text {
+			fmt.Fprintf(&b, `\u%04x`, r)
+		}
+		b.WriteString(`"`)
+		if cost != nil {
+			fmt.Fprintf(&b, `,"cost_usd":%v`, *cost)
+		}
+		b.WriteString(`}`)
+		return []byte(b.String())
+	}
+	raw := func(h *runLoopHarness, tok string, body []byte) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, RouteReply, bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+tok)
+		w := httptest.NewRecorder()
+		mux := http.NewServeMux()
+		h.loop.Mount(mux)
+		mux.ServeHTTP(w, req)
+		return w
+	}
+	t.Run("fits", func(t *testing.T) {
+		h := newRunLoopHarness(t)
+		h.consent(aliceID)
+		h.text(aliceID, "hello")
+		c := h.mustClaim()
+		text := strings.Repeat("я", 7*4096) // 7 parts, > 64 KiB escaped
+		if w := raw(h, c.Token, escaped(text, nil)); w.Code != http.StatusOK {
+			t.Fatalf("reply: %d %s", w.Code, w.Body)
+		}
+		sent := h.sender.to(aliceID)
+		if len(sent) != 1 || sent[0] == output.ServerText(output.TextReplyTooLong).String() {
+			t.Fatal("an answer Render accepts was refused")
+		}
+	})
+	t.Run("over the body cap", func(t *testing.T) {
+		h := newRunLoopHarness(t)
+		h.consent(aliceID)
+		h.text(aliceID, "hello")
+		c := h.mustClaim()
+		text := strings.Repeat("я", maxReplyBody/6+100)
+		if w := raw(h, c.Token, escaped(text, nil)); w.Code != http.StatusOK {
+			t.Fatalf("reply: %d %s", w.Code, w.Body)
+		}
+		sent := h.sender.to(aliceID)
+		if len(sent) != 1 || sent[0] != output.ServerText(output.TextReplyTooLong).String() {
+			t.Fatalf("sent %d; an over-long body must get the server text", len(sent))
+		}
+		if js, us := h.jobStatus(c.JobID); js != "done" || us != "settled" {
+			t.Fatalf("job %s usage %s, want finished", js, us)
+		}
+	})
+}
+
+// TestRunLoop_ReportedCostCapped: one absurd cost_usd cannot fill the
+// global day window shared with the managed runtime.
+func TestRunLoop_ReportedCostCapped(t *testing.T) {
+	h := newRunLoopHarness(t)
+	h.consent(aliceID)
+	h.text(aliceID, "hello")
+	c := h.mustClaim()
+	huge := 1e300
+	if w := h.post(RouteReply, c.Token, replyRequest{Text: "ok", CostUSD: &huge}); w.Code != http.StatusOK {
+		t.Fatalf("reply: %d", w.Code)
+	}
+	var cost float64
+	if err := h.convoHarness.store.DB.QueryRow(`SELECT cost_usd FROM pa_usage WHERE job_id = $1`, c.JobID).Scan(&cost); err != nil {
+		t.Fatal(err)
+	}
+	if cost != maxCostMultiple*0.25 {
+		t.Fatalf("settled at %v, want the cap %v", cost, maxCostMultiple*0.25)
+	}
 }
 
 func utf8Valid(b []byte) bool { return strings.ToValidUTF8(string(b), "�") == string(b) }

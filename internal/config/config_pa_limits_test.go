@@ -57,6 +57,16 @@ func TestLoadPA_Limits(t *testing.T) {
 			}
 		})
 	}
+	t.Run("refuses a job dearer than the global day", func(t *testing.T) {
+		enable(t)
+		// The managed checks pass (its job cost is lowered to fit), so
+		// only the PA check can refuse.
+		t.Setenv("MANAGED_MAX_JOB_COST_USD", "0.1")
+		t.Setenv("MANAGED_BUDGET_USD_GLOBAL_DAY", "0.2")
+		if _, err := Load(); err == nil {
+			t.Fatal("PA_BUDGET_USD_JOB above MANAGED_BUDGET_USD_GLOBAL_DAY accepted")
+		}
+	})
 	t.Run("off reads nothing", func(t *testing.T) {
 		t.Setenv("PA_ENABLED", "false")
 		t.Setenv("PA_RATE_MESSAGES", "0")

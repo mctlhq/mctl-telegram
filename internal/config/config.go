@@ -662,6 +662,12 @@ func loadPALimits(c *Config) error {
 	if c.PABudgetUSDJob > c.PABudgetUSDDay || c.PABudgetUSDDay > c.PABudgetUSDMonth {
 		return errors.New("PA budgets must satisfy PA_BUDGET_USD_JOB <= PA_BUDGET_USD_DAY <= PA_BUDGET_USD_MONTH")
 	}
+	// The global day window is MANAGED_BUDGET_USD_GLOBAL_DAY, shared with
+	// the managed runtime; a PA job dearer than it would be held forever.
+	// MANAGED_CLAIM_NOT_AFTER is managed-only: PA_ENABLED is the PA switch.
+	if c.PABudgetUSDJob > c.ManagedBudgetUSDGlobalDay {
+		return errors.New("PA_BUDGET_USD_JOB must not exceed MANAGED_BUDGET_USD_GLOBAL_DAY")
+	}
 	return nil
 }
 

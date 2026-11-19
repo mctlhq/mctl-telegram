@@ -201,15 +201,6 @@ func cancelPAJobs(ctx context.Context, tx *sql.Tx, principal, nowMS int64, statu
 	return nil
 }
 
-// CancelPAJobs cancels every pending, held and claimed job of the
-// principal, in the caller's transaction (consent withdrawal, /forget).
-func (s *Store) CancelPAJobs(ctx context.Context, tx *sql.Tx, principal int64, now time.Time) error {
-	if tx == nil || principal <= 0 {
-		return fmt.Errorf("%w: cancel", jobs.ErrInvalid)
-	}
-	return cancelPAJobs(ctx, tx, principal, now.UnixMilli(), jobs.StatusPending, jobs.StatusHeld, jobs.StatusClaimed)
-}
-
 // ExpirePAJobs ends every claimed job whose lease ran out and holds its
 // reservation at the full amount. It runs in its own short transaction
 // before a claim: the claim must not hold another principal's job row while
@@ -585,11 +576,11 @@ func cancelOne(ctx context.Context, tx *sql.Tx, j jobs.Job, nowMS int64) error {
 }
 
 // ReleasePAClaim implements jobs.Store.
-func (s *Store) ReleasePAClaim(ctx context.Context, ref jobs.Ref, requeue bool) error {
-	if !ref.Valid() {
+func (s *Store) ReleasePAClaim(ctx context.Context, ref jobs.Ref, requeue bool, now time.Time) error {
+	if !ref.Valid() || now.IsZero() {
 		return fmt.Errorf("%w: release", jobs.ErrInvalid)
 	}
-	tx, j, err := s.beginRunning(ctx, ref, time.Now())
+	tx, j, err := s.beginRunning(ctx, ref, now)
 	if err != nil {
 		return err
 	}
@@ -614,7 +605,7 @@ func (s *Store) ReleasePAClaim(ctx context.Context, ref jobs.Ref, requeue bool) 
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE pa_jobs SET status = $1, lease_until_ms = 0, execution_context = '', context_digest = '', tool_set = '',
 		        updated_at_ms = $2 WHERE id = $3`,
-		string(next), time.Now().UnixMilli(), j.ID); err != nil {
+		string(next), now.UnixMilli(), j.ID); err != nil {
 		return fmt.Errorf("release pa claim: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

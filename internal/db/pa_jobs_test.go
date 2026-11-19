@@ -426,18 +426,40 @@ func runPAJobsSuite(t *testing.T, s *Store) {
 		}
 	})
 
+	t.Run("/new cancels queued and running jobs at once", func(t *testing.T) {
+		f := newPAFixture(t, s)
+		f.enqueue(paAlice, "c1")
+		j := f.claim().Job
+		f.enqueue(paAlice, "c1")
+		tx, _ := s.DB.Begin()
+		if err := s.ClosePAConversations(context.Background(), tx, paAlice, f.now); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		if js, us := f.status(j.ID); js != "cancelled" || us != "held" {
+			t.Fatalf("running job after /new: %s %s", js, us)
+		}
+		var live int
+		_ = s.DB.QueryRow(`SELECT COUNT(*) FROM pa_jobs WHERE principal = $1 AND status IN ('pending','held','claimed')`, paAlice).Scan(&live)
+		if live != 0 {
+			t.Fatalf("%d live jobs after /new", live)
+		}
+	})
+
 	t.Run("release requeues or cancels", func(t *testing.T) {
 		f := newPAFixture(t, s)
 		f.enqueue(paAlice, "c1")
 		j := f.claim().Job
-		if err := s.ReleasePAClaim(context.Background(), ref(j), true); err != nil {
+		if err := s.ReleasePAClaim(context.Background(), ref(j), true, f.now); err != nil {
 			t.Fatal(err)
 		}
 		if js, us := f.status(j.ID); js != "pending" || us != "" {
 			t.Fatalf("requeued: %s %q", js, us)
 		}
 		j = f.claim().Job
-		if err := s.ReleasePAClaim(context.Background(), ref(j), false); err != nil {
+		if err := s.ReleasePAClaim(context.Background(), ref(j), false, f.now); err != nil {
 			t.Fatal(err)
 		}
 		if js, _ := f.status(j.ID); js != "cancelled" {

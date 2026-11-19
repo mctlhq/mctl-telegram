@@ -115,7 +115,10 @@ type Budget struct {
 // Valid reports whether every cap is positive. A budget with a zero cap is
 // not "unlimited": the run loop refuses to start with it.
 func (b Budget) Valid() bool {
-	return b.PerJobUSD > 0 && b.PrincipalDayUSD > 0 && b.PrincipalMonthUSD > 0 && b.GlobalDayUSD > 0
+	// A job dearer than any window could never be claimed: it would be
+	// held at every reset, without end.
+	return b.PerJobUSD > 0 && b.PerJobUSD <= b.PrincipalDayUSD && b.PrincipalDayUSD <= b.PrincipalMonthUSD &&
+		b.PerJobUSD <= b.GlobalDayUSD
 }
 
 // Job is one pa_jobs row.
@@ -298,7 +301,7 @@ type Store interface {
 	// ReleasePAClaim undoes a claim whose token never left the server:
 	// the reservation is deleted and the job returns to pending (requeue)
 	// or is cancelled (a deterministic failure, which would recur).
-	ReleasePAClaim(ctx context.Context, ref Ref, requeue bool) error
+	ReleasePAClaim(ctx context.Context, ref Ref, requeue bool, now time.Time) error
 	// RunningPAJob reads the job of ref, refusing one that is not running
 	// under exactly this attempt and context. It changes nothing.
 	RunningPAJob(ctx context.Context, ref Ref, now time.Time) (Job, error)

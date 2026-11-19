@@ -229,6 +229,13 @@ func (s *Store) ClosePAConversations(ctx context.Context, tx *sql.Tx, principal 
 	if tx == nil || principal <= 0 {
 		return fmt.Errorf("%w: close conversation", convo.ErrInvalid)
 	}
+	// Jobs of the closed conversation go with it, at once rather than at
+	// their next gate check (#1313 slice d1). Each principal has one open
+	// conversation, so these are all of the principal's live jobs.
+	if err := cancelPAJobs(ctx, tx, principal, now.UnixMilli(),
+		jobs.StatusPending, jobs.StatusHeld, jobs.StatusClaimed); err != nil {
+		return fmt.Errorf("close pa conversation: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM pa_fragments WHERE principal = $1 AND conversation_id IN
 			(SELECT id FROM pa_conversations WHERE principal = $1 AND closed_at_ms = 0)`,
