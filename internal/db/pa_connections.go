@@ -367,3 +367,44 @@ func (s *Store) RotatePAConnectionTokens(ctx context.Context, principal int64, i
 	}
 	return c, nil
 }
+
+// StalePAConnection identifies a pending connection for the stale sweep.
+type StalePAConnection struct {
+	Principal         int64
+	ID                string
+	AuthorityRevision int64
+}
+
+// StalePendingPAConnections lists up to limit connections still in a
+// pending_* state whose last transition is at or before updatedBefore,
+// oldest first. Linking never leaves a connection in one pending state for
+// longer than that step's secret lives, so such a row was stranded (for
+// example a store error after a secret was consumed). The linking sweeper
+// fails it and revokes whatever tokens it holds.
+func (s *Store) StalePendingPAConnections(ctx context.Context, updatedBefore time.Time, limit int) ([]StalePAConnection, error) {
+	if limit <= 0 {
+		return nil, errors.New("pa connection: stale listing needs a positive limit")
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT principal, id, authority_revision FROM pa_connections
+		WHERE state IN ($1, $2, $3, $4) AND updated_at_ms <= $5
+		ORDER BY updated_at_ms, id LIMIT $6`,
+		string(connection.StatePendingLink), string(connection.StatePendingOAuth),
+		string(connection.StatePendingReturn), string(connection.StatePendingConfirm),
+		updatedBefore.UnixMilli(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("pa connection: list stale: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := []StalePAConnection{}
+	for rows.Next() {
+		var c StalePAConnection
+		if err := rows.Scan(&c.Principal, &c.ID, &c.AuthorityRevision); err != nil {
+			return nil, fmt.Errorf("pa connection: list stale: scan: %w", err)
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("pa connection: list stale: %w", err)
+	}
+	return out, nil
+}

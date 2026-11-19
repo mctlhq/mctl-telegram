@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -61,7 +62,7 @@ func TestLinking_S1L1_ForgedExpiredOrUnsafeInitDataRefused(t *testing.T) {
 		for k, v := range vals {
 			forged[k] = v
 		}
-		forged.Set("user", `{"id":`+strconv.FormatInt(h.alice, 10)+`,"first_name":"Mallory"}`)
+		forged.Set("user", `{"id":`+strconv.FormatInt(h.alice, 10)+`,"first_name":"Bob"}`)
 		// Expired: signed correctly, six minutes old.
 		expired := signInitData(paBotToken, initDataFields(h.alice, "Alice", h.clock.Now().Add(-6*time.Minute), ""))
 		// initDataUnsafe alone: the client's parsed fields with no hash.
@@ -596,6 +597,143 @@ func TestLinking_CompleteExchangeUnreadableRowRevokes(t *testing.T) {
 		}
 		if len(h.msgr.all()) != 0 {
 			t.Fatal("card sent")
+		}
+	})
+}
+
+// faultStore injects manager-store failures after a linking secret has
+// been consumed.
+type faultStore struct {
+	connection.Store
+	mu          *sync.Mutex
+	failTo      connection.State // fail transitions into this state
+	failSealed  bool             // fail every sealed read
+	failSealFor string           // fail sealed reads of this connection id
+}
+
+func (f *faultStore) TransitionPAConnection(ctx context.Context, p int64, id string, t connection.Transition) (connection.Connection, error) {
+	f.mu.Lock()
+	to := f.failTo
+	f.mu.Unlock()
+	if to != "" && t.To == to {
+		return connection.Connection{}, errors.New("injected: transition write failed")
+	}
+	return f.Store.TransitionPAConnection(ctx, p, id, t)
+}
+
+func (f *faultStore) GetPAConnectionSealed(ctx context.Context, p int64, id string) (connection.Connection, connection.Sealed, error) {
+	f.mu.Lock()
+	fail := f.failSealed || (f.failSealFor != "" && f.failSealFor == id)
+	f.mu.Unlock()
+	if fail {
+		return connection.Connection{}, connection.Sealed{}, errors.New("injected: row unreadable")
+	}
+	return f.Store.GetPAConnectionSealed(ctx, p, id)
+}
+
+func (f *faultStore) set(fn func(f *faultStore)) { f.mu.Lock(); fn(f); f.mu.Unlock() }
+
+// TestLinking_StrandedConfirmIsSweptAndRevoked: the confirm nonce is
+// consumed, then the activation write fails. The row is left in
+// pending_confirm holding live tokens, and a second press is refused
+// because the nonce is spent. The pending-age sweep must fail it and
+// revoke its tokens (T1 step 5, T3).
+func TestLinking_StrandedConfirmIsSweptAndRevoked(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		ctx := context.Background()
+		h := newHarness(t, s, false)
+		fs := &faultStore{Store: s, mu: &sync.Mutex{}}
+		h.rebuild(fs, tokenClient{h.as})
+		confirm, _ := confirmData(h.toConfirm(connection.ServerTG, h.tgLogin(h.alice)))
+		fs.set(func(f *faultStore) { f.failTo = connection.StateActive })
+		if _, err := h.svc.HandleCallback(ctx, callbackUpdate(t, h.alice, confirm)); err == nil {
+			t.Fatal("confirm succeeded despite the failed write")
+		}
+		fs.set(func(f *faultStore) { f.failTo = "" })
+		if _, err := h.svc.HandleCallback(ctx, callbackUpdate(t, h.alice, confirm)); !errors.Is(err, linking.ErrRefused) {
+			t.Fatalf("second press: %v", err)
+		}
+		if h.state(connection.ServerTG) != connection.StatePendingConfirm || h.revoker.count() != 0 {
+			t.Fatalf("precondition: state %s, revoked %v", h.state(connection.ServerTG), h.revoker.tokens)
+		}
+		// The store stamps transitions with the wall clock; the margins
+		// cover the test's own run time.
+		h.clock.Add(linking.PendingMaxAge - time.Minute)
+		if _, err := h.svc.ExpireStale(ctx, 1000); err != nil {
+			t.Fatal(err)
+		}
+		if h.state(connection.ServerTG) != connection.StatePendingConfirm {
+			t.Fatal("swept before PendingMaxAge")
+		}
+		h.clock.Add(2 * time.Minute)
+		res, err := h.svc.ExpireStale(ctx, 1000)
+		if err != nil || res.Failed < 1 {
+			t.Fatalf("sweep %+v %v", res, err)
+		}
+		if h.state(connection.ServerTG) != connection.StateFailed || !h.revoker.has("fake-at-tg-2") || !h.revoker.has("fake-rt-tg-2") {
+			t.Fatalf("stranded confirm: state %s, revoked %v", h.state(connection.ServerTG), h.revoker.tokens)
+		}
+	})
+}
+
+// TestLinking_StrandedReturnIsSwept: the completion code is consumed, then
+// reading the sealed authorization code fails. The connection stays in
+// pending_return with no live secret; the sweep fails it.
+func TestLinking_StrandedReturnIsSwept(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		ctx := context.Background()
+		h := newHarness(t, s, false)
+		fs := &faultStore{Store: s, mu: &sync.Mutex{}}
+		h.rebuild(fs, tokenClient{h.as})
+		code := h.toCompletion(connection.ServerTG, h.tgLogin(h.alice))
+		fs.set(func(f *faultStore) { f.failSealed = true })
+		if err := h.svc.Complete(ctx, h.initData(h.alice, code)); err == nil {
+			t.Fatal("completed with an unreadable code")
+		}
+		fs.set(func(f *faultStore) { f.failSealed = false })
+		if n := h.as[connection.ServerTG].exchangeCount(); n != 0 {
+			t.Fatalf("exchanged %d times", n)
+		}
+		h.clock.Add(linking.PendingMaxAge + time.Minute)
+		if res, err := h.svc.ExpireStale(ctx, 1000); err != nil || res.Failed < 1 {
+			t.Fatalf("sweep %+v %v", res, err)
+		}
+		if h.state(connection.ServerTG) != connection.StateFailed {
+			t.Fatalf("state %s, want failed", h.state(connection.ServerTG))
+		}
+	})
+}
+
+// TestLinking_SweepContinuesPastUnreadableRow: one connection the sweep
+// cannot read is counted and skipped; the others behind it still expire.
+func TestLinking_SweepContinuesPastUnreadableRow(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		ctx := context.Background()
+		h := newHarness(t, s, true)
+		fs := &faultStore{Store: s, mu: &sync.Mutex{}}
+		h.rebuild(fs, tokenClient{h.as})
+		h.toConfirm(connection.ServerTG, h.tgLogin(h.alice))
+		h.clock.Add(time.Second) // the tg row sorts first by age
+		h.toConfirm(connection.ServerAlice, linking.Account{ID: "yandex-uid-1"})
+		bad := h.connection(connection.ServerTG)
+		fs.set(func(f *faultStore) { f.failSealFor = bad.ID })
+		h.clock.Add(linking.PendingMaxAge)
+		res, err := h.svc.ExpireStale(ctx, 1000)
+		if err == nil || res.Errors < 1 {
+			t.Fatalf("sweep %+v %v: the unreadable row is not reported", res, err)
+		}
+		if h.state(connection.ServerAlice) != connection.StateFailed {
+			t.Fatalf("the row behind the unreadable one was not swept: %s", h.state(connection.ServerAlice))
+		}
+		if h.state(connection.ServerTG) != connection.StatePendingConfirm {
+			t.Fatalf("unreadable row state %s", h.state(connection.ServerTG))
+		}
+		fs.set(func(f *faultStore) { f.failSealFor = "" })
+		if _, err := h.svc.ExpireStale(ctx, 1000); err != nil {
+			t.Fatal(err)
+		}
+		if h.state(connection.ServerTG) != connection.StateFailed {
+			t.Fatalf("not retried on the next sweep: %s", h.state(connection.ServerTG))
 		}
 	})
 }

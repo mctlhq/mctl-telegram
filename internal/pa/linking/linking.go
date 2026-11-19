@@ -46,6 +46,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strconv"
 	"strings"
@@ -71,6 +72,7 @@ type Store interface {
 	ConsumePALinkSecret(ctx context.Context, kind db.PALinkKind, hash string, now time.Time, check func(db.PALinkSecret) error) (db.PALinkSecret, error)
 	ExpiredPALinkSecrets(ctx context.Context, kind db.PALinkKind, now time.Time, limit int) ([]db.PALinkSecret, error)
 	RetirePALinkSecret(ctx context.Context, kind db.PALinkKind, hash string, now time.Time) error
+	StalePendingPAConnections(ctx context.Context, updatedBefore time.Time, limit int) ([]db.StalePAConnection, error)
 	EnsurePAUser(ctx context.Context, tgID int64) (int64, error)
 }
 
@@ -682,41 +684,87 @@ func (s *Service) enabled(server connection.Server) bool {
 	return err == nil
 }
 
+// PendingMaxAge is how long a connection may stay in one pending_* state
+// before the sweep fails it. Every pending state is bounded by a secret
+// that lives at most ten minutes (LinkTokenTTL, StateTTL, ConfirmTTL); the
+// margin covers clock skew between replicas.
+const PendingMaxAge = 15 * time.Minute
+
 // SweepResult counts what ExpireStale did.
 type SweepResult struct {
-	Failed  int
+	// Failed connections were moved to failed and their tokens revoked.
+	Failed int
+	// Skipped connections had moved on (or were gone) by the time of the
+	// sweep.
 	Skipped int
+	// Errors counts connections the sweep could not observe or fail. They
+	// are left for the next sweep; they do not stop this one.
+	Errors int
 }
 
-// ExpireStale fails every connection whose linking secret expired unused
-// (an abandoned Mini App, callback page or confirm card) and revokes any
-// tokens it holds. A connection that moved on since is skipped. Each
-// expired secret is retired so it is listed once. The caller runs it
-// periodically; it does nothing on its own.
+// ExpireStale fails, and revokes any tokens of, every connection the
+// linking flow abandoned. It runs two passes:
+//
+//  1. every secret that expired unused (an abandoned Mini App, callback page
+//     or confirm card): its connection is failed and the secret retired, so
+//     it is listed once;
+//  2. every connection still pending PendingMaxAge after its last
+//     transition, whatever its secrets say. This catches a row stranded by
+//     a store or KEK error after its secret was already consumed (for
+//     example a Confirm whose activation write failed), which pass 1 cannot
+//     see.
+//
+// A connection that cannot be observed or failed is counted in Errors,
+// logged, and left for the next sweep; the sweep continues past it, and the
+// returned error joins every such failure. The caller runs it periodically;
+// it does nothing on its own.
 func (s *Service) ExpireStale(ctx context.Context, limit int) (SweepResult, error) {
 	var res SweepResult
+	var errs []error
 	now := s.now()
+	abandon := func(principal int64, id string, rev int64, reason string) bool {
+		out, err := s.cfg.Manager.Abandon(ctx, principal, id, rev, reason)
+		switch {
+		case err == nil:
+			res.Failed++
+			if out.RemoteErr != nil {
+				// Failed locally, so never usable again; the remote revocation
+				// did not go through and needs an operator.
+				slog.WarnContext(ctx, "pa linking sweep: remote revocation failed", "reason", reason, "error", out.RemoteErr)
+			}
+		case errors.Is(err, connection.ErrConflict), errors.Is(err, connection.ErrNotFound):
+			res.Skipped++
+		default:
+			// Could not observe or fail the connection: count it, keep its
+			// secret listed for the next sweep, and go on.
+			res.Errors++
+			errs = append(errs, err)
+			slog.WarnContext(ctx, "pa linking sweep: connection not failed", "reason", reason, "error", err)
+			return false
+		}
+		return true
+	}
 	for _, kind := range []db.PALinkKind{db.PALinkToken, db.PALinkState, db.PALinkHandoff, db.PALinkCompletion, db.PALinkConfirm} {
 		stale, err := s.cfg.Store.ExpiredPALinkSecrets(ctx, kind, now, limit)
 		if err != nil {
-			return res, err
+			errs = append(errs, err)
+			continue
 		}
 		for _, l := range stale {
-			_, err := s.cfg.Manager.Abandon(ctx, l.Principal, l.ConnectionID, l.Revision, "link_expired")
-			switch {
-			case err == nil:
-				res.Failed++
-			case errors.Is(err, connection.ErrConflict), errors.Is(err, connection.ErrNotFound):
-				res.Skipped++
-			default:
-				// Could not observe the connection: keep the secret listed so
-				// the next sweep tries again.
-				return res, err
+			if !abandon(l.Principal, l.ConnectionID, l.Revision, "link_expired") {
+				continue
 			}
 			if err := s.cfg.Store.RetirePALinkSecret(ctx, kind, l.Hash, now); err != nil {
-				return res, err
+				errs = append(errs, err)
 			}
 		}
 	}
-	return res, nil
+	pending, err := s.cfg.Store.StalePendingPAConnections(ctx, now.Add(-PendingMaxAge), limit)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	for _, c := range pending {
+		abandon(c.Principal, c.ID, c.AuthorityRevision, "pending_stale")
+	}
+	return res, errors.Join(errs...)
 }

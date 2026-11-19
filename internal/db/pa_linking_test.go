@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -213,6 +214,63 @@ func TestEnsurePAUser_MarkedPromotedAndExcluded(t *testing.T) {
 		}
 		if f, err := s.GetBroadcastRecipientFacts(ctx, id, time.Now()); err != nil || f == nil {
 			t.Fatalf("promoted row is not a broadcast candidate: %v", err)
+		}
+	})
+}
+
+// EnsurePAUser must not split an existing identity. A user known only
+// through telegram_accounts (no users.telegram_login_id) is returned as it
+// is; no second row is created, so every other caller's lookup of that
+// Telegram id still resolves to the same single user.
+func TestEnsurePAUser_ExistingTelegramAccountUnchanged(t *testing.T) {
+	paLinkDialects(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		p := paLinkPrincipal(t, s)
+		owner, err := s.EnsureUser(ctx, "pa-legacy-"+randomSuffix(t), "", "mctl-api")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_, _ = s.DB.Exec(`DELETE FROM telegram_accounts WHERE user_id = $1`, owner)
+			_, _ = s.DB.Exec(`DELETE FROM users WHERE id = $1`, owner)
+		})
+		if _, err := s.DB.ExecContext(ctx,
+			`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted) VALUES($1,$2,$3)`,
+			owner, p, []byte("blob")); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.EnsurePAUser(ctx, p)
+		if err != nil || got != owner {
+			t.Fatalf("EnsurePAUser = %d, %v; want the existing user %d", got, err, owner)
+		}
+		var n int
+		if err := s.DB.QueryRow(`SELECT COUNT(*) FROM users WHERE telegram_login_id = $1 OR github_login = $2`,
+			p, "tg:"+strconv.FormatInt(p, 10)).Scan(&n); err != nil || n != 0 {
+			t.Fatalf("a second users row was created: %d %v", n, err)
+		}
+		if again, err := s.UserIDByTelegramID(ctx, p); err != nil || again != owner {
+			t.Fatalf("mapping changed: %d %v", again, err)
+		}
+	})
+}
+
+// A PA row is promoted by the other sign-in path too (localjwt, worker
+// tokens, k8ssa, provision_local_account).
+func TestEnsurePAUser_PromotedByEnsureUserByTelegramID(t *testing.T) {
+	paLinkDialects(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		p := paLinkPrincipal(t, s)
+		id, err := s.EnsurePAUser(ctx, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.EnsureUserByTelegramID(ctx, p, "", "Alice")
+		if err != nil || got != id {
+			t.Fatalf("EnsureUserByTelegramID = %d, %v; want %d", got, err, id)
+		}
+		var provider string
+		if err := s.DB.QueryRow(`SELECT provider FROM users WHERE id = $1`, id).Scan(&provider); err != nil || provider != "tg-mcp" {
+			t.Fatalf("provider %q %v, want tg-mcp", provider, err)
 		}
 	})
 }

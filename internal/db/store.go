@@ -270,6 +270,10 @@ func (s *Store) EnsureUserByTelegramID(ctx context.Context, tgID int64, username
 			return 0, fmt.Errorf("select user by tg_id: %w", err)
 		}
 	}
+	// A principal first seen through the Personal Assistant has a "pa" row;
+	// signing in here makes it an ordinary tg-mcp login. Best-effort, like
+	// the metadata refresh below.
+	s.promotePAUser(ctx, tgID)
 	// Best-effort refresh of metadata. Idempotent and safe to skip on error
 	// because the next call will retry; surfacing it would block auth.
 	if username != "" || displayName != "" {

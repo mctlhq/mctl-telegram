@@ -270,15 +270,32 @@ func (s *Store) RetirePALinkSecret(ctx context.Context, kind PALinkKind, hash st
 
 // EnsurePAUser returns the users.id of a PA principal, creating the row on
 // its first PA connection (owner decision 2026-11-19, #1312 decision 2) so
-// the ADR 0003 audit chain has a user to append to. A row created here has
-// provider "pa", which tells PA-only principals apart from tg-mcp logins; an
-// existing row of any provider is returned unchanged. No display name or
-// username is stored.
+// the ADR 0003 audit chain has a user to append to.
+//
+// It resolves first, with the same lookup the audit sink uses, and inserts
+// only when that lookup positively finds no user. An existing user of any
+// provider, including one known only through telegram_accounts, is returned
+// unchanged: inserting a second row for it would make every later lookup of
+// that Telegram id ambiguous. A failed lookup is an error, never "no user".
+// A row created here has provider "pa", which tells PA-only principals apart
+// from tg-mcp logins. No display name or username is stored.
 func (s *Store) EnsurePAUser(ctx context.Context, tgID int64) (int64, error) {
 	if tgID <= 0 {
 		return 0, errors.New("telegram id must be positive")
 	}
-	if _, err := s.DB.ExecContext(ctx,
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("pa user: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	id, err := userIDByTelegramID(ctx, tx, tgID)
+	switch {
+	case err == nil:
+		return id, nil
+	case !errors.Is(err, ErrUserNotFound):
+		return 0, fmt.Errorf("pa user: resolve: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO users(github_login, provider, telegram_login_id)
 		 VALUES($1, $2, $3)
 		 ON CONFLICT DO NOTHING`,
@@ -286,14 +303,28 @@ func (s *Store) EnsurePAUser(ctx context.Context, tgID int64) (int64, error) {
 	); err != nil {
 		return 0, fmt.Errorf("insert pa user: %w", err)
 	}
-	// The same resolution the audit sink uses: one user, or an error.
-	return userIDByTelegramID(ctx, s.DB, tgID)
+	if id, err = userIDByTelegramID(ctx, tx, tgID); err != nil {
+		return 0, fmt.Errorf("pa user: resolve after insert: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("pa user: commit: %w", err)
+	}
+	return id, nil
 }
 
 // promotePAUserTx marks the PA-created row of tgID as a tg-mcp login, inside
 // the sign-in transaction, and reports whether it did. It runs under a
 // savepoint so a failure leaves the sign-in intact: the marker is a label
 // for reporting and broadcast eligibility.
+//
+// promotePAUser is the same outside a transaction, for sign-in paths that
+// have none (EnsureUserByTelegramID: localjwt, worker tokens, k8ssa,
+// provision_local_account).
+func (s *Store) promotePAUser(ctx context.Context, tgID int64) {
+	_, _ = s.DB.ExecContext(ctx, `UPDATE users SET provider = $1 WHERE telegram_login_id = $2 AND provider = $3`,
+		"tg-mcp", tgID, PAProvider)
+}
+
 func (s *Store) promotePAUserTx(ctx context.Context, tx *sql.Tx, tgID int64) bool {
 	if _, err := tx.ExecContext(ctx, `SAVEPOINT pa_promote`); err != nil {
 		return false
