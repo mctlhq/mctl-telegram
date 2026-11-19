@@ -11,6 +11,7 @@ const (
 	testPABotToken    = "7000000001:pa-test-token-not-real-0123456789"
 	testLoginBotToken = "7000000002:login-test-token-not-real"
 	testPASecret      = "pa_webhook_secret_for_tests_only_0123456789"
+	testPAWebhookURL  = "https://pa.example/pa/bot/webhook"
 )
 
 // TestLoadPA_FailClosed covers the PA master switch (threat model T11,
@@ -33,6 +34,7 @@ func TestLoadPA_FailClosed(t *testing.T) {
 			// Present but must be ignored while the PA is off.
 			t.Setenv("PA_BOT_TOKEN", testPABotToken)
 			t.Setenv("PA_WEBHOOK_SECRET", testPASecret)
+			t.Setenv("PA_WEBHOOK_URL", testPAWebhookURL)
 			cfg, err := Load()
 			if err != nil {
 				t.Fatalf("Load() error: %v", err)
@@ -40,7 +42,7 @@ func TestLoadPA_FailClosed(t *testing.T) {
 			if cfg.PAEnabled {
 				t.Error("PAEnabled = true, want false")
 			}
-			if cfg.PABotToken != "" || cfg.PAWebhookSecret != "" {
+			if cfg.PABotToken != "" || cfg.PAWebhookSecret != "" || cfg.PAWebhookURL != "" {
 				t.Error("PA secrets were read while PA_ENABLED is off")
 			}
 		})
@@ -52,6 +54,7 @@ func TestLoadPA_Enabled(t *testing.T) {
 		t.Setenv("PA_ENABLED", "true")
 		t.Setenv("PA_BOT_TOKEN", testPABotToken)
 		t.Setenv("PA_WEBHOOK_SECRET", testPASecret)
+		t.Setenv("PA_WEBHOOK_URL", testPAWebhookURL)
 		t.Setenv("TELEGRAM_LOGIN_BOT_TOKEN", testLoginBotToken)
 		cfg, err := Load()
 		if err != nil {
@@ -80,6 +83,7 @@ func TestLoadPA_Enabled(t *testing.T) {
 			t.Setenv("PA_ENABLED", "true")
 			t.Setenv("PA_BOT_TOKEN", tc.token)
 			t.Setenv("PA_WEBHOOK_SECRET", tc.secret)
+			t.Setenv("PA_WEBHOOK_URL", testPAWebhookURL)
 			t.Setenv("TELEGRAM_LOGIN_BOT_TOKEN", tc.login)
 			_, err := Load()
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -89,6 +93,43 @@ func TestLoadPA_Enabled(t *testing.T) {
 				if len(secret) > 12 && strings.Contains(err.Error(), secret) {
 					t.Fatalf("Load() error echoes a credential: %v", err)
 				}
+			}
+		})
+	}
+}
+
+// TestLoadPA_WebhookURL: PA_WEBHOOK_URL is required when the PA is on and
+// must be the https PA webhook path with nothing an attacker could smuggle
+// into it; the getWebhookInfo monitor compares Telegram's URL against it.
+func TestLoadPA_WebhookURL(t *testing.T) {
+	enable := func(t *testing.T, u string) {
+		t.Setenv("PA_ENABLED", "true")
+		t.Setenv("PA_BOT_TOKEN", testPABotToken)
+		t.Setenv("PA_WEBHOOK_SECRET", testPASecret)
+		t.Setenv("TELEGRAM_LOGIN_BOT_TOKEN", testLoginBotToken)
+		t.Setenv("PA_WEBHOOK_URL", u)
+	}
+	enable(t, testPAWebhookURL)
+	cfg, err := Load()
+	if err != nil || cfg.PAWebhookURL != testPAWebhookURL {
+		t.Fatalf("url=%q err=%v", cfg.PAWebhookURL, err)
+	}
+	for _, bad := range []string{
+		"",
+		"http://pa.example/pa/bot/webhook",
+		"https:///pa/bot/webhook",
+		"https://user:pw@pa.example/pa/bot/webhook",
+		"https://pa.example/pa/bot/webhook?x=1",
+		"https://pa.example/pa/bot/webhook?",
+		"https://pa.example/pa/bot/webhook#f",
+		"https://pa.example/other",
+		"pa.example/pa/bot/webhook",
+	} {
+		t.Run(bad, func(t *testing.T) {
+			enable(t, bad)
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), "PA_WEBHOOK_URL") {
+				t.Fatalf("Load() = %v, want a PA_WEBHOOK_URL refusal", err)
 			}
 		})
 	}

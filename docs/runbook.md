@@ -3929,6 +3929,116 @@ answers `500 assistant instructions unavailable` for a fork account means
 the pinned fork version or its base snapshot is missing: the owner
 reinstalls a version that exists (`list_assistants` shows them).
 
+## Personal Assistant bot webhook and outbox (issue #1313 slice d2)
+
+Everything here exists only while `PA_ENABLED=true`. With the PA off the
+monitor does not start, its gauges are never created and no alert below
+can fire. The rules are in `deploy/alerts/mctl-telegram.rules.yaml`
+(group `mctl-telegram-pa`) and are not deployed yet: porting them to the
+mctl-gitops vm-rules is part of enabling the PA (#1318).
+
+- **Monitor.** Every 5 minutes the server reads `getWebhookInfo` with
+  `PA_BOT_TOKEN` and compares it with `PA_WEBHOOK_URL` and the expected
+  `allowed_updates` (`message`, `callback_query`). It exports
+  `mctl_pa_webhook_info_up` (1 readable, 0 not), `mctl_pa_webhook_info_ok`,
+  `mctl_pa_webhook_problem{problem}`, `mctl_pa_webhook_pending_updates`,
+  `mctl_pa_webhook_info_last_error_timestamp_seconds` and
+  `mctl_pa_webhook_info_last_success_timestamp_seconds`. A failed read sets
+  `up` and `ok` to 0 and withdraws the per-state series: an unreadable
+  webhook is an unknown state, never a healthy one. Logs name problems and
+  counts only, never the URL Telegram reports or its error text.
+- **setWebhook.** The server never registers the webhook. `pa.SetWebhook`
+  exists for the operator step of #1318 and nothing in the server calls it
+  (a guard test enforces that).
+- **Outbox.** Every PA reply and notice (budget hold, run failed, request
+  dropped, answer too long) is written to `pa_outbox` in the transaction of
+  the state change that owes it. Delivery starts after the request that
+  wrote the row has been answered, on a context of its own, so neither a
+  slow Telegram nor a worker that hangs up delays or cuts it off; the
+  background pass (every 15s) retries whatever is left due. Each row is
+  claimed right before its own send, so its 2-minute lease covers one send.
+  Send-once: only a failure known to have left the message undelivered is
+  retried (a failure before the request was written, or an explicit Bot API
+  429 or 5xx, honouring `retry_after`), with backoff (15s doubling, at most
+  10m, 8 attempts). A Bot API 4xx other than 429 (the user blocked the bot,
+  chat not found) fails the row at once and is counted `refused`. Anything
+  that may have reached Telegram (a connection dropped after the request
+  was written, an unreadable or malformed answer) makes the row `unknown`,
+  and so does a row still `sending` when its lease runs out: it is never
+  sent again, because a duplicate is worse than a gap. A long reply goes out
+  in parts and `sent_parts` records each part Telegram accepted, so a retry
+  resumes after them. A reply whose conversation was closed, forgotten or
+  withdrawn before it went out is dropped with it; `/forget` also deletes
+  the principal's pending notices.
+
+<a id="mctlpawebhookinfounreadable"></a>
+### MctlPAWebhookInfoUnreadable
+
+More than a fifth of the checks in the last 30 minutes were unreadable
+(`avg_over_time(mctl_pa_webhook_info_up[30m]) < 0.8` for 5 minutes),
+in a row or on and off. The server log has
+`pa webhook info unreadable` with the reason (`refused (HTTP 401)` means
+the bot token is revoked; a transport error means egress to
+api.telegram.org is failing). Until it reads again the webhook state is
+unknown: check it by hand with `getWebhookInfo` from a trusted machine.
+
+<a id="mctlpawebhookinfostale"></a>
+### MctlPAWebhookInfoStale
+
+No readable check for 30 minutes. If `up` is 0 this follows the alert
+above. If `up` is 1, the monitor goroutine stopped: restart the pod and
+open an issue.
+
+<a id="mctlpawebhookmisconfigured"></a>
+### MctlPAWebhookMisconfigured
+
+`url_changed`: Telegram delivers PA updates somewhere other than
+`PA_WEBHOOK_URL`. Treat it as a possible token compromise: rotate
+`PA_BOT_TOKEN` with BotFather, then re-register the webhook (#1318).
+`allowed_updates_changed`: the webhook was registered with another update
+list; re-register it with the operator helper. The alert takes the
+maximum over 15 minutes, so a URL that flips between checks keeps it
+firing.
+
+<a id="mctlpawebhooksecretrejected"></a>
+### MctlPAWebhookSecretRejected
+
+Telegram's latest delivery error is our 401: the `secret_token` it was
+given differs from `PA_WEBHOOK_SECRET` (usually a secret rotated in Vault
+without re-registering the webhook). Re-register with the current secret;
+`mctl_pa_updates_total{outcome="bad_secret"}` rises at the same time.
+
+<a id="mctlpawebhookdeliveryerrors"></a>
+### MctlPAWebhookDeliveryErrors
+
+Most checks in 30 minutes saw a new delivery error. Check the ingress and
+the pod; `mctl_pa_updates_total` by outcome shows what the webhook answers.
+
+<a id="mctlpawebhookbacklog"></a>
+### MctlPAWebhookBacklog
+
+More than 100 updates are waiting at Telegram for 15 minutes. Usually it
+follows delivery errors; once they stop, Telegram drains the queue.
+
+<a id="mctlpawebhookbadsecretburst"></a>
+### MctlPAWebhookBadSecretBurst
+
+More than 20 requests without the right secret in 15 minutes. Without
+`MctlPAWebhookSecretRejected` it is someone probing the public URL; the
+webhook refuses them before reading the body.
+
+<a id="mctlpaoutboxundelivered"></a>
+### MctlPAOutboxUndelivered
+
+`failed`: a message used its attempts, or could not be built.
+`unknown`: a send may have reached Telegram (connection lost after the
+request went out, an unreadable answer, or the pod died mid-send) and is
+not resent; ask the principal whether it arrived if it matters. `refused`
+(a Bot API 4xx: the principal blocked the bot or deleted the chat) is
+counted but does not fire this alert. `claim_error`: `pa_outbox` could not be read; nothing was sent and
+the rows stay due. Inspect rows by principal with `Store.PAOutboxRows`;
+rows carry no message text.
+
 ## Personal Assistant catalog pin (issue #1315)
 
 The PA dispatcher compares each catalog server's live `tools/list` with the

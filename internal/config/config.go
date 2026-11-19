@@ -525,7 +525,8 @@ type Config struct {
 	ManagedBudgetUSDPerAccountMonth float64
 	// ManagedClaimNotAfter (MANAGED_CLAIM_NOT_AFTER, RFC 3339, optional) ends
 	// managed claims at that instant, so a time-boxed run stops spending without
-	// depending on anyone being there to stop it. Zero means no cutoff.
+	// depending on anyone being there to stop it. Zero means no cutoff. It
+	// ends PA claims too (PABudget; owner decision 2026-11-19).
 	ManagedClaimNotAfter      time.Time
 	ManagedBudgetUSDGlobalDay float64
 	// WorkItemTenant is the single configured mctl-api tenant every
@@ -557,6 +558,11 @@ type Config struct {
 	// X-Telegram-Bot-Api-Secret-Token on every webhook delivery
 	// (PA_WEBHOOK_SECRET). No default; read only when PAEnabled is true.
 	PAWebhookSecret string
+	// PAWebhookURL is the public URL the webhook is registered at
+	// (PA_WEBHOOK_URL): https, path /pa/bot/webhook, no userinfo, query or
+	// fragment. Required when PAEnabled; the getWebhookInfo monitor alerts
+	// when Telegram reports any other URL (T4). Read only when PAEnabled.
+	PAWebhookURL string
 	// PAConversationTTL is the PA conversation lifetime, anchored at
 	// creation (PA_CONVERSATION_TTL, default 24h, at most 24h because the
 	// consent text promises it). Read only when PAEnabled is true; an
@@ -571,7 +577,8 @@ type Config struct {
 	//   PA_MAX_CONTEXT_TOKENS (32000);
 	//   PA_BUDGET_USD_JOB / _DAY / _MONTH (0.25 / 2 / 20), the per-run
 	//   reservation and the per-principal caps. The platform-wide daily cap
-	//   is MANAGED_BUDGET_USD_GLOBAL_DAY, shared with the managed runtime.
+	//   is MANAGED_BUDGET_USD_GLOBAL_DAY, shared with the managed runtime;
+	//   PA_MIN_TURN_COST_USD (0.005), the settlement floor per model turn.
 	// Active jobs per principal (1) and tool calls per run (8) are fixed.
 	PARateMessages     int
 	PARateWindow       time.Duration
@@ -579,6 +586,17 @@ type Config struct {
 	PABudgetUSDJob     float64
 	PABudgetUSDDay     float64
 	PABudgetUSDMonth   float64
+	PAMinTurnUSD       float64
+}
+
+// PABudget is the PA run loop's budget: the PA caps, the global day shared
+// with the managed runtime, and MANAGED_CLAIM_NOT_AFTER, which ends PA
+// claims as it ends managed ones.
+func (c *Config) PABudget() jobs.Budget {
+	return jobs.Budget{
+		PerJobUSD: c.PABudgetUSDJob, PrincipalDayUSD: c.PABudgetUSDDay, PrincipalMonthUSD: c.PABudgetUSDMonth,
+		GlobalDayUSD: c.ManagedBudgetUSDGlobalDay, MinTurnUSD: c.PAMinTurnUSD, ClaimNotAfter: c.ManagedClaimNotAfter,
+	}
 }
 
 // MinPAWebhookSecretLen is the shortest PA_WEBHOOK_SECRET Load accepts.
@@ -592,6 +610,13 @@ var paBotTokenFormat = regexp.MustCompile(`^[0-9]+:[A-Za-z0-9_-]{30,}$`)
 
 // paWebhookSecretChars is Telegram's documented secret_token alphabet.
 var paWebhookSecretChars = regexp.MustCompile(`^[A-Za-z0-9_-]{1,256}$`)
+
+// ValidPAWebhookSecret reports whether s is a PA_WEBHOOK_SECRET Load
+// accepts: MinPAWebhookSecretLen to 256 characters of Telegram's
+// secret_token alphabet. pa.SetWebhook checks the same rule.
+func ValidPAWebhookSecret(s string) bool {
+	return len(s) >= MinPAWebhookSecretLen && paWebhookSecretChars.MatchString(s)
+}
 
 // loadPA reads the PA settings. With PA_ENABLED off it reads nothing else, so
 // a stray PA_BOT_TOKEN in an environment that has not enabled the PA cannot
@@ -610,8 +635,12 @@ func loadPA(c *Config) error {
 	if loginID, ok := BotIDFromToken(c.TelegramLoginBotToken); ok && loginID == paID {
 		return errors.New("PA_BOT_TOKEN must belong to a different bot than TELEGRAM_LOGIN_BOT_TOKEN")
 	}
-	if len(c.PAWebhookSecret) < MinPAWebhookSecretLen || !paWebhookSecretChars.MatchString(c.PAWebhookSecret) {
+	if !ValidPAWebhookSecret(c.PAWebhookSecret) {
 		return fmt.Errorf("PA_ENABLED=true requires PA_WEBHOOK_SECRET of %d-256 characters from [A-Za-z0-9_-]", MinPAWebhookSecretLen)
+	}
+	c.PAWebhookURL = os.Getenv("PA_WEBHOOK_URL")
+	if err := validatePAWebhookURL(c.PAWebhookURL); err != nil {
+		return fmt.Errorf("PA_ENABLED=true requires PA_WEBHOOK_URL: %w", err)
 	}
 	c.PAConversationTTL = 24 * time.Hour
 	if v := os.Getenv("PA_CONVERSATION_TTL"); v != "" {
@@ -628,6 +657,7 @@ func loadPALimits(c *Config) error {
 	c.PARateMessages, c.PARateWindow = jobs.DefaultRateMessages, jobs.DefaultRateWindow
 	c.PAMaxContextTokens = jobs.DefaultMaxContextTokens
 	c.PABudgetUSDJob, c.PABudgetUSDDay, c.PABudgetUSDMonth = jobs.DefaultBudgetJobUSD, jobs.DefaultBudgetDayUSD, jobs.DefaultBudgetMonthUSD
+	c.PAMinTurnUSD = jobs.DefaultMinTurnUSD
 	for _, iv := range []struct {
 		key string
 		dst *int
@@ -650,7 +680,8 @@ func loadPALimits(c *Config) error {
 	for _, fv := range []struct {
 		key string
 		dst *float64
-	}{{"PA_BUDGET_USD_JOB", &c.PABudgetUSDJob}, {"PA_BUDGET_USD_DAY", &c.PABudgetUSDDay}, {"PA_BUDGET_USD_MONTH", &c.PABudgetUSDMonth}} {
+	}{{"PA_BUDGET_USD_JOB", &c.PABudgetUSDJob}, {"PA_BUDGET_USD_DAY", &c.PABudgetUSDDay}, {"PA_BUDGET_USD_MONTH", &c.PABudgetUSDMonth},
+		{"PA_MIN_TURN_COST_USD", &c.PAMinTurnUSD}} {
 		if v := os.Getenv(fv.key); v != "" {
 			f, err := strconv.ParseFloat(v, 64)
 			if err != nil || !(f > 0) || math.IsInf(f, 0) {
@@ -664,9 +695,13 @@ func loadPALimits(c *Config) error {
 	}
 	// The global day window is MANAGED_BUDGET_USD_GLOBAL_DAY, shared with
 	// the managed runtime; a PA job dearer than it would be held forever.
-	// MANAGED_CLAIM_NOT_AFTER is managed-only: PA_ENABLED is the PA switch.
 	if c.PABudgetUSDJob > c.ManagedBudgetUSDGlobalDay {
 		return errors.New("PA_BUDGET_USD_JOB must not exceed MANAGED_BUDGET_USD_GLOBAL_DAY")
+	}
+	// The floor of a run at its turn cap (one turn per tool call plus the
+	// answer) must fit the reservation it is settled against.
+	if c.PAMinTurnUSD*float64(jobs.DefaultMaxToolCalls+1) > c.PABudgetUSDJob+1e-9 {
+		return fmt.Errorf("PA_MIN_TURN_COST_USD x %d turns must not exceed PA_BUDGET_USD_JOB", jobs.DefaultMaxToolCalls+1)
 	}
 	return nil
 }
@@ -1505,5 +1540,35 @@ func loadK8sSA(c *Config) error {
 		return fmt.Errorf("MCP_K8S_SA_TELEGRAM_ID %d must be listed in CANARY_TELEGRAM_IDS", id)
 	}
 	c.K8sSATelegramID = id
+	return nil
+}
+
+// PAWebhookPath is pa.WebhookPath. config does not import internal/pa
+// (internal/pa imports config for ValidPAWebhookSecret);
+// pa.TestWebhookPathMatchesConfig keeps the two equal.
+const PAWebhookPath = "/pa/bot/webhook"
+
+// validatePAWebhookURL accepts an absolute https URL with a host, the PA
+// webhook path, and no userinfo, query or fragment. The value is never
+// echoed in the error.
+func validatePAWebhookURL(raw string) error {
+	if raw == "" {
+		return errors.New("not set")
+	}
+	u, err := url.Parse(raw)
+	switch {
+	case err != nil:
+		return errors.New("not a url")
+	case u.Scheme != "https":
+		return errors.New("must be https")
+	case u.Hostname() == "":
+		return errors.New("no host")
+	case u.User != nil:
+		return errors.New("userinfo is not allowed")
+	case u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.ContainsAny(raw, "?#"):
+		return errors.New("query and fragment are not allowed")
+	case u.Path != PAWebhookPath:
+		return errors.New("path must be " + PAWebhookPath)
+	}
 	return nil
 }

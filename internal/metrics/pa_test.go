@@ -2,44 +2,104 @@ package metrics
 
 import (
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
-// An observed listing sets drift and clears unknown; an unobserved one
-// removes the drift series instead of reporting 0, and a later observation
-// brings it back. Denied counts of a cleared reason drop to 0.
-func TestPAPinGauges(t *testing.T) {
+func paFamilies(t *testing.T, r *Registry) map[string]int {
+	t.Helper()
+	mfs, err := r.Prometheus.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]int{}
+	for _, mf := range mfs {
+		out[mf.GetName()] = len(mf.GetMetric())
+	}
+	return out
+}
+
+// TestPAWebhookGauges_AbsentUntilStarted: with the PA off nothing exports
+// a webhook state, so no "unreadable" alert can fire where there is no
+// webhook.
+func TestPAWebhookGauges_AbsentUntilStarted(t *testing.T) {
 	r := New()
-	reasons := []string{"not_pinned", "changed_description"}
-	r.PAPinObserved("tg", true, map[string]int{"not_pinned": 3, "changed_description": 1}, reasons)
-	if testutil.ToFloat64(r.PAPinDrift.WithLabelValues("tg")) != 1 ||
-		testutil.ToFloat64(r.PAPinListingUnknown.WithLabelValues("tg")) != 0 ||
-		testutil.ToFloat64(r.PAPinDeniedTools.WithLabelValues("tg", "changed_description")) != 1 {
-		t.Fatal("drift observation not recorded")
+	f := paFamilies(t, r)
+	for _, name := range []string{
+		"mctl_pa_webhook_info_up", "mctl_pa_webhook_info_ok",
+		"mctl_pa_webhook_info_last_success_timestamp_seconds", "mctl_pa_webhook_problem",
+	} {
+		if f[name] != 0 {
+			t.Fatalf("%s exported before the monitor started", name)
+		}
 	}
-	r.PAPinUnknown("tg")
-	if n := testutil.CollectAndCount(r.PAPinDrift); n != 0 {
-		t.Fatalf("drift series kept while unknown: %d", n)
+	r.StartPAWebhookMonitor()
+	f = paFamilies(t, r)
+	if f["mctl_pa_webhook_info_up"] != 1 || f["mctl_pa_webhook_info_last_success_timestamp_seconds"] != 1 {
+		t.Fatalf("after start: %v", f)
 	}
-	if n := testutil.CollectAndCount(r.PAPinDeniedTools); n != 0 {
-		t.Fatalf("denied-tool series kept while unknown: %d", n)
+	if v := testutil.ToFloat64(r.pa.up.WithLabelValues()); v != 0 {
+		t.Fatalf("up before the first read = %v, want 0", v)
 	}
-	if testutil.ToFloat64(r.PAPinListingUnknown.WithLabelValues("tg")) != 1 {
-		t.Fatal("unknown not set")
+}
+
+// TestPAWebhookGauges_UnreadableIsNotHealthy: a failed read sets up and ok
+// to 0 and withdraws the per-state series; it never leaves the last
+// healthy values to be read as current (I9).
+func TestPAWebhookGauges_UnreadableIsNotHealthy(t *testing.T) {
+	r := New()
+	r.StartPAWebhookMonitor()
+	at := time.Unix(1_800_000_000, 0)
+	r.ObservePAWebhookInfo(true, nil, 3, 0, at)
+	if testutil.ToFloat64(r.pa.ok.WithLabelValues()) != 1 || testutil.ToFloat64(r.pa.up.WithLabelValues()) != 1 {
+		t.Fatal("healthy read not exported")
 	}
-	r.PAPinObserved("tg", false, map[string]int{"not_pinned": 3}, reasons)
-	if testutil.ToFloat64(r.PAPinDrift.WithLabelValues("tg")) != 0 ||
-		testutil.ToFloat64(r.PAPinListingUnknown.WithLabelValues("tg")) != 0 ||
-		testutil.ToFloat64(r.PAPinDeniedTools.WithLabelValues("tg", "changed_description")) != 0 {
-		t.Fatal("recovery not recorded")
+	if testutil.ToFloat64(r.pa.pending.WithLabelValues()) != 3 || testutil.ToFloat64(r.pa.lastOK.WithLabelValues()) != float64(at.Unix()) {
+		t.Fatal("state not exported")
 	}
-	r.CountPAListingFailure("tg", "unauthorized")
-	if testutil.ToFloat64(r.PAPinListingFailures.WithLabelValues("tg", "unauthorized")) != 1 {
-		t.Fatal("listing failure not counted")
+	r.ObservePAWebhookInfo(false, nil, 0, 0, at.Add(time.Minute))
+	if testutil.ToFloat64(r.pa.ok.WithLabelValues()) != 0 || testutil.ToFloat64(r.pa.up.WithLabelValues()) != 0 {
+		t.Fatal("unreadable read left ok or up at 1")
 	}
-	r.CountPADispatch("tg", "refused", "flag_off")
-	if testutil.ToFloat64(r.PADispatchTotal.WithLabelValues("tg", "refused", "flag_off")) != 1 {
-		t.Fatal("dispatch not counted")
+	f := paFamilies(t, r)
+	for _, name := range []string{"mctl_pa_webhook_problem", "mctl_pa_webhook_pending_updates", "mctl_pa_webhook_info_last_error_timestamp_seconds"} {
+		if f[name] != 0 {
+			t.Fatalf("%s still exported while unreadable", name)
+		}
+	}
+	// The last success keeps its time, so staleness is measurable.
+	if testutil.ToFloat64(r.pa.lastOK.WithLabelValues()) != float64(at.Unix()) {
+		t.Fatal("last success moved on an unreadable read")
+	}
+	if testutil.ToFloat64(r.pa.checks.WithLabelValues("unreadable")) != 1 {
+		t.Fatal("unreadable check not counted")
+	}
+}
+
+func TestPAWebhookGauges_Problems(t *testing.T) {
+	r := New()
+	r.StartPAWebhookMonitor()
+	r.ObservePAWebhookInfo(true, []string{"url_changed"}, 0, 0, time.Unix(1_800_000_000, 0))
+	if testutil.ToFloat64(r.pa.ok.WithLabelValues()) != 0 {
+		t.Fatal("a problem left ok at 1")
+	}
+	for _, p := range PAWebhookProblems {
+		want := 0.0
+		if p == "url_changed" {
+			want = 1
+		}
+		if got := testutil.ToFloat64(r.pa.problem.WithLabelValues(p)); got != want {
+			t.Fatalf("problem %s = %v, want %v", p, got, want)
+		}
+	}
+}
+
+// TestPACounters_PreCreated: every outcome series exists at zero, so the
+// first event after a restart is visible to increase().
+func TestPACounters_PreCreated(t *testing.T) {
+	f := paFamilies(t, New())
+	if f["mctl_pa_outbox_total"] != len(PAOutboxOutcomes) || f["mctl_pa_updates_total"] != len(PAUpdateOutcomes) {
+		t.Fatalf("families %v", f)
 	}
 }

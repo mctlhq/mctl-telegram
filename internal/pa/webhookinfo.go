@@ -21,11 +21,15 @@ var AllowedUpdates = []string{"message", "callback_query"}
 
 // WebhookInfo is the subset of getWebhookInfo the health check reads.
 type WebhookInfo struct {
-	URL                  string   `json:"url"`
-	HasCustomCertificate bool     `json:"has_custom_certificate"`
-	PendingUpdateCount   int      `json:"pending_update_count"`
-	LastErrorDate        int64    `json:"last_error_date"`
-	AllowedUpdates       []string `json:"allowed_updates"`
+	URL                  string `json:"url"`
+	HasCustomCertificate bool   `json:"has_custom_certificate"`
+	PendingUpdateCount   int    `json:"pending_update_count"`
+	LastErrorDate        int64  `json:"last_error_date"`
+	// LastErrorMessage is Telegram's text for the last delivery error. It
+	// is classified (see CheckWebhook), never logged or exported.
+	LastErrorMessage string   `json:"last_error_message"`
+	MaxConnections   int      `json:"max_connections"`
+	AllowedUpdates   []string `json:"allowed_updates"`
 }
 
 // Webhook problems reported by CheckWebhook.
@@ -33,7 +37,18 @@ const (
 	ProblemURLChanged      = "url_changed"
 	ProblemAllowedUpdates  = "allowed_updates_changed"
 	ProblemLastErrorRecent = "delivery_error"
+	// ProblemSecretRejected: the latest delivery error is our webhook's 401,
+	// which it answers only to a missing or wrong secret token. Telegram
+	// does not report the secret it sends, so a secret that differs from
+	// PA_WEBHOOK_SECRET is seen only this way (and in the bad_secret count).
+	ProblemSecretRejected = "secret_rejected"
 )
+
+// WebhookProblems lists every problem CheckWebhook can report: a closed
+// set, so it can be a metric label.
+func WebhookProblems() []string {
+	return []string{ProblemURLChanged, ProblemAllowedUpdates, ProblemLastErrorRecent, ProblemSecretRejected}
+}
 
 // botAPITimeout bounds one Bot API call made by this package. A variable
 // only so a test can shorten it.
@@ -123,6 +138,15 @@ func CheckWebhook(info WebhookInfo, expectedURL string, errorsSince time.Time) [
 	}
 	if info.LastErrorDate != 0 && !time.Unix(info.LastErrorDate, 0).Before(errorsSince) {
 		problems = append(problems, ProblemLastErrorRecent)
+		if secretRejected(info.LastErrorMessage) {
+			problems = append(problems, ProblemSecretRejected)
+		}
 	}
 	return problems
+}
+
+// secretRejected reports a delivery error that is our 401 (Telegram words
+// it "Wrong response from the webhook: 401 Unauthorized").
+func secretRejected(msg string) bool {
+	return strings.Contains(msg, " 401") || strings.HasPrefix(msg, "401")
 }

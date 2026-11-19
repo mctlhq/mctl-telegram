@@ -42,23 +42,20 @@ func requireInOrder(t *testing.T, sec string, markers []string) {
 	}
 }
 
-// Every env var the worker reads in poll mode is a table cell in
+// Every env var the worker reads (any mode, any file) is a table cell in
 // agent-worker.md.
 func TestAgentWorkerEnvTableComplete(t *testing.T) {
-	src, err := os.ReadFile("../cmd/agent-worker/main.go")
-	if err != nil {
-		t.Fatal(err)
-	}
+	src := readGoSources(t, "../cmd/agent-worker")
 	re := regexp.MustCompile(`(?:requireEnv|requiredEnvFloat|envFloat|envBoolStrict|envPositiveInt|envDuration|envConcurrency|os\.Getenv)\("([A-Z][A-Z0-9_]+)"`)
 	names := map[string]bool{}
-	for _, m := range re.FindAllStringSubmatch(string(src), -1) {
+	for _, m := range re.FindAllStringSubmatch(src, -1) {
 		if strings.HasPrefix(m[1], "AGENT_JOB_") {
 			continue
 		}
 		names[m[1]] = true
 	}
 	if len(names) < 15 {
-		t.Fatalf("found only %d env names in main.go; the scan is broken", len(names))
+		t.Fatalf("found only %d env names in cmd/agent-worker; the scan is broken", len(names))
 	}
 	doc := readDoc(t, "agent-worker.md")
 	for name := range names {

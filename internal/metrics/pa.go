@@ -1,112 +1,154 @@
-// Copyright 2025 MCTL Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package metrics
 
-import "github.com/prometheus/client_golang/prometheus"
+// Personal Assistant bot metrics (issue #1313 slice d2): webhook ingress,
+// the outbox, and the getWebhookInfo monitor (threat model T4).
 
-// Personal Assistant connector dispatch metrics (#1315). Every label value
-// comes from a closed set in internal/pa/connector: catalog server names,
-// deny reasons, dispatch statuses and refusal reasons.
+import (
+	"time"
 
-// paMetrics are the PA collectors, embedded in Registry.
-type paMetrics struct {
-	// Listings are read per connection; the dispatcher aggregates the
-	// fresh observations of every connection of a server before it sets
-	// these gauges, so one connection cannot hide another's.
-	//
-	// PAPinDrift is 1 while any fresh observed tools/list of a server
-	// differs from the committed pin for at least one pinned tool (missing,
-	// changed schema, description or annotations), 0 when they all match.
-	// It has no series while no listing of the server could be observed: a
-	// failed read is not "no drift" (I9); PAPinListingUnknown says so.
-	PAPinDrift *prometheus.GaugeVec
-	// PAPinListingUnknown is 1 while no fresh tools/list of a server could
-	// be read or parsed, 0 once one was.
-	PAPinListingUnknown *prometheus.GaugeVec
-	// PAPinDeniedTools counts, per server and deny reason, the tools of the
-	// fresh observed listings the pin denies (the largest count of any
-	// connection). not_pinned is expected (tg lists its write tools too)
-	// and is not drift. No series while the listing is unknown.
-	PAPinDeniedTools *prometheus.GaugeVec
-	// PAPinListingFailures counts failed tools/list reads by server and
-	// reason: unauthorized (the server refused one connection's token, a
-	// problem of that connection, not of the listing) or unavailable.
-	PAPinListingFailures *prometheus.CounterVec
-	// PADispatchTotal counts dispatcher outcomes: an executed call's status
-	// (reason "") or a refusal's reason (status "refused").
-	PADispatchTotal *prometheus.CounterVec
+	"github.com/prometheus/client_golang/prometheus"
+)
+
+// PAWebhookProblems is pa.WebhookProblems(): the closed problem label set
+// (TestPAWebhookProblemLabels in internal/pa keeps them equal).
+var PAWebhookProblems = []string{"url_changed", "allowed_updates_changed", "delivery_error", "secret_rejected"}
+
+// PAOutboxOutcomes is the closed outcome label set of mctl_pa_outbox_total
+// (the pa.OutboxOutcome* constants).
+var PAOutboxOutcomes = []string{"sent", "retry", "failed", "refused", "dropped", "unknown", "stale", "claim_error"}
+
+// PAUpdateOutcomes is the closed outcome label set of
+// mctl_pa_updates_total (the pa.Outcome* constants of the webhook).
+var PAUpdateOutcomes = []string{
+	"accepted", "duplicate", "malformed", "unsupported_kind", "business", "not_private",
+	"chat_from_mismatch", "sender_chat", "via_bot", "no_sender", "bot_sender",
+	"inline_callback", "callback_no_data", "game_callback",
+	"bad_secret", "bad_method", "too_large", "read_error", "dedup_error", "handler_error", "gave_up",
 }
 
-func newPAMetrics(reg *prometheus.Registry) paMetrics {
-	m := paMetrics{
-		PAPinDrift: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "mctl_pa_pin_drift",
-			Help: "1 while a PA catalog server's live tools/list differs from the committed pin for a pinned tool, 0 when it matches; absent while the listing is unknown.",
-		}, []string{"server"}),
-		PAPinListingUnknown: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "mctl_pa_pin_listing_unknown",
-			Help: "1 while the last tools/list of a PA catalog server could not be read or parsed.",
-		}, []string{"server"}),
-		PAPinDeniedTools: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "mctl_pa_pin_denied_tools",
-			Help: "Tools of the last observed PA catalog listing the pin denies, by server and deny reason.",
-		}, []string{"server", "reason"}),
-		PAPinListingFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "mctl_pa_pin_listing_failures_total",
-			Help: "Failed PA catalog tools/list reads, by server and reason (unauthorized, unavailable, invalid).",
-		}, []string{"server", "reason"}),
-		PADispatchTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "mctl_pa_dispatch_total",
-			Help: "PA connector dispatcher outcomes, by server, status and refusal reason.",
-		}, []string{"server", "status", "reason"}),
+type paCollectors struct {
+	updates *prometheus.CounterVec
+	outbox  *prometheus.CounterVec
+	checks  *prometheus.CounterVec
+	// up, ok and lastOK have no labels but are vectors so that they do
+	// not exist at all until the monitor starts: with PA_ENABLED off there
+	// is no webhook to watch, and a 0 would read as "unreadable".
+	up      *prometheus.GaugeVec
+	ok      *prometheus.GaugeVec
+	lastOK  *prometheus.GaugeVec
+	problem *prometheus.GaugeVec
+	pending *prometheus.GaugeVec
+	lastErr *prometheus.GaugeVec
+}
+
+func newPACollectors() *paCollectors {
+	c := &paCollectors{
+		updates: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "mctl_pa_updates_total",
+			Help: "PA webhook deliveries by outcome. bad_secret counts requests without the PA_WEBHOOK_SECRET token.",
+		}, []string{"outcome"}),
+		outbox: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "mctl_pa_outbox_total",
+			Help: "PA outbox rows by delivery outcome. unknown: a row outlived its send lease and is not resent; claim_error: the outbox could not be read.",
+		}, []string{"outcome"}),
+		checks: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "mctl_pa_webhook_info_checks_total",
+			Help: "getWebhookInfo checks by result: ok, problem or unreadable.",
+		}, []string{"result"}),
+		up: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "mctl_pa_webhook_info_up",
+			Help: "1 when the last getWebhookInfo read succeeded, 0 when it failed (state unknown, never healthy). Absent while the monitor is not running.",
+		}, nil),
+		ok: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "mctl_pa_webhook_info_ok",
+			Help: "1 when the last check read the webhook and found no problem; 0 on a problem or an unreadable check.",
+		}, nil),
+		lastOK: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "mctl_pa_webhook_info_last_success_timestamp_seconds",
+			Help: "Unix time of the last readable getWebhookInfo check; 0 from the monitor start until the first one.",
+		}, nil),
+		problem: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "mctl_pa_webhook_problem",
+			Help: "1 when the last readable check found the problem, else 0. Absent while the webhook is unreadable.",
+		}, []string{"problem"}),
+		pending: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "mctl_pa_webhook_pending_updates",
+			Help: "getWebhookInfo pending_update_count. Absent while the webhook is unreadable.",
+		}, nil),
+		lastErr: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "mctl_pa_webhook_info_last_error_timestamp_seconds",
+			Help: "getWebhookInfo last_error_date (0: none). Absent while the webhook is unreadable.",
+		}, nil),
 	}
-	reg.MustRegister(m.PAPinDrift, m.PAPinListingUnknown, m.PAPinDeniedTools, m.PAPinListingFailures, m.PADispatchTotal)
-	return m
-}
-
-// PAPinObserved records a successfully read listing of server: drift says
-// whether any pinned tool is denied, denied counts denied tools by reason.
-// Reasons absent from denied are set to 0, so a cleared reason does not
-// keep its last count.
-func (r *Registry) PAPinObserved(server string, drift bool, denied map[string]int, reasons []string) {
-	v := 0.0
-	if drift {
-		v = 1
+	for _, o := range PAUpdateOutcomes {
+		c.updates.WithLabelValues(o).Add(0)
 	}
-	r.PAPinDrift.WithLabelValues(server).Set(v)
-	r.PAPinListingUnknown.WithLabelValues(server).Set(0)
-	for _, reason := range reasons {
-		r.PAPinDeniedTools.WithLabelValues(server, reason).Set(float64(denied[reason]))
+	for _, o := range PAOutboxOutcomes {
+		c.outbox.WithLabelValues(o).Add(0)
 	}
+	for _, r := range []string{"ok", "problem", "unreadable"} {
+		c.checks.WithLabelValues(r).Add(0)
+	}
+	return c
 }
 
-// PAPinUnknown records that server's listing could not be observed. The
-// drift and denied-tool series are removed rather than set to 0 or left at
-// their last counts.
-func (r *Registry) PAPinUnknown(server string) {
-	r.PAPinDrift.DeleteLabelValues(server)
-	r.PAPinDeniedTools.DeletePartialMatch(prometheus.Labels{"server": server})
-	r.PAPinListingUnknown.WithLabelValues(server).Set(1)
+func (c *paCollectors) collectors() []prometheus.Collector {
+	return []prometheus.Collector{c.updates, c.outbox, c.checks, c.up, c.ok, c.lastOK, c.problem, c.pending, c.lastErr}
 }
 
-// CountPAListingFailure counts one failed tools/list read.
-func (r *Registry) CountPAListingFailure(server, reason string) {
-	r.PAPinListingFailures.WithLabelValues(server, reason).Inc()
+// CountPAUpdate counts one webhook delivery. Satisfies pa.Counter.
+func (r *Registry) CountPAUpdate(outcome string) {
+	r.pa.updates.WithLabelValues(outcome).Inc()
 }
 
-// CountPADispatch counts one dispatcher outcome.
-func (r *Registry) CountPADispatch(server, status, reason string) {
-	r.PADispatchTotal.WithLabelValues(server, status, reason).Inc()
+// CountPAOutbox counts one outbox outcome. Satisfies pa.OutboxCounter.
+func (r *Registry) CountPAOutbox(outcome string) {
+	r.pa.outbox.WithLabelValues(outcome).Inc()
+}
+
+// ObservePAWebhookInfo exports one getWebhookInfo check. Satisfies
+// pa.WebhookGauges. An unreadable check withdraws the per-state series
+// rather than leaving the last values (or zeros) to read as current.
+func (r *Registry) ObservePAWebhookInfo(readable bool, problems []string, pendingUpdates int, lastErrorUnix int64, at time.Time) {
+	c := r.pa
+	if !readable {
+		c.checks.WithLabelValues("unreadable").Inc()
+		c.up.WithLabelValues().Set(0)
+		c.ok.WithLabelValues().Set(0)
+		c.problem.Reset()
+		c.pending.Reset()
+		c.lastErr.Reset()
+		return
+	}
+	c.up.WithLabelValues().Set(1)
+	c.lastOK.WithLabelValues().Set(float64(at.Unix()))
+	c.pending.WithLabelValues().Set(float64(pendingUpdates))
+	c.lastErr.WithLabelValues().Set(float64(lastErrorUnix))
+	found := map[string]bool{}
+	for _, p := range problems {
+		found[p] = true
+	}
+	for _, p := range PAWebhookProblems {
+		v := 0.0
+		if found[p] {
+			v = 1
+		}
+		c.problem.WithLabelValues(p).Set(v)
+	}
+	if len(problems) > 0 {
+		c.checks.WithLabelValues("problem").Inc()
+		c.ok.WithLabelValues().Set(0)
+		return
+	}
+	c.checks.WithLabelValues("ok").Inc()
+	c.ok.WithLabelValues().Set(1)
+}
+
+// StartPAWebhookMonitor marks the monitor as running: the last-success
+// timestamp exists (at 0) from now on, so a monitor that never reads the
+// webhook is visibly stale instead of absent.
+func (r *Registry) StartPAWebhookMonitor() {
+	r.pa.lastOK.WithLabelValues().Set(0)
+	r.pa.up.WithLabelValues().Set(0)
+	r.pa.ok.WithLabelValues().Set(0)
 }

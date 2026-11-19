@@ -2,7 +2,6 @@ package docs
 
 import (
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -42,24 +41,7 @@ func TestRunbookMetricNamesRegistered(t *testing.T) {
 		t.Fatalf("failed to read runbook.md: %v", err)
 	}
 
-	// Every non-test source file of the metrics package registers series
-	// (metrics.go, pa.go, ...).
-	sources, err := filepath.Glob("../internal/metrics/*.go")
-	if err != nil || len(sources) == 0 {
-		t.Fatalf("failed to list internal/metrics sources: %v", err)
-	}
-	var metricsBuf strings.Builder
-	for _, src := range sources {
-		if strings.HasSuffix(src, "_test.go") {
-			continue
-		}
-		data, err := os.ReadFile(src)
-		if err != nil {
-			t.Fatalf("failed to read %s: %v", src, err)
-		}
-		metricsBuf.Write(data)
-	}
-	metricsSource := metricsBuf.String()
+	metricsSource := readGoSources(t, "../internal/metrics")
 
 	re := regexp.MustCompile(`mctl_[a-z_]+`)
 	names := re.FindAllString(string(runbookData), -1)
@@ -93,4 +75,31 @@ func baseSeriesName(name string) string {
 		}
 	}
 	return name
+}
+
+// readGoSources concatenates the non-test Go files of dir, so a metric or
+// env name is found whichever file of the package registers or reads it.
+func readGoSources(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	var b strings.Builder
+	for _, e := range entries {
+		n := e.Name()
+		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(dir + "/" + n)
+		if err != nil {
+			t.Fatalf("read %s/%s: %v", dir, n, err)
+		}
+		b.Write(data)
+		b.WriteByte('\n')
+	}
+	if b.Len() == 0 {
+		t.Fatalf("no Go sources in %s", dir)
+	}
+	return b.String()
 }

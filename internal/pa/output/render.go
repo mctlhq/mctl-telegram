@@ -54,6 +54,12 @@ type Text struct {
 // String returns the text exactly as it will be sent, parts joined.
 func (t Text) String() string { return strings.Join(t.parts, "") }
 
+// Parts returns how many messages the text is sent as.
+func (t Text) Parts() int { return len(t.parts) }
+
+// Part returns message i of the text, exactly as it will be sent.
+func (t Text) Part(i int) string { return t.parts[i] }
+
 // ServerText wraps a server-authored template. It skips Render, since the
 // server wrote it, but it is still sent through Sender with previews
 // disabled and no parse mode.
