@@ -113,7 +113,8 @@ func (s *Store) broadcastFacts(ctx context.Context, now time.Time, onlyUser int6
 		`SELECT u.id, u.telegram_login_id, u.access_tier, u.identity_captured_at, u.last_seen_at, r.state
 		   FROM users u
 		   LEFT JOIN client_bot_reachability r ON r.user_id = u.id
-		  WHERE u.telegram_login_id IS NOT NULL`+filter+`
+		  WHERE u.telegram_login_id IS NOT NULL
+		    AND u.provider <> '`+PAProvider+`'`+filter+`
 		  ORDER BY u.id`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("broadcast facts: %w", err)

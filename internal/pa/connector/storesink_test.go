@@ -17,12 +17,14 @@ package connector
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/pa/catalog"
 )
 
 func newStore(t *testing.T) *db.Store {
@@ -204,5 +206,102 @@ func TestStoreSink_ZeroUserIDRefused(t *testing.T) {
 		ConnectionID: "conn-a", AuthorityRevision: 1, ArgsSHA256: digest(nil), Taint: TaintClean, Status: StatusDispatching}
 	if err := (StoreSink{Store: z}).Append(context.Background(), e); !errors.Is(err, ErrUnrecordable) || z.logged != 0 {
 		t.Fatalf("err = %v, logged = %d", err, z.logged)
+	}
+}
+
+// PA users row (owner decision 2026-11-19 on #1312): a principal whose only
+// contact with MCTL is a PA connection gets its users row from
+// EnsurePAUser on its first connection, marked provider "pa", and its calls
+// are audited through the same chain as anyone else's. Alice here has no
+// tg-mcp login and no telegram_accounts row.
+func TestStoreSink_PAOnlyPrincipalIsAudited(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	userID, err := store.EnsurePAUser(ctx, aliceID)
+	if err != nil {
+		t.Fatalf("EnsurePAUser: %v", err)
+	}
+	var provider string
+	if err := store.DB.QueryRowContext(ctx, `SELECT provider FROM users WHERE id = $1`, userID).Scan(&provider); err != nil {
+		t.Fatal(err)
+	}
+	if provider != db.PAProvider {
+		t.Fatalf("provider = %q, want %q", provider, db.PAProvider)
+	}
+	x := &Executor{Sink: StoreSink{Store: store}, Now: func() time.Time { return t0 }}
+	n := 0
+	dispatch := func(context.Context) (Result, error) { n++; return Result{Output: []byte("ok")}, nil }
+	if _, err := x.Execute(ctx, tgSurface(t), readCall(t, `{}`), dispatch); err != nil {
+		t.Fatalf("Execute for a PA-only principal: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("dispatches = %d, want 1", n)
+	}
+	if rows := readRows(t, store, userID); len(rows) != 2 {
+		t.Fatalf("audit rows = %d, want 2", len(rows))
+	}
+	v, err := store.VerifyAuditChain(ctx, userID)
+	if err != nil || !v.OK || v.Verified != 2 {
+		t.Fatalf("chain = %+v, %v", v, err)
+	}
+	// A second connection reuses the row.
+	again, err := store.EnsurePAUser(ctx, aliceID)
+	if err != nil || again != userID {
+		t.Fatalf("second EnsurePAUser = %d, %v; want %d", again, err, userID)
+	}
+}
+
+// aliceSurface observes the committed pin against mctl-alice's tools/list
+// snapshot (internal/pa/catalog/testdata).
+func aliceSurface(t *testing.T) *catalog.Surface {
+	t.Helper()
+	page, err := os.ReadFile(filepath.Join("..", "catalog", "testdata", "alice.tools.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin, err := catalog.LoadPin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := pin.Observe("alice", [][]byte{page}, nil, t0)
+	if s.Err() != nil {
+		t.Fatal(s.Err())
+	}
+	return s
+}
+
+// The owner-required case literally: an alice-only principal. Alice's only
+// PA connection is to the alice server, she has no tg-mcp login and no
+// telegram_accounts row, and her alice_list_devices call is audited through
+// the ADR 0003 chain under the users row EnsurePAUser created.
+func TestStoreSink_AliceOnlyPrincipalIsAudited(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	userID, err := store.EnsurePAUser(ctx, aliceID)
+	if err != nil {
+		t.Fatalf("EnsurePAUser: %v", err)
+	}
+	x := &Executor{Sink: StoreSink{Store: store}, Now: func() time.Time { return t0 }}
+	n := 0
+	dispatch := func(context.Context) (Result, error) { n++; return Result{Output: []byte("[]")}, nil }
+	call := Call{Policy: alicePolicy(t), ConnectionID: "conn-a", Tool: "alice_list_devices", Args: []byte(`{}`), Taint: TaintClean}
+	if _, err := x.Execute(ctx, aliceSurface(t), call, dispatch); err != nil {
+		t.Fatalf("Execute on the alice surface: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("dispatches = %d, want 1", n)
+	}
+	rows := readRows(t, store, userID)
+	if len(rows) != 2 {
+		t.Fatalf("audit rows = %d, want 2", len(rows))
+	}
+	for _, r := range rows {
+		if r.tool != "pa:alice/alice_list_devices" || r.callPath != AuditCallPath {
+			t.Fatalf("row %+v", r)
+		}
+	}
+	v, err := store.VerifyAuditChain(ctx, userID)
+	if err != nil || !v.OK || v.Verified != 2 {
+		t.Fatalf("chain = %+v, %v", v, err)
 	}
 }
