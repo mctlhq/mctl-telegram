@@ -1011,3 +1011,30 @@ func TestDispatch_NoCallLeftRegistered(t *testing.T) {
 		}
 	})
 }
+
+// TestDispatch_TamperedContext (I2/I10): the connections a call may use
+// come from the execution context the claim built, proven by its digest.
+// A context edited in the ledger afterwards is unreadable, never used.
+func TestDispatch_TamperedContext(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newDispatchEnv(t, s)
+		token, jobID := e.run(alice)
+		var ec string
+		if err := s.DB.QueryRow(`SELECT execution_context FROM pa_jobs WHERE id = $1`, jobID).Scan(&ec); err != nil {
+			t.Fatal(err)
+		}
+		// Bind Bob's connection instead of Alice's, keeping the JSON valid.
+		tampered := strings.Replace(ec, e.connA.ID, e.connB.ID, 1)
+		if tampered == ec {
+			t.Fatal("context does not name Alice's connection")
+		}
+		if _, err := s.DB.Exec(`UPDATE pa_jobs SET execution_context = $1 WHERE id = $2`, tampered, jobID); err != nil {
+			t.Fatal(err)
+		}
+		e.wantRefusal(e.call(token, req("tg", "list_dialogs", e.connB.ID)), http.StatusServiceUnavailable, connector.ReasonJobUnreadable, alice, 0)
+		e.noDispatch()
+		if _, bearers, _ := e.tg.snapshot(); len(bearers) != 0 {
+			t.Fatal("a token was opened")
+		}
+	})
+}
