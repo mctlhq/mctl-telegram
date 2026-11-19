@@ -486,6 +486,39 @@ func TestConversations_S1I4(t *testing.T) {
 // TestConversations_Commands: /new and /forget take effect at once, are
 // handled server-side and never stored, and a forwarded command is just
 // external text.
+// TestUserCommand_CaseInsensitive: a capitalised command (a phone
+// keyboard's "/Forget") is still the command, never text for the model.
+func TestUserCommand_CaseInsensitive(t *testing.T) {
+	for _, tc := range []struct{ text, cmd, arg string }{
+		{"/forget", CommandForget, ""},
+		{"/Forget", CommandForget, ""},
+		{"/CONSENT withdraw", CommandConsent, "withdraw"},
+		{"/Consent Withdraw", CommandConsent, "withdraw"},
+		{"/New@SomeBot", CommandNew, ""},
+		{"/NEW", CommandNew, ""},
+	} {
+		cmd, arg, ok := userCommand([]convo.Fragment{convo.NewFragment(convo.KindText, convo.ProvenanceUser, tc.text)})
+		if !ok || cmd != tc.cmd || arg != tc.arg {
+			t.Errorf("%q: (%q, %q, %v), want (%q, %q, true)", tc.text, cmd, arg, ok, tc.cmd, tc.arg)
+		}
+	}
+	if _, _, ok := userCommand([]convo.Fragment{convo.NewFragment(convo.KindText, convo.ProvenanceUser, "/Forgetful")}); ok {
+		t.Error("/Forgetful taken as a command")
+	}
+	// Through the webhook: "/Forget" deletes the state and is not stored.
+	h := newConvoHarness(t)
+	h.consent(aliceID)
+	h.text(aliceID, "one")
+	runs := len(h.runs.calls())
+	h.text(aliceID, "/Forget")
+	if got := h.replies.last(aliceID).reply; got != ReplyForgotten {
+		t.Fatalf("/Forget: reply %q, want %q", got, ReplyForgotten)
+	}
+	if h.fragments(aliceID) != 0 || len(h.runs.calls()) != runs {
+		t.Fatal("/Forget was stored or reached the run loop")
+	}
+}
+
 func TestConversations_Commands(t *testing.T) {
 	h := newConvoHarness(t)
 	h.consent(aliceID)

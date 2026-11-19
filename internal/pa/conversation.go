@@ -353,7 +353,11 @@ func userCommand(frags []convo.Fragment) (cmd, arg string, ok bool) {
 		if len(fields) == 0 {
 			return "", "", false
 		}
+		// Commands are case-insensitive, as Telegram treats them: a phone
+		// keyboard's "/Forget" must not reach the model as text. The
+		// @bot suffix is cut before folding.
 		name, _, _ := strings.Cut(fields[0], "@")
+		name = strings.ToLower(name)
 		switch name {
 		case CommandNew, CommandForget, CommandConsent:
 			if len(fields) > 1 {

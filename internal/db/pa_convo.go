@@ -77,8 +77,8 @@ func paConvoSchema(pg bool) []string {
 		// lock: a concurrent upsert of the same key waits for the holder's
 		// transaction on Postgres, and SQLite serialises writers anyway.
 		`CREATE TABLE IF NOT EXISTS pa_principal_locks (
-			principal BIGINT PRIMARY KEY,
-			locked_at_ms BIGINT NOT NULL
+			principal ` + intT + ` PRIMARY KEY,
+			locked_at_ms ` + intT + ` NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS pa_callbacks (
 			principal ` + intT + ` NOT NULL,
