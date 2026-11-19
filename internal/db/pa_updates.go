@@ -59,3 +59,43 @@ func (s *Store) AcceptPAUpdate(ctx context.Context, updateID int64, fn func(cont
 	}
 	return true, nil
 }
+
+// RecordPAUpdateFailure counts one failed handling of updateID in its own
+// transaction (the update's transaction has rolled back) and returns the
+// count so far. An error is returned as an error: a failure that could not
+// be counted must not be acknowledged (I9).
+func (s *Store) RecordPAUpdateFailure(ctx context.Context, updateID int64) (int, error) {
+	nowMS := time.Now().UnixMilli()
+	var n int
+	err := s.DB.QueryRowContext(ctx,
+		`INSERT INTO pa_update_failures(update_id, attempts, updated_at_ms) VALUES($1, 1, $2)
+		 ON CONFLICT (update_id) DO UPDATE SET attempts = pa_update_failures.attempts + 1, updated_at_ms = excluded.updated_at_ms
+		 RETURNING attempts`, updateID, nowMS).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("record pa update failure: %w", err)
+	}
+	return n, nil
+}
+
+// AckFailedPAUpdate records updateID as handled with reason as its
+// handler_error, without running anything, so Telegram stops redelivering a
+// deterministically failing update. A duplicate is not an error.
+func (s *Store) AckFailedPAUpdate(ctx context.Context, updateID int64, reason string) error {
+	if reason == "" {
+		return fmt.Errorf("ack failed pa update: reason required")
+	}
+	if _, err := s.DB.ExecContext(ctx,
+		`INSERT INTO pa_updates(update_id, received_at, handler_error) VALUES($1, $2, $3)
+		 ON CONFLICT (update_id) DO NOTHING`, updateID, time.Now().UTC(), reason); err != nil {
+		return fmt.Errorf("ack failed pa update: %w", err)
+	}
+	return nil
+}
+
+// PAUpdateHandlerError returns the recorded handler error of updateID, ""
+// for one that ran, and sql.ErrNoRows for one never recorded.
+func (s *Store) PAUpdateHandlerError(ctx context.Context, updateID int64) (string, error) {
+	var reason string
+	err := s.DB.QueryRowContext(ctx, `SELECT handler_error FROM pa_updates WHERE update_id = $1`, updateID).Scan(&reason)
+	return reason, err
+}

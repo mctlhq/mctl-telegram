@@ -100,6 +100,13 @@ type Claims struct {
 	// minted before the claim existed, which the agent API resolves from
 	// the account instead.
 	JobTools []string `json:"job_tools,omitempty"`
+	// PAPrincipal and ContextDigest bind a "pa-job" credential (issue #1313
+	// slice d1) to one Personal Assistant principal (a Telegram user id of
+	// the PA bot, not an MCTL account) and to the SHA-256 of the run's
+	// execution context. Set only by MintPAJob; every other credential
+	// omits them, and PAJobVerifier refuses a pa-job token without them.
+	PAPrincipal   int64  `json:"pa_principal,omitempty"`
+	ContextDigest string `json:"ctx,omitempty"`
 }
 
 // Issuer signs Claims into compact JWTs. Construct with NewIssuer.
@@ -323,6 +330,13 @@ func (p *Provider) Authenticate(r *http.Request) (*auth.Identity, error) {
 	if err := CheckAudience(c.Audience, p.ExpectedAudience, p.AudienceRequired); err != nil {
 		return nil, &auth.AttributedError{Attr: attrFrom(c), Err: err}
 	}
+	// A pa-job credential is accepted only by PAJobVerifier, whatever this
+	// provider's audience policy is: with OAUTH_JWT_AUDIENCE unset it would
+	// otherwise pass the check above and act as its principal's Telegram
+	// identity on every Provider-guarded surface (#1313 slice d1).
+	if hasPAJobClaims(c) {
+		return nil, &auth.AttributedError{Attr: attrFrom(c), Err: errors.New("pa-job token is not accepted here")}
+	}
 	// Revocation check: for every non-interactive credential (see
 	// needsRevocationCheck) — a jti-bearing token, a jti-less pre-jti one
 	// identified by its worker audience, or a bridge/agent token derived from
@@ -410,6 +424,10 @@ const workerBridgeAudience = "mcp-worker-bridge"
 // token it already held: eviction dropped the socket, the reconnect skipped
 // the denylist entirely, and containment lasted until the token expired on
 // its own.
+//
+// pa-job tokens are not listed: Provider refuses them outright (they never
+// reach the revocation check here), and PAJobVerifier checks revocation by
+// the inherited pool jti and the principal itself.
 var derivedAudiences = [...]string{"bridge", "agent", "agent-job", "agent-pool"}
 
 // needsRevocationCheck reports whether Authenticate must consult the

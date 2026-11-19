@@ -33,4 +33,17 @@ func tpl(s string) Template { return Template{s: s} }
 var (
 	// LabelCancel is a generic Cancel button label.
 	LabelCancel = tpl("Cancel")
+
+	// TextBudgetHold is sent once per held run when a spending limit is
+	// reached (#1313 slice d1, S1-R3): no model call was made.
+	TextBudgetHold = tpl("The assistant has reached its spending limit for now. Your request is on hold until the limit resets. If the conversation expires first, you will be told and can send it again.")
+	// TextRunFailed is sent when a request ended without an answer: the
+	// run's lease expired, or it failed repeatedly (#1313 slice d1).
+	TextRunFailed = tpl("The assistant could not finish your request. Please send it again.")
+	// TextRequestDropped is sent when a queued or held request is dropped
+	// because its conversation closed or expired first (#1313 slice d1).
+	TextRequestDropped = tpl("Your earlier request could not be answered before the conversation expired. Please send it again.")
+	// TextReplyTooLong replaces a model reply that does not fit the message
+	// limit. The reply is never truncated (#1313 slice d1).
+	TextReplyTooLong = tpl("The answer was too long to send. Please ask for a shorter answer.")
 )

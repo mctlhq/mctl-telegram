@@ -31,7 +31,23 @@ const (
 	OutcomeReadError    = "read_error"
 	OutcomeDedupError   = "dedup_error"
 	OutcomeHandlerError = "handler_error"
+	// OutcomeGaveUp: the handler failed MaxHandlerAttempts times for this
+	// update; it is acknowledged with its handler error recorded, so a
+	// deterministic failure does not make Telegram redeliver it forever.
+	OutcomeGaveUp = "gave_up"
 )
+
+// MaxHandlerAttempts is how many failed handlings of one update are retried
+// through Telegram's redelivery before the update is acknowledged anyway.
+const MaxHandlerAttempts = 5
+
+// FailureRecorder counts handler failures outside the rolled-back update
+// transaction (*db.Store implements it). Both methods return an error for
+// any failed write: an uncounted failure is answered 500, never acked.
+type FailureRecorder interface {
+	RecordPAUpdateFailure(ctx context.Context, updateID int64) (int, error)
+	AckFailedPAUpdate(ctx context.Context, updateID int64, reason string) error
+}
 
 // Deduper records an update_id durably and runs fn only for the first
 // delivery, in the same transaction (*db.Store implements it). It must return
@@ -70,6 +86,8 @@ type WebhookConfig struct {
 	Dedup   Deduper
 	Handler Handler
 	Counter Counter
+	// Failures caps redelivery of a failing update. Required.
+	Failures FailureRecorder
 }
 
 // webhook is the PA bot's webhook endpoint.
@@ -78,15 +96,16 @@ type webhook struct {
 	dedup     Deduper
 	handler   Handler
 	counter   Counter
+	failures  FailureRecorder
 }
 
 // ErrWebhookConfig reports an unusable WebhookConfig. It never contains the
 // secret.
-var ErrWebhookConfig = errors.New("pa webhook: secret, deduper and handler are required")
+var ErrWebhookConfig = errors.New("pa webhook: secret, deduper, handler and failure recorder are required")
 
 // NewWebhookHandler builds the webhook endpoint.
 func NewWebhookHandler(cfg WebhookConfig) (http.Handler, error) {
-	if cfg.Secret == "" || cfg.Dedup == nil || cfg.Handler == nil {
+	if cfg.Secret == "" || cfg.Dedup == nil || cfg.Handler == nil || cfg.Failures == nil {
 		return nil, ErrWebhookConfig
 	}
 	return &webhook{
@@ -94,6 +113,7 @@ func NewWebhookHandler(cfg WebhookConfig) (http.Handler, error) {
 		dedup:     cfg.Dedup,
 		handler:   cfg.Handler,
 		counter:   cfg.Counter,
+		failures:  cfg.Failures,
 	}, nil
 }
 
@@ -146,8 +166,7 @@ func (h *webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case handlerErr != nil:
 		// Only the update id: the handler's error text may carry content.
 		slog.Warn("pa update handler failed", "update_id", u.UpdateID())
-		h.count(OutcomeHandlerError)
-		w.WriteHeader(http.StatusInternalServerError)
+		h.handlerFailed(r.Context(), w, u.UpdateID())
 	case err != nil:
 		slog.Warn("pa update dedup failed", "update_id", u.UpdateID(), "err", err)
 		h.count(OutcomeDedupError)
@@ -159,6 +178,30 @@ func (h *webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.count(OutcomeAccepted)
 		w.WriteHeader(http.StatusOK)
 	}
+}
+
+// handlerFailed counts the failure and, once the update has failed
+// MaxHandlerAttempts times, acknowledges it with its handler error recorded.
+// The transaction of the failed attempt is already rolled back, so nothing
+// here runs inside it, and nothing is sent.
+func (h *webhook) handlerFailed(ctx context.Context, w http.ResponseWriter, updateID int64) {
+	n, err := h.failures.RecordPAUpdateFailure(ctx, updateID)
+	if err != nil || n < MaxHandlerAttempts {
+		if err != nil {
+			slog.Warn("pa update failure not recorded", "update_id", updateID, "err", err)
+		}
+		h.count(OutcomeHandlerError)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	if err := h.failures.AckFailedPAUpdate(ctx, updateID, OutcomeHandlerError); err != nil {
+		slog.Warn("pa update ack failed", "update_id", updateID, "err", err)
+		h.count(OutcomeHandlerError)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	h.count(OutcomeGaveUp)
+	w.WriteHeader(http.StatusOK)
 }
 
 // secretOK compares the presented secret in constant time. Both sides are

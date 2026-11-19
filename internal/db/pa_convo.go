@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
+	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 )
 
 var _ convo.Store = (*Store)(nil)
@@ -104,6 +105,21 @@ func unreadable(op string, err error) error {
 	return fmt.Errorf("%w: %s: %v", convo.ErrUnreadable, op, err)
 }
 
+// storeFault is unreadable for a failed read (query, begin, rows):
+// nothing was observed about the row.
+func storeFault(op string, err error) error {
+	return fmt.Errorf("%w: %w: %s: %v", convo.ErrUnreadable, convo.ErrStoreFault, op, err)
+}
+
+// rowRead classifies an error from reading one row: a row that was read
+// and does not scan is the row's fault, anything else the store's.
+func rowRead(op string, err error) error {
+	if isRowFault(err) {
+		return unreadable(op, err)
+	}
+	return storeFault(op, err)
+}
+
 // GetPAConsent implements convo.Store.
 func (s *Store) GetPAConsent(ctx context.Context, tx *sql.Tx, principal int64) (convo.ConsentRecord, error) {
 	if tx == nil || principal <= 0 {
@@ -121,7 +137,7 @@ func (s *Store) GetPAConsent(ctx context.Context, tx *sql.Tx, principal int64) (
 		return convo.ConsentRecord{}, convo.ErrNotFound
 	}
 	if err != nil {
-		return convo.ConsentRecord{}, unreadable("consent", err)
+		return convo.ConsentRecord{}, rowRead("consent", err)
 	}
 	rec.State = convo.ConsentState(state)
 	if rec.Principal != principal || rec.Version == "" || rec.TextSHA256 == "" ||
@@ -228,6 +244,13 @@ func (s *Store) ClosePAConversations(ctx context.Context, tx *sql.Tx, principal 
 	if tx == nil || principal <= 0 {
 		return fmt.Errorf("%w: close conversation", convo.ErrInvalid)
 	}
+	// Jobs of the closed conversation go with it, at once rather than at
+	// their next gate check (#1313 slice d1). Each principal has one open
+	// conversation, so these are all of the principal's live jobs.
+	if err := cancelPAJobs(ctx, tx, principal, now.UnixMilli(),
+		jobs.StatusPending, jobs.StatusHeld, jobs.StatusClaimed); err != nil {
+		return fmt.Errorf("close pa conversation: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM pa_fragments WHERE principal = $1 AND conversation_id IN
 			(SELECT id FROM pa_conversations WHERE principal = $1 AND closed_at_ms = 0)`,
@@ -246,6 +269,12 @@ func (s *Store) ClosePAConversations(ctx context.Context, tx *sql.Tx, principal 
 func (s *Store) ForgetPAConversations(ctx context.Context, tx *sql.Tx, principal int64) error {
 	if tx == nil || principal <= 0 {
 		return fmt.Errorf("%w: forget conversations", convo.ErrInvalid)
+	}
+	// Queued and running jobs go with the conversations they would read
+	// (#1313 slice d1); a running job's reservation is held, not refunded.
+	if err := cancelPAJobs(ctx, tx, principal, time.Now().UnixMilli(),
+		jobs.StatusPending, jobs.StatusHeld, jobs.StatusClaimed); err != nil {
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pa_fragments WHERE principal = $1`, principal); err != nil {
 		return fmt.Errorf("forget pa conversations: fragments: %w", err)
@@ -314,7 +343,7 @@ func (s *Store) LoadPAFragments(ctx context.Context, principal int64, conversati
 	}
 	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return nil, unreadable("load fragments: begin", err)
+		return nil, storeFault("load fragments: begin", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	var open int
@@ -326,14 +355,14 @@ func (s *Store) LoadPAFragments(ctx context.Context, principal int64, conversati
 		return nil, convo.ErrNotFound
 	}
 	if err != nil {
-		return nil, unreadable("load fragments: conversation", err)
+		return nil, storeFault("load fragments: conversation", err)
 	}
 	rows, err := tx.QueryContext(ctx,
 		`SELECT conversation_id, seq, principal, kind, provenance, sealed, created_at_ms
 		 FROM pa_fragments WHERE conversation_id = $1 AND principal = $2 ORDER BY seq`,
 		conversationID, principal)
 	if err != nil {
-		return nil, unreadable("load fragments", err)
+		return nil, storeFault("load fragments", err)
 	}
 	defer rows.Close()
 	var out []convo.SealedFragment
@@ -344,14 +373,14 @@ func (s *Store) LoadPAFragments(ctx context.Context, principal int64, conversati
 			createdMS  int64
 		)
 		if err := rows.Scan(&f.ConversationID, &f.Seq, &f.Principal, &kind, &prov, &f.Sealed, &createdMS); err != nil {
-			return nil, unreadable("load fragments: scan", err)
+			return nil, rowRead("load fragments: scan", err)
 		}
 		f.Kind, f.Provenance = convo.Kind(kind), convo.Provenance(prov)
 		f.CreatedAt = time.UnixMilli(createdMS).UTC()
 		out = append(out, f)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, unreadable("load fragments: rows", err)
+		return nil, storeFault("load fragments: rows", err)
 	}
 	return out, nil
 }
@@ -440,6 +469,14 @@ func (s *Store) SweepPAState(ctx context.Context, now, updatesBefore time.Time) 
 		{&r.Conversations, `DELETE FROM pa_conversations WHERE closed_at_ms > 0 OR expires_at_ms <= $1`, []any{nowMS}},
 		{&r.Callbacks, `DELETE FROM pa_callbacks WHERE expires_at_ms <= $1`, []any{nowMS}},
 		{&r.Updates, `DELETE FROM pa_updates WHERE received_at < $1`, []any{updatesBefore.UTC()}},
+		// Run-loop rows (#1313 slice d1): failure counters past the dedup
+		// window, finished jobs past it, and ledger rows past every budget
+		// window (a month plus a margin). Discarded counts: SweepResult is
+		// convo's and has no field for them.
+		{new(int64), `DELETE FROM pa_update_failures WHERE updated_at_ms < $1`, []any{updatesBefore.UnixMilli()}},
+		{new(int64), `DELETE FROM pa_jobs WHERE status IN ('done', 'cancelled', 'expired') AND updated_at_ms < $1`, []any{updatesBefore.UnixMilli()}},
+		{new(int64), `DELETE FROM pa_usage WHERE status <> 'reserved' AND created_at_ms < $1`, []any{now.Add(-PAUsageRetention).UnixMilli()}},
+		{new(int64), `DELETE FROM pa_rate WHERE window_start_ms < $1`, []any{updatesBefore.UnixMilli()}},
 	}
 	for _, st := range steps {
 		res, err := tx.ExecContext(ctx, st.q, st.args...)

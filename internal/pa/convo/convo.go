@@ -107,6 +107,10 @@ var (
 	// ErrUnreadable is any failure to read or interpret a row. It is never
 	// treated as absence (I9).
 	ErrUnreadable = errors.New("pa convo: state unreadable")
+	// ErrStoreFault marks an ErrUnreadable that is the store's (a query,
+	// begin or timeout failed) rather than the row's: nothing was observed,
+	// so it must not count against the row's job (#1313 d1).
+	ErrStoreFault = errors.New("pa convo: store fault")
 	// ErrUnmarked is a stored fragment without a known provenance mark.
 	// Unmarked state is never loaded (T5); PurgeUnmarkedPAState deletes it.
 	ErrUnmarked = errors.New("pa convo: fragment without a provenance mark")

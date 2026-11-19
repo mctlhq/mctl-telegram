@@ -15,6 +15,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
+	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 )
 
 // enqueueRecorder stands in for the run loop (slice d1): the only path from
@@ -68,6 +69,13 @@ func (r *replyRecorder) last(principal int64) queuedReply {
 	return queuedReply{}
 }
 
+// unlimited admits every update: the slice (b) tests are not about rate.
+type unlimited struct{}
+
+func (unlimited) AdmitMessage(context.Context, *sql.Tx, Principal) (jobs.RateDecision, error) {
+	return jobs.RateDecision{Allowed: true}, nil
+}
+
 // convoHarness drives Conversations through the real webhook and the real
 // SQLite dedup transaction, as production would.
 type convoHarness struct {
@@ -101,9 +109,13 @@ func newConvoHarnessOn(t *testing.T, store *db.Store, runs RunEnqueuer, firstUpd
 	if err != nil {
 		t.Fatal(err)
 	}
+	var lim Limiter = unlimited{}
+	if l, ok := runs.(Limiter); ok {
+		lim = l
+	}
 	h.conv, err = NewConversations(ConversationsConfig{
 		Store: h.store, Sealer: sealer, TTL: DefaultConversationTTL,
-		Runs: enq, Replies: h.replies, Now: func() time.Time { return h.now },
+		Runs: enq, Replies: h.replies, Limiter: lim, Now: func() time.Time { return h.now },
 	})
 	if err != nil {
 		t.Fatal(err)

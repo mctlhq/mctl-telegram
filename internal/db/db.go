@@ -539,6 +539,12 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 	if err := migratePAConvo(ctx, dbConn, pg); err != nil {
 		return err
 	}
+	// Personal Assistant run-loop queue, ledger and rate window (issue
+	// #1313 slice d1); DDL in pa_jobs.go. After pa_convo: it adds a
+	// column to pa_updates.
+	if err := migratePAJobs(ctx, dbConn, pg); err != nil {
+		return err
+	}
 	return dropLegacyColumns(ctx, dbConn, pg)
 }
 
