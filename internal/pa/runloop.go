@@ -63,12 +63,6 @@ const (
 // over it is a too-long answer, handled like output.ErrTooLong.
 const maxReplyBody = 6*output.MaxParts*4096 + 4<<10
 
-// maxCostMultiple caps a reported cost at this multiple of the per-job
-// reservation. The cost counts in the global day window shared with the
-// managed runtime, so an absurd value from the worker must not exhaust it;
-// a modest overrun is still counted in full.
-const maxCostMultiple = 4
-
 // RunLoopStore is what the run loop persists through (*db.Store).
 type RunLoopStore interface {
 	jobs.Store
@@ -266,7 +260,9 @@ func (l *RunLoop) build(ctx context.Context, tx *sql.Tx, j jobs.Job, reservation
 	tools = slices.Compact(tools)
 	ec, err := restoreInteractive(j, conns, BudgetReservation{ID: "pa_usage:" + strconv.FormatInt(reservationID, 10)})
 	if err != nil {
-		return nil, "", nil, err
+		// The job row and connections do not make a valid context: that
+		// recurs on every attempt, so the claim cancels the job.
+		return nil, "", nil, fmt.Errorf("%w: execution context: %v", jobs.ErrInvalid, err)
 	}
 	rc := runContext{
 		V: 1, Principal: ec.Principal().TelegramID(), Trigger: TriggerInteractive, ConversationID: ec.ConversationID(),
@@ -295,9 +291,10 @@ type (
 		Text       string `json:"text"`
 	}
 	wireLimits struct {
-		MaxToolCalls       int `json:"max_tool_calls"`
-		MaxContextTokens   int `json:"max_context_tokens"`
-		MaxToolOutputBytes int `json:"max_tool_output_bytes"`
+		MaxJobCostUSD      float64 `json:"max_job_cost_usd"`
+		MaxToolCalls       int     `json:"max_tool_calls"`
+		MaxContextTokens   int     `json:"max_context_tokens"`
+		MaxToolOutputBytes int     `json:"max_tool_output_bytes"`
 	}
 	claimResponse struct {
 		JobID      int64          `json:"job_id"`
@@ -370,6 +367,10 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 	res, err := l.store.ClaimPAJob(ctx, jobs.ClaimRequest{
 		Now: now, Lease: l.lease, Budget: l.budget, Gate: l.gate, Build: l.build,
 	})
+	// Committed before this point; owed whether or not the claim succeeded.
+	for _, n := range res.Notices {
+		l.notify(ctx, n)
+	}
 	if err != nil {
 		stop(w, err)
 		return
@@ -399,9 +400,7 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 		// the job is cancelled; a store hiccup puts it back.
 		deterministic := errors.Is(err, convo.ErrUnmarked) || errors.Is(err, convo.ErrUnreadable) ||
 			errors.Is(err, convo.ErrNotFound)
-		if rerr := l.store.ReleasePAClaim(ctx, ref, !deterministic, now); rerr != nil {
-			slog.Warn("pa claim not released", "job_id", j.ID, "err", rerr)
-		}
+		l.release(ctx, ref, !deterministic, now)
 		stop(w, err)
 		return
 	}
@@ -411,9 +410,7 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 		Principal: j.Principal, JobID: j.ID, Attempt: j.Attempts, ContextDigest: j.ContextDigest, Tools: j.ToolSet,
 	}, id.Jti, id.OriginalIssuedAt, ttl)
 	if err != nil {
-		if rerr := l.store.ReleasePAClaim(ctx, ref, true, now); rerr != nil {
-			slog.Warn("pa claim not released", "job_id", j.ID, "err", rerr)
-		}
+		l.release(ctx, ref, true, now)
 		stop(w, err)
 		return
 	}
@@ -421,7 +418,7 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 		JobID: j.ID, Attempt: j.Attempts, Token: tok, LeaseUntil: j.LeaseUntil, ToolSet: j.ToolSet,
 		Limits: wireLimits{
 			MaxToolCalls: l.limits.MaxToolCalls, MaxContextTokens: l.limits.MaxContextTokens,
-			MaxToolOutputBytes: jobs.MaxToolOutputBytes,
+			MaxToolOutputBytes: jobs.MaxToolOutputBytes, MaxJobCostUSD: l.budget.PerJobUSD,
 		},
 		Fragments: frags,
 	})
@@ -509,7 +506,7 @@ func (l *RunLoop) serveTurn(w http.ResponseWriter, r *http.Request) {
 		MaxTurns: l.limits.MaxToolCalls + 1, Gate: l.gate,
 	})
 	if err != nil {
-		stop(w, err)
+		l.stopRun(r.Context(), w, ref, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"turns": j.Turns, "tool_calls": j.ToolCalls})
@@ -541,9 +538,9 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 	// conversation (output.Render, T14). It is read before the finish
 	// transaction (on SQLite the load needs the one connection); a failed
 	// read is a refusal, never an empty allow-list that would still send.
-	cur, err := l.store.RunningPAJob(ctx, ref, l.now())
+	cur, err := l.store.RunningPAJob(ctx, ref, l.now(), l.gate)
 	if err != nil {
-		stop(w, err)
+		l.stopRun(ctx, w, ref, err)
 		return
 	}
 	frags, err := l.loadFragments(ctx, cur.Principal, cur.ConversationID)
@@ -574,9 +571,10 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 	cost := -1.0
 	if req.CostUSD != nil {
 		cost = *req.CostUSD
-		if limit := maxCostMultiple * l.budget.PerJobUSD; cost > limit {
-			slog.Warn("pa reported cost capped", "job_id", ref.JobID)
-			cost = limit
+		if cost > l.budget.PerJobUSD {
+			// FinishPAJob settles at most the reservation and records the
+			// reported figure; the overrun is worth a look.
+			slog.Warn("pa reported cost above the reservation", "job_id", ref.JobID)
 		}
 	}
 	j, err := l.store.FinishPAJob(ctx, ref, jobs.FinishRequest{
@@ -589,7 +587,7 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 	if err != nil {
-		stop(w, err)
+		l.stopRun(ctx, w, ref, err)
 		return
 	}
 	// After the commit: the send is never inside a transaction.
@@ -599,6 +597,32 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"delivered": true})
+}
+
+// notify sends a notice owed after a committed state change. Like the hold
+// notice it is sent once, after the commit; a failed send is logged and
+// not retried (the outbox for run-loop notices is deferred to d2).
+func (l *RunLoop) notify(ctx context.Context, n jobs.Notice) {
+	t := output.TextRunFailed
+	if n.Kind == jobs.NoticeDropped {
+		t = output.TextRequestDropped
+	}
+	if err := l.sender.Send(ctx, n.Principal, output.ServerText(t), nil); err != nil {
+		slog.Warn("pa job notice not sent", "job_id", n.JobID)
+	}
+}
+
+// release undoes a claim whose token was never handed out and sends the
+// notice it may owe.
+func (l *RunLoop) release(ctx context.Context, ref jobs.Ref, requeue bool, now time.Time) {
+	n, err := l.store.ReleasePAClaim(ctx, ref, requeue, now)
+	if err != nil {
+		slog.Warn("pa claim not released", "job_id", ref.JobID, "err", err)
+		return
+	}
+	if n != nil {
+		l.notify(ctx, *n)
+	}
 }
 
 // appendAssistant stores the model's answer as an external-marked
@@ -657,5 +681,23 @@ func (l *RunLoop) AdmitPAToolCall(ctx context.Context, job PAJob, server, tool s
 	_, err := l.store.AdmitPAToolCall(ctx, job.ref, jobs.ToolCallRequest{
 		Now: l.now(), Tool: name, MaxToolCalls: l.limits.MaxToolCalls, Gate: l.gate,
 	})
+	l.droppedNotice(ctx, job.ref, err)
 	return err
+}
+
+// stopRun is stop for a step that ran the gate: a job cancelled because its
+// conversation expired mid-run owes the principal a notice.
+func (l *RunLoop) stopRun(ctx context.Context, w http.ResponseWriter, ref jobs.Ref, err error) {
+	l.droppedNotice(ctx, ref, err)
+	stop(w, err)
+}
+
+// droppedNotice sends the dropped-request notice when err says this call
+// cancelled the job because its conversation closed or expired. The store
+// returns ErrConversationGone only to the call that cancelled, so it is
+// sent once.
+func (l *RunLoop) droppedNotice(ctx context.Context, ref jobs.Ref, err error) {
+	if errors.Is(err, jobs.ErrConversationGone) {
+		l.notify(ctx, jobs.Notice{Principal: ref.Principal, JobID: ref.JobID, Kind: jobs.NoticeDropped})
+	}
 }

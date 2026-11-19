@@ -23,6 +23,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -141,6 +142,10 @@ type Job struct {
 	LeaseUntil time.Time
 	HeldUntil  time.Time
 	CreatedAt  time.Time
+	// HoldNotified: the principal was told this job is held.
+	HoldNotified bool
+	// ClaimFailures counts failed claims of this job (ClaimBackoff).
+	ClaimFailures int
 }
 
 // Ref names one attempt of one job, as a verified pa-job token does. Every
@@ -167,6 +172,10 @@ var (
 	// ErrGone: consent was withdrawn or changed, or the conversation was
 	// closed or expired. The job is cancelled.
 	ErrGone = errors.New("pa jobs: consent or conversation no longer valid")
+	// ErrConversationGone is the ErrGone of a closed or expired
+	// conversation while consent still stands: the principal is told that
+	// the request was dropped. errors.Is(err, ErrGone) holds for it.
+	ErrConversationGone = fmt.Errorf("%w: conversation", ErrGone)
 	// ErrToolCap: the run reached its tool-call cap (S1-R2).
 	ErrToolCap = errors.New("pa jobs: tool-call cap reached")
 	// ErrToolNotInSet: the tool is not in the job's signed tool set (S1-I1).
@@ -256,6 +265,45 @@ type ClaimResult struct {
 	ReservationID int64
 	Notify        bool
 	Scope         string
+	// Notices are owed to principals whose jobs ended without an answer
+	// during this claim (an expired lease, a job cancelled after repeated
+	// failures, a request dropped with its conversation). They are set
+	// even when the claim itself returns an error.
+	Notices []Notice
+}
+
+// NoticeKind says why a job ended without an answer.
+type NoticeKind int
+
+const (
+	// NoticeRunFailed: the job could not be run (repeated failures, an
+	// expired lease, state that cannot be built).
+	NoticeRunFailed NoticeKind = iota + 1
+	// NoticeDropped: the conversation the job would answer closed or
+	// expired before the job ran (for example during a budget hold).
+	NoticeDropped
+)
+
+// Notice is a server message owed to Principal about JobID.
+type Notice struct {
+	Principal int64
+	JobID     int64
+	Kind      NoticeKind
+}
+
+// MaxClaimFailures is how many failed claims of one job (a per-job read or
+// build error) are backed off before the job is cancelled with a notice.
+const MaxClaimFailures = 5
+
+// ClaimBackoff is the wait after the n-th (1-based) failed claim of a job:
+// 30s doubling, at most 8m. A failing job must not stay the oldest due job
+// and block every other principal's claim.
+func ClaimBackoff(n int) time.Duration {
+	d := 30 * time.Second
+	for i := 1; i < n && d < 8*time.Minute; i++ {
+		d *= 2
+	}
+	return min(d, 8*time.Minute)
 }
 
 // TurnRequest is a model turn the worker is about to take.
@@ -301,10 +349,14 @@ type Store interface {
 	// ReleasePAClaim undoes a claim whose token never left the server:
 	// the reservation is deleted and the job returns to pending (requeue)
 	// or is cancelled (a deterministic failure, which would recur).
-	ReleasePAClaim(ctx context.Context, ref Ref, requeue bool, now time.Time) error
+	// With requeue the job is backed off like a failed claim (and
+	// cancelled after MaxClaimFailures); the returned notice, if any, is
+	// for the principal.
+	ReleasePAClaim(ctx context.Context, ref Ref, requeue bool, now time.Time) (*Notice, error)
 	// RunningPAJob reads the job of ref, refusing one that is not running
-	// under exactly this attempt and context. It changes nothing.
-	RunningPAJob(ctx context.Context, ref Ref, now time.Time) (Job, error)
+	// under exactly this attempt and context, and runs gate; like every
+	// step it cancels the job when the gate reports ErrGone.
+	RunningPAJob(ctx context.Context, ref Ref, now time.Time, gate Gate) (Job, error)
 	// AdmitPATurn admits one model turn.
 	AdmitPATurn(ctx context.Context, ref Ref, req TurnRequest) (Job, error)
 	// AdmitPAToolCall admits one tool call (cap, tool set, budget, gate).

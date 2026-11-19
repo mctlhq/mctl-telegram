@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"time"
 
@@ -59,6 +60,7 @@ func paJobsSchema(pg bool) []string {
 			lease_until_ms ` + intT + ` NOT NULL DEFAULT 0,
 			held_until_ms ` + intT + ` NOT NULL DEFAULT 0,
 			hold_notified ` + intT + ` NOT NULL DEFAULT 0,
+			claim_failures ` + intT + ` NOT NULL DEFAULT 0,
 			created_at_ms ` + intT + ` NOT NULL,
 			updated_at_ms ` + intT + ` NOT NULL
 		)`,
@@ -72,6 +74,7 @@ func paJobsSchema(pg bool) []string {
 			principal ` + intT + ` NOT NULL,
 			reserved_usd ` + realT + ` NOT NULL,
 			cost_usd ` + realT + `,
+			reported_cost_usd ` + realT + `,
 			status TEXT NOT NULL,
 			created_at_ms ` + intT + ` NOT NULL,
 			updated_at_ms ` + intT + ` NOT NULL,
@@ -202,45 +205,66 @@ func cancelPAJobs(ctx context.Context, tx *sql.Tx, principal, nowMS int64, statu
 }
 
 // ExpirePAJobs ends every claimed job whose lease ran out and holds its
-// reservation at the full amount. It runs in its own short transaction
-// before a claim: the claim must not hold another principal's job row while
-// it waits for a principal lock (a turn holds that lock and then wants the
-// row).
-func (s *Store) ExpirePAJobs(ctx context.Context, now time.Time) error {
+// reservation at the full amount (a model call may have been made). It
+// runs in its own short transaction before a claim: the claim must not
+// hold another principal's job row while it waits for a principal lock (a
+// turn holds that lock and then wants the row). Each expired job owes its
+// principal a notice; RETURNING makes exactly one expiring claim own it.
+func (s *Store) ExpirePAJobs(ctx context.Context, now time.Time) ([]jobs.Notice, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("expire pa jobs: begin: %w", err)
+		return nil, fmt.Errorf("expire pa jobs: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	nowMS := now.UnixMilli()
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE pa_jobs SET status = $1, updated_at_ms = $2 WHERE status = $3 AND lease_until_ms <= $2`,
-		string(jobs.StatusExpired), nowMS, string(jobs.StatusClaimed)); err != nil {
-		return fmt.Errorf("expire pa jobs: %w", err)
+	rows, err := tx.QueryContext(ctx,
+		`UPDATE pa_jobs SET status = $1, updated_at_ms = $2 WHERE status = $3 AND lease_until_ms <= $2
+		 RETURNING id, principal`,
+		string(jobs.StatusExpired), nowMS, string(jobs.StatusClaimed))
+	if err != nil {
+		return nil, fmt.Errorf("expire pa jobs: %w", err)
+	}
+	var notices []jobs.Notice
+	for rows.Next() {
+		n := jobs.Notice{Kind: jobs.NoticeRunFailed}
+		if err := rows.Scan(&n.JobID, &n.Principal); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("expire pa jobs: scan: %w", err)
+		}
+		notices = append(notices, n)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("expire pa jobs: close: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("expire pa jobs: rows: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE pa_usage SET status = $1, updated_at_ms = $2
 		  WHERE status = $3 AND job_id IN (SELECT id FROM pa_jobs WHERE status <> $4)`,
 		jobs.UsageHeld, nowMS, jobs.UsageReserved, string(jobs.StatusClaimed)); err != nil {
-		return fmt.Errorf("expire pa jobs: hold usage: %w", err)
+		return nil, fmt.Errorf("expire pa jobs: hold usage: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("expire pa jobs: commit: %w", err)
+		return nil, fmt.Errorf("expire pa jobs: commit: %w", err)
 	}
-	return nil
+	return notices, nil
 }
 
 const paJobColumns = `id, principal, conversation_id, update_id, consent_version, status, attempts, turns,
-	tool_calls, execution_context, context_digest, tool_set, lease_until_ms, held_until_ms, created_at_ms`
+	tool_calls, execution_context, context_digest, tool_set, lease_until_ms, held_until_ms, created_at_ms,
+	hold_notified, claim_failures`
 
 func scanPAJob(row interface{ Scan(...any) error }) (jobs.Job, error) {
 	var (
 		j                         jobs.Job
 		status, ec, tools         string
 		leaseMS, heldMS, createMS int64
+		holdNotified              int
 	)
 	if err := row.Scan(&j.ID, &j.Principal, &j.ConversationID, &j.UpdateID, &j.ConsentVersion, &status,
-		&j.Attempts, &j.Turns, &j.ToolCalls, &ec, &j.ContextDigest, &tools, &leaseMS, &heldMS, &createMS); err != nil {
+		&j.Attempts, &j.Turns, &j.ToolCalls, &ec, &j.ContextDigest, &tools, &leaseMS, &heldMS, &createMS,
+		&holdNotified, &j.ClaimFailures); err != nil {
 		return jobs.Job{}, err
 	}
 	j.Status = jobs.Status(status)
@@ -264,6 +288,7 @@ func scanPAJob(row interface{ Scan(...any) error }) (jobs.Job, error) {
 		j.HeldUntil = time.UnixMilli(heldMS).UTC()
 	}
 	j.CreatedAt = time.UnixMilli(createMS).UTC()
+	j.HoldNotified = holdNotified != 0
 	return j, nil
 }
 
@@ -286,6 +311,26 @@ func paWindowSums(ctx context.Context, tx *sql.Tx, sinceMS, principal int64) (du
 	return durable, inflight, nil
 }
 
+// maxClaimTries bounds how many due jobs one ClaimPAJob call may try when
+// earlier ones fail on their own state.
+const maxClaimTries = 8
+
+// paJobFailure is a claim failure that belongs to one job (its consent or
+// conversation could not be read, its context could not be built), not to
+// the store. The job is backed off and the next due job is tried, so one
+// principal's broken state never blocks every other principal's queue.
+type paJobFailure struct {
+	job           jobs.Job
+	deterministic bool
+	// skip: not a failure, the job is simply not due (see claimOnce);
+	// the next job is tried and nothing is recorded.
+	skip bool
+	err  error
+}
+
+func (f *paJobFailure) Error() string { return "pa job claim failed: " + f.err.Error() }
+func (f *paJobFailure) Unwrap() error { return f.err }
+
 // ClaimPAJob implements jobs.Store.
 func (s *Store) ClaimPAJob(ctx context.Context, req jobs.ClaimRequest) (jobs.ClaimResult, error) {
 	if !req.Budget.Valid() || req.Lease <= 0 || req.Gate == nil || req.Build == nil || req.Now.IsZero() {
@@ -295,9 +340,77 @@ func (s *Store) ClaimPAJob(ctx context.Context, req jobs.ClaimRequest) (jobs.Cla
 	if err != nil {
 		return jobs.ClaimResult{}, jobsUnreadable("claim: dialect", err)
 	}
-	if err := s.ExpirePAJobs(ctx, req.Now); err != nil {
+	notices, err := s.ExpirePAJobs(ctx, req.Now)
+	if err != nil {
 		return jobs.ClaimResult{}, err
 	}
+	var tried []int64
+	for range maxClaimTries {
+		res, err := s.claimOnce(ctx, req, pg, tried)
+		res.Notices = append(notices, res.Notices...)
+		var f *paJobFailure
+		if !errors.As(err, &f) {
+			return res, err
+		}
+		notices = res.Notices
+		tried = append(tried, f.job.ID)
+		if f.skip {
+			continue
+		}
+		slog.Warn("pa job claim failed, backing off", "job_id", f.job.ID, "err", f.err)
+		n, berr := s.backoffPAJob(ctx, f.job, req.Now, f.deterministic)
+		if berr != nil {
+			return jobs.ClaimResult{Notices: notices}, errors.Join(err, berr)
+		}
+		if n != nil {
+			notices = append(notices, *n)
+		}
+	}
+	return jobs.ClaimResult{Outcome: jobs.ClaimNone, Notices: notices}, nil
+}
+
+// backoffPAJob records a failed claim of j in its own transaction: the job
+// is due again after ClaimBackoff, or cancelled (with a notice) when the
+// failure is deterministic or the job failed MaxClaimFailures times. Only a
+// queued job is touched; one that changed meanwhile is left alone.
+func (s *Store) backoffPAJob(ctx context.Context, j jobs.Job, now time.Time, deterministic bool) (*jobs.Notice, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("back off pa job: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var failures int
+	err = tx.QueryRowContext(ctx,
+		`UPDATE pa_jobs SET claim_failures = claim_failures + 1, updated_at_ms = $1
+		  WHERE id = $2 AND status IN ($3, $4) RETURNING claim_failures`,
+		now.UnixMilli(), j.ID, string(jobs.StatusPending), string(jobs.StatusHeld)).Scan(&failures)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, tx.Commit()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("back off pa job: %w", err)
+	}
+	var notice *jobs.Notice
+	if deterministic || failures >= jobs.MaxClaimFailures {
+		_, err = tx.ExecContext(ctx, `UPDATE pa_jobs SET status = $1 WHERE id = $2`, string(jobs.StatusCancelled), j.ID)
+		notice = &jobs.Notice{Principal: j.Principal, JobID: j.ID, Kind: jobs.NoticeRunFailed}
+	} else {
+		// Never shortens a budget hold that ends later.
+		_, err = tx.ExecContext(ctx, `UPDATE pa_jobs SET held_until_ms = CASE WHEN held_until_ms > $1 THEN held_until_ms ELSE $1 END WHERE id = $2`,
+			now.Add(jobs.ClaimBackoff(failures)).UnixMilli(), j.ID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("back off pa job: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("back off pa job: commit: %w", err)
+	}
+	return notice, nil
+}
+
+// claimOnce tries the oldest due job. A failure of that job's own state is
+// returned as *paJobFailure after its transaction is rolled back.
+func (s *Store) claimOnce(ctx context.Context, req jobs.ClaimRequest, pg bool, skip []int64) (jobs.ClaimResult, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return jobs.ClaimResult{}, fmt.Errorf("claim pa job: begin: %w", err)
@@ -310,13 +423,24 @@ func (s *Store) ClaimPAJob(ctx context.Context, req jobs.ClaimRequest) (jobs.Cla
 		return jobs.ClaimResult{}, err
 	}
 	nowMS := req.Now.UnixMilli()
+	// Due: queued, and past any hold or claim backoff (held_until_ms is 0
+	// for a job never held or backed off). A held job whose conversation
+	// closed or expired is due at once: it is dropped with a notice now,
+	// not when the budget window resets (the hold notice promises that).
+	// Jobs that already failed in this call are skipped.
+	q := `SELECT j.id, j.principal FROM pa_jobs j
+	  WHERE j.status IN ($1, $2)
+	    AND (j.held_until_ms <= $3 OR (j.status = $2 AND NOT EXISTS (
+	         SELECT 1 FROM pa_conversations v WHERE v.id = j.conversation_id AND v.principal = j.principal
+	            AND v.closed_at_ms = 0 AND v.expires_at_ms > $3)))
+	    AND NOT EXISTS (SELECT 1 FROM pa_jobs c WHERE c.principal = j.principal AND c.status = $4)`
+	args := []any{string(jobs.StatusPending), string(jobs.StatusHeld), nowMS, string(jobs.StatusClaimed)}
+	for _, sk := range skip {
+		args = append(args, sk)
+		q += fmt.Sprintf(" AND j.id <> $%d", len(args))
+	}
 	var id, principal int64
-	err = tx.QueryRowContext(ctx,
-		`SELECT j.id, j.principal FROM pa_jobs j
-		  WHERE (j.status = $1 OR (j.status = $2 AND j.held_until_ms <= $3))
-		    AND NOT EXISTS (SELECT 1 FROM pa_jobs c WHERE c.principal = j.principal AND c.status = $4)
-		  ORDER BY j.created_at_ms, j.id LIMIT 1`,
-		string(jobs.StatusPending), string(jobs.StatusHeld), nowMS, string(jobs.StatusClaimed)).Scan(&id, &principal)
+	err = tx.QueryRowContext(ctx, q+` ORDER BY j.created_at_ms, j.id LIMIT 1`, args...).Scan(&id, &principal)
 	if errors.Is(err, sql.ErrNoRows) {
 		return jobs.ClaimResult{Outcome: jobs.ClaimNone}, nil
 	}
@@ -335,10 +459,13 @@ func (s *Store) ClaimPAJob(ctx context.Context, req jobs.ClaimRequest) (jobs.Cla
 	j, err := scanPAJob(tx.QueryRowContext(ctx,
 		`SELECT `+paJobColumns+` FROM pa_jobs WHERE id = $1 AND principal = $2`+lock, id, principal))
 	if err != nil {
-		return jobs.ClaimResult{}, jobsUnreadable("claim: job", err)
+		// The row was due a moment ago: one that does not scan is this
+		// job's broken state.
+		return jobs.ClaimResult{}, &paJobFailure{job: jobs.Job{ID: id, Principal: principal}, err: jobsUnreadable("claim: job", err)}
 	}
-	if j.Status != jobs.StatusPending && (j.Status != jobs.StatusHeld || j.HeldUntil.After(req.Now)) {
-		// Cancelled between the pick and the lock.
+	early := j.HeldUntil.After(req.Now)
+	if (j.Status != jobs.StatusPending && j.Status != jobs.StatusHeld) || (early && j.Status != jobs.StatusHeld) {
+		// Changed between the pick and the lock.
 		if err := tx.Commit(); err != nil {
 			return jobs.ClaimResult{}, fmt.Errorf("claim pa job: commit: %w", err)
 		}
@@ -346,7 +473,7 @@ func (s *Store) ClaimPAJob(ctx context.Context, req jobs.ClaimRequest) (jobs.Cla
 	}
 	if err := req.Gate(ctx, tx, j, req.Now); err != nil {
 		if !errors.Is(err, jobs.ErrGone) {
-			return jobs.ClaimResult{}, err
+			return jobs.ClaimResult{}, &paJobFailure{job: j, err: err}
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE pa_jobs SET status = $1, updated_at_ms = $2 WHERE id = $3`,
 			string(jobs.StatusCancelled), nowMS, j.ID); err != nil {
@@ -355,8 +482,20 @@ func (s *Store) ClaimPAJob(ctx context.Context, req jobs.ClaimRequest) (jobs.Cla
 		if err := tx.Commit(); err != nil {
 			return jobs.ClaimResult{}, fmt.Errorf("claim pa job: commit: %w", err)
 		}
-		j.Status = jobs.StatusCancelled
-		return jobs.ClaimResult{Outcome: jobs.ClaimCancelled, Job: j}, nil
+		res := jobs.ClaimResult{Outcome: jobs.ClaimCancelled, Job: j}
+		res.Job.Status = jobs.StatusCancelled
+		// Consent still stands, the conversation does not: the request
+		// (perhaps held for days) is dropped, and the principal is told.
+		if errors.Is(err, jobs.ErrConversationGone) {
+			res.Notices = []jobs.Notice{{Principal: j.Principal, JobID: j.ID, Kind: jobs.NoticeDropped}}
+		}
+		return res, nil
+	}
+	if early {
+		// Picked only because its conversation looked gone, and the gate
+		// says it is not: it stays held until its window resets, and the
+		// next due job is tried.
+		return jobs.ClaimResult{}, &paJobFailure{job: j, skip: true, err: errors.New("held, conversation open")}
 	}
 
 	res, err := s.paBudget(ctx, tx, req, j)
@@ -365,12 +504,7 @@ func (s *Store) ClaimPAJob(ctx context.Context, req jobs.ClaimRequest) (jobs.Cla
 	}
 	switch res.Outcome {
 	case jobs.ClaimHeld:
-		notify := 0
-		err := tx.QueryRowContext(ctx, `SELECT hold_notified FROM pa_jobs WHERE id = $1`, j.ID).Scan(&notify)
-		if err != nil {
-			return jobs.ClaimResult{}, jobsUnreadable("claim: hold notified", err)
-		}
-		res.Notify = notify == 0
+		res.Notify = !j.HoldNotified
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE pa_jobs SET status = $1, held_until_ms = $2, hold_notified = 1, updated_at_ms = $3 WHERE id = $4`,
 			string(jobs.StatusHeld), res.Job.HeldUntil.UnixMilli(), nowMS, j.ID); err != nil {
@@ -391,21 +525,16 @@ func (s *Store) ClaimPAJob(ctx context.Context, req jobs.ClaimRequest) (jobs.Cla
 		j.HeldUntil = time.Time{}
 		ecJSON, digest, tools, err := req.Build(ctx, tx, j, resID)
 		if err != nil {
-			if !errors.Is(err, jobs.ErrInvalid) {
-				return jobs.ClaimResult{}, err
-			}
-			// A job that cannot be built (a tool outside the read-only
-			// catalog, say) fails the same way on every attempt. Left
-			// pending it would stay the oldest job and block every
-			// principal's queue, so it is cancelled with nothing reserved.
-			_ = tx.Rollback()
-			if cerr := s.cancelInvalidPAJob(ctx, j.ID, req.Now); cerr != nil {
-				return jobs.ClaimResult{}, errors.Join(err, cerr)
-			}
-			return jobs.ClaimResult{}, err
+			// A job that cannot be built (ErrInvalid: a tool outside the
+			// read-only catalog, a context that does not validate) fails
+			// the same way on every attempt and is cancelled; any other
+			// build error is backed off. The rollback drops the
+			// reservation either way.
+			return jobs.ClaimResult{}, &paJobFailure{job: j, deterministic: errors.Is(err, jobs.ErrInvalid), err: err}
 		}
 		if len(ecJSON) == 0 || digest == "" {
-			return jobs.ClaimResult{}, fmt.Errorf("%w: claim: empty execution context", jobs.ErrInvalid)
+			return jobs.ClaimResult{}, &paJobFailure{job: j, deterministic: true,
+				err: fmt.Errorf("%w: claim: empty execution context", jobs.ErrInvalid)}
 		}
 		if tools == nil {
 			tools = []string{}
@@ -559,7 +688,10 @@ func runGate(ctx context.Context, tx *sql.Tx, gate jobs.Gate, j jobs.Job, now ti
 	if cerr := tx.Commit(); cerr != nil {
 		return fmt.Errorf("cancel pa job: commit: %w", cerr)
 	}
-	return jobs.ErrGone
+	// The gate's own error (it wraps ErrGone): the caller can tell a
+	// dropped conversation (ErrConversationGone), owed a notice, from a
+	// withdrawn consent. Only the call that cancelled sees it.
+	return err
 }
 
 func cancelOne(ctx context.Context, tx *sql.Tx, j jobs.Job, nowMS int64) error {
@@ -575,47 +707,56 @@ func cancelOne(ctx context.Context, tx *sql.Tx, j jobs.Job, nowMS int64) error {
 	return nil
 }
 
-// ReleasePAClaim implements jobs.Store.
-func (s *Store) ReleasePAClaim(ctx context.Context, ref jobs.Ref, requeue bool, now time.Time) error {
+// ReleasePAClaim implements jobs.Store. The reservation is deleted (the
+// token never left the server, so no model call was made). Without requeue
+// the job is cancelled with a notice. With requeue it is backed off like a
+// failed claim, so a job that keeps failing after its claim cannot stay the
+// oldest due job; when another job of the principal is already queued,
+// that job will read the same conversation, and this one is cancelled
+// quietly.
+func (s *Store) ReleasePAClaim(ctx context.Context, ref jobs.Ref, requeue bool, now time.Time) (*jobs.Notice, error) {
 	if !ref.Valid() || now.IsZero() {
-		return fmt.Errorf("%w: release", jobs.ErrInvalid)
+		return nil, fmt.Errorf("%w: release", jobs.ErrInvalid)
 	}
 	tx, j, err := s.beginRunning(ctx, ref, now)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pa_usage WHERE job_id = $1 AND attempt = $2 AND status = $3`,
 		j.ID, j.Attempts, jobs.UsageReserved); err != nil {
-		return fmt.Errorf("release pa claim: usage: %w", err)
+		return nil, fmt.Errorf("release pa claim: usage: %w", err)
 	}
-	next := jobs.StatusCancelled
-	if requeue {
-		// A queued job of the principal already reads the same
-		// conversation when it runs; only one may be queued.
+	next, heldUntil := jobs.StatusCancelled, int64(0)
+	var notice *jobs.Notice
+	failures := j.ClaimFailures + 1
+	switch {
+	case !requeue || failures >= jobs.MaxClaimFailures:
+		notice = &jobs.Notice{Principal: j.Principal, JobID: j.ID, Kind: jobs.NoticeRunFailed}
+	default:
 		var queued int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pa_jobs WHERE principal = $1 AND status IN ($2, $3)`,
 			j.Principal, string(jobs.StatusPending), string(jobs.StatusHeld)).Scan(&queued); err != nil {
-			return jobsUnreadable("release: queued", err)
+			return nil, jobsUnreadable("release: queued", err)
 		}
 		if queued == 0 {
-			next = jobs.StatusPending
+			next, heldUntil = jobs.StatusPending, now.Add(jobs.ClaimBackoff(failures)).UnixMilli()
 		}
 	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE pa_jobs SET status = $1, lease_until_ms = 0, execution_context = '', context_digest = '', tool_set = '',
-		        updated_at_ms = $2 WHERE id = $3`,
-		string(next), now.UnixMilli(), j.ID); err != nil {
-		return fmt.Errorf("release pa claim: %w", err)
+		        held_until_ms = $2, claim_failures = $3, updated_at_ms = $4 WHERE id = $5`,
+		string(next), heldUntil, failures, now.UnixMilli(), j.ID); err != nil {
+		return nil, fmt.Errorf("release pa claim: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("release pa claim: commit: %w", err)
+		return nil, fmt.Errorf("release pa claim: commit: %w", err)
 	}
-	return nil
+	return notice, nil
 }
 
 // RunningPAJob implements jobs.Store.
-func (s *Store) RunningPAJob(ctx context.Context, ref jobs.Ref, now time.Time) (jobs.Job, error) {
+func (s *Store) RunningPAJob(ctx context.Context, ref jobs.Ref, now time.Time, gate jobs.Gate) (jobs.Job, error) {
 	if !ref.Valid() {
 		return jobs.Job{}, fmt.Errorf("%w: running job", jobs.ErrInvalid)
 	}
@@ -623,7 +764,13 @@ func (s *Store) RunningPAJob(ctx context.Context, ref jobs.Ref, now time.Time) (
 	if err != nil {
 		return jobs.Job{}, err
 	}
-	_ = tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
+	// The gate before the reply loads the conversation: a job whose
+	// conversation or consent went away is cancelled here, not refused
+	// as an unreadable load.
+	if err := runGate(ctx, tx, gate, j, now); err != nil {
+		return jobs.Job{}, err
+	}
 	return j, nil
 }
 
@@ -731,14 +878,28 @@ func (s *Store) FinishPAJob(ctx context.Context, ref jobs.Ref, req jobs.FinishRe
 		}
 	}
 	nowMS := req.Now.UnixMilli()
-	// An unreported cost settles at the full reservation.
-	q, args := `UPDATE pa_usage SET status = $1, cost_usd = reserved_usd, updated_at_ms = $2
-		  WHERE job_id = $3 AND attempt = $4 AND status = $5`, []any{jobs.UsageSettled, nowMS, j.ID, j.Attempts, jobs.UsageReserved}
-	if req.CostUSD >= 0 {
-		q, args = `UPDATE pa_usage SET status = $1, cost_usd = $6, updated_at_ms = $2
-		  WHERE job_id = $3 AND attempt = $4 AND status = $5`, append(args, req.CostUSD)
+	var reserved float64
+	err = tx.QueryRowContext(ctx, `SELECT reserved_usd FROM pa_usage WHERE job_id = $1 AND attempt = $2 AND status = $3`,
+		j.ID, j.Attempts, jobs.UsageReserved).Scan(&reserved)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return jobs.Job{}, jobs.ErrBudget
+	case err != nil:
+		return jobs.Job{}, jobsUnreadable("finish: reservation", err)
 	}
-	res, err := tx.ExecContext(ctx, q, args...)
+	// The worker's figure is recorded as reported; what counts against the
+	// windows is at most the reservation, so no report can exhaust the
+	// global day shared with the managed runtime. An unreported cost
+	// settles at the full reservation.
+	cost, reported := reserved, sql.NullFloat64{}
+	if req.CostUSD >= 0 {
+		reported = sql.NullFloat64{Float64: req.CostUSD, Valid: true}
+		cost = min(req.CostUSD, reserved)
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE pa_usage SET status = $1, cost_usd = $2, reported_cost_usd = $3, updated_at_ms = $4
+		  WHERE job_id = $5 AND attempt = $6 AND status = $7`,
+		jobs.UsageSettled, cost, reported, nowMS, j.ID, j.Attempts, jobs.UsageReserved)
 	if err != nil {
 		return jobs.Job{}, fmt.Errorf("finish pa job: settle: %w", err)
 	}
@@ -772,7 +933,7 @@ func (s *Store) PAConversationOpen(ctx context.Context, tx *sql.Tx, principal in
 		`SELECT 1 FROM pa_conversations WHERE id = $1 AND principal = $2 AND closed_at_ms = 0 AND expires_at_ms > $3`,
 		conversationID, principal, now.UnixMilli()).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
-		return jobs.ErrGone
+		return jobs.ErrConversationGone
 	}
 	if err != nil {
 		return jobsUnreadable("conversation", err)
@@ -809,17 +970,4 @@ func (s *Store) PAUsageFor(ctx context.Context, principal int64) ([]PAUsageRow, 
 		return nil, jobsUnreadable("usage: rows", err)
 	}
 	return out, nil
-}
-
-// cancelInvalidPAJob cancels a queued job whose execution context cannot be
-// built. It runs in its own transaction after the claim's was rolled back,
-// so no reservation exists for it.
-func (s *Store) cancelInvalidPAJob(ctx context.Context, id int64, now time.Time) error {
-	_, err := s.DB.ExecContext(ctx,
-		`UPDATE pa_jobs SET status = $1, updated_at_ms = $2 WHERE id = $3 AND status IN ($4, $5)`,
-		string(jobs.StatusCancelled), now.UnixMilli(), id, string(jobs.StatusPending), string(jobs.StatusHeld))
-	if err != nil {
-		return fmt.Errorf("claim pa job: cancel invalid: %w", err)
-	}
-	return nil
 }

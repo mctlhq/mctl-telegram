@@ -69,6 +69,7 @@ type runLoopHarness struct {
 	issuer *localjwt.Issuer
 	pool   string
 	tools  []string
+	conns  map[int64][]ConnectionRevision
 	store  RunLoopStore
 }
 
@@ -110,8 +111,8 @@ func newRunLoopHarness(t *testing.T, opts ...rlOption) *runLoopHarness {
 	}
 	cfg := RunLoopConfig{
 		Store: store, Sealer: sealer, Pool: pool, Minter: iss, Verifier: ver, Sender: h.sender,
-		Tools: func(context.Context, *sql.Tx, int64) ([]ConnectionRevision, []string, error) {
-			return nil, h.tools, nil
+		Tools: func(_ context.Context, _ *sql.Tx, p int64) ([]ConnectionRevision, []string, error) {
+			return h.conns[p], h.tools, nil
 		},
 		Limits: jobs.DefaultLimits(),
 		Budget: jobs.Budget{PerJobUSD: 0.25, PrincipalDayUSD: 2, PrincipalMonthUSD: 20, GlobalDayUSD: 20},
@@ -374,16 +375,19 @@ func TestRunLoop_ReportedCostCapped(t *testing.T) {
 	h.consent(aliceID)
 	h.text(aliceID, "hello")
 	c := h.mustClaim()
+	if c.Limits.MaxJobCostUSD != 0.25 {
+		t.Fatalf("claim limits carry max_job_cost_usd %v, want the reservation", c.Limits.MaxJobCostUSD)
+	}
 	huge := 1e300
 	if w := h.post(RouteReply, c.Token, replyRequest{Text: "ok", CostUSD: &huge}); w.Code != http.StatusOK {
 		t.Fatalf("reply: %d", w.Code)
 	}
-	var cost float64
-	if err := h.convoHarness.store.DB.QueryRow(`SELECT cost_usd FROM pa_usage WHERE job_id = $1`, c.JobID).Scan(&cost); err != nil {
+	var cost, reported float64
+	if err := h.convoHarness.store.DB.QueryRow(`SELECT cost_usd, reported_cost_usd FROM pa_usage WHERE job_id = $1`, c.JobID).Scan(&cost, &reported); err != nil {
 		t.Fatal(err)
 	}
-	if cost != maxCostMultiple*0.25 {
-		t.Fatalf("settled at %v, want the cap %v", cost, maxCostMultiple*0.25)
+	if cost != 0.25 || reported != huge {
+		t.Fatalf("settled at %v (reported %v), want the reservation with the report kept", cost, reported)
 	}
 }
 
@@ -450,9 +454,116 @@ func TestRunLoop_S1R3(t *testing.T) {
 	if len(h.sender.to(aliceID)) != 2 {
 		t.Fatal("the hold message was repeated")
 	}
-	// The next day the held job runs and reads both messages.
+	// A day later the conversation has expired: the held request is
+	// dropped and Alice is told, instead of waiting silently (F3).
 	h.now = h.now.Add(24 * time.Hour)
 	h.consentStillOpen(t)
+	sent = h.sender.to(aliceID)
+	if len(sent) != 3 || sent[2] != output.ServerText(output.TextRequestDropped).String() {
+		t.Fatalf("sent %q, want the dropped-request notice last", sent)
+	}
+}
+
+// TestRunLoop_HeldDroppedBeforeWindowResets: a held job whose conversation
+// expires is dropped (with a notice) when the conversation goes, not when
+// the month window resets.
+func TestRunLoop_HeldDroppedBeforeWindowResets(t *testing.T) {
+	h := newRunLoopHarness(t, withBudget(jobs.Budget{PerJobUSD: 0.25, PrincipalDayUSD: 0.25, PrincipalMonthUSD: 0.25, GlobalDayUSD: 20}))
+	h.consent(aliceID)
+	h.text(aliceID, "one")
+	c := h.mustClaim()
+	if w := h.post(RouteReply, c.Token, replyRequest{Text: "done"}); w.Code != http.StatusOK {
+		t.Fatalf("reply: %d", w.Code)
+	}
+	h.text(aliceID, "two")
+	if _, code := h.claim(); code != http.StatusNoContent {
+		t.Fatalf("claim over the month cap: %d", code)
+	}
+	if _, err := h.convoHarness.store.DB.Exec(`UPDATE pa_conversations SET expires_at_ms = $1 WHERE principal = $2`,
+		h.now.Add(time.Hour).UnixMilli(), aliceID); err != nil {
+		t.Fatal(err)
+	}
+	h.now = h.now.Add(2 * time.Hour) // well before the month resets
+	if _, code := h.claim(); code != http.StatusNoContent {
+		t.Fatalf("claim: %d", code)
+	}
+	sent := h.sender.to(aliceID)
+	if len(sent) != 3 || sent[2] != output.ServerText(output.TextRequestDropped).String() {
+		t.Fatalf("sent %q, want answer, hold, dropped", sent)
+	}
+	var st string
+	_ = h.convoHarness.store.DB.QueryRow(`SELECT status FROM pa_jobs WHERE principal = $1 ORDER BY id DESC LIMIT 1`, aliceID).Scan(&st)
+	if st != "cancelled" {
+		t.Fatalf("held job %s", st)
+	}
+}
+
+// TestRunLoop_ExpiredLeaseNotice is F5: a run whose lease ran out ends
+// with a short server text, once.
+func TestRunLoop_ExpiredLeaseNotice(t *testing.T) {
+	h := newRunLoopHarness(t)
+	h.consent(aliceID)
+	h.text(aliceID, "hello")
+	c := h.mustClaim()
+	h.now = h.now.Add(jobs.DefaultLease + time.Second)
+	for range 2 {
+		if _, code := h.claim(); code != http.StatusNoContent {
+			t.Fatalf("claim: %d", code)
+		}
+	}
+	sent := h.sender.to(aliceID)
+	if len(sent) != 1 || sent[0] != output.ServerText(output.TextRunFailed).String() {
+		t.Fatalf("sent %q, want one run-failed notice", sent)
+	}
+	if w := h.post(RouteReply, c.Token, replyRequest{Text: "late"}); w.Code != http.StatusConflict {
+		t.Fatalf("late reply: %d", w.Code)
+	}
+	if len(h.sender.to(aliceID)) != 1 {
+		t.Fatal("a late reply was sent")
+	}
+}
+
+// TestRunLoop_StateChangesBetweenClaimAndReply is M13: the reply route
+// re-runs the gate, so a conversation that expired or a consent version
+// that changed after the claim stops the reply.
+func TestRunLoop_StateChangesBetweenClaimAndReply(t *testing.T) {
+	for _, tc := range []struct {
+		name, sql string
+		notice    *output.Template
+	}{
+		{"conversation expired", `UPDATE pa_conversations SET expires_at_ms = 1 WHERE principal = $1`, &output.TextRequestDropped},
+		{"conversation closed", `UPDATE pa_conversations SET closed_at_ms = 1 WHERE principal = $1`, &output.TextRequestDropped},
+		{"consent version changed", `UPDATE pa_consents SET version = 'pa-data-flow/v0' WHERE principal = $1`, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRunLoopHarness(t)
+			h.consent(aliceID)
+			h.text(aliceID, "hello")
+			c := h.mustClaim()
+			if _, err := h.convoHarness.store.DB.Exec(tc.sql, aliceID); err != nil {
+				t.Fatal(err)
+			}
+			if w := h.post(RouteReply, c.Token, replyRequest{Text: "secret"}); w.Code != http.StatusConflict {
+				t.Fatalf("reply: %d", w.Code)
+			}
+			sent := h.sender.to(aliceID)
+			want := 0
+			if tc.notice != nil {
+				want = 1
+			}
+			if len(sent) != want || (want == 1 && sent[0] != output.ServerText(*tc.notice).String()) {
+				t.Fatalf("sent %q", sent)
+			}
+			if js, us := h.jobStatus(c.JobID); js != "cancelled" || us != "held" {
+				t.Fatalf("job %s usage %s", js, us)
+			}
+			// A second step does not repeat the notice.
+			_ = h.post(RouteReply, c.Token, replyRequest{Text: "secret"})
+			if len(h.sender.to(aliceID)) != want {
+				t.Fatal("notice repeated")
+			}
+		})
+	}
 }
 
 // consentStillOpen re-opens the conversation clock check: the harness
@@ -521,6 +632,29 @@ func TestRunLoop_S1I1(t *testing.T) {
 		h2.text(bobID, "hi")
 		if c := h2.mustClaim(); c.Token == "" {
 			t.Fatal("Bob blocked behind an unbuildable job")
+		}
+	})
+	// F1: a context that does not validate (here a connection revision
+	// the resolver should never produce) recurs on every attempt, so the
+	// job is cancelled with a notice in the same claim that serves Bob.
+	t.Run("invalid execution context", func(t *testing.T) {
+		h2 := newRunLoopHarness(t)
+		h2.conns = map[int64][]ConnectionRevision{aliceID: {{ConnectionID: "c1", AuthorityRevision: 0}}}
+		h2.consent(aliceID)
+		h2.consent(bobID)
+		h2.text(aliceID, "hello")
+		h2.now = h2.now.Add(time.Millisecond)
+		h2.text(bobID, "hi")
+		c := h2.mustClaim()
+		if c.Token == "" {
+			t.Fatal("Bob not claimed")
+		}
+		if n := h2.count(`SELECT count(*) FROM pa_jobs WHERE principal = $1 AND status = 'cancelled'`, aliceID); n != 1 {
+			t.Fatalf("Alice cancelled = %d", n)
+		}
+		sent := h2.sender.to(aliceID)
+		if len(sent) != 1 || sent[0] != output.ServerText(output.TextRunFailed).String() {
+			t.Fatalf("Alice was sent %q", sent)
 		}
 	})
 }
@@ -616,9 +750,10 @@ func (failingConversation) PAConversationOpen(context.Context, *sql.Tx, int64, s
 	return errors.New("conversation table unreadable")
 }
 
-// TestRunLoop_ReadErrorsFailClosed: a consent or status read error is a
-// refusal (503), never consent, never an open conversation, and changes no
-// state (I9).
+// TestRunLoop_ReadErrorsFailClosed: a consent or status read error is
+// never consent, never an open conversation, and reserves nothing (I9).
+// The job is not claimed and not cancelled: it is backed off (F1), so it
+// cannot block other principals' jobs.
 func TestRunLoop_ReadErrorsFailClosed(t *testing.T) {
 	for name, wrap := range map[string]func(*db.Store) RunLoopStore{
 		"consent":      func(s *db.Store) RunLoopStore { return failingConsent{s} },
@@ -628,8 +763,14 @@ func TestRunLoop_ReadErrorsFailClosed(t *testing.T) {
 			h := newRunLoopHarness(t, withStore(wrap))
 			h.consent(aliceID) // the webhook path reads through the real store
 			h.text(aliceID, "hello")
-			if _, code := h.claim(); code != http.StatusServiceUnavailable {
+			if _, code := h.claim(); code != http.StatusNoContent {
 				t.Fatalf("claim with an unreadable %s: %d", name, code)
+			}
+			if n := h.count(`SELECT count(*) FROM pa_jobs WHERE claim_failures = 1 AND held_until_ms > 0`); n != 1 {
+				t.Fatal("the failed claim was not backed off")
+			}
+			if len(h.sender.to(aliceID)) != 0 {
+				t.Fatal("a notice after one transient failure")
 			}
 			if h.count(`SELECT count(*) FROM pa_usage`) != 0 {
 				t.Fatal("reserved on an unreadable read")
@@ -763,7 +904,8 @@ func TestRunLoop_RedeliveryCap(t *testing.T) {
 type failureRecorderDown struct{ *db.Store }
 
 func (failureRecorderDown) RecordPAUpdateFailure(context.Context, int64) (int, error) {
-	return 0, errors.New("down")
+	// A count at the cap together with an error: the error wins (M33).
+	return MaxHandlerAttempts + 1, errors.New("down")
 }
 
 func TestRunLoop_RedeliveryCapUncountedIsNotAcked(t *testing.T) {

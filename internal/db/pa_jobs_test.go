@@ -336,12 +336,12 @@ func runPAJobsSuite(t *testing.T, s *Store) {
 			{Principal: paAlice, JobID: j.ID, Attempt: j.Attempts + 1, Digest: j.ContextDigest},
 			{Principal: paAlice, JobID: j.ID, Attempt: j.Attempts, Digest: "00"},
 		} {
-			if _, err := s.RunningPAJob(context.Background(), bad, f.now); !errors.Is(err, jobs.ErrStale) {
+			if _, err := s.RunningPAJob(context.Background(), bad, f.now, okGate); !errors.Is(err, jobs.ErrStale) {
 				t.Fatalf("%+v: %v", bad, err)
 			}
 		}
 		// Bob naming Alice's job: the lookup is under the principal.
-		if _, err := s.RunningPAJob(context.Background(), jobs.Ref{Principal: paBob, JobID: j.ID, Attempt: 1, Digest: j.ContextDigest}, f.now); !errors.Is(err, jobs.ErrNotFound) {
+		if _, err := s.RunningPAJob(context.Background(), jobs.Ref{Principal: paBob, JobID: j.ID, Attempt: 1, Digest: j.ContextDigest}, f.now, okGate); !errors.Is(err, jobs.ErrNotFound) {
 			t.Fatalf("Bob reading Alice's job: %v", err)
 		}
 	})
@@ -351,11 +351,18 @@ func runPAJobsSuite(t *testing.T, s *Store) {
 		f.enqueue(paAlice, "c1")
 		j := f.claim().Job
 		later := f.now.Add(6 * time.Minute)
-		if _, err := s.RunningPAJob(context.Background(), ref(j), later); !errors.Is(err, jobs.ErrStale) {
+		if _, err := s.RunningPAJob(context.Background(), ref(j), later, okGate); !errors.Is(err, jobs.ErrStale) {
 			t.Fatalf("after the lease: %v", err)
 		}
-		if err := s.ExpirePAJobs(context.Background(), later); err != nil {
+		notices, err := s.ExpirePAJobs(context.Background(), later)
+		if err != nil {
 			t.Fatal(err)
+		}
+		if len(notices) != 1 || notices[0].Principal != paAlice || notices[0].Kind != jobs.NoticeRunFailed {
+			t.Fatalf("notices = %+v, want one run-failed notice for Alice", notices)
+		}
+		if again, _ := s.ExpirePAJobs(context.Background(), later); len(again) != 0 {
+			t.Fatalf("a second expiry pass owes %+v", again)
 		}
 		if js, us := f.status(j.ID); js != "expired" || us != "held" {
 			t.Fatalf("expired: job %s usage %s", js, us)
@@ -448,22 +455,186 @@ func runPAJobsSuite(t *testing.T, s *Store) {
 		}
 	})
 
-	t.Run("release requeues or cancels", func(t *testing.T) {
+	t.Run("release backs off or cancels", func(t *testing.T) {
 		f := newPAFixture(t, s)
 		f.enqueue(paAlice, "c1")
 		j := f.claim().Job
-		if err := s.ReleasePAClaim(context.Background(), ref(j), true, f.now); err != nil {
-			t.Fatal(err)
+		n, err := s.ReleasePAClaim(context.Background(), ref(j), true, f.now)
+		if err != nil || n != nil {
+			t.Fatalf("requeue: notice %+v err %v", n, err)
 		}
 		if js, us := f.status(j.ID); js != "pending" || us != "" {
 			t.Fatalf("requeued: %s %q", js, us)
 		}
+		// Backed off: not due at once, so it cannot stay the oldest due job.
+		if r := f.claim(); r.Outcome != jobs.ClaimNone {
+			t.Fatalf("requeued job claimed during its backoff: %+v", r)
+		}
+		f.now = f.now.Add(jobs.ClaimBackoff(1) + time.Second)
 		j = f.claim().Job
-		if err := s.ReleasePAClaim(context.Background(), ref(j), false, f.now); err != nil {
-			t.Fatal(err)
+		n, err = s.ReleasePAClaim(context.Background(), ref(j), false, f.now)
+		if err != nil || n == nil || n.Kind != jobs.NoticeRunFailed || n.Principal != paAlice {
+			t.Fatalf("release for good: notice %+v err %v", n, err)
 		}
 		if js, _ := f.status(j.ID); js != "cancelled" {
 			t.Fatalf("released for good: %s", js)
+		}
+	})
+
+	// F1: one principal's unreadable state must not block the queue.
+	t.Run("a failing job is backed off and the next principal claims", func(t *testing.T) {
+		f := newPAFixture(t, s)
+		f.enqueue(paAlice, "c1") // oldest
+		f.now = f.now.Add(time.Millisecond)
+		f.enqueue(paBob, "c2")
+		broken := errors.New("alice's consent row does not read")
+		gate := func(_ context.Context, _ *sql.Tx, j jobs.Job, _ time.Time) error {
+			if j.Principal == paAlice {
+				return broken
+			}
+			return nil
+		}
+		claim := func() jobs.ClaimResult {
+			r, err := s.ClaimPAJob(context.Background(), jobs.ClaimRequest{
+				Now: f.now, Lease: time.Hour, Budget: f.b, Gate: gate, Build: paBuild(),
+			})
+			if err != nil {
+				t.Fatalf("claim: %v", err)
+			}
+			return r
+		}
+		r := claim()
+		if r.Outcome != jobs.ClaimClaimed || r.Job.Principal != paBob {
+			t.Fatalf("claim behind Alice's broken job = %+v", r)
+		}
+		var aliceID int64
+		_ = s.DB.QueryRow(`SELECT id FROM pa_jobs WHERE principal = $1`, paAlice).Scan(&aliceID)
+		if js, us := f.status(aliceID); js != "pending" || us != "" {
+			t.Fatalf("Alice: %s %q", js, us)
+		}
+		// Each failure backs off further; the fifth cancels with a notice.
+		for i := 2; i <= jobs.MaxClaimFailures; i++ {
+			f.now = f.now.Add(jobs.ClaimBackoff(i-1) + time.Second)
+			r = claim()
+			if i < jobs.MaxClaimFailures {
+				if len(r.Notices) != 0 {
+					t.Fatalf("failure %d: notices %+v", i, r.Notices)
+				}
+				continue
+			}
+			if len(r.Notices) != 1 || r.Notices[0].Principal != paAlice || r.Notices[0].Kind != jobs.NoticeRunFailed {
+				t.Fatalf("failure %d: notices %+v, want Alice told", i, r.Notices)
+			}
+		}
+		if js, _ := f.status(aliceID); js != "cancelled" {
+			t.Fatalf("Alice after %d failures: %s", jobs.MaxClaimFailures, js)
+		}
+	})
+
+	t.Run("a backoff never shortens a budget hold", func(t *testing.T) {
+		f := newPAFixture(t, s)
+		f.enqueue(paAlice, "c1")
+		until := f.now.Add(48 * time.Hour)
+		if _, err := s.DB.Exec(`UPDATE pa_jobs SET status = 'held', held_until_ms = $1 WHERE principal = $2`, until.UnixMilli(), paAlice); err != nil {
+			t.Fatal(err)
+		}
+		// Picked early (no open conversation row), then the gate fails.
+		_, err := s.ClaimPAJob(context.Background(), jobs.ClaimRequest{
+			Now: f.now, Lease: time.Minute, Budget: f.b, Build: paBuild(),
+			Gate: func(context.Context, *sql.Tx, jobs.Job, time.Time) error { return errors.New("unreadable") },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var held int64
+		_ = s.DB.QueryRow(`SELECT held_until_ms FROM pa_jobs WHERE principal = $1`, paAlice).Scan(&held)
+		if held != until.UnixMilli() {
+			t.Fatalf("held until %v, want the hold's %v kept", time.UnixMilli(held).UTC(), until)
+		}
+	})
+
+	t.Run("an unbuildable job is cancelled at once and the next is claimed", func(t *testing.T) {
+		f := newPAFixture(t, s)
+		f.enqueue(paAlice, "c1")
+		f.now = f.now.Add(time.Millisecond)
+		f.enqueue(paBob, "c2")
+		build := func(ctx context.Context, tx *sql.Tx, j jobs.Job, res int64) ([]byte, string, []string, error) {
+			if j.Principal == paAlice {
+				return nil, "", nil, fmt.Errorf("%w: write tool offered", jobs.ErrInvalid)
+			}
+			return paBuild()(ctx, tx, j, res)
+		}
+		r, err := s.ClaimPAJob(context.Background(), jobs.ClaimRequest{
+			Now: f.now, Lease: time.Minute, Budget: f.b, Gate: okGate, Build: build,
+		})
+		if err != nil || r.Outcome != jobs.ClaimClaimed || r.Job.Principal != paBob {
+			t.Fatalf("claim = %+v err %v", r, err)
+		}
+		if len(r.Notices) != 1 || r.Notices[0].Principal != paAlice {
+			t.Fatalf("notices = %+v", r.Notices)
+		}
+		rows, _ := s.PAUsageFor(context.Background(), paAlice)
+		if len(rows) != 0 {
+			t.Fatalf("Alice's refused build left usage %+v", rows)
+		}
+	})
+
+	t.Run("expired leases end before the claim picks", func(t *testing.T) {
+		f := newPAFixture(t, s)
+		f.enqueue(paAlice, "c1")
+		old := f.claim().Job
+		f.enqueue(paAlice, "c1")
+		f.now = f.now.Add(6 * time.Minute)
+		r := f.claim()
+		if r.Outcome != jobs.ClaimClaimed || r.Job.ID == old.ID {
+			t.Fatalf("Alice's next job behind an expired lease = %+v", r)
+		}
+		if len(r.Notices) != 1 || r.Notices[0].JobID != old.ID {
+			t.Fatalf("notices = %+v, want the expired job's", r.Notices)
+		}
+	})
+
+	t.Run("principal month cap holds until the month ends", func(t *testing.T) {
+		f := newPAFixture(t, s)
+		f.b.PrincipalDayUSD, f.b.PrincipalMonthUSD = 0.5, 0.5
+		for range 2 {
+			f.enqueue(paAlice, "c1")
+			f.finish(f.claim().Job, -1)
+		}
+		f.enqueue(paAlice, "c1")
+		r := f.claim()
+		end := time.Date(f.now.Year(), f.now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, 1, 0)
+		if r.Outcome != jobs.ClaimHeld || r.Scope != jobs.ScopePrincipalMonth || !r.Job.HeldUntil.Equal(end) {
+			t.Fatalf("month cap = %+v, want held until %v", r, end)
+		}
+	})
+
+	t.Run("a tool call needs a live reservation", func(t *testing.T) {
+		f := newPAFixture(t, s)
+		f.enqueue(paAlice, "c1")
+		j := f.claim("tg/get_messages").Job
+		if _, err := s.DB.Exec(`UPDATE pa_usage SET status = 'held' WHERE job_id = $1`, j.ID); err != nil {
+			t.Fatal(err)
+		}
+		_, err := s.AdmitPAToolCall(context.Background(), ref(j), jobs.ToolCallRequest{
+			Now: f.now, Tool: "tg/get_messages", MaxToolCalls: 8, Gate: okGate,
+		})
+		if !errors.Is(err, jobs.ErrBudget) {
+			t.Fatalf("tool call without a live reservation: %v", err)
+		}
+	})
+
+	t.Run("a reported cost settles at most the reservation", func(t *testing.T) {
+		f := newPAFixture(t, s)
+		f.enqueue(paAlice, "c1")
+		j := f.claim().Job
+		f.finish(j, 1e9)
+		var cost, reported float64
+		if err := s.DB.QueryRow(`SELECT cost_usd, reported_cost_usd FROM pa_usage WHERE job_id = $1`, j.ID).Scan(&cost, &reported); err != nil {
+			t.Fatal(err)
+		}
+		if cost != 0.25 || reported != 1e9 {
+			t.Fatalf("cost %v reported %v, want 0.25 and the report kept", cost, reported)
 		}
 	})
 
@@ -591,5 +762,88 @@ func TestPAJobs_LedgerReadErrorFailsClosed(t *testing.T) {
 				t.Fatal("global window read an unreadable ledger as zero")
 			}
 		})
+	}
+}
+
+// TestPAJobs_ManagedCandidatesSeePASpend: the managed runtime's candidate
+// filter reads pa_usage in the shared global day, so PA spend stops a
+// managed claim it leaves no room for.
+func TestPAJobs_ManagedCandidatesSeePASpend(t *testing.T) {
+	ctx := context.Background()
+	s := withBudget(newTestStoreCrypted(t), 0.5, 5, 15, 1.0)
+	uid := seedManagedAccount(t, s, "pa-glob", RuntimeManaged, 1)
+	if _, err := s.DB.ExecContext(ctx, `UPDATE users SET telegram_login_id = 9811 WHERE id = $1`, uid); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.ListManagedClaimCandidates(ctx, budgetNow, 5, nil, 10); err != nil || len(got) != 1 {
+		t.Fatalf("before PA spend: %+v err %v", got, err)
+	}
+	f := &paFixture{t: t, s: s, now: budgetNow, b: jobs.Budget{PerJobUSD: 0.6, PrincipalDayUSD: 2, PrincipalMonthUSD: 20, GlobalDayUSD: 1.0}}
+	paReset(t, s)
+	f.enqueue(paAlice, "c1")
+	if r := f.claim(); r.Outcome != jobs.ClaimClaimed {
+		t.Fatalf("PA claim = %+v", r)
+	}
+	if got, err := s.ListManagedClaimCandidates(ctx, budgetNow, 5, nil, 10); err != nil || len(got) != 0 {
+		t.Fatalf("after 0.6 of PA spend in a 1.0 window: %+v err %v, want none", got, err)
+	}
+	if got := claimOne(t, s, uid); len(got) != 0 {
+		t.Fatalf("managed claim took %d jobs past the shared window", len(got))
+	}
+}
+
+// TestPAJobsPostgresSharesManagedBudgetLock: a PA claim waits for the
+// managed budget lock, so spend committed under it (by a managed claim) is
+// seen before the PA claim reserves.
+func TestPAJobsPostgresSharesManagedBudgetLock(t *testing.T) {
+	ctx := context.Background()
+	s := newFreshSchemaPostgresStore(t)
+	f := newPAFixture(t, s)
+	f.b.GlobalDayUSD = globalDayNow(t, s, f.now) + 0.3 // room for one 0.25 job
+	f.enqueue(paAlice, "c1")
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, managedBudgetLockKey); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan jobs.ClaimResult, 1)
+	errc := make(chan error, 1)
+	go func() {
+		r, err := s.ClaimPAJob(ctx, jobs.ClaimRequest{Now: f.now, Lease: time.Minute, Budget: f.b, Gate: okGate, Build: paBuild()})
+		if err != nil {
+			errc <- err
+			return
+		}
+		done <- r
+	}()
+	select {
+	case r := <-done:
+		t.Fatalf("PA claim did not wait for the managed budget lock: %+v", r)
+	case err := <-errc:
+		t.Fatal(err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	// Spend committed under the lock, as a managed claim would.
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO pa_usage(job_id, attempt, principal, reserved_usd, cost_usd, status, created_at_ms, updated_at_ms)
+		 VALUES(-1, 1, $1, 0.25, 0.25, 'settled', $2, $2)`, paBob, f.now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case r := <-done:
+		if r.Outcome != jobs.ClaimHeld || r.Scope != jobs.ScopeGlobalDay {
+			t.Fatalf("PA claim after the locked spend = %+v, want held on the global day", r)
+		}
+	case err := <-errc:
+		t.Fatal(err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("PA claim never finished")
 	}
 }

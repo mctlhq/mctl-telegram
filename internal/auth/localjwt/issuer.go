@@ -424,7 +424,11 @@ const workerBridgeAudience = "mcp-worker-bridge"
 // token it already held: eviction dropped the socket, the reconnect skipped
 // the denylist entirely, and containment lasted until the token expired on
 // its own.
-var derivedAudiences = [...]string{"bridge", "agent", "agent-job", "agent-pool", PAJobAudience}
+//
+// pa-job tokens are not listed: Provider refuses them outright (they never
+// reach the revocation check here), and PAJobVerifier checks revocation by
+// the inherited pool jti and the principal itself.
+var derivedAudiences = [...]string{"bridge", "agent", "agent-job", "agent-pool"}
 
 // needsRevocationCheck reports whether Authenticate must consult the
 // revocation denylist for these claims. Three shapes qualify:
