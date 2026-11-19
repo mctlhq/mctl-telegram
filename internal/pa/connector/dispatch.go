@@ -124,6 +124,10 @@ const DefaultCallTimeout = 60 * time.Second
 // them, so one connection's failure does not hide drift another one saw.
 const PinObservationWindow = 5 * time.Minute
 
+// PinRefreshInterval is how often Run ages observations out of the gauges
+// when no dispatch does it.
+const PinRefreshInterval = 30 * time.Second
+
 // Refusal audit bound: a worker cannot write more than refusalAuditBurst
 // refusals per refusalAuditWindow into one principal's chain. Past it, a
 // refusal is still refused and counted (status refused_unaudited).
@@ -158,7 +162,11 @@ type Dispatcher struct {
 	mu           sync.Mutex
 	listings     map[listingKey]*catalog.Surface
 	observations map[listingKey]pinObservation
-	refusals     map[int64]*auditWindow
+	// pinServers are the servers whose gauges were ever published; each
+	// is recomputed on every refresh, so none keeps a value no fresh
+	// observation supports.
+	pinServers map[string]bool
+	refusals   map[int64]*auditWindow
 }
 
 // pinObservation is one connection's last tools/list read: ok is false
@@ -194,7 +202,8 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	}
 	return &Dispatcher{
 		cfg: cfg, listings: map[listingKey]*catalog.Surface{},
-		observations: map[listingKey]pinObservation{}, refusals: map[int64]*auditWindow{},
+		observations: map[listingKey]pinObservation{}, pinServers: map[string]bool{},
+		refusals: map[int64]*auditWindow{},
 	}, nil
 }
 
@@ -547,7 +556,8 @@ func (d *Dispatcher) surface(ctx context.Context, ep MCPEndpoint, token connecti
 		}
 	}
 	d.observations[key] = pinObservation{at: now, ok: ok, drift: drift, denied: denied}
-	d.recordPinLocked(server, now)
+	d.pinServers[server] = true
+	d.refreshPinsLocked(now)
 	return s, true
 }
 
@@ -612,35 +622,73 @@ func GatewayPrefixed(s *catalog.Surface, pin *catalog.Pin) bool {
 	return true
 }
 
-// recordPinLocked sets server's drift gauges from the fresh observations of
-// all its connections (PinObservationWindow): drift if any fresh listing
-// drifted, unknown if none could be read. The caller holds d.mu, so two
-// requests cannot write the gauges out of order.
-func (d *Dispatcher) recordPinLocked(server string, now time.Time) {
-	seen, drift := false, false
-	denied := map[string]int{}
+// RefreshPins ages expired observations out of the drift gauges. Without
+// it an idle dispatcher would keep publishing its last values: a 0 that
+// claims "no drift" with no fresh listing behind it, or a 1 that keeps the
+// alert firing on stale data.
+func (d *Dispatcher) RefreshPins() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.refreshPinsLocked(d.now())
+}
+
+// Run calls RefreshPins every interval (PinRefreshInterval if 0) until ctx
+// ends. Whoever serves RouteTool must also run this.
+func (d *Dispatcher) Run(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = PinRefreshInterval
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			d.RefreshPins()
+		}
+	}
+}
+
+// refreshPinsLocked drops observations older than PinObservationWindow and
+// recomputes the gauges of every published server from what is left: drift
+// if any fresh listing of the server drifted, unknown if none could be
+// read, including when the last one simply aged out. The caller holds d.mu,
+// so two requests cannot write the gauges out of order.
+func (d *Dispatcher) refreshPinsLocked(now time.Time) {
+	type agg struct {
+		seen, drift bool
+		denied      map[string]int
+	}
+	per := map[string]*agg{}
+	for server := range d.pinServers {
+		per[server] = &agg{denied: map[string]int{}}
+	}
 	for k, o := range d.observations {
 		if now.Sub(o.at) > PinObservationWindow {
 			delete(d.observations, k)
 			continue
 		}
-		if k.server != server || !o.ok {
+		a := per[k.server]
+		if a == nil || !o.ok {
 			continue
 		}
-		seen = true
-		drift = drift || o.drift
+		a.seen = true
+		a.drift = a.drift || o.drift
 		for r, n := range o.denied {
-			denied[r] = max(denied[r], n)
+			a.denied[r] = max(a.denied[r], n)
 		}
 	}
 	if d.cfg.Metrics == nil {
 		return
 	}
-	if !seen {
-		d.cfg.Metrics.PAPinUnknown(server)
-		return
+	for server, a := range per {
+		if !a.seen {
+			d.cfg.Metrics.PAPinUnknown(server)
+			continue
+		}
+		d.cfg.Metrics.PAPinObserved(server, a.drift, a.denied, denyReasons)
 	}
-	d.cfg.Metrics.PAPinObserved(server, drift, denied, denyReasons)
 }
 
 func (d *Dispatcher) logDrift(server string, s *catalog.Surface) {

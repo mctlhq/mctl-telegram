@@ -22,13 +22,19 @@ import (
 // tokenEP is tg's endpoint answering tools/list per bearer: each
 // connection's token sees its own listing (or error).
 type tokenEP struct {
-	mu    sync.Mutex
-	pages map[string][]byte
-	errs  map[string]error
-	lists map[string]int
+	server string // "tg" when empty
+	mu     sync.Mutex
+	pages  map[string][]byte
+	errs   map[string]error
+	lists  map[string]int
 }
 
-func (e *tokenEP) Server() string { return "tg" }
+func (e *tokenEP) Server() string {
+	if e.server == "" {
+		return "tg"
+	}
+	return e.server
+}
 
 func (e *tokenEP) ListTools(_ context.Context, tok connection.Secret) ([][]byte, error) {
 	e.mu.Lock()
@@ -67,22 +73,24 @@ func (noConns) AccessToken(context.Context, int64, string, int64) (connection.Se
 }
 
 type surfaceEnv struct {
-	d   *Dispatcher
-	ep  *tokenEP
-	reg *metrics.Registry
-	now time.Time
+	d     *Dispatcher
+	ep    *tokenEP
+	alice *tokenEP
+	reg   *metrics.Registry
+	now   time.Time
 }
 
 func newSurfaceEnv(t *testing.T) *surfaceEnv {
 	t.Helper()
 	e := &surfaceEnv{
-		ep:  &tokenEP{pages: map[string][]byte{}, errs: map[string]error{}, lists: map[string]int{}},
-		reg: metrics.New(),
-		now: t0,
+		ep:    &tokenEP{pages: map[string][]byte{}, errs: map[string]error{}, lists: map[string]int{}},
+		alice: &tokenEP{server: "alice", pages: map[string][]byte{}, errs: map[string]error{}, lists: map[string]int{}},
+		reg:   metrics.New(),
+		now:   t0,
 	}
 	d, err := NewDispatcher(DispatcherConfig{
 		Jobs: noJobs{}, Connections: noConns{}, Pin: loadPin(t),
-		Endpoints: map[string]MCPEndpoint{"tg": e.ep},
+		Endpoints: map[string]MCPEndpoint{"tg": e.ep, "alice": e.alice},
 		Executor:  newExecutor(&fakeSink{ev: &events{}}),
 		Flags:     func() (Flags, error) { return Flags{}, nil },
 		Metrics:   e.reg,
@@ -168,6 +176,77 @@ func TestPinGaugesAggregateConnections(t *testing.T) {
 	}
 	// A refused token on top of that changes nothing.
 	step("refused while unknown", "c4", false, 0, 0, 1)
+}
+
+// TestPinGaugesAgeOut (#1341 review thread on recordPinLocked): an
+// observation that leaves the window takes the server's gauges with it,
+// whoever triggers the refresh. A fresh drift ages into unknown, never into
+// a stale 1 or a 0 that claims "no drift"; a fresh clean listing clears it.
+func TestPinGaugesAgeOut(t *testing.T) {
+	e := newSurfaceEnv(t)
+	e.ep.pages["tok-c1"] = tgListing(t, func(tools []map[string]any) []map[string]any {
+		for _, tool := range tools {
+			if tool["name"] == "get_messages" {
+				tool["description"] = "changed"
+			}
+		}
+		return tools
+	})
+	e.ep.pages["tok-c2"] = tgListing(t, nil)
+	e.alice.errs["tok-a1"] = errors.New("connection reset")
+	want := func(name string, wantDrift float64, wantSeries int, wantUnknown float64) {
+		t.Helper()
+		drift, series, unknown, denied := e.gauges(t)
+		if series != wantSeries || drift != wantDrift || unknown != wantUnknown {
+			t.Fatalf("%s: drift %v (%d series) unknown %v, want %v (%d) %v", name, drift, series, unknown, wantDrift, wantSeries, wantUnknown)
+		}
+		if wantSeries == 0 && denied != 0 {
+			t.Fatalf("%s: %d denied-tool series while unknown", name, denied)
+		}
+	}
+	e.observe("c1", 1)
+	want("fresh drift", 1, 1, 0)
+
+	// Idle: a refresh with no dispatch ages the drift out to unknown.
+	e.now = e.now.Add(PinObservationWindow + time.Second)
+	e.d.RefreshPins()
+	want("drift aged out", 0, 0, 1)
+
+	e.observe("c2", 1)
+	want("fresh clean listing", 0, 1, 0)
+
+	// Another server's dispatch also ages tg's clean listing out: no 0
+	// stays behind without a fresh listing.
+	e.now = e.now.Add(PinObservationWindow + time.Second)
+	e.d.surface(context.Background(), e.alice, connection.NewSecret("tok-a1"), pa.ConnectionRevision{ConnectionID: "a1", AuthorityRevision: 1})
+	want("clean aged out by alice", 0, 0, 1)
+
+	// Run does the refresh on its own.
+	e.observe("c1", 2)
+	want("fresh drift again", 1, 1, 0)
+	e.d.mu.Lock()
+	e.now = e.now.Add(PinObservationWindow + time.Second)
+	e.d.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { e.d.Run(ctx, 5*time.Millisecond); close(done) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		e.d.mu.Lock()
+		series := testutil.CollectAndCount(e.reg.PAPinDrift)
+		e.d.mu.Unlock()
+		if series == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("Run never aged the drift out")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	want("drift aged out by Run", 0, 0, 1)
 }
 
 // A refused token alone never raises "listing unknown".

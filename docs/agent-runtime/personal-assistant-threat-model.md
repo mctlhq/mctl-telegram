@@ -462,9 +462,12 @@ per connection, so the server's gauges aggregate the last observation of every
 connection made in the past 5 minutes: `mctl_pa_pin_drift{server}` is 1 when
 any of them shows a pinned tool changed or missing, 0 when all match. Unpinned
 extras, such as `tg`'s write tools or a gateway's `tg_`-prefixed names, are
-denied but are not drift. When none of them could be read or parsed, the drift
-and denied-tool series are removed and `mctl_pa_pin_listing_unknown{server}`
-is 1: an unobserved listing is never reported as clean, and one connection's
+denied but are not drift. When none of them could be read or parsed, or the last
+one aged out of the window (also while idle: the gauges of every server are
+recomputed on each refresh, at least every 30s), the drift and denied-tool
+series are removed and `mctl_pa_pin_listing_unknown{server}` is 1: an
+unobserved listing is never reported as clean, a drift seen long ago does not
+keep the alert firing, and one connection's
 failure cannot hide drift another connection saw. A server refusing one
 connection's token on `tools/list` is that connection's problem: the call is
 refused as `server_refused` and counted in

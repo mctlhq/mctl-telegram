@@ -862,11 +862,17 @@ spec:
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpapindrift"
 
         - alert: MctlPAPinListingUnknown
-          # Could not observe is not observed clean: a listing that failed or
-          # did not parse leaves drift unknown, and every call to the server
-          # is refused as server_unavailable meanwhile.
+          # Could not observe is not observed clean: with no fresh listing
+          # (failed, unparsable, or aged out of the 5-minute window) drift is
+          # unknown, the drift gauge is absent, and calls are refused as
+          # server_unavailable. An idle server also ages into unknown; that
+          # is true but not actionable, so the alert needs PA calls to the
+          # server in the same 15 minutes. The idle case is decided here,
+          # explicitly, not by leaving a stale 0 in the drift gauge.
           expr: |
             max by (server) (mctl_pa_pin_listing_unknown) > 0
+              and on (server)
+            sum by (server) (increase(mctl_pa_dispatch_total[15m])) > 0
           for: 15m
           labels:
             severity: warning
@@ -874,7 +880,7 @@ spec:
           annotations:
             summary: "PA catalog server {{ $labels.server }} tools/list cannot be observed"
             description: >
-              The last tools/list of {{ $labels.server }} could not be read
-              or parsed, so pin drift is unknown and Personal Assistant calls
-              to it are refused.
+              Personal Assistant calls reach {{ $labels.server }}, but no
+              tools/list of it could be read or parsed in the last 5 minutes,
+              so pin drift is unknown and those calls are refused.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpapinlistingunknown"

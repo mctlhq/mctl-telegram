@@ -3960,9 +3960,14 @@ whether the change is legitimate.
 <a id="mctlpapinlistingunknown"></a>
 ### MctlPAPinListingUnknown
 
-`mctl_pa_pin_listing_unknown{server}` has read 1 for 15 minutes: no connection
-has read the server's `tools/list` successfully in the last 5 minutes (each
-connection's last observation counts; the gauges aggregate them). Drift is
+`mctl_pa_pin_listing_unknown{server}` has read 1 for 15 minutes while PA calls
+reached the server: no connection has read the server's `tools/list`
+successfully in the last 5 minutes (each connection's last observation
+counts; the gauges aggregate them). Observations age out even with no
+traffic, so an idle server also reads unknown; the alert expression leaves
+that case out by requiring `mctl_pa_dispatch_total` for the server to have
+grown in the same 15 minutes, rather than letting a stale 0 stand in for a
+listing. Drift is
 unknown (the drift and denied-tool series are removed, never 0) and PA calls
 to the server are refused as `server_unavailable`. Check the server's own
 health and the egress logs of the `mcp` purpose;
