@@ -206,3 +206,45 @@ func TestStoreSink_ZeroUserIDRefused(t *testing.T) {
 		t.Fatalf("err = %v, logged = %d", err, z.logged)
 	}
 }
+
+// PA users row (owner decision 2026-11-19 on #1312): a principal whose only
+// contact with MCTL is a PA connection gets its users row from
+// EnsurePAUser on its first connection, marked provider "pa", and its calls
+// are audited through the same chain as anyone else's. Alice here has no
+// tg-mcp login and no telegram_accounts row.
+func TestStoreSink_PAOnlyPrincipalIsAudited(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	userID, err := store.EnsurePAUser(ctx, aliceID)
+	if err != nil {
+		t.Fatalf("EnsurePAUser: %v", err)
+	}
+	var provider string
+	if err := store.DB.QueryRowContext(ctx, `SELECT provider FROM users WHERE id = $1`, userID).Scan(&provider); err != nil {
+		t.Fatal(err)
+	}
+	if provider != db.PAProvider {
+		t.Fatalf("provider = %q, want %q", provider, db.PAProvider)
+	}
+	x := &Executor{Sink: StoreSink{Store: store}, Now: func() time.Time { return t0 }}
+	n := 0
+	dispatch := func(context.Context) (Result, error) { n++; return Result{Output: []byte("ok")}, nil }
+	if _, err := x.Execute(ctx, tgSurface(t), readCall(t, `{}`), dispatch); err != nil {
+		t.Fatalf("Execute for a PA-only principal: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("dispatches = %d, want 1", n)
+	}
+	if rows := readRows(t, store, userID); len(rows) != 2 {
+		t.Fatalf("audit rows = %d, want 2", len(rows))
+	}
+	v, err := store.VerifyAuditChain(ctx, userID)
+	if err != nil || !v.OK || v.Verified != 2 {
+		t.Fatalf("chain = %+v, %v", v, err)
+	}
+	// A second connection reuses the row.
+	again, err := store.EnsurePAUser(ctx, aliceID)
+	if err != nil || again != userID {
+		t.Fatalf("second EnsurePAUser = %d, %v; want %d", again, err, userID)
+	}
+}

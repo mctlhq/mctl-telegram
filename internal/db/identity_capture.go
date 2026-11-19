@@ -90,7 +90,14 @@ func (s *Store) EnsureUserByTelegramCapture(ctx context.Context, c TelegramIdent
 	// Only the call that created the row writes the acquisition record. The
 	// insert runs under a savepoint so a failure leaves the user row (and the
 	// sign-in) intact with the acquisition row absent.
-	if created, _ := res.RowsAffected(); created == 1 && c.Acquisition != nil {
+	created, _ := res.RowsAffected()
+	// A principal first seen through the Personal Assistant already has a
+	// row with provider "pa" (EnsurePAUser). This sign-in is its first
+	// tg-mcp login: the row becomes a tg-mcp login and, like a new row,
+	// gets its acquisition record. Best-effort under a savepoint, like the
+	// acquisition insert: a failure here must not fail the sign-in.
+	promoted := created != 1 && s.promotePAUserTx(ctx, tx, c.TelegramID)
+	if (created == 1 || promoted) && c.Acquisition != nil {
 		s.insertAcquisitionBestEffort(ctx, tx, syntheticLogin, *c.Acquisition)
 	}
 	if err := tx.Commit(); err != nil {

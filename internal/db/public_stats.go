@@ -85,7 +85,8 @@ func (s *Store) PublicStatsQuery(ctx context.Context, canaryTelegramIDs []int64)
 	if err := s.DB.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM users
 		  WHERE telegram_login_id IS NOT NULL
-		    AND account_deleted_at IS NULL`+notCanary("id"),
+		    AND account_deleted_at IS NULL
+		    AND provider <> '`+PAProvider+`'`+notCanary("id"),
 		canaryArgs...,
 	).Scan(&out.AccountsTotal); err != nil {
 		return PublicStats{}, fmt.Errorf("public stats: accounts: %w", err)

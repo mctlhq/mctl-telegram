@@ -5,8 +5,10 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"database/sql"
+	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 )
@@ -91,4 +93,43 @@ func randomSuffix(t *testing.T) string {
 		out = append(out, hexd[x>>4], hexd[x&15])
 	}
 	return string(out)
+}
+
+// TestPALinkSecret_ConsumeCASPinsUnconsumed covers the consumed_at_ms = 0
+// predicate of the consume compare-and-set: a second consumer that commits
+// between this consumer's read and its update must win alone. Postgres only,
+// for the same reason as the revoke test above.
+func TestPALinkSecret_ConsumeCASPinsUnconsumed(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	s := newPostgresTestStore(t, dsn)
+	ctx := context.Background()
+	now := time.Now()
+	h := paHash("cas-" + randomSuffix(t))
+	t.Cleanup(func() { _, _ = s.DB.Exec(`DELETE FROM pa_link_secrets WHERE hash = $1`, h) })
+	if err := s.CreatePALinkSecret(ctx, PALinkSecret{Hash: h, Kind: PALinkCompletion, Principal: 9_300_000_001,
+		Server: "tg", ExpiresAt: now.Add(time.Minute)}, now); err != nil {
+		t.Fatal(err)
+	}
+	fired := false
+	paConsumeAfterRead = func(ctx context.Context, _ string) {
+		if fired {
+			return
+		}
+		fired = true
+		// Another replica consumes the secret in the window.
+		if _, err := s.DB.ExecContext(ctx, `UPDATE pa_link_secrets SET consumed_at_ms = $1 WHERE hash = $2`,
+			now.UnixMilli(), h); err != nil {
+			t.Errorf("consume in the window: %v", err)
+		}
+	}
+	t.Cleanup(func() { paConsumeAfterRead = nil })
+	if _, err := s.ConsumePALinkSecret(ctx, PALinkCompletion, h, now, nil); !errors.Is(err, ErrPALinkConsumed) {
+		t.Fatalf("err %v, want ErrPALinkConsumed: a secret was consumed twice", err)
+	}
+	if !fired {
+		t.Fatal("the test seam never fired")
+	}
 }
