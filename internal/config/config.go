@@ -557,6 +557,11 @@ type Config struct {
 	// X-Telegram-Bot-Api-Secret-Token on every webhook delivery
 	// (PA_WEBHOOK_SECRET). No default; read only when PAEnabled is true.
 	PAWebhookSecret string
+	// PAWebhookURL is the public URL the webhook is registered at
+	// (PA_WEBHOOK_URL): https, path /pa/bot/webhook, no userinfo, query or
+	// fragment. Required when PAEnabled; the getWebhookInfo monitor alerts
+	// when Telegram reports any other URL (T4). Read only when PAEnabled.
+	PAWebhookURL string
 	// PAConversationTTL is the PA conversation lifetime, anchored at
 	// creation (PA_CONVERSATION_TTL, default 24h, at most 24h because the
 	// consent text promises it). Read only when PAEnabled is true; an
@@ -612,6 +617,10 @@ func loadPA(c *Config) error {
 	}
 	if len(c.PAWebhookSecret) < MinPAWebhookSecretLen || !paWebhookSecretChars.MatchString(c.PAWebhookSecret) {
 		return fmt.Errorf("PA_ENABLED=true requires PA_WEBHOOK_SECRET of %d-256 characters from [A-Za-z0-9_-]", MinPAWebhookSecretLen)
+	}
+	c.PAWebhookURL = os.Getenv("PA_WEBHOOK_URL")
+	if err := validatePAWebhookURL(c.PAWebhookURL); err != nil {
+		return fmt.Errorf("PA_ENABLED=true requires PA_WEBHOOK_URL: %w", err)
 	}
 	c.PAConversationTTL = 24 * time.Hour
 	if v := os.Getenv("PA_CONVERSATION_TTL"); v != "" {
@@ -1505,5 +1514,34 @@ func loadK8sSA(c *Config) error {
 		return fmt.Errorf("MCP_K8S_SA_TELEGRAM_ID %d must be listed in CANARY_TELEGRAM_IDS", id)
 	}
 	c.K8sSATelegramID = id
+	return nil
+}
+
+// paWebhookPath is pa.WebhookPath (config does not import internal/pa;
+// TestPAWebhookPathMatches keeps the two equal).
+const paWebhookPath = "/pa/bot/webhook"
+
+// validatePAWebhookURL accepts an absolute https URL with a host, the PA
+// webhook path, and no userinfo, query or fragment. The value is never
+// echoed in the error.
+func validatePAWebhookURL(raw string) error {
+	if raw == "" {
+		return errors.New("not set")
+	}
+	u, err := url.Parse(raw)
+	switch {
+	case err != nil:
+		return errors.New("not a url")
+	case u.Scheme != "https":
+		return errors.New("must be https")
+	case u.Hostname() == "":
+		return errors.New("no host")
+	case u.User != nil:
+		return errors.New("userinfo is not allowed")
+	case u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.ContainsAny(raw, "?#"):
+		return errors.New("query and fragment are not allowed")
+	case u.Path != paWebhookPath:
+		return errors.New("path must be " + paWebhookPath)
+	}
 	return nil
 }

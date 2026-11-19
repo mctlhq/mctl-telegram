@@ -75,6 +75,7 @@ const senderFile = "output/sender.go"
 var botAPIURLAllowed = map[string]string{
 	senderFile:       "the Sender itself",
 	"webhookinfo.go": "read-only getWebhookInfo health check (#1313 slice a); sends nothing",
+	"setwebhook.go":  "operator-only setWebhook helper (#1313 slice d2, #1318); sends no message, and TestSetWebhookNotCalledByServer keeps it out of the server",
 }
 
 var forbiddenBotImports = []string{

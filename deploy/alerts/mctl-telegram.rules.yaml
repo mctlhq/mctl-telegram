@@ -835,3 +835,124 @@ spec:
               Budget erosion is sustained but not critical. File a reliability ticket.
               See docs/slo.md for the error-budget policy and recovery criteria.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/slo.md"
+
+    # Personal Assistant bot webhook and outbox (issue #1313 slice d2,
+    # threat model T4). Every series below exists only while PA_ENABLED is
+    # true: the monitor and its gauges do not start otherwise, so none of
+    # these can fire where the PA is off. Deployed nowhere yet: porting them
+    # to mctl-gitops vm-rules is part of enabling the PA (#1318).
+    - name: mctl-telegram-pa
+      rules:
+        - alert: MctlPAWebhookInfoUnreadable
+          # Could not observe is not healthy (I9): a failed getWebhookInfo
+          # sets up to 0, never leaves the last good state in place.
+          expr: mctl_pa_webhook_info_up == 0
+          for: 15m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "PA bot getWebhookInfo has been unreadable for 15 minutes"
+            description: >
+              The PA webhook monitor could not read getWebhookInfo for three
+              checks running. The webhook state (URL, allowed_updates,
+              delivery errors) is unknown, not healthy.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookinfounreadable"
+
+        - alert: MctlPAWebhookInfoStale
+          # Also catches a monitor that stopped checking while up stayed 1.
+          expr: time() - mctl_pa_webhook_info_last_success_timestamp_seconds > 1800
+          for: 5m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "PA bot webhook not checked successfully for 30 minutes"
+            description: >
+              The last readable getWebhookInfo check is more than 30 minutes
+              old. Either every read fails or the monitor stopped running.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookinfostale"
+
+        - alert: MctlPAWebhookMisconfigured
+          expr: |
+            max by (problem) (mctl_pa_webhook_problem{problem=~"url_changed|allowed_updates_changed"}) == 1
+          for: 10m
+          labels:
+            severity: critical
+            service: mctl-telegram
+          annotations:
+            summary: "PA bot webhook {{ $labels.problem }}"
+            description: >
+              getWebhookInfo reports a webhook URL other than PA_WEBHOOK_URL,
+              or allowed_updates other than message and callback_query, on
+              two checks running. Updates may be going to someone else.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookmisconfigured"
+
+        - alert: MctlPAWebhookSecretRejected
+          # Our webhook answers 401 only to a missing or wrong secret, and
+          # this is Telegram's own delivery failing, not a probe.
+          expr: max(max_over_time(mctl_pa_webhook_problem{problem="secret_rejected"}[15m])) == 1
+          labels:
+            severity: critical
+            service: mctl-telegram
+          annotations:
+            summary: "Telegram's PA webhook deliveries are rejected for the secret"
+            description: >
+              getWebhookInfo's latest delivery error is a 401 from our webhook:
+              the secret_token Telegram sends does not match PA_WEBHOOK_SECRET.
+              No PA update is being processed.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhooksecretrejected"
+
+        - alert: MctlPAWebhookDeliveryErrors
+          # The problem is set only by a check that saw a new error, so the
+          # share of the window it was set is the share of checks that did.
+          expr: max(avg_over_time(mctl_pa_webhook_problem{problem="delivery_error"}[30m])) > 0.5
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "Telegram keeps failing to deliver PA webhook updates"
+            description: >
+              Most getWebhookInfo checks in the last 30 minutes found a new
+              delivery error. Updates are queuing at Telegram.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookdeliveryerrors"
+
+        - alert: MctlPAWebhookBacklog
+          expr: mctl_pa_webhook_pending_updates > 100
+          for: 15m
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "PA webhook has {{ $value }} pending updates at Telegram"
+            description: >
+              getWebhookInfo pending_update_count has stayed above 100 for 15
+              minutes: Telegram is not getting its deliveries accepted.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookbacklog"
+
+        - alert: MctlPAWebhookBadSecretBurst
+          expr: sum(increase(mctl_pa_updates_total{outcome="bad_secret"}[15m])) > 20
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "PA webhook refused more than 20 requests for the secret in 15 minutes"
+            description: >
+              Requests to /pa/bot/webhook without the right secret token. A
+              burst is either probing of a public URL or a secret mismatch;
+              MctlPAWebhookSecretRejected tells the two apart.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookbadsecretburst"
+
+        - alert: MctlPAOutboxUndelivered
+          expr: |
+            sum by (outcome) (increase(mctl_pa_outbox_total{outcome=~"failed|unknown|claim_error"}[30m])) > 0
+          labels:
+            severity: warning
+            service: mctl-telegram
+          annotations:
+            summary: "PA outbox: {{ $labels.outcome }} in the last 30 minutes"
+            description: >
+              A PA reply or notice was not delivered (failed after its
+              retries, or its outcome is unknown and it is not resent), or the
+              outbox could not be read at all.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpaoutboxundelivered"

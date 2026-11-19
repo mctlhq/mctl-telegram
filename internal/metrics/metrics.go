@@ -23,6 +23,9 @@ type Registry struct {
 	usageModelsMu sync.Mutex
 	usageModels   map[string]struct{}
 
+	// pa holds the Personal Assistant bot collectors (pa.go).
+	pa *paCollectors
+
 	// HTTP layer — labeled by method, route (chi pattern), status_code.
 	HTTPRequestsTotal *prometheus.CounterVec
 
@@ -1019,6 +1022,8 @@ func New() *Registry {
 
 	// Register all collectors. MustRegister panics on duplicate names, which
 	// cannot happen when New() is called once per process/test instance.
+	r.pa = newPACollectors()
+	reg.MustRegister(r.pa.collectors()...)
 	reg.MustRegister(
 		r.EventsPublishedTotal,
 		r.EventsPublishFailuresTotal,

@@ -283,6 +283,7 @@ A crash between steps 1 and 3 leaves a `dispatching` record. On restart, that re
 - S1-B1: business, group, channel, `sender_chat`, `via_bot` and `chat.id != from.id` updates are dropped.
 - S1-B2: a duplicate `update_id` causes no second run.
 - S1-B3: a wrong webhook secret is refused.
+- S1-B4: the periodic `getWebhookInfo` check reports a changed URL, changed `allowed_updates`, a new delivery error and a rejected secret, and exports an unreadable result as unreadable (`up` and `ok` at 0, the state series withdrawn), never as healthy. Nothing in the server registers the webhook.
 - S2-X5: B cannot approve A's approval, with either a guessed id or A's `callback_data`.
 
 ### T5 Prompt injection: provenance and taint
@@ -574,6 +575,7 @@ A missing or unreadable consent refuses the run.
 - S1-O1: every send carries the disabled-preview option.
 - S1-O2: a model-authored URL not in user text is neutralised. So are a user host with an appended query, a scheme-less domain, a punycode domain and a `t.me/<bot>?start=` link.
 - S1-O3: model-authored markup and URL buttons are stripped.
+- S1-O4: a reply or notice owed after a commit survives a failed send: it is written to the outbox with the state change, retried, sent once, and rendered again through `Render` from the stored answer; a reply whose conversation is gone is dropped, and a send of unknown outcome is not repeated.
 
 ## Acceptance evals
 
