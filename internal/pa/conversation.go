@@ -220,12 +220,11 @@ func (c *Conversations) handleCommand(ctx context.Context, tx *sql.Tx, p Princip
 				return err
 			}
 			return c.reply(ctx, tx, p, ReplyConsentWithdrawn, "")
-		case "accept":
-			if err := c.store.AcceptPAConsent(ctx, tx, p.TelegramID(), convo.ConsentVersion, convo.ConsentTextSHA256(), c.now()); err != nil {
-				return err
-			}
-			return c.reply(ctx, tx, p, ReplyConsentAccepted, "")
 		default:
+			// Anything else, "/consent accept" included, shows the text
+			// with its button: consent is recorded only from a button bound
+			// to the text the principal was shown (T13), never from typed
+			// words that need not follow any prompt.
 			return c.prompt(ctx, tx, p)
 		}
 	}

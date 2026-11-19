@@ -172,4 +172,11 @@ func TestSealer_RefusesBadInput(t *testing.T) {
 	if _, err := s.Seal(aliceID, "c", 1, Fragment{kind: KindText}); err == nil {
 		t.Error("sealed an unmarked fragment")
 	}
+	big := NewFragment(KindText, ProvenanceUser, strings.Repeat("a", MaxFragmentBytes+1))
+	if _, err := s.Seal(aliceID, "c", 1, big); !errors.Is(err, ErrInvalid) {
+		t.Errorf("oversize fragment: err = %v, want ErrInvalid", err)
+	}
+	if _, err := s.Seal(aliceID, "c", 1, NewFragment(KindText, ProvenanceUser, strings.Repeat("a", MaxFragmentBytes))); err != nil {
+		t.Errorf("fragment at the bound: %v", err)
+	}
 }

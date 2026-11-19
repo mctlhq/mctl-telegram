@@ -492,6 +492,26 @@ func TestConversations_Commands(t *testing.T) {
 	}
 }
 
+// TestConversations_TypedAcceptOnlyPrompts: "/consent accept" typed as a
+// first message records nothing. Consent comes only from a button bound to
+// the text the principal was shown (T13).
+func TestConversations_TypedAcceptOnlyPrompts(t *testing.T) {
+	h := newConvoHarness(t)
+	if code := h.text(aliceID, "/consent accept"); code != http.StatusOK {
+		t.Fatalf("/consent accept: %d", code)
+	}
+	if r := h.replies.last(aliceID); r.reply != ReplyConsentPrompt || r.button == "" {
+		t.Fatalf("typed accept: reply %+v, want the prompt", r)
+	}
+	if n := h.count(`SELECT COUNT(*) FROM pa_consents WHERE principal = $1`, aliceID); n != 0 {
+		t.Fatalf("typed accept recorded consent: %d rows", n)
+	}
+	h.text(aliceID, "hello")
+	if n := len(h.runs.calls()); n != 0 {
+		t.Fatalf("message after typed accept reached the run loop: %d runs", n)
+	}
+}
+
 // TestConversations_S1X_State is the state and provenance part of S1-X1 and
 // S1-X2: Bob cannot load Alice's conversation or use her button, and none of
 // Alice's commands touch Bob's consent or state.

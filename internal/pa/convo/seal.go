@@ -69,10 +69,19 @@ func fragmentAAD(principal int64, conversationID string, seq int64, kind Kind, p
 	return b
 }
 
+// MaxFragmentBytes bounds the text of one sealed fragment. Telegram caps a
+// message at 4096 UTF-16 code units (at most 12 KiB of UTF-8) and a caption
+// at 1024, so no genuine update comes near it; the bound keeps the sealed
+// buffer's size computation from overflowing on an absurd input.
+const MaxFragmentBytes = 64 << 10
+
 // Seal returns the stored form of f at (principal, conversationID, seq).
 func (s *Sealer) Seal(principal int64, conversationID string, seq int64, f Fragment) (SealedFragment, error) {
 	if conversationID == "" || seq <= 0 || !f.kind.Valid() || !f.prov.Known() {
 		return SealedFragment{}, fmt.Errorf("%w: fragment", ErrInvalid)
+	}
+	if len(f.text) > MaxFragmentBytes {
+		return SealedFragment{}, fmt.Errorf("%w: fragment of %d bytes", ErrInvalid, len(f.text))
 	}
 	gcm, err := s.aead(principal)
 	if err != nil {

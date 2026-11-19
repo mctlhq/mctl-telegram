@@ -183,18 +183,22 @@ func TestPAState_SweepAndPurge(t *testing.T) {
 		_, err = s.DB.Exec(`INSERT INTO pa_fragments(conversation_id, seq, principal, kind, provenance, sealed, created_at_ms)
 			VALUES($1, 2, $2, 'text', '', $3, 0)`, convB, bob, []byte{9})
 		must(t, err)
+		// A marked row of a kind this build does not know is undecodable too.
+		_, err = s.DB.Exec(`INSERT INTO pa_fragments(conversation_id, seq, principal, kind, provenance, sealed, created_at_ms)
+			VALUES($1, 3, $2, 'sticker', 'user', $3, 0)`, convB, bob, []byte{9})
+		must(t, err)
 		rows, err := s.LoadPAFragments(ctx, bob, convB, t0.Add(2*time.Hour))
 		must(t, err)
-		if len(rows) != 2 || rows[1].Provenance.Known() {
+		if len(rows) != 3 || rows[1].Provenance.Known() || rows[2].Kind.Valid() {
 			t.Fatalf("raw load = %+v", rows)
 		}
 		n, err := s.PurgeUnmarkedPAState(ctx)
 		must(t, err)
-		if n < 1 {
-			t.Fatalf("purged %d rows, want the unmarked one", n)
+		if n < 2 {
+			t.Fatalf("purged %d rows, want the unmarked and the unknown-kind one", n)
 		}
-		if rows, _ := s.LoadPAFragments(ctx, bob, convB, t0.Add(2*time.Hour)); len(rows) != 1 {
-			t.Fatalf("after purge: %d rows, want the marked one only", len(rows))
+		if rows, _ := s.LoadPAFragments(ctx, bob, convB, t0.Add(2*time.Hour)); len(rows) != 1 || rows[0].Seq != 1 {
+			t.Fatalf("after purge: %+v, want the marked text one only", rows)
 		}
 
 		// pa_updates: one old, one recent.

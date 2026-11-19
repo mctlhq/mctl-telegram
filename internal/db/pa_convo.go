@@ -16,6 +16,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
@@ -358,10 +360,18 @@ func (s *Store) ConsumePACallback(ctx context.Context, tx *sql.Tx, principal int
 }
 
 // PurgeUnmarkedPAState implements convo.Store: the "purge on enable" of T5.
+// It removes every fragment this build cannot decode: one without a known
+// provenance mark, or one of a kind it does not know.
 func (s *Store) PurgeUnmarkedPAState(ctx context.Context) (int64, error) {
+	args := []any{string(convo.ProvenanceUser), string(convo.ProvenanceExternal)}
+	kinds := make([]string, 0, len(convo.Kinds()))
+	for _, k := range convo.Kinds() {
+		args = append(args, string(k))
+		kinds = append(kinds, "$"+strconv.Itoa(len(args)))
+	}
 	res, err := s.DB.ExecContext(ctx,
-		`DELETE FROM pa_fragments WHERE provenance IS NULL OR provenance NOT IN ($1, $2)`,
-		string(convo.ProvenanceUser), string(convo.ProvenanceExternal))
+		`DELETE FROM pa_fragments WHERE provenance IS NULL OR provenance NOT IN ($1, $2)
+			OR kind IS NULL OR kind NOT IN (`+strings.Join(kinds, ", ")+`)`, args...)
 	if err != nil {
 		return 0, fmt.Errorf("purge unmarked pa state: %w", err)
 	}

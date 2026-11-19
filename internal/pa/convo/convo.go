@@ -62,6 +62,11 @@ const (
 )
 
 // Valid reports whether k is a kind this build knows.
+// Kinds lists every valid Kind, for stores that must find rows of any other.
+func Kinds() []Kind {
+	return []Kind{KindText, KindCaption, KindReply, KindQuote, KindAssistant, KindTool}
+}
+
 func (k Kind) Valid() bool {
 	switch k {
 	case KindText, KindCaption, KindReply, KindQuote, KindAssistant, KindTool:
