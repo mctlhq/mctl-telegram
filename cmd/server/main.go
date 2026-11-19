@@ -446,6 +446,12 @@ func main() {
 	// Communication-agent notifier: delivers pending owner_notifications
 	// (summaries, approval requests) to Saved Messages.
 	go sweeper.AgentNotifier(ctx, agentNotifier)
+	// Personal Assistant state (issue #1313): purge unmarked fragments, then
+	// the hourly retention sweep. Nothing at all unless PA_ENABLED is true.
+	if _, err := startPAState(ctx, cfg, store); err != nil {
+		slog.Error("pa state", "err", err)
+		os.Exit(1)
+	}
 	// Active session gauge sampler: refreshes mctl_sessions_active every minute.
 	go func() {
 		ticker := time.NewTicker(time.Minute)

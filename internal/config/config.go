@@ -556,6 +556,11 @@ type Config struct {
 	// X-Telegram-Bot-Api-Secret-Token on every webhook delivery
 	// (PA_WEBHOOK_SECRET). No default; read only when PAEnabled is true.
 	PAWebhookSecret string
+	// PAConversationTTL is the PA conversation lifetime, anchored at
+	// creation (PA_CONVERSATION_TTL, default 24h, at most 24h because the
+	// consent text promises it). Read only when PAEnabled is true; an
+	// unparseable or out-of-range value refuses to start.
+	PAConversationTTL time.Duration
 }
 
 // MinPAWebhookSecretLen is the shortest PA_WEBHOOK_SECRET Load accepts.
@@ -589,6 +594,14 @@ func loadPA(c *Config) error {
 	}
 	if len(c.PAWebhookSecret) < MinPAWebhookSecretLen || !paWebhookSecretChars.MatchString(c.PAWebhookSecret) {
 		return fmt.Errorf("PA_ENABLED=true requires PA_WEBHOOK_SECRET of %d-256 characters from [A-Za-z0-9_-]", MinPAWebhookSecretLen)
+	}
+	c.PAConversationTTL = 24 * time.Hour
+	if v := os.Getenv("PA_CONVERSATION_TTL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < time.Minute || d > 24*time.Hour {
+			return errors.New("PA_CONVERSATION_TTL must be a duration between 1m and 24h")
+		}
+		c.PAConversationTTL = d
 	}
 	return nil
 }

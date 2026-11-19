@@ -2,7 +2,10 @@ package pa
 
 import (
 	"encoding/json"
+	"slices"
 	"strconv"
+
+	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 )
 
 // Kind is the kind of a verified update. Only two exist: allowed_updates is
@@ -29,6 +32,8 @@ const (
 	DropNoSender        = "no_sender"
 	DropBotSender       = "bot_sender"
 	DropInlineCallback  = "inline_callback"
+	DropCallbackNoData  = "callback_no_data"
+	DropGameCallback    = "game_callback"
 )
 
 // maxCallbackData is Telegram's documented limit on callback_data (1-64
@@ -51,9 +56,10 @@ func (p Principal) IsZero() bool { return p.telegramID <= 0 }
 // unexported so that no package other than this one can fabricate one: every
 // VerifiedUpdate outside tests came from Filter.
 //
-// It deliberately carries no message text. Text is decoded together with its
-// provenance mark (threat model T5) in the conversation-state slice, so that
-// unmarked content never exists in memory as a plain string.
+// Message text is carried only as marked fragments (threat model T5): Filter
+// decodes it from the same parsed object it validated, attaches the
+// provenance mark at that moment, and nothing else ever unmarshals the body
+// again. There is no accessor for unmarked text.
 type VerifiedUpdate struct {
 	updateID     int64
 	kind         Kind
@@ -61,6 +67,7 @@ type VerifiedUpdate struct {
 	messageID    int64
 	callbackID   string
 	callbackData string
+	fragments    []convo.Fragment
 }
 
 func (u VerifiedUpdate) UpdateID() int64      { return u.updateID }
@@ -79,6 +86,10 @@ func (u VerifiedUpdate) CallbackID() string { return u.callbackID }
 // a later slice resolves it as a random id under (Principal, id), never as a
 // reference that names its own owner (T4, cross-user isolation).
 func (u VerifiedUpdate) CallbackData() string { return u.callbackData }
+
+// Fragments returns a copy of the marked text pieces of a message update, in
+// the order text, caption, reply, quote. Empty for a callback.
+func (u VerifiedUpdate) Fragments() []convo.Fragment { return slices.Clone(u.fragments) }
 
 type tgUser struct {
 	ID    int64 `json:"id"`
@@ -158,12 +169,78 @@ func filterMessage(updateID int64, raw json.RawMessage) (VerifiedUpdate, string)
 	if outcome != "" {
 		return VerifiedUpdate{}, outcome
 	}
+	frags, ok := messageFragments(fields)
+	if !ok {
+		return VerifiedUpdate{}, DropMalformed
+	}
 	return VerifiedUpdate{
 		updateID:  updateID,
 		kind:      KindMessage,
 		principal: principal,
 		messageID: messageID,
+		fragments: frags,
 	}, OutcomeAccepted
+}
+
+// forwardKeys mark a message as forwarded. forward_origin is the current
+// field; the others are its deprecated predecessors, checked too so an old or
+// odd client cannot pass forwarded text off as the principal's own.
+var forwardKeys = []string{
+	"forward_origin", "forward_from", "forward_from_chat", "forward_from_message_id",
+	"forward_signature", "forward_sender_name", "forward_date", "is_automatic_forward",
+}
+
+// messageFragments extracts the marked text of a verified message (threat
+// model T5). Only message.text of a message that is not forwarded is user;
+// the caption, the replied-to message's text or caption, and the quote are
+// external whatever they say. A text field of the wrong type is malformed.
+func messageFragments(msg map[string]json.RawMessage) ([]convo.Fragment, bool) {
+	textProv := convo.ProvenanceUser
+	for _, k := range forwardKeys {
+		if _, present := msg[k]; present {
+			textProv = convo.ProvenanceExternal
+			break
+		}
+	}
+	var frags []convo.Fragment
+	add := func(obj map[string]json.RawMessage, key string, kind convo.Kind, prov convo.Provenance) bool {
+		raw, present := obj[key]
+		if !present || isNull(raw) {
+			return true
+		}
+		var text string
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return false
+		}
+		if text != "" {
+			frags = append(frags, convo.NewFragment(kind, prov, text))
+		}
+		return true
+	}
+	if !add(msg, "text", convo.KindText, textProv) || !add(msg, "caption", convo.KindCaption, convo.ProvenanceExternal) {
+		return nil, false
+	}
+	for _, key := range []string{"reply_to_message", "quote"} {
+		raw, present := msg[key]
+		if !present || isNull(raw) {
+			continue
+		}
+		obj, ok := decodeObject(raw)
+		if !ok {
+			return nil, false
+		}
+		kind := convo.KindReply
+		if key == "quote" {
+			kind = convo.KindQuote
+		}
+		if !add(obj, "text", kind, convo.ProvenanceExternal) {
+			return nil, false
+		}
+		if key == "reply_to_message" && !add(obj, "caption", kind, convo.ProvenanceExternal) {
+			return nil, false
+		}
+	}
+	return frags, true
 }
 
 func filterCallback(updateID int64, raw json.RawMessage) (VerifiedUpdate, string) {
@@ -181,7 +258,8 @@ func filterCallback(updateID int64, raw json.RawMessage) (VerifiedUpdate, string
 		return VerifiedUpdate{}, DropMalformed
 	}
 	var data string
-	if rawData, present := fields["data"]; present {
+	rawData, hasData := fields["data"]
+	if hasData && !isNull(rawData) {
 		if err := json.Unmarshal(rawData, &data); err != nil || len(data) > maxCallbackData {
 			return VerifiedUpdate{}, DropMalformed
 		}
@@ -205,6 +283,16 @@ func filterCallback(updateID int64, raw json.RawMessage) (VerifiedUpdate, string
 	principal, messageID, outcome := privateSender(fields, msg)
 	if outcome != "" {
 		return VerifiedUpdate{}, outcome
+	}
+	// A game button carries game_short_name instead of data; the PA has no
+	// games, so it did not build that button.
+	if _, present := fields["game_short_name"]; present {
+		return VerifiedUpdate{}, DropGameCallback
+	}
+	// Every button the PA builds carries an opaque id in data. A callback
+	// without one cannot be resolved under (principal, id) and is dropped.
+	if data == "" {
+		return VerifiedUpdate{}, DropCallbackNoData
 	}
 	return VerifiedUpdate{
 		updateID:     updateID,

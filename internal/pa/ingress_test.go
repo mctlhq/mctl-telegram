@@ -119,12 +119,12 @@ func TestFilter_S1B1(t *testing.T) {
 		},
 		{
 			"callback: Bob pressing a button in Alice's chat",
-			fmt.Sprintf(`{"update_id":1,"callback_query":{"id":"cb","from":{"id":%d,"is_bot":false},"message":{"message_id":1,"chat":{"id":%d,"type":"private"}}}}`, bobID, aliceID),
+			fmt.Sprintf(`{"update_id":1,"callback_query":{"id":"cb","data":"opaque-1","from":{"id":%d,"is_bot":false},"message":{"message_id":1,"chat":{"id":%d,"type":"private"}}}}`, bobID, aliceID),
 			DropChatMismatch,
 		},
 		{
 			"callback from a group message",
-			fmt.Sprintf(`{"update_id":1,"callback_query":{"id":"cb","from":{"id":%d,"is_bot":false},"message":{"message_id":1,"chat":{"id":%d,"type":"group"}}}}`, aliceID, groupChat),
+			fmt.Sprintf(`{"update_id":1,"callback_query":{"id":"cb","data":"opaque-1","from":{"id":%d,"is_bot":false},"message":{"message_id":1,"chat":{"id":%d,"type":"group"}}}}`, aliceID, groupChat),
 			DropNotPrivate,
 		},
 		{
@@ -139,7 +139,7 @@ func TestFilter_S1B1(t *testing.T) {
 		},
 		{
 			"callback without a message",
-			fmt.Sprintf(`{"update_id":1,"callback_query":{"id":"cb","from":{"id":%d,"is_bot":false}}}`, aliceID),
+			fmt.Sprintf(`{"update_id":1,"callback_query":{"id":"cb","data":"opaque-1","from":{"id":%d,"is_bot":false}}}`, aliceID),
 			DropInlineCallback,
 		},
 		{
@@ -169,22 +169,22 @@ func TestFilter_S1B1(t *testing.T) {
 		},
 		{
 			"callback on a business message",
-			fmt.Sprintf(`{"update_id":1,"callback_query":{"id":"cb","from":{"id":%d,"is_bot":false},"message":{"message_id":1,"business_connection_id":"bc","chat":{"id":%d,"type":"private"}}}}`, aliceID, aliceID),
+			fmt.Sprintf(`{"update_id":1,"callback_query":{"id":"cb","data":"opaque-1","from":{"id":%d,"is_bot":false},"message":{"message_id":1,"business_connection_id":"bc","chat":{"id":%d,"type":"private"}}}}`, aliceID, aliceID),
 			DropBusiness,
 		},
 		{
 			"callback on a via_bot message",
-			fmt.Sprintf(`{"update_id":1,"callback_query":{"id":"cb","from":{"id":%d,"is_bot":false},"message":{"message_id":1,"via_bot":{"id":1,"is_bot":true},"chat":{"id":%d,"type":"private"}}}}`, aliceID, aliceID),
+			fmt.Sprintf(`{"update_id":1,"callback_query":{"id":"cb","data":"opaque-1","from":{"id":%d,"is_bot":false},"message":{"message_id":1,"via_bot":{"id":1,"is_bot":true},"chat":{"id":%d,"type":"private"}}}}`, aliceID, aliceID),
 			DropViaBot,
 		},
 		{
 			"callback on a sender_chat message",
-			fmt.Sprintf(`{"update_id":1,"callback_query":{"id":"cb","from":{"id":%d,"is_bot":false},"message":{"message_id":1,"sender_chat":{"id":%d,"type":"channel"},"chat":{"id":%d,"type":"private"}}}}`, aliceID, channelChat, aliceID),
+			fmt.Sprintf(`{"update_id":1,"callback_query":{"id":"cb","data":"opaque-1","from":{"id":%d,"is_bot":false},"message":{"message_id":1,"sender_chat":{"id":%d,"type":"channel"},"chat":{"id":%d,"type":"private"}}}}`, aliceID, channelChat, aliceID),
 			DropSenderChat,
 		},
 		{
 			"callback from a bot sender",
-			fmt.Sprintf(`{"update_id":1,"callback_query":{"id":"cb","from":{"id":%d,"is_bot":true},"message":{"message_id":1,"chat":{"id":%d,"type":"private"}}}}`, aliceID, aliceID),
+			fmt.Sprintf(`{"update_id":1,"callback_query":{"id":"cb","data":"opaque-1","from":{"id":%d,"is_bot":true},"message":{"message_id":1,"chat":{"id":%d,"type":"private"}}}}`, aliceID, aliceID),
 			DropBotSender,
 		},
 		{
@@ -207,6 +207,40 @@ func TestFilter_S1B1(t *testing.T) {
 			fmt.Sprintf(`{"update_id":1,"chosen_inline_result":{"result_id":"r","from":{"id":%d,"is_bot":false},"query":"q"}}`, aliceID),
 			DropUnsupportedKind,
 		},
+		// Slice (a) review follow-ups: a callback the PA cannot resolve
+		// under (principal, id) is dropped at the filter.
+		{
+			"callback without data",
+			fmt.Sprintf(`{"update_id":1,"callback_query":{"id":"cb","from":{"id":%d,"is_bot":false},"message":{"message_id":1,"chat":{"id":%d,"type":"private"}}}}`, aliceID, aliceID),
+			DropCallbackNoData,
+		},
+		{
+			"callback with empty data",
+			fmt.Sprintf(`{"update_id":1,"callback_query":{"id":"cb","data":"","from":{"id":%d,"is_bot":false},"message":{"message_id":1,"chat":{"id":%d,"type":"private"}}}}`, aliceID, aliceID),
+			DropCallbackNoData,
+		},
+		{
+			"callback with null data",
+			fmt.Sprintf(`{"update_id":1,"callback_query":{"id":"cb","data":null,"from":{"id":%d,"is_bot":false},"message":{"message_id":1,"chat":{"id":%d,"type":"private"}}}}`, aliceID, aliceID),
+			DropCallbackNoData,
+		},
+		{
+			"callback with game_short_name",
+			fmt.Sprintf(`{"update_id":1,"callback_query":{"id":"cb","game_short_name":"g","from":{"id":%d,"is_bot":false},"message":{"message_id":1,"chat":{"id":%d,"type":"private"}}}}`, aliceID, aliceID),
+			DropGameCallback,
+		},
+		{
+			"callback with game_short_name and data",
+			fmt.Sprintf(`{"update_id":1,"callback_query":{"id":"cb","data":"opaque-1","game_short_name":"g","from":{"id":%d,"is_bot":false},"message":{"message_id":1,"chat":{"id":%d,"type":"private"}}}}`, aliceID, aliceID),
+			DropGameCallback,
+		},
+		{
+			"callback data of the wrong type",
+			fmt.Sprintf(`{"update_id":1,"callback_query":{"id":"cb","data":7,"from":{"id":%d,"is_bot":false},"message":{"message_id":1,"chat":{"id":%d,"type":"private"}}}}`, aliceID, aliceID),
+			DropMalformed,
+		},
+		{"message text of the wrong type", privateMessage(1, aliceID, `,"caption":{"x":1}`), DropMalformed},
+		{"reply_to_message of the wrong type", privateMessage(1, aliceID, `,"reply_to_message":"x"`), DropMalformed},
 		{"update_id overflows int64", `{"update_id":9223372036854775808,"message":{}}`, DropMalformed},
 		{"float update_id", `{"update_id":1.5,"message":{}}`, DropMalformed},
 		{"exponent update_id", `{"update_id":1e3,"message":{}}`, DropMalformed},

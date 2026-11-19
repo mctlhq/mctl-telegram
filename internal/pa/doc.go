@@ -18,6 +18,12 @@
 //   - MemoryStore, an interface with a no-op implementation only;
 //   - a getWebhookInfo health helper.
 //
+// and slice (b): Conversations, the update handler for consent
+// (pa-data-flow/v1, T13), the server-side /new, /forget and /consent
+// commands, conversation state whose every fragment carries a provenance
+// mark sealed with it (T5), and callback_data resolved as an opaque id
+// under (principal, id) (T4). Types and the store contract live in convo.
+//
 // Subpackages: egress (T9 outbound client), catalog (the T8 catalog pin and
 // tools/list drift check, #1315) and connector (the executor's pin check and
 // fail-closed T12 audit path, #1315; dispatch itself is a later slice).

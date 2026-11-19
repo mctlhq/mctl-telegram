@@ -3,26 +3,19 @@ package pa
 import (
 	"context"
 	"errors"
+
+	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 )
 
 // Provenance marks where a fragment of state came from (threat model T5).
-// The zero value is unknown, and unknown is treated as external (I6, I9).
-type Provenance string
+// It is defined in internal/pa/convo, which the db layer can import; the
+// zero value is unknown, and unknown is treated as external (I6, I9).
+type Provenance = convo.Provenance
 
 const (
-	ProvenanceUser     Provenance = "user"
-	ProvenanceExternal Provenance = "external"
+	ProvenanceUser     = convo.ProvenanceUser
+	ProvenanceExternal = convo.ProvenanceExternal
 )
-
-// Effective returns the provenance a gate must act on: only an explicit
-// ProvenanceUser is user; everything else, including the zero value, is
-// external.
-func (p Provenance) Effective() Provenance {
-	if p == ProvenanceUser {
-		return ProvenanceUser
-	}
-	return ProvenanceExternal
-}
 
 // MemoryItem is one remembered fragment. It always carries a provenance mark,
 // so nothing unmarked can be stored or loaded.
