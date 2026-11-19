@@ -572,6 +572,9 @@ func (d *Dispatcher) surface(ctx context.Context, ep MCPEndpoint, token connecti
 	}
 	s = d.cfg.Pin.Observe(server, pages, err, now)
 	drift, denied, ok := PinDrift(s)
+	if !ok && err == nil {
+		d.countListingFailure(server, "invalid")
+	}
 	if drift {
 		d.logDrift(server, s)
 	}

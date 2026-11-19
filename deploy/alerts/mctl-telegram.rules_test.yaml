@@ -691,19 +691,21 @@ tests:
               description: "The live tools/list of tg differs from the committed pin for at least one pinned tool. Those tools are denied to Personal Assistant runs until the listing matches or the pin is updated through a reviewed PR.\n"
               runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpapindrift"
 
-  # Unknown fires only while calls reach the server: tg is unknown with
-  # refused calls coming in; alice is unknown but idle (its last listing
-  # aged out, no calls), which must not fire.
+  # Unknown fires only while listing attempts fail: tg is unknown with
+  # failed listings; alice is unknown and switched off, its calls refused
+  # as flag_off before any listing, which must not fire.
   - interval: 1m
     input_series:
       - series: 'mctl_pa_pin_listing_unknown{server="tg"}'
         values: '1x20'
       - series: 'mctl_pa_pin_listing_unknown{server="alice"}'
         values: '1x20'
-      - series: 'mctl_pa_dispatch_total{server="tg",status="refused",reason="server_unavailable"}'
+      - series: 'mctl_pa_pin_listing_failures_total{server="tg",reason="unavailable"}'
         values: '0+2x20'
-      - series: 'mctl_pa_dispatch_total{server="alice",status="ok",reason=""}'
-        values: '5x20'
+      - series: 'mctl_pa_pin_listing_failures_total{server="alice",reason="unauthorized"}'
+        values: '0+1x20'
+      - series: 'mctl_pa_dispatch_total{server="alice",status="refused",reason="flag_off"}'
+        values: '0+3x20'
     alert_rule_test:
       - eval_time: 16m
         alertname: MctlPAPinDrift
@@ -720,7 +722,7 @@ tests:
               server: tg
             exp_annotations:
               summary: "PA catalog server tg tools/list cannot be observed"
-              description: "Personal Assistant calls reach tg, but no tools/list of it could be read or parsed in the last 5 minutes, so pin drift is unknown and those calls are refused.\n"
+              description: "Personal Assistant calls try to list tg, but no tools/list of it could be read or parsed in the last 5 minutes, so pin drift is unknown and those calls are refused.\n"
               runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpapinlistingunknown"
 
   # Unauthorized listings: steady 401s on tg fire after 30m; one 401 on

@@ -65,7 +65,7 @@ func newPAMetrics(reg *prometheus.Registry) paMetrics {
 		}, []string{"server", "reason"}),
 		PAPinListingFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mctl_pa_pin_listing_failures_total",
-			Help: "Failed PA catalog tools/list reads, by server and reason (unauthorized, unavailable).",
+			Help: "Failed PA catalog tools/list reads, by server and reason (unauthorized, unavailable, invalid).",
 		}, []string{"server", "reason"}),
 		PADispatchTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mctl_pa_dispatch_total",

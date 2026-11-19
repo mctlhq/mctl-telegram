@@ -428,6 +428,20 @@ func TestPinGaugesOnlyUnauthorizedAgesOut(t *testing.T) {
 	}
 }
 
+// A listing that answers but does not parse is a failed attempt too
+// (reason invalid): the unknown alert's gate counts it.
+func TestPinListingInvalidCounted(t *testing.T) {
+	e := newSurfaceEnv(t)
+	e.ep.pages["tok-c1"] = []byte(`{"tools":"not a list"}`)
+	e.observe("c1", 1)
+	if got := testutil.ToFloat64(e.reg.PAPinListingFailures.WithLabelValues("tg", "invalid")); got != 1 {
+		t.Fatalf("invalid failures %v, want 1", got)
+	}
+	if _, u := gaugeOf(t, e.reg, "tg"); u != 1 {
+		t.Fatalf("unknown %v, want 1", u)
+	}
+}
+
 // A refused token alone never raises "listing unknown".
 func TestPinGaugesRefusedTokenIsNotUnknown(t *testing.T) {
 	e := newSurfaceEnv(t)
