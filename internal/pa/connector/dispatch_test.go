@@ -190,3 +190,27 @@ func observeTG(t *testing.T, mutate func([]map[string]any) []map[string]any) *ca
 	}
 	return loadPin(t).Observe("tg", [][]byte{page}, nil, t0)
 }
+
+// GatewayPrefixed names only a listing whose pinned names all moved under
+// the "<server>_" prefix: a direct listing, an empty one and a failed one
+// are not the gateway.
+func TestGatewayPrefixed(t *testing.T) {
+	pin := loadPin(t)
+	prefixed := observeTG(t, func(tools []map[string]any) []map[string]any {
+		for _, tool := range tools {
+			tool["name"] = "tg_" + tool["name"].(string)
+		}
+		return tools
+	})
+	if !GatewayPrefixed(prefixed, pin) {
+		t.Fatal("prefixed listing not recognised")
+	}
+	empty := observeTG(t, func([]map[string]any) []map[string]any { return []map[string]any{} })
+	for name, s := range map[string]*catalog.Surface{
+		"direct": observeTG(t, nil), "empty": empty, "failed": pin.Observe("tg", nil, context.Canceled, t0), "nil": nil,
+	} {
+		if GatewayPrefixed(s, pin) {
+			t.Errorf("%s listing taken for the gateway", name)
+		}
+	}
+}

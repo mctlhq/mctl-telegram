@@ -235,7 +235,27 @@ func (s *failingSink) Append(ctx context.Context, e connector.Entry) error {
 // failingConns fails connection reads while fail is set.
 type failingConns struct {
 	*connection.Manager
-	fail atomic.Bool
+	fail  atomic.Bool
+	mu    sync.Mutex
+	calls []*connection.Call
+}
+
+// BeginCall records every call the dispatcher opens, so a test can check
+// that none is left registered.
+func (f *failingConns) BeginCall(ctx context.Context, p int64, id string, rev int64) (*connection.Call, error) {
+	c, err := f.Manager.BeginCall(ctx, p, id, rev)
+	if c != nil {
+		f.mu.Lock()
+		f.calls = append(f.calls, c)
+		f.mu.Unlock()
+	}
+	return c, err
+}
+
+func (f *failingConns) opened() []*connection.Call {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.calls)
 }
 
 func (f *failingConns) Get(ctx context.Context, p int64, id string) (connection.Connection, error) {
@@ -952,6 +972,42 @@ func TestDispatch_OutputCap(t *testing.T) {
 		a = e.call(token, req("tg", "get_messages", ""))
 		if a.code == http.StatusOK || a.Output != "" {
 			t.Fatalf("server refusal answered as output: %+v", a)
+		}
+	})
+}
+
+// TestDispatch_NoCallLeftRegistered: a call refused after BeginCall (here:
+// the listing cannot be read, or the pre-dispatch audit append fails) is
+// deregistered, its context cancelled, exactly like a finished one.
+func TestDispatch_NoCallLeftRegistered(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newDispatchEnv(t, s)
+		token, _ := e.run(alice)
+		if a := e.call(token, req("tg", "list_dialogs", "")); a.code != http.StatusOK {
+			t.Fatalf("ok call %+v", a)
+		}
+		e.h.Advance(catalog.ReadListingTTL + time.Second)
+		e.tg.mu.Lock()
+		e.tg.listErr = errors.New("connection reset")
+		e.tg.mu.Unlock()
+		if a := e.call(token, req("tg", "list_dialogs", "")); a.Stop != connector.ReasonServerUnavailable {
+			t.Fatalf("listing failure %+v", a)
+		}
+		e.tg.mu.Lock()
+		e.tg.listErr = nil
+		e.tg.mu.Unlock()
+		e.sink.fail.Store(true)
+		if a := e.call(token, req("tg", "list_dialogs", "")); a.Stop != "audit_unavailable" {
+			t.Fatalf("audit failure %+v", a)
+		}
+		calls := e.conns.opened()
+		if len(calls) != 3 {
+			t.Fatalf("%d calls opened, want 3", len(calls))
+		}
+		for i, c := range calls {
+			if c.Ctx.Err() == nil {
+				t.Fatalf("call %d still registered after the request", i)
+			}
 		}
 	})
 }
