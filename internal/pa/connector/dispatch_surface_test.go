@@ -236,6 +236,14 @@ func TestPinGaugesAgeOut(t *testing.T) {
 	e.now = e.now.Add(PinObservationWindow + time.Second)
 	e.d.RefreshPins()
 	want("drift aged out", 0, 0, 1)
+	// The aged observation is dropped, not only ignored: the map does not
+	// grow with every connection and revision ever seen.
+	e.d.mu.Lock()
+	kept := len(e.d.observations)
+	e.d.mu.Unlock()
+	if kept != 0 {
+		t.Fatalf("%d aged observations kept", kept)
+	}
 
 	e.observe("c2", 1)
 	want("fresh clean listing", 0, 1, 0)
