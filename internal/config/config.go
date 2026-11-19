@@ -682,11 +682,6 @@ func loadPALimits(c *Config) error {
 	if c.PABudgetUSDJob > c.ManagedBudgetUSDGlobalDay {
 		return errors.New("PA_BUDGET_USD_JOB must not exceed MANAGED_BUDGET_USD_GLOBAL_DAY")
 	}
-	// No job settles more than jobs.MaxSettleUSD, an unreported one
-	// included, which settles at the reservation.
-	if c.PABudgetUSDJob > jobs.MaxSettleUSD {
-		return fmt.Errorf("PA_BUDGET_USD_JOB must not exceed %v", jobs.MaxSettleUSD)
-	}
 	// The floor of a run at its turn cap (one turn per tool call plus the
 	// answer) must fit the reservation it is settled against.
 	if c.PAMinTurnUSD*float64(jobs.DefaultMaxToolCalls+1) > c.PABudgetUSDJob+1e-9 {

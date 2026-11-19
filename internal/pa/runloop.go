@@ -409,8 +409,8 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 		// Unmarked or unreadable state is never loaded (T5). A sealed row
 		// that does not open will not open on the next attempt either, so
 		// the job is cancelled; a store hiccup puts it back.
-		// A failed read (store fault) says nothing about the job: it is
-		// due again at once and counts no failure.
+		// A failed read (store fault) says nothing about the job: it
+		// counts no failure and is due again after ClaimBackoff(1).
 		mode := jobs.ReleaseBackoff
 		switch {
 		case errors.Is(err, convo.ErrStoreFault):

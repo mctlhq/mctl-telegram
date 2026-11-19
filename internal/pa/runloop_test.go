@@ -424,6 +424,32 @@ func TestRunLoop_TurnFloor(t *testing.T) {
 	}
 }
 
+// TestRunLoop_TurnFloorFromBudget: the reply settles with the configured
+// floor, not the default.
+// Mutation: pass jobs.DefaultMinTurnUSD instead of l.budget.MinTurnUSD.
+func TestRunLoop_TurnFloorFromBudget(t *testing.T) {
+	h := newRunLoopHarness(t, withBudget(jobs.Budget{PerJobUSD: 0.25, PrincipalDayUSD: 2, PrincipalMonthUSD: 20, GlobalDayUSD: 20, MinTurnUSD: 0.02}))
+	h.consent(aliceID)
+	h.text(aliceID, "hello")
+	c := h.mustClaim()
+	for i := range 3 {
+		if w := h.post(RouteTurn, c.Token, turnRequest{ContextTokens: 10}); w.Code != http.StatusOK {
+			t.Fatalf("turn %d: %d", i+1, w.Code)
+		}
+	}
+	zero := 0.0
+	if w := h.post(RouteReply, c.Token, replyRequest{Text: "ok", CostUSD: &zero}); w.Code != http.StatusOK {
+		t.Fatalf("reply: %d", w.Code)
+	}
+	var cost float64
+	if err := h.convoHarness.store.DB.QueryRow(`SELECT cost_usd FROM pa_usage WHERE job_id = $1`, c.JobID).Scan(&cost); err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(cost-0.06) > 1e-9 {
+		t.Fatalf("settled %v, want 3 turns x the configured 0.02", cost)
+	}
+}
+
 // TestRunLoop_ClaimNotAfter: MANAGED_CLAIM_NOT_AFTER (Budget.ClaimNotAfter)
 // ends PA claims with the refusal a managed claim gives past it: nothing
 // handed out (204), nothing reserved, counted or backed off, nobody told.

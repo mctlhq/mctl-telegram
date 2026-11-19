@@ -76,11 +76,9 @@ const (
 	DefaultMinTurnUSD = 0.005
 	// SettleFactor bounds a settlement at this multiple of the reservation
 	// (owner decision 2026-11-19): a run may cost more than reserved, but
-	// a buggy report cannot settle without bound.
+	// a buggy report cannot settle without bound. There is no absolute
+	// ceiling besides it (owner decision 2026-11-19, P3-2).
 	SettleFactor = 4
-	// MaxSettleUSD is the most one job ever settles, whatever the report
-	// and the reservation (4 x the default 0.25 reservation).
-	MaxSettleUSD = 1.0
 	// DefaultLease is how long a claimed job and its pa-job token live.
 	DefaultLease = 5 * time.Minute
 	// MaxMessageChars is the Telegram maximum for one message, applied to
@@ -134,10 +132,9 @@ type Budget struct {
 // not "unlimited": the run loop refuses to start with it.
 func (b Budget) Valid() bool {
 	// A job dearer than any window could never be claimed: it would be
-	// held at every reset, without end. A reservation above MaxSettleUSD
-	// would settle more than any job may.
+	// held at every reset, without end.
 	return b.PerJobUSD > 0 && b.PerJobUSD <= b.PrincipalDayUSD && b.PrincipalDayUSD <= b.PrincipalMonthUSD &&
-		b.PerJobUSD <= b.GlobalDayUSD && b.PerJobUSD <= MaxSettleUSD &&
+		b.PerJobUSD <= b.GlobalDayUSD &&
 		b.MinTurnUSD > 0 && b.MinTurnUSD <= b.PerJobUSD
 }
 
@@ -146,16 +143,15 @@ func (b Budget) ClaimsEnded(now time.Time) bool {
 	return !b.ClaimNotAfter.IsZero() && !now.Before(b.ClaimNotAfter)
 }
 
-// Settle is what a finished run of turns admitted turns counts against the
+// Settle is what a finished run of turns model turns counts against the
 // windows: the reported cost (the reservation when unreported, a negative
-// reported) bounded by SettleFactor x the reservation and MaxSettleUSD, and
-// never below minTurn per admitted turn. A finished run made at least one
+// reported) bounded by SettleFactor x the reservation, and never below minTurn per admitted turn. A finished run made at least one
 // model call, so the floor counts at least one turn. The floor is what the
 // server itself observed; the report is only the worker's word.
 func Settle(reported, reserved float64, turns int, minTurn float64) float64 {
 	cost := reserved
 	if reported >= 0 {
-		cost = min(reported, SettleFactor*reserved, MaxSettleUSD)
+		cost = min(reported, SettleFactor*reserved)
 	}
 	return max(cost, float64(max(turns, 1))*minTurn)
 }

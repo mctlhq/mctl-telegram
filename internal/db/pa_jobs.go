@@ -406,6 +406,9 @@ func (s *Store) ClaimPAJob(ctx context.Context, req jobs.ClaimRequest) (jobs.Cla
 		notices = res.Notices
 		tried = append(tried, f.job.ID)
 		if f.storeFault {
+			// Nothing is recorded against the job, so the skip is only
+			// visible here.
+			slog.Warn("pa job claim met a store fault, trying the next job", "job_id", f.job.ID, "err", f.err)
 			fault = f.err
 			continue
 		}
@@ -659,6 +662,11 @@ type paWindow struct {
 	end               time.Time
 }
 
+// room admits a claim when one reservation fits. A run then settles up to
+// jobs.SettleFactor x its reservation (owner decision 2026-11-19, P3-1:
+// caps stay soft), so the principal and global caps are soft by up to
+// (4-1) x reservation per concurrently settling job. The next claim sees
+// the overshoot and is held.
 func (w paWindow) room(perJob float64, withInflight bool) bool {
 	used := w.durable
 	if withInflight {
@@ -1007,16 +1015,20 @@ func (s *Store) FinishPAJob(ctx context.Context, ref jobs.Ref, req jobs.FinishRe
 		return jobs.Job{}, jobsUnreadable("finish: reservation", err)
 	}
 	// The worker's figure is recorded as reported. What counts against the
-	// windows is jobs.Settle: at most SettleFactor x the reservation and
-	// MaxSettleUSD, so no report can exhaust the global day shared with
-	// the managed runtime, and at least the per-turn floor for the turns
-	// the server admitted, so a report of zero is not a free run. An
+	// windows is jobs.Settle: at most SettleFactor x the reservation, so
+	// no report can exhaust the global day shared with the managed
+	// runtime, and at least the per-turn floor for the turns the server
+	// admitted, so a report of zero is not a free run. An
 	// unreported cost settles at the full reservation.
 	reported := sql.NullFloat64{}
 	if req.CostUSD >= 0 {
 		reported = sql.NullFloat64{Float64: req.CostUSD, Valid: true}
 	}
-	cost := jobs.Settle(req.CostUSD, reserved, j.Turns, req.MinTurnUSD)
+	// The floor counts the model turns the server saw: those admitted
+	// through /turn, and at least one per admitted tool call plus the
+	// answer, since every tool call follows a model turn. A worker that
+	// skips /turn cannot shrink the floor.
+	cost := jobs.Settle(req.CostUSD, reserved, max(j.Turns, j.ToolCalls+1), req.MinTurnUSD)
 	res, err := tx.ExecContext(ctx,
 		`UPDATE pa_usage SET status = $1, cost_usd = $2, reported_cost_usd = $3, updated_at_ms = $4
 		  WHERE job_id = $5 AND attempt = $6 AND status = $7`,

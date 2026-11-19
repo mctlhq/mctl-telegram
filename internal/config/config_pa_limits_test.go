@@ -3,6 +3,8 @@ package config
 import (
 	"testing"
 	"time"
+
+	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 )
 
 // TestLoadPA_Limits: the run-loop limits default to the owner decisions,
@@ -103,16 +105,22 @@ func TestLoadPA_Limits(t *testing.T) {
 			t.Fatalf("a floor that fits refused: %v", err)
 		}
 	})
-	t.Run("refuses a reservation above the settlement ceiling", func(t *testing.T) {
+	// Owner decision 2026-11-19 (P3-2): no absolute settlement ceiling. A
+	// reservation above $1 loads, and its run settles up to 4x of it.
+	t.Run("no absolute ceiling on a large reservation", func(t *testing.T) {
 		enable(t)
 		t.Setenv("MANAGED_BUDGET_USD_GLOBAL_DAY", "20")
 		t.Setenv("PA_BUDGET_USD_JOB", "1.5")
-		if _, err := Load(); err == nil {
-			t.Fatal("PA_BUDGET_USD_JOB above jobs.MaxSettleUSD accepted")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("PA_BUDGET_USD_JOB=1.5 refused: %v", err)
 		}
-		t.Setenv("PA_BUDGET_USD_JOB", "1")
-		if _, err := Load(); err != nil {
-			t.Fatalf("PA_BUDGET_USD_JOB at the ceiling refused: %v", err)
+		b := cfg.PABudget()
+		if !b.Valid() || b.PerJobUSD != 1.5 {
+			t.Fatalf("budget %+v, want a valid 1.5 reservation", b)
+		}
+		if got := jobs.Settle(100, b.PerJobUSD, 1, b.MinTurnUSD); got != 6 {
+			t.Fatalf("settled %v, want 6 (4 x 1.5, no clamp)", got)
 		}
 	})
 	t.Run("off reads nothing", func(t *testing.T) {

@@ -783,7 +783,8 @@ func runPAJobsSuite(t *testing.T, s *Store) {
 			{"exactly 4x", 0.25, 1.0, 1, 1.0},
 			{"above 4x", 0.25, 1e9, 1, 1.0},
 			{"above 4x of a small reservation", 0.1, 0.5, 1, 0.4},
-			{"never above $1", 0.3, 1.1, 1, 1.0},
+			{"no absolute ceiling below 4x", 0.3, 1.1, 1, 1.1},
+			{"no absolute ceiling at 4x", 0.5, 3, 1, 2.0},
 			{"zero with three turns charges the floor", 0.25, 0, 3, 0.015},
 			{"zero with no turn admitted charges one turn", 0.25, 0, 0, 0.005},
 			{"a report above the floor is not raised", 0.25, 0.02, 3, 0.02},
@@ -848,6 +849,64 @@ func runPAJobsSuite(t *testing.T, s *Store) {
 			f.finish(r.Job, 0)
 		}
 		t.Fatal("200 zero-cost runs never reached the day cap")
+	})
+
+	// The floor counts the turns the server saw: /turn admissions, and at
+	// least one per admitted tool call plus the answer. A worker that
+	// skips /turn cannot deflate it.
+	// Mutation: settle with j.Turns alone.
+	t.Run("floor counts tool calls when /turn is skipped", func(t *testing.T) {
+		for _, tc := range []struct {
+			name         string
+			turns, calls int
+			want         float64
+		}{
+			{"eight calls, no turn", 0, 8, 9 * 0.005},
+			{"more turns than calls", 6, 2, 6 * 0.005},
+			{"fewer turns than calls", 2, 5, 6 * 0.005},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f := newPAFixture(t, s)
+				f.enqueue(paAlice, "c1")
+				j := f.claim("tg/get_messages").Job
+				for range tc.turns {
+					f.turn(j)
+				}
+				for range tc.calls {
+					if _, err := s.AdmitPAToolCall(context.Background(), ref(j), jobs.ToolCallRequest{
+						Now: f.now, Tool: "tg/get_messages", MaxToolCalls: 8, Gate: okGate,
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				f.finish(j, 0)
+				var cost float64
+				if err := s.DB.QueryRow(`SELECT cost_usd FROM pa_usage WHERE job_id = $1`, j.ID).Scan(&cost); err != nil {
+					t.Fatal(err)
+				}
+				if math.Abs(cost-tc.want) > 1e-9 {
+					t.Fatalf("settled %v, want %v", cost, tc.want)
+				}
+			})
+		}
+	})
+
+	// Past the cutoff the claim takes nothing, but a lease that lapsed is
+	// still expired and its principal still told.
+	// Mutation: return no notices from the cutoff branch.
+	t.Run("cutoff keeps lease expiry notices", func(t *testing.T) {
+		f := newPAFixture(t, s)
+		f.enqueue(paAlice, "c1")
+		j := f.claim().Job
+		f.now = j.LeaseUntil.Add(time.Second)
+		f.b.ClaimNotAfter = f.now.Add(-time.Minute)
+		r := f.claim()
+		if r.Outcome != jobs.ClaimNone || len(r.Notices) != 1 || r.Notices[0].JobID != j.ID || r.Notices[0].Principal != paAlice {
+			t.Fatalf("claim past the cutoff with a lapsed lease = %+v, want ClaimNone and the expiry notice", r)
+		}
+		if js, _ := f.status(j.ID); js != "expired" {
+			t.Fatalf("lapsed job is %s past the cutoff, want expired", js)
+		}
 	})
 
 	t.Run("finish refuses a missing turn floor", func(t *testing.T) {

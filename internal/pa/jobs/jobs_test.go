@@ -18,7 +18,6 @@ func TestBudgetValid(t *testing.T) {
 		"day above month":  func(b *Budget) { b.PrincipalDayUSD = 30 },
 		"job above global": func(b *Budget) { b.GlobalDayUSD = 0.1 },
 		"global not set":   func(b *Budget) { b.GlobalDayUSD = 0 },
-		"job above $1":     func(b *Budget) { b.PerJobUSD, b.PrincipalDayUSD = 1.5, 1.5 },
 		"no turn floor":    func(b *Budget) { b.MinTurnUSD = 0 },
 		"floor above job":  func(b *Budget) { b.MinTurnUSD = 0.3 },
 	} {
@@ -31,7 +30,7 @@ func TestBudgetValid(t *testing.T) {
 }
 
 // TestSettle pins owner decisions 2 and 3 (2026-11-19):
-// max(turns x floor, min(reported, 4 x reservation, $1)), the reservation
+// max(turns x floor, min(reported, 4 x reservation)), the reservation
 // when unreported, and at least one turn's floor.
 func TestSettle(t *testing.T) {
 	for _, tc := range []struct {
@@ -44,7 +43,8 @@ func TestSettle(t *testing.T) {
 		{"exactly 4x", 1.0, 0.25, 1, 1.0},
 		{"above 4x", 5, 0.25, 1, 1.0},
 		{"4x of a small reservation", 0.5, 0.1, 1, 0.4},
-		{"never above $1", 2, 0.3, 1, MaxSettleUSD},
+		{"no absolute ceiling", 2, 0.3, 1, 1.2},
+		{"no ceiling on a large reservation", 10, 1.5, 1, 6},
 		{"unreported", -1, 0.25, 3, 0.25},
 		{"zero, three turns", 0, 0.25, 3, 0.015},
 		{"zero, no turn", 0, 0.25, 0, 0.005},
