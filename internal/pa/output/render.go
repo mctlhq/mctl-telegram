@@ -37,6 +37,7 @@
 package output
 
 import (
+	"errors"
 	"regexp"
 	"strings"
 	"unicode"
@@ -56,6 +57,9 @@ func (t Text) String() string { return strings.Join(t.parts, "") }
 // ServerText wraps a server-authored template. It skips Render, since the
 // server wrote it, but it is still sent through Sender with previews
 // disabled and no parse mode.
+//
+// A registry template longer than MaxParts messages is a programming error;
+// Sender refuses the resulting Text.
 func ServerText(t Template) Text {
 	return Text{parts: split(t.s, maxTextUTF16)}
 }
@@ -102,24 +106,60 @@ func (u UserText) allows(tok string) bool {
 //     findCandidates and neutralise).
 //  4. The text is cut into Bot API sized parts and step 3 runs again on each
 //     part, so a cut cannot leave a live piece of a token (fit).
-func Render(model string, allow UserText) Text {
-	return Text{parts: fit(neutralise(stripMarkup(normalise(model)), allow), allow)}
+//
+// Render is idempotent: rendering its own output changes nothing. Text that
+// would need more than MaxParts messages is refused with ErrTooLong, never
+// truncated, so injected content cannot flood the principal's chat or push
+// the bot into flood waits, and a cut can never fall inside a token.
+func Render(model string, allow UserText) (Text, error) {
+	// Each part holds at most maxTextUTF16 units, so longer input cannot
+	// fit; refusing it first also bounds the work below.
+	if utf16Len(model) > MaxParts*maxTextUTF16 {
+		return Text{}, ErrTooLong
+	}
+	parts, ok := fit(neutralise(stripMarkup(normalise(model)), allow), allow)
+	if !ok {
+		return Text{}, ErrTooLong
+	}
+	return Text{parts: parts}, nil
 }
+
+// MaxParts is the most messages one Render or ServerText may produce. Eight
+// parts is about 32k characters, far above a normal assistant answer
+// (PA_MAX_CONTEXT_TOKENS is 32k tokens for the whole context), and small
+// enough that one reply cannot flood the chat.
+const MaxParts = 8
+
+// ErrTooLong is returned when text needs more than MaxParts messages.
+var ErrTooLong = errors.New("pa output: text needs more than MaxParts messages")
 
 // fit splits s into Bot API sized parts and neutralises each part again. A
 // part that defanging pushed over the limit is split and neutralised once
-// more; defang is idempotent, so this ends.
-func fit(s string, allow UserText) []string {
+// more; defang is idempotent, so this ends. It reports false, and stops,
+// as soon as more than MaxParts parts would be needed.
+func fit(s string, allow UserText) ([]string, bool) {
 	var out []string
-	for _, p := range split(s, maxTextUTF16) {
-		p = neutralise(p, allow)
-		if utf16Len(p) > maxTextUTF16 {
-			out = append(out, fit(p, allow)...)
-			continue
+	var walk func(s string) bool
+	walk = func(s string) bool {
+		for _, p := range split(s, maxTextUTF16) {
+			p = neutralise(p, allow)
+			if utf16Len(p) > maxTextUTF16 {
+				if !walk(p) {
+					return false
+				}
+				continue
+			}
+			if len(out) == MaxParts {
+				return false
+			}
+			out = append(out, p)
 		}
-		out = append(out, p)
+		return true
 	}
-	return out
+	if !walk(s) {
+		return nil, false
+	}
+	return out, true
 }
 
 // normalise removes format and control characters other than \n, and maps
@@ -258,7 +298,7 @@ func findCandidates(s string) []span {
 		}
 		lead := len(s[start:end]) - len(strings.TrimLeft(s[start:end], badStart))
 		run := trimEnd(s[start+lead : end])
-		if run != "" && isCandidate(run) {
+		if run != "" && isCandidate(s, start+lead, start+lead+len(run)) {
 			out = append(out, span{start + lead, start + lead + len(run)})
 		}
 		start = -1
@@ -276,11 +316,15 @@ func findCandidates(s string) []span {
 	return out
 }
 
-func isCandidate(run string) bool {
+// isCandidate reports whether s[a:b] could hold a link. The defanged check
+// looks at s, not at the trimmed run, so the "[" that trimming removed from
+// "[.]x" still marks that dot as defanged.
+func isCandidate(s string, a, b int) bool {
+	run := s[a:b]
 	if strings.Contains(run, "://") || schemeColon.MatchString(run) || botMention.MatchString(run) {
 		return true
 	}
-	if !hasLiveDot(run) {
+	if !hasLiveDot(s, a, b) {
 		return false
 	}
 	return !plainNumber.MatchString(run)
@@ -293,10 +337,10 @@ func defanged(s string, i, size int) bool {
 	return i > 0 && s[i-1] == '[' && i+size < len(s) && s[i+size] == ']'
 }
 
-// hasLiveDot reports a dot-class character not already defanged.
-func hasLiveDot(run string) bool {
-	for i, r := range run {
-		if isDot(r) && !defanged(run, i, utf8.RuneLen(r)) {
+// hasLiveDot reports a dot-class character in s[a:b] not already defanged.
+func hasLiveDot(s string, a, b int) bool {
+	for i, r := range s[a:b] {
+		if isDot(r) && !defanged(s, a+i, utf8.RuneLen(r)) {
 			return true
 		}
 	}
@@ -308,10 +352,10 @@ func hasLiveDot(run string) bool {
 // "https://a.example/x" becomes "https[:]//a[.]example/x". It is idempotent:
 // a character already written as "[x]" is left alone, so Render can
 // neutralise again after splitting.
-func defang(tok string) string {
+func defang(s string, sp span) string {
 	var b strings.Builder
-	for i, r := range tok {
-		if (isDot(r) || r == ':' || r == '@') && !defanged(tok, i, utf8.RuneLen(r)) {
+	for i, r := range s[sp.start:sp.end] {
+		if (isDot(r) || r == ':' || r == '@') && !defanged(s, sp.start+i, utf8.RuneLen(r)) {
 			if isDot(r) {
 				b.WriteString("[.]")
 			} else {
@@ -333,7 +377,7 @@ func neutralise(s string, allow UserText) string {
 		if allow.allows(tok) {
 			b.WriteString(tok)
 		} else {
-			b.WriteString(defang(tok))
+			b.WriteString(defang(s, sp))
 		}
 		last = sp.end
 	}

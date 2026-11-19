@@ -76,9 +76,9 @@ func TestS1O1_EverySendDisablesPreviews(t *testing.T) {
 		text Text
 		kb   Keyboard
 	}{
-		{Render("see https://docs.example.org/a", allow), nil},
+		{mustRender(t, "see https://docs.example.org/a", allow), nil},
 		{ServerText(tpl("Consent required.")), Keyboard{{{Label: tpl("Agree"), Data: "c:1"}}}},
-		{Render(strings.Repeat("Bob wrote a long message. ", 400), UserText{}), nil},
+		{mustRender(t, strings.Repeat("Bob wrote a long message. ", 400), UserText{}), nil},
 	}
 	for _, sd := range sends {
 		if err := s.Send(ctx, aliceChat, sd.text, sd.kb); err != nil {
@@ -111,7 +111,7 @@ func TestS1O1_EverySendDisablesPreviews(t *testing.T) {
 func TestS1O3_PlainTextAndNoURLButtons(t *testing.T) {
 	f, s := newFake(t)
 	ctx := context.Background()
-	model := Render(`<a href="https://attacker.example">x</a> **y** [z](tg://resolve?domain=EvilBot)`, UserText{})
+	model := mustRender(t, `<a href="https://attacker.example">x</a> **y** [z](tg://resolve?domain=EvilBot)`, UserText{})
 	if err := s.Send(ctx, aliceChat, model, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -154,11 +154,14 @@ func TestSendRefusesBadInput(t *testing.T) {
 	if err := s.Send(ctx, aliceChat, Text{}, nil); !errors.Is(err, ErrEmptyText) {
 		t.Errorf("zero Text: %v", err)
 	}
-	if err := s.Send(ctx, aliceChat, Render(" \n ", UserText{}), nil); !errors.Is(err, ErrEmptyText) {
+	if err := s.Send(ctx, aliceChat, mustRender(t, " \n ", UserText{}), nil); !errors.Is(err, ErrEmptyText) {
 		t.Errorf("blank Text: %v", err)
 	}
 	if err := s.Send(ctx, -100200, ServerText(tpl("x")), nil); !errors.Is(err, ErrInvalidChat) {
 		t.Errorf("group chat id: %v", err)
+	}
+	if err := s.Send(ctx, aliceChat, Text{parts: []string{strings.Repeat("z", maxTextUTF16+1)}}, nil); !errors.Is(err, ErrPartTooLong) {
+		t.Errorf("oversize part: %v", err)
 	}
 	for _, kb := range []Keyboard{
 		{{}},

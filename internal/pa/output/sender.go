@@ -54,6 +54,9 @@ var (
 	ErrInvalidChat     = errors.New("pa output: invalid chat id")
 	ErrInvalidKeyboard = errors.New("pa output: invalid keyboard")
 	ErrInvalidConfig   = errors.New("pa output: invalid config")
+	// ErrPartTooLong means a Text part is over the Bot API limit. Render and
+	// ServerText never produce one, so it marks a bug, not bad input.
+	ErrPartTooLong = errors.New("pa output: message part over the Bot API limit")
 )
 
 // Button is one inline keyboard button. It can only carry callback data:
@@ -143,13 +146,19 @@ func (s *Sender) Send(ctx context.Context, chatID int64, text Text, kb Keyboard)
 	if len(text.parts) == 0 {
 		return ErrEmptyText
 	}
+	if len(text.parts) > MaxParts {
+		return ErrTooLong
+	}
 	markup, err := kb.wire()
 	if err != nil {
 		return err
 	}
 	for i, p := range text.parts {
-		if strings.TrimSpace(p) == "" || utf16Len(p) > maxTextUTF16 {
+		if strings.TrimSpace(p) == "" {
 			return ErrEmptyText
+		}
+		if n := utf16Len(p); n > maxTextUTF16 {
+			return fmt.Errorf("%w: part %d is %d UTF-16 units, limit %d", ErrPartTooLong, i, n, maxTextUTF16)
 		}
 		req := sendMessageRequest{
 			ChatID:             chatID,

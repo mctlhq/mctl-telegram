@@ -25,10 +25,20 @@ import (
 
 const templatesFile = "templates.go"
 
+// textBuilders are the only functions that may build a non-empty Text.
+var textBuilders = map[string]bool{"Render": true, "ServerText": true}
+
 // scanTemplates returns one finding per Template built from anything but a
-// string literal in templates.go: a Template{...} literal anywhere except
-// inside tpl, a call to tpl outside templates.go, or a tpl argument that is
-// not a string literal.
+// string literal in templates.go, and per Text built outside Render and
+// ServerText:
+//   - a Template{...} literal anywhere except inside tpl;
+//   - a call to tpl outside templates.go, or with an argument that is not a
+//     string literal;
+//   - a conversion to Template or Text (Template(struct{ s string }{s}));
+//   - an assignment to a .s or .parts field (var t Template; t.s = s);
+//   - a non-empty Text{...} literal outside Render and ServerText;
+//   - a type alias or definition over Template or Text, whose literals the
+//     checks above would not recognise by name.
 func scanTemplates(fset *token.FileSet, f *ast.File, file string) []string {
 	var out []string
 	report := func(n ast.Node, what string) {
@@ -44,17 +54,51 @@ func scanTemplates(fset *token.FileSet, f *ast.File, file string) []string {
 		id, ok := e.(*ast.Ident)
 		return ok && id.Name == "Template"
 	}
+	isNamed := func(e ast.Expr, name string) bool {
+		for {
+			p, ok := e.(*ast.ParenExpr)
+			if !ok {
+				break
+			}
+			e = p.X
+		}
+		id, ok := e.(*ast.Ident)
+		return ok && id.Name == name
+	}
+	fn := ""
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.FuncDecl:
 			if x == inTpl {
 				return false // the one place a Template is built from a string
 			}
+			fn = x.Name.Name
 		case *ast.CompositeLit:
 			if isTemplateType(x.Type) && len(x.Elts) > 0 {
 				report(x, "Template literal outside tpl")
 			}
+			if isNamed(x.Type, "Text") && len(x.Elts) > 0 && !textBuilders[fn] {
+				report(x, "Text literal outside Render and ServerText")
+			}
+		case *ast.TypeSpec:
+			if isNamed(x.Type, "Template") || isNamed(x.Type, "Text") {
+				report(x, "type over Template or Text")
+			}
+		case *ast.AssignStmt:
+			for _, lhs := range x.Lhs {
+				ast.Inspect(lhs, func(m ast.Node) bool {
+					if sel, ok := m.(*ast.SelectorExpr); ok && (sel.Sel.Name == "s" || sel.Sel.Name == "parts") {
+						report(sel, "assignment to ."+sel.Sel.Name)
+						return false
+					}
+					return true
+				})
+			}
 		case *ast.CallExpr:
+			if isNamed(x.Fun, "Template") || isNamed(x.Fun, "Text") {
+				report(x, "conversion to Template or Text")
+				return true
+			}
 			id, ok := x.Fun.(*ast.Ident)
 			if !ok || id.Name != "tpl" {
 				return true
@@ -108,6 +152,15 @@ func TestTemplatesGuardDetects(t *testing.T) {
 		{"render.go", `package output; var x = tpl("hi")`},
 		{templatesFile, `package output; func tpl(s string) Template { return Template{s: s} }; func f(s string) Template { return tpl(s) }`},
 		{templatesFile, `package output; func tpl(s string) Template { return Template{s: s} }; var x = tpl("a" + "b")`},
+		{"render.go", `package output; func f(s string) Template { var t Template; t.s = s; return t }`},
+		{"render.go", `package output; func f(s string) Template { return Template(struct{ s string }{s}) }`},
+		{"render.go", `package output; func f(s string) Template { return (Template)(struct{ s string }{s}) }`},
+		{"render.go", `package output; func f(s string) Text { return Text{parts: []string{s}} }`},
+		{"render.go", `package output; func f(s string) Text { return Text{[]string{s}} }`},
+		{"render.go", `package output; func f(t *Text, s string) { t.parts = []string{s} }`},
+		{"render.go", `package output; func f(t Text, s string) { t.parts[0] = s }`},
+		{"render.go", `package output; type T = Template`},
+		{"render.go", `package output; type X Text`},
 	}
 	for i, b := range bad {
 		fset := token.NewFileSet()
@@ -122,6 +175,7 @@ func TestTemplatesGuardDetects(t *testing.T) {
 	good := []struct{ file, src string }{
 		{templatesFile, `package output; func tpl(s string) Template { return Template{s: s} }; var x = tpl("hi")`},
 		{"render.go", `package output; func f(t Template) string { return t.s }; var z = Template{}`},
+		{"render.go", `package output; func Render(m string) Text { return Text{parts: fit(m)} }; func ServerText(t Template) Text { return Text{parts: split(t.s)} }; var e = Text{}`},
 	}
 	for i, g := range good {
 		fset := token.NewFileSet()
