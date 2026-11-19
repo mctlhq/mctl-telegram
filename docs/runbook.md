@@ -3965,8 +3965,9 @@ mctl-gitops vm-rules is part of enabling the PA (#1318).
   Send-once: only a failure known to have left the message undelivered is
   retried (a failure before the request was written, or an explicit Bot API
   429 or 5xx, honouring `retry_after`), with backoff (15s doubling, at most
-  10m, 8 attempts). A Bot API 4xx other than 429 (the user blocked the bot,
-  chat not found) fails the row at once and is counted `refused`. Anything
+  10m, 8 attempts). A Bot API 4xx other than 429 fails the row at once. It
+  is counted `refused` when it is a 403 (the user blocked the bot) or a 400
+  "chat not found", and `failed`, which pages, for every other 4xx. Anything
   that may have reached Telegram (a connection dropped after the request
   was written, an unreadable or malformed answer) makes the row `unknown`,
   and so does a row still `sending` when its lease runs out: it is never
@@ -4046,16 +4047,17 @@ webhook refuses them before reading the body.
 <a id="mctlpaoutboxundelivered"></a>
 ### MctlPAOutboxUndelivered
 
-`failed`: a message used its attempts, or could not be built.
-`unknown`: a send may have reached Telegram (connection lost after the
-request went out, an unreadable answer, or the pod died mid-send) and is
-not resent; ask the principal whether it arrived if it matters. `refused`
-(a Bot API 4xx other than 429) is counted but does not fire this alert. It
-is meant for a principal who blocked the bot or deleted the chat, but today
-it also catches other 4xx (a request we built wrong, a revoked bot token), so
-those do not page: a known defect tracked in #1343, not expected behaviour.
-Until it is fixed, check `refused` rates by hand after a bot token change. `claim_error`: `pa_outbox` could not be read; nothing was sent and
-the rows stay due. Inspect rows by principal with `Store.PAOutboxRows`;
+`failed`: a message used its attempts, could not be built, or got a Bot
+API 4xx that is not the principal's doing: any 400 other than "chat not
+found" (a request we built wrong), or a 401 or 404 (a bad or revoked
+`PA_BOT_TOKEN`; check the token first after a rotation). None of these is
+retried. `unknown`: a send may have reached Telegram (connection lost after
+the request went out, an unreadable answer, or the pod died mid-send) and
+is not resent; ask the principal whether it arrived if it matters.
+`refused` is counted but does not fire this alert: it is only a 403 (the
+principal blocked the bot) or a 400 whose description says the chat was
+not found, both the principal's choice. `claim_error`: `pa_outbox` could
+not be read; nothing was sent and the rows stay due. Inspect rows by principal with `Store.PAOutboxRows`;
 rows carry no message text.
 
 ## Personal Assistant catalog pin (issue #1315)

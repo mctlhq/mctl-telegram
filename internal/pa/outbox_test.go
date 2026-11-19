@@ -241,7 +241,8 @@ func TestRunLoop_OutboxUnreadableIsNotEmpty(t *testing.T) {
 }
 
 // TestSendOutcome: only a failure known to have sent nothing is retried;
-// a refusal is final; everything that may have reached Telegram is
+// a refusal is final, and only a 403 or a 400 "chat not found" counts as
+// the principal's refusal; everything that may have reached Telegram is
 // unknown and never sent again (S1-O4).
 func TestSendOutcome(t *testing.T) {
 	h := newRunLoopHarness(t)
@@ -257,8 +258,15 @@ func TestSendOutcome(t *testing.T) {
 		{"accepted", nil, jobs.OutboxSent, OutboxOutcomeSent, 0},
 		{"cut off after the write", cutOff, jobs.OutboxUnknown, OutboxOutcomeUnknown, 0},
 		{"context ended after the write", fmt.Errorf("%w: context deadline exceeded", output.ErrOutcomeUnknown), jobs.OutboxUnknown, OutboxOutcomeUnknown, 0},
-		{"blocked by the user", &output.APIError{Status: 403, Code: 403}, jobs.OutboxFailed, OutboxOutcomeRefused, 0},
-		{"chat not found", &output.APIError{Status: 400, Code: 400}, jobs.OutboxFailed, OutboxOutcomeRefused, 0},
+		{"blocked by the user", &output.APIError{Status: 403, Code: 403, Description: "Forbidden: bot was blocked by the user"}, jobs.OutboxFailed, OutboxOutcomeRefused, 0},
+		{"chat not found", &output.APIError{Status: 400, Code: 400, Description: "Bad Request: chat not found"}, jobs.OutboxFailed, OutboxOutcomeRefused, 0},
+		// Any other 4xx is a fault of ours, not the principal's choice, so
+		// it is failed (which pages), never refused (which does not).
+		{"another 400", &output.APIError{Status: 400, Code: 400, Description: "Bad Request: can't parse entities"}, jobs.OutboxFailed, OutboxOutcomeFailed, 0},
+		{"400 without a description", &output.APIError{Status: 400, Code: 400}, jobs.OutboxFailed, OutboxOutcomeFailed, 0},
+		{"bad bot token", &output.APIError{Status: 401, Code: 401, Description: "Unauthorized"}, jobs.OutboxFailed, OutboxOutcomeFailed, 0},
+		{"revoked bot token", &output.APIError{Status: 404, Code: 404, Description: "Not Found"}, jobs.OutboxFailed, OutboxOutcomeFailed, 0},
+		{"409 conflict", &output.APIError{Status: 409, Code: 409, Description: "Conflict"}, jobs.OutboxFailed, OutboxOutcomeFailed, 0},
 		{"flood wait under the backoff", floodWait, jobs.OutboxPending, OutboxOutcomeRetry, jobs.OutboxBackoff(1)},
 		{"flood wait over the backoff", &output.APIError{Status: 429, RetryAfter: 100}, jobs.OutboxPending, OutboxOutcomeRetry, 100 * time.Second},
 		{"bot api 502", &output.APIError{Status: 502}, jobs.OutboxPending, OutboxOutcomeRetry, jobs.OutboxBackoff(1)},

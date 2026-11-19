@@ -952,8 +952,9 @@ spec:
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookbadsecretburst"
 
         - alert: MctlPAOutboxUndelivered
-          # "refused" (Telegram's 4xx: the principal blocked the bot or
-          # deleted the chat) is the principal's choice, not ours to page on.
+          # "refused" (a 403, or a 400 "chat not found": the principal
+          # blocked the bot or the chat is gone) is the principal's choice,
+          # not ours to page on. Every other 4xx except 429 is "failed".
           expr: |
             sum by (outcome) (increase(mctl_pa_outbox_total{outcome=~"failed|unknown|claim_error"}[30m])) > 0
           labels:
