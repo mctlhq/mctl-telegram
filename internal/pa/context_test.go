@@ -5,6 +5,8 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+
+	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 )
 
 func verified(t *testing.T, user int64) VerifiedUpdate {
@@ -165,5 +167,46 @@ func TestProvenanceEffective(t *testing.T) {
 		if got := p.Effective(); got != want {
 			t.Errorf("%q.Effective() = %q, want %q", p, got, want)
 		}
+	}
+}
+
+// TestRestoreInteractive: the claim rebuilds a run's context from the job
+// row only, through NewInteractive: the principal, conversation and consent
+// version are the row's, the trigger is interactive, and a row that would
+// not make a valid interactive context fails the same way.
+// Mutations: take the principal from anywhere but j.Principal; skip the
+// principal check; bypass NewInteractive's validation.
+func TestRestoreInteractive(t *testing.T) {
+	conns := []ConnectionRevision{{ConnectionID: "conn-a", AuthorityRevision: 2}}
+	budget := BudgetReservation{ID: "pa_usage:7"}
+	j := jobs.Job{ID: 7, Principal: aliceID, ConversationID: "conv-a", ConsentVersion: ConsentDataFlowV1}
+	ec, err := restoreInteractive(j, conns, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ec.Principal().TelegramID() != aliceID || ec.ConversationID() != "conv-a" || ec.Trigger() != TriggerInteractive ||
+		ec.ConsentVersion() != ConsentDataFlowV1 || ec.Budget().ID != "pa_usage:7" ||
+		!reflect.DeepEqual(ec.Connections(), conns) {
+		t.Fatalf("restored context = %+v", ec)
+	}
+	for _, tc := range []struct {
+		name string
+		mut  func(*jobs.Job)
+		b    BudgetReservation
+		want error
+	}{
+		{"no principal", func(j *jobs.Job) { j.Principal = 0 }, budget, ErrNoPrincipal},
+		{"negative principal", func(j *jobs.Job) { j.Principal = -1 }, budget, ErrNoPrincipal},
+		{"no conversation", func(j *jobs.Job) { j.ConversationID = "" }, budget, ErrNoConversation},
+		{"other consent version", func(j *jobs.Job) { j.ConsentVersion = "pa-data-flow/v0" }, budget, ErrConsentVersion},
+		{"no reservation", func(*jobs.Job) {}, BudgetReservation{}, ErrNoBudget},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bad := j
+			tc.mut(&bad)
+			if _, err := restoreInteractive(bad, conns, tc.b); !errors.Is(err, tc.want) {
+				t.Fatalf("error = %v, want %v", err, tc.want)
+			}
+		})
 	}
 }

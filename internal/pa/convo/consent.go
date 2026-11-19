@@ -8,8 +8,9 @@ import (
 // ConsentVersion is the consent the Phase 1 PA requires (threat model T13).
 const ConsentVersion = "pa-data-flow/v1"
 
-// ConsentText is the text of ConsentVersion. It names the provider class,
-// the data categories and the retention, as T13 requires.
+// ConsentText is the text of ConsentVersion. It names the provider and the
+// gateway that reaches it, the data categories and the retention, as T13
+// requires; /privacy lists the same recipients.
 //
 // Changing one character of it changes ConsentTextSHA256, and
 // TestConsentTextPinnedToVersion_S1N3 fails until ConsentVersion is bumped
@@ -19,7 +20,7 @@ const ConsentText = `Before the assistant answers you, it needs your consent to 
 
 What is sent: the messages you write to this bot, any text you forward, reply to or quote here, and the results the assistant reads from the services you connect (for example your Telegram chats or your smart home).
 
-Where it goes: to a third-party AI model provider that generates the answers. The provider processes it under its API terms.
+Where it goes: to Nebius, the AI model provider that generates the answers, reached through Cloudflare AI Gateway. They process it under their API terms. See https://tg.mctl.ai/privacy.
 
 How long it is kept: a conversation is kept on our servers for at most 24 hours from its start. /new starts a fresh conversation, /forget deletes all of your conversations now, and /consent withdraw stops the assistant and deletes your conversations.
 

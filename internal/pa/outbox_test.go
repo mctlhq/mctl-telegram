@@ -87,7 +87,7 @@ func TestRunLoop_ReplySurvivesFailedSend(t *testing.T) {
 // notices are retried after a send that failed before its request was
 // written.
 func TestRunLoop_NoticesSurviveFailedSend(t *testing.T) {
-	h := newRunLoopHarness(t, withBudget(jobs.Budget{PerJobUSD: 0.25, PrincipalDayUSD: 0.25, PrincipalMonthUSD: 20, GlobalDayUSD: 20}))
+	h := newRunLoopHarness(t, withBudget(jobs.Budget{PerJobUSD: 0.25, PrincipalDayUSD: 0.25, PrincipalMonthUSD: 20, GlobalDayUSD: 20, MinTurnUSD: 0.005}))
 	h.consent(aliceID)
 	h.text(aliceID, "one")
 	c := h.mustClaim()

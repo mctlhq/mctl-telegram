@@ -361,7 +361,12 @@ type paJobFailure struct {
 	// skip: not a failure, the job is simply not due (see claimOnce);
 	// the next job is tried and nothing is recorded.
 	skip bool
-	err  error
+	// storeFault: the store failed while this job was being claimed.
+	// Nothing was learned about the job, so nothing is recorded, but the
+	// next job is tried: a fault that recurs for this one job must not
+	// hold up every other principal's queue.
+	storeFault bool
+	err        error
 }
 
 func (f *paJobFailure) Error() string { return "pa job claim failed: " + f.err.Error() }
@@ -380,19 +385,38 @@ func (s *Store) ClaimPAJob(ctx context.Context, req jobs.ClaimRequest) (jobs.Cla
 	if err != nil {
 		return jobs.ClaimResult{}, err
 	}
-	// A store fault (anything that is not a *paJobFailure) ends the loop
-	// with an error and changes nothing: the next job would meet the same
-	// fault, and a fault says nothing about the job.
+	// MANAGED_CLAIM_NOT_AFTER ends PA claims too: nothing is picked,
+	// reserved, held or backed off, exactly as a managed claim takes
+	// nothing (reserveBudget). Expiry above still returns lapsed leases.
+	if req.Budget.ClaimsEnded(req.Now) {
+		return jobs.ClaimResult{Outcome: jobs.ClaimNone, Notices: notices}, nil
+	}
+	// A store fault before any job is picked ends the loop with an error
+	// and changes nothing. One met while claiming a picked job skips that
+	// job without recording anything; if no other job is claimed, the
+	// fault is returned, never a quiet ClaimNone (a store-wide fault fails
+	// every try and is a 503).
 	var tried []int64
+	var fault error
 	for range maxClaimTries {
 		res, err := s.claimOnce(ctx, req, pg, tried)
 		res.Notices = append(notices, res.Notices...)
 		var f *paJobFailure
 		if !errors.As(err, &f) {
+			if err == nil && res.Outcome == jobs.ClaimNone && fault != nil {
+				return jobs.ClaimResult{Notices: res.Notices}, fault
+			}
 			return res, err
 		}
 		notices = res.Notices
 		tried = append(tried, f.job.ID)
+		if f.storeFault {
+			// Nothing is recorded against the job, so the skip is only
+			// visible here.
+			slog.Warn("pa job claim met a store fault, trying the next job", "job_id", f.job.ID, "err", f.err)
+			fault = f.err
+			continue
+		}
 		if f.skip {
 			continue
 		}
@@ -404,6 +428,9 @@ func (s *Store) ClaimPAJob(ctx context.Context, req jobs.ClaimRequest) (jobs.Cla
 		if n != nil {
 			notices = append(notices, *n)
 		}
+	}
+	if fault != nil {
+		return jobs.ClaimResult{Notices: notices}, fault
 	}
 	return jobs.ClaimResult{Outcome: jobs.ClaimNone, Notices: notices}, nil
 }
@@ -454,8 +481,20 @@ func (s *Store) backoffPAJob(ctx context.Context, j jobs.Job, now time.Time, det
 }
 
 // claimOnce tries the oldest due job. A failure of that job's own state is
-// returned as *paJobFailure after its transaction is rolled back.
+// returned as *paJobFailure after its transaction is rolled back; so is a
+// store fault met after the pick, flagged storeFault.
 func (s *Store) claimOnce(ctx context.Context, req jobs.ClaimRequest, pg bool, skip []int64) (jobs.ClaimResult, error) {
+	var picked jobs.Job
+	res, err := s.claimPicked(ctx, req, pg, skip, &picked)
+	var f *paJobFailure
+	if err != nil && picked.ID != 0 && !errors.As(err, &f) {
+		return jobs.ClaimResult{}, &paJobFailure{job: picked, storeFault: true, err: err}
+	}
+	return res, err
+}
+
+// claimPicked is claimOnce; it sets *picked once a job is picked.
+func (s *Store) claimPicked(ctx context.Context, req jobs.ClaimRequest, pg bool, skip []int64, picked *jobs.Job) (jobs.ClaimResult, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return jobs.ClaimResult{}, fmt.Errorf("claim pa job: begin: %w", err)
@@ -494,6 +533,7 @@ func (s *Store) claimOnce(ctx context.Context, req jobs.ClaimRequest, pg bool, s
 	if err != nil {
 		return jobs.ClaimResult{}, jobsStoreFault("claim: pick", err)
 	}
+	*picked = jobs.Job{ID: id, Principal: principal, ClaimFailures: failures}
 	// Serialise with the principal's webhook updates (withdrawal, /forget),
 	// then read the job again under that lock.
 	if err := s.LockPAPrincipal(ctx, tx, principal); err != nil {
@@ -642,6 +682,11 @@ type paWindow struct {
 	end               time.Time
 }
 
+// room admits a claim when one reservation fits. A run then settles up to
+// jobs.SettleFactor x its reservation (owner decision 2026-11-19, P3-1:
+// caps stay soft), so the principal and global caps are soft by up to
+// (4-1) x reservation per concurrently settling job. The next claim sees
+// the overshoot and is held.
 func (w paWindow) room(perJob float64, withInflight bool) bool {
 	used := w.durable
 	if withInflight {
@@ -728,6 +773,13 @@ func (s *Store) loadRunningPAJob(ctx context.Context, tx *sql.Tx, pg bool, ref j
 // SQLite the probe would wait for the one connection the transaction
 // holds), then loads the running job of ref under the principal lock.
 func (s *Store) beginRunning(ctx context.Context, ref jobs.Ref, now time.Time) (*sql.Tx, jobs.Job, error) {
+	return s.beginRunningLocked(ctx, ref, now, false)
+}
+
+// beginRunningLocked is beginRunning; with budget it first takes the
+// managed ledger's global lock, in the order a claim takes it (budget,
+// then principal), for a write that moves the shared windows.
+func (s *Store) beginRunningLocked(ctx context.Context, ref jobs.Ref, now time.Time, budget bool) (*sql.Tx, jobs.Job, error) {
 	pg, err := s.postgresDialect(ctx)
 	if err != nil {
 		return nil, jobs.Job{}, jobsUnreadable("dialect", err)
@@ -735,6 +787,12 @@ func (s *Store) beginRunning(ctx context.Context, ref jobs.Ref, now time.Time) (
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, jobs.Job{}, fmt.Errorf("pa job: begin: %w", err)
+	}
+	if budget {
+		if err := s.lockManagedBudget(ctx, tx, pg, 0); err != nil {
+			_ = tx.Rollback()
+			return nil, jobs.Job{}, err
+		}
 	}
 	j, err := s.loadRunningPAJob(ctx, tx, pg, ref, now)
 	if err != nil {
@@ -794,8 +852,9 @@ func cancelOne(ctx context.Context, tx *sql.Tx, j jobs.Job, nowMS int64) error {
 // token never left the server, so no model call was made), then by mode:
 // ReleaseCancel cancels with a notice; ReleaseBackoff counts a failure
 // and backs the job off like a failed claim (cancelled with a notice at
-// MaxClaimFailures); ReleaseRetry (a store fault) makes it due again at
-// once and counts nothing. When another job of the principal is already
+// MaxClaimFailures); ReleaseRetry (a store or server fault) counts
+// nothing and makes it due again after ClaimBackoff(1), so a fault that
+// recurs for this job does not keep it at the head of the queue. When another job of the principal is already
 // queued, that job will read the same conversation, and this one is
 // cancelled quietly instead of requeued.
 func (s *Store) ReleasePAClaim(ctx context.Context, ref jobs.Ref, mode jobs.ReleaseMode, now time.Time) (*jobs.Notice, error) {
@@ -828,8 +887,11 @@ func (s *Store) ReleasePAClaim(ctx context.Context, ref jobs.Ref, mode jobs.Rele
 		}
 		if queued == 0 {
 			next = jobs.StatusPending
-			if mode == jobs.ReleaseBackoff {
+			switch mode {
+			case jobs.ReleaseBackoff:
 				retryAt = now.Add(jobs.ClaimBackoff(failures)).UnixMilli()
+			case jobs.ReleaseRetry:
+				retryAt = now.Add(jobs.ClaimBackoff(1)).UnixMilli()
 			}
 		}
 	}
@@ -956,10 +1018,13 @@ func (s *Store) AdmitPAToolCall(ctx context.Context, ref jobs.Ref, req jobs.Tool
 // settled and the job marked done in one transaction; the send happens
 // after the commit, never inside it.
 func (s *Store) FinishPAJob(ctx context.Context, ref jobs.Ref, req jobs.FinishRequest) (jobs.Job, error) {
-	if !ref.Valid() {
+	if !ref.Valid() || !(req.MinTurnUSD > 0) {
 		return jobs.Job{}, fmt.Errorf("%w: finish", jobs.ErrInvalid)
 	}
-	tx, j, err := s.beginRunning(ctx, ref, req.Now)
+	// A settlement may exceed the reservation (jobs.Settle), so it moves
+	// the global day shared with the managed runtime: it is written under
+	// the same #1092 lock every claim decides under.
+	tx, j, err := s.beginRunningLocked(ctx, ref, req.Now, true)
 	if err != nil {
 		return jobs.Job{}, err
 	}
@@ -982,15 +1047,21 @@ func (s *Store) FinishPAJob(ctx context.Context, ref jobs.Ref, req jobs.FinishRe
 	case err != nil:
 		return jobs.Job{}, jobsUnreadable("finish: reservation", err)
 	}
-	// The worker's figure is recorded as reported; what counts against the
-	// windows is at most the reservation, so no report can exhaust the
-	// global day shared with the managed runtime. An unreported cost
-	// settles at the full reservation.
-	cost, reported := reserved, sql.NullFloat64{}
+	// The worker's figure is recorded as reported. What counts against the
+	// windows is jobs.Settle: at most SettleFactor x the reservation, so
+	// no report can exhaust the global day shared with the managed
+	// runtime, and at least the per-turn floor for the turns the server
+	// admitted, so a report of zero is not a free run. An
+	// unreported cost settles at the full reservation.
+	reported := sql.NullFloat64{}
 	if req.CostUSD >= 0 {
 		reported = sql.NullFloat64{Float64: req.CostUSD, Valid: true}
-		cost = min(req.CostUSD, reserved)
 	}
+	// The floor counts the model turns the server saw: those admitted
+	// through /turn, and at least one per admitted tool call plus the
+	// answer, since every tool call follows a model turn. A worker that
+	// skips /turn cannot shrink the floor.
+	cost := jobs.Settle(req.CostUSD, reserved, max(j.Turns, j.ToolCalls+1), req.MinTurnUSD)
 	res, err := tx.ExecContext(ctx,
 		`UPDATE pa_usage SET status = $1, cost_usd = $2, reported_cost_usd = $3, updated_at_ms = $4
 		  WHERE job_id = $5 AND attempt = $6 AND status = $7`,
