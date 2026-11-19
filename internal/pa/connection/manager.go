@@ -215,7 +215,7 @@ func (m *Manager) List(ctx context.Context, principal int64) ([]Connection, erro
 
 // StartOAuth moves pending_link -> pending_oauth.
 func (m *Manager) StartOAuth(ctx context.Context, principal int64, id string, expectRevision int64) (Connection, error) {
-	return m.store.TransitionPAConnection(ctx, principal, id, Transition{
+	return m.transition(ctx, principal, id, Transition{
 		From: StatePendingLink, To: StatePendingOAuth, ExpectRevision: expectRevision,
 	})
 }
@@ -239,7 +239,7 @@ func (m *Manager) StoreAuthorizationCode(ctx context.Context, principal int64, i
 	if err != nil {
 		return Connection{}, err
 	}
-	return m.store.TransitionPAConnection(ctx, principal, id, Transition{
+	return m.transition(ctx, principal, id, Transition{
 		From: StatePendingOAuth, To: StatePendingReturn, ExpectRevision: expectRevision, SealedCode: blob,
 	})
 }
@@ -333,7 +333,7 @@ func (m *Manager) CompleteExchangeWith(ctx context.Context, principal int64, id 
 	if err != nil {
 		return m.failAndRevoke(ctx, c, check.Tokens, "exchange_seal", err)
 	}
-	out, err := m.store.TransitionPAConnection(ctx, principal, id, Transition{
+	out, err := m.transition(ctx, principal, id, Transition{
 		From: StatePendingReturn, To: StatePendingConfirm, ExpectRevision: expectRevision,
 		AccountID: accountID, GrantedScope: check.Granted, SealedTokens: blob,
 	})
@@ -360,7 +360,7 @@ func (m *Manager) RevokeTokenResponse(ctx context.Context, server Server, tokenR
 // == principal within 10 minutes) is the linking slice's; this is the store
 // edge it ends in.
 func (m *Manager) Confirm(ctx context.Context, principal int64, id string, expectRevision int64) (Connection, error) {
-	return m.store.TransitionPAConnection(ctx, principal, id, Transition{
+	return m.transition(ctx, principal, id, Transition{
 		From: StatePendingConfirm, To: StateActive, ExpectRevision: expectRevision,
 	})
 }
@@ -371,7 +371,7 @@ func (m *Manager) Fail(ctx context.Context, principal int64, id string, expectRe
 	if err != nil {
 		return Connection{}, readErr(err)
 	}
-	return m.store.TransitionPAConnection(ctx, principal, id, Transition{
+	return m.transition(ctx, principal, id, Transition{
 		From: c.State, To: StateFailed, ExpectRevision: expectRevision, Reason: reason,
 	})
 }
@@ -394,7 +394,7 @@ func (m *Manager) Abandon(ctx context.Context, principal int64, id string, expec
 	if len(s.SealedTokens) > 0 {
 		ts, openErr = m.openTokens(ctx, c, s)
 	}
-	out, err := m.store.TransitionPAConnection(ctx, principal, id, Transition{
+	out, err := m.transition(ctx, principal, id, Transition{
 		From: c.State, To: StateFailed, ExpectRevision: expectRevision, Reason: reason,
 	})
 	if err != nil {
@@ -413,7 +413,7 @@ func (m *Manager) Abandon(ctx context.Context, principal int64, id string, expec
 // under a response that did not pass the check. It always returns cause
 // (joined with any store error): the caller must not proceed.
 func (m *Manager) failAndRevoke(ctx context.Context, c Connection, issued TokenSet, reason string, cause error) (Connection, error) {
-	_, terr := m.store.TransitionPAConnection(ctx, c.Principal, c.ID, Transition{
+	_, terr := m.transition(ctx, c.Principal, c.ID, Transition{
 		From: c.State, To: StateFailed, ExpectRevision: c.AuthorityRevision, Reason: reason,
 	})
 	rerr := m.revokeTokens(ctx, c.Server, issued)
@@ -643,7 +643,7 @@ func (m *Manager) refresh(ctx context.Context, principal int64, id string, fn Re
 		m.cancelInflight(id)
 		return Connection{}, errors.Join(err, rerr, m.revokeTokens(ctx, c.Server, old))
 	case errors.Is(err, ErrInvalidGrant):
-		_, terr := m.store.TransitionPAConnection(ctx, principal, id, Transition{
+		_, terr := m.transition(ctx, principal, id, Transition{
 			From: StateActive, To: StateExpired, ExpectRevision: c.AuthorityRevision, Reason: "invalid_grant",
 		})
 		return Connection{}, errors.Join(err, terr)
@@ -830,4 +830,10 @@ func (c *Call) Finish(ctx context.Context) error {
 		BoundRevision: c.boundRevision, Reason: reason,
 	})
 	return errors.Join(fmt.Errorf("%w: %s", ErrFenced, reason), aerr)
+}
+
+// transition stamps t with the Manager's clock and applies it.
+func (m *Manager) transition(ctx context.Context, principal int64, id string, t Transition) (Connection, error) {
+	t.At = m.now().UTC()
+	return m.store.TransitionPAConnection(ctx, principal, id, t)
 }

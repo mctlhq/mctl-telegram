@@ -268,6 +268,11 @@ func (s *Store) RetirePALinkSecret(ctx context.Context, kind PALinkKind, hash st
 	return nil
 }
 
+// paEnsureAfterResolve is a test seam: it runs inside EnsurePAUser's
+// transaction right after the first lookup, so a test can make a failed
+// lookup transient and prove the failure alone stops the insert.
+var paEnsureAfterResolve func(ctx context.Context, tx *sql.Tx)
+
 // EnsurePAUser returns the users.id of a PA principal, creating the row on
 // its first PA connection (owner decision 2026-11-19, #1312 decision 2) so
 // the ADR 0003 audit chain has a user to append to.
@@ -290,6 +295,9 @@ func (s *Store) EnsurePAUser(ctx context.Context, tgID int64) (int64, error) {
 	}
 	defer func() { _ = tx.Rollback() }()
 	id, err := userIDByTelegramID(ctx, tx, tgID)
+	if paEnsureAfterResolve != nil {
+		paEnsureAfterResolve(ctx, tx)
+	}
 	switch {
 	case err == nil:
 		return id, nil

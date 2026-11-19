@@ -737,3 +737,98 @@ func TestLinking_SweepContinuesPastUnreadableRow(t *testing.T) {
 		}
 	})
 }
+
+// The pending-age sweep must never fail a legitimate slow flow. For every
+// pending state, the user waits until one second before that step's secret
+// expires, a sweep runs, and the flow still completes to active. A row left
+// in the same state past PendingMaxAge is failed. The store stamps
+// transitions with the Manager's clock, so the ages here are exact.
+func TestLinking_SweepSparesSlowFlowInEveryPendingState(t *testing.T) {
+	steps := []struct {
+		state connection.State
+		wait  time.Duration
+	}{
+		{connection.StatePendingLink, linking.LinkTokenTTL},
+		{connection.StatePendingOAuth, linking.StateTTL},
+		{connection.StatePendingReturn, linking.CompletionTTL},
+		{connection.StatePendingConfirm, linking.ConfirmTTL},
+	}
+	for _, st := range steps {
+		t.Run(string(st.state), func(t *testing.T) {
+			forEachDialect(t, func(t *testing.T, s *db.Store) {
+				ctx := context.Background()
+				for _, slow := range []bool{true, false} {
+					h := newHarness(t, s, false)
+					// Run an hour ahead of the wall clock: a row stamped with
+					// the store's own clock would look an hour old and be swept
+					// mid-flow.
+					h.clock.Add(time.Hour)
+					login := h.tgLogin(h.alice)
+					server := connection.ServerTG
+					// pause runs at the step under test: a wait just short of
+					// the step's secret TTL (the flow must survive it), or past
+					// PendingMaxAge (the row must be failed).
+					pause := func(at connection.State) bool {
+						if at != st.state {
+							return true
+						}
+						if got := h.state(server); got != st.state {
+							t.Fatalf("at %s the row is %s", st.state, got)
+						}
+						if slow {
+							h.clock.Add(st.wait - time.Second)
+						} else {
+							h.clock.Add(linking.PendingMaxAge + time.Second)
+						}
+						if _, err := h.svc.ExpireStale(ctx, 1000); err != nil {
+							t.Fatal(err)
+						}
+						if !slow {
+							if got := h.state(server); got != connection.StateFailed {
+								t.Fatalf("%s past PendingMaxAge: state %s, want failed", st.state, got)
+							}
+							return false
+						}
+						if got := h.state(server); got != st.state {
+							t.Fatalf("slow %s flow swept: state %s", st.state, got)
+						}
+						return true
+					}
+					link := h.start(server)
+					if !pause(connection.StatePendingLink) {
+						continue
+					}
+					authURL := h.begin(link)
+					if !pause(connection.StatePendingOAuth) {
+						continue
+					}
+					res, err := h.svc.Callback(ctx, server, h.as[server].authorize(t, authURL, login))
+					if err != nil {
+						t.Fatalf("callback: %v", err)
+					}
+					if !pause(connection.StatePendingReturn) {
+						continue
+					}
+					deep, _, err := h.svc.Handoff(ctx, res.Handoff)
+					if err != nil {
+						t.Fatalf("handoff: %v", err)
+					}
+					if err := h.svc.Complete(ctx, h.initData(h.alice, startapp(t, deep))); err != nil {
+						t.Fatalf("complete: %v", err)
+					}
+					if !pause(connection.StatePendingConfirm) {
+						continue
+					}
+					cards := h.msgr.all()
+					confirm, _ := confirmData(cards[len(cards)-1].card)
+					if _, err := h.svc.HandleCallback(ctx, callbackUpdate(t, h.alice, confirm)); err != nil {
+						t.Fatalf("confirm after a slow %s: %v", st.state, err)
+					}
+					if got := h.state(server); got != connection.StateActive {
+						t.Fatalf("slow %s flow ended %s, want active", st.state, got)
+					}
+				}
+			})
+		})
+	}
+}

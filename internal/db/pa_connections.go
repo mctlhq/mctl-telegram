@@ -122,6 +122,9 @@ func (s *Store) CreatePAConnection(ctx context.Context, c connection.Connection,
 		return fmt.Errorf("%w: a new connection is pending_link at revision 1 with only a wrapped dek", connection.ErrInvalidTransition)
 	}
 	now := time.Now().UTC().UnixMilli()
+	if !c.CreatedAt.IsZero() {
+		now = c.CreatedAt.UTC().UnixMilli()
+	}
 	_, err := s.DB.ExecContext(ctx,
 		`INSERT INTO pa_connections(id, principal, server, state, authority_revision, token_generation,
 			kek_id, wrapped_dek, created_at_ms, updated_at_ms)
@@ -191,6 +194,9 @@ func (s *Store) TransitionPAConnection(ctx context.Context, principal int64, id 
 		return connection.Connection{}, err
 	}
 	now := time.Now().UTC().UnixMilli()
+	if !t.At.IsZero() {
+		now = t.At.UTC().UnixMilli()
+	}
 	set := `state = $1, authority_revision = authority_revision + 1, updated_at_ms = $2,
 		refresh_lease_owner = '', refresh_lease_until_ms = 0`
 	args := []any{string(t.To), now, principal, id, string(t.From), t.ExpectRevision}

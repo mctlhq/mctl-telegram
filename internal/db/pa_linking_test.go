@@ -303,3 +303,79 @@ func TestEnsurePAUser_LegacySyntheticLoginBackfilled(t *testing.T) {
 		}
 	})
 }
+
+// A lookup that cannot decide is never "no user": EnsurePAUser returns the
+// error and inserts nothing, both when the Telegram id already maps to two
+// users and when the lookup itself fails.
+func TestEnsurePAUser_LookupFailureInsertsNothing(t *testing.T) {
+	countRows := func(t *testing.T, s *Store, p int64) int {
+		t.Helper()
+		var n int
+		if err := s.DB.QueryRow(`SELECT COUNT(*) FROM users WHERE telegram_login_id = $1 OR github_login = $2`,
+			p, "tg:"+strconv.FormatInt(p, 10)).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	t.Run("ambiguous", func(t *testing.T) {
+		paLinkDialects(t, func(t *testing.T, s *Store) {
+			ctx := context.Background()
+			p := paLinkPrincipal(t, s)
+			for i := 0; i < 2; i++ {
+				owner, err := s.EnsureUser(ctx, "pa-ambiguous-"+randomSuffix(t), "", "mctl-api")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					_, _ = s.DB.Exec(`DELETE FROM telegram_accounts WHERE user_id = $1`, owner)
+					_, _ = s.DB.Exec(`DELETE FROM users WHERE id = $1`, owner)
+				})
+				if _, err := s.DB.ExecContext(ctx,
+					`INSERT INTO telegram_accounts(user_id, telegram_user_id, session_encrypted) VALUES($1,$2,$3)`,
+					owner, p, []byte("blob")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if id, err := s.EnsurePAUser(ctx, p); !errors.Is(err, ErrTelegramIdentityAmbiguous) {
+				t.Fatalf("EnsurePAUser = %d, %v; want ErrTelegramIdentityAmbiguous", id, err)
+			}
+			if n := countRows(t, s, p); n != 0 {
+				t.Fatalf("%d users rows inserted for an ambiguous id", n)
+			}
+		})
+	})
+	t.Run("lookup error", func(t *testing.T) {
+		// SQLite only: the lookup's telegram_accounts table is renamed away
+		// on a private in-memory database, so the lookup fails while an
+		// INSERT into users would still succeed.
+		ctx := context.Background()
+		conn, err := Open(ctx, "file:pa_link_err_"+randomSuffix(t)+"?mode=memory&cache=shared", 0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		if err := MigrateCached(ctx, conn); err != nil {
+			t.Fatal(err)
+		}
+		s := &Store{DB: conn}
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE telegram_accounts RENAME TO telegram_accounts_gone`); err != nil {
+			t.Fatal(err)
+		}
+		// The failure is made transient: once the first lookup has failed,
+		// the table comes back, so only the failed first lookup itself can
+		// stop the insert.
+		paEnsureAfterResolve = func(ctx context.Context, tx *sql.Tx) {
+			if _, err := tx.ExecContext(ctx, `ALTER TABLE telegram_accounts_gone RENAME TO telegram_accounts`); err != nil {
+				t.Errorf("restore table: %v", err)
+			}
+		}
+		t.Cleanup(func() { paEnsureAfterResolve = nil })
+		const p int64 = 9_300_000_777
+		if id, err := s.EnsurePAUser(ctx, p); err == nil || errors.Is(err, ErrUserNotFound) {
+			t.Fatalf("EnsurePAUser = %d, %v; want the lookup error", id, err)
+		}
+		if n := countRows(t, s, p); n != 0 {
+			t.Fatalf("%d users rows inserted after a failed lookup", n)
+		}
+	})
+}
