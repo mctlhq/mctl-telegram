@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"go/parser"
 	"go/token"
 	"net/http"
@@ -243,6 +245,75 @@ func TestBuildPA_ClaimAuthenticatesPool(t *testing.T) {
 	}
 }
 
+// TestBuildPA_JobTokenRoundTrip drives one run through the built runtime:
+// consent through the webhook, a message, a claim with a pool token and a
+// turn with the pa-job token the claim minted. A minter and verifier wired
+// with different keys or issuers would turn every turn into a 401 after a
+// successful claim; this is the test that sees it.
+func TestBuildPA_JobTokenRoundTrip(t *testing.T) {
+	store, conn := paTestStoreConn(t)
+	_, rt := buildEnabledPA(t, store)
+	mux := chi.NewRouter()
+	rt.Mount(mux)
+	const user = 4242002
+	update := int64(6000)
+	send := func(kind, payload string) {
+		t.Helper()
+		update++
+		body := fmt.Sprintf(`{"update_id":%d,%q:%s}`, update, kind, payload)
+		if code := postPAWebhook(mux, body); code != http.StatusOK {
+			t.Fatalf("%s update: status %d", kind, code)
+		}
+	}
+	text := func(s string) {
+		send("message", fmt.Sprintf(`{"message_id":7,"date":1,"text":%q,`+
+			`"from":{"id":%d,"is_bot":false,"first_name":"Bob"},"chat":{"id":%d,"type":"private"}}`, s, user, user))
+	}
+	text("hello")
+	var button string
+	if err := conn.QueryRowContext(context.Background(), `SELECT id FROM pa_callbacks WHERE principal = ?`, user).Scan(&button); err != nil {
+		t.Fatalf("consent callback: %v", err)
+	}
+	send("callback_query", fmt.Sprintf(`{"id":"cb","data":%q,"from":{"id":%d,"is_bot":false},`+
+		`"message":{"message_id":9,"date":1,"chat":{"id":%d,"type":"private"}}}`, button, user, user))
+	text("what is on my calendar")
+
+	iss, err := localjwt.NewIssuer([]byte(testPASigningKey), testPABaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := iss.Mint(localjwt.Claims{
+		Subject: "pool:main", Audience: []string{localjwt.PoolAudience}, Jti: "pool-jti-roundtrip",
+		OriginalIssuedAt: time.Now().Add(-time.Minute).Unix(),
+	}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(route, token, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, route, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		return w
+	}
+	w := post(pa.RouteClaim, pool, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("claim: status %d, want 200 (a run is due)", w.Code)
+	}
+	var claim struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &claim); err != nil || claim.Token == "" {
+		t.Fatalf("claim response without a job token: %v", err)
+	}
+	if w := post(pa.RouteTurn, claim.Token, `{"context_tokens":100}`); w.Code != http.StatusOK {
+		t.Fatalf("turn with the claimed job token: status %d, want 200; body %s", w.Code, w.Body.String())
+	}
+	if w := post(pa.RouteTurn, pool, `{"context_tokens":100}`); w.Code != http.StatusUnauthorized {
+		t.Fatalf("turn with the pool token: status %d, want 401", w.Code)
+	}
+}
+
 // TestBuildPA_RefusesMissingSecrets: buildPA refuses a hand-built enabled
 // configuration without what the run loop is keyed from.
 func TestBuildPA_RefusesMissingSecrets(t *testing.T) {
@@ -251,7 +322,7 @@ func TestBuildPA_RefusesMissingSecrets(t *testing.T) {
 	base := func() *config.Config {
 		return &config.Config{
 			PAEnabled: true, PAWebhookSecret: testPASecret, PABotToken: "7000000001:pa-test-token-not-real-0123456789",
-			EncryptionKey: make([]byte, 32), OAUTHJWTSecret: testPASigningKey, PublicBaseURL: testPABaseURL,
+			EncryptionKey: make([]byte, 32), OAUTHJWTSecret: testPASigningKey, OAUTHJWTSecretDedicated: true, PublicBaseURL: testPABaseURL,
 			PAConversationTTL: time.Hour, PARateMessages: 20, PARateWindow: time.Hour, PAMaxContextTokens: 1000,
 			PABudgetUSDJob: 0.25, PABudgetUSDDay: 2, PABudgetUSDMonth: 20, ManagedBudgetUSDGlobalDay: 20, PAMinTurnUSD: 0.005,
 		}
@@ -260,11 +331,12 @@ func TestBuildPA_RefusesMissingSecrets(t *testing.T) {
 		t.Fatalf("control: runtime=%v err=%v", rt, err)
 	}
 	for name, mutate := range map[string]func(*config.Config){
-		"no signing key":    func(c *config.Config) { c.OAUTHJWTSecret = "" },
-		"no encryption key": func(c *config.Config) { c.EncryptionKey = nil },
-		"short key":         func(c *config.Config) { c.EncryptionKey = make([]byte, 16) },
-		"no bot token":      func(c *config.Config) { c.PABotToken = "" },
-		"no webhook secret": func(c *config.Config) { c.PAWebhookSecret = "" },
+		"no signing key":     func(c *config.Config) { c.OAUTHJWTSecret = "" },
+		"shared signing key": func(c *config.Config) { c.OAUTHJWTSecretDedicated = false },
+		"no encryption key":  func(c *config.Config) { c.EncryptionKey = nil },
+		"short key":          func(c *config.Config) { c.EncryptionKey = make([]byte, 16) },
+		"no bot token":       func(c *config.Config) { c.PABotToken = "" },
+		"no webhook secret":  func(c *config.Config) { c.PAWebhookSecret = "" },
 	} {
 		c := base()
 		mutate(c)
@@ -355,10 +427,15 @@ func TestPARuntime_ShutdownBoundedByDeadline(t *testing.T) {
 	f := &fakePALoop{release: make(chan struct{}), started: make(chan struct{})}
 	defer close(f.release)
 	rt := &paRuntime{loop: f}
-	start := time.Now()
-	rt.Shutdown(start.Add(100 * time.Millisecond))
-	if d := time.Since(start); d > 5*time.Second {
-		t.Fatalf("shutdown took %s past a 100ms deadline", d)
+	done := make(chan struct{})
+	go func() {
+		rt.Shutdown(time.Now().Add(100 * time.Millisecond))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown ignored its 100ms deadline")
 	}
 }
 

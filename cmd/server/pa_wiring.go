@@ -65,8 +65,8 @@ func buildPA(cfg *config.Config, store *db.Store, rc *localjwt.RevocationCache, 
 		return nil, errors.New("pa: store and worker-token revocation cache are required")
 	}
 	secret := []byte(cfg.OAUTHJWTSecret)
-	if len(secret) == 0 {
-		return nil, errors.New("pa: OAUTH_JWT_SIGNING_KEY is required")
+	if len(secret) == 0 || !cfg.OAUTHJWTSecretDedicated {
+		return nil, errors.New("pa: a dedicated OAUTH_JWT_SIGNING_KEY in AUTH_MODE=local-jwt is required")
 	}
 	issuer := strings.TrimRight(cfg.PublicBaseURL, "/")
 	sealer, err := convo.NewSealer(cfg.EncryptionKey)
@@ -89,7 +89,8 @@ func buildPA(cfg *config.Config, store *db.Store, rc *localjwt.RevocationCache, 
 	if err != nil {
 		return nil, err
 	}
-	// Optional interface values must stay nil, not a typed nil.
+	// m is optional (tests pass nil); a nil m leaves both counters nil
+	// interfaces rather than wrapping it. main always passes a registry.
 	var counter pa.Counter
 	var outboxCounter pa.OutboxCounter
 	if m != nil {
@@ -154,10 +155,12 @@ func (r *paRuntime) Start(ctx context.Context) {
 
 // Shutdown waits for the outbox loop (its context must already be done)
 // and then for the deliveries request paths started, until deadline. It is
-// called after the HTTP server has stopped serving, so no new delivery can
-// start, and before the store closes, so none is cut off mid-write. A
-// delivery still running at the deadline is abandoned; its row outlives
-// its lease and becomes unknown, never resent.
+// called after the HTTP server has stopped serving and before the store
+// closes, so a delivery is not cut off mid-write. If the server's own
+// shutdown timed out, a handler still running may start a delivery this
+// wait does not see; like a delivery still running at the deadline, it is
+// abandoned, and its row outlives its lease and becomes unknown, never
+// resent.
 func (r *paRuntime) Shutdown(deadline time.Time) {
 	if r == nil {
 		return
@@ -179,7 +182,9 @@ func (r *paRuntime) Shutdown(deadline time.Time) {
 // broadcast worker, all before main returns and the deferred database
 // close runs. Split out of main so a test can check the order.
 func gracefulShutdown(ctx context.Context, srv interface{ Shutdown(context.Context) error }, paRT *paRuntime, deadline time.Time) {
-	_ = srv.Shutdown(ctx)
+	if err := srv.Shutdown(ctx); err != nil {
+		slog.Warn("http shutdown incomplete; requests may still be running", "err", err)
+	}
 	paRT.Shutdown(deadline)
 	waitBroadcastWorker(deadline)
 }

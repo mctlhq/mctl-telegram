@@ -3941,8 +3941,11 @@ mctl-gitops vm-rules is part of enabling the PA (#1318).
   run loop: the webhook's update handler is `pa.Conversations`, and the
   worker routes `/api/pa/v1/jobs/{claim,turn,reply}` are mounted. Startup
   refuses an enabled PA without `ENCRYPTION_KEY` (it keys the conversation
-  state, under its own HKDF info) or `OAUTH_JWT_SIGNING_KEY` (it signs the
-  pool and pa-job tokens, issuer `PUBLIC_BASE_URL`). The run loop has no
+  state, under its own HKDF info) or without `AUTH_MODE=local-jwt` and a
+  set `OAUTH_JWT_SIGNING_KEY` (it signs the pool and pa-job tokens, issuer
+  `PUBLIC_BASE_URL`; shared-hmac's shared secret and the legacy
+  `OAUTH_JWT_SECRET` fallback are refused, because another service holds
+  them). The run loop has no
   tools: the connector's tool route is not mounted and the dispatcher does
   not run until the tools slice (#1314). The outbox retry loop runs every
   15s. On shutdown the server stops serving first and then waits, at most

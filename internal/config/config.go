@@ -66,11 +66,16 @@ type Config struct {
 	// tier (see localEnvNames there) makes an insecure-auth or
 	// missing-encryption-key boot fatal regardless of the configured listen
 	// address.
-	Environment      string
-	DatabaseURL      string
-	OAUTHJWTSecret   string // HS256 signing key; see OAUTH_JWT_SIGNING_KEY
-	OAUTHJWTAudience string // expected `aud` claim; empty disables the check
-	OAUTHJWTAudReq   bool   // when true, tokens without aud are rejected
+	Environment    string
+	DatabaseURL    string
+	OAUTHJWTSecret string // HS256 signing key; see OAUTH_JWT_SIGNING_KEY
+	// OAUTHJWTSecretDedicated is true when OAUTHJWTSecret is mctl-telegram's
+	// own OAUTH_JWT_SIGNING_KEY in local-jwt mode, not a secret another
+	// service also holds (shared-hmac's OAUTH_JWT_SECRET or its legacy
+	// fallback). The PA requires it (#1349 review).
+	OAUTHJWTSecretDedicated bool
+	OAUTHJWTAudience        string // expected `aud` claim; empty disables the check
+	OAUTHJWTAudReq          bool   // when true, tokens without aud are rejected
 	// WorkerTokenRevocationCacheTTL bounds how long a worker-token jti
 	// denylist check may serve a stale in-memory snapshot before refreshing
 	// from worker_token_revocations. <=0 falls back to
@@ -728,6 +733,7 @@ func Load() (*Config, error) {
 		Environment:                     envOr("ENV", ""),
 		DatabaseURL:                     envOr("DATABASE_URL", "file:mctl-telegram.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"),
 		OAUTHJWTSecret:                  jwtSigningKey(authMode),
+		OAUTHJWTSecretDedicated:         strings.EqualFold(authMode, "local-jwt") && os.Getenv("OAUTH_JWT_SIGNING_KEY") != "",
 		OAUTHJWTAudience:                os.Getenv("OAUTH_JWT_AUDIENCE"),
 		OAUTHJWTAudReq:                  envBool("OAUTH_JWT_AUDIENCE_REQUIRED", false),
 		WorkerTokenRevocationCacheTTL:   envDuration("WORKER_TOKEN_REVOCATION_CACHE_TTL", 10*time.Second),
@@ -1086,8 +1092,13 @@ func validatePAWiring(c *Config) error {
 	if len(c.EncryptionKey) != 32 {
 		return errors.New("PA_ENABLED=true requires ENCRYPTION_KEY (64 hex chars): it keys the PA conversation state")
 	}
-	if c.OAUTHJWTSecret == "" {
-		return errors.New("PA_ENABLED=true requires OAUTH_JWT_SIGNING_KEY: it signs the PA worker and job tokens")
+	// The PA's pool and pa-job tokens unlock principals' conversations, so
+	// they must be signed with a key only this service holds: the dedicated
+	// OAUTH_JWT_SIGNING_KEY in local-jwt mode. shared-hmac signs with
+	// api.mctl.ai's shared secret, and local-jwt's legacy OAUTH_JWT_SECRET
+	// fallback was historically that same secret.
+	if c.OAUTHJWTSecret == "" || !c.OAUTHJWTSecretDedicated {
+		return errors.New("PA_ENABLED=true requires AUTH_MODE=local-jwt with OAUTH_JWT_SIGNING_KEY set: it signs the PA worker and job tokens, and no other service may hold that key")
 	}
 	return nil
 }

@@ -65,6 +65,30 @@ func TestLoadPA_ServerSecrets(t *testing.T) {
 			}
 		})
 	}
+	// The signing key must be mctl-telegram's own: shared-hmac's shared
+	// secret, or local-jwt's legacy fallback to it, is refused even when
+	// set.
+	t.Run("shared-hmac mode", func(t *testing.T) {
+		enable(t)
+		t.Setenv("AUTH_MODE", "shared-hmac")
+		t.Setenv("OAUTH_JWT_SECRET", testSigningKey+"-shared")
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "AUTH_MODE=local-jwt") {
+			t.Fatalf("Load() error = %v, want refusal of the shared signing key", err)
+		}
+	})
+	t.Run("legacy key only", func(t *testing.T) {
+		enable(t)
+		t.Setenv("OAUTH_JWT_SIGNING_KEY", "")
+		t.Setenv("OAUTH_JWT_SECRET", testSigningKey+"-legacy")
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "OAUTH_JWT_SIGNING_KEY") {
+			t.Fatalf("Load() error = %v, want refusal of the legacy signing key", err)
+		}
+		if strings.Contains(err.Error(), testSigningKey) {
+			t.Fatalf("Load() error echoes a credential: %v", err)
+		}
+	})
 	t.Run("off ignores them", func(t *testing.T) {
 		t.Setenv("PA_ENABLED", "false")
 		t.Setenv("ENCRYPTION_KEY", "")
