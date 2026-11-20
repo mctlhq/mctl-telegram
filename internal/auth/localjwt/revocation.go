@@ -137,37 +137,45 @@ func (c *RevocationCache) check(ctx context.Context, jti string, checkJti bool, 
 		if err := c.refresh(ctx); err != nil && !wasPopulated {
 			return false, fmt.Errorf("revocation cache cold-start refresh: %w", err)
 		}
-	} else {
-		// Not stale a moment ago, but past the bound now: with the TTL at
-		// MaxRevocationCacheTTL the two are the same instant, and a delay on
-		// the lock can carry a check across it. Refresh rather than refuse
-		// with a healthy store; if this refresh fails, the bound below
-		// refuses as it should.
-		c.mu.Lock()
-		crossed := c.now().Sub(c.readStartedAt) > MaxRevocationSnapshotAge
-		c.mu.Unlock()
-		if crossed {
-			_ = c.refresh(ctx)
-		}
 	}
 
+	// A check that was not stale a moment ago can find the snapshot past
+	// the bound when it reads it: with the TTL at MaxRevocationCacheTTL the
+	// two are the same instant, and any delay carries a check across. Such
+	// a check refreshes once and looks again, with the age taken under the
+	// same lock as the lookup it guards. Only a snapshot still past the
+	// bound after this call's own refresh attempt is refused.
+	refreshed := stale
+	for {
+		revoked, tooOld, err := c.lookup(jti, checkJti, telegramID, issuedAt)
+		if !tooOld || refreshed {
+			return revoked, err
+		}
+		refreshed = true
+		_ = c.refresh(ctx)
+	}
+}
+
+// lookup answers from the applied snapshot. tooOld reports a snapshot past
+// MaxRevocationSnapshotAge, which is refused with ErrRevocationSnapshotTooOld.
+func (c *RevocationCache) lookup(jti string, checkJti bool, telegramID int64, issuedAt time.Time) (revoked, tooOld bool, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.populated {
-		return false, errors.New("revocation cache never populated")
+		return false, false, errors.New("revocation cache never populated")
 	}
 	if age := c.now().Sub(c.readStartedAt); age > MaxRevocationSnapshotAge {
-		return false, fmt.Errorf("%w: %s old, bound %s", ErrRevocationSnapshotTooOld, age.Round(time.Millisecond), MaxRevocationSnapshotAge)
+		return false, true, fmt.Errorf("%w: %s old, bound %s", ErrRevocationSnapshotTooOld, age.Round(time.Millisecond), MaxRevocationSnapshotAge)
 	}
 	if checkJti {
 		if _, ok := c.jtis[jti]; ok {
-			return true, nil
+			return true, false, nil
 		}
 	}
 	if revokedAt, ok := c.blanket[telegramID]; ok && !issuedAt.After(revokedAt) {
-		return true, nil
+		return true, false, nil
 	}
-	return false, nil
+	return false, false, nil
 }
 
 // Refresh forces an immediate reload of the denylist, ignoring the TTL.
