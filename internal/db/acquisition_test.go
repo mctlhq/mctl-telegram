@@ -156,6 +156,11 @@ func testAcquisitionLabelsAndReport(t *testing.T, s *Store) {
 		}
 	}
 	now := time.Now().UTC()
+	// A returned activity report only counts events on/after sign-up.
+	// Backdate Alice's registration so both genuine calls are post-sign-up.
+	if _, err := s.DB.Exec(`UPDATE users SET created_at=$1 WHERE id=$2`, now.Add(-72*time.Hour), alice); err != nil {
+		t.Fatal(err)
+	}
 	ins(alice, now)
 	ins(alice, now.Add(-30*time.Hour))
 	ins(bob, now)
@@ -280,3 +285,104 @@ func TestHeardFromUnanswered_FailedReadIsAnErrorNotFalse(t *testing.T) {
 		t.Fatal("a failed write must return an error")
 	}
 }
+
+// TestAcquisitionReport_QualifyingEvents exercises the acquisition funnel's
+// activity predicate on SQLite and Postgres. A successful signup and its
+// connect:* audit steps are NOT MCP product use; neither are failed calls,
+// Local Bridge housekeeping, web forms or Personal Assistant connector rows.
+//
+// Mutation check: replacing publicToolFilter with "tool_name NOT LIKE 'pa:%'"
+// must fail this test; removing the signup timestamp fence must fail too.
+func TestAcquisitionReport_QualifyingEvents(t *testing.T) {
+	t.Run("sqlite", func(t *testing.T) { testAcquisitionReportQualifyingEvents(t, newTestStore(t)) })
+	t.Run("postgres", func(t *testing.T) { testAcquisitionReportQualifyingEvents(t, newFreshSchemaPostgresStore(t)) })
+}
+
+func testAcquisitionReportQualifyingEvents(t *testing.T, s *Store) {
+	ctx := context.Background()
+	// Noon UTC gives stable distinct-day expectations on both SQL dialects.
+	now := time.Now().UTC().Truncate(24*time.Hour).Add(12 * time.Hour)
+	started := now.Add(-72 * time.Hour)
+	create := func(tg int64, source string) int64 {
+		t.Helper()
+		uid, err := s.EnsureUserByTelegramCapture(ctx, captureFor(tg, &Acquisition{
+			State: AcquisitionAttributed, UTMSource: source,
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DB.ExecContext(ctx,
+			`UPDATE users SET created_at=$1 WHERE id=$2`, started, uid); err != nil {
+			t.Fatal(err)
+		}
+		return uid
+	}
+	insert := func(uid int64, tool, status string, at time.Time) {
+		t.Helper()
+		if _, err := s.DB.ExecContext(ctx,
+			`INSERT INTO audit_logs(user_id, tool_name, status, created_at) VALUES($1,$2,$3,$4)`,
+			uid, tool, status, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Reuse synthetic numeric IDs from other isolated acquisition tests.
+	connect := create(77001, "only-connect")
+	insert(connect, "connect:oidc_callback", "ok", now.Add(-26*time.Hour))
+	insert(connect, "connect:success", "ok", now.Add(-2*time.Hour))
+	failed := create(77002, "only-failed")
+	insert(failed, "get_messages", "error", now.Add(-26*time.Hour))
+	insert(failed, "search_messages", "refused", now.Add(-2*time.Hour))
+	bridge := create(77003, "only-bridge")
+	insert(bridge, "local_bridge_device_refresh", "ok", now.Add(-26*time.Hour))
+	insert(bridge, "local_bridge_device_refresh", "ok", now.Add(-2*time.Hour))
+	web := create(77004, "only-web")
+	insert(web, "POST /telegram/connect/manage/notifications", "ok", now.Add(-26*time.Hour))
+	insert(web, "POST /telegram/connect/manage/notifications", "ok", now.Add(-2*time.Hour))
+	pa := create(77005, "only-pa")
+	insert(pa, "pa:tg/list_dialogs", "ok", now.Add(-26*time.Hour))
+	insert(pa, "pa:tg/list_dialogs", "ok", now.Add(-2*time.Hour))
+	preSignup := create(77011, "only-before-signup")
+	insert(preSignup, "list_dialogs", "ok", started.Add(-time.Hour))
+	twoDays := create(77012, "valid-two-days")
+	insert(twoDays, "list_dialogs", "ok", now.Add(-26*time.Hour))
+	insert(twoDays, "get_messages", "ok", now.Add(-2*time.Hour))
+	oneDay := create(77013, "valid-one-day")
+	insert(oneDay, "get_messages", "ok", now.Add(-2*time.Hour))
+	insert(oneDay, "search_messages", "error", now.Add(-26*time.Hour))
+	sameDay := create(77014, "valid-same-day")
+	insert(sameDay, "list_dialogs", "ok", now.Add(-2*time.Hour))
+	insert(sameDay, "get_messages", "ok", now.Add(-time.Hour))
+
+	report, err := s.AcquisitionReport(ctx, now.Add(-7*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]AcquisitionBucket, len(report))
+	for _, b := range report {
+		got[b.Source] = b
+	}
+	for _, source := range []string{
+		"only-connect", "only-failed", "only-bridge", "only-web",
+		"only-pa", "only-before-signup",
+	} {
+		b, found := got[source]
+		if !found || b.Signups != 1 || b.ToolCallUsers != 0 || b.Active2PlusDays != 0 {
+			t.Errorf("%s = %+v (found=%v); want signups=1, calls=0, 2plus=0", source, b, found)
+		}
+	}
+	for _, tc := range []struct {
+		source string
+		twoPlus int64
+	}{
+		{source: "valid-two-days", twoPlus: 1},
+		{source: "valid-one-day", twoPlus: 0},
+		{source: "valid-same-day", twoPlus: 0},
+	} {
+		b, found := got[tc.source]
+		if !found || b.Signups != 1 || b.ToolCallUsers != 1 || b.Active2PlusDays != tc.twoPlus {
+			t.Errorf("%s = %+v (found=%v); want signup=1, tool_user=1, 2plus=%d",
+				tc.source, b, found, tc.twoPlus)
+		}
+	}
+}
+
