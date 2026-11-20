@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package output
+package safetext
 
 // Template is server-authored message text. Its field is unexported, so
 // code outside this package cannot make one from a string, by conversion, a
@@ -23,6 +23,9 @@ package output
 type Template struct {
 	s string
 }
+
+// String returns the template text exactly as it will be sent.
+func (t Template) String() string { return t.s }
 
 // tpl builds a registry entry. Call it only in this file, only with a
 // string literal.

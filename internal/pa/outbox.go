@@ -2,7 +2,7 @@ package pa
 
 // outbox.go delivers the PA outbox (issue #1313 slice d2; the rules are in
 // internal/pa/jobs/outbox.go). Every message still goes through
-// output.Render or output.ServerText and output.Sender only: a notice row
+// safetext.Render or safetext.ServerText and output.Sender only: a notice row
 // maps to a registry template, and a reply row is rendered from its stored,
 // external-marked assistant fragment with the allow-list of the
 // principal's own text in that conversation (T14).
@@ -20,6 +20,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output"
+	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
 // OutboxCounter counts outbox outcomes (*metrics.Registry implements it).
@@ -69,21 +70,21 @@ const outboxButtonMinLife = 5 * time.Minute
 
 // outboxTemplates maps every notice kind, job-level and conversation-level
 // (#1348), to its server text.
-var outboxTemplates = map[jobs.OutboxKind]output.Template{
-	jobs.OutboxReplyTooLong:   output.TextReplyTooLong,
-	jobs.OutboxBudgetHold:     output.TextBudgetHold,
-	jobs.OutboxRunFailed:      output.TextRunFailed,
-	jobs.OutboxRequestDropped: output.TextRequestDropped,
+var outboxTemplates = map[jobs.OutboxKind]safetext.Template{
+	jobs.OutboxReplyTooLong:   safetext.TextReplyTooLong,
+	jobs.OutboxBudgetHold:     safetext.TextBudgetHold,
+	jobs.OutboxRunFailed:      safetext.TextRunFailed,
+	jobs.OutboxRequestDropped: safetext.TextRequestDropped,
 
-	jobs.OutboxConsentPrompt:    output.TextConsentPrompt,
-	jobs.OutboxConsentAccepted:  output.TextConsentAccepted,
-	jobs.OutboxConsentWithdrawn: output.TextConsentWithdrawn,
-	jobs.OutboxConsentStale:     output.TextConsentStale,
-	jobs.OutboxNewConversation:  output.TextNewConversation,
-	jobs.OutboxForgotten:        output.TextForgotten,
-	jobs.OutboxUnknownButton:    output.TextUnknownButton,
-	jobs.OutboxRateLimited:      output.TextRateLimited,
-	jobs.OutboxMessageTooLong:   output.TextMessageTooLong,
+	jobs.OutboxConsentPrompt:    safetext.TextConsentPrompt,
+	jobs.OutboxConsentAccepted:  safetext.TextConsentAccepted,
+	jobs.OutboxConsentWithdrawn: safetext.TextConsentWithdrawn,
+	jobs.OutboxConsentStale:     safetext.TextConsentStale,
+	jobs.OutboxNewConversation:  safetext.TextNewConversation,
+	jobs.OutboxForgotten:        safetext.TextForgotten,
+	jobs.OutboxUnknownButton:    safetext.TextUnknownButton,
+	jobs.OutboxRateLimited:      safetext.TextRateLimited,
+	jobs.OutboxMessageTooLong:   safetext.TextMessageTooLong,
 }
 
 // outboxKeyboard is the keyboard a row is sent with: the consent prompt's
@@ -96,12 +97,12 @@ func outboxKeyboard(it jobs.OutboxItem) (output.Keyboard, bool) {
 	if it.Button == "" {
 		return nil, false
 	}
-	return output.Keyboard{{{Label: output.LabelConsentAccept, Data: it.Button}}}, true
+	return output.Keyboard{{{Label: safetext.LabelConsentAccept, Data: it.Button}}}, true
 }
 
 const (
 	// outboxSendTimeout bounds building and sending one claimed row (up to
-	// output.MaxParts messages). A row is claimed right before its own
+	// safetext.MaxParts messages). A row is claimed right before its own
 	// send, so with outboxRecordTimeout for its bookkeeping it ends well
 	// inside jobs.OutboxLease: a send that returns is completed before its
 	// lease could mark it unknown.
@@ -191,7 +192,7 @@ func (l *RunLoop) count(outcome string) {
 // sendItem builds and sends one claimed row and says what to record.
 func (l *RunLoop) sendItem(ctx context.Context, it jobs.OutboxItem) (jobs.OutboxCompletion, string) {
 	now := l.now()
-	var text output.Text
+	var text safetext.Text
 	switch {
 	case it.Kind == jobs.OutboxReply:
 		t, err := l.renderReply(ctx, it)
@@ -215,7 +216,7 @@ func (l *RunLoop) sendItem(ctx context.Context, it jobs.OutboxItem) (jobs.Outbox
 		if !ok {
 			return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxFailed}, OutboxOutcomeFailed
 		}
-		text = output.ServerText(tpl)
+		text = safetext.ServerText(tpl)
 	}
 	kb, ok := outboxKeyboard(it)
 	if !ok {
@@ -356,7 +357,7 @@ func refusedByPrincipal(err error) bool {
 // request: it would be refused the same way again.
 func isLocalSendError(err error) bool {
 	for _, e := range []error{output.ErrEmptyText, output.ErrInvalidChat, output.ErrInvalidKeyboard,
-		output.ErrPartTooLong, output.ErrTooLong, output.ErrInvalidConfig} {
+		output.ErrPartTooLong, safetext.ErrTooLong, output.ErrInvalidConfig} {
 		if errors.Is(err, e) {
 			return true
 		}
@@ -368,17 +369,17 @@ func isLocalSendError(err error) bool {
 // names, which must be an external-marked assistant fragment, with the
 // principal's own text in that conversation as the allow-list. An answer
 // that no longer fits is replaced by the server text, never truncated.
-func (l *RunLoop) renderReply(ctx context.Context, it jobs.OutboxItem) (output.Text, error) {
+func (l *RunLoop) renderReply(ctx context.Context, it jobs.OutboxItem) (safetext.Text, error) {
 	rows, err := l.store.LoadPAFragments(ctx, it.Principal, it.ConversationID, l.now())
 	if err != nil {
-		return output.Text{}, err
+		return safetext.Text{}, err
 	}
 	var typed []string
 	answer, found := "", false
 	for _, row := range rows {
 		f, err := l.sealer.Open(it.Principal, row)
 		if err != nil {
-			return output.Text{}, err
+			return safetext.Text{}, err
 		}
 		text, prov := f.Text()
 		// The allow-list is what the principal typed before the answer,
@@ -389,17 +390,17 @@ func (l *RunLoop) renderReply(ctx context.Context, it jobs.OutboxItem) (output.T
 		}
 		if row.Seq == it.FragmentSeq {
 			if f.Kind() != convo.KindAssistant || prov != convo.ProvenanceExternal {
-				return output.Text{}, convo.ErrUnreadable
+				return safetext.Text{}, convo.ErrUnreadable
 			}
 			answer, found = text, true
 		}
 	}
 	if !found {
-		return output.Text{}, convo.ErrNotFound
+		return safetext.Text{}, convo.ErrNotFound
 	}
-	t, err := output.Render(answer, output.AllowFromUserText(typed...))
-	if errors.Is(err, output.ErrTooLong) {
-		return output.ServerText(output.TextReplyTooLong), nil
+	t, err := safetext.Render(answer, safetext.AllowFromUserText(typed...))
+	if errors.Is(err, safetext.ErrTooLong) {
+		return safetext.ServerText(safetext.TextReplyTooLong), nil
 	}
 	return t, err
 }

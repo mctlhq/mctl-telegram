@@ -11,6 +11,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output"
+	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
 // Outbox delivery through the run loop (issue #1313 slice d2, d1 deferral
@@ -106,7 +107,7 @@ func TestRunLoop_NoticesSurviveFailedSend(t *testing.T) {
 	h.now = h.now.Add(jobs.OutboxBackoff(1))
 	h.loop.deliver(context.Background(), 0)
 	sent := h.sender.to(aliceID)
-	if len(sent) != 2 || sent[1] != output.ServerText(output.TextBudgetHold).String() {
+	if len(sent) != 2 || sent[1] != safetext.ServerText(safetext.TextBudgetHold).String() {
 		t.Fatalf("sent %q, want the answer then the hold notice", sent)
 	}
 }
@@ -131,7 +132,7 @@ func TestRunLoop_RunFailedNoticeSurvivesFailedSend(t *testing.T) {
 	h.now = h.now.Add(jobs.OutboxBackoff(1))
 	h.loop.deliver(context.Background(), 0)
 	sent := h.sender.to(aliceID)
-	if len(sent) != 1 || sent[0] != output.ServerText(output.TextRunFailed).String() {
+	if len(sent) != 1 || sent[0] != safetext.ServerText(safetext.TextRunFailed).String() {
 		t.Fatalf("sent %q", sent)
 	}
 }
@@ -278,7 +279,7 @@ func TestSendOutcome(t *testing.T) {
 		{"bot api 502", &output.APIError{Status: 502}, jobs.OutboxPending, OutboxOutcomeRetry, jobs.OutboxBackoff(1)},
 		{"ok false on a 200", &output.APIError{Status: 200, Code: 400}, jobs.OutboxUnknown, OutboxOutcomeUnknown, 0},
 		{"refused before building", output.ErrInvalidChat, jobs.OutboxFailed, OutboxOutcomeFailed, 0},
-		{"too long", output.ErrTooLong, jobs.OutboxFailed, OutboxOutcomeFailed, 0},
+		{"too long", safetext.ErrTooLong, jobs.OutboxFailed, OutboxOutcomeFailed, 0},
 		{"part too long", output.ErrPartTooLong, jobs.OutboxFailed, OutboxOutcomeFailed, 0},
 		{"failed before the write", notWritten, jobs.OutboxPending, OutboxOutcomeRetry, jobs.OutboxBackoff(1)},
 		{"context ended before the write", context.DeadlineExceeded, jobs.OutboxPending, OutboxOutcomeRetry, jobs.OutboxBackoff(1)},

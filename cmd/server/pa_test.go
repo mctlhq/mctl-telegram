@@ -25,6 +25,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa/connector"
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output"
+	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
 const testPASecret = "pa_webhook_secret_for_tests_only_0123456789"
@@ -261,7 +262,7 @@ type paSendRecorder struct {
 	answered []string
 }
 
-func (r *paSendRecorder) AnswerCallback(_ context.Context, id string, _ output.Template) error {
+func (r *paSendRecorder) AnswerCallback(_ context.Context, id string, _ safetext.Template) error {
 	r.mu.Lock()
 	r.answered = append(r.answered, id)
 	r.mu.Unlock()
@@ -274,7 +275,7 @@ func (r *paSendRecorder) answers() []string {
 	return append([]string(nil), r.answered...)
 }
 
-func (r *paSendRecorder) SendFrom(_ context.Context, chat int64, text output.Text, kb output.Keyboard, from int, done func(int) error) error {
+func (r *paSendRecorder) SendFrom(_ context.Context, chat int64, text safetext.Text, kb output.Keyboard, from int, done func(int) error) error {
 	s := paSend{chat: chat, text: text.String()}
 	if len(kb) == 1 && len(kb[0]) == 1 {
 		s.button = kb[0][0].Data
@@ -417,7 +418,7 @@ func TestBuildPA_JobTokenRoundTrip(t *testing.T) {
 	rt.loop.WaitDeliveries()
 	got := sent.get()
 	if len(got) != 2 || got[0].text != convo.ConsentText || got[0].button != button ||
-		got[1].text != output.ServerText(output.TextConsentAccepted).String() || got[1].button != "" {
+		got[1].text != safetext.ServerText(safetext.TextConsentAccepted).String() || got[1].button != "" {
 		t.Fatalf("sent = %+v", got)
 	}
 }

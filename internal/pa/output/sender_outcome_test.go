@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
 // Only a failure before the request was written, or an explicit ok:false,
@@ -52,7 +54,7 @@ func TestSendOutcomeClassification(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(tc.reply))
 			defer srv.Close()
 			s := &Sender{hc: srv.Client(), base: srv.URL, token: testToken}
-			err := s.Send(ctx, aliceChat, ServerText(tpl("x")), nil)
+			err := s.Send(ctx, aliceChat, anyText, nil)
 			var ae *APIError
 			if err == nil || errors.Is(err, ErrOutcomeUnknown) != tc.unknown || errors.As(err, &ae) != tc.api {
 				t.Fatalf("err = %v: unknown %v api %v, want %v %v", err, errors.Is(err, ErrOutcomeUnknown), errors.As(err, &ae), tc.unknown, tc.api)
@@ -77,12 +79,12 @@ func TestSendOutcomeContextAndDial(t *testing.T) {
 	s := &Sender{hc: srv.Client(), base: srv.URL, token: testToken}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	if err := s.Send(ctx, aliceChat, ServerText(tpl("x")), nil); !errors.Is(err, ErrOutcomeUnknown) {
+	if err := s.Send(ctx, aliceChat, anyText, nil); !errors.Is(err, ErrOutcomeUnknown) {
 		t.Fatalf("deadline mid-request: %v, want ErrOutcomeUnknown", err)
 	}
 	done, cancelDone := context.WithCancel(context.Background())
 	cancelDone()
-	if err := s.Send(done, aliceChat, ServerText(tpl("x")), nil); err == nil || errors.Is(err, ErrOutcomeUnknown) {
+	if err := s.Send(done, aliceChat, anyText, nil); err == nil || errors.Is(err, ErrOutcomeUnknown) {
 		t.Fatalf("context ended before the write: %v, want a known failure", err)
 	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -92,7 +94,7 @@ func TestSendOutcomeContextAndDial(t *testing.T) {
 	addr := l.Addr().String()
 	_ = l.Close()
 	s.base = "http://" + addr
-	if err := s.Send(context.Background(), aliceChat, ServerText(tpl("x")), nil); err == nil || errors.Is(err, ErrOutcomeUnknown) {
+	if err := s.Send(context.Background(), aliceChat, anyText, nil); err == nil || errors.Is(err, ErrOutcomeUnknown) {
 		t.Fatalf("refused dial: %v, want a known failure", err)
 	}
 }
@@ -100,7 +102,7 @@ func TestSendOutcomeContextAndDial(t *testing.T) {
 // SendFrom resumes after the delivered parts and reports each one.
 func TestSendFromResumes(t *testing.T) {
 	f, s := newFake(t)
-	text, err := Render(strings.TrimSpace(strings.Repeat("word ", 2000)), UserText{})
+	text, err := safetext.Render(strings.TrimSpace(strings.Repeat("word ", 2000)), safetext.UserText{})
 	if err != nil || text.Parts() != 3 {
 		t.Fatalf("render: %d parts, %v", text.Parts(), err)
 	}

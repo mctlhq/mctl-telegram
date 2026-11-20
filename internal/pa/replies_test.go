@@ -18,7 +18,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
-	"github.com/mctlhq/mctl-telegram/internal/pa/output"
+	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
 // newOutboxRepliesHarness is the run-loop harness with the production
@@ -88,7 +88,7 @@ func consentButton(t *testing.T, m sentMessage) string {
 	if m.text != convo.ConsentText {
 		t.Fatalf("sent %q, want the consent text", m.text)
 	}
-	if len(m.kb) != 1 || len(m.kb[0]) != 1 || m.kb[0][0].Data == "" || m.kb[0][0].Label != output.LabelConsentAccept {
+	if len(m.kb) != 1 || len(m.kb[0]) != 1 || m.kb[0][0].Data == "" || m.kb[0][0].Label != safetext.LabelConsentAccept {
 		t.Fatalf("prompt keyboard = %+v, want one consent button", m.kb)
 	}
 	return m.kb[0][0].Data
@@ -126,7 +126,7 @@ func TestConversationReplies_E2E(t *testing.T) {
 			t.Fatalf("press: %d", code)
 		}
 		msgs = h.messagesTo(aliceID)
-		if len(msgs) != 2 || msgs[1].text != output.ServerText(output.TextConsentAccepted).String() || msgs[1].kb != nil {
+		if len(msgs) != 2 || msgs[1].text != safetext.ServerText(safetext.TextConsentAccepted).String() || msgs[1].kb != nil {
 			t.Fatalf("after press = %+v", msgs)
 		}
 
@@ -242,7 +242,7 @@ func TestConversationReplies_FloodWaitRetriesWithButton(t *testing.T) {
 	}
 	// The retried button still records consent.
 	h.press(aliceID, button)
-	if got := h.messagesTo(aliceID); len(got) != 2 || got[1].text != output.ServerText(output.TextConsentAccepted).String() {
+	if got := h.messagesTo(aliceID); len(got) != 2 || got[1].text != safetext.ServerText(safetext.TextConsentAccepted).String() {
 		t.Fatalf("after press = %+v", got)
 	}
 }
@@ -255,14 +255,14 @@ func TestConversationReplies_CommandsAnswered(t *testing.T) {
 	h.text(aliceID, "/forget")
 	h.text(aliceID, "/consent withdraw")
 	h.press(aliceID, "no-such-button")
-	want := []output.Template{output.TextNewConversation, output.TextForgotten, output.TextConsentWithdrawn, output.TextUnknownButton}
+	want := []safetext.Template{safetext.TextNewConversation, safetext.TextForgotten, safetext.TextConsentWithdrawn, safetext.TextUnknownButton}
 	msgs := h.messagesTo(aliceID)
 	if len(msgs) != len(want) {
 		t.Fatalf("sent %d messages, want %d", len(msgs), len(want))
 	}
 	for i, tpl := range want {
-		if msgs[i].text != output.ServerText(tpl).String() || msgs[i].kb != nil {
-			t.Fatalf("message %d = %q, want %q", i, msgs[i].text, output.ServerText(tpl).String())
+		if msgs[i].text != safetext.ServerText(tpl).String() || msgs[i].kb != nil {
+			t.Fatalf("message %d = %q, want %q", i, msgs[i].text, safetext.ServerText(tpl).String())
 		}
 	}
 }
@@ -270,7 +270,7 @@ func TestConversationReplies_CommandsAnswered(t *testing.T) {
 // TestConsentPromptIsConsentText: the prompt sends exactly the text whose
 // hash its button binds, in one message.
 func TestConsentPromptIsConsentText(t *testing.T) {
-	txt := output.ServerText(output.TextConsentPrompt)
+	txt := safetext.ServerText(safetext.TextConsentPrompt)
 	if txt.String() != convo.ConsentText || txt.Parts() != 1 {
 		t.Fatalf("consent prompt differs from convo.ConsentText (parts %d)", txt.Parts())
 	}
@@ -292,7 +292,7 @@ func TestEveryReplyHasAKindAndATemplate(t *testing.T) {
 		}
 		seen[k] = true
 		tpl, ok := outboxTemplates[k]
-		if !ok || output.ServerText(tpl).Parts() == 0 {
+		if !ok || safetext.ServerText(tpl).Parts() == 0 {
 			t.Fatalf("kind %q has no server text", k)
 		}
 	}

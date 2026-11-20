@@ -15,7 +15,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/agentworker"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
-	"github.com/mctlhq/mctl-telegram/internal/pa/output"
+	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
 type e2eModel struct {
@@ -158,7 +158,7 @@ func TestWorkerE2E_ToolCapEndsRun(t *testing.T) {
 		t.Fatalf("claim after expiry = %v, %v", c2, err)
 	}
 	sent := h.sentTo(aliceID)
-	if len(sent) != 1 || sent[0] != output.ServerText(output.TextRunFailed).String() {
+	if len(sent) != 1 || sent[0] != safetext.ServerText(safetext.TextRunFailed).String() {
 		t.Fatalf("sent %q, want one run-failed notice", sent)
 	}
 }
