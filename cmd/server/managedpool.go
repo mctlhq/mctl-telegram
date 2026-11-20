@@ -16,9 +16,19 @@ import (
 )
 
 // managedPoolEnabled reports whether the managed-runtime pool credential
-// (ADR 0008) is wired: MANAGED_RUNTIME_ENABLED on and a signing secret set.
+// (ADR 0008) is wired: MANAGED_RUNTIME_ENABLED on and a signing key only this
+// service holds (#1351). config.Load already refuses the flag without that
+// key; this check keeps a Config built any other way from wiring a pool that
+// a holder of api.mctl.ai's shared OAUTH_JWT_SECRET could mint tokens for.
 func managedPoolEnabled(cfg *config.Config) bool {
-	return cfg.ManagedRuntimeEnabled && cfg.OAUTHJWTSecret != ""
+	return cfg.ManagedRuntimeEnabled && dedicatedSigningKey(cfg)
+}
+
+// dedicatedSigningKey reports whether cfg.OAUTHJWTSecret is mctl-telegram's
+// own OAUTH_JWT_SIGNING_KEY in local-jwt mode, not a secret another service
+// also holds.
+func dedicatedSigningKey(cfg *config.Config) bool {
+	return cfg.OAUTHJWTSecret != "" && cfg.OAUTHJWTSecretDedicated
 }
 
 // wireManagedPool is the whole managed-runtime pool wiring main uses, kept in

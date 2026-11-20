@@ -40,6 +40,24 @@ type managedSurface struct {
 
 func newManagedSurface(t *testing.T, managedEnabled bool) *managedSurface {
 	t.Helper()
+	return newManagedSurfaceWith(t, &config.Config{
+		AuthMode:                        "local-jwt",
+		OAUTHJWTSecret:                  managedTestSecret,
+		OAUTHJWTSecretDedicated:         true,
+		PublicBaseURL:                   "https://tg.example.test",
+		ManagedRuntimeEnabled:           managedEnabled,
+		ManagedMaxInflightPerAccount:    1,
+		ManagedMaxJobCostUSD:            0.5,
+		ManagedBudgetUSDPerAccountDay:   1,
+		ManagedBudgetUSDPerAccountMonth: 15,
+		ManagedBudgetUSDGlobalDay:       20,
+	})
+}
+
+// newManagedSurfaceWith builds the surface from cfg as given, so a test can
+// drive a configuration config.Load produced or one it would refuse.
+func newManagedSurfaceWith(t *testing.T, cfg *config.Config) *managedSurface {
+	t.Helper()
 	ctx := context.Background()
 	name := strings.ReplaceAll(t.Name(), "/", "_") + "_" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	conn, err := db.Open(ctx, "file:"+name+"?mode=memory&cache=shared", 0, 0)
@@ -59,17 +77,6 @@ func newManagedSurface(t *testing.T, managedEnabled bool) *managedSurface {
 		t.Fatal(err)
 	}
 	store := db.NewStore(conn, crypt)
-	cfg := &config.Config{
-		AuthMode:                        "local-jwt",
-		OAUTHJWTSecret:                  managedTestSecret,
-		PublicBaseURL:                   "https://tg.example.test",
-		ManagedRuntimeEnabled:           managedEnabled,
-		ManagedMaxInflightPerAccount:    1,
-		ManagedMaxJobCostUSD:            0.5,
-		ManagedBudgetUSDPerAccountDay:   1,
-		ManagedBudgetUSDPerAccountMonth: 15,
-		ManagedBudgetUSDGlobalDay:       20,
-	}
 	m := metrics.New()
 	rc := localjwt.NewRevocationCache(store, time.Hour) // advanced explicitly with Refresh
 	agentProvider := selectAgentProvider(cfg, store, rc)
@@ -373,5 +380,96 @@ func TestWireManagedPool_BudgetOnlyWithFlag(t *testing.T) {
 	off.claim(pool)
 	if err := off.store.DB.QueryRow(`SELECT COUNT(*) FROM agent_usage`).Scan(&after); err != nil || after != before {
 		t.Fatalf("flag off: ledger rows %d -> %d err %v", before, after, err)
+	}
+}
+
+// mintTestPool signs a pool credential with secret under the surface issuer,
+// the way someone holding that secret could without the mint route.
+func mintTestPool(t *testing.T, secret, jti string) string {
+	t.Helper()
+	signer, err := localjwt.NewIssuer([]byte(secret), "https://tg.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	tok, err := signer.Mint(localjwt.Claims{
+		Subject: localjwt.PoolSubjectPrefix + "main", Audience: []string{localjwt.PoolAudience},
+		Jti: jti, IssuedAt: now.Unix(), OriginalIssuedAt: now.Unix(),
+	}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
+}
+
+// #1351: with the managed runtime on, config.Load in local-jwt with both a
+// dedicated OAUTH_JWT_SIGNING_KEY and the legacy OAUTH_JWT_SECRET yields a
+// surface whose pool is keyed by the dedicated key alone: a pool token the
+// mint route issues claims, one signed with the legacy (shared) secret is
+// 401 and claims nothing.
+// Mutation: sign and verify the pool with the legacy secret
+// (jwtSigningKey preferring OAUTH_JWT_SECRET) — the forged token claims.
+func TestManagedPool_DedicatedKeyOnly(t *testing.T) {
+	const legacy = "legacy-shared-secret-held-by-api-0123456789"
+	t.Setenv("AUTH_MODE", "local-jwt")
+	t.Setenv("OAUTH_JWT_SIGNING_KEY", managedTestSecret)
+	t.Setenv("OAUTH_JWT_SECRET", legacy)
+	t.Setenv("PUBLIC_BASE_URL", "https://tg.example.test")
+	t.Setenv("MANAGED_RUNTIME_ENABLED", "true")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("local-jwt + dedicated key + managed runtime: Load = %v", err)
+	}
+	s := newManagedSurfaceWith(t, cfg)
+	s.seedManaged(9501, 1)
+
+	forged := mintTestPool(t, legacy, "forged-legacy")
+	if code, jobs := s.claim(forged); code != http.StatusUnauthorized || len(jobs) != 0 {
+		t.Fatalf("pool token signed with OAUTH_JWT_SECRET: claim = %d %+v, want 401", code, jobs)
+	}
+	var status string
+	if err := s.store.DB.QueryRow(`SELECT status FROM agent_jobs`).Scan(&status); err != nil || status != db.JobPending {
+		t.Fatalf("after the forged claim: job status %q err %v, want pending", status, err)
+	}
+
+	pool, _ := s.mintPool()
+	if code, jobs := s.claim(pool); code != http.StatusOK || len(jobs) != 1 || jobs[0].JobToken == "" {
+		t.Fatalf("minted pool token: claim = %d %+v, want one job", code, jobs)
+	}
+}
+
+// #1351 defence in depth: a Config that did not come through config.Load's
+// refusal, with the managed runtime on but a signing key another service
+// holds (shared-hmac's OAUTH_JWT_SECRET, or local-jwt's legacy fallback),
+// wires no pool: the mint route is 404 and a pool token signed with that
+// key is 401.
+// Mutation: drop the dedicated-key check from managedPoolEnabled and
+// selectAgentPoolProvider — the mint answers 200 and the token claims.
+func TestManagedPool_SharedKeyNeverWired(t *testing.T) {
+	for _, mode := range []string{"local-jwt", "shared-hmac"} {
+		t.Run(mode, func(t *testing.T) {
+			s := newManagedSurfaceWith(t, &config.Config{
+				AuthMode:                        mode,
+				OAUTHJWTSecret:                  managedTestSecret,
+				OAUTHJWTSecretDedicated:         false,
+				PublicBaseURL:                   "https://tg.example.test",
+				ManagedRuntimeEnabled:           true,
+				ManagedMaxInflightPerAccount:    1,
+				ManagedMaxJobCostUSD:            0.5,
+				ManagedBudgetUSDPerAccountDay:   1,
+				ManagedBudgetUSDPerAccountMonth: 15,
+				ManagedBudgetUSDGlobalDay:       20,
+			})
+			s.seedManaged(9601, 1)
+			if rec := s.do("POST", "/api/agent/pool-token", "", `{"pool_name":"main"}`); rec.Code != http.StatusNotFound {
+				t.Fatalf("mint route answered %d, want 404", rec.Code)
+			}
+			if code, _ := s.claim(mintTestPool(t, managedTestSecret, "shared-"+mode)); code != http.StatusUnauthorized {
+				t.Fatalf("pool token signed with a shared key: claim = %d, want 401", code)
+			}
+			if selectAgentPoolProvider(s.cfg, s.rc) != nil {
+				t.Fatal("selectAgentPoolProvider built a pool verifier on a shared key")
+			}
+		})
 	}
 }

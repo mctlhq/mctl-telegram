@@ -1403,11 +1403,14 @@ func (c chainProvider) Authenticate(r *http.Request) (*auth.Identity, error) {
 }
 
 // selectAgentPoolProvider builds the provider for the claim-only
-// "agent-pool" credential, signed under this service's own issuer in every
-// AUTH_MODE. Returns nil when it cannot be built, in which case a pool token
-// is refused with 401.
+// "agent-pool" credential, signed under this service's own issuer with its
+// dedicated OAUTH_JWT_SIGNING_KEY. Returns nil when it cannot be built, in
+// which case a pool token is refused with 401. A key another service also
+// holds (shared-hmac's OAUTH_JWT_SECRET, or local-jwt's legacy fallback to
+// it) is never used to verify a pool token (#1351).
 func selectAgentPoolProvider(cfg *config.Config, revocationCache *localjwt.RevocationCache) auth.Provider {
-	if cfg.OAUTHJWTSecret == "" {
+	if !dedicatedSigningKey(cfg) {
+		slog.Error("agent: pool provider needs a dedicated OAUTH_JWT_SIGNING_KEY in AUTH_MODE=local-jwt; pool credential disabled")
 		return nil
 	}
 	p, err := localjwt.NewPoolProvider(localjwt.PoolProviderConfig{

@@ -739,6 +739,10 @@ func TestLoadManagedRuntime(t *testing.T) {
 		t.Fatalf("defaults = %v %d %d", cfg.ManagedRuntimeEnabled, cfg.ManagedRuntimeMaxAccounts, cfg.ManagedMaxInflightPerAccount)
 	}
 	t.Setenv("MANAGED_RUNTIME_ENABLED", "true")
+	// On, the runtime needs its own signing key (#1351); the refusal itself
+	// is covered by TestLoadManagedRuntime_DedicatedKey.
+	t.Setenv("AUTH_MODE", "local-jwt")
+	t.Setenv("OAUTH_JWT_SIGNING_KEY", "managed-runtime-test-signing-key-0123456789")
 	t.Setenv("MANAGED_RUNTIME_MAX_ACCOUNTS", "0")
 	if cfg, err = Load(); err != nil || !cfg.ManagedRuntimeEnabled || cfg.ManagedRuntimeMaxAccounts != 0 {
 		t.Fatalf("set = %+v, %v", cfg, err)
