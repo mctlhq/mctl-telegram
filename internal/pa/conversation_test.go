@@ -41,6 +41,7 @@ func (r *enqueueRecorder) calls() []RunRequest {
 
 type queuedReply struct {
 	principal int64
+	update    int64
 	reply     Reply
 	button    string
 }
@@ -50,10 +51,10 @@ type replyRecorder struct {
 	replies []queuedReply
 }
 
-func (r *replyRecorder) QueueReply(_ context.Context, _ *sql.Tx, p Principal, rep Reply, button string) error {
+func (r *replyRecorder) QueueReply(_ context.Context, _ *sql.Tx, p Principal, update int64, rep Reply, button string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.replies = append(r.replies, queuedReply{p.TelegramID(), rep, button})
+	r.replies = append(r.replies, queuedReply{p.TelegramID(), update, rep, button})
 	return nil
 }
 

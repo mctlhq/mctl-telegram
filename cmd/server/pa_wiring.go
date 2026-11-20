@@ -35,6 +35,13 @@ type paLoop interface {
 	WaitDeliveries()
 }
 
+// newPASender builds the PA bot's sender. A variable only so the wiring
+// tests can record what the wired runtime sends instead of calling the Bot
+// API; nothing else assigns it.
+var newPASender = func(token string) (pa.BotSender, error) {
+	return output.NewSender(output.Config{Token: token})
+}
+
 // paRuntime is the Personal Assistant's server half (#1313, wired by
 // #1343): the webhook with the Conversations handler, the run-loop routes
 // (claim, turn, reply), the outbox retry loop and its shutdown drain.
@@ -85,7 +92,7 @@ func buildPA(cfg *config.Config, store *db.Store, rc *localjwt.RevocationCache, 
 	if err != nil {
 		return nil, err
 	}
-	sender, err := output.NewSender(output.Config{Token: cfg.PABotToken})
+	sender, err := newPASender(cfg.PABotToken)
 	if err != nil {
 		return nil, err
 	}
@@ -105,10 +112,12 @@ func buildPA(cfg *config.Config, store *db.Store, rc *localjwt.RevocationCache, 
 	if err != nil {
 		return nil, err
 	}
-	// Replies stays nil until conversation-level outbox rows exist (#1343
-	// follow-up): no consent prompt is sent, so nothing runs end to end.
+	// The conversation's own answers (the consent prompt and its button,
+	// /new, /forget, /consent) are conversation-level outbox rows (#1348),
+	// written in the update's transaction and delivered after its commit.
 	conv, err := pa.NewConversations(pa.ConversationsConfig{
 		Store: store, Sealer: sealer, TTL: cfg.PAConversationTTL, Runs: loop, Limiter: loop,
+		Replies: &pa.OutboxReplies{Store: store},
 	})
 	if err != nil {
 		return nil, err
@@ -118,6 +127,9 @@ func buildPA(cfg *config.Config, store *db.Store, rc *localjwt.RevocationCache, 
 		// Counts every delivery outcome, bad_secret included: a secret
 		// mismatch with Telegram shows here as well as in getWebhookInfo.
 		Counter: counter,
+		// Deliver the rows the update queued once it committed; rows this
+		// does not reach stay due for RunOutbox.
+		AfterCommit: func(ctx context.Context, p pa.Principal) { loop.DeliverAfter(ctx, p.TelegramID()) },
 	})
 	if err != nil {
 		return nil, err

@@ -28,8 +28,8 @@ type Template struct {
 // string literal.
 func tpl(s string) Template { return Template{s: s} }
 
-// The registry. Later slices add their server texts here (consent prompt,
-// /new and /forget confirmations, button labels), each as a literal.
+// The registry. Every server text and button label is here, each as a
+// literal.
 var (
 	// LabelCancel is a generic Cancel button label.
 	LabelCancel = tpl("Cancel")
@@ -46,4 +46,33 @@ var (
 	// TextReplyTooLong replaces a model reply that does not fit the message
 	// limit. The reply is never truncated (#1313 slice d1).
 	TextReplyTooLong = tpl("The answer was too long to send. Please ask for a shorter answer.")
+
+	// LabelConsentAccept is the consent prompt's only button (#1348).
+	LabelConsentAccept = tpl("I agree")
+
+	// TextConsentPrompt is convo.ConsentText, verbatim: the text whose hash
+	// the prompt's button binds (TestConsentPromptIsConsentText). Change
+	// both together, and bump convo.ConsentVersion.
+	TextConsentPrompt = tpl("Before the assistant answers you, it needs your consent to this data flow (pa-data-flow/v1).\n\nWhat is sent: the messages you write to this bot, any text you forward, reply to or quote here, and the results the assistant reads from the services you connect (for example your Telegram chats or your smart home).\n\nWhere it goes: to Nebius, the AI model provider that generates the answers, reached through Cloudflare AI Gateway. They process it under their API terms. See https://tg.mctl.ai/privacy.\n\nHow long it is kept: a conversation is kept on our servers for at most 24 hours from its start. /new starts a fresh conversation, /forget deletes all of your conversations now, and /consent withdraw stops the assistant and deletes your conversations.\n\nThe assistant only reads in this version; it cannot send, change or delete anything on your behalf.")
+	// TextConsentAccepted answers the consent button. A message sent before
+	// consent was not stored, so the principal is asked to send it again.
+	TextConsentAccepted = tpl("Thank you, your consent is recorded. Send your request and the assistant will answer it.")
+	// TextConsentWithdrawn answers /consent withdraw.
+	TextConsentWithdrawn = tpl("Your consent is withdrawn. The assistant has stopped and your conversations are deleted. Send /consent to give it again.")
+	// TextConsentStale precedes a fresh prompt when the button pressed was
+	// shown with an earlier consent text.
+	TextConsentStale = tpl("The consent text has changed since that button was shown. Please read the current text below.")
+	// TextNewConversation answers /new.
+	TextNewConversation = tpl("A new conversation has started. The assistant no longer sees your earlier messages.")
+	// TextForgotten answers /forget.
+	TextForgotten = tpl("All of your conversations are deleted.")
+	// TextUnknownButton answers a button that is unknown, expired or
+	// already used.
+	TextUnknownButton = tpl("This button is no longer valid.")
+	// TextRateLimited is sent once per rate window, on the first message
+	// over the limit.
+	TextRateLimited = tpl("You are sending messages faster than the assistant accepts. Please wait a little and send your request again.")
+	// TextMessageTooLong refuses a message over the size limit; nothing of
+	// it was stored.
+	TextMessageTooLong = tpl("Your message is too long. Please send a shorter one.")
 )

@@ -23,6 +23,8 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/pa"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connector"
+	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
+	"github.com/mctlhq/mctl-telegram/internal/pa/output"
 )
 
 const testPASecret = "pa_webhook_secret_for_tests_only_0123456789"
@@ -194,6 +196,7 @@ func TestBuildPA_EnabledRoutes(t *testing.T) {
 // dropped every update and recorded nothing.
 func TestBuildPA_WebhookRunsConversations(t *testing.T) {
 	store, conn := paTestStoreConn(t)
+	sent := recordPASends(t)
 	_, rt := buildEnabledPA(t, store)
 	mux := chi.NewRouter()
 	rt.Mount(mux)
@@ -209,6 +212,68 @@ func TestBuildPA_WebhookRunsConversations(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("pa_callbacks rows = %d, want 1 (consent prompt)", n)
 	}
+	// The wired Conversations queue the prompt as a conversation-level
+	// outbox row (#1348), and the webhook delivers it after the commit:
+	// no RunOutbox pass runs here.
+	var button string
+	if err := conn.QueryRowContext(context.Background(), `SELECT id FROM pa_callbacks`).Scan(&button); err != nil {
+		t.Fatal(err)
+	}
+	rt.loop.WaitDeliveries()
+	got := sent.get()
+	if len(got) != 1 || got[0].chat != 4242001 || got[0].text != convo.ConsentText || got[0].button != button {
+		t.Fatalf("sent = %+v, want the consent prompt with button %q", got, button)
+	}
+	var kind, status string
+	var update int64
+	if err := conn.QueryRowContext(context.Background(),
+		`SELECT kind, status, update_id FROM pa_outbox WHERE principal = 4242001`).Scan(&kind, &status, &update); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "consent_prompt" || status != "sent" || update != 5001 {
+		t.Fatalf("outbox row = %s %s %d", kind, status, update)
+	}
+}
+
+type paSend struct {
+	chat   int64
+	text   string
+	button string
+}
+
+type paSendRecorder struct {
+	mu   sync.Mutex
+	sent []paSend
+}
+
+func (r *paSendRecorder) SendFrom(_ context.Context, chat int64, text output.Text, kb output.Keyboard, from int, done func(int) error) error {
+	s := paSend{chat: chat, text: text.String()}
+	if len(kb) == 1 && len(kb[0]) == 1 {
+		s.button = kb[0][0].Data
+	}
+	r.mu.Lock()
+	r.sent = append(r.sent, s)
+	r.mu.Unlock()
+	if done != nil {
+		return done(text.Parts())
+	}
+	return nil
+}
+
+func (r *paSendRecorder) get() []paSend {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]paSend(nil), r.sent...)
+}
+
+// recordPASends makes buildPA's sender a recorder for this test.
+func recordPASends(t *testing.T) *paSendRecorder {
+	t.Helper()
+	r := &paSendRecorder{}
+	prev := newPASender
+	newPASender = func(string) (pa.BotSender, error) { return r, nil }
+	t.Cleanup(func() { newPASender = prev })
+	return r
 }
 
 // TestBuildPA_ClaimAuthenticatesPool: the mounted claim route takes a pool
@@ -252,6 +317,9 @@ func TestBuildPA_ClaimAuthenticatesPool(t *testing.T) {
 // successful claim; this is the test that sees it.
 func TestBuildPA_JobTokenRoundTrip(t *testing.T) {
 	store, conn := paTestStoreConn(t)
+	// The prompt and the replies are delivered after their commits; record
+	// them rather than calling the Bot API.
+	sent := recordPASends(t)
 	_, rt := buildEnabledPA(t, store)
 	mux := chi.NewRouter()
 	rt.Mount(mux)
@@ -311,6 +379,14 @@ func TestBuildPA_JobTokenRoundTrip(t *testing.T) {
 	}
 	if w := post(pa.RouteTurn, pool, `{"context_tokens":100}`); w.Code != http.StatusUnauthorized {
 		t.Fatalf("turn with the pool token: status %d, want 401", w.Code)
+	}
+	// The principal was sent the prompt with the button pressed above,
+	// then the acceptance (#1348).
+	rt.loop.WaitDeliveries()
+	got := sent.get()
+	if len(got) != 2 || got[0].text != convo.ConsentText || got[0].button != button ||
+		got[1].text != output.ServerText(output.TextConsentAccepted).String() || got[1].button != "" {
+		t.Fatalf("sent = %+v", got)
 	}
 }
 

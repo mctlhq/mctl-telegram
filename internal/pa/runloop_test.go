@@ -34,6 +34,8 @@ var runLoopSecret = bytes.Repeat([]byte{9}, 32)
 type sentMessage struct {
 	chat int64
 	text string
+	// kb is the keyboard a completed send carried.
+	kb output.Keyboard
 }
 
 type sendRecorder struct {
@@ -50,7 +52,7 @@ type sendRecorder struct {
 	before func(ctx context.Context, chat int64, part int) error
 }
 
-func (s *sendRecorder) SendFrom(ctx context.Context, chatID int64, t output.Text, _ output.Keyboard, from int, sent func(int) error) error {
+func (s *sendRecorder) SendFrom(ctx context.Context, chatID int64, t output.Text, kb output.Keyboard, from int, sent func(int) error) error {
 	var b strings.Builder
 	for i := from; i < t.Parts(); i++ {
 		s.mu.Lock()
@@ -67,7 +69,7 @@ func (s *sendRecorder) SendFrom(ctx context.Context, chatID int64, t output.Text
 			err = nil
 		}
 		if err == nil {
-			s.parts = append(s.parts, sentMessage{chatID, t.Part(i)})
+			s.parts = append(s.parts, sentMessage{chat: chatID, text: t.Part(i)})
 			b.WriteString(t.Part(i))
 		}
 		s.mu.Unlock()
@@ -81,7 +83,7 @@ func (s *sendRecorder) SendFrom(ctx context.Context, chatID int64, t output.Text
 		}
 	}
 	s.mu.Lock()
-	s.sent = append(s.sent, sentMessage{chatID, b.String()})
+	s.sent = append(s.sent, sentMessage{chat: chatID, text: b.String(), kb: kb})
 	s.mu.Unlock()
 	return nil
 }
@@ -100,6 +102,19 @@ func (s *sendRecorder) partsTo(chat int64) []string {
 	for _, m := range s.parts {
 		if m.chat == chat {
 			out = append(out, m.text)
+		}
+	}
+	return out
+}
+
+// messagesTo returns the completed sends to chat, keyboards included.
+func (s *sendRecorder) messagesTo(chat int64) []sentMessage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []sentMessage
+	for _, m := range s.sent {
+		if m.chat == chat {
+			out = append(out, m)
 		}
 	}
 	return out
