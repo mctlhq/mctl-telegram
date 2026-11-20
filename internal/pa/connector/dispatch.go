@@ -650,6 +650,12 @@ func (d *Dispatcher) surface(ctx context.Context, ep MCPEndpoint, token connecti
 	if s.Err() == nil {
 		if !now.Before(d.listings[key].at) {
 			d.listings[key] = cachedSurface{s: s, at: now}
+		} else {
+			// A newer read finished first and is cached. This call is
+			// authorized against that listing, the one the cache and the
+			// gauges report, never against its own older read: a tool the
+			// newer listing denies must not go through (#1343).
+			s = d.listings[key].s
 		}
 	} else {
 		d.uncacheLocked(key, now)

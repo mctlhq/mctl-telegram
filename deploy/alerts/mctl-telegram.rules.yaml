@@ -876,12 +876,22 @@ spec:
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookinfostale"
 
         - alert: MctlPAWebhookMisconfigured
-          # max_over_time: a URL that flips back and forth between checks,
-          # or an unreadable check in between (which clears the problem
-          # series), must not restart the clock.
+          # Two checks (5 minutes apart) must have seen the problem within
+          # 20 minutes. This counts checks, not samples: the problem gauge
+          # holds one check's value for the whole interval, so samples of it
+          # count scrapes and one bad check would already look like several.
+          # A URL that flips between checks, or an unreadable check in
+          # between, leaves the counter where it was and does not reset it.
+          # The second clause requires the problem gauge to have read 1 in
+          # the same window: after a scrape gap, VictoriaMetrics' increase()
+          # may count an old counter value from an earlier incident as new.
+          # Under Prometheus the first increment after the monitor starts is
+          # not counted (the first scrape already sees 1), so there the alert
+          # fires at the third bad check, not the second.
           expr: |
-            max by (problem) (max_over_time(mctl_pa_webhook_problem{problem=~"url_changed|allowed_updates_changed"}[15m])) == 1
-          for: 10m
+            max by (problem) (increase(mctl_pa_webhook_problem_checks_total{problem=~"url_changed|allowed_updates_changed"}[20m])) >= 2
+              and on (problem)
+            max by (problem) (max_over_time(mctl_pa_webhook_problem{problem=~"url_changed|allowed_updates_changed"}[20m])) == 1
           labels:
             severity: critical
             service: mctl-telegram
@@ -889,9 +899,9 @@ spec:
             summary: "PA bot webhook {{ $labels.problem }}"
             description: >
               getWebhookInfo reports a webhook URL other than PA_WEBHOOK_URL,
-              or allowed_updates other than message and callback_query, at
-              checks across 10 minutes, steadily or on and off. Updates may be
-              going to someone else.
+              or allowed_updates other than message and callback_query, at two
+              or more checks within 20 minutes, in a row or on and off. Updates
+              may be going to someone else.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookmisconfigured"
 
         - alert: MctlPAWebhookSecretRejected
@@ -950,8 +960,9 @@ spec:
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookbadsecretburst"
 
         - alert: MctlPAOutboxUndelivered
-          # "refused" (Telegram's 4xx: the principal blocked the bot or
-          # deleted the chat) is the principal's choice, not ours to page on.
+          # "refused" (a 403, or a 400 "chat not found": the principal
+          # blocked the bot or the chat is gone) is the principal's choice,
+          # not ours to page on. Every other 4xx except 429 is "failed".
           expr: |
             sum by (outcome) (increase(mctl_pa_outbox_total{outcome=~"failed|unknown|claim_error"}[30m])) > 0
           labels:

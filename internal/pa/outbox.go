@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
@@ -30,11 +31,13 @@ type OutboxCounter interface {
 const (
 	OutboxOutcomeSent  = "sent"
 	OutboxOutcomeRetry = "retry"
-	// OutboxOutcomeFailed: out of attempts, or a row that cannot be built.
+	// OutboxOutcomeFailed: out of attempts, a row that cannot be built, or
+	// a Bot API 4xx that is not the principal's doing (a request we built
+	// wrong, a bad or revoked bot token). An operational fault: it pages.
 	OutboxOutcomeFailed = "failed"
-	// OutboxOutcomeRefused: the Bot API refused the message for good (the
-	// principal blocked the bot, the chat is gone). A principal's choice,
-	// not an operational fault, so it is counted apart from failed.
+	// OutboxOutcomeRefused: the principal blocked the bot or the chat is
+	// gone (a 403, or a 400 "chat not found"). A principal's choice, not an
+	// operational fault, so it is counted apart from failed.
 	OutboxOutcomeRefused = "refused"
 	OutboxOutcomeDropped = "dropped"
 	// OutboxOutcomeUnknown: the send may have reached Telegram and its
@@ -194,9 +197,10 @@ func (l *RunLoop) sendItem(ctx context.Context, it jobs.OutboxItem) (jobs.Outbox
 
 // sendOutcome classifies a send. Only a failure known to have left the
 // message undelivered is retried: one before the request was written, or
-// an explicit Bot API 429 or 5xx. A 4xx is the principal's choice and is
-// final. Every other failure may have delivered the message, so the row
-// becomes unknown and is never sent again (send-once).
+// an explicit Bot API 429 or 5xx. Any other 4xx is final: refused when it
+// is the principal's choice (refusedByPrincipal), failed otherwise. Every
+// other failure may have delivered the message, so the row becomes
+// unknown and is never sent again (send-once).
 func (l *RunLoop) sendOutcome(it jobs.OutboxItem, err error) (jobs.OutboxCompletion, string) {
 	now := l.now()
 	var api *output.APIError
@@ -205,8 +209,10 @@ func (l *RunLoop) sendOutcome(it jobs.OutboxItem, err error) (jobs.OutboxComplet
 		return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxSent}, OutboxOutcomeSent
 	case errors.Is(err, output.ErrOutcomeUnknown):
 		return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxUnknown}, OutboxOutcomeUnknown
-	case permanentSendError(err):
+	case refusedByPrincipal(err):
 		return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxFailed}, OutboxOutcomeRefused
+	case permanentSendError(err):
+		return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxFailed}, OutboxOutcomeFailed
 	case errors.As(err, &api):
 		if api.Status != http.StatusTooManyRequests && (api.Status < 500 || api.Status > 599) {
 			return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxUnknown}, OutboxOutcomeUnknown
@@ -230,12 +236,46 @@ func (l *RunLoop) retry(it jobs.OutboxItem, now time.Time, wait time.Duration) (
 	return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxPending, RetryAt: now.Add(wait)}, OutboxOutcomeRetry
 }
 
-// permanentSendError reports a Bot API 4xx other than a flood wait (the
-// principal blocked the bot, the chat is gone): sending again would be
-// refused the same way.
+// permanentSendError reports a Bot API 4xx other than a flood wait:
+// sending again would be refused the same way.
 func permanentSendError(err error) bool {
 	var api *output.APIError
 	return errors.As(err, &api) && api.Status >= 400 && api.Status < 500 && api.Status != http.StatusTooManyRequests
+}
+
+// principalForbidden are the 403 descriptions that mean the principal
+// blocked the bot, left, or never started it. Other 403s ("bots can't send
+// messages to bots", none at all) point at a chat id or token of ours.
+var principalForbidden = []string{
+	"bot was blocked by the user",
+	"user is deactivated",
+	"bot was kicked",
+	"bot can't initiate conversation",
+}
+
+// refusedByPrincipal reports the 4xx answers that mean the principal
+// blocked the bot or the chat is gone: a 403 with one of the
+// principalForbidden descriptions, or a 400 whose description says the
+// chat was not found. Every other 4xx (a malformed request, a bad or
+// revoked token's 401 or 404, an unexplained 403) is ours to fix and must
+// not hide here.
+func refusedByPrincipal(err error) bool {
+	var api *output.APIError
+	if !errors.As(err, &api) {
+		return false
+	}
+	desc := strings.ToLower(api.Description)
+	switch api.Status {
+	case http.StatusForbidden:
+		for _, d := range principalForbidden {
+			if strings.Contains(desc, d) {
+				return true
+			}
+		}
+	case http.StatusBadRequest:
+		return strings.Contains(desc, "chat not found")
+	}
+	return false
 }
 
 // isLocalSendError reports a message Sender refused to build, before any

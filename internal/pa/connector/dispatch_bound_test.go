@@ -10,6 +10,10 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/mctlhq/mctl-telegram/internal/pa"
+	"github.com/mctlhq/mctl-telegram/internal/pa/catalog"
+	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 )
 
 // allSecurityReasons is the security refusal class, spelled out so that a
@@ -180,18 +184,32 @@ func TestRefusalEvictionWritesSummaries(t *testing.T) {
 // its answer, and returns when it is on the wire.
 func (e *surfaceEnv) startSlow(t *testing.T) (release chan struct{}, done chan struct{}) {
 	t.Helper()
+	release, done, _ = e.startSlowCall(t)
+	return release, done
+}
+
+// startSlowCall is startSlow that also keeps the surface the slow call
+// returned, the one its tool call would be authorized against. Read it
+// only after done is closed.
+func (e *surfaceEnv) startSlowCall(t *testing.T) (release chan struct{}, done chan struct{}, got **catalog.Surface) {
+	t.Helper()
 	release, done = make(chan struct{}), make(chan struct{})
+	got = new(*catalog.Surface)
 	e.ep.mu.Lock()
 	before := e.ep.lists["tok-c1"]
 	e.ep.block = map[string]chan struct{}{"tok-c1": release}
 	e.ep.mu.Unlock()
-	go func() { e.observe("c1", 1); close(done) }()
+	go func() {
+		*got, _ = e.d.surface(context.Background(), e.ep, connection.NewSecret("tok-c1"),
+			pa.ConnectionRevision{ConnectionID: "c1", AuthorityRevision: 1})
+		close(done)
+	}()
 	for {
 		e.ep.mu.Lock()
 		started := e.ep.lists["tok-c1"] > before
 		e.ep.mu.Unlock()
 		if started {
-			return release, done
+			return release, done, got
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -232,6 +250,30 @@ func TestListingCacheOrderedByStart(t *testing.T) {
 			t.Fatalf("gauge drift %v, want 1", d)
 		}
 	})
+	// The reviewer's late-call probe: the call whose own read is the older
+	// clean one must be authorized against the newer drifted listing the
+	// cache and the gauge hold, not against its own stale read.
+	t.Run("late call authorizes against the newer listing", func(t *testing.T) {
+		e := newSurfaceEnv(t)
+		e.ep.pages["tok-c1"] = tgListing(t, nil)
+		release, done, got := e.startSlowCall(t)
+		e.ep.mu.Lock()
+		e.ep.pages["tok-c1"] = driftedTG(t)
+		e.ep.mu.Unlock()
+		e.advance(time.Second)
+		e.observe("c1", 1)
+		close(release)
+		<-done
+		if *got == nil {
+			t.Fatal("late call got no surface")
+		}
+		if drift, _, _ := PinDrift(*got); !drift {
+			t.Fatal("late call got the older clean listing, not the newer drifted one")
+		}
+		if _, err := (*got).Authorize("get_messages", e.d.now()); !errors.Is(err, catalog.ErrToolChanged) {
+			t.Fatalf("late call: Authorize(get_messages) = %v, want ErrToolChanged", err)
+		}
+	})
 	for name, err := range map[string]error{"failed read late": errors.New("down"), "refused token late": ErrMCPUnauthorized} {
 		t.Run(name, func(t *testing.T) {
 			e := newSurfaceEnv(t)
@@ -253,15 +295,18 @@ func TestListingCacheOrderedByStart(t *testing.T) {
 }
 
 // Every configured server's failure series exist at 0 from the start, so
-// increase() sees the first failure of each reason.
+// increase() sees the first failure of each reason. The reasons are spelled
+// out, not read from ListingFailureReasons, so that a reason dropped from
+// that list fails here (#1343, mutant N19).
 func TestListingFailuresPreInitialized(t *testing.T) {
 	e := newSurfaceEnv(t)
+	reasons := []string{"unauthorized", "unavailable", "invalid"}
 	// Counted before any lookup: GetMetricWithLabelValues creates series.
-	if n := testutil.CollectAndCount(e.reg.PAPinListingFailures); n != 2*len(ListingFailureReasons) {
-		t.Fatalf("%d failure series, want %d", n, 2*len(ListingFailureReasons))
+	if n := testutil.CollectAndCount(e.reg.PAPinListingFailures); n != 2*len(reasons) {
+		t.Fatalf("%d failure series, want %d", n, 2*len(reasons))
 	}
 	for _, server := range []string{"tg", "alice"} {
-		for _, reason := range ListingFailureReasons {
+		for _, reason := range reasons {
 			c, err := e.reg.PAPinListingFailures.GetMetricWithLabelValues(server, reason)
 			if err != nil {
 				t.Fatal(err)

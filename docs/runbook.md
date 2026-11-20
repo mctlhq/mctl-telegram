@@ -3962,7 +3962,9 @@ mctl-gitops vm-rules is part of enabling the PA (#1318).
   `PA_BOT_TOKEN` and compares it with `PA_WEBHOOK_URL` and the expected
   `allowed_updates` (`message`, `callback_query`). It exports
   `mctl_pa_webhook_info_up` (1 readable, 0 not), `mctl_pa_webhook_info_ok`,
-  `mctl_pa_webhook_problem{problem}`, `mctl_pa_webhook_pending_updates`,
+  `mctl_pa_webhook_problem{problem}`,
+  `mctl_pa_webhook_problem_checks_total{problem}` (readable checks that
+  found the problem), `mctl_pa_webhook_pending_updates`,
   `mctl_pa_webhook_info_last_error_timestamp_seconds` and
   `mctl_pa_webhook_info_last_success_timestamp_seconds`. A failed read sets
   `up` and `ok` to 0 and withdraws the per-state series: an unreadable
@@ -3981,8 +3983,11 @@ mctl-gitops vm-rules is part of enabling the PA (#1318).
   Send-once: only a failure known to have left the message undelivered is
   retried (a failure before the request was written, or an explicit Bot API
   429 or 5xx, honouring `retry_after`), with backoff (15s doubling, at most
-  10m, 8 attempts). A Bot API 4xx other than 429 (the user blocked the bot,
-  chat not found) fails the row at once and is counted `refused`. Anything
+  10m, 8 attempts). A Bot API 4xx other than 429 fails the row at once. It
+  is counted `refused` when the principal caused it: a 403 saying the bot
+  was blocked or kicked, the user is deactivated or never started the bot,
+  or a 400 "chat not found". Every other 4xx, an unexplained 403 included,
+  is `failed`, which pages. Anything
   that may have reached Telegram (a connection dropped after the request
   was written, an unreadable or malformed answer) makes the row `unknown`,
   and so does a row still `sending` when its lease runs out: it is never
@@ -4018,9 +4023,17 @@ open an issue.
 `PA_WEBHOOK_URL`. Treat it as a possible token compromise: rotate
 `PA_BOT_TOKEN` with BotFather, then re-register the webhook (#1318).
 `allowed_updates_changed`: the webhook was registered with another update
-list; re-register it with the operator helper. The alert takes the
-maximum over 15 minutes, so a URL that flips between checks keeps it
-firing.
+list; re-register it with the operator helper. The alert fires once two
+checks within 20 minutes have seen the same problem, counted by
+`mctl_pa_webhook_problem_checks_total{problem}`: one bad check stays
+silent, while a URL that flips between checks, or an unreadable check in
+between, still fires on the second bad one. It counts checks rather than
+samples of `mctl_pa_webhook_problem`, which holds one check's value for
+the whole 5-minute interval and so shows a single check as several
+samples. The gauge must also have read 1 within the same 20 minutes, so an
+old count from an earlier incident cannot page after a scrape gap. Under
+Prometheus the first check after a start is not counted, so there it fires
+at the third bad check.
 
 <a id="mctlpawebhooksecretrejected"></a>
 ### MctlPAWebhookSecretRejected
@@ -4057,16 +4070,17 @@ webhook refuses them before reading the body.
 <a id="mctlpaoutboxundelivered"></a>
 ### MctlPAOutboxUndelivered
 
-`failed`: a message used its attempts, or could not be built.
-`unknown`: a send may have reached Telegram (connection lost after the
-request went out, an unreadable answer, or the pod died mid-send) and is
-not resent; ask the principal whether it arrived if it matters. `refused`
-(a Bot API 4xx other than 429) is counted but does not fire this alert. It
-is meant for a principal who blocked the bot or deleted the chat, but today
-it also catches other 4xx (a request we built wrong, a revoked bot token), so
-those do not page: a known defect tracked in #1343, not expected behaviour.
-Until it is fixed, check `refused` rates by hand after a bot token change. `claim_error`: `pa_outbox` could not be read; nothing was sent and
-the rows stay due. Inspect rows by principal with `Store.PAOutboxRows`;
+`failed`: a message used its attempts, could not be built, or got a Bot
+API 4xx that is not the principal's doing: any 400 other than "chat not
+found" (a request we built wrong), or a 401 or 404 (a bad or revoked
+`PA_BOT_TOKEN`; check the token first after a rotation). None of these is
+retried. `unknown`: a send may have reached Telegram (connection lost after
+the request went out, an unreadable answer, or the pod died mid-send) and
+is not resent; ask the principal whether it arrived if it matters.
+`refused` is counted but does not fire this alert: it is only a 403 (the
+principal blocked the bot) or a 400 whose description says the chat was
+not found, both the principal's choice. `claim_error`: `pa_outbox` could
+not be read; nothing was sent and the rows stay due. Inspect rows by principal with `Store.PAOutboxRows`;
 rows carry no message text.
 
 ## Personal Assistant catalog pin (issue #1315)
@@ -4126,7 +4140,9 @@ fresh successful one: a connection whose last good listing drifted keeps
 `mctl_pa_pin_drift` at 1 for the 5-minute window even if it then answers
 errors. Both the gauges and the 60s listing cache are ordered by when a
 read started: a slow read that finishes late neither replaces nor drops a
-newer listing, so calls authorize against the listing the gauges report.
+newer listing, and the call that made the slow read is authorized against
+the newer cached listing rather than its own, so calls authorize against
+the listing the gauges report.
 
 ### PA refusal audit bound
 

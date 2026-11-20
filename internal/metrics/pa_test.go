@@ -103,3 +103,32 @@ func TestPACounters_PreCreated(t *testing.T) {
 		t.Fatalf("families %v", f)
 	}
 }
+
+// TestPAWebhookProblemChecks_CountsChecks: the counter moves once per
+// readable check that found the problem, survives an unreadable check, and
+// exists at zero from the monitor start, so MctlPAWebhookMisconfigured can
+// count checks rather than scrapes of the problem gauge.
+func TestPAWebhookProblemChecks_CountsChecks(t *testing.T) {
+	r := New()
+	if f := paFamilies(t, r); f["mctl_pa_webhook_problem_checks_total"] != 0 {
+		t.Fatal("problem checks exported before the monitor started")
+	}
+	r.StartPAWebhookMonitor()
+	if f := paFamilies(t, r); f["mctl_pa_webhook_problem_checks_total"] != len(PAWebhookProblems) {
+		t.Fatalf("after start: %v", f)
+	}
+	at := time.Unix(1_800_000_000, 0)
+	r.ObservePAWebhookInfo(true, []string{"url_changed", "url_changed"}, 0, 0, at)
+	r.ObservePAWebhookInfo(false, nil, 0, 0, at.Add(5*time.Minute))
+	r.ObservePAWebhookInfo(true, nil, 0, 0, at.Add(10*time.Minute))
+	r.ObservePAWebhookInfo(true, []string{"url_changed"}, 0, 0, at.Add(15*time.Minute))
+	for _, p := range PAWebhookProblems {
+		want := 0.0
+		if p == "url_changed" {
+			want = 2
+		}
+		if got := testutil.ToFloat64(r.pa.problemChecks.WithLabelValues(p)); got != want {
+			t.Fatalf("problem checks %s = %v, want %v", p, got, want)
+		}
+	}
+}

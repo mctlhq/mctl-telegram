@@ -768,14 +768,23 @@ tests:
     - eval_time: 40m
       alertname: MctlPAWebhookInfoStale
       exp_alerts: []
-  # PA: url changed for 15m fires
+  # PA: url changed at every check fires from the second check on. Checks
+  # run every 5 minutes; the gauge holds each check's value until the next
+  # one, the counter moves once per check that found the problem.
   - interval: 1m
     input_series:
     - series: mctl_pa_webhook_problem{problem="url_changed"}
-      values: 1x20
+      values: 0 1x20
+    - series: mctl_pa_webhook_problem_checks_total{problem="url_changed"}
+      values: 0 1 1 1 1 1 2 2 2 2 2 3 3 3 3 3 4 4 4 4 4
     - series: mctl_pa_webhook_problem{problem="delivery_error"}
       values: '0x20'
+    - series: mctl_pa_webhook_problem_checks_total{problem="delivery_error"}
+      values: '0x20'
     alert_rule_test:
+    - eval_time: 4m
+      alertname: MctlPAWebhookMisconfigured
+      exp_alerts: []
     - eval_time: 15m
       alertname: MctlPAWebhookMisconfigured
       exp_alerts:
@@ -785,13 +794,15 @@ tests:
           problem: url_changed
         exp_annotations:
           summary: PA bot webhook url_changed
-          description: "getWebhookInfo reports a webhook URL other than PA_WEBHOOK_URL, or allowed_updates other than message and callback_query, at checks across 10 minutes, steadily or on and off. Updates may be going to someone else.\n"
+          description: "getWebhookInfo reports a webhook URL other than PA_WEBHOOK_URL, or allowed_updates other than message and callback_query, at two or more checks within 20 minutes, in a row or on and off. Updates may be going to someone else.\n"
           runbook_url: https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookmisconfigured
   # PA: allowed_updates changed fires
   - interval: 1m
     input_series:
     - series: mctl_pa_webhook_problem{problem="allowed_updates_changed"}
-      values: 1x20
+      values: 0 1x20
+    - series: mctl_pa_webhook_problem_checks_total{problem="allowed_updates_changed"}
+      values: 0 1 1 1 1 1 2 2 2 2 2 3 3 3 3 3 4 4 4 4 4
     alert_rule_test:
     - eval_time: 15m
       alertname: MctlPAWebhookMisconfigured
@@ -802,15 +813,19 @@ tests:
           problem: allowed_updates_changed
         exp_annotations:
           summary: PA bot webhook allowed_updates_changed
-          description: "getWebhookInfo reports a webhook URL other than PA_WEBHOOK_URL, or allowed_updates other than message and callback_query, at checks across 10 minutes, steadily or on and off. Updates may be going to someone else.\n"
+          description: "getWebhookInfo reports a webhook URL other than PA_WEBHOOK_URL, or allowed_updates other than message and callback_query, at two or more checks within 20 minutes, in a row or on and off. Updates may be going to someone else.\n"
           runbook_url: https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookmisconfigured
-  # PA: a url flipping between checks fires
+  # PA: a url flipping between checks (bad, good, unreadable, bad, good,
+  # bad) fires: neither the good check nor the unreadable one, which
+  # withdraws the gauge, resets the count
   - interval: 1m
     input_series:
     - series: mctl_pa_webhook_problem{problem="url_changed"}
-      values: 1 1 1 1 1 0 0 0 0 0 1 1 1 1 1 0 0 0 0 0 1 1 1 1 1 0 0 0 0 0
+      values: 0 1 1 1 1 1 0 0 0 0 0 _ _ _ _ _ 1 1 1 1 1 0 0 0 0 0 1 1 1 1
+    - series: mctl_pa_webhook_problem_checks_total{problem="url_changed"}
+      values: 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 2 2 2 2 2 2 2 2 2 2 3 3 3 3
     alert_rule_test:
-    - eval_time: 25m
+    - eval_time: 18m
       alertname: MctlPAWebhookMisconfigured
       exp_alerts:
       - exp_labels:
@@ -819,15 +834,85 @@ tests:
           problem: url_changed
         exp_annotations:
           summary: PA bot webhook url_changed
-          description: "getWebhookInfo reports a webhook URL other than PA_WEBHOOK_URL, or allowed_updates other than message and callback_query, at checks across 10 minutes, steadily or on and off. Updates may be going to someone else.\n"
+          description: "getWebhookInfo reports a webhook URL other than PA_WEBHOOK_URL, or allowed_updates other than message and callback_query, at two or more checks within 20 minutes, in a row or on and off. Updates may be going to someone else.\n"
           runbook_url: https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookmisconfigured
-  # PA: url changed for under 10m is silent
+    - eval_time: 28m
+      alertname: MctlPAWebhookMisconfigured
+      exp_alerts:
+      - exp_labels:
+          severity: critical
+          service: mctl-telegram
+          problem: url_changed
+        exp_annotations:
+          summary: PA bot webhook url_changed
+          description: "getWebhookInfo reports a webhook URL other than PA_WEBHOOK_URL, or allowed_updates other than message and callback_query, at two or more checks within 20 minutes, in a row or on and off. Updates may be going to someone else.\n"
+          runbook_url: https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookmisconfigured
+  # PA: one bad check is silent at 10m and later (#1343). The gauge stays
+  # at 1 for the whole check interval, several samples, but that is one
+  # observation.
   - interval: 1m
     input_series:
     - series: mctl_pa_webhook_problem{problem="url_changed"}
-      values: 0x5 1x5 0x20
+      values: 0 1 1 1 1 1 0x30
+    - series: mctl_pa_webhook_problem_checks_total{problem="url_changed"}
+      values: 0 1x35
     alert_rule_test:
-    - eval_time: 9m
+    - eval_time: 5m
+      alertname: MctlPAWebhookMisconfigured
+      exp_alerts: []
+    - eval_time: 10m
+      alertname: MctlPAWebhookMisconfigured
+      exp_alerts: []
+    - eval_time: 15m
+      alertname: MctlPAWebhookMisconfigured
+      exp_alerts: []
+    - eval_time: 30m
+      alertname: MctlPAWebhookMisconfigured
+      exp_alerts: []
+  # PA: as the server really starts, the first scrape already sees the
+  # first check's increment. Prometheus does not count it, so the alert
+  # fires at the third bad check (10m), not the second.
+  - interval: 1m
+    input_series:
+    - series: mctl_pa_webhook_problem{problem="url_changed"}
+      values: 1x20
+    - series: mctl_pa_webhook_problem_checks_total{problem="url_changed"}
+      values: 1 1 1 1 1 2 2 2 2 2 3 3 3 3 3 4 4 4 4 4 5
+    alert_rule_test:
+    - eval_time: 6m
+      alertname: MctlPAWebhookMisconfigured
+      exp_alerts: []
+    - eval_time: 11m
+      alertname: MctlPAWebhookMisconfigured
+      exp_alerts:
+      - exp_labels:
+          severity: critical
+          service: mctl-telegram
+          problem: url_changed
+        exp_annotations:
+          summary: PA bot webhook url_changed
+          description: "getWebhookInfo reports a webhook URL other than PA_WEBHOOK_URL, or allowed_updates other than message and callback_query, at two or more checks within 20 minutes, in a row or on and off. Updates may be going to someone else.\n"
+          runbook_url: https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookmisconfigured
+  # PA: a counter that reads as increased while no check in the window saw
+  # the problem is silent. This stands in for VictoriaMetrics counting an
+  # old counter value as new after a scrape gap.
+  - interval: 1m
+    input_series:
+    - series: mctl_pa_webhook_problem{problem="url_changed"}
+      values: '0x25'
+    - series: mctl_pa_webhook_problem_checks_total{problem="url_changed"}
+      values: 0 3x25
+    alert_rule_test:
+    - eval_time: 10m
+      alertname: MctlPAWebhookMisconfigured
+      exp_alerts: []
+  # PA: two bad checks more than 20 minutes apart are silent
+  - interval: 1m
+    input_series:
+    - series: mctl_pa_webhook_problem_checks_total{problem="url_changed"}
+      values: 0 1x24 2x10
+    alert_rule_test:
+    - eval_time: 30m
       alertname: MctlPAWebhookMisconfigured
       exp_alerts: []
   # PA: a delivery error alone is not misconfiguration
@@ -835,8 +920,12 @@ tests:
     input_series:
     - series: mctl_pa_webhook_problem{problem="url_changed"}
       values: '0x20'
+    - series: mctl_pa_webhook_problem_checks_total{problem="url_changed"}
+      values: '0x20'
     - series: mctl_pa_webhook_problem{problem="delivery_error"}
       values: 1x20
+    - series: mctl_pa_webhook_problem_checks_total{problem="delivery_error"}
+      values: 0+1x20
     alert_rule_test:
     - eval_time: 15m
       alertname: MctlPAWebhookMisconfigured
