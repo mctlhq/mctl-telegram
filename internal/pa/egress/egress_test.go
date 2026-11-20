@@ -492,36 +492,108 @@ func TestS1E5_OversizedResponseFails(t *testing.T) {
 }
 
 // S1-E6: a slow response times out, whether the headers or the body stall.
+//
+// The handler never ends a response cleanly. It holds until the client call
+// under test has returned, then aborts the connection. It must not return on
+// r.Context().Done(): when the client gives up, its TLS close_notify reaches
+// the server before the socket closes, which cancels that context. A handler
+// that then returns lets the server write the final chunk, and under load
+// those bytes can reach the client's pending read before its own socket is
+// torn down. The body then ends with io.EOF after the deadline, which
+// http.Client passes through as success, and the test saw nil (#1336). The
+// 10s cap only frees a wedged handler, and it aborts too, so no path can
+// hand the client a complete response.
 func TestS1E6_SlowResponseTimesOut(t *testing.T) {
-	release := make(chan struct{})
+	var mu sync.Mutex
+	gates := map[string]chan struct{}{}
+	// gate returns the channel closed when the client call for uri returns.
+	gate := func(uri string) chan struct{} {
+		mu.Lock()
+		defer mu.Unlock()
+		ch, ok := gates[uri]
+		if !ok {
+			ch = make(chan struct{})
+			gates[uri] = ch
+		}
+		return ch
+	}
 	h := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/slowbody" {
 			_, _ = io.WriteString(w, "partial")
 			w.(http.Flusher).Flush()
 		}
 		select {
-		case <-release:
-		case <-r.Context().Done():
+		case <-gate(r.URL.RequestURI()):
+		case <-time.After(10 * time.Second):
 		}
+		panic(http.ErrAbortHandler)
 	}))
-	// Registered after the harness, so it runs first and frees the handlers
-	// before the server shuts down.
-	t.Cleanup(func() { close(release) })
 	c := h.client(t, Config{Timeout: 150 * time.Millisecond})
-	for _, path := range []string{"/slowheaders", "/slowbody"} {
-		done := make(chan error, 1)
+
+	type result struct {
+		phase string // "headers" if Do failed, "body" if reading the body did
+		err   error
+	}
+	call := func(uri string) (result, bool) {
+		clientReturned := gate(uri)
+		done := make(chan result, 1)
 		go func() {
-			_, err := do(t, c, "https://"+hostMCP+path)
-			done <- err
+			defer close(clientReturned)
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://"+hostMCP+uri, nil)
+			if err != nil {
+				done <- result{"request", err}
+				return
+			}
+			resp, err := c.Do(req)
+			if err != nil {
+				done <- result{"headers", err}
+				return
+			}
+			if resp.StatusCode != http.StatusOK {
+				_ = resp.Body.Close()
+				done <- result{"headers", fmt.Errorf("status %d", resp.StatusCode)}
+				return
+			}
+			_, err = ReadBody(resp)
+			done <- result{"body", err}
 		}()
 		select {
-		case err := <-done:
-			var ne net.Error
-			if err == nil || !errors.As(err, &ne) || !ne.Timeout() {
-				t.Errorf("%s: want a timeout, got %v", path, err)
-			}
+		case res := <-done:
+			return res, true
 		case <-time.After(3 * time.Second):
-			t.Errorf("%s: no timeout after 3s against a 150ms limit", path)
+			return result{}, false
+		}
+	}
+
+	// Each path must time out in its own phase, so the test tells the header
+	// deadline apart from the one that covers the body. Reaching the body
+	// phase is a precondition, not the property under test: on a loaded
+	// runner the dial, handshake and headers alone can outlast 150ms, and
+	// /slowbody then times out before its body. That attempt still had to
+	// time out, and is retried; any other outcome fails at once.
+	const attempts = 5
+	for _, tc := range []struct{ path, phase string }{
+		{"/slowheaders", "headers"},
+		{"/slowbody", "body"},
+	} {
+		var last result
+		for n := 0; n < attempts; n++ {
+			res, ok := call(fmt.Sprintf("%s?n=%d", tc.path, n))
+			if !ok {
+				t.Fatalf("%s: no timeout after 3s against a 150ms limit", tc.path)
+			}
+			var ne net.Error
+			if res.err == nil || !errors.As(res.err, &ne) || !ne.Timeout() {
+				t.Fatalf("%s: want a timeout, got %v (%s)", tc.path, res.err, res.phase)
+			}
+			last = res
+			if res.phase == tc.phase {
+				break
+			}
+			t.Logf("%s: attempt %d timed out in the %s, before the %s; retrying", tc.path, n+1, res.phase, tc.phase)
+		}
+		if last.phase != tc.phase {
+			t.Errorf("%s: timed out in the %s on all %d attempts, never in the %s", tc.path, last.phase, attempts, tc.phase)
 		}
 	}
 }
