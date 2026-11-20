@@ -16,9 +16,10 @@ const (
 // with the resolved key, so a key api.mctl.ai also holds would let it mint
 // a pool token and claim managed jobs. With the runtime off every one of
 // these configurations still loads, as before.
-// Mutation: drop the validateManagedRuntimeKey call from Load — the three
-// refusal cases load; make it check OAUTHJWTSecret only — the legacy-only
-// and shared-hmac cases load.
+// Mutation: drop the validateManagedRuntimeKey call from Load — every
+// refusal case loads; make it check OAUTHJWTSecret only — the legacy-only,
+// shared-hmac and local-dev-with-key cases load; drop the equal-value
+// check — the equal-keys case loads.
 func TestLoadManagedRuntime_DedicatedKey(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -32,6 +33,15 @@ func TestLoadManagedRuntime_DedicatedKey(t *testing.T) {
 			"AUTH_MODE": "local-jwt", "OAUTH_JWT_SECRET": managedTestSharedKey,
 		}, true},
 		{"local-dev without any key", map[string]string{"AUTH_MODE": "local-dev"}, true},
+		// Deliberate: local-dev (and cmd/login, which calls Load) cannot run
+		// the managed runtime even with a dedicated key set.
+		{"local-dev with the dedicated key", map[string]string{
+			"AUTH_MODE": "local-dev", "OAUTH_JWT_SIGNING_KEY": managedTestSigningKey,
+		}, true},
+		// The dedicated variable holding the shared value is the shared key.
+		{"local-jwt with the dedicated key equal to OAUTH_JWT_SECRET", map[string]string{
+			"AUTH_MODE": "local-jwt", "OAUTH_JWT_SIGNING_KEY": managedTestSigningKey, "OAUTH_JWT_SECRET": managedTestSigningKey,
+		}, true},
 		{"local-jwt with the dedicated key", map[string]string{
 			"AUTH_MODE": "local-jwt", "OAUTH_JWT_SIGNING_KEY": managedTestSigningKey,
 		}, false},

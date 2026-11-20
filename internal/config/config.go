@@ -1,6 +1,7 @@
 package config
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1094,12 +1095,21 @@ func Load() (*Config, error) {
 // holder of the other service's secret could mint a pool token. The same rule
 // as validatePAWiring; names the variables, never a value. With the managed
 // runtime off nothing changes.
+//
+// OAUTHJWTSecretDedicated records where the key came from, not what it is,
+// so a dedicated OAUTH_JWT_SIGNING_KEY that merely repeats the value of
+// OAUTH_JWT_SECRET (the shared secret, copied over in a migration) is
+// refused too. The comparison is constant-time and nothing is printed.
 func validateManagedRuntimeKey(c *Config) error {
 	if !c.ManagedRuntimeEnabled {
 		return nil
 	}
 	if c.OAUTHJWTSecret == "" || !c.OAUTHJWTSecretDedicated {
 		return errors.New("MANAGED_RUNTIME_ENABLED=true requires AUTH_MODE=local-jwt with OAUTH_JWT_SIGNING_KEY set: it signs the agent-pool and managed agent-job tokens, and no other service may hold that key (OAUTH_JWT_SECRET is not accepted)")
+	}
+	if legacy := os.Getenv("OAUTH_JWT_SECRET"); legacy != "" &&
+		subtle.ConstantTimeCompare([]byte(legacy), []byte(c.OAUTHJWTSecret)) == 1 {
+		return errors.New("MANAGED_RUNTIME_ENABLED=true requires OAUTH_JWT_SIGNING_KEY to differ from OAUTH_JWT_SECRET: an equal value is the shared secret under another name")
 	}
 	return nil
 }

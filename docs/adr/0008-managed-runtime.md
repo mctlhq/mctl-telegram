@@ -110,7 +110,10 @@ a confirmed operation:
   the account token), mounted only under the flag (`managedPoolEnabled` also requires the JWT
   signing secret to be the dedicated `OAUTH_JWT_SIGNING_KEY` in
   `AUTH_MODE=local-jwt`, and `config.Load` refuses the flag without it:
-  a key api.mctl.ai also holds would let it mint pool tokens, #1351). It is not an MCP tool:
+  a key api.mctl.ai also holds would let it mint pool tokens, #1351; a
+  signing key equal to `OAUTH_JWT_SECRET` is refused as well, and
+  `AUTH_MODE=local-dev`, including `cmd/login`, deliberately cannot run with
+  the flag on even when the key is set). It is not an MCP tool:
   one mint per environment per rotation. The value lives in Vault and
   reaches the worker as `AGENT_API_TOKEN` through an ExternalSecret.
 - A pool identity may call exactly one route: `POST /jobs/claim`. A new
