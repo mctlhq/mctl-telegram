@@ -27,6 +27,14 @@ package jobs
 // recorded (sent_parts) before the next is sent, and a retry resumes after
 // the last recorded part, so a failure on part 3 never sends parts 1 and 2
 // again.
+//
+// Conversation-level rows (#1348) carry the server answers of the
+// conversation layer: the consent prompt with its button, and the answers
+// to /new, /forget, /consent and to a refused message or button. They
+// belong to no job: they are keyed by principal and the Telegram update
+// that owed them, and are written in that update's transaction. They are
+// delivered by the same claim, in the same per-principal order and with
+// the same send-once rules as every other row.
 
 import (
 	"context"
@@ -51,9 +59,44 @@ const (
 	OutboxRequestDropped OutboxKind = "request_dropped"
 )
 
+// Conversation-level kinds (#1348), one per pa.Reply, with the same names.
+// Only OutboxConsentPrompt carries a button.
+const (
+	OutboxConsentPrompt    OutboxKind = "consent_prompt"
+	OutboxConsentAccepted  OutboxKind = "consent_accepted"
+	OutboxConsentWithdrawn OutboxKind = "consent_withdrawn"
+	OutboxConsentStale     OutboxKind = "consent_stale"
+	OutboxNewConversation  OutboxKind = "new_conversation"
+	OutboxForgotten        OutboxKind = "forgotten"
+	OutboxUnknownButton    OutboxKind = "unknown_button"
+	OutboxRateLimited      OutboxKind = "rate_limited"
+	OutboxMessageTooLong   OutboxKind = "message_too_long"
+)
+
 // OutboxKinds lists every kind this build writes.
 func OutboxKinds() []OutboxKind {
+	return append(jobOutboxKinds(), ConversationOutboxKinds()...)
+}
+
+func jobOutboxKinds() []OutboxKind {
 	return []OutboxKind{OutboxReply, OutboxReplyTooLong, OutboxBudgetHold, OutboxRunFailed, OutboxRequestDropped}
+}
+
+// ConversationOutboxKinds lists the conversation-level kinds.
+func ConversationOutboxKinds() []OutboxKind {
+	return []OutboxKind{OutboxConsentPrompt, OutboxConsentAccepted, OutboxConsentWithdrawn, OutboxConsentStale,
+		OutboxNewConversation, OutboxForgotten, OutboxUnknownButton, OutboxRateLimited, OutboxMessageTooLong}
+}
+
+// ConversationLevel reports whether k is a conversation-level kind, whose
+// rows have an update and no job.
+func (k OutboxKind) ConversationLevel() bool {
+	for _, v := range ConversationOutboxKinds() {
+		if v == k {
+			return true
+		}
+	}
+	return false
 }
 
 // Valid reports whether k is a kind this build knows.
@@ -98,8 +141,16 @@ const (
 type OutboxItem struct {
 	ID        int64
 	Principal int64
-	JobID     int64
-	Kind      OutboxKind
+	// JobID is the job that owes a job-level row; 0 for a
+	// conversation-level row.
+	JobID int64
+	// UpdateID is the Telegram update that owed a conversation-level row;
+	// 0 for a job-level row.
+	UpdateID int64
+	Kind     OutboxKind
+	// Button is the opaque callback id of an OutboxConsentPrompt's single
+	// button; empty for every other kind.
+	Button string
 	// ConversationID and FragmentSeq name the assistant fragment of an
 	// OutboxReply; both are empty for every other kind.
 	ConversationID string
@@ -115,7 +166,19 @@ type OutboxItem struct {
 
 // Valid reports whether the item can be enqueued.
 func (o OutboxItem) Valid() bool {
-	if o.Principal <= 0 || o.JobID <= 0 || !o.Kind.Valid() {
+	if o.Principal <= 0 || !o.Kind.Valid() {
+		return false
+	}
+	if o.Kind.ConversationLevel() {
+		if o.JobID != 0 || o.UpdateID <= 0 || o.ConversationID != "" || o.FragmentSeq != 0 {
+			return false
+		}
+		if len(o.Button) > MaxOutboxButton {
+			return false
+		}
+		return (o.Kind == OutboxConsentPrompt) == (o.Button != "")
+	}
+	if o.JobID <= 0 || o.UpdateID != 0 || o.Button != "" {
 		return false
 	}
 	if o.Kind == OutboxReply {
@@ -126,6 +189,8 @@ func (o OutboxItem) Valid() bool {
 
 // Outbox limits.
 const (
+	// MaxOutboxButton is the Bot API's callback_data limit, in bytes.
+	MaxOutboxButton = 64
 	// OutboxLease bounds one row's send. A row still sending after it
 	// becomes OutboxUnknown. A row is claimed right before its own send,
 	// which is bounded well inside the lease (pa.outboxSendTimeout).
@@ -180,8 +245,9 @@ var ErrOutboxStale = errors.New("pa outbox: row is not sending under this attemp
 
 // OutboxStore is the persistence contract of the outbox (*db.Store).
 type OutboxStore interface {
-	// EnqueuePAOutbox records item in tx, once per (job, kind): a second
-	// enqueue of the same pair is a no-op.
+	// EnqueuePAOutbox records item in tx, once per (job, kind) for a
+	// job-level row and once per (principal, update, kind) for a
+	// conversation-level one: a second enqueue of the same key is a no-op.
 	EnqueuePAOutbox(ctx context.Context, tx *sql.Tx, item OutboxItem, now time.Time) error
 	// ClaimPAOutbox marks expired sending rows unknown, then claims due
 	// rows. Every failure is an error, never an empty result (I9).

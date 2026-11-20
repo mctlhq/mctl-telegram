@@ -51,12 +51,36 @@ const (
 	OutboxOutcomeClaimError = "claim_error"
 )
 
-// outboxTemplates maps every notice kind to its server text.
+// outboxTemplates maps every notice kind, job-level and conversation-level
+// (#1348), to its server text.
 var outboxTemplates = map[jobs.OutboxKind]output.Template{
 	jobs.OutboxReplyTooLong:   output.TextReplyTooLong,
 	jobs.OutboxBudgetHold:     output.TextBudgetHold,
 	jobs.OutboxRunFailed:      output.TextRunFailed,
 	jobs.OutboxRequestDropped: output.TextRequestDropped,
+
+	jobs.OutboxConsentPrompt:    output.TextConsentPrompt,
+	jobs.OutboxConsentAccepted:  output.TextConsentAccepted,
+	jobs.OutboxConsentWithdrawn: output.TextConsentWithdrawn,
+	jobs.OutboxConsentStale:     output.TextConsentStale,
+	jobs.OutboxNewConversation:  output.TextNewConversation,
+	jobs.OutboxForgotten:        output.TextForgotten,
+	jobs.OutboxUnknownButton:    output.TextUnknownButton,
+	jobs.OutboxRateLimited:      output.TextRateLimited,
+	jobs.OutboxMessageTooLong:   output.TextMessageTooLong,
+}
+
+// outboxKeyboard is the keyboard a row is sent with: the consent prompt's
+// single button, carrying the opaque callback id stored with the row, and
+// none for every other kind. A prompt row without its id cannot be sent.
+func outboxKeyboard(it jobs.OutboxItem) (output.Keyboard, bool) {
+	if it.Kind != jobs.OutboxConsentPrompt {
+		return nil, it.Button == ""
+	}
+	if it.Button == "" {
+		return nil, false
+	}
+	return output.Keyboard{{{Label: output.LabelConsentAccept, Data: it.Button}}}, true
 }
 
 const (
@@ -132,11 +156,11 @@ func (l *RunLoop) deliverItem(ctx context.Context, it jobs.OutboxItem) delivery 
 	case err != nil:
 		// The row stays sending and becomes unknown after its lease: it is
 		// not sent twice.
-		slog.Warn("pa outbox outcome not recorded", "job_id", it.JobID, "kind", string(it.Kind), "err", err)
+		slog.Warn("pa outbox outcome not recorded", "job_id", it.JobID, "update_id", it.UpdateID, "kind", string(it.Kind), "err", err)
 	}
 	l.count(outcome)
 	if c.Status != jobs.OutboxSent {
-		slog.Warn("pa outbox row not sent", "job_id", it.JobID, "kind", string(it.Kind),
+		slog.Warn("pa outbox row not sent", "job_id", it.JobID, "update_id", it.UpdateID, "kind", string(it.Kind),
 			"attempt", it.Attempts, "outcome", outcome)
 	}
 	return delivery{item: it, status: c.Status, outcome: outcome}
@@ -177,12 +201,16 @@ func (l *RunLoop) sendItem(ctx context.Context, it jobs.OutboxItem) (jobs.Outbox
 		}
 		text = output.ServerText(tpl)
 	}
+	kb, ok := outboxKeyboard(it)
+	if !ok {
+		return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxFailed}, OutboxOutcomeFailed
+	}
 	if it.SentParts >= text.Parts() {
 		// Every part was delivered on an earlier attempt and only the
 		// completion was lost.
 		return jobs.OutboxCompletion{Now: l.now(), Status: jobs.OutboxSent}, OutboxOutcomeSent
 	}
-	err := l.sender.SendFrom(ctx, it.Principal, text, nil, it.SentParts, func(parts int) error {
+	err := l.sender.SendFrom(ctx, it.Principal, text, kb, it.SentParts, func(parts int) error {
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outboxRecordTimeout)
 		defer cancel()
 		if err := l.store.RecordPAOutboxParts(rctx, it, parts, l.now()); err != nil {
@@ -380,6 +408,16 @@ func (l *RunLoop) deliverAfter(ctx context.Context, principals ...int64) {
 			l.deliver(dctx, p)
 		}
 	}()
+}
+
+// DeliverAfter starts delivering principal's due rows after a request
+// path committed them: the webhook calls it once an update's transaction
+// committed, so a consent prompt or a command's answer goes out at once
+// instead of on the next RunOutbox pass (#1348).
+func (l *RunLoop) DeliverAfter(ctx context.Context, principal int64) {
+	if principal > 0 {
+		l.deliverAfter(ctx, principal)
+	}
 }
 
 // WaitDeliveries waits for the deliveries the request paths started, for

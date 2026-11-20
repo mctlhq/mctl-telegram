@@ -18,17 +18,22 @@ import (
 
 var _ jobs.OutboxStore = (*Store)(nil)
 
-func paOutboxSchema(pg bool) []string {
+// paOutboxTable is the pa_outbox DDL under name. job_id is NULL on a
+// conversation-level row (#1348): NULLs are distinct under UNIQUE (job_id,
+// kind), so those rows are keyed by idx_pa_outbox_update instead, while a
+// job-level row keeps the (job, kind) key it always had.
+func paOutboxTable(pg bool, name string) string {
 	intT, idT := "INTEGER", "INTEGER PRIMARY KEY AUTOINCREMENT"
 	if pg {
 		intT, idT = "BIGINT", "BIGSERIAL PRIMARY KEY"
 	}
-	return []string{
-		`CREATE TABLE IF NOT EXISTS pa_outbox (
+	return `CREATE TABLE IF NOT EXISTS ` + name + ` (
 			id ` + idT + `,
 			principal ` + intT + ` NOT NULL,
-			job_id ` + intT + ` NOT NULL,
+			job_id ` + intT + `,
+			update_id ` + intT + ` NOT NULL DEFAULT 0,
 			kind TEXT NOT NULL,
+			button TEXT NOT NULL DEFAULT '',
 			conversation_id TEXT NOT NULL DEFAULT '',
 			fragment_seq ` + intT + ` NOT NULL DEFAULT 0,
 			status TEXT NOT NULL,
@@ -39,25 +44,114 @@ func paOutboxSchema(pg bool) []string {
 			created_at_ms ` + intT + ` NOT NULL,
 			updated_at_ms ` + intT + ` NOT NULL,
 			UNIQUE (job_id, kind)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_pa_outbox_due ON pa_outbox(status, next_at_ms)`,
-		`CREATE INDEX IF NOT EXISTS idx_pa_outbox_principal ON pa_outbox(principal, id)`,
-	}
+		)`
 }
 
+// paOutboxIndexes run after the table has every column.
+var paOutboxIndexes = []string{
+	`CREATE INDEX IF NOT EXISTS idx_pa_outbox_due ON pa_outbox(status, next_at_ms)`,
+	`CREATE INDEX IF NOT EXISTS idx_pa_outbox_principal ON pa_outbox(principal, id)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_pa_outbox_update ON pa_outbox(principal, update_id, kind) WHERE job_id IS NULL`,
+}
+
+// migratePAOutbox creates pa_outbox, or brings a table created before #1348
+// (job_id NOT NULL, no update_id or button) to the current shape. Rows
+// already there are job-level and keep their key.
 func migratePAOutbox(ctx context.Context, dbConn *sql.DB, pg bool) error {
-	for _, s := range paOutboxSchema(pg) {
-		if _, err := dbConn.ExecContext(ctx, s); err != nil {
+	if _, err := dbConn.ExecContext(ctx, paOutboxTable(pg, "pa_outbox")); err != nil {
+		return fmt.Errorf("migrate pa outbox: %w", err)
+	}
+	notNull, err := paOutboxJobIDNotNull(ctx, dbConn, pg)
+	if err != nil {
+		return err
+	}
+	if notNull {
+		if pg {
+			// Postgres drops the constraint in place; a replica that loses
+			// the race runs the same statement again, which is a no-op.
+			for _, q := range []string{
+				`ALTER TABLE pa_outbox ADD COLUMN IF NOT EXISTS update_id BIGINT NOT NULL DEFAULT 0`,
+				`ALTER TABLE pa_outbox ADD COLUMN IF NOT EXISTS button TEXT NOT NULL DEFAULT ''`,
+				`ALTER TABLE pa_outbox ALTER COLUMN job_id DROP NOT NULL`,
+			} {
+				if _, err := dbConn.ExecContext(ctx, q); err != nil {
+					return fmt.Errorf("migrate pa outbox: %w", err)
+				}
+			}
+		} else if err := rebuildSQLitePAOutbox(ctx, dbConn); err != nil {
+			return err
+		}
+	}
+	for _, q := range paOutboxIndexes {
+		if _, err := dbConn.ExecContext(ctx, q); err != nil {
 			return fmt.Errorf("migrate pa outbox: %w", err)
 		}
 	}
 	return nil
 }
 
-// enqueuePAOutbox inserts item in tx, once per (job, kind).
+// paOutboxJobIDNotNull reports whether pa_outbox.job_id still has the NOT
+// NULL of the pre-#1348 table. A failed catalog read is an error, never
+// "already migrated".
+func paOutboxJobIDNotNull(ctx context.Context, dbConn *sql.DB, pg bool) (bool, error) {
+	q := `SELECT "notnull" <> 0 FROM pragma_table_info('pa_outbox') WHERE name = 'job_id'`
+	if pg {
+		q = `SELECT attnotnull FROM pg_attribute
+		      WHERE attrelid = to_regclass('pa_outbox') AND attname = 'job_id' AND attnum > 0 AND NOT attisdropped`
+	}
+	var notNull bool
+	if err := dbConn.QueryRowContext(ctx, q).Scan(&notNull); err != nil {
+		return false, fmt.Errorf("migrate pa outbox: read job_id: %w", err)
+	}
+	return notNull, nil
+}
+
+// rebuildSQLitePAOutbox copies a pre-#1348 SQLite pa_outbox into the
+// current shape: SQLite cannot drop a NOT NULL in place. SQLite serves one
+// process (local development), so nothing races the rebuild; it runs in
+// one transaction, so a failure leaves the old table as it was.
+func rebuildSQLitePAOutbox(ctx context.Context, dbConn *sql.DB) error {
+	tx, err := dbConn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("migrate pa outbox: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	const cols = `id, principal, job_id, kind, conversation_id, fragment_seq, status, attempts, sent_parts,
+		next_at_ms, lease_until_ms, created_at_ms, updated_at_ms`
+	for _, q := range []string{
+		`DROP TABLE IF EXISTS pa_outbox_rebuild`,
+		paOutboxTable(false, "pa_outbox_rebuild"),
+		`INSERT INTO pa_outbox_rebuild (` + cols + `) SELECT ` + cols + ` FROM pa_outbox`,
+		`DROP TABLE pa_outbox`,
+		`ALTER TABLE pa_outbox_rebuild RENAME TO pa_outbox`,
+	} {
+		if _, err := tx.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("migrate pa outbox: rebuild: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("migrate pa outbox: rebuild: commit: %w", err)
+	}
+	return nil
+}
+
+// enqueuePAOutbox inserts item in tx, once per (job, kind) for a job-level
+// row and once per (principal, update, kind) for a conversation-level one.
 func enqueuePAOutbox(ctx context.Context, tx *sql.Tx, item jobs.OutboxItem, nowMS int64) error {
 	if tx == nil || !item.Valid() {
 		return fmt.Errorf("%w: outbox item", jobs.ErrInvalid)
+	}
+	if item.Kind.ConversationLevel() {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO pa_outbox(principal, job_id, update_id, kind, button, status, attempts,
+			                       next_at_ms, created_at_ms, updated_at_ms)
+			 VALUES($1, NULL, $2, $3, $4, $5, 0, $6, $6, $6)
+			 ON CONFLICT (principal, update_id, kind) WHERE job_id IS NULL DO NOTHING`,
+			item.Principal, item.UpdateID, string(item.Kind), item.Button,
+			string(jobs.OutboxPending), nowMS); err != nil {
+			return fmt.Errorf("pa outbox: enqueue: %w", err)
+		}
+		return nil
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO pa_outbox(principal, job_id, kind, conversation_id, fragment_seq, status, attempts,
@@ -86,13 +180,15 @@ func (s *Store) EnqueuePAOutbox(ctx context.Context, tx *sql.Tx, item jobs.Outbo
 	return enqueuePAOutbox(ctx, tx, item, now.UnixMilli())
 }
 
-const paOutboxColumns = `id, principal, job_id, kind, conversation_id, fragment_seq, attempts, sent_parts, status, next_at_ms`
+// paOutboxColumns reads a conversation-level row's NULL job_id as 0.
+const paOutboxColumns = `id, principal, COALESCE(job_id, 0), update_id, kind, button, conversation_id, fragment_seq,
+	attempts, sent_parts, status, next_at_ms`
 
 func scanPAOutbox(row interface{ Scan(...any) error }) (jobs.OutboxItem, error) {
 	var it jobs.OutboxItem
 	var kind, status string
 	var nextMS int64
-	if err := row.Scan(&it.ID, &it.Principal, &it.JobID, &kind, &it.ConversationID, &it.FragmentSeq,
+	if err := row.Scan(&it.ID, &it.Principal, &it.JobID, &it.UpdateID, &kind, &it.Button, &it.ConversationID, &it.FragmentSeq,
 		&it.Attempts, &it.SentParts, &status, &nextMS); err != nil {
 		return jobs.OutboxItem{}, err
 	}
@@ -242,14 +338,16 @@ func (s *Store) RecordPAOutboxParts(ctx context.Context, item jobs.OutboxItem, p
 	return nil
 }
 
-// deletePAOutboxNotices deletes the principal's pending notice rows in tx
-// (/forget and consent withdrawal): a notice about a request the principal
-// asked to forget is not sent afterwards. A pending reply stays, and is
-// dropped when it comes due because its fragment is gone; a row that is
-// sending is left to finish.
+// deletePAOutboxNotices deletes the principal's pending job notice rows in
+// tx (/forget and consent withdrawal): a notice about a request the
+// principal asked to forget is not sent afterwards. A pending reply stays,
+// and is dropped when it comes due because its fragment is gone; a row that
+// is sending is left to finish. Conversation-level rows stay too: they
+// carry no conversation content, and the answer to the /forget or
+// withdrawal itself is one of them.
 func deletePAOutboxNotices(ctx context.Context, tx *sql.Tx, principal int64) error {
 	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM pa_outbox WHERE principal = $1 AND status = $2 AND kind <> $3`,
+		`DELETE FROM pa_outbox WHERE principal = $1 AND status = $2 AND kind <> $3 AND job_id IS NOT NULL`,
 		principal, string(jobs.OutboxPending), string(jobs.OutboxReply)); err != nil {
 		return fmt.Errorf("forget pa outbox notices: %w", err)
 	}

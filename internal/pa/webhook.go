@@ -88,6 +88,10 @@ type WebhookConfig struct {
 	Counter Counter
 	// Failures caps redelivery of a failing update. Required.
 	Failures FailureRecorder
+	// AfterCommit, if set, runs once an update's transaction committed,
+	// with its principal: the server starts delivering the outbox rows
+	// the update queued (RunLoop.DeliverAfter, #1348). It must not block.
+	AfterCommit func(ctx context.Context, p Principal)
 }
 
 // webhook is the PA bot's webhook endpoint.
@@ -97,6 +101,7 @@ type webhook struct {
 	handler   Handler
 	counter   Counter
 	failures  FailureRecorder
+	after     func(context.Context, Principal)
 }
 
 // ErrWebhookConfig reports an unusable WebhookConfig. It never contains the
@@ -114,6 +119,7 @@ func NewWebhookHandler(cfg WebhookConfig) (http.Handler, error) {
 		handler:   cfg.Handler,
 		counter:   cfg.Counter,
 		failures:  cfg.Failures,
+		after:     cfg.AfterCommit,
 	}, nil
 }
 
@@ -176,6 +182,9 @@ func (h *webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	default:
 		h.count(OutcomeAccepted)
+		if h.after != nil {
+			h.after(r.Context(), u.Principal())
+		}
 		w.WriteHeader(http.StatusOK)
 	}
 }

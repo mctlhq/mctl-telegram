@@ -52,10 +52,11 @@ const (
 )
 
 // ReplyQueue records a reply in the update's transaction, so it is sent
-// only if the state change it describes committed. button is the opaque
-// callback_data of the reply's single button, or "".
+// only if the state change it describes committed. updateID is the update
+// that owes it; button is the opaque callback_data of the reply's single
+// button, or "". *OutboxReplies is the production queue.
 type ReplyQueue interface {
-	QueueReply(ctx context.Context, tx *sql.Tx, p Principal, r Reply, button string) error
+	QueueReply(ctx context.Context, tx *sql.Tx, p Principal, updateID int64, r Reply, button string) error
 }
 
 // RunRequest is what the conversation layer hands the run loop: the
@@ -118,7 +119,9 @@ type ConversationsConfig struct {
 	// Runs is the run loop; nil until slice (d1), in which case accepted
 	// messages are stored and nothing runs.
 	Runs RunEnqueuer
-	// Replies is optional until slice (c) provides the sender.
+	// Replies queues the conversation's own answers (*OutboxReplies in
+	// production, #1348). Without it no consent prompt is ever sent, so
+	// nobody can consent and nothing runs.
 	Replies ReplyQueue
 	// Limiter is the per-principal rate window. Required with Runs: a run
 	// loop without a rate limit is refused.
@@ -179,7 +182,7 @@ func (c *Conversations) HandleUpdate(ctx context.Context, tx *sql.Tx, u Verified
 		}
 		if !d.Allowed {
 			if d.Notify {
-				return c.reply(ctx, tx, p, ReplyRateLimited, "")
+				return c.reply(ctx, tx, u, ReplyRateLimited, "")
 			}
 			return nil
 		}
@@ -198,19 +201,19 @@ func (c *Conversations) handleMessage(ctx context.Context, tx *sql.Tx, u Verifie
 	p := u.Principal()
 	frags := u.Fragments()
 	if cmd, arg, ok := userCommand(frags); ok {
-		return c.handleCommand(ctx, tx, p, cmd, arg)
+		return c.handleCommand(ctx, tx, u, cmd, arg)
 	}
 	// Size before anything is stored (S1-R1): a part over the Telegram
 	// maximum is refused whole, not cut.
 	for _, f := range frags {
 		if text, _ := f.Text(); utf16Len(text) > jobs.MaxMessageChars {
-			return c.reply(ctx, tx, p, ReplyMessageTooLong, "")
+			return c.reply(ctx, tx, u, ReplyMessageTooLong, "")
 		}
 	}
 	// Consent first: without it nothing is stored and nothing runs (S1-N1).
 	version, err := c.requireConsent(ctx, tx, p)
 	if errors.Is(err, ErrConsentRequired) {
-		return c.prompt(ctx, tx, p)
+		return c.prompt(ctx, tx, u)
 	}
 	if err != nil {
 		return err
@@ -249,31 +252,32 @@ func (c *Conversations) handleMessage(ctx context.Context, tx *sql.Tx, u Verifie
 	})
 }
 
-func (c *Conversations) handleCommand(ctx context.Context, tx *sql.Tx, p Principal, cmd, arg string) error {
+func (c *Conversations) handleCommand(ctx context.Context, tx *sql.Tx, u VerifiedUpdate, cmd, arg string) error {
+	p := u.Principal()
 	switch cmd {
 	case CommandNew:
 		if err := c.store.ClosePAConversations(ctx, tx, p.TelegramID(), c.now()); err != nil {
 			return err
 		}
-		return c.reply(ctx, tx, p, ReplyNewConversation, "")
+		return c.reply(ctx, tx, u, ReplyNewConversation, "")
 	case CommandForget:
 		if err := c.store.ForgetPAConversations(ctx, tx, p.TelegramID()); err != nil {
 			return err
 		}
-		return c.reply(ctx, tx, p, ReplyForgotten, "")
+		return c.reply(ctx, tx, u, ReplyForgotten, "")
 	case CommandConsent:
 		switch arg {
 		case "withdraw":
 			if err := c.store.WithdrawPAConsent(ctx, tx, p.TelegramID(), c.now()); err != nil {
 				return err
 			}
-			return c.reply(ctx, tx, p, ReplyConsentWithdrawn, "")
+			return c.reply(ctx, tx, u, ReplyConsentWithdrawn, "")
 		default:
 			// Anything else, "/consent accept" included, shows the text
 			// with its button: consent is recorded only from a button bound
 			// to the text the principal was shown (T13), never from typed
 			// words that need not follow any prompt.
-			return c.prompt(ctx, tx, p)
+			return c.prompt(ctx, tx, u)
 		}
 	}
 	return fmt.Errorf("pa: unhandled command %q", cmd)
@@ -285,7 +289,7 @@ func (c *Conversations) handleCallback(ctx context.Context, tx *sql.Tx, u Verifi
 	if errors.Is(err, convo.ErrNotFound) {
 		// Unknown, expired, already used, or another principal's id: the
 		// lookup is under (principal, id), so all four look the same.
-		return c.reply(ctx, tx, p, ReplyUnknownButton, "")
+		return c.reply(ctx, tx, u, ReplyUnknownButton, "")
 	}
 	if err != nil {
 		return err
@@ -294,35 +298,36 @@ func (c *Conversations) handleCallback(ctx context.Context, tx *sql.Tx, u Verifi
 		// An action this build does not know: the id is consumed and the
 		// press answered, never an error, which would roll the consume back
 		// and have Telegram redeliver the update forever.
-		return c.reply(ctx, tx, p, ReplyUnknownButton, "")
+		return c.reply(ctx, tx, u, ReplyUnknownButton, "")
 	}
 	if action != consentAcceptAction() {
 		// The text changed after the prompt was shown: ask again.
-		if err := c.reply(ctx, tx, p, ReplyConsentStale, ""); err != nil {
+		if err := c.reply(ctx, tx, u, ReplyConsentStale, ""); err != nil {
 			return err
 		}
-		return c.prompt(ctx, tx, p)
+		return c.prompt(ctx, tx, u)
 	}
 	if err := c.store.AcceptPAConsent(ctx, tx, p.TelegramID(), convo.ConsentVersion, convo.ConsentTextSHA256(), c.now()); err != nil {
 		return err
 	}
-	return c.reply(ctx, tx, p, ReplyConsentAccepted, "")
+	return c.reply(ctx, tx, u, ReplyConsentAccepted, "")
 }
 
 // prompt issues a consent button bound to the current version and text.
-func (c *Conversations) prompt(ctx context.Context, tx *sql.Tx, p Principal) error {
+func (c *Conversations) prompt(ctx context.Context, tx *sql.Tx, u VerifiedUpdate) error {
+	p := u.Principal()
 	id := newOpaqueID()
 	if err := c.store.CreatePACallback(ctx, tx, p.TelegramID(), id, consentAcceptAction(), c.now().Add(ConsentPromptTTL)); err != nil {
 		return err
 	}
-	return c.reply(ctx, tx, p, ReplyConsentPrompt, id)
+	return c.reply(ctx, tx, u, ReplyConsentPrompt, id)
 }
 
-func (c *Conversations) reply(ctx context.Context, tx *sql.Tx, p Principal, r Reply, button string) error {
+func (c *Conversations) reply(ctx context.Context, tx *sql.Tx, u VerifiedUpdate, r Reply, button string) error {
 	if c.replies == nil {
 		return nil
 	}
-	return c.replies.QueueReply(ctx, tx, p, r, button)
+	return c.replies.QueueReply(ctx, tx, u.Principal(), u.UpdateID(), r, button)
 }
 
 // requireConsent returns the consent version p agreed to, ErrConsentRequired,
