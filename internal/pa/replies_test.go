@@ -45,7 +45,10 @@ func newOutboxRepliesHarness(t *testing.T, store *db.Store, replies func(ReplyQu
 	}
 	h.hook, err = NewWebhookHandler(WebhookConfig{
 		Secret: testSecret, Dedup: store, Handler: h.conv, Failures: store,
-		AfterCommit: func(ctx context.Context, p Principal) { h.loop.DeliverAfter(ctx, p.TelegramID()) },
+		AfterCommit: func(ctx context.Context, u VerifiedUpdate) {
+			h.loop.DeliverAfter(ctx, u.Principal().TelegramID())
+			h.loop.AnswerCallbackAfter(ctx, u)
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

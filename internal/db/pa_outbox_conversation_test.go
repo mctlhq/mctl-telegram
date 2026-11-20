@@ -44,12 +44,28 @@ func runPAOutboxConversationSuite(t *testing.T, s *Store) {
 		if n := len(outboxRows(t, s, paAlice)); n != 0 {
 			t.Fatalf("%d rows survived a rolled-back transaction", n)
 		}
-		outboxEnqueue(t, s, now, true,
+		tx, err := s.DB.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, it := range []jobs.OutboxItem{
 			convReply(paAlice, u, jobs.OutboxConsentStale, ""),
 			convReply(paAlice, u, jobs.OutboxConsentPrompt, "btn-a"),
-			convReply(paAlice, u, jobs.OutboxConsentPrompt, "btn-a"),
-			// The same update id of another principal is another key.
-			convReply(paBob, u, jobs.OutboxConsentPrompt, "btn-b"))
+			// Same principal, update and kind: nothing is written, and
+			// the conflict is reported, not swallowed (update id reuse).
+			convReply(paAlice, u, jobs.OutboxConsentPrompt, "btn-a2"),
+			// The same update id of another principal is another key;
+			// the transaction is still usable after the conflict.
+			convReply(paBob, u, jobs.OutboxConsentPrompt, "btn-b"),
+		} {
+			err := s.EnqueuePAOutbox(ctx, tx, it, now)
+			if want := i == 2; want != errors.Is(err, jobs.ErrOutboxUpdateReused) || (!want && err != nil) {
+				t.Fatalf("enqueue %d = %v", i, err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
 		rows := outboxRows(t, s, paAlice)
 		if len(rows) != 2 || rows[0].Kind != jobs.OutboxConsentStale || rows[1].Kind != jobs.OutboxConsentPrompt {
 			t.Fatalf("alice rows = %+v", rows)
@@ -231,8 +247,19 @@ func checkPre1348Migration(t *testing.T, conn *sql.DB, pg bool) {
 	now := time.UnixMilli(2000)
 	outboxEnqueue(t, s, now, true,
 		notice(555, 42, jobs.OutboxRunFailed), notice(555, 42, jobs.OutboxRunFailed),
-		convReply(555, 7, jobs.OutboxConsentPrompt, "btn"), convReply(555, 7, jobs.OutboxConsentPrompt, "btn"),
+		convReply(555, 7, jobs.OutboxConsentPrompt, "btn"),
 		convReply(555, 7, jobs.OutboxForgotten, ""), convReply(555, 8, jobs.OutboxForgotten, ""))
+	// The conversation key holds on the migrated table: a second row for
+	// the same principal, update and kind is refused and reported.
+	tx, err := s.DB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = s.EnqueuePAOutbox(ctx, tx, convReply(555, 7, jobs.OutboxConsentPrompt, "btn"), now)
+	_ = tx.Rollback()
+	if !errors.Is(err, jobs.ErrOutboxUpdateReused) {
+		t.Fatalf("duplicate conversation row = %v, want ErrOutboxUpdateReused", err)
+	}
 	rows, err = s.PAOutboxRows(ctx, 555)
 	if err != nil {
 		t.Fatal(err)

@@ -71,6 +71,9 @@ type RunLoopStore interface {
 	convo.Store
 	AdmitPAMessage(ctx context.Context, tx *sql.Tx, principal int64, now time.Time, limit int, window time.Duration) (jobs.RateDecision, error)
 	PAConversationOpen(ctx context.Context, tx *sql.Tx, principal int64, conversationID string, now time.Time) error
+	// PACallbackExpiry returns when a callback id stops resolving, or
+	// convo.ErrNotFound when it does not resolve at all.
+	PACallbackExpiry(ctx context.Context, principal int64, id string) (time.Time, error)
 }
 
 // BotSender sends a rendered message (*output.Sender). SendFrom resumes a
@@ -79,6 +82,9 @@ type RunLoopStore interface {
 // reached Telegram.
 type BotSender interface {
 	SendFrom(ctx context.Context, chatID int64, text output.Text, kb output.Keyboard, from int, sent func(delivered int) error) error
+	// AnswerCallback answers a callback query (answerCallbackQuery), so the
+	// client stops the spinner on the pressed button.
+	AnswerCallback(ctx context.Context, callbackQueryID string, notice output.Template) error
 }
 
 // PoolAuthenticator authenticates the worker pool (*localjwt.PoolProvider).
@@ -129,6 +135,9 @@ type RunLoopConfig struct {
 	Now   func() time.Time
 	// Metrics counts outbox outcomes. Optional.
 	Metrics OutboxCounter
+	// CallbackMetrics counts callback answers (AnswerCallbackAfter).
+	// Optional.
+	CallbackMetrics CallbackCounter
 }
 
 // RunLoop serves the run-loop routes and implements RunEnqueuer and
@@ -146,6 +155,7 @@ type RunLoop struct {
 	lease    time.Duration
 	now      func() time.Time
 	metrics  OutboxCounter
+	cbCount  CallbackCounter
 	// pending tracks the deliveries request paths started (deliverAfter).
 	pending sync.WaitGroup
 	// readTools is every tool the pin admits without approval, as
@@ -195,7 +205,7 @@ func NewRunLoop(cfg RunLoopConfig) (*RunLoop, error) {
 	return &RunLoop{
 		store: cfg.Store, sealer: cfg.Sealer, pool: cfg.Pool, minter: cfg.Minter, verifier: cfg.Verifier,
 		sender: cfg.Sender, tools: cfg.Tools, limits: cfg.Limits, budget: cfg.Budget, lease: lease, now: now,
-		readTools: read, metrics: cfg.Metrics,
+		readTools: read, metrics: cfg.Metrics, cbCount: cfg.CallbackMetrics,
 	}, nil
 }
 

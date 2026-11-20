@@ -50,6 +50,29 @@ type sendRecorder struct {
 	// before runs outside the lock before each part (1-based); it can
 	// block, cancel or fail the part.
 	before func(ctx context.Context, chat int64, part int) error
+	// answered has one entry per callback answer that succeeded;
+	// answerFail fails every answer.
+	answered   []string
+	answerFail error
+}
+
+func (s *sendRecorder) AnswerCallback(_ context.Context, id string, notice output.Template) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.answerFail != nil {
+		return s.answerFail
+	}
+	if notice != (output.Template{}) {
+		return errors.New("sendRecorder: a callback answer with a notice")
+	}
+	s.answered = append(s.answered, id)
+	return nil
+}
+
+func (s *sendRecorder) answers() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.answered...)
 }
 
 func (s *sendRecorder) SendFrom(ctx context.Context, chatID int64, t output.Text, kb output.Keyboard, from int, sent func(int) error) error {

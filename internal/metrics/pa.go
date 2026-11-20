@@ -15,7 +15,14 @@ var PAWebhookProblems = []string{"url_changed", "allowed_updates_changed", "deli
 
 // PAOutboxOutcomes is the closed outcome label set of mctl_pa_outbox_total
 // (the pa.OutboxOutcome* constants).
-var PAOutboxOutcomes = []string{"sent", "retry", "failed", "refused", "dropped", "unknown", "stale", "claim_error"}
+var PAOutboxOutcomes = []string{
+	"sent", "retry", "failed", "refused", "dropped", "unknown", "stale", "claim_error",
+	"button_expired", "update_reused",
+}
+
+// PACallbackAnswerOutcomes is the closed outcome label set of
+// mctl_pa_callback_answers_total (the pa.CallbackAnswer* constants).
+var PACallbackAnswerOutcomes = []string{"answered", "failed"}
 
 // PAUpdateOutcomes is the closed outcome label set of
 // mctl_pa_updates_total (the pa.Outcome* constants of the webhook).
@@ -29,6 +36,7 @@ var PAUpdateOutcomes = []string{
 type paCollectors struct {
 	updates *prometheus.CounterVec
 	outbox  *prometheus.CounterVec
+	answers *prometheus.CounterVec
 	checks  *prometheus.CounterVec
 	// problemChecks counts readable checks per problem found. The problem
 	// gauge holds the last check's value until the next one, so its
@@ -54,7 +62,11 @@ func newPACollectors() *paCollectors {
 		}, []string{"outcome"}),
 		outbox: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mctl_pa_outbox_total",
-			Help: "PA outbox rows by delivery outcome. unknown: a row outlived its send lease and is not resent; claim_error: the outbox could not be read.",
+			Help: "PA outbox rows by delivery outcome. unknown: a row outlived its send lease and is not resent; claim_error: the outbox could not be read; button_expired: a consent prompt not sent because its button no longer resolves; update_reused: a reply not queued because a row for the same update id and kind exists.",
+		}, []string{"outcome"}),
+		answers: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "mctl_pa_callback_answers_total",
+			Help: "PA answerCallbackQuery calls after a button press committed, by outcome: answered or failed (best effort, never retried).",
 		}, []string{"outcome"}),
 		checks: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mctl_pa_webhook_info_checks_total",
@@ -95,6 +107,9 @@ func newPACollectors() *paCollectors {
 	for _, o := range PAOutboxOutcomes {
 		c.outbox.WithLabelValues(o).Add(0)
 	}
+	for _, o := range PACallbackAnswerOutcomes {
+		c.answers.WithLabelValues(o).Add(0)
+	}
 	for _, r := range []string{"ok", "problem", "unreadable"} {
 		c.checks.WithLabelValues(r).Add(0)
 	}
@@ -102,7 +117,7 @@ func newPACollectors() *paCollectors {
 }
 
 func (c *paCollectors) collectors() []prometheus.Collector {
-	return []prometheus.Collector{c.updates, c.outbox, c.checks, c.problemChecks, c.up, c.ok, c.lastOK, c.problem, c.pending, c.lastErr}
+	return []prometheus.Collector{c.updates, c.outbox, c.answers, c.checks, c.problemChecks, c.up, c.ok, c.lastOK, c.problem, c.pending, c.lastErr}
 }
 
 // CountPAUpdate counts one webhook delivery. Satisfies pa.Counter.
@@ -113,6 +128,12 @@ func (r *Registry) CountPAUpdate(outcome string) {
 // CountPAOutbox counts one outbox outcome. Satisfies pa.OutboxCounter.
 func (r *Registry) CountPAOutbox(outcome string) {
 	r.pa.outbox.WithLabelValues(outcome).Inc()
+}
+
+// CountPACallbackAnswer counts one callback answer. Satisfies
+// pa.CallbackCounter.
+func (r *Registry) CountPACallbackAnswer(outcome string) {
+	r.pa.answers.WithLabelValues(outcome).Inc()
 }
 
 // ObservePAWebhookInfo exports one getWebhookInfo check. Satisfies

@@ -164,20 +164,31 @@ func rebuildSQLitePAOutbox(ctx context.Context, dbConn migrateDB) error {
 }
 
 // enqueuePAOutbox inserts item in tx, once per (job, kind) for a job-level
-// row and once per (principal, update, kind) for a conversation-level one.
+// row and once per (principal, update, kind) for a conversation-level one;
+// a conversation-level conflict returns jobs.ErrOutboxUpdateReused.
 func enqueuePAOutbox(ctx context.Context, tx *sql.Tx, item jobs.OutboxItem, nowMS int64) error {
 	if tx == nil || !item.Valid() {
 		return fmt.Errorf("%w: outbox item", jobs.ErrInvalid)
 	}
 	if item.Kind.ConversationLevel() {
-		if _, err := tx.ExecContext(ctx,
+		r, err := tx.ExecContext(ctx,
 			`INSERT INTO pa_outbox(principal, job_id, update_id, kind, button, status, attempts,
 			                       next_at_ms, created_at_ms, updated_at_ms)
 			 VALUES($1, NULL, $2, $3, $4, $5, 0, $6, $6, $6)
 			 ON CONFLICT (principal, update_id, kind) WHERE job_id IS NULL DO NOTHING`,
 			item.Principal, item.UpdateID, string(item.Kind), item.Button,
-			string(jobs.OutboxPending), nowMS); err != nil {
+			string(jobs.OutboxPending), nowMS)
+		if err != nil {
 			return fmt.Errorf("pa outbox: enqueue: %w", err)
+		}
+		n, err := r.RowsAffected()
+		if err != nil {
+			// Not knowing whether the row was written is an error, never
+			// "written".
+			return fmt.Errorf("pa outbox: enqueue: rows affected: %w", err)
+		}
+		if n == 0 {
+			return jobs.ErrOutboxUpdateReused
 		}
 		return nil
 	}

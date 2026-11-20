@@ -243,11 +243,19 @@ type OutboxCompletion struct {
 // lease ran out and it was marked unknown).
 var ErrOutboxStale = errors.New("pa outbox: row is not sending under this attempt")
 
+// ErrOutboxUpdateReused: a conversation-level row for the same principal,
+// update id and kind already exists, so nothing was written. The
+// transaction is still usable (the insert is ON CONFLICT DO NOTHING); the
+// caller decides whether that is fatal. OutboxReplies counts and logs it.
+var ErrOutboxUpdateReused = errors.New("pa outbox: a reply for this update id and kind already exists")
+
 // OutboxStore is the persistence contract of the outbox (*db.Store).
 type OutboxStore interface {
 	// EnqueuePAOutbox records item in tx, once per (job, kind) for a
 	// job-level row and once per (principal, update, kind) for a
-	// conversation-level one: a second enqueue of the same key is a no-op.
+	// conversation-level one. A second enqueue of a job-level key is a
+	// no-op; one of a conversation-level key writes nothing and returns
+	// ErrOutboxUpdateReused, so the lost reply can be counted.
 	EnqueuePAOutbox(ctx context.Context, tx *sql.Tx, item OutboxItem, now time.Time) error
 	// ClaimPAOutbox marks expired sending rows unknown, then claims due
 	// rows. Every failure is an error, never an empty result (I9).

@@ -420,6 +420,29 @@ func (s *Store) ConsumePACallback(ctx context.Context, tx *sql.Tx, principal int
 	return action, nil
 }
 
+// PACallbackExpiry returns when principal's callback id stops resolving.
+// convo.ErrNotFound means there is no such id for principal: consumed,
+// purged after it expired, deleted, or never issued. A failed read wraps
+// convo.ErrStoreFault and says nothing about the id. The outbox reads it
+// before sending a consent prompt, so a button that can no longer be
+// pressed is not sent (#1352 follow-up).
+func (s *Store) PACallbackExpiry(ctx context.Context, principal int64, id string) (time.Time, error) {
+	if principal <= 0 || id == "" {
+		return time.Time{}, fmt.Errorf("%w: callback", convo.ErrInvalid)
+	}
+	var expiresMS int64
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT expires_at_ms FROM pa_callbacks WHERE principal = $1 AND id = $2`,
+		principal, id).Scan(&expiresMS)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, convo.ErrNotFound
+	}
+	if err != nil {
+		return time.Time{}, storeFault("callback expiry", err)
+	}
+	return time.UnixMilli(expiresMS).UTC(), nil
+}
+
 // PurgeUnmarkedPAState implements convo.Store: the "purge on enable" of T5.
 // It removes every fragment this build cannot decode: one without a known
 // provenance mark, or one of a kind it does not know.
