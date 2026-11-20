@@ -80,6 +80,14 @@ type UserText struct {
 // AllowFromUserText collects the link tokens of the given user-provenance
 // texts. Render keeps a token only when it is exactly one of these: a user
 // host is not enough, because a query string can be appended.
+//
+// The texts are normalised but not stripped of markup, so tokens are cut
+// from what the principal literally typed. A link they wrote as Markdown,
+// "[docs](https://a.example/x)", yields the token
+// "docs](https://a.example/x)", which no rendered URL equals: the model's
+// copy of that URL is defanged. That fails closed. Stripping first would
+// let markup removal join characters into a token the principal never
+// typed ("a.example/<b>x" becomes "a.example/x"), so it is not done.
 func AllowFromUserText(texts ...string) UserText {
 	u := UserText{tokens: map[string]struct{}{}}
 	for _, t := range texts {
@@ -96,8 +104,10 @@ func (u UserText) allows(tok string) bool {
 	return ok
 }
 
-// Render turns model-authored text into Text. It never fails: whatever it
-// cannot prove safe is neutralised, not passed through.
+// Render turns model-authored text into Text. Whatever it cannot prove
+// safe is neutralised, not passed through. Its only error is ErrTooLong,
+// for text that needs more than MaxParts messages; the caller must handle
+// it (outbox sends TextReplyTooLong instead).
 //
 //  1. normalise: Unicode format characters (Cf: zero-width, bidi) and
 //     control characters other than newline are removed, and tabs and every

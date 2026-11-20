@@ -17,6 +17,7 @@ package safetext
 import (
 	"errors"
 	"math/rand"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -405,5 +406,38 @@ func TestS1O2_PartsCap(t *testing.T) {
 	// Exactly MaxParts full parts is allowed.
 	if txt, err := Render(strings.Repeat("y", MaxParts*MaxPartUTF16), UserText{}); err != nil || len(txt.parts) != MaxParts {
 		t.Errorf("MaxParts parts: got %d, %v", len(txt.parts), err)
+	}
+}
+
+// A ~1 MB reply is refused before any of the passes runs: the size check
+// comes first, so the work is one length count, not copies of the input.
+// The allocation bound is what fails if the check is removed; the
+// ErrTooLong alone would not, since fit refuses the text later anyway.
+func TestS1O2_HugeInputRefusedUpfront(t *testing.T) {
+	for _, in := range []string{
+		strings.Repeat("y", 1<<20),
+		strings.Repeat("see a.example/x ", 1<<16),
+		strings.Repeat("<b>**[x](https://a.example)**</b> ", 1<<15),
+	} {
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		txt, err := Render(in, UserText{})
+		runtime.ReadMemStats(&after)
+		if !errors.Is(err, ErrTooLong) || txt.Parts() != 0 {
+			t.Fatalf("%d bytes: want ErrTooLong and no parts, got %d parts, %v", len(in), txt.Parts(), err)
+		}
+		if grew := after.TotalAlloc - before.TotalAlloc; grew > 64<<10 {
+			t.Errorf("%d bytes: Render allocated %d bytes before refusing; the size check must come first", len(in), grew)
+		}
+	}
+}
+
+// AllowFromUserText cuts tokens from the literal user text, markup
+// included, so a URL the principal wrote as a Markdown link is not
+// allowed on its own: the model's copy of it is defanged (fails closed).
+func TestAllowFromUserTextKeepsMarkup(t *testing.T) {
+	allow := AllowFromUserText("read [docs](https://a.example/x) please")
+	if got := mustRender(t, "see https://a.example/x", allow).String(); got != "see https[:]//a[.]example/x" {
+		t.Errorf("got %q, want the URL defanged", got)
 	}
 }

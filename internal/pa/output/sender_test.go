@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -177,7 +178,7 @@ func TestSendRefusesBadInput(t *testing.T) {
 	if err := s.sendParts(ctx, aliceChat, []string{strings.Repeat("z", safetext.MaxPartUTF16+1)}, nil, 0, nil); !errors.Is(err, ErrPartTooLong) {
 		t.Errorf("oversize part: %v", err)
 	}
-	if err := s.sendParts(ctx, aliceChat, make([]string, safetext.MaxParts+1), nil, 0, nil); !errors.Is(err, safetext.ErrTooLong) {
+	if err := s.sendParts(ctx, aliceChat, slices.Repeat([]string{"x"}, safetext.MaxParts+1), nil, 0, nil); !errors.Is(err, safetext.ErrTooLong) {
 		t.Errorf("over MaxParts: %v", err)
 	}
 	for _, kb := range []Keyboard{
