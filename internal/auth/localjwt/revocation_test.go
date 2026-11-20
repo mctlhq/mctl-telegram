@@ -198,7 +198,12 @@ func TestRevocationCache_StaleRefreshErrorServesLastKnownGood(t *testing.T) {
 	if err := store.RevokeWorkerToken(ctx, "jti-c", 1, "", 0); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	cache := NewRevocationCache(store, time.Minute)
+	// A TTL below MaxRevocationSnapshotAge leaves a window that is stale
+	// (a refresh is attempted) but within the bound; time.Minute would be
+	// clamped to 15s and never go stale inside it.
+	cache := NewRevocationCache(store, DefaultRevocationCacheTTL)
+	failures := 0
+	cache.SetRefreshErrorHook(func() { failures++ })
 	if revoked, err := cache.IsRevoked(ctx, "jti-c", 1, time.Now()); err != nil || !revoked {
 		t.Fatalf("initial populate should see jti-c revoked: revoked=%v err=%v", revoked, err)
 	}
@@ -216,6 +221,9 @@ func TestRevocationCache_StaleRefreshErrorServesLastKnownGood(t *testing.T) {
 	}
 	if !revoked {
 		t.Fatal("last-known-good snapshot lost jti-c")
+	}
+	if failures != 1 {
+		t.Fatalf("refresh failures = %d, want 1: the check must have attempted a refresh and failed", failures)
 	}
 }
 
