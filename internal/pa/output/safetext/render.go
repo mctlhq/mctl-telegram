@@ -106,17 +106,24 @@ func (u UserText) allows(tok string) bool {
 //     below a subset of its own.
 //  2. Markup is stripped: HTML tags and comments, Markdown links and images
 //     (rewritten to "label (target)"), and the paired emphasis, strike,
-//     spoiler and code markers. Sender never sets parse_mode, so this is for
-//     readability; the security property is step 3, which runs last.
+//     spoiler and code markers, again until none is left (stripMarkup).
+//     Sender never sets parse_mode, so this is for readability; the
+//     security property is step 3, which runs last.
 //  3. Every link token not exactly present in allow is defanged (see
 //     findCandidates and neutralise).
 //  4. The text is cut into Bot API sized parts and step 3 runs again on each
 //     part, so a cut cannot leave a live piece of a token (fit).
 //
-// Render is idempotent: rendering its own output changes nothing. Text that
-// would need more than MaxParts messages is refused with ErrTooLong, never
-// truncated, so injected content cannot flood the principal's chat or push
-// the bot into flood waits, and a cut can never fall inside a token.
+// For text that fits one message, Render is idempotent: rendering its own
+// output changes nothing (TestS1O2_RenderIsIdempotent, FuzzRender). Text
+// cut into several messages is not promised to be: a second Render cuts
+// the joined parts again, possibly elsewhere, though its output is just as
+// neutralised.
+//
+// Text that would need more than MaxParts messages is refused with
+// ErrTooLong, never truncated, so injected content cannot flood the
+// principal's chat or push the bot into flood waits, and a cut can never
+// fall inside a token.
 func Render(model string, allow UserText) (Text, error) {
 	// Each part holds at most MaxPartUTF16 units, so longer input cannot
 	// fit; refusing it first also bounds the work below.
@@ -197,11 +204,61 @@ var (
 	mdMarkers = regexp.MustCompile("\\*\\*|__|~~|\\|\\||`+")
 )
 
+// maxStripPasses bounds how often stripMarkup re-runs. Removing one piece
+// of markup can join the text around it into another ("<**b>" becomes
+// "<b>", "*`*" becomes "**"), so a single pass is not a fixpoint. Real text
+// settles in one or two passes; text nested deeper than this is treated as
+// hostile and handled by breakMarkup.
+const maxStripPasses = 4
+
+// stripMarkup strips markup until nothing more matches, so that its result
+// holds no markup (and a second Render finds none). If maxStripPasses do
+// not reach that point, breakMarkup removes what is left.
 func stripMarkup(s string) string {
+	for range maxStripPasses {
+		next := stripOnce(s)
+		if next == s {
+			return s
+		}
+		s = next
+	}
+	if next := stripOnce(s); next != s {
+		return breakMarkup(next)
+	}
+	return s
+}
+
+// breakMarkup makes s free of markup in one step, for text that is still
+// changing after maxStripPasses: it drops every character that starts a
+// tag or a paired marker (< * _ ~ | and the backtick), then puts a space
+// in every "](" so no Markdown link remains. Deleting characters cannot
+// create a "<" or a marker pair, and the "](" pass runs last, so the
+// result is a fixpoint of stripOnce. It loses those characters, which only
+// deliberately nested markup pays for.
+func breakMarkup(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if strings.ContainsRune("<*_~|`", r) {
+			return -1
+		}
+		return r
+	}, s)
+	return strings.ReplaceAll(s, "](", "] (")
+}
+
+// defangLabels are the labels of the "[x]" forms defang writes. A defanged
+// dot, colon or @ followed by "(" reads as a Markdown link ("[.](x)");
+// rewriting it would undo the defang in a second Render, so it is left as
+// it is. The link pass that runs after stripMarkup still neutralises x.
+var defangLabels = map[string]bool{".": true, ":": true, "@": true}
+
+func stripOnce(s string) string {
 	s = htmlComment.ReplaceAllString(s, "")
 	s = htmlTag.ReplaceAllString(s, "")
 	s = mdLink.ReplaceAllStringFunc(s, func(m string) string {
 		sub := mdLink.FindStringSubmatch(m)
+		if defangLabels[sub[1]] {
+			return m
+		}
 		label, target := strings.TrimSpace(sub[1]), strings.TrimSpace(sub[2])
 		switch {
 		case target == "":
