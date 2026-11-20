@@ -100,7 +100,7 @@ func paJobsSchema(pg bool) []string {
 	}
 }
 
-func migratePAJobs(ctx context.Context, dbConn *sql.DB, pg bool) error {
+func migratePAJobs(ctx context.Context, dbConn migrateDB, pg bool) error {
 	for _, s := range paJobsSchema(pg) {
 		if _, err := dbConn.ExecContext(ctx, s); err != nil {
 			return fmt.Errorf("migrate pa jobs: %w", err)

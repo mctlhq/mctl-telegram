@@ -92,7 +92,7 @@ func paConvoSchema(pg bool) []string {
 	}
 }
 
-func migratePAConvo(ctx context.Context, dbConn *sql.DB, pg bool) error {
+func migratePAConvo(ctx context.Context, dbConn migrateDB, pg bool) error {
 	for _, s := range paConvoSchema(pg) {
 		if _, err := dbConn.ExecContext(ctx, s); err != nil {
 			return fmt.Errorf("migrate pa conversation state: %w", err)
