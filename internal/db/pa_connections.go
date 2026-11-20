@@ -56,7 +56,7 @@ func paConnectionsSchema(pg bool) []string {
 	}
 }
 
-func migratePAConnections(ctx context.Context, dbConn *sql.DB, pg bool) error {
+func migratePAConnections(ctx context.Context, dbConn migrateDB, pg bool) error {
 	for _, s := range paConnectionsSchema(pg) {
 		if _, err := dbConn.ExecContext(ctx, s); err != nil {
 			return fmt.Errorf("migrate pa_connections: %w", err)

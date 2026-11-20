@@ -49,7 +49,23 @@ const (
 	// OutboxOutcomeClaimError: the outbox could not be read. Nothing was
 	// sent, and the rows stay due.
 	OutboxOutcomeClaimError = "claim_error"
+	// OutboxOutcomeButtonExpired: a consent prompt held back (flood waits,
+	// an outage) until its button would no longer resolve when pressed.
+	// It is dropped unsent; the principal's next message gets a fresh one.
+	OutboxOutcomeButtonExpired = "button_expired"
+	// OutboxOutcomeUpdateReused: a conversation-level reply was not queued
+	// because a row for the same principal, update id and kind already
+	// exists. The update dedup should have refused such an update first,
+	// so this means Telegram reused an update id (it may after a week
+	// without updates) or a handler queued one kind twice. Counted at
+	// enqueue, not delivery; the reply is not sent.
+	OutboxOutcomeUpdateReused = "update_reused"
 )
+
+// outboxButtonMinLife is how long a consent prompt's button must still
+// resolve when the prompt is sent. A prompt whose button expires sooner
+// would be pressed into "no longer valid", so it is dropped instead.
+const outboxButtonMinLife = 5 * time.Minute
 
 // outboxTemplates maps every notice kind, job-level and conversation-level
 // (#1348), to its server text.
@@ -210,6 +226,21 @@ func (l *RunLoop) sendItem(ctx context.Context, it jobs.OutboxItem) (jobs.Outbox
 		// completion was lost.
 		return jobs.OutboxCompletion{Now: l.now(), Status: jobs.OutboxSent}, OutboxOutcomeSent
 	}
+	// Only a prompt that still has parts to send is checked: one delivered
+	// in full on an earlier attempt was sent, whatever its button became
+	// since (a press consumes it).
+	if it.Kind == jobs.OutboxConsentPrompt {
+		live, err := l.buttonLive(ctx, it, now)
+		if err != nil {
+			// Could not read the button: nothing is known about it and
+			// nothing was sent. It is due again.
+			slog.Warn("pa outbox prompt button not readable", "update_id", it.UpdateID, "err", err)
+			return l.retry(it, now, 0)
+		}
+		if !live {
+			return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxDropped}, OutboxOutcomeButtonExpired
+		}
+	}
 	err := l.sender.SendFrom(ctx, it.Principal, text, kb, it.SentParts, func(parts int) error {
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outboxRecordTimeout)
 		defer cancel()
@@ -221,6 +252,21 @@ func (l *RunLoop) sendItem(ctx context.Context, it jobs.OutboxItem) (jobs.Outbox
 		return nil
 	})
 	return l.sendOutcome(it, err)
+}
+
+// buttonLive reports whether a consent prompt's button still resolves for
+// at least outboxButtonMinLife. A button whose id is gone (consumed,
+// purged, never issued) is not live; a failed read is an error, never
+// either answer.
+func (l *RunLoop) buttonLive(ctx context.Context, it jobs.OutboxItem, now time.Time) (bool, error) {
+	expires, err := l.store.PACallbackExpiry(ctx, it.Principal, it.Button)
+	switch {
+	case errors.Is(err, convo.ErrNotFound):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	return expires.After(now.Add(outboxButtonMinLife)), nil
 }
 
 // sendOutcome classifies a send. Only a failure known to have left the

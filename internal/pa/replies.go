@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
@@ -46,6 +47,9 @@ type OutboxReplies struct {
 	Store ReplyOutbox
 	// Now defaults to time.Now.
 	Now func() time.Time
+	// Metrics counts a reply lost to a reused update id
+	// (OutboxOutcomeUpdateReused). Optional.
+	Metrics OutboxCounter
 }
 
 var _ ReplyQueue = (*OutboxReplies)(nil)
@@ -60,7 +64,20 @@ func (q *OutboxReplies) QueueReply(ctx context.Context, tx *sql.Tx, p Principal,
 	if q.Now != nil {
 		now = q.Now
 	}
-	return q.Store.EnqueuePAOutbox(ctx, tx, jobs.OutboxItem{
+	err := q.Store.EnqueuePAOutbox(ctx, tx, jobs.OutboxItem{
 		Principal: p.TelegramID(), UpdateID: updateID, Kind: kind, Button: button,
 	}, now())
+	if errors.Is(err, jobs.ErrOutboxUpdateReused) {
+		// The update dedup let an update through whose id already has this
+		// reply: Telegram reused the id, or one update queued a kind twice.
+		// The update itself stands (failing it would make Telegram
+		// redeliver it forever); the reply is not sent, and that is
+		// counted rather than silent.
+		slog.Warn("pa reply not queued: update id already has this reply", "update_id", updateID, "kind", string(kind))
+		if q.Metrics != nil {
+			q.Metrics.CountPAOutbox(OutboxOutcomeUpdateReused)
+		}
+		return nil
+	}
+	return err
 }

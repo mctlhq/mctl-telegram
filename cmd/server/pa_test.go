@@ -233,6 +233,20 @@ func TestBuildPA_WebhookRunsConversations(t *testing.T) {
 	if kind != "consent_prompt" || status != "sent" || update != 5001 {
 		t.Fatalf("outbox row = %s %s %d", kind, status, update)
 	}
+	if a := sent.answers(); len(a) != 0 {
+		t.Fatalf("a message update answered callbacks %v", a)
+	}
+	// Pressing the button: the wired AfterCommit answers the callback query
+	// so the client stops its spinner.
+	press := `{"update_id":5002,"callback_query":{"id":"cbq-wired","data":"` + button + `",` +
+		`"from":{"id":4242001,"is_bot":false},"message":{"message_id":9,"date":1,"chat":{"id":4242001,"type":"private"}}}}`
+	if code := postPAWebhook(mux, press); code != http.StatusOK {
+		t.Fatalf("press: status = %d, want 200", code)
+	}
+	rt.loop.WaitDeliveries()
+	if a := sent.answers(); !slices.Equal(a, []string{"cbq-wired"}) {
+		t.Fatalf("callback answers = %v, want [cbq-wired]", a)
+	}
 }
 
 type paSend struct {
@@ -242,8 +256,22 @@ type paSend struct {
 }
 
 type paSendRecorder struct {
-	mu   sync.Mutex
-	sent []paSend
+	mu       sync.Mutex
+	sent     []paSend
+	answered []string
+}
+
+func (r *paSendRecorder) AnswerCallback(_ context.Context, id string, _ output.Template) error {
+	r.mu.Lock()
+	r.answered = append(r.answered, id)
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *paSendRecorder) answers() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.answered...)
 }
 
 func (r *paSendRecorder) SendFrom(_ context.Context, chat int64, text output.Text, kb output.Keyboard, from int, done func(int) error) error {
@@ -338,6 +366,10 @@ func TestBuildPA_JobTokenRoundTrip(t *testing.T) {
 			`"from":{"id":%d,"is_bot":false,"first_name":"Bob"},"chat":{"id":%d,"type":"private"}}`, s, user, user))
 	}
 	text("hello")
+	// The prompt goes out before its button can be pressed, as it does for
+	// a real principal: a prompt whose callback is already gone when it
+	// comes due is not sent (button_expired).
+	rt.loop.WaitDeliveries()
 	var button string
 	if err := conn.QueryRowContext(context.Background(), `SELECT id FROM pa_callbacks WHERE principal = ?`, user).Scan(&button); err != nil {
 		t.Fatalf("consent callback: %v", err)

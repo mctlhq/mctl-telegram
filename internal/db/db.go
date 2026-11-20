@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
-	_ "github.com/jackc/pgx/v5/stdlib"
-	_ "modernc.org/sqlite"
+	"github.com/jackc/pgx/v5/stdlib"
+	"modernc.org/sqlite"
 )
 
 // driverFor inspects the DSN scheme and returns the database/sql driver name
@@ -73,14 +73,43 @@ func Open(ctx context.Context, dsn string, maxOpenConns, maxIdleConns int) (*sql
 //
 // Passing no ids re-arms every NULL row, which is exactly how an identity
 // dropped from the exemption list gets its TTL back.
+//
+// On Postgres every step runs on one connection that holds the
+// session-level advisory lock migrateLockKey (migrate_lock.go), so two
+// replicas starting together migrate one after the other.
 func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64) error {
-	// We re-probe by issuing one driver-specific NOOP. SQLite parses `SELECT 1`
-	// fine on both; we detect Postgres by `current_database()` which only
-	// exists there. Cleaner than threading the driver name through callers.
-	var pg bool
-	if err := dbConn.QueryRowContext(ctx, "SELECT 1 FROM pg_catalog.pg_database WHERE datname = current_database()").Scan(new(int)); err == nil {
-		pg = true
+	pg, err := dialectOf(dbConn)
+	if err != nil {
+		return err
 	}
+	if !pg {
+		// SQLite serves one process (MaxOpenConns 1): nothing to race.
+		return migrate(ctx, dbConn, false, ttlExemptTelegramIDs)
+	}
+	return withMigrateLock(ctx, dbConn, func(conn migrateDB) error {
+		return migrate(ctx, conn, true, ttlExemptTelegramIDs)
+	})
+}
+
+// dialectOf reports whether dbConn is a Postgres pool, from the driver Open
+// registered it with. It does no I/O, so it cannot mistake a failed read for
+// "not Postgres": an earlier SQL probe did, and a transient error on
+// Postgres then skipped the migration lock and ran the SQLite DDL. A driver
+// that is neither is an error, never a guess.
+func dialectOf(dbConn *sql.DB) (pg bool, err error) {
+	switch d := dbConn.Driver().(type) {
+	case *stdlib.Driver:
+		return true, nil
+	case *sqlite.Driver:
+		return false, nil
+	default:
+		return false, fmt.Errorf("migrate: unsupported database driver %T", d)
+	}
+}
+
+// migrate applies the schema on dbConn: the pool on SQLite, the locked
+// connection on Postgres.
+func migrate(ctx context.Context, dbConn migrateDB, pg bool, ttlExemptTelegramIDs []int64) error {
 	var stmts []string
 	if pg {
 		stmts = pgSchema()
@@ -575,14 +604,14 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 // already answered, so it goes instead. Dropping rather than leaving it is the
 // point: DESIGN.md described it as load-bearing, which is a live trap for the
 // next reader.
-func dropLegacyColumns(ctx context.Context, dbConn *sql.DB, pg bool) error {
+func dropLegacyColumns(ctx context.Context, dbConn migrateDB, pg bool) error {
 	return dropColumnIfPresent(ctx, dbConn, pg, "telegram_accounts", "bridge_token_hash")
 }
 
 // columnExists reports whether table already has column, in whichever dialect
 // is in play. Both catalogs are ordinary reads that take no table lock:
 // pg_attribute for Postgres and the pragma table for SQLite.
-func columnExists(ctx context.Context, dbConn *sql.DB, pg bool, table, column string) (bool, error) {
+func columnExists(ctx context.Context, dbConn migrateDB, pg bool, table, column string) (bool, error) {
 	q := `SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`
 	if pg {
 		// Resolved through to_regclass so the lookup lands on exactly the
@@ -632,7 +661,7 @@ func columnExists(ctx context.Context, dbConn *sql.DB, pg bool, table, column st
 // lock: two pods can boot together, both read "present", and both issue the
 // drop, and IF EXISTS is what makes the loser a no-op instead of an error that
 // crashloops it.
-func dropColumnIfPresent(ctx context.Context, dbConn *sql.DB, pg bool, table, column string) error {
+func dropColumnIfPresent(ctx context.Context, dbConn migrateDB, pg bool, table, column string) error {
 	present, err := columnExists(ctx, dbConn, pg, table, column)
 	if err != nil {
 		return err
@@ -655,7 +684,7 @@ func dropColumnIfPresent(ctx context.Context, dbConn *sql.DB, pg bool, table, co
 // natively; SQLite needs us to inspect pragma_table_info first and skip the
 // ALTER when the column is there. Used by Migrate() to fold post-launch
 // schema additions into a single idempotent pass.
-func addColumnIfMissing(ctx context.Context, dbConn *sql.DB, pg bool, table, column, pgType, sqliteType string) error {
+func addColumnIfMissing(ctx context.Context, dbConn migrateDB, pg bool, table, column, pgType, sqliteType string) error {
 	if pg {
 		stmt := fmt.Sprintf(
 			`ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s`,
@@ -711,7 +740,7 @@ func addColumnIfMissing(ctx context.Context, dbConn *sql.DB, pg bool, table, col
 // sqliteSourceDigestReferenced, which isSourceDigestFKViolation matches; the completeness trigger raises "CHECK
 // constraint failed", which nothing maps -- a half-set source_ref is a
 // programming error, not an operator refusal.
-func ensureCampaignSourceDigestFK(ctx context.Context, dbConn *sql.DB, pg bool) error {
+func ensureCampaignSourceDigestFK(ctx context.Context, dbConn migrateDB, pg bool) error {
 	var stmts []string
 	if pg {
 		stmts = []string{`DO $$

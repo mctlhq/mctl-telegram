@@ -99,7 +99,8 @@ func TestPAWebhookGauges_Problems(t *testing.T) {
 // first event after a restart is visible to increase().
 func TestPACounters_PreCreated(t *testing.T) {
 	f := paFamilies(t, New())
-	if f["mctl_pa_outbox_total"] != len(PAOutboxOutcomes) || f["mctl_pa_updates_total"] != len(PAUpdateOutcomes) {
+	if f["mctl_pa_outbox_total"] != len(PAOutboxOutcomes) || f["mctl_pa_updates_total"] != len(PAUpdateOutcomes) ||
+		f["mctl_pa_callback_answers_total"] != len(PACallbackAnswerOutcomes) {
 		t.Fatalf("families %v", f)
 	}
 }

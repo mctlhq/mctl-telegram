@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"time"
 )
@@ -25,7 +24,7 @@ const legacyHRRecruiterDigest = "sha256:715ac8851f4c7a0600d74a1a8acfdaa1c58bec3d
 // tg_update_state / tg_channel_state persist gotd's updates.Manager pts/qts
 // watermark so a restarted listener can recover missed updates via
 // getDifference instead of silently dropping them.
-func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
+func migrateAgent(ctx context.Context, dbConn migrateDB, pg bool) error {
 	var stmts []string
 	if pg {
 		stmts = agentSchemaPG()
@@ -363,7 +362,7 @@ func migrateAgent(ctx context.Context, dbConn *sql.DB, pg bool) error {
 	return nil
 }
 
-func retirePlaintextApprovalCodes(ctx context.Context, dbConn *sql.DB) error {
+func retirePlaintextApprovalCodes(ctx context.Context, dbConn migrateDB) error {
 	tx, err := dbConn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin plaintext approval-code retirement: %w", err)
@@ -396,7 +395,7 @@ func retirePlaintextApprovalCodes(ctx context.Context, dbConn *sql.DB) error {
 // production executor, so they may be arbitrarily stale. The migration marker
 // and status update share one transaction: exactly one replica retires those
 // rows, while later restarts leave newly-approved work untouched.
-func retirePreExecutorApprovedActions(ctx context.Context, dbConn *sql.DB) error {
+func retirePreExecutorApprovedActions(ctx context.Context, dbConn migrateDB) error {
 	tx, err := dbConn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin pre-executor action retirement: %w", err)

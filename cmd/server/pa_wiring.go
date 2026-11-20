@@ -27,6 +27,7 @@ var _ pa.RunLoopStore = (*db.Store)(nil)
 type paMetrics interface {
 	pa.Counter
 	pa.OutboxCounter
+	pa.CallbackCounter
 }
 
 // paLoop is the part of *pa.RunLoop the server's lifecycle drives.
@@ -100,14 +101,15 @@ func buildPA(cfg *config.Config, store *db.Store, rc *localjwt.RevocationCache, 
 	// interfaces rather than wrapping it. main always passes a registry.
 	var counter pa.Counter
 	var outboxCounter pa.OutboxCounter
+	var callbackCounter pa.CallbackCounter
 	if m != nil {
-		counter, outboxCounter = m, m
+		counter, outboxCounter, callbackCounter = m, m, m
 	}
 	loop, err := pa.NewRunLoop(pa.RunLoopConfig{
 		Store: store, Sealer: sealer, Pool: pool, Minter: minter, Verifier: verifier, Sender: sender,
 		Tools:  pa.NoTools,
 		Limits: cfg.PALimits(), Budget: cfg.PABudget(),
-		Metrics: outboxCounter,
+		Metrics: outboxCounter, CallbackMetrics: callbackCounter,
 	})
 	if err != nil {
 		return nil, err
@@ -117,7 +119,7 @@ func buildPA(cfg *config.Config, store *db.Store, rc *localjwt.RevocationCache, 
 	// written in the update's transaction and delivered after its commit.
 	conv, err := pa.NewConversations(pa.ConversationsConfig{
 		Store: store, Sealer: sealer, TTL: cfg.PAConversationTTL, Runs: loop, Limiter: loop,
-		Replies: &pa.OutboxReplies{Store: store},
+		Replies: &pa.OutboxReplies{Store: store, Metrics: outboxCounter},
 	})
 	if err != nil {
 		return nil, err
@@ -128,8 +130,12 @@ func buildPA(cfg *config.Config, store *db.Store, rc *localjwt.RevocationCache, 
 		// mismatch with Telegram shows here as well as in getWebhookInfo.
 		Counter: counter,
 		// Deliver the rows the update queued once it committed; rows this
-		// does not reach stay due for RunOutbox.
-		AfterCommit: func(ctx context.Context, p pa.Principal) { loop.DeliverAfter(ctx, p.TelegramID()) },
+		// does not reach stay due for RunOutbox. A pressed button is
+		// answered too, best effort, so the client stops its spinner.
+		AfterCommit: func(ctx context.Context, u pa.VerifiedUpdate) {
+			loop.DeliverAfter(ctx, u.Principal().TelegramID())
+			loop.AnswerCallbackAfter(ctx, u)
+		},
 	})
 	if err != nil {
 		return nil, err

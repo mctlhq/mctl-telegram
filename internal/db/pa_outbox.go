@@ -58,7 +58,7 @@ var paOutboxIndexes = []string{
 // migratePAOutbox creates pa_outbox, or brings a table created before #1348
 // (job_id NOT NULL, no update_id or button) to the current shape. Rows
 // already there are job-level and keep their key.
-func migratePAOutbox(ctx context.Context, dbConn *sql.DB, pg bool) error {
+func migratePAOutbox(ctx context.Context, dbConn migrateDB, pg bool) error {
 	if _, err := dbConn.ExecContext(ctx, paOutboxTable(pg, "pa_outbox")); err != nil {
 		return fmt.Errorf("migrate pa outbox: %w", err)
 	}
@@ -94,7 +94,7 @@ func migratePAOutbox(ctx context.Context, dbConn *sql.DB, pg bool) error {
 // paOutboxJobIDNotNull reports whether pa_outbox.job_id still has the NOT
 // NULL of the pre-#1348 table. A failed catalog read is an error, never
 // "already migrated".
-func paOutboxJobIDNotNull(ctx context.Context, dbConn *sql.DB, pg bool) (bool, error) {
+func paOutboxJobIDNotNull(ctx context.Context, dbConn migrateDB, pg bool) (bool, error) {
 	q := `SELECT "notnull" <> 0 FROM pragma_table_info('pa_outbox') WHERE name = 'job_id'`
 	if pg {
 		q = `SELECT attnotnull FROM pg_attribute
@@ -113,7 +113,7 @@ func paOutboxJobIDNotNull(ctx context.Context, dbConn *sql.DB, pg bool) (bool, e
 // default), and none it lacks is assumed. SQLite serves one process (local
 // development), so nothing races the rebuild; it runs in one transaction,
 // so a failure leaves the old table as it was.
-func rebuildSQLitePAOutbox(ctx context.Context, dbConn *sql.DB) error {
+func rebuildSQLitePAOutbox(ctx context.Context, dbConn migrateDB) error {
 	tx, err := dbConn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("migrate pa outbox: begin: %w", err)
@@ -164,20 +164,31 @@ func rebuildSQLitePAOutbox(ctx context.Context, dbConn *sql.DB) error {
 }
 
 // enqueuePAOutbox inserts item in tx, once per (job, kind) for a job-level
-// row and once per (principal, update, kind) for a conversation-level one.
+// row and once per (principal, update, kind) for a conversation-level one;
+// a conversation-level conflict returns jobs.ErrOutboxUpdateReused.
 func enqueuePAOutbox(ctx context.Context, tx *sql.Tx, item jobs.OutboxItem, nowMS int64) error {
 	if tx == nil || !item.Valid() {
 		return fmt.Errorf("%w: outbox item", jobs.ErrInvalid)
 	}
 	if item.Kind.ConversationLevel() {
-		if _, err := tx.ExecContext(ctx,
+		r, err := tx.ExecContext(ctx,
 			`INSERT INTO pa_outbox(principal, job_id, update_id, kind, button, status, attempts,
 			                       next_at_ms, created_at_ms, updated_at_ms)
 			 VALUES($1, NULL, $2, $3, $4, $5, 0, $6, $6, $6)
 			 ON CONFLICT (principal, update_id, kind) WHERE job_id IS NULL DO NOTHING`,
 			item.Principal, item.UpdateID, string(item.Kind), item.Button,
-			string(jobs.OutboxPending), nowMS); err != nil {
+			string(jobs.OutboxPending), nowMS)
+		if err != nil {
 			return fmt.Errorf("pa outbox: enqueue: %w", err)
+		}
+		n, err := r.RowsAffected()
+		if err != nil {
+			// Not knowing whether the row was written is an error, never
+			// "written".
+			return fmt.Errorf("pa outbox: enqueue: rows affected: %w", err)
+		}
+		if n == 0 {
+			return jobs.ErrOutboxUpdateReused
 		}
 		return nil
 	}

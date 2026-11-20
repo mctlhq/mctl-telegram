@@ -110,7 +110,7 @@ func paLinkingSchema(pg bool) []string {
 	}
 }
 
-func migratePALinking(ctx context.Context, dbConn *sql.DB, pg bool) error {
+func migratePALinking(ctx context.Context, dbConn migrateDB, pg bool) error {
 	for _, s := range paLinkingSchema(pg) {
 		if _, err := dbConn.ExecContext(ctx, s); err != nil {
 			return fmt.Errorf("migrate pa_link_secrets: %w", err)

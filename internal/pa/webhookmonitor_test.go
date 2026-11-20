@@ -201,7 +201,10 @@ func TestPAMetricLabels(t *testing.T) {
 		t.Fatalf("problems %v vs metrics %v", WebhookProblems(), metrics.PAWebhookProblems)
 	}
 	outbox := []string{OutboxOutcomeSent, OutboxOutcomeRetry, OutboxOutcomeFailed, OutboxOutcomeRefused, OutboxOutcomeDropped,
-		OutboxOutcomeUnknown, OutboxOutcomeStale, OutboxOutcomeClaimError}
+		OutboxOutcomeUnknown, OutboxOutcomeStale, OutboxOutcomeClaimError, OutboxOutcomeButtonExpired, OutboxOutcomeUpdateReused}
+	if !slices.Equal(sorted([]string{CallbackAnswerAnswered, CallbackAnswerFailed}), sorted(metrics.PACallbackAnswerOutcomes)) {
+		t.Fatalf("callback answer outcomes vs metrics %v", metrics.PACallbackAnswerOutcomes)
+	}
 	if !slices.Equal(sorted(outbox), sorted(metrics.PAOutboxOutcomes)) {
 		t.Fatalf("outbox outcomes %v vs metrics %v", outbox, metrics.PAOutboxOutcomes)
 	}
