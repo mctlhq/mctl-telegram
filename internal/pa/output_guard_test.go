@@ -31,9 +31,10 @@ package pa
 //     internal/telegram, internal/notify, internal/broadcast, or a
 //     third-party Bot API library);
 //
-// output.Template has an unexported field, so no code outside the output
-// package can make one; inside it, TestTemplatesAreLiteralRegistry keeps
-// every Template a string literal in templates.go.
+// safetext.Text and safetext.Template have unexported fields, so no code
+// outside package safetext can make one; inside it,
+// TestTemplatesAreLiteralRegistry keeps every Template a string literal in
+// templates.go.
 //
 // String literals joined with + are folded before the check. A method name
 // assembled at run time (fmt.Sprintf, a byte slice) is not caught; review

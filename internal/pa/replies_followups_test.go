@@ -20,6 +20,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output"
+	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
 type callbackCounts struct {
@@ -95,7 +96,7 @@ func TestConversationReplies_PressIsAnswered(t *testing.T) {
 			t.Fatalf("a duplicate press was answered again: %v", a)
 		}
 		msgs := h.messagesTo(aliceID)
-		if len(msgs) != 2 || msgs[1].text != output.ServerText(output.TextConsentAccepted).String() {
+		if len(msgs) != 2 || msgs[1].text != safetext.ServerText(safetext.TextConsentAccepted).String() {
 			t.Fatalf("sent = %+v", msgs)
 		}
 	})
@@ -133,7 +134,7 @@ func TestConversationReplies_FailedAnswerIsCountedNotFatal(t *testing.T) {
 		t.Fatalf("callback counts = %v", cb.m)
 	}
 	msgs := h.messagesTo(aliceID)
-	if len(msgs) != 2 || msgs[1].text != output.ServerText(output.TextConsentAccepted).String() {
+	if len(msgs) != 2 || msgs[1].text != safetext.ServerText(safetext.TextConsentAccepted).String() {
 		t.Fatalf("sent = %+v", msgs)
 	}
 }

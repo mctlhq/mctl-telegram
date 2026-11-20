@@ -21,6 +21,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output"
+	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
 // Run-loop tests (issue #1313 slice d1). They drive the real webhook, the
@@ -56,13 +57,13 @@ type sendRecorder struct {
 	answerFail error
 }
 
-func (s *sendRecorder) AnswerCallback(_ context.Context, id string, notice output.Template) error {
+func (s *sendRecorder) AnswerCallback(_ context.Context, id string, notice safetext.Template) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.answerFail != nil {
 		return s.answerFail
 	}
-	if notice != (output.Template{}) {
+	if notice != (safetext.Template{}) {
 		return errors.New("sendRecorder: a callback answer with a notice")
 	}
 	s.answered = append(s.answered, id)
@@ -75,7 +76,7 @@ func (s *sendRecorder) answers() []string {
 	return append([]string(nil), s.answered...)
 }
 
-func (s *sendRecorder) SendFrom(ctx context.Context, chatID int64, t output.Text, kb output.Keyboard, from int, sent func(int) error) error {
+func (s *sendRecorder) SendFrom(ctx context.Context, chatID int64, t safetext.Text, kb output.Keyboard, from int, sent func(int) error) error {
 	var b strings.Builder
 	for i := from; i < t.Parts(); i++ {
 		s.mu.Lock()
@@ -403,12 +404,12 @@ func TestRunLoop_S1R1(t *testing.T) {
 		h.consent(aliceID)
 		h.text(aliceID, "hello")
 		c := h.mustClaim()
-		long := strings.Repeat("word ", output.MaxParts*4096/5+10) // needs more than MaxParts messages
+		long := strings.Repeat("word ", safetext.MaxParts*4096/5+10) // needs more than MaxParts messages
 		if w := h.post(RouteReply, c.Token, replyRequest{Text: long}); w.Code != http.StatusOK {
 			t.Fatalf("reply: %d %s", w.Code, w.Body)
 		}
 		sent := h.sender.to(aliceID)
-		if len(sent) != 1 || sent[0] != output.ServerText(output.TextReplyTooLong).String() {
+		if len(sent) != 1 || sent[0] != safetext.ServerText(safetext.TextReplyTooLong).String() {
 			t.Fatalf("sent %d messages; a too-long reply must be replaced, never cut", len(sent))
 		}
 		if h.count(`SELECT count(*) FROM pa_fragments WHERE kind = 'assistant'`) != 0 {
@@ -454,7 +455,7 @@ func TestRunLoop_S1R1NonASCIIReply(t *testing.T) {
 			t.Fatalf("reply: %d %s", w.Code, w.Body)
 		}
 		sent := h.sender.to(aliceID)
-		if len(sent) != 1 || sent[0] == output.ServerText(output.TextReplyTooLong).String() {
+		if len(sent) != 1 || sent[0] == safetext.ServerText(safetext.TextReplyTooLong).String() {
 			t.Fatal("an answer Render accepts was refused")
 		}
 	})
@@ -468,7 +469,7 @@ func TestRunLoop_S1R1NonASCIIReply(t *testing.T) {
 			t.Fatalf("reply: %d %s", w.Code, w.Body)
 		}
 		sent := h.sender.to(aliceID)
-		if len(sent) != 1 || sent[0] != output.ServerText(output.TextReplyTooLong).String() {
+		if len(sent) != 1 || sent[0] != safetext.ServerText(safetext.TextReplyTooLong).String() {
 			t.Fatalf("sent %d; an over-long body must get the server text", len(sent))
 		}
 		if js, us := h.jobStatus(c.JobID); js != "done" || us != "settled" {
@@ -738,7 +739,7 @@ func TestRunLoop_S1R3(t *testing.T) {
 		t.Fatalf("claim over budget: %d, want 204 (no token)", code)
 	}
 	sent := h.sender.to(aliceID)
-	if len(sent) != 2 || sent[1] != output.ServerText(output.TextBudgetHold).String() {
+	if len(sent) != 2 || sent[1] != safetext.ServerText(safetext.TextBudgetHold).String() {
 		t.Fatalf("sent %q, want the answer then one hold message", sent)
 	}
 	if n := h.count(`SELECT count(*) FROM pa_usage WHERE principal = $1`, aliceID); n != 1 {
@@ -756,7 +757,7 @@ func TestRunLoop_S1R3(t *testing.T) {
 	h.now = h.now.Add(24 * time.Hour)
 	h.consentStillOpen(t)
 	sent = h.sender.to(aliceID)
-	if len(sent) != 3 || sent[2] != output.ServerText(output.TextRequestDropped).String() {
+	if len(sent) != 3 || sent[2] != safetext.ServerText(safetext.TextRequestDropped).String() {
 		t.Fatalf("sent %q, want the dropped-request notice last", sent)
 	}
 }
@@ -785,7 +786,7 @@ func TestRunLoop_HeldDroppedBeforeWindowResets(t *testing.T) {
 		t.Fatalf("claim: %d", code)
 	}
 	sent := h.sender.to(aliceID)
-	if len(sent) != 3 || sent[2] != output.ServerText(output.TextRequestDropped).String() {
+	if len(sent) != 3 || sent[2] != safetext.ServerText(safetext.TextRequestDropped).String() {
 		t.Fatalf("sent %q, want answer, hold, dropped", sent)
 	}
 	var st string
@@ -809,7 +810,7 @@ func TestRunLoop_ExpiredLeaseNotice(t *testing.T) {
 		}
 	}
 	sent := h.sender.to(aliceID)
-	if len(sent) != 1 || sent[0] != output.ServerText(output.TextRunFailed).String() {
+	if len(sent) != 1 || sent[0] != safetext.ServerText(safetext.TextRunFailed).String() {
 		t.Fatalf("sent %q, want one run-failed notice", sent)
 	}
 	if w := h.post(RouteReply, c.Token, replyRequest{Text: "late"}); w.Code != http.StatusConflict {
@@ -826,10 +827,10 @@ func TestRunLoop_ExpiredLeaseNotice(t *testing.T) {
 func TestRunLoop_StateChangesBetweenClaimAndReply(t *testing.T) {
 	for _, tc := range []struct {
 		name, sql string
-		notice    *output.Template
+		notice    *safetext.Template
 	}{
-		{"conversation expired", `UPDATE pa_conversations SET expires_at_ms = 1 WHERE principal = $1`, &output.TextRequestDropped},
-		{"conversation closed", `UPDATE pa_conversations SET closed_at_ms = 1 WHERE principal = $1`, &output.TextRequestDropped},
+		{"conversation expired", `UPDATE pa_conversations SET expires_at_ms = 1 WHERE principal = $1`, &safetext.TextRequestDropped},
+		{"conversation closed", `UPDATE pa_conversations SET closed_at_ms = 1 WHERE principal = $1`, &safetext.TextRequestDropped},
 		{"consent version changed", `UPDATE pa_consents SET version = 'pa-data-flow/v0' WHERE principal = $1`, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -848,7 +849,7 @@ func TestRunLoop_StateChangesBetweenClaimAndReply(t *testing.T) {
 			if tc.notice != nil {
 				want = 1
 			}
-			if len(sent) != want || (want == 1 && sent[0] != output.ServerText(*tc.notice).String()) {
+			if len(sent) != want || (want == 1 && sent[0] != safetext.ServerText(*tc.notice).String()) {
 				t.Fatalf("sent %q", sent)
 			}
 			if js, us := h.jobStatus(c.JobID); js != "cancelled" || us != "held" {
@@ -950,7 +951,7 @@ func TestRunLoop_S1I1(t *testing.T) {
 			t.Fatalf("Alice cancelled = %d", n)
 		}
 		sent := h2.sender.to(aliceID)
-		if len(sent) != 1 || sent[0] != output.ServerText(output.TextRunFailed).String() {
+		if len(sent) != 1 || sent[0] != safetext.ServerText(safetext.TextRunFailed).String() {
 			t.Fatalf("Alice was sent %q", sent)
 		}
 	})
@@ -1328,7 +1329,7 @@ func TestRunLoop_FinishGate(t *testing.T) {
 		t.Fatalf("reply: %d", w.Code)
 	}
 	sent := h.sender.to(aliceID)
-	if len(sent) != 1 || sent[0] != output.ServerText(output.TextRequestDropped).String() {
+	if len(sent) != 1 || sent[0] != safetext.ServerText(safetext.TextRequestDropped).String() {
 		t.Fatalf("sent %q, want only the dropped notice", sent)
 	}
 	if js, us := h.jobStatus(c.JobID); js != "cancelled" || us != "held" {

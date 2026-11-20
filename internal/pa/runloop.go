@@ -12,7 +12,7 @@ package pa
 //   - turn: called before every model call; re-checks the job, consent, the
 //     conversation, the context size (S1-R1) and the turn cap;
 //   - reply: re-checks, records the answer, settles the reservation, and
-//     sends through output.Render and output.Sender only, after the commit.
+//     sends through safetext.Render and output.Sender only, after the commit.
 //     A reply too long to send is replaced by a short server text, never
 //     truncated.
 //
@@ -49,6 +49,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output"
+	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
 // Run-loop routes. All three are POST.
@@ -61,8 +62,8 @@ const (
 // maxReplyBody bounds a reply request. It is sized from the Render limit
 // so that any answer Render could accept fits even fully \uXXXX-escaped
 // (6 bytes per UTF-16 unit), plus room for the rest of the JSON. A body
-// over it is a too-long answer, handled like output.ErrTooLong.
-const maxReplyBody = 6*output.MaxParts*4096 + 4<<10
+// over it is a too-long answer, handled like safetext.ErrTooLong.
+const maxReplyBody = 6*safetext.MaxParts*4096 + 4<<10
 
 // RunLoopStore is what the run loop persists through (*db.Store).
 type RunLoopStore interface {
@@ -81,10 +82,10 @@ type RunLoopStore interface {
 // part; it wraps output.ErrOutcomeUnknown around any failure that may have
 // reached Telegram.
 type BotSender interface {
-	SendFrom(ctx context.Context, chatID int64, text output.Text, kb output.Keyboard, from int, sent func(delivered int) error) error
+	SendFrom(ctx context.Context, chatID int64, text safetext.Text, kb output.Keyboard, from int, sent func(delivered int) error) error
 	// AnswerCallback answers a callback query (answerCallbackQuery), so the
 	// client stops the spinner on the pressed button.
-	AnswerCallback(ctx context.Context, callbackQueryID string, notice output.Template) error
+	AnswerCallback(ctx context.Context, callbackQueryID string, notice safetext.Template) error
 }
 
 // PoolAuthenticator authenticates the worker pool (*localjwt.PoolProvider).
@@ -569,7 +570,7 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case overflow:
 		// Too long to have rendered: the same fail-closed path as
-		// output.ErrTooLong, with the cost unreported.
+		// safetext.ErrTooLong, with the cost unreported.
 		req = replyRequest{}
 	case err == nil:
 		err = json.Unmarshal(body, &req)
@@ -580,7 +581,7 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	// The allow-list of URLs is what the principal typed in this
-	// conversation (output.Render, T14). It is read before the finish
+	// conversation (safetext.Render, T14). It is read before the finish
 	// transaction (on SQLite the load needs the one connection); a failed
 	// read is a refusal, never an empty allow-list that would still send.
 	cur, err := l.store.RunningPAJob(ctx, ref, l.now(), l.gate)
@@ -601,13 +602,13 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 	}
 	// Rendered here only to refuse an answer too long to send; the outbox
 	// renders the stored answer again when it sends it.
-	_, err = output.Render(req.Text, output.AllowFromUserText(typed...))
+	_, err = safetext.Render(req.Text, safetext.AllowFromUserText(typed...))
 	if overflow {
-		err = output.ErrTooLong
+		err = safetext.ErrTooLong
 	}
 	record := true
 	switch {
-	case errors.Is(err, output.ErrTooLong):
+	case errors.Is(err, safetext.ErrTooLong):
 		// Fail closed: a short server text, never a truncated answer. The
 		// answer the principal never saw is not kept as conversation state.
 		record = false

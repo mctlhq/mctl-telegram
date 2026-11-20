@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package output
+package safetext
 
 import (
 	"go/ast"
@@ -147,20 +147,20 @@ func TestTemplatesAreLiteralRegistry(t *testing.T) {
 
 func TestTemplatesGuardDetects(t *testing.T) {
 	bad := []struct{ file, src string }{
-		{"render.go", `package output; func f(s string) Template { return Template{s: s} }`},
-		{"render.go", `package output; func f(s string) Template { return Template{s} }`},
-		{"render.go", `package output; var x = tpl("hi")`},
-		{templatesFile, `package output; func tpl(s string) Template { return Template{s: s} }; func f(s string) Template { return tpl(s) }`},
-		{templatesFile, `package output; func tpl(s string) Template { return Template{s: s} }; var x = tpl("a" + "b")`},
-		{"render.go", `package output; func f(s string) Template { var t Template; t.s = s; return t }`},
-		{"render.go", `package output; func f(s string) Template { return Template(struct{ s string }{s}) }`},
-		{"render.go", `package output; func f(s string) Template { return (Template)(struct{ s string }{s}) }`},
-		{"render.go", `package output; func f(s string) Text { return Text{parts: []string{s}} }`},
-		{"render.go", `package output; func f(s string) Text { return Text{[]string{s}} }`},
-		{"render.go", `package output; func f(t *Text, s string) { t.parts = []string{s} }`},
-		{"render.go", `package output; func f(t Text, s string) { t.parts[0] = s }`},
-		{"render.go", `package output; type T = Template`},
-		{"render.go", `package output; type X Text`},
+		{"render.go", `package safetext; func f(s string) Template { return Template{s: s} }`},
+		{"render.go", `package safetext; func f(s string) Template { return Template{s} }`},
+		{"render.go", `package safetext; var x = tpl("hi")`},
+		{templatesFile, `package safetext; func tpl(s string) Template { return Template{s: s} }; func f(s string) Template { return tpl(s) }`},
+		{templatesFile, `package safetext; func tpl(s string) Template { return Template{s: s} }; var x = tpl("a" + "b")`},
+		{"render.go", `package safetext; func f(s string) Template { var t Template; t.s = s; return t }`},
+		{"render.go", `package safetext; func f(s string) Template { return Template(struct{ s string }{s}) }`},
+		{"render.go", `package safetext; func f(s string) Template { return (Template)(struct{ s string }{s}) }`},
+		{"render.go", `package safetext; func f(s string) Text { return Text{parts: []string{s}} }`},
+		{"render.go", `package safetext; func f(s string) Text { return Text{[]string{s}} }`},
+		{"render.go", `package safetext; func f(t *Text, s string) { t.parts = []string{s} }`},
+		{"render.go", `package safetext; func f(t Text, s string) { t.parts[0] = s }`},
+		{"render.go", `package safetext; type T = Template`},
+		{"render.go", `package safetext; type X Text`},
 	}
 	for i, b := range bad {
 		fset := token.NewFileSet()
@@ -173,9 +173,9 @@ func TestTemplatesGuardDetects(t *testing.T) {
 		}
 	}
 	good := []struct{ file, src string }{
-		{templatesFile, `package output; func tpl(s string) Template { return Template{s: s} }; var x = tpl("hi")`},
-		{"render.go", `package output; func f(t Template) string { return t.s }; var z = Template{}`},
-		{"render.go", `package output; func Render(m string) Text { return Text{parts: fit(m)} }; func ServerText(t Template) Text { return Text{parts: split(t.s)} }; var e = Text{}`},
+		{templatesFile, `package safetext; func tpl(s string) Template { return Template{s: s} }; var x = tpl("hi")`},
+		{"render.go", `package safetext; func f(t Template) string { return t.s }; var z = Template{}`},
+		{"render.go", `package safetext; func Render(m string) Text { return Text{parts: fit(m)} }; func ServerText(t Template) Text { return Text{parts: split(t.s)} }; var e = Text{}`},
 	}
 	for i, g := range good {
 		fset := token.NewFileSet()

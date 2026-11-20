@@ -26,10 +26,10 @@ import (
 	"net/url"
 	"strings"
 	"sync/atomic"
-	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/egress"
+	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
 // This file is the only place under internal/pa that names a Bot API send
@@ -42,8 +42,6 @@ const (
 	methodSendMessage         = "sendMessage"
 	methodAnswerCallbackQuery = "answerCallbackQuery"
 
-	// maxTextUTF16 is the Bot API limit on message text, in UTF-16 units.
-	maxTextUTF16 = 4096
 	// maxCallbackData is the Bot API limit on callback_data, in bytes.
 	maxCallbackData = 64
 	// maxCallbackAnswerUTF16 is the limit on answerCallbackQuery text.
@@ -73,7 +71,7 @@ var (
 // game, so a URL button cannot be expressed (S1-O3). The label is a server
 // Template; Data is a server-generated opaque id.
 type Button struct {
-	Label Template
+	Label safetext.Template
 	Data  string
 }
 
@@ -147,7 +145,7 @@ type answerCallbackRequest struct {
 // and ServerText cut it to the Bot API limit); the keyboard, if any, goes on
 // the last one. Every message has link previews disabled. It stops at the
 // first failure.
-func (s *Sender) Send(ctx context.Context, chatID int64, text Text, kb Keyboard) error {
+func (s *Sender) Send(ctx context.Context, chatID int64, text safetext.Text, kb Keyboard) error {
 	return s.SendFrom(ctx, chatID, text, kb, 0, nil)
 }
 
@@ -157,39 +155,50 @@ func (s *Sender) Send(ctx context.Context, chatID int64, text Text, kb Keyboard)
 // instead of sending the earlier ones again. An error from sent stops the
 // send and is returned as is. Every part is checked before the first one
 // is sent: a part that would be refused never leaves earlier parts behind.
-func (s *Sender) SendFrom(ctx context.Context, chatID int64, text Text, kb Keyboard, from int, sent func(delivered int) error) error {
+func (s *Sender) SendFrom(ctx context.Context, chatID int64, text safetext.Text, kb Keyboard, from int, sent func(delivered int) error) error {
+	parts := make([]string, text.Parts())
+	for i := range parts {
+		parts[i] = text.Part(i)
+	}
+	return s.sendParts(ctx, chatID, parts, kb, from, sent)
+}
+
+// sendParts is SendFrom on the parts of a Text. It takes a plain slice only
+// so that tests can hand it parts Render and ServerText never produce; the
+// only production caller is SendFrom.
+func (s *Sender) sendParts(ctx context.Context, chatID int64, parts []string, kb Keyboard, from int, sent func(delivered int) error) error {
 	if chatID <= 0 {
 		// The PA serves private chats only, whose id is the user id.
 		return ErrInvalidChat
 	}
-	if len(text.parts) == 0 {
+	if len(parts) == 0 {
 		return ErrEmptyText
 	}
-	if len(text.parts) > MaxParts {
-		return ErrTooLong
+	if len(parts) > safetext.MaxParts {
+		return safetext.ErrTooLong
 	}
-	if from < 0 || from > len(text.parts) {
-		return fmt.Errorf("%w: resume at part %d of %d", ErrInvalidConfig, from, len(text.parts))
+	if from < 0 || from > len(parts) {
+		return fmt.Errorf("%w: resume at part %d of %d", ErrInvalidConfig, from, len(parts))
 	}
 	markup, err := kb.wire()
 	if err != nil {
 		return err
 	}
-	for i, p := range text.parts {
+	for i, p := range parts {
 		if strings.TrimSpace(p) == "" {
 			return ErrEmptyText
 		}
-		if n := utf16Len(p); n > maxTextUTF16 {
-			return fmt.Errorf("%w: part %d is %d UTF-16 units, limit %d", ErrPartTooLong, i, n, maxTextUTF16)
+		if n := safetext.UTF16Len(p); n > safetext.MaxPartUTF16 {
+			return fmt.Errorf("%w: part %d is %d UTF-16 units, limit %d", ErrPartTooLong, i, n, safetext.MaxPartUTF16)
 		}
 	}
-	for i := from; i < len(text.parts); i++ {
+	for i := from; i < len(parts); i++ {
 		req := sendMessageRequest{
 			ChatID:             chatID,
-			Text:               text.parts[i],
+			Text:               parts[i],
 			LinkPreviewOptions: linkPreviewOptions{IsDisabled: true},
 		}
-		if i == len(text.parts)-1 {
+		if i == len(parts)-1 {
 			req.ReplyMarkup = markup
 		}
 		if err := s.call(ctx, methodSendMessage, req); err != nil {
@@ -206,16 +215,16 @@ func (s *Sender) SendFrom(ctx context.Context, chatID int64, text Text, kb Keybo
 
 // AnswerCallback answers a callback query, with an optional short
 // server-authored notice. It never carries a URL.
-func (s *Sender) AnswerCallback(ctx context.Context, callbackQueryID string, notice Template) error {
+func (s *Sender) AnswerCallback(ctx context.Context, callbackQueryID string, notice safetext.Template) error {
 	if callbackQueryID == "" {
 		return fmt.Errorf("%w: empty callback query id", ErrInvalidConfig)
 	}
-	if utf16Len(notice.s) > maxCallbackAnswerUTF16 {
+	if safetext.UTF16Len(notice.String()) > maxCallbackAnswerUTF16 {
 		return fmt.Errorf("%w: callback notice too long", ErrInvalidConfig)
 	}
 	return s.call(ctx, methodAnswerCallbackQuery, answerCallbackRequest{
 		CallbackQueryID: callbackQueryID,
-		Text:            notice.s,
+		Text:            notice.String(),
 	})
 }
 
@@ -230,13 +239,13 @@ func (kb Keyboard) wire() (*wireMarkup, error) {
 		}
 		wr := make([]wireButton, 0, len(row))
 		for _, b := range row {
-			if strings.TrimSpace(b.Label.s) == "" {
+			if strings.TrimSpace(b.Label.String()) == "" {
 				return nil, fmt.Errorf("%w: empty label", ErrInvalidKeyboard)
 			}
 			if b.Data == "" || len(b.Data) > maxCallbackData || !utf8.ValidString(b.Data) {
 				return nil, fmt.Errorf("%w: callback data must be 1..%d bytes of UTF-8", ErrInvalidKeyboard, maxCallbackData)
 			}
-			wr = append(wr, wireButton{Text: b.Label.s, CallbackData: b.Data})
+			wr = append(wr, wireButton{Text: b.Label.String(), CallbackData: b.Data})
 		}
 		m.InlineKeyboard = append(m.InlineKeyboard, wr)
 	}
@@ -325,47 +334,4 @@ type APIError struct {
 
 func (e *APIError) Error() string {
 	return fmt.Sprintf("pa output %s: refused (HTTP %d, code %d): %s", e.Method, e.Status, e.Code, e.Description)
-}
-
-func utf16Len(s string) int {
-	n := 0
-	for _, r := range s {
-		n += utf16.RuneLen(r)
-	}
-	return n
-}
-
-// split cuts s into parts of at most max UTF-16 units, never inside a rune,
-// preferring the last newline, then the last space, in the second half of a
-// part. Whitespace-only parts are dropped, as the Bot API refuses them.
-// A cut can turn the tail of a token into a new token (4095 x "x" followed
-// by "a1.2.3.4/..." leaves "1.2.3.4/..." in the next part), so Render
-// neutralises every part again after splitting.
-func split(s string, max int) []string {
-	var parts []string
-	for utf16Len(s) > max {
-		cut, n := 0, 0
-		for i, r := range s {
-			w := utf16.RuneLen(r)
-			if n+w > max {
-				break
-			}
-			n += w
-			cut = i + utf8.RuneLen(r)
-		}
-		head := s[:cut]
-		if i := strings.LastIndexByte(head, '\n'); i > cut/2 {
-			cut = i + 1
-		} else if i := strings.LastIndexByte(head, ' '); i > cut/2 {
-			cut = i + 1
-		}
-		if strings.TrimSpace(s[:cut]) != "" {
-			parts = append(parts, s[:cut])
-		}
-		s = s[cut:]
-	}
-	if strings.TrimSpace(s) != "" {
-		parts = append(parts, s)
-	}
-	return parts
 }

@@ -12,29 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package output is the only way the Personal Assistant bot sends anything
-// to Telegram. It implements threat model T14, output exfiltration through
-// the bot's own messages (docs/agent-runtime/personal-assistant-threat-model.md):
+// Package safetext holds the only values the Personal Assistant bot may
+// send: Text and Template. It implements the construction half of threat
+// model T14, output exfiltration through the bot's own messages
+// (docs/agent-runtime/personal-assistant-threat-model.md); package output
+// sends them.
 //
 //   - Text is a value only this package can build: Render for model-authored
 //     text, ServerText for server-authored templates from the registry in
-//     templates.go. Sender accepts nothing else, so model text cannot reach
-//     a send without going through Render.
+//     templates.go. Both types have unexported fields, so the compiler
+//     refuses a Text or Template built anywhere else, by literal,
+//     conversion, alias or generic. output.Sender accepts nothing else, so
+//     model text cannot reach a send without going through Render.
+//   - Inside this package, TestTemplatesAreLiteralRegistry keeps every
+//     Template a string literal in templates.go and every field access in
+//     the few functions that build or read the values.
 //   - Render strips markup and neutralises every token Telegram could turn
 //     into a link (URL, scheme-less or IDN domain, IP address, e-mail, tg:
 //     link, bot mention) unless that exact token appeared in the principal's
 //     own text in this conversation.
-//   - Sender sends plain text only (no parse_mode, no entities), with link
-//     previews disabled on every message, and inline keyboards made only of
-//     server-authored callback buttons. A URL, login, web app or inline
-//     query button cannot be expressed.
 //
-// A static test (TestS1O1_SenderIsTheOnlyBotAPICallSite) keeps every Bot API
-// send method and raw Bot API URL under internal/pa inside sender.go.
-//
-// The package is library code: nothing in the runtime constructs a Sender
-// yet, and PA_ENABLED (default off) gates everything that will.
-package output
+// The package is a leaf: it imports nothing from internal/pa, and must not,
+// so that it stays small enough to review as a whole.
+package safetext
 
 import (
 	"errors"
@@ -67,7 +67,7 @@ func (t Text) Part(i int) string { return t.parts[i] }
 // A registry template longer than MaxParts messages is a programming error;
 // Sender refuses the resulting Text.
 func ServerText(t Template) Text {
-	return Text{parts: split(t.s, maxTextUTF16)}
+	return Text{parts: split(t.s, MaxPartUTF16)}
 }
 
 // UserText is the set of tokens the principal typed themselves in this
@@ -118,9 +118,9 @@ func (u UserText) allows(tok string) bool {
 // truncated, so injected content cannot flood the principal's chat or push
 // the bot into flood waits, and a cut can never fall inside a token.
 func Render(model string, allow UserText) (Text, error) {
-	// Each part holds at most maxTextUTF16 units, so longer input cannot
+	// Each part holds at most MaxPartUTF16 units, so longer input cannot
 	// fit; refusing it first also bounds the work below.
-	if utf16Len(model) > MaxParts*maxTextUTF16 {
+	if UTF16Len(model) > MaxParts*MaxPartUTF16 {
 		return Text{}, ErrTooLong
 	}
 	parts, ok := fit(neutralise(stripMarkup(normalise(model)), allow), allow)
@@ -147,9 +147,9 @@ func fit(s string, allow UserText) ([]string, bool) {
 	var out []string
 	var walk func(s string) bool
 	walk = func(s string) bool {
-		for _, p := range split(s, maxTextUTF16) {
+		for _, p := range split(s, MaxPartUTF16) {
 			p = neutralise(p, allow)
-			if utf16Len(p) > maxTextUTF16 {
+			if UTF16Len(p) > MaxPartUTF16 {
 				if !walk(p) {
 					return false
 				}
