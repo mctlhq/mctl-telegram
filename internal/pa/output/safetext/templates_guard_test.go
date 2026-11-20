@@ -19,101 +19,169 @@ import (
 	"go/parser"
 	"go/token"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
 
 const templatesFile = "templates.go"
 
-// textBuilders are the only functions that may build a non-empty Text.
-var textBuilders = map[string]bool{"Render": true, "ServerText": true}
+// fieldUsers are the only declarations that may touch the fields of Text
+// and Template (s and parts) or build a non-empty one, keyed by
+// "Receiver.Name" for methods. Everything else in the package goes through
+// them. tpl is allowed only in templates.go.
+var fieldUsers = map[string]bool{
+	"tpl":             true,
+	"Template.String": true,
+	"Text.String":     true,
+	"Text.Parts":      true,
+	"Text.Part":       true,
+	"ServerText":      true,
+	"Render":          true,
+}
 
-// scanTemplates returns one finding per Template built from anything but a
-// string literal in templates.go, and per Text built outside Render and
-// ServerText:
-//   - a Template{...} literal anywhere except inside tpl;
-//   - a call to tpl outside templates.go, or with an argument that is not a
-//     string literal;
-//   - a conversion to Template or Text (Template(struct{ s string }{s}));
-//   - an assignment to a .s or .parts field (var t Template; t.s = s);
-//   - a non-empty Text{...} literal outside Render and ServerText;
-//   - a type alias or definition over Template or Text, whose literals the
-//     checks above would not recognise by name.
+// guardedFields are the unexported fields of Text and Template. Any
+// selector or literal key with one of these names counts, whatever its
+// type: the scan has no type information, so it fails closed.
+var guardedFields = map[string]bool{"s": true, "parts": true}
+
+// unwrapType strips parentheses and pointer stars, so (Text), *Text and
+// (*Text) all name Text.
+func unwrapType(e ast.Expr) ast.Expr {
+	for {
+		switch x := e.(type) {
+		case *ast.ParenExpr:
+			e = x.X
+		case *ast.StarExpr:
+			e = x.X
+		default:
+			return e
+		}
+	}
+}
+
+func namesGuardedType(e ast.Expr) bool {
+	id, ok := unwrapType(e).(*ast.Ident)
+	return ok && (id.Name == "Text" || id.Name == "Template")
+}
+
+// mentionsGuardedType reports whether a type expression names Text or
+// Template anywhere (*Text, []Template, struct{ Text }, ...).
+func mentionsGuardedType(e ast.Expr) bool {
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && (id.Name == "Text" || id.Name == "Template") {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// declKey names a top-level declaration as fieldUsers does; "" for
+// anything but a function or method.
+func declKey(d ast.Decl) string {
+	fn, ok := d.(*ast.FuncDecl)
+	if !ok {
+		return ""
+	}
+	if fn.Recv == nil || len(fn.Recv.List) == 0 {
+		return fn.Name.Name
+	}
+	if id, ok := unwrapType(fn.Recv.List[0].Type).(*ast.Ident); ok {
+		return id.Name + "." + fn.Name.Name
+	}
+	return "?." + fn.Name.Name
+}
+
+// scanTemplates returns one finding per way f could build a Text or a
+// Template from anything but Render, ServerText and the literal registry.
+// Every top-level declaration is checked on its own, so the allowance of
+// one function never carries over to the next. Outside fieldUsers:
+//   - any selector .s or .parts, read or write (t.s = x, &t.s,
+//     copy(t.parts, x), for t.s = range ...);
+//   - any composite literal with a key s or parts, of any type, and any
+//     non-empty Text or Template literal;
+//
+// and anywhere in the file:
+//   - a conversion to Text or Template, or to a pointer to one
+//     ((*Text)(&struct{ parts []string }{x}));
+//   - a type declaration that mentions Text or Template (type T = Text,
+//     type P *Text, type W struct{ Text }), other than their own;
+//   - a generic declaration (mk[T ~struct{ s string }]), since a type
+//     parameter can stand for either type without naming it;
+//   - an import of unsafe or reflect;
+//   - a call to tpl outside templates.go, or whose argument is not a string
+//     literal.
 func scanTemplates(fset *token.FileSet, f *ast.File, file string) []string {
 	var out []string
 	report := func(n ast.Node, what string) {
 		out = append(out, fset.Position(n.Pos()).String()+": "+what)
 	}
-	var inTpl *ast.FuncDecl
+	for _, imp := range f.Imports {
+		if p, err := strconv.Unquote(imp.Path.Value); err == nil && (p == "unsafe" || p == "reflect") {
+			report(imp, "import "+imp.Path.Value)
+		}
+	}
 	for _, d := range f.Decls {
-		if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == "tpl" && file == templatesFile {
-			inTpl = fn
+		key := declKey(d)
+		if key == "tpl" && file != templatesFile {
+			report(d, "tpl declared outside "+templatesFile)
 		}
-	}
-	isTemplateType := func(e ast.Expr) bool {
-		id, ok := e.(*ast.Ident)
-		return ok && id.Name == "Template"
-	}
-	isNamed := func(e ast.Expr, name string) bool {
-		for {
-			p, ok := e.(*ast.ParenExpr)
-			if !ok {
-				break
-			}
-			e = p.X
+		trusted := fieldUsers[key] && (key != "tpl" || file == templatesFile)
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Type.TypeParams != nil {
+			report(fn, "generic function")
 		}
-		id, ok := e.(*ast.Ident)
-		return ok && id.Name == name
-	}
-	fn := ""
-	ast.Inspect(f, func(n ast.Node) bool {
-		switch x := n.(type) {
-		case *ast.FuncDecl:
-			if x == inTpl {
-				return false // the one place a Template is built from a string
-			}
-			fn = x.Name.Name
-		case *ast.CompositeLit:
-			if isTemplateType(x.Type) && len(x.Elts) > 0 {
-				report(x, "Template literal outside tpl")
-			}
-			if isNamed(x.Type, "Text") && len(x.Elts) > 0 && !textBuilders[fn] {
-				report(x, "Text literal outside Render and ServerText")
-			}
-		case *ast.TypeSpec:
-			if isNamed(x.Type, "Template") || isNamed(x.Type, "Text") {
-				report(x, "type over Template or Text")
-			}
-		case *ast.AssignStmt:
-			for _, lhs := range x.Lhs {
-				ast.Inspect(lhs, func(m ast.Node) bool {
-					if sel, ok := m.(*ast.SelectorExpr); ok && (sel.Sel.Name == "s" || sel.Sel.Name == "parts") {
-						report(sel, "assignment to ."+sel.Sel.Name)
-						return false
-					}
+		ast.Inspect(d, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.TypeSpec:
+				if x.TypeParams != nil {
+					report(x, "generic type")
+				}
+				own := (x.Name.Name == "Text" || x.Name.Name == "Template") && x.Assign == 0
+				if !own && mentionsGuardedType(x.Type) {
+					report(x, "type over Template or Text")
+				}
+			case *ast.SelectorExpr:
+				if !trusted && guardedFields[x.Sel.Name] {
+					report(x, "use of ."+x.Sel.Name+" outside "+key)
+				}
+			case *ast.CompositeLit:
+				if trusted {
 					return true
-				})
+				}
+				if x.Type != nil && namesGuardedType(x.Type) && len(x.Elts) > 0 {
+					report(x, "non-empty Template or Text literal")
+					return true
+				}
+				for _, e := range x.Elts {
+					if kv, ok := e.(*ast.KeyValueExpr); ok {
+						if id, ok := kv.Key.(*ast.Ident); ok && guardedFields[id.Name] {
+							report(kv, "literal key "+id.Name)
+						}
+					}
+				}
+			case *ast.CallExpr:
+				if namesGuardedType(x.Fun) {
+					report(x, "conversion to Template or Text")
+					return true
+				}
+				id, ok := x.Fun.(*ast.Ident)
+				if !ok || id.Name != "tpl" {
+					return true
+				}
+				if file != templatesFile {
+					report(x, "tpl called outside "+templatesFile)
+				}
+				if len(x.Args) != 1 {
+					report(x, "tpl needs one argument")
+				} else if lit, ok := x.Args[0].(*ast.BasicLit); !ok || lit.Kind != token.STRING {
+					report(x, "tpl argument is not a string literal")
+				}
 			}
-		case *ast.CallExpr:
-			if isNamed(x.Fun, "Template") || isNamed(x.Fun, "Text") {
-				report(x, "conversion to Template or Text")
-				return true
-			}
-			id, ok := x.Fun.(*ast.Ident)
-			if !ok || id.Name != "tpl" {
-				return true
-			}
-			if file != templatesFile {
-				report(x, "tpl called outside "+templatesFile)
-			}
-			if len(x.Args) != 1 {
-				report(x, "tpl needs one argument")
-			} else if lit, ok := x.Args[0].(*ast.BasicLit); !ok || lit.Kind != token.STRING {
-				report(x, "tpl argument is not a string literal")
-			}
-		}
-		return true
-	})
+			return true
+		})
+	}
 	return out
 }
 
@@ -145,22 +213,54 @@ func TestTemplatesAreLiteralRegistry(t *testing.T) {
 	}
 }
 
+// TestTemplatesGuardDetects: each bad source is one way to build a Text or
+// Template outside Render, ServerText and the registry, and gives exactly
+// want findings; each good source gives none. The cases after the first
+// block are the gaps found in review of #1333 (#1337).
 func TestTemplatesGuardDetects(t *testing.T) {
-	bad := []struct{ file, src string }{
-		{"render.go", `package safetext; func f(s string) Template { return Template{s: s} }`},
-		{"render.go", `package safetext; func f(s string) Template { return Template{s} }`},
-		{"render.go", `package safetext; var x = tpl("hi")`},
-		{templatesFile, `package safetext; func tpl(s string) Template { return Template{s: s} }; func f(s string) Template { return tpl(s) }`},
-		{templatesFile, `package safetext; func tpl(s string) Template { return Template{s: s} }; var x = tpl("a" + "b")`},
-		{"render.go", `package safetext; func f(s string) Template { var t Template; t.s = s; return t }`},
-		{"render.go", `package safetext; func f(s string) Template { return Template(struct{ s string }{s}) }`},
-		{"render.go", `package safetext; func f(s string) Template { return (Template)(struct{ s string }{s}) }`},
-		{"render.go", `package safetext; func f(s string) Text { return Text{parts: []string{s}} }`},
-		{"render.go", `package safetext; func f(s string) Text { return Text{[]string{s}} }`},
-		{"render.go", `package safetext; func f(t *Text, s string) { t.parts = []string{s} }`},
-		{"render.go", `package safetext; func f(t Text, s string) { t.parts[0] = s }`},
-		{"render.go", `package safetext; type T = Template`},
-		{"render.go", `package safetext; type X Text`},
+	const pkg = "package safetext; "
+	bad := []struct {
+		file, src string
+		want      int
+	}{
+		{"render.go", pkg + `func f(s string) Template { return Template{s: s} }`, 1},
+		{"render.go", pkg + `func f(s string) Template { return Template{s} }`, 1},
+		{"render.go", pkg + `var x = tpl("hi")`, 1},
+		{templatesFile, pkg + `func tpl(s string) Template { return Template{s: s} }; func f(s string) Template { return tpl(s) }`, 1},
+		{templatesFile, pkg + `func tpl(s string) Template { return Template{s: s} }; var x = tpl("a" + "b")`, 1},
+		{"render.go", pkg + `func f(s string) Template { var t Template; t.s = s; return t }`, 1},
+		{"render.go", pkg + `func f(s string) Template { return Template(struct{ s string }{s}) }`, 1},
+		{"render.go", pkg + `func f(s string) Template { return (Template)(struct{ s string }{s}) }`, 1},
+		{"render.go", pkg + `func f(s string) Text { return Text{parts: []string{s}} }`, 1},
+		{"render.go", pkg + `func f(s string) Text { return Text{[]string{s}} }`, 1},
+		{"render.go", pkg + `func f(t *Text, s string) { t.parts = []string{s} }`, 1},
+		{"render.go", pkg + `func f(t Text, s string) { t.parts[0] = s }`, 1},
+		{"render.go", pkg + `type T = Template`, 1},
+		{"render.go", pkg + `type X Text`, 1},
+
+		// #1337: the allowance of Render no longer leaks into the
+		// declarations after it.
+		{"render.go", pkg + `func Render(m string) Text { return Text{} }; var x = Text{parts: []string{"a"}}`, 1},
+		{"render.go", pkg + `func Render(m string) Text { return Text{} }; func f(t *Text, s string) { t.parts = []string{s} }`, 1},
+		// #1337: writes that are not plain assignments.
+		{"render.go", pkg + `func f(t Text, s []string) { copy(t.parts, s) }`, 1},
+		{"render.go", pkg + `func f(t *Template, s string) { p := &t.s; *p = s }`, 1},
+		{"render.go", pkg + `func f(t *Template, xs []string) { for _, t.s = range xs {} }`, 1},
+		// #1337: a generic builder (generic function, and its keyed literal).
+		{"render.go", pkg + `func mk[T ~struct{ s string }](s string) T { return T{s: s} }; var x = mk[Template]("a")`, 2},
+		{"render.go", pkg + `type box[T any] struct{ v T }`, 1},
+		// #1337: unsafe (import, and the pointer conversion).
+		{"render.go", pkg + `import "unsafe"; func f(p unsafe.Pointer) Text { return *(*Text)(p) }`, 2},
+		{"render.go", pkg + `import "reflect"; var _ = reflect.TypeOf(0)`, 1},
+		// A pointer conversion needs no unsafe.
+		{"render.go", pkg + `func f(s string) *Text { return (*Text)(&struct{ parts []string }{[]string{s}}) }`, 1},
+		{"render.go", pkg + `type P *Text`, 1},
+		{"render.go", pkg + `type W struct{ Text }; func f(s string) (w W) { w.parts = []string{s}; return }`, 2},
+		// Reading a field outside the accessors, and builder names on the
+		// wrong receiver or in the wrong file.
+		{"render.go", pkg + `func f(t Template) string { return t.s }`, 1},
+		{"render.go", pkg + `type X struct{}; func (X) Render(s string) Text { return Text{parts: []string{s}} }`, 1},
+		{"render.go", pkg + `func tpl(s string) Template { return Template{s: s} }`, 2},
 	}
 	for i, b := range bad {
 		fset := token.NewFileSet()
@@ -168,14 +268,16 @@ func TestTemplatesGuardDetects(t *testing.T) {
 		if err != nil {
 			t.Fatalf("bad %d: %v", i, err)
 		}
-		if got := scanTemplates(fset, f, b.file); len(got) != 1 {
-			t.Errorf("bad %d: want 1 finding, got %v", i, got)
+		if got := scanTemplates(fset, f, b.file); len(got) != b.want {
+			t.Errorf("bad %d (%s): want %d findings, got %v", i, b.src, b.want, got)
 		}
 	}
 	good := []struct{ file, src string }{
-		{templatesFile, `package safetext; func tpl(s string) Template { return Template{s: s} }; var x = tpl("hi")`},
-		{"render.go", `package safetext; func f(t Template) string { return t.s }; var z = Template{}`},
-		{"render.go", `package safetext; func Render(m string) Text { return Text{parts: fit(m)} }; func ServerText(t Template) Text { return Text{parts: split(t.s)} }; var e = Text{}`},
+		{templatesFile, pkg + `func tpl(s string) Template { return Template{s: s} }; var x = tpl("hi"); func (t Template) String() string { return t.s }`},
+		{"render.go", pkg + `var z = Template{}; var e = Text{}; func f() (Text, error) { return Text{}, nil }`},
+		{"render.go", pkg + `func Render(m string) Text { return Text{parts: fit(m)} }; func ServerText(t Template) Text { return Text{parts: split(t.s)} }`},
+		{"render.go", pkg + `func (t Text) String() string { return join(t.parts) }; func (t Text) Parts() int { return len(t.parts) }; func (t Text) Part(i int) string { return t.parts[i] }`},
+		{"render.go", pkg + `type span struct{ start, end int }; func f(sp span) int { return sp.end - sp.start }; var u = UserText{tokens: nil}`},
 	}
 	for i, g := range good {
 		fset := token.NewFileSet()

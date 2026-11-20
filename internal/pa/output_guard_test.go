@@ -30,6 +30,8 @@ package pa
 //   - import another Telegram client (internal/botapi, internal/bot,
 //     internal/telegram, internal/notify, internal/broadcast, or a
 //     third-party Bot API library);
+//   - import unsafe, the one way to forge a safetext.Text or Template that
+//     the compiler does not refuse (*(*safetext.Text)(unsafe.Pointer(&x)));
 //
 // safetext.Text and safetext.Template have unexported fields, so no code
 // outside package safetext can make one; inside it,
@@ -136,6 +138,9 @@ func scanBotAPIUse(fset *token.FileSet, f *ast.File, rel string) []string {
 		if err != nil {
 			continue
 		}
+		if path == "unsafe" {
+			report(imp, `import "unsafe" (could forge a safetext.Text)`)
+		}
 		for _, p := range forbiddenBotImports {
 			if path == p || strings.HasPrefix(path, p+"/") {
 				report(imp, "import "+strconv.Quote(path))
@@ -236,6 +241,7 @@ func TestS1O1_GuardDetects(t *testing.T) {
 		"telegram import":          `package x; import "github.com/mctlhq/mctl-telegram/internal/telegram"; var _ = telegram.X`,
 		"third-party bot lib":      `package x; import tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"; var _ = tgbotapi.X`,
 		"method in struct tag-ish": `package x; var m = map[string]string{"method": "copyMessage"}`,
+		"unsafe import":            `package x; import "unsafe"; var _ = unsafe.Sizeof(0)`,
 	}
 	for name, src := range bad {
 		fset := token.NewFileSet()
