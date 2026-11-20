@@ -221,6 +221,14 @@ func (l *RunLoop) sendItem(ctx context.Context, it jobs.OutboxItem) (jobs.Outbox
 	if !ok {
 		return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxFailed}, OutboxOutcomeFailed
 	}
+	if it.SentParts >= text.Parts() {
+		// Every part was delivered on an earlier attempt and only the
+		// completion was lost.
+		return jobs.OutboxCompletion{Now: l.now(), Status: jobs.OutboxSent}, OutboxOutcomeSent
+	}
+	// Only a prompt that still has parts to send is checked: one delivered
+	// in full on an earlier attempt was sent, whatever its button became
+	// since (a press consumes it).
 	if it.Kind == jobs.OutboxConsentPrompt {
 		live, err := l.buttonLive(ctx, it, now)
 		if err != nil {
@@ -232,11 +240,6 @@ func (l *RunLoop) sendItem(ctx context.Context, it jobs.OutboxItem) (jobs.Outbox
 		if !live {
 			return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxDropped}, OutboxOutcomeButtonExpired
 		}
-	}
-	if it.SentParts >= text.Parts() {
-		// Every part was delivered on an earlier attempt and only the
-		// completion was lost.
-		return jobs.OutboxCompletion{Now: l.now(), Status: jobs.OutboxSent}, OutboxOutcomeSent
 	}
 	err := l.sender.SendFrom(ctx, it.Principal, text, kb, it.SentParts, func(parts int) error {
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outboxRecordTimeout)

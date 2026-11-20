@@ -211,6 +211,36 @@ func TestConversationReplies_MissingButtonNotSent(t *testing.T) {
 	}
 }
 
+// TestConversationReplies_DeliveredPromptStaysSent: a prompt delivered in
+// full on an earlier attempt, whose completion write was lost, is recorded
+// as sent even though its button was pressed (consumed) since; it is not
+// sent again and not counted as button_expired.
+func TestConversationReplies_DeliveredPromptStaysSent(t *testing.T) {
+	counts := outboxCounts{}
+	h := newOutboxRepliesHarness(t, newStore(t), nil, withOutboxCounter(counts))
+	h.failSends(floodWait)
+	h.text(aliceID, "hello")
+	h.loop.WaitDeliveries()
+	// Every part reached Telegram; only the completion was lost. Then the
+	// principal pressed the button, which consumed its callback.
+	if _, err := h.convoHarness.store.DB.Exec(`UPDATE pa_outbox SET sent_parts = 1 WHERE principal = $1 AND kind = $2`,
+		aliceID, jobs.OutboxConsentPrompt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.convoHarness.store.DB.Exec(`DELETE FROM pa_callbacks WHERE principal = $1`, aliceID); err != nil {
+		t.Fatal(err)
+	}
+	h.failSends(nil)
+	h.now = h.now.Add(time.Minute)
+	h.loop.outboxPass(context.Background())
+	if msgs := h.messagesTo(aliceID); len(msgs) != 0 {
+		t.Fatalf("a delivered prompt was sent again: %+v", msgs)
+	}
+	if st := h.outboxStatus(jobs.OutboxConsentPrompt); st != "sent" || counts[OutboxOutcomeSent] != 1 || counts[OutboxOutcomeButtonExpired] != 0 {
+		t.Fatalf("status %q, counts %v", st, counts)
+	}
+}
+
 // callbackExpiryDown fails the button read.
 type callbackExpiryDown struct{ *db.Store }
 
