@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
-	_ "github.com/jackc/pgx/v5/stdlib"
-	_ "modernc.org/sqlite"
+	"github.com/jackc/pgx/v5/stdlib"
+	"modernc.org/sqlite"
 )
 
 // driverFor inspects the DSN scheme and returns the database/sql driver name
@@ -78,12 +78,9 @@ func Open(ctx context.Context, dsn string, maxOpenConns, maxIdleConns int) (*sql
 // session-level advisory lock migrateLockKey (migrate_lock.go), so two
 // replicas starting together migrate one after the other.
 func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64) error {
-	// We re-probe by issuing one driver-specific NOOP. SQLite parses `SELECT 1`
-	// fine on both; we detect Postgres by `current_database()` which only
-	// exists there. Cleaner than threading the driver name through callers.
-	var pg bool
-	if err := dbConn.QueryRowContext(ctx, "SELECT 1 FROM pg_catalog.pg_database WHERE datname = current_database()").Scan(new(int)); err == nil {
-		pg = true
+	pg, err := dialectOf(dbConn)
+	if err != nil {
+		return err
 	}
 	if !pg {
 		// SQLite serves one process (MaxOpenConns 1): nothing to race.
@@ -92,6 +89,22 @@ func Migrate(ctx context.Context, dbConn *sql.DB, ttlExemptTelegramIDs ...int64)
 	return withMigrateLock(ctx, dbConn, func(conn migrateDB) error {
 		return migrate(ctx, conn, true, ttlExemptTelegramIDs)
 	})
+}
+
+// dialectOf reports whether dbConn is a Postgres pool, from the driver Open
+// registered it with. It does no I/O, so it cannot mistake a failed read for
+// "not Postgres": an earlier SQL probe did, and a transient error on
+// Postgres then skipped the migration lock and ran the SQLite DDL. A driver
+// that is neither is an error, never a guess.
+func dialectOf(dbConn *sql.DB) (pg bool, err error) {
+	switch d := dbConn.Driver().(type) {
+	case *stdlib.Driver:
+		return true, nil
+	case *sqlite.Driver:
+		return false, nil
+	default:
+		return false, fmt.Errorf("migrate: unsupported database driver %T", d)
+	}
 }
 
 // migrate applies the schema on dbConn: the pool on SQLite, the locked
