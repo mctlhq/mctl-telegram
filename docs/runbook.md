@@ -3937,6 +3937,24 @@ can fire. The rules are in `deploy/alerts/mctl-telegram.rules.yaml`
 (group `mctl-telegram-pa`) and are not deployed yet: porting them to the
 mctl-gitops vm-rules is part of enabling the PA (#1318).
 
+- **Server wiring (#1343).** With `PA_ENABLED=true` the server builds the
+  run loop: the webhook's update handler is `pa.Conversations`, and the
+  worker routes `/api/pa/v1/jobs/{claim,turn,reply}` are mounted. Startup
+  refuses an enabled PA without `ENCRYPTION_KEY` (it keys the conversation
+  state, under its own HKDF info) or without `AUTH_MODE=local-jwt` and a
+  set `OAUTH_JWT_SIGNING_KEY` (it signs the pool and pa-job tokens, issuer
+  `PUBLIC_BASE_URL`; shared-hmac's shared secret and the legacy
+  `OAUTH_JWT_SECRET` fallback are refused, because another service holds
+  them). The run loop has no
+  tools: the connector's tool route is not mounted and the dispatcher does
+  not run until the tools slice (#1314). The outbox retry loop runs every
+  15s. On shutdown the server stops serving first and then waits, at most
+  20s, for deliveries already started; one still running is abandoned and
+  its row becomes `unknown`, never resent.
+- **No consent prompt yet.** Conversation-level replies (the consent
+  prompt, `/new`, `/forget`) have no sender until #1348. Until then a first
+  message records the prompt's callback and sends nothing, so no principal
+  can consent and nothing runs: enabling the PA before #1348 serves no one.
 - **Webhook URL.** `PA_ENABLED=true` without a valid `PA_WEBHOOK_URL`
   refuses to start; there is no fallback to polling (owner decision on
   #1313, 2026-11-20).

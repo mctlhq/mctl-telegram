@@ -66,11 +66,16 @@ type Config struct {
 	// tier (see localEnvNames there) makes an insecure-auth or
 	// missing-encryption-key boot fatal regardless of the configured listen
 	// address.
-	Environment      string
-	DatabaseURL      string
-	OAUTHJWTSecret   string // HS256 signing key; see OAUTH_JWT_SIGNING_KEY
-	OAUTHJWTAudience string // expected `aud` claim; empty disables the check
-	OAUTHJWTAudReq   bool   // when true, tokens without aud are rejected
+	Environment    string
+	DatabaseURL    string
+	OAUTHJWTSecret string // HS256 signing key; see OAUTH_JWT_SIGNING_KEY
+	// OAUTHJWTSecretDedicated is true when OAUTHJWTSecret is mctl-telegram's
+	// own OAUTH_JWT_SIGNING_KEY in local-jwt mode, not a secret another
+	// service also holds (shared-hmac's OAUTH_JWT_SECRET or its legacy
+	// fallback). The PA requires it (#1349 review).
+	OAUTHJWTSecretDedicated bool
+	OAUTHJWTAudience        string // expected `aud` claim; empty disables the check
+	OAUTHJWTAudReq          bool   // when true, tokens without aud are rejected
 	// WorkerTokenRevocationCacheTTL bounds how long a worker-token jti
 	// denylist check may serve a stale in-memory snapshot before refreshing
 	// from worker_token_revocations. <=0 falls back to
@@ -589,6 +594,16 @@ type Config struct {
 	PAMinTurnUSD       float64
 }
 
+// PALimits is the PA run loop's per-principal limits: the rate window and
+// context bound from PA_RATE_* and PA_MAX_CONTEXT_TOKENS, and the fixed
+// per-run tool-call cap.
+func (c *Config) PALimits() jobs.Limits {
+	return jobs.Limits{
+		RateMessages: c.PARateMessages, RateWindow: c.PARateWindow,
+		MaxToolCalls: jobs.DefaultMaxToolCalls, MaxContextTokens: c.PAMaxContextTokens,
+	}
+}
+
 // PABudget is the PA run loop's budget: the PA caps, the global day shared
 // with the managed runtime, and MANAGED_CLAIM_NOT_AFTER, which ends PA
 // claims as it ends managed ones.
@@ -718,6 +733,7 @@ func Load() (*Config, error) {
 		Environment:                     envOr("ENV", ""),
 		DatabaseURL:                     envOr("DATABASE_URL", "file:mctl-telegram.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"),
 		OAUTHJWTSecret:                  jwtSigningKey(authMode),
+		OAUTHJWTSecretDedicated:         strings.EqualFold(authMode, "local-jwt") && os.Getenv("OAUTH_JWT_SIGNING_KEY") != "",
 		OAUTHJWTAudience:                os.Getenv("OAUTH_JWT_AUDIENCE"),
 		OAUTHJWTAudReq:                  envBool("OAUTH_JWT_AUDIENCE_REQUIRED", false),
 		WorkerTokenRevocationCacheTTL:   envDuration("WORKER_TOKEN_REVOCATION_CACHE_TTL", 10*time.Second),
@@ -1056,8 +1072,35 @@ func Load() (*Config, error) {
 		}
 		c.EncryptionKey = decoded
 	}
+	if err := validatePAWiring(c); err != nil {
+		return nil, err
+	}
 
 	return c, nil
+}
+
+// validatePAWiring refuses an enabled PA without the two server secrets its
+// run loop is built from (#1343): ENCRYPTION_KEY keys the conversation-state
+// sealer (its own HKDF info keeps it apart from the session keys) and the
+// OAuth signing key signs and verifies the pool and pa-job tokens. It runs
+// after both are parsed, and names the variable, never its value. With the
+// PA off neither is required by this check.
+func validatePAWiring(c *Config) error {
+	if !c.PAEnabled {
+		return nil
+	}
+	if len(c.EncryptionKey) != 32 {
+		return errors.New("PA_ENABLED=true requires ENCRYPTION_KEY (64 hex chars): it keys the PA conversation state")
+	}
+	// The PA's pool and pa-job tokens unlock principals' conversations, so
+	// they must be signed with a key only this service holds: the dedicated
+	// OAUTH_JWT_SIGNING_KEY in local-jwt mode. shared-hmac signs with
+	// api.mctl.ai's shared secret, and local-jwt's legacy OAUTH_JWT_SECRET
+	// fallback was historically that same secret.
+	if c.OAUTHJWTSecret == "" || !c.OAUTHJWTSecretDedicated {
+		return errors.New("PA_ENABLED=true requires AUTH_MODE=local-jwt with OAUTH_JWT_SIGNING_KEY set: it signs the PA worker and job tokens, and no other service may hold that key")
+	}
+	return nil
 }
 
 // jwtSigningKey resolves the HS256 key for OAuth/MCP JWTs, honouring AUTH_MODE.

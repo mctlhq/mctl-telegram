@@ -536,7 +536,7 @@ CIMD documents are fetched by the authorization server from MCTL. They are not M
 ### T11 Kill switches and rollback
 
 **Flags.** All are independent and fail-closed: a missing or unparseable value means off.
-- `PA_ENABLED`: the whole bot. When off, the bot answers "temporarily unavailable" and runs no loop.
+- `PA_ENABLED`: the whole bot. When off, nothing PA is built: no webhook or worker route exists (a request gets 404), and no loop runs.
 - `PA_EXTERNAL_TOOLS_ENABLED`: no MCP calls at all.
 - `PA_WRITES_ENABLED`: every write becomes `never`.
 - `PA_SERVER_<NAME>_ENABLED`: one server.

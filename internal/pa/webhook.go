@@ -220,7 +220,8 @@ func (h *webhook) count(outcome string) {
 	}
 }
 
-// InertHandler is the production handler until the run loop lands (slice
-// (d) of #1313): it accepts a verified update and does nothing with it. No
-// model call, no tool call, no message.
+// InertHandler accepts a verified update and does nothing with it: no
+// model call, no tool call, no message. It was the production handler until
+// the run loop was wired (#1343); the server now uses Conversations, and
+// this remains for tests that need a handler with no effects.
 var InertHandler Handler = HandlerFunc(func(context.Context, *sql.Tx, VerifiedUpdate) error { return nil })

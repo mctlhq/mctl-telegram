@@ -53,7 +53,6 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/netctx"
 	"github.com/mctlhq/mctl-telegram/internal/oauth"
 	"github.com/mctlhq/mctl-telegram/internal/oauth/cimd"
-	"github.com/mctlhq/mctl-telegram/internal/pa"
 	"github.com/mctlhq/mctl-telegram/internal/productupdate"
 	"github.com/mctlhq/mctl-telegram/internal/sweeper"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
@@ -925,12 +924,16 @@ func main() {
 	// bridgeAuth was validated at the top of main; nil means not configured.
 	mountBotStartBridge(mux, store, m, bridgeAuth)
 
-	// Personal Assistant bot webhook (issue #1313). Inert unless PA_ENABLED
-	// is explicitly true: with it off no PA route exists at all.
-	if _, err := mountPA(mux, cfg, store, m); err != nil {
-		slog.Error("pa webhook", "err", err)
+	// Personal Assistant bot (issue #1313, wired by #1343): the webhook and
+	// the run-loop routes, plus the outbox retry loop. Nothing is built
+	// unless PA_ENABLED is explicitly true: with it off no PA route exists.
+	paRT, err := buildPA(cfg, store, workerTokenRevocationCache, m)
+	if err != nil {
+		slog.Error("pa runtime", "err", err)
 		os.Exit(1)
 	}
+	paRT.Mount(mux)
+	paRT.Start(ctx)
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
@@ -962,8 +965,7 @@ func main() {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	workerDeadline := time.Now().Add(broadcastShutdownGrace)
-	_ = srv.Shutdown(shutCtx)
-	waitBroadcastWorker(workerDeadline)
+	gracefulShutdown(shutCtx, srv, paRT, workerDeadline)
 }
 
 // metricsHandler wraps the Prometheus exposition handler with an optional CIDR
@@ -1670,35 +1672,4 @@ func withK8sSA(cfg *config.Config, store *db.Store, provider auth.Provider) (aut
 	}
 	slog.Info("k8s service account auth enabled on /mcp", "subject", cfg.K8sSASubject, "audience", cfg.K8sSAAudience, "issuer", cfg.K8sSAIssuer)
 	return p, nil
-}
-
-// mountPA mounts the Personal Assistant webhook (issue #1313) when, and only
-// when, cfg.PAEnabled is true. config.Load has already refused an enabled
-// configuration without a PA bot token or webhook secret. Until the run loop
-// lands, verified updates go to pa.InertHandler: deduplicated and dropped,
-// with no model call, tool call or message. Split out of main so a test can
-// assert that nothing is registered while the flag is off.
-func mountPA(mux chi.Router, cfg *config.Config, store *db.Store, counter pa.Counter) (bool, error) {
-	if !cfg.PAEnabled {
-		slog.Info("pa bot disabled", "reason", "PA_ENABLED not true")
-		return false, nil
-	}
-	h, err := pa.NewWebhookHandler(pa.WebhookConfig{
-		Secret:   cfg.PAWebhookSecret,
-		Dedup:    store,
-		Handler:  pa.InertHandler,
-		Failures: store,
-		// Counts every delivery outcome, bad_secret included: a secret
-		// mismatch with Telegram shows here as well as in getWebhookInfo.
-		Counter: counter,
-	})
-	if err != nil {
-		return false, err
-	}
-	// Handle, not Method(POST): the handler checks the secret before the
-	// method, so a GET without the secret is a 401 like any other request
-	// and the router does not reveal the endpoint with a 405.
-	mux.Handle(pa.WebhookPath, h)
-	slog.Info("pa bot webhook enabled", "path", pa.WebhookPath, "handler", "inert")
-	return true, nil
 }
