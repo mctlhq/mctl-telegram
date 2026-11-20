@@ -12,29 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package output is the only way the Personal Assistant bot sends anything
-// to Telegram. It implements threat model T14, output exfiltration through
-// the bot's own messages (docs/agent-runtime/personal-assistant-threat-model.md):
+// Package safetext holds the only values the Personal Assistant bot may
+// send: Text and Template. It implements the construction half of threat
+// model T14, output exfiltration through the bot's own messages
+// (docs/agent-runtime/personal-assistant-threat-model.md); package output
+// sends them.
 //
 //   - Text is a value only this package can build: Render for model-authored
 //     text, ServerText for server-authored templates from the registry in
-//     templates.go. Sender accepts nothing else, so model text cannot reach
-//     a send without going through Render.
+//     templates.go. Both types have unexported fields, so the compiler
+//     refuses a Text or Template built anywhere else, by literal,
+//     conversion, alias or generic. output.Sender accepts nothing else, so
+//     model text cannot reach a send without going through Render.
+//   - Inside this package, TestTemplatesAreLiteralRegistry keeps every
+//     Template a string literal in templates.go and every field access in
+//     the few functions that build or read the values.
 //   - Render strips markup and neutralises every token Telegram could turn
 //     into a link (URL, scheme-less or IDN domain, IP address, e-mail, tg:
 //     link, bot mention) unless that exact token appeared in the principal's
 //     own text in this conversation.
-//   - Sender sends plain text only (no parse_mode, no entities), with link
-//     previews disabled on every message, and inline keyboards made only of
-//     server-authored callback buttons. A URL, login, web app or inline
-//     query button cannot be expressed.
 //
-// A static test (TestS1O1_SenderIsTheOnlyBotAPICallSite) keeps every Bot API
-// send method and raw Bot API URL under internal/pa inside sender.go.
-//
-// The package is library code: nothing in the runtime constructs a Sender
-// yet, and PA_ENABLED (default off) gates everything that will.
-package output
+// The package is a leaf: it imports nothing from internal/pa, and must not,
+// so that it stays small enough to review as a whole.
+package safetext
 
 import (
 	"errors"
@@ -67,7 +67,7 @@ func (t Text) Part(i int) string { return t.parts[i] }
 // A registry template longer than MaxParts messages is a programming error;
 // Sender refuses the resulting Text.
 func ServerText(t Template) Text {
-	return Text{parts: split(t.s, maxTextUTF16)}
+	return Text{parts: split(t.s, MaxPartUTF16)}
 }
 
 // UserText is the set of tokens the principal typed themselves in this
@@ -80,6 +80,14 @@ type UserText struct {
 // AllowFromUserText collects the link tokens of the given user-provenance
 // texts. Render keeps a token only when it is exactly one of these: a user
 // host is not enough, because a query string can be appended.
+//
+// The texts are normalised but not stripped of markup, so tokens are cut
+// from what the principal literally typed. A link they wrote as Markdown,
+// "[docs](https://a.example/x)", yields the token
+// "docs](https://a.example/x)", which no rendered URL equals: the model's
+// copy of that URL is defanged. That fails closed. Stripping first would
+// let markup removal join characters into a token the principal never
+// typed ("a.example/<b>x" becomes "a.example/x"), so it is not done.
 func AllowFromUserText(texts ...string) UserText {
 	u := UserText{tokens: map[string]struct{}{}}
 	for _, t := range texts {
@@ -96,8 +104,10 @@ func (u UserText) allows(tok string) bool {
 	return ok
 }
 
-// Render turns model-authored text into Text. It never fails: whatever it
-// cannot prove safe is neutralised, not passed through.
+// Render turns model-authored text into Text. Whatever it cannot prove
+// safe is neutralised, not passed through. Its only error is ErrTooLong,
+// for text that needs more than MaxParts messages; the caller must handle
+// it (outbox sends TextReplyTooLong instead).
 //
 //  1. normalise: Unicode format characters (Cf: zero-width, bidi) and
 //     control characters other than newline are removed, and tabs and every
@@ -106,21 +116,28 @@ func (u UserText) allows(tok string) bool {
 //     below a subset of its own.
 //  2. Markup is stripped: HTML tags and comments, Markdown links and images
 //     (rewritten to "label (target)"), and the paired emphasis, strike,
-//     spoiler and code markers. Sender never sets parse_mode, so this is for
-//     readability; the security property is step 3, which runs last.
+//     spoiler and code markers, again until none is left (stripMarkup).
+//     Sender never sets parse_mode, so this is for readability; the
+//     security property is step 3, which runs last.
 //  3. Every link token not exactly present in allow is defanged (see
 //     findCandidates and neutralise).
 //  4. The text is cut into Bot API sized parts and step 3 runs again on each
 //     part, so a cut cannot leave a live piece of a token (fit).
 //
-// Render is idempotent: rendering its own output changes nothing. Text that
-// would need more than MaxParts messages is refused with ErrTooLong, never
-// truncated, so injected content cannot flood the principal's chat or push
-// the bot into flood waits, and a cut can never fall inside a token.
+// For text that fits one message, Render is idempotent: rendering its own
+// output changes nothing (TestS1O2_RenderIsIdempotent, FuzzRender). Text
+// cut into several messages is not promised to be: a second Render cuts
+// the joined parts again, possibly elsewhere, though its output is just as
+// neutralised.
+//
+// Text that would need more than MaxParts messages is refused with
+// ErrTooLong, never truncated, so injected content cannot flood the
+// principal's chat or push the bot into flood waits, and a cut can never
+// fall inside a token.
 func Render(model string, allow UserText) (Text, error) {
-	// Each part holds at most maxTextUTF16 units, so longer input cannot
+	// Each part holds at most MaxPartUTF16 units, so longer input cannot
 	// fit; refusing it first also bounds the work below.
-	if utf16Len(model) > MaxParts*maxTextUTF16 {
+	if UTF16Len(model) > MaxParts*MaxPartUTF16 {
 		return Text{}, ErrTooLong
 	}
 	parts, ok := fit(neutralise(stripMarkup(normalise(model)), allow), allow)
@@ -147,9 +164,9 @@ func fit(s string, allow UserText) ([]string, bool) {
 	var out []string
 	var walk func(s string) bool
 	walk = func(s string) bool {
-		for _, p := range split(s, maxTextUTF16) {
+		for _, p := range split(s, MaxPartUTF16) {
 			p = neutralise(p, allow)
-			if utf16Len(p) > maxTextUTF16 {
+			if UTF16Len(p) > MaxPartUTF16 {
 				if !walk(p) {
 					return false
 				}
@@ -197,11 +214,61 @@ var (
 	mdMarkers = regexp.MustCompile("\\*\\*|__|~~|\\|\\||`+")
 )
 
+// maxStripPasses bounds how often stripMarkup re-runs. Removing one piece
+// of markup can join the text around it into another ("<**b>" becomes
+// "<b>", "*`*" becomes "**"), so a single pass is not a fixpoint. Real text
+// settles in one or two passes; text nested deeper than this is treated as
+// hostile and handled by breakMarkup.
+const maxStripPasses = 4
+
+// stripMarkup strips markup until nothing more matches, so that its result
+// holds no markup (and a second Render finds none). If maxStripPasses do
+// not reach that point, breakMarkup removes what is left.
 func stripMarkup(s string) string {
+	for range maxStripPasses {
+		next := stripOnce(s)
+		if next == s {
+			return s
+		}
+		s = next
+	}
+	if next := stripOnce(s); next != s {
+		return breakMarkup(next)
+	}
+	return s
+}
+
+// breakMarkup makes s free of markup in one step, for text that is still
+// changing after maxStripPasses: it drops every character that starts a
+// tag or a paired marker (< * _ ~ | and the backtick), then puts a space
+// in every "](" so no Markdown link remains. Deleting characters cannot
+// create a "<" or a marker pair, and the "](" pass runs last, so the
+// result is a fixpoint of stripOnce. It loses those characters, which only
+// deliberately nested markup pays for.
+func breakMarkup(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if strings.ContainsRune("<*_~|`", r) {
+			return -1
+		}
+		return r
+	}, s)
+	return strings.ReplaceAll(s, "](", "] (")
+}
+
+// defangLabels are the labels of the "[x]" forms defang writes. A defanged
+// dot, colon or @ followed by "(" reads as a Markdown link ("[.](x)");
+// rewriting it would undo the defang in a second Render, so it is left as
+// it is. The link pass that runs after stripMarkup still neutralises x.
+var defangLabels = map[string]bool{".": true, ":": true, "@": true}
+
+func stripOnce(s string) string {
 	s = htmlComment.ReplaceAllString(s, "")
 	s = htmlTag.ReplaceAllString(s, "")
 	s = mdLink.ReplaceAllStringFunc(s, func(m string) string {
 		sub := mdLink.FindStringSubmatch(m)
+		if defangLabels[sub[1]] {
+			return m
+		}
 		label, target := strings.TrimSpace(sub[1]), strings.TrimSpace(sub[2])
 		switch {
 		case target == "":

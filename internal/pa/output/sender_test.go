@@ -21,15 +21,30 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
 const testToken = "123456:test-token-alice"
 
 // Alice's synthetic private chat id.
 const aliceChat int64 = 100001
+
+// anyText is a valid one-part Text for tests about the transport.
+var anyText = safetext.ServerText(safetext.TextRunFailed)
+
+func mustRender(t *testing.T, model string, allow safetext.UserText) safetext.Text {
+	t.Helper()
+	txt, err := safetext.Render(model, allow)
+	if err != nil {
+		t.Fatalf("Render(%.40q): %v", model, err)
+	}
+	return txt
+}
 
 type recorded struct {
 	path string
@@ -71,14 +86,14 @@ func newFake(t *testing.T) (*fakeBotAPI, *Sender) {
 func TestS1O1_EverySendDisablesPreviews(t *testing.T) {
 	f, s := newFake(t)
 	ctx := context.Background()
-	allow := AllowFromUserText("https://docs.example.org/a")
+	allow := safetext.AllowFromUserText("https://docs.example.org/a")
 	sends := []struct {
-		text Text
+		text safetext.Text
 		kb   Keyboard
 	}{
 		{mustRender(t, "see https://docs.example.org/a", allow), nil},
-		{ServerText(tpl("Consent required.")), Keyboard{{{Label: tpl("Agree"), Data: "c:1"}}}},
-		{mustRender(t, strings.Repeat("Bob wrote a long message. ", 400), UserText{}), nil},
+		{safetext.ServerText(safetext.TextConsentPrompt), Keyboard{{{Label: safetext.LabelConsentAccept, Data: "c:1"}}}},
+		{mustRender(t, strings.Repeat("Bob wrote a long message. ", 400), safetext.UserText{}), nil},
 	}
 	for _, sd := range sends {
 		if err := s.Send(ctx, aliceChat, sd.text, sd.kb); err != nil {
@@ -99,7 +114,7 @@ func TestS1O1_EverySendDisablesPreviews(t *testing.T) {
 		if _, ok := c.body["disable_web_page_preview"]; ok {
 			t.Errorf("call %d: legacy preview flag set", i)
 		}
-		if n := utf16Len(c.body["text"].(string)); n > maxTextUTF16 || n == 0 {
+		if n := safetext.UTF16Len(c.body["text"].(string)); n > safetext.MaxPartUTF16 || n == 0 {
 			t.Errorf("call %d: text length %d", i, n)
 		}
 	}
@@ -111,12 +126,12 @@ func TestS1O1_EverySendDisablesPreviews(t *testing.T) {
 func TestS1O3_PlainTextAndNoURLButtons(t *testing.T) {
 	f, s := newFake(t)
 	ctx := context.Background()
-	model := mustRender(t, `<a href="https://attacker.example">x</a> **y** [z](tg://resolve?domain=EvilBot)`, UserText{})
+	model := mustRender(t, `<a href="https://attacker.example">x</a> **y** [z](tg://resolve?domain=EvilBot)`, safetext.UserText{})
 	if err := s.Send(ctx, aliceChat, model, nil); err != nil {
 		t.Fatal(err)
 	}
-	kb := Keyboard{{{Label: tpl("Yes"), Data: "a:1"}, {Label: tpl("No"), Data: "a:2"}}, {{Label: tpl("Cancel"), Data: "a:3"}}}
-	if err := s.Send(ctx, aliceChat, ServerText(tpl("Confirm?")), kb); err != nil {
+	kb := Keyboard{{{Label: safetext.LabelConsentAccept, Data: "a:1"}, {Label: safetext.LabelCancel, Data: "a:2"}}, {{Label: safetext.LabelCancel, Data: "a:3"}}}
+	if err := s.Send(ctx, aliceChat, safetext.ServerText(safetext.TextConsentStale), kb); err != nil {
 		t.Fatal(err)
 	}
 	allowedTop := map[string]bool{"chat_id": true, "text": true, "link_preview_options": true, "reply_markup": true}
@@ -151,25 +166,28 @@ func TestS1O3_PlainTextAndNoURLButtons(t *testing.T) {
 func TestSendRefusesBadInput(t *testing.T) {
 	f, s := newFake(t)
 	ctx := context.Background()
-	if err := s.Send(ctx, aliceChat, Text{}, nil); !errors.Is(err, ErrEmptyText) {
+	if err := s.Send(ctx, aliceChat, safetext.Text{}, nil); !errors.Is(err, ErrEmptyText) {
 		t.Errorf("zero Text: %v", err)
 	}
-	if err := s.Send(ctx, aliceChat, mustRender(t, " \n ", UserText{}), nil); !errors.Is(err, ErrEmptyText) {
+	if err := s.Send(ctx, aliceChat, mustRender(t, " \n ", safetext.UserText{}), nil); !errors.Is(err, ErrEmptyText) {
 		t.Errorf("blank Text: %v", err)
 	}
-	if err := s.Send(ctx, -100200, ServerText(tpl("x")), nil); !errors.Is(err, ErrInvalidChat) {
+	if err := s.Send(ctx, -100200, anyText, nil); !errors.Is(err, ErrInvalidChat) {
 		t.Errorf("group chat id: %v", err)
 	}
-	if err := s.Send(ctx, aliceChat, Text{parts: []string{strings.Repeat("z", maxTextUTF16+1)}}, nil); !errors.Is(err, ErrPartTooLong) {
+	if err := s.sendParts(ctx, aliceChat, []string{strings.Repeat("z", safetext.MaxPartUTF16+1)}, nil, 0, nil); !errors.Is(err, ErrPartTooLong) {
 		t.Errorf("oversize part: %v", err)
+	}
+	if err := s.sendParts(ctx, aliceChat, slices.Repeat([]string{"x"}, safetext.MaxParts+1), nil, 0, nil); !errors.Is(err, safetext.ErrTooLong) {
+		t.Errorf("over MaxParts: %v", err)
 	}
 	for _, kb := range []Keyboard{
 		{{}},
-		{{{Label: tpl(""), Data: "a"}}},
-		{{{Label: tpl("x"), Data: ""}}},
-		{{{Label: tpl("x"), Data: strings.Repeat("d", maxCallbackData+1)}}},
+		{{{Label: safetext.Template{}, Data: "a"}}},
+		{{{Label: safetext.LabelCancel, Data: ""}}},
+		{{{Label: safetext.LabelCancel, Data: strings.Repeat("d", maxCallbackData+1)}}},
 	} {
-		if err := s.Send(ctx, aliceChat, ServerText(tpl("x")), kb); !errors.Is(err, ErrInvalidKeyboard) {
+		if err := s.Send(ctx, aliceChat, anyText, kb); !errors.Is(err, ErrInvalidKeyboard) {
 			t.Errorf("keyboard %v: %v", kb, err)
 		}
 	}
@@ -201,7 +219,7 @@ func TestSendFailuresAreErrors(t *testing.T) {
 		f.mu.Lock()
 		f.reply = r
 		f.mu.Unlock()
-		err := s.Send(ctx, aliceChat, ServerText(tpl("x")), nil)
+		err := s.Send(ctx, aliceChat, anyText, nil)
 		if err == nil {
 			t.Errorf("%s: want error", name)
 			continue
@@ -215,14 +233,14 @@ func TestSendFailuresAreErrors(t *testing.T) {
 		}
 	}
 	s.base = "http://127.0.0.1:1"
-	if err := s.Send(ctx, aliceChat, ServerText(tpl("x")), nil); err == nil || strings.Contains(err.Error(), testToken) {
+	if err := s.Send(ctx, aliceChat, anyText, nil); err == nil || strings.Contains(err.Error(), testToken) {
 		t.Errorf("transport failure: %v", err)
 	}
 }
 
 func TestAnswerCallbackHasNoURL(t *testing.T) {
 	f, s := newFake(t)
-	if err := s.AnswerCallback(context.Background(), "cbq-1", tpl("Saved.")); err != nil {
+	if err := s.AnswerCallback(context.Background(), "cbq-1", safetext.TextForgotten); err != nil {
 		t.Fatal(err)
 	}
 	c := f.calls[0]
@@ -234,7 +252,7 @@ func TestAnswerCallbackHasNoURL(t *testing.T) {
 			t.Errorf("unexpected field %q", k)
 		}
 	}
-	if err := s.AnswerCallback(context.Background(), "", Template{}); err == nil {
+	if err := s.AnswerCallback(context.Background(), "", safetext.Template{}); err == nil {
 		t.Error("empty callback id accepted")
 	}
 }
@@ -252,23 +270,8 @@ func TestNewSenderUsesEgress(t *testing.T) {
 	}
 	// The egress client refuses any host but the Bot API host.
 	s.base = "https://attacker.example"
-	err = s.Send(context.Background(), aliceChat, ServerText(tpl("x")), nil)
+	err = s.Send(context.Background(), aliceChat, anyText, nil)
 	if err == nil || !strings.Contains(err.Error(), "allowlist") {
 		t.Fatalf("egress client must refuse a non-Bot-API host, got %v", err)
-	}
-}
-
-func TestSplit(t *testing.T) {
-	s := strings.Repeat("a", 10) + "\n" + strings.Repeat("b", 10)
-	got := split(s, 15)
-	if len(got) != 2 || got[0] != strings.Repeat("a", 10)+"\n" || got[1] != strings.Repeat("b", 10) {
-		t.Fatalf("got %q", got)
-	}
-	// A rune outside the BMP counts as two UTF-16 units and is never cut.
-	emoji := strings.Repeat("\U0001F600", 5)
-	for _, p := range split(emoji, 3) {
-		if utf16Len(p) > 3 || !strings.HasPrefix(p, "\U0001F600") {
-			t.Fatalf("bad part %q", p)
-		}
 	}
 }

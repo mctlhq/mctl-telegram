@@ -7,10 +7,10 @@ package jobs
 // sent after the commit. A failed send therefore leaves the row due again
 // instead of losing the message.
 //
-// A row stores no message text. A server notice is a kind, mapped to an
-// output template when it is sent; a reply names the external-marked
+// A row stores no message text. A server notice is a kind, mapped to a
+// safetext template when it is sent; a reply names the external-marked
 // assistant fragment that holds the model's answer, and is rendered from it
-// through output.Render when it is sent. A reply whose conversation was
+// through safetext.Render when it is sent. A reply whose conversation was
 // closed, forgotten or withdrawn before delivery is dropped with it.
 //
 // Send-once: a row is claimed (pending -> sending) right before it is sent,

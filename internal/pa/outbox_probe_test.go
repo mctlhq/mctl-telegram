@@ -17,7 +17,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
-	"github.com/mctlhq/mctl-telegram/internal/pa/output"
+	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
 // Probes of the outbox send-once rules (issue #1313 slice d2, round 2):
@@ -155,7 +155,7 @@ func TestOutbox_LeaseCoversOneSend(t *testing.T) {
 		<-done
 		h.now = h.now.Add(jobs.OutboxBackoff(1))
 		h.loop.deliver(context.Background(), 0)
-		if sent := h.sender.to(bobID); len(sent) != 1 || sent[0] != output.ServerText(output.TextRunFailed).String() {
+		if sent := h.sender.to(bobID); len(sent) != 1 || sent[0] != safetext.ServerText(safetext.TextRunFailed).String() {
 			t.Fatalf("Bob got %q, want his notice once", sent)
 		}
 		if st, _ := h.outboxRow(bobID, jobs.OutboxRunFailed); st != "sent" {
@@ -220,7 +220,7 @@ func TestOutbox_ClaimAnswersBeforeDelivery(t *testing.T) {
 			t.Fatal("the claim response waited on a Telegram send")
 		}
 		close(release)
-		if sent := h.sentTo(aliceID); len(sent) != 1 || sent[0] != output.ServerText(output.TextRunFailed).String() {
+		if sent := h.sentTo(aliceID); len(sent) != 1 || sent[0] != safetext.ServerText(safetext.TextRunFailed).String() {
 			t.Fatalf("Alice got %q, want the run-failed notice", sent)
 		}
 	})
@@ -309,7 +309,7 @@ func TestOutbox_RetryResumesAfterDeliveredParts(t *testing.T) {
 	h.text(aliceID, "hello")
 	c := h.mustClaim()
 	answer := strings.TrimSpace(strings.Repeat("word ", 2000))
-	want, err := output.Render(answer, output.AllowFromUserText("hello"))
+	want, err := safetext.Render(answer, safetext.AllowFromUserText("hello"))
 	if err != nil || want.Parts() != 3 {
 		t.Fatalf("render: %d parts, %v; the probe needs 3", want.Parts(), err)
 	}
@@ -494,11 +494,11 @@ func TestOutbox_RetryRendersAsFirstAttempt(t *testing.T) {
 	c := h.mustClaim()
 	const link = "https://example.org/report"
 	answer := "see " + link
-	want, err := output.Render(answer, output.AllowFromUserText("hello"))
+	want, err := safetext.Render(answer, safetext.AllowFromUserText("hello"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if later, _ := output.Render(answer, output.AllowFromUserText("hello", link)); later.String() == want.String() {
+	if later, _ := safetext.Render(answer, safetext.AllowFromUserText("hello", link)); later.String() == want.String() {
 		t.Fatal("the probe needs a link the allow-list changes")
 	}
 	h.failSends(floodWait)
@@ -576,7 +576,7 @@ func TestOutbox_StoredAnswerTooLong(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	seq, err := h.loop.appendAssistant(ctx, tx, jobs.Job{Principal: aliceID, ConversationID: convID}, strings.Repeat("x", (output.MaxParts+1)*4096))
+	seq, err := h.loop.appendAssistant(ctx, tx, jobs.Job{Principal: aliceID, ConversationID: convID}, strings.Repeat("x", (safetext.MaxParts+1)*4096))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -588,7 +588,7 @@ func TestOutbox_StoredAnswerTooLong(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.loop.deliver(ctx, 0)
-	if sent := h.sender.to(aliceID); len(sent) != 1 || sent[0] != output.ServerText(output.TextReplyTooLong).String() {
+	if sent := h.sender.to(aliceID); len(sent) != 1 || sent[0] != safetext.ServerText(safetext.TextReplyTooLong).String() {
 		t.Fatalf("sent %d messages, want the too-long server text", len(sent))
 	}
 }

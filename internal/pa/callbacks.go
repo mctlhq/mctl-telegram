@@ -17,7 +17,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/mctlhq/mctl-telegram/internal/pa/output"
+	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
 // CallbackCounter counts callback answers (*metrics.Registry implements
@@ -54,7 +54,7 @@ func (l *RunLoop) AnswerCallbackAfter(ctx context.Context, u VerifiedUpdate) {
 		actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), callbackAnswerTimeout)
 		defer cancel()
 		// No notice: the press is answered by its own outbox row.
-		if err := l.sender.AnswerCallback(actx, id, output.Template{}); err != nil {
+		if err := l.sender.AnswerCallback(actx, id, safetext.Template{}); err != nil {
 			slog.Warn("pa callback not answered", "update_id", updateID, "err", err)
 			l.countCallback(CallbackAnswerFailed)
 			return

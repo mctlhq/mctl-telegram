@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package output
+package safetext
 
 import (
-	"context"
 	"errors"
+	"math/rand"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -246,18 +247,18 @@ func TestS1O2_UserURLCannotBeExtended(t *testing.T) {
 // part is neutralised again, so the tail of a long user link cut at the
 // limit is defanged in its own part.
 func TestS1O2_SplitCannotCreateLink(t *testing.T) {
-	long := "https://a.example/" + strings.Repeat("q", maxTextUTF16-len("https://a.example/")) + "1.2.3.4/?d=SECRET"
+	long := "https://a.example/" + strings.Repeat("q", MaxPartUTF16-len("https://a.example/")) + "1.2.3.4/?d=SECRET"
 	allow := AllowFromUserText(long)
 	for _, model := range []string{
 		long,
-		strings.Repeat("x", maxTextUTF16-1) + "a1.2.3.4/?d=SECRET",
+		strings.Repeat("x", MaxPartUTF16-1) + "a1.2.3.4/?d=SECRET",
 	} {
 		txt := mustRender(t, model, allow)
 		if len(txt.parts) < 2 {
 			t.Fatalf("want a split, got %d parts", len(txt.parts))
 		}
 		for i, p := range txt.parts {
-			if utf16Len(p) > maxTextUTF16 {
+			if UTF16Len(p) > MaxPartUTF16 {
 				t.Errorf("part %d too long", i)
 			}
 			if bad := liveLinks(p, allow); len(bad) != 0 {
@@ -270,17 +271,119 @@ func TestS1O2_SplitCannotCreateLink(t *testing.T) {
 	}
 }
 
-// S1-O2: Render is idempotent, including on runs that start with an
-// already defanged "[.]" (the "[" is trimmed as an opener, so the check has
-// to look at the whole string). Every Render call in these tests also
-// checks this through mustRender.
+// idempotenceAlphabet is what the seeded corpus and FuzzRender build text
+// from: markup, the defang forms, link pieces and the characters normalise
+// and the boundary rules care about.
+var idempotenceAlphabet = []string{
+	"[", "]", "(", ")", ".", ":", "@", "a", "b", " ", "\n", "<", ">", "*", "_",
+	"`", "!", "/", "x.y", "[.]", "[:]", "[@]", "https://", "<b>", "**", "-", "~",
+	"|", ",", "'", "\"", "1", "<!--", "-->", "\t", "\u200b", "\u3002", "@bot", "tg:",
+}
+
+// idempotenceCounterexamples were not idempotent before #1337: a defanged
+// "[.]", "[:]" or "[@]" followed by "(" read as a Markdown link on the
+// second Render, and removing one piece of markup joined the text around
+// it into another. The last ones nest deeper than maxStripPasses, so only
+// breakMarkup settles them.
+var idempotenceCounterexamples = []string{
+	",[.]([@]\n)",
+	"@()<b>https://**[['/)`",
+	"\n.()a\"!('.",
+	"]'.()>[:]|<b>",
+	"(,.(1[.]<||1)",
+	"\"-_1,|`|",
+	"-~**~''~]<b><b>",
+	"a)\n,/*`*[*)",
+	"_@/<`b<b>/>\"",
+	"**_`_~:-.|! ",
+	"https://|`|https://@",
+	"[.]<b>:.@_**_[",
+	strings.Repeat("<b", 12) + strings.Repeat(">", 12) + " evil.example",
+	strings.Repeat("[", 12) + "a" + strings.Repeat("](x)", 12),
+	strings.Repeat("*", 1) + strings.Repeat("`", 12) + strings.Repeat("*", 1),
+	"*" + strings.Repeat("~|_", 6) + strings.Repeat("_|~", 6) + "*",
+}
+
+// S1-O2: a text that fits one message renders to a fixpoint: rendering
+// Render's output again changes nothing. Without the #1337 fix 65 of the
+// 20000 seeded inputs were not idempotent; the fixed counterexamples
+// include text that only breakMarkup settles.
 func TestS1O2_RenderIsIdempotent(t *testing.T) {
+	// Runs that start with an already defanged "[.]" (the "[" is trimmed
+	// as an opener, so the check has to look at the whole string) are not
+	// defanged twice.
 	for _, in := range []string{"[.]evil.io", "evil .com", "x [:]//a.b [@]EvilBot", strings.Repeat("[.]", 50)} {
-		once := mustRender(t, in, UserText{}).String()
-		if strings.Contains(once, "[[") {
+		if once := mustRender(t, in, UserText{}).String(); strings.Contains(once, "[[") {
 			t.Errorf("%q double-defanged: %q", in, once)
 		}
 	}
+	inputs := append([]string(nil), idempotenceCounterexamples...)
+	r := rand.New(rand.NewSource(1337))
+	for range 20000 {
+		var b strings.Builder
+		for range 1 + r.Intn(16) {
+			b.WriteString(idempotenceAlphabet[r.Intn(len(idempotenceAlphabet))])
+		}
+		inputs = append(inputs, b.String())
+	}
+	failed := 0
+	for _, in := range inputs {
+		once, err := Render(in, UserText{})
+		if err != nil {
+			t.Fatalf("Render(%q): %v", in, err)
+		}
+		twice, err := Render(once.String(), UserText{})
+		if err != nil || twice.String() != once.String() {
+			if failed++; failed <= 10 {
+				t.Errorf("not idempotent on %q:\n once  %q\n twice %q (err %v)", in, once.String(), twice.String(), err)
+			}
+		}
+		if bad := liveLinks(once.String(), UserText{}); len(bad) != 0 {
+			t.Errorf("%q -> %q: live link tokens %q", in, once.String(), bad)
+		}
+	}
+	if failed > 0 {
+		t.Errorf("%d of %d inputs not idempotent", failed, len(inputs))
+	}
+}
+
+// S1-O3: markup nested deeper than maxStripPasses is broken up rather than
+// left half-stripped: no tag, marker or Markdown link survives.
+func TestS1O3_DeepMarkupBroken(t *testing.T) {
+	for _, in := range idempotenceCounterexamples[len(idempotenceCounterexamples)-4:] {
+		out := mustRender(t, in, UserText{}).String()
+		if stripOnce(out) != out {
+			t.Errorf("%q -> %q: markup left", in, out)
+		}
+	}
+}
+
+// FuzzRender: for any input that fits one message, Render's output has no
+// live link token and is a fixpoint of Render.
+func FuzzRender(f *testing.F) {
+	for _, s := range idempotenceCounterexamples {
+		f.Add(s)
+	}
+	for _, s := range []string{"see https://a.example/x?d=1", "[x](tg://resolve?domain=EvilBot)", "<b>@EvilBot</b>", "1.2.3.4", "a.b\tc.d"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, in string) {
+		once, err := Render(in, UserText{})
+		if err != nil {
+			return
+		}
+		out := once.String()
+		if bad := liveLinks(out, UserText{}); len(bad) != 0 {
+			t.Fatalf("%q -> %q: live link tokens %q", in, out, bad)
+		}
+		if once.Parts() != 1 {
+			return // idempotence is promised for one message only
+		}
+		twice, err := Render(out, UserText{})
+		if err != nil || twice.String() != out {
+			t.Fatalf("not idempotent on %q:\n once  %q\n twice %q (err %v)", in, out, twice.String(), err)
+		}
+	})
 }
 
 // A reply that needs more than MaxParts messages is refused, not
@@ -292,20 +395,49 @@ func TestS1O2_PartsCap(t *testing.T) {
 		t.Errorf("[.]x1400: want 2 parts, got %d, %v", len(txt.parts), err)
 	}
 	// Under the input limit, but defanging inflates it past MaxParts.
-	inflating := strings.Repeat("a.b ", 7*maxTextUTF16/4)
+	inflating := strings.Repeat("a.b ", 7*MaxPartUTF16/4)
 	if txt, err := Render(inflating, UserText{}); !errors.Is(err, ErrTooLong) || len(txt.parts) != 0 {
 		t.Errorf("inflating text: want ErrTooLong and no parts, got %d parts, %v", len(txt.parts), err)
 	}
 	// Over the input limit: refused before any work.
-	if txt, err := Render(strings.Repeat("y", MaxParts*maxTextUTF16+1), UserText{}); !errors.Is(err, ErrTooLong) || len(txt.parts) != 0 {
+	if txt, err := Render(strings.Repeat("y", MaxParts*MaxPartUTF16+1), UserText{}); !errors.Is(err, ErrTooLong) || len(txt.parts) != 0 {
 		t.Errorf("long text: want ErrTooLong, got %d parts, %v", len(txt.parts), err)
 	}
 	// Exactly MaxParts full parts is allowed.
-	if txt, err := Render(strings.Repeat("y", MaxParts*maxTextUTF16), UserText{}); err != nil || len(txt.parts) != MaxParts {
+	if txt, err := Render(strings.Repeat("y", MaxParts*MaxPartUTF16), UserText{}); err != nil || len(txt.parts) != MaxParts {
 		t.Errorf("MaxParts parts: got %d, %v", len(txt.parts), err)
 	}
-	f, s := newFake(t)
-	if err := s.Send(context.Background(), aliceChat, Text{parts: make([]string, MaxParts+1)}, nil); !errors.Is(err, ErrTooLong) || len(f.calls) != 0 {
-		t.Errorf("Send over MaxParts: %v, %d calls", err, len(f.calls))
+}
+
+// A ~1 MB reply is refused before any of the passes runs: the size check
+// comes first, so the work is one length count, not copies of the input.
+// The allocation bound is what fails if the check is removed; the
+// ErrTooLong alone would not, since fit refuses the text later anyway.
+func TestS1O2_HugeInputRefusedUpfront(t *testing.T) {
+	for _, in := range []string{
+		strings.Repeat("y", 1<<20),
+		strings.Repeat("see a.example/x ", 1<<16),
+		strings.Repeat("<b>**[x](https://a.example)**</b> ", 1<<15),
+	} {
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		txt, err := Render(in, UserText{})
+		runtime.ReadMemStats(&after)
+		if !errors.Is(err, ErrTooLong) || txt.Parts() != 0 {
+			t.Fatalf("%d bytes: want ErrTooLong and no parts, got %d parts, %v", len(in), txt.Parts(), err)
+		}
+		if grew := after.TotalAlloc - before.TotalAlloc; grew > 64<<10 {
+			t.Errorf("%d bytes: Render allocated %d bytes before refusing; the size check must come first", len(in), grew)
+		}
+	}
+}
+
+// AllowFromUserText cuts tokens from the literal user text, markup
+// included, so a URL the principal wrote as a Markdown link is not
+// allowed on its own: the model's copy of it is defanged (fails closed).
+func TestAllowFromUserTextKeepsMarkup(t *testing.T) {
+	allow := AllowFromUserText("read [docs](https://a.example/x) please")
+	if got := mustRender(t, "see https://a.example/x", allow).String(); got != "see https[:]//a[.]example/x" {
+		t.Errorf("got %q, want the URL defanged", got)
 	}
 }
