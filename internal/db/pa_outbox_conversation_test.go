@@ -48,6 +48,10 @@ func runPAOutboxConversationSuite(t *testing.T, s *Store) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// A failed assertion must not leave the transaction open: on SQLite
+		// (one connection) every later test would wait on it until the
+		// package timeout. After Commit this is a no-op (ErrTxDone).
+		defer func() { _ = tx.Rollback() }()
 		for i, it := range []jobs.OutboxItem{
 			convReply(paAlice, u, jobs.OutboxConsentStale, ""),
 			convReply(paAlice, u, jobs.OutboxConsentPrompt, "btn-a"),

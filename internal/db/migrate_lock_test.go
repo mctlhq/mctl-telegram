@@ -200,7 +200,14 @@ func TestMigrateLockPostgres_WaitsForHolder(t *testing.T) {
 
 // TestMigrateLockPostgres_ContextEndsWhileWaiting: a Migrate whose context
 // ends while it waits for the lock returns that error, migrated nothing,
-// and leaves no lock behind on a pooled connection.
+// and no session of its pool holds the lock once the holder let go (so a
+// grant that raced the cancellation did not survive on an idle pooled
+// connection).
+//
+// It does not prove that withMigrateLock discards the connection on that
+// path: pgx closes a connection whose query was cancelled by its context
+// anyway, so the test passes with or without the discard. The discard is
+// there for a driver or a failure that leaves the connection open.
 func TestMigrateLockPostgres_ContextEndsWhileWaiting(t *testing.T) {
 	dsn := freshPostgresSchemaDSN(t)
 	app := testAppName(t, "migrate")
