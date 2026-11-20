@@ -510,7 +510,8 @@ type Config struct {
 	AssistantForksEnabled bool
 	// ManagedRuntimeEnabled lets an account choose runtime "managed" for its
 	// assistant (ADR 0008). Off by default: switching to managed is then
-	// refused. Set via MANAGED_RUNTIME_ENABLED.
+	// refused. Set via MANAGED_RUNTIME_ENABLED. On, Load requires
+	// AUTH_MODE=local-jwt with a dedicated OAUTH_JWT_SIGNING_KEY (#1351).
 	ManagedRuntimeEnabled bool
 	// ManagedRuntimeMaxAccounts caps how many accounts may be managed at
 	// once; 0 means none may become managed. Set via
@@ -1075,8 +1076,32 @@ func Load() (*Config, error) {
 	if err := validatePAWiring(c); err != nil {
 		return nil, err
 	}
+	if err := validateManagedRuntimeKey(c); err != nil {
+		return nil, err
+	}
 
 	return c, nil
+}
+
+// validateManagedRuntimeKey refuses MANAGED_RUNTIME_ENABLED=true unless the
+// key that signs and verifies its tokens is mctl-telegram's own (issue
+// #1351). The managed runtime trusts two credentials: the claim-only
+// agent-pool token, which claims jobs across every managed account, and the
+// agent-job tokens a pool claim mints for those accounts. Both are signed with
+// OAUTHJWTSecret. In shared-hmac that is api.mctl.ai's shared
+// OAUTH_JWT_SECRET, and in local-jwt without OAUTH_JWT_SIGNING_KEY it is the
+// legacy OAUTH_JWT_SECRET, historically that same shared value: either way a
+// holder of the other service's secret could mint a pool token. The same rule
+// as validatePAWiring; names the variables, never a value. With the managed
+// runtime off nothing changes.
+func validateManagedRuntimeKey(c *Config) error {
+	if !c.ManagedRuntimeEnabled {
+		return nil
+	}
+	if c.OAUTHJWTSecret == "" || !c.OAUTHJWTSecretDedicated {
+		return errors.New("MANAGED_RUNTIME_ENABLED=true requires AUTH_MODE=local-jwt with OAUTH_JWT_SIGNING_KEY set: it signs the agent-pool and managed agent-job tokens, and no other service may hold that key (OAUTH_JWT_SECRET is not accepted)")
+	}
+	return nil
 }
 
 // validatePAWiring refuses an enabled PA without the two server secrets its
