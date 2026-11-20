@@ -266,8 +266,8 @@ func (h *l2APIHarness) sources() map[string]string {
 		return sb.String()
 	}
 	return map[string]string{
-		"audit_logs":                 dump(`SELECT tool_name, COALESCE(peer_redacted,''), status, COALESCE(error,'') FROM audit_logs`, 4),
-		"agent_actions":              dump(`SELECT intent, policy_reasons, payload_encrypted FROM agent_actions`, 3),
+		"audit_logs":                 dump(`SELECT tool_name, COALESCE(peer_redacted,''), status, COALESCE(error,''), COALESCE(deny_code,'') FROM audit_logs`, 5),
+		"agent_actions":              dump(`SELECT intent, policy_reasons, payload_encrypted, COALESCE(deny_code,'') FROM agent_actions`, 4),
 		"owner_notifications.stored": dump(`SELECT kind, status, body_encrypted FROM owner_notifications`, 3),
 	}
 }
@@ -327,7 +327,17 @@ func TestL2Finance_T10(t *testing.T) {
 			rows.Close()
 		}
 		ev := fmt.Sprintf("code=%s metric_count=%v durable_in_audit_or_actions=%t deny_code_columns=%d", code, metric, durable, denyCols)
-		expectGap(t, "T10.denycode_persisted", metric >= 1 && !durable && denyCols == 0, ev)
+		// #1271: the code is now persisted in agent_actions.deny_code and on the
+		// same-transaction audit_logs.deny_code row of the denied action, so the
+		// reviewed gap no longer reproduces and the row is a PASS.
+		actionRows := h.count(`SELECT COUNT(*) FROM agent_actions WHERE status = 'denied' AND deny_code = $1`, code)
+		auditRows := h.count(`SELECT COUNT(*) FROM audit_logs WHERE deny_code = $1`, code)
+		ev += fmt.Sprintf(" action_rows=%d audit_rows=%d", actionRows, auditRows)
+		ok := metric >= 1 && durable && denyCols == 1 && actionRows >= 1 && auditRows >= 1
+		l2Record(t, "T10.denycode_persisted", l2Outcome(ok), ev)
+		if !ok {
+			t.Errorf("deny code not persisted: %s", ev)
+		}
 	})
 	t.Run("redaction_text", func(t *testing.T) {
 		h := l2NewAPIHarness(t, db.AgentModeGuarded, "discovery")

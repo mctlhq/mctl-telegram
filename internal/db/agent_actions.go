@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -109,6 +111,112 @@ type AgentAction struct {
 	// InstallRevision is the install revision the action was created under:
 	// its job's, or the profile's for an action without a job (#1018).
 	InstallRevision int64
+	// DenyCode is the stable code of the denial (#1271). On InsertAgentAction
+	// it is stored only when Status is denied (empty becomes DenyCodeUnknown)
+	// and ignored otherwise. On read it is "" for every action that is not
+	// denied and for legacy denied rows, which are never backfilled.
+	DenyCode string
+}
+
+// DenyCodeUnknown is the deny code of a denial that has no policy code
+// (retention sweep, supersession, send-gate and refusal paths, ...). It equals
+// policy.DenyUnknown; internal/db does not import the policy package.
+const DenyCodeUnknown = "unknown"
+
+// DenyCodeInstallChanged is the deny code of an action left over from an
+// earlier assistant install revision. It equals policy.DenyInstallChanged.
+const DenyCodeInstallChanged = "install_changed"
+
+// DenyCodeSourceSuperseded is the deny code of a draft withdrawn because its
+// source message was edited or deleted. It equals policy.DenySourceSuperseded.
+const DenyCodeSourceSuperseded = "source_message_superseded"
+
+// AuditToolActionDenied is the audit tool name of the per-action row written
+// in the same transaction as each transition of an action to denied.
+const AuditToolActionDenied = "agent_action_denied"
+
+// auditActionDeniedError is the constant error text of a denial audit row. The
+// structured deny_code column, not this text, carries the detail.
+const auditActionDeniedError = "agent action denied"
+
+func normalizeDenyCode(code string) string {
+	if strings.TrimSpace(code) == "" {
+		return DenyCodeUnknown
+	}
+	return code
+}
+
+// deniedAction identifies one row that an UPDATE actually moved to denied.
+type deniedAction struct{ id, userID int64 }
+
+// denyActionsTx runs an `UPDATE agent_actions ... RETURNING id, user_id` that
+// moves rows to denied and writes one audit row per returned (i.e. actually
+// transitioned) row, all in one transaction: an audit failure rolls the status
+// change back, and a failed or cancelled commit leaves neither. Rows the
+// UPDATE did not match (lost CAS, replay) produce no audit row. The returned
+// slice is non-empty only when the transaction committed.
+func (s *Store) denyActionsTx(ctx context.Context, code, query string, args ...any) ([]deniedAction, error) {
+	code = normalizeDenyCode(code)
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin deny tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	denied, err := denyUpdateReturning(ctx, tx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	if len(denied) == 0 {
+		return nil, nil
+	}
+	if err := auditDeniedActions(ctx, tx, denied, code); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit deny: %w", err)
+	}
+	return denied, nil
+}
+
+func denyUpdateReturning(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]deniedAction, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	var out []deniedAction
+	for rows.Next() {
+		var d deniedAction
+		if err := rows.Scan(&d.id, &d.userID); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan denied action: %w", err)
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// auditDeniedActions writes the per-action denial audit row inside tx.
+func auditDeniedActions(ctx context.Context, tx *sql.Tx, denied []deniedAction, code string) error {
+	for _, d := range denied {
+		if err := insertAuditTx(ctx, tx, ToolCall{
+			UserID:       d.userID,
+			Tool:         AuditToolActionDenied,
+			PeerRedacted: "action:" + strconv.FormatInt(d.id, 10),
+			Status:       "denied",
+			ErrMsg:       auditActionDeniedError,
+			DenyCode:     code,
+		}); err != nil {
+			return fmt.Errorf("audit denied action %d: %w", d.id, err)
+		}
+	}
+	return nil
 }
 
 const approvalCodeBlindIndexPurpose = "agent-approval-code"
@@ -195,6 +303,11 @@ func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, er
 		convID = a.ConversationID
 	}
 	var id int64
+	// deny_code is stored only on an action inserted already denied.
+	var insertDenyCode any
+	if a.Status == ActionDenied {
+		insertDenyCode = normalizeDenyCode(a.DenyCode)
+	}
 	if a.JobID != 0 {
 		// Source the insert from the job row so a job-tied action can only be
 		// created while its job still exists. This closes a purge race:
@@ -221,14 +334,14 @@ func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, er
 			`INSERT INTO agent_actions
 			   (approval_code_hash, approval_code_encrypted, job_id, conversation_id,
 			    user_id, action_type, intent, payload_encrypted, policy_decision,
-			    policy_reasons, status, install_revision)
-			 SELECT $1, $2, j.id, $4, $5, $6, $7, $8, $9, $10, $11, j.install_revision
+			    policy_reasons, status, install_revision, deny_code)
+			 SELECT $1, $2, j.id, $4, $5, $6, $7, $8, $9, $10, $11, j.install_revision, $14
 			   FROM agent_jobs j
 			  WHERE j.id = $3 AND j.user_id = $5 AND j.status = $12 AND j.attempts = $13`+lock+`
 			 ON CONFLICT (job_id, action_type) WHERE job_id IS NOT NULL DO NOTHING
 			 RETURNING id`,
 			codeHash, codeEncrypted, a.JobID, convID, a.UserID, a.ActionType, a.Intent,
-			payload, a.PolicyDecision, a.PolicyReasons, a.Status, JobProcessing, a.Attempt,
+			payload, a.PolicyDecision, a.PolicyReasons, a.Status, JobProcessing, a.Attempt, insertDenyCode,
 		).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			// Two ways to land here: a redelivery hit the (job_id, action_type)
@@ -254,6 +367,14 @@ func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, er
 			return id, nil
 		}
 		if err == nil {
+			// An action inserted already denied is a transition to denied: its
+			// audit row commits with it or not at all. A redelivery that hit
+			// the unique index returned above and audits nothing.
+			if a.Status == ActionDenied {
+				if err := auditDeniedActions(ctx, tx, []deniedAction{{id: id, userID: a.UserID}}, normalizeDenyCode(a.DenyCode)); err != nil {
+					return 0, err
+				}
+			}
 			// Operator routing: a job-tied propose_reply that the policy
 			// denied or parked for approval is forwarded to the operator in
 			// the same transaction that records the decision.
@@ -278,17 +399,32 @@ func (s *Store) InsertAgentAction(ctx context.Context, a AgentAction) (int64, er
 			s.notifyOutbox(routed)
 		}
 	} else {
-		err = s.DB.QueryRowContext(ctx,
+		tx, txErr := s.DB.BeginTx(ctx, nil)
+		if txErr != nil {
+			return 0, fmt.Errorf("begin agent action tx: %w", txErr)
+		}
+		defer func() { _ = tx.Rollback() }()
+		err = tx.QueryRowContext(ctx,
 			`INSERT INTO agent_actions
 			   (approval_code_hash, approval_code_encrypted, job_id, conversation_id,
 			    user_id, action_type, intent, payload_encrypted, policy_decision,
-			    policy_reasons, status, install_revision)
+			    policy_reasons, status, install_revision, deny_code)
 			 VALUES($1,$2,NULL,$3,$4,$5,$6,$7,$8,$9,$10,
-			        COALESCE((SELECT install_revision FROM agent_profiles WHERE user_id = $4), 1))
+			        COALESCE((SELECT install_revision FROM agent_profiles WHERE user_id = $4), 1), $11)
 			 RETURNING id`,
 			codeHash, codeEncrypted, convID, a.UserID, a.ActionType, a.Intent,
-			payload, a.PolicyDecision, a.PolicyReasons, a.Status,
+			payload, a.PolicyDecision, a.PolicyReasons, a.Status, insertDenyCode,
 		).Scan(&id)
+		if err == nil {
+			if a.Status == ActionDenied {
+				if err := auditDeniedActions(ctx, tx, []deniedAction{{id: id, userID: a.UserID}}, normalizeDenyCode(a.DenyCode)); err != nil {
+					return 0, err
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				return 0, fmt.Errorf("commit agent action: %w", err)
+			}
+		}
 	}
 	if err != nil {
 		return 0, fmt.Errorf("insert agent action: %w", err)
@@ -391,18 +527,19 @@ func (s *Store) getAgentAction(ctx context.Context, where string, args ...any) (
 		sendRandomID      sql.NullInt64
 		codeEncrypted     []byte
 		payload, sendBody []byte
+		denyCode          sql.NullString
 	)
 	err := s.DB.QueryRowContext(ctx,
 		`SELECT id, approval_code_encrypted, job_id, conversation_id, user_id, action_type, intent,
 		        payload_encrypted, policy_decision, policy_reasons, status,
 		        executed_tg_message_id, send_random_id, send_body_encrypted, created_at, updated_at, install_revision,
-		        send_attempts
+		        send_attempts, deny_code
 		   FROM agent_actions WHERE `+where,
 		args...,
 	).Scan(&a.ID, &codeEncrypted, &jobID, &convID, &a.UserID, &a.ActionType, &a.Intent,
 		&payload, &a.PolicyDecision, &a.PolicyReasons, &a.Status,
 		&execMsgID, &sendRandomID, &sendBody, &a.CreatedAt, &a.UpdatedAt, &a.InstallRevision,
-		&a.SendAttempts)
+		&a.SendAttempts, &denyCode)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrAgentActionNotFound
 	}
@@ -413,6 +550,7 @@ func (s *Store) getAgentAction(ctx context.Context, where string, args ...any) (
 	a.ConversationID = convID.Int64
 	a.ExecutedTGMessageID = execMsgID.Int64
 	a.SendRandomID = sendRandomID.Int64
+	a.DenyCode = denyCode.String
 	if len(codeEncrypted) > 0 {
 		pt, err := s.Crypt.OpenForUser(codeEncrypted, a.UserID)
 		if err != nil {
@@ -496,6 +634,13 @@ func (s *Store) UpdateAgentActionStatus(ctx context.Context, userID, id int64, f
 	} else if _, ok := tos[to]; !ok {
 		return false, fmt.Errorf("%w: %s -> %s", ErrInvalidActionTransition, from, to)
 	}
+	if to == ActionDenied {
+		// A denial always leaves its per-action audit row in the same
+		// transaction. This status-only entry point has no policy code to
+		// give, so the code is "unknown"; callers with one use
+		// DenyAgentActionCode.
+		return s.DenyAgentActionCode(ctx, userID, id, from, DenyCodeUnknown)
+	}
 	var res sql.Result
 	var err error
 	if isTerminalActionStatus(to) {
@@ -524,24 +669,57 @@ func (s *Store) UpdateAgentActionStatus(ctx context.Context, userID, id int64, f
 // as its policy_reasons, compare-and-set like UpdateAgentActionStatus, so
 // the audit row says why it was refused rather than keeping the reasons it
 // was proposed with.
-func (s *Store) DenyAgentAction(ctx context.Context, userID, id int64, from, reason string) (bool, error) {
-	if tos, ok := allowedActionTransitions[from]; !ok {
-		return false, fmt.Errorf("%w: %s -> %s", ErrInvalidActionTransition, from, ActionDenied)
-	} else if _, ok := tos[ActionDenied]; !ok {
-		return false, fmt.Errorf("%w: %s -> %s", ErrInvalidActionTransition, from, ActionDenied)
+//
+// code is the stable deny code stored in agent_actions.deny_code and on the
+// per-action audit row written in the same transaction ("" is stored as
+// DenyCodeUnknown). A lost CAS returns false and writes no audit row.
+func (s *Store) DenyAgentAction(ctx context.Context, userID, id int64, from, reason, code string) (bool, error) {
+	if err := checkDenyTransition(from); err != nil {
+		return false, err
 	}
-	res, err := s.DB.ExecContext(ctx,
+	code = normalizeDenyCode(code)
+	denied, err := s.denyActionsTx(ctx, code,
 		`UPDATE agent_actions
 		    SET status = $1, approval_code = NULL, approval_code_hash = NULL,
-		        approval_code_encrypted = NULL, policy_reasons = $2, updated_at = $3
-		  WHERE id = $4 AND user_id = $5 AND status = $6`,
-		ActionDenied, reason, time.Now().UTC(), id, userID, from,
+		        approval_code_encrypted = NULL, policy_reasons = $2, updated_at = $3, deny_code = $7
+		  WHERE id = $4 AND user_id = $5 AND status = $6
+		  RETURNING id, user_id`,
+		ActionDenied, reason, time.Now().UTC(), id, userID, from, code,
 	)
 	if err != nil {
 		return false, fmt.Errorf("deny action: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
+	return len(denied) > 0, nil
+}
+
+// DenyAgentActionCode is DenyAgentAction without touching policy_reasons: the
+// status-only denial, with its code and audit row.
+func (s *Store) DenyAgentActionCode(ctx context.Context, userID, id int64, from, code string) (bool, error) {
+	if err := checkDenyTransition(from); err != nil {
+		return false, err
+	}
+	code = normalizeDenyCode(code)
+	denied, err := s.denyActionsTx(ctx, code,
+		`UPDATE agent_actions
+		    SET status = $1, approval_code = NULL, approval_code_hash = NULL,
+		        approval_code_encrypted = NULL, updated_at = $2, deny_code = $6
+		  WHERE id = $3 AND user_id = $4 AND status = $5
+		  RETURNING id, user_id`,
+		ActionDenied, time.Now().UTC(), id, userID, from, code,
+	)
+	if err != nil {
+		return false, fmt.Errorf("update action status: %w", err)
+	}
+	return len(denied) > 0, nil
+}
+
+func checkDenyTransition(from string) error {
+	if tos, ok := allowedActionTransitions[from]; !ok {
+		return fmt.Errorf("%w: %s -> %s", ErrInvalidActionTransition, from, ActionDenied)
+	} else if _, ok := tos[ActionDenied]; !ok {
+		return fmt.Errorf("%w: %s -> %s", ErrInvalidActionTransition, from, ActionDenied)
+	}
+	return nil
 }
 
 // BeginExecutingAgentAction transitions an action from approved to executing
@@ -973,20 +1151,20 @@ func (s *Store) ListStuckExecutingActions(ctx context.Context, grace time.Durati
 // `executing` are deliberately left alone: the send may already be in
 // flight and cannot be safely recalled. Returns the number of rows flipped.
 func (s *Store) DenyPendingActionsForConversation(ctx context.Context, userID, conversationID int64, reason string) (int64, error) {
-	res, err := s.DB.ExecContext(ctx,
+	denied, err := s.denyActionsTx(ctx, DenyCodeUnknown,
 		`UPDATE agent_actions
 		    SET status = $1, approval_code = NULL, approval_code_hash = NULL,
-		        approval_code_encrypted = NULL, policy_reasons = $2, updated_at = $3
+		        approval_code_encrypted = NULL, policy_reasons = $2, updated_at = $3, deny_code = $9
 		  WHERE user_id = $4 AND conversation_id = $5
-		    AND status IN ($6, $7, $8)`,
+		    AND status IN ($6, $7, $8)
+		  RETURNING id, user_id`,
 		ActionDenied, reason, time.Now().UTC(), userID, conversationID,
-		ActionProposed, ActionPendingApproval, ActionApproved,
+		ActionProposed, ActionPendingApproval, ActionApproved, DenyCodeUnknown,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("deny pending actions for conversation: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	return n, nil
+	return int64(len(denied)), nil
 }
 
 // DenyPendingActionsForSourceMessage invalidates only drafts derived from a
@@ -996,10 +1174,10 @@ func (s *Store) DenyPendingActionsForConversation(ctx context.Context, userID, c
 // coalesced into another job's turn denies the head job's drafts, since
 // actions are written under the head (#950).
 func (s *Store) DenyPendingActionsForSourceMessage(ctx context.Context, userID, conversationID, sourceMessageID int64, reason string) (int64, error) {
-	res, err := s.DB.ExecContext(ctx,
+	denied, err := s.denyActionsTx(ctx, DenyCodeSourceSuperseded,
 		`UPDATE agent_actions
 		    SET status = $1, approval_code = NULL, approval_code_hash = NULL,
-		        approval_code_encrypted = NULL, policy_reasons = $2, updated_at = $3
+		        approval_code_encrypted = NULL, policy_reasons = $2, updated_at = $3, deny_code = $10
 		  WHERE user_id = $4 AND conversation_id = $5
 		    AND status IN ($6, $7, $8)
 		    AND job_id IN (
@@ -1009,15 +1187,15 @@ func (s *Store) DenyPendingActionsForSourceMessage(ctx context.Context, userID, 
 		            ON e.event_id = j.event_id AND e.user_id = j.user_id
 		         WHERE j.user_id = $4 AND j.conversation_id = $5
 		           AND e.message_id = $9
-		    )`,
+		    )
+		  RETURNING id, user_id`,
 		ActionDenied, reason, time.Now().UTC(), userID, conversationID,
-		ActionProposed, ActionPendingApproval, ActionApproved, sourceMessageID,
+		ActionProposed, ActionPendingApproval, ActionApproved, sourceMessageID, DenyCodeSourceSuperseded,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("deny pending actions for source message: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	return n, nil
+	return int64(len(denied)), nil
 }
 
 // ListActionsByStatus returns up to limit actions in the given status,
@@ -1717,19 +1895,22 @@ func (s *Store) HasExecutedOwnerSummarySince(ctx context.Context, userID, conver
 // instead of saying the assistant changed. The approve-time check denies
 // them with that explanation, and approval expiry clears the rest.
 func (s *Store) DenyActionsFromEarlierInstalls(ctx context.Context, userID int64, reason string) (int64, error) {
-	res, err := s.DB.ExecContext(ctx,
+	// The SQL itself proves the revision is stale, so the stable code is
+	// install_changed on the action and on its audit row, whatever reason text
+	// the caller passes.
+	denied, err := s.denyActionsTx(ctx, DenyCodeInstallChanged,
 		`UPDATE agent_actions
 		    SET status = $1, approval_code = NULL, approval_code_hash = NULL,
-		        approval_code_encrypted = NULL, policy_reasons = $2, updated_at = $3
+		        approval_code_encrypted = NULL, policy_reasons = $2, updated_at = $3, deny_code = $7
 		  WHERE user_id = $4
 		    AND status IN ($5, $6)
-		    AND install_revision < (SELECT install_revision FROM agent_profiles WHERE user_id = $4)`,
+		    AND install_revision < (SELECT install_revision FROM agent_profiles WHERE user_id = $4)
+		  RETURNING id, user_id`,
 		ActionDenied, reason, time.Now().UTC(), userID,
-		ActionProposed, ActionApproved,
+		ActionProposed, ActionApproved, DenyCodeInstallChanged,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("deny actions from earlier installs: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	return n, nil
+	return int64(len(denied)), nil
 }
