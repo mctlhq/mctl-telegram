@@ -506,6 +506,10 @@ func (s *Store) SweepPAState(ctx context.Context, now, updatesBefore time.Time) 
 		// Outbox rows that will not be sent again (#1313 slice d2). A
 		// pending or sending row is kept whatever its age.
 		{new(int64), `DELETE FROM pa_outbox WHERE status NOT IN ('pending', 'sending') AND updated_at_ms < $1`, []any{updatesBefore.UnixMilli()}},
+		// Linking secrets past PALinkSecretRetention after their expiry,
+		// consumed or not (#1338). A row that has not expired is kept, so
+		// a live secret is never deleted under its holder.
+		{new(int64), `DELETE FROM pa_link_secrets WHERE expires_at_ms < $1`, []any{now.Add(-PALinkSecretRetention).UnixMilli()}},
 	}
 	for _, st := range steps {
 		res, err := tx.ExecContext(ctx, st.q, st.args...)
