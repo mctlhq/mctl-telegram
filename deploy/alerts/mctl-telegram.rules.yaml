@@ -882,8 +882,16 @@ spec:
           # count scrapes and one bad check would already look like several.
           # A URL that flips between checks, or an unreadable check in
           # between, leaves the counter where it was and does not reset it.
+          # The second clause requires the problem gauge to have read 1 in
+          # the same window: after a scrape gap, VictoriaMetrics' increase()
+          # may count an old counter value from an earlier incident as new.
+          # Under Prometheus the first increment after the monitor starts is
+          # not counted (the first scrape already sees 1), so there the alert
+          # fires at the third bad check, not the second.
           expr: |
             max by (problem) (increase(mctl_pa_webhook_problem_checks_total{problem=~"url_changed|allowed_updates_changed"}[20m])) >= 2
+              and on (problem)
+            max by (problem) (max_over_time(mctl_pa_webhook_problem{problem=~"url_changed|allowed_updates_changed"}[20m])) == 1
           labels:
             severity: critical
             service: mctl-telegram

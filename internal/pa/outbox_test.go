@@ -260,6 +260,12 @@ func TestSendOutcome(t *testing.T) {
 		{"context ended after the write", fmt.Errorf("%w: context deadline exceeded", output.ErrOutcomeUnknown), jobs.OutboxUnknown, OutboxOutcomeUnknown, 0},
 		{"blocked by the user", &output.APIError{Status: 403, Code: 403, Description: "Forbidden: bot was blocked by the user"}, jobs.OutboxFailed, OutboxOutcomeRefused, 0},
 		{"chat not found", &output.APIError{Status: 400, Code: 400, Description: "Bad Request: chat not found"}, jobs.OutboxFailed, OutboxOutcomeRefused, 0},
+		{"user deactivated", &output.APIError{Status: 403, Code: 403, Description: "Forbidden: user is deactivated"}, jobs.OutboxFailed, OutboxOutcomeRefused, 0},
+		{"bot kicked", &output.APIError{Status: 403, Code: 403, Description: "Forbidden: bot was kicked from the group chat"}, jobs.OutboxFailed, OutboxOutcomeRefused, 0},
+		{"never started", &output.APIError{Status: 403, Code: 403, Description: "Forbidden: bot can't initiate conversation with a user"}, jobs.OutboxFailed, OutboxOutcomeRefused, 0},
+		// A 403 that is not the principal's doing pages like any other.
+		{"bot to bot", &output.APIError{Status: 403, Code: 403, Description: "Forbidden: bots can't send messages to bots"}, jobs.OutboxFailed, OutboxOutcomeFailed, 0},
+		{"403 without a description", &output.APIError{Status: 403, Code: 403}, jobs.OutboxFailed, OutboxOutcomeFailed, 0},
 		// Any other 4xx is a fault of ours, not the principal's choice, so
 		// it is failed (which pages), never refused (which does not).
 		{"another 400", &output.APIError{Status: 400, Code: 400, Description: "Bad Request: can't parse entities"}, jobs.OutboxFailed, OutboxOutcomeFailed, 0},

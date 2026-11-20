@@ -3966,8 +3966,10 @@ mctl-gitops vm-rules is part of enabling the PA (#1318).
   retried (a failure before the request was written, or an explicit Bot API
   429 or 5xx, honouring `retry_after`), with backoff (15s doubling, at most
   10m, 8 attempts). A Bot API 4xx other than 429 fails the row at once. It
-  is counted `refused` when it is a 403 (the user blocked the bot) or a 400
-  "chat not found", and `failed`, which pages, for every other 4xx. Anything
+  is counted `refused` when the principal caused it: a 403 saying the bot
+  was blocked or kicked, the user is deactivated or never started the bot,
+  or a 400 "chat not found". Every other 4xx, an unexplained 403 included,
+  is `failed`, which pages. Anything
   that may have reached Telegram (a connection dropped after the request
   was written, an unreadable or malformed answer) makes the row `unknown`,
   and so does a row still `sending` when its lease runs out: it is never
@@ -4010,7 +4012,10 @@ silent, while a URL that flips between checks, or an unreadable check in
 between, still fires on the second bad one. It counts checks rather than
 samples of `mctl_pa_webhook_problem`, which holds one check's value for
 the whole 5-minute interval and so shows a single check as several
-samples.
+samples. The gauge must also have read 1 within the same 20 minutes, so an
+old count from an earlier incident cannot page after a scrape gap. Under
+Prometheus the first check after a start is not counted, so there it fires
+at the third bad check.
 
 <a id="mctlpawebhooksecretrejected"></a>
 ### MctlPAWebhookSecretRejected

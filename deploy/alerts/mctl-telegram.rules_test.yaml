@@ -869,6 +869,43 @@ tests:
     - eval_time: 30m
       alertname: MctlPAWebhookMisconfigured
       exp_alerts: []
+  # PA: as the server really starts, the first scrape already sees the
+  # first check's increment. Prometheus does not count it, so the alert
+  # fires at the third bad check (10m), not the second.
+  - interval: 1m
+    input_series:
+    - series: mctl_pa_webhook_problem{problem="url_changed"}
+      values: 1x20
+    - series: mctl_pa_webhook_problem_checks_total{problem="url_changed"}
+      values: 1 1 1 1 1 2 2 2 2 2 3 3 3 3 3 4 4 4 4 4 5
+    alert_rule_test:
+    - eval_time: 6m
+      alertname: MctlPAWebhookMisconfigured
+      exp_alerts: []
+    - eval_time: 11m
+      alertname: MctlPAWebhookMisconfigured
+      exp_alerts:
+      - exp_labels:
+          severity: critical
+          service: mctl-telegram
+          problem: url_changed
+        exp_annotations:
+          summary: PA bot webhook url_changed
+          description: "getWebhookInfo reports a webhook URL other than PA_WEBHOOK_URL, or allowed_updates other than message and callback_query, at two or more checks within 20 minutes, in a row or on and off. Updates may be going to someone else.\n"
+          runbook_url: https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlpawebhookmisconfigured
+  # PA: a counter that reads as increased while no check in the window saw
+  # the problem is silent. This stands in for VictoriaMetrics counting an
+  # old counter value as new after a scrape gap.
+  - interval: 1m
+    input_series:
+    - series: mctl_pa_webhook_problem{problem="url_changed"}
+      values: '0x25'
+    - series: mctl_pa_webhook_problem_checks_total{problem="url_changed"}
+      values: 0 3x25
+    alert_rule_test:
+    - eval_time: 10m
+      alertname: MctlPAWebhookMisconfigured
+      exp_alerts: []
   # PA: two bad checks more than 20 minutes apart are silent
   - interval: 1m
     input_series:

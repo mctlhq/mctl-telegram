@@ -243,21 +243,37 @@ func permanentSendError(err error) bool {
 	return errors.As(err, &api) && api.Status >= 400 && api.Status < 500 && api.Status != http.StatusTooManyRequests
 }
 
+// principalForbidden are the 403 descriptions that mean the principal
+// blocked the bot, left, or never started it. Other 403s ("bots can't send
+// messages to bots", none at all) point at a chat id or token of ours.
+var principalForbidden = []string{
+	"bot was blocked by the user",
+	"user is deactivated",
+	"bot was kicked",
+	"bot can't initiate conversation",
+}
+
 // refusedByPrincipal reports the 4xx answers that mean the principal
-// blocked the bot or the chat is gone: a 403 ("bot was blocked by the
-// user", "user is deactivated"), or a 400 whose description says the
+// blocked the bot or the chat is gone: a 403 with one of the
+// principalForbidden descriptions, or a 400 whose description says the
 // chat was not found. Every other 4xx (a malformed request, a bad or
-// revoked token's 401 or 404) is ours to fix and must not hide here.
+// revoked token's 401 or 404, an unexplained 403) is ours to fix and must
+// not hide here.
 func refusedByPrincipal(err error) bool {
 	var api *output.APIError
 	if !errors.As(err, &api) {
 		return false
 	}
+	desc := strings.ToLower(api.Description)
 	switch api.Status {
 	case http.StatusForbidden:
-		return true
+		for _, d := range principalForbidden {
+			if strings.Contains(desc, d) {
+				return true
+			}
+		}
 	case http.StatusBadRequest:
-		return strings.Contains(strings.ToLower(api.Description), "chat not found")
+		return strings.Contains(desc, "chat not found")
 	}
 	return false
 }
