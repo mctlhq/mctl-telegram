@@ -100,14 +100,18 @@ func declKey(d ast.Decl) string {
 // one function never carries over to the next. Outside fieldUsers:
 //   - any selector .s or .parts, read or write (t.s = x, &t.s,
 //     copy(t.parts, x), for t.s = range ...);
-//   - any composite literal with a key s or parts, of any type, and any
-//     non-empty Text or Template literal;
+//   - any composite literal with a key s or parts, of any type, any
+//     non-empty Text or Template literal, and any positional literal whose
+//     type is elided ([]Text{{p}}, map[int]Template{0: {s}});
 //
 // and anywhere in the file:
 //   - a conversion to Text or Template, or to a pointer to one
 //     ((*Text)(&struct{ parts []string }{x}));
 //   - a type declaration that mentions Text or Template (type T = Text,
 //     type P *Text, type W struct{ Text }), other than their own;
+//   - a struct type with a field named s or parts, other than Text and
+//     Template themselves: inside this package it is assignable to them
+//     (return struct{ parts []string }{p} is a Text);
 //   - a generic declaration (mk[T ~struct{ s string }]), since a type
 //     parameter can stand for either type without naming it;
 //   - an import of unsafe or reflect;
@@ -138,9 +142,21 @@ func scanTemplates(fset *token.FileSet, f *ast.File, file string) []string {
 				if x.TypeParams != nil {
 					report(x, "generic type")
 				}
-				own := (x.Name.Name == "Text" || x.Name.Name == "Template") && x.Assign == 0
-				if !own && mentionsGuardedType(x.Type) {
+				if (x.Name.Name == "Text" || x.Name.Name == "Template") && x.Assign == 0 {
+					return false // the two declarations themselves
+				}
+				if mentionsGuardedType(x.Type) {
 					report(x, "type over Template or Text")
+				}
+			case *ast.StructType:
+				// A struct with the same fields is assignable to Text or
+				// Template inside this package, with no conversion.
+				for _, fld := range x.Fields.List {
+					for _, nm := range fld.Names {
+						if guardedFields[nm.Name] {
+							report(nm, "struct type with a field "+nm.Name)
+						}
+					}
 				}
 			case *ast.SelectorExpr:
 				if !trusted && guardedFields[x.Sel.Name] {
@@ -153,6 +169,13 @@ func scanTemplates(fset *token.FileSet, f *ast.File, file string) []string {
 				if x.Type != nil && namesGuardedType(x.Type) && len(x.Elts) > 0 {
 					report(x, "non-empty Template or Text literal")
 					return true
+				}
+				if x.Type == nil && len(x.Elts) > 0 {
+					// An elided type ([]Text{{p}}) hides what is built.
+					if _, keyed := x.Elts[0].(*ast.KeyValueExpr); !keyed {
+						report(x, "positional literal with elided type")
+						return true
+					}
 				}
 				for _, e := range x.Elts {
 					if kv, ok := e.(*ast.KeyValueExpr); ok {
@@ -229,8 +252,8 @@ func TestTemplatesGuardDetects(t *testing.T) {
 		{templatesFile, pkg + `func tpl(s string) Template { return Template{s: s} }; func f(s string) Template { return tpl(s) }`, 1},
 		{templatesFile, pkg + `func tpl(s string) Template { return Template{s: s} }; var x = tpl("a" + "b")`, 1},
 		{"render.go", pkg + `func f(s string) Template { var t Template; t.s = s; return t }`, 1},
-		{"render.go", pkg + `func f(s string) Template { return Template(struct{ s string }{s}) }`, 1},
-		{"render.go", pkg + `func f(s string) Template { return (Template)(struct{ s string }{s}) }`, 1},
+		{"render.go", pkg + `func f(s string) Template { return Template(struct{ s string }{s}) }`, 2},
+		{"render.go", pkg + `func f(s string) Template { return (Template)(struct{ s string }{s}) }`, 2},
 		{"render.go", pkg + `func f(s string) Text { return Text{parts: []string{s}} }`, 1},
 		{"render.go", pkg + `func f(s string) Text { return Text{[]string{s}} }`, 1},
 		{"render.go", pkg + `func f(t *Text, s string) { t.parts = []string{s} }`, 1},
@@ -247,18 +270,22 @@ func TestTemplatesGuardDetects(t *testing.T) {
 		{"render.go", pkg + `func f(t *Template, s string) { p := &t.s; *p = s }`, 1},
 		{"render.go", pkg + `func f(t *Template, xs []string) { for _, t.s = range xs {} }`, 1},
 		// #1337: a generic builder (generic function, and its keyed literal).
-		{"render.go", pkg + `func mk[T ~struct{ s string }](s string) T { return T{s: s} }; var x = mk[Template]("a")`, 2},
+		{"render.go", pkg + `func mk[T ~struct{ s string }](s string) T { return T{s: s} }; var x = mk[Template]("a")`, 3},
 		{"render.go", pkg + `type box[T any] struct{ v T }`, 1},
 		// #1337: unsafe (import, and the pointer conversion).
 		{"render.go", pkg + `import "unsafe"; func f(p unsafe.Pointer) Text { return *(*Text)(p) }`, 2},
 		{"render.go", pkg + `import "reflect"; var _ = reflect.TypeOf(0)`, 1},
 		// A pointer conversion needs no unsafe.
-		{"render.go", pkg + `func f(s string) *Text { return (*Text)(&struct{ parts []string }{[]string{s}}) }`, 1},
+		{"render.go", pkg + `func f(s string) *Text { return (*Text)(&struct{ parts []string }{[]string{s}}) }`, 2},
 		{"render.go", pkg + `type P *Text`, 1},
 		{"render.go", pkg + `type W struct{ Text }; func f(s string) (w W) { w.parts = []string{s}; return }`, 2},
 		// Reading a field outside the accessors, and builder names on the
 		// wrong receiver or in the wrong file.
 		{"render.go", pkg + `func f(t Template) string { return t.s }`, 1},
+		// #1356 review: assignability and elided literal types.
+		{"render.go", pkg + `func f(s string) Text { return struct{ parts []string }{[]string{s}} }`, 1},
+		{"render.go", pkg + `func f(s string) Text { return []Text{{[]string{s}}}[0] }`, 1},
+		{"render.go", pkg + `func f(s string) Template { return map[int]Template{0: {s}}[0] }`, 1},
 		{"render.go", pkg + `type X struct{}; func (X) Render(s string) Text { return Text{parts: []string{s}} }`, 1},
 		{"render.go", pkg + `func tpl(s string) Template { return Template{s: s} }`, 2},
 	}

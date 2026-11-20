@@ -31,7 +31,10 @@ package pa
 //     internal/telegram, internal/notify, internal/broadcast, or a
 //     third-party Bot API library);
 //   - import unsafe, the one way to forge a safetext.Text or Template that
-//     the compiler does not refuse (*(*safetext.Text)(unsafe.Pointer(&x)));
+//     the compiler does not refuse (*(*safetext.Text)(unsafe.Pointer(&x))).
+//     The scan covers internal/pa only: code elsewhere (cmd/server,
+//     internal/telegram) could import safetext and unsafe together, and
+//     review has to catch that;
 //
 // safetext.Text and safetext.Template have unexported fields, so no code
 // outside package safetext can make one; inside it,
