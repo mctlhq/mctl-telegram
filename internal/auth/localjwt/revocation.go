@@ -21,6 +21,22 @@ const MaxRevocationCacheTTL = 15 * time.Second
 // DefaultRevocationCacheTTL is used when NewRevocationCache is given ttl<=0.
 const DefaultRevocationCacheTTL = 10 * time.Second
 
+// MaxRevocationSnapshotAge bounds how old a served snapshot may be, measured
+// from when its read began, whatever happened to later refreshes. A populated
+// cache whose refreshes keep failing serves its last good snapshot only up to
+// this age; past it every check returns an error, so callers refuse the token
+// as unverifiable (#1346). Without the bound, an unreadable store would be
+// read as "nothing newly revoked" for as long as the outage lasts, and a
+// revocation recorded in that time would never take effect. It equals
+// MaxRevocationCacheTTL so the documented propagation delay holds on the
+// failure path too.
+const MaxRevocationSnapshotAge = MaxRevocationCacheTTL
+
+// ErrRevocationSnapshotTooOld is returned when no snapshot younger than
+// MaxRevocationSnapshotAge is available: the latest refresh failed, or the
+// read that produced the newest snapshot took longer than the bound.
+var ErrRevocationSnapshotTooOld = errors.New("revocation cache snapshot is older than its bound")
+
 // RevocationCache is an in-memory, mutex-protected view of
 // worker_token_revocations, lazily refreshed from
 // db.Store.ListWorkerTokenRevocations at most once per TTL window. Modeled on
@@ -41,14 +57,17 @@ type RevocationCache struct {
 	ttl   time.Duration
 	now   func() time.Time
 
+	// onRefreshError, when set, is called once per failed refresh (the
+	// server wires it to mctl_worker_token_revocation_refresh_failures_total).
+	onRefreshError func()
+
 	mu        sync.Mutex
 	populated bool
-	// lastRefresh is when the applied snapshot finished loading; it drives
-	// the TTL. readStartedAt is when that same snapshot's read BEGAN, and is
-	// what decides whether an arriving snapshot is newer than the applied
-	// one. The two are different clocks and the distinction is load-bearing:
-	// see refresh.
-	lastRefresh   time.Time
+	// readStartedAt is when the applied snapshot's read BEGAN. It decides
+	// whether an arriving snapshot is newer than the applied one (see
+	// refresh), when the next refresh is due (TTL) and how old the served
+	// snapshot is (MaxRevocationSnapshotAge). A snapshot's freshness is when
+	// it looked at the database, not when its query happened to return.
 	readStartedAt time.Time
 	jtis          map[string]struct{}
 	blanket       map[int64]time.Time // telegram_id -> most recent blanket revoked_at
@@ -73,6 +92,12 @@ func NewRevocationCache(store *db.Store, ttl time.Duration) *RevocationCache {
 	}
 }
 
+// SetRefreshErrorHook registers f to be called once per failed refresh. Call
+// it before the cache is shared; it is not synchronised with checks.
+func (c *RevocationCache) SetRefreshErrorHook(f func()) {
+	c.onRefreshError = f
+}
+
 // IsRevoked reports whether jti is individually denylisted, or telegramID
 // carries a blanket revocation recorded at or after issuedAt. Refreshes the
 // cache first when it is stale (or has never populated).
@@ -82,9 +107,10 @@ func NewRevocationCache(store *db.Store, ttl time.Duration) *RevocationCache {
 // error is returned so the caller (Provider.Authenticate) rejects the
 // request instead of treating an unreachable revocation store as "nothing is
 // revoked". Once the cache has populated at least once, a later refresh
-// failure is swallowed here and the last-known-good snapshot is used instead
-// — otherwise a single transient DB blip would turn every worker-token
-// request into a 401 rather than merely risk staleness within the TTL bound.
+// failure is tolerated and the last good snapshot is served, so a short DB
+// blip does not turn every worker-token request into a 401 — but only while
+// that snapshot is younger than MaxRevocationSnapshotAge. An older snapshot
+// is an error, never "not revoked" (#1346).
 func (c *RevocationCache) IsRevoked(ctx context.Context, jti string, telegramID int64, issuedAt time.Time) (bool, error) {
 	return c.check(ctx, jti, true, telegramID, issuedAt)
 }
@@ -98,7 +124,12 @@ func (c *RevocationCache) IsBlanketRevoked(ctx context.Context, telegramID int64
 
 func (c *RevocationCache) check(ctx context.Context, jti string, checkJti bool, telegramID int64, issuedAt time.Time) (bool, error) {
 	c.mu.Lock()
-	stale := !c.populated || c.now().Sub(c.lastRefresh) >= c.ttl
+	// Staleness and the age bound both count from when the applied
+	// snapshot's read began. Counting staleness from when the read finished
+	// would leave a window, as long as the read took, in which no refresh
+	// is attempted yet the snapshot is already past the bound: a spurious
+	// refusal with no refresh failure behind it.
+	stale := !c.populated || c.now().Sub(c.readStartedAt) >= c.ttl
 	wasPopulated := c.populated
 	c.mu.Unlock()
 
@@ -108,20 +139,43 @@ func (c *RevocationCache) check(ctx context.Context, jti string, checkJti bool, 
 		}
 	}
 
+	// A check that was not stale a moment ago can find the snapshot past
+	// the bound when it reads it: with the TTL at MaxRevocationCacheTTL the
+	// two are the same instant, and any delay carries a check across. Such
+	// a check refreshes once and looks again, with the age taken under the
+	// same lock as the lookup it guards. Only a snapshot still past the
+	// bound after this call's own refresh attempt is refused.
+	refreshed := stale
+	for {
+		revoked, tooOld, err := c.lookup(jti, checkJti, telegramID, issuedAt)
+		if !tooOld || refreshed {
+			return revoked, err
+		}
+		refreshed = true
+		_ = c.refresh(ctx)
+	}
+}
+
+// lookup answers from the applied snapshot. tooOld reports a snapshot past
+// MaxRevocationSnapshotAge, which is refused with ErrRevocationSnapshotTooOld.
+func (c *RevocationCache) lookup(jti string, checkJti bool, telegramID int64, issuedAt time.Time) (revoked, tooOld bool, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.populated {
-		return false, errors.New("revocation cache never populated")
+		return false, false, errors.New("revocation cache never populated")
+	}
+	if age := c.now().Sub(c.readStartedAt); age > MaxRevocationSnapshotAge {
+		return false, true, fmt.Errorf("%w: %s old, bound %s", ErrRevocationSnapshotTooOld, age.Round(time.Millisecond), MaxRevocationSnapshotAge)
 	}
 	if checkJti {
 		if _, ok := c.jtis[jti]; ok {
-			return true, nil
+			return true, false, nil
 		}
 	}
 	if revokedAt, ok := c.blanket[telegramID]; ok && !issuedAt.After(revokedAt) {
-		return true, nil
+		return true, false, nil
 	}
-	return false, nil
+	return false, false, nil
 }
 
 // Refresh forces an immediate reload of the denylist, ignoring the TTL.
@@ -147,6 +201,11 @@ func (c *RevocationCache) refresh(ctx context.Context) error {
 	readStartedAt := c.now()
 	rows, err := c.store.ListWorkerTokenRevocations(ctx)
 	if err != nil {
+		// A request the client abandoned is not a store failure; counting
+		// it would make the metric follow traffic rather than outages.
+		if c.onRefreshError != nil && !errors.Is(ctx.Err(), context.Canceled) {
+			c.onRefreshError()
+		}
 		return fmt.Errorf("refresh worker token revocation cache: %w", err)
 	}
 	jtis := make(map[string]struct{}, len(rows))
@@ -166,7 +225,7 @@ func (c *RevocationCache) refresh(ctx context.Context) error {
 	// one did. Without this, a slow lazy refresh that started before a
 	// revocation was recorded can land after the forced refresh that
 	// followed it, overwrite the denylist with pre-revocation data, and
-	// stamp lastRefresh so the cache looks current — handing a just-evicted
+	// mark the cache current — handing a just-evicted
 	// daemon a clean reconnect for a whole TTL window. That is precisely the
 	// containment this cache exists to provide.
 	//
@@ -187,6 +246,5 @@ func (c *RevocationCache) refresh(ctx context.Context) error {
 	c.blanket = blanket
 	c.populated = true
 	c.readStartedAt = readStartedAt
-	c.lastRefresh = c.now()
 	return nil
 }

@@ -19,6 +19,7 @@ var expectedMetricNames = []string{
 	"mctl_events_published_total",
 	"mctl_events_publish_failures_total",
 	"mctl_events_outbox_backlog",
+	"mctl_worker_token_revocation_refresh_failures_total",
 	"mctl_auth_failures_total",
 	"mctl_rate_limit_events_total",
 	"mctl_tool_invocations_total",

@@ -548,6 +548,7 @@ func main() {
 	// cfg, store and this cache) so `provider` exists in time to be passed as
 	// web.ConnectConfig.Identifier when constructing the connect server.
 	workerTokenRevocationCache := localjwt.NewRevocationCache(store, cfg.WorkerTokenRevocationCacheTTL)
+	workerTokenRevocationCache.SetRefreshErrorHook(m.WorkerTokenRevocationRefreshFailuresTotal.Inc)
 
 	provider, err := selectProvider(cfg, store, workerTokenRevocationCache)
 	if err != nil {
