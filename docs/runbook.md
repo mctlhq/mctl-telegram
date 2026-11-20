@@ -3929,6 +3929,28 @@ answers `500 assistant instructions unavailable` for a fork account means
 the pinned fork version or its base snapshot is missing: the owner
 reinstalls a version that exists (`list_assistants` shows them).
 
+## Schema migrations on Postgres
+
+Every replica runs `db.Migrate` at startup. On Postgres it first takes the
+session-level advisory lock `0x6d63746c74670001` (7882271781986697217) on
+one connection and runs every migration step on that connection, so two
+replicas starting together migrate one after the other instead of racing
+`CREATE ... IF NOT EXISTS` into a duplicate-key error on `pg_class`. A
+replica that has to wait logs `migrate: another instance holds the
+migration lock; waiting`. A startup stuck there means the holder is stuck:
+find it with
+
+```sql
+SELECT pid, state, query_start, query FROM pg_stat_activity
+ WHERE pid IN (SELECT pid FROM pg_locks WHERE locktype = 'advisory'
+               AND ((classid::bigint << 32) | objid::bigint) = 7882271781986697217);
+```
+
+and terminate that backend (`pg_terminate_backend(pid)`) only once its pod
+is gone; ending the session releases the lock. A failed lock or unlock
+fails startup, and a connection whose lock state is unknown is closed, not
+returned to the pool. SQLite takes no lock (one process).
+
 ## Personal Assistant bot webhook and outbox (issue #1313 slice d2)
 
 Everything here exists only while `PA_ENABLED=true`. With the PA off the
@@ -3978,9 +4000,29 @@ mctl-gitops vm-rules is part of enabling the PA (#1318).
   This is also why `PA_ENABLED` must only be turned on once every replica
   runs a build with #1348: an older pod in the same rollout claims the
   same table.
-- **Callback spinner.** A pressed button is not answered with
-  `answerCallbackQuery` yet: the reply arrives as a new message, and the
-  Telegram client shows its spinner on the button for a few seconds.
+- **Callback answer.** Once a press's update committed, the server answers
+  its callback query (`answerCallbackQuery`, no text) so the client stops
+  the spinner on the button; the reply itself is an outbox row as above.
+  It is best effort: it runs after the commit, on its own 10s deadline, is
+  never retried, and never fails or repeats the update. A duplicate,
+  failed or given-up update is not answered. Outcomes are counted in
+  `mctl_pa_callback_answers_total{outcome="answered|failed"}`; `failed`
+  (logged as `pa callback not answered`) only leaves the spinner running
+  until the client gives up, and needs no action unless it is most of
+  them, which points at the bot token or egress to api.telegram.org.
+- **Expired prompt button.** A consent prompt held back (flood waits, an
+  outage) until its button would resolve for less than 5 more minutes, or
+  whose callback id is gone, is not sent: the row becomes `dropped` and is
+  counted `mctl_pa_outbox_total{outcome="button_expired"}`. The principal
+  got no prompt for that message; their next message gets a fresh one. A
+  button that could not be read is not dropped: the row is retried.
+- **Reused update id.** Telegram may hand out an update id again after a
+  week without updates; the dedup row (48h) is gone by then, so the update
+  runs. If a conversation reply for that principal, update id and kind
+  already exists, the new one is not queued: it is logged
+  (`pa reply not queued: update id already has this reply`) and counted
+  `mctl_pa_outbox_total{outcome="update_reused"}`. The update itself is
+  accepted. Any non-zero count means a principal missed an answer.
 - **Webhook URL.** `PA_ENABLED=true` without a valid `PA_WEBHOOK_URL`
   refuses to start; there is no fallback to polling (owner decision on
   #1313, 2026-11-20).
@@ -4106,7 +4148,9 @@ is not resent; ask the principal whether it arrived if it matters.
 `refused` is counted but does not fire this alert: it is only a 403 (the
 principal blocked the bot) or a 400 whose description says the chat was
 not found, both the principal's choice. `claim_error`: `pa_outbox` could
-not be read; nothing was sent and the rows stay due. Inspect rows by principal with `Store.PAOutboxRows`;
+not be read; nothing was sent and the rows stay due. `button_expired` and
+`update_reused` do not fire this alert either: see "Expired prompt button"
+and "Reused update id" in the outbox section above. Inspect rows by principal with `Store.PAOutboxRows`;
 rows carry no message text.
 
 ## Personal Assistant catalog pin (issue #1315)
