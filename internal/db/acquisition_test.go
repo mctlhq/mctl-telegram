@@ -285,6 +285,7 @@ func TestHeardFromUnanswered_FailedReadIsAnErrorNotFalse(t *testing.T) {
 		t.Fatal("a failed write must return an error")
 	}
 }
+
 // TestAcquisitionReport_QualifyingEvents exercises the acquisition funnel's
 // activity predicate on SQLite and Postgres. A successful signup and its
 // connect:* audit steps are NOT MCP product use; neither are failed calls,
@@ -324,30 +325,31 @@ func testAcquisitionReportQualifyingEvents(t *testing.T, s *Store) {
 			t.Fatal(err)
 		}
 	}
-	connect := create(77901, "only-connect")
+	// Reuse synthetic numeric IDs from other isolated acquisition tests.
+	connect := create(77001, "only-connect")
 	insert(connect, "connect:oidc_callback", "ok", now.Add(-26*time.Hour))
 	insert(connect, "connect:success", "ok", now.Add(-2*time.Hour))
-	failed := create(77902, "only-failed")
+	failed := create(77002, "only-failed")
 	insert(failed, "get_messages", "error", now.Add(-26*time.Hour))
 	insert(failed, "search_messages", "refused", now.Add(-2*time.Hour))
-	bridge := create(77903, "only-bridge")
+	bridge := create(77003, "only-bridge")
 	insert(bridge, "local_bridge_device_refresh", "ok", now.Add(-26*time.Hour))
 	insert(bridge, "local_bridge_device_refresh", "ok", now.Add(-2*time.Hour))
-	web := create(77904, "only-web")
+	web := create(77004, "only-web")
 	insert(web, "POST /telegram/connect/manage/notifications", "ok", now.Add(-26*time.Hour))
 	insert(web, "POST /telegram/connect/manage/notifications", "ok", now.Add(-2*time.Hour))
-	pa := create(77905, "only-pa")
+	pa := create(77005, "only-pa")
 	insert(pa, "pa:tg/list_dialogs", "ok", now.Add(-26*time.Hour))
 	insert(pa, "pa:tg/list_dialogs", "ok", now.Add(-2*time.Hour))
-	preSignup := create(77906, "only-before-signup")
+	preSignup := create(77011, "only-before-signup")
 	insert(preSignup, "list_dialogs", "ok", started.Add(-time.Hour))
-	twoDays := create(77907, "valid-two-days")
+	twoDays := create(77012, "valid-two-days")
 	insert(twoDays, "list_dialogs", "ok", now.Add(-26*time.Hour))
 	insert(twoDays, "get_messages", "ok", now.Add(-2*time.Hour))
-	oneDay := create(77908, "valid-one-day")
+	oneDay := create(77013, "valid-one-day")
 	insert(oneDay, "get_messages", "ok", now.Add(-2*time.Hour))
 	insert(oneDay, "search_messages", "error", now.Add(-26*time.Hour))
-	sameDay := create(77909, "valid-same-day")
+	sameDay := create(77014, "valid-same-day")
 	insert(sameDay, "list_dialogs", "ok", now.Add(-2*time.Hour))
 	insert(sameDay, "get_messages", "ok", now.Add(-time.Hour))
 
