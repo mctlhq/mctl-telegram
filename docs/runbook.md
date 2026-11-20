@@ -3968,6 +3968,16 @@ mctl-gitops vm-rules is part of enabling the PA (#1318).
   fresh prompt. Startup migrates a `pa_outbox` created before #1348 (it
   drops the `NOT NULL` of `job_id` in place on Postgres, and rebuilds the
   table on SQLite); its rows are kept.
+- **Rollback below #1348.** A build from before #1348 reads `job_id` as a
+  plain integer, so a single pending conversation row (`job_id` NULL)
+  makes its `ClaimPAOutbox` fail on every pass, for every principal, and
+  its `/forget` would delete such rows. Before rolling back past this
+  release once PA has run, scale to zero and delete them:
+  `DELETE FROM pa_outbox WHERE job_id IS NULL`. Their answers are lost,
+  which is the price of the rollback; roll forward instead where you can.
+  This is also why `PA_ENABLED` must only be turned on once every replica
+  runs a build with #1348: an older pod in the same rollout claims the
+  same table.
 - **Callback spinner.** A pressed button is not answered with
   `answerCallbackQuery` yet: the reply arrives as a new message, and the
   Telegram client shows its spinner on the button for a few seconds.
