@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -241,6 +242,40 @@ func checkPre1348Migration(t *testing.T, conn *sql.DB, pg bool) {
 	}
 	if rows[1].ID <= rows[0].ID || rows[1].JobID != 42 || rows[2].UpdateID != 7 || rows[2].Button != "btn" {
 		t.Fatalf("new rows = %+v", rows[1:])
+	}
+}
+
+// TestPAOutboxMigratesTableWithoutSentParts: an SQLite pa_outbox from
+// before sent_parts existed is rebuilt too; its rows keep their fields and
+// take the default for the column they lacked.
+func TestPAOutboxMigratesTableWithoutSentParts(t *testing.T) {
+	ctx := context.Background()
+	conn, err := Open(ctx, fmt.Sprintf("file:pa_outbox_mig_old_%d?mode=memory&cache=shared", time.Now().UnixNano()), 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	ddl := strings.Replace(prePR1348OutboxDDL(false), "sent_parts INTEGER NOT NULL DEFAULT 0,", "", 1)
+	if ddl == prePR1348OutboxDDL(false) {
+		t.Fatal("sent_parts not removed from the old DDL")
+	}
+	if _, err := conn.ExecContext(ctx, ddl); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`INSERT INTO pa_outbox(principal, job_id, kind, status, attempts, next_at_ms, created_at_ms, updated_at_ms)
+		 VALUES(555, 43, 'run_failed', 'pending', 1, 1000, 900, 950)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, conn); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := (&Store{DB: conn}).PAOutboxRows(ctx, 555)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].JobID != 43 || rows[0].Kind != jobs.OutboxRunFailed || rows[0].Attempts != 1 || rows[0].SentParts != 0 {
+		t.Fatalf("rows = %+v", rows)
 	}
 }
 

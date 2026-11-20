@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
@@ -107,17 +108,44 @@ func paOutboxJobIDNotNull(ctx context.Context, dbConn *sql.DB, pg bool) (bool, e
 }
 
 // rebuildSQLitePAOutbox copies a pre-#1348 SQLite pa_outbox into the
-// current shape: SQLite cannot drop a NOT NULL in place. SQLite serves one
-// process (local development), so nothing races the rebuild; it runs in
-// one transaction, so a failure leaves the old table as it was.
+// current shape: SQLite cannot drop a NOT NULL in place. Only the columns
+// the old table has are copied (a table from before sent_parts takes its
+// default), and none it lacks is assumed. SQLite serves one process (local
+// development), so nothing races the rebuild; it runs in one transaction,
+// so a failure leaves the old table as it was.
 func rebuildSQLitePAOutbox(ctx context.Context, dbConn *sql.DB) error {
 	tx, err := dbConn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("migrate pa outbox: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	const cols = `id, principal, job_id, kind, conversation_id, fragment_seq, status, attempts, sent_parts,
-		next_at_ms, lease_until_ms, created_at_ms, updated_at_ms`
+	have := map[string]bool{}
+	rows, err := tx.QueryContext(ctx, `SELECT name FROM pragma_table_info('pa_outbox')`)
+	if err != nil {
+		return fmt.Errorf("migrate pa outbox: read columns: %w", err)
+	}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("migrate pa outbox: read columns: %w", err)
+		}
+		have[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("migrate pa outbox: read columns: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("migrate pa outbox: read columns: %w", err)
+	}
+	var keep []string
+	for _, c := range []string{"id", "principal", "job_id", "kind", "conversation_id", "fragment_seq", "status",
+		"attempts", "sent_parts", "next_at_ms", "lease_until_ms", "created_at_ms", "updated_at_ms"} {
+		if have[c] {
+			keep = append(keep, c)
+		}
+	}
+	cols := strings.Join(keep, ", ")
 	for _, q := range []string{
 		`DROP TABLE IF EXISTS pa_outbox_rebuild`,
 		paOutboxTable(false, "pa_outbox_rebuild"),

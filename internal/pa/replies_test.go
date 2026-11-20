@@ -163,18 +163,20 @@ func TestConversationReplies_E2E(t *testing.T) {
 // TestConversationReplies_RolledBackUpdateLeavesNoRow: a reply queued by
 // an update whose transaction rolls back is neither stored nor sent.
 func TestConversationReplies_RolledBackUpdateLeavesNoRow(t *testing.T) {
-	h := newOutboxRepliesHarness(t, newStore(t), func(q ReplyQueue) ReplyQueue { return failAfterQueue{q} })
-	if code := h.text(aliceID, "hello"); code != http.StatusInternalServerError {
-		t.Fatalf("update = %d, want 500 (rolled back)", code)
-	}
-	if rows := h.outboxRows(aliceID); len(rows) != 0 {
-		t.Fatalf("rows of a rolled-back update: %+v", rows)
-	}
-	h.now = h.now.Add(time.Minute)
-	h.loop.outboxPass(context.Background())
-	if msgs := h.messagesTo(aliceID); len(msgs) != 0 {
-		t.Fatalf("sent %+v for a rolled-back update", msgs)
-	}
+	eachStore(t, func(t *testing.T, s *db.Store) {
+		h := newOutboxRepliesHarness(t, s, func(q ReplyQueue) ReplyQueue { return failAfterQueue{q} })
+		if code := h.text(aliceID, "hello"); code != http.StatusInternalServerError {
+			t.Fatalf("update = %d, want 500 (rolled back)", code)
+		}
+		if rows := h.outboxRows(aliceID); len(rows) != 0 {
+			t.Fatalf("rows of a rolled-back update: %+v", rows)
+		}
+		h.now = h.now.Add(time.Minute)
+		h.loop.outboxPass(context.Background())
+		if msgs := h.messagesTo(aliceID); len(msgs) != 0 {
+			t.Fatalf("sent %+v for a rolled-back update", msgs)
+		}
+	})
 }
 
 // failAfterQueue queues the reply, then fails the update.

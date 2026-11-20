@@ -3951,10 +3951,26 @@ mctl-gitops vm-rules is part of enabling the PA (#1318).
   15s. On shutdown the server stops serving first and then waits, at most
   20s, for deliveries already started; one still running is abandoned and
   its row becomes `unknown`, never resent.
-- **No consent prompt yet.** Conversation-level replies (the consent
-  prompt, `/new`, `/forget`) have no sender until #1348. Until then a first
-  message records the prompt's callback and sends nothing, so no principal
-  can consent and nothing runs: enabling the PA before #1348 serves no one.
+- **Consent prompt and command answers (#1348).** The conversation's own
+  answers -- the consent prompt with its "I agree" button, and the answers
+  to `/new`, `/forget`, `/consent`, a pressed button and a refused message
+  (rate limit, too long) -- are `pa_outbox` rows of their own: no job,
+  keyed by principal and Telegram update (`update_id`), with
+  `kind` naming the server text and, for the prompt only, `button` holding
+  the opaque callback id. They are written in the update's transaction,
+  so an update that rolls back leaves none, and the webhook starts
+  delivering them once the update committed. They follow every outbox
+  rule below (order per principal, send-once, `unknown` never resent) and
+  count to the same `mctl_pa_outbox_total` outcomes. `/forget` and consent
+  withdrawal do not delete them: they carry no conversation content. A
+  prompt is sent with exactly `convo.ConsentText`, the text its button's
+  hash binds; a button pressed after the text changed is answered with a
+  fresh prompt. Startup migrates a `pa_outbox` created before #1348 (it
+  drops the `NOT NULL` of `job_id` in place on Postgres, and rebuilds the
+  table on SQLite); its rows are kept.
+- **Callback spinner.** A pressed button is not answered with
+  `answerCallbackQuery` yet: the reply arrives as a new message, and the
+  Telegram client shows its spinner on the button for a few seconds.
 - **Webhook URL.** `PA_ENABLED=true` without a valid `PA_WEBHOOK_URL`
   refuses to start; there is no fallback to polling (owner decision on
   #1313, 2026-11-20).
@@ -3974,7 +3990,7 @@ mctl-gitops vm-rules is part of enabling the PA (#1318).
   exists for the operator step of #1318 and nothing in the server calls it
   (a guard test enforces that).
 - **Outbox.** Every PA reply and notice (budget hold, run failed, request
-  dropped, answer too long) is written to `pa_outbox` in the transaction of
+  dropped, answer too long, and the conversation-level answers above) is written to `pa_outbox` in the transaction of
   the state change that owes it. Delivery starts after the request that
   wrote the row has been answered, on a context of its own, so neither a
   slow Telegram nor a worker that hangs up delays or cuts it off; the
@@ -3996,7 +4012,7 @@ mctl-gitops vm-rules is part of enabling the PA (#1318).
   in parts and `sent_parts` records each part Telegram accepted, so a retry
   resumes after them. A reply whose conversation was closed, forgotten or
   withdrawn before it went out is dropped with it; `/forget` also deletes
-  the principal's pending notices.
+  the principal's pending job notices.
 
 <a id="mctlpawebhookinfounreadable"></a>
 ### MctlPAWebhookInfoUnreadable
