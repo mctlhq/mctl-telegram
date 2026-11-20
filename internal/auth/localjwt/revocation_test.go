@@ -778,3 +778,47 @@ func TestRevocationCache_CancelledRequestNotCountedAsRefreshFailure(t *testing.T
 		t.Fatalf("a store failure on a live context must be counted once, got %d", failures)
 	}
 }
+
+// TestRevocationCache_CrossingTheBoundRefreshes: with the TTL at its 15s
+// maximum, a check that is not stale when it looks (14.999s) but past the
+// bound by the time it reads the snapshot must refresh, not refuse, when
+// the store is healthy.
+func TestRevocationCache_CrossingTheBoundRefreshes(t *testing.T) {
+	store := newTestLocaljwtStore(t)
+	ctx := context.Background()
+	base := time.Now()
+	cache := NewRevocationCache(store, MaxRevocationCacheTTL)
+	cache.now = func() time.Time { return base }
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("populate: %v", err)
+	}
+	calls := 0
+	cache.now = func() time.Time {
+		calls++
+		if calls == 1 {
+			return base.Add(MaxRevocationCacheTTL - time.Millisecond)
+		}
+		return base.Add(MaxRevocationSnapshotAge + 500*time.Millisecond)
+	}
+	if _, err := cache.IsRevoked(ctx, "jti-x", 1, base); err != nil {
+		t.Fatalf("healthy store crossing the bound: unexpected error %v", err)
+	}
+}
+
+// TestRevocationCache_DeadlineCountedAsRefreshFailure: a refresh that ran
+// out of time is a store problem and is counted; only a caller that went
+// away (Canceled) is not.
+func TestRevocationCache_DeadlineCountedAsRefreshFailure(t *testing.T) {
+	store := newBrokenLocaljwtStore(t, "deadline_ctx")
+	cache := NewRevocationCache(store, DefaultRevocationCacheTTL)
+	failures := 0
+	cache.SetRefreshErrorHook(func() { failures++ })
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	if err := cache.Refresh(ctx); err == nil {
+		t.Fatal("refresh on a closed store must fail")
+	}
+	if failures != 1 {
+		t.Fatalf("a refresh past its deadline must be counted, got %d", failures)
+	}
+}

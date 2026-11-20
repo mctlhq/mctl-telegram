@@ -137,6 +137,18 @@ func (c *RevocationCache) check(ctx context.Context, jti string, checkJti bool, 
 		if err := c.refresh(ctx); err != nil && !wasPopulated {
 			return false, fmt.Errorf("revocation cache cold-start refresh: %w", err)
 		}
+	} else {
+		// Not stale a moment ago, but past the bound now: with the TTL at
+		// MaxRevocationCacheTTL the two are the same instant, and a delay on
+		// the lock can carry a check across it. Refresh rather than refuse
+		// with a healthy store; if this refresh fails, the bound below
+		// refuses as it should.
+		c.mu.Lock()
+		crossed := c.now().Sub(c.readStartedAt) > MaxRevocationSnapshotAge
+		c.mu.Unlock()
+		if crossed {
+			_ = c.refresh(ctx)
+		}
 	}
 
 	c.mu.Lock()
@@ -183,7 +195,7 @@ func (c *RevocationCache) refresh(ctx context.Context) error {
 	if err != nil {
 		// A request the client abandoned is not a store failure; counting
 		// it would make the metric follow traffic rather than outages.
-		if c.onRefreshError != nil && ctx.Err() == nil {
+		if c.onRefreshError != nil && !errors.Is(ctx.Err(), context.Canceled) {
 			c.onRefreshError()
 		}
 		return fmt.Errorf("refresh worker token revocation cache: %w", err)
