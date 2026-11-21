@@ -443,13 +443,26 @@ func TestConnection_S1C8_ScopeEscalationNeedsNewConnection(t *testing.T) {
 		if !errors.Is(err, connection.ErrInvalidTransition) {
 			t.Fatalf("scope change on an existing connection: err %v, want ErrInvalidTransition", err)
 		}
-		// A rotation cannot change the granted scope either.
-		_, err = s.RotatePAConnectionTokens(ctx, alice, c.ID, connection.Rotation{
+		// A rotation cannot change the granted scope either. The lease is
+		// really held, so the only thing the wider rotation differs in is
+		// the scope; the same rotation with the granted scope then applies.
+		now := time.Now()
+		if ok, err := s.ClaimPAConnectionRefresh(ctx, alice, c.ID, c.TokenGeneration, "x", now, now.Add(time.Minute)); err != nil || !ok {
+			t.Fatalf("claim refresh lease: ok=%v err=%v", ok, err)
+		}
+		rot := connection.Rotation{
 			ExpectRevision: c.AuthorityRevision, ExpectGeneration: c.TokenGeneration,
-			GrantedScope: tgScope + " admin:users", LeaseOwner: "x", SealedTokens: []byte("x"), Now: time.Now(),
-		})
-		if !errors.Is(err, connection.ErrConflict) {
+			GrantedScope: tgScope + " admin:users", LeaseOwner: "x", SealedTokens: []byte("x"), Now: now,
+		}
+		if _, err = s.RotatePAConnectionTokens(ctx, alice, c.ID, rot); !errors.Is(err, connection.ErrConflict) {
 			t.Fatalf("rotation with a different scope: err %v, want ErrConflict", err)
+		}
+		rot.GrantedScope = c.GrantedScope
+		if _, err = s.RotatePAConnectionTokens(ctx, alice, c.ID, rot); err != nil {
+			t.Fatalf("rotation with the granted scope under the same lease: %v", err)
+		}
+		if c, err = e.m.Get(ctx, alice, c.ID); err != nil {
+			t.Fatal(err)
 		}
 
 		// Terminal rows never go back to any pending state or to active.
