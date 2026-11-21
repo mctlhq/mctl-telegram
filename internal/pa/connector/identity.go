@@ -36,8 +36,14 @@ import (
 // identityTool is tg's self-identity tool.
 const identityTool = "get_my_identity"
 
-// ErrAccountSourceUnsupported: the server has no account source.
-var ErrAccountSourceUnsupported = errors.New("pa connector: no account source for this server")
+var (
+	// ErrAccountSourceUnsupported: the server has no account source.
+	ErrAccountSourceUnsupported = errors.New("pa connector: no account source for this server")
+	// ErrAccountSourceConfig: the server has an account source, but it is
+	// not configured (no MCP endpoint). A wiring fault, not a property of
+	// the server.
+	ErrAccountSourceConfig = errors.New("pa connector: account source not configured")
+)
 
 // IdentityAccounts implements linking.AccountSource over the catalog
 // servers' MCP endpoints.
@@ -58,7 +64,7 @@ func (s IdentityAccounts) Account(ctx context.Context, server connection.Server,
 	}
 	ep := s.Endpoints[server]
 	if ep == nil {
-		return linking.Account{}, fmt.Errorf("%w: no endpoint for %s", ErrAccountSourceUnsupported, server)
+		return linking.Account{}, fmt.Errorf("%w: no MCP endpoint for %s", ErrAccountSourceConfig, server)
 	}
 	if accessToken.Empty() {
 		return linking.Account{}, errors.New("pa connector: no access token for the identity call")

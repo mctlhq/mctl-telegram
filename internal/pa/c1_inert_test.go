@@ -89,6 +89,17 @@ func TestC1SymbolsNotWiredAtRuntime(t *testing.T) {
 func c1Violations(fset *token.FileSet, f *ast.File, rel string, seen map[string]bool) []string {
 	var out []string
 	ast.Inspect(f, func(n ast.Node) bool {
+		// An unkeyed output.Config literal sets WebAppURL by position, so
+		// the identifier never appears: refuse the form itself.
+		if cl, ok := n.(*ast.CompositeLit); ok && isOutputConfig(cl.Type) && !c1Idents["WebAppURL"][rel] {
+			for _, e := range cl.Elts {
+				if _, keyed := e.(*ast.KeyValueExpr); !keyed {
+					out = append(out, fmt.Sprintf("%s: unkeyed output.Config literal; slice C1 code is not wired at runtime until C2 (#1318)", fset.Position(cl.Pos())))
+					break
+				}
+			}
+			return true
+		}
 		id, ok := n.(*ast.Ident)
 		if !ok {
 			return true
@@ -107,6 +118,16 @@ func c1Violations(fset *token.FileSet, f *ast.File, rel string, seen map[string]
 	return out
 }
 
+// isOutputConfig reports whether t is output.Config.
+func isOutputConfig(t ast.Expr) bool {
+	sel, ok := t.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Config" {
+		return false
+	}
+	x, ok := sel.X.(*ast.Ident)
+	return ok && x.Name == "output"
+}
+
 // TestC1Violations_Detects proves the checker both ways.
 func TestC1Violations_Detects(t *testing.T) {
 	bad := map[string]string{
@@ -115,6 +136,7 @@ func TestC1Violations_Detects(t *testing.T) {
 		"messenger":      `var m = linking.BotMessenger{}`,
 		"web app send":   `func f(s *output.Sender) { _ = s.SendWebApp(nil, 1, safetext.Text{}, safetext.Template{}, "") }`,
 		"web app config": `var c = output.Config{WebAppURL: "x"}`,
+		"unkeyed config": `var c = output.Config{"tok", nil, "https://pa.example/pa/link/app"}`,
 		"identity":       `var a linking.AccountSource = connector.IdentityAccounts{}`,
 		"template":       `var x = safetext.TextConnectOpen`,
 	}
@@ -135,5 +157,15 @@ func TestC1Violations_Detects(t *testing.T) {
 	}
 	if v := c1Violations(fset, f, "internal/pa/linking/messenger.go", map[string]bool{}); len(v) != 0 {
 		t.Errorf("allowed file reported: %v", v)
+	}
+	// A keyed output.Config without WebAppURL is how existing callers build
+	// the Sender, and stays allowed.
+	fset = token.NewFileSet()
+	f, err = parser.ParseFile(fset, "x.go", "package server\nvar c = output.Config{Token: \"t\"}", parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := c1Violations(fset, f, "cmd/server/main.go", map[string]bool{}); len(v) != 0 {
+		t.Errorf("keyed config reported: %v", v)
 	}
 }

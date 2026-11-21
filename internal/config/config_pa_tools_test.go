@@ -135,6 +135,8 @@ func TestLoadPATools_FailClosed(t *testing.T) {
 		{"no mcp url", map[string]string{"PA_SERVER_TG_MCP_URL": ""}, "PA_SERVER_TG_MCP_URL"},
 		{"mcp host off allowlist", map[string]string{"PA_SERVER_TG_MCP_URL": "https://other.example/mcp"}, "PA_SERVER_TG_MCP_URL"},
 		{"issuer host off allowlist", map[string]string{"PA_SERVER_TG_ISSUER": "https://other.example"}, "PA_SERVER_TG_ISSUER"},
+		{"authorization endpoint off allowlist", map[string]string{"PA_SERVER_TG_AUTHORIZATION_ENDPOINT": "https://other.example/oauth/authorize"}, "PA_SERVER_TG_AUTHORIZATION_ENDPOINT"},
+		{"resource off allowlist", map[string]string{"PA_SERVER_TG_RESOURCE": "https://other.example/mcp"}, "PA_SERVER_TG_RESOURCE"},
 		{"no resource", map[string]string{"PA_SERVER_TG_RESOURCE": ""}, "PA_SERVER_TG_RESOURCE"},
 		{"no allowed hosts", map[string]string{"PA_SERVER_TG_ALLOWED_HOSTS": ""}, "PA_SERVER_TG_ALLOWED_HOSTS"},
 		{"allowed host with port", map[string]string{"PA_SERVER_TG_ALLOWED_HOSTS": "tg.example:443"}, "PA_SERVER_TG_ALLOWED_HOSTS"},
@@ -181,10 +183,16 @@ func TestLoadPATools_AppURLMustBeOrigin(t *testing.T) {
 	if _, err := LoadPATools(c, getenvFrom(paToolsEnv())); err != nil {
 		t.Errorf("base with trailing slash: %v", err)
 	}
-	for _, base := range []string{"http://pa.example", "https://pa.example/sub", "https://pa.example?x", ""} {
+	// Not canonical, or not on port 443: refused at load time, naming the
+	// variable, rather than later by output.NewSender.
+	for _, base := range []string{"http://pa.example", "https://pa.example/sub", "https://pa.example?x", "",
+		"HTTPS://pa.example", "https://PA.example", "https://pa.example:8443", "https://pa.example/%2e"} {
 		c := paToolsConfig()
 		c.PublicBaseURL = base
-		if _, err := LoadPATools(c, getenvFrom(paToolsEnv())); err == nil || !strings.Contains(err.Error(), "PUBLIC_BASE_URL") {
+		// PA_APP_URL follows the base, so only the base check can refuse.
+		env := paToolsEnv()
+		env["PA_APP_URL"] = strings.TrimRight(base, "/") + PAAppPath
+		if _, err := LoadPATools(c, getenvFrom(env)); err == nil || !strings.HasPrefix(err.Error(), "PA tools require PUBLIC_BASE_URL") {
 			t.Errorf("PUBLIC_BASE_URL %q: err = %v", base, err)
 		}
 	}

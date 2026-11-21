@@ -74,7 +74,9 @@ func TestIdentityAccounts_UnsupportedAndUnconfigured(t *testing.T) {
 	if _, err := src.Account(context.Background(), connection.ServerAlice, tok); !errors.Is(err, ErrAccountSourceUnsupported) {
 		t.Errorf("alice: %v", err)
 	}
-	if _, err := (IdentityAccounts{}).Account(context.Background(), connection.ServerTG, tok); !errors.Is(err, ErrAccountSourceUnsupported) {
+	// A missing tg endpoint is a configuration fault, never reported as
+	// "tg is unsupported".
+	if _, err := (IdentityAccounts{}).Account(context.Background(), connection.ServerTG, tok); !errors.Is(err, ErrAccountSourceConfig) || errors.Is(err, ErrAccountSourceUnsupported) {
 		t.Errorf("no endpoint: %v", err)
 	}
 	if _, err := src.Account(context.Background(), connection.ServerTG, connection.Secret{}); err == nil {

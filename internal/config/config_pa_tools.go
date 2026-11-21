@@ -170,12 +170,18 @@ func LoadPATools(c *Config, getenv func(string) string) (*PATools, error) {
 
 // paPublicBase is PUBLIC_BASE_URL as an https origin without a trailing
 // slash: the redirect URIs and the app URL are built on it, and Telegram
-// opens a web_app button only over https.
+// opens a web_app button only over https. It must be in canonical form
+// (lower-case scheme and host, as url.URL.String writes it back), because
+// output.Sender and the redirect-URI match compare it as a string, so a
+// value like HTTPS://... fails here rather than later. Port 443 only, the
+// same rule as every endpoint: no tier serves the PA on another port, and
+// the preview origin carries none.
 func paPublicBase(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery ||
-		u.Fragment != "" || strings.Trim(u.Path, "/") != "" {
-		return "", errors.New("PA tools require PUBLIC_BASE_URL to be an https origin")
+		u.Fragment != "" || strings.Trim(u.Path, "/") != "" || u.String() != raw || u.Host != strings.ToLower(u.Host) ||
+		(u.Port() != "" && u.Port() != "443") {
+		return "", errors.New("PA tools require PUBLIC_BASE_URL to be a canonical https origin on port 443")
 	}
 	return strings.TrimRight(raw, "/"), nil
 }
@@ -216,6 +222,7 @@ func loadPALinking(t *PATools, getenv func(string) string, base string) error {
 	}
 	// Compared as a string, not as a parsed URL: the value becomes the
 	// web_app button's URL, and output.Sender accepts exactly this value.
+	// base is canonical (paPublicBase), so equality makes it canonical too.
 	t.AppURL = getenv("PA_APP_URL")
 	if t.AppURL != base+PAAppPath {
 		return fmt.Errorf("PA tools: PA_APP_URL must be PUBLIC_BASE_URL + %s", PAAppPath)
@@ -238,19 +245,15 @@ func loadPAServer(name connection.Server, getenv func(string) string, base strin
 		setting  string
 		dst      *string
 		optional bool
-		// called: the service sends requests to it, so its host must be on
-		// the egress allowlist. The authorization endpoint is opened by the
-		// user's browser, never by the service.
-		called bool
 		// noQuery: the value must not carry a query (an issuer, RFC 8414 2).
 		noQuery bool
 	}{
-		{"ISSUER", &s.Issuer, false, true, true},
-		{"AUTHORIZATION_ENDPOINT", &s.AuthorizationEndpoint, false, false, false},
-		{"TOKEN_ENDPOINT", &s.TokenEndpoint, false, true, false},
-		{"REVOCATION_ENDPOINT", &s.RevocationEndpoint, true, true, false},
-		{"MCP_URL", &s.MCPURL, false, true, false},
-		{"RESOURCE", &s.Resource, false, false, false},
+		{"ISSUER", &s.Issuer, false, true},
+		{"AUTHORIZATION_ENDPOINT", &s.AuthorizationEndpoint, false, false},
+		{"TOKEN_ENDPOINT", &s.TokenEndpoint, false, false},
+		{"REVOCATION_ENDPOINT", &s.RevocationEndpoint, true, false},
+		{"MCP_URL", &s.MCPURL, false, false},
+		{"RESOURCE", &s.Resource, false, false},
 	}
 	for _, u := range urls {
 		env := PAServerEnv(name, u.setting)
@@ -265,7 +268,13 @@ func loadPAServer(name connection.Server, getenv func(string) string, base strin
 		if err != nil {
 			return PAServer{}, fmt.Errorf("PA tools: %s %w", env, err)
 		}
-		if u.called && !containsHost(hosts, host) {
+		// Every URL belongs to the server: the ones the service calls
+		// (issuer, token, revocation, MCP) need it for egress, and the
+		// authorization endpoint the user's browser opens and the resource
+		// the tokens are bound to must not point at a host the server does
+		// not own. The issuer's host is itself on the list, so "the issuer's
+		// host or the allowlist" is the allowlist.
+		if !containsHost(hosts, host) {
 			return PAServer{}, fmt.Errorf("PA tools: the host of %s must be on %s", env, PAServerEnv(name, "ALLOWED_HOSTS"))
 		}
 		*u.dst = v
