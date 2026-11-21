@@ -39,6 +39,7 @@ to do about it), see [docs/troubleshooting.md](troubleshooting.md) instead.
 - [MctlTelegramLoginSendCodeStalls — logins stalling at SendCode](#mctltelegramloginsendcodestalls)
 - [MctlTelegramLoginSlow — SendCode p95 above 30s](#mctltelegramloginslow)
 - [MctlBridgeDaemonsFlapping — Local Bridge daemons reconnecting](#mctlbridgedaemonsflapping)
+- [MctlWorkerTokenRevocationRefreshFailing — worker-token revocation list cannot be refreshed](#mctlworkertokenrevocationrefreshfailing)
 - [Auditing accounts with send disabled](#auditing-accounts-with-send-disabled)
 - [Canary](#canary)
 - [Deployment compatibility boundaries](#deployment-compatibility)
@@ -2994,6 +2995,125 @@ Open a postmortem if a local-mode account was revoked by the idle sweeper
 while in active use — that is the known correctness gap described in
 `internal/bridge/DESIGN.md`, and each occurrence is evidence for fixing it
 rather than re-applying the exemption.
+
+---
+
+<a id="mctlworkertokenrevocationrefreshfailing"></a>
+## MctlWorkerTokenRevocationRefreshFailing — worker-token revocation list cannot be refreshed
+
+### Symptom
+
+- Alert `MctlWorkerTokenRevocationRefreshFailing` fires with severity
+  **critical** when at least two refreshes of the worker-token revocation
+  cache failed within 3 minutes, for 5 minutes running
+  (`sum by (job) (increase(mctl_worker_token_revocation_refresh_failures_total[3m])) > 1.5`).
+  `> 1.5` reads "at least two" on both VictoriaMetrics (whole-number
+  `increase()`) and Prometheus (whose extrapolation can turn one failure into
+  1.5). The lookback is shorter than the hold, so a burst during a failover
+  ages out before it can fire; only failures that keep coming survive.
+- What it means: since mctl-telegram#1346 (release 0.140.0) the revocation
+  cache fails closed. It serves its last good snapshot for at most 15
+  seconds (`localjwt.MaxRevocationSnapshotAge`). Past that, **every** token
+  checked against it is refused with 401: worker tokens, the managed pool
+  token, Local Bridge daemon tokens, agent job tokens and PA job tokens. All
+  of them share one cache in the server.
+- How the counter moves: there is no background refresher. A refresh runs
+  inline on a token check that finds the snapshot at least one TTL old
+  (`WORKER_TOKEN_REVOCATION_CACHE_TTL`, default 10s). While refreshes fail
+  the snapshot never gets younger, so every worker-token request during the
+  outage is one failed refresh. No traffic means no refreshes, no failures
+  and no one refused. The pool worker polls every 2 seconds and backs off to
+  at most 60 seconds on errors, so a real outage with any worker running
+  produces at least one failure a minute.
+- On the client side: agent workers and the pool worker log 401s and back
+  off; Local Bridge daemons reconnect in a loop. `mctl_auth_failures_total`
+  rises with `reason="other"` (the refusal is a store failure, not a bad
+  token) for the worker providers.
+- The series is a plain counter, registered at 0 when the server starts, so
+  it exists on every running, scraped server from 0.140.0 on. It does not
+  exist on earlier releases, which never refused tokens for this reason. A
+  server that is down or not scraped gives this rule no data at all; that
+  case is `ServiceUnavailable` (the `/healthz` probe), not this alert.
+
+### Likely causes
+
+1. **shared-pg is down, restarting or failing over** for longer than the
+   15-second bound. The most likely cause, and usually visible as a
+   `SharedPg*` alert (`SharedPgNoPrimary`, `SharedPgInstanceDown`) at the
+   same time.
+2. **The database refuses the query**: connections exhausted on the
+   shared-pg side (`SharedPgConnectionsHigh`, `SharedPgRoleConnectionsHigh`),
+   credentials rotated without a restart, or the `worker_token_revocations`
+   table missing or unreadable after a bad migration.
+3. **Network path to shared-pg broken** from the mctl-telegram pod (network
+   policy change, DNS).
+
+What this alert does **not** see: a database that hangs instead of failing.
+A refresh whose request is abandoned by its client ends with
+`context.Canceled`, which is not counted (otherwise the metric would follow
+traffic rather than outages), and the query has no timeout of its own. A
+hung shared-pg, or the server's own connection pool held by slow queries,
+therefore refuses tokens while this counter stays flat. Look for the same
+symptoms below with no alert, and check shared-pg directly.
+
+### Diagnostic queries
+
+```promql
+# Failed refreshes per minute, fleet of the job.
+sum by (job) (rate(mctl_worker_token_revocation_refresh_failures_total[5m])) * 60
+
+# The refusals the outage causes, by provider.
+sum by (provider) (increase(mctl_auth_failures_total{reason="other"}[5m]))
+```
+
+Server logs (`mctl_get_service_logs` for the mctl-telegram service in the
+`labs` tenant):
+
+- `auth failed` with `err` containing `check worker token revocation` or
+  `check pool token revocation`, followed by either
+  `revocation cache snapshot is older than its bound` (the snapshot aged
+  past 15s) or `revocation cache cold-start refresh` (a fresh pod that never
+  loaded the list). The wrapped database error after
+  `refresh worker token revocation cache:` names the real cause
+  (connection refused, too many clients, missing relation).
+- Unrelated database errors from other paths at the same time confirm the
+  store, not this cache, is the problem.
+
+Database: check the `SharedPg*` alerts in vmalert and the shared-pg cluster
+status (read only). `mctl_get_service_status` and `mctl_get_service_pods`
+show whether mctl-telegram itself is healthy and how many pods serve.
+
+### Impact
+
+Every agent worker, the managed pool worker, PA jobs and Local Bridge
+daemons are refused for as long as the store stays unreadable. Interactive
+users (OAuth sessions) are not affected: their tokens skip the revocation
+check. No data is lost; jobs stay pending and are claimed once refreshes
+succeed again, within one request of the database coming back.
+
+### Mitigation
+
+1. Restore the database. This is the only fix. Once a refresh succeeds the
+   next token check serves a fresh snapshot and workers recover by
+   themselves within their backoff (at most 60 seconds).
+2. If only mctl-telegram cannot reach a healthy shared-pg, restart the
+   mctl-telegram pods after fixing the path or credentials.
+3. **Do not raise or disable the 15-second bound** (no
+   `WORKER_TOKEN_REVOCATION_CACHE_TTL` change helps either: it is clamped to
+   15s). The bound is the promised propagation delay for a revocation; an
+   outage is exactly when a stolen or leaked worker token must not keep
+   working. Waiting for the store is the designed behaviour.
+
+### Escalation
+
+If shared-pg is healthy and refreshes still fail, or the outage lasts longer
+than 15 minutes, escalate to the platform owner with the wrapped database
+error from the log.
+
+### Postmortem trigger
+
+Any firing: every agent worker was stopped. Record how long the store was
+unreadable and whether a `SharedPg*` alert fired first.
 
 ---
 
