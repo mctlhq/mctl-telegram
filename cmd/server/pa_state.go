@@ -17,7 +17,12 @@ import (
 // enabled") and only then starts the retention sweeper. A failed purge is
 // returned so the server refuses to start rather than run beside unmarked
 // state; the loader refuses such rows anyway, this makes them gone.
-func startPAState(ctx context.Context, cfg *config.Config, store convo.Store) (bool, error) {
+//
+// links is the linking flow's sweep ((*linking.Service).ExpireStale). With
+// PA_ENABLED on and links set, the linking sweeper runs beside the
+// retention sweeper (#1338). links is nil while the server does not run the
+// linking flow (#1314): nothing builds a linking.Service yet.
+func startPAState(ctx context.Context, cfg *config.Config, store convo.Store, links sweeper.PALinkExpirer) (bool, error) {
 	if !cfg.PAEnabled {
 		return false, nil
 	}
@@ -29,6 +34,9 @@ func startPAState(ctx context.Context, cfg *config.Config, store convo.Store) (b
 		slog.Warn("pa state: purged unmarked fragments", "rows", n)
 	}
 	go sweeper.PAState(ctx, store)
+	if links != nil {
+		go sweeper.PALinks(ctx, links)
+	}
 	return true, nil
 }
 

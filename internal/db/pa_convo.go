@@ -101,7 +101,11 @@ func migratePAConvo(ctx context.Context, dbConn migrateDB, pg bool) error {
 			return fmt.Errorf("migrate pa conversation state: %w", err)
 		}
 	}
-	return nil
+	// purged_at_ms: when an account deletion last purged the principal
+	// (purgePAPrincipals), 0 if never. It fences a Begin admitted before the
+	// deletion (CreatePAConnection, #1338).
+	return addColumnIfMissing(ctx, dbConn, pg, "pa_principal_locks", "purged_at_ms",
+		"BIGINT NOT NULL DEFAULT 0", "INTEGER NOT NULL DEFAULT 0")
 }
 
 func unreadable(op string, err error) error {

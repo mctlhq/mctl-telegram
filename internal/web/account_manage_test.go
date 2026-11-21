@@ -23,6 +23,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/canaryguard"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/oauth"
+	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 	"github.com/mctlhq/mctl-telegram/internal/workertoken"
 )
 
@@ -854,5 +855,53 @@ func TestManagePage_SettingsControlsFollowTheServerCheck(t *testing.T) {
 				t.Fatalf("toggle-send status = %d; accepted = %v, want %v", post.Code, accepted, c.accepted)
 			}
 		})
+	}
+}
+
+// seedTokenHoldingPAConnection gives principal a PA connection that holds
+// provider tokens (pending_confirm).
+func seedTokenHoldingPAConnection(t *testing.T, s *db.Store, principal int64) {
+	t.Helper()
+	ctx := context.Background()
+	a, err := s.AdmitPAConnection(ctx, principal)
+	if err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+	const id = "pac_web_delete"
+	if err := s.CreatePAConnection(ctx, connection.Connection{
+		ID: id, Principal: principal, Server: connection.ServerTG, State: connection.StatePendingLink, AuthorityRevision: 1,
+	}, connection.Sealed{KEKID: "test", WrappedDEK: []byte("wrapped")}, a); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	for _, tr := range []connection.Transition{
+		{From: connection.StatePendingLink, To: connection.StatePendingOAuth, ExpectRevision: 1},
+		{From: connection.StatePendingOAuth, To: connection.StatePendingReturn, ExpectRevision: 2, SealedCode: []byte("code")},
+		{From: connection.StatePendingReturn, To: connection.StatePendingConfirm, ExpectRevision: 3,
+			AccountID: "acct", GrantedScope: "telegram:dialogs:read", SealedTokens: []byte("tokens")},
+	} {
+		if _, err := s.TransitionPAConnection(ctx, principal, id, tr); err != nil {
+			t.Fatalf("%s -> %s: %v", tr.From, tr.To, err)
+		}
+	}
+}
+
+// A deletion refused because a linked PA service still holds provider
+// tokens tells the user what to do (409 with the message), not "delete
+// failed", and deletes nothing (#1338).
+func TestAccountEndpoints_DeleteRefusedByPAConnection(t *testing.T) {
+	f := newAccountManageFixture(t, 7700199)
+	seedTokenHoldingPAConnection(t, f.store, f.tgID)
+	rec := f.call(http.MethodDelete, "/", f.accessToken("dcr-client", "telegram:messages:read", "account:manage"), "")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Disconnect or revoke your linked services first") {
+		t.Fatalf("body = %s, want the user message", rec.Body.String())
+	}
+	if n := f.accountRows(); n != 1 {
+		t.Fatalf("account rows = %d after a refused delete, want 1", n)
+	}
+	if len(f.evictor.users) != 0 {
+		t.Fatalf("evicted %v after a refused delete, want none", f.evictor.users)
 	}
 }
