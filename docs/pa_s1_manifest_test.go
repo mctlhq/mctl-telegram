@@ -134,15 +134,18 @@ func checkS1Manifest(ids []string, manifest map[string]s1Entry, funcs map[string
 		mapped[id] = map[string]bool{}
 		halves := map[string]bool{}
 		for _, g := range e.Gaps {
+			// Halves are compared trimmed: " principal disable" is the same
+			// gap as "principal disable", not a second one.
+			half := strings.TrimSpace(g.Half)
 			switch {
-			case strings.TrimSpace(g.Half) == "":
+			case half == "":
 				problems = append(problems, fmt.Sprintf("%s: a gap without a half", id))
 			case !s1IssueRef.MatchString(g.TrackedBy):
 				problems = append(problems, fmt.Sprintf("%s: gap %q is not tracked by an issue (tracked_by %q, want #NNNN)", id, g.Half, g.TrackedBy))
-			case halves[g.Half]:
-				problems = append(problems, fmt.Sprintf("%s: gap %q listed twice", id, g.Half))
+			case halves[half]:
+				problems = append(problems, fmt.Sprintf("%s: gap %q listed twice", id, half))
 			}
-			halves[g.Half] = true
+			halves[half] = true
 		}
 		for _, ref := range e.Tests {
 			switch {
@@ -264,15 +267,25 @@ func TestPAS1Manifest(t *testing.T) {
 	for _, p := range checkS1Manifest(ids, manifest, repoTestFuncs(t, "..")) {
 		t.Error(p)
 	}
-	gaps := openS1Gaps(manifest)
-	for _, g := range gaps {
+	for _, g := range openS1Gaps(manifest) {
 		t.Logf("open S1 gap: %s", g)
 	}
-	if os.Getenv(s1GateClosingEnv) != "" {
-		for _, g := range gaps {
-			t.Errorf("%s is set but an S1 gap is open: %s", s1GateClosingEnv, g)
-		}
+	for _, p := range s1ClosingProblems(manifest, os.Getenv(s1GateClosingEnv) != "") {
+		t.Error(p)
 	}
+}
+
+// s1ClosingProblems is the closing half of the gate: with closing set
+// (PA_S1_GATE_CLOSING), every open gap is a problem; without it, none is.
+func s1ClosingProblems(manifest map[string]s1Entry, closing bool) []string {
+	if !closing {
+		return nil
+	}
+	var out []string
+	for _, g := range openS1Gaps(manifest) {
+		out = append(out, fmt.Sprintf("%s is set but an S1 gap is open: %s", s1GateClosingEnv, g))
+	}
+	return out
 }
 
 // openS1Gaps lists every gap of the manifest as "S1-XX: half (tracked by
@@ -367,6 +380,14 @@ func TestPAS1ManifestCheckDetects(t *testing.T) {
 			m["S1-A2"] = s1Entry{Tests: []string{"internal/x.TestCovers"}, Gaps: []s1Gap{{Half: "principal disable", TrackedBy: "later"}}}
 			return ids
 		}, "is not tracked by an issue"},
+		{"duplicate gap", func(ids []string, m map[string]s1Entry, f map[string]bool) []string {
+			m["S1-A2"] = s1Entry{Tests: []string{"internal/x.TestCovers"}, Gaps: []s1Gap{{Half: "principal disable", TrackedBy: "#1"}, {Half: "principal disable", TrackedBy: "#2"}}}
+			return ids
+		}, `S1-A2: gap "principal disable" listed twice`},
+		{"duplicate gap after trimming", func(ids []string, m map[string]s1Entry, f map[string]bool) []string {
+			m["S1-A2"] = s1Entry{Tests: []string{"internal/x.TestCovers"}, Gaps: []s1Gap{{Half: "principal disable", TrackedBy: "#1"}, {Half: "  principal disable ", TrackedBy: "#1"}}}
+			return ids
+		}, `S1-A2: gap "principal disable" listed twice`},
 		{"gap without a half", func(ids []string, m map[string]s1Entry, f map[string]bool) []string {
 			m["S1-A2"] = s1Entry{Tests: []string{"internal/x.TestCovers"}, Gaps: []s1Gap{{TrackedBy: "#1"}}}
 			return ids
@@ -439,5 +460,24 @@ func TestOpenS1Gaps(t *testing.T) {
 	want := []string{"S1-A1: a (tracked by #1)", "S1-B1: b (tracked by #2)"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("open gaps %v, want %v", got, want)
+	}
+}
+
+// TestS1ClosingProblems proves the closing branch both ways: with
+// PA_S1_GATE_CLOSING set, an open gap fails the gate and a manifest with
+// none passes; without it, open gaps are only logged.
+func TestS1ClosingProblems(t *testing.T) {
+	open := map[string]s1Entry{
+		"S1-A1": {Tests: []string{"internal/x.TestCovers"}, Gaps: []s1Gap{{Half: "principal disable", TrackedBy: "#1"}}},
+	}
+	closed := map[string]s1Entry{"S1-A1": {Tests: []string{"internal/x.TestCovers"}}}
+	if p := s1ClosingProblems(open, true); len(p) != 1 || !strings.Contains(p[0], "S1-A1: principal disable (tracked by #1)") || !strings.Contains(p[0], s1GateClosingEnv) {
+		t.Fatalf("closing with an open gap: %v", p)
+	}
+	if p := s1ClosingProblems(closed, true); len(p) != 0 {
+		t.Fatalf("closing with no gap: %v", p)
+	}
+	if p := s1ClosingProblems(open, false); len(p) != 0 {
+		t.Fatalf("not closing: an open gap failed the gate: %v", p)
 	}
 }

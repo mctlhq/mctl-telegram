@@ -78,6 +78,13 @@ jobs:
       # channels, and #495 was a send-on-closed-channel that plain `go test`
       # could never surface. The whole module passes under -race on main.
       - run: go test -race ./...
+      # The PA S1 gate in closing mode (#1317, #1318): any open gap in
+      # docs/agent-runtime/pa-s1-manifest.yaml fails the build, so a gap
+      # cannot be added back without this step being changed in review.
+      - name: PA S1 gate (closing)
+        env:
+          PA_S1_GATE_CLOSING: "1"
+        run: go test -count=1 ./docs -run S1Manifest
       # A nested Go module is skipped by the root module's go test ./... .
       # Run it inside the existing required "test" check, so a failing PoC
       # cannot be merged merely because a new optional check was not required.

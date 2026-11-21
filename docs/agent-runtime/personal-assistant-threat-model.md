@@ -544,17 +544,17 @@ CIMD documents are fetched by the authorization server from MCTL. They are not M
 - `PA_WRITES_ENABLED`: every write becomes `never`.
 - `PA_SERVER_<NAME>_ENABLED`: one server.
 
-An admin command can also disable a single principal.
+An admin command (`set_pa_principal_disabled`, #1318) can also disable a single principal. While the PA is a preview, only the principals listed in `PA_ALLOWED_PRINCIPALS` may use it at all; unset or empty allows nobody (owner decision 2026-11-21, #1318). Both are checked at ingress and at every run step, like the flags.
 
 All of these, plus consent, are checked again at **every dispatch**, not only at ingress, so a `pa-job` token already in flight cannot keep calling after a switch turns off.
 
 **Rollback.** Turn off the flags, then roll back the image. Connections stay sealed and unused. Deleting them is a separate, explicit action.
 
 **Tests.**
-- S1-F1: each flag disables exactly its own layer.
+- S1-F1: each flag disables exactly its own layer. For `PA_WRITES_ENABLED`, S1-F1 covers that reads are unaffected; that it disables writes is S2-F3 (owner decision 2026-11-21, #1318).
 - S1-F2: a missing flag means off.
 - S1-F4: switching off `PA_EXTERNAL_TOOLS_ENABLED`, a server flag, the principal or consent during a run refuses the run's next dispatch.
-- S2-F3: turning `PA_WRITES_ENABLED` off while an approval is pending refuses it at dispatch.
+- S2-F3: turning `PA_WRITES_ENABLED` off disables writes, and turning it off while an approval is pending refuses it at dispatch.
 
 ### T12 Audit
 
