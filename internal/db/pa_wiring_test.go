@@ -554,3 +554,66 @@ func TestPurgePAPrincipals_LockRowOnlyAfterAdmission(t *testing.T) {
 		}
 	})
 }
+
+// Postgres, two real transactions: an admission's lock-row insert is still
+// open when an account deletion runs. The deletion's UPDATE finds no row,
+// its INSERT ... DO NOTHING waits for the admission and loses to it, and it
+// must go back to the UPDATE: the admitted row stays with its mark raised,
+// so the Begin admitted with the old mark is fenced.
+func TestPurgePAPrincipals_LostInsertToAdmissionRaisesMark(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	s := newPostgresTestStore(t, dsn)
+	ctx := context.Background()
+	dana := 9200000000 + (time.Now().UnixNano()/1000)%100000000 + 43
+	uid, err := s.EnsureUserByTelegramID(ctx, dana, "dana", "Dana")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	seedAccountForTelegramID(t, s, uid, dana, nil)
+	t.Cleanup(func() {
+		_, _ = s.DB.Exec(`DELETE FROM pa_connections WHERE principal = $1`, dana)
+		_, _ = s.DB.Exec(`DELETE FROM pa_principal_locks WHERE principal = $1`, dana)
+	})
+
+	adm, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = adm.Rollback() }()
+	if _, err := adm.ExecContext(ctx,
+		`INSERT INTO pa_principal_locks(principal, locked_at_ms) VALUES($1, $2)
+		 ON CONFLICT (principal) DO UPDATE SET locked_at_ms = excluded.locked_at_ms`,
+		dana, time.Now().UnixMilli()); err != nil {
+		t.Fatalf("admission insert: %v", err)
+	}
+	old, _, err := paAdmissionState(ctx, adm, dana)
+	if err != nil || old != 0 {
+		t.Fatalf("admission mark = %d, %v; want 0", old, err)
+	}
+
+	deleted := make(chan error, 1)
+	go func() {
+		_, err := s.HardDeleteAccount(ctx, uid)
+		deleted <- err
+	}()
+	waitForPALockWait(t, s, "INSERT INTO pa_principal_locks(principal, locked_at_ms) VALUES($1, $2) ON CONFLICT (principal) DO NOTHING")
+	if err := adm.Commit(); err != nil {
+		t.Fatalf("admission commit: %v", err)
+	}
+	if err := <-deleted; err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if n := paRowsIn(t, s, "pa_principal_locks", dana); n != 1 {
+		t.Fatalf("%d lock rows after the deletion, want the admitted row kept", n)
+	}
+	if m := paPurgeMark(t, s, dana); m <= old {
+		t.Fatalf("deletion mark = %d, want it raised past the admission's %d", m, old)
+	}
+	c, sealed := newPAConn(dana, "pac_lost_"+randomSuffix(t))
+	if err := s.CreatePAConnection(ctx, c, sealed, connection.Admission{PurgeMark: old, ReadAt: time.Now()}); !errors.Is(err, connection.ErrPrincipalDeleted) {
+		t.Fatalf("Begin admitted before the deletion: %v, want ErrPrincipalDeleted", err)
+	}
+}
