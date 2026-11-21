@@ -19,9 +19,11 @@ S1-L4:
   tests:
     - internal/pa/linking.TestLinking_S1L4_LinkTokenReuseRefused
 S1-L5:
-  note: "The tests run with RequireIss true; deriving it from the authorization server metadata at wiring time is #1338."
+  note: "RequireIss is derived from the authorization server metadata (#1364); the callback test runs on the derived value."
   tests:
     - internal/pa/linking.TestLinking_S1L5_CallbackChecks
+    - internal/pa/linking.TestLinking_RequireIssFromMetadata
+    - internal/pa/linking.TestParseASMetadata
 S1-L6:
   tests:
     - internal/pa/linking.TestLinking_S1L6_CompletionByOtherUserDoesNotExchange
