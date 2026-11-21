@@ -61,10 +61,8 @@ var sensitiveKeys = map[string]struct{}{
 	"client_secret":               {},
 	"telegram_oidc_client_secret": {},
 	"encryption_key":              {},
-	// The PA preview allowlist (#1318): Telegram user ids.
-	"pa_allowed_principals": {},
-	"authorization":         {},
-	"bearer":                {},
+	"authorization":               {},
+	"bearer":                      {},
 	// Human-input (agent clarification) content, issue-571: the question the
 	// agent asked and the answer the owner typed are private user content.
 	//
@@ -127,6 +125,10 @@ var sensitiveKeys = map[string]struct{}{
 	"pabottoken":        {},
 	"pa_webhook_secret": {},
 	"pawebhooksecret":   {},
+	// The PA preview allowlist (#1318): Telegram user ids, under the env
+	// name and the Go field name.
+	"pa_allowed_principals": {},
+	"paallowedprincipals":   {},
 	// PA connections (issue #1314, threat model T3): downstream OAuth tokens,
 	// the authorization code and PKCE verifier, the per-server DCR client
 	// credentials, and the DEK/KEK material that seals them. "code" and
