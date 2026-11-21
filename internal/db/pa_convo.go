@@ -523,19 +523,36 @@ func (s *Store) PurgeUnmarkedPAState(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
+// SweepPAPrincipalLocks deletes every principal lock row unused since
+// before, and returns how many it deleted. It is the only statement that
+// sweeps pa_principal_locks, and sweeper.PALocks runs it whatever
+// PA_ENABLED says (#1318): an account deletion raises the deletion mark on
+// an existing row and keeps the row (purgePAPrincipals), so a PA turned off
+// within pa.UpdatesRetention of a deletion would otherwise leave the row,
+// which carries the principal, forever.
+//
+// One autocommit statement, never inside a transaction that holds other PA
+// rows: a handler takes its principal's lock row before touching
+// conversations, so a sweep that held conversation rows and then waited for
+// a lock row could deadlock with it. Lock rows carry no state; one unused
+// for the dedup window goes.
+func (s *Store) SweepPAPrincipalLocks(ctx context.Context, before time.Time) (int64, error) {
+	res, err := s.DB.ExecContext(ctx, `DELETE FROM pa_principal_locks WHERE locked_at_ms < $1`, before.UnixMilli())
+	if err != nil {
+		return 0, fmt.Errorf("sweep pa principal locks: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("sweep pa principal locks: rows affected: %w", err)
+	}
+	return n, nil
+}
+
 // SweepPAState implements convo.Store. One transaction, so a conversation
-// and its fragments go together.
+// and its fragments go together. It does not sweep pa_principal_locks:
+// SweepPAPrincipalLocks owns that statement, and runs with the PA off too.
 func (s *Store) SweepPAState(ctx context.Context, now, updatesBefore time.Time) (convo.SweepResult, error) {
 	var r convo.SweepResult
-	// Stale lock rows go first, in their own statement and transaction: a
-	// handler takes its principal's lock row before touching conversations,
-	// so a sweep that held conversation rows and then waited for a lock row
-	// could deadlock with it. The sweep transaction below holds no lock row.
-	// Lock rows carry no state; one unused for the dedup window goes.
-	if _, err := s.DB.ExecContext(ctx, `DELETE FROM pa_principal_locks WHERE locked_at_ms < $1`,
-		updatesBefore.UnixMilli()); err != nil {
-		return r, fmt.Errorf("sweep pa state: locks: %w", err)
-	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return r, fmt.Errorf("sweep pa state: begin: %w", err)

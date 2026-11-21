@@ -25,11 +25,26 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// accountRemover is the part of *telegram.ClientPool that
+// delete_telegram_account uses.
+type accountRemover interface {
+	RemoveAtomic(userID int64, fn func() error) error
+}
+
 type Server struct {
 	Store     *db.Store
 	Pool      *telegram.ClientPool
 	AllowSend bool
 	Confirms  *ConfirmStore
+	// PARevoker, when set, revokes the provider tokens of the account's
+	// Personal Assistant connections before delete_telegram_account
+	// (Store.RevokeAccountPATokens, #1338). nil, while the server does not
+	// run the PA linking flow, keeps the delete as it was: the purge itself
+	// refuses an account whose connection holds tokens.
+	PARevoker db.PATokenRevoker
+	// accountRemover replaces Pool for delete_telegram_account in tests, so
+	// they can see whether the deletion reached RemoveAtomic. nil uses Pool.
+	accountRemover accountRemover
 	// Limiter is the per-identity / per-peer write-action limiter.
 	// Optional: when nil, AllowPeer checks are skipped.
 	Limiter *audit.RateLimiter

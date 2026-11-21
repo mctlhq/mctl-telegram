@@ -1032,12 +1032,29 @@ Returns: {"deleted": true, "rows_removed": <int>}.`),
 		// RemoveAtomic for the same reason as disconnect — eviction and
 		// DB delete must commit under one lock so a concurrent Borrow()
 		// cannot allocate a fresh client against a still-existing row.
+		//
+		// With PARevoker set, the PA provider tokens are revoked first, and
+		// outside RemoveAtomic: a refused revocation deletes nothing, so it
+		// must not evict the live client either. A connection that gains
+		// tokens between the revoke and the purge is still refused inside
+		// RemoveAtomic by the purge's own check, after the eviction, which
+		// costs one reconnect on the next Borrow; only a race reaches that.
 		var rows int64
-		err := s.Pool.RemoveAtomic(id.UserID, func() error {
-			var e error
-			rows, e = s.Store.HardDeleteAccount(ctx, id.UserID)
-			return e
-		})
+		var err error
+		if s.PARevoker != nil {
+			err = s.Store.RevokeAccountPATokens(ctx, id.UserID, s.PARevoker)
+		}
+		if err == nil {
+			var remover accountRemover = s.Pool
+			if s.accountRemover != nil {
+				remover = s.accountRemover
+			}
+			err = remover.RemoveAtomic(id.UserID, func() error {
+				var e error
+				rows, e = s.Store.HardDeleteAccount(ctx, id.UserID)
+				return e
+			})
+		}
 		s.audit(ctx, id, auditTool, "", err, startedAt)
 		if errors.Is(err, db.ErrPAConnectionsNeedRevocation) {
 			// Not a store fault: the account holds a linked PA service whose
