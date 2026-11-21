@@ -216,15 +216,21 @@ func checkS2Mutations(id string, e s2Entry, lines guardLines) []string {
 
 // guardTextProblem returns why text does not pin line (1-based) of a file
 // with lines ls, or "" when it does: text must occur exactly once in the
-// file, and that occurrence must cover the line.
+// file, and that occurrence must hold some non-blank text of the line. A
+// leading or trailing newline is refused: it would stretch the text over a
+// neighbouring line without taking a character of it.
 func guardTextProblem(ls []string, line int, text string) string {
+	if strings.HasPrefix(text, "\n") || strings.HasSuffix(text, "\n") {
+		return "starts or ends with a newline, so it does not pin"
+	}
 	file := strings.Join(ls, "\n")
 	switch n := strings.Count(file, text); {
 	case n > 1:
 		return fmt.Sprintf("occurs %d times in the guard file, want once; it does not pin", n)
 	case n == 1:
 		start := strings.Count(file[:strings.Index(file, text)], "\n") + 1
-		if end := start + strings.Count(text, "\n"); line >= start && line <= end {
+		parts := strings.Split(text, "\n")
+		if i := line - start; i >= 0 && i < len(parts) && strings.TrimSpace(parts[i]) != "" {
 			return ""
 		}
 	}
@@ -615,6 +621,15 @@ func TestPAS2ManifestCheckDetects(t *testing.T) {
 		{"multi-line guard_text that ends before the guard line", func(f *s2Fixture) {
 			f.mutate(func(m *s2Mutation) { m.Guard, m.GuardText = "internal/x/x.go:13", "line 11\n\treturn err // guard M2" })
 		}, `is not on internal/x/x.go:13`},
+		{"guard_text of the previous line and a newline", func(f *s2Fixture) {
+			f.mutate(func(m *s2Mutation) { m.Guard, m.GuardText = "internal/x/x.go:12", "line 11\n" })
+		}, `guard_text "line 11\n" starts or ends with a newline, so it does not pin internal/x/x.go:12`},
+		{"guard_text of a newline and the next line", func(f *s2Fixture) {
+			f.mutate(func(m *s2Mutation) { m.Guard, m.GuardText = "internal/x/x.go:12", "\nline 13" })
+		}, `guard_text "\nline 13" starts or ends with a newline, so it does not pin internal/x/x.go:12`},
+		{"guard_text holding only the indentation of the guard line", func(f *s2Fixture) {
+			f.mutate(func(m *s2Mutation) { m.Guard, m.GuardText = "internal/x/x.go:10", "line 9\n\t" })
+		}, `guard_text "line 9\n\t" is not on internal/x/x.go:10`},
 		{"multi-line guard_text that starts after the guard line", func(f *s2Fixture) {
 			f.mutate(func(m *s2Mutation) { m.Guard, m.GuardText = "internal/x/x.go:10", "line 11\n\treturn err // guard M2" })
 		}, `is not on internal/x/x.go:10`},
@@ -763,6 +778,7 @@ func TestPAS2ThreatModelRows(t *testing.T) {
 		"after punctuation":        {"- S2-A1: x\n(S2-A2) and -S2-A3\n", "S2-A2, S2-A3"},
 		"italic row":               {"- S2-A1: x\n- _S2-A2_: y\n", "S2-A2"},
 		"bold underscore row":      {"- S2-A1: x\n- __S2-A2__: y\n", "S2-A2"},
+		"italic underscore id":     {"- S2-A1: x\nsee _S2_Z9_ there\n", "S2_Z9"},
 	} {
 		if _, err := paSuiteS2.threatModelIDs([]byte(tc.doc)); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err %v, want one naming %s", name, err, tc.want)

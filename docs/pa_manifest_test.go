@@ -38,7 +38,9 @@ type paSuite struct {
 	// an identifier such as PA_S1_GATE_CLOSING is not a mention. An
 	// underscore before it still counts when a real dash (not an underscore)
 	// follows the suite name, so a markdown italic "_S1-N5_" is a mention.
-	// The mention is group 1 or group 2, whichever matched.
+	// Underscores right after the boundary are markup too, so "_S1_N5_" is
+	// a mention as a bare "S1_N5" is. The mention is group 1 or group 2,
+	// whichever matched.
 	mentionRe *regexp.Regexp
 	// An id claimed by a test function name: TestS1E1E2_...,
 	// TestLinking_S1L13_... or TestS1_E1_... . A group without a digit
@@ -55,7 +57,7 @@ func newPASuite(name string) paSuite {
 	return paSuite{
 		name:      name,
 		rowRe:     regexp.MustCompile(`(?m)^- (` + q + `-[A-Z]+[0-9]+):`),
-		mentionRe: regexp.MustCompile(`(?:^|[^\p{L}\p{N}_])(` + q + `(?:` + dash + `|_)[\p{L}\p{N}]*)|_(` + q + dash + `[\p{L}\p{N}]*)`),
+		mentionRe: regexp.MustCompile(`(?:^|[^\p{L}\p{N}_])_*(` + q + `(?:` + dash + `|_)[\p{L}\p{N}]*)|_(` + q + dash + `[\p{L}\p{N}]*)`),
 		nameRe:    regexp.MustCompile(q + `_?((?:[A-Z][0-9]+)+)`),
 	}
 }
@@ -245,7 +247,11 @@ func repoTestFuncs(t *testing.T, root string) map[string]bool {
 			if !ok || fn.Recv != nil || !strings.HasPrefix(fn.Name.Name, "Test") || !isTestingT(fn, names, dot) {
 				continue
 			}
-			funcs[pkg+"."+fn.Name.Name] = inCI
+			// One name may be declared in files that build constraints keep
+			// apart (_linux and _windows): it runs in CI when any of them is
+			// in CI's build, whatever the walk order.
+			k := pkg + "." + fn.Name.Name
+			funcs[k] = funcs[k] || inCI
 		}
 		return nil
 	})
@@ -332,8 +338,13 @@ func TestRepoTestFuncs(t *testing.T) {
 		"a/linux_test.go":       "//go:build linux && !windows\n\npackage a\n\nimport \"testing\"\n\nfunc TestLinux(t *testing.T) {}\n",
 		"a/norace_test.go":      "//go:build !race\n\npackage a\n\nimport \"testing\"\n\nfunc TestNoRace(t *testing.T) {}\n",
 		"a/race_test.go":        "//go:build race\n\npackage a\n\nimport \"testing\"\n\nfunc TestRaceOnly(t *testing.T) {}\n",
-		"nested/go.mod":         "module example.com/nested\n",
-		"nested/n_test.go":      "package n\n\nimport \"testing\"\n\nfunc TestNested(t *testing.T) {}\n",
+		// One name in two files a build constraint keeps apart: whichever
+		// the walk reads last, the Linux file puts it in CI. The z_ file
+		// sorts after the one CI builds, so a last-write-wins index fails.
+		"a/both_linux_test.go":     "package a\n\nimport \"testing\"\n\nfunc TestBoth(t *testing.T) {}\n",
+		"a/z_both_windows_test.go": "package a\n\nimport \"testing\"\n\nfunc TestBoth(t *testing.T) {}\n",
+		"nested/go.mod":            "module example.com/nested\n",
+		"nested/n_test.go":         "package n\n\nimport \"testing\"\n\nfunc TestNested(t *testing.T) {}\n",
 	})
 	got := repoTestFuncs(t, root)
 	want := map[string]bool{
@@ -344,6 +355,7 @@ func TestRepoTestFuncs(t *testing.T) {
 		"a.TestLinux":            true,
 		"a.TestRaceOnly":         true,
 		"a.TestNoRace":           false,
+		"a.TestBoth":             true,
 		"a.TestTagged":           false,
 		"a.TestWindowsOnly":      false,
 	}
