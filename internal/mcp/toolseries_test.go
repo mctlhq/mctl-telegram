@@ -40,17 +40,17 @@ func TestInitToolInvocationSeries(t *testing.T) {
 	}
 
 	// The first error is an increment of an existing series, not a new one.
-	any := ""
+	tool := ""
 	for name := range tools {
-		any = name
+		tool = name
 		break
 	}
-	reg.ToolInvocationsTotal.WithLabelValues(any, "error", metrics.TrafficUser).Inc()
+	reg.ToolInvocationsTotal.WithLabelValues(tool, "error", metrics.TrafficUser).Inc()
 	if got, want := testutil.CollectAndCount(reg.ToolInvocationsTotal), len(tools)*len(toolInvocationStatuses); got != want {
 		t.Fatalf("series after the first error = %d, want %d (no new series)", got, want)
 	}
-	if v := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues(any, "error", metrics.TrafficUser)); v != 1 {
-		t.Fatalf("{%s,error,user} = %v, want 1", any, v)
+	if v := testutil.ToFloat64(reg.ToolInvocationsTotal.WithLabelValues(tool, "error", metrics.TrafficUser)); v != 1 {
+		t.Fatalf("{%s,error,user} = %v, want 1", tool, v)
 	}
 }
 
