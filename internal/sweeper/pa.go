@@ -18,8 +18,9 @@ const PAStateSweeperInterval = time.Hour
 
 // PAState hard-deletes Personal Assistant state past its lifetime until ctx
 // is cancelled: expired or closed conversations with their fragments,
-// expired callback ids, and pa_updates dedup rows older than
-// pa.UpdatesRetention (issue #1313, owner decision 2026-11-18). It is
+// expired callback ids, pa_updates dedup rows older than
+// pa.UpdatesRetention (issue #1313, owner decision 2026-11-18), and linking
+// secrets past db.PALinkSecretRetention after their expiry (#1338). It is
 // started only when PA_ENABLED is true.
 func PAState(ctx context.Context, store convo.Store) {
 	ticker := time.NewTicker(PAStateSweeperInterval)
@@ -44,6 +45,6 @@ func PAStateSweepOnce(ctx context.Context, store convo.Store, now time.Time) {
 	}
 	if r != (convo.SweepResult{}) {
 		slog.Info("pa state sweep", "conversations", r.Conversations, "fragments", r.Fragments,
-			"callbacks", r.Callbacks, "updates", r.Updates)
+			"callbacks", r.Callbacks, "updates", r.Updates, "link_secrets", r.LinkSecrets)
 	}
 }

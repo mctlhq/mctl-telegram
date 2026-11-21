@@ -159,6 +159,9 @@ type ConsentRecord struct {
 // SweepResult counts what one SweepPAState pass deleted.
 type SweepResult struct {
 	Conversations, Fragments, Callbacks, Updates int64
+	// LinkSecrets counts linking secrets deleted past their retention
+	// (#1338).
+	LinkSecrets int64
 }
 
 // Store is the persistence contract (implemented by *db.Store). Methods that
