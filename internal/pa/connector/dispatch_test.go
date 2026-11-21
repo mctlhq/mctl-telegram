@@ -71,7 +71,10 @@ func TestPinRefusalReasonIsClosed(t *testing.T) {
 		catalog.ErrNotPinned:         ReasonNotPinned,
 		catalog.ErrToolChanged:       ReasonToolChanged,
 		catalog.ErrNoWritePath:       ReasonNoWritePath,
-		ErrInvalidCall:               ReasonInternal,
+		// Phase 2's refusal is still "no write path" to the Phase 1
+		// dispatcher, never an unknown outcome (P2-S1).
+		catalog.ErrApprovalRequired: ReasonNoWritePath,
+		ErrInvalidCall:              ReasonInternal,
 	} {
 		if got := PinRefusalReason(err); got != want {
 			t.Errorf("%v: %q, want %q", err, got, want)
@@ -134,6 +137,59 @@ func TestEnvFlags(t *testing.T) {
 		if _, err := flags(); err == nil {
 			t.Fatalf("%q accepted", bad)
 		}
+	}
+}
+
+// TestEnvFlagsWrites: PA_WRITES_ENABLED is off when unset or empty, on only
+// for "true", and any other value is unknown: Writes is false and WritesErr
+// is set, while reads keep their own switches (T11, S1-F1). It is re-read on
+// every call.
+func TestEnvFlagsWrites(t *testing.T) {
+	env := map[string]string{ExternalToolsFlagEnv: "true", "PA_SERVER_TG_ENABLED": "true"}
+	flags := EnvFlags(func(k string) string { return env[k] })
+	if f, err := flags(); err != nil || f.Writes || f.WritesErr != nil {
+		t.Fatalf("unset: %+v %v", f, err)
+	}
+	for v, want := range map[string]bool{"": false, "false": false, "true": true, " true ": true} {
+		env[WritesFlagEnv] = v
+		f, err := flags()
+		if err != nil || f.Writes != want || f.WritesErr != nil || !f.ExternalTools || !f.Servers["tg"] {
+			t.Fatalf("%q: %+v %v, want Writes=%v", v, f, err, want)
+		}
+	}
+	for _, bad := range []string{"yes", "1", "TRUE", "on", "0", "no", "False", "true\x00"} {
+		env[WritesFlagEnv] = bad
+		f, err := flags()
+		if err != nil || f.Writes || f.WritesErr == nil {
+			t.Fatalf("%q: %+v %v, want Writes false with WritesErr", bad, f, err)
+		}
+		// Reads are a different layer: a bad writes switch leaves them on.
+		if !f.ExternalTools || !f.Servers["tg"] {
+			t.Fatalf("%q turned reads off: %+v", bad, f)
+		}
+	}
+	env[WritesFlagEnv] = "true"
+	if f, err := flags(); err != nil || !f.Writes || f.WritesErr != nil {
+		t.Fatalf("re-read after a bad value: %+v %v", f, err)
+	}
+}
+
+// TestEnvFlagsServersIndependent: an unreadable server flag turns off that
+// server only, with its error kept; the other server keeps its own flag
+// (T11, S1-F1).
+func TestEnvFlagsServersIndependent(t *testing.T) {
+	env := map[string]string{ExternalToolsFlagEnv: "true", "PA_SERVER_TG_ENABLED": "true", "PA_SERVER_ALICE_ENABLED": "yes"}
+	flags := EnvFlags(func(k string) string { return env[k] })
+	f, err := flags()
+	if err != nil || !f.ExternalTools || !f.Servers["tg"] || f.ServerErrs["tg"] != nil {
+		t.Fatalf("a bad alice flag affected tg: %+v %v", f, err)
+	}
+	if on, known := f.Servers["alice"]; on || !known || f.ServerErrs["alice"] == nil {
+		t.Fatalf("bad alice flag: on=%v known=%v err=%v, want off with an error", on, known, f.ServerErrs["alice"])
+	}
+	env["PA_SERVER_ALICE_ENABLED"] = "true"
+	if f, err = flags(); err != nil || !f.Servers["alice"] || f.ServerErrs["alice"] != nil {
+		t.Fatalf("re-read after a bad value: %+v %v", f, err)
 	}
 }
 
