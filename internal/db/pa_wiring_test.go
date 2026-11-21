@@ -522,9 +522,10 @@ wait:
 }
 
 // An account deletion of a principal that was never admitted to link leaves
-// no pa_principal_locks row, so with the PA off (no lock sweep runs) a
-// deleted account's Telegram id is not kept. One that was admitted keeps
-// its row with the deletion mark raised, the fence a Begin in flight needs.
+// no pa_principal_locks row, so a deleted account's Telegram id is not kept
+// even until the next lock sweep. One that was admitted keeps its row with
+// the deletion mark raised, the fence a Begin in flight needs, until
+// SweepPAPrincipalLocks removes it.
 func TestPurgePAPrincipals_LockRowOnlyAfterAdmission(t *testing.T) {
 	deletionDialects(t, func(t *testing.T, s *Store, base int64) {
 		ctx := context.Background()
@@ -615,5 +616,26 @@ func TestPurgePAPrincipals_LostInsertToAdmissionRaisesMark(t *testing.T) {
 	c, sealed := newPAConn(dana, "pac_lost_"+randomSuffix(t))
 	if err := s.CreatePAConnection(ctx, c, sealed, connection.Admission{PurgeMark: old, ReadAt: time.Now()}); !errors.Is(err, connection.ErrPrincipalDeleted) {
 		t.Fatalf("Begin admitted before the deletion: %v, want ErrPrincipalDeleted", err)
+	}
+}
+
+// RevokeAccountPATokens fails closed: a nil revoker, and Telegram ids that
+// cannot be read, both return ErrPAConnectionsNeedRevocation, never "nothing
+// to revoke", and no principal is revoked on an unreadable list.
+func TestRevokeAccountPATokens_FailsClosed(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if err := s.RevokeAccountPATokens(ctx, 1, nil); !errors.Is(err, ErrPAConnectionsNeedRevocation) {
+		t.Fatalf("nil revoker: %v, want ErrPAConnectionsNeedRevocation", err)
+	}
+	r := &fakePARevoker{s: s}
+	if err := s.DB.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := s.RevokeAccountPATokens(ctx, 1, r); !errors.Is(err, ErrPAConnectionsNeedRevocation) {
+		t.Fatalf("unreadable telegram ids: %v, want ErrPAConnectionsNeedRevocation", err)
+	}
+	if len(r.calls) != 0 {
+		t.Fatalf("revoked %v on an unreadable id list, want none", r.calls)
 	}
 }

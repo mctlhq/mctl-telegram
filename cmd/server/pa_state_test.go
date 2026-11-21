@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/config"
+	"github.com/mctlhq/mctl-telegram/internal/pa"
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/linking"
 )
@@ -102,5 +103,35 @@ func TestStartPAState_StartsLinkingSweep(t *testing.T) {
 	case <-off.called:
 		t.Fatal("off: the linking sweep ran with PA_ENABLED off")
 	default:
+	}
+}
+
+// lockSweepStore signals its first SweepPAPrincipalLocks call.
+type lockSweepStore struct{ called chan time.Time }
+
+func (l *lockSweepStore) SweepPAPrincipalLocks(_ context.Context, before time.Time) (int64, error) {
+	select {
+	case l.called <- before:
+	default:
+	}
+	return 0, nil
+}
+
+// TestStartPALockSweep_RunsWithPADisabled: the principal lock sweep starts
+// with PA_ENABLED off (#1318), so a lock row an account deletion kept as its
+// fence is deleted even after the PA is turned off. The cutoff is
+// pa.UpdatesRetention back.
+func TestStartPALockSweep_RunsWithPADisabled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &lockSweepStore{called: make(chan time.Time, 1)}
+	startPALockSweep(ctx, &config.Config{PAEnabled: false}, s)
+	select {
+	case before := <-s.called:
+		if d := time.Since(before); d < pa.UpdatesRetention || d > pa.UpdatesRetention+time.Minute {
+			t.Fatalf("lock sweep cutoff %v ago, want pa.UpdatesRetention (%v)", d, pa.UpdatesRetention)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("PA off: the lock sweep never ran")
 	}
 }

@@ -445,6 +445,11 @@ func main() {
 	// Communication-agent notifier: delivers pending owner_notifications
 	// (summaries, approval requests) to Saved Messages.
 	go sweeper.AgentNotifier(ctx, agentNotifier)
+	// Personal Assistant principal lock rows (#1318): swept whether or not
+	// PA_ENABLED is on, since an account deletion can leave one behind as
+	// its fence. The only sweep of that table; the PA state sweep below
+	// leaves it alone.
+	startPALockSweep(ctx, cfg, store)
 	// Personal Assistant state (issue #1313): purge unmarked fragments, then
 	// the hourly retention sweep. Nothing at all unless PA_ENABLED is true.
 	// No linking sweep: the linking flow is not wired (#1314), so there is

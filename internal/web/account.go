@@ -51,6 +51,12 @@ type AccountHandlers struct {
 	// Canary is CANARY_TELEGRAM_IDS. Disconnect and delete of a listed
 	// account need ?confirm_canary=true (issue #961); nil guards nothing.
 	Canary canaryguard.Set
+	// PARevoker, when set, revokes the provider tokens of the account's
+	// Personal Assistant connections before a delete
+	// (Store.RevokeAccountPATokens, #1338). nil, while the server does not
+	// run the PA linking flow, keeps the delete as it was: the purge itself
+	// refuses an account whose connection holds tokens.
+	PARevoker db.PATokenRevoker
 }
 
 // AccountEvictor drops a deleted account's live connections.
@@ -242,14 +248,25 @@ func (h *AccountHandlers) delete(w http.ResponseWriter, r *http.Request) {
 	}
 	var rows int64
 	var err error
-	if h.Pool != nil {
-		err = h.Pool.RemoveAtomic(id.UserID, func() error {
-			var e error
-			rows, e = h.Store.HardDeleteAccount(r.Context(), id.UserID)
-			return e
-		})
-	} else {
-		rows, err = h.Store.HardDeleteAccount(r.Context(), id.UserID)
+	if h.PARevoker != nil {
+		// Revoke before RemoveAtomic, never inside it: a refused revocation
+		// must leave the live Telegram client in the pool, since nothing is
+		// deleted. A connection that gains tokens after this, before the
+		// purge, is still refused inside RemoveAtomic by the purge's own
+		// check; the client is evicted by then, which costs one reconnect
+		// on the next Borrow. Only a race reaches that.
+		err = h.Store.RevokeAccountPATokens(r.Context(), id.UserID, h.PARevoker)
+	}
+	if err == nil {
+		if h.Pool != nil {
+			err = h.Pool.RemoveAtomic(id.UserID, func() error {
+				var e error
+				rows, e = h.Store.HardDeleteAccount(r.Context(), id.UserID)
+				return e
+			})
+		} else {
+			rows, err = h.Store.HardDeleteAccount(r.Context(), id.UserID)
+		}
 	}
 	h.audit(r, id, tool, err)
 	if errors.Is(err, db.ErrPAConnectionsNeedRevocation) {
