@@ -202,6 +202,140 @@ The `for: 0m` convention is used on burn-rate alerts. The burn window itself
 provides the statistical stabilization; adding a separate `for:` duration
 would delay the alert by double and mask fast incidents.
 
+As deployed today the thresholds above are applied with **no minimum-volume
+guard**: the 1h and 6h alerts compare the recorded `rate()` ratio against the
+percentage alone, however few calls the window holds. A guard is proposed in
+the next subsection; until the owner accepts it, this paragraph is what the
+cluster does.
+
+### Minimum-volume guard (Proposed - pending owner decision)
+
+Status: **Proposed - pending owner decision.** Nothing in this subsection is
+deployed, and no objective, burn multiplier or percentage threshold in the
+tables above changes if it is accepted. If it is accepted, this subsection
+loses the "Proposed" marker and the `mctl-gitops` PR follows, in the order the
+top of this document prescribes.
+
+#### Problem
+
+mctl-telegram is low-volume, so a one-hour window often holds very few calls,
+and two things make the current `FastBurn` alert fire on noise rather than on
+burn.
+
+1. **Few calls.** Over the 21 days measured (2026-10-31 to 2026-11-21, UTC), counting
+   user `ok|error` calls the way the SLI does, an hour held a median of 32
+   calls, p25 18, p10 11 and p75 55; 147 of 504 hours with data held fewer than
+   20 calls, and 27 fewer than 10. At 32 calls, three errors are already 9.4%,
+   above the 7.2% fast-burn threshold.
+2. **`rate()` on a lazily created error series.** An error series is created on
+   its first error, so a first error on a new series has no earlier sample to
+   anchor `rate()` and VictoriaMetrics extrapolates it. On 2026-11-18 16:20Z two
+   real errors in 115 calls (1.74%) were recorded as a 0.150 ratio by
+   `mctl_telegram:tool_errors:ratio_rate1h`: the `rate()` numerator read about
+   20 errors per hour against 2 observed (`increase()` over the same window
+   returned 2 of 115). That single 5-minute sample fired
+   `MctlTelegramToolAvailabilityFastBurn`.
+
+#### Proposal
+
+Alert on windowed counts instead of the extrapolated rate, and require a minimum
+number of errors before the percentage counts. Thresholds stay exactly those in
+the tables above; only the `>= N errors` clause is new.
+
+| Alert | Ratio (windowed `increase()`) | Condition |
+|-------|-------------------------------|-----------|
+| `MctlTelegramToolAvailabilityFastBurn` | errors / (ok + error) over 1h | ratio > 7.2% **and** at least 5 errors in the 1h window |
+| `MctlTelegramToolAvailabilitySlowBurn` | errors / (ok + error) over 6h | ratio > 3.0% **and** at least 10 errors in the 6h window |
+
+```promql
+# FastBurn
+(
+  sum by (job, namespace) (increase(mctl_tool_invocations_total{status="error",traffic!="canary"}[1h]))
+  /
+  sum by (job, namespace) (increase(mctl_tool_invocations_total{status=~"ok|error",traffic!="canary"}[1h]))
+  > 0.072
+)
+and
+sum by (job, namespace) (increase(mctl_tool_invocations_total{status="error",traffic!="canary"}[1h])) >= 5
+```
+
+SlowBurn is the same expression with `[6h]`, `> 0.03` and `>= 10`. The selectors
+are the SLI's own (see [MCP tool availability](#mcp-tool-availability)), so
+`caller_error`, `no_session` and canary calls stay out of both the ratio and the
+error count. The OAuth and session-borrow burn alerts are not part of this
+proposal. The `mctl_telegram:tool_errors:ratio_rate1h` and `ratio_rate6h`
+recording rules stay as they are, because dashboards read them; only the two
+tool-availability alerts stop reading them.
+
+Companion change in the server, so the first error is not lost to a series that
+does not exist yet: register every `tool x status` child of
+`mctl_tool_invocations_total` at startup (`WithLabelValues` for each pair, for
+`traffic="user"`), so each series starts at 0 and its first increment is
+visible to `increase()`.
+
+#### Evidence
+
+All numbers were measured on 2026-11-21 against VictoriaMetrics over the 21
+days before it, from `mctl_tool_invocations_total{traffic!="canary"}` with
+`status` in `ok|error`.
+
+| Check | Result |
+|-------|--------|
+| Calls per hour (504 hours with data) | median 32, p25 18, p10 11; 147 hours under 20 calls |
+| 2026-11-18 16:20Z, recorded `rate()` ratio | 0.150 |
+| 2026-11-18 16:20Z, `increase()` ratio | 2 / 115 = 0.0174 |
+| `increase()` ratio > 7.2% alone, 5-minute steps | 7 episodes: 10-31 23:50, 11-01 03:30, 11-04 03:55, 11-07 21:00, 11-15 11:15, 11-16 22:10, 11-19 12:50 (UTC) |
+| Same, with at least 5 errors in the hour | 1 episode: 11-07 21:00 to 21:55 (15 errors in 55 calls in the hour ending 21:00) |
+| 6h ratio > 3.0% with at least 10 errors | unchanged: every sample above 3.0% (72, one episode starting 11-07 21:00) already had at least 10 errors |
+
+Two caveats on reading that table.
+
+- The 7 episodes are what the `increase()` ratio would do **without** the
+  guard; they are not alerts that fired. The deployed `rate()`-based
+  `FastBurn` fired in three episodes in the same window (10-31 23:25, 11-07
+  21:00 to 21:25 and 11-18 16:20 to 16:25, UTC). Switching from `rate()` to `increase()` without the guard would therefore be
+  noisier, not quieter; the guard is what makes the change worthwhile.
+- The one episode that survives the guard, 11-07, is the one the
+  [Caller errors](#caller-errors) section describes: 14 topic refusals plus one
+  other error, counted as `error` at the time. Since 2026-11-21 topic refusals
+  are `caller_error` and outside the SLI, so that incident would not recur in
+  this form. The backtest says what the guard keeps among past events, not what
+  it keeps among future ones.
+
+Stale 28-day data: the 28-day tool availability reads about 96.3% (measured
+96.28% from `increase()`: 1005 errors in 27041 calls). Of those errors, 936
+were recorded on 2026-10-29 and 2026-10-30 (UTC days), from the canary-account
+disconnect that [No active session](#no-active-session) describes, before the
+`no_session` and canary exclusions existed. They leave the 28-day window
+around 2026-11-26 to 2026-11-27, after which the 28-day figure stops being
+dominated by them. That is context for the error-budget alert, not a reason for
+or against the guard, and nothing in this proposal touches the 99.5% objective.
+
+#### Trade-off
+
+The guard trades sensitivity at low volume for precision. In an hour with 32
+calls the fast-burn alert needs 5 errors (15.6%) rather than 3 (9.4%), and in
+an hour with 11 calls it needs 5 of 11. A real outage that fails calls at a
+very low volume, below what the guard can see, does not trip these two alerts.
+It is covered by the alerts that do not depend on call volume:
+`ServiceUnavailable` (the `/healthz` probe) and `MctlTelegramCanaryFailing`
+(the canary runs every 10 minutes regardless of user traffic), as the
+[Canary traffic](#canary-traffic) section already relies on. A slow, steady
+failure that stays under 5 errors an hour and under 10 in six is not caught
+either; the 28-day error-budget alert still sees it.
+
+#### Decision and follow-up
+
+The owner decides: accept as proposed, accept with other thresholds (the
+backtest above is the basis for choosing them), or reject and keep the
+behaviour described at the top of this subsection. If accepted, the
+`mctl-gitops` change replaces the two `expr` lines of the tool-availability
+burn alerts in `mctl-telegram-slo.yaml`, rewrites the "no minimum-volume guard"
+paragraph in that file's header to point here, and is paired with the
+startup-initialisation change in this repository. Both alerts must be proven
+both ways before merge: quiet on the converged traffic above and firing on a
+deliberate mutation of the counters.
+
 ---
 
 ## Error-budget policy
