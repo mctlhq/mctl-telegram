@@ -23,8 +23,11 @@
 #     id        unique within the entry
 #     guard     <file>.go:<line> of the guarded code, at the commit the
 #               mutation ran on (must exist in the tree and be in range)
-#     guard_text a substring of the guard line in the current tree; when the
-#               code moves, the record fails until guard and guard_text are
+#     guard_text text of the current tree that occurs exactly once in the
+#               guard file and covers the guard line; when the guard line
+#               is not unique in its file, it runs onto the lines around it
+#               ("\n\t" escapes in a double-quoted string). When the code
+#               moves, the record fails until guard and guard_text are
 #               pointed at the guard again
 #     mutation  what was broken
 #     killed_by the tests that went red; each must be listed under tests
@@ -156,7 +159,7 @@ S2-I6:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.478s
     - id: P2S7-I6d
       guard: internal/db/pa_jobs.go:1105
-      guard_text: 'runGate(ctx, tx, req.Gate, j, req.Now)'
+      guard_text: "runGate(ctx, tx, req.Gate, j, req.Now); err != nil {\n\t\treturn jobs.Job{}, err\n\t}\n\tif err := req.Record(ctx, tx, j); err != nil {"
       mutation: "RecordPAToolResult skips the job gate: `runGate(ctx, tx, req.Gate, j, req.Now)` -> `error(nil)`"
       killed_by:
         - internal/pa.TestS2I6_ToolResultRecordRunsTheGate
@@ -182,7 +185,7 @@ S2-I6:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.443s
     - id: P2S7-I6f
       guard: internal/pa/runloop.go:727
-      guard_text: 'return err'
+      guard_text: "convo.ProvenanceExternal, string(output)))\n\t\t\treturn err"
       mutation: "RecordToolResult swallows a failed fragment append: `return err` -> `_ = err; return nil`"
       killed_by:
         - internal/pa.TestS2I6_FailedToolRecordIsAnError
@@ -325,7 +328,7 @@ S2-I10:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.458s
     - id: P2S7-I10c
       guard: internal/pa/connector/dispatch.go:536
-      guard_text: 'return TaintExternal'
+      guard_text: "\"pa dispatch: conversation taint unreadable, recorded as external\", \"err\", err)\n\t\treturn TaintExternal"
       mutation: "Dispatcher.taint read error recorded clean: `return TaintExternal` -> `return TaintClean` in the error branch"
       killed_by:
         - internal/pa.TestS2I10_DispatchTaintFromConversation

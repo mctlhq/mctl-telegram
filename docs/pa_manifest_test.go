@@ -35,8 +35,10 @@ type paSuite struct {
 	// bold, a table cell, a Unicode dash, an id without a digit) cannot drop
 	// out of the gate unseen. The suite name must start the text or follow a
 	// character that is not a letter, digit or underscore, so the "_S1_" of
-	// an identifier such as PA_S1_GATE_CLOSING is not a mention. Group 1 is
-	// the mention itself.
+	// an identifier such as PA_S1_GATE_CLOSING is not a mention. An
+	// underscore before it still counts when a real dash (not an underscore)
+	// follows the suite name, so a markdown italic "_S1-N5_" is a mention.
+	// The mention is group 1 or group 2, whichever matched.
 	mentionRe *regexp.Regexp
 	// An id claimed by a test function name: TestS1E1E2_...,
 	// TestLinking_S1L13_... or TestS1_E1_... . A group without a digit
@@ -49,11 +51,11 @@ func newPASuite(name string) paSuite {
 	// \p{Pd} is every dash punctuation, U+FE63 SMALL HYPHEN-MINUS among
 	// them; U+2212 MINUS SIGN (Sm) and U+2043 HYPHEN BULLET (Po) read as
 	// dashes too.
-	dash := `[\p{Pd}\x{2212}\x{2043}_]`
+	dash := `[\p{Pd}\x{2212}\x{2043}]`
 	return paSuite{
 		name:      name,
 		rowRe:     regexp.MustCompile(`(?m)^- (` + q + `-[A-Z]+[0-9]+):`),
-		mentionRe: regexp.MustCompile(`(?:^|[^\p{L}\p{N}_])(` + q + dash + `[\p{L}\p{N}]*)`),
+		mentionRe: regexp.MustCompile(`(?:^|[^\p{L}\p{N}_])(` + q + `(?:` + dash + `|_)[\p{L}\p{N}]*)|_(` + q + dash + `[\p{L}\p{N}]*)`),
 		nameRe:    regexp.MustCompile(q + `_?((?:[A-Z][0-9]+)+)`),
 	}
 }
@@ -92,7 +94,11 @@ func (s paSuite) threatModelIDs(doc []byte) ([]string, error) {
 	}
 	var stray []string
 	for _, m := range s.mentionRe.FindAllSubmatch(doc, -1) {
-		if id := string(m[1]); !slices.Contains(ids, id) && !slices.Contains(stray, id) {
+		id := string(m[1])
+		if id == "" {
+			id = string(m[2])
+		}
+		if !slices.Contains(ids, id) && !slices.Contains(stray, id) {
 			stray = append(stray, id)
 		}
 	}
