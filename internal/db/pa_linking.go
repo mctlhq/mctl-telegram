@@ -123,6 +123,9 @@ func paLinkingSchema(pg bool) []string {
 			created_at_ms ` + intT + ` NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_pa_link_secrets_expiry ON pa_link_secrets(kind, consumed_at_ms, expires_at_ms)`,
+		// Account deletion and the retention sweep (#1338).
+		`CREATE INDEX IF NOT EXISTS idx_pa_link_secrets_principal ON pa_link_secrets(principal)`,
+		`CREATE INDEX IF NOT EXISTS idx_pa_link_secrets_expires ON pa_link_secrets(expires_at_ms)`,
 	}
 }
 

@@ -45,6 +45,6 @@ func PAStateSweepOnce(ctx context.Context, store convo.Store, now time.Time) {
 	}
 	if r != (convo.SweepResult{}) {
 		slog.Info("pa state sweep", "conversations", r.Conversations, "fragments", r.Fragments,
-			"callbacks", r.Callbacks, "updates", r.Updates)
+			"callbacks", r.Callbacks, "updates", r.Updates, "link_secrets", r.LinkSecrets)
 	}
 }

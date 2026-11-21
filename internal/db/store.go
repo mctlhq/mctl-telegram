@@ -1343,10 +1343,11 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 		return 0, err
 	}
 
-	// Personal Assistant linking state (#1338) is keyed by Telegram id, not
-	// by user id, and has no foreign key to either, so it goes explicitly,
-	// for every Telegram id the account can carry (see userTelegramIDs).
-	if err := purgePALinkingState(ctx, tx, tgIDs); err != nil {
+	// Personal Assistant state (#1338) is keyed by Telegram id, not by user
+	// id, and has no foreign key to either, so it goes explicitly, for every
+	// Telegram id the account can carry (see userTelegramIDs and
+	// purgePAPrincipals).
+	if err := purgePAPrincipals(ctx, tx, tgIDs); err != nil {
 		return 0, err
 	}
 
@@ -1485,33 +1486,6 @@ func (s *Store) HardDeleteAccount(ctx context.Context, userID int64) (int64, err
 	}
 	s.notifySessionsEnded(userID, sealedSessions)
 	return rows, nil
-}
-
-// purgePALinkingState deletes the Personal Assistant connections and linking
-// secrets of every principal in tgIDs, inside the account deletion's
-// transaction: a failed delete fails the account deletion, which rolls back
-// as a whole.
-//
-// A connection's sealed tokens are wiped locally without being revoked at
-// the provider. Provider-side revocation needs the connection Manager (KEK
-// and RFC 7009 client) and an outbound call, which this transaction must not
-// make; no environment runs the linking flow yet, so no live provider token
-// exists. TODO(#1314): revoke each active connection's tokens before the
-// rows go, once linking is wired.
-//
-// A Telegram id shared with another user loses that user's PA rows too, the
-// same accepted over-reach as the worker-token revocation: it is the same
-// person.
-func purgePALinkingState(ctx context.Context, tx *sql.Tx, tgIDs []int64) error {
-	for _, tgID := range tgIDs {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM pa_link_secrets WHERE principal = $1`, tgID); err != nil {
-			return fmt.Errorf("delete account: purge pa link secrets: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM pa_connections WHERE principal = $1`, tgID); err != nil {
-			return fmt.Errorf("delete account: purge pa connections: %w", err)
-		}
-	}
-	return nil
 }
 
 // userTelegramIDs returns every Telegram id a worker token for userID can

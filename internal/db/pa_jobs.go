@@ -69,6 +69,9 @@ func paJobsSchema(pg bool) []string {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_pa_jobs_queued ON pa_jobs(principal) WHERE status IN ('pending', 'held')`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_pa_jobs_running ON pa_jobs(principal) WHERE status = 'claimed'`,
 		`CREATE INDEX IF NOT EXISTS idx_pa_jobs_status ON pa_jobs(status, created_at_ms)`,
+		// Every job of a principal, finished ones included (account
+		// deletion); the unique indexes above cover live jobs only.
+		`CREATE INDEX IF NOT EXISTS idx_pa_jobs_principal ON pa_jobs(principal)`,
 		`CREATE TABLE IF NOT EXISTS pa_usage (
 			id ` + idT + `,
 			job_id ` + intT + ` NOT NULL,
