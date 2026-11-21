@@ -1,0 +1,28 @@
+schema: mctl-telegram.product-update/v1
+id: pa-principal-disable
+kind: new_tool
+title: Admins can turn the Personal Assistant off for one user
+summary: >-
+  Operators with the admin users scope can call set_pa_principal_disabled to
+  turn the Personal Assistant bot off, or back on, for one Telegram user,
+  with a short recorded reason. A disabled user gets a fixed "not available"
+  reply, nothing they send is stored, and a request already running stops at
+  its next step; /forget still deletes their conversations.
+  get_pa_principal_status reads the current state. The assistant is a
+  preview and off by default, so this changes nothing for everyday use.
+locale: en
+delivery: docs_only
+high_value: false
+tools: [get_pa_principal_status, set_pa_principal_disabled]
+evidence:
+  from: 0.141.0
+  changes:
+    - {tool: get_pa_principal_status, change: added}
+    - {tool: set_pa_principal_disabled, change: added}
+status: approved
+provenance:
+  author: mashkovd
+  assisted_by: claude-opus-5-5
+  reviewed_by: mashkovd
+created_at: "2026-11-21"
+reviewed_at: "2026-11-21"
