@@ -221,3 +221,40 @@ func TestGatewayPrefixed(t *testing.T) {
 		}
 	}
 }
+
+// TestEnvFlags_S1F1_EachVariableItsOwnSwitch: from everything on, turning
+// one variable off changes exactly its own switch and no other.
+func TestEnvFlags_S1F1_EachVariableItsOwnSwitch(t *testing.T) {
+	vars := []string{ExternalToolsFlagEnv, "PA_SERVER_TG_ENABLED", "PA_SERVER_ALICE_ENABLED"}
+	allOn := Flags{ExternalTools: true, Servers: map[string]bool{"tg": true, "alice": true}}
+	for _, off := range vars {
+		t.Run(off, func(t *testing.T) {
+			env := map[string]string{}
+			for _, v := range vars {
+				env[v] = "true"
+			}
+			env[off] = "false"
+			f, err := EnvFlags(func(k string) string { return env[k] })()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := Flags{ExternalTools: allOn.ExternalTools, Servers: map[string]bool{"tg": true, "alice": true}}
+			switch off {
+			case ExternalToolsFlagEnv:
+				want.ExternalTools = false
+			case "PA_SERVER_TG_ENABLED":
+				want.Servers["tg"] = false
+			case "PA_SERVER_ALICE_ENABLED":
+				want.Servers["alice"] = false
+			}
+			if f.ExternalTools != want.ExternalTools || len(f.Servers) != len(want.Servers) {
+				t.Fatalf("%s off: %+v, want %+v", off, f, want)
+			}
+			for s, on := range want.Servers {
+				if f.Servers[s] != on {
+					t.Fatalf("%s off: %+v, want %+v", off, f, want)
+				}
+			}
+		})
+	}
+}
