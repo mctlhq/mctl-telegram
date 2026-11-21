@@ -202,19 +202,19 @@ The `for: 0m` convention is used on burn-rate alerts. The burn window itself
 provides the statistical stabilization; adding a separate `for:` duration
 would delay the alert by double and mask fast incidents.
 
-As deployed today the thresholds above are applied with **no minimum-volume
-guard**: the 1h and 6h alerts compare the recorded `rate()` ratio against the
-percentage alone, however few calls the window holds. A guard is proposed in
-the next subsection; until the owner accepts it, this paragraph is what the
-cluster does.
+As deployed when this subsection was written, the thresholds above are applied
+with **no minimum-volume guard**: the 1h and 6h alerts compare the recorded
+`rate()` ratio against the percentage alone, however few calls the window
+holds. The guard in the next subsection was accepted on 2026-11-21; until its
+rollout (see [Decision and follow-up](#decision-and-follow-up)) is live, this
+paragraph is what the cluster does.
 
-### Minimum-volume guard (Proposed - pending owner decision)
+### Minimum-volume guard
 
-Status: **Proposed - pending owner decision.** Nothing in this subsection is
-deployed, and no objective, burn multiplier or percentage threshold in the
-tables above changes if it is accepted. If it is accepted, this subsection
-loses the "Proposed" marker and the `mctl-gitops` PR follows, in the order the
-top of this document prescribes.
+Status: **Accepted by the owner on 2026-11-21 as proposed; rollout pending.**
+No objective, burn multiplier or percentage threshold in the tables above
+changes. The `mctl-gitops` change and the startup-initialisation change below
+are the rollout; the status becomes "In effect" when both are live.
 
 #### Problem
 
@@ -326,15 +326,23 @@ either; the 28-day error-budget alert still sees it.
 
 #### Decision and follow-up
 
-The owner decides: accept as proposed, accept with other thresholds (the
-backtest above is the basis for choosing them), or reject and keep the
-behaviour described at the top of this subsection. If accepted, the
-`mctl-gitops` change replaces the two `expr` lines of the tool-availability
-burn alerts in `mctl-telegram-slo.yaml`, rewrites the "no minimum-volume guard"
-paragraph in that file's header to point here, and is paired with the
-startup-initialisation change in this repository. Both alerts must be proven
-both ways before merge: quiet on the converged traffic above and firing on a
-deliberate mutation of the counters.
+Decision (owner, 2026-11-21): accepted as proposed, with the thresholds and
+counts in the table above. The rollout, in this order:
+
+1. This document (the step this change completes).
+2. A `mctl-gitops` change that replaces the two `expr` lines of the
+   tool-availability burn alerts in `mctl-telegram-slo.yaml` and rewrites the
+   "no minimum-volume guard" paragraph in that file's header to point here.
+3. The startup-initialisation change in this repository, so the first error on
+   a series is visible to `increase()`.
+
+Both alerts must be proven both ways before merge: quiet on converged traffic
+and firing on a deliberate mutation of the counters. Steps 2 and 3 can merge
+independently, and the initialisation changes no alert. Without step 3 the
+first error on a series that does not exist yet may be missed by `increase()`;
+how VictoriaMetrics treats that first sample under `increase()` was not
+verified separately, which is why the initialisation is part of the rollout
+rather than assumed unnecessary.
 
 ---
 
