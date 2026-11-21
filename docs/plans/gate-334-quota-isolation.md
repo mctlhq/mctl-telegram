@@ -15,8 +15,8 @@ closed (and the #889 Part B soak), as a separate owner decision.
 #334 was written for the Option C worker that shells out to `claude -p`. Its
 failure story is a shared Claude credential pool used by interactive sessions
 and `claude-review.yml`. The managed runtime (ADR 0008) does not use Claude at
-all: the pool worker `labs/agent-worker-managed-preview` calls GLM-5.1 on
-Nebius through the Cloudflare AI Gateway `mctl-telegram` with a dedicated key.
+all: the pool worker `labs/agent-worker-managed-preview` calls GLM-5.3-Flash
+(GLM-5.1 until 2026-11-05) on Nebius through the Cloudflare AI Gateway `mctl-telegram` with a dedicated key.
 The list below is a paraphrase of the seven acceptance criteria of #334, in some
 places stricter than the issue text. The issue text is the gate until the owner
 accepts a change (section 3). The invariants stay mandatory:
@@ -34,8 +34,9 @@ accepts a change (section 3). The invariants stay mandatory:
 
 What changes is the wording of the evidence. "The interactive or review pool is
 unavailable" cannot be produced on demand against a third-party pool, and for
-Nebius the relevant neighbours are other Nebius consumers (for example the
-support agent pilot, which also uses GLM-5.1 on Nebius with its own Vault key),
+Nebius the relevant neighbours are other Nebius consumers (the support agent
+pilot keeps a Nebius fallback with its own Vault key; it has run on Anthropic
+since 2026-11-05),
 not Claude Code.
 
 ## 2. Gap matrix
