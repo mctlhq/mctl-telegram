@@ -20,6 +20,14 @@ Hetzner), #1094 CI image (#1114), mctlhq/mctl-gitops#2345 deployment
 (mctlhq/mctl-gitops#2376, inert at `replicaCount: 0`). Activation is a
 separate owner decision; see the runbook.
 
+Model amendment (owner, 2026-11-05; recorded 2026-11-21): the managed pool runs
+`zai-org/GLM-5.3-Flash` on Nebius through `custom-nebius`, at 0.15 / 0.50 USD
+per MTok (Nebius catalog). GLM-5.1 hung on Nebius and left Nebius Serverless on
+2026-11-09 (decision D4 in `docs/plans/gate-889-managed-soak.md`). Flash failed
+C1 in #1093, so it is not yet accepted as a production model: production still
+needs two clean C1 passes on the current prompt version. The GLM-5.1 figures
+below are the state when this ADR was written.
+
 ## Context
 
 An installed assistant only works while something claims its jobs. Today that
@@ -55,7 +63,7 @@ Facts the decision rests on:
   `NewWorker(client, runner)`.
 - The Anthropic organisation is disabled (29.10). The platform's model path
   is Cloudflare AI Gateway with custom providers `nebius` (GLM-5.1, 1.40 /
-  4.40 USD per MTok) and `hetzner` (Qwen, free while experimental, 10
+  4.40 USD per MTok at the time; now GLM-5.3-Flash, see the amendment above) and `hetzner` (Qwen, free while experimental, 10
   requests per 60 s per key, not for production). Both speak the OpenAI
   chat-completions format. The gateway is BYOK, logs off; it reports cost 0
   for custom providers, so cost accounting has to live in mctl.
