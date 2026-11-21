@@ -8,13 +8,8 @@ package docs
 import (
 	"bytes"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -23,10 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const (
-	paThreatModelPath = "agent-runtime/personal-assistant-threat-model.md"
-	s1ManifestPath    = "agent-runtime/pa-s1-manifest.yaml"
-)
+const s1ManifestPath = "agent-runtime/pa-s1-manifest.yaml"
 
 type s1Entry struct {
 	Note  string   `yaml:"note"`
@@ -38,56 +30,16 @@ type s1Entry struct {
 	Gaps []s1Gap `yaml:"gaps"`
 }
 
-type s1Gap struct {
-	Half      string `yaml:"half"`
-	TrackedBy string `yaml:"tracked_by"`
-}
+type s1Gap = paGap
 
 // s1GateClosingEnv marks a run that is closing the S1 gate (#1317 or the
 // preview gate of #1318): any listed gap then fails the gate.
 const s1GateClosingEnv = "PA_S1_GATE_CLOSING"
 
-var (
-	// An S1 row of the threat model: "- S1-L1: ...".
-	s1RowRe = regexp.MustCompile(`(?m)^- (S1-[A-Z]+[0-9]+):`)
-	// Any S1 id written anywhere in the threat model. Each must be a row
-	// id, so a row written in another shape (indented, bold, a table
-	// cell) cannot drop out of the gate unseen.
-	s1MentionRe = regexp.MustCompile(`S1-[A-Z]+[0-9]+`)
-	// A tracking reference: an issue number of this repository.
-	s1IssueRef = regexp.MustCompile(`^#[0-9]+$`)
-	// An S1 id claimed by a test function name: TestS1E1E2_..., or
-	// TestLinking_S1L13_... . A group without a digit (S1X_State) claims
-	// nothing.
-	s1NameRe  = regexp.MustCompile(`S1((?:[A-Z][0-9]+)+)`)
-	s1PartRe  = regexp.MustCompile(`[A-Z][0-9]+`)
-	s1TestRef = regexp.MustCompile(`^[a-z0-9_/.-]+\.Test[A-Za-z0-9_]*$`)
-)
-
 // threatModelS1IDs returns the S1 ids of the threat model, in order. A
 // repeated id is an error.
 func threatModelS1IDs(doc []byte) ([]string, error) {
-	var ids []string
-	for _, m := range s1RowRe.FindAllSubmatch(doc, -1) {
-		id := string(m[1])
-		if slices.Contains(ids, id) {
-			return nil, fmt.Errorf("threat model lists %s twice", id)
-		}
-		ids = append(ids, id)
-	}
-	if len(ids) == 0 {
-		return nil, fmt.Errorf("threat model lists no S1 id: the row pattern no longer matches")
-	}
-	var stray []string
-	for _, m := range s1MentionRe.FindAll(doc, -1) {
-		if id := string(m); !slices.Contains(ids, id) && !slices.Contains(stray, id) {
-			stray = append(stray, id)
-		}
-	}
-	if len(stray) > 0 {
-		return nil, fmt.Errorf("threat model mentions %s, which is not a row of the form \"- S1-XX: ...\"", strings.Join(stray, ", "))
-	}
-	return ids, nil
+	return paSuiteS1.threatModelIDs(doc)
 }
 
 // parseS1Manifest decodes the manifest strictly: an unknown field or a
@@ -104,13 +56,7 @@ func parseS1Manifest(raw []byte) (map[string]s1Entry, error) {
 
 // s1NameClaims returns the S1 ids a test function name claims.
 func s1NameClaims(name string) []string {
-	var out []string
-	for _, m := range s1NameRe.FindAllStringSubmatch(name, -1) {
-		for _, p := range s1PartRe.FindAllString(m[1], -1) {
-			out = append(out, "S1-"+p)
-		}
-	}
-	return out
+	return paSuiteS1.nameClaims(name)
 }
 
 // checkS1Manifest returns every disagreement between the threat model's
@@ -132,120 +78,20 @@ func checkS1Manifest(ids []string, manifest map[string]s1Entry, funcs map[string
 			problems = append(problems, fmt.Sprintf("%s: in the manifest but not an S1 id of the threat model", id))
 		}
 		mapped[id] = map[string]bool{}
-		halves := map[string]bool{}
-		for _, g := range e.Gaps {
-			switch {
-			case strings.TrimSpace(g.Half) == "":
-				problems = append(problems, fmt.Sprintf("%s: a gap without a half", id))
-			case !s1IssueRef.MatchString(g.TrackedBy):
-				problems = append(problems, fmt.Sprintf("%s: gap %q is not tracked by an issue (tracked_by %q, want #NNNN)", id, g.Half, g.TrackedBy))
-			case halves[g.Half]:
-				problems = append(problems, fmt.Sprintf("%s: gap %q listed twice", id, g.Half))
-			}
-			halves[g.Half] = true
-		}
-		for _, ref := range e.Tests {
-			switch {
-			case !s1TestRef.MatchString(ref):
-				problems = append(problems, fmt.Sprintf("%s: %q is not <package dir>.<TestFunc>", id, ref))
-			case !funcs[ref]:
-				problems = append(problems, fmt.Sprintf("%s: test %s does not exist", id, ref))
-			case mapped[id][ref]:
-				problems = append(problems, fmt.Sprintf("%s: test %s listed twice", id, ref))
-			}
-			mapped[id][ref] = true
-		}
+		problems = append(problems, checkGaps(id, e.Gaps)...)
+		problems = append(problems, checkTestRefs(id, e.Tests, funcs, mapped[id])...)
 	}
-	for ref := range funcs {
-		name := ref[strings.LastIndex(ref, ".")+1:]
-		for _, id := range s1NameClaims(name) {
-			switch {
-			case !inModel[id]:
-				problems = append(problems, fmt.Sprintf("test %s claims %s, which is not an S1 id of the threat model", ref, id))
-			case !mapped[id][ref]:
-				problems = append(problems, fmt.Sprintf("test %s claims %s but the manifest does not list it there", ref, id))
-			}
-		}
-	}
+	problems = append(problems, paSuiteS1.checkNameClaims(inModel, mapped, funcs)...)
 	sort.Strings(problems)
 	return problems
 }
 
-// repoTestFuncs indexes every top-level Test function of the module below
-// root as "<package dir>.<TestFunc>". A file that does not parse fails the
-// test: an unreadable tree is not an empty one.
-func repoTestFuncs(t *testing.T, root string) map[string]bool {
+// s1TreeProblems runs the S1 gate on the module below root and returns
+// its problems and its open gaps. It reads s1GateClosingEnv itself, so the
+// closing mode is tested through the same path the real gate takes.
+func s1TreeProblems(t *testing.T, root string) (problems, gaps []string) {
 	t.Helper()
-	funcs := map[string]bool{}
-	fset := token.NewFileSet()
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case ".git", ".worktrees", "vendor", "node_modules", "testdata":
-				return filepath.SkipDir
-			}
-			// A nested module is not this module's test code.
-			if path != root {
-				if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
-					return filepath.SkipDir
-				}
-			}
-			return nil
-		}
-		if !strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		f, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(root, filepath.Dir(path))
-		if err != nil {
-			return err
-		}
-		pkg := filepath.ToSlash(rel)
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Recv != nil || !strings.HasPrefix(fn.Name.Name, "Test") || !isTestingT(fn) {
-				continue
-			}
-			funcs[pkg+"."+fn.Name.Name] = true
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("index test functions: %v", err)
-	}
-	if len(funcs) == 0 {
-		t.Fatal("no test functions found: the walk is not looking at the module")
-	}
-	return funcs
-}
-
-// isTestingT reports whether fn has the signature func(*testing.T).
-func isTestingT(fn *ast.FuncDecl) bool {
-	ps := fn.Type.Params.List
-	if len(ps) != 1 || len(ps[0].Names) > 1 {
-		return false
-	}
-	star, ok := ps[0].Type.(*ast.StarExpr)
-	if !ok {
-		return false
-	}
-	sel, ok := star.X.(*ast.SelectorExpr)
-	if !ok {
-		return false
-	}
-	x, ok := sel.X.(*ast.Ident)
-	return ok && x.Name == "testing" && sel.Sel.Name == "T"
-}
-
-// TestPAS1Manifest is the gate check on the real tree.
-func TestPAS1Manifest(t *testing.T) {
-	doc, err := os.ReadFile(paThreatModelPath)
+	doc, err := os.ReadFile(filepath.Join(root, "docs", paThreatModelPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +99,7 @@ func TestPAS1Manifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(s1ManifestPath)
+	raw, err := os.ReadFile(filepath.Join(root, "docs", s1ManifestPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,17 +107,45 @@ func TestPAS1Manifest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s: %v", s1ManifestPath, err)
 	}
-	for _, p := range checkS1Manifest(ids, manifest, repoTestFuncs(t, "..")) {
-		t.Error(p)
+	problems = checkS1Manifest(ids, manifest, repoTestFuncs(t, root))
+	gaps = openS1Gaps(manifest)
+	if paGateClosing(s1GateClosingEnv) {
+		for _, g := range gaps {
+			problems = append(problems, fmt.Sprintf("%s is set but an S1 gap is open: %s", s1GateClosingEnv, g))
+		}
 	}
-	gaps := openS1Gaps(manifest)
+	return problems, gaps
+}
+
+// TestPAS1Manifest is the gate check on the real tree.
+func TestPAS1Manifest(t *testing.T) {
+	problems, gaps := s1TreeProblems(t, "..")
 	for _, g := range gaps {
 		t.Logf("open S1 gap: %s", g)
 	}
-	if os.Getenv(s1GateClosingEnv) != "" {
-		for _, g := range gaps {
-			t.Errorf("%s is set but an S1 gap is open: %s", s1GateClosingEnv, g)
-		}
+	for _, p := range problems {
+		t.Error(p)
+	}
+}
+
+// TestPAS1GateClosingEnv proves the closing mode on a small tree: an open
+// gap passes a normal run and fails a run with PA_S1_GATE_CLOSING set.
+func TestPAS1GateClosingEnv(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"go.mod":                    "module example.com/x\n",
+		"docs/" + paThreatModelPath: "- S1-A1: x\n",
+		"docs/" + s1ManifestPath: "S1-A1:\n  tests: [x.TestS1A1_Thing]\n" +
+			"  gaps:\n    - half: rest\n      tracked_by: \"#1\"\n",
+		"x/x_test.go": "package x\n\nimport \"testing\"\n\nfunc TestS1A1_Thing(t *testing.T) {}\n",
+	})
+	t.Setenv(s1GateClosingEnv, "")
+	if p, gaps := s1TreeProblems(t, root); len(p) != 0 || len(gaps) != 1 {
+		t.Fatalf("normal run: problems %v, gaps %v; want none and one gap", p, gaps)
+	}
+	t.Setenv(s1GateClosingEnv, "1")
+	p, _ := s1TreeProblems(t, root)
+	if !slices.ContainsFunc(p, func(s string) bool { return strings.Contains(s, s1GateClosingEnv+" is set but an S1 gap is open") }) {
+		t.Fatalf("closing run: problems %v, want the open gap", p)
 	}
 }
 
