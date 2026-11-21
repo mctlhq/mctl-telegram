@@ -39,7 +39,9 @@ const (
 	// provision_local_account, and a get_media claim refused because the
 	// same confirmation is already being downloaded (ErrConfirmationInFlight),
 	// and a content read of a broadcast channel while BROADCAST_CONTENT_ENABLED
-	// is off (telegram.ErrBroadcastContent).
+	// is off (telegram.ErrBroadcastContent), and an account deletion refused
+	// because a linked PA service still holds provider tokens
+	// (db.ErrPAConnectionsNeedRevocation).
 	ReasonRefused = "refused"
 	// ReasonRateLimited is raised when audit.RateLimiter blocks a
 	// destructive send/write action.

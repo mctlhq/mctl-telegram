@@ -1039,6 +1039,14 @@ Returns: {"deleted": true, "rows_removed": <int>}.`),
 			return e
 		})
 		s.audit(ctx, id, auditTool, "", err, startedAt)
+		if errors.Is(err, db.ErrPAConnectionsNeedRevocation) {
+			// Not a store fault: the account holds a linked PA service whose
+			// provider tokens could not be revoked. Say what to do; the
+			// cause stays in the log.
+			slog.WarnContext(ctx, "delete_telegram_account: pa connections need revocation", "user_id", id.UserID, "err", err)
+			hintReason(ctx, ReasonRefused)
+			return toolErr("%s", db.PAConnectionsNeedRevocationMessage), nil
+		}
 		if err != nil {
 			return s.storeErr(ctx, "delete", err), nil
 		}

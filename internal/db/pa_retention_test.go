@@ -109,7 +109,7 @@ func seedPAConnection(t *testing.T, s *Store, principal int64) string {
 	id := fmt.Sprintf("pac_del_%d_%s", principal, randomSuffix(t))
 	if err := s.CreatePAConnection(context.Background(), connection.Connection{
 		ID: id, Principal: principal, Server: connection.ServerTG, State: connection.StatePendingLink, AuthorityRevision: 1,
-	}, connection.Sealed{KEKID: "test", WrappedDEK: []byte("wrapped")}); err != nil {
+	}, connection.Sealed{KEKID: "test", WrappedDEK: []byte("wrapped")}, mustAdmitPA(t, s, principal)); err != nil {
 		t.Fatalf("create connection: %v", err)
 	}
 	t.Cleanup(func() { _, _ = s.DB.Exec(`DELETE FROM pa_connections WHERE id = $1`, id) })
@@ -213,12 +213,19 @@ func TestHardDeleteAccount_PurgesPAState(t *testing.T) {
 		// Listed here, not taken from paPrincipalPurges, so dropping a table
 		// from that list fails this test.
 		purged := []string{"pa_outbox", "pa_jobs", "pa_callbacks", "pa_fragments", "pa_conversations",
-			"pa_consents", "pa_link_secrets", "pa_connections", "pa_principal_locks"}
+			"pa_consents", "pa_link_secrets", "pa_connections"}
 		for _, p := range []int64{aliceLogin, aliceSession} {
 			for _, table := range purged {
 				if n := paRowsIn(t, s, table, p); n != 0 {
 					t.Errorf("principal %d: %d rows left in %s, want 0", p, n, table)
 				}
+			}
+			// The lock row stays as the deletion fence, with its mark raised.
+			if n := paRowsIn(t, s, "pa_principal_locks", p); n != 1 {
+				t.Errorf("principal %d: %d pa_principal_locks rows, want 1 (the deletion fence)", p, n)
+			}
+			if m := paPurgeMark(t, s, p); m <= 0 {
+				t.Errorf("principal %d: purged_at_ms = %d after the deletion, want > 0", p, m)
 			}
 			// The cap ledgers stay; a reservation of the claimed job is held
 			// at its full amount, never left reserved.
@@ -237,7 +244,21 @@ func TestHardDeleteAccount_PurgesPAState(t *testing.T) {
 		if st := paUsageStatus(t, s, bobID); st != "reserved" {
 			t.Errorf("bob's pa_usage status %q after alice's delete, want reserved", st)
 		}
+		if m := paPurgeMark(t, s, bobID); m != 0 {
+			t.Errorf("bob's purged_at_ms = %d after alice's delete, want 0", m)
+		}
 	})
+}
+
+// paPurgeMark reads principal's account-deletion mark.
+func paPurgeMark(t *testing.T, s *Store, principal int64) int64 {
+	t.Helper()
+	var m int64
+	if err := s.DB.QueryRowContext(context.Background(),
+		`SELECT purged_at_ms FROM pa_principal_locks WHERE principal = $1`, principal).Scan(&m); err != nil {
+		t.Fatalf("read purge mark: %v", err)
+	}
+	return m
 }
 
 // TestPAPrincipalPurges_CoverEveryPrincipalTable fails when a PA table with
@@ -245,7 +266,8 @@ func TestHardDeleteAccount_PurgesPAState(t *testing.T) {
 // kept (see paPrincipalPurges).
 func TestPAPrincipalPurges_CoverEveryPrincipalTable(t *testing.T) {
 	s := newTestStore(t)
-	kept := map[string]bool{"pa_usage": true, "pa_rate": true}
+	// pa_principal_locks stays as the deletion fence (see paPrincipalPurges).
+	kept := map[string]bool{"pa_usage": true, "pa_rate": true, "pa_principal_locks": true}
 	purged := map[string]bool{}
 	for _, st := range paPrincipalPurges {
 		purged[st.table] = true
@@ -275,10 +297,10 @@ func TestPAPrincipalPurges_CoverEveryPrincipalTable(t *testing.T) {
 	}
 }
 
-// A connection that still holds provider tokens refuses the deletion: its
-// tokens would stay live at the provider (TODO #1314). The deletion rolls
-// back and the connection is untouched. No such row exists in any
-// environment, since linking is not wired.
+// A connection that still holds provider tokens when the purge runs refuses
+// the deletion: its tokens would stay live at the provider. The deletion
+// rolls back and the connection is untouched. DeleteAccountRevokingPA
+// revokes such connections before the purge.
 func TestHardDeleteAccount_RefusesConnectionHoldingTokens(t *testing.T) {
 	for _, active := range []bool{false, true} {
 		name := "pending_confirm"
@@ -558,4 +580,14 @@ func TestPAPurgeIndexes(t *testing.T) {
 			}
 		}
 	})
+}
+
+// mustAdmitPA is the admission a Begin would get for principal.
+func mustAdmitPA(t *testing.T, s *Store, principal int64) connection.Admission {
+	t.Helper()
+	a, err := s.AdmitPAConnection(context.Background(), principal)
+	if err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+	return a
 }

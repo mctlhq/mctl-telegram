@@ -252,6 +252,13 @@ func (h *AccountHandlers) delete(w http.ResponseWriter, r *http.Request) {
 		rows, err = h.Store.HardDeleteAccount(r.Context(), id.UserID)
 	}
 	h.audit(r, id, tool, err)
+	if errors.Is(err, db.ErrPAConnectionsNeedRevocation) {
+		// The account holds a linked PA service whose provider tokens could
+		// not be revoked: nothing was deleted, and the user can act on it.
+		slog.Warn("account.delete: pa connections need revocation", "err", err)
+		writeAccountErr(w, http.StatusConflict, db.PAConnectionsNeedRevocationMessage)
+		return
+	}
 	if err != nil {
 		slog.Warn("account.delete", "err", err)
 		writeAccountErr(w, http.StatusInternalServerError, "delete failed")

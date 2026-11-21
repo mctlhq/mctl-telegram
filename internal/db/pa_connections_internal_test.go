@@ -35,7 +35,7 @@ func TestPAConnection_RevokePinsTokenGeneration(t *testing.T) {
 
 	if err := s.CreatePAConnection(ctx, connection.Connection{
 		ID: id, Principal: principal, Server: connection.ServerTG, State: connection.StatePendingLink, AuthorityRevision: 1,
-	}, connection.Sealed{KEKID: "test", WrappedDEK: []byte("wrapped")}); err != nil {
+	}, connection.Sealed{KEKID: "test", WrappedDEK: []byte("wrapped")}, mustAdmitPA(t, s, principal)); err != nil {
 		t.Fatal(err)
 	}
 	steps := []connection.Transition{
