@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -250,4 +251,40 @@ func TestOpenWithRetry_ExportedWrapper(t *testing.T) {
 		t.Fatalf("OpenWithRetry error: %v", err)
 	}
 	defer dbConn.Close()
+}
+
+// The startup race loses the first attempt or two on every cold start, so
+// those are Info; a database still unreachable after several attempts is the
+// case worth a Warn. Both directions are asserted.
+func TestOpenWithRetry_FailureLogLevel(t *testing.T) {
+	var buf bytes.Buffer
+	f := &fakeOpener{failCount: retryWarnAfterAttempts + 2}
+	dbConn, err := openWithRetry(context.Background(), pgDSN, 0, 0,
+		time.Millisecond, time.Second, testLogger(&buf), f.open)
+	if err != nil {
+		t.Fatalf("openWithRetry error: %v", err)
+	}
+	defer dbConn.Close()
+
+	levels := map[int]string{}
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var rec struct {
+			Level   string  `json:"level"`
+			Msg     string  `json:"msg"`
+			Attempt float64 `json:"attempt"`
+		}
+		if json.Unmarshal([]byte(line), &rec) != nil || rec.Msg != "db not reachable yet, retrying" {
+			continue
+		}
+		levels[int(rec.Attempt)] = rec.Level
+	}
+	for attempt := 0; attempt < retryWarnAfterAttempts+2; attempt++ {
+		want := "INFO"
+		if attempt >= retryWarnAfterAttempts {
+			want = "WARN"
+		}
+		if got := levels[attempt]; got != want {
+			t.Errorf("attempt %d logged at %q, want %q", attempt, got, want)
+		}
+	}
 }

@@ -33,6 +33,10 @@ func OpenWithRetry(ctx context.Context, dsn string, maxOpenConns, maxIdleConns i
 	return openWithRetry(ctx, dsn, maxOpenConns, maxIdleConns, interval, timeout, slog.Default(), Open)
 }
 
+// retryWarnAfterAttempts is the 0-based attempt number from which a failed
+// connection attempt is logged at Warn instead of Info.
+const retryWarnAfterAttempts = 3
+
 // openWithRetry holds the actual loop. The per-attempt call and the logger
 // are passed in as parameters (not package-level variables) so tests can
 // drive deterministic attempt outcomes and capture log output without
@@ -77,7 +81,16 @@ func openWithRetry(
 		if !errors.Is(err, context.DeadlineExceeded) {
 			lastErr = err
 		}
-		logger.Warn("db not reachable yet, retrying", "err", err, "attempt", attempt, "wait", interval)
+		// A pod that starts before Postgres is reachable always loses the
+		// first attempt or two (documented startup race), so those are Info.
+		// Only a database that is still unreachable after several attempts is
+		// worth a Warn, which is what an alert or a person reading Warn lines
+		// should be looking for.
+		level := slog.LevelInfo
+		if attempt >= retryWarnAfterAttempts {
+			level = slog.LevelWarn
+		}
+		logger.Log(ctx, level, "db not reachable yet, retrying", "err", err, "attempt", attempt, "wait", interval)
 
 		select {
 		case <-time.After(interval):

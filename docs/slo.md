@@ -369,6 +369,13 @@ from both sides of the tool-availability SLI**. It covers:
   `CHAT_WRITE_FORBIDDEN`), including a peer the caller has no access hash
   for. This is the same definition as the session-borrow `call_error`
   above: `telegram.IsCallerRefusal` decides both;
+- a topic refusal: `list_topics` or a topic-scoped call on a chat that is
+  not a forum (`ErrNotAForum`), a topic id the chat does not have
+  (`ErrTopicNotFound`), or a closed topic (`ErrTopicClosed`). These are
+  decided from a Telegram reply that succeeded, so they say nothing about
+  availability. Before 2026-11-21 they counted as `error` (reason
+  `unknown`); 14 of them, plus one other error, tripped
+  `MctlTelegramToolAvailabilityFastBurn` on 2026-11-07;
 - an argument, scope or tool-profile refusal that the failing code path
   itself named (`invalid_argument`, `scope_denied`, `profile_denied`), or
   the `identity missing scope` refusal. A reason guessed only from the error text is not trusted and
