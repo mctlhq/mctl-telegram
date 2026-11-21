@@ -297,7 +297,7 @@ type harness struct {
 func serverConfig(server connection.Server, enabled bool) linking.ServerConfig {
 	host := "https://as." + string(server) + ".example.test"
 	return linking.ServerConfig{
-		Enabled: enabled, Issuer: host, RequireIss: true,
+		Enabled: enabled, Issuer: host, Metadata: &linking.ASMetadata{Issuer: host, IssParameterSupported: true},
 		AuthorizationEndpoint: host + "/authorize", TokenEndpoint: host + "/token",
 		ClientID: "pa-client-" + string(server), RedirectURI: "https://pa.example.test/pa/oauth/callback/" + string(server),
 		Resource: "https://mcp." + string(server) + ".example.test/mcp", PromptConsent: true,

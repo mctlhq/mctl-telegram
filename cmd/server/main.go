@@ -447,7 +447,9 @@ func main() {
 	go sweeper.AgentNotifier(ctx, agentNotifier)
 	// Personal Assistant state (issue #1313): purge unmarked fragments, then
 	// the hourly retention sweep. Nothing at all unless PA_ENABLED is true.
-	if _, err := startPAState(ctx, cfg, store); err != nil {
+	// No linking sweep: the linking flow is not wired (#1314), so there is
+	// no *linking.Service to pass.
+	if _, err := startPAState(ctx, cfg, store, nil); err != nil {
 		slog.Error("pa state", "err", err)
 		os.Exit(1)
 	}
@@ -547,8 +549,11 @@ func main() {
 	// Hoisted above the local-jwt block below (selectProvider depends only on
 	// cfg, store and this cache) so `provider` exists in time to be passed as
 	// web.ConnectConfig.Identifier when constructing the connect server.
-	workerTokenRevocationCache := localjwt.NewRevocationCache(store, cfg.WorkerTokenRevocationCacheTTL)
-	workerTokenRevocationCache.SetRefreshErrorHook(m.WorkerTokenRevocationRefreshFailuresTotal.Inc)
+	workerTokenRevocationCache, err := startWorkerTokenRevocation(ctx, store, cfg.WorkerTokenRevocationCacheTTL, m, nil)
+	if err != nil {
+		slog.Error("worker token revocation cache", "err", err)
+		os.Exit(1)
+	}
 
 	provider, err := selectProvider(cfg, store, workerTokenRevocationCache)
 	if err != nil {

@@ -250,4 +250,30 @@ var (
 	// of a refresh token.
 	ErrInvalidGrant      = errors.New("pa connection: invalid_grant")
 	ErrRefreshTokenReuse = errors.New("pa connection: refresh token reuse detected")
+	// ErrTooManyPending: the principal already has MaxPendingConnections
+	// connections in a pending_* state (threat model T10).
+	ErrTooManyPending = errors.New("pa connection: too many connections being linked")
+	// ErrPrincipalDeleted: the principal's account was deleted after this
+	// Begin was admitted, so it may not create a connection (#1338).
+	ErrPrincipalDeleted = errors.New("pa connection: the account was deleted")
 )
+
+// MaxPendingConnections is the per-principal cap on connections in a
+// pending_* state (threat model T10, #1338). Each Begin wraps a fresh DEK
+// with the KEK, which may be a Vault Transit call, and each pending row lives
+// up to the linking sweep's PendingMaxAge, so without a cap a principal
+// could have the server wrap keys and keep rows without bound. Three covers
+// a link attempt per catalog server plus one retry; a principal that hits it
+// waits for an attempt to finish or for the sweep to fail it.
+const MaxPendingConnections = 3
+
+// Admission is a store's permission for one Begin, read before the KEK wrap
+// (Store.AdmitPAConnection) and checked again when the row is created
+// (Store.CreatePAConnection). Its fields belong to the store; the manager
+// only passes it along.
+type Admission struct {
+	// PurgeMark is the principal's account-deletion mark when admitted.
+	PurgeMark int64
+	// ReadAt is when the store admitted the Begin, on the store's clock.
+	ReadAt time.Time
+}
