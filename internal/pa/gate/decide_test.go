@@ -85,6 +85,12 @@ func TestDecideOrder(t *testing.T) {
 		{"threat model says never", func(in *Input) { in.Tool = "alice_control_room" }, Decision{OutcomeCard, ReasonNeverLowerable}},
 		{"never lowerable beats taint", func(in *Input) { in.Lowerable, in.Tainted = catalog.LowerableNever, true },
 			Decision{OutcomeCard, ReasonNeverLowerable}},
+		// The threat model's list decides ahead of taint too, even where
+		// the pin entry says "yes": rule 5 is one rule, not two.
+		{"threat model never beats taint", func(in *Input) { in.Tool, in.Tainted = "alice_control_room", true },
+			Decision{OutcomeCard, ReasonNeverLowerable}},
+		{"threat model never beats unreadable taint", func(in *Input) { in.Tool, in.TaintErr = "alice_trigger_scenario", errRead },
+			Decision{OutcomeCard, ReasonNeverLowerable}},
 
 		// 6. taint
 		{"tainted", func(in *Input) { in.Tainted = true }, Decision{OutcomeCard, ReasonTainted}},

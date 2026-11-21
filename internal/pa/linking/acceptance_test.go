@@ -435,16 +435,17 @@ func TestLinking_S1L14_ServerFlagGatesLinking(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, s *db.Store) {
 		ctx := context.Background()
 
-		flags, err := linking.LoadServerFlags(func(string) string { return "" })
-		if err != nil || flags[connection.ServerAlice] || flags[connection.ServerTG] {
-			t.Fatalf("defaults %v %v, want all off", flags, err)
+		for _, srv := range linking.FlagServers() {
+			if on, err := linking.ServerFlag(func(string) string { return "" }, srv); err != nil || on {
+				t.Fatalf("%s default %v %v, want off", srv, on, err)
+			}
 		}
-		if _, err := linking.LoadServerFlags(func(k string) string {
+		if _, err := linking.ServerFlag(func(k string) string {
 			if k == "PA_SERVER_ALICE_ENABLED" {
 				return "yes"
 			}
 			return ""
-		}); !errors.Is(err, linking.ErrConfig) {
+		}, connection.ServerAlice); !errors.Is(err, linking.ErrConfig) {
 			t.Fatalf("a non-boolean flag accepted: %v", err)
 		}
 

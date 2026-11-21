@@ -44,8 +44,12 @@ const WritesFlagEnv = "PA_WRITES_ENABLED"
 //   - PA_SERVER_<NAME>_ENABLED gates one server: an unreadable value turns
 //     that server off and records ServerErrs, and the others are unaffected.
 //
-// An unreadable switch is unknown, not off, so its error is kept for the
-// caller rather than folded into a plain false.
+// An unreadable switch is unknown, not off, so its error is recorded
+// (WritesErr, ServerErrs) rather than folded into a plain false. Nothing
+// reads those errors yet: they are kept for the slice that wires the gate
+// (gate.Input.WritesErr) and for tests. Today the dispatcher looks only at
+// the bools, so a malformed server flag is refused, and audited, exactly
+// like an off one, as ReasonFlagOff.
 func EnvFlags(getenv func(string) string) func() (Flags, error) {
 	return func() (Flags, error) {
 		ext, err := boolFlag(getenv, ExternalToolsFlagEnv)

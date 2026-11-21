@@ -226,6 +226,72 @@ func TestValidatePhase2Rules(t *testing.T) {
 		{"disclosure enum arg needs no cap", "alice", "alice_say_phrase", func(pt *PinnedTool) {
 			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"phrase":{"type":"string"},"voice":{"type":"string","enum":["a","b"]}}}`)
 		}, true},
+		// A disclosure admits scalar arguments only, and every free-text
+		// one is capped.
+		{"disclosure object arg", "alice", "alice_say_phrase", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"phrase":{"type":"string"},"extra":{"type":"object","properties":{"text":{"type":"string"}}}}}`)
+		}, false},
+		{"disclosure array arg", "alice", "alice_say_phrase", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"phrase":{"type":"string"},"lines":{"type":"array","items":{"type":"string"}}}}`)
+		}, false},
+		{"disclosure arg with no type", "alice", "alice_say_phrase", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"phrase":{"type":"string"},"extra":{"description":"anything"}}}`)
+		}, false},
+		{"disclosure arg with an empty type", "alice", "alice_send_command", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"command":{"type":"string"},"extra":{"type":""}}}`)
+		}, false},
+		{"disclosure arg of type null", "alice", "alice_say_phrase", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"phrase":{"type":"string"},"extra":{"type":"null"}}}`)
+		}, false},
+		{"disclosure arg of an unknown type", "alice", "alice_say_phrase", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"phrase":{"type":"string"},"extra":{"type":"text"}}}`)
+		}, false},
+		{"disclosure scalar args need no cap", "alice", "alice_say_phrase", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"phrase":{"type":"string"},"n":{"type":"integer"},"v":{"type":"number"},"loud":{"type":"boolean"}}}`)
+		}, true},
+		// The top level of a write or disclosure schema is a plain object
+		// schema; additionalProperties, when present, is false.
+		{"disclosure additionalProperties false", "alice", "alice_say_phrase", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","additionalProperties":false,"properties":{"device":{"type":"string"},"phrase":{"type":"string"}}}`)
+		}, true},
+		{"disclosure additionalProperties true", "alice", "alice_say_phrase", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","additionalProperties":true,"properties":{"device":{"type":"string"},"phrase":{"type":"string"}}}`)
+		}, false},
+		{"disclosure additionalProperties schema", "alice", "alice_say_phrase", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","additionalProperties":{"type":"string"},"properties":{"device":{"type":"string"},"phrase":{"type":"string"}}}`)
+		}, false},
+		{"disclosure patternProperties", "alice", "alice_send_command", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","patternProperties":{"^x":{"type":"string"}},"properties":{"device":{"type":"string"},"command":{"type":"string"}}}`)
+		}, false},
+		{"disclosure anyOf", "alice", "alice_say_phrase", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","anyOf":[{"properties":{"note":{"type":"string"}}}],"properties":{"device":{"type":"string"},"phrase":{"type":"string"}}}`)
+		}, false},
+		{"disclosure $ref", "alice", "alice_say_phrase", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","$ref":"#/$defs/x","properties":{"device":{"type":"string"},"phrase":{"type":"string"}}}`)
+		}, false},
+		{"disclosure schema not an object type", "alice", "alice_say_phrase", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"array","properties":{"device":{"type":"string"},"phrase":{"type":"string"}}}`)
+		}, false},
+		{"disclosure schema without a type", "alice", "alice_say_phrase", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"properties":{"device":{"type":"string"},"phrase":{"type":"string"}}}`)
+		}, false},
+		// The same shape rule holds for a write, whose constraints name
+		// arguments too.
+		{"write patternProperties", "alice", "alice_set_volume", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","patternProperties":{"^lev":{"type":"string"}},"properties":{"device":{"type":"string"},"level":{"type":"number"}}}`)
+		}, false},
+		{"write additionalProperties true", "alice", "alice_set_volume", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","additionalProperties":true,"properties":{"device":{"type":"string"},"level":{"type":"number"}}}`)
+		}, false},
+		{"write oneOf", "alice", "alice_control_room", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","oneOf":[{"required":["room"]}],"properties":{"room":{"type":"string"}}}`)
+		}, false},
+		{"write bounded arg without a single type", "alice", "alice_set_volume", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"level":{"type":["number","string"]}}}`)
+		}, false},
+		{"write playback arg without a single type", "alice", "alice_media_control", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"action":{"type":["string","null"],"enum":["play","pause","stop","next","prev"]}}}`)
+		}, false},
 		{"constraints on a read", "alice", "alice_list_devices", func(pt *PinnedTool) {
 			pt.Constraints = &Constraints{TextCap: map[string]int{"only_speakers": 1}}
 		}, false},
@@ -368,5 +434,21 @@ func TestAuthorizeWrites(t *testing.T) {
 	}
 	if _, err := s.AuthorizeWrites("alice_set_light", t0.Add(2*ReadListingTTL), true); !errors.Is(err, ErrListingStale) {
 		t.Fatalf("stale listing: %v, want ErrListingStale", err)
+	}
+}
+
+// TestCheckDeclaredArgs: arguments the pinned schema does not list are
+// refused, a case variant of a declared name included; declared ones pass.
+func TestCheckDeclaredArgs(t *testing.T) {
+	pt := phase2Pin(t).Servers["alice"].Tools["alice_set_volume"]
+	for _, ok := range []string{`{}`, `{"level":5}`, `{"device":"kitchen","level":5}`} {
+		if err := pt.CheckDeclaredArgs([]byte(ok)); err != nil {
+			t.Errorf("%s: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{`{"level":5,"volume":100}`, `{"Level":10}`, `[]`, `null`, `"x"`, `{`} {
+		if err := pt.CheckDeclaredArgs([]byte(bad)); !errors.Is(err, ErrUndeclaredArg) {
+			t.Errorf("%s: %v, want ErrUndeclaredArg", bad, err)
+		}
 	}
 }

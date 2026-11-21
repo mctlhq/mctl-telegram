@@ -409,13 +409,27 @@ func DeviceTypeAllowed(prefixes []string, deviceType string) bool {
 //
 //   - every write or disclosure is a T6 tool on the alice server, with the
 //     T6 class, lowered no further than T6 allows;
-//   - every disclosure caps each of its free-text (non-enum string)
-//     arguments at MaxDisclosureText or less, and has no argument whose
-//     type is not a single plain type;
+//   - every write or disclosure has a plain object input schema: type
+//     "object", and no top-level keyword other than those of
+//     schemaTopLevel, so no patternProperties, combinator or $ref can
+//     declare arguments the properties do not list, and an
+//     additionalProperties that is present is false;
+//   - every disclosure argument is a scalar (string, number, integer or
+//     boolean): an object, an array, a null, a missing or an unknown type
+//     could carry text no cap covers; and every free-text (non-enum
+//     string) argument is capped at MaxDisclosureText or less;
 //   - a "conditional" tool names its condition (playback actions or device
 //     type prefixes), and only a conditional write carries one;
 //   - every argument a constraint names is a property of the pinned input
 //     schema with the right type, and the schema has no duplicate key.
+//
+// Undeclared arguments are not refused here, and cannot be: the upstream
+// schemas leave additionalProperties unset (open), and input_schema is
+// derived from upstream, so pinning false would itself be drift. The
+// slice that enforces a write must refuse them at dispatch with
+// PinnedTool.CheckDeclaredArgs, so that no argument outside the reviewed
+// properties, and therefore outside every cap and bound, reaches the
+// server.
 func (p *Pin) ValidatePhase2() error {
 	if err := p.Validate(); err != nil {
 		return err
@@ -452,6 +466,9 @@ func validatePhase2Tool(server, name string, t PinnedTool) error {
 	if err := strictJSON(t.InputSchema); err != nil {
 		return fmt.Errorf("input_schema: %v", err)
 	}
+	if err := checkSchemaShape(t.InputSchema); err != nil {
+		return fmt.Errorf("input_schema: %v", err)
+	}
 	props, err := schemaProperties(t.InputSchema)
 	if err != nil {
 		return fmt.Errorf("input_schema: %v", err)
@@ -463,16 +480,20 @@ func validatePhase2Tool(server, name string, t PinnedTool) error {
 	if t.Class == ClassDisclosure {
 		// Everything a disclosure carries reaches a third party (T6), so
 		// every free-text argument is capped, the target device included.
-		// An enum string is not free text. A property whose type is not
-		// one plain type may carry text this check cannot see.
+		// An enum string is not free text. Only scalars are admitted: an
+		// object or array holds strings this check cannot see, and a
+		// property with no single known type may be either.
 		for arg, pr := range props {
-			switch {
-			case pr.Type == "":
-				return fmt.Errorf("text_cap: %q has no single type", arg)
-			case pr.Type == "string" && len(pr.Enum) == 0:
-				if _, ok := c.TextCap[arg]; !ok {
+			switch pr.Type {
+			case "string":
+				if _, ok := c.TextCap[arg]; !ok && len(pr.Enum) == 0 {
 					return fmt.Errorf("text_cap: free-text argument %q is not capped", arg)
 				}
+			case "number", "integer", "boolean":
+			case "":
+				return fmt.Errorf("disclosure argument %q has no single type", arg)
+			default:
+				return fmt.Errorf("disclosure argument %q is of type %q, not a scalar", arg, pr.Type)
 			}
 		}
 		if len(c.TextCap) == 0 {
@@ -527,6 +548,73 @@ func validatePhase2Tool(server, name string, t PinnedTool) error {
 			return fmt.Errorf("allowed_type_prefixes: %q is repeated or not allowed by threat model T6", pfx)
 		}
 		seen[pfx] = true
+	}
+	return nil
+}
+
+// schemaTopLevel are the only top-level keywords a write or disclosure
+// input schema may have, with the value each must hold where that is
+// fixed. Every other keyword is refused rather than interpreted:
+// patternProperties, dependentSchemas, an anyOf/oneOf/allOf/not/if
+// branch or a $ref could each declare or reshape an argument outside
+// "properties", where no constraint check looks.
+var schemaTopLevel = map[string]bool{
+	"type":                 true,
+	"properties":           true,
+	"required":             true,
+	"additionalProperties": true,
+	"description":          true,
+	"title":                true,
+	"$schema":              true,
+}
+
+// checkSchemaShape refuses an input schema that is not a plain object
+// schema (see schemaTopLevel). additionalProperties, when present, must be
+// false: true or a schema admits arguments with no constraint.
+func checkSchemaShape(raw json.RawMessage) error {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return err
+	}
+	for k := range top {
+		if !schemaTopLevel[k] {
+			return fmt.Errorf("top-level keyword %q is not allowed on a write or disclosure", k)
+		}
+	}
+	var typ string
+	if err := json.Unmarshal(top["type"], &typ); err != nil || typ != "object" {
+		return errors.New(`type must be "object"`)
+	}
+	if ap, ok := top["additionalProperties"]; ok {
+		var closed bool
+		if err := json.Unmarshal(ap, &closed); err != nil || closed {
+			return errors.New("additionalProperties must be false when present")
+		}
+	}
+	return nil
+}
+
+// ErrUndeclaredArg is returned by CheckDeclaredArgs.
+var ErrUndeclaredArg = errors.New("pa catalog: argument not declared by the pinned input schema")
+
+// CheckDeclaredArgs refuses call arguments (a JSON object, the output of
+// CanonicalArgs) that hold a key the pinned input schema does not list in
+// its properties. The upstream schemas leave additionalProperties open, so
+// the closed world a write's constraints assume is enforced here, at
+// dispatch, not by the schema. No runtime code calls it yet (P2-S1).
+func (t PinnedTool) CheckDeclaredArgs(args []byte) error {
+	props, err := schemaProperties(t.InputSchema)
+	if err != nil {
+		return fmt.Errorf("%w: input_schema: %v", ErrUndeclaredArg, err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(args, &got); err != nil || got == nil {
+		return fmt.Errorf("%w: arguments are not a JSON object", ErrUndeclaredArg)
+	}
+	for k := range got {
+		if _, ok := props[k]; !ok {
+			return fmt.Errorf("%w: %.40q", ErrUndeclaredArg, k)
+		}
 	}
 	return nil
 }

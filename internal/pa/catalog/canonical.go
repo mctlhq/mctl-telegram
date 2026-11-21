@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
 	"strconv"
 	"strings"
 	"unicode"
@@ -83,6 +84,13 @@ var ErrInvalidArgs = errors.New("pa catalog: invalid tool arguments")
 //     receiver would merge {"level":1,"Level":10});
 //   - a number that does not fit a finite float64 (1e999), which a
 //     receiver cannot represent as the value the card showed;
+//   - a nonzero number that underflows to zero (1e-400), which a receiver
+//     reads as 0 while the card shows something else;
+//   - an integer literal (no '.', 'e' or 'E') whose magnitude is above
+//     2^53, where float64 stops holding every integer, so a receiver
+//     that decodes into float64 (JavaScript, encoding/json into any)
+//     would act on a neighbouring value (9007199254740993 becomes
+//     9007199254740992);
 //   - invalid UTF-8 or an escape that decodes to U+FFFD (a lone surrogate),
 //     which encoding/json replaces silently;
 //   - anything but exactly one JSON object.
@@ -97,6 +105,12 @@ func CanonicalArgs(raw []byte) ([]byte, error) {
 	return c, nil
 }
 
+// Numbers keep their literal text, so equal values written differently
+// are different arguments: 5, 5.0 and 5e0 have three different canonical
+// forms and three different hashes. The slice that enforces an approval
+// must therefore compare the exact canonical bytes the card showed (or
+// their hash), never a parsed numeric value, and must send those bytes.
+//
 // CanonicalArgsSHA256 is the hex SHA-256 of CanonicalArgs(raw).
 func CanonicalArgsSHA256(raw []byte) (string, error) {
 	c, err := CanonicalArgs(raw)
@@ -108,7 +122,8 @@ func CanonicalArgsSHA256(raw []byte) (string, error) {
 
 // strictJSON checks that raw is exactly one JSON value with no duplicate
 // object key (keys equal under case folding count as duplicates), no
-// non-finite number and no replaced character. It only
+// number that does not round-trip through float64 (strictNumber) and no
+// replaced character. It only
 // checks; canonicalJSON encodes.
 func strictJSON(raw []byte) error {
 	if !utf8.Valid(raw) {
@@ -176,13 +191,38 @@ func strictValue(dec *json.Decoder) error {
 	case string:
 		return strictString(v)
 	case json.Number:
-		f, err := strconv.ParseFloat(v.String(), 64)
-		if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
-			return fmt.Errorf("number %.40s is not a finite float64", v.String())
-		}
+		return strictNumber(v.String())
 	case bool, nil:
 	default:
 		return fmt.Errorf("unexpected token %T", tok)
+	}
+	return nil
+}
+
+// maxExactInt is 2^53, the largest magnitude below which float64 holds
+// every integer.
+var maxExactInt = new(big.Int).Lsh(big.NewInt(1), 53)
+
+// strictNumber refuses a number literal that a float64 receiver would not
+// read back as the value it spells: one that overflows, one that is
+// nonzero but underflows to zero, and an integer literal above 2^53.
+func strictNumber(lit string) error {
+	f, err := strconv.ParseFloat(lit, 64)
+	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+		return fmt.Errorf("number %.40s is not a finite float64", lit)
+	}
+	mantissa, _, _ := strings.Cut(strings.ToLower(lit), "e")
+	if f == 0 && strings.ContainsAny(mantissa, "123456789") {
+		return fmt.Errorf("number %.40s underflows to zero", lit)
+	}
+	if !strings.ContainsAny(lit, ".eE") {
+		n, ok := new(big.Int).SetString(lit, 10)
+		if !ok {
+			return fmt.Errorf("number %.40s is not an integer literal", lit)
+		}
+		if n.CmpAbs(maxExactInt) > 0 {
+			return fmt.Errorf("integer %.40s is above 2^53 and does not round-trip through float64", lit)
+		}
 	}
 	return nil
 }

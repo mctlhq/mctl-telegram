@@ -47,6 +47,17 @@ func TestCanonicalArgsSHA256(t *testing.T) {
 	if d, _ := CanonicalArgsSHA256([]byte(`{"a":1.0}`)); d == mustHash(t, `{"a":1}`) {
 		t.Fatal("1.0 and 1 hash the same; the hash must bind the literal sent")
 	}
+	// 5, 5.0 and 5e0 are three canonical forms (see CanonicalArgsSHA256).
+	if h := []string{mustHash(t, `{"a":5}`), mustHash(t, `{"a":5.0}`), mustHash(t, `{"a":5e0}`)}; h[0] == h[1] || h[0] == h[2] || h[1] == h[2] {
+		t.Fatalf("5, 5.0 and 5e0 share a hash: %v", h)
+	}
+	// Numbers that do round-trip are accepted: zero in any spelling, 2^53
+	// itself, a tiny but representable value, and a large value written
+	// with an exponent (it is not an integer literal).
+	for _, ok := range []string{`{"a":0}`, `{"a":-0}`, `{"a":0.0e10}`, `{"a":0e-400}`, `{"a":9007199254740992}`,
+		`{"a":-9007199254740992}`, `{"a":5e-324}`, `{"a":1e300}`} {
+		mustHash(t, ok)
+	}
 
 	bad := map[string]string{
 		"duplicate key":           `{"a":1,"a":2}`,
@@ -64,6 +75,12 @@ func TestCanonicalArgsSHA256(t *testing.T) {
 		"overflow":                `{"a":1e999}`,
 		"negative overflow":       `{"a":-1e999}`,
 		"nested overflow":         `{"a":[1,2e400]}`,
+		"underflow":               `{"a":1e-400}`,
+		"negative underflow":      `{"a":-2.5E-400}`,
+		"nested underflow":        `{"a":{"b":[0.0000001e-330]}}`,
+		"integer above 2^53":      `{"a":9007199254740993}`,
+		"negative above 2^53":     `{"a":-9007199254740993}`,
+		"huge integer":            `{"a":123456789012345678901234567890}`,
 		"invalid UTF-8":           "{\"a\":\"\xff\"}",
 		"lone surrogate":          `{"a":"\ud800"}`,
 		"lone surrogate in a key": `{"\udc00":1}`,
