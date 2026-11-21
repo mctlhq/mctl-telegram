@@ -5,11 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"go/parser"
-	"go/token"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -141,9 +138,10 @@ func TestBuildPA_InertByDefault(t *testing.T) {
 	}
 }
 
-// TestBuildPA_EnabledRoutes: with the PA on, exactly the webhook and the
-// three run-loop routes are mounted. The connector's tool route is not:
-// it arrives with the tools slice (#1314), not here.
+// TestBuildPA_EnabledRoutes: with the PA on and no PA server enabled,
+// exactly the webhook and the three run-loop routes are mounted. Neither the
+// connector's tool route nor any linking route is: they exist only with a
+// server enabled (TestBuildPA_WiresToolsOnlyWhenEnabled).
 func TestBuildPA_EnabledRoutes(t *testing.T) {
 	store := paTestStore(t)
 	_, rt := buildEnabledPA(t, store)
@@ -254,6 +252,10 @@ type paSend struct {
 	chat   int64
 	text   string
 	button string
+	// buttons are every button's data, for a card sent with Send.
+	buttons []string
+	// webApp is the URL of a web_app button (SendWebApp).
+	webApp string
 }
 
 type paSendRecorder struct {
@@ -289,6 +291,26 @@ func (r *paSendRecorder) SendFrom(_ context.Context, chat int64, text safetext.T
 	return nil
 }
 
+func (r *paSendRecorder) Send(_ context.Context, chat int64, text safetext.Text, kb output.Keyboard) error {
+	s := paSend{chat: chat, text: text.String()}
+	for _, row := range kb {
+		for _, b := range row {
+			s.buttons = append(s.buttons, b.Data)
+		}
+	}
+	r.mu.Lock()
+	r.sent = append(r.sent, s)
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *paSendRecorder) SendWebApp(_ context.Context, chat int64, text safetext.Text, _ safetext.Template, appURL string) error {
+	r.mu.Lock()
+	r.sent = append(r.sent, paSend{chat: chat, text: text.String(), webApp: appURL})
+	r.mu.Unlock()
+	return nil
+}
+
 func (r *paSendRecorder) get() []paSend {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -300,7 +322,7 @@ func recordPASends(t *testing.T) *paSendRecorder {
 	t.Helper()
 	r := &paSendRecorder{}
 	prev := newPASender
-	newPASender = func(string) (pa.BotSender, error) { return r, nil }
+	newPASender = func(string, string) (paBotSender, error) { return r, nil }
 	t.Cleanup(func() { newPASender = prev })
 	return r
 }
@@ -545,43 +567,5 @@ func TestPARuntime_ShutdownBoundedByDeadline(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("shutdown ignored its 100ms deadline")
-	}
-}
-
-// TestPAWiring_NoToolsSliceImports: the server does not build the tools
-// slice yet. Its packages (dispatcher, connections and KEK, linking) arrive
-// with #1314; until then no non-test file of cmd/server may import them.
-func TestPAWiring_NoToolsSliceImports(t *testing.T) {
-	forbidden := []string{
-		"github.com/mctlhq/mctl-telegram/internal/pa/connector",
-		"github.com/mctlhq/mctl-telegram/internal/pa/connection",
-		"github.com/mctlhq/mctl-telegram/internal/pa/linking",
-	}
-	files, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	fset := token.NewFileSet()
-	checked := 0
-	for _, name := range files {
-		if strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(fset, name, nil, parser.ImportsOnly)
-		if err != nil {
-			t.Fatal(err)
-		}
-		checked++
-		for _, imp := range f.Imports {
-			path := strings.Trim(imp.Path.Value, `"`)
-			for _, bad := range forbidden {
-				if path == bad || strings.HasPrefix(path, bad+"/") {
-					t.Errorf("%s imports %s before the tools slice", name, path)
-				}
-			}
-		}
-	}
-	if checked == 0 {
-		t.Fatal("no source files read: the guard checked nothing")
 	}
 }

@@ -7,9 +7,9 @@ package config
 // LoadPATools either returns a complete, validated set for every enabled
 // server or an error naming the first variable that is missing or wrong.
 //
-// Nothing calls LoadPATools yet. Slice C2 calls it from the PA wiring,
-// behind PA_ENABLED; until then no environment variable below is read by
-// the running service (internal/pa.TestC1SymbolsNotWiredAtRuntime).
+// The PA wiring (cmd/server buildPA) calls it behind PA_ENABLED: with the
+// PA off no variable below is read, and with every server off nothing of
+// the tools runtime is built.
 
 import (
 	"errors"

@@ -76,15 +76,16 @@ var outboxTemplates = map[jobs.OutboxKind]safetext.Template{
 	jobs.OutboxRunFailed:      safetext.TextRunFailed,
 	jobs.OutboxRequestDropped: safetext.TextRequestDropped,
 
-	jobs.OutboxConsentPrompt:    safetext.TextConsentPrompt,
-	jobs.OutboxConsentAccepted:  safetext.TextConsentAccepted,
-	jobs.OutboxConsentWithdrawn: safetext.TextConsentWithdrawn,
-	jobs.OutboxConsentStale:     safetext.TextConsentStale,
-	jobs.OutboxNewConversation:  safetext.TextNewConversation,
-	jobs.OutboxForgotten:        safetext.TextForgotten,
-	jobs.OutboxUnknownButton:    safetext.TextUnknownButton,
-	jobs.OutboxRateLimited:      safetext.TextRateLimited,
-	jobs.OutboxMessageTooLong:   safetext.TextMessageTooLong,
+	jobs.OutboxConsentPrompt:      safetext.TextConsentPrompt,
+	jobs.OutboxConsentAccepted:    safetext.TextConsentAccepted,
+	jobs.OutboxConsentWithdrawn:   safetext.TextConsentWithdrawn,
+	jobs.OutboxConsentStale:       safetext.TextConsentStale,
+	jobs.OutboxNewConversation:    safetext.TextNewConversation,
+	jobs.OutboxForgotten:          safetext.TextForgotten,
+	jobs.OutboxUnknownButton:      safetext.TextUnknownButton,
+	jobs.OutboxRateLimited:        safetext.TextRateLimited,
+	jobs.OutboxMessageTooLong:     safetext.TextMessageTooLong,
+	jobs.OutboxLinkingUnavailable: safetext.TextLinkingUnavailable,
 }
 
 // outboxKeyboard is the keyboard a row is sent with: the consent prompt's

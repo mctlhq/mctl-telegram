@@ -103,7 +103,22 @@ const (
 	CommandNew     = "/new"
 	CommandForget  = "/forget"
 	CommandConsent = "/consent"
+	// The account-linking commands (#1318 slice C2). The update's
+	// transaction only admits them (consent, rate window); the linking
+	// action runs after the commit (postcommit.go).
+	CommandConnect     = "/connect"
+	CommandDisconnect  = "/disconnect"
+	CommandConnections = "/connections"
 )
+
+// LinkButtonPrefixes are the callback_data prefixes of the linking confirm
+// card (linking.ConfirmCard). Such a button is not a pa_callbacks row: the
+// linking flow consumes its own nonce after the commit.
+var LinkButtonPrefixes = []string{"pa:lc:", "pa:lx:"}
+
+// ReplyLinkingUnavailable answers a linking command when the server runs
+// no linking flow (no PA server enabled).
+const ReplyLinkingUnavailable Reply = "linking_unavailable"
 
 // Callback actions. The stored action binds the consent version and text
 // hash the prompt showed, so a button pressed after the text changed does
@@ -126,6 +141,11 @@ type ConversationsConfig struct {
 	// Limiter is the per-principal rate window. Required with Runs: a run
 	// loop without a rate limit is refused.
 	Limiter Limiter
+	// Linking: the server runs the account-linking flow, so the linking
+	// commands and buttons are handed to AfterCommit (LinkAction). Off,
+	// a linking command is answered ReplyLinkingUnavailable and a linking
+	// button ReplyUnknownButton.
+	Linking bool
 	// Now defaults to time.Now.
 	Now func() time.Time
 }
@@ -140,6 +160,7 @@ type Conversations struct {
 	runs    RunEnqueuer
 	replies ReplyQueue
 	limiter Limiter
+	linking bool
 	now     func() time.Time
 }
 
@@ -155,7 +176,7 @@ func NewConversations(cfg ConversationsConfig) (*Conversations, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &Conversations{store: cfg.Store, sealer: cfg.Sealer, ttl: cfg.TTL, runs: cfg.Runs, replies: cfg.Replies, limiter: cfg.Limiter, now: now}, nil
+	return &Conversations{store: cfg.Store, sealer: cfg.Sealer, ttl: cfg.TTL, runs: cfg.Runs, replies: cfg.Replies, limiter: cfg.Limiter, linking: cfg.Linking, now: now}, nil
 }
 
 // HandleUpdate implements Handler. Any error rolls back the update's dedup
@@ -283,12 +304,49 @@ func (c *Conversations) handleCommand(ctx context.Context, tx *sql.Tx, u Verifie
 			// words that need not follow any prompt.
 			return c.prompt(ctx, tx, u)
 		}
+	case CommandConnect, CommandDisconnect, CommandConnections:
+		return c.handleLinkCommand(ctx, tx, u, cmd, arg)
 	}
 	return fmt.Errorf("pa: unhandled command %q", cmd)
 }
 
+// handleLinkCommand admits a linking command in the update's transaction
+// and leaves the action to AfterCommit: Manager.Begin and Disconnect take
+// the principal lock this transaction holds (postcommit.go). Consent comes
+// first, as for any message; the rate window has already counted it.
+func (c *Conversations) handleLinkCommand(ctx context.Context, tx *sql.Tx, u VerifiedUpdate, cmd, arg string) error {
+	if !c.linking {
+		return c.reply(ctx, tx, u, ReplyLinkingUnavailable, "")
+	}
+	_, err := c.requireConsent(ctx, tx, u.Principal())
+	if errors.Is(err, ErrConsentRequired) {
+		return c.prompt(ctx, tx, u)
+	}
+	if err != nil {
+		return err
+	}
+	return setPostCommit(ctx, LinkAction{Command: cmd, Arg: arg})
+}
+
+// linkButton reports whether data is a linking confirm card button.
+func linkButton(data string) bool {
+	for _, p := range LinkButtonPrefixes {
+		if strings.HasPrefix(data, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Conversations) handleCallback(ctx context.Context, tx *sql.Tx, u VerifiedUpdate) error {
 	p := u.Principal()
+	if c.linking && linkButton(u.CallbackData()) {
+		// The confirm card's nonce is the linking flow's, not a pa_callbacks
+		// id: consuming it here would answer "unknown button" and the
+		// card's press would never reach the flow. The flow checks the
+		// nonce, its principal and its expiry after the commit.
+		return setPostCommit(ctx, LinkAction{Button: true})
+	}
 	action, err := c.store.ConsumePACallback(ctx, tx, p.TelegramID(), u.CallbackData(), c.now())
 	if errors.Is(err, convo.ErrNotFound) {
 		// Unknown, expired, already used, or another principal's id: the
@@ -409,7 +467,7 @@ func userCommand(frags []convo.Fragment) (cmd, arg string, ok bool) {
 		name, _, _ := strings.Cut(fields[0], "@")
 		name = strings.ToLower(name)
 		switch name {
-		case CommandNew, CommandForget, CommandConsent:
+		case CommandNew, CommandForget, CommandConsent, CommandConnect, CommandDisconnect, CommandConnections:
 			if len(fields) > 1 {
 				arg = strings.ToLower(fields[1])
 			}

@@ -24,6 +24,14 @@ type ASMetadata struct {
 	// (RFC 9207 section 3): the server puts iss on every authorization
 	// response. RequireIss is derived from it.
 	IssParameterSupported bool
+	// AuthorizationEndpoint, TokenEndpoint and RevocationEndpoint are the
+	// endpoints the metadata names, or "" for one it leaves out. The
+	// server wiring refuses to start when one differs from the configured
+	// value (#1318 slice C2): the metadata is the server's own statement
+	// of where its endpoints are.
+	AuthorizationEndpoint string
+	TokenEndpoint         string
+	RevocationEndpoint    string
 }
 
 // ErrASMetadata is authorization server metadata that could not be fetched
@@ -56,6 +64,20 @@ func ParseASMetadata(body []byte, issuer string) (ASMetadata, error) {
 		return ASMetadata{}, fmt.Errorf("%w: issuer is not the pinned issuer", ErrASMetadata)
 	}
 	md := ASMetadata{Issuer: got}
+	for field, dst := range map[string]*string{
+		"authorization_endpoint": &md.AuthorizationEndpoint,
+		"token_endpoint":         &md.TokenEndpoint,
+		"revocation_endpoint":    &md.RevocationEndpoint,
+	} {
+		raw, ok := doc[field]
+		if !ok {
+			continue
+		}
+		// Present but not a string is unreadable, never absent.
+		if json.Unmarshal(raw, dst) != nil || *dst == "" {
+			return ASMetadata{}, fmt.Errorf("%w: %s is not a non-empty string", ErrASMetadata, field)
+		}
+	}
 	if raw, ok := doc[issParameterField]; ok {
 		raw = bytes.TrimSpace(raw)
 		switch string(raw) {

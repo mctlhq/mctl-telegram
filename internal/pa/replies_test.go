@@ -280,7 +280,8 @@ func TestConsentPromptIsConsentText(t *testing.T) {
 // conversation-level kind, and each such kind to a non-empty server text.
 func TestEveryReplyHasAKindAndATemplate(t *testing.T) {
 	all := []Reply{ReplyConsentPrompt, ReplyConsentAccepted, ReplyConsentWithdrawn, ReplyConsentStale,
-		ReplyNewConversation, ReplyForgotten, ReplyUnknownButton, ReplyRateLimited, ReplyMessageTooLong}
+		ReplyNewConversation, ReplyForgotten, ReplyUnknownButton, ReplyRateLimited, ReplyMessageTooLong,
+		ReplyLinkingUnavailable}
 	if len(replyKinds) != len(all) || len(jobs.ConversationOutboxKinds()) != len(all) {
 		t.Fatalf("%d replies, %d mapped, %d kinds", len(all), len(replyKinds), len(jobs.ConversationOutboxKinds()))
 	}

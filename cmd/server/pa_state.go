@@ -20,8 +20,8 @@ import (
 //
 // links is the linking flow's sweep ((*linking.Service).ExpireStale). With
 // PA_ENABLED on and links set, the linking sweeper runs beside the
-// retention sweeper (#1338). links is nil while the server does not run the
-// linking flow (#1314): nothing builds a linking.Service yet.
+// retention sweeper (#1338). links is nil when the server runs no linking
+// flow (no PA server enabled; paRuntime.Links).
 func startPAState(ctx context.Context, cfg *config.Config, store convo.Store, links sweeper.PALinkExpirer) (bool, error) {
 	if !cfg.PAEnabled {
 		return false, nil

@@ -617,3 +617,23 @@ func TestPurgePAPrincipals_LostInsertToAdmissionRaisesMark(t *testing.T) {
 		t.Fatalf("Begin admitted before the deletion: %v, want ErrPrincipalDeleted", err)
 	}
 }
+
+// ListPAConnectionsTx is the tool resolver's read inside the claim
+// transaction (#1318 C2): without a transaction it is unreadable, never an
+// empty list, and inside one it sees the same rows as ListPAConnections.
+func TestListPAConnectionsTx(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	if list, err := s.ListPAConnectionsTx(ctx, nil, 100001); !errors.Is(err, connection.ErrUnreadable) || list != nil {
+		t.Fatalf("nil tx: %v, %v; want ErrUnreadable", list, err)
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	list, err := s.ListPAConnectionsTx(ctx, tx, 100001)
+	if err != nil || len(list) != 0 {
+		t.Fatalf("empty principal: %v, %v", list, err)
+	}
+}

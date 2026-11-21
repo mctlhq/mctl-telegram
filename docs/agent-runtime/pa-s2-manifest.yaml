@@ -253,7 +253,7 @@ S2-I8:
     - internal/db.TestS2I8_NoStatementLowersTaint
   mutations:
     - id: P2S7-I8a
-      guard: internal/pa/conversation.go:399
+      guard: internal/pa/conversation.go:457
       guard_text: 'if prov != convo.ProvenanceUser {'
       mutation: "userCommand accepts a command of any provenance: `if prov != convo.ProvenanceUser {` -> `if false && prov != convo.ProvenanceUser {`"
       killed_by:

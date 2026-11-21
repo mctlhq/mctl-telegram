@@ -262,7 +262,25 @@ func (s *Store) GetPAConnectionSealed(ctx context.Context, principal int64, id s
 // ListPAConnections returns the principal's rows only. A failure on any row
 // fails the whole read: a shorter list is not a valid answer.
 func (s *Store) ListPAConnections(ctx context.Context, principal int64) ([]connection.Connection, error) {
-	rows, err := s.DB.QueryContext(ctx,
+	return listPAConns(ctx, s.DB, principal)
+}
+
+// ListPAConnectionsTx is ListPAConnections inside tx: the run loop's tool
+// resolver reads the connections a claim binds in the claim's own
+// transaction (#1318 slice C2).
+func (s *Store) ListPAConnectionsTx(ctx context.Context, tx *sql.Tx, principal int64) ([]connection.Connection, error) {
+	if tx == nil {
+		return nil, fmt.Errorf("%w: list: no transaction", connection.ErrUnreadable)
+	}
+	return listPAConns(ctx, tx, principal)
+}
+
+type paRowsQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func listPAConns(ctx context.Context, q paRowsQuerier, principal int64) ([]connection.Connection, error) {
+	rows, err := q.QueryContext(ctx,
 		`SELECT `+paConnCols+` FROM pa_connections WHERE principal = $1 ORDER BY created_at_ms, id`, principal)
 	if err != nil {
 		return nil, fmt.Errorf("%w: list: %v", connection.ErrUnreadable, err)

@@ -445,14 +445,8 @@ func main() {
 	// Communication-agent notifier: delivers pending owner_notifications
 	// (summaries, approval requests) to Saved Messages.
 	go sweeper.AgentNotifier(ctx, agentNotifier)
-	// Personal Assistant state (issue #1313): purge unmarked fragments, then
-	// the hourly retention sweep. Nothing at all unless PA_ENABLED is true.
-	// No linking sweep: the linking flow is not wired (#1314), so there is
-	// no *linking.Service to pass.
-	if _, err := startPAState(ctx, cfg, store, nil); err != nil {
-		slog.Error("pa state", "err", err)
-		os.Exit(1)
-	}
+	// Personal Assistant state (issue #1313) starts after buildPA below, so
+	// the linking sweep can be given the linking flow it sweeps.
 	// PA webhook monitor (T4): reads getWebhookInfo every 5 minutes and
 	// exports what it saw; also only when PA_ENABLED is true.
 	if _, err := startPAWebhookMonitor(ctx, cfg, m, ""); err != nil {
@@ -931,11 +925,21 @@ func main() {
 	mountBotStartBridge(mux, store, m, bridgeAuth)
 
 	// Personal Assistant bot (issue #1313, wired by #1343): the webhook and
-	// the run-loop routes, plus the outbox retry loop. Nothing is built
-	// unless PA_ENABLED is explicitly true: with it off no PA route exists.
+	// the run-loop routes, plus the outbox retry loop; with a PA server
+	// enabled also the tools runtime (#1318 slice C2): account linking, its
+	// bot commands and the connector dispatcher. Nothing is built unless
+	// PA_ENABLED is explicitly true: with it off no PA route exists.
 	paRT, err := buildPA(cfg, store, workerTokenRevocationCache, m)
 	if err != nil {
 		slog.Error("pa runtime", "err", err)
+		os.Exit(1)
+	}
+	// PA state: purge unmarked fragments, then the hourly retention sweep,
+	// and the linking sweep when the linking flow runs (paRT.Links() is nil
+	// otherwise). Nothing at all unless PA_ENABLED is true. It runs before
+	// the server serves, so no update meets unmarked state.
+	if _, err := startPAState(ctx, cfg, store, paRT.Links()); err != nil {
+		slog.Error("pa state", "err", err)
 		os.Exit(1)
 	}
 	paRT.Mount(mux)

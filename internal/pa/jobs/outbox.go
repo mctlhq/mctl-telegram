@@ -71,6 +71,9 @@ const (
 	OutboxUnknownButton    OutboxKind = "unknown_button"
 	OutboxRateLimited      OutboxKind = "rate_limited"
 	OutboxMessageTooLong   OutboxKind = "message_too_long"
+	// OutboxLinkingUnavailable answers a linking command while no PA
+	// server is enabled (#1318 slice C2).
+	OutboxLinkingUnavailable OutboxKind = "linking_unavailable"
 )
 
 // OutboxKinds lists every kind this build writes.
@@ -85,7 +88,8 @@ func jobOutboxKinds() []OutboxKind {
 // ConversationOutboxKinds lists the conversation-level kinds.
 func ConversationOutboxKinds() []OutboxKind {
 	return []OutboxKind{OutboxConsentPrompt, OutboxConsentAccepted, OutboxConsentWithdrawn, OutboxConsentStale,
-		OutboxNewConversation, OutboxForgotten, OutboxUnknownButton, OutboxRateLimited, OutboxMessageTooLong}
+		OutboxNewConversation, OutboxForgotten, OutboxUnknownButton, OutboxRateLimited, OutboxMessageTooLong,
+		OutboxLinkingUnavailable}
 }
 
 // ConversationLevel reports whether k is a conversation-level kind, whose
