@@ -77,6 +77,22 @@ type PALinkSecret struct {
 	ConsumedAt  time.Time
 }
 
+// PALinkSecretRetention is how long a pa_link_secrets row is kept after it
+// expires, consumed or not. SweepPAState hard-deletes it then (#1338): a
+// spent row still names its principal, server and masked account, and
+// nothing reads it for long. Every secret lives at most ten minutes, so a
+// consumed row is gone within a day and ten minutes of its consume.
+//
+// A day, not less: the linking sweep (ExpireStale) finds abandoned
+// connections through their expired, unconsumed rows, and a day leaves it
+// many passes to see them first; its second pass fails a stranded pending
+// connection whatever its secrets say, so a row deleted unseen strands
+// nothing. A replayed secret is refused whether its row is still there
+// (ErrPALinkConsumed) or gone (ErrPALinkUnknown). Not more: no reader needs
+// the row past that, and pa_updates, the PA's other replay record, is kept
+// two days.
+const PALinkSecretRetention = 24 * time.Hour
+
 // Errors of ConsumePALinkSecret. ErrPALinkUnknown also covers a hash of
 // another kind: a secret is never reported as existing under a kind it was
 // not minted for.
@@ -107,6 +123,9 @@ func paLinkingSchema(pg bool) []string {
 			created_at_ms ` + intT + ` NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_pa_link_secrets_expiry ON pa_link_secrets(kind, consumed_at_ms, expires_at_ms)`,
+		// Account deletion and the retention sweep (#1338).
+		`CREATE INDEX IF NOT EXISTS idx_pa_link_secrets_principal ON pa_link_secrets(principal)`,
+		`CREATE INDEX IF NOT EXISTS idx_pa_link_secrets_expires ON pa_link_secrets(expires_at_ms)`,
 	}
 }
 
