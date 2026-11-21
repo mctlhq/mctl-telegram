@@ -220,9 +220,10 @@ func newRunLoopHarnessOn(t *testing.T, store *db.Store, opts ...rlOption) *runLo
 		Tools: func(_ context.Context, _ *sql.Tx, p int64) ([]ConnectionRevision, []string, error) {
 			return h.conns[p], h.tools, nil
 		},
-		Limits: jobs.DefaultLimits(),
-		Budget: jobs.Budget{PerJobUSD: 0.25, PrincipalDayUSD: 2, PrincipalMonthUSD: 20, GlobalDayUSD: 20, MinTurnUSD: 0.005},
-		Now:    func() time.Time { return h.now },
+		Limits:  jobs.DefaultLimits(),
+		Budget:  jobs.Budget{PerJobUSD: 0.25, PrincipalDayUSD: 2, PrincipalMonthUSD: 20, GlobalDayUSD: 20, MinTurnUSD: 0.005},
+		Allowed: newTestAllowlist(),
+		Now:     func() time.Time { return h.now },
 	}
 	for _, o := range opts {
 		o(&cfg, h)
@@ -668,7 +669,7 @@ func TestNewRunLoop_RefusesTurnFloorAboveReservation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := RunLoopConfig{
 				Store: newStore(t), Sealer: mustSealer(t), Pool: noPool{}, Minter: failingMinter{}, Verifier: noVerifier{},
-				Sender: &sendRecorder{}, Tools: NoTools, Limits: jobs.DefaultLimits(),
+				Sender: &sendRecorder{}, Tools: NoTools, Limits: jobs.DefaultLimits(), Allowed: NewAllowlist(nil),
 				Budget: jobs.Budget{PerJobUSD: 0.25, PrincipalDayUSD: 2, PrincipalMonthUSD: 20, GlobalDayUSD: 20, MinTurnUSD: tc.floor},
 			}
 			_, err := NewRunLoop(cfg)
@@ -1225,7 +1226,7 @@ func TestNewRunLoop_RequiresEverything(t *testing.T) {
 		t.Fatalf("empty config: %v", err)
 	}
 	if _, err := NewConversations(ConversationsConfig{
-		Store: newStore(t), Sealer: mustSealer(t), TTL: time.Hour, Runs: &enqueueRecorder{},
+		Store: newStore(t), Sealer: mustSealer(t), TTL: time.Hour, Runs: &enqueueRecorder{}, Allowed: NewAllowlist(nil),
 	}); !errors.Is(err, ErrConversationsConfig) {
 		t.Fatalf("a run loop without a limiter: %v", err)
 	}

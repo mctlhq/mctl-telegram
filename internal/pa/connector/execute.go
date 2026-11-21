@@ -348,17 +348,21 @@ const (
 // Refusal reasons recorded in Entry.Reason. A closed set: the record never
 // carries error text.
 const (
-	ReasonTokenExpired         = "token_expired"
-	ReasonTokenRevoked         = "token_revoked"
-	ReasonTokenInvalid         = "token_invalid"
-	ReasonTokenUnverifiable    = "token_unverifiable"
-	ReasonBadRequest           = "bad_request"
-	ReasonFlagOff              = "flag_off"
-	ReasonToolNotInSet         = "tool_not_in_set"
-	ReasonToolCap              = "tool_cap"
-	ReasonBudget               = "budget"
-	ReasonJobStale             = "job_stale"
-	ReasonJobGone              = "job_gone"
+	ReasonTokenExpired      = "token_expired"
+	ReasonTokenRevoked      = "token_revoked"
+	ReasonTokenInvalid      = "token_invalid"
+	ReasonTokenUnverifiable = "token_unverifiable"
+	ReasonBadRequest        = "bad_request"
+	ReasonFlagOff           = "flag_off"
+	ReasonToolNotInSet      = "tool_not_in_set"
+	ReasonToolCap           = "tool_cap"
+	ReasonBudget            = "budget"
+	ReasonJobStale          = "job_stale"
+	ReasonJobGone           = "job_gone"
+	// The run's principal was disabled by an admin, or is not on the
+	// preview allowlist (T11, S1-F4, #1318).
+	ReasonPrincipalDisabled    = "principal_disabled"
+	ReasonPrincipalNotAllowed  = "principal_not_allowed"
 	ReasonJobUnreadable        = "job_unreadable"
 	ReasonConnectionUnbound    = "connection_unbound"
 	ReasonConnectionAmbiguous  = "connection_ambiguous"

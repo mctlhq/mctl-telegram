@@ -37,6 +37,8 @@ func TestToolOutputSchemas(t *testing.T) {
 		{"revoke_worker_token", first(s.toolRevokeWorkerToken())},
 		{"mint_worker_token", first(s.toolMintWorkerToken())},
 		{"set_telegram_access", first(s.toolSetAccess())},
+		{"set_pa_principal_disabled", first(s.toolSetPAPrincipalDisabled())},
+		{"get_pa_principal_status", first(s.toolGetPAPrincipalStatus())},
 		{"set_account_send", first(s.toolSetAccountSend())},
 		{"set_send_consent", first(s.toolSetSendConsent())},
 		{"revoke_local_bridge_device", first(s.toolRevokeLocalBridgeDevice())},

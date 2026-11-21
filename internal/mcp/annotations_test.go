@@ -44,6 +44,8 @@ func TestToolAnnotations(t *testing.T) {
 		{"revoke_worker_token", first(s.toolRevokeWorkerToken()), false, true, false},
 		{"mint_worker_token", first(s.toolMintWorkerToken()), false, true, false},
 		{"set_telegram_access", first(s.toolSetAccess()), false, true, false},
+		{"set_pa_principal_disabled", first(s.toolSetPAPrincipalDisabled()), false, true, false},
+		{"get_pa_principal_status", first(s.toolGetPAPrincipalStatus()), true, false, false},
 		{"set_account_send", first(s.toolSetAccountSend()), false, true, false},
 		{"set_send_consent", first(s.toolSetSendConsent()), false, true, false},
 		{"revoke_local_bridge_device", first(s.toolRevokeLocalBridgeDevice()), false, true, false},

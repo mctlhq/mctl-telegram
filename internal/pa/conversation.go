@@ -49,6 +49,10 @@ const (
 	// ReplyMessageTooLong refuses a message part over jobs.MaxMessageChars;
 	// nothing of the message is stored (S1-R1).
 	ReplyMessageTooLong Reply = "message_too_long"
+	// ReplyPrincipalDisabled refuses every update, other than /forget and
+	// /consent withdraw, of a principal an admin disabled or one not on the
+	// preview allowlist (T11, #1318). Nothing of the update is stored.
+	ReplyPrincipalDisabled Reply = "principal_disabled"
 )
 
 // ReplyQueue records a reply in the update's transaction, so it is sent
@@ -93,7 +97,7 @@ var (
 	// is refused; this is never treated as either consent or its absence.
 	ErrConsentUnreadable = errors.New("pa: consent record unreadable")
 	// ErrConversationsConfig reports an unusable ConversationsConfig.
-	ErrConversationsConfig = errors.New("pa: conversations need a store, a sealer, a TTL of at most 24h, and a limiter with a run loop")
+	ErrConversationsConfig = errors.New("pa: conversations need a store, a sealer, an allowlist, a TTL of at most 24h, and a limiter with a run loop")
 )
 
 // Command names handled server-side (PR #1329 decision for slice b). They
@@ -126,6 +130,10 @@ type ConversationsConfig struct {
 	// Limiter is the per-principal rate window. Required with Runs: a run
 	// loop without a rate limit is refused.
 	Limiter Limiter
+	// Allowed is the preview allowlist (PA_ALLOWED_PRINCIPALS). Required:
+	// there is no "allow everyone" default, and an empty list allows
+	// nobody.
+	Allowed PrincipalAllowlist
 	// Now defaults to time.Now.
 	Now func() time.Time
 }
@@ -140,6 +148,7 @@ type Conversations struct {
 	runs    RunEnqueuer
 	replies ReplyQueue
 	limiter Limiter
+	allowed PrincipalAllowlist
 	now     func() time.Time
 }
 
@@ -147,7 +156,7 @@ var _ Handler = (*Conversations)(nil)
 
 // NewConversations builds the handler.
 func NewConversations(cfg ConversationsConfig) (*Conversations, error) {
-	if cfg.Store == nil || cfg.Sealer == nil || cfg.TTL <= 0 || cfg.TTL > MaxConversationTTL ||
+	if cfg.Store == nil || cfg.Sealer == nil || cfg.Allowed == nil || cfg.TTL <= 0 || cfg.TTL > MaxConversationTTL ||
 		(cfg.Runs != nil && cfg.Limiter == nil) {
 		return nil, ErrConversationsConfig
 	}
@@ -155,7 +164,8 @@ func NewConversations(cfg ConversationsConfig) (*Conversations, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &Conversations{store: cfg.Store, sealer: cfg.Sealer, ttl: cfg.TTL, runs: cfg.Runs, replies: cfg.Replies, limiter: cfg.Limiter, now: now}, nil
+	return &Conversations{store: cfg.Store, sealer: cfg.Sealer, ttl: cfg.TTL, runs: cfg.Runs, replies: cfg.Replies, limiter: cfg.Limiter,
+		allowed: cfg.Allowed, now: now}, nil
 }
 
 // HandleUpdate implements Handler. Any error rolls back the update's dedup
@@ -171,6 +181,20 @@ func (c *Conversations) HandleUpdate(ctx context.Context, tx *sql.Tx, u Verified
 	// leaving state the withdrawal never saw (S1-N4).
 	if err := c.store.LockPAPrincipal(ctx, tx, p.TelegramID()); err != nil {
 		return err
+	}
+	// A principal not on the allowlist, or one an admin disabled, gets one
+	// fixed reply and nothing of the update is stored or queued (T11,
+	// #1318). /forget and /consent withdraw still run, so a refused
+	// principal can always delete their data. A disable that cannot be
+	// read is an error: the update rolls back and Telegram retries it.
+	if !erasure(u) {
+		refused, err := c.principalRefused(ctx, tx, p)
+		if err != nil {
+			return err
+		}
+		if refused {
+			return c.reply(ctx, tx, u, ReplyPrincipalDisabled, "")
+		}
 	}
 	// The rate window counts every update, consent prompts and button
 	// presses included (#1313 slice d1), except the two that delete the
@@ -315,6 +339,20 @@ func (c *Conversations) handleCallback(ctx context.Context, tx *sql.Tx, u Verifi
 		return err
 	}
 	return c.reply(ctx, tx, u, ReplyConsentAccepted, "")
+}
+
+// principalRefused reports whether p may not use the PA: not on the
+// allowlist, or disabled by an admin. A failed read of the disable is an
+// error, never "enabled".
+func (c *Conversations) principalRefused(ctx context.Context, tx *sql.Tx, p Principal) (bool, error) {
+	if !c.allowed.Allowed(p.TelegramID()) {
+		return true, nil
+	}
+	disabled, err := c.store.PAPrincipalDisabled(ctx, tx, p.TelegramID())
+	if err != nil {
+		return true, fmt.Errorf("pa: principal disable: %w", err)
+	}
+	return disabled, nil
 }
 
 // prompt issues a consent button bound to the current version and text.

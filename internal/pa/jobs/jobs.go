@@ -216,6 +216,14 @@ var (
 	// conversation while consent still stands: the principal is told that
 	// the request was dropped. errors.Is(err, ErrGone) holds for it.
 	ErrConversationGone = fmt.Errorf("%w: conversation", ErrGone)
+	// ErrPrincipalDisabled is the ErrGone of a principal an admin disabled
+	// (T11, S1-F4). The job is cancelled and the principal told that the
+	// assistant is not available (NoticePrincipalDisabled).
+	ErrPrincipalDisabled = fmt.Errorf("%w: principal disabled", ErrGone)
+	// ErrPrincipalNotAllowed is the ErrGone of a principal that is not on
+	// the preview allowlist (PA_ALLOWED_PRINCIPALS). It is told the same as
+	// a disabled one.
+	ErrPrincipalNotAllowed = fmt.Errorf("%w: principal not allowed", ErrGone)
 	// ErrToolCap: the run reached its tool-call cap (S1-R2).
 	ErrToolCap = errors.New("pa jobs: tool-call cap reached")
 	// ErrToolNotInSet: the tool is not in the job's signed tool set (S1-I1).
@@ -328,7 +336,23 @@ const (
 	// NoticeDropped: the conversation the job would answer closed or
 	// expired before the job ran (for example during a budget hold).
 	NoticeDropped
+	// NoticePrincipalDisabled: the principal was disabled, or left the
+	// allowlist, while the job was queued or running.
+	NoticePrincipalDisabled
 )
+
+// NoticeFor returns the notice a gate refusal owes the principal, if any:
+// a dropped conversation and a disabled or not-allowed principal are told,
+// a withdrawn consent is not (the withdrawal answered itself).
+func NoticeFor(err error) (NoticeKind, bool) {
+	switch {
+	case errors.Is(err, ErrConversationGone):
+		return NoticeDropped, true
+	case errors.Is(err, ErrPrincipalDisabled), errors.Is(err, ErrPrincipalNotAllowed):
+		return NoticePrincipalDisabled, true
+	}
+	return 0, false
+}
 
 // Notice is a server message owed to Principal about JobID.
 type Notice struct {

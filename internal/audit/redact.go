@@ -61,8 +61,10 @@ var sensitiveKeys = map[string]struct{}{
 	"client_secret":               {},
 	"telegram_oidc_client_secret": {},
 	"encryption_key":              {},
-	"authorization":               {},
-	"bearer":                      {},
+	// The PA preview allowlist (#1318): Telegram user ids.
+	"pa_allowed_principals": {},
+	"authorization":         {},
+	"bearer":                {},
 	// Human-input (agent clarification) content, issue-571: the question the
 	// agent asked and the answer the owner typed are private user content.
 	//

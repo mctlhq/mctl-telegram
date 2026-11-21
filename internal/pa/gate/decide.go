@@ -19,7 +19,9 @@
 // observe" is decided in one place and always fails closed (I9).
 //
 // No runtime code calls Decide yet (P2-S1). Reads never reach it: the
-// catalog grants auto reads (catalog.Surface.Authorize).
+// catalog grants auto reads (catalog.Surface.Authorize). The principal half
+// of Input comes from StorePrincipalStatus, the admin disable of #1318; the
+// run loop checks the same disable at every step on its own.
 package gate
 
 import (
@@ -149,18 +151,32 @@ type PrincipalStatus interface {
 	PrincipalDisabled(ctx context.Context, principal int64) (bool, error)
 }
 
-// ErrPrincipalStatusUnavailable: no per-principal disable exists yet, so
-// the state cannot be read.
-var ErrPrincipalStatusUnavailable = errors.New("pa gate: per-principal disable is not implemented")
-
-// NoPrincipalStatus is the PrincipalStatus until a per-principal disable
-// exists (#1318 has none): it always fails, so every principal is treated
-// as disabled and no write can pass Decide.
-type NoPrincipalStatus struct{}
-
-// PrincipalDisabled implements PrincipalStatus.
-func (NoPrincipalStatus) PrincipalDisabled(context.Context, int64) (bool, error) {
-	return true, ErrPrincipalStatusUnavailable
+// PrincipalDisableReader reads the admin disable outside a transaction
+// (*db.Store.PAPrincipalDisabledState). It returns true with any error.
+type PrincipalDisableReader interface {
+	PAPrincipalDisabledState(ctx context.Context, principal int64) (bool, error)
 }
 
-var _ PrincipalStatus = NoPrincipalStatus{}
+// ErrPrincipalStatusUnavailable: no store to read the disable from.
+var ErrPrincipalStatusUnavailable = errors.New("pa gate: principal disable state is unavailable")
+
+// StorePrincipalStatus is the PrincipalStatus backed by the admin disable
+// (pa_principal_disables, #1318). A read error, or no store, is (true,
+// err): a principal whose state cannot be read is treated as disabled.
+type StorePrincipalStatus struct {
+	Store PrincipalDisableReader
+}
+
+// PrincipalDisabled implements PrincipalStatus.
+func (s StorePrincipalStatus) PrincipalDisabled(ctx context.Context, principal int64) (bool, error) {
+	if s.Store == nil {
+		return true, ErrPrincipalStatusUnavailable
+	}
+	disabled, err := s.Store.PAPrincipalDisabledState(ctx, principal)
+	if err != nil {
+		return true, err
+	}
+	return disabled, nil
+}
+
+var _ PrincipalStatus = StorePrincipalStatus{}
