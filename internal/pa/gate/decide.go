@@ -1,0 +1,152 @@
+// Copyright 2025 MCTL Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Package gate decides how a proposed PA write or disclosure may proceed
+// (threat model I5, I6, T5, T6, T7, T11). It is pure: callers read the
+// switches, the principal's state, the taint and the standing permissions,
+// and hand the results here, read errors included, so that "could not
+// observe" is decided in one place and always fails closed (I9).
+//
+// No runtime code calls Decide yet (P2-S1). Reads never reach it: the
+// catalog grants auto reads (catalog.Surface.Authorize).
+package gate
+
+import (
+	"context"
+	"errors"
+
+	"github.com/mctlhq/mctl-telegram/internal/pa/catalog"
+)
+
+// Outcome is how a call may proceed.
+type Outcome string
+
+const (
+	// OutcomeNever: the call does not run, and no card is offered.
+	OutcomeNever Outcome = "never"
+	// OutcomeCard: the call runs only after a per-call approval card.
+	OutcomeCard Outcome = "card"
+	// OutcomeLowered: a standing permission covers the exact call, so it
+	// runs without a card.
+	OutcomeLowered Outcome = "lowered"
+)
+
+// Reason names the rule that decided, one per branch of Decide.
+type Reason string
+
+const (
+	ReasonWritesOff         Reason = "writes_off"
+	ReasonPrincipalDisabled Reason = "principal_disabled"
+	ReasonNotAWrite         Reason = "not_a_write"
+	ReasonDisclosure        Reason = "disclosure"
+	ReasonNeverLowerable    Reason = "never_lowerable"
+	ReasonTainted           Reason = "tainted"
+	ReasonPermission        Reason = "standing_permission"
+	ReasonNoPermission      Reason = "no_permission"
+)
+
+// Decision is Decide's verdict.
+type Decision struct {
+	Outcome Outcome
+	Reason  Reason
+}
+
+// Input is everything Decide looks at. Each observation carries the error
+// of reading it; a non-nil error is decided as the unsafe value (writes
+// off, principal disabled, tainted, no permission), whatever the bool says.
+type Input struct {
+	// Writes is Flags.Writes (PA_WRITES_ENABLED), WritesErr the error of
+	// reading the flags.
+	Writes    bool
+	WritesErr error
+	// PrincipalDisabled and PrincipalErr are PrincipalStatus's answer for
+	// the job's principal.
+	PrincipalDisabled bool
+	PrincipalErr      error
+	// Tool, Class and Lowerable come from the pin entry the catalog
+	// matched for the call, never from the model.
+	Tool      string
+	Class     catalog.Class
+	Lowerable catalog.Lowerable
+	// Tainted: external content entered this conversation (T5). Assistant
+	// output in a clean conversation does not taint; a conversation row
+	// from before taint was recorded is tainted. TaintErr is the error of
+	// reading it.
+	Tainted  bool
+	TaintErr error
+	// PermissionMatch: a standing permission of this principal, connection
+	// and revision covers this exact call within its limits (T6, T7): the
+	// caller has checked the device id, the device type read fresh, the
+	// value ceiling and the expiry. PermissionErr is the error of reading
+	// the permissions.
+	PermissionMatch bool
+	PermissionErr   error
+}
+
+// Decide applies the gate in a fixed order; the first rule that matches
+// decides:
+//
+//  1. writes off, or the flags unreadable -> never;
+//  2. the principal disabled, or their state unreadable -> never;
+//  3. not a write or disclosure -> never (a read or an unknown class has
+//     no business here);
+//  4. a disclosure -> card (never lowerable, whatever the taint: S2-I9);
+//  5. never lowerable, by the pin or by the threat model's list -> card;
+//  6. tainted, or the taint unreadable -> card (S2-I5, S2-I10);
+//  7. a standing permission covers the call -> lowered;
+//  8. otherwise -> card.
+func Decide(in Input) Decision {
+	switch {
+	case in.WritesErr != nil || !in.Writes:
+		return Decision{OutcomeNever, ReasonWritesOff}
+	case in.PrincipalErr != nil || in.PrincipalDisabled:
+		return Decision{OutcomeNever, ReasonPrincipalDisabled}
+	case in.Class != catalog.ClassWrite && in.Class != catalog.ClassDisclosure:
+		return Decision{OutcomeNever, ReasonNotAWrite}
+	case in.Class == catalog.ClassDisclosure:
+		return Decision{OutcomeCard, ReasonDisclosure}
+	case (in.Lowerable != catalog.LowerableYes && in.Lowerable != catalog.LowerableConditional) ||
+		catalog.IsNeverLowerable(in.Tool):
+		return Decision{OutcomeCard, ReasonNeverLowerable}
+	case in.TaintErr != nil || in.Tainted:
+		return Decision{OutcomeCard, ReasonTainted}
+	case in.PermissionErr == nil && in.PermissionMatch:
+		return Decision{OutcomeLowered, ReasonPermission}
+	default:
+		return Decision{OutcomeCard, ReasonNoPermission}
+	}
+}
+
+// PrincipalStatus reports whether an admin disabled one principal's PA
+// (threat model T11). An error means the state could not be read, and the
+// principal is treated as disabled.
+type PrincipalStatus interface {
+	PrincipalDisabled(ctx context.Context, principal int64) (bool, error)
+}
+
+// ErrPrincipalStatusUnavailable: no per-principal disable exists yet, so
+// the state cannot be read.
+var ErrPrincipalStatusUnavailable = errors.New("pa gate: per-principal disable is not implemented")
+
+// NoPrincipalStatus is the PrincipalStatus until a per-principal disable
+// exists (#1318 has none): it always fails, so every principal is treated
+// as disabled and no write can pass Decide.
+type NoPrincipalStatus struct{}
+
+// PrincipalDisabled implements PrincipalStatus.
+func (NoPrincipalStatus) PrincipalDisabled(context.Context, int64) (bool, error) {
+	return true, ErrPrincipalStatusUnavailable
+}
+
+var _ PrincipalStatus = NoPrincipalStatus{}

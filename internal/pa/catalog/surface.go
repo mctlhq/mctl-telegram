@@ -45,6 +45,12 @@ var (
 	// ErrNoWritePath: the tool is not an auto read. Phase 1 has no path
 	// that dispatches anything else (I5).
 	ErrNoWritePath = errors.New("pa catalog: tool needs an approval path that does not exist")
+	// ErrApprovalRequired: the tool is an approve-tier write or disclosure
+	// and writes are on, so the call needs an approval or a standing
+	// permission before it may run (I5). It wraps ErrNoWritePath, so a
+	// caller that has no approval path, as every Phase 1 caller, refuses it
+	// exactly as before.
+	ErrApprovalRequired = fmt.Errorf("%w: approval required", ErrNoWritePath)
 )
 
 // DenyReason says why a tool the server lists, or the pin names, is denied.
@@ -221,8 +227,17 @@ func (s *Surface) Denied() []DeniedTool {
 // Authorize decides whether a call to tool may be dispatched. The name is
 // whatever the model proposed; it is looked up in the pin first, so a tool
 // outside the pin is refused even if the server lists it. Phase 1 grants
-// auto reads only.
+// auto reads only: it is AuthorizeWrites with writes off.
 func (s *Surface) Authorize(tool string, now time.Time) (Grant, error) {
+	return s.AuthorizeWrites(tool, now, false)
+}
+
+// AuthorizeWrites is Authorize with the PA_WRITES_ENABLED switch (threat
+// model T11). It grants auto reads only, whatever writes says. An
+// approve-tier write or disclosure is refused with ErrApprovalRequired when
+// writes is true and with ErrNoWritePath otherwise; neither ever grants.
+// No runtime code passes true (P2-S1).
+func (s *Surface) AuthorizeWrites(tool string, now time.Time, writes bool) (Grant, error) {
 	if err := s.fresh(now); err != nil {
 		return Grant{}, err
 	}
@@ -233,8 +248,11 @@ func (s *Surface) Authorize(tool string, now time.Time) (Grant, error) {
 	if _, ok := s.usable[tool]; !ok {
 		return Grant{}, ErrToolChanged
 	}
-	if pt.Tier != TierAuto || pt.Class != ClassRead {
-		return Grant{}, ErrNoWritePath
+	if pt.Tier == TierAuto && pt.Class == ClassRead {
+		return Grant{Server: s.server, Tool: tool, Tier: pt.Tier, Class: pt.Class, Lowerable: pt.Lowerable}, nil
 	}
-	return Grant{Server: s.server, Tool: tool, Tier: pt.Tier, Class: pt.Class, Lowerable: pt.Lowerable}, nil
+	if writes && pt.Tier == TierApprove && (pt.Class == ClassWrite || pt.Class == ClassDisclosure) {
+		return Grant{}, ErrApprovalRequired
+	}
+	return Grant{}, ErrNoWritePath
 }

@@ -71,7 +71,10 @@ func TestPinRefusalReasonIsClosed(t *testing.T) {
 		catalog.ErrNotPinned:         ReasonNotPinned,
 		catalog.ErrToolChanged:       ReasonToolChanged,
 		catalog.ErrNoWritePath:       ReasonNoWritePath,
-		ErrInvalidCall:               ReasonInternal,
+		// Phase 2's refusal is still "no write path" to the Phase 1
+		// dispatcher, never an unknown outcome (P2-S1).
+		catalog.ErrApprovalRequired: ReasonNoWritePath,
+		ErrInvalidCall:              ReasonInternal,
 	} {
 		if got := PinRefusalReason(err); got != want {
 			t.Errorf("%v: %q, want %q", err, got, want)
@@ -134,6 +137,35 @@ func TestEnvFlags(t *testing.T) {
 		if _, err := flags(); err == nil {
 			t.Fatalf("%q accepted", bad)
 		}
+	}
+}
+
+// TestEnvFlagsWrites: PA_WRITES_ENABLED is off when unset or empty, on only
+// for "true", and any other value is an error that refuses the call (it is
+// unknown, not off). It is re-read on every call.
+func TestEnvFlagsWrites(t *testing.T) {
+	env := map[string]string{ExternalToolsFlagEnv: "true", "PA_SERVER_TG_ENABLED": "true"}
+	flags := EnvFlags(func(k string) string { return env[k] })
+	if f, err := flags(); err != nil || f.Writes {
+		t.Fatalf("unset: %+v %v", f, err)
+	}
+	for v, want := range map[string]bool{"": false, "false": false, "true": true, " true ": true} {
+		env[WritesFlagEnv] = v
+		f, err := flags()
+		if err != nil || f.Writes != want || !f.ExternalTools || !f.Servers["tg"] {
+			t.Fatalf("%q: %+v %v, want Writes=%v", v, f, err, want)
+		}
+	}
+	for _, bad := range []string{"yes", "1", "TRUE", "on", "0", "no", "False", "true\x00"} {
+		env[WritesFlagEnv] = bad
+		f, err := flags()
+		if err == nil || f.Writes || f.ExternalTools {
+			t.Fatalf("%q: %+v %v, want an error and zero flags", bad, f, err)
+		}
+	}
+	env[WritesFlagEnv] = "true"
+	if f, err := flags(); err != nil || !f.Writes {
+		t.Fatalf("re-read after a bad value: %+v %v", f, err)
 	}
 }
 

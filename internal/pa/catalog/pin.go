@@ -77,12 +77,50 @@ type PinnedTool struct {
 	Class              Class     `json:"class"`
 	Lowerable          Lowerable `json:"lowerable"`
 	CatalogDescription string    `json:"catalog_description"`
+	// Constraints are optional, hand-authored limits on a write or
+	// disclosure tool (threat model T6). Only ValidatePhase2 gives them
+	// meaning; a read never has them.
+	Constraints *Constraints `json:"constraints,omitempty"`
 
 	// Derived from the server's descriptor by -update-pin.
 	DescriptionSHA256 string          `json:"description_sha256"`
 	InputSchema       json.RawMessage `json:"input_schema"`
 	InputSchemaSHA256 string          `json:"input_schema_sha256"`
 	Annotations       json.RawMessage `json:"annotations"`
+}
+
+// Constraints are the per-tool limits of threat model T6 that a Phase 2
+// pin records. They narrow what a standing permission may cover or what an
+// argument may hold; none of them widens a tool. Each argument they name
+// must be a property of the tool's pinned input schema.
+type Constraints struct {
+	// PlaybackActions are the values of one enum argument a standing
+	// permission may cover (alice_media_control: "playback controls
+	// only"). Every other value of that argument needs a card.
+	PlaybackActions *EnumSubset `json:"playback_actions,omitempty"`
+	// IntegerBounds are inclusive bounds of numeric arguments, in the
+	// device units the server takes (alice_set_volume level 1..10).
+	IntegerBounds map[string]IntBound `json:"integer_bounds,omitempty"`
+	// AllowedTypePrefixes are the device type prefixes a standing
+	// permission may cover (alice_control_device: light and media_device
+	// only). Each must be one of allowedDeviceTypePrefixes exactly; a type
+	// matches a prefix when it equals it or continues it after a dot.
+	AllowedTypePrefixes []string `json:"allowed_type_prefixes,omitempty"`
+	// TextCap is the maximum length, in characters, of string arguments
+	// (disclosure text: 1000).
+	TextCap map[string]int `json:"text_cap,omitempty"`
+}
+
+// EnumSubset names an enum argument and the subset of its values allowed.
+type EnumSubset struct {
+	Arg    string   `json:"arg"`
+	Values []string `json:"values"`
+}
+
+// IntBound is an inclusive integer range.
+type IntBound struct {
+	Min int64 `json:"min"`
+	Max int64 `json:"max"`
 }
 
 // ServerPin is the pin of one catalog server.
@@ -102,6 +140,13 @@ type Pin struct {
 
 //go:embed pin.json
 var pinJSON []byte
+
+// pinPhase2JSON is the Phase 2 pin. No runtime code loads it: LoadPin is
+// the only loader the service calls until Phase 2 is enabled by a reviewed
+// change (TestNoRuntimePhase2PinLoad in internal/pa guards this).
+//
+//go:embed pin_phase2.json
+var pinPhase2JSON []byte
 
 // ErrInvalidPin is wrapped by every pin validation failure.
 var ErrInvalidPin = errors.New("pa catalog: invalid pin")
@@ -128,9 +173,29 @@ func LoadPin() (*Pin, error) {
 	return p, nil
 }
 
+// LoadPinPhase2 returns the embedded Phase 2 pin, validated by
+// ValidatePhase2. It is not called by any runtime code (P2-S1): the
+// service runs on LoadPin, which admits reads only.
+func LoadPinPhase2() (*Pin, error) {
+	p, err := ParsePin(pinPhase2JSON)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.ValidatePhase2(); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
 // ParsePin decodes and validates a pin. Unknown fields are refused so a
-// misspelt policy field cannot be silently ignored.
+// misspelt policy field cannot be silently ignored, and so is a duplicate
+// key anywhere in the file: encoding/json keeps the last one silently, so a
+// reviewer reading the first entry of a tool pinned twice would review the
+// wrong policy.
 func ParsePin(raw []byte) (*Pin, error) {
+	if err := strictJSON(raw); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidPin, err)
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var p Pin
@@ -188,30 +253,8 @@ func validateTool(name string, t PinnedTool) error {
 	default:
 		return fmt.Errorf("class %q", t.Class)
 	}
-	switch t.Lowerable {
-	case LowerableNever, LowerableYes, LowerableConditional:
-	default:
-		return fmt.Errorf("lowerable %q", t.Lowerable)
-	}
-	// Reads are auto and have nothing to lower; everything else needs a
-	// decision of the principal (I5), so it is never auto.
-	if t.Class == ClassRead {
-		if t.Tier != TierAuto || t.Lowerable != LowerableNever {
-			return errors.New("a read must be tier auto, lowerable never")
-		}
-	} else if t.Tier != TierApprove {
-		return errors.New("a write or disclosure must be tier approve")
-	}
-	if t.Class == ClassDisclosure && t.Lowerable != LowerableNever {
-		return errors.New("a disclosure tool is never lowerable")
-	}
-	if want, ok := neverLowerable[name]; ok {
-		if t.Lowerable != LowerableNever {
-			return errors.New("this tool is never lowerable (threat model T6)")
-		}
-		if t.Class != want {
-			return fmt.Errorf("this tool is class %s (threat model T6)", want)
-		}
+	if err := checkPolicy(name, t); err != nil {
+		return err
 	}
 	desc := strings.TrimSpace(t.CatalogDescription)
 	if desc == "" || len(t.CatalogDescription) > maxCatalogDescription {
@@ -251,6 +294,47 @@ func validateTool(name string, t PinnedTool) error {
 	return nil
 }
 
+// checkPolicy holds the tier, class and lowerable rules of threat model T6
+// and I5 that every phase keeps. Validate and ValidatePhase2 both run it.
+func checkPolicy(name string, t PinnedTool) error {
+	switch t.Lowerable {
+	case LowerableNever, LowerableYes, LowerableConditional:
+	default:
+		return fmt.Errorf("lowerable %q", t.Lowerable)
+	}
+	// Reads are auto and have nothing to lower; everything else needs a
+	// decision of the principal (I5), so it is never auto.
+	if t.Class == ClassRead {
+		if t.Tier != TierAuto || t.Lowerable != LowerableNever {
+			return errors.New("a read must be tier auto, lowerable never")
+		}
+	} else if t.Tier != TierApprove {
+		return errors.New("a write or disclosure must be tier approve")
+	}
+	if t.Class == ClassDisclosure && t.Lowerable != LowerableNever {
+		return errors.New("a disclosure tool is never lowerable")
+	}
+	if want, ok := neverLowerable[name]; ok {
+		if t.Lowerable != LowerableNever {
+			return errors.New("this tool is never lowerable (threat model T6)")
+		}
+		if t.Class != want {
+			return fmt.Errorf("this tool is class %s (threat model T6)", want)
+		}
+	}
+	if t.Class == ClassRead && t.Constraints != nil {
+		return errors.New("a read has no constraints")
+	}
+	return nil
+}
+
+// IsNeverLowerable reports whether the threat model makes tool never
+// lowerable by name (T6), whatever a pin says.
+func IsNeverLowerable(tool string) bool {
+	_, ok := neverLowerable[tool]
+	return ok
+}
+
 // ValidatePhase1 checks that the pin has no write path (threat model I5):
 // every pinned tool is a read.
 func (p *Pin) ValidatePhase1() error {
@@ -262,6 +346,205 @@ func (p *Pin) ValidatePhase1() error {
 		}
 	}
 	return nil
+}
+
+// phase2Server is the only server Phase 2 pins writes on: Phase 2 is "a
+// small set of approved Alice actions" (threat model Scope, T6).
+const phase2Server = "alice"
+
+// phase2Policy is the T6 table: the only write and disclosure tools a
+// Phase 2 pin may hold, with their class and the most a pin may lower
+// them. A pin may be stricter (lowerable "never"), never looser.
+var phase2Policy = map[string]struct {
+	class Class
+	max   Lowerable
+}{
+	"alice_say_phrase":       {ClassDisclosure, LowerableNever},
+	"alice_send_command":     {ClassDisclosure, LowerableNever},
+	"alice_media_control":    {ClassWrite, LowerableConditional},
+	"alice_set_volume":       {ClassWrite, LowerableYes},
+	"alice_set_light":        {ClassWrite, LowerableYes},
+	"alice_control_device":   {ClassWrite, LowerableConditional},
+	"alice_control_room":     {ClassWrite, LowerableNever},
+	"alice_trigger_scenario": {ClassWrite, LowerableNever},
+}
+
+// MaxDisclosureText is the T6 cap on disclosure text, in characters.
+const MaxDisclosureText = 1000
+
+// allowedDeviceTypePrefixes are the only device types T6 lets a standing
+// permission cover (alice_control_device): lights and media devices.
+var allowedDeviceTypePrefixes = map[string]bool{
+	"devices.types.light":        true,
+	"devices.types.media_device": true,
+}
+
+// DeviceTypeAllowed reports whether a device type read fresh at dispatch
+// falls under one of prefixes: it equals a prefix or continues it after a
+// dot. An empty type (unknown or unreadable, T6) never matches.
+func DeviceTypeAllowed(prefixes []string, deviceType string) bool {
+	if deviceType == "" {
+		return false
+	}
+	for _, p := range prefixes {
+		if !allowedDeviceTypePrefixes[p] {
+			continue
+		}
+		if deviceType == p || strings.HasPrefix(deviceType, p+".") {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidatePhase2 checks a pin for Phase 2. No runtime code calls it (P2-S1).
+// On top of Validate (structure and the per-phase rules: a write or
+// disclosure is tier approve, a disclosure is never lowerable, the
+// neverLowerable tools stay never), it requires:
+//
+//   - every write or disclosure is a T6 tool on the alice server, with the
+//     T6 class, lowered no further than T6 allows;
+//   - every disclosure caps each of its text arguments at
+//     MaxDisclosureText or less;
+//   - a "conditional" tool names its condition (playback actions or device
+//     type prefixes), and only a conditional write carries one;
+//   - every argument a constraint names is a property of the pinned input
+//     schema with the right type, and the schema has no duplicate key.
+func (p *Pin) ValidatePhase2() error {
+	if err := p.Validate(); err != nil {
+		return err
+	}
+	for server, sp := range p.Servers {
+		for name, t := range sp.Tools {
+			if err := validatePhase2Tool(server, name, t); err != nil {
+				return fmt.Errorf("%w: %s/%s: %v", ErrInvalidPin, server, name, err)
+			}
+		}
+	}
+	return nil
+}
+
+func validatePhase2Tool(server, name string, t PinnedTool) error {
+	// Validate ran checkPolicy already; run it again so ValidatePhase2
+	// never depends on its caller having validated the pin first.
+	if err := checkPolicy(name, t); err != nil {
+		return err
+	}
+	if t.Class == ClassRead {
+		return nil
+	}
+	want, ok := phase2Policy[name]
+	if server != phase2Server || !ok {
+		return errors.New("not a Phase 2 tool (threat model T6)")
+	}
+	if t.Class != want.class {
+		return fmt.Errorf("class %s, threat model T6 says %s", t.Class, want.class)
+	}
+	if t.Lowerable != LowerableNever && t.Lowerable != want.max {
+		return fmt.Errorf("lowerable %s, threat model T6 allows at most %s", t.Lowerable, want.max)
+	}
+	if err := strictJSON(t.InputSchema); err != nil {
+		return fmt.Errorf("input_schema: %v", err)
+	}
+	props, err := schemaProperties(t.InputSchema)
+	if err != nil {
+		return fmt.Errorf("input_schema: %v", err)
+	}
+	c := t.Constraints
+	if c == nil {
+		c = &Constraints{}
+	}
+	if t.Class == ClassDisclosure && len(c.TextCap) == 0 {
+		return errors.New("a disclosure caps its text (text_cap)")
+	}
+	for arg, n := range c.TextCap {
+		if pr, ok := props[arg]; !ok || pr.Type != "string" {
+			return fmt.Errorf("text_cap: %q is not a string argument", arg)
+		}
+		if n < 1 || n > MaxDisclosureText {
+			return fmt.Errorf("text_cap: %q must be 1..%d", arg, MaxDisclosureText)
+		}
+	}
+	if len(c.IntegerBounds) > 0 && t.Class != ClassWrite {
+		return errors.New("integer_bounds: only a write has them")
+	}
+	for arg, b := range c.IntegerBounds {
+		if pr, ok := props[arg]; !ok || (pr.Type != "number" && pr.Type != "integer") {
+			return fmt.Errorf("integer_bounds: %q is not a numeric argument", arg)
+		}
+		if b.Min > b.Max {
+			return fmt.Errorf("integer_bounds: %q min > max", arg)
+		}
+	}
+	conditional := t.Class == ClassWrite && t.Lowerable == LowerableConditional
+	if (c.PlaybackActions != nil || len(c.AllowedTypePrefixes) > 0) && !conditional {
+		return errors.New("playback_actions and allowed_type_prefixes are conditions of a conditional write only")
+	}
+	if conditional && c.PlaybackActions == nil && len(c.AllowedTypePrefixes) == 0 {
+		return errors.New("a conditional write names its condition")
+	}
+	if pa := c.PlaybackActions; pa != nil {
+		pr, ok := props[pa.Arg]
+		if !ok || pr.Type != "string" || len(pr.Enum) == 0 {
+			return fmt.Errorf("playback_actions: %q is not a string enum argument", pa.Arg)
+		}
+		if len(pa.Values) == 0 {
+			return errors.New("playback_actions: no values")
+		}
+		seen := map[string]bool{}
+		for _, v := range pa.Values {
+			if seen[v] || !slices.Contains(pr.Enum, v) {
+				return fmt.Errorf("playback_actions: %q is repeated or not in the enum", v)
+			}
+			seen[v] = true
+		}
+	}
+	seen := map[string]bool{}
+	for _, pfx := range c.AllowedTypePrefixes {
+		if seen[pfx] || !allowedDeviceTypePrefixes[pfx] {
+			return fmt.Errorf("allowed_type_prefixes: %q is repeated or not allowed by threat model T6", pfx)
+		}
+		seen[pfx] = true
+	}
+	return nil
+}
+
+type schemaProperty struct {
+	Type string
+	Enum []string
+}
+
+// schemaProperties returns the top-level properties of an input schema
+// with their type, when it is a single string, and their string enum. A
+// property whose type is not a single string has Type "".
+func schemaProperties(raw json.RawMessage) (map[string]schemaProperty, error) {
+	var s struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil, err
+	}
+	out := make(map[string]schemaProperty, len(s.Properties))
+	for name, rp := range s.Properties {
+		var p struct {
+			Type json.RawMessage   `json:"type"`
+			Enum []json.RawMessage `json:"enum"`
+		}
+		if err := json.Unmarshal(rp, &p); err != nil {
+			return nil, fmt.Errorf("property %q: %v", name, err)
+		}
+		var sp schemaProperty
+		_ = json.Unmarshal(p.Type, &sp.Type) // a non-string type stays ""
+		for _, e := range p.Enum {
+			var v string
+			if err := json.Unmarshal(e, &v); err != nil {
+				return nil, fmt.Errorf("property %q: enum value is not a string", name)
+			}
+			sp.Enum = append(sp.Enum, v)
+		}
+		out[name] = sp
+	}
+	return out, nil
 }
 
 // ServerNames returns the pinned server names, sorted.

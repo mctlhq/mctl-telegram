@@ -27,29 +27,48 @@ import (
 // ExternalToolsFlagEnv switches every PA MCP call off (threat model T11).
 const ExternalToolsFlagEnv = "PA_EXTERNAL_TOOLS_ENABLED"
 
+// WritesFlagEnv makes every PA write and disclosure "never" when off
+// (threat model T11). Nothing dispatches a write yet (P2-S1).
+const WritesFlagEnv = "PA_WRITES_ENABLED"
+
 // EnvFlags reads the dispatch switches from the environment on every call,
 // so turning one off takes effect at the next dispatch (S1-F4). Missing or
 // empty is off; anything but "true" or "false" is an error, which refuses
-// the call.
+// the call. That holds for every switch: a malformed PA_WRITES_ENABLED
+// refuses reads too, because a switch that cannot be read is not off, it
+// is unknown.
 func EnvFlags(getenv func(string) string) func() (Flags, error) {
 	return func() (Flags, error) {
-		var ext bool
-		switch v := strings.TrimSpace(getenv(ExternalToolsFlagEnv)); v {
-		case "", "false":
-		case "true":
-			ext = true
-		default:
-			return Flags{}, fmt.Errorf("pa connector: %s must be true or false", ExternalToolsFlagEnv)
+		ext, err := boolFlag(getenv, ExternalToolsFlagEnv)
+		if err != nil {
+			return Flags{}, err
+		}
+		writes, err := boolFlag(getenv, WritesFlagEnv)
+		if err != nil {
+			return Flags{}, err
 		}
 		servers, err := linking.LoadServerFlags(getenv)
 		if err != nil {
 			return Flags{}, err
 		}
-		out := Flags{ExternalTools: ext, Servers: map[string]bool{}}
+		out := Flags{ExternalTools: ext, Writes: writes, Servers: map[string]bool{}}
 		for s, on := range servers {
 			out.Servers[string(s)] = on
 		}
 		return out, nil
+	}
+}
+
+// boolFlag reads one switch: missing or empty is false, "true" and "false"
+// are themselves, anything else is an error.
+func boolFlag(getenv func(string) string, name string) (bool, error) {
+	switch v := strings.TrimSpace(getenv(name)); v {
+	case "", "false":
+		return false, nil
+	case "true":
+		return true, nil
+	default:
+		return false, fmt.Errorf("pa connector: %s must be true or false", name)
 	}
 }
 

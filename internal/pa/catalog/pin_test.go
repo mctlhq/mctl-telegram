@@ -135,22 +135,27 @@ func regeneratePin(t *testing.T, current []byte, upstream map[string][]byte) []b
 }
 
 // TestPinMatchesUpstream is the drift gate: a change upstream to a pinned
-// tool's schema, description or annotations fails CI until pin.json is
-// regenerated, which makes the update a reviewed diff (ADR 0007 pattern).
+// tool's schema, description or annotations fails CI until pin.json (and
+// pin_phase2.json, which no runtime code loads) is regenerated, which makes
+// the update a reviewed diff (ADR 0007 pattern).
 func TestPinMatchesUpstream(t *testing.T) {
-	current, err := os.ReadFile("pin.json")
-	if err != nil {
-		t.Fatalf("read pin.json: %v", err)
-	}
-	want := regeneratePin(t, current, upstreamPages(t))
-	if *updatePin {
-		if err := os.WriteFile("pin.json", want, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
-	if !bytes.Equal(current, want) {
-		t.Fatalf("pin.json is out of date with its upstream descriptors; regenerate it with:\n  %s\nand review the diff", regenerateHint)
+	for _, file := range []string{"pin.json", "pin_phase2.json"} {
+		t.Run(file, func(t *testing.T) {
+			current, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatalf("read %s: %v", file, err)
+			}
+			want := regeneratePin(t, current, upstreamPages(t))
+			if *updatePin {
+				if err := os.WriteFile(file, want, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if !bytes.Equal(current, want) {
+				t.Fatalf("%s is out of date with its upstream descriptors; regenerate it with:\n  %s\nand review the diff", file, regenerateHint)
+			}
+		})
 	}
 }
 

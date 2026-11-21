@@ -99,7 +99,11 @@ type Connections interface {
 // Flags are the switches re-read at every dispatch (threat model T11).
 type Flags struct {
 	ExternalTools bool
-	Servers       map[string]bool
+	// Writes is PA_WRITES_ENABLED: off makes every write and disclosure
+	// "never" (T11). The dispatcher does not read it yet: no write path
+	// exists (P2-S1), so it is inert until the approval engine uses it.
+	Writes  bool
+	Servers map[string]bool
 }
 
 // MCPEndpoint is one catalog server's MCP surface. *Endpoint is the only

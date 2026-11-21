@@ -22,6 +22,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"strconv"
+	"unicode/utf8"
 )
 
 // canonicalJSON re-encodes a JSON value so that two encodings of the same
@@ -61,6 +64,124 @@ func canonicalObject(raw []byte) ([]byte, error) {
 		return nil, fmt.Errorf("want a JSON object, got %.20q", c)
 	}
 	return c, nil
+}
+
+// ErrInvalidArgs is wrapped by every CanonicalArgs failure.
+var ErrInvalidArgs = errors.New("pa catalog: invalid tool arguments")
+
+// CanonicalArgs returns the canonical encoding of a tool call's arguments,
+// the form an approval binds (threat model T6, T7) and the executor sends.
+// It is canonicalObject with the ambiguities that would let two different
+// inputs share one hash refused instead of resolved:
+//
+//   - a duplicate object key, at any depth (encoding/json keeps the last
+//     one silently, so {"a":1,"a":2} and {"a":2} would hash the same while a
+//     reader of the first sees a 1);
+//   - a number that does not fit a finite float64 (1e999), which a
+//     receiver cannot represent as the value the card showed;
+//   - invalid UTF-8 or an escape that decodes to U+FFFD (a lone surrogate),
+//     which encoding/json replaces silently;
+//   - anything but exactly one JSON object.
+func CanonicalArgs(raw []byte) ([]byte, error) {
+	if err := strictJSON(raw); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidArgs, err)
+	}
+	c, err := canonicalObject(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidArgs, err)
+	}
+	return c, nil
+}
+
+// CanonicalArgsSHA256 is the hex SHA-256 of CanonicalArgs(raw).
+func CanonicalArgsSHA256(raw []byte) (string, error) {
+	c, err := CanonicalArgs(raw)
+	if err != nil {
+		return "", err
+	}
+	return sha256Hex(c), nil
+}
+
+// strictJSON checks that raw is exactly one JSON value with no duplicate
+// object key, no non-finite number and no replaced character. It only
+// checks; canonicalJSON encodes.
+func strictJSON(raw []byte) error {
+	if !utf8.Valid(raw) {
+		return errors.New("invalid UTF-8")
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := strictValue(dec); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("trailing data after JSON value")
+	}
+	return nil
+}
+
+func strictValue(dec *json.Decoder) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	switch v := tok.(type) {
+	case json.Delim:
+		switch v {
+		case '{':
+			seen := map[string]struct{}{}
+			for dec.More() {
+				kt, err := dec.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := kt.(string)
+				if !ok {
+					return errors.New("object key is not a string")
+				}
+				if err := strictString(key); err != nil {
+					return err
+				}
+				if _, dup := seen[key]; dup {
+					return fmt.Errorf("duplicate key %.40q", key)
+				}
+				seen[key] = struct{}{}
+				if err := strictValue(dec); err != nil {
+					return err
+				}
+			}
+		case '[':
+			for dec.More() {
+				if err := strictValue(dec); err != nil {
+					return err
+				}
+			}
+		default:
+			return fmt.Errorf("unexpected %v", v)
+		}
+		// The closing delimiter; Token checks that it matches.
+		if _, err := dec.Token(); err != nil {
+			return err
+		}
+	case string:
+		return strictString(v)
+	case json.Number:
+		f, err := strconv.ParseFloat(v.String(), 64)
+		if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+			return fmt.Errorf("number %.40s is not a finite float64", v.String())
+		}
+	case bool, nil:
+	default:
+		return fmt.Errorf("unexpected token %T", tok)
+	}
+	return nil
+}
+
+func strictString(s string) error {
+	if !utf8.ValidString(s) || bytes.ContainsRune([]byte(s), utf8.RuneError) {
+		return errors.New("string has an invalid or replaced character")
+	}
+	return nil
 }
 
 // canonicalAnnotations normalises an annotations value. A missing or null
