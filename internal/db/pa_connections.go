@@ -131,21 +131,45 @@ func paAdmissionState(ctx context.Context, q paQuerier, principal int64) (mark, 
 	return mark, pending, nil
 }
 
-// AdmitPAConnection implements connection.Store. It takes no lock: it only
-// spares a principal at the cap the KEK wrap. CreatePAConnection decides.
+// AdmitPAConnection implements connection.Store. Its cap check only spares
+// a principal at the cap the KEK wrap; CreatePAConnection decides. It takes
+// the principal lock to read the deletion mark, so the lock row exists from
+// admission on: an account deletion keeps a row that exists and raises its
+// mark (purgePAPrincipals), which is what fences this Begin. Like
+// CreatePAConnection, it must not run inside a transaction that already
+// holds the principal lock: it would wait for itself.
 func (s *Store) AdmitPAConnection(ctx context.Context, principal int64) (connection.Admission, error) {
 	if principal <= 0 {
 		return connection.Admission{}, fmt.Errorf("%w: admission needs a principal", connection.ErrInvalidTransition)
 	}
-	mark, pending, err := paAdmissionState(ctx, s.DB, principal)
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return connection.Admission{}, fmt.Errorf("%w: admission: begin: %v", connection.ErrUnreadable, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO pa_principal_locks(principal, locked_at_ms) VALUES($1, $2)
+		 ON CONFLICT (principal) DO UPDATE SET locked_at_ms = excluded.locked_at_ms`,
+		principal, time.Now().UnixMilli()); err != nil {
+		return connection.Admission{}, fmt.Errorf("admit pa connection: lock principal: %w", err)
+	}
+	mark, pending, err := paAdmissionState(ctx, tx, principal)
 	if err != nil {
 		return connection.Admission{}, err
 	}
 	if pending >= connection.MaxPendingConnections {
 		return connection.Admission{}, connection.ErrTooManyPending
 	}
+	if err := tx.Commit(); err != nil {
+		return connection.Admission{}, fmt.Errorf("admit pa connection: commit: %w", err)
+	}
 	return connection.Admission{PurgeMark: mark, ReadAt: time.Now().UTC()}, nil
 }
+
+// paCreateAfterRecount is a test seam: it runs inside CreatePAConnection's
+// transaction after the cap and mark checks and before the insert, so a test
+// can hold one Begin there while another runs. Always nil outside tests.
+var paCreateAfterRecount func(c connection.Connection)
 
 // CreatePAConnection inserts a new pending_link row. In one transaction it
 // takes the principal's lock (the pa_principal_locks upsert that a webhook
@@ -162,6 +186,14 @@ func (s *Store) AdmitPAConnection(ctx context.Context, principal int64) (connect
 //     (ErrTooManyPending). Counting under the lock is what makes the cap
 //     hold for concurrent Begins: on Postgres the second waits for the first
 //     to commit, and SQLite runs one writer at a time.
+//
+// The fence covers a deletion concurrent with a Begin. A Begin admitted
+// after a deletion committed links normally: the principal is a Telegram
+// id, so that is the same person registering again.
+//
+// It must not be called inside a transaction that already holds the
+// principal lock (LockPAPrincipal): it takes the lock in its own
+// transaction and would wait for itself until ctx ends.
 func (s *Store) CreatePAConnection(ctx context.Context, c connection.Connection, sealed connection.Sealed, a connection.Admission) error {
 	if c.ID == "" || c.Principal <= 0 || !c.Server.Valid() || c.State != connection.StatePendingLink ||
 		c.AuthorityRevision != 1 || c.TokenGeneration != 0 || sealed.KEKID == "" || len(sealed.WrappedDEK) == 0 ||
@@ -195,6 +227,9 @@ func (s *Store) CreatePAConnection(ctx context.Context, c connection.Connection,
 	}
 	if pending >= connection.MaxPendingConnections {
 		return connection.ErrTooManyPending
+	}
+	if paCreateAfterRecount != nil {
+		paCreateAfterRecount(c)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO pa_connections(id, principal, server, state, authority_revision, token_generation,

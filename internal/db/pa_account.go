@@ -78,11 +78,15 @@ func (s *Store) accountTelegramIDs(ctx context.Context, userID int64) ([]int64, 
 
 // paPrincipalPurges are the deletes of purgePAPrincipals, in order. Each
 // takes the principal as $1. Not purged:
-//   - pa_principal_locks: the principal's lock row stays, with its
+//   - pa_principal_locks, when the row already existed: it stays, with its
 //     purged_at_ms deletion mark raised, so a linking Begin admitted before
 //     the deletion cannot create a connection after it (CreatePAConnection).
-//     It carries the principal and two timestamps, and the lock sweep
-//     deletes it once unused for pa.UpdatesRetention;
+//     It carries the principal and two timestamps, and the PA lock sweep
+//     deletes it once unused for pa.UpdatesRetention. A row the purge had
+//     to create only to take the lock is deleted again before commit: no
+//     Begin can be in flight for a principal without a lock row, because
+//     admission writes one (AdmitPAConnection), so with the PA off (no
+//     sweep running) an account deletion leaves no row behind;
 //   - pa_usage and pa_rate, the spend ledger and the message rate window
 //     behind the PA's caps: deleting them would let a delete-and-return
 //     reset the caps. They carry the principal, amounts and counts, no
@@ -137,15 +141,9 @@ var paPrincipalPurges = []struct{ table, q string }{
 func purgePAPrincipals(ctx context.Context, tx *sql.Tx, tgIDs []int64) error {
 	for _, p := range slices.Sorted(slices.Values(tgIDs)) {
 		now := time.Now().UnixMilli()
-		// The lock and the deletion mark in one upsert. The mark strictly
-		// grows while the row exists, even for two deletions in the same
-		// millisecond, so a Begin admitted between them still sees it move.
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO pa_principal_locks(principal, locked_at_ms, purged_at_ms) VALUES($1, $2, $2)
-			 ON CONFLICT (principal) DO UPDATE SET locked_at_ms = excluded.locked_at_ms,
-				purged_at_ms = CASE WHEN pa_principal_locks.purged_at_ms >= excluded.purged_at_ms
-					THEN pa_principal_locks.purged_at_ms + 1 ELSE excluded.purged_at_ms END`, p, now); err != nil {
-			return fmt.Errorf("delete account: lock pa principal: %w", err)
+		created, err := lockPAPrincipalForPurge(ctx, tx, p, now)
+		if err != nil {
+			return err
 		}
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE pa_usage SET status = $1, updated_at_ms = $2 WHERE principal = $3 AND status = $4`,
@@ -171,8 +169,50 @@ func purgePAPrincipals(ctx context.Context, tx *sql.Tx, tgIDs []int64) error {
 			// these gained tokens after that, or the caller did not revoke.
 			return ErrPAConnectionsNeedRevocation
 		}
+		if created {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM pa_principal_locks WHERE principal = $1`, p); err != nil {
+				return fmt.Errorf("delete account: release pa principal lock: %w", err)
+			}
+		}
 	}
 	return nil
+}
+
+// lockPAPrincipalForPurge takes principal's lock for the purge. On an
+// existing row it raises the deletion mark in the same statement: the mark
+// strictly grows, even for two deletions in the same millisecond, so a Begin
+// admitted between them still sees it move. Without a row it inserts one
+// only to hold the lock and reports created, and the purge deletes it
+// again. An insert that loses to a concurrent admission (DO NOTHING waits
+// for it on Postgres) goes back to the update, so an admitted Begin's row
+// always gets the mark.
+func lockPAPrincipalForPurge(ctx context.Context, tx *sql.Tx, principal, now int64) (created bool, err error) {
+	for range 2 {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE pa_principal_locks SET locked_at_ms = $2,
+				purged_at_ms = CASE WHEN purged_at_ms >= $2 THEN purged_at_ms + 1 ELSE $2 END
+			 WHERE principal = $1`, principal, now)
+		if err != nil {
+			return false, fmt.Errorf("delete account: lock pa principal: %w", err)
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return false, fmt.Errorf("delete account: lock pa principal: %w", err)
+		} else if n == 1 {
+			return false, nil
+		}
+		res, err = tx.ExecContext(ctx,
+			`INSERT INTO pa_principal_locks(principal, locked_at_ms) VALUES($1, $2) ON CONFLICT (principal) DO NOTHING`,
+			principal, now)
+		if err != nil {
+			return false, fmt.Errorf("delete account: lock pa principal: %w", err)
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return false, fmt.Errorf("delete account: lock pa principal: %w", err)
+		} else if n == 1 {
+			return true, nil
+		}
+	}
+	return false, errors.New("delete account: lock pa principal: the lock row kept changing")
 }
 
 // paPurgeAfterDelete is a test seam: it runs inside purgePAPrincipals'

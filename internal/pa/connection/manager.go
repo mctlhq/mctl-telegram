@@ -180,7 +180,9 @@ func readErr(err error) error {
 // MaxPendingConnections costs no wrap (T10), and checks again when it
 // creates the row, under the principal's lock: concurrent Begins cannot
 // both pass the cap, and a Begin admitted before an account deletion
-// cannot leave a row after it (ErrPrincipalDeleted, #1338).
+// cannot leave a row after it (ErrPrincipalDeleted, #1338). Begin takes
+// the principal lock itself, so it must not be called while the caller's
+// transaction holds that lock: it would wait for itself until ctx ends.
 func (m *Manager) Begin(ctx context.Context, principal int64, server Server) (Connection, error) {
 	if err := validPrincipal(principal); err != nil {
 		return Connection{}, err

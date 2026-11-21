@@ -441,3 +441,116 @@ func TestPAConnectionsPurge_SkipsRowThatGainsTokensWhileWaiting(t *testing.T) {
 		t.Fatalf("connection after the purge: err %v, %d token bytes, want it kept with its tokens", err, len(sealed.SealedTokens))
 	}
 }
+
+// Postgres, deterministic T10 race: Begin A is held between its recount and
+// its insert while Begin B, admitted at cap-1 too, runs. B must wait for
+// A's principal lock and then count A's row, or both would insert and the
+// principal would end past the cap.
+func TestCreatePAConnection_PendingCapHeldBegin(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	s := newPostgresTestStore(t, dsn)
+	ctx := context.Background()
+	bob := 9200000000 + (time.Now().UnixNano()/1000)%100000000 + 40
+	t.Cleanup(func() {
+		_, _ = s.DB.Exec(`DELETE FROM pa_connections WHERE principal = $1`, bob)
+		_, _ = s.DB.Exec(`DELETE FROM pa_principal_locks WHERE principal = $1`, bob)
+	})
+	for range connection.MaxPendingConnections - 1 {
+		seedPAConnection(t, s, bob)
+	}
+	admA, admB := mustAdmitPA(t, s, bob), mustAdmitPA(t, s, bob)
+	cA, sealed := newPAConn(bob, "pac_held_a_"+randomSuffix(t))
+	cB, _ := newPAConn(bob, "pac_held_b_"+randomSuffix(t))
+
+	held, release := make(chan struct{}), make(chan struct{})
+	paCreateAfterRecount = func(c connection.Connection) {
+		if c.ID == cA.ID {
+			close(held)
+			<-release
+		}
+	}
+	t.Cleanup(func() { paCreateAfterRecount = nil })
+	doneA, doneB := make(chan error, 1), make(chan error, 1)
+	go func() { doneA <- s.CreatePAConnection(ctx, cA, sealed, admA) }()
+	<-held
+	go func() { doneB <- s.CreatePAConnection(ctx, cB, sealed, admB) }()
+
+	// B either waits on A's lock (correct) or finishes without waiting.
+	var errB error
+	finishedEarly := false
+	deadline := time.Now().Add(10 * time.Second)
+wait:
+	for {
+		select {
+		case errB = <-doneB:
+			finishedEarly = true
+			break wait
+		default:
+		}
+		var n int
+		if err := s.DB.QueryRow(`SELECT COUNT(*) FROM pg_stat_activity
+			WHERE wait_event_type = 'Lock' AND query LIKE 'INSERT INTO pa_principal_locks%'`).Scan(&n); err != nil {
+			t.Fatalf("pg_stat_activity: %v", err)
+		}
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Begin B neither waited on the principal lock nor finished")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	close(release)
+	if err := <-doneA; err != nil {
+		t.Fatalf("Begin A: %v", err)
+	}
+	if !finishedEarly {
+		errB = <-doneB
+	}
+	if finishedEarly && errB == nil {
+		t.Fatal("Begin B created its row while Begin A was held after its recount: the cap check is not under the principal lock")
+	}
+	if !errors.Is(errB, connection.ErrTooManyPending) {
+		t.Fatalf("Begin B: %v, want ErrTooManyPending", errB)
+	}
+	if n := paRowsIn(t, s, "pa_connections", bob); n != connection.MaxPendingConnections {
+		t.Fatalf("%d pending rows, want %d", n, connection.MaxPendingConnections)
+	}
+}
+
+// An account deletion of a principal that was never admitted to link leaves
+// no pa_principal_locks row, so with the PA off (no lock sweep runs) a
+// deleted account's Telegram id is not kept. One that was admitted keeps
+// its row with the deletion mark raised, the fence a Begin in flight needs.
+func TestPurgePAPrincipals_LockRowOnlyAfterAdmission(t *testing.T) {
+	deletionDialects(t, func(t *testing.T, s *Store, base int64) {
+		ctx := context.Background()
+		carol, dana := base+41, base+42
+		for _, p := range []int64{carol, dana} {
+			uid, err := s.EnsureUserByTelegramID(ctx, p, "carol", "Carol")
+			if err != nil {
+				t.Fatalf("ensure: %v", err)
+			}
+			seedAccountForTelegramID(t, s, uid, p, nil)
+			t.Cleanup(func() { _, _ = s.DB.Exec(`DELETE FROM pa_principal_locks WHERE principal = $1`, p) })
+			if p == dana {
+				mustAdmitPA(t, s, p)
+			}
+			if _, err := s.HardDeleteAccount(ctx, uid); err != nil {
+				t.Fatalf("delete %d: %v", p, err)
+			}
+		}
+		if n := paRowsIn(t, s, "pa_principal_locks", carol); n != 0 {
+			t.Fatalf("%d pa_principal_locks rows of a never-admitted deleted principal, want 0", n)
+		}
+		if n := paRowsIn(t, s, "pa_principal_locks", dana); n != 1 {
+			t.Fatalf("%d pa_principal_locks rows of an admitted deleted principal, want 1", n)
+		}
+		if m := paPurgeMark(t, s, dana); m <= 0 {
+			t.Fatalf("deletion mark of an admitted principal = %d, want > 0", m)
+		}
+	})
+}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -46,7 +47,8 @@ func ParseASMetadata(body []byte, issuer string) (ASMetadata, error) {
 	if err := dec.Decode(&doc); err != nil || doc == nil {
 		return ASMetadata{}, fmt.Errorf("%w: not a JSON object", ErrASMetadata)
 	}
-	if dec.More() {
+	// Token, not More: More reports false before a stray closing bracket.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return ASMetadata{}, fmt.Errorf("%w: trailing data after the JSON object", ErrASMetadata)
 	}
 	var got string
