@@ -55,6 +55,7 @@ func TestCanonicalArgsSHA256(t *testing.T) {
 		"case variant key":        `{"level":1,"Level":10}`,
 		"nested case variant key": `{"x":{"Device":"a","dEVICE":"b"}}`,
 		"kelvin sign key":         `{"\u212aind":1,"kind":2}`,
+		"long s key":              `{"\u017fcene":1,"scene":2}`,
 		"array":                   `[{"a":1}]`,
 		"number":                  `1`,
 		"string":                  `"x"`,

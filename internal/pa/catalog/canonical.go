@@ -190,8 +190,8 @@ func strictValue(dec *json.Decoder) error {
 // foldKey maps s to one representative of its case-folding class: two
 // strings have the same foldKey exactly when strings.EqualFold says they
 // are equal. Each rune becomes the smallest rune of its unicode.SimpleFold
-// orbit, which also catches the Kelvin sign and the long s that
-// encoding/json folds to k and s.
+// orbit, the same fold encoding/json applies (its foldRune), which also
+// catches the Kelvin sign and the long s, folded to K and S.
 func foldKey(s string) string {
 	var b strings.Builder
 	for _, r := range s {
