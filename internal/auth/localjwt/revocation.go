@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -38,11 +39,33 @@ const MaxRevocationSnapshotAge = MaxRevocationCacheTTL
 // queries, then ends every refresh with the client giving up (context
 // Canceled), which is deliberately not counted as a refresh failure, so the
 // outage refuses every worker token while the failure counter stays flat.
-// With this deadline such a read ends as a counted failure. It is shorter
-// than MaxRevocationSnapshotAge so a check that has to refresh still answers
-// well inside the bound, and long enough that a merely slow but healthy
-// read of a single-digit-row table does not trip it.
+// With this deadline such a read ends as a counted failure, and a request
+// that has to refresh inline waits at most this long. It does NOT keep a
+// hung-store check inside the bound: an inline refresh starts only once the
+// snapshot is at least one TTL old (10s by default), so a read that runs to
+// this deadline returns with the snapshot at 15s or more and the check is
+// refused. That is the fail-closed outcome #1346 asks for, not a stale
+// answer. What keeps checks inside the bound is the background refresher
+// (RevocationRefreshInterval): with RevocationRefreshInterval +
+// RevocationRefreshTimeout <= DefaultRevocationCacheTTL, a healthy store,
+// however slow up to this deadline, refreshes the snapshot before any
+// request finds it stale. Long enough that a slow but healthy read of a
+// single-digit-row table does not trip it.
 const RevocationRefreshTimeout = 5 * time.Second
+
+// RevocationRefreshInterval is how often RunRefresher reloads the denylist,
+// independently of traffic. Two reasons, both from #1346's outage shape:
+//
+//   - Workers exit on their first 401 and come back only through
+//     CrashLoopBackOff (up to 5 minutes apart), so request-driven refreshes
+//     stop almost as soon as an outage starts. A store failure must still be
+//     observed at a rate the server sets: one read per interval.
+//   - A snapshot kept younger than the TTL means the request path almost
+//     never refreshes inline, so a healthy but slow store adds no latency
+//     to token checks.
+//
+// See RevocationRefreshTimeout for how the two combine with the TTL.
+const RevocationRefreshInterval = 5 * time.Second
 
 // errRefreshDeadline is the cause attached to the refresh read's own
 // deadline. context.Cause on the read's context returns it only when that
@@ -76,6 +99,10 @@ type RevocationCache struct {
 	// refreshTimeout is RevocationRefreshTimeout; a field only so tests can
 	// shorten it.
 	refreshTimeout time.Duration
+	// createdAt stands in for the read start while the cache has never
+	// populated: no snapshot is younger than the process's cache, so that
+	// is the age SnapshotAge reports rather than zero or "unknown".
+	createdAt time.Time
 
 	// onRefreshError, when set, is called once per failed refresh (the
 	// server wires it to mctl_worker_token_revocation_refresh_failures_total).
@@ -108,6 +135,7 @@ func NewRevocationCache(store *db.Store, ttl time.Duration) *RevocationCache {
 		ttl:            ttl,
 		now:            time.Now,
 		refreshTimeout: RevocationRefreshTimeout,
+		createdAt:      time.Now(),
 		jtis:           make(map[string]struct{}),
 		blanket:        make(map[int64]time.Time),
 	}
@@ -211,6 +239,64 @@ func (c *RevocationCache) lookup(jti string, checkJti bool, telegramID int64, is
 		return true, false, nil
 	}
 	return false, false, nil
+}
+
+// SnapshotAge is how old the served snapshot is, measured from when its read
+// began: the age MaxRevocationSnapshotAge bounds. Past that bound every
+// check is refused, so this is the direct signal of #1346's outage whatever
+// the traffic. A cache that has never populated reports the time since it
+// was created, never zero: could not load is not fresh.
+func (c *RevocationCache) SnapshotAge() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.populated {
+		return c.now().Sub(c.createdAt)
+	}
+	return c.now().Sub(c.readStartedAt)
+}
+
+// RunRefresher reloads the denylist every RevocationRefreshInterval until
+// ctx ends, starting with one load at once. Run it once per cache, on the
+// server's lifetime context. Failures go through the same counted path as
+// request-driven refreshes, so while the store is unreadable the failure
+// counter moves at least once per interval with no traffic at all.
+//
+// Reads run one at a time on this goroutine, each bounded by
+// RevocationRefreshTimeout, so a hung store cannot pile up refresher reads:
+// a tick that arrives while a read is running waits (time.Ticker keeps at
+// most one) and the rest are dropped. A request-path refresh is a separate
+// read with its own context and is counted separately: the counter is
+// failed reads, not failed checks. ctx ending stops the loop and aborts a
+// read in flight; that abort is a caller cancel and is not counted.
+func (c *RevocationCache) RunRefresher(ctx context.Context) {
+	t := time.NewTicker(RevocationRefreshInterval)
+	defer t.Stop()
+	c.runRefresher(ctx, t.C)
+}
+
+// runRefresher is RunRefresher with the tick source injected for tests.
+func (c *RevocationCache) runRefresher(ctx context.Context, tick <-chan time.Time) {
+	failing := false
+	refreshOnce := func() {
+		err := c.refresh(ctx)
+		switch {
+		case err != nil && ctx.Err() == nil && !failing:
+			failing = true
+			slog.Warn("worker token revocation refresher: refresh failing", "err", err)
+		case err == nil && failing:
+			failing = false
+			slog.Info("worker token revocation refresher: refresh recovered")
+		}
+	}
+	refreshOnce()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick:
+			refreshOnce()
+		}
+	}
 }
 
 // Refresh forces an immediate reload of the denylist, ignoring the TTL.

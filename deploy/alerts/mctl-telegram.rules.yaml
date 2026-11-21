@@ -254,10 +254,11 @@ spec:
         # the unit tests. Kept here so runbook_links_test.go checks the
         # anchor. The expression must stay identical to the deployed one.
         # #1346: past a 15s-old snapshot every worker-derived token is
-        # refused, so a store that keeps failing refreshes stops every agent
-        # worker.
+        # refused. Driven by the snapshot age gauge, not by request traffic:
+        # agent workers exit on their first 401 and crash-loop, so requests
+        # stop almost as soon as an outage starts.
         - alert: MctlWorkerTokenRevocationRefreshFailing
-          expr: sum by (job) (increase(mctl_worker_token_revocation_refresh_failures_total[3m])) > 1.5
+          expr: max by (job) (max_over_time(mctl_worker_token_revocation_snapshot_age_seconds[1m])) > 15
           for: 5m
           labels:
             severity: critical
@@ -265,12 +266,12 @@ spec:
           annotations:
             summary: "mctl-telegram cannot refresh the worker-token revocation list; worker tokens are refused"
             description: >
-              {{ $value | humanize }} worker-token revocation refreshes failed in
-              the last 3 minutes, and refreshes have kept failing for five
-              minutes. Once the last good snapshot is 15 seconds old, every
-              worker, pool, Local Bridge and job token is refused with 401, so
-              agent workers are stopped. The store is the cause (shared-pg down or
-              unreachable): check the database, not the bound.
+              The worker-token revocation snapshot reached {{ $value | humanizeDuration }}
+              in the last minute and has been past its 15-second bound for five
+              minutes. Past the bound every worker, pool, Local Bridge and job
+              token is refused with 401, so agent workers are stopped. The store
+              is the cause (shared-pg down, unreachable or hung): check the
+              database, not the bound.
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlworkertokenrevocationrefreshfailing"
 
     - name: mctl-telegram-agent

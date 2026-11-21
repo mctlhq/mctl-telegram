@@ -3004,36 +3004,52 @@ rather than re-applying the exemption.
 ### Symptom
 
 - Alert `MctlWorkerTokenRevocationRefreshFailing` fires with severity
-  **critical** when at least two refreshes of the worker-token revocation
-  cache failed within 3 minutes, for 5 minutes running
-  (`sum by (job) (increase(mctl_worker_token_revocation_refresh_failures_total[3m])) > 1.5`).
-  `> 1.5` reads "at least two" on both VictoriaMetrics (whole-number
-  `increase()`) and Prometheus (whose extrapolation can turn one failure into
-  1.5). The lookback is shorter than the hold, so a burst during a failover
-  ages out before it can fire; only failures that keep coming survive.
+  **critical** when the worker-token revocation snapshot of some pod has been
+  past its 15-second bound in every minute for 5 minutes running
+  (`max by (job) (max_over_time(mctl_worker_token_revocation_snapshot_age_seconds[1m])) > 15`).
+  The gauge is the snapshot's age from when its read began, the same measure
+  the bound uses, computed at each scrape. `> 15` is the bound itself: the
+  server refuses at an age above 15 seconds. `max_over_time` over `[1m]`
+  keeps a store that flaps between failing and healthy from resetting the
+  hold; the window is shorter than the hold, so one stale minute during a
+  failover cannot page.
 - What it means: since mctl-telegram#1346 (release 0.140.0) the revocation
   cache fails closed. It serves its last good snapshot for at most 15
   seconds (`localjwt.MaxRevocationSnapshotAge`). Past that, **every** token
   checked against it is refused with 401: worker tokens, the managed pool
   token, Local Bridge daemon tokens, agent job tokens and PA job tokens. All
   of them share one cache in the server.
-- How the counter moves: there is no background refresher. A refresh runs
-  inline on a token check that finds the snapshot at least one TTL old
-  (`WORKER_TOKEN_REVOCATION_CACHE_TTL`, default 10s). While refreshes fail
-  the snapshot never gets younger, so every worker-token request during the
-  outage is one failed refresh. No traffic means no refreshes, no failures
-  and no one refused. The pool worker polls every 2 seconds and backs off to
-  at most 60 seconds on errors, so a real outage with any worker running
-  produces at least one failure a minute.
-- On the client side: agent workers and the pool worker log 401s and back
-  off; Local Bridge daemons reconnect in a loop. `mctl_auth_failures_total`
-  rises with `reason="other"` (the refusal is a store failure, not a bad
-  token) for the worker providers.
-- The series is a plain counter, registered at 0 when the server starts, so
-  it exists on every running, scraped server from 0.140.0 on. It does not
-  exist on earlier releases, which never refused tokens for this reason. A
-  server that is down or not scraped gives this rule no data at all; that
-  case is `ServiceUnavailable` (the `/healthz` probe), not this alert.
+- Why the age and not request traffic: an agent worker **exits** on its
+  first 401 (it reads its token once at start, so retrying cannot help) and
+  comes back only through Kubernetes `CrashLoopBackOff`, with restarts 10s,
+  20s, 40s … apart up to 5 minutes. The PA worker stops. After the first
+  minute of an outage there are almost no worker-token requests, so a signal
+  driven by requests goes quiet exactly when the outage is real. The server
+  therefore refreshes on its own: a background refresher reloads the list
+  every 5 seconds (`localjwt.RevocationRefreshInterval`), one read at a time,
+  each bounded by a 5-second deadline (`localjwt.RevocationRefreshTimeout`).
+  On a healthy store, even a slow one, the age stays at or under 10 seconds.
+  While the store is unreadable it climbs without limit, traffic or not.
+- A pod that starts into the outage and never loads the list reports its
+  age since the cache was created, never 0, so it pages too.
+- How the failure counter moves (diagnostic only):
+  `mctl_worker_token_revocation_refresh_failures_total` counts failed reads.
+  The refresher adds one per tick (at least one per 10 seconds while the
+  store hangs to its deadline), and a request that finds the snapshot stale
+  and refreshes inline adds its own. A read its caller abandons
+  (`context.Canceled`, including server shutdown) is not counted; a read
+  that hits its own deadline is.
+- On the client side: agent workers log the 401 and exit, then crash-loop
+  (`get_service_pods` shows restarts climbing); Local Bridge daemons
+  reconnect in a loop. `mctl_auth_failures_total` rises with
+  `reason="other"` (the refusal is a store failure, not a bad token) for the
+  worker providers.
+- The gauge exists from the release that ships the refresher (0.140.0, also
+  the first release that refuses tokens). Older releases export no gauge and
+  this rule stays silent on them; they fail open, so there is nothing to
+  page on. A server that is down or not scraped gives this rule no data at
+  all; that case is `ServiceUnavailable` (the `/healthz` probe), not this
+  alert.
 
 ### Likely causes
 
@@ -3050,20 +3066,21 @@ rather than re-applying the exemption.
 
 4. **shared-pg hangs instead of failing**, or the server's own connection
    pool is held by slow queries. Each refresh read has its own 5-second
-   deadline (`localjwt.RevocationRefreshTimeout`, below the 15-second bound),
-   derived from the request's context. When that deadline expires the read
-   counts as a failed refresh, so a hang shows up here like an outright
-   failure, only slower: about one failure per request every 5 seconds. A
-   request the client abandons before the deadline (`context.Canceled`) is
-   still not counted, because the metric must follow outages, not traffic.
-   Every worker client waits longer than 5 seconds (the agent worker polls
-   with a 30-second deadline, Local Bridge clients 15 seconds), so in
-   practice the deadline fires first.
+   deadline (`localjwt.RevocationRefreshTimeout`), derived from the
+   refresher's or the request's context, so a hung read ends as a counted
+   failure and the age climbs exactly as in an outright failure. A request
+   that has to refresh inline waits at most those 5 seconds and is then
+   refused: an inline refresh starts only once the snapshot is a TTL (10s)
+   old, so a read that runs to the deadline returns past the 15-second
+   bound. That is the fail-closed outcome, not a stale answer.
 
 ### Diagnostic queries
 
 ```promql
-# Failed refreshes per minute, fleet of the job.
+# Snapshot age per pod, in seconds; above 15 that pod refuses worker tokens.
+mctl_worker_token_revocation_snapshot_age_seconds
+
+# Failed refresh reads per minute (refresher ticks plus inline refreshes).
 sum by (job) (rate(mctl_worker_token_revocation_refresh_failures_total[5m])) * 60
 
 # The refusals the outage causes, by provider.
@@ -3082,6 +3099,9 @@ mctl-telegram service in the `labs` tenant):
   (connection refused, too many clients, missing relation, or
   `revocation refresh read exceeded RevocationRefreshTimeout` when the read
   hung until its own deadline).
+- `worker token revocation refresher: refresh failing` (logged once when
+  the background refresher's reads start failing, with the same wrapped
+  error) and `worker token revocation refresher: refresh recovered`.
 - Unrelated database errors from other paths at the same time confirm the
   store, not this cache, is the problem.
 
@@ -3095,14 +3115,18 @@ many pods serve.
 Every agent worker, the managed pool worker, PA jobs and Local Bridge
 daemons are refused for as long as the store stays unreadable. Interactive
 users (OAuth sessions) are not affected: their tokens skip the revocation
-check. No data is lost; jobs stay pending and are claimed once refreshes
-succeed again, within one request of the database coming back.
+check. No data is lost; jobs stay pending and are claimed once workers are
+back. The server itself recovers within one refresher tick (5 seconds) of
+the database coming back; workers recover on their next CrashLoopBackOff
+restart, which can be up to 5 minutes later.
 
 ### Mitigation
 
-1. Restore the database. This is the only fix. Once a refresh succeeds the
-   next token check serves a fresh snapshot and workers recover by
-   themselves within their backoff (at most 60 seconds).
+1. Restore the database. This is the only fix. Within 5 seconds the
+   refresher loads a fresh snapshot (the age gauge drops under 10) and
+   token checks pass again. Crashed agent workers come back on their next
+   CrashLoopBackOff restart, up to 5 minutes later; to skip the wait,
+   restart the worker pods once the gauge is back under 10.
 2. If only mctl-telegram cannot reach a healthy shared-pg, restart the
    mctl-telegram pods after fixing the path or credentials.
 3. **Do not raise or disable the 15-second bound** (no

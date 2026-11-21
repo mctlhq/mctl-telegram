@@ -182,3 +182,197 @@ func TestRevocationCache_HungStoreStillFailsClosedPastBound(t *testing.T) {
 		t.Fatalf("refresh failures after the refused check = %d, want 2", got)
 	}
 }
+
+// The relations the refresher depends on. With interval + timeout within
+// the default TTL, a healthy store (even one slow up to the read deadline)
+// refreshes the snapshot before a request finds it stale, so the request
+// path does not refresh inline; and a refresher tick always lands inside
+// the age bound.
+func TestRevocationRefreshInterval_KeepsSnapshotWarm(t *testing.T) {
+	if RevocationRefreshInterval <= 0 {
+		t.Fatalf("RevocationRefreshInterval = %s, want > 0", RevocationRefreshInterval)
+	}
+	if got := RevocationRefreshInterval + RevocationRefreshTimeout; got > DefaultRevocationCacheTTL {
+		t.Fatalf("interval + timeout = %s, want <= DefaultRevocationCacheTTL (%s)", got, DefaultRevocationCacheTTL)
+	}
+	if RevocationRefreshInterval >= MaxRevocationSnapshotAge {
+		t.Fatalf("RevocationRefreshInterval = %s, want below MaxRevocationSnapshotAge (%s)",
+			RevocationRefreshInterval, MaxRevocationSnapshotAge)
+	}
+}
+
+// startRefresher runs the refresher on a manual, unbuffered tick channel.
+// An unbuffered send completes only when the loop is back in its select, so
+// a second send proves the refresh started by the first one has finished:
+// no sleeps, no wall-clock polling.
+func startRefresher(t *testing.T, cache *RevocationCache) (tick chan time.Time, stop func()) {
+	t.Helper()
+	tick = make(chan time.Time)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		cache.runRefresher(ctx, tick)
+		close(done)
+	}()
+	var once bool
+	stop = func() {
+		if once {
+			return
+		}
+		once = true
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("refresher did not stop after its context was canceled")
+		}
+	}
+	t.Cleanup(stop)
+	return tick, stop
+}
+
+func sendTick(t *testing.T, tick chan time.Time) {
+	t.Helper()
+	select {
+	case tick <- time.Time{}:
+	case <-time.After(3 * time.Second):
+		t.Fatal("refresher did not take a tick: a refresh is stuck past its deadline")
+	}
+}
+
+// The refresher loads at once and reloads on every tick, with no request in
+// sight: a revocation recorded later reaches the snapshot through a tick
+// alone. The clock is frozen, so no check here is ever stale and no inline
+// refresh can be what picked it up.
+func TestRevocationCache_RefresherReloadsOnTick(t *testing.T) {
+	store := newTestLocaljwtStore(t)
+	ctx := context.Background()
+	base := time.Now()
+	cache := NewRevocationCache(store, DefaultRevocationCacheTTL)
+	cache.now = func() time.Time { return base }
+	tick, stop := startRefresher(t, cache)
+
+	sendTick(t, tick) // returns once the initial load is done
+	if got := cache.SnapshotAge(); got != 0 {
+		t.Fatalf("snapshot age after the initial load = %s, want 0 on a frozen clock", got)
+	}
+	if err := store.RevokeWorkerToken(ctx, "jti-tick", 1, "", 0); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	// The tick above already started a refresh that may predate the
+	// revocation; two more sends guarantee one full refresh after it.
+	sendTick(t, tick)
+	sendTick(t, tick)
+	stop()
+	revoked, err := cache.IsRevoked(ctx, "jti-tick", 1, base)
+	if err != nil || !revoked {
+		t.Fatalf("revocation recorded after start not picked up by the refresher: revoked=%v err=%v", revoked, err)
+	}
+}
+
+// A failing store is counted once per tick (plus the initial load), whatever
+// the traffic: the rate is the server's, not the clients'.
+func TestRevocationCache_RefresherCountsFailuresAtTickRate(t *testing.T) {
+	store := newBrokenLocaljwtStore(t, "refresher_failing")
+	cache := NewRevocationCache(store, DefaultRevocationCacheTTL)
+	var failures atomic.Int32
+	cache.SetRefreshErrorHook(func() { failures.Add(1) })
+	tick, stop := startRefresher(t, cache)
+	const ticks = 5
+	for range ticks {
+		sendTick(t, tick)
+	}
+	sendTick(t, tick) // lands once the last of the 5 tick refreshes has finished
+	stop()
+	// Finished for sure: the initial load and the 5 ticks. The sync tick's
+	// own refresh races with stop(): it is counted if it failed before the
+	// cancel and not counted if the cancel aborted it.
+	if got := failures.Load(); got < ticks+1 || got > ticks+2 {
+		t.Fatalf("failures = %d, want %d or %d (initial load + %d ticks, plus maybe the sync tick)", got, ticks+1, ticks+2, ticks)
+	}
+}
+
+// A hung store: each refresher read runs to its deadline and is counted, and
+// reads never overlap, so ticks are taken one deadline apart rather than
+// piling up concurrent reads.
+func TestRevocationCache_RefresherHungStoreOneReadAtATime(t *testing.T) {
+	store := newTestLocaljwtStore(t)
+	cache := NewRevocationCache(store, DefaultRevocationCacheTTL)
+	cache.refreshTimeout = 50 * time.Millisecond
+	var failures atomic.Int32
+	cache.SetRefreshErrorHook(func() { failures.Add(1) })
+	holdOnlyConnection(t, store)
+
+	start := time.Now()
+	tick, stop := startRefresher(t, cache)
+	for range 3 {
+		sendTick(t, tick)
+	}
+	// Three sends: the first waits out the initial read, each later one the
+	// read the previous tick started. Concurrent reads would take them at once.
+	if elapsed, min := time.Since(start), 3*cache.refreshTimeout; elapsed < min {
+		t.Fatalf("3 ticks taken in %s, want >= %s: refresher reads overlapped", elapsed, min)
+	}
+	stop()
+	// The initial read and the first two ticks' reads ran to their deadline;
+	// the third tick's read is normally aborted by stop() (not counted).
+	if got := failures.Load(); got < 3 || got > 4 {
+		t.Fatalf("failures = %d, want 3 (or 4 if the last read beat stop): one per read, each to its deadline", got)
+	}
+}
+
+// Canceling the server context stops the loop promptly even while a read is
+// hung (the read's deadline derives from that context), and that abort is
+// not counted as a store failure.
+func TestRevocationCache_RefresherStopsOnCancelDuringHungRead(t *testing.T) {
+	store := newTestLocaljwtStore(t)
+	cache := NewRevocationCache(store, DefaultRevocationCacheTTL)
+	cache.refreshTimeout = time.Minute
+	var failures atomic.Int32
+	cache.SetRefreshErrorHook(func() { failures.Add(1) })
+	holdOnlyConnection(t, store)
+
+	_, stop := startRefresher(t, cache) // initial read is now hung
+	time.Sleep(20 * time.Millisecond)   // let it reach the store; not a sync point
+	start := time.Now()
+	stop() // fails the test if the loop is not gone within 3s
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("refresher took %s to stop with a hung read", elapsed)
+	}
+	if got := failures.Load(); got != 0 {
+		t.Fatalf("failures = %d, want 0: a shutdown abort is not a store failure", got)
+	}
+}
+
+// SnapshotAge is the bound's own measure: from the applied snapshot's read
+// start, unchanged by failing refreshes, and never zero for a cache that has
+// never loaded.
+func TestRevocationCache_SnapshotAge(t *testing.T) {
+	store := newTestLocaljwtStore(t)
+	ctx := context.Background()
+	base := time.Now()
+	cache := NewRevocationCache(store, DefaultRevocationCacheTTL)
+	cache.createdAt = base
+	cache.now = func() time.Time { return base.Add(7 * time.Second) }
+	if got := cache.SnapshotAge(); got != 7*time.Second {
+		t.Fatalf("never-populated age = %s, want 7s since creation", got)
+	}
+	cache.now = func() time.Time { return base.Add(10 * time.Second) }
+	if err := cache.Refresh(ctx); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	cache.now = func() time.Time { return base.Add(13 * time.Second) }
+	if got := cache.SnapshotAge(); got != 3*time.Second {
+		t.Fatalf("age after a load at +10s, read at +13s = %s, want 3s", got)
+	}
+	if err := store.DB.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	cache.now = func() time.Time { return base.Add(30 * time.Second) }
+	if err := cache.Refresh(ctx); err == nil {
+		t.Fatal("refresh against a closed store succeeded")
+	}
+	if got := cache.SnapshotAge(); got != 20*time.Second {
+		t.Fatalf("age after a failed refresh = %s, want 20s: a failure must not make the snapshot look fresh", got)
+	}
+}

@@ -549,6 +549,17 @@ func main() {
 	// web.ConnectConfig.Identifier when constructing the connect server.
 	workerTokenRevocationCache := localjwt.NewRevocationCache(store, cfg.WorkerTokenRevocationCacheTTL)
 	workerTokenRevocationCache.SetRefreshErrorHook(m.WorkerTokenRevocationRefreshFailuresTotal.Inc)
+	if err := m.RegisterWorkerTokenRevocationSnapshotAge(func() float64 {
+		return workerTokenRevocationCache.SnapshotAge().Seconds()
+	}); err != nil {
+		slog.Error("worker token revocation snapshot age gauge", "err", err)
+		os.Exit(1)
+	}
+	// Traffic-independent refresh (#1346): workers exit on their first 401,
+	// so request-driven refreshes stop almost as soon as an outage starts.
+	// Stops with ctx, like the sweepers below; a read in flight is bounded
+	// by localjwt.RevocationRefreshTimeout and aborted by the same ctx.
+	go workerTokenRevocationCache.RunRefresher(ctx)
 
 	provider, err := selectProvider(cfg, store, workerTokenRevocationCache)
 	if err != nil {

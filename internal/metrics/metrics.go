@@ -5,6 +5,7 @@
 package metrics
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -708,6 +709,28 @@ func (r *Registry) CountLoginLogOut(reason, outcome string) {
 // New constructs a Registry with all collectors registered on a fresh
 // prometheus.Registry. Panics only if duplicate names are registered within
 // the same call (which cannot happen in practice).
+// WorkerTokenRevocationSnapshotAgeName is the gauge that
+// RegisterWorkerTokenRevocationSnapshotAge exports.
+const WorkerTokenRevocationSnapshotAgeName = "mctl_worker_token_revocation_snapshot_age_seconds"
+
+// RegisterWorkerTokenRevocationSnapshotAge exports age, read at scrape time,
+// as mctl_worker_token_revocation_snapshot_age_seconds: how old the
+// worker-token revocation snapshot is, from when its read began. Past
+// localjwt.MaxRevocationSnapshotAge (15s) every worker-token check is
+// refused (#1346), and because the value is computed on each scrape it
+// rises during an outage whether or not any token is being checked. Call it
+// once; the server wires it to RevocationCache.SnapshotAge.
+func (r *Registry) RegisterWorkerTokenRevocationSnapshotAge(age func() float64) error {
+	g := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: WorkerTokenRevocationSnapshotAgeName,
+		Help: "Age in seconds of the worker-token revocation snapshot, from when its read began; above 15 every worker token is refused.",
+	}, age)
+	if err := r.Prometheus.Register(g); err != nil {
+		return fmt.Errorf("register %s: %w", WorkerTokenRevocationSnapshotAgeName, err)
+	}
+	return nil
+}
+
 func New() *Registry {
 	reg := prometheus.NewRegistry()
 	r := &Registry{Prometheus: reg}
