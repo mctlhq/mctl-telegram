@@ -1,10 +1,10 @@
 # LLMS.md — mctl-telegram MCP Remote Server Overview
 
-> `mctl-telegram` is a hosted Go MCP (Model Context Protocol) remote server exposing user-authorized Telegram account access (via `gotd/td` MTProto) for Claude (claude.ai, the desktop and mobile apps, and Claude Code) and for ChatGPT by URL. Other MCP clients such as Cursor, VS Code and Windsurf are not yet tested against tg.mctl.ai.
+> `mctl-telegram` is a hosted Go MCP (Model Context Protocol) remote server exposing user-authorized Telegram account access (via `gotd/td` MTProto) for Claude (claude.ai and the desktop and mobile apps) and for ChatGPT by URL. Other MCP clients, including Claude Code, Cursor, VS Code, Windsurf, Gemini, Grok, Notion and Rayrun, are not yet tested against tg.mctl.ai (per-client status: https://tg.mctl.ai/docs#client-status). If your client does not work, write to support@mctl.ai.
 
 ## Core Capabilities
 
-- **Hosted URL**: `https://tg.mctl.ai/mcp` (OAuth 2.1 PKCE + Dynamic Client Registration). Claude is the client we test against: add it as a custom connector. ChatGPT adds it as a personal plugin (Plugins → Add → Add custom MCP server, OAuth), not a directory listing. Cursor, VS Code and Windsurf are not yet tested against tg.mctl.ai.
+- **Hosted URL**: `https://tg.mctl.ai/mcp` (OAuth 2.1 PKCE + Dynamic Client Registration). Claude is the client we test against: add it as a custom connector. ChatGPT adds it as a personal plugin (Plugins → Add → Add custom MCP server, OAuth), not a directory listing. Claude Code, Cursor, VS Code, Windsurf, Gemini, Grok, Notion and Rayrun are not yet tested against tg.mctl.ai; if your client does not work, write to support@mctl.ai.
 - **Read-only by default**: a newly connected account has `send_enabled=false`; write tools return previews until the owner opts in with `set_send_consent`.
 - **Data Minimization & Encryption**: Message bodies are fetched live for user-requested tool calls and are not persisted for ordinary MCP use (Communication Agent accounts store encrypted content, see `/privacy`). MTProto session blobs are encrypted at rest with AES-256-GCM under per-user HKDF keys.
 - **Archived submission packets** (historical): `docs/archive/chatgpt-submission-package.md`, `docs/archive/claude-connector-submission.md`.
