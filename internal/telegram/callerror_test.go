@@ -28,6 +28,12 @@ func TestIsCallerRefusal(t *testing.T) {
 		{"no_existing_dialog_wrapped", fmt.Errorf("draft: %w", ErrNoExistingDialog), true},
 		{"cannot_post", ErrCannotPost, true},
 		{"peer_deleted", ErrPeerDeleted, true},
+		// Topic refusals are decided from a successful reply: the caller named
+		// a topic the chat does not have, or a closed one.
+		{"not_a_forum", ErrNotAForum, true},
+		{"not_a_forum_wrapped", fmt.Errorf("list_topics: %w", ErrNotAForum), true},
+		{"topic_not_found", ErrTopicNotFound, true},
+		{"topic_closed_wrapped", fmt.Errorf("draft: %w", ErrTopicClosed), true},
 		// A frozen account's refusal is Telegram answering (#853).
 		{"frozen_method", tgerr.New(420, "FROZEN_METHOD_INVALID"), true},
 		{"frozen_participant_wrapped", fmt.Errorf("send: %w", tgerr.New(400, "FROZEN_PARTICIPANT_MISSING")), true},

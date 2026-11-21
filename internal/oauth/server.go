@@ -1792,6 +1792,30 @@ func isPrefetch(r *http.Request) bool {
 // false here — the guard above returns 204 before any reject path — and is
 // retained deliberately so one prefetch= query matches every line both
 // routes emit. It also counts the rejection.
+// canaryStatePrefix is the prefix the monitoring canary puts on the state of
+// its deliberate unknown_state probe (cmd/canary/loginpath.go).
+const canaryStatePrefix = "canary-"
+
+// logUnknownStateReject records an unknown_state rejection. The canary probes
+// this path on purpose every ten minutes, so its rejection is expected and is
+// logged at Info; a Warn line for it was indistinguishable from a real user's
+// failed sign-in and was about all the callback Warn lines there were. The
+// rejection is still counted, so the metric is unchanged, and the prefix only
+// lowers a log level: anyone can send it, and doing so gains nothing but a
+// quieter log line for a request that was refused anyway.
+func (s *Server) logUnknownStateReject(r *http.Request, serverState string) {
+	if !strings.HasPrefix(serverState, canaryStatePrefix) {
+		s.logCallbackReject(r, reasonUnknownState)
+		return
+	}
+	s.countCallbackReject(reasonUnknownState)
+	s.logger().Info("oauth: callback request rejected",
+		"route", "/oauth/telegram/callback",
+		"reason", reasonUnknownState,
+		"prefetch", isPrefetch(r),
+		"probe", "canary")
+}
+
 func (s *Server) logCallbackReject(r *http.Request, reason string) {
 	s.countCallbackReject(reason)
 	s.logger().Warn("oauth: callback request rejected",
@@ -1880,7 +1904,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if errors.Is(err, db.ErrOAuthNotFound) {
-			s.logCallbackReject(r, reasonUnknownState)
+			s.logUnknownStateReject(r, serverState)
 			renderEnableReused(w, "That sign-in link was already used or has expired. Close this page and start connecting again from your MCP client.")
 			return
 		}
@@ -1908,7 +1932,7 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		delete(s.pending, serverState)
 		s.mu.Unlock()
 		if !ok {
-			s.logCallbackReject(r, reasonUnknownState)
+			s.logUnknownStateReject(r, serverState)
 			renderEnableReused(w, "That sign-in link was already used or has expired. Close this page and start connecting again from your MCP client.")
 			return
 		}
