@@ -463,6 +463,11 @@ func TestPAS2ManifestCheckDetects(t *testing.T) {
 			"green run does not report ok"},
 		{"green run that failed", func(f *s2Fixture) { f.mutate(func(m *s2Mutation) { m.Green = "FAIL\tinternal/x" }) },
 			"green run does not report ok"},
+		{"green run that reports ok and a FAIL", func(f *s2Fixture) {
+			f.mutate(func(m *s2Mutation) {
+				m.Green = "--- FAIL: TestS2A1_Thing (0.01s)\nok  \tinternal/y\t0.1s\nFAIL\tinternal/x"
+			})
+		}, "green run does not report ok without FAIL"},
 		{"malformed mutation on a pending id", func(f *s2Fixture) {
 			e := f.m["S2-A2"]
 			e.Mutations = []s2Mutation{{ID: "P1"}}
