@@ -25,16 +25,19 @@
 #               mutation ran on (must exist in the tree and be in range)
 #     mutation  what was broken
 #     killed_by the tests that went red; each must be listed under tests
-#     red       the mutated run's output: reports FAIL and names every
-#               killing test
-#     green     the run after git restore: reports ok, no FAIL
+#     red       the mutated run's output: a "FAIL" result line and a
+#               "--- FAIL: <name> (" line for every killing test
+#     green     the run after git restore: an "ok  <pkg>" line, no FAIL
+#   A test in a file CI's build leaves out (a build tag such as smoke, or a
+#   _windows file name) is not evidence and may not be listed.
 #   slice: the slice that delivered it (optional). gaps: parts of the row
 #   that have no guard yet, each with a half and tracked_by, as in the S1
 #   manifest.
 #
 # Print the open items with: go test -v ./docs -run TestPAS2Manifest
 #
-# Green ids were verified on 969cfe02 (main after #1369 and #1370) with
+# Green ids were verified on 969cfe02 (main after #1369 and #1370), and
+# P2S7-I7a re-run on 790bb2cd, with
 # TEST_DATABASE_URL empty (sqlite): each mutation was applied, the killing
 # tests ran red, the file was restored with git restore and the tests ran
 # green.
@@ -79,7 +82,10 @@ S2-I5:
   status: pending
   slice: P2-S5
   tracked_by: "#1321"
-  note: "the card gate reads the durable taint; P2-S11 (lowering) must keep it"
+  note: "the card gate reads the durable taint; P2-S11 (lowering) must keep it. The tests are of the inert gate.Decide (#1370): rule 6 cards a tainted or unreadable taint. Nothing in the runtime calls Decide yet, so the id stays pending."
+  tests:
+    - internal/pa/gate.TestDecideOrder
+    - internal/pa/gate.TestDecideNeverLowersWithoutEveryCondition
 
 S2-I6:
   status: green
@@ -194,6 +200,7 @@ S2-I7:
       killed_by:
         - internal/db.TestS2I7_ResetOnlyThroughNewRow
         - internal/db.TestS2I7_ForgetResetsThroughNewRow
+        - internal/db.TestS2I7_MigrationTaintsExistingRows
         - internal/pa.TestS2I7_NewAndTTLResetThroughNewRow
       red: |-
         --- FAIL: TestS2I7_ResetOnlyThroughNewRow (0.04s)
@@ -259,7 +266,10 @@ S2-I9:
   status: pending
   slice: P2-S6
   tracked_by: "#1321"
-  note: "a reset never lowers the disclosure card gate"
+  note: "a reset never lowers the disclosure card gate. The tests are of the inert gate.Decide (#1370): rule 4 cards a disclosure whatever the taint. Nothing in the runtime calls Decide yet, so the id stays pending."
+  tests:
+    - internal/pa/gate.TestDecideOrder
+    - internal/pa/gate.TestDecideNeverLowersWithoutEveryCondition
 
 S2-I10:
   status: green
@@ -314,7 +324,10 @@ S2-D1:
   status: pending
   slice: P2-S6
   tracked_by: "#1322"
-  note: "disclosure class: card always"
+  note: "disclosure class: card always. The tests are of the inert gate.Decide (#1370): rule 4 cards a disclosure ahead of taint and standing permissions. Nothing in the runtime calls Decide yet, so the id stays pending."
+  tests:
+    - internal/pa/gate.TestDecideOrder
+    - internal/pa/gate.TestDecideNeverLowersWithoutEveryCondition
 
 S2-D2:
   status: pending
@@ -326,7 +339,9 @@ S2-D3:
   status: pending
   slice: P2-S6
   tracked_by: "#1322"
-  note: "disclosure text cap of 1000 characters"
+  note: "disclosure text cap of 1000 characters. The test is of the inert pin validation (#1370): catalog.MaxDisclosureText = 1000 and a text_cap over it is refused. No disclosure dispatch exists yet, so text over the cap is not refused at run time and the id stays pending."
+  tests:
+    - internal/pa/catalog.TestValidatePhase2Rules
 
 S2-D4:
   status: pending
@@ -338,7 +353,7 @@ S2-D5:
   status: pending
   slice: P2-S10
   tracked_by: "#1322"
-  note: "standing permission device allowlist; type read fresh at dispatch"
+  note: "standing permission device allowlist; type read fresh at dispatch. Open question (#1323): the fresh type read at dispatch may belong to P2-S8 (Alice iot writes) or P2-S11 (lowering) rather than P2-S10."
 
 S2-D6:
   status: pending
@@ -398,7 +413,7 @@ S2-A8:
   status: pending
   slice: P2-S10
   tracked_by: "#1320"
-  note: "standing permissions: no grant route reachable from the worker"
+  note: "standing permissions: no grant route reachable from the worker. Open question (#1323): the 'no tool reachable from the worker' half may be co-owned by P2-S13 (worker tool path)."
 
 S2-A9:
   status: pending

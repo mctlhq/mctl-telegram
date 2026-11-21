@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -85,9 +86,12 @@ func checkS1Manifest(ids []string, manifest map[string]s1Entry, funcs map[string
 	return problems
 }
 
-// TestPAS1Manifest is the gate check on the real tree.
-func TestPAS1Manifest(t *testing.T) {
-	doc, err := os.ReadFile(paThreatModelPath)
+// s1TreeProblems runs the S1 gate on the module below root and returns
+// its problems and its open gaps. It reads s1GateClosingEnv itself, so the
+// closing mode is tested through the same path the real gate takes.
+func s1TreeProblems(t *testing.T, root string) (problems, gaps []string) {
+	t.Helper()
+	doc, err := os.ReadFile(filepath.Join(root, "docs", paThreatModelPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +99,7 @@ func TestPAS1Manifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(s1ManifestPath)
+	raw, err := os.ReadFile(filepath.Join(root, "docs", s1ManifestPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,17 +107,45 @@ func TestPAS1Manifest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s: %v", s1ManifestPath, err)
 	}
-	for _, p := range checkS1Manifest(ids, manifest, repoTestFuncs(t, "..")) {
-		t.Error(p)
+	problems = checkS1Manifest(ids, manifest, repoTestFuncs(t, root))
+	gaps = openS1Gaps(manifest)
+	if paGateClosing(s1GateClosingEnv) {
+		for _, g := range gaps {
+			problems = append(problems, fmt.Sprintf("%s is set but an S1 gap is open: %s", s1GateClosingEnv, g))
+		}
 	}
-	gaps := openS1Gaps(manifest)
+	return problems, gaps
+}
+
+// TestPAS1Manifest is the gate check on the real tree.
+func TestPAS1Manifest(t *testing.T) {
+	problems, gaps := s1TreeProblems(t, "..")
 	for _, g := range gaps {
 		t.Logf("open S1 gap: %s", g)
 	}
-	if os.Getenv(s1GateClosingEnv) != "" {
-		for _, g := range gaps {
-			t.Errorf("%s is set but an S1 gap is open: %s", s1GateClosingEnv, g)
-		}
+	for _, p := range problems {
+		t.Error(p)
+	}
+}
+
+// TestPAS1GateClosingEnv proves the closing mode on a small tree: an open
+// gap passes a normal run and fails a run with PA_S1_GATE_CLOSING set.
+func TestPAS1GateClosingEnv(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"go.mod":                    "module example.com/x\n",
+		"docs/" + paThreatModelPath: "- S1-A1: x\n",
+		"docs/" + s1ManifestPath: "S1-A1:\n  tests: [x.TestS1A1_Thing]\n" +
+			"  gaps:\n    - half: rest\n      tracked_by: \"#1\"\n",
+		"x/x_test.go": "package x\n\nimport \"testing\"\n\nfunc TestS1A1_Thing(t *testing.T) {}\n",
+	})
+	t.Setenv(s1GateClosingEnv, "")
+	if p, gaps := s1TreeProblems(t, root); len(p) != 0 || len(gaps) != 1 {
+		t.Fatalf("normal run: problems %v, gaps %v; want none and one gap", p, gaps)
+	}
+	t.Setenv(s1GateClosingEnv, "1")
+	p, _ := s1TreeProblems(t, root)
+	if !slices.ContainsFunc(p, func(s string) bool { return strings.Contains(s, s1GateClosingEnv+" is set but an S1 gap is open") }) {
+		t.Fatalf("closing run: problems %v, want the open gap", p)
 	}
 }
 

@@ -68,7 +68,16 @@ type s2Mutation struct {
 var (
 	s2SliceRe = regexp.MustCompile(`^P2-S[0-9]+$`)
 	s2GuardRe = regexp.MustCompile(`^([a-z0-9_/.-]+\.go):([1-9][0-9]*)$`)
+	// A go test result line: "FAIL\t<pkg>", "FAIL", or "ok  \t<pkg>".
+	s2FailLineRe = regexp.MustCompile(`(?m)^FAIL(?:\s|$)`)
+	s2OKLineRe   = regexp.MustCompile(`(?m)^ok\s+\S`)
 )
+
+// s2FailedTestRe matches the line go test prints for a failed test name,
+// "--- FAIL: <name> (<time>)", and not one of a longer name.
+func s2FailedTestRe(name string) *regexp.Regexp {
+	return regexp.MustCompile(`(?m)^\s*--- FAIL: ` + regexp.QuoteMeta(name) + ` \(`)
+}
 
 // guardLines returns the number of lines of a repository file, for a
 // guard reference. An error means the file could not be read.
@@ -178,14 +187,14 @@ func checkS2Mutations(id string, e s2Entry, lines guardLines) []string {
 				bad("killing test %s is not listed in the tests of %s", k, id)
 			}
 			name := k[strings.LastIndex(k, ".")+1:]
-			if !strings.Contains(m.Red, name) {
-				bad("red run does not name killing test %s", name)
+			if !s2FailedTestRe(name).MatchString(m.Red) {
+				bad("red run does not name killing test %s in a \"--- FAIL: %s (\" line", name, name)
 			}
 		}
-		if !strings.Contains(m.Red, "FAIL") {
+		if !s2FailLineRe.MatchString(m.Red) {
 			bad("red run does not report FAIL")
 		}
-		if !strings.Contains(m.Green, "ok") || strings.Contains(m.Green, "FAIL") {
+		if !s2OKLineRe.MatchString(m.Green) || strings.Contains(m.Green, "FAIL") {
 			bad("green run does not report ok without FAIL")
 		}
 	}
@@ -241,17 +250,20 @@ func repoGuardLines(root string) guardLines {
 	}
 }
 
-// TestPAS2Manifest is the gate check on the real tree.
-func TestPAS2Manifest(t *testing.T) {
-	doc, err := os.ReadFile(paThreatModelPath)
+// s2TreeProblems runs the S2 gate on the module below root and returns
+// its problems and its open items. It reads s2GateClosingEnv itself, so
+// the closing mode is tested through the same path the real gate takes.
+func s2TreeProblems(t *testing.T, root string) (problems, open []string, ids int) {
+	t.Helper()
+	doc, err := os.ReadFile(filepath.Join(root, "docs", paThreatModelPath))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ids, err := paSuiteS2.threatModelIDs(doc)
+	modelIDs, err := paSuiteS2.threatModelIDs(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(s2ManifestPath)
+	raw, err := os.ReadFile(filepath.Join(root, "docs", s2ManifestPath))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,16 +271,96 @@ func TestPAS2Manifest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s: %v", s2ManifestPath, err)
 	}
-	for _, p := range checkS2Manifest(ids, manifest, repoTestFuncs(t, ".."), repoGuardLines("..")) {
-		t.Error(p)
-	}
-	open := openS2Items(manifest)
-	t.Logf("S2: %d ids in the threat model, %d open items", len(ids), len(open))
+	problems = checkS2Manifest(modelIDs, manifest, repoTestFuncs(t, root), repoGuardLines(root))
+	problems = append(problems, s2ClosingProblems(manifest, paGateClosing(s2GateClosingEnv))...)
+	return problems, openS2Items(manifest), len(modelIDs)
+}
+
+// TestPAS2Manifest is the gate check on the real tree.
+func TestPAS2Manifest(t *testing.T) {
+	problems, open, ids := s2TreeProblems(t, "..")
+	t.Logf("S2: %d ids in the threat model, %d open items", ids, len(open))
 	for _, o := range open {
 		t.Logf("open S2 item: %s", o)
 	}
-	for _, p := range s2ClosingProblems(manifest, os.Getenv(s2GateClosingEnv) != "") {
+	for _, p := range problems {
 		t.Error(p)
+	}
+}
+
+// s2TreeFixture is a small module with one green and one pending S2 id.
+func s2TreeFixture(t *testing.T, guard string) string {
+	return writeTree(t, map[string]string{
+		"go.mod":                    "module example.com/x\n",
+		"docs/" + paThreatModelPath: "- S2-A1: x\n- S2-A2: y\n",
+		"docs/" + s2ManifestPath: `S2-A1:
+  status: green
+  tests: [x.TestS2A1_Thing]
+  mutations:
+    - id: M1
+      guard: ` + guard + `
+      mutation: "return nil"
+      killed_by: [x.TestS2A1_Thing]
+      red: "--- FAIL: TestS2A1_Thing (0.01s)\nFAIL\tx"
+      green: "ok  \tx\t0.1s"
+S2-A2:
+  status: pending
+  slice: P2-S2
+  tracked_by: "#1"
+`,
+		"x/x.go":      "package x\n\nfunc X() {}\n",
+		"x/x_test.go": "package x\n\nimport \"testing\"\n\nfunc TestS2A1_Thing(t *testing.T) {}\n",
+	})
+}
+
+// TestPAS2GateClosingEnv proves the closing mode and the guard reads on a
+// small tree: a pending id passes a normal run and fails a run with
+// PA_S2_GATE_CLOSING set, and a guard past the end of its real file fails.
+func TestPAS2GateClosingEnv(t *testing.T) {
+	root := s2TreeFixture(t, "x/x.go:3")
+	t.Setenv(s2GateClosingEnv, "")
+	if p, open, _ := s2TreeProblems(t, root); len(p) != 0 || len(open) != 1 {
+		t.Fatalf("normal run: problems %v, open %v; want none and one open item", p, open)
+	}
+	t.Setenv(s2GateClosingEnv, "1")
+	p, _, _ := s2TreeProblems(t, root)
+	if !slices.ContainsFunc(p, func(s string) bool {
+		return strings.Contains(s, s2GateClosingEnv+" is set but an S2 item is open: S2-A2")
+	}) {
+		t.Fatalf("closing run: problems %v, want the pending id", p)
+	}
+	t.Setenv(s2GateClosingEnv, "")
+	for guard, want := range map[string]string{
+		"x/x.go:4":    "guard line 4 is past the end of x/x.go (3 lines)",
+		"x/gone.go:1": "guard file x/gone.go could not be read",
+	} {
+		p, _, _ := s2TreeProblems(t, s2TreeFixture(t, guard))
+		if !slices.ContainsFunc(p, func(s string) bool { return strings.Contains(s, want) }) {
+			t.Errorf("guard %s: problems %v, want one containing %q", guard, p, want)
+		}
+	}
+}
+
+func TestRepoGuardLines(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"a.go":      "1\n2\n3\n",
+		"no_eol.go": "1\n2",
+		"empty.go":  "",
+		"long.go":   strings.Repeat("x", 200<<10) + "\n2\n",
+		"huge.go":   strings.Repeat("x", 2<<20) + "\n",
+	})
+	lines := repoGuardLines(root)
+	for path, want := range map[string]int{"a.go": 3, "no_eol.go": 2, "empty.go": 0, "long.go": 2} {
+		if n, err := lines(path); err != nil || n != want {
+			t.Errorf("%s: %d lines, %v; want %d", path, n, err, want)
+		}
+	}
+	// A file that cannot be read, or not to the end, is an error, never a
+	// count: could not observe is not observed short.
+	for _, path := range []string{"gone.go", "huge.go"} {
+		if n, err := lines(path); err == nil {
+			t.Errorf("%s: %d lines and no error, want an error", path, n)
+		}
 	}
 }
 
@@ -278,6 +370,10 @@ type s2Fixture struct {
 	m     map[string]s2Entry
 	funcs map[string]bool
 	files map[string]int
+	// target is the mutation record mutate edits; mutated records that
+	// mutate ran.
+	target  int
+	mutated bool
 }
 
 func newS2Fixture() *s2Fixture {
@@ -294,6 +390,13 @@ func newS2Fixture() *s2Fixture {
 					Mutation: "return nil",
 					KilledBy: []string{"internal/x.TestS2A1_Thing"},
 					Red:      "--- FAIL: TestS2A1_Thing (0.01s)\nFAIL\tinternal/x",
+					Green:    "ok  \tinternal/x\t0.1s",
+				}, {
+					ID:       "M2",
+					Guard:    "internal/x/x.go:12",
+					Mutation: "return err -> return nil",
+					KilledBy: []string{"internal/x.TestS2A1_Thing", "internal/x.TestCovers"},
+					Red:      "--- FAIL: TestS2A1_Thing (0.01s)\n--- FAIL: TestCovers (0.00s)\nFAIL\nFAIL\tinternal/x\t0.2s\nFAIL",
 					Green:    "ok  \tinternal/x\t0.1s",
 				}},
 			},
@@ -325,11 +428,14 @@ func (f *s2Fixture) check() []string { return checkS2Manifest(f.ids, f.m, f.func
 func (f *s2Fixture) green() s2Entry { return f.m["S2-A1"] }
 func (f *s2Fixture) set(e s2Entry)  { f.m["S2-A1"] = e }
 
-// mutate edits the first mutation record of S2-A1.
+// mutate edits the mutation record of S2-A1 that the case targets
+// (f.target): each malformed-record case runs against the first record and
+// against a later one, so a check that stops at the first record fails.
 func (f *s2Fixture) mutate(edit func(*s2Mutation)) {
 	e := f.green()
 	ms := slices.Clone(e.Mutations)
-	edit(&ms[0])
+	edit(&ms[f.target])
+	f.mutated = true
 	e.Mutations = ms
 	f.set(e)
 }
@@ -420,6 +526,11 @@ func TestPAS2ManifestCheckDetects(t *testing.T) {
 			e.Slice = "S7"
 			f.set(e)
 		}, `S2-A1: slice "S7" is not P2-S<n>`},
+		{"slice with trailing text", func(f *s2Fixture) {
+			e := f.green()
+			e.Slice = "P2-S7x"
+			f.set(e)
+		}, `S2-A1: slice "P2-S7x" is not P2-S<n>`},
 		// Malformed mutation records.
 		{"mutation without an id", func(f *s2Fixture) { f.mutate(func(m *s2Mutation) { m.ID = "" }) },
 			"S2-A1: mutation #1 without an id"},
@@ -459,9 +570,26 @@ func TestPAS2ManifestCheckDetects(t *testing.T) {
 		{"red run not naming the killing test", func(f *s2Fixture) {
 			f.mutate(func(m *s2Mutation) { m.Red = "--- FAIL: TestOther (0.01s)\nFAIL\tinternal/x" })
 		}, "red run does not name killing test TestS2A1_Thing"},
+		{"red run naming only a longer test name", func(f *s2Fixture) {
+			f.mutate(func(m *s2Mutation) {
+				m.Red = "--- FAIL: TestS2A1_ThingElse (0.01s)\n--- FAIL: TestCovers (0.00s)\nFAIL\tinternal/x"
+			})
+		}, "red run does not name killing test TestS2A1_Thing"},
+		{"red run naming the test outside a FAIL line", func(f *s2Fixture) {
+			f.mutate(func(m *s2Mutation) {
+				m.Red = "TestS2A1_Thing TestCovers should fail\n--- FAIL: TestOther (0.01s)\nFAIL\tinternal/x"
+			})
+		}, "red run does not name killing test TestS2A1_Thing"},
+		{"red run with FAIL only inside a word", func(f *s2Fixture) {
+			f.mutate(func(m *s2Mutation) {
+				m.Red = "--- FAIL: TestS2A1_Thing (0.01s)\n--- FAIL: TestCovers (0.00s)\nFAILED to restore"
+			})
+		}, "red run does not report FAIL"},
 		{"green run empty", func(f *s2Fixture) { f.mutate(func(m *s2Mutation) { m.Green = "" }) },
 			"green run does not report ok"},
 		{"green run that failed", func(f *s2Fixture) { f.mutate(func(m *s2Mutation) { m.Green = "FAIL\tinternal/x" }) },
+			"green run does not report ok"},
+		{"green run with ok only inside a word", func(f *s2Fixture) { f.mutate(func(m *s2Mutation) { m.Green = "broken token" }) },
 			"green run does not report ok"},
 		{"green run that reports ok and a FAIL", func(f *s2Fixture) {
 			f.mutate(func(m *s2Mutation) {
@@ -486,6 +614,9 @@ func TestPAS2ManifestCheckDetects(t *testing.T) {
 		{"pending with a malformed slice", func(f *s2Fixture) {
 			f.m["S2-A2"] = s2Entry{Status: s2StatusPending, Slice: "slice 2", TrackedBy: "#1320"}
 		}, `S2-A2: slice "slice 2" is not P2-S<n>`},
+		{"pending with two slices", func(f *s2Fixture) {
+			f.m["S2-A2"] = s2Entry{Status: s2StatusPending, Slice: "P2-S5/P2-S11", TrackedBy: "#1320"}
+		}, `S2-A2: slice "P2-S5/P2-S11" is not P2-S<n>`},
 		{"pending with gaps", func(f *s2Fixture) {
 			f.m["S2-A2"] = s2Entry{Status: s2StatusPending, Slice: "P2-S2", TrackedBy: "#1320",
 				Gaps: []paGap{{Half: "x", TrackedBy: "#1320"}}}
@@ -503,14 +634,28 @@ func TestPAS2ManifestCheckDetects(t *testing.T) {
 		}, "S2-A1: a gap without a half"},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
+		for target := range newS2Fixture().green().Mutations {
 			f := newS2Fixture()
+			f.target = target
 			tc.breakIt(f)
-			got := f.check()
-			if !slices.ContainsFunc(got, func(p string) bool { return strings.Contains(p, tc.want) }) {
-				t.Fatalf("problems %v, want one containing %q", got, tc.want)
+			if target > 0 && !f.mutated {
+				continue // the case does not edit a record: one run is enough
 			}
-		})
+			want := tc.want
+			if f.mutated {
+				id := f.green().Mutations[target].ID
+				if id == "" {
+					id = "#" + strconv.Itoa(target+1)
+				}
+				want = strings.NewReplacer("mutation M1", "mutation "+id, "mutation #1", "mutation "+id).Replace(want)
+			}
+			t.Run(fmt.Sprintf("%s/record %d", tc.name, target+1), func(t *testing.T) {
+				got := f.check()
+				if !slices.ContainsFunc(got, func(p string) bool { return strings.Contains(p, want) }) {
+					t.Fatalf("problems %v, want one containing %q", got, want)
+				}
+			})
+		}
 	}
 	// The closing mode: a pending id or a gap fails a closing run, and the
 	// same manifest passes a run that is not closing.
@@ -534,15 +679,24 @@ func TestPAS2ManifestCheckDetects(t *testing.T) {
 }
 
 func TestPAS2ThreatModelRows(t *testing.T) {
-	for name, doc := range map[string]string{
-		"indented row": "- S2-A1: x\n  - S2-A2: y\n",
-		"bold row":     "- S2-A1: x\n- **S2-A2**: y\n",
-		"table cell":   "- S2-A1: x\n| S2-A2 | y |\n",
-		"prose":        "- S2-A1: x\nSee S2-A2 below.\n",
+	for name, tc := range map[string]struct{ doc, want string }{
+		"indented row": {"- S2-A1: x\n  - S2-A2: y\n", "S2-A2"},
+		"bold row":     {"- S2-A1: x\n- **S2-A2**: y\n", "S2-A2"},
+		"table cell":   {"- S2-A1: x\n| S2-A2 | y |\n", "S2-A2"},
+		"prose":        {"- S2-A1: x\nSee S2-A2 below.\n", "S2-A2"},
+		"unicode dash": {"- S2-A1: x\n- S2\u2011A2: y\n", "S2\u2011A2"},
+		"en dash":      {"- S2-A1: x\n- S2\u2013A2: y\n", "S2\u2013A2"},
+		"no digit":     {"- S2-A1: x\n- S2-Z: z\n", "S2-Z"},
+		"letter tail":  {"- S2-A1: x\n- S2-A2b: y\n", "S2-A2b"},
+		"underscore":   {"- S2-A1: x\n- S2_A2: y\n", "S2_A2"},
 	} {
-		if _, err := paSuiteS2.threatModelIDs([]byte(doc)); err == nil || !strings.Contains(err.Error(), "S2-A2") {
-			t.Errorf("%s: err %v, want one naming S2-A2", name, err)
+		if _, err := paSuiteS2.threatModelIDs([]byte(tc.doc)); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err %v, want one naming %s", name, err, tc.want)
 		}
+	}
+	// The S1 suite shares the check.
+	if _, err := paSuiteS1.threatModelIDs([]byte("- S1-A1: x\n- S1\u2011A2: y\n")); err == nil {
+		t.Error("S1: a row with a Unicode dash accepted")
 	}
 	if _, err := paSuiteS2.threatModelIDs([]byte("- S2-A1: x\n- S2-A1: y\n")); err == nil {
 		t.Error("repeated threat model id accepted")
@@ -565,6 +719,9 @@ func TestS2NameClaims(t *testing.T) {
 		"TestS2I6_TaintSurvivesTurnsSummaryAndEviction": {"S2-I6"},
 		"TestS2I10_TaintReadErrorMeansTainted":          {"S2-I10"},
 		"TestApproval_S2A1A3_ReplayAndArgs":             {"S2-A1", "S2-A3"},
+		"TestS2_A1_UnderscoreEscape":                    {"S2-A1"},
+		"TestApproval_S2_A1A3_Underscore":               {"S2-A1", "S2-A3"},
+		"TestS2_Plain":                                  nil,
 		"TestS1E1E2_CheckURLLayer":                      nil,
 		"TestAuthenticate_HS256Refused":                 nil,
 		"TestVerifyAssertionES256":                      nil,
