@@ -63,6 +63,9 @@ func paConvoSchema(pg bool) []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_pa_conversations_open ON pa_conversations(principal) WHERE closed_at_ms = 0`,
 		`CREATE INDEX IF NOT EXISTS idx_pa_conversations_expiry ON pa_conversations(expires_at_ms)`,
+		// Every conversation of a principal, closed ones included (/forget,
+		// account deletion); idx_pa_conversations_open covers open ones only.
+		`CREATE INDEX IF NOT EXISTS idx_pa_conversations_principal ON pa_conversations(principal)`,
 		`CREATE TABLE IF NOT EXISTS pa_fragments (
 			conversation_id TEXT NOT NULL,
 			seq ` + intT + ` NOT NULL,
@@ -506,6 +509,10 @@ func (s *Store) SweepPAState(ctx context.Context, now, updatesBefore time.Time) 
 		// Outbox rows that will not be sent again (#1313 slice d2). A
 		// pending or sending row is kept whatever its age.
 		{new(int64), `DELETE FROM pa_outbox WHERE status NOT IN ('pending', 'sending') AND updated_at_ms < $1`, []any{updatesBefore.UnixMilli()}},
+		// Linking secrets past PALinkSecretRetention after their expiry,
+		// consumed or not (#1338). A row that has not expired is kept, so
+		// a live secret is never deleted under its holder.
+		{&r.LinkSecrets, `DELETE FROM pa_link_secrets WHERE expires_at_ms < $1`, []any{now.Add(-PALinkSecretRetention).UnixMilli()}},
 	}
 	for _, st := range steps {
 		res, err := tx.ExecContext(ctx, st.q, st.args...)

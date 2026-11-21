@@ -388,6 +388,10 @@ func (r *Router) handleUnpause(ctx context.Context, userID int64) error {
 		}
 		return fmt.Errorf("unpause autopilot: %w", err)
 	}
+	// The resume is an owner decision that changes the one gate stopping the
+	// agent from replying; record it in the same audit log the agent API
+	// uses for pause and refused-resume attempts (#944).
+	r.Store.LogToolCall(ctx, db.ToolCall{UserID: userID, Tool: "resume_autopilot", Status: "ok", ErrMsg: "owner /mctl unpause"})
 	profile, err := r.Store.GetAgentProfile(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("load profile: %w", err)
