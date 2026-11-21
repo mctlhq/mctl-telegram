@@ -138,7 +138,7 @@ This record is Phase 0 of the Personal Assistant epic (#1312). Refs #1048, the s
   - The model cannot create, widen or renew one.
 - **Provenance and taint** (threat model T5):
   - `user` is only `message.text` the principal typed, with no forward origin. Everything else is `external`, including unknown or unreadable provenance.
-  - Any external fragment taints the run, and every write in a tainted run needs a card.
+  - Any external fragment taints the run, and every write in a tainted run needs a card. Taint is the conversation's durable flag; tool results are stored as external fragments and raise it. Model output in a clean conversation does not raise it (owner decision, 2026-11-21).
   - Taint resets only on `/new`, on TTL expiry or on state deletion. Context-window eviction never resets it, and nothing a model or a tool writes resets it.
   - A reset never weakens a `disclosure` gate or a non-lowerable gate.
 

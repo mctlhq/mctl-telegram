@@ -307,6 +307,9 @@ A crash between steps 1 and 3 leaves a `dispatching` record. On restart, that re
 - Once any `external` fragment is in a run's context, that run is tainted.
 - In a tainted run, every write needs a per-call card, even for a tool with a standing permission.
 - Taint is held in the conversation state. A read error on it means tainted.
+- The conversation's durable flag is the run's taint (#1321). It rises in the same transaction that stores any fragment other than user text: a forward, a caption, a reply, a quote, any unknown mark, and every tool result (a tool error included), which is stored as an external `tool` fragment before the worker receives it. A result that cannot be stored is withheld.
+- Model output is the one external-marked kind that does not raise the flag (owner decision, 2026-11-21). An answer written in a clean conversation saw no external content, and one written in a tainted conversation changes nothing, because the flag only rises. A summary of external content is therefore covered: the content it summarises tainted the conversation first.
+- The flag is trustworthy only once every replica runs a build with #1321. An older pod stores external fragments and returns tool results without raising it, so the PA is enabled only after the rollout completes (see the runbook).
 
 **Taint reset.** Taint resets only on:
 - `/new`, a user-only command the server recognises (the model cannot issue it);

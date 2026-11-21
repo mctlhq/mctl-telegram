@@ -1090,6 +1090,30 @@ func (s *Store) FinishPAJob(ctx context.Context, ref jobs.Ref, req jobs.FinishRe
 	return j, nil
 }
 
+// RecordPAToolResult implements jobs.Store: the job must still be running
+// under ref with the gate passing, and req.Record stores the result in the
+// same transaction (#1321). Nothing is committed unless all of it holds.
+func (s *Store) RecordPAToolResult(ctx context.Context, ref jobs.Ref, req jobs.ToolResultRequest) (jobs.Job, error) {
+	if !ref.Valid() || req.Record == nil {
+		return jobs.Job{}, fmt.Errorf("%w: tool result", jobs.ErrInvalid)
+	}
+	tx, j, err := s.beginRunning(ctx, ref, req.Now)
+	if err != nil {
+		return jobs.Job{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := runGate(ctx, tx, req.Gate, j, req.Now); err != nil {
+		return jobs.Job{}, err
+	}
+	if err := req.Record(ctx, tx, j); err != nil {
+		return jobs.Job{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return jobs.Job{}, fmt.Errorf("record pa tool result: commit: %w", err)
+	}
+	return j, nil
+}
+
 // PAConversationOpen reports whether conversationID is the principal's
 // open, unexpired conversation: nil, convo-style absence as jobs.ErrGone,
 // or a read error. The run loop's gate uses it at every step.

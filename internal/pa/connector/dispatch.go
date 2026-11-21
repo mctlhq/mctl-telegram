@@ -87,6 +87,13 @@ type JobGate interface {
 	AuthenticateAttributed(r *http.Request) (pa.PAJob, pa.TokenRefusal, error)
 	AdmitToolCall(ctx context.Context, job pa.PAJob, server, tool string) (pa.Policy, error)
 	StillRunning(ctx context.Context, job pa.PAJob) error
+	// ConversationTainted reads the run's durable taint (T5, #1321). An
+	// error comes with true and the call is recorded tainted (S2-I10).
+	ConversationTainted(ctx context.Context, policy pa.Policy) (bool, error)
+	// RecordToolResult stores a result as external conversation state,
+	// which taints the conversation, before the worker sees it. An error
+	// withholds the result.
+	RecordToolResult(ctx context.Context, job pa.PAJob, output []byte) error
 }
 
 // Connections is the connection manager's half (*connection.Manager).
@@ -456,21 +463,25 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ConnectionID: bound.ConnectionID,
 		Tool:         req.Tool,
 		Args:         req.Arguments,
-		// The dispatcher cannot prove a run clean: everything the model
-		// saw may have come from a tool. Phase 1 has reads only, so this
-		// only labels the record.
-		Taint: TaintExternal,
+		Taint:        d.taint(ctx, policy),
 	}, func(ctx context.Context) (res Result, err error) {
 		dispatched = true
 		// The post-dispatch checks run whatever the call did, a panic
 		// included (the call is deregistered either way): a result that
 		// arrives after the connection changed, or after the job stopped
-		// running (cancelled, consent withdrawn), is discarded.
+		// running (cancelled, consent withdrawn), is discarded. So is one
+		// whose recording as conversation state failed: the worker never
+		// gets tool output that did not taint its conversation (#1321).
 		defer func() {
 			fctx := context.WithoutCancel(ctx)
 			ferr := call.Finish(fctx)
 			if ferr == nil {
 				ferr = d.cfg.Jobs.StillRunning(fctx, job)
+			}
+			if ferr == nil && err == nil {
+				// Recorded as the worker will see it: capped.
+				out, _ := jobs.TruncateToolOutput(res.Output)
+				ferr = d.cfg.Jobs.RecordToolResult(fctx, job, out)
 			}
 			if ferr != nil {
 				res, err = Result{}, fmt.Errorf("%w: %w", ErrDispatchFenced, ferr)
@@ -500,6 +511,22 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	out, truncated := jobs.TruncateToolOutput(res.Output)
 	d.count(req.Server, string(status), "")
 	writeJSON(w, http.StatusOK, toolResponse{Status: string(status), Output: string(out), Truncated: truncated})
+}
+
+// taint is the run's taint for the audit record: the conversation's
+// durable flag, read at dispatch (T5, #1321). Only a flag read as clean is
+// clean; a read error is external (S2-I10). It labels the record; no gate
+// is lowered by it here.
+func (d *Dispatcher) taint(ctx context.Context, policy pa.Policy) Taint {
+	tainted, err := d.cfg.Jobs.ConversationTainted(ctx, policy)
+	if err != nil {
+		slog.Warn("pa dispatch: conversation taint unreadable, recorded as external", "err", err)
+		return TaintExternal
+	}
+	if tainted {
+		return TaintExternal
+	}
+	return TaintClean
 }
 
 func (d *Dispatcher) callTimeout() time.Duration {
