@@ -5,6 +5,7 @@ package pa
 // cannot live in package pa: the connector imports pa.
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -51,6 +52,25 @@ func (d *DispatchHarness) Count(q string, args ...any) int { return d.h.count(q,
 func (d *DispatchHarness) Claim() (token string, jobID int64, attempt int, code int) {
 	c, code := d.h.claim()
 	return c.Token, c.JobID, c.Attempt, code
+}
+
+// ClaimRaw claims the next job as the pool and returns the response body
+// as the worker receives it (S1-K2 scans it for token material).
+func (d *DispatchHarness) ClaimRaw() (body []byte, token string, code int) {
+	w := d.h.post(RouteClaim, d.h.pool, nil)
+	var c claimResponse
+	if w.Code == http.StatusOK {
+		if err := json.Unmarshal(w.Body.Bytes(), &c); err != nil {
+			d.h.t.Fatal(err)
+		}
+	}
+	return w.Body.Bytes(), c.Token, w.Code
+}
+
+// TurnRaw asks for a model turn under token and returns the raw body.
+func (d *DispatchHarness) TurnRaw(token string) (body []byte, code int) {
+	w := d.h.post(RouteTurn, token, turnRequest{ContextTokens: 10})
+	return w.Body.Bytes(), w.Code
 }
 
 // RevokePool revokes the pool credential every job token inherits and
