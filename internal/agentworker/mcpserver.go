@@ -404,7 +404,7 @@ func (b *toolBuilder) sendOwnerSummary() (mcplib.Tool, mcpserver.ToolHandlerFunc
 
 // pauseAutopilot is pause-only by construction — it takes no arguments and
 // always pauses, never resumes. Resuming is a deliberate, standing-down
-// decision only the owner should make, via the authenticated /mctl continue
+// decision only the owner should make, via the authenticated /mctl unpause
 // slash-command path (internal/agent/control), not a model call. An earlier
 // version accepted a paused=false argument: since every action's policy
 // check reads the same AutopilotPaused flag, a prompt-injected incoming
@@ -414,7 +414,7 @@ func (b *toolBuilder) sendOwnerSummary() (mcplib.Tool, mcpserver.ToolHandlerFunc
 // from replying on its own."
 func (b *toolBuilder) pauseAutopilot() (mcplib.Tool, mcpserver.ToolHandlerFunc) {
 	tool := mcplib.NewTool("pause_autopilot",
-		mcplib.WithDescription("Pause autonomous replies for this account. Use this if the conversation has become something you should not keep handling on your own. Pause-only — resuming is a deliberate owner decision made via /mctl continue, not something this tool can do."),
+		mcplib.WithDescription("Pause autonomous replies for this account. Use this if the conversation has become something you should not keep handling on your own. Pause-only — resuming is a deliberate owner decision made via /mctl unpause, not something this tool can do."),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		return b.guarded(func() (*mcplib.CallToolResult, error) {

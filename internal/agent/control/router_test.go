@@ -912,6 +912,39 @@ func TestRouter_Unpause_ClearsAutopilotPaused(t *testing.T) {
 	}
 }
 
+// TestRouter_Unpause_Audited pins #944: the owner's account-wide resume writes
+// a resume_autopilot audit row, and a failed unpause (no profile) writes none.
+func TestRouter_Unpause_Audited(t *testing.T) {
+	cases := []struct {
+		name     string
+		noProf   bool
+		wantRows int
+	}{
+		{"profile present", false, 1},
+		{"no profile", true, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			router, _, _, store, uid := newTestRouter(t)
+			ctx := context.Background()
+			if tc.noProf {
+				uid = 987654 // no profile and no audit row for this user
+			}
+			if err := router.HandleSavedText(ctx, SavedMeta{UserID: uid}, "/mctl unpause"); err != nil {
+				t.Fatalf("handle: %v", err)
+			}
+			var n int
+			if err := store.DB.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM audit_logs WHERE tool_name = 'resume_autopilot' AND status = 'ok'`).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			if n != tc.wantRows {
+				t.Errorf("resume_autopilot audit rows = %d, want %d", n, tc.wantRows)
+			}
+		})
+	}
+}
+
 func TestRouter_Unpause_NoProfile(t *testing.T) {
 	router, _, sender, store, uid := newTestRouter(t)
 	ctx := context.Background()

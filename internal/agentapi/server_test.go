@@ -1114,7 +1114,7 @@ func TestHandleJobComplete_FailedNeedsNoAction(t *testing.T) {
 	}
 }
 
-func TestHandleAutopilotPause_TogglesBothWays(t *testing.T) {
+func TestHandleAutopilotPause_PausesButNeverResumes(t *testing.T) {
 	h := newHarness(t)
 	h.seedProfile(db.AgentModeGuarded)
 
@@ -1128,10 +1128,14 @@ func TestHandleAutopilotPause_TogglesBothWays(t *testing.T) {
 		t.Fatalf("expected paused=true by default")
 	}
 
+	// An agent credential may not resume (#944): 403 and the pause stays.
 	rec2 := h.do("POST", "/autopilot/pause", autopilotPauseRequest{Paused: boolPtr(false)})
-	decodeBody(t, rec2, &body)
-	if body["autopilot_paused"] {
-		t.Fatalf("expected paused=false after explicit resume")
+	if rec2.Code != http.StatusForbidden {
+		t.Fatalf("resume status = %d, want 403, body=%s", rec2.Code, rec2.Body.String())
+	}
+	p, err := h.store.GetAgentProfile(context.Background(), h.userID)
+	if err != nil || !p.AutopilotPaused {
+		t.Fatalf("autopilot_paused = %v (err %v), want still paused", p != nil && p.AutopilotPaused, err)
 	}
 }
 
