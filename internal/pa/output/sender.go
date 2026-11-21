@@ -24,6 +24,7 @@ import (
 	"net/http/httptrace"
 	"net/netip"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"unicode/utf8"
@@ -68,8 +69,10 @@ var (
 
 // Button is one inline keyboard button. It can only carry callback data:
 // the type has no field for a URL, login URL, web app, inline query or
-// game, so a URL button cannot be expressed (S1-O3). The label is a server
-// Template; Data is a server-generated opaque id.
+// game, so a URL button cannot be expressed in a Keyboard (S1-O3). The one
+// URL-bearing button the bot sends is SendWebApp's, which opens only the
+// configured linking Mini App. The label is a server Template; Data is a
+// server-generated opaque id.
 type Button struct {
 	Label safetext.Template
 	Data  string
@@ -84,6 +87,10 @@ type Config struct {
 	Token string
 	// DeniedPrefixes are passed to the egress client (egress.Config).
 	DeniedPrefixes []netip.Prefix
+	// WebAppURL is the linking Mini App URL (PA_APP_URL): an https URL
+	// without query, fragment or userinfo. SendWebApp accepts this URL
+	// with a link token and nothing else. Empty disables SendWebApp.
+	WebAppURL string
 }
 
 // Sender sends bot messages. It is safe for concurrent use.
@@ -91,6 +98,9 @@ type Sender struct {
 	hc    *http.Client
 	base  string
 	token string
+	// webApp is the only URL a web_app button may open (SendWebApp), nil
+	// when none is configured.
+	webApp *url.URL
 }
 
 // NewSender builds a Sender whose requests go through the PA egress client
@@ -108,7 +118,25 @@ func NewSender(cfg Config) (*Sender, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pa output: egress client: %w", err)
 	}
-	return &Sender{hc: hc, base: botAPIBaseURL, token: cfg.Token}, nil
+	s := &Sender{hc: hc, base: botAPIBaseURL, token: cfg.Token}
+	if cfg.WebAppURL != "" {
+		u, err := parseWebAppBase(cfg.WebAppURL)
+		if err != nil {
+			return nil, err
+		}
+		s.webApp = u
+	}
+	return s, nil
+}
+
+// parseWebAppBase checks the configured Mini App URL.
+func parseWebAppBase(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Opaque != "" || u.RawQuery != "" ||
+		u.ForceQuery || u.Fragment != "" || u.RawPath != "" || strings.ContainsAny(raw, "?#") || u.String() != raw {
+		return nil, fmt.Errorf("%w: web app URL must be an https URL without query, fragment or userinfo", ErrInvalidConfig)
+	}
+	return u, nil
 }
 
 // linkPreviewOptions is sent on every message (S1-O1).
@@ -132,6 +160,29 @@ type sendMessageRequest struct {
 	Text               string             `json:"text"`
 	LinkPreviewOptions linkPreviewOptions `json:"link_preview_options"`
 	ReplyMarkup        *wireMarkup        `json:"reply_markup,omitempty"`
+}
+
+// webAppRequest is a sendMessage with exactly one web_app button. It is a
+// separate type so that the callback keyboard of sendMessageRequest keeps
+// no way to carry a URL.
+type webAppRequest struct {
+	ChatID             int64              `json:"chat_id"`
+	Text               string             `json:"text"`
+	LinkPreviewOptions linkPreviewOptions `json:"link_preview_options"`
+	ReplyMarkup        webAppMarkup       `json:"reply_markup"`
+}
+
+type webAppMarkup struct {
+	InlineKeyboard [][]webAppButton `json:"inline_keyboard"`
+}
+
+type webAppButton struct {
+	Text   string     `json:"text"`
+	WebApp webAppInfo `json:"web_app"`
+}
+
+type webAppInfo struct {
+	URL string `json:"url"`
 }
 
 // answerCallbackRequest has no url field: a callback answer never opens a
@@ -209,6 +260,73 @@ func (s *Sender) sendParts(ctx context.Context, chatID int64, parts []string, kb
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+// linkTokenFormat is the link token linking.StartLink appends: 256 random
+// bits, base64url without padding.
+var linkTokenFormat = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+
+// SendWebApp sends one server text with a single inline web_app button
+// that opens the linking Mini App (threat model T1 step 1). It is the only
+// way a message can carry a URL, and the URL must be exactly the configured
+// WebAppURL with one query parameter, link, holding a well-formed link
+// token: any other scheme, host, port, path, parameter, fragment or
+// userinfo is refused before anything is sent (S1-O3). The text must fit
+// one message, and link previews are disabled (S1-O1).
+func (s *Sender) SendWebApp(ctx context.Context, chatID int64, text safetext.Text, label safetext.Template, appURL string) error {
+	if chatID <= 0 {
+		// web_app buttons work in private chats only, and the PA serves
+		// nothing else.
+		return ErrInvalidChat
+	}
+	if err := s.checkWebAppURL(appURL); err != nil {
+		return err
+	}
+	if strings.TrimSpace(label.String()) == "" {
+		return fmt.Errorf("%w: empty label", ErrInvalidKeyboard)
+	}
+	if text.Parts() != 1 {
+		if text.Parts() == 0 {
+			return ErrEmptyText
+		}
+		return fmt.Errorf("%w: a web app message must be one part", ErrPartTooLong)
+	}
+	part := text.Part(0)
+	if strings.TrimSpace(part) == "" {
+		return ErrEmptyText
+	}
+	if n := safetext.UTF16Len(part); n > safetext.MaxPartUTF16 {
+		return fmt.Errorf("%w: %d UTF-16 units, limit %d", ErrPartTooLong, n, safetext.MaxPartUTF16)
+	}
+	return s.call(ctx, methodSendMessage, webAppRequest{
+		ChatID:             chatID,
+		Text:               part,
+		LinkPreviewOptions: linkPreviewOptions{IsDisabled: true},
+		ReplyMarkup: webAppMarkup{InlineKeyboard: [][]webAppButton{{
+			{Text: label.String(), WebApp: webAppInfo{URL: appURL}},
+		}}},
+	})
+}
+
+// checkWebAppURL accepts exactly <WebAppURL>?link=<token>.
+func (s *Sender) checkWebAppURL(raw string) error {
+	if s.webApp == nil {
+		return fmt.Errorf("%w: no web app URL configured", ErrInvalidKeyboard)
+	}
+	refuse := fmt.Errorf("%w: web app URL is not the linking Mini App", ErrInvalidKeyboard)
+	base, query, ok := strings.Cut(raw, "?")
+	if !ok || base != s.webApp.String() {
+		return refuse
+	}
+	// Both halves are compared as strings, so nothing is left to a URL
+	// parser: the base is byte-equal to the configured URL, which has no
+	// query, fragment or userinfo, and the query is exactly one link
+	// parameter whose value cannot hold '&', '#', '%' or '='.
+	tok, ok := strings.CutPrefix(query, "link=")
+	if !ok || !linkTokenFormat.MatchString(tok) {
+		return refuse
 	}
 	return nil
 }

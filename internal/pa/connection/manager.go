@@ -794,7 +794,14 @@ func (m *Manager) Disconnect(ctx context.Context, principal int64, id string) (D
 // tokens now. The purge checks again in its own transaction, so a
 // connection that gains tokens after this returns still refuses the
 // deletion.
+//
+// A nil *Manager refuses rather than panics: a typed nil stored in a
+// db.PATokenRevoker passes the callers' nil checks, and the account
+// deletion must then refuse (409 / tool error), not crash the handler.
 func (m *Manager) RevokeHeldTokens(ctx context.Context, principal int64) error {
+	if m == nil {
+		return errors.New("pa connection: revoke held tokens: no manager")
+	}
 	if err := validPrincipal(principal); err != nil {
 		return err
 	}

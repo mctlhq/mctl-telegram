@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.141.0](https://github.com/mctlhq/mctl-telegram/compare/0.140.1...0.141.0) (2026-11-21)
+
+
+### Features
+
+* **metrics:** create every tool invocation series at 0 on startup ([c0a9796](https://github.com/mctlhq/mctl-telegram/commit/c0a9796663bbfe2de50f9c26e1369fde929ab9cd))
+* **metrics:** create every tool invocation series at 0 on startup ([3646f73](https://github.com/mctlhq/mctl-telegram/commit/3646f73305a369823857d2eb8ae4d016b909e522))
+* **pa:** add inert Phase 2 primitives for the write gate ([969cfe0](https://github.com/mctlhq/mctl-telegram/commit/969cfe025df3e3f3a33ce6e9c979c07252976611))
+* **pa:** add inert Phase 2 primitives for the write gate ([#1320](https://github.com/mctlhq/mctl-telegram/issues/1320)) ([7d831fa](https://github.com/mctlhq/mctl-telegram/commit/7d831faf2301f4887b963493514820d6494d6a42))
+* **pa:** add tools runtime config and production OAuth/messenger impls ([9792085](https://github.com/mctlhq/mctl-telegram/commit/97920852cf4a0a691da78c6a84a0a3878c292584))
+* **pa:** add tools runtime config and production OAuth/messenger impls ([236e148](https://github.com/mctlhq/mctl-telegram/commit/236e1487fdd0bd9e7925ad6e4541bf372530ffdd)), closes [#1318](https://github.com/mctlhq/mctl-telegram/issues/1318)
+* **pa:** durable per-conversation taint and tool provenance ([b3c908a](https://github.com/mctlhq/mctl-telegram/commit/b3c908a3cb60ca1379388773d25cdad7522ebbb4))
+* **pa:** durable per-conversation taint and tool provenance ([981443e](https://github.com/mctlhq/mctl-telegram/commit/981443e0c71fd90ab129dc49fca5280d935b290f)), closes [#1321](https://github.com/mctlhq/mctl-telegram/issues/1321)
+
+
+### Bug Fixes
+
+* **pa:** close disclosure schema gaps and tighten inert guards ([5eea2a2](https://github.com/mctlhq/mctl-telegram/commit/5eea2a2247a6cbb79fe22cb0cc439c5c1bf7d881))
+* **pa:** fence, cap and revoke-first deletion for PA linking ([906c445](https://github.com/mctlhq/mctl-telegram/commit/906c4457f6f15ae762b392f7636ac5760cd5c505))
+* **pa:** fence, cap and revoke-first deletion for PA linking ([f844019](https://github.com/mctlhq/mctl-telegram/commit/f8440197494b46e7099217dcf99736084f3ec9f4))
+* **pa:** keep no lock row for never-admitted deleted principals ([437c9e5](https://github.com/mctlhq/mctl-telegram/commit/437c9e552f35cb13ac81b0297d1a0888e401e5fe))
+* **pa:** keep switches independent and close review gaps ([ebea984](https://github.com/mctlhq/mctl-telegram/commit/ebea9843b25cbba3a29f0d0967e1eb22c9f7c36c))
+* **pa:** read schema keywords by exact name, bound integers by value ([0c5043b](https://github.com/mctlhq/mctl-telegram/commit/0c5043be508f3a0a316e67aef241b9b0b49ceb8d))
+* **pa:** taint by kind, gate-tested tool records, pinned outputs ([0d02267](https://github.com/mctlhq/mctl-telegram/commit/0d0226740f6b60138745c5708cfacb8744de347c))
+* **pa:** tighten tools config URLs and identity config error ([6d5ca27](https://github.com/mctlhq/mctl-telegram/commit/6d5ca27e1ed247cac9ef32ef28d154b34249b0d2)), closes [#1318](https://github.com/mctlhq/mctl-telegram/issues/1318)
+* **slo:** count topic refusals as caller errors; quiet two expected WARNs ([8a3054c](https://github.com/mctlhq/mctl-telegram/commit/8a3054c8667c5f7a6014988990df25f3bb230fb2))
+* **slo:** count topic refusals as caller errors; quiet two expected WARNs ([d69ee00](https://github.com/mctlhq/mctl-telegram/commit/d69ee00530478f4a255f1198895cfaeeef5650be))
+
 ## [0.140.1](https://github.com/mctlhq/mctl-telegram/compare/0.140.0...0.140.1) (2026-11-21)
 
 

@@ -56,6 +56,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/pa"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
+	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
 // TTLs of threat model T1.
@@ -638,8 +639,8 @@ func ConfirmCard(server connection.Server, accountID, nonce string) Card {
 	return Card{
 		Text: "Connect " + string(server) + " account " + accountID + "?",
 		Buttons: []Button{
-			{Label: "Confirm", Data: confirmPrefix + nonce},
-			{Label: "Cancel", Data: cancelPrefix + nonce},
+			{Label: safetext.LabelConfirm.String(), Data: confirmPrefix + nonce},
+			{Label: safetext.LabelCancel.String(), Data: cancelPrefix + nonce},
 		},
 	}
 }

@@ -457,7 +457,9 @@ func TestLanding_UntestedClientsLabelled(t *testing.T) {
 		// the "Other clients" tab; Windsurf is named in the FAQ answer, which
 		// carries the label too (TestUntestedClients_LabelledEverywhere).
 		`<span class="tag-untested">not yet tested</span>`,
-		"Cursor, VS Code, Windsurf) may work but are not yet tested",
+		"Claude Code, Gemini, Cursor, VS Code, Grok, Notion, Rayrun, Hermes Agent and other MCP clients are not yet tested",
+		`href="mailto:support@mctl.ai">support@mctl.ai</a>`,
+		"Your client does not work? Write to",
 	} {
 		if !strings.Contains(body, label) {
 			t.Errorf("landing missing %q", label)
@@ -477,7 +479,7 @@ func TestUntestedClients_LabelledEverywhere(t *testing.T) {
 		return w.Body.String()
 	}
 	htmlBlocks := func(s string) []string {
-		return strings.FieldsFunc(strings.NewReplacer("</li>", "\x00", "</p>", "\x00", "</dd>", "\x00", "</h1>", "\x00", "</h2>", "\x00", "</h3>", "\x00").Replace(s), func(r rune) bool { return r == 0 })
+		return strings.FieldsFunc(strings.NewReplacer("</li>", "\x00", "</tr>", "\x00", "</p>", "\x00", "</dd>", "\x00", "</h1>", "\x00", "</h2>", "\x00", "</h3>", "\x00").Replace(s), func(r rune) bool { return r == 0 })
 	}
 	mdBlocks := func(s string) []string {
 		return strings.Split(strings.NewReplacer("\n- ", "\n\n", "\n* ", "\n\n").Replace(s), "\n\n")
@@ -500,9 +502,9 @@ func TestUntestedClients_LabelledEverywhere(t *testing.T) {
 	for src, blocks := range sources {
 		for _, block := range blocks {
 			block = strings.Join(strings.Fields(block), " ")
-			for _, client := range []string{"Cursor", "VS Code", "Windsurf"} {
-				if strings.Contains(block, client) && !strings.Contains(block, "not yet tested") {
-					t.Errorf("%s: %s is named without \"not yet tested\" in: %s", src, client, block)
+			for _, client := range []string{"Cursor", "VS Code", "Windsurf", "Grok", "Notion", "Rayrun", "Hermes", "Gemini"} {
+				if strings.Contains(block, client) && !strings.Contains(block, "not yet tested") && !strings.Contains(block, "not tested") {
+					t.Errorf("%s: %s is named without \"not yet tested\" or \"not tested\" in: %s", src, client, block)
 				}
 			}
 		}

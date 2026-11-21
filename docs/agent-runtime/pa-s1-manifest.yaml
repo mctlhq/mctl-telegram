@@ -54,6 +54,7 @@ S1-L12:
     - internal/pa/linking.TestLinking_S1L12_CompletionCodeOnlyFromSignedStartParam
 S1-L13:
   tests:
+    - internal/pa/connector.TestS1L13_IdentityAccountsReadsTelegramID
     - internal/pa/linking.TestLinking_S1L13_TGIdentityMustBePrincipal
 S1-L14:
   tests:
@@ -325,6 +326,7 @@ S1-O2:
 S1-O3:
   tests:
     - internal/pa/output.TestS1O3_PlainTextAndNoURLButtons
+    - internal/pa/output.TestS1O3_WebAppButtonOnlyForAppURL
     - internal/pa/output/safetext.TestS1O3_DeepMarkupBroken
     - internal/pa/output/safetext.TestS1O3_MarkupStripped
 S1-O4:
