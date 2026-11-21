@@ -230,6 +230,10 @@ func (c *Conversations) handleMessage(ctx context.Context, tx *sql.Tx, u Verifie
 		return err
 	}
 	now := c.now()
+	// Every fragment that is not exactly user text (a forward, caption,
+	// reply, quote, or an unknown mark) taints the conversation in this
+	// transaction: AppendPAFragment raises the flag with the insert, so the
+	// content and the taint commit together (T5, #1321).
 	for _, f := range frags {
 		sf, err := c.sealer.Seal(p.TelegramID(), conv.ID, seq, f)
 		if err != nil {

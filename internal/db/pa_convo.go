@@ -33,7 +33,7 @@ var _ convo.Store = (*Store)(nil)
 //   - pa_conversations: expires_at_ms is created_at_ms + TTL and never
 //     moves. closed_at_ms > 0 means /new closed it; it is never loaded
 //     again. The partial unique index allows one open conversation per
-//     principal.
+//     principal. tainted (added by migratePAConvo) only ever rises.
 //   - pa_fragments: sealed text with its kind and mark in clear. provenance
 //     has no CHECK constraint on purpose: the Go layer refuses to write an
 //     unknown mark, and an unmarked row that exists anyway (older state, a
@@ -104,8 +104,17 @@ func migratePAConvo(ctx context.Context, dbConn migrateDB, pg bool) error {
 	// purged_at_ms: when an account deletion last purged the principal
 	// (purgePAPrincipals), 0 if never. It fences a Begin admitted before the
 	// deletion (CreatePAConnection, #1338).
-	return addColumnIfMissing(ctx, dbConn, pg, "pa_principal_locks", "purged_at_ms",
-		"BIGINT NOT NULL DEFAULT 0", "INTEGER NOT NULL DEFAULT 0")
+	if err := addColumnIfMissing(ctx, dbConn, pg, "pa_principal_locks", "purged_at_ms",
+		"BIGINT NOT NULL DEFAULT 0", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	// tainted: 1 once external content entered the conversation (T5,
+	// #1321). The default is 1, so every row that existed before the column
+	// (whose history this build cannot prove clean) and any insert that
+	// does not name the column is tainted; OpenPAConversation alone writes
+	// a clean row, and only when it creates one.
+	return addColumnIfMissing(ctx, dbConn, pg, "pa_conversations", "tainted",
+		"INTEGER NOT NULL DEFAULT 1", "INTEGER NOT NULL DEFAULT 1")
 }
 
 func unreadable(op string, err error) error {
@@ -206,9 +215,11 @@ func (s *Store) OpenPAConversation(ctx context.Context, tx *sql.Tx, principal in
 		nowMS, principal); err != nil {
 		return convo.Conversation{}, fmt.Errorf("open pa conversation: close expired: %w", err)
 	}
+	// A new row starts clean. On a conflict the open row is kept as it
+	// is, its taint included: nothing here lowers a flag.
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO pa_conversations(id, principal, created_at_ms, expires_at_ms, closed_at_ms)
-		 VALUES($1, $2, $3, $4, 0)
+		`INSERT INTO pa_conversations(id, principal, created_at_ms, expires_at_ms, closed_at_ms, tainted)
+		 VALUES($1, $2, $3, $4, 0, 0)
 		 ON CONFLICT (principal) WHERE closed_at_ms = 0 DO NOTHING`,
 		newID, principal, nowMS, now.Add(ttl).UnixMilli()); err != nil {
 		return convo.Conversation{}, fmt.Errorf("open pa conversation: insert: %w", err)
@@ -343,7 +354,46 @@ func (s *Store) AppendPAFragment(ctx context.Context, tx *sql.Tx, f convo.Sealed
 	if n != 1 {
 		return convo.ErrNotFound
 	}
+	if !convo.Taints(f.Kind, f.Provenance) {
+		return nil
+	}
+	// The flag rises in the fragment's transaction: external content is
+	// never stored without it. An UPDATE that touches no row means the
+	// conversation was not observed, and the fragment is refused with it.
+	res, err = tx.ExecContext(ctx,
+		`UPDATE pa_conversations SET tainted = 1 WHERE id = $1 AND principal = $2`,
+		f.ConversationID, f.Principal)
+	if err != nil {
+		return fmt.Errorf("append pa fragment: taint: %w", err)
+	}
+	if n, err = res.RowsAffected(); err != nil {
+		return fmt.Errorf("append pa fragment: taint: rows affected: %w", err)
+	}
+	if n != 1 {
+		return fmt.Errorf("%w: append pa fragment: taint not recorded", convo.ErrUnreadable)
+	}
 	return nil
+}
+
+// ReadPAConversationTaint implements convo.Store. Only a row read with a
+// stored 0 is clean; any other value, a missing row and every failed
+// read are tainted (I9, S2-I10). The row is read whether or not it is
+// still open: a closed or expired conversation keeps the flag it had.
+func (s *Store) ReadPAConversationTaint(ctx context.Context, principal int64, conversationID string) (bool, error) {
+	if principal <= 0 || conversationID == "" {
+		return true, fmt.Errorf("%w: conversation taint", convo.ErrInvalid)
+	}
+	var tainted int64
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT tainted FROM pa_conversations WHERE id = $1 AND principal = $2`,
+		conversationID, principal).Scan(&tainted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, convo.ErrNotFound
+	}
+	if err != nil {
+		return true, rowRead("conversation taint", err)
+	}
+	return tainted != 0, nil
 }
 
 // LoadPAFragments implements convo.Store.

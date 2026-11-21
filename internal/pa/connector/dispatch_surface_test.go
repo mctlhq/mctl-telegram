@@ -73,6 +73,12 @@ func (noJobs) AdmitToolCall(context.Context, pa.PAJob, string, string) (pa.Polic
 	return pa.Policy{}, errors.New("not used")
 }
 func (noJobs) StillRunning(context.Context, pa.PAJob) error { return errors.New("not used") }
+func (noJobs) ConversationTainted(context.Context, pa.Policy) (bool, error) {
+	return true, errors.New("not used")
+}
+func (noJobs) RecordToolResult(context.Context, pa.PAJob, []byte) error {
+	return errors.New("not used")
+}
 
 type noConns struct{}
 

@@ -57,8 +57,8 @@ const (
 	KindQuote Kind = "quote"
 	// KindAssistant is model output, stored by the run loop (slice d1).
 	KindAssistant Kind = "assistant"
-	// KindTool is tool output, stored by the run loop (slice d1): always
-	// external.
+	// KindTool is tool output, stored by the run loop when the dispatcher
+	// returns a tool result to the worker (#1321): always external.
 	KindTool Kind = "tool"
 )
 
@@ -69,6 +69,16 @@ func Kinds() []Kind {
 
 // Valid reports whether k is a kind this build knows.
 func (k Kind) Valid() bool { return slices.Contains(Kinds(), k) }
+
+// Taints reports whether storing a fragment of kind with mark prov taints
+// its conversation (threat model T5, #1321): anything not exactly user is
+// external content entering the conversation. Model output is the one
+// exception (owner decision 2026-11-21): an answer written in a clean
+// conversation saw no external content, and one written in a tainted
+// conversation changes nothing, because the flag only ever rises.
+func Taints(kind Kind, prov Provenance) bool {
+	return kind != KindAssistant && prov.Effective() != ProvenanceUser
+}
 
 // Fragment is one marked piece of conversation text. Its fields are
 // unexported: the text cannot be read without its mark.
@@ -184,6 +194,10 @@ type Store interface {
 
 	// OpenPAConversation returns the principal's open, unexpired
 	// conversation, creating one (expires_at = now + ttl) if none exists.
+	// A new conversation starts clean; an existing one keeps its taint.
+	// A new row is the only way taint resets (#1321): /new, TTL expiry,
+	// /forget and purge all end the old row, and nothing clears the flag
+	// on a row in place.
 	OpenPAConversation(ctx context.Context, tx *sql.Tx, principal int64, newID string, now time.Time, ttl time.Duration) (Conversation, error)
 	// ClosePAConversations closes the principal's open conversation (/new):
 	// it is never loaded again and the sweeper deletes it.
@@ -195,8 +209,14 @@ type Store interface {
 	// of the principal.
 	NextPAFragmentSeq(ctx context.Context, tx *sql.Tx, principal int64, conversationID string) (int64, error)
 	// AppendPAFragment stores one sealed fragment. It refuses an unknown
-	// mark or kind (ErrInvalid).
+	// mark or kind (ErrInvalid). A fragment that Taints marks its
+	// conversation tainted in the same transaction, so the content and the
+	// flag commit together or not at all.
 	AppendPAFragment(ctx context.Context, tx *sql.Tx, f SealedFragment) error
+	// ReadPAConversationTaint reports whether external content entered the
+	// principal's conversation (T5, #1321). Any error, ErrNotFound included,
+	// comes with true: a caller that cannot observe the flag acts on taint.
+	ReadPAConversationTaint(ctx context.Context, principal int64, conversationID string) (bool, error)
 	// LoadPAFragments returns the fragments of an open, unexpired
 	// conversation of the principal in order. A conversation that is not
 	// the principal's, closed or expired is ErrNotFound.

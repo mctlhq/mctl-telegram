@@ -401,6 +401,17 @@ type FinishRequest struct {
 	Record func(ctx context.Context, tx *sql.Tx, j Job) error
 }
 
+// ToolResultRequest records a tool result before the worker sees it
+// (#1321).
+type ToolResultRequest struct {
+	Now  time.Time
+	Gate Gate
+	// Record runs in the step's transaction after the gate, to store the
+	// result as conversation state and taint the conversation. Its error
+	// rolls the step back, and the result is withheld.
+	Record func(ctx context.Context, tx *sql.Tx, j Job) error
+}
+
 // Store is the persistence contract (implemented by *db.Store).
 type Store interface {
 	// AdmitPAMessage counts one message of principal in its fixed rate
@@ -426,6 +437,9 @@ type Store interface {
 	AdmitPAToolCall(ctx context.Context, ref Ref, req ToolCallRequest) (Job, error)
 	// FinishPAJob settles the reservation and marks the job done.
 	FinishPAJob(ctx context.Context, ref Ref, req FinishRequest) (Job, error)
+	// RecordPAToolResult runs req.Record for the running job of ref,
+	// after the gate, in one transaction.
+	RecordPAToolResult(ctx context.Context, ref Ref, req ToolResultRequest) (Job, error)
 }
 
 // EstimateTokens is the conservative context estimate the run loop uses:

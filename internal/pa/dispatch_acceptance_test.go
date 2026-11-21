@@ -289,10 +289,29 @@ func (f *failingConns) List(ctx context.Context, p int64) ([]connection.Connecti
 	return cs, err
 }
 
-// failingJobs fails the ledger admission while fail is set.
+// failingJobs fails the ledger admission while fail is set, the taint
+// read while taintFail is set, and the tool-result record while
+// recordFail is set.
 type failingJobs struct {
 	*pa.RunLoop
-	fail atomic.Bool
+	fail       atomic.Bool
+	taintFail  atomic.Bool
+	recordFail atomic.Bool
+}
+
+func (f *failingJobs) ConversationTainted(ctx context.Context, p pa.Policy) (bool, error) {
+	if f.taintFail.Load() {
+		// A broken reader that also says "clean": the error must win.
+		return false, errors.New("injected taint read error")
+	}
+	return f.RunLoop.ConversationTainted(ctx, p)
+}
+
+func (f *failingJobs) RecordToolResult(ctx context.Context, j pa.PAJob, out []byte) error {
+	if f.recordFail.Load() {
+		return errors.New("injected taint write error")
+	}
+	return f.RunLoop.RecordToolResult(ctx, j, out)
 }
 
 func (f *failingJobs) AdmitToolCall(ctx context.Context, j pa.PAJob, server, tool string) (pa.Policy, error) {

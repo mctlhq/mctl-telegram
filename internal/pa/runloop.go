@@ -670,19 +670,65 @@ func (l *RunLoop) release(ctx context.Context, ref jobs.Ref, mode jobs.ReleaseMo
 }
 
 // appendAssistant stores the model's answer as an external-marked
-// assistant fragment: model output is never user provenance (T5).
+// assistant fragment: model output is never user provenance (T5). The mark
+// does not taint the conversation (convo.Taints): an answer only saw what
+// the conversation already held.
 func (l *RunLoop) appendAssistant(ctx context.Context, tx *sql.Tx, j jobs.Job, text string) (int64, error) {
+	return l.appendFragment(ctx, tx, j, convo.NewFragment(convo.KindAssistant, convo.ProvenanceExternal, text))
+}
+
+// appendFragment stores f in the job's conversation, in tx.
+// AppendPAFragment taints the conversation in the same transaction when f
+// is external content.
+func (l *RunLoop) appendFragment(ctx context.Context, tx *sql.Tx, j jobs.Job, f convo.Fragment) (int64, error) {
 	seq, err := l.store.NextPAFragmentSeq(ctx, tx, j.Principal, j.ConversationID)
 	if err != nil {
 		return 0, err
 	}
-	sf, err := l.sealer.Seal(j.Principal, j.ConversationID, seq,
-		convo.NewFragment(convo.KindAssistant, convo.ProvenanceExternal, text))
+	sf, err := l.sealer.Seal(j.Principal, j.ConversationID, seq, f)
 	if err != nil {
 		return 0, err
 	}
 	sf.CreatedAt = l.now()
 	return seq, l.store.AppendPAFragment(ctx, tx, sf)
+}
+
+// ConversationTainted reports whether the run's conversation is tainted,
+// for the dispatcher's audit record and, once writes exist, its card gate
+// (threat model T5, #1321). It reads the durable flag, never the fragments
+// in the model's context: eviction and summaries do not lower it. Any
+// error comes with true, and the caller acts on taint (S2-I10).
+func (l *RunLoop) ConversationTainted(ctx context.Context, policy Policy) (bool, error) {
+	pid, conv := policy.Principal().TelegramID(), policy.ConversationID()
+	if pid <= 0 || conv == "" {
+		return true, ErrInvalidContext
+	}
+	tainted, err := l.store.ReadPAConversationTaint(ctx, pid, conv)
+	if err != nil {
+		return true, err
+	}
+	return tainted, nil
+}
+
+// RecordToolResult stores a tool result the dispatcher is about to return
+// to the worker as an external KindTool fragment of the job's
+// conversation, which taints it, in one transaction with the job's gate
+// (#1321). An error means nothing was stored and the result must be
+// withheld: the worker never holds tool output its conversation does not
+// record.
+func (l *RunLoop) RecordToolResult(ctx context.Context, job PAJob, output []byte) error {
+	if !job.ref.Valid() {
+		return ErrNoJob
+	}
+	_, err := l.store.RecordPAToolResult(ctx, job.ref, jobs.ToolResultRequest{
+		Now: l.now(), Gate: l.gate,
+		Record: func(ctx context.Context, tx *sql.Tx, j jobs.Job) error {
+			_, err := l.appendFragment(ctx, tx, j, convo.NewFragment(convo.KindTool, convo.ProvenanceExternal, string(output)))
+			return err
+		},
+	})
+	l.droppedNotice(ctx, job.ref, err)
+	return err
 }
 
 // PAJob is a verified pa-job credential, for the tool executor (#1315).
