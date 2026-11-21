@@ -1786,12 +1786,6 @@ func isPrefetch(r *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(r.Header.Get("Purpose")), "prefetch")
 }
 
-// logCallbackReject emits one WARN line for a rejected /oauth/telegram/callback
-// request. Attributes are deliberately limited to route, reason and the
-// prefetch boolean — never code, state, or a cookie value. prefetch is always
-// false here — the guard above returns 204 before any reject path — and is
-// retained deliberately so one prefetch= query matches every line both
-// routes emit. It also counts the rejection.
 // canaryStatePrefix is the prefix the monitoring canary puts on the state of
 // its deliberate unknown_state probe (cmd/canary/loginpath.go).
 const canaryStatePrefix = "canary-"
@@ -1816,6 +1810,12 @@ func (s *Server) logUnknownStateReject(r *http.Request, serverState string) {
 		"probe", "canary")
 }
 
+// logCallbackReject emits one WARN line for a rejected /oauth/telegram/callback
+// request. Attributes are deliberately limited to route, reason and the
+// prefetch boolean — never code, state, or a cookie value. prefetch is always
+// false here — the guard above returns 204 before any reject path — and is
+// retained deliberately so one prefetch= query matches every line both
+// routes emit. It also counts the rejection.
 func (s *Server) logCallbackReject(r *http.Request, reason string) {
 	s.countCallbackReject(reason)
 	s.logger().Warn("oauth: callback request rejected",

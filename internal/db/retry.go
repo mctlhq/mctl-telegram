@@ -33,15 +33,15 @@ func OpenWithRetry(ctx context.Context, dsn string, maxOpenConns, maxIdleConns i
 	return openWithRetry(ctx, dsn, maxOpenConns, maxIdleConns, interval, timeout, slog.Default(), Open)
 }
 
+// retryWarnAfterAttempts is the 0-based attempt number from which a failed
+// connection attempt is logged at Warn instead of Info.
+const retryWarnAfterAttempts = 3
+
 // openWithRetry holds the actual loop. The per-attempt call and the logger
 // are passed in as parameters (not package-level variables) so tests can
 // drive deterministic attempt outcomes and capture log output without
 // mutating shared state — important the moment any test in this package
 // runs with t.Parallel().
-// retryWarnAfterAttempts is the 0-based attempt number from which a failed
-// connection attempt is logged at Warn instead of Info.
-const retryWarnAfterAttempts = 3
-
 func openWithRetry(
 	ctx context.Context,
 	dsn string,
