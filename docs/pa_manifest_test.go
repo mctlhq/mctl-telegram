@@ -30,10 +30,13 @@ type paSuite struct {
 	// A row of the suite: "- S1-L1: ...".
 	rowRe *regexp.Regexp
 	// Anything written as the suite name, a dash of any kind (or an
-	// underscore) and a word: "S1-L1", "S1\u2011L1", "S1-Z". Each must be a
-	// row id, so a row written in another shape (indented, bold, a table
-	// cell, a Unicode dash, an id without a digit) cannot drop out of the
-	// gate unseen.
+	// underscore) and a word: "S1-L1", "S1\u2011L1", "S1\u2212L1", "S1-Z".
+	// Each must be a row id, so a row written in another shape (indented,
+	// bold, a table cell, a Unicode dash, an id without a digit) cannot drop
+	// out of the gate unseen. The suite name must start the text or follow a
+	// character that is not a letter, digit or underscore, so the "_S1_" of
+	// an identifier such as PA_S1_GATE_CLOSING is not a mention. Group 1 is
+	// the mention itself.
 	mentionRe *regexp.Regexp
 	// An id claimed by a test function name: TestS1E1E2_...,
 	// TestLinking_S1L13_... or TestS1_E1_... . A group without a digit
@@ -43,10 +46,14 @@ type paSuite struct {
 
 func newPASuite(name string) paSuite {
 	q := regexp.QuoteMeta(name)
+	// \p{Pd} is every dash punctuation, U+FE63 SMALL HYPHEN-MINUS among
+	// them; U+2212 MINUS SIGN (Sm) and U+2043 HYPHEN BULLET (Po) read as
+	// dashes too.
+	dash := `[\p{Pd}\x{2212}\x{2043}_]`
 	return paSuite{
 		name:      name,
 		rowRe:     regexp.MustCompile(`(?m)^- (` + q + `-[A-Z]+[0-9]+):`),
-		mentionRe: regexp.MustCompile(q + `[\p{Pd}_][\p{L}\p{N}]*`),
+		mentionRe: regexp.MustCompile(`(?:^|[^\p{L}\p{N}_])(` + q + dash + `[\p{L}\p{N}]*)`),
 		nameRe:    regexp.MustCompile(q + `_?((?:[A-Z][0-9]+)+)`),
 	}
 }
@@ -84,8 +91,8 @@ func (s paSuite) threatModelIDs(doc []byte) ([]string, error) {
 		return nil, fmt.Errorf("threat model lists no %s id: the row pattern no longer matches", s.name)
 	}
 	var stray []string
-	for _, m := range s.mentionRe.FindAll(doc, -1) {
-		if id := string(m); !slices.Contains(ids, id) && !slices.Contains(stray, id) {
+	for _, m := range s.mentionRe.FindAllSubmatch(doc, -1) {
+		if id := string(m[1]); !slices.Contains(ids, id) && !slices.Contains(stray, id) {
 			stray = append(stray, id)
 		}
 	}
@@ -173,12 +180,13 @@ func (s paSuite) checkNameClaims(inModel map[string]bool, mapped map[string]map[
 }
 
 // ciBuild is the build CI runs the suites in (build.yml: go test -race
-// ./... on ubuntu-latest, no build tags). A test file it excludes is not
-// gate evidence.
+// ./... on ubuntu-latest, no other build tags). -race sets the "race" build
+// tag, so a file behind //go:build !race never runs there. A test file it
+// excludes is not gate evidence.
 var ciBuild = func() build.Context {
 	c := build.Default
 	c.GOOS, c.GOARCH, c.CgoEnabled = "linux", "amd64", true
-	c.BuildTags, c.ToolTags = nil, nil
+	c.BuildTags, c.ToolTags = []string{"race"}, nil
 	return c
 }()
 
@@ -316,6 +324,8 @@ func TestRepoTestFuncs(t *testing.T) {
 		"a/tagged_test.go":      "//go:build smoke\n\npackage a\n\nimport \"testing\"\n\nfunc TestTagged(t *testing.T) {}\n",
 		"a/win_windows_test.go": "package a\n\nimport \"testing\"\n\nfunc TestWindowsOnly(t *testing.T) {}\n",
 		"a/linux_test.go":       "//go:build linux && !windows\n\npackage a\n\nimport \"testing\"\n\nfunc TestLinux(t *testing.T) {}\n",
+		"a/norace_test.go":      "//go:build !race\n\npackage a\n\nimport \"testing\"\n\nfunc TestNoRace(t *testing.T) {}\n",
+		"a/race_test.go":        "//go:build race\n\npackage a\n\nimport \"testing\"\n\nfunc TestRaceOnly(t *testing.T) {}\n",
 		"nested/go.mod":         "module example.com/nested\n",
 		"nested/n_test.go":      "package n\n\nimport \"testing\"\n\nfunc TestNested(t *testing.T) {}\n",
 	})
@@ -326,6 +336,8 @@ func TestRepoTestFuncs(t *testing.T) {
 		"a.TestAlias":            true,
 		"a.TestDot":              true,
 		"a.TestLinux":            true,
+		"a.TestRaceOnly":         true,
+		"a.TestNoRace":           false,
 		"a.TestTagged":           false,
 		"a.TestWindowsOnly":      false,
 	}

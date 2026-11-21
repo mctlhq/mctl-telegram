@@ -56,9 +56,13 @@ type s2Mutation struct {
 	ID string `yaml:"id"`
 	// Guard is the guarded code as <file>:<line>, relative to the
 	// repository root, at the commit the mutation ran on.
-	Guard    string   `yaml:"guard"`
-	Mutation string   `yaml:"mutation"`
-	KilledBy []string `yaml:"killed_by"`
+	Guard string `yaml:"guard"`
+	// GuardText is a substring the guard line must hold in the current
+	// tree, so a record whose line has drifted away from the guarded code
+	// fails instead of passing on a line number that still exists.
+	GuardText string   `yaml:"guard_text"`
+	Mutation  string   `yaml:"mutation"`
+	KilledBy  []string `yaml:"killed_by"`
 	// Red is the evidence of the mutated run: it names every killing test
 	// and reports FAIL. Green is the evidence of the restored run.
 	Red   string `yaml:"red"`
@@ -79,9 +83,9 @@ func s2FailedTestRe(name string) *regexp.Regexp {
 	return regexp.MustCompile(`(?m)^\s*--- FAIL: ` + regexp.QuoteMeta(name) + ` \(`)
 }
 
-// guardLines returns the number of lines of a repository file, for a
-// guard reference. An error means the file could not be read.
-type guardLines func(path string) (int, error)
+// guardLines returns the lines of a repository file, for a guard
+// reference. An error means the file could not be read.
+type guardLines func(path string) ([]string, error)
 
 // parseS2Manifest decodes the manifest strictly: an unknown field or a
 // duplicate id is an error, not an entry that silently drops.
@@ -171,10 +175,15 @@ func checkS2Mutations(id string, e s2Entry, lines guardLines) []string {
 		}
 		if g := s2GuardRe.FindStringSubmatch(m.Guard); g == nil {
 			bad("guard %q is not <file>.go:<line>", m.Guard)
-		} else if n, err := lines(g[1]); err != nil {
+		} else if ls, err := lines(g[1]); err != nil {
 			bad("guard file %s could not be read: %v", g[1], err)
-		} else if line, _ := strconv.Atoi(g[2]); line > n {
-			bad("guard line %d is past the end of %s (%d lines)", line, g[1], n)
+		} else if line, _ := strconv.Atoi(g[2]); line > len(ls) {
+			bad("guard line %d is past the end of %s (%d lines)", line, g[1], len(ls))
+		} else if strings.TrimSpace(m.GuardText) != "" && !strings.Contains(ls[line-1], m.GuardText) {
+			bad("guard_text %q is not on %s, which reads %q", m.GuardText, m.Guard, ls[line-1])
+		}
+		if strings.TrimSpace(m.GuardText) == "" {
+			bad("no guard_text")
 		}
 		if strings.TrimSpace(m.Mutation) == "" {
 			bad("no mutation text")
@@ -229,24 +238,24 @@ func s2ClosingProblems(manifest map[string]s2Entry, closing bool) []string {
 	return out
 }
 
-// repoGuardLines counts the lines of a file below root.
+// repoGuardLines reads the lines of a file below root.
 func repoGuardLines(root string) guardLines {
-	return func(path string) (int, error) {
+	return func(path string) ([]string, error) {
 		f, err := os.Open(filepath.Join(root, filepath.FromSlash(path)))
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		defer f.Close()
 		sc := bufio.NewScanner(f)
 		sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
-		n := 0
+		var out []string
 		for sc.Scan() {
-			n++
+			out = append(out, sc.Text())
 		}
 		if err := sc.Err(); err != nil {
-			return 0, err
+			return nil, err
 		}
-		return n, nil
+		return out, nil
 	}
 }
 
@@ -299,6 +308,7 @@ func s2TreeFixture(t *testing.T, guard string) string {
   mutations:
     - id: M1
       guard: ` + guard + `
+      guard_text: "func X()"
       mutation: "return nil"
       killed_by: [x.TestS2A1_Thing]
       red: "--- FAIL: TestS2A1_Thing (0.01s)\nFAIL\tx"
@@ -351,15 +361,18 @@ func TestRepoGuardLines(t *testing.T) {
 	})
 	lines := repoGuardLines(root)
 	for path, want := range map[string]int{"a.go": 3, "no_eol.go": 2, "empty.go": 0, "long.go": 2} {
-		if n, err := lines(path); err != nil || n != want {
-			t.Errorf("%s: %d lines, %v; want %d", path, n, err, want)
+		if ls, err := lines(path); err != nil || len(ls) != want {
+			t.Errorf("%s: %d lines, %v; want %d", path, len(ls), err, want)
 		}
+	}
+	if ls, _ := lines("a.go"); !slices.Equal(ls, []string{"1", "2", "3"}) {
+		t.Errorf("a.go: lines %q, want [1 2 3]", ls)
 	}
 	// A file that cannot be read, or not to the end, is an error, never a
 	// count: could not observe is not observed short.
 	for _, path := range []string{"gone.go", "huge.go"} {
-		if n, err := lines(path); err == nil {
-			t.Errorf("%s: %d lines and no error, want an error", path, n)
+		if ls, err := lines(path); err == nil {
+			t.Errorf("%s: %d lines and no error, want an error", path, len(ls))
 		}
 	}
 }
@@ -369,6 +382,9 @@ type s2Fixture struct {
 	ids   []string
 	m     map[string]s2Entry
 	funcs map[string]bool
+	// files maps a path to its line count; a negative count is a file
+	// that cannot be read. Line n of a file reads "line n", except lines 10
+	// and 12 of internal/x/x.go, which hold the guards.
 	files map[string]int
 	// target is the mutation record mutate edits; mutated records that
 	// mutate ran.
@@ -385,19 +401,21 @@ func newS2Fixture() *s2Fixture {
 				Slice:  "P2-S7",
 				Tests:  []string{"internal/x.TestS2A1_Thing", "internal/x.TestCovers"},
 				Mutations: []s2Mutation{{
-					ID:       "M1",
-					Guard:    "internal/x/x.go:10",
-					Mutation: "return nil",
-					KilledBy: []string{"internal/x.TestS2A1_Thing"},
-					Red:      "--- FAIL: TestS2A1_Thing (0.01s)\nFAIL\tinternal/x",
-					Green:    "ok  \tinternal/x\t0.1s",
+					ID:        "M1",
+					Guard:     "internal/x/x.go:10",
+					GuardText: "return nil // guard M1",
+					Mutation:  "return nil",
+					KilledBy:  []string{"internal/x.TestS2A1_Thing"},
+					Red:       "--- FAIL: TestS2A1_Thing (0.01s)\nFAIL\tinternal/x",
+					Green:     "ok  \tinternal/x\t0.1s",
 				}, {
-					ID:       "M2",
-					Guard:    "internal/x/x.go:12",
-					Mutation: "return err -> return nil",
-					KilledBy: []string{"internal/x.TestS2A1_Thing", "internal/x.TestCovers"},
-					Red:      "--- FAIL: TestS2A1_Thing (0.01s)\n--- FAIL: TestCovers (0.00s)\nFAIL\nFAIL\tinternal/x\t0.2s\nFAIL",
-					Green:    "ok  \tinternal/x\t0.1s",
+					ID:        "M2",
+					Guard:     "internal/x/x.go:12",
+					GuardText: "return err // guard M2",
+					Mutation:  "return err -> return nil",
+					KilledBy:  []string{"internal/x.TestS2A1_Thing", "internal/x.TestCovers"},
+					Red:       "--- FAIL: TestS2A1_Thing (0.01s)\n--- FAIL: TestCovers (0.00s)\nFAIL\nFAIL\tinternal/x\t0.2s\nFAIL",
+					Green:     "ok  \tinternal/x\t0.1s",
 				}},
 			},
 			"S2-A2": {Status: s2StatusPending, Slice: "P2-S2", TrackedBy: "#1320"},
@@ -411,15 +429,22 @@ func newS2Fixture() *s2Fixture {
 	}
 }
 
-func (f *s2Fixture) lines(path string) (int, error) {
+func (f *s2Fixture) lines(path string) ([]string, error) {
 	n, ok := f.files[path]
 	if !ok {
-		return 0, fmt.Errorf("open %s: no such file", path)
+		return nil, fmt.Errorf("open %s: no such file", path)
 	}
 	if n < 0 {
-		return 0, fmt.Errorf("read %s: permission denied", path)
+		return nil, fmt.Errorf("read %s: permission denied", path)
 	}
-	return n, nil
+	out := make([]string, n)
+	for i := range out {
+		out[i] = "line " + strconv.Itoa(i+1)
+	}
+	if path == "internal/x/x.go" {
+		out[9], out[11] = "\treturn nil // guard M1", "\treturn err // guard M2"
+	}
+	return out, nil
 }
 
 func (f *s2Fixture) check() []string { return checkS2Manifest(f.ids, f.m, f.funcs, f.lines) }
@@ -552,6 +577,17 @@ func TestPAS2ManifestCheckDetects(t *testing.T) {
 		}, "guard file internal/x/x.go could not be read"},
 		{"guard line past the end", func(f *s2Fixture) { f.mutate(func(m *s2Mutation) { m.Guard = "internal/x/x.go:21" }) },
 			"guard line 21 is past the end"},
+		{"no guard_text", func(f *s2Fixture) { f.mutate(func(m *s2Mutation) { m.GuardText = " " }) },
+			"mutation M1: no guard_text"},
+		{"no guard_text on a malformed guard", func(f *s2Fixture) {
+			f.mutate(func(m *s2Mutation) { m.Guard, m.GuardText = "the taint read", "" })
+		}, "mutation M1: no guard_text"},
+		{"guard_text missing from the guard line", func(f *s2Fixture) {
+			f.mutate(func(m *s2Mutation) { m.GuardText = "return tainted, nil" })
+		}, `mutation M1: guard_text "return tainted, nil" is not on internal/x/x.go:`},
+		{"guard line drifted to another line", func(f *s2Fixture) {
+			f.mutate(func(m *s2Mutation) { m.Guard = "internal/x/x.go:11" })
+		}, `is not on internal/x/x.go:11, which reads "line 11"`},
 		{"no mutation text", func(f *s2Fixture) { f.mutate(func(m *s2Mutation) { m.Mutation = " " }) },
 			"mutation M1: no mutation text"},
 		{"no killing test", func(f *s2Fixture) { f.mutate(func(m *s2Mutation) { m.KilledBy = nil }) },
@@ -680,18 +716,36 @@ func TestPAS2ManifestCheckDetects(t *testing.T) {
 
 func TestPAS2ThreatModelRows(t *testing.T) {
 	for name, tc := range map[string]struct{ doc, want string }{
-		"indented row": {"- S2-A1: x\n  - S2-A2: y\n", "S2-A2"},
-		"bold row":     {"- S2-A1: x\n- **S2-A2**: y\n", "S2-A2"},
-		"table cell":   {"- S2-A1: x\n| S2-A2 | y |\n", "S2-A2"},
-		"prose":        {"- S2-A1: x\nSee S2-A2 below.\n", "S2-A2"},
-		"unicode dash": {"- S2-A1: x\n- S2\u2011A2: y\n", "S2\u2011A2"},
-		"en dash":      {"- S2-A1: x\n- S2\u2013A2: y\n", "S2\u2013A2"},
-		"no digit":     {"- S2-A1: x\n- S2-Z: z\n", "S2-Z"},
-		"letter tail":  {"- S2-A1: x\n- S2-A2b: y\n", "S2-A2b"},
-		"underscore":   {"- S2-A1: x\n- S2_A2: y\n", "S2_A2"},
+		"indented row":             {"- S2-A1: x\n  - S2-A2: y\n", "S2-A2"},
+		"bold row":                 {"- S2-A1: x\n- **S2-A2**: y\n", "S2-A2"},
+		"table cell":               {"- S2-A1: x\n| S2-A2 | y |\n", "S2-A2"},
+		"prose":                    {"- S2-A1: x\nSee S2-A2 below.\n", "S2-A2"},
+		"unicode dash":             {"- S2-A1: x\n- S2\u2011A2: y\n", "S2\u2011A2"},
+		"en dash":                  {"- S2-A1: x\n- S2\u2013A2: y\n", "S2\u2013A2"},
+		"no digit":                 {"- S2-A1: x\n- S2-Z: z\n", "S2-Z"},
+		"letter tail":              {"- S2-A1: x\n- S2-A2b: y\n", "S2-A2b"},
+		"underscore":               {"- S2-A1: x\n- S2_A2: y\n", "S2_A2"},
+		"minus sign":               {"- S2-A1: x\n- S2\u2212A2: y\n", "S2\u2212A2"},
+		"hyphen bullet":            {"- S2-A1: x\n- S2\u2043A2: y\n", "S2\u2043A2"},
+		"small hyphen-minus":       {"- S2-A1: x\n- S2\uFE63A2: y\n", "S2\uFE63A2"},
+		"standalone underscore id": {"- S2-A1: x\nsee S2_I8 there\n", "S2_I8"},
+		"at the start of the text": {"S2_I8 first\n- S2-A1: x\n", "S2_I8"},
+		"after punctuation":        {"- S2-A1: x\n(S2-A2) and -S2-A3\n", "S2-A2, S2-A3"},
 	} {
 		if _, err := paSuiteS2.threatModelIDs([]byte(tc.doc)); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err %v, want one naming %s", name, err, tc.want)
+		}
+	}
+	// An identifier that holds the suite name after a letter, digit or
+	// underscore is not a mention: PA_S2_GATE_CLOSING is not the id S2_GATE.
+	for name, doc := range map[string]string{
+		"env name":       "- S2-A1: x\nSet PA_S2_GATE_CLOSING=1 to close.\n",
+		"letter prefix":  "- S2-A1: x\nthe XS2-A9 part\n",
+		"digit prefix":   "- S2-A1: x\nversion 1S2-A9\n",
+		"in a code span": "- S2-A1: x\n`PA_S2_GATE_CLOSING`\n",
+	} {
+		if ids, err := paSuiteS2.threatModelIDs([]byte(doc)); err != nil || !slices.Equal(ids, []string{"S2-A1"}) {
+			t.Errorf("%s: ids %v, err %v; want [S2-A1] and no error", name, ids, err)
 		}
 	}
 	// The S1 suite shares the check.
