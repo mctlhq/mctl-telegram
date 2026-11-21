@@ -17,7 +17,8 @@ has seen it work. It is the documentation slice D1 of
 
 The "Allowlist entry today" cells were read from mctl-gitops
 `platform-gitops/services/labs/mctl-telegram/values.yaml` at gitops revision
-`a481332` on 2026-10-27. That file is authoritative; this table is a dated
+`a481332` on 2026-10-27. The Gemini/Google, Grok, Notion, Rayrun and Hermes
+Agent rows were added on 2026-11-21 against revision `8d082583b`. That file is authoritative; this table is a dated
 snapshot. The settings involved are `OAUTH_ALLOWED_IMPLICIT_HOSTS`,
 `OAUTH_CIMD_ALLOWED_HOSTS`, `MCP_CLIENT_PROFILES` and
 `OAUTH_DCR_REDIRECT_URIS`.
@@ -29,8 +30,13 @@ snapshot. The settings involved are `OAUTH_ALLOWED_IMPLICIT_HOSTS`,
 | Claude (hosted connector) | CIMD (`claude.ai`); DCR only while CIMD is not advertised | implicit `claude.ai`, `claude.com`; CIMD `claude.ai` | works with caveats | CIMD proof was recorded against mctl-api, not tg.mctl.ai: [mctl-gitops#2039](https://github.com/mctlhq/mctl-gitops/pull/2039), inventory in [#784](https://github.com/mctlhq/mctl-telegram/issues/784). No tg.mctl.ai host run is recorded. The README claim that Claude is the tested client awaits a recorded host run. | 2026-10-23 |
 | Claude Code | DCR with a loopback redirect | none needed: loopback redirects are always accepted | not tested | No recorded sign-in against tg.mctl.ai, and the mctl-api CIMD proof ([mctl-gitops#2039](https://github.com/mctlhq/mctl-gitops/pull/2039)) covers the hosted connector, not Claude Code's loopback DCR path. On 2026-10-27 read-only tool calls succeeded from a Claude Code session during the [#784 E2 run](https://github.com/mctlhq/mctl-telegram/issues/784#issuecomment-6450452592), but whether that connection came through the claude.ai connector or a local DCR registration was not recorded. | not observed |
 | ChatGPT | CIMD (`chatgpt.com`, which also covers Codex) | implicit `chatgpt.com`; CIMD `chatgpt.com` | works with caveats | CIMD proof was on mctl-api ([mctl-gitops#2039](https://github.com/mctlhq/mctl-gitops/pull/2039)); no tg.mctl.ai run is recorded. MCP Apps are deferred to [#650](https://github.com/mctlhq/mctl-telegram/issues/650). | 2026-10-23 |
-| Cursor | DCR with the hosted callback on `www.cursor.com`; the `cursor://` scheme is refused | implicit `www.cursor.com`, `cursor.com` | not tested | Allowlisted only. Production saw 464 rejected registrations on 2026-09-21..23 before the hosts were admitted; no sign-in is verified. | not observed |
+| Cursor | DCR with the hosted callback on `www.cursor.com`; the `cursor://` scheme is refused | implicit `www.cursor.com`, `cursor.com` | not tested | Allowlisted only. Production saw 464 rejected registrations on 2026-09-21..23 before the hosts were admitted; no sign-in is verified; tracked in [#1385](https://github.com/mctlhq/mctl-telegram/issues/1385). | not observed |
 | VS Code | CIMD (`vscode.dev`) | CIMD `vscode.dev` | not tested | Allowlisted only. No run is recorded. | not observed |
+| Gemini and Google (Gemini custom connectors, Antigravity) | DCR; callbacks under `oauth-redirect*.googleusercontent.com` scoped to the `user_bound_custom-mcp-` path prefix | implicit `oauth-redirect.googleusercontent.com`, `oauth-redirect-sandbox...`, `oauth-redirect-test...` (path-prefix scoped), `antigravity.google` | not tested | Allowlisted only (Gemini hosts since 0.139.0). No sign-in is verified; tracked in [#1386](https://github.com/mctlhq/mctl-telegram/issues/1386). | not observed |
+| Grok | DCR from `grok.com` | none yet; admission in progress ([mctl-gitops#2870](https://github.com/mctlhq/mctl-gitops/pull/2870)) | not tested | Production refused 11 registrations on 2026-11-12..21, all `redirect_host_not_allowed`. Verification tracked in [#1381](https://github.com/mctlhq/mctl-telegram/issues/1381). | not observed |
+| Notion | DCR from `app.notion.com` | none yet; admission in progress (mctl-gitops follow-up to [#2870](https://github.com/mctlhq/mctl-gitops/pull/2870)) | not tested | Production refused 2 registrations on 2026-11-16, both `redirect_host_not_allowed`. Verification tracked in [#1382](https://github.com/mctlhq/mctl-telegram/issues/1382). | not observed |
+| Rayrun | DCR from `ray.run` | none yet; admission in progress (mctl-gitops follow-up to [#2870](https://github.com/mctlhq/mctl-gitops/pull/2870)) | not tested | Production refused 1 registration on 2026-11-15, `redirect_host_not_allowed`. Verification tracked in [#1383](https://github.com/mctlhq/mctl-telegram/issues/1383). | not observed |
+| Hermes Agent | DCR from a per-user pod subdomain under `agentspodium.com` | none; a per-user host cannot be admitted as one exact host | not tested | Production refused 1 registration on 2026-11-13, `redirect_host_not_allowed`. Verification tracked in [#1384](https://github.com/mctlhq/mctl-telegram/issues/1384). | not observed |
 | Windsurf | unknown (DCR assumed) | none | not tested | No allowlist entry and no run. | not observed |
 | Town | CIMD document published at `https://www.town.com/.well-known/oauth-client-id`; DCR via a `www.town.com` callback. Which one Town uses is not confirmed. | implicit `www.town.com`, `town.com`; CIMD `www.town.com`; profile binding to `core-reply` | not tested | Proven: DCR was rejected with `invalid_redirect_uri` until mctl-gitops#2023; the CIMD document resolves; authorize reaches the Telegram sign-in; the `MCP_CLIENT_PROFILES` binding to `core-reply` parses. Not proven: a completed token, a tool call, and the CIMD-or-DCR choice. See [#784](https://github.com/mctlhq/mctl-telegram/issues/784) and the [admission runbook](../runbooks/admitting-an-agent-platform.md). | 2026-10-23 |
 | MCP Inspector | DCR with a loopback redirect | none needed: loopback redirects are always accepted | not tested | Not run against tg.mctl.ai. Only the in-process probe exists: see the `in-process-current-main` cell in [cloudflare-portal-compat.md](../cloudflare-portal-compat.md). | not observed |
@@ -39,7 +45,7 @@ snapshot. The settings involved are `OAUTH_ALLOWED_IMPLICIT_HOSTS`,
 ## Notes
 
 - `antigravity.google` is on `OAUTH_ALLOWED_IMPLICIT_HOSTS`. It is
-  allowlisted, not in scope of this matrix, and not tested.
+  allowlisted and not tested; it is covered by the Gemini and Google row.
 - `localhost` and `127.0.0.1` on the implicit list are redundant: the server
   accepts loopback redirects regardless of that list. Custom schemes such as
   `cursor://` are refused.

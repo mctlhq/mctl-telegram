@@ -91,7 +91,10 @@
     background: color-mix(in srgb, var(--surface-fg) 4%, transparent);
     font-size: 13px; color: var(--surface-fg-muted);
   }
-  .hero-chips + .stats-strip { margin-top: 56px; }
+  .hero-chips a { color: inherit; text-decoration: underline; }
+  .support-note { margin: 14px 0 0; text-align: center; font-size: 14px; color: var(--surface-fg-muted); }
+  .support-note a { color: inherit; text-decoration: underline; }
+  .hero-chips + .stats-strip, .support-note + .stats-strip { margin-top: 56px; }
   /* Telegram API terms 2.2: the Telegram-API fact stays in the first screen. */
   .hero-legal {
     margin: 20px auto 0; max-width: 70ch;
@@ -302,11 +305,13 @@
       <a class="btn-secondary" href="https://claude.ai/new#customize/connectors/yours" target="_blank" rel="noopener">Open Claude connectors &#8599;</a>
     </div>
     <div class="hero-chips">
-      <span>Claude web · desktop · mobile · Code</span>
+      <span>Claude web · desktop · mobile</span>
       <span>ChatGPT by URL</span>
+      <span>Other MCP clients: <a href="/docs#client-status">see status</a></span>
       <span>Read-only by default</span>
       <span>Open source</span>
     </div>
+    <p class="support-note">Your client does not work? Write to <a href="mailto:support@mctl.ai">support@mctl.ai</a></p>
     {{if .Stats}}
     <div class="stats-strip" id="stats" aria-label="Usage so far">
       <div class="stat"><span class="stat__value" data-stat="tool_calls_total">{{fmtCount .Stats.ToolCallsTotal}}</span><span class="stat__label">tool calls, last 90 days</span></div>
@@ -452,7 +457,7 @@
       </details>
       <details>
         <summary>Which assistants does it work with?</summary>
-        <p class="answer">Claude on web, desktop, mobile and Claude Code; ChatGPT by URL. Other MCP clients (Cursor, VS Code, Windsurf) may work but are not yet tested.</p>
+        <p class="answer">Claude on web, desktop and mobile, and ChatGPT by URL, are the supported clients (works with caveats in the <a href="/docs#client-status">client status table</a>). Claude Code, Gemini, Cursor, VS Code, Grok, Notion, Rayrun, Hermes Agent and other MCP clients are not yet tested, and some are not admitted yet. Your client does not work? Write to <a href="mailto:support@mctl.ai">support@mctl.ai</a>.</p>
       </details>
       <details>
         <summary>Is it open source?</summary>
