@@ -37,6 +37,17 @@ var (
 	// LabelCancel is a generic Cancel button label.
 	LabelCancel = tpl("Cancel")
 
+	// LabelConfirm is the account-linking confirm card's Confirm button
+	// (threat model T1 step 5).
+	LabelConfirm = tpl("Confirm")
+
+	// LabelConnect is the /connect web_app button that opens the linking
+	// Mini App (T1 step 1).
+	LabelConnect = tpl("Connect")
+
+	// TextConnectOpen goes with the /connect web_app button.
+	TextConnectOpen = tpl("Tap Connect to link your account. The button works once and expires in 10 minutes.")
+
 	// TextBudgetHold is sent once per held run when a spending limit is
 	// reached (#1313 slice d1, S1-R3): no model call was made.
 	TextBudgetHold = tpl("The assistant has reached its spending limit for now. Your request is on hold until the limit resets. If the conversation expires first, you will be told and can send it again.")
