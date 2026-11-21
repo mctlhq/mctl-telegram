@@ -23,16 +23,30 @@ func FlagEnv(server connection.Server) string {
 // acceptance of that residual risk (S1-L14).
 func LoadServerFlags(getenv func(string) string) (map[connection.Server]bool, error) {
 	out := map[connection.Server]bool{}
-	for _, s := range []connection.Server{connection.ServerTG, connection.ServerAlice} {
-		v := strings.TrimSpace(getenv(FlagEnv(s)))
-		switch v {
-		case "", "false":
-			out[s] = false
-		case "true":
-			out[s] = true
-		default:
-			return nil, fmt.Errorf("%w: %s must be true or false", ErrConfig, FlagEnv(s))
+	for _, s := range FlagServers() {
+		on, err := ServerFlag(getenv, s)
+		if err != nil {
+			return nil, err
 		}
+		out[s] = on
 	}
 	return out, nil
+}
+
+// FlagServers lists the catalog servers that have a linking flag.
+func FlagServers() []connection.Server {
+	return []connection.Server{connection.ServerTG, connection.ServerAlice}
+}
+
+// ServerFlag reads one server's linking flag: missing or empty is off,
+// "true" and "false" are themselves, anything else wraps ErrConfig.
+func ServerFlag(getenv func(string) string, s connection.Server) (bool, error) {
+	switch strings.TrimSpace(getenv(FlagEnv(s))) {
+	case "", "false":
+		return false, nil
+	case "true":
+		return true, nil
+	default:
+		return false, fmt.Errorf("%w: %s must be true or false", ErrConfig, FlagEnv(s))
+	}
 }

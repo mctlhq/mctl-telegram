@@ -102,8 +102,16 @@ type Flags struct {
 	// Writes is PA_WRITES_ENABLED: off makes every write and disclosure
 	// "never" (T11). The dispatcher does not read it yet: no write path
 	// exists (P2-S1), so it is inert until the approval engine uses it.
-	Writes  bool
-	Servers map[string]bool
+	// WritesErr is the error of reading it; when set, Writes is false and
+	// the gate decides writes off (gate.Input.WritesErr). It turns off
+	// writes only: reads keep their own switches (T11, S1-F1).
+	Writes    bool
+	WritesErr error
+	// Servers is PA_SERVER_<NAME>_ENABLED per server. A server whose flag
+	// cannot be read is off, with the error in ServerErrs; the other
+	// servers keep their own flags (S1-F1).
+	Servers    map[string]bool
+	ServerErrs map[string]error
 }
 
 // MCPEndpoint is one catalog server's MCP surface. *Endpoint is the only

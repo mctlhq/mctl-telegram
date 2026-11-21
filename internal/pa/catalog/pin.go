@@ -99,7 +99,11 @@ type Constraints struct {
 	// only"). Every other value of that argument needs a card.
 	PlaybackActions *EnumSubset `json:"playback_actions,omitempty"`
 	// IntegerBounds are inclusive bounds of numeric arguments, in the
-	// device units the server takes (alice_set_volume level 1..10).
+	// device units the server takes (alice_set_volume level 1..10). They
+	// bound integers only, even where the schema type is "number": the
+	// slice that enforces them must refuse a value that is not an integer
+	// (5.5) rather than round or compare it,
+	// so no fractional value is ever inside a bound.
 	IntegerBounds map[string]IntBound `json:"integer_bounds,omitempty"`
 	// AllowedTypePrefixes are the device type prefixes a standing
 	// permission may cover (alice_control_device: light and media_device
@@ -189,9 +193,10 @@ func LoadPinPhase2() (*Pin, error) {
 
 // ParsePin decodes and validates a pin. Unknown fields are refused so a
 // misspelt policy field cannot be silently ignored, and so is a duplicate
-// key anywhere in the file: encoding/json keeps the last one silently, so a
-// reviewer reading the first entry of a tool pinned twice would review the
-// wrong policy.
+// key anywhere in the file, keys that differ only in case included:
+// encoding/json keeps the last one silently and matches fields
+// case-insensitively, so a reviewer reading "lowerable": "never" ahead of
+// a "Lowerable": "yes" would review the wrong policy.
 func ParsePin(raw []byte) (*Pin, error) {
 	if err := strictJSON(raw); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidPin, err)
@@ -404,8 +409,9 @@ func DeviceTypeAllowed(prefixes []string, deviceType string) bool {
 //
 //   - every write or disclosure is a T6 tool on the alice server, with the
 //     T6 class, lowered no further than T6 allows;
-//   - every disclosure caps each of its text arguments at
-//     MaxDisclosureText or less;
+//   - every disclosure caps each of its free-text (non-enum string)
+//     arguments at MaxDisclosureText or less, and has no argument whose
+//     type is not a single plain type;
 //   - a "conditional" tool names its condition (playback actions or device
 //     type prefixes), and only a conditional write carries one;
 //   - every argument a constraint names is a property of the pinned input
@@ -454,8 +460,24 @@ func validatePhase2Tool(server, name string, t PinnedTool) error {
 	if c == nil {
 		c = &Constraints{}
 	}
-	if t.Class == ClassDisclosure && len(c.TextCap) == 0 {
-		return errors.New("a disclosure caps its text (text_cap)")
+	if t.Class == ClassDisclosure {
+		// Everything a disclosure carries reaches a third party (T6), so
+		// every free-text argument is capped, the target device included.
+		// An enum string is not free text. A property whose type is not
+		// one plain type may carry text this check cannot see.
+		for arg, pr := range props {
+			switch {
+			case pr.Type == "":
+				return fmt.Errorf("text_cap: %q has no single type", arg)
+			case pr.Type == "string" && len(pr.Enum) == 0:
+				if _, ok := c.TextCap[arg]; !ok {
+					return fmt.Errorf("text_cap: free-text argument %q is not capped", arg)
+				}
+			}
+		}
+		if len(c.TextCap) == 0 {
+			return errors.New("a disclosure caps its text (text_cap)")
+		}
 	}
 	for arg, n := range c.TextCap {
 		if pr, ok := props[arg]; !ok || pr.Type != "string" {

@@ -258,6 +258,7 @@
           "catalog_description": "Make one Alice speaker say a phrase aloud. Everyone in the room hears it, so it always needs the principal's approval on a card showing the device and the full text. At most 1000 characters.",
           "constraints": {
             "text_cap": {
+              "device": 200,
               "phrase": 1000
             }
           },
@@ -288,7 +289,8 @@
           "catalog_description": "Send one text command to an Alice speaker, as if spoken. The command reaches Yandex, so it always needs the principal's approval on a card showing the device and the full command. At most 1000 characters.",
           "constraints": {
             "text_cap": {
-              "command": 1000
+              "command": 1000,
+              "device": 200
             }
           },
           "description_sha256": "6f0710b2ec743d52e0810298f428848b5a13114c8715a0f142165dec65133316",

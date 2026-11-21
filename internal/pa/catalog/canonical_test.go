@@ -39,6 +39,11 @@ func TestCanonicalArgsSHA256(t *testing.T) {
 	if err != nil || string(c) != `{"a":2,"b":1}` {
 		t.Fatalf("CanonicalArgs = %s, %v", c, err)
 	}
+	// Keys that differ only in case are refused (below), but distinct keys
+	// that merely share letters are not.
+	if _, err := CanonicalArgs([]byte(`{"level":1,"levels":2}`)); err != nil {
+		t.Fatalf("distinct keys refused: %v", err)
+	}
 	if d, _ := CanonicalArgsSHA256([]byte(`{"a":1.0}`)); d == mustHash(t, `{"a":1}`) {
 		t.Fatal("1.0 and 1 hash the same; the hash must bind the literal sent")
 	}
@@ -47,6 +52,9 @@ func TestCanonicalArgsSHA256(t *testing.T) {
 		"duplicate key":           `{"a":1,"a":2}`,
 		"nested duplicate key":    `{"x":{"a":1,"a":1}}`,
 		"duplicate key in array":  `{"x":[{"a":1},{"b":1,"b":2}]}`,
+		"case variant key":        `{"level":1,"Level":10}`,
+		"nested case variant key": `{"x":{"Device":"a","dEVICE":"b"}}`,
+		"kelvin sign key":         `{"\u212aind":1,"kind":2}`,
 		"array":                   `[{"a":1}]`,
 		"number":                  `1`,
 		"string":                  `"x"`,

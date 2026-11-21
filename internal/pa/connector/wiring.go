@@ -33,26 +33,33 @@ const WritesFlagEnv = "PA_WRITES_ENABLED"
 
 // EnvFlags reads the dispatch switches from the environment on every call,
 // so turning one off takes effect at the next dispatch (S1-F4). Missing or
-// empty is off; anything but "true" or "false" is an error, which refuses
-// the call. That holds for every switch: a malformed PA_WRITES_ENABLED
-// refuses reads too, because a switch that cannot be read is not off, it
-// is unknown.
+// empty is off; anything but "true" or "false" is unreadable, and an
+// unreadable switch turns off exactly its own layer (threat model T11,
+// S1-F1), never more and never less:
+//
+//   - PA_EXTERNAL_TOOLS_ENABLED gates every call, so an unreadable value is
+//     an error that refuses the whole dispatch;
+//   - PA_WRITES_ENABLED gates writes and disclosures only: an unreadable
+//     value sets Writes false and WritesErr, and reads are unaffected;
+//   - PA_SERVER_<NAME>_ENABLED gates one server: an unreadable value turns
+//     that server off and records ServerErrs, and the others are unaffected.
+//
+// An unreadable switch is unknown, not off, so its error is kept for the
+// caller rather than folded into a plain false.
 func EnvFlags(getenv func(string) string) func() (Flags, error) {
 	return func() (Flags, error) {
 		ext, err := boolFlag(getenv, ExternalToolsFlagEnv)
 		if err != nil {
 			return Flags{}, err
 		}
-		writes, err := boolFlag(getenv, WritesFlagEnv)
-		if err != nil {
-			return Flags{}, err
-		}
-		servers, err := linking.LoadServerFlags(getenv)
-		if err != nil {
-			return Flags{}, err
-		}
-		out := Flags{ExternalTools: ext, Writes: writes, Servers: map[string]bool{}}
-		for s, on := range servers {
+		out := Flags{ExternalTools: ext, Servers: map[string]bool{}, ServerErrs: map[string]error{}}
+		// boolFlag and ServerFlag return false with their error.
+		out.Writes, out.WritesErr = boolFlag(getenv, WritesFlagEnv)
+		for _, s := range linking.FlagServers() {
+			on, err := linking.ServerFlag(getenv, s)
+			if err != nil {
+				out.ServerErrs[string(s)] = err
+			}
 			out.Servers[string(s)] = on
 		}
 		return out, nil

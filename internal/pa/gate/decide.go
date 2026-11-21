@@ -52,6 +52,7 @@ const (
 	ReasonDisclosure        Reason = "disclosure"
 	ReasonNeverLowerable    Reason = "never_lowerable"
 	ReasonTainted           Reason = "tainted"
+	ReasonConditionUnmet    Reason = "condition_unmet"
 	ReasonPermission        Reason = "standing_permission"
 	ReasonNoPermission      Reason = "no_permission"
 )
@@ -66,8 +67,8 @@ type Decision struct {
 // of reading it; a non-nil error is decided as the unsafe value (writes
 // off, principal disabled, tainted, no permission), whatever the bool says.
 type Input struct {
-	// Writes is Flags.Writes (PA_WRITES_ENABLED), WritesErr the error of
-	// reading the flags.
+	// Writes is Flags.Writes (PA_WRITES_ENABLED), WritesErr is
+	// Flags.WritesErr, the error of reading that switch.
 	Writes    bool
 	WritesErr error
 	// PrincipalDisabled and PrincipalErr are PrincipalStatus's answer for
@@ -92,6 +93,15 @@ type Input struct {
 	// the permissions.
 	PermissionMatch bool
 	PermissionErr   error
+	// ConditionMet: for a "conditional" tool, the call meets the pin's own
+	// condition (catalog.Constraints): every playback action is in
+	// playback_actions (alice_media_control), or the device type, read
+	// fresh at dispatch, passes catalog.DeviceTypeAllowed for
+	// allowed_type_prefixes (alice_control_device). ConditionErr is the
+	// error of checking it (the device type unreadable, for one). Decide
+	// ignores both for a tool that is not conditional.
+	ConditionMet bool
+	ConditionErr error
 }
 
 // Decide applies the gate in a fixed order; the first rule that matches
@@ -104,8 +114,10 @@ type Input struct {
 //  4. a disclosure -> card (never lowerable, whatever the taint: S2-I9);
 //  5. never lowerable, by the pin or by the threat model's list -> card;
 //  6. tainted, or the taint unreadable -> card (S2-I5, S2-I10);
-//  7. a standing permission covers the call -> lowered;
-//  8. otherwise -> card.
+//  7. a conditional tool whose condition is unmet, or could not be
+//     checked -> card (T6);
+//  8. a standing permission covers the call -> lowered;
+//  9. otherwise -> card.
 func Decide(in Input) Decision {
 	switch {
 	case in.WritesErr != nil || !in.Writes:
@@ -121,6 +133,8 @@ func Decide(in Input) Decision {
 		return Decision{OutcomeCard, ReasonNeverLowerable}
 	case in.TaintErr != nil || in.Tainted:
 		return Decision{OutcomeCard, ReasonTainted}
+	case in.Lowerable == catalog.LowerableConditional && (in.ConditionErr != nil || !in.ConditionMet):
+		return Decision{OutcomeCard, ReasonConditionUnmet}
 	case in.PermissionErr == nil && in.PermissionMatch:
 		return Decision{OutcomeLowered, ReasonPermission}
 	default:

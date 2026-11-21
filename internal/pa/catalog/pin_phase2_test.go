@@ -90,6 +90,18 @@ func phase2Pin(t *testing.T) *Pin {
 	return p
 }
 
+// setSchema replaces a tool's input schema and recomputes its hash, so
+// that only a Phase 2 rule, and not the structural hash check, can refuse
+// the edit.
+func setSchema(t *testing.T, pt *PinnedTool, schema string) {
+	t.Helper()
+	c, err := canonicalObject([]byte(schema))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pt.InputSchema, pt.InputSchemaSHA256 = c, sha256Hex(c)
+}
+
 func editTool(p *Pin, server, name string, f func(*PinnedTool)) {
 	pt := p.Servers[server].Tools[name]
 	if pt.Constraints != nil {
@@ -178,6 +190,36 @@ func TestValidatePhase2Rules(t *testing.T) {
 			pt.Tier, pt.Class, pt.Lowerable = TierApprove, ClassWrite, LowerableNever
 			pt.Annotations = []byte(`{}`)
 		}, false},
+		{"structure: empty catalog_description", "alice", "alice_set_light", func(pt *PinnedTool) { pt.CatalogDescription = " " }, false},
+		{"structure: malformed description hash", "alice", "alice_set_volume", func(pt *PinnedTool) { pt.DescriptionSHA256 = "abc" }, false},
+		{"text cap on a numeric arg", "alice", "alice_set_volume", func(pt *PinnedTool) {
+			pt.Constraints.TextCap = map[string]int{"level": 10}
+		}, false},
+		{"playback on a yes write", "alice", "alice_set_light", func(pt *PinnedTool) {
+			pt.Constraints.PlaybackActions = &EnumSubset{Arg: "state", Values: []string{"on"}}
+		}, false},
+		{"playback on a never media_control", "alice", "alice_media_control", func(pt *PinnedTool) { pt.Lowerable = LowerableNever }, false},
+		{"playback value repeated", "alice", "alice_media_control", func(pt *PinnedTool) {
+			pt.Constraints.PlaybackActions = &EnumSubset{Arg: "action", Values: []string{"play", "play"}}
+		}, false},
+		{"non-string enum value in a schema", "alice", "alice_set_light", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"brightness":{"type":"number","enum":[1,"2"]},"color_temp_k":{"type":"number"}}}`)
+		}, false},
+		{"schema re-hash alone is valid", "alice", "alice_set_light", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"brightness":{"type":"number"},"color_temp_k":{"type":"number"}}}`)
+		}, true},
+		{"disclosure device uncapped", "alice", "alice_say_phrase", func(pt *PinnedTool) {
+			pt.Constraints.TextCap = map[string]int{"phrase": 1000}
+		}, false},
+		{"disclosure command device uncapped", "alice", "alice_send_command", func(pt *PinnedTool) {
+			pt.Constraints.TextCap = map[string]int{"command": 1000}
+		}, false},
+		{"disclosure arg without a single type", "alice", "alice_say_phrase", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"phrase":{"type":"string"},"voice":{"type":["string","null"]}}}`)
+		}, false},
+		{"disclosure enum arg needs no cap", "alice", "alice_say_phrase", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"phrase":{"type":"string"},"voice":{"type":"string","enum":["a","b"]}}}`)
+		}, true},
 		{"constraints on a read", "alice", "alice_list_devices", func(pt *PinnedTool) {
 			pt.Constraints = &Constraints{TextCap: map[string]int{"only_speakers": 1}}
 		}, false},
@@ -236,7 +278,10 @@ func TestParsePinRefusesDuplicateKeys(t *testing.T) {
 	}
 	dupField := strings.Replace(string(pinJSON), `"lowerable": "never",`, `"lowerable": "never", "lowerable": "never",`, 1)
 	dupTool := strings.Replace(string(pinPhase2JSON), `"alice_set_light": {`, `"alice_set_light": {}, "alice_set_light": {`, 1)
-	for name, raw := range map[string]string{"field": dupField, "tool": dupTool} {
+	// encoding/json matches fields case-insensitively and keeps the last,
+	// so a reader sees "never" where the decoder loads "yes".
+	caseField := strings.Replace(string(pinPhase2JSON), `"lowerable": "yes",`, `"lowerable": "never", "Lowerable": "yes",`, 1)
+	for name, raw := range map[string]string{"field": dupField, "tool": dupTool, "case variant field": caseField} {
 		if raw == string(pinJSON) || raw == string(pinPhase2JSON) {
 			t.Fatalf("%s: replacement did not apply", name)
 		}

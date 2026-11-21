@@ -44,7 +44,11 @@ func TestDecideOrder(t *testing.T) {
 		want Decision
 	}{
 		{"all clear lowers", func(*Input) {}, Decision{OutcomeLowered, ReasonPermission}},
-		{"conditional lowers", func(in *Input) { in.Tool, in.Lowerable = "alice_control_device", catalog.LowerableConditional },
+		{"conditional lowers", func(in *Input) {
+			in.Tool, in.Lowerable, in.ConditionMet = "alice_control_device", catalog.LowerableConditional, true
+		},
+			Decision{OutcomeLowered, ReasonPermission}},
+		{"a yes write ignores the condition", func(in *Input) { in.ConditionMet, in.ConditionErr = false, errRead },
 			Decision{OutcomeLowered, ReasonPermission}},
 
 		// 1. writes
@@ -86,7 +90,25 @@ func TestDecideOrder(t *testing.T) {
 		{"tainted", func(in *Input) { in.Tainted = true }, Decision{OutcomeCard, ReasonTainted}},
 		{"taint unreadable", func(in *Input) { in.TaintErr = errRead }, Decision{OutcomeCard, ReasonTainted}},
 
-		// 7, 8. permission
+		// 7. condition of a conditional tool
+		{"condition unmet", func(in *Input) {
+			in.Tool, in.Lowerable, in.ConditionMet = "alice_control_device", catalog.LowerableConditional, false
+		},
+			Decision{OutcomeCard, ReasonConditionUnmet}},
+		{"condition unreadable", func(in *Input) {
+			in.Tool, in.Lowerable, in.ConditionMet, in.ConditionErr = "alice_media_control", catalog.LowerableConditional, true, errRead
+		},
+			Decision{OutcomeCard, ReasonConditionUnmet}},
+		{"taint beats an unmet condition", func(in *Input) {
+			in.Tool, in.Lowerable, in.Tainted = "alice_control_device", catalog.LowerableConditional, true
+		},
+			Decision{OutcomeCard, ReasonTainted}},
+		{"unmet condition beats a permission", func(in *Input) {
+			in.Tool, in.Lowerable, in.PermissionMatch = "alice_media_control", catalog.LowerableConditional, true
+		},
+			Decision{OutcomeCard, ReasonConditionUnmet}},
+
+		// 8, 9. permission
 		{"no permission", func(in *Input) { in.PermissionMatch = false }, Decision{OutcomeCard, ReasonNoPermission}},
 		{"permissions unreadable", func(in *Input) { in.PermissionErr = errRead }, Decision{OutcomeCard, ReasonNoPermission}},
 	}
@@ -102,12 +124,17 @@ func TestDecideOrder(t *testing.T) {
 }
 
 // TestDecideNeverLowersWithoutEveryCondition: over every combination of
-// the boolean observations, a call is lowered only when every one of them
-// is the safe value.
+// the boolean observations, for a conditional tool, a call is lowered only
+// when every one of them is the safe value.
 func TestDecideNeverLowersWithoutEveryCondition(t *testing.T) {
-	for mask := 0; mask < 1<<8; mask++ {
+	for mask := 0; mask < 1<<10; mask++ {
 		bit := func(i int) bool { return mask&(1<<i) != 0 }
 		in := open()
+		in.Tool, in.Lowerable = "alice_control_device", catalog.LowerableConditional
+		in.ConditionMet = !bit(8)
+		if bit(9) {
+			in.ConditionErr = errRead
+		}
 		in.Writes = !bit(0)
 		if bit(1) {
 			in.WritesErr = errRead
@@ -126,10 +153,10 @@ func TestDecideNeverLowersWithoutEveryCondition(t *testing.T) {
 		}
 		got := Decide(in)
 		if (got.Outcome == OutcomeLowered) != (mask == 0) {
-			t.Fatalf("mask %08b: %+v", mask, got)
+			t.Fatalf("mask %010b: %+v", mask, got)
 		}
 		if (bit(0) || bit(1) || bit(2) || bit(3)) && got.Outcome != OutcomeNever {
-			t.Fatalf("mask %08b: %+v, want never", mask, got)
+			t.Fatalf("mask %010b: %+v, want never", mask, got)
 		}
 	}
 }

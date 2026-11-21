@@ -24,6 +24,8 @@ import (
 	"io"
 	"math"
 	"strconv"
+	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -74,9 +76,11 @@ var ErrInvalidArgs = errors.New("pa catalog: invalid tool arguments")
 // It is canonicalObject with the ambiguities that would let two different
 // inputs share one hash refused instead of resolved:
 //
-//   - a duplicate object key, at any depth (encoding/json keeps the last
-//     one silently, so {"a":1,"a":2} and {"a":2} would hash the same while a
-//     reader of the first sees a 1);
+//   - a duplicate object key, at any depth, including keys that differ
+//     only in case (encoding/json keeps the last one silently and matches
+//     struct fields case-insensitively, so {"a":1,"a":2} and {"a":2} would
+//     hash the same while a reader of the first sees a 1, and a Go
+//     receiver would merge {"level":1,"Level":10});
 //   - a number that does not fit a finite float64 (1e999), which a
 //     receiver cannot represent as the value the card showed;
 //   - invalid UTF-8 or an escape that decodes to U+FFFD (a lone surrogate),
@@ -103,7 +107,8 @@ func CanonicalArgsSHA256(raw []byte) (string, error) {
 }
 
 // strictJSON checks that raw is exactly one JSON value with no duplicate
-// object key, no non-finite number and no replaced character. It only
+// object key (keys equal under case folding count as duplicates), no
+// non-finite number and no replaced character. It only
 // checks; canonicalJSON encodes.
 func strictJSON(raw []byte) error {
 	if !utf8.Valid(raw) {
@@ -142,10 +147,15 @@ func strictValue(dec *json.Decoder) error {
 				if err := strictString(key); err != nil {
 					return err
 				}
-				if _, dup := seen[key]; dup {
+				// encoding/json matches a struct field to a key
+				// case-insensitively and keeps the last match, so
+				// "lowerable" and "Lowerable" are one field to a decoder
+				// and two keys to a reader: refuse them as duplicates.
+				fk := foldKey(key)
+				if _, dup := seen[fk]; dup {
 					return fmt.Errorf("duplicate key %.40q", key)
 				}
-				seen[key] = struct{}{}
+				seen[fk] = struct{}{}
 				if err := strictValue(dec); err != nil {
 					return err
 				}
@@ -175,6 +185,25 @@ func strictValue(dec *json.Decoder) error {
 		return fmt.Errorf("unexpected token %T", tok)
 	}
 	return nil
+}
+
+// foldKey maps s to one representative of its case-folding class: two
+// strings have the same foldKey exactly when strings.EqualFold says they
+// are equal. Each rune becomes the smallest rune of its unicode.SimpleFold
+// orbit, which also catches the Kelvin sign and the long s that
+// encoding/json folds to k and s.
+func foldKey(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		low := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < low {
+				low = f
+			}
+		}
+		b.WriteRune(low)
+	}
+	return b.String()
 }
 
 func strictString(s string) error {
