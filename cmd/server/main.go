@@ -449,7 +449,7 @@ func main() {
 	// PA_ENABLED is on, since an account deletion can leave one behind as
 	// its fence. The only sweep of that table; the PA state sweep below
 	// leaves it alone.
-	startPALockSweep(ctx, cfg, store)
+	startPALockSweep(ctx, store)
 	// Personal Assistant state (issue #1313): purge unmarked fragments, then
 	// the hourly retention sweep. Nothing at all unless PA_ENABLED is true.
 	// No linking sweep: the linking flow is not wired (#1314), so there is
