@@ -522,9 +522,10 @@ wait:
 }
 
 // An account deletion of a principal that was never admitted to link leaves
-// no pa_principal_locks row, so with the PA off (no lock sweep runs) a
-// deleted account's Telegram id is not kept. One that was admitted keeps
-// its row with the deletion mark raised, the fence a Begin in flight needs.
+// no pa_principal_locks row, so a deleted account's Telegram id is not kept
+// even until the next lock sweep. One that was admitted keeps its row with
+// the deletion mark raised, the fence a Begin in flight needs, until
+// SweepPAPrincipalLocks removes it.
 func TestPurgePAPrincipals_LockRowOnlyAfterAdmission(t *testing.T) {
 	deletionDialects(t, func(t *testing.T, s *Store, base int64) {
 		ctx := context.Background()
@@ -636,4 +637,54 @@ func TestListPAConnectionsTx(t *testing.T) {
 	if err != nil || len(list) != 0 {
 		t.Fatalf("empty principal: %v, %v", list, err)
 	}
+}
+
+// RevokeAccountPATokens fails closed: a nil revoker, and Telegram ids that
+// cannot be read, both return ErrPAConnectionsNeedRevocation, never "nothing
+// to revoke", and no principal is revoked on an unreadable list.
+func TestRevokeAccountPATokens_FailsClosed(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	if err := s.RevokeAccountPATokens(ctx, 1, nil); !errors.Is(err, ErrPAConnectionsNeedRevocation) {
+		t.Fatalf("nil revoker: %v, want ErrPAConnectionsNeedRevocation", err)
+	}
+	r := &fakePARevoker{s: s}
+	if err := s.DB.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := s.RevokeAccountPATokens(ctx, 1, r); !errors.Is(err, ErrPAConnectionsNeedRevocation) {
+		t.Fatalf("unreadable telegram ids: %v, want ErrPAConnectionsNeedRevocation", err)
+	}
+	if len(r.calls) != 0 {
+		t.Fatalf("revoked %v on an unreadable id list, want none", r.calls)
+	}
+}
+
+// A typed-nil *connection.Manager stored in a PATokenRevoker passes every
+// nil check of the deletion surfaces. RevokeAccountPATokens must then refuse
+// with ErrPAConnectionsNeedRevocation (409 / tool error), not panic, and
+// delete nothing.
+func TestRevokeAccountPATokens_TypedNilManager(t *testing.T) {
+	deletionDialects(t, func(t *testing.T, s *Store, base int64) {
+		ctx := context.Background()
+		p := base + 43
+		uid, err := s.EnsureUserByTelegramID(ctx, p, "erin", "Erin")
+		if err != nil {
+			t.Fatalf("ensure: %v", err)
+		}
+		seedAccountForTelegramID(t, s, uid, p, nil)
+		t.Cleanup(func() { _, _ = s.DB.Exec(`DELETE FROM pa_principal_locks WHERE principal = $1`, p) })
+		seedPAConnectionWithTokens(t, s, p)
+
+		var r PATokenRevoker = (*connection.Manager)(nil)
+		if r == nil {
+			t.Fatal("test setup: the typed nil compares equal to nil")
+		}
+		if err := s.RevokeAccountPATokens(ctx, uid, r); !errors.Is(err, ErrPAConnectionsNeedRevocation) {
+			t.Fatalf("typed-nil manager: %v, want ErrPAConnectionsNeedRevocation", err)
+		}
+		if n := accountRows(t, s, uid); n != 1 {
+			t.Fatalf("telegram_accounts rows = %d, want 1", n)
+		}
+	})
 }

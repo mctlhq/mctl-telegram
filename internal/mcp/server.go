@@ -25,11 +25,26 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// accountRemover is the part of *telegram.ClientPool that
+// delete_telegram_account uses.
+type accountRemover interface {
+	RemoveAtomic(userID int64, fn func() error) error
+}
+
 type Server struct {
 	Store     *db.Store
 	Pool      *telegram.ClientPool
 	AllowSend bool
 	Confirms  *ConfirmStore
+	// PARevoker, when set, revokes the provider tokens of the account's
+	// Personal Assistant connections before delete_telegram_account
+	// (Store.RevokeAccountPATokens, #1338). nil, while the server does not
+	// run the PA linking flow, keeps the delete as it was: the purge itself
+	// refuses an account whose connection holds tokens.
+	PARevoker db.PATokenRevoker
+	// accountRemover replaces Pool for delete_telegram_account in tests, so
+	// they can see whether the deletion reached RemoveAtomic. nil uses Pool.
+	accountRemover accountRemover
 	// Limiter is the per-identity / per-peer write-action limiter.
 	// Optional: when nil, AllowPeer checks are skipped.
 	Limiter *audit.RateLimiter
@@ -359,10 +374,44 @@ func (s *Server) handleReadAppResource(ctx context.Context, req mcplib.ReadResou
 }
 
 func (s *Server) HTTPHandler() http.Handler {
+	srv := s.newMCPServer()
+	s.initToolInvocationSeries(srv)
 	return mcpserver.NewStreamableHTTPServer(
-		s.newMCPServer(),
+		srv,
 		mcpserver.WithHTTPContextFunc(httpContext),
 	)
+}
+
+// toolInvocationStatuses are every status label mctl_tool_invocations_total
+// can carry (see callRecord.metricStatus).
+var toolInvocationStatuses = []string{"ok", "error", statusCallerError, statusNoSession}
+
+// initToolInvocationSeries creates every user-traffic series of
+// mctl_tool_invocations_total at zero, for each registered tool and status.
+//
+// A counter child exists only after its first use, so after a deploy the
+// status="error" series of a healthy service does not exist, and the first
+// error appears as a series that starts at 1 with no earlier sample. Window
+// functions (rate, increase) cannot see that first increment, and rate() on
+// a young series extrapolates it: on 2026-11-18 16:20Z two real errors in 115
+// calls were recorded as a 0.150 error ratio and paged the fast-burn alert
+// (docs/slo.md, "Minimum-volume guard"). A series that starts at 0 makes the
+// first error an ordinary increment.
+//
+// Only traffic="user" is created: it is the class the tool-availability SLI
+// reads, and the canary series appear with the canary's first call. The
+// tool set is the registered one, so a tool added later is covered without a
+// second list. Called once, from HTTPHandler; it changes no value and does
+// nothing when no registry is wired.
+func (s *Server) initToolInvocationSeries(srv *mcpserver.MCPServer) {
+	if s.Metrics == nil {
+		return
+	}
+	for name := range srv.ListTools() {
+		for _, status := range toolInvocationStatuses {
+			s.Metrics.ToolInvocationsTotal.WithLabelValues(name, status, metrics.TrafficUser)
+		}
+	}
 }
 
 // httpContext is what every tool call's ctx is built from. It carries the

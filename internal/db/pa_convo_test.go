@@ -219,6 +219,16 @@ func TestPAState_SweepAndPurge(t *testing.T) {
 
 		r, err := s.SweepPAState(ctx, now, now.Add(-48*time.Hour))
 		must(t, err)
+		// SweepPAState leaves lock rows alone: SweepPAPrincipalLocks is
+		// their only sweep (#1318), and runs with the PA off too.
+		if n := countRows(t, s, `SELECT count(*) FROM pa_principal_locks WHERE principal = $1`, alice); n != 1 {
+			t.Fatalf("SweepPAState touched a lock row: %d left, want 1", n)
+		}
+		locks, err := s.SweepPAPrincipalLocks(ctx, now.Add(-48*time.Hour))
+		must(t, err)
+		if locks < 1 {
+			t.Fatalf("SweepPAPrincipalLocks deleted %d rows, want the stale one", locks)
+		}
 		if n := countRows(t, s, `SELECT count(*) FROM pa_principal_locks WHERE principal = $1`, alice); n != 0 {
 			t.Fatalf("stale lock row survived the sweep: %d", n)
 		}

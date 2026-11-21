@@ -67,7 +67,7 @@ func (e *recordingEvictor) EvictDeletedAccount(_ context.Context, userID int64) 
 	return true
 }
 
-func newAccountManageFixture(t *testing.T, tgID int64) *accountManageFixture {
+func newAccountManageFixture(t *testing.T, tgID int64, opts ...func(*AccountHandlers)) *accountManageFixture {
 	t.Helper()
 	ctx := context.Background()
 	store := newManageTestStore(t)
@@ -119,6 +119,9 @@ func newAccountManageFixture(t *testing.T, tgID int64) *accountManageFixture {
 	accountHandlers := NewAccountHandlers(store, nil)
 	accountHandlers.Evictor = evictor
 	accountHandlers.Canary = canaryguard.Set{accountManageCanaryTGID: {}}
+	for _, o := range opts {
+		o(accountHandlers)
+	}
 	accountHandlers.Register(router)
 	manageSrv := NewManageServer(store, nil, accountManageIssuer, "", oauth.ConnectClientID).
 		WithCanaryGuard(canaryguard.Set{accountManageCanaryTGID: {}})
