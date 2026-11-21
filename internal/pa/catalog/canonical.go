@@ -86,11 +86,12 @@ var ErrInvalidArgs = errors.New("pa catalog: invalid tool arguments")
 //     receiver cannot represent as the value the card showed;
 //   - a nonzero number that underflows to zero (1e-400), which a receiver
 //     reads as 0 while the card shows something else;
-//   - an integer literal (no '.', 'e' or 'E') whose magnitude is above
-//     2^53, where float64 stops holding every integer, so a receiver
-//     that decodes into float64 (JavaScript, encoding/json into any)
-//     would act on a neighbouring value (9007199254740993 becomes
-//     9007199254740992);
+//   - a number that is mathematically an integer, however it is spelt
+//     (9007199254740993, 9007199254740993.0, 9007199254740993e0, 1e23),
+//     whose magnitude is above 2^53, where float64 stops holding every
+//     integer, so a receiver that decodes into float64 (JavaScript,
+//     encoding/json into any) would act on a neighbouring value
+//     (9007199254740993 becomes 9007199254740992);
 //   - invalid UTF-8 or an escape that decodes to U+FFFD (a lone surrogate),
 //     which encoding/json replaces silently;
 //   - anything but exactly one JSON object.
@@ -199,13 +200,14 @@ func strictValue(dec *json.Decoder) error {
 	return nil
 }
 
-// maxExactInt is 2^53, the largest magnitude below which float64 holds
+// maxExactInt is 2^53, the largest magnitude up to which float64 holds
 // every integer.
-var maxExactInt = new(big.Int).Lsh(big.NewInt(1), 53)
+var maxExactInt = new(big.Rat).SetInt(new(big.Int).Lsh(big.NewInt(1), 53))
 
 // strictNumber refuses a number literal that a float64 receiver would not
 // read back as the value it spells: one that overflows, one that is
-// nonzero but underflows to zero, and an integer literal above 2^53.
+// nonzero but underflows to zero, and one whose exact value is an integer
+// above 2^53 in magnitude, whatever its spelling.
 func strictNumber(lit string) error {
 	f, err := strconv.ParseFloat(lit, 64)
 	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
@@ -215,14 +217,18 @@ func strictNumber(lit string) error {
 	if f == 0 && strings.ContainsAny(mantissa, "123456789") {
 		return fmt.Errorf("number %.40s underflows to zero", lit)
 	}
-	if !strings.ContainsAny(lit, ".eE") {
-		n, ok := new(big.Int).SetString(lit, 10)
-		if !ok {
-			return fmt.Errorf("number %.40s is not an integer literal", lit)
-		}
-		if n.CmpAbs(maxExactInt) > 0 {
-			return fmt.Errorf("integer %.40s is above 2^53 and does not round-trip through float64", lit)
-		}
+	// Below 2^53 as a float64, the exact value cannot be an integer above
+	// 2^53 (rounding is monotonic), so the exact parse runs only for large
+	// values, whose literal is bounded by a finite float64 anyway.
+	if math.Abs(f) < 1<<53 {
+		return nil
+	}
+	r, ok := new(big.Rat).SetString(lit)
+	if !ok {
+		return fmt.Errorf("number %.40s does not parse exactly", lit)
+	}
+	if r.IsInt() && new(big.Rat).Abs(r).Cmp(maxExactInt) > 0 {
+		return fmt.Errorf("integer %.40s is above 2^53 and does not round-trip through float64", lit)
 	}
 	return nil
 }

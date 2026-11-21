@@ -52,10 +52,11 @@ func TestCanonicalArgsSHA256(t *testing.T) {
 		t.Fatalf("5, 5.0 and 5e0 share a hash: %v", h)
 	}
 	// Numbers that do round-trip are accepted: zero in any spelling, 2^53
-	// itself, a tiny but representable value, and a large value written
-	// with an exponent (it is not an integer literal).
+	// itself in any spelling, a tiny but representable value, and a large
+	// value that is not an integer.
 	for _, ok := range []string{`{"a":0}`, `{"a":-0}`, `{"a":0.0e10}`, `{"a":0e-400}`, `{"a":9007199254740992}`,
-		`{"a":-9007199254740992}`, `{"a":5e-324}`, `{"a":1e300}`} {
+		`{"a":-9007199254740992}`, `{"a":9007199254740992.0}`, `{"a":9.007199254740992e15}`, `{"a":5e-324}`,
+		`{"a":1.5e0}`, `{"a":12345.678}`} {
 		mustHash(t, ok)
 	}
 
@@ -81,6 +82,12 @@ func TestCanonicalArgsSHA256(t *testing.T) {
 		"integer above 2^53":      `{"a":9007199254740993}`,
 		"negative above 2^53":     `{"a":-9007199254740993}`,
 		"huge integer":            `{"a":123456789012345678901234567890}`,
+		"integer above 2^53 .0":   `{"a":9007199254740993.0}`,
+		"integer above 2^53 e0":   `{"a":9007199254740993e0}`,
+		"integer above 2^53 E+0":  `{"a":-9007199254740993E+0}`,
+		"integer spelt 1e23":      `{"a":1e23}`,
+		"integer spelt 1e300":     `{"a":1e300}`,
+		"integer spelt as frac":   `{"a":90071992547409.93e2}`,
 		"invalid UTF-8":           "{\"a\":\"\xff\"}",
 		"lone surrogate":          `{"a":"\ud800"}`,
 		"lone surrogate in a key": `{"\udc00":1}`,

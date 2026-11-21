@@ -147,7 +147,7 @@ var pinJSON []byte
 
 // pinPhase2JSON is the Phase 2 pin. No runtime code loads it: LoadPin is
 // the only loader the service calls until Phase 2 is enabled by a reviewed
-// change (TestNoRuntimePhase2PinLoad in internal/pa guards this).
+// change (TestNoRuntimePhase2Use in internal/pa guards this).
 //
 //go:embed pin_phase2.json
 var pinPhase2JSON []byte
@@ -284,16 +284,20 @@ func validateTool(name string, t PinnedTool) error {
 	// A read whose server says it is not read-only is a contradiction the
 	// pin must not paper over.
 	if t.Class == ClassRead {
-		var ann struct {
-			ReadOnly *bool `json:"readOnlyHint"`
+		// Looked up by exact key: a struct field would also match
+		// "ReadOnlyHint" or "READONLYHINT", which MCP does not define.
+		ann, err := exactKeys(t.Annotations, "readOnlyHint")
+		if err != nil {
+			return fmt.Errorf("annotations: %v", err)
 		}
-		if len(t.Annotations) > 0 {
-			if err := json.Unmarshal(t.Annotations, &ann); err != nil {
-				return fmt.Errorf("annotations: %v", err)
+		if ro, ok := ann["readOnlyHint"]; ok {
+			var v bool
+			if err := json.Unmarshal(ro, &v); err != nil {
+				return fmt.Errorf("annotations: readOnlyHint is not a boolean")
 			}
-		}
-		if ann.ReadOnly != nil && !*ann.ReadOnly {
-			return errors.New("class read but the server annotates readOnlyHint=false")
+			if !v {
+				return errors.New("class read but the server annotates readOnlyHint=false")
+			}
 		}
 	}
 	return nil
@@ -624,28 +628,66 @@ type schemaProperty struct {
 	Enum []string
 }
 
-// schemaProperties returns the top-level properties of an input schema
-// with their type, when it is a single string, and their string enum. A
-// property whose type is not a single string has Type "".
-func schemaProperties(raw json.RawMessage) (map[string]schemaProperty, error) {
-	var s struct {
-		Properties map[string]json.RawMessage `json:"properties"`
+// exactKeys decodes a JSON object (or an absent or null value, as an
+// empty map) into its members, keyed by their exact names. Schema and
+// annotation keywords are read through it, never through struct fields:
+// encoding/json matches a struct field case-insensitively, so "Enum" or
+// "TYPE" would be read as the keyword while JSON Schema, and the server,
+// ignore them as unknown. A key that is a case variant of one of the
+// keywords the caller reads is refused rather than ignored: a reviewer
+// may read it as the keyword, and no reading of it is safe to assume.
+func exactKeys(raw json.RawMessage, keywords ...string) (map[string]json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return map[string]json.RawMessage{}, nil
 	}
-	if err := json.Unmarshal(raw, &s); err != nil {
+	if trimmed[0] != '{' {
+		return nil, errors.New("not a JSON object")
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &m); err != nil {
 		return nil, err
 	}
-	out := make(map[string]schemaProperty, len(s.Properties))
-	for name, rp := range s.Properties {
-		var p struct {
-			Type json.RawMessage   `json:"type"`
-			Enum []json.RawMessage `json:"enum"`
+	for k := range m {
+		for _, kw := range keywords {
+			if k != kw && strings.EqualFold(k, kw) {
+				return nil, fmt.Errorf("key %.40q is a case variant of %q", k, kw)
+			}
 		}
-		if err := json.Unmarshal(rp, &p); err != nil {
+	}
+	return m, nil
+}
+
+// schemaProperties returns the top-level properties of an input schema
+// with their type, when it is a single string, and their string enum. A
+// property whose type is not a single string has Type "". Every keyword
+// is matched by its exact name (exactKeys).
+func schemaProperties(raw json.RawMessage) (map[string]schemaProperty, error) {
+	top, err := exactKeys(raw, "properties")
+	if err != nil {
+		return nil, err
+	}
+	props, err := exactKeys(top["properties"])
+	if err != nil {
+		return nil, fmt.Errorf("properties: %v", err)
+	}
+	out := make(map[string]schemaProperty, len(props))
+	for name, rp := range props {
+		kw, err := exactKeys(rp, "type", "enum")
+		if err != nil {
 			return nil, fmt.Errorf("property %q: %v", name, err)
 		}
+		var enum []json.RawMessage
+		if e, ok := kw["enum"]; ok {
+			if err := json.Unmarshal(e, &enum); err != nil {
+				return nil, fmt.Errorf("property %q: enum is not an array", name)
+			}
+		}
 		var sp schemaProperty
-		_ = json.Unmarshal(p.Type, &sp.Type) // a non-string type stays ""
-		for _, e := range p.Enum {
+		if t, ok := kw["type"]; ok {
+			_ = json.Unmarshal(t, &sp.Type) // a non-string type stays ""
+		}
+		for _, e := range enum {
 			var v string
 			if err := json.Unmarshal(e, &v); err != nil {
 				return nil, fmt.Errorf("property %q: enum value is not a string", name)

@@ -249,6 +249,25 @@ func TestValidatePhase2Rules(t *testing.T) {
 		{"disclosure scalar args need no cap", "alice", "alice_say_phrase", func(pt *PinnedTool) {
 			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"phrase":{"type":"string"},"n":{"type":"integer"},"v":{"type":"number"},"loud":{"type":"boolean"}}}`)
 		}, true},
+		// Property keywords are matched by exact name. A case variant of
+		// "enum" or "type" is refused: encoding/json would read "Enum" as
+		// the enum and skip the cap, while the server ignores it and
+		// takes any string.
+		{"disclosure Enum variant skips no cap", "alice", "alice_say_phrase", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"phrase":{"type":"string"},"note":{"type":"string","Enum":["a","b"]}}}`)
+		}, false},
+		{"disclosure ENUM variant on a capped arg", "alice", "alice_say_phrase", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"phrase":{"type":"string","ENUM":["hi"]}}}`)
+		}, false},
+		{"disclosure TYPE variant", "alice", "alice_say_phrase", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"phrase":{"type":"string"},"note":{"TYPE":"string","enum":["a","b"]}}}`)
+		}, false},
+		{"write Type variant on a bounded arg", "alice", "alice_set_volume", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"level":{"Type":"number"}}}`)
+		}, false},
+		{"write Enum variant on the playback arg", "alice", "alice_media_control", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"action":{"type":"string","Enum":["play","pause","stop","next","prev"]}}}`)
+		}, false},
 		// The top level of a write or disclosure schema is a plain object
 		// schema; additionalProperties, when present, is false.
 		{"disclosure additionalProperties false", "alice", "alice_say_phrase", func(pt *PinnedTool) {
@@ -450,5 +469,11 @@ func TestCheckDeclaredArgs(t *testing.T) {
 		if err := pt.CheckDeclaredArgs([]byte(bad)); !errors.Is(err, ErrUndeclaredArg) {
 			t.Errorf("%s: %v, want ErrUndeclaredArg", bad, err)
 		}
+	}
+	// The properties are found by their exact keyword: a "Properties"
+	// member declares nothing, and is refused as a case variant.
+	setSchema(t, &pt, `{"type":"object","Properties":{"level":{"type":"number"}}}`)
+	if err := pt.CheckDeclaredArgs([]byte(`{"level":5}`)); !errors.Is(err, ErrUndeclaredArg) {
+		t.Errorf("Properties variant: %v, want ErrUndeclaredArg", err)
 	}
 }

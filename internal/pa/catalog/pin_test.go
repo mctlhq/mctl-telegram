@@ -252,6 +252,28 @@ func TestPinPolicyRules(t *testing.T) {
 			p.Annotations = json.RawMessage(`{"readOnlyHint":false}`)
 			return p
 		}(), false},
+		// The hint is read by its exact name; a case variant of it is
+		// refused, not ignored and not read as the hint.
+		{"read annotated ReadOnlyHint", "x_read", func() PinnedTool {
+			p := validTool()
+			p.Annotations = json.RawMessage(`{"ReadOnlyHint":true}`)
+			return p
+		}(), false},
+		{"read annotated READONLYHINT false", "x_read", func() PinnedTool {
+			p := validTool()
+			p.Annotations = json.RawMessage(`{"READONLYHINT":false}`)
+			return p
+		}(), false},
+		{"read annotated readOnlyHint not a bool", "x_read", func() PinnedTool {
+			p := validTool()
+			p.Annotations = json.RawMessage(`{"readOnlyHint":"yes"}`)
+			return p
+		}(), false},
+		{"read with other annotations only", "x_read", func() PinnedTool {
+			p := validTool()
+			p.Annotations = json.RawMessage(`{"title":"x"}`)
+			return p
+		}(), true},
 		{"schema hash mismatch", "x_read", func() PinnedTool {
 			p := validTool()
 			p.InputSchema = json.RawMessage(`{"type":"object","x":1}`)
