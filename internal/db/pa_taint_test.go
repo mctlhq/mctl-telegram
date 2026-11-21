@@ -113,6 +113,36 @@ func TestS2I6_FragmentKindsTaint(t *testing.T) {
 	})
 }
 
+// TestS2I6_StoreTaintsExternalKindsWhateverTheMark: the store does not
+// rely on convo.NewFragment having rewritten the mark. A SealedFragment of
+// an external kind that arrives carrying a user mark still taints.
+func TestS2I6_StoreTaintsExternalKindsWhateverTheMark(t *testing.T) {
+	paConvoDialects(t, func(t *testing.T, s *Store, alice, _ int64) {
+		sealer := taintSealer(t)
+		ctx := context.Background()
+		for i, kind := range []convo.Kind{convo.KindCaption, convo.KindReply, convo.KindQuote, convo.KindTool} {
+			now := t0.Add(time.Duration(i) * 48 * time.Hour)
+			conv := openConv(t, s, alice, "k-"+strconv.Itoa(i), now)
+			must(t, inTx(t, s, func(tx *sql.Tx) error {
+				seq, err := s.NextPAFragmentSeq(ctx, tx, alice, conv.ID)
+				if err != nil {
+					return err
+				}
+				sf, err := sealer.Seal(alice, conv.ID, seq, convo.NewFragment(convo.KindText, convo.ProvenanceUser, "x"))
+				if err != nil {
+					return err
+				}
+				// Built by hand, not through NewFragment: kind external, mark user.
+				sf.Kind, sf.Provenance, sf.CreatedAt = kind, convo.ProvenanceUser, now
+				return s.AppendPAFragment(ctx, tx, sf)
+			}))
+			if !mustTaint(t, s, alice, conv.ID) {
+				t.Fatalf("%s fragment marked user did not taint", kind)
+			}
+		}
+	})
+}
+
 // TestS2I6_TaintRollsBackWithFragment: the flag and the fragment share the
 // transaction, so a rolled-back append leaves neither.
 func TestS2I6_TaintRollsBackWithFragment(t *testing.T) {
@@ -288,8 +318,14 @@ func TestS2I7_MigrationTaintsExistingRows(t *testing.T) {
 	})
 }
 
-// taintAssign finds an assignment to the tainted column in SQL text.
-var taintAssign = regexp.MustCompile(`(?i)\btainted\s*=\s*([^\s,)]+)`)
+// taintAssign finds an assignment to the tainted column in SQL text and
+// captures its whole right-hand side, up to WHERE, a comma, a closing
+// parenthesis, a semicolon or the end: `1 - tainted` is not `1`.
+var taintAssign = regexp.MustCompile(`(?is)\btainted\s*=\s*(.+?)\s*(?:\bWHERE\b|,|\)|;|$)`)
+
+// taintTupleAssign finds a column-list assignment naming tainted, such as
+// `SET (tainted) = (0)`, which taintAssign cannot read.
+var taintTupleAssign = regexp.MustCompile(`(?i)\(\s*[^()]*\btainted\b[^()]*\)\s*=`)
 
 // TestS2I8_NoStatementLowersTaint is a static check over every non-test Go
 // file of the module: the only value any SQL string literal assigns to
@@ -335,6 +371,9 @@ func TestS2I8_NoStatementLowersTaint(t *testing.T) {
 				if m[1] != "1" {
 					t.Errorf("%s: SQL assigns tainted = %s; only 1 is allowed:\n%s", path, m[1], text)
 				}
+			}
+			if taintTupleAssign.MatchString(text) {
+				t.Errorf("%s: SQL assigns tainted in a column list; only `tainted = 1` is allowed:\n%s", path, text)
 			}
 			low := strings.ToLower(text)
 			if strings.Contains(low, "tainted") && strings.Contains(low, "insert into pa_conversations") {

@@ -4154,6 +4154,13 @@ mctl-gitops vm-rules is part of enabling the PA (#1318).
   This is also why `PA_ENABLED` must only be turned on once every replica
   runs a build with #1348: an older pod in the same rollout claims the
   same table.
+- **Conversation taint (#1321).** The same holds for the durable
+  conversation taint: a build from before #1321 appends forwarded text and
+  returns tool results without raising `pa_conversations.tainted`, so a
+  conversation opened clean by a newer pod could stay clean beside an
+  older one. Turn `PA_ENABLED` on only once every replica runs a build
+  with #1321. The column is added with default 1, so rows from before it
+  read as tainted.
 - **Callback answer.** Once a press's update committed, the server answers
   its callback query (`answerCallbackQuery`, no text) so the client stops
   the spinner on the button; the reply itself is an outbox row as above.

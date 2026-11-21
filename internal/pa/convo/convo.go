@@ -76,8 +76,19 @@ func (k Kind) Valid() bool { return slices.Contains(Kinds(), k) }
 // exception (owner decision 2026-11-21): an answer written in a clean
 // conversation saw no external content, and one written in a tainted
 // conversation changes nothing, because the flag only ever rises.
+//
+// The decision does not trust the stored mark alone: a caption, reply,
+// quote or tool output taints whatever mark it carries, as NewFragment
+// would have marked it, so a store handed a SealedFragment built some
+// other way still raises the flag.
 func Taints(kind Kind, prov Provenance) bool {
-	return kind != KindAssistant && prov.Effective() != ProvenanceUser
+	switch kind {
+	case KindAssistant:
+		return false
+	case KindCaption, KindReply, KindQuote, KindTool:
+		return true
+	}
+	return prov.Effective() != ProvenanceUser
 }
 
 // Fragment is one marked piece of conversation text. Its fields are

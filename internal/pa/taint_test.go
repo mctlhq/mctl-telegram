@@ -348,3 +348,70 @@ func TestS2I6_FailedToolRecordIsAnError(t *testing.T) {
 		t.Fatalf("job %s after a failed record, want still claimed", js)
 	}
 }
+
+// TestS2I6_ToolResultRecordRunsTheGate: the record of a tool result applies
+// the job's gate in its own transaction. A job that is still claimed, but
+// whose consent was withdrawn or whose conversation expired after the
+// dispatcher's StillRunning, records nothing and returns an error, so the
+// result is withheld. The fragment append alone would not refuse either:
+// it checks closed_at_ms, not consent or expires_at_ms.
+func TestS2I6_ToolResultRecordRunsTheGate(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(h *runLoopHarness, conv string) error
+	}{
+		{"consent withdrawn", func(h *runLoopHarness, _ string) error {
+			_, err := h.convoHarness.store.DB.Exec(
+				`UPDATE pa_consents SET state = $1 WHERE principal = $2`, string(convo.ConsentWithdrawn), aliceID)
+			return err
+		}},
+		{"conversation expired", func(h *runLoopHarness, conv string) error {
+			_, err := h.convoHarness.store.DB.Exec(
+				`UPDATE pa_conversations SET expires_at_ms = $1 WHERE id = $2`, h.now.UnixMilli(), conv)
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			onDialects(t, func(t *testing.T, store func(*testing.T) *db.Store) {
+				h := newRunLoopHarnessOn(t, store(t))
+				h.consent(aliceID)
+				h.mustText(aliceID, "what is new?")
+				conv := h.openConversation(aliceID)
+				c := h.mustClaim()
+				job := h.paJob(c.Token)
+				if err := tc.mutate(h, conv); err != nil {
+					t.Fatal(err)
+				}
+				before := h.fragments(aliceID)
+				if err := h.loop.RecordToolResult(context.Background(), job, []byte(`{"content":[]}`)); err == nil {
+					t.Fatal("a tool result was recorded past a failing gate")
+				}
+				if h.fragments(aliceID) != before {
+					t.Fatal("a result refused by the gate left a fragment")
+				}
+				if n := h.count(`SELECT count(*) FROM pa_fragments WHERE principal = $1 AND kind = 'tool'`, aliceID); n != 0 {
+					t.Fatalf("tool fragments = %d past a failing gate", n)
+				}
+			})
+		})
+	}
+}
+
+// TestS2I6_ToolOutputFitsAFragment: the worker's tool-output cap never
+// exceeds what a fragment can hold. If it did, every large result would
+// fail to seal and be withheld: fail closed, but a silent outage.
+func TestS2I6_ToolOutputFitsAFragment(t *testing.T) {
+	if jobs.MaxToolOutputBytes > convo.MaxFragmentBytes {
+		t.Fatalf("MaxToolOutputBytes %d > MaxFragmentBytes %d", jobs.MaxToolOutputBytes, convo.MaxFragmentBytes)
+	}
+	out, _ := jobs.TruncateToolOutput([]byte(strings.Repeat("x", jobs.MaxToolOutputBytes*2)))
+	s, err := convo.NewSealer(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seal the largest output a worker can ever get.
+	if _, err := s.Seal(aliceID, "c", 1, convo.NewFragment(convo.KindTool, convo.ProvenanceExternal, string(out))); err != nil {
+		t.Fatalf("the largest tool output does not seal: %v", err)
+	}
+}

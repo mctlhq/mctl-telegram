@@ -297,6 +297,9 @@ type failingJobs struct {
 	fail       atomic.Bool
 	taintFail  atomic.Bool
 	recordFail atomic.Bool
+	// recorded is the output of the last RecordToolResult that reached
+	// the run loop: what the conversation stores for the worker's answer.
+	recorded atomic.Pointer[[]byte]
 }
 
 func (f *failingJobs) ConversationTainted(ctx context.Context, p pa.Policy) (bool, error) {
@@ -311,6 +314,8 @@ func (f *failingJobs) RecordToolResult(ctx context.Context, j pa.PAJob, out []by
 	if f.recordFail.Load() {
 		return errors.New("injected taint write error")
 	}
+	stored := bytes.Clone(out)
+	f.recorded.Store(&stored)
 	return f.RunLoop.RecordToolResult(ctx, j, out)
 }
 
@@ -1041,6 +1046,11 @@ func TestDispatch_OutputCap(t *testing.T) {
 		if a.code != http.StatusOK || !a.Truncated || len(a.Output) > jobs.MaxToolOutputBytes ||
 			!strings.HasSuffix(a.Output, jobs.TruncationMarker) {
 			t.Fatalf("code %d truncated %v len %d", a.code, a.Truncated, len(a.Output))
+		}
+		// The conversation stores exactly what the worker got: the capped
+		// output, never the whole one.
+		if got := e.jobs.recorded.Load(); got == nil || string(*got) != a.Output {
+			t.Fatal("the stored tool fragment is not the truncated output the worker received")
 		}
 		// The service failing the call is an error result, not output.
 		e.tg.mu.Lock()
