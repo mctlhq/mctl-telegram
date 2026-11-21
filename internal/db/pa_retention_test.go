@@ -2,8 +2,10 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -399,7 +401,7 @@ func TestHardDeleteAccount_PALinkingPurgeFailureRollsBack(t *testing.T) {
 		t.Run(table, func(t *testing.T) {
 			isolatedDialects(t, func(t *testing.T, s *Store) {
 				ctx := context.Background()
-				const tgID = int64(4646)
+				const tgID = int64(5858)
 				uid, err := s.EnsureUserByTelegramID(ctx, tgID, "dana", "Dana")
 				if err != nil {
 					t.Fatalf("ensure: %v", err)
@@ -437,24 +439,27 @@ func TestHardDeleteAccount_PALinkingPurgeFailureRollsBack(t *testing.T) {
 	}
 }
 
-// A guard that cannot read the connections refuses the deletion: tokens it
-// could not observe are not absent tokens.
+// A token count that cannot read the connections refuses the deletion:
+// tokens it could not observe are not absent tokens. The seam breaks the
+// column inside the deletion's transaction, after the deletes, so only the
+// count fails; the rollback undoes the break.
 func TestHardDeleteAccount_UnreadableConnectionsRefuse(t *testing.T) {
 	isolatedDialects(t, func(t *testing.T, s *Store) {
 		ctx := context.Background()
-		const tgID = int64(4646)
+		const tgID = int64(5858)
 		uid, err := s.EnsureUserByTelegramID(ctx, tgID, "dana", "Dana")
 		if err != nil {
 			t.Fatalf("ensure: %v", err)
 		}
 		seedAccountForTelegramID(t, s, uid, tgID, nil)
-		// The guard reads sealed_tokens; the purge's DELETE does not, so
-		// only the guard breaks.
-		if _, err := s.DB.ExecContext(ctx, `ALTER TABLE pa_connections DROP COLUMN sealed_tokens`); err != nil {
-			t.Fatalf("drop column: %v", err)
+		paPurgeAfterDelete = func(ctx context.Context, tx *sql.Tx, _ int64) {
+			if _, err := tx.ExecContext(ctx, `ALTER TABLE pa_connections RENAME COLUMN sealed_tokens TO sealed_tokens_broken`); err != nil {
+				t.Errorf("break column: %v", err)
+			}
 		}
-		if _, err := s.HardDeleteAccount(ctx, uid); err == nil {
-			t.Fatal("delete succeeded although the token guard could not read pa_connections")
+		t.Cleanup(func() { paPurgeAfterDelete = nil })
+		if _, err := s.HardDeleteAccount(ctx, uid); err == nil || errors.Is(err, ErrPAConnectionsNeedRevocation) {
+			t.Fatalf("delete with an unreadable token count: %v, want a read error", err)
 		}
 		var accounts int
 		if err := s.DB.QueryRowContext(ctx,
@@ -463,6 +468,68 @@ func TestHardDeleteAccount_UnreadableConnectionsRefuse(t *testing.T) {
 		}
 		if accounts != 1 {
 			t.Errorf("telegram_accounts rows = %d after a refused delete, want 1", accounts)
+		}
+	})
+}
+
+// A connection that gains provider tokens after the purge's delete, as one
+// committed by a concurrent link would, is found by the count in the same
+// transaction: the deletion fails and rolls back, and the row survives.
+func TestHardDeleteAccount_TokensGainedAfterDeleteRefuse(t *testing.T) {
+	deletionDialects(t, func(t *testing.T, s *Store, base int64) {
+		ctx := context.Background()
+		tgID := base + 27
+		uid, err := s.EnsureUserByTelegramID(ctx, tgID, "dana", "Dana")
+		if err != nil {
+			t.Fatalf("ensure: %v", err)
+		}
+		seedAccountForTelegramID(t, s, uid, tgID, nil)
+		pending := seedPAConnection(t, s, tgID)
+		late := fmt.Sprintf("pac_late_%d_%s", tgID, randomSuffix(t))
+		t.Cleanup(func() { _, _ = s.DB.Exec(`DELETE FROM pa_connections WHERE id = $1`, late) })
+		paPurgeAfterDelete = func(ctx context.Context, tx *sql.Tx, p int64) {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO pa_connections(id, principal, server, state, authority_revision,
+				token_generation, kek_id, wrapped_dek, sealed_tokens, created_at_ms, updated_at_ms)
+				VALUES($1, $2, 'tg', 'pending_confirm', 4, 0, 'test', $3, $4, 1, 1)`,
+				late, p, []byte("wrapped"), []byte("tokens")); err != nil {
+				t.Errorf("insert late connection: %v", err)
+			}
+		}
+		t.Cleanup(func() { paPurgeAfterDelete = nil })
+
+		if _, err := s.HardDeleteAccount(ctx, uid); !errors.Is(err, ErrPAConnectionsNeedRevocation) {
+			t.Fatalf("delete: %v, want ErrPAConnectionsNeedRevocation", err)
+		}
+		paPurgeAfterDelete = nil
+		// Rolled back as a whole: the token-free row the purge deleted is
+		// back too.
+		if _, err := s.GetPAConnection(ctx, tgID, pending); err != nil {
+			t.Errorf("pending connection after a refused delete: %v, want it back", err)
+		}
+	})
+}
+
+// Principals are purged in ascending order whatever order the account's
+// Telegram ids come in, so concurrent deletions sharing ids take their
+// principal locks in one order.
+func TestHardDeleteAccount_PurgesPrincipalsInOrder(t *testing.T) {
+	deletionDialects(t, func(t *testing.T, s *Store, base int64) {
+		ctx := context.Background()
+		// userTelegramIDs returns the login id first; it is the larger.
+		login, session := base+31, base+30
+		uid, err := s.EnsureUserByTelegramID(ctx, login, "alice", "Alice")
+		if err != nil {
+			t.Fatalf("ensure: %v", err)
+		}
+		seedAccountForTelegramID(t, s, uid, session, nil)
+		var order []int64
+		paPurgeAfterDelete = func(_ context.Context, _ *sql.Tx, p int64) { order = append(order, p) }
+		t.Cleanup(func() { paPurgeAfterDelete = nil })
+		if _, err := s.HardDeleteAccount(ctx, uid); err != nil {
+			t.Fatalf("delete: %v", err)
+		}
+		if !slices.Equal(order, []int64{session, login}) {
+			t.Errorf("purge order %v, want %v", order, []int64{session, login})
 		}
 	})
 }

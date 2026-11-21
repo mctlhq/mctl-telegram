@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
@@ -41,7 +42,8 @@ var paPrincipalPurges = []struct{ table, q string }{
 	{"pa_conversations", `DELETE FROM pa_conversations WHERE principal = $1`},
 	{"pa_consents", `DELETE FROM pa_consents WHERE principal = $1`},
 	{"pa_link_secrets", `DELETE FROM pa_link_secrets WHERE principal = $1`},
-	{"pa_connections", `DELETE FROM pa_connections WHERE principal = $1`},
+	// Only rows without provider tokens; see purgePAPrincipals.
+	{"pa_connections", `DELETE FROM pa_connections WHERE principal = $1 AND sealed_tokens IS NULL`},
 	{"pa_principal_locks", `DELETE FROM pa_principal_locks WHERE principal = $1`},
 }
 
@@ -49,11 +51,23 @@ var paPrincipalPurges = []struct{ table, q string }{
 // in tgIDs inside the account deletion's transaction. Any failed statement
 // fails the deletion, which rolls back as a whole.
 //
-// Per principal it first refuses, with ErrPAConnectionsNeedRevocation, a
-// connection that holds provider tokens (see that error). It then takes the
-// principal lock, as a webhook update and a job claim do before touching
-// the principal's state, so a concurrent update or claim of that principal
-// runs wholly before or wholly after the purge. A job claimed by a worker
+// Principals are taken in ascending order, so two deletions that share
+// Telegram ids take their principal locks in one order and cannot deadlock
+// on them. Per principal it first takes the principal lock, as a webhook
+// update and a job claim do before touching the principal's state, so a
+// concurrent update or claim of that principal runs wholly before or
+// wholly after the purge.
+//
+// A connection that holds provider tokens is never deleted, and its
+// presence refuses the deletion (ErrPAConnectionsNeedRevocation). The rule
+// sits in the DELETE predicate itself rather than in a read before it, so
+// no check-then-act window exists: on Postgres a row another transaction
+// is writing is re-checked against the predicate once that write commits,
+// and SQLite runs one writer at a time. A count after the delete, in the
+// same transaction, then finds any token-holding row (one that held tokens
+// all along or gained them meanwhile) and fails the deletion, which rolls
+// back the whole purge. A failed count fails it too: tokens that could not
+// be observed are not absent. A job claimed by a worker
 // at that moment loses its row: the worker's next step under the lock
 // (turn, tool call, finish) finds no job and stops, so it writes no reply.
 // Its reservation, like every reserved pa_usage row of the principal, is
@@ -66,17 +80,7 @@ var paPrincipalPurges = []struct{ table, q string }{
 // the same accepted over-reach as the worker-token revocation: it is the
 // same person.
 func purgePAPrincipals(ctx context.Context, tx *sql.Tx, tgIDs []int64) error {
-	for _, p := range tgIDs {
-		var holding int
-		if err := tx.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM pa_connections WHERE principal = $1 AND sealed_tokens IS NOT NULL`, p,
-		).Scan(&holding); err != nil {
-			return fmt.Errorf("delete account: read pa connections: %w", err)
-		}
-		if holding > 0 {
-			// TODO(#1314): revoke these tokens at the provider, then delete.
-			return ErrPAConnectionsNeedRevocation
-		}
+	for _, p := range slices.Sorted(slices.Values(tgIDs)) {
 		now := time.Now().UnixMilli()
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO pa_principal_locks(principal, locked_at_ms) VALUES($1, $2)
@@ -93,6 +97,25 @@ func purgePAPrincipals(ctx context.Context, tx *sql.Tx, tgIDs []int64) error {
 				return fmt.Errorf("delete account: purge %s: %w", st.table, err)
 			}
 		}
+		if paPurgeAfterDelete != nil {
+			paPurgeAfterDelete(ctx, tx, p)
+		}
+		var holding int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM pa_connections WHERE principal = $1 AND sealed_tokens IS NOT NULL`, p,
+		).Scan(&holding); err != nil {
+			return fmt.Errorf("delete account: read pa connections: %w", err)
+		}
+		if holding > 0 {
+			// TODO(#1314): revoke these tokens at the provider, then delete.
+			return ErrPAConnectionsNeedRevocation
+		}
 	}
 	return nil
 }
+
+// paPurgeAfterDelete is a test seam: it runs inside purgePAPrincipals'
+// transaction after a principal's deletes and before the token count, so a
+// test can stand in for a row that gains tokens in that window. Always nil
+// outside tests.
+var paPurgeAfterDelete func(ctx context.Context, tx *sql.Tx, principal int64)
