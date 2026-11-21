@@ -211,7 +211,7 @@ func startRefresher(t *testing.T, cache *RevocationCache) (tick chan time.Time, 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		cache.runRefresher(ctx, tick)
+		cache.RunRefresherOn(ctx, tick)
 		close(done)
 	}()
 	var once bool

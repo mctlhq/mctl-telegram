@@ -3044,12 +3044,15 @@ rather than re-applying the exemption.
   reconnect in a loop. `mctl_auth_failures_total` rises with
   `reason="other"` (the refusal is a store failure, not a bad token) for the
   worker providers.
-- The gauge exists from the release that ships the refresher (0.140.0, also
-  the first release that refuses tokens). Older releases export no gauge and
-  this rule stays silent on them; they fail open, so there is nothing to
-  page on. A server that is down or not scraped gives this rule no data at
-  all; that case is `ServiceUnavailable` (the `/healthz` probe), not this
-  alert.
+- The gauge exists only from the release containing #1360, the first one
+  after 0.140.0. **0.140.0 itself refuses tokens (#1347) and exports no
+  gauge, so on 0.140.0 a shared-pg outage stops every agent worker and pages
+  nothing**; the gap closes only when the release containing #1360 is
+  deployed, so ship it promptly. Releases before 0.140.0 fail open and have
+  nothing to page on. On any release without the gauge this rule has no
+  data and is silent. A server that is down or not scraped gives this rule
+  no data at all; that case is `ServiceUnavailable` (the `/healthz` probe),
+  not this alert.
 
 ### Likely causes
 

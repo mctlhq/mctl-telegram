@@ -706,9 +706,6 @@ func (r *Registry) CountLoginLogOut(reason, outcome string) {
 	r.LoginLogOutTotal.WithLabelValues(reason, outcome).Inc()
 }
 
-// New constructs a Registry with all collectors registered on a fresh
-// prometheus.Registry. Panics only if duplicate names are registered within
-// the same call (which cannot happen in practice).
 // WorkerTokenRevocationSnapshotAgeName is the gauge that
 // RegisterWorkerTokenRevocationSnapshotAge exports.
 const WorkerTokenRevocationSnapshotAgeName = "mctl_worker_token_revocation_snapshot_age_seconds"
@@ -731,6 +728,9 @@ func (r *Registry) RegisterWorkerTokenRevocationSnapshotAge(age func() float64) 
 	return nil
 }
 
+// New constructs a Registry with all collectors registered on a fresh
+// prometheus.Registry. Panics only if duplicate names are registered within
+// the same call (which cannot happen in practice).
 func New() *Registry {
 	reg := prometheus.NewRegistry()
 	r := &Registry{Prometheus: reg}

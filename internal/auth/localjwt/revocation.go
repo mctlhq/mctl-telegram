@@ -271,11 +271,14 @@ func (c *RevocationCache) SnapshotAge() time.Duration {
 func (c *RevocationCache) RunRefresher(ctx context.Context) {
 	t := time.NewTicker(RevocationRefreshInterval)
 	defer t.Stop()
-	c.runRefresher(ctx, t.C)
+	c.RunRefresherOn(ctx, t.C)
 }
 
-// runRefresher is RunRefresher with the tick source injected for tests.
-func (c *RevocationCache) runRefresher(ctx context.Context, tick <-chan time.Time) {
+// RunRefresherOn is RunRefresher driven by tick instead of its own ticker:
+// one load at once, then one per value received, until ctx ends. Tests use
+// it with a manual channel; a send on an unbuffered one completes only when
+// the previous refresh has finished.
+func (c *RevocationCache) RunRefresherOn(ctx context.Context, tick <-chan time.Time) {
 	failing := false
 	refreshOnce := func() {
 		err := c.refresh(ctx)
