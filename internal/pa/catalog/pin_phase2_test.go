@@ -135,9 +135,11 @@ func TestValidatePhase2Rules(t *testing.T) {
 			pt.Constraints = &Constraints{AllowedTypePrefixes: []string{"devices.types.light"}}
 		}, false},
 		{"say_phrase as write", "alice", "alice_say_phrase", func(pt *PinnedTool) { pt.Class = ClassWrite }, false},
+		// Every other Phase 2 rule holds for this edit (all free text
+		// capped, no integer bounds), so only the T6 class check refuses.
 		{"set_light as disclosure", "alice", "alice_set_light", func(pt *PinnedTool) {
 			pt.Class, pt.Lowerable = ClassDisclosure, LowerableNever
-			pt.Constraints = &Constraints{TextCap: map[string]int{"device": 10}}
+			pt.Constraints = &Constraints{TextCap: map[string]int{"device": 10, "room": 10}}
 		}, false},
 		{"set_volume conditional (looser than T6)", "alice", "alice_set_volume", func(pt *PinnedTool) {
 			pt.Lowerable = LowerableConditional
@@ -216,6 +218,10 @@ func TestValidatePhase2Rules(t *testing.T) {
 		}, false},
 		{"disclosure arg without a single type", "alice", "alice_say_phrase", func(pt *PinnedTool) {
 			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"phrase":{"type":"string"},"voice":{"type":["string","null"]}}}`)
+		}, false},
+		{"disclosure with no free text still needs a text_cap", "alice", "alice_say_phrase", func(pt *PinnedTool) {
+			setSchema(t, pt, `{"type":"object","properties":{"voice":{"type":"string","enum":["a","b"]}}}`)
+			pt.Constraints = nil
 		}, false},
 		{"disclosure enum arg needs no cap", "alice", "alice_say_phrase", func(pt *PinnedTool) {
 			setSchema(t, pt, `{"type":"object","properties":{"device":{"type":"string"},"phrase":{"type":"string"},"voice":{"type":"string","enum":["a","b"]}}}`)
