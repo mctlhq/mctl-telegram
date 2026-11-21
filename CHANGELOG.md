@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.140.2](https://github.com/mctlhq/mctl-telegram/compare/0.140.1...0.140.2) (2026-11-21)
+
+
+### Bug Fixes
+
+* **pa:** fence, cap and revoke-first deletion for PA linking ([906c445](https://github.com/mctlhq/mctl-telegram/commit/906c4457f6f15ae762b392f7636ac5760cd5c505))
+* **pa:** fence, cap and revoke-first deletion for PA linking ([f844019](https://github.com/mctlhq/mctl-telegram/commit/f8440197494b46e7099217dcf99736084f3ec9f4))
+* **pa:** keep no lock row for never-admitted deleted principals ([437c9e5](https://github.com/mctlhq/mctl-telegram/commit/437c9e552f35cb13ac81b0297d1a0888e401e5fe))
+
 ## [0.140.1](https://github.com/mctlhq/mctl-telegram/compare/0.140.0...0.140.1) (2026-11-21)
 
 
