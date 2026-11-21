@@ -1,0 +1,419 @@
+# S2 test manifest (threat model "Gate evidence", #1323).
+#
+# PHASE 2 WRITES CANNOT BE ENABLED WHILE ANY ID BELOW IS PENDING OR ANY GAP IS
+# OPEN. PA_WRITES_ENABLED stays off on every environment until this file has
+# no pending id and no gap. Slice P2-S14 closes the gate: it runs the check
+# with PA_S2_GATE_CLOSING=1 (the phase2_gate=closed mode), which fails on any
+# pending id or gap.
+#
+# Every S2 row of personal-assistant-threat-model.md has exactly one entry
+# here, in threat model order. docs/pa_s2_manifest_test.go fails when a row is
+# missing, when an id here is not a row, when an id is listed twice, when an
+# S2 id is written in the threat model in any shape other than a "- S2-XX:"
+# row, or when a test whose name claims an S2 id (TestS2I6_..., or
+# Test<Area>_S2A1_...) is not listed under that id.
+#
+# status: pending -- not built yet. slice: the Phase 2 slice that builds it
+#   (P2-S<n>); tracked_by: the issue that owns the id ("#NNNN"). Both are
+#   required. A pending id may list tests that already exist, and has no
+#   gaps: the whole row is open.
+# status: green -- covered. tests: every test function that covers it, as
+#   <package dir>.<TestFunc>; each must exist. mutations: at least one record
+#   per id, each with:
+#     id        unique within the entry
+#     guard     <file>.go:<line> of the guarded code, at the commit the
+#               mutation ran on (must exist in the tree and be in range)
+#     mutation  what was broken
+#     killed_by the tests that went red; each must be listed under tests
+#     red       the mutated run's output: reports FAIL and names every
+#               killing test
+#     green     the run after git restore: reports ok, no FAIL
+#   slice: the slice that delivered it (optional). gaps: parts of the row
+#   that have no guard yet, each with a half and tracked_by, as in the S1
+#   manifest.
+#
+# Print the open items with: go test -v ./docs -run TestPAS2Manifest
+#
+# Green ids were verified on 969cfe02 (main after #1369 and #1370) with
+# TEST_DATABASE_URL empty (sqlite): each mutation was applied, the killing
+# tests ran red, the file was restored with git restore and the tests ran
+# green.
+
+S2-C9:
+  status: pending
+  slice: P2-S12
+  tracked_by: "#1320"
+  note: "disconnect cancels a pending approval and a standing permission"
+
+S2-C10:
+  status: pending
+  slice: P2-S2
+  tracked_by: "#1320"
+  note: "the durable approval binds authority_revision"
+
+S2-C11:
+  status: pending
+  slice: P2-S3
+  tracked_by: "#1320"
+  note: "the server write executor records outcome_unknown and never retries"
+
+S2-C12:
+  status: pending
+  slice: P2-S2
+  tracked_by: "#1320"
+  note: "the commit-then-call dispatch ledger survives a crash"
+
+S2-C13:
+  status: pending
+  slice: P2-S12
+  tracked_by: "#1320"
+  note: "disconnect during an in-flight write fences its result"
+
+S2-X5:
+  status: pending
+  slice: P2-S5
+  tracked_by: "#1320"
+  note: "callback check from.id == principal on approval cards"
+
+S2-I5:
+  status: pending
+  slice: P2-S5
+  tracked_by: "#1321"
+  note: "the card gate reads the durable taint; P2-S11 (lowering) must keep it"
+
+S2-I6:
+  status: green
+  slice: P2-S7
+  note: "Durable per-conversation flag (#1369): survives turns, summaries and eviction; tool results, errors included, raise it. Nothing reads it as a gate until S2-I5."
+  tests:
+    - internal/pa.TestS2I6_TaintSurvivesTurnsSummaryAndEviction
+    - internal/pa.TestS2I6_ToolResultStoredAndTaints
+    - internal/pa.TestS2I6_ToolErrorResultTaints
+    - internal/db.TestS2I6_FragmentKindsTaint
+    - internal/db.TestS2I6_StoreTaintsExternalKindsWhateverTheMark
+    - internal/db.TestS2I6_TaintRollsBackWithFragment
+    - internal/pa.TestS2I6_DispatchStoresResultBeforeAnswer
+    - internal/pa.TestS2I6_ToolResultRecordRunsTheGate
+    - internal/pa.TestS2I6_ToolOutputFitsAFragment
+    - internal/pa.TestS2I6_FailedToolRecordIsAnError
+  mutations:
+    - id: P2S7-I6a
+      guard: internal/pa/runloop.go:710
+      mutation: "ConversationTainted returns the durable flag as clean: `return tainted, nil` -> `return tainted && false, nil`"
+      killed_by:
+        - internal/pa.TestS2I6_TaintSurvivesTurnsSummaryAndEviction
+        - internal/pa.TestS2I6_ToolResultStoredAndTaints
+        - internal/pa.TestS2I6_ToolErrorResultTaints
+      red: |-
+        --- FAIL: TestS2I6_TaintSurvivesTurnsSummaryAndEviction (0.04s)
+        --- FAIL: TestS2I6_ToolResultStoredAndTaints (0.03s)
+        --- FAIL: TestS2I6_ToolErrorResultTaints (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.754s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.682s
+    - id: P2S7-I6b
+      guard: internal/db/pa_convo.go:364
+      mutation: "AppendPAFragment taint UPDATE made a no-op: `SET tainted = 1` -> `SET tainted = tainted`"
+      killed_by:
+        - internal/db.TestS2I6_FragmentKindsTaint
+        - internal/db.TestS2I6_StoreTaintsExternalKindsWhateverTheMark
+        - internal/db.TestS2I6_TaintRollsBackWithFragment
+      red: |-
+        --- FAIL: TestS2I6_FragmentKindsTaint (0.04s)
+        --- FAIL: TestS2I6_StoreTaintsExternalKindsWhateverTheMark (0.01s)
+        --- FAIL: TestS2I6_TaintRollsBackWithFragment (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.545s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.527s
+    - id: P2S7-I6c
+      guard: internal/pa/connector/dispatch.go:496
+      mutation: "dispatcher no longer records the tool result: `ferr = d.cfg.Jobs.RecordToolResult(fctx, job, out)` -> `_ = out`"
+      killed_by:
+        - internal/pa.TestS2I6_DispatchStoresResultBeforeAnswer
+      red: |-
+        --- FAIL: TestS2I6_DispatchStoresResultBeforeAnswer (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.650s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.478s
+    - id: P2S7-I6d
+      guard: internal/db/pa_jobs.go:1105
+      mutation: "RecordPAToolResult skips the job gate: `runGate(ctx, tx, req.Gate, j, req.Now)` -> `error(nil)`"
+      killed_by:
+        - internal/pa.TestS2I6_ToolResultRecordRunsTheGate
+      red: |-
+        --- FAIL: TestS2I6_ToolResultRecordRunsTheGate (0.07s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.604s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.483s
+    - id: P2S7-I6e
+      guard: internal/pa/jobs/jobs.go:89
+      mutation: "tool output cap raised past the fragment cap: `MaxToolOutputBytes = 64 << 10` -> `128 << 10`"
+      killed_by:
+        - internal/pa.TestS2I6_ToolOutputFitsAFragment
+      red: |-
+        --- FAIL: TestS2I6_ToolOutputFitsAFragment (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.597s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.443s
+    - id: P2S7-I6f
+      guard: internal/pa/runloop.go:727
+      mutation: "RecordToolResult swallows a failed fragment append: `return err` -> `_ = err; return nil`"
+      killed_by:
+        - internal/pa.TestS2I6_FailedToolRecordIsAnError
+      red: |-
+        --- FAIL: TestS2I6_FailedToolRecordIsAnError (0.04s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.578s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.551s
+
+S2-I7:
+  status: green
+  slice: P2-S7
+  note: "Reset only by a new row: /new, TTL expiry, /forget and the sweep (#1369)."
+  tests:
+    - internal/db.TestS2I7_ResetOnlyThroughNewRow
+    - internal/db.TestS2I7_ForgetResetsThroughNewRow
+    - internal/pa.TestS2I7_NewAndTTLResetThroughNewRow
+    - internal/db.TestS2I7_MigrationTaintsExistingRows
+  mutations:
+    - id: P2S7-I7a
+      guard: internal/db/pa_convo.go:222
+      mutation: "a new conversation row starts tainted, so no reset path ever yields a clean row: `VALUES($1, $2, $3, $4, 0, 0)` -> `VALUES($1, $2, $3, $4, 0, 1)`"
+      killed_by:
+        - internal/db.TestS2I7_ResetOnlyThroughNewRow
+        - internal/db.TestS2I7_ForgetResetsThroughNewRow
+        - internal/pa.TestS2I7_NewAndTTLResetThroughNewRow
+      red: |-
+        --- FAIL: TestS2I7_ResetOnlyThroughNewRow (0.04s)
+        --- FAIL: TestS2I7_ForgetResetsThroughNewRow (0.01s)
+        --- FAIL: TestS2I7_MigrationTaintsExistingRows (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.631s
+        FAIL
+        --- FAIL: TestS2I7_NewAndTTLResetThroughNewRow (0.04s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.647s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.432s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.464s
+    - id: P2S7-I7b
+      guard: internal/db/pa_convo.go:117
+      mutation: "migration default lowered: `INTEGER NOT NULL DEFAULT 1` -> `DEFAULT 0` in both dialects"
+      killed_by:
+        - internal/db.TestS2I7_MigrationTaintsExistingRows
+      red: |-
+        --- FAIL: TestS2I7_MigrationTaintsExistingRows (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.531s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.442s
+
+S2-I8:
+  status: green
+  slice: P2-S7
+  note: "Only user-provenance KindText reaches a command; no SQL in the module lowers the flag (#1369)."
+  tests:
+    - internal/pa.TestS2I8_InjectedResetHasNoEffect
+    - internal/db.TestS2I8_NoStatementLowersTaint
+  mutations:
+    - id: P2S7-I8a
+      guard: internal/pa/conversation.go:399
+      mutation: "userCommand accepts a command of any provenance: `if prov != convo.ProvenanceUser {` -> `if false && prov != convo.ProvenanceUser {`"
+      killed_by:
+        - internal/pa.TestS2I8_InjectedResetHasNoEffect
+      red: |-
+        --- FAIL: TestS2I8_InjectedResetHasNoEffect (0.04s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.904s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.447s
+    - id: P2S7-I8b
+      guard: internal/db/pa_convo.go:364
+      mutation: "a statement that lowers the flag: `SET tainted = 1` -> `SET tainted = 0`"
+      killed_by:
+        - internal/db.TestS2I8_NoStatementLowersTaint
+      red: |-
+        --- FAIL: TestS2I8_NoStatementLowersTaint (0.15s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.632s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.471s
+
+S2-I9:
+  status: pending
+  slice: P2-S6
+  tracked_by: "#1321"
+  note: "a reset never lowers the disclosure card gate"
+
+S2-I10:
+  status: green
+  slice: P2-S7
+  note: "Every taint read fails closed: store, run loop and dispatcher (#1369)."
+  tests:
+    - internal/db.TestS2I10_TaintReadFailsClosed
+    - internal/db.TestS2I10_ReadErrorOnBrokenSchema
+    - internal/pa.TestS2I10_TaintReadErrorMeansTainted
+    - internal/pa.TestS2I10_DispatchTaintFromConversation
+  mutations:
+    - id: P2S7-I10a
+      guard: internal/db/pa_convo.go:394
+      mutation: "ReadPAConversationTaint read error returns clean: `return true, rowRead(...)` -> `return false, rowRead(...)`"
+      killed_by:
+        - internal/db.TestS2I10_TaintReadFailsClosed
+        - internal/db.TestS2I10_ReadErrorOnBrokenSchema
+      red: |-
+        --- FAIL: TestS2I10_TaintReadFailsClosed (0.04s)
+        --- FAIL: TestS2I10_ReadErrorOnBrokenSchema (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.519s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.404s
+    - id: P2S7-I10b
+      guard: internal/pa/runloop.go:708
+      mutation: "ConversationTainted store error returns clean: `return true, err` -> `return false, err`"
+      killed_by:
+        - internal/pa.TestS2I10_TaintReadErrorMeansTainted
+      red: |-
+        --- FAIL: TestS2I10_TaintReadErrorMeansTainted (0.04s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.567s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.458s
+    - id: P2S7-I10c
+      guard: internal/pa/connector/dispatch.go:536
+      mutation: "Dispatcher.taint read error recorded clean: `return TaintExternal` -> `return TaintClean` in the error branch"
+      killed_by:
+        - internal/pa.TestS2I10_DispatchTaintFromConversation
+      red: |-
+        --- FAIL: TestS2I10_DispatchTaintFromConversation (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.572s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.531s
+
+S2-D1:
+  status: pending
+  slice: P2-S6
+  tracked_by: "#1322"
+  note: "disclosure class: card always"
+
+S2-D2:
+  status: pending
+  slice: P2-S6
+  tracked_by: "#1322"
+  note: "disclosure approval binds device id and argument hash"
+
+S2-D3:
+  status: pending
+  slice: P2-S6
+  tracked_by: "#1322"
+  note: "disclosure text cap of 1000 characters"
+
+S2-D4:
+  status: pending
+  slice: P2-S6
+  tracked_by: "#1322"
+  note: "disclosure card renders full text and device"
+
+S2-D5:
+  status: pending
+  slice: P2-S10
+  tracked_by: "#1322"
+  note: "standing permission device allowlist; type read fresh at dispatch"
+
+S2-D6:
+  status: pending
+  slice: P2-S9
+  tracked_by: "#1322"
+  note: "trigger_scenario card shows the steps"
+
+S2-D7:
+  status: pending
+  slice: P2-S3
+  tracked_by: "#1322"
+  note: "the executor sends exactly the approved arguments"
+
+S2-A1:
+  status: pending
+  slice: P2-S2
+  tracked_by: "#1320"
+  note: "single-use receipt"
+
+S2-A2:
+  status: pending
+  slice: P2-S2
+  tracked_by: "#1320"
+  note: "5-minute approval expiry"
+
+S2-A3:
+  status: pending
+  slice: P2-S2
+  tracked_by: "#1320"
+  note: "approval binds the argument hash"
+
+S2-A4:
+  status: pending
+  slice: P2-S2
+  tracked_by: "#1320"
+  note: "approval binds the principal"
+
+S2-A5:
+  status: pending
+  slice: P2-S4
+  tracked_by: "#1320"
+  note: "fresh tools/list at dispatch compared with pin and approval"
+
+S2-A6:
+  status: pending
+  slice: P2-S4
+  tracked_by: "#1320"
+  note: "a failed fresh tools/list refuses"
+
+S2-A7:
+  status: pending
+  slice: P2-S2
+  tracked_by: "#1320"
+  note: "the dispatch ledger dispatches a double tap once"
+
+S2-A8:
+  status: pending
+  slice: P2-S10
+  tracked_by: "#1320"
+  note: "standing permissions: no grant route reachable from the worker"
+
+S2-A9:
+  status: pending
+  slice: P2-S10
+  tracked_by: "#1320"
+  note: "standing permissions bound to revision and expiry"
+
+S2-A10:
+  status: pending
+  slice: P2-S10
+  tracked_by: "#1320"
+  note: "grants only through /permissions, never from a card"
+
+S2-F3:
+  status: pending
+  slice: P2-S3
+  tracked_by: "#1320"
+  note: "PA_WRITES_ENABLED re-checked at dispatch"
