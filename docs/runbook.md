@@ -3048,13 +3048,17 @@ rather than re-applying the exemption.
 3. **Network path to shared-pg broken** from the mctl-telegram pod (network
    policy change, DNS).
 
-What this alert does **not** see: a database that hangs instead of failing.
-A refresh whose request is abandoned by its client ends with
-`context.Canceled`, which is not counted (otherwise the metric would follow
-traffic rather than outages), and the query has no timeout of its own. A
-hung shared-pg, or the server's own connection pool held by slow queries,
-therefore refuses tokens while this counter stays flat. Look for the same
-symptoms below with no alert, and check shared-pg directly.
+4. **shared-pg hangs instead of failing**, or the server's own connection
+   pool is held by slow queries. Each refresh read has its own 5-second
+   deadline (`localjwt.RevocationRefreshTimeout`, below the 15-second bound),
+   derived from the request's context. When that deadline expires the read
+   counts as a failed refresh, so a hang shows up here like an outright
+   failure, only slower: about one failure per request every 5 seconds. A
+   request the client abandons before the deadline (`context.Canceled`) is
+   still not counted, because the metric must follow outages, not traffic.
+   Every worker client waits longer than 5 seconds (the agent worker polls
+   with a 30-second deadline, Local Bridge clients 15 seconds), so in
+   practice the deadline fires first.
 
 ### Diagnostic queries
 
@@ -3066,8 +3070,8 @@ sum by (job) (rate(mctl_worker_token_revocation_refresh_failures_total[5m])) * 6
 sum by (provider) (increase(mctl_auth_failures_total{reason="other"}[5m]))
 ```
 
-Server logs (`mctl_get_service_logs` for the mctl-telegram service in the
-`labs` tenant):
+Server logs (the platform MCP `get_service_logs` tool, for the
+mctl-telegram service in the `labs` tenant):
 
 - `auth failed` with `err` containing `check worker token revocation` or
   `check pool token revocation`, followed by either
@@ -3075,13 +3079,16 @@ Server logs (`mctl_get_service_logs` for the mctl-telegram service in the
   past 15s) or `revocation cache cold-start refresh` (a fresh pod that never
   loaded the list). The wrapped database error after
   `refresh worker token revocation cache:` names the real cause
-  (connection refused, too many clients, missing relation).
+  (connection refused, too many clients, missing relation, or
+  `revocation refresh read exceeded RevocationRefreshTimeout` when the read
+  hung until its own deadline).
 - Unrelated database errors from other paths at the same time confirm the
   store, not this cache, is the problem.
 
 Database: check the `SharedPg*` alerts in vmalert and the shared-pg cluster
-status (read only). `mctl_get_service_status` and `mctl_get_service_pods`
-show whether mctl-telegram itself is healthy and how many pods serve.
+status (read only). The platform MCP `get_service_status` and
+`get_service_pods` tools show whether mctl-telegram itself is healthy and how
+many pods serve.
 
 ### Impact
 

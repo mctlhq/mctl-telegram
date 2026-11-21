@@ -32,6 +32,23 @@ const DefaultRevocationCacheTTL = 10 * time.Second
 // failure path too.
 const MaxRevocationSnapshotAge = MaxRevocationCacheTTL
 
+// RevocationRefreshTimeout bounds one read of worker_token_revocations.
+// Without it a read waits for as long as the caller's request lives: a
+// shared-pg that hangs instead of failing, or a connection pool held by slow
+// queries, then ends every refresh with the client giving up (context
+// Canceled), which is deliberately not counted as a refresh failure, so the
+// outage refuses every worker token while the failure counter stays flat.
+// With this deadline such a read ends as a counted failure. It is shorter
+// than MaxRevocationSnapshotAge so a check that has to refresh still answers
+// well inside the bound, and long enough that a merely slow but healthy
+// read of a single-digit-row table does not trip it.
+const RevocationRefreshTimeout = 5 * time.Second
+
+// errRefreshDeadline is the cause attached to the refresh read's own
+// deadline. context.Cause on the read's context returns it only when that
+// deadline, and not the caller's context, ended the read.
+var errRefreshDeadline = errors.New("revocation refresh read exceeded RevocationRefreshTimeout")
+
 // ErrRevocationSnapshotTooOld is returned when no snapshot younger than
 // MaxRevocationSnapshotAge is available: the latest refresh failed, or the
 // read that produced the newest snapshot took longer than the bound.
@@ -56,6 +73,9 @@ type RevocationCache struct {
 	store *db.Store
 	ttl   time.Duration
 	now   func() time.Time
+	// refreshTimeout is RevocationRefreshTimeout; a field only so tests can
+	// shorten it.
+	refreshTimeout time.Duration
 
 	// onRefreshError, when set, is called once per failed refresh (the
 	// server wires it to mctl_worker_token_revocation_refresh_failures_total).
@@ -84,11 +104,12 @@ func NewRevocationCache(store *db.Store, ttl time.Duration) *RevocationCache {
 		ttl = MaxRevocationCacheTTL
 	}
 	return &RevocationCache{
-		store:   store,
-		ttl:     ttl,
-		now:     time.Now,
-		jtis:    make(map[string]struct{}),
-		blanket: make(map[int64]time.Time),
+		store:          store,
+		ttl:            ttl,
+		now:            time.Now,
+		refreshTimeout: RevocationRefreshTimeout,
+		jtis:           make(map[string]struct{}),
+		blanket:        make(map[int64]time.Time),
 	}
 }
 
@@ -156,6 +177,20 @@ func (c *RevocationCache) check(ctx context.Context, jti string, checkJti bool, 
 	}
 }
 
+// callerCanceled reports whether a failed read ended because the caller
+// canceled its context, rather than because the store failed or the read's
+// own deadline expired. Only that case goes uncounted: a request the client
+// abandoned is not a store failure, and counting it would make the metric
+// follow traffic rather than outages. The read's own deadline is told apart
+// by its cause, not by the error text: when it fires first, context.Cause
+// of readCtx is errRefreshDeadline even if the caller cancels afterwards.
+func callerCanceled(ctx, readCtx context.Context) bool {
+	if errors.Is(context.Cause(readCtx), errRefreshDeadline) {
+		return false
+	}
+	return errors.Is(ctx.Err(), context.Canceled)
+}
+
 // lookup answers from the applied snapshot. tooOld reports a snapshot past
 // MaxRevocationSnapshotAge, which is refused with ErrRevocationSnapshotTooOld.
 func (c *RevocationCache) lookup(jti string, checkJti bool, telegramID int64, issuedAt time.Time) (revoked, tooOld bool, err error) {
@@ -193,18 +228,28 @@ func (c *RevocationCache) Refresh(ctx context.Context) error {
 // refresh reloads the denylist from the store. Safe for concurrent callers:
 // a race between two callers both observing a stale cache just issues the
 // same idempotent read twice, which is harmless for a single-digit-row
-// table and simpler than adding a singleflight for it.
+// table and simpler than adding a singleflight for it. There is no shared
+// in-flight read, so one caller's cancel aborts only its own read, and each
+// read is bounded by refreshTimeout: a hung store holds a request for at
+// most that long, never indefinitely.
 func (c *RevocationCache) refresh(ctx context.Context) error {
+	// Derived from the caller's context, so a caller that goes away still
+	// aborts its read at once; the deadline only adds an upper bound.
+	readCtx, cancel := context.WithTimeoutCause(ctx, c.refreshTimeout, errRefreshDeadline)
+	defer cancel()
 	// Stamped before the read, not after: a snapshot's freshness is decided
 	// by when it looked at the database, not by when its query happened to
 	// return.
 	readStartedAt := c.now()
-	rows, err := c.store.ListWorkerTokenRevocations(ctx)
+	rows, err := c.store.ListWorkerTokenRevocations(readCtx)
 	if err != nil {
-		// A request the client abandoned is not a store failure; counting
-		// it would make the metric follow traffic rather than outages.
-		if c.onRefreshError != nil && !errors.Is(ctx.Err(), context.Canceled) {
+		if c.onRefreshError != nil && !callerCanceled(ctx, readCtx) {
 			c.onRefreshError()
+		}
+		// The driver reports only "context deadline exceeded"; name our
+		// own deadline so the log says the store hung, not the client.
+		if errors.Is(context.Cause(readCtx), errRefreshDeadline) {
+			err = fmt.Errorf("%w: %w", errRefreshDeadline, err)
 		}
 		return fmt.Errorf("refresh worker token revocation cache: %w", err)
 	}
