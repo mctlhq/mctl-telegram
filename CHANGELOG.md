@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.140.1](https://github.com/mctlhq/mctl-telegram/compare/0.140.0...0.140.1) (2026-11-21)
+
+
+### Bug Fixes
+
+* **agentapi:** refuse agent-token autopilot resume, audit owner resume ([78f3ad9](https://github.com/mctlhq/mctl-telegram/commit/78f3ad9dd24942bc1b8337c23f65e63abe237148)), closes [#944](https://github.com/mctlhq/mctl-telegram/issues/944)
+* **agentapi:** refuse agent-token autopilot resume, audit resume ([31c0aee](https://github.com/mctlhq/mctl-telegram/commit/31c0aee1786dc677d0484d3a41db811240b34f59))
+* **auth:** background revocation refresh, snapshot age gauge, runbook ([7aa3f2e](https://github.com/mctlhq/mctl-telegram/commit/7aa3f2e791434f219c3d1bc80f5b3abb4e7e5d15))
+* **auth:** refresh revocations in background, export snapshot age ([46de8d4](https://github.com/mctlhq/mctl-telegram/commit/46de8d4b8417571d1a5fe18107f2783754e608d1))
+* **pa:** make the account-deletion token guard race-free ([bab3783](https://github.com/mctlhq/mctl-telegram/commit/bab3783c87b1519bb808a2fb91c64d7cbe89fc49)), closes [#1338](https://github.com/mctlhq/mctl-telegram/issues/1338)
+* **pa:** purge linking state on retention and account deletion ([5633a93](https://github.com/mctlhq/mctl-telegram/commit/5633a935e478969777260e2c4d63162650fbba5e))
+
 ## [0.140.0](https://github.com/mctlhq/mctl-telegram/compare/0.139.5...0.140.0) (2026-11-21)
 
 

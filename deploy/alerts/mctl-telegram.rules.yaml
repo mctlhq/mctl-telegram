@@ -246,6 +246,34 @@ spec:
               refused").
             runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlbridgeauthfailing"
 
+    - name: mctl-telegram-worker-auth
+      rules:
+        # Mirror only, like the rest of this file: the deployed rule is in
+        # mctl-gitops vm-rules/mctl-telegram-ops.yaml (group
+        # mctl-telegram-worker-auth), which carries the full reasoning and
+        # the unit tests. Kept here so runbook_links_test.go checks the
+        # anchor. The expression must stay identical to the deployed one.
+        # #1346: past a 15s-old snapshot every worker-derived token is
+        # refused. Driven by the snapshot age gauge, not by request traffic:
+        # agent workers exit on their first 401 and crash-loop, so requests
+        # stop almost as soon as an outage starts.
+        - alert: MctlWorkerTokenRevocationRefreshFailing
+          expr: max by (job) (max_over_time(mctl_worker_token_revocation_snapshot_age_seconds[1m])) > 15
+          for: 5m
+          labels:
+            severity: critical
+            service: mctl-telegram
+          annotations:
+            summary: "mctl-telegram cannot refresh the worker-token revocation list; worker tokens are refused"
+            description: >
+              The worker-token revocation snapshot reached {{ $value | humanizeDuration }}
+              in the last minute and has been past its 15-second bound for five
+              minutes. Past the bound every worker, pool, Local Bridge and job
+              token is refused with 401, so agent workers are stopped. The store
+              is the cause (shared-pg down, unreachable or hung): check the
+              database, not the bound.
+            runbook_url: "https://github.com/mctlhq/mctl-telegram/blob/main/docs/runbook.md#mctlworkertokenrevocationrefreshfailing"
+
     - name: mctl-telegram-agent
       rules:
         # The three alerts below (MctlAgentClaudeUsageLimit,
