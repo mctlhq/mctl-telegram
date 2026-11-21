@@ -17,7 +17,15 @@ import (
 // Every method is keyed by (principal, id); a row of another principal is
 // ErrNotFound. A failed read is an error, never a zero Connection.
 type Store interface {
-	CreatePAConnection(ctx context.Context, c Connection, s Sealed) error
+	// AdmitPAConnection decides whether principal may begin a connection:
+	// ErrTooManyPending when it has MaxPendingConnections pending ones. A
+	// failed read is an error, never an admission.
+	AdmitPAConnection(ctx context.Context, principal int64) (Admission, error)
+	// CreatePAConnection inserts a new pending_link row under the
+	// principal's lock, after checking again in the same transaction that
+	// the cap holds (ErrTooManyPending) and that the principal's account was
+	// not deleted since a was issued (ErrPrincipalDeleted).
+	CreatePAConnection(ctx context.Context, c Connection, s Sealed, a Admission) error
 	GetPAConnection(ctx context.Context, principal int64, id string) (Connection, error)
 	GetPAConnectionSealed(ctx context.Context, principal int64, id string) (Connection, Sealed, error)
 	ListPAConnections(ctx context.Context, principal int64) ([]Connection, error)
@@ -32,6 +40,10 @@ type Store interface {
 	// token remotely. A row already revoked returns alreadyRevoked=true and
 	// changes nothing.
 	RevokePAConnection(ctx context.Context, principal int64, id, reason string) (c Connection, before Sealed, alreadyRevoked bool, err error)
+	// RevokePAConnectionAt is RevokePAConnection for one known row version:
+	// it changes the row only while it is still at revision and generation,
+	// and is ErrConflict otherwise. A row already revoked is ErrConflict too.
+	RevokePAConnectionAt(ctx context.Context, principal int64, id string, revision, generation int64, reason string) (Connection, error)
 	// ClaimPAConnectionRefresh takes the refresh lease of an active row at
 	// generation for owner until until, if no unexpired lease is held. It
 	// reports whether the lease was taken.
@@ -163,12 +175,22 @@ func readErr(err error) error {
 // Begin creates a new connection in pending_link with its own DEK. Every
 // link attempt, every reconnect and every scope escalation calls Begin and
 // gets a new id (S1-C8); no method re-activates an existing row.
+//
+// The store admits the Begin before the KEK wrap, so a principal at
+// MaxPendingConnections costs no wrap (T10), and checks again when it
+// creates the row, under the principal's lock: concurrent Begins cannot
+// both pass the cap, and a Begin admitted before an account deletion
+// cannot leave a row after it (ErrPrincipalDeleted, #1338).
 func (m *Manager) Begin(ctx context.Context, principal int64, server Server) (Connection, error) {
 	if err := validPrincipal(principal); err != nil {
 		return Connection{}, err
 	}
 	if !server.Valid() {
 		return Connection{}, errors.New("pa connection: unknown server")
+	}
+	adm, err := m.store.AdmitPAConnection(ctx, principal)
+	if err != nil {
+		return Connection{}, fmt.Errorf("pa connection: admit: %w", err)
 	}
 	id, err := randomID("pac_")
 	if err != nil {
@@ -188,7 +210,7 @@ func (m *Manager) Begin(ctx context.Context, principal int64, server Server) (Co
 		ID: id, Principal: principal, Server: server, State: StatePendingLink,
 		AuthorityRevision: 1, CreatedAt: now, UpdatedAt: now,
 	}
-	if err := m.store.CreatePAConnection(ctx, c, Sealed{KEKID: m.kek.ID(), WrappedDEK: wrapped}); err != nil {
+	if err := m.store.CreatePAConnection(ctx, c, Sealed{KEKID: m.kek.ID(), WrappedDEK: wrapped}, adm); err != nil {
 		return Connection{}, fmt.Errorf("pa connection: create: %w", err)
 	}
 	return c, nil
@@ -743,6 +765,83 @@ func (m *Manager) Disconnect(ctx context.Context, principal int64, id string) (D
 	}
 	res.RemoteErr = m.revokeTokens(ctx, c.Server, ts)
 	return res, nil
+}
+
+// RevokeHeldTokens revokes every connection of principal that still holds
+// provider tokens, for account deletion (#1338): at the provider first, and
+// locally only once the provider has taken the revocation.
+//
+// The order is the reverse of Disconnect's, on purpose. Disconnect revokes
+// locally first and calls the provider best-effort (S1-C6), which is right
+// for a connection that stays: its row keeps saying revoked. Account
+// deletion purges the row afterwards, so a token wiped locally before the
+// provider took its revocation could never be revoked by anyone. Here a
+// connection whose tokens cannot be read, or whose remote revocation fails,
+// keeps its row and its sealed tokens, and the failure is returned: the
+// caller refuses the deletion, which can be retried.
+//
+// The local revocation is a compare-and-set on the row's revision and token
+// generation. A connection that changed in between (a refresh rotated its
+// tokens, a confirm activated it) is read and revoked again, at most
+// revokeHeldAttempts times; the new tokens are revoked at the provider before
+// anything local changes. A connection without tokens is left as it is: the
+// purge deletes it. A connection that is gone (ErrNotFound) holds nothing.
+//
+// The error joins one error per connection not revoked, and a failed listing
+// is an error: nil means every connection the listing returned holds no
+// tokens now. The purge checks again in its own transaction, so a
+// connection that gains tokens after this returns still refuses the
+// deletion.
+func (m *Manager) RevokeHeldTokens(ctx context.Context, principal int64) error {
+	if err := validPrincipal(principal); err != nil {
+		return err
+	}
+	list, err := m.store.ListPAConnections(ctx, principal)
+	if err != nil {
+		return readErr(err)
+	}
+	var errs []error
+	for _, c := range list {
+		if err := m.revokeHeld(ctx, principal, c.ID); err != nil {
+			errs = append(errs, fmt.Errorf("pa connection %s: %w", c.ID, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// revokeHeldAttempts bounds RevokeHeldTokens' retries on one connection.
+const revokeHeldAttempts = 3
+
+func (m *Manager) revokeHeld(ctx context.Context, principal int64, id string) error {
+	for range revokeHeldAttempts {
+		c, s, err := m.store.GetPAConnectionSealed(ctx, principal, id)
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return readErr(err)
+		}
+		if len(s.SealedTokens) == 0 {
+			return nil
+		}
+		ts, err := m.openTokens(ctx, c, s)
+		if err != nil {
+			return fmt.Errorf("pa connection: tokens for remote revocation: %w", err)
+		}
+		if err := m.revokeTokens(ctx, c.Server, ts); err != nil {
+			return err
+		}
+		_, err = m.store.RevokePAConnectionAt(ctx, principal, id, c.AuthorityRevision, c.TokenGeneration, "account_deleted")
+		if errors.Is(err, ErrConflict) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("pa connection: local revoke: %w", err)
+		}
+		m.cancelInflight(id)
+		return nil
+	}
+	return fmt.Errorf("%w: the connection kept changing while it was revoked", ErrConflict)
 }
 
 // Call is one outbound MCP call under the connection lease (threat model T2

@@ -7,6 +7,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/pa"
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
+	"github.com/mctlhq/mctl-telegram/internal/pa/linking"
 )
 
 // PAStateSweeperInterval is how often PAState() wakes up. Conversations live
@@ -47,4 +48,52 @@ func PAStateSweepOnce(ctx context.Context, store convo.Store, now time.Time) {
 		slog.Info("pa state sweep", "conversations", r.Conversations, "fragments", r.Fragments,
 			"callbacks", r.Callbacks, "updates", r.Updates, "link_secrets", r.LinkSecrets)
 	}
+}
+
+// PALinkSweeperInterval is how often PALinks wakes up. It is well under
+// linking.PendingMaxAge, so a connection the linking flow abandoned is
+// failed, and any tokens it holds revoked, within PendingMaxAge plus one
+// interval of its last transition.
+const PALinkSweeperInterval = 5 * time.Minute
+
+// PALinkSweepLimit bounds each listing of one ExpireStale pass. A pass that
+// fills it leaves the rest for the next interval.
+const PALinkSweepLimit = 200
+
+// PALinkExpirer is the linking flow's sweep: (*linking.Service).ExpireStale.
+type PALinkExpirer interface {
+	ExpireStale(ctx context.Context, limit int) (linking.SweepResult, error)
+}
+
+// PALinks runs the linking sweep (#1338) until ctx is cancelled: every
+// connection whose link secret expired unused, or that stayed pending past
+// linking.PendingMaxAge, is failed and its tokens revoked. It is started
+// only when PA_ENABLED is true and the server runs the linking flow.
+func PALinks(ctx context.Context, e PALinkExpirer) {
+	ticker := time.NewTicker(PALinkSweeperInterval)
+	defer ticker.Stop()
+	PALinksSweepOnce(ctx, e)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			PALinksSweepOnce(ctx, e)
+		}
+	}
+}
+
+// PALinksSweepOnce runs one pass. A connection the pass could not observe
+// or fail is counted in Errors and left for the next pass; the pass logs
+// the joined error and the counts rather than stopping at the first.
+func PALinksSweepOnce(ctx context.Context, e PALinkExpirer) linking.SweepResult {
+	r, err := e.ExpireStale(ctx, PALinkSweepLimit)
+	if err != nil {
+		slog.Warn("pa link sweep: incomplete", "failed", r.Failed, "skipped", r.Skipped, "errors", r.Errors, "err", err)
+		return r
+	}
+	if r != (linking.SweepResult{}) {
+		slog.Info("pa link sweep", "failed", r.Failed, "skipped", r.Skipped, "errors", r.Errors)
+	}
+	return r
 }

@@ -114,24 +114,97 @@ func getPAConn(ctx context.Context, q paQuerier, principal int64, id string, sea
 		`SELECT `+cols+` FROM pa_connections WHERE principal = $1 AND id = $2`, principal, id), sealed)
 }
 
-// CreatePAConnection inserts a new pending_link row.
-func (s *Store) CreatePAConnection(ctx context.Context, c connection.Connection, sealed connection.Sealed) error {
+// paAdmissionState reads what admits a Begin for principal: its
+// account-deletion mark (purgePAPrincipals; 0 when the principal has no lock
+// row) and how many of its connections are pending. One statement, so the
+// two are read together.
+func paAdmissionState(ctx context.Context, q paQuerier, principal int64) (mark, pending int64, err error) {
+	err = q.QueryRowContext(ctx, `SELECT
+			COALESCE((SELECT purged_at_ms FROM pa_principal_locks WHERE principal = $1), 0),
+			(SELECT COUNT(*) FROM pa_connections WHERE principal = $1 AND state IN ($2, $3, $4, $5))`,
+		principal, string(connection.StatePendingLink), string(connection.StatePendingOAuth),
+		string(connection.StatePendingReturn), string(connection.StatePendingConfirm),
+	).Scan(&mark, &pending)
+	if err != nil {
+		return 0, 0, fmt.Errorf("%w: admission: %v", connection.ErrUnreadable, err)
+	}
+	return mark, pending, nil
+}
+
+// AdmitPAConnection implements connection.Store. It takes no lock: it only
+// spares a principal at the cap the KEK wrap. CreatePAConnection decides.
+func (s *Store) AdmitPAConnection(ctx context.Context, principal int64) (connection.Admission, error) {
+	if principal <= 0 {
+		return connection.Admission{}, fmt.Errorf("%w: admission needs a principal", connection.ErrInvalidTransition)
+	}
+	mark, pending, err := paAdmissionState(ctx, s.DB, principal)
+	if err != nil {
+		return connection.Admission{}, err
+	}
+	if pending >= connection.MaxPendingConnections {
+		return connection.Admission{}, connection.ErrTooManyPending
+	}
+	return connection.Admission{PurgeMark: mark, ReadAt: time.Now().UTC()}, nil
+}
+
+// CreatePAConnection inserts a new pending_link row. In one transaction it
+// takes the principal's lock (the pa_principal_locks upsert that a webhook
+// update, a job claim and an account deletion take too), then checks:
+//
+//   - the deletion mark is still the one admission read. purgePAPrincipals
+//     raises it under the same lock in the deleting transaction, so a Begin
+//     admitted before a deletion that commits first is refused
+//     (ErrPrincipalDeleted), and one that commits first is purged with the
+//     account. The mark only grows while its row exists, and the lock sweep
+//     removes a row only after pa.UpdatesRetention unused, so a mark written
+//     after admission is always greater than the one admission read;
+//   - fewer than connection.MaxPendingConnections pending rows exist
+//     (ErrTooManyPending). Counting under the lock is what makes the cap
+//     hold for concurrent Begins: on Postgres the second waits for the first
+//     to commit, and SQLite runs one writer at a time.
+func (s *Store) CreatePAConnection(ctx context.Context, c connection.Connection, sealed connection.Sealed, a connection.Admission) error {
 	if c.ID == "" || c.Principal <= 0 || !c.Server.Valid() || c.State != connection.StatePendingLink ||
 		c.AuthorityRevision != 1 || c.TokenGeneration != 0 || sealed.KEKID == "" || len(sealed.WrappedDEK) == 0 ||
 		len(sealed.SealedCode) != 0 || len(sealed.SealedTokens) != 0 {
 		return fmt.Errorf("%w: a new connection is pending_link at revision 1 with only a wrapped dek", connection.ErrInvalidTransition)
 	}
+	if a.ReadAt.IsZero() {
+		return fmt.Errorf("%w: a new connection needs an admission", connection.ErrInvalidTransition)
+	}
 	now := time.Now().UTC().UnixMilli()
 	if !c.CreatedAt.IsZero() {
 		now = c.CreatedAt.UTC().UnixMilli()
 	}
-	_, err := s.DB.ExecContext(ctx,
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("create pa connection: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO pa_principal_locks(principal, locked_at_ms) VALUES($1, $2)
+		 ON CONFLICT (principal) DO UPDATE SET locked_at_ms = excluded.locked_at_ms`,
+		c.Principal, time.Now().UnixMilli()); err != nil {
+		return fmt.Errorf("create pa connection: lock principal: %w", err)
+	}
+	mark, pending, err := paAdmissionState(ctx, tx, c.Principal)
+	if err != nil {
+		return err
+	}
+	if mark > a.PurgeMark {
+		return connection.ErrPrincipalDeleted
+	}
+	if pending >= connection.MaxPendingConnections {
+		return connection.ErrTooManyPending
+	}
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO pa_connections(id, principal, server, state, authority_revision, token_generation,
 			kek_id, wrapped_dek, created_at_ms, updated_at_ms)
 		 VALUES($1, $2, $3, $4, 1, 0, $5, $6, $7, $7)`,
-		c.ID, c.Principal, string(c.Server), string(c.State), sealed.KEKID, sealed.WrappedDEK, now)
-	if err != nil {
+		c.ID, c.Principal, string(c.Server), string(c.State), sealed.KEKID, sealed.WrappedDEK, now); err != nil {
 		return fmt.Errorf("create pa connection: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("create pa connection: commit: %w", err)
 	}
 	return nil
 }
@@ -303,6 +376,47 @@ func (s *Store) revokePAConnOnce(ctx context.Context, principal int64, id, reaso
 		return connection.Connection{}, connection.Sealed{}, false, fmt.Errorf("pa connection revoke: commit: %w", err)
 	}
 	return c, before, false, nil
+}
+
+// RevokePAConnectionAt implements connection.Store: the revocation of
+// RevokePAConnection for the row version the caller read, with no retry. A
+// row that moved on, or was already revoked, is ErrConflict; a missing row
+// is ErrNotFound.
+func (s *Store) RevokePAConnectionAt(ctx context.Context, principal int64, id string, revision, generation int64, reason string) (connection.Connection, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return connection.Connection{}, fmt.Errorf("pa connection revoke: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `UPDATE pa_connections
+		SET state = $1, authority_revision = authority_revision + 1, updated_at_ms = $2,
+			wrapped_dek = NULL, sealed_code = NULL, sealed_tokens = NULL, failure_reason = $3,
+			refresh_lease_owner = '', refresh_lease_until_ms = 0
+		WHERE principal = $4 AND id = $5 AND state <> $1 AND authority_revision = $6
+		  AND token_generation = $7`,
+		string(connection.StateRevoked), time.Now().UTC().UnixMilli(), reason,
+		principal, id, revision, generation)
+	if err != nil {
+		return connection.Connection{}, fmt.Errorf("pa connection revoke: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return connection.Connection{}, fmt.Errorf("pa connection revoke: rows affected: %w", err)
+	}
+	if n != 1 {
+		if _, err := getPAConn(ctx, tx, principal, id, nil); err != nil {
+			return connection.Connection{}, err
+		}
+		return connection.Connection{}, connection.ErrConflict
+	}
+	c, err := getPAConn(ctx, tx, principal, id, nil)
+	if err != nil {
+		return connection.Connection{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return connection.Connection{}, fmt.Errorf("pa connection revoke: commit: %w", err)
+	}
+	return c, nil
 }
 
 // ClaimPAConnectionRefresh takes the refresh lease (see connection.Store).

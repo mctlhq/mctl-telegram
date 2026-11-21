@@ -447,7 +447,9 @@ func main() {
 	go sweeper.AgentNotifier(ctx, agentNotifier)
 	// Personal Assistant state (issue #1313): purge unmarked fragments, then
 	// the hourly retention sweep. Nothing at all unless PA_ENABLED is true.
-	if _, err := startPAState(ctx, cfg, store); err != nil {
+	// No linking sweep: the linking flow is not wired (#1314), so there is
+	// no *linking.Service to pass.
+	if _, err := startPAState(ctx, cfg, store, nil); err != nil {
 		slog.Error("pa state", "err", err)
 		os.Exit(1)
 	}

@@ -146,8 +146,15 @@ type ServerConfig struct {
 	// Issuer is the one pinned issuer (RFC 9207 iss must equal it).
 	Issuer string
 	// RequireIss: the server sends iss on every callback, so a callback
-	// without it is refused.
-	RequireIss            bool
+	// without it is refused. It is derived from Metadata: set here it can
+	// only add the requirement, never remove it.
+	RequireIss bool
+	// Metadata is the server's authorization server metadata
+	// (FetchASMetadata), required for an enabled server: an enabled server
+	// without it, or with metadata of another issuer, is refused at New and
+	// on every request. RequireIss is true whenever it says the server
+	// sends iss (#1338).
+	Metadata              *ASMetadata
 	AuthorizationEndpoint string
 	TokenEndpoint         string
 	ClientID              string
@@ -223,6 +230,9 @@ func New(cfg Config) (*Service, error) {
 			sc.Resource == "" || !strings.HasSuffix(sc.RedirectURI, "/pa/oauth/callback/"+string(name)) {
 			return nil, fmt.Errorf("%w: server %s is enabled without a complete registration", ErrConfig, name)
 		}
+		if _, err := withMetadata(name, sc); err != nil {
+			return nil, err
+		}
 	}
 	now := cfg.Now
 	if now == nil {
@@ -232,11 +242,24 @@ func New(cfg Config) (*Service, error) {
 }
 
 // server returns the config of an enabled server, or ErrServerDisabled. A
-// server absent from the config is disabled.
+// server absent from the config is disabled. The config is checked against
+// its metadata on every call, not only at New: the map may change after.
 func (s *Service) server(name connection.Server) (ServerConfig, error) {
 	sc, ok := s.cfg.Servers[name]
 	if !ok || !sc.Enabled || !name.Valid() {
 		return ServerConfig{}, ErrServerDisabled
+	}
+	return withMetadata(name, sc)
+}
+
+// withMetadata returns sc with RequireIss derived from its metadata, or
+// ErrConfig when it has none for its issuer.
+func withMetadata(name connection.Server, sc ServerConfig) (ServerConfig, error) {
+	if sc.Metadata == nil || sc.Metadata.Issuer == "" || sc.Metadata.Issuer != sc.Issuer {
+		return ServerConfig{}, fmt.Errorf("%w: server %s has no authorization server metadata for its issuer", ErrConfig, name)
+	}
+	if sc.Metadata.IssParameterSupported {
+		sc.RequireIss = true
 	}
 	return sc, nil
 }
