@@ -36,6 +36,10 @@ type fakeServer struct {
 	deletes      []string // session ids of DELETE requests
 	// onCall runs when tools/call arrives (under the lock).
 	onCall func()
+	// callResult replaces the tools/call result object when set.
+	callResult string
+	// calls records the params of every tools/call.
+	calls []string
 }
 
 func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -91,6 +95,10 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.onCall()
 		}
 		result = `{"content":[{"type":"text","text":"ok"}]}`
+		if f.callResult != "" {
+			result = f.callResult
+		}
+		f.calls = append(f.calls, string(m.Params))
 	default:
 		w.WriteHeader(http.StatusNotFound)
 		return
