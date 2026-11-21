@@ -79,6 +79,14 @@
     <li>whether you want a restricted tool profile (below).</li>
   </ul>
 
+  <h2>Hosts and clients today</h2>
+  <p>Status words follow the <a href="https://github.com/mctlhq/mctl-telegram/blob/main/docs/platforms/compatibility.md" target="_blank" rel="noopener">compatibility matrix</a>. An admitted host is not a verified client.</p>
+  <ul>
+    <li><strong>Admitted, works with caveats:</strong> Claude (<code>claude.ai</code>, CIMD) and ChatGPT (<code>chatgpt.com</code>, CIMD). The recorded proof ran against the sibling mctl-api service, not tg.mctl.ai.</li>
+    <li><strong>Admitted, not tested:</strong> VS Code (<code>vscode.dev</code>, CIMD), Cursor (<code>www.cursor.com</code>), Town (<code>www.town.com</code>, reply-only profile), and Google's Gemini custom connectors and Antigravity.</li>
+    <li><strong>Not admitted yet, not tested:</strong> Grok (<code>grok.com</code>), Notion (<code>app.notion.com</code>) and Rayrun (<code>ray.run</code>) are being admitted. Hermes Agent signs in from a per-user subdomain of <code>agentspodium.com</code>, which is not admitted.</li>
+  </ul>
+  <p>Not on the list? Send the details below to <a href="mailto:support@mctl.ai">support@mctl.ai</a>.</p>
   <h2>Endpoints and discovery</h2>
   <div class="table-scroll">
   <table>

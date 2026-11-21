@@ -60,7 +60,9 @@ func isDeploymentFault(msg string) bool {
 // refusing it as the caller's mistake: an MTProto 400 or 403 reply (an
 // unknown peer, a missing permission), ErrPeerNotAccessible, one of the
 // draft_reply refusals ErrNoExistingDialog, ErrCannotPost and ErrPeerDeleted,
-// or ErrBroadcastContent.
+// ErrBroadcastContent, or a topic refusal (ErrNotAForum, ErrTopicNotFound,
+// ErrTopicClosed: the caller named a topic the chat does not have, or one
+// that is closed).
 // Such a reply proves the session and the service work, so availability SLIs
 // must not count it as a failure.
 //
@@ -82,6 +84,14 @@ func IsCallerRefusal(err error) bool {
 	// succeeded: the session worked, and the caller picked a conversation
 	// draft_reply will not use.
 	if errors.Is(err, ErrPeerNotAccessible) || errors.Is(err, ErrNoExistingDialog) || errors.Is(err, ErrCannotPost) || errors.Is(err, ErrPeerDeleted) || errors.Is(err, ErrBroadcastContent) || IsFrozenAccount(err) {
+		return true
+	}
+	// The topic refusals are decided from a reply that succeeded (the forum
+	// flag, the topic list), so like the refusals above they prove the
+	// session works. Left out, list_topics on a chat that is not a forum
+	// counted as an availability error: 14 of them, plus one other error,
+	// are what tripped MctlTelegramToolAvailabilityFastBurn on 2026-11-07.
+	if errors.Is(err, ErrNotAForum) || errors.Is(err, ErrTopicNotFound) || errors.Is(err, ErrTopicClosed) {
 		return true
 	}
 	var te *tgerr.Error

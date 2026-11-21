@@ -58,6 +58,8 @@ func TestCompatibilityMatrixRequiredHosts(t *testing.T) {
 	required := []string{
 		"Claude (hosted connector)", "Claude Code", "ChatGPT", "Cursor",
 		"VS Code", "Windsurf", "Town", "MCP Inspector", "Cloudflare MCP portal",
+		"Gemini and Google (Gemini custom connectors, Antigravity)", "Grok", "Notion",
+		"Rayrun", "Hermes Agent",
 	}
 	for _, h := range required {
 		if counts[h] != 1 {

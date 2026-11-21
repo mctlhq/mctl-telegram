@@ -888,6 +888,43 @@ func callbackWithStateHeaders(t *testing.T, mux *mockRouter, state string, heade
 	return rec
 }
 
+// The monitoring canary probes the unknown_state path on purpose every ten
+// minutes. Its rejection is logged at Info, a real user's at Warn, and both
+// are still counted so the metric keeps its meaning.
+func TestHandleTelegramCallback_CanaryProbeLogsAtInfo(t *testing.T) {
+	cases := []struct {
+		name, state, wantLevel string
+	}{
+		{"canary probe", canaryStatePrefix + "abc123", "level=INFO"},
+		{"real unknown state", "never-issued-state", "level=WARN"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := captureServerLog(t)
+			srv := newTestServer(t)
+			mux := newMockRouter()
+			srv.Register(mux)
+
+			rec := callbackWithState(t, mux, tc.state)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+			}
+			var line string
+			for _, l := range strings.Split(buf.String(), "\n") {
+				if strings.Contains(l, "callback request rejected") {
+					line = l
+				}
+			}
+			if line == "" {
+				t.Fatalf("no rejection log line, got:\n%s", buf.String())
+			}
+			if !strings.Contains(line, tc.wantLevel) || !strings.Contains(line, "reason="+reasonUnknownState) {
+				t.Errorf("log line = %q, want %s and reason=%s", line, tc.wantLevel, reasonUnknownState)
+			}
+		})
+	}
+}
+
 // TestHandleTelegramCallback_ReusedState_FriendlyPage confirms an unknown
 // state on the callback renders HTML (not a plain-text body) at 200, with one
 // WARN log line carrying reason=unknown_state — for both the in-memory and
