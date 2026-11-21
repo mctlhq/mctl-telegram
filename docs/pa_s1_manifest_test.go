@@ -31,11 +31,31 @@ const (
 type s1Entry struct {
 	Note  string   `yaml:"note"`
 	Tests []string `yaml:"tests"`
+	// Gaps are the parts of the row that have no guard yet, so no test
+	// can cover them. Each names the issue that will build it. The gate
+	// accepts an id with gaps only while they are tracked, and refuses any
+	// gap when PA_S1_GATE_CLOSING is set.
+	Gaps []s1Gap `yaml:"gaps"`
 }
+
+type s1Gap struct {
+	Half      string `yaml:"half"`
+	TrackedBy string `yaml:"tracked_by"`
+}
+
+// s1GateClosingEnv marks a run that is closing the S1 gate (#1317 or the
+// preview gate of #1318): any listed gap then fails the gate.
+const s1GateClosingEnv = "PA_S1_GATE_CLOSING"
 
 var (
 	// An S1 row of the threat model: "- S1-L1: ...".
 	s1RowRe = regexp.MustCompile(`(?m)^- (S1-[A-Z]+[0-9]+):`)
+	// Any S1 id written anywhere in the threat model. Each must be a row
+	// id, so a row written in another shape (indented, bold, a table
+	// cell) cannot drop out of the gate unseen.
+	s1MentionRe = regexp.MustCompile(`S1-[A-Z]+[0-9]+`)
+	// A tracking reference: an issue number of this repository.
+	s1IssueRef = regexp.MustCompile(`^#[0-9]+$`)
 	// An S1 id claimed by a test function name: TestS1E1E2_..., or
 	// TestLinking_S1L13_... . A group without a digit (S1X_State) claims
 	// nothing.
@@ -57,6 +77,15 @@ func threatModelS1IDs(doc []byte) ([]string, error) {
 	}
 	if len(ids) == 0 {
 		return nil, fmt.Errorf("threat model lists no S1 id: the row pattern no longer matches")
+	}
+	var stray []string
+	for _, m := range s1MentionRe.FindAll(doc, -1) {
+		if id := string(m); !slices.Contains(ids, id) && !slices.Contains(stray, id) {
+			stray = append(stray, id)
+		}
+	}
+	if len(stray) > 0 {
+		return nil, fmt.Errorf("threat model mentions %s, which is not a row of the form \"- S1-XX: ...\"", strings.Join(stray, ", "))
 	}
 	return ids, nil
 }
@@ -103,6 +132,18 @@ func checkS1Manifest(ids []string, manifest map[string]s1Entry, funcs map[string
 			problems = append(problems, fmt.Sprintf("%s: in the manifest but not an S1 id of the threat model", id))
 		}
 		mapped[id] = map[string]bool{}
+		halves := map[string]bool{}
+		for _, g := range e.Gaps {
+			switch {
+			case strings.TrimSpace(g.Half) == "":
+				problems = append(problems, fmt.Sprintf("%s: a gap without a half", id))
+			case !s1IssueRef.MatchString(g.TrackedBy):
+				problems = append(problems, fmt.Sprintf("%s: gap %q is not tracked by an issue (tracked_by %q, want #NNNN)", id, g.Half, g.TrackedBy))
+			case halves[g.Half]:
+				problems = append(problems, fmt.Sprintf("%s: gap %q listed twice", id, g.Half))
+			}
+			halves[g.Half] = true
+		}
 		for _, ref := range e.Tests {
 			switch {
 			case !s1TestRef.MatchString(ref):
@@ -223,6 +264,28 @@ func TestPAS1Manifest(t *testing.T) {
 	for _, p := range checkS1Manifest(ids, manifest, repoTestFuncs(t, "..")) {
 		t.Error(p)
 	}
+	gaps := openS1Gaps(manifest)
+	for _, g := range gaps {
+		t.Logf("open S1 gap: %s", g)
+	}
+	if os.Getenv(s1GateClosingEnv) != "" {
+		for _, g := range gaps {
+			t.Errorf("%s is set but an S1 gap is open: %s", s1GateClosingEnv, g)
+		}
+	}
+}
+
+// openS1Gaps lists every gap of the manifest as "S1-XX: half (tracked by
+// #NNNN)", sorted.
+func openS1Gaps(manifest map[string]s1Entry) []string {
+	var out []string
+	for id, e := range manifest {
+		for _, g := range e.Gaps {
+			out = append(out, fmt.Sprintf("%s: %s (tracked by %s)", id, g.Half, g.TrackedBy))
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // TestPAS1ManifestCheckDetects proves the check both ways on a small
@@ -296,6 +359,18 @@ func TestPAS1ManifestCheckDetects(t *testing.T) {
 			m["S1-A2"] = s1Entry{Tests: []string{"internal/x.TestX_S1A1_Thing"}}
 			return ids
 		}, "claims S1-A1 but the manifest does not list it"},
+		{"gap without tracked_by", func(ids []string, m map[string]s1Entry, f map[string]bool) []string {
+			m["S1-A2"] = s1Entry{Tests: []string{"internal/x.TestCovers"}, Gaps: []s1Gap{{Half: "principal disable"}}}
+			return ids
+		}, `S1-A2: gap "principal disable" is not tracked by an issue`},
+		{"gap tracked by prose", func(ids []string, m map[string]s1Entry, f map[string]bool) []string {
+			m["S1-A2"] = s1Entry{Tests: []string{"internal/x.TestCovers"}, Gaps: []s1Gap{{Half: "principal disable", TrackedBy: "later"}}}
+			return ids
+		}, "is not tracked by an issue"},
+		{"gap without a half", func(ids []string, m map[string]s1Entry, f map[string]bool) []string {
+			m["S1-A2"] = s1Entry{Tests: []string{"internal/x.TestCovers"}, Gaps: []s1Gap{{TrackedBy: "#1"}}}
+			return ids
+		}, "S1-A2: a gap without a half"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -340,5 +415,29 @@ func TestParseS1ManifestStrict(t *testing.T) {
 	}
 	if _, err := threatModelS1IDs([]byte("no rows here\n")); err == nil {
 		t.Error("a threat model with no S1 row accepted")
+	}
+	for name, doc := range map[string]string{
+		"indented row": "- S1-A1: x\n  - S1-A2: y\n",
+		"bold row":     "- S1-A1: x\n- **S1-A2**: y\n",
+		"table cell":   "- S1-A1: x\n| S1-A2 | y |\n",
+	} {
+		if _, err := threatModelS1IDs([]byte(doc)); err == nil || !strings.Contains(err.Error(), "S1-A2") {
+			t.Errorf("%s: err %v, want one naming S1-A2", name, err)
+		}
+	}
+	if ids, err := threatModelS1IDs([]byte("- S1-A1: x, see also S1-A1\n")); err != nil || !slices.Equal(ids, []string{"S1-A1"}) {
+		t.Errorf("a mention of a row id: %v %v", ids, err)
+	}
+}
+
+func TestOpenS1Gaps(t *testing.T) {
+	got := openS1Gaps(map[string]s1Entry{
+		"S1-B1": {Gaps: []s1Gap{{Half: "b", TrackedBy: "#2"}}},
+		"S1-A1": {Gaps: []s1Gap{{Half: "a", TrackedBy: "#1"}}},
+		"S1-C1": {},
+	})
+	want := []string{"S1-A1: a (tracked by #1)", "S1-B1: b (tracked by #2)"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("open gaps %v, want %v", got, want)
 	}
 }

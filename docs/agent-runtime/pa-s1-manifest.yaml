@@ -5,6 +5,13 @@
 # when an id has no test, when a named test does not exist, when an id here is
 # not in the threat model, or when a test whose name claims an S1 id is not
 # listed under that id. Mutation evidence per id is in the gate PR.
+#
+# gaps: the parts of a row that have no guard yet. Each must name its half and
+# the issue that builds it (tracked_by: "#NNNN"); the gate refuses a gap
+# without one, and prints every open gap (go test -v ./docs -run
+# TestPAS1Manifest). The S1 gate is NOT closed while any gap is listed: #1317
+# cannot close, and the preview gate (#1318) cannot pass, until the list is
+# empty. A run with PA_S1_GATE_CLOSING=1 fails on any listed gap.
 
 S1-L1:
   tests:
@@ -107,10 +114,15 @@ S1-X2:
     - internal/pa.TestWebhook_S1X_IngressIsolation
 S1-X3:
   tests:
+    - internal/pa.TestDispatch_AmbiguousConnection
+    - internal/pa.TestDispatch_HappyPath
     - internal/pa.TestDispatch_S1X3
+    - internal/pa.TestDispatch_S1X3_OwnUnboundConnectionRefused
 S1-X4:
   tests:
+    - internal/auth/localjwt.TestPAJob_VerifierRefusesOtherShapes
     - internal/auth/localjwt.TestProvider_RefusesPAJobTokens
+    - internal/auth/localjwt.TestVerifyAttributed
     - internal/pa.TestDispatch_S1X4
 S1-B1:
   tests:
@@ -236,6 +248,9 @@ S1-R3:
     - internal/pa.TestRunLoop_S1R3
 S1-F1:
   note: "PA_WRITES_ENABLED does not exist in Phase 1: there are no write tools (its own test is S2-F3)."
+  gaps:
+    - half: "PA_WRITES_ENABLED disables writes and nothing else"
+      tracked_by: "#1320"
   tests:
     - cmd/server.TestBuildPA_InertByDefault
     - internal/pa.TestDispatch_S1F1_ExternalToolsFlagOnlyStopsTools
@@ -247,7 +262,10 @@ S1-F2:
     - internal/pa/connector.TestEnvFlags
     - internal/pa/linking.TestLinking_S1L14_ServerFlagGatesLinking
 S1-F4:
-  note: "Gap: the admin command that disables a single principal is not implemented, so its half of S1-F4 has no guard to test."
+  note: "The admin command that disables a single principal is not implemented, so that half of S1-F4 has no guard to test."
+  gaps:
+    - half: "principal disable"
+      tracked_by: "#1318"
   tests:
     - internal/pa.TestDispatch_JobStoppedFencesResult
     - internal/pa.TestDispatch_S1F4

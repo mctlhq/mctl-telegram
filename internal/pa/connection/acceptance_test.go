@@ -435,14 +435,20 @@ func TestConnection_S1C8_ScopeEscalationNeedsNewConnection(t *testing.T) {
 		alice, _ := principals(t, s)
 		c := e.toActive(t, alice)
 
-		// No edge sets account or scope except into pending_confirm.
-		_, err := s.TransitionPAConnection(ctx, alice, c.ID, connection.Transition{
-			From: connection.StateActive, To: connection.StateExpired, ExpectRevision: c.AuthorityRevision,
-			AccountID: "acct-other", GrantedScope: tgScope + " admin:users", SealedTokens: []byte("x"),
-		})
-		if !errors.Is(err, connection.ErrInvalidTransition) {
-			t.Fatalf("scope change on an existing connection: err %v, want ErrInvalidTransition", err)
+		// No edge sets account or scope except into pending_confirm. Each
+		// field is probed alone, so each clause of the check is tested on
+		// its own rather than masked by another.
+		for name, tr := range map[string]connection.Transition{
+			"account": {AccountID: "acct-other"},
+			"scope":   {GrantedScope: tgScope + " admin:users"},
+			"tokens":  {SealedTokens: []byte("x")},
+		} {
+			tr.From, tr.To, tr.ExpectRevision = connection.StateActive, connection.StateExpired, c.AuthorityRevision
+			if _, err := s.TransitionPAConnection(ctx, alice, c.ID, tr); !errors.Is(err, connection.ErrInvalidTransition) {
+				t.Fatalf("%s change on an existing connection: err %v, want ErrInvalidTransition", name, err)
+			}
 		}
+		var err error
 		// A rotation cannot change the granted scope either. The lease is
 		// really held, so the only thing the wider rotation differs in is
 		// the scope; the same rotation with the granted scope then applies.

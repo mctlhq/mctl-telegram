@@ -170,3 +170,24 @@ type fakeTransportError struct{}
 func (fakeTransportError) Error() string { return "fake transport failure" }
 
 var errFakeTransport error = fakeTransportError{}
+
+// TestDispatch_S1X3_OwnUnboundConnectionRefused: the other half of S1-X3.
+// A connection of the same principal, on the same server, that the run did
+// not bind is refused as unbound before any token is opened, even though
+// the principal filter of the listing keeps it.
+func TestDispatch_S1X3_OwnUnboundConnectionRefused(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newDispatchEnv(t, s)
+		unbound := e.activeTG(alice, "acct-alice-2")
+		token, _ := e.run(alice)
+		e.wantRefusal(e.call(token, req("tg", "list_dialogs", unbound.ID)), http.StatusForbidden, connector.ReasonConnectionUnbound, alice, 0)
+		e.noDispatch()
+		if _, bearers, _ := e.tg.snapshot(); len(bearers) != 0 {
+			t.Fatalf("a token was opened: %v", bearers)
+		}
+		// The bound connection still works on the same run.
+		if a := e.call(token, req("tg", "list_dialogs", e.connA.ID)); a.code != http.StatusOK {
+			t.Fatalf("bound call %+v", a)
+		}
+	})
+}
