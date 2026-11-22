@@ -158,6 +158,110 @@ func TestConversations_RefusalIsRateBounded(t *testing.T) {
 	}
 }
 
+// TestConversations_ErasureIsRateBounded: /forget and /consent withdraw
+// always delete, for an allowed principal and a refused one alike, even
+// past the rate limit. Their confirmations count in the rate window:
+// exactly RateMessages per window, then silence, so a stream of them
+// cannot flood the outbox (#1318 review). No erasure creates a job.
+func TestConversations_ErasureIsRateBounded(t *testing.T) {
+	for _, refused := range []bool{false, true} {
+		t.Run(fmt.Sprintf("refused=%v", refused), func(t *testing.T) {
+			lim := jobs.DefaultLimits()
+			lim.RateMessages = 3
+			h := newRunLoopHarness(t, withLimits(lim))
+			h.consent(aliceID)
+			h.text(aliceID, "keep me")
+			if h.fragments(aliceID) != 1 {
+				t.Fatal("control: the setup fragment was not stored")
+			}
+			jobsBefore := h.count(`SELECT count(*) FROM pa_jobs WHERE principal = $1`, aliceID)
+			if refused {
+				disable(t, h.convoHarness.store, aliceID)
+			}
+			accepted := func() int {
+				return h.count(`SELECT count(*) FROM pa_consents WHERE principal = $1 AND state = 'accepted'`, aliceID)
+			}
+			// Spend a fresh window with updates that delete nothing.
+			h.now = h.now.Add(lim.RateWindow)
+			for range lim.RateMessages {
+				h.text(aliceID, "/consent")
+			}
+			if h.fragments(aliceID) != 1 || accepted() != 1 {
+				t.Fatal("control: the filler deleted something")
+			}
+			// Past the limit both erasures still delete, unconfirmed.
+			spent := len(h.repliesTo(aliceID))
+			if code := h.text(aliceID, "/forget"); code != http.StatusOK || h.fragments(aliceID) != 0 {
+				t.Fatalf("/forget past the limit: %d, %d fragments left", code, h.fragments(aliceID))
+			}
+			if code := h.text(aliceID, "/consent withdraw"); code != http.StatusOK || accepted() != 0 {
+				t.Fatalf("/consent withdraw past the limit: %d, consent still accepted", code)
+			}
+			if got := h.repliesTo(aliceID)[spent:]; len(got) != 0 {
+				t.Fatalf("erasures past the limit were confirmed: %+v", got)
+			}
+			// A fresh window confirms exactly RateMessages erasures.
+			h.now = h.now.Add(lim.RateWindow)
+			before := len(h.repliesTo(aliceID))
+			for n := range lim.RateMessages + 2 {
+				cmd := "/forget"
+				if n%2 == 1 {
+					cmd = "/consent withdraw"
+				}
+				if code := h.text(aliceID, cmd); code != http.StatusOK {
+					t.Fatalf("%s: %d", cmd, code)
+				}
+			}
+			got := h.repliesTo(aliceID)[before:]
+			if len(got) != lim.RateMessages {
+				t.Fatalf("%d erasure replies in one window, want exactly %d: %+v", len(got), lim.RateMessages, got)
+			}
+			for _, r := range got {
+				if r.reply != ReplyForgotten && r.reply != ReplyConsentWithdrawn {
+					t.Fatalf("unexpected reply %+v", r)
+				}
+			}
+			if n := h.count(`SELECT count(*) FROM pa_jobs WHERE principal = $1`, aliceID); n != jobsBefore {
+				t.Fatalf("erasure created jobs: %d, want %d", n, jobsBefore)
+			}
+		})
+	}
+}
+
+// TestConversations_NoLimiterIsSilent: a Conversations built without a
+// limiter (no run loop, so nothing can run) answers neither a refused
+// principal nor an erasure, so it has no unbounded reply path either; the
+// erasure itself still runs.
+func TestConversations_NoLimiterIsSilent(t *testing.T) {
+	h := newConvoHarness(t)
+	h.consent(aliceID)
+	h.text(aliceID, "keep me")
+	sealer, err := convo.NewSealer(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.conv, err = NewConversations(ConversationsConfig{
+		Store: h.store, Sealer: sealer, TTL: DefaultConversationTTL,
+		Replies: h.replies, Allowed: h.allow, Now: func() time.Time { return h.now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.hook = newWebhook(t, h.store, h.conv, nil)
+	h.allow.deny(bobID)
+	before := len(h.replies.replies)
+	for range 5 {
+		h.text(bobID, "hello")
+		h.text(aliceID, "/forget")
+	}
+	if got := h.replies.replies[before:]; len(got) != 0 {
+		t.Fatalf("replies without a limiter: %+v", got)
+	}
+	if h.fragments(aliceID) != 0 {
+		t.Fatal("/forget without a limiter did not delete")
+	}
+}
+
 // to returns the replies queued for principal, in order.
 func (r *replyRecorder) to(principal int64) []queuedReply {
 	r.mu.Lock()

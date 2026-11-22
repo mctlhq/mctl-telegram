@@ -1113,9 +1113,13 @@ func TestRunLoop_RateLimit(t *testing.T) {
 	if len(h.replies.replies) != before {
 		t.Fatal("the notice was repeated")
 	}
-	h.text(aliceID, "/forget")
-	if h.replies.last(aliceID).reply != ReplyForgotten {
-		t.Fatal("/forget was rate limited")
+	// /forget past the limit still runs (TestConversations_ErasureIsRateBounded
+	// proves the deletion); only its confirmation is dropped.
+	if code := h.text(aliceID, "/forget"); code != http.StatusOK {
+		t.Fatalf("/forget past the limit: %d", code)
+	}
+	if len(h.replies.replies) != before {
+		t.Fatal("/forget past the limit was confirmed: the window does not bound erasure replies")
 	}
 	// Bob has his own window.
 	h.text(bobID, "hi")

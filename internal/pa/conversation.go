@@ -212,8 +212,9 @@ func (c *Conversations) HandleUpdate(ctx context.Context, tx *sql.Tx, u Verified
 		}
 	}
 	// The rate window counts every update, consent prompts and button
-	// presses included (#1313 slice d1), except the two that delete the
-	// principal's data: /forget and /consent withdraw always go through.
+	// presses included (#1313 slice d1). /forget and /consent withdraw
+	// always go through: the deletion runs first, and only its
+	// confirmation is counted (erasureReply).
 	if c.limiter != nil && !erasure(u) {
 		d, err := c.limiter.AdmitMessage(ctx, tx, p)
 		if err != nil {
@@ -307,14 +308,14 @@ func (c *Conversations) handleCommand(ctx context.Context, tx *sql.Tx, u Verifie
 		if err := c.store.ForgetPAConversations(ctx, tx, p.TelegramID()); err != nil {
 			return err
 		}
-		return c.reply(ctx, tx, u, ReplyForgotten, "")
+		return c.erasureReply(ctx, tx, u, ReplyForgotten)
 	case CommandConsent:
 		switch arg {
 		case "withdraw":
 			if err := c.store.WithdrawPAConsent(ctx, tx, p.TelegramID(), c.now()); err != nil {
 				return err
 			}
-			return c.reply(ctx, tx, u, ReplyConsentWithdrawn, "")
+			return c.erasureReply(ctx, tx, u, ReplyConsentWithdrawn)
 		default:
 			// Anything else, "/consent accept" included, shows the text
 			// with its button: consent is recorded only from a button bound
@@ -378,6 +379,30 @@ func (c *Conversations) prompt(ctx context.Context, tx *sql.Tx, u VerifiedUpdate
 		return err
 	}
 	return c.reply(ctx, tx, u, ReplyConsentPrompt, id)
+}
+
+// erasureReply confirms /forget or /consent withdraw, which has already
+// run: the deletion itself is never refused, rate-limited or blocked by
+// the allowlist. Its confirmation is not free, though. It counts in the
+// principal's rate window and is sent only while the window allows it
+// (at most RateMessages per window, allowed and refused principals alike),
+// then silently dropped, with no rate notice, so a stream of /forget cannot
+// flood the outbox or the bot's send rate (#1318 review). Without a limiter
+// (no run loop) the confirmation is silent, as the refusal is. An
+// admission that cannot be read is an error: the update rolls back, the
+// erasure with it, and Telegram retries both.
+func (c *Conversations) erasureReply(ctx context.Context, tx *sql.Tx, u VerifiedUpdate, r Reply) error {
+	if c.limiter == nil {
+		return nil
+	}
+	d, err := c.limiter.AdmitMessage(ctx, tx, u.Principal())
+	if err != nil {
+		return err
+	}
+	if !d.Allowed {
+		return nil
+	}
+	return c.reply(ctx, tx, u, r, "")
 }
 
 func (c *Conversations) reply(ctx context.Context, tx *sql.Tx, u VerifiedUpdate, r Reply, button string) error {
