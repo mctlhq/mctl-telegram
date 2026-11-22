@@ -4424,12 +4424,58 @@ the count (` suppressed=N` in the record). A steady
 line rate: find the principal from its `refusals_suppressed_security` rows
 and stop its runs.
 
+### PA token refresh and expired connections
+
+A connection's access token is refreshed through the server's
+refresh-token grant (#1318 slice C2b):
+
+- ahead of time, when its expiry is known (the token response's
+  `expires_in`, counted from receipt) and less than 60s remains. An unknown
+  expiry is never treated as "does not expire" and is never refreshed
+  ahead;
+- after a 401 from the MCP server, once per tool request, followed by one
+  retry. A 403 is never retried.
+
+Concurrent calls share one refresh (per replica a single flight, across
+replicas the store lease), and a flight for a generation that another
+flight already replaced does not rotate again. A refresh that fails for a
+transient reason, or whose lease another replica holds, is not retried. A
+refresh ahead that fails that way still hands out the current token while
+it has not expired; past its expiry, and after a 401, the call fails as
+`refresh_unavailable` (503). A refresh the server
+answers `invalid_grant`, or a 401 on a connection without a refresh token,
+moves the connection to `expired`: its secrets are destroyed, every later
+call is refused as `connection_expired` (403) without contacting the
+server, `/connections` lists it as expired with the `/connect` hint, and
+the user gets one "link it again" message. That message is a
+`connection_expired` row in `pa_outbox`, written in the transaction of the
+`active -> expired` change and unique per (principal, connection), so a
+restart or a second replica never sends it twice. A new `/connect` on the
+same server revokes the expired connection (and any other active one there)
+when it is confirmed, so the user never has two connections a run could
+bind. A run bound after the expiry gets none of that server's tools: only
+`active` connections are bound.
+
+Rolling back past this change is safe for the outbox. A
+`connection_expired` row stores minus its own id as `update_id`, so the
+previous build's `idx_pa_outbox_update`, which its Migrate recreates at
+start, still builds when one principal has several such rows. The previous
+build has no template for that kind: it marks a pending row `failed` rather
+than sending it, so a "link it again" message still pending at rollback is
+not delivered. The connection itself stays `expired` and `/connections`
+still shows it.
+
 <a id="mctlpapinlistingunauthorized"></a>
 ### MctlPAPinListingUnauthorized
 
 `mctl_pa_pin_listing_failures_total{server,reason="unauthorized"}` has grown
 for 30 minutes: the server answers 401 to PA connection tokens on
-`tools/list`, and those calls are refused as `server_refused`. One user with
+`tools/list`. Since #1318 slice C2b a 401 is answered by one refresh of
+that connection's tokens and one retry; only a 401 after the refresh is
+refused as `server_refused` (a 403 is refused at once, never retried). Each
+401 is counted, the recovered first one included, so a server whose tokens
+carry no `expires_in` (never refreshed ahead) adds one count per token
+lifetime per active user. One user with
 a broken connection fires this only if they keep retrying; several users at
 once usually means the server stopped accepting our tokens (key rotation,
 changed audience, revoked client).

@@ -42,6 +42,8 @@ type paServerNet struct {
 	Metadata *http.Client
 	Revoker  connection.Revoker
 	Tokens   linking.TokenClient
+	// Refresh is the server's refresh-token grant (#1318 slice C2b).
+	Refresh  connection.RefreshFunc
 	Endpoint connector.MCPEndpoint
 }
 
@@ -64,7 +66,7 @@ var newPAServerNet = func(s config.PAServer) (paServerNet, error) {
 	if err != nil {
 		return paServerNet{}, err
 	}
-	return paServerNet{Metadata: md, Revoker: oc, Tokens: oc.TokenClient(), Endpoint: ep}, nil
+	return paServerNet{Metadata: md, Revoker: oc, Tokens: oc.TokenClient(), Refresh: oc.Refresh, Endpoint: ep}, nil
 }
 
 // paRevokers dispatches a revocation to its server's client. A server
@@ -78,6 +80,19 @@ func (r paRevokers) Revoke(ctx context.Context, server connection.Server, token 
 		return fmt.Errorf("pa tools: no revocation client for %s", server)
 	}
 	return rv.Revoke(ctx, server, token, hint)
+}
+
+// paRefreshers dispatches a refresh-token grant to its server's client. A
+// server without one is an error, which fails the call that needed the
+// refresh and changes nothing (connection.ErrRefreshFailed).
+type paRefreshers map[connection.Server]connection.RefreshFunc
+
+func (r paRefreshers) Refresh(ctx context.Context, server connection.Server, refreshToken connection.Secret) ([]byte, error) {
+	fn, ok := r[server]
+	if !ok || fn == nil {
+		return nil, fmt.Errorf("pa tools: no refresh client for %s", server)
+	}
+	return fn(ctx, server, refreshToken)
 }
 
 // paTokenClients dispatches a code exchange to its server's client.
@@ -122,6 +137,7 @@ func buildPATools(ctx context.Context, cfg *config.Config, tools *config.PATools
 	t := &paTools{pin: pin, endpoints: map[string]connector.MCPEndpoint{}, flags: connector.EnvFlags(os.Getenv)}
 	revokers := paRevokers{}
 	tokens := paTokenClients{}
+	refreshers := paRefreshers{}
 	identity := map[connection.Server]connector.MCPEndpoint{}
 	servers := map[connection.Server]linking.ServerConfig{}
 	ctx, cancel := context.WithTimeout(ctx, paMetadataTimeout)
@@ -143,6 +159,7 @@ func buildPATools(ctx context.Context, cfg *config.Config, tools *config.PATools
 			return nil, err
 		}
 		revokers[name], tokens[name], identity[name] = n.Revoker, n.Tokens, n.Endpoint
+		refreshers[name] = n.Refresh
 		t.endpoints[string(name)] = n.Endpoint
 		t.servers = append(t.servers, name)
 		servers[name] = linking.ServerConfig{
@@ -156,6 +173,7 @@ func buildPATools(ctx context.Context, cfg *config.Config, tools *config.PATools
 	t.executor = &connector.Executor{Sink: sink}
 	t.manager, err = connection.NewManager(connection.Config{
 		Store: store, KEK: kek, Revoker: revokers, Auditor: connector.FenceAudit{Sink: sink},
+		Refresh: refreshers.Refresh,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("pa tools: connection manager: %w", err)

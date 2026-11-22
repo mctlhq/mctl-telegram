@@ -88,6 +88,8 @@ var outboxTemplates = map[jobs.OutboxKind]safetext.Template{
 	jobs.OutboxMessageTooLong:     safetext.TextMessageTooLong,
 	jobs.OutboxLinkingUnavailable: safetext.TextLinkingUnavailable,
 	jobs.OutboxPrincipalDisabled:  safetext.TextAssistantUnavailable,
+
+	jobs.OutboxConnectionExpired: safetext.TextConnectionExpired,
 }
 
 // outboxKeyboard is the keyboard a row is sent with: the consent prompt's

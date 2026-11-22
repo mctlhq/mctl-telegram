@@ -176,6 +176,13 @@ func TestCommands_List(t *testing.T) {
 	if got, want := s.last(), "Your connections:\ntg (active): telegram:100001"; got != want {
 		t.Fatalf("list %q, want %q", got, want)
 	}
+	// An expired connection is listed as it is, with the way back
+	// (#1318 slice C2b).
+	conns.conns[0].State = connection.StateExpired
+	cmd.Run(context.Background(), u, pa.LinkAction{Command: pa.CommandConnections})
+	if got, want := s.last(), "Your connections:\ntg (expired): telegram:100001 - send /connect tg to link it again"; got != want {
+		t.Fatalf("expired list %q, want %q", got, want)
+	}
 	conns.conns = conns.conns[1:]
 	cmd.Run(context.Background(), u, pa.LinkAction{Command: pa.CommandConnections})
 	if got := s.last(); got != srv(safetext.TextConnectionsNone) {

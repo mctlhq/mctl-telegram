@@ -1,6 +1,8 @@
 package jobs
 
 import (
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -65,5 +67,38 @@ func TestClaimsEnded(t *testing.T) {
 	b.ClaimNotAfter = now
 	if b.ClaimsEnded(now.Add(-time.Nanosecond)) || !b.ClaimsEnded(now) || !b.ClaimsEnded(now.Add(time.Second)) {
 		t.Fatal("cutoff is not [ClaimNotAfter, ...)")
+	}
+}
+
+// A connection-level outbox row (#1318 slice C2b) names its connection and
+// nothing else; no other kind may carry a connection id.
+func TestOutboxItemValid_ConnectionLevel(t *testing.T) {
+	ok := OutboxItem{Principal: 4242001, Kind: OutboxConnectionExpired, ConnectionID: "pac_a"}
+	if !ok.Valid() {
+		t.Fatalf("%+v should be valid", ok)
+	}
+	for name, mut := range map[string]func(*OutboxItem){
+		"no connection": func(o *OutboxItem) { o.ConnectionID = "" },
+		"long id":       func(o *OutboxItem) { o.ConnectionID = strings.Repeat("a", MaxOutboxConnectionID+1) },
+		"job":           func(o *OutboxItem) { o.JobID = 1 },
+		"update":        func(o *OutboxItem) { o.UpdateID = 1 },
+		"button":        func(o *OutboxItem) { o.Button = "b" },
+		"conversation":  func(o *OutboxItem) { o.ConversationID = "c" },
+		"fragment":      func(o *OutboxItem) { o.FragmentSeq = 1 },
+	} {
+		o := ok
+		mut(&o)
+		if o.Valid() {
+			t.Errorf("%s: %+v accepted", name, o)
+		}
+	}
+	if (OutboxItem{Principal: 4242001, Kind: OutboxForgotten, UpdateID: 7, ConnectionID: "pac_a"}).Valid() {
+		t.Error("a conversation-level row with a connection id accepted")
+	}
+	if (OutboxItem{Principal: 4242001, Kind: OutboxBudgetHold, JobID: 1, ConnectionID: "pac_a"}).Valid() {
+		t.Error("a job-level row with a connection id accepted")
+	}
+	if !slices.Contains(OutboxKinds(), OutboxConnectionExpired) || !OutboxConnectionExpired.Valid() {
+		t.Error("connection_expired is not a known kind")
 	}
 }

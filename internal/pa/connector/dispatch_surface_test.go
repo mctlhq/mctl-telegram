@@ -91,6 +91,9 @@ func (noConns) BeginCall(context.Context, int64, string, int64) (*connection.Cal
 func (noConns) AccessToken(context.Context, int64, string, int64) (connection.Secret, connection.Connection, error) {
 	return connection.Secret{}, connection.Connection{}, errors.New("not used")
 }
+func (noConns) RefreshAccess(context.Context, int64, string, int64, int64) (connection.Secret, connection.Connection, error) {
+	return connection.Secret{}, connection.Connection{}, errors.New("not used")
+}
 
 type surfaceEnv struct {
 	d     *Dispatcher
@@ -136,9 +139,9 @@ func newSurfaceEnv(t *testing.T) *surfaceEnv {
 
 // observe reads the listing of connection id at revision rev.
 func (e *surfaceEnv) observe(id string, rev int64) bool {
-	_, listed := e.d.surface(context.Background(), e.ep, connection.NewSecret("tok-"+id),
+	_, refused := e.d.surface(context.Background(), e.ep, connection.NewSecret("tok-"+id),
 		pa.ConnectionRevision{ConnectionID: id, AuthorityRevision: rev})
-	return listed
+	return refused == nil
 }
 
 func (e *surfaceEnv) gauges(t *testing.T) (drift float64, driftSeries int, unknown float64, deniedSeries int) {

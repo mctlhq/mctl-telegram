@@ -184,8 +184,8 @@ func TestEndpoint_Failures(t *testing.T) {
 		f    *fakeServer
 		want error
 	}{
-		"401":        {&fakeServer{status: http.StatusUnauthorized}, ErrMCPUnauthorized},
-		"403":        {&fakeServer{status: http.StatusForbidden}, ErrMCPUnauthorized},
+		"401":        {&fakeServer{status: http.StatusUnauthorized}, ErrMCPTokenRejected},
+		"403":        {&fakeServer{status: http.StatusForbidden}, ErrMCPForbidden},
 		"500":        {&fakeServer{status: http.StatusInternalServerError}, ErrMCPProtocol},
 		"wrong id":   {&fakeServer{badID: true, pages: []string{`{"tools":[]}`}}, ErrMCPProtocol},
 		"sse no msg": {&fakeServer{sse: true, badID: true, pages: []string{`{"tools":[]}`}}, ErrMCPProtocol},
@@ -195,7 +195,7 @@ func TestEndpoint_Failures(t *testing.T) {
 		"no content type": {&fakeServer{noContentType: true, pages: []string{`{"tools":[]}`}}, ErrMCPProtocol},
 		// The server refused notifications/initialized: no session.
 		"notify refused": {&fakeServer{notifyStatus: http.StatusBadRequest, pages: []string{`{"tools":[]}`}}, ErrMCPProtocol},
-		"notify 401":     {&fakeServer{notifyStatus: http.StatusUnauthorized, pages: []string{`{"tools":[]}`}}, ErrMCPUnauthorized},
+		"notify 401":     {&fakeServer{notifyStatus: http.StatusUnauthorized, pages: []string{`{"tools":[]}`}}, ErrMCPTokenRejected},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -207,6 +207,12 @@ func TestEndpoint_Failures(t *testing.T) {
 				t.Fatalf("call err = %v, want %v", err, c.want)
 			}
 		})
+	}
+	// A 401 (refresh and retry once) and a 403 (refused, never retried) are
+	// told apart (#1318 slice C2b); both stay ErrMCPUnauthorized.
+	if errors.Is(ErrMCPForbidden, ErrMCPTokenRejected) || errors.Is(ErrMCPTokenRejected, ErrMCPForbidden) ||
+		!errors.Is(ErrMCPForbidden, ErrMCPUnauthorized) || !errors.Is(ErrMCPTokenRejected, ErrMCPUnauthorized) {
+		t.Fatal("401 and 403 errors are not distinct kinds of ErrMCPUnauthorized")
 	}
 }
 

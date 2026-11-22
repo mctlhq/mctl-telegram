@@ -40,6 +40,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"time"
 )
 
@@ -81,9 +82,31 @@ const (
 	OutboxPrincipalDisabled OutboxKind = "principal_disabled"
 )
 
+// Connection-level kinds (#1318 slice C2b). A row belongs to one
+// connection, not to a job or an update, and is written in the transaction
+// of the state change that owes it, once per connection and kind: a
+// connection leaves active for expired at most once, so the row is keyed
+// on that transition durably, across restarts and replicas.
+const (
+	// OutboxConnectionExpired asks the principal to link a connection the
+	// service stopped accepting again (active -> expired).
+	OutboxConnectionExpired OutboxKind = "connection_expired"
+)
+
+// ConnectionOutboxKinds lists the connection-level kinds.
+func ConnectionOutboxKinds() []OutboxKind {
+	return []OutboxKind{OutboxConnectionExpired}
+}
+
+// ConnectionLevel reports whether k is a connection-level kind, whose rows
+// have a connection id and neither a job nor an update.
+func (k OutboxKind) ConnectionLevel() bool {
+	return slices.Contains(ConnectionOutboxKinds(), k)
+}
+
 // OutboxKinds lists every kind this build writes.
 func OutboxKinds() []OutboxKind {
-	return append(jobOutboxKinds(), ConversationOutboxKinds()...)
+	return slices.Concat(jobOutboxKinds(), ConversationOutboxKinds(), ConnectionOutboxKinds())
 }
 
 func jobOutboxKinds() []OutboxKind {
@@ -168,6 +191,9 @@ type OutboxItem struct {
 	// OutboxReply; both are empty for every other kind.
 	ConversationID string
 	FragmentSeq    int64
+	// ConnectionID is the connection a connection-level row is about;
+	// empty for every other kind.
+	ConnectionID string
 	// Attempts counts claims, including the current one.
 	Attempts int
 	// SentParts counts the messages of this row the Bot API accepted, over
@@ -180,6 +206,13 @@ type OutboxItem struct {
 // Valid reports whether the item can be enqueued.
 func (o OutboxItem) Valid() bool {
 	if o.Principal <= 0 || !o.Kind.Valid() {
+		return false
+	}
+	if o.Kind.ConnectionLevel() {
+		return o.ConnectionID != "" && len(o.ConnectionID) <= MaxOutboxConnectionID && o.JobID == 0 && o.UpdateID == 0 &&
+			o.Button == "" && o.ConversationID == "" && o.FragmentSeq == 0
+	}
+	if o.ConnectionID != "" {
 		return false
 	}
 	if o.Kind.ConversationLevel() {
@@ -204,6 +237,8 @@ func (o OutboxItem) Valid() bool {
 const (
 	// MaxOutboxButton is the Bot API's callback_data limit, in bytes.
 	MaxOutboxButton = 64
+	// MaxOutboxConnectionID bounds a connection-level row's connection id.
+	MaxOutboxConnectionID = 128
 	// OutboxLease bounds one row's send. A row still sending after it
 	// becomes OutboxUnknown. A row is claimed right before its own send,
 	// which is bounded well inside the lease (pa.outboxSendTimeout).

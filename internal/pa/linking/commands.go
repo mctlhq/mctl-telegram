@@ -221,6 +221,10 @@ func (c *Commands) list(ctx context.Context, p pa.Principal) safetext.Text {
 		if conn.AccountID != "" {
 			line += ": " + conn.AccountID
 		}
+		if conn.State == connection.StateExpired {
+			// The service stopped accepting it (#1318 slice C2b).
+			line += " - send /connect " + string(conn.Server) + " to link it again"
+		}
 		lines = append(lines, line)
 	}
 	if len(lines) == 0 {
