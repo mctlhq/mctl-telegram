@@ -12,11 +12,13 @@ assistants access to a user's own Telegram account. It reads dialogs and
 messages, searches, and sends only when the user has explicitly allowed
 it. It runs in production at
 `https://tg.mctl.ai/mcp`. Claude is the client we test against —
-claude.ai, the desktop and mobile apps, and Claude Code — and ChatGPT can
-add it by URL. It is a standard remote MCP server with OAuth, so other
-clients such as Cursor, VS Code and Windsurf may work, but they are not
-yet tested against tg.mctl.ai. Agent platforms can also connect on behalf
-of their users.
+claude.ai and the desktop and mobile apps — and ChatGPT can add it by
+URL. It is a standard remote MCP server with OAuth, so other clients
+such as Claude Code, Cursor, VS Code, Windsurf, Gemini, Grok, Notion and
+Rayrun may work, but they are not yet tested against tg.mctl.ai
+(per-client status: [docs/platforms/compatibility.md](docs/platforms/compatibility.md)).
+If your client does not work, write to support@mctl.ai. Agent platforms
+can also connect on behalf of their users.
 
 Written in Go on [`gotd/td`](https://github.com/gotd/td) (MTProto) and
 [`mcp-go`](https://github.com/mark3labs/mcp-go), with its own OAuth 2.1
@@ -148,7 +150,7 @@ deployment boundary.**
   `https://tg.mctl.ai/mcp`, authentication OAuth, then Create as a plugin.
   MCTL is not listed in the public plugin directory; adding it as your own
   plugin is the supported path.
-- **Cursor, VS Code, Windsurf and others** (not yet tested): use
+- **Claude Code, Cursor, VS Code, Windsurf, Gemini, Grok, Notion, Rayrun and others** (not yet tested): use
   `https://tg.mctl.ai/mcp`; the client discovers OAuth from the well-known
   metadata. None of these has a verified sign-in against tg.mctl.ai, so
   treat this as a starting point. A `cursor://` redirect is refused today
