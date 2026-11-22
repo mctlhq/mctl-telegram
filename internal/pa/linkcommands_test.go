@@ -180,6 +180,50 @@ func TestConversations_LinkingOffAnswersUnavailable(t *testing.T) {
 	}
 }
 
+// TestConversations_ForgetAndWithdrawRetireLinks: with linking on, /forget
+// and /consent withdraw answer in the transaction and hand a Retire action
+// to AfterCommit, which fails the principal's unfinished links; with
+// linking off they hand nothing.
+func TestConversations_ForgetAndWithdrawRetireLinks(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		t.Run(map[bool]string{true: "linking on", false: "linking off"}[on], func(t *testing.T) { testForgetAndWithdrawRetire(t, on) })
+	}
+}
+
+func testForgetAndWithdrawRetire(t *testing.T, on bool) {
+	h := newLinkHarness(t, on)
+	const dana = 100004
+	h.consent(dana)
+	for _, tc := range []struct {
+		text  string
+		reply Reply
+	}{
+		{"/forget", ReplyForgotten},
+		{"/consent withdraw", ReplyConsentWithdrawn},
+	} {
+		n, _ := h.actions()
+		if code := h.text(dana, tc.text); code != http.StatusOK {
+			t.Fatalf("linking %v, %s: status %d", on, tc.text, code)
+		}
+		if r := h.replies.last(dana); r.reply != tc.reply {
+			t.Fatalf("linking %v, %s: reply %q", on, tc.text, r.reply)
+		}
+		got, errs := h.actions()
+		if !on {
+			if len(got) != 0 {
+				t.Fatalf("linking off, %s: actions %+v", tc.text, got)
+			}
+			continue
+		}
+		if len(got) != len(n)+1 || !got[len(got)-1].Retire || got[len(got)-1].Command != "" || got[len(got)-1].Button {
+			t.Fatalf("%s: actions %+v", tc.text, got)
+		}
+		if err := errs[len(errs)-1]; err != nil {
+			t.Fatalf("%s: principal lock after the commit: %v", tc.text, err)
+		}
+	}
+}
+
 // TestPostCommit_NoSlotFailsTheUpdate: a handler run without a post-commit
 // slot cannot lose the action silently.
 func TestPostCommit_NoSlotFailsTheUpdate(t *testing.T) {

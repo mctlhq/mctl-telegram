@@ -214,7 +214,8 @@ type Store interface {
 	// it is never loaded again and the sweeper deletes it.
 	ClosePAConversations(ctx context.Context, tx *sql.Tx, principal int64, now time.Time) error
 	// ForgetPAConversations hard-deletes every conversation and fragment of
-	// the principal (/forget).
+	// the principal (/forget), and every link secret of a link the
+	// principal has not finished, so it cannot complete afterwards.
 	ForgetPAConversations(ctx context.Context, tx *sql.Tx, principal int64) error
 	// NextPAFragmentSeq returns the next sequence number in a conversation
 	// of the principal.

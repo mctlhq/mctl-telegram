@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 )
 
 // Store tests of the Personal Assistant linking secrets and the PA users row
@@ -376,6 +378,84 @@ func TestEnsurePAUser_LookupFailureInsertsNothing(t *testing.T) {
 		}
 		if n := countRows(t, s, p); n != 0 {
 			t.Fatalf("%d users rows inserted after a failed lookup", n)
+		}
+	})
+}
+
+// /forget (and so /consent withdraw, which calls it) deletes the
+// principal's link secrets in its own transaction, and nobody else's: a
+// link started before it cannot finish after it.
+func TestForgetPAConversations_DeletesLinkSecrets(t *testing.T) {
+	paLinkDialects(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		alice, bob := paLinkPrincipal(t, s), paLinkPrincipal(t, s)
+		now := time.Now()
+		for _, p := range []int64{alice, bob} {
+			for _, kind := range []PALinkKind{PALinkState, PALinkConfirm} {
+				if err := s.CreatePALinkSecret(ctx, PALinkSecret{Hash: paHash(string(kind) + randomSuffix(t)), Kind: kind, Principal: p,
+					Server: "tg", ConnectionID: "pac_f", Revision: 1, ExpiresAt: now.Add(time.Minute)}, now); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		tx, err := s.DB.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ForgetPAConversations(ctx, tx, alice); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		count := func(p int64) int {
+			var n int
+			if err := s.DB.QueryRow(`SELECT COUNT(*) FROM pa_link_secrets WHERE principal = $1`, p).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			return n
+		}
+		if a, b := count(alice), count(bob); a != 0 || b != 2 {
+			t.Fatalf("after alice's /forget: alice %d secrets, bob %d (want 0, 2)", a, b)
+		}
+	})
+}
+
+// ReadPAConsent reads like GetPAConsent: not found only without a row,
+// unreadable for a row it cannot accept, and a failed read is never either.
+func TestReadPAConsent(t *testing.T) {
+	paLinkDialects(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		p := paLinkPrincipal(t, s)
+		t.Cleanup(func() { _, _ = s.DB.Exec(`DELETE FROM pa_consents WHERE principal = $1`, p) })
+		if _, err := s.ReadPAConsent(ctx, p); !errors.Is(err, convo.ErrNotFound) {
+			t.Fatalf("no row: %v", err)
+		}
+		tx, err := s.DB.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.AcceptPAConsent(ctx, tx, p, convo.ConsentVersion, convo.ConsentTextSHA256(), time.Now()); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		if rec, err := s.ReadPAConsent(ctx, p); err != nil || !convo.Satisfied(rec) {
+			t.Fatalf("accepted: %+v %v", rec, err)
+		}
+		if _, err := s.DB.Exec(`UPDATE pa_consents SET state = 'bogus' WHERE principal = $1`, p); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.ReadPAConsent(ctx, p); !errors.Is(err, convo.ErrUnreadable) {
+			t.Fatalf("bad state: %v", err)
+		}
+		cctx, cancel := context.WithCancel(ctx)
+		cancel()
+		if _, err := s.ReadPAConsent(cctx, p); err == nil || errors.Is(err, convo.ErrNotFound) {
+			t.Fatalf("failed read: %v", err)
 		}
 	})
 }

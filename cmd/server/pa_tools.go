@@ -105,8 +105,9 @@ type paTools struct {
 }
 
 // buildPATools builds the tools runtime for tools, or nil when no server is
-// enabled. Any error refuses startup.
-func buildPATools(cfg *config.Config, tools *config.PATools, store *db.Store, sender paBotSender) (*paTools, error) {
+// enabled. Any error refuses startup. The metadata fetch runs under ctx,
+// bounded by paMetadataTimeout.
+func buildPATools(ctx context.Context, cfg *config.Config, tools *config.PATools, store *db.Store, sender paBotSender) (*paTools, error) {
 	if !tools.AnyEnabled() {
 		return nil, nil
 	}
@@ -123,7 +124,7 @@ func buildPATools(cfg *config.Config, tools *config.PATools, store *db.Store, se
 	tokens := paTokenClients{}
 	identity := map[connection.Server]connector.MCPEndpoint{}
 	servers := map[connection.Server]linking.ServerConfig{}
-	ctx, cancel := context.WithTimeout(context.Background(), paMetadataTimeout)
+	ctx, cancel := context.WithTimeout(ctx, paMetadataTimeout)
 	defer cancel()
 	for name, s := range tools.Servers {
 		if !s.Enabled {

@@ -29,6 +29,7 @@ const CommandTimeout = 30 * time.Second
 type Links interface {
 	StartLink(ctx context.Context, principal pa.Principal, server connection.Server) (string, error)
 	HandleCallback(ctx context.Context, u pa.VerifiedUpdate) (bool, error)
+	AbandonPending(ctx context.Context, principal int64) (int, error)
 }
 
 var _ Links = (*Service)(nil)
@@ -80,6 +81,9 @@ func (c *Commands) Run(ctx context.Context, u pa.VerifiedUpdate, a pa.LinkAction
 	}
 	var text safetext.Text
 	switch {
+	case a.Retire:
+		c.retire(ctx, u, p)
+		return
 	case a.Button:
 		text = c.button(ctx, u)
 	case a.Command == pa.CommandConnect:
@@ -98,6 +102,18 @@ func (c *Commands) Run(ctx context.Context, u pa.VerifiedUpdate, a pa.LinkAction
 	}
 	if err := c.send(ctx, p.TelegramID(), text); err != nil {
 		slog.Warn("pa linking: reply not sent", "update_id", u.UpdateID(), "err", err)
+	}
+}
+
+// retire fails the principal's unfinished links (LinkAction.Retire). It
+// answers nothing: /forget or /consent withdraw already did.
+func (c *Commands) retire(ctx context.Context, u pa.VerifiedUpdate, p pa.Principal) {
+	if c.Links == nil {
+		return
+	}
+	n, err := c.Links.AbandonPending(ctx, p.TelegramID())
+	if err != nil {
+		slog.Warn("pa linking: unfinished links not all retired; the sweep fails the rest", "update_id", u.UpdateID(), "retired", n, "err", err)
 	}
 }
 

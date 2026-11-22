@@ -303,7 +303,27 @@ func (s *Store) ForgetPAConversations(ctx context.Context, tx *sql.Tx, principal
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pa_conversations WHERE principal = $1`, principal); err != nil {
 		return fmt.Errorf("forget pa conversations: %w", err)
 	}
+	// A link the principal started before /forget or /consent withdraw
+	// must not finish after it: with its link token, state and confirm
+	// nonce gone, the Mini App, the callback and the confirm card are all
+	// refused. The connection rows are failed, and their tokens revoked,
+	// after the commit (pa.LinkAction.Retire) and, failing that, by the
+	// linking sweep once they are PendingMaxAge old.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pa_link_secrets WHERE principal = $1`, principal); err != nil {
+		return fmt.Errorf("forget pa conversations: link secrets: %w", err)
+	}
 	return nil
+}
+
+// ReadPAConsent is GetPAConsent in its own read transaction, for a caller
+// outside an update's transaction (the linking confirm press).
+func (s *Store) ReadPAConsent(ctx context.Context, principal int64) (convo.ConsentRecord, error) {
+	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return convo.ConsentRecord{}, storeFault("consent", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	return s.GetPAConsent(ctx, tx, principal)
 }
 
 // NextPAFragmentSeq implements convo.Store. The (conversation_id, seq)

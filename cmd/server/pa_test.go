@@ -98,7 +98,7 @@ func buildEnabledPA(t *testing.T, store *db.Store) (*config.Config, *paRuntime) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt, err := buildPA(cfg, store, localjwt.NewRevocationCache(store, localjwt.DefaultRevocationCacheTTL), nil)
+	rt, err := buildPA(context.Background(), cfg, store, localjwt.NewRevocationCache(store, localjwt.DefaultRevocationCacheTTL), nil)
 	if err != nil || rt == nil {
 		t.Fatalf("PA_ENABLED on: runtime=%v err=%v", rt, err)
 	}
@@ -116,7 +116,7 @@ func TestBuildPA_InertByDefault(t *testing.T) {
 	if cfg.PAEnabled {
 		t.Fatal("PA_ENABLED unset loaded as enabled")
 	}
-	rt, err := buildPA(cfg, store, localjwt.NewRevocationCache(store, time.Second), nil)
+	rt, err := buildPA(context.Background(), cfg, store, localjwt.NewRevocationCache(store, time.Second), nil)
 	if err != nil || rt != nil {
 		t.Fatalf("PA_ENABLED unset: runtime=%v err=%v, want nil nil", rt, err)
 	}
@@ -262,6 +262,14 @@ type paSendRecorder struct {
 	mu       sync.Mutex
 	sent     []paSend
 	answered []string
+	// real is a production output.Sender built from the same token and
+	// Mini App URL buildPA passed: SendWebApp runs every one of its
+	// checks on what the wired runtime asked to send, so a test sees
+	// StartLink's real URL go through checkWebAppURL. Only the Bot API
+	// call itself is cut off (a cancelled context), so nothing leaves.
+	real *output.Sender
+	// refused collects what the real sender refused before its request.
+	refused []error
 }
 
 func (r *paSendRecorder) AnswerCallback(_ context.Context, id string, _ safetext.Template) error {
@@ -304,11 +312,31 @@ func (r *paSendRecorder) Send(_ context.Context, chat int64, text safetext.Text,
 	return nil
 }
 
-func (r *paSendRecorder) SendWebApp(_ context.Context, chat int64, text safetext.Text, _ safetext.Template, appURL string) error {
+func (r *paSendRecorder) SendWebApp(_ context.Context, chat int64, text safetext.Text, label safetext.Template, appURL string) error {
+	if r.real != nil {
+		// A cancelled context stops the request before it is written,
+		// so the only errors that can come back are the sender's own
+		// refusals and "request failed: context canceled". Anything
+		// else is a refusal of what the runtime built.
+		cctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := r.real.SendWebApp(cctx, chat, text, label, appURL); err == nil || !strings.Contains(err.Error(), "request failed: context canceled") {
+			r.mu.Lock()
+			r.refused = append(r.refused, err)
+			r.mu.Unlock()
+			return err
+		}
+	}
 	r.mu.Lock()
 	r.sent = append(r.sent, paSend{chat: chat, text: text.String(), webApp: appURL})
 	r.mu.Unlock()
 	return nil
+}
+
+func (r *paSendRecorder) refusals() []error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]error(nil), r.refused...)
 }
 
 func (r *paSendRecorder) get() []paSend {
@@ -322,7 +350,16 @@ func recordPASends(t *testing.T) *paSendRecorder {
 	t.Helper()
 	r := &paSendRecorder{}
 	prev := newPASender
-	newPASender = func(string, string) (paBotSender, error) { return r, nil }
+	newPASender = func(token, webAppURL string) (paBotSender, error) {
+		if webAppURL != "" {
+			real, err := output.NewSender(output.Config{Token: token, WebAppURL: webAppURL})
+			if err != nil {
+				return nil, err
+			}
+			r.real = real
+		}
+		return r, nil
+	}
 	t.Cleanup(func() { newPASender = prev })
 	return r
 }
@@ -458,7 +495,7 @@ func TestBuildPA_RefusesMissingSecrets(t *testing.T) {
 			PABudgetUSDJob: 0.25, PABudgetUSDDay: 2, PABudgetUSDMonth: 20, ManagedBudgetUSDGlobalDay: 20, PAMinTurnUSD: 0.005,
 		}
 	}
-	if rt, err := buildPA(base(), store, rc, nil); err != nil || rt == nil {
+	if rt, err := buildPA(context.Background(), base(), store, rc, nil); err != nil || rt == nil {
 		t.Fatalf("control: runtime=%v err=%v", rt, err)
 	}
 	for name, mutate := range map[string]func(*config.Config){
@@ -471,11 +508,11 @@ func TestBuildPA_RefusesMissingSecrets(t *testing.T) {
 	} {
 		c := base()
 		mutate(c)
-		if rt, err := buildPA(c, store, rc, nil); err == nil || rt != nil {
+		if rt, err := buildPA(context.Background(), c, store, rc, nil); err == nil || rt != nil {
 			t.Fatalf("%s: runtime=%v err=%v, want refusal", name, rt, err)
 		}
 	}
-	if _, err := buildPA(base(), store, nil, nil); err == nil {
+	if _, err := buildPA(context.Background(), base(), store, nil, nil); err == nil {
 		t.Fatal("no revocation cache: want refusal")
 	}
 }

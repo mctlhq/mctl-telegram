@@ -20,11 +20,14 @@ import (
 const cmdUser = 100001
 
 type cmdLinks struct {
-	startURL string
-	startErr error
-	handled  bool
-	cbErr    error
-	started  []connection.Server
+	startURL  string
+	startErr  error
+	handled   bool
+	cbErr     error
+	started   []connection.Server
+	retired   []int64
+	retireN   int
+	retireErr error
 }
 
 func (l *cmdLinks) StartLink(_ context.Context, _ pa.Principal, s connection.Server) (string, error) {
@@ -34,6 +37,11 @@ func (l *cmdLinks) StartLink(_ context.Context, _ pa.Principal, s connection.Ser
 
 func (l *cmdLinks) HandleCallback(context.Context, pa.VerifiedUpdate) (bool, error) {
 	return l.handled, l.cbErr
+}
+
+func (l *cmdLinks) AbandonPending(_ context.Context, principal int64) (int, error) {
+	l.retired = append(l.retired, principal)
+	return l.retireN, l.retireErr
 }
 
 type cmdConns struct {
@@ -197,6 +205,25 @@ func TestCommands_Button(t *testing.T) {
 		cmd.Run(context.Background(), callbackUpdate(t, cmdUser, c.data), pa.LinkAction{Button: true})
 		if got := s.last(); got != c.want {
 			t.Errorf("%s: reply %q, want %q", name, got, c.want)
+		}
+	}
+}
+
+// Retire fails the principal's unfinished links and answers nothing: the
+// command that recorded it already did. A failure is logged, not sent.
+func TestCommands_Retire(t *testing.T) {
+	for name, links := range map[string]*cmdLinks{
+		"retired": {retireN: 1},
+		"failed":  {retireErr: errors.New("store down")},
+	} {
+		s := &cmdSender{}
+		cmd := &linking.Commands{Links: links, Connections: &cmdConns{}, Sender: s}
+		cmd.Run(context.Background(), messageUpdate(t), pa.LinkAction{Retire: true})
+		if len(links.retired) != 1 || links.retired[0] != cmdUser {
+			t.Errorf("%s: AbandonPending calls %v, want [%d]", name, links.retired, cmdUser)
+		}
+		if s.last() != "" || len(s.webApp) != 0 || len(links.started) != 0 {
+			t.Errorf("%s: retire sent %q or started a link", name, s.last())
 		}
 	}
 }

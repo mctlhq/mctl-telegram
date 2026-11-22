@@ -29,6 +29,11 @@ type LinkAction struct {
 	// Button is a linking confirm or cancel button (LinkButton). Its
 	// callback data is the update's; it is not consumed from pa_callbacks.
 	Button bool
+	// Retire fails the principal's unfinished links after /forget or
+	// /consent withdraw. Their link secrets went in the same transaction,
+	// so none can finish; this revokes the tokens a pending connection
+	// already holds. It sends nothing: the command already answered.
+	Retire bool
 }
 
 // ErrNoPostCommit: the handler ran outside a webhook delivery that can run

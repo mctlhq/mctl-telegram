@@ -11,6 +11,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/mctlhq/mctl-telegram/internal/db"
+	mcpapp "github.com/mctlhq/mctl-telegram/internal/mcp"
+	"github.com/mctlhq/mctl-telegram/internal/web"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -335,7 +338,7 @@ func TestBuildPA_MetadataRefusesStart(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			rt, err := buildPA(cfg, paTestStore(t), localjwt.NewRevocationCache(paTestStore(t), localjwt.DefaultRevocationCacheTTL), nil)
+			rt, err := buildPA(context.Background(), cfg, paTestStore(t), localjwt.NewRevocationCache(paTestStore(t), localjwt.DefaultRevocationCacheTTL), nil)
 			if err == nil || rt != nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("buildPA = %v, %v; want a refusal naming %s", rt, err, tc.want)
 			}
@@ -343,6 +346,25 @@ func TestBuildPA_MetadataRefusesStart(t *testing.T) {
 				t.Fatalf("err = %v, want errPAMetadataMismatch", err)
 			}
 		})
+	}
+}
+
+// TestBuildPA_MetadataFetchUsesMainContext: the startup metadata fetch runs
+// under main's context, so a SIGTERM during startup (a cancelled context)
+// stops it and refuses the start instead of waiting out paMetadataTimeout.
+func TestBuildPA_MetadataFetchUsesMainContext(t *testing.T) {
+	fakePAServerNet(t, 4242003)
+	enablePAToolsEnv(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rt, err := buildPA(ctx, cfg, paTestStore(t), localjwt.NewRevocationCache(paTestStore(t), localjwt.DefaultRevocationCacheTTL), nil)
+	// The metadata error carries the transport error as text only.
+	if err == nil || rt != nil || !strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("buildPA on a cancelled context = %v, %v; want a refusal from the cancelled fetch", rt, err)
 	}
 }
 
@@ -409,72 +431,105 @@ func (l *paFakeLister) ListPAConnectionsTx(context.Context, *sql.Tx, int64) ([]c
 	return l.conns, l.err
 }
 
-// TestPATools_ConnectDispatchDisconnect is the wired path end to end over
-// the HTTP routes, with the authorization server and the MCP endpoint
-// faked: /connect tg, the OAuth round trip and the confirm card; a run
-// claimed with the tg tools bound, a tool call dispatched through the
-// executor and audited; then /disconnect tg revoking at the server.
-func TestPATools_ConnectDispatchDisconnect(t *testing.T) {
+// paE2E drives the wired PA runtime over its HTTP routes as Carol does:
+// webhook updates, the Mini App and the OAuth pages.
+type paE2E struct {
+	t    *testing.T
+	f    *paToolsFakes
+	conn *sql.DB
+	sent *paSendRecorder
+	rt   *paRuntime
+	mux  *chi.Mux
+	user int64
+	upd  int64
+}
+
+func newPAE2E(t *testing.T) *paE2E {
+	t.Helper()
 	const carol = 4242003
-	f := fakePAServerNet(t, carol)
-	store, conn := paTestStoreConn(t)
-	sent := recordPASends(t)
+	e := &paE2E{t: t, user: carol, upd: 7000}
+	e.f = fakePAServerNet(t, carol)
+	var store *db.Store
+	store, e.conn = paTestStoreConn(t)
+	e.sent = recordPASends(t)
 	enablePAToolsEnv(t)
 	t.Setenv("PA_EXTERNAL_TOOLS_ENABLED", "true")
-	_, rt := buildEnabledPA(t, store)
-	mux := chi.NewRouter()
-	rt.Mount(mux)
-	ctx := context.Background()
+	_, e.rt = buildEnabledPA(t, store)
+	e.mux = chi.NewRouter()
+	e.rt.Mount(e.mux)
+	return e
+}
 
-	update := int64(7000)
-	send := func(kind, payload string) {
-		t.Helper()
-		update++
-		if code := postPAWebhook(mux, fmt.Sprintf(`{"update_id":%d,%q:%s}`, update, kind, payload)); code != http.StatusOK {
-			t.Fatalf("%s update: status %d", kind, code)
-		}
-		rt.loop.WaitDeliveries()
-		rt.tools.commands.Wait()
+func (e *paE2E) send(kind, payload string) {
+	e.t.Helper()
+	e.upd++
+	if code := postPAWebhook(e.mux, fmt.Sprintf(`{"update_id":%d,%q:%s}`, e.upd, kind, payload)); code != http.StatusOK {
+		e.t.Fatalf("%s update: status %d", kind, code)
 	}
-	text := func(s string) {
-		send("message", fmt.Sprintf(`{"message_id":7,"date":1,"text":%q,`+
-			`"from":{"id":%d,"is_bot":false,"first_name":"Carol"},"chat":{"id":%d,"type":"private"}}`, s, carol, carol))
-	}
-	press := func(data string) {
-		send("callback_query", fmt.Sprintf(`{"id":"cb","data":%q,"from":{"id":%d,"is_bot":false},`+
-			`"message":{"message_id":9,"date":1,"chat":{"id":%d,"type":"private"}}}`, data, carol, carol))
-	}
-	last := func() paSend {
-		t.Helper()
-		got := sent.get()
-		if len(got) == 0 {
-			t.Fatal("nothing sent")
-		}
-		return got[len(got)-1]
-	}
-	do := func(method, path, ctype, body string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(method, path, strings.NewReader(body))
-		if ctype != "" {
-			req.Header.Set("Content-Type", ctype)
-		}
-		w := httptest.NewRecorder()
-		mux.ServeHTTP(w, req)
-		return w
-	}
+	e.rt.loop.WaitDeliveries()
+	e.rt.tools.commands.Wait()
+}
 
-	// Consent first: linking commands are admitted only with it.
-	text("hello")
+func (e *paE2E) text(s string) {
+	e.t.Helper()
+	e.send("message", fmt.Sprintf(`{"message_id":7,"date":1,"text":%q,`+
+		`"from":{"id":%d,"is_bot":false,"first_name":"Carol"},"chat":{"id":%d,"type":"private"}}`, s, e.user, e.user))
+}
+
+func (e *paE2E) press(data string) {
+	e.t.Helper()
+	e.send("callback_query", fmt.Sprintf(`{"id":"cb","data":%q,"from":{"id":%d,"is_bot":false},`+
+		`"message":{"message_id":9,"date":1,"chat":{"id":%d,"type":"private"}}}`, data, e.user, e.user))
+}
+
+func (e *paE2E) last() paSend {
+	e.t.Helper()
+	got := e.sent.get()
+	if len(got) == 0 {
+		e.t.Fatal("nothing sent")
+	}
+	return got[len(got)-1]
+}
+
+func (e *paE2E) do(method, path, ctype, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	if ctype != "" {
+		req.Header.Set("Content-Type", ctype)
+	}
+	w := httptest.NewRecorder()
+	e.mux.ServeHTTP(w, req)
+	return w
+}
+
+// consent accepts the data-flow consent: linking commands need it.
+func (e *paE2E) consent() {
+	e.t.Helper()
+	e.text("hello")
 	var button string
-	if err := conn.QueryRowContext(ctx, `SELECT id FROM pa_callbacks WHERE principal = ?`, carol).Scan(&button); err != nil {
-		t.Fatal(err)
+	if err := e.conn.QueryRowContext(context.Background(), `SELECT id FROM pa_callbacks WHERE principal = ?`, e.user).Scan(&button); err != nil {
+		e.t.Fatal(err)
 	}
-	press(button)
+	e.press(button)
+}
 
+// toCard runs /connect tg through the Mini App, the authorization server
+// and the handoff page, and returns the confirm card.
+func (e *paE2E) toCard() paSend {
+	t := e.t
+	t.Helper()
+	text, last, do := e.text, e.last, e.do
+	sent, f, carol := e.sent, e.f, e.user
 	// /connect tg: the web_app button carries the link token.
 	text("/connect tg")
 	app := last()
+	// Exactly <base>/pa/link/app?link=<43-char token>: the recorder also ran
+	// it through a real output.Sender's checks (checkWebAppURL).
+	wantApp := regexp.MustCompile(`^` + regexp.QuoteMeta(testPABaseURL+linking.AppPath) + `\?link=[A-Za-z0-9_-]{43}$`)
+	if r := sent.refusals(); len(r) != 0 || sent.real == nil {
+		t.Fatalf("the real sender refused the connect button (%v), or none was built", r)
+	}
 	appURL, err := url.Parse(app.webApp)
-	if err != nil || app.chat != carol || !strings.HasPrefix(app.webApp, testPABaseURL+linking.AppPath+"?") {
+	if err != nil || app.chat != carol || !wantApp.MatchString(app.webApp) {
 		t.Fatalf("connect button %+v", app)
 	}
 	begin, _ := json.Marshal(map[string]string{"init_data": paSignInitData(carol, ""), "link": appURL.Query().Get("link")})
@@ -504,6 +559,21 @@ func TestPATools_ConnectDispatchDisconnect(t *testing.T) {
 	if len(card.buttons) != 2 || !strings.HasPrefix(card.buttons[0], "pa:lc:") {
 		t.Fatalf("confirm card %+v", card)
 	}
+	return card
+}
+
+// TestPATools_ConnectDispatchDisconnect is the wired path end to end over
+// the HTTP routes, with the authorization server and the MCP endpoint
+// faked: /connect tg, the OAuth round trip and the confirm card; a run
+// claimed with the tg tools bound, a tool call dispatched through the
+// executor and audited; then /disconnect tg revoking at the server.
+func TestPATools_ConnectDispatchDisconnect(t *testing.T) {
+	e := newPAE2E(t)
+	ctx := context.Background()
+	f, conn, rt, mux, carol := e.f, e.conn, e.rt, e.mux, e.user
+	text, press, last := e.text, e.press, e.last
+	e.consent()
+	card := e.toCard()
 	press(card.buttons[0])
 	if got := last().text; got != safetext.ServerText(safetext.TextConnected).String() {
 		t.Fatalf("after confirm: %q", got)
@@ -533,7 +603,7 @@ func TestPATools_ConnectDispatchDisconnect(t *testing.T) {
 		mux.ServeHTTP(w, req)
 		return w
 	}
-	w = post(pa.RouteClaim, pool, "")
+	w := post(pa.RouteClaim, pool, "")
 	var claim struct {
 		Token   string   `json:"token"`
 		ToolSet []string `json:"tool_set"`
@@ -577,5 +647,145 @@ func TestPATools_ConnectDispatchDisconnect(t *testing.T) {
 	conns, err = rt.Connections().List(ctx, carol)
 	if err != nil || len(conns) != 1 || conns[0].State != connection.StateRevoked {
 		t.Fatalf("after /disconnect: %+v err %v", conns, err)
+	}
+}
+
+// TestPATools_ConsentLossBeforeConfirm: Carol runs /connect tg and gets the
+// confirm card, then sends /forget or /consent withdraw before pressing
+// Confirm. The press links nothing: there is no active connection, the
+// pending one is failed with its stored tokens wiped, and the tokens the
+// authorization server issued are revoked there.
+func TestPATools_ConsentLossBeforeConfirm(t *testing.T) {
+	for _, cmd := range []string{"/forget", "/consent withdraw"} {
+		t.Run(cmd, func(t *testing.T) {
+			e := newPAE2E(t)
+			ctx := context.Background()
+			e.consent()
+			card := e.toCard()
+			e.text(cmd)
+			e.press(card.buttons[0])
+			if got := e.last().text; got == safetext.ServerText(safetext.TextConnected).String() {
+				t.Fatalf("after %s the press connected", cmd)
+			}
+			conns, err := e.rt.Connections().List(ctx, e.user)
+			if err != nil || len(conns) != 1 || conns[0].State != connection.StateFailed {
+				t.Fatalf("after %s and the press: %+v err %v", cmd, conns, err)
+			}
+			var sealed []byte
+			if err := e.conn.QueryRowContext(ctx, `SELECT sealed_tokens FROM pa_connections WHERE id = ?`, conns[0].ID).Scan(&sealed); err != nil || len(sealed) != 0 {
+				t.Fatalf("stored tokens left: %d bytes (%v)", len(sealed), err)
+			}
+			at := e.f.as.issued[len(e.f.as.issued)-1]
+			if rv := e.f.revoker.got(); !slices.ContainsFunc(rv, func(s string) bool { return strings.Contains(s, at) }) {
+				t.Fatalf("the issued access token was not revoked: %v", rv)
+			}
+		})
+	}
+}
+
+// TestPARuntime_StartRunsDispatcher: with tools on, Start runs the wired
+// dispatcher's pin refresh loop at PinRefreshInterval on Start's context,
+// and Shutdown waits for it to return; with every server off it never runs.
+func TestPARuntime_StartRunsDispatcher(t *testing.T) {
+	type run struct {
+		d     *connector.Dispatcher
+		every time.Duration
+	}
+	started := make(chan run, 4)
+	returned := make(chan struct{}, 4)
+	prev := runPADispatcher
+	runPADispatcher = func(ctx context.Context, d *connector.Dispatcher, every time.Duration) {
+		started <- run{d, every}
+		<-ctx.Done()
+		returned <- struct{}{}
+	}
+	t.Cleanup(func() { runPADispatcher = prev })
+	fakePAServerNet(t, 4242003)
+
+	_, off := buildEnabledPA(t, paTestStore(t))
+	offCtx, offCancel := context.WithCancel(context.Background())
+	off.Start(offCtx)
+	offCancel()
+	off.Shutdown(time.Now().Add(5 * time.Second))
+	select {
+	case <-started:
+		t.Fatal("dispatcher loop ran with every server off")
+	default:
+	}
+
+	enablePAToolsEnv(t)
+	_, on := buildEnabledPA(t, paTestStore(t))
+	ctx, cancel := context.WithCancel(context.Background())
+	on.Start(ctx)
+	select {
+	case got := <-started:
+		if got.d == nil || got.d != on.dispatcher || got.every != connector.PinRefreshInterval {
+			t.Fatalf("dispatcher loop ran with %p every %v, want %p every %v", got.d, got.every, on.dispatcher, connector.PinRefreshInterval)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not run the dispatcher loop")
+	}
+	select {
+	case <-returned:
+		t.Fatal("dispatcher loop returned before its context ended")
+	default:
+	}
+	cancel()
+	on.Shutdown(time.Now().Add(5 * time.Second))
+	select {
+	case <-returned:
+	default:
+		t.Fatal("Shutdown returned before the dispatcher loop did")
+	}
+}
+
+// TestWirePARevokers: with tools on, the web account handlers and the MCP
+// server both get the runtime's connection manager as their PA revoker;
+// with tools off, PA off (a nil runtime) or a runtime without a manager,
+// both stay a nil interface, never a typed-nil *connection.Manager.
+func TestWirePARevokers(t *testing.T) {
+	fakePAServerNet(t, 4242003)
+	check := func(name string, rt *paRuntime, want *connection.Manager) {
+		t.Helper()
+		account, srv := &web.AccountHandlers{}, &mcpapp.Server{}
+		wirePARevokers(rt, account, srv)
+		if want == nil {
+			if account.PARevoker != nil || srv.PARevoker != nil {
+				t.Fatalf("%s: revokers set to %#v / %#v, want nil interfaces", name, account.PARevoker, srv.PARevoker)
+			}
+			return
+		}
+		a, aok := account.PARevoker.(*connection.Manager)
+		m, mok := srv.PARevoker.(*connection.Manager)
+		if !aok || !mok || a != want || m != want {
+			t.Fatalf("%s: revokers %#v / %#v, want the runtime's manager %p", name, account.PARevoker, srv.PARevoker, want)
+		}
+	}
+	check("PA off", nil, nil)
+	_, off := buildEnabledPA(t, paTestStore(t))
+	check("tools off", off, nil)
+	enablePAToolsEnv(t)
+	_, on := buildEnabledPA(t, paTestStore(t))
+	if on.Connections() == nil {
+		t.Fatal("tools on built no manager")
+	}
+	check("tools on", on, on.Connections())
+}
+
+// main.go wires the revokers once, after buildPA and before the server
+// serves: a revoker set later would let a deletion through without it.
+func TestMainWiresPARevokersBeforeServing(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(src)
+	call := "\twirePARevokers(paRT, accountHandlers, mcpSrv)\n"
+	if strings.Count(s, "wirePARevokers(") != 1 || !strings.Contains(s, call) {
+		t.Fatalf("main.go must call %q exactly once", strings.TrimSpace(call))
+	}
+	at, build, serve := strings.Index(s, call), strings.Index(s, "paRT, err := buildPA("), strings.Index(s, "srv.ListenAndServe()")
+	if build < 0 || serve < 0 || !(build < at && at < serve) {
+		t.Fatalf("wirePARevokers at %d, want between buildPA (%d) and ListenAndServe (%d)", at, build, serve)
 	}
 }

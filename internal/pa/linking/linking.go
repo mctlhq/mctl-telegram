@@ -56,6 +56,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/pa"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
+	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
@@ -75,6 +76,9 @@ type Store interface {
 	RetirePALinkSecret(ctx context.Context, kind db.PALinkKind, hash string, now time.Time) error
 	StalePendingPAConnections(ctx context.Context, updatedBefore time.Time, limit int) ([]db.StalePAConnection, error)
 	EnsurePAUser(ctx context.Context, tgID int64) (int64, error)
+	// ReadPAConsent is convo.Store's GetPAConsent in its own transaction:
+	// convo.ErrNotFound only when no row exists.
+	ReadPAConsent(ctx context.Context, principal int64) (convo.ConsentRecord, error)
 }
 
 var _ Store = (*db.Store)(nil)
@@ -206,6 +210,10 @@ var (
 	ErrWrongUser      = errors.New("pa linking: opened by a different Telegram user")
 	ErrRefused        = errors.New("pa linking: refused")
 	ErrNotOwner       = errors.New("pa linking: the account does not belong to the principal")
+	// ErrNoConsent: the principal has no current data-flow consent (it
+	// was withdrawn after /connect, or cannot be read), so a link is not
+	// activated.
+	ErrNoConsent = errors.New("pa linking: no current consent")
 )
 
 // New validates cfg.
@@ -651,7 +659,10 @@ func ConfirmCard(server connection.Server, accountID, nonce string) Card {
 //
 // The button counts only when pressed by the principal the card was sent
 // to, before it expires (S1-L9). A press by anyone else changes nothing.
-// An expired card fails the connection and revokes its tokens. Before
+// An expired card fails the connection and revokes its tokens. A confirm
+// needs the principal's current consent: /consent withdraw between
+// /connect and the press, or a consent row that cannot be read, fails the
+// connection and revokes its tokens instead (ErrNoConsent). Before
 // activating, the principal gets a users row (EnsurePAUser) so its calls
 // can be audited; if that fails, the connection is not activated.
 func (s *Service) HandleCallback(ctx context.Context, u pa.VerifiedUpdate) (bool, error) {
@@ -695,12 +706,62 @@ func (s *Service) HandleCallback(ctx context.Context, u pa.VerifiedUpdate) (bool
 		_, aerr := s.cfg.Manager.Abandon(ctx, l.Principal, l.ConnectionID, l.Revision, "server_disabled")
 		return true, errors.Join(ErrServerDisabled, aerr)
 	}
+	if err := s.consented(ctx, l.Principal); err != nil {
+		_, aerr := s.cfg.Manager.Abandon(ctx, l.Principal, l.ConnectionID, l.Revision, "no_consent")
+		return true, errors.Join(err, aerr)
+	}
 	if _, err := s.cfg.Store.EnsurePAUser(ctx, l.Principal); err != nil {
 		_, aerr := s.cfg.Manager.Abandon(ctx, l.Principal, l.ConnectionID, l.Revision, "unauditable")
 		return true, errors.Join(fmt.Errorf("pa linking: users row: %w", err), aerr)
 	}
 	_, err = s.cfg.Manager.Confirm(ctx, l.Principal, l.ConnectionID, l.Revision)
 	return true, err
+}
+
+// consented fails closed: only a readable, current, accepted consent row
+// is consent.
+func (s *Service) consented(ctx context.Context, principal int64) error {
+	rec, err := s.cfg.Store.ReadPAConsent(ctx, principal)
+	switch {
+	case errors.Is(err, convo.ErrNotFound):
+		return ErrNoConsent
+	case err != nil:
+		return fmt.Errorf("%w: consent unreadable: %w", ErrNoConsent, err)
+	case !convo.Satisfied(rec):
+		return ErrNoConsent
+	}
+	return nil
+}
+
+// AbandonPending fails, and revokes the tokens of, every pending connection
+// of principal: a link it started and may no longer finish (/forget or
+// /consent withdraw, pa.LinkAction.Retire). A connection that moved on in
+// the meantime is left alone. Every other failure is returned; the linking
+// sweep fails what is left once it is PendingMaxAge old.
+func (s *Service) AbandonPending(ctx context.Context, principal int64) (int, error) {
+	conns, err := s.cfg.Manager.List(ctx, principal)
+	if err != nil {
+		return 0, err
+	}
+	var errs []error
+	n := 0
+	for _, c := range conns {
+		// Abandon refuses anything but a pending connection at this
+		// revision with ErrConflict, so an active or terminal connection
+		// is never touched here.
+		out, err := s.cfg.Manager.Abandon(ctx, principal, c.ID, c.AuthorityRevision, "link_retired")
+		switch {
+		case err == nil:
+			n++
+			if out.RemoteErr != nil {
+				errs = append(errs, out.RemoteErr)
+			}
+		case errors.Is(err, connection.ErrConflict), errors.Is(err, connection.ErrNotFound):
+		default:
+			errs = append(errs, err)
+		}
+	}
+	return n, errors.Join(errs...)
 }
 
 func (s *Service) enabled(server connection.Server) bool {

@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	mcpapp "github.com/mctlhq/mctl-telegram/internal/mcp"
+	"github.com/mctlhq/mctl-telegram/internal/web"
 	"log/slog"
 	"net/http"
 	"os"
@@ -59,6 +61,13 @@ var newPASender = func(token, webAppURL string) (paBotSender, error) {
 	return output.NewSender(output.Config{Token: token, WebAppURL: webAppURL})
 }
 
+// runPADispatcher runs the dispatcher's pin refresh loop. A variable only
+// so the wiring tests can see that Start runs it, with which dispatcher and
+// interval, without waiting a PinRefreshInterval; nothing else assigns it.
+var runPADispatcher = func(ctx context.Context, d *connector.Dispatcher, every time.Duration) {
+	d.Run(ctx, every)
+}
+
 // paRuntime is the Personal Assistant's server half (#1313, wired by
 // #1343): the webhook with the Conversations handler, the run-loop routes
 // (claim, turn, reply), the outbox retry loop and its shutdown drain.
@@ -83,8 +92,9 @@ type paRuntime struct {
 // already refused an enabled configuration without the bot token, webhook
 // secret, webhook URL, ENCRYPTION_KEY or OAuth signing key; buildPA checks
 // what it uses again, so a hand-built Config cannot start a half-configured
-// PA. Any error refuses startup.
-func buildPA(cfg *config.Config, store *db.Store, rc *localjwt.RevocationCache, m paMetrics) (*paRuntime, error) {
+// PA. Any error refuses startup. ctx is main's: a SIGTERM during startup
+// cancels the tools runtime's metadata fetch.
+func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *localjwt.RevocationCache, m paMetrics) (*paRuntime, error) {
 	if !cfg.PAEnabled {
 		return nil, nil
 	}
@@ -124,7 +134,7 @@ func buildPA(cfg *config.Config, store *db.Store, rc *localjwt.RevocationCache, 
 	if err != nil {
 		return nil, err
 	}
-	pt, err := buildPATools(cfg, tools, store, sender)
+	pt, err := buildPATools(ctx, cfg, tools, store, sender)
 	if err != nil {
 		return nil, err
 	}
@@ -250,6 +260,21 @@ func (r *paRuntime) Mount(mux chi.Router) {
 		"servers", strings.Join(servers, ","), "route", connector.RouteTool)
 }
 
+// wirePARevokers gives the account-deletion surfaces (the web account page
+// and the MCP delete tool) the connection manager, so deleting an account
+// first revokes the provider tokens the PA holds for it (#1389). Only a
+// runtime with tools has a manager; otherwise both fields stay a nil
+// interface, never a typed-nil *connection.Manager, which would pass their
+// nil checks. Called before the server serves.
+func wirePARevokers(rt *paRuntime, account *web.AccountHandlers, srv *mcpapp.Server) {
+	m := rt.Connections()
+	if m == nil {
+		return
+	}
+	account.PARevoker = m
+	srv.PARevoker = m
+}
+
 // Start runs the outbox retry loop until ctx ends.
 func (r *paRuntime) Start(ctx context.Context) {
 	if r == nil {
@@ -266,7 +291,7 @@ func (r *paRuntime) Start(ctx context.Context) {
 		r.wg.Add(1)
 		go func() {
 			defer r.wg.Done()
-			r.dispatcher.Run(ctx, connector.PinRefreshInterval)
+			runPADispatcher(ctx, r.dispatcher, connector.PinRefreshInterval)
 		}()
 	}
 }

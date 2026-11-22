@@ -2,6 +2,7 @@ package linking_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"net/url"
 	"strconv"
@@ -832,4 +833,105 @@ func TestLinking_SweepSparesSlowFlowInEveryPendingState(t *testing.T) {
 			})
 		})
 	}
+}
+
+// sealedTokens is the length of the connection's stored token blob: zero
+// once a terminal state wiped it.
+func (h *harness) sealedTokens(id string) int {
+	h.t.Helper()
+	var b []byte
+	if err := h.s.DB.QueryRow(`SELECT sealed_tokens FROM pa_connections WHERE id = $1`, id).Scan(&b); err != nil {
+		h.t.Fatal(err)
+	}
+	return len(b)
+}
+
+// A confirm needs the principal's current consent, read again at the press:
+// with the link secrets still in place (so only this check stands in the
+// way), no consent row, a withdrawn one, one for an older text, or one that
+// cannot be read each fail the connection, wipe its tokens and revoke them
+// at the server. Nothing is activated and no users row is created.
+func TestLinking_ConfirmNeedsConsent(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		for name, lose := range map[string]string{
+			"no row":     `DELETE FROM pa_consents WHERE principal = $1`,
+			"withdrawn":  `UPDATE pa_consents SET state = 'withdrawn' WHERE principal = $1`,
+			"stale":      `UPDATE pa_consents SET version = 'pa-data-flow/v0' WHERE principal = $1`,
+			"unreadable": `UPDATE pa_consents SET state = 'bogus' WHERE principal = $1`,
+		} {
+			t.Run(name, func(t *testing.T) {
+				ctx := context.Background()
+				h := newHarness(t, s, false)
+				confirm, _ := confirmData(h.toConfirm(connection.ServerTG, h.tgLogin(h.alice)))
+				if _, err := s.DB.Exec(lose, h.alice); err != nil {
+					t.Fatal(err)
+				}
+				handled, err := h.svc.HandleCallback(ctx, callbackUpdate(t, h.alice, confirm))
+				if !handled || !errors.Is(err, linking.ErrNoConsent) {
+					t.Fatalf("confirm without consent: handled=%v err=%v", handled, err)
+				}
+				c := h.connection(connection.ServerTG)
+				if c.State != connection.StateFailed || h.sealedTokens(c.ID) != 0 || h.revoker.count() == 0 {
+					t.Fatalf("state %s, sealed %d bytes, %d revoked", c.State, h.sealedTokens(c.ID), h.revoker.count())
+				}
+				if _, err := s.UserIDByTelegramID(ctx, h.alice); !errors.Is(err, db.ErrUserNotFound) {
+					t.Fatalf("a users row was created without consent: %v", err)
+				}
+			})
+		}
+	})
+}
+
+// /forget and /consent withdraw delete the principal's link secrets in
+// their own transaction, so a confirm card shown before them cannot finish
+// after them, even with consent still in place (/forget keeps it).
+// AbandonPending then fails the pending connection and revokes its tokens,
+// and leaves an active connection alone.
+func TestLinking_ForgetAndWithdrawRetireUnfinishedLinks(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		for name, forget := range map[string]func(h *harness, tx *sql.Tx) error{
+			"forget": func(h *harness, tx *sql.Tx) error {
+				return s.ForgetPAConversations(context.Background(), tx, h.alice)
+			},
+			"withdraw": func(h *harness, tx *sql.Tx) error {
+				return s.WithdrawPAConsent(context.Background(), tx, h.alice, h.clock.Now())
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				ctx := context.Background()
+				h := newHarness(t, s, true)
+				// An active alice connection, then an unfinished tg link.
+				aliceConfirm, _ := confirmData(h.toConfirm(connection.ServerAlice, linking.Account{ID: "alice:acct-1", DisplayName: "Alice"}))
+				if _, err := h.svc.HandleCallback(ctx, callbackUpdate(t, h.alice, aliceConfirm)); err != nil {
+					t.Fatalf("alice confirm: %v", err)
+				}
+				confirm, _ := confirmData(h.toConfirm(connection.ServerTG, h.tgLogin(h.alice)))
+				h.inTx(func(tx *sql.Tx) error { return forget(h, tx) })
+				var left int
+				if err := s.DB.QueryRow(`SELECT COUNT(*) FROM pa_link_secrets WHERE principal = $1`, h.alice).Scan(&left); err != nil || left != 0 {
+					t.Fatalf("%d link secrets left (%v)", left, err)
+				}
+				if name == "forget" {
+					// /forget keeps consent, so only the deleted secret refuses this.
+					h.consent(h.alice)
+				}
+				handled, err := h.svc.HandleCallback(ctx, callbackUpdate(t, h.alice, confirm))
+				if !handled || err == nil || h.state(connection.ServerTG) == connection.StateActive {
+					t.Fatalf("confirm after %s: handled=%v err=%v state %s", name, handled, err, h.state(connection.ServerTG))
+				}
+				before := h.revoker.count()
+				n, err := h.svc.AbandonPending(ctx, h.alice)
+				if err != nil || n != 1 {
+					t.Fatalf("AbandonPending: %d %v", n, err)
+				}
+				c := h.connection(connection.ServerTG)
+				if c.State != connection.StateFailed || h.sealedTokens(c.ID) != 0 || h.revoker.count() <= before {
+					t.Fatalf("tg after retire: state %s, sealed %d bytes, revoked %d->%d", c.State, h.sealedTokens(c.ID), before, h.revoker.count())
+				}
+				if st := h.state(connection.ServerAlice); st != connection.StateActive {
+					t.Fatalf("the finished alice link was touched: %s", st)
+				}
+			})
+		}
+	})
 }

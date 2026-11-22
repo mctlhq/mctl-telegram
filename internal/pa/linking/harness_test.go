@@ -5,11 +5,13 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"math/big"
 	"net/url"
 	"os"
@@ -339,14 +341,42 @@ func newHarness(t *testing.T, s *db.Store, aliceEnabled bool) *harness {
 	}
 	h.alice = 9_500_000_000 + n.Int64()*2
 	h.bob = h.alice + 1
+	// Alice consented to the data flow before /connect, as the
+	// conversation layer requires; a confirm checks it again.
+	h.consent(h.alice)
 	t.Cleanup(func() {
 		for _, p := range []int64{h.alice, h.bob} {
+			_, _ = s.DB.Exec(`DELETE FROM pa_consents WHERE principal = $1`, p)
 			_, _ = s.DB.Exec(`DELETE FROM pa_link_secrets WHERE principal = $1`, p)
 			_, _ = s.DB.Exec(`DELETE FROM pa_connections WHERE principal = $1`, p)
 			_, _ = s.DB.Exec(`DELETE FROM users WHERE telegram_login_id = $1`, p)
 		}
 	})
 	return h
+}
+
+// consent records principal's current data-flow consent.
+func (h *harness) consent(principal int64) {
+	h.t.Helper()
+	h.inTx(func(tx *sql.Tx) error {
+		return h.s.AcceptPAConsent(context.Background(), tx, principal, convo.ConsentVersion, convo.ConsentTextSHA256(), h.clock.Now())
+	})
+}
+
+// inTx runs fn in a committed store transaction.
+func (h *harness) inTx(fn func(tx *sql.Tx) error) {
+	h.t.Helper()
+	tx, err := h.s.DB.BeginTx(context.Background(), nil)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+		h.t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		h.t.Fatal(err)
+	}
 }
 
 // rebuild replaces the manager's store and the token client, keeping the

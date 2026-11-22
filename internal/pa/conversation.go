@@ -289,11 +289,17 @@ func (c *Conversations) handleCommand(ctx context.Context, tx *sql.Tx, u Verifie
 		if err := c.store.ForgetPAConversations(ctx, tx, p.TelegramID()); err != nil {
 			return err
 		}
+		if err := c.retireLinks(ctx); err != nil {
+			return err
+		}
 		return c.reply(ctx, tx, u, ReplyForgotten, "")
 	case CommandConsent:
 		switch arg {
 		case "withdraw":
 			if err := c.store.WithdrawPAConsent(ctx, tx, p.TelegramID(), c.now()); err != nil {
+				return err
+			}
+			if err := c.retireLinks(ctx); err != nil {
 				return err
 			}
 			return c.reply(ctx, tx, u, ReplyConsentWithdrawn, "")
@@ -326,6 +332,16 @@ func (c *Conversations) handleLinkCommand(ctx context.Context, tx *sql.Tx, u Ver
 		return err
 	}
 	return setPostCommit(ctx, LinkAction{Command: cmd, Arg: arg})
+}
+
+// retireLinks records, with linking on, that the principal's unfinished
+// links are failed after the commit (LinkAction.Retire). The store already
+// deleted their link secrets in this transaction.
+func (c *Conversations) retireLinks(ctx context.Context) error {
+	if !c.linking {
+		return nil
+	}
+	return setPostCommit(ctx, LinkAction{Retire: true})
 }
 
 // linkButton reports whether data is a linking confirm card button.

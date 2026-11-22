@@ -934,7 +934,7 @@ func main() {
 	// enabled also the tools runtime (#1318 slice C2): account linking, its
 	// bot commands and the connector dispatcher. Nothing is built unless
 	// PA_ENABLED is explicitly true: with it off no PA route exists.
-	paRT, err := buildPA(cfg, store, workerTokenRevocationCache, m)
+	paRT, err := buildPA(ctx, cfg, store, workerTokenRevocationCache, m)
 	if err != nil {
 		slog.Error("pa runtime", "err", err)
 		os.Exit(1)
@@ -947,6 +947,9 @@ func main() {
 		slog.Error("pa state", "err", err)
 		os.Exit(1)
 	}
+	// Account deletion revokes the PA's provider tokens first when the
+	// tools runtime holds any (#1389).
+	wirePARevokers(paRT, accountHandlers, mcpSrv)
 	paRT.Mount(mux)
 	paRT.Start(ctx)
 
