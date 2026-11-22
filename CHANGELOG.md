@@ -1,5 +1,154 @@
 # Changelog
 
+## [0.142.0](https://github.com/mctlhq/mctl-telegram/compare/0.141.0...0.142.0) (2026-11-22)
+
+
+### Features
+
+* **pa:** revoke PA tokens before account delete eviction ([d6e3380](https://github.com/mctlhq/mctl-telegram/commit/d6e33803a436244300a59031941ae5c49f0955d2))
+
+
+### Bug Fixes
+
+* **pa:** guard lock-sweep wiring and typed-nil PA revoker ([c3de2ee](https://github.com/mctlhq/mctl-telegram/commit/c3de2ee07d3e032d567e00dc4cda207ec7f211a8))
+
+## [0.141.0](https://github.com/mctlhq/mctl-telegram/compare/0.140.1...0.141.0) (2026-11-21)
+
+
+### Features
+
+* **metrics:** create every tool invocation series at 0 on startup ([c0a9796](https://github.com/mctlhq/mctl-telegram/commit/c0a9796663bbfe2de50f9c26e1369fde929ab9cd))
+* **metrics:** create every tool invocation series at 0 on startup ([3646f73](https://github.com/mctlhq/mctl-telegram/commit/3646f73305a369823857d2eb8ae4d016b909e522))
+* **pa:** add inert Phase 2 primitives for the write gate ([969cfe0](https://github.com/mctlhq/mctl-telegram/commit/969cfe025df3e3f3a33ce6e9c979c07252976611))
+* **pa:** add inert Phase 2 primitives for the write gate ([#1320](https://github.com/mctlhq/mctl-telegram/issues/1320)) ([7d831fa](https://github.com/mctlhq/mctl-telegram/commit/7d831faf2301f4887b963493514820d6494d6a42))
+* **pa:** add tools runtime config and production OAuth/messenger impls ([9792085](https://github.com/mctlhq/mctl-telegram/commit/97920852cf4a0a691da78c6a84a0a3878c292584))
+* **pa:** add tools runtime config and production OAuth/messenger impls ([236e148](https://github.com/mctlhq/mctl-telegram/commit/236e1487fdd0bd9e7925ad6e4541bf372530ffdd)), closes [#1318](https://github.com/mctlhq/mctl-telegram/issues/1318)
+* **pa:** durable per-conversation taint and tool provenance ([b3c908a](https://github.com/mctlhq/mctl-telegram/commit/b3c908a3cb60ca1379388773d25cdad7522ebbb4))
+* **pa:** durable per-conversation taint and tool provenance ([981443e](https://github.com/mctlhq/mctl-telegram/commit/981443e0c71fd90ab129dc49fca5280d935b290f)), closes [#1321](https://github.com/mctlhq/mctl-telegram/issues/1321)
+
+
+### Bug Fixes
+
+* **pa:** close disclosure schema gaps and tighten inert guards ([5eea2a2](https://github.com/mctlhq/mctl-telegram/commit/5eea2a2247a6cbb79fe22cb0cc439c5c1bf7d881))
+* **pa:** fence, cap and revoke-first deletion for PA linking ([906c445](https://github.com/mctlhq/mctl-telegram/commit/906c4457f6f15ae762b392f7636ac5760cd5c505))
+* **pa:** fence, cap and revoke-first deletion for PA linking ([f844019](https://github.com/mctlhq/mctl-telegram/commit/f8440197494b46e7099217dcf99736084f3ec9f4))
+* **pa:** keep no lock row for never-admitted deleted principals ([437c9e5](https://github.com/mctlhq/mctl-telegram/commit/437c9e552f35cb13ac81b0297d1a0888e401e5fe))
+* **pa:** keep switches independent and close review gaps ([ebea984](https://github.com/mctlhq/mctl-telegram/commit/ebea9843b25cbba3a29f0d0967e1eb22c9f7c36c))
+* **pa:** read schema keywords by exact name, bound integers by value ([0c5043b](https://github.com/mctlhq/mctl-telegram/commit/0c5043be508f3a0a316e67aef241b9b0b49ceb8d))
+* **pa:** taint by kind, gate-tested tool records, pinned outputs ([0d02267](https://github.com/mctlhq/mctl-telegram/commit/0d0226740f6b60138745c5708cfacb8744de347c))
+* **pa:** tighten tools config URLs and identity config error ([6d5ca27](https://github.com/mctlhq/mctl-telegram/commit/6d5ca27e1ed247cac9ef32ef28d154b34249b0d2)), closes [#1318](https://github.com/mctlhq/mctl-telegram/issues/1318)
+* **slo:** count topic refusals as caller errors; quiet two expected WARNs ([8a3054c](https://github.com/mctlhq/mctl-telegram/commit/8a3054c8667c5f7a6014988990df25f3bb230fb2))
+* **slo:** count topic refusals as caller errors; quiet two expected WARNs ([d69ee00](https://github.com/mctlhq/mctl-telegram/commit/d69ee00530478f4a255f1198895cfaeeef5650be))
+
+## [0.140.1](https://github.com/mctlhq/mctl-telegram/compare/0.140.0...0.140.1) (2026-11-21)
+
+
+### Bug Fixes
+
+* **agentapi:** refuse agent-token autopilot resume, audit owner resume ([78f3ad9](https://github.com/mctlhq/mctl-telegram/commit/78f3ad9dd24942bc1b8337c23f65e63abe237148)), closes [#944](https://github.com/mctlhq/mctl-telegram/issues/944)
+* **agentapi:** refuse agent-token autopilot resume, audit resume ([31c0aee](https://github.com/mctlhq/mctl-telegram/commit/31c0aee1786dc677d0484d3a41db811240b34f59))
+* **auth:** background revocation refresh, snapshot age gauge, runbook ([7aa3f2e](https://github.com/mctlhq/mctl-telegram/commit/7aa3f2e791434f219c3d1bc80f5b3abb4e7e5d15))
+* **auth:** refresh revocations in background, export snapshot age ([46de8d4](https://github.com/mctlhq/mctl-telegram/commit/46de8d4b8417571d1a5fe18107f2783754e608d1))
+* **pa:** make the account-deletion token guard race-free ([bab3783](https://github.com/mctlhq/mctl-telegram/commit/bab3783c87b1519bb808a2fb91c64d7cbe89fc49)), closes [#1338](https://github.com/mctlhq/mctl-telegram/issues/1338)
+* **pa:** purge linking state on retention and account deletion ([5633a93](https://github.com/mctlhq/mctl-telegram/commit/5633a935e478969777260e2c4d63162650fbba5e))
+
+## [0.140.0](https://github.com/mctlhq/mctl-telegram/compare/0.139.5...0.140.0) (2026-11-21)
+
+
+### Features
+
+* **pa:** add T9 egress client for catalog MCP servers ([ade80a2](https://github.com/mctlhq/mctl-telegram/commit/ade80a2e39533df3d15824406145683b193dbf63))
+* **pa:** add T9 egress client for catalog MCP servers ([8dad56b](https://github.com/mctlhq/mctl-telegram/commit/8dad56bb5c846068fdecf044c228cd7c5d6aba90))
+* **pa:** agent worker PA mode (AGENT_WORKER_PA) ([833bce0](https://github.com/mctlhq/mctl-telegram/commit/833bce08e76672f6775ba52d5d08b25530ff72f9)), closes [#1313](https://github.com/mctlhq/mctl-telegram/issues/1313)
+* **pa:** apply owner decisions on claim stop and cost settlement ([34b8325](https://github.com/mctlhq/mctl-telegram/commit/34b8325cbf9e7cabf71e2700b294d9ddc1d62811))
+* **pa:** apply owner decisions on claim stop, cost settlement and consent text ([0d7a8a4](https://github.com/mctlhq/mctl-telegram/commit/0d7a8a4f88f58c37cb02addbeaa4948c59a5ae34))
+* **pa:** catalog pin and audit path ([#1315](https://github.com/mctlhq/mctl-telegram/issues/1315) slice 1) ([9bcd2ee](https://github.com/mctlhq/mctl-telegram/commit/9bcd2ee93370e32aeb80a3413373d35ff4d5b544))
+* **pa:** catalog pin and audit path ([#1315](https://github.com/mctlhq/mctl-telegram/issues/1315) slice 1) ([ce8f275](https://github.com/mctlhq/mctl-telegram/commit/ce8f275a8193498fcb8ecd68cfbf800c7782b6d1))
+* **pa:** connection store, state machine and scope check ([cecce0e](https://github.com/mctlhq/mctl-telegram/commit/cecce0ef2d37e6b474f18492697dfaa4bfb8db0d)), closes [#1314](https://github.com/mctlhq/mctl-telegram/issues/1314)
+* **pa:** connection store, state machine and scope check ([#1314](https://github.com/mctlhq/mctl-telegram/issues/1314) slice 1) ([520086a](https://github.com/mctlhq/mctl-telegram/commit/520086a943b4ed072c36c5764c776b6bc2467249))
+* **pa:** connector dispatch with pa-job tokens ([#1315](https://github.com/mctlhq/mctl-telegram/issues/1315) slice 2) ([ed730f6](https://github.com/mctlhq/mctl-telegram/commit/ed730f67300d695a2669766909fb4a81e671366b))
+* **pa:** connector dispatch with pa-job tokens ([#1315](https://github.com/mctlhq/mctl-telegram/issues/1315) slice 2) ([b713f06](https://github.com/mctlhq/mctl-telegram/commit/b713f0616f5e77e0443bdd0812b8ded855eb73ca))
+* **pa:** consent prompt and command answers through the outbox ([660c660](https://github.com/mctlhq/mctl-telegram/commit/660c660d5cc24e698617f40b29f1131ec9bbb24b))
+* **pa:** consent, conversation state and provenance ([#1313](https://github.com/mctlhq/mctl-telegram/issues/1313) slice b) ([1b8dfb4](https://github.com/mctlhq/mctl-telegram/commit/1b8dfb4f265a083af35ef05396f53046d54dd628))
+* **pa:** consent, conversation state and provenance ([#1313](https://github.com/mctlhq/mctl-telegram/issues/1313) slice b) ([dbf1019](https://github.com/mctlhq/mctl-telegram/commit/dbf1019a8e839e1056e0b2ef372436db375b9c84))
+* **pa:** conversation-level replies through the outbox ([e6161f2](https://github.com/mctlhq/mctl-telegram/commit/e6161f256745a0f69aab45e2205a8ad9d35cffb3)), closes [#1348](https://github.com/mctlhq/mctl-telegram/issues/1348)
+* **pa:** cookie-free account linking ([#1314](https://github.com/mctlhq/mctl-telegram/issues/1314) slice 2) ([6f37b19](https://github.com/mctlhq/mctl-telegram/commit/6f37b19b588ccef383c837d29ead87aee1e8094a))
+* **pa:** cookie-free account linking ([#1314](https://github.com/mctlhq/mctl-telegram/issues/1314) slice 2) ([56af063](https://github.com/mctlhq/mctl-telegram/commit/56af06392dd5b6c39f137cf5722b06b253594390))
+* **pa:** durable outbox for run-loop replies and notices ([6cc72cf](https://github.com/mctlhq/mctl-telegram/commit/6cc72cf47106641998aa479feacd065df45b4b6a)), closes [#1313](https://github.com/mctlhq/mctl-telegram/issues/1313)
+* **pa:** getWebhookInfo monitor, alerts and setWebhook helper ([82aa6e0](https://github.com/mctlhq/mctl-telegram/commit/82aa6e0acc64bf5594c8134e2b746a207e044c40)), closes [#1313](https://github.com/mctlhq/mctl-telegram/issues/1313)
+* **pa:** linking secrets store and PA users row ([121faef](https://github.com/mctlhq/mctl-telegram/commit/121faef4ef4bc57a467b11ee3d9a43000dc57ccb))
+* **pa:** name Nebius via Cloudflare AI Gateway in the consent text ([8078068](https://github.com/mctlhq/mctl-telegram/commit/80780682bffe97adb79e474066b5b451b9936123))
+* **pa:** output hardening for bot sends ([#1313](https://github.com/mctlhq/mctl-telegram/issues/1313) slice c) ([830e500](https://github.com/mctlhq/mctl-telegram/commit/830e500e2180618bdc40103a97f45719b71b2ddb))
+* **pa:** output hardening for bot sends ([#1313](https://github.com/mctlhq/mctl-telegram/issues/1313) slice c) ([46e47cf](https://github.com/mctlhq/mctl-telegram/commit/46e47cf8231f30de2df3aef3ac17821ca45d046b))
+* **pa:** PA bot webhook ingress and ExecutionContext ([725b466](https://github.com/mctlhq/mctl-telegram/commit/725b466f85d29b07c4cb8b08ab97a544c0d5c2f0)), closes [#1313](https://github.com/mctlhq/mctl-telegram/issues/1313)
+* **pa:** PA bot webhook ingress and ExecutionContext ([#1313](https://github.com/mctlhq/mctl-telegram/issues/1313) slice a) ([0f25952](https://github.com/mctlhq/mctl-telegram/commit/0f25952185f4fd0af96f0e0e62ff07a0a614baba))
+* **pa:** pa-job token, ledger and run-loop routes ([#1313](https://github.com/mctlhq/mctl-telegram/issues/1313) slice d1) ([4d98ce7](https://github.com/mctlhq/mctl-telegram/commit/4d98ce7df90fd2e9fdad59b14cace2ae63d4003d))
+* **pa:** pa-job token, ledger and run-loop routes ([#1313](https://github.com/mctlhq/mctl-telegram/issues/1313) slice d1) ([ae5deca](https://github.com/mctlhq/mctl-telegram/commit/ae5deca95863a03826d0042231267859446edaf6))
+* **pa:** pin drift gauges and alerts ([c6025bc](https://github.com/mctlhq/mctl-telegram/commit/c6025bcbb4037ee0f15ca0eba05d6d985751ecd9)), closes [#1315](https://github.com/mctlhq/mctl-telegram/issues/1315)
+* **pa:** wire the run loop into the server, without tools ([451730e](https://github.com/mctlhq/mctl-telegram/commit/451730eee68b5136415d052eb833414e9d222b29))
+* **pa:** wire the run loop into the server, without tools ([c3ff1a4](https://github.com/mctlhq/mctl-telegram/commit/c3ff1a40a6aa4ee4255f391f04ae4f37d24accab)), closes [#1343](https://github.com/mctlhq/mctl-telegram/issues/1343)
+* **pa:** worker PA mode, webhook monitor and outbox ([#1313](https://github.com/mctlhq/mctl-telegram/issues/1313) slice d2) ([ab409e0](https://github.com/mctlhq/mctl-telegram/commit/ab409e02d3ae2b6100288c6d45a43bbd9882b855))
+* **web:** same-origin chrome scripts, drop script-src unsafe-inline ([c7c3c63](https://github.com/mctlhq/mctl-telegram/commit/c7c3c63f7e27b627bbeb5a3dcb1d50933610ad2f))
+* **web:** serve chrome scripts as same-origin files, drop script unsafe-inline ([c8c2cf5](https://github.com/mctlhq/mctl-telegram/commit/c8c2cf503d480fde01a5689ec428d22365bc5d9d))
+
+
+### Bug Fixes
+
+* **agentpool:** refuse a signing key equal to the shared secret ([c29d1b7](https://github.com/mctlhq/mctl-telegram/commit/c29d1b795b3129bf857b4dc37f0247300316a86f))
+* **agentpool:** sign managed pool tokens with a dedicated key ([3b53dc2](https://github.com/mctlhq/mctl-telegram/commit/3b53dc2d87725be89405b77b6c165d6c472eae64))
+* **agentpool:** sign managed pool tokens with a dedicated key ([dba6e15](https://github.com/mctlhq/mctl-telegram/commit/dba6e150cd3cc99f4b1b8a143286299132bfd711)), closes [#1351](https://github.com/mctlhq/mctl-telegram/issues/1351)
+* **auth:** bound worker-token revocation snapshot age ([8c43d31](https://github.com/mctlhq/mctl-telegram/commit/8c43d31d1dee7bf157a81ccbdc4d88601aa3a92e))
+* **auth:** bound worker-token revocation snapshot age ([da549b9](https://github.com/mctlhq/mctl-telegram/commit/da549b9787c95f79f0f72305b3765b8fbfb55f40))
+* **auth:** count revocation staleness from read start ([5adf87c](https://github.com/mctlhq/mctl-telegram/commit/5adf87cf70dd225a19a1b7f4e3dc1336c912fb53))
+* **auth:** refresh, not refuse, a snapshot that crosses the bound ([9012e04](https://github.com/mctlhq/mctl-telegram/commit/9012e045e6413fbcc434ecb396416083fb3675ca))
+* **auth:** take the bound check's age under the lookup's own lock ([d7a897e](https://github.com/mctlhq/mctl-telegram/commit/d7a897e5ec282605d7e83aec04049a5744f5f84f))
+* **db:** pick the migration dialect from the driver, not a probe ([f4bf56f](https://github.com/mctlhq/mctl-telegram/commit/f4bf56f74de731ab6351e46b81b0abfba4c14294)), closes [#1312](https://github.com/mctlhq/mctl-telegram/issues/1312)
+* **db:** serialise Postgres migrations with an advisory lock ([a76deaf](https://github.com/mctlhq/mctl-telegram/commit/a76deafb9e5112027e747065d86ef4eb0d3b778e)), closes [#1312](https://github.com/mctlhq/mctl-telegram/issues/1312)
+* **oauth:** add per-client scope ceiling for membership scopes ([a9fe5e5](https://github.com/mctlhq/mctl-telegram/commit/a9fe5e5ea91ec2fca362048c8fd6bf11c1cf5538)), closes [#1326](https://github.com/mctlhq/mctl-telegram/issues/1326)
+* **oauth:** log a ceiling refresh grant only once a token is issued ([caa8555](https://github.com/mctlhq/mctl-telegram/commit/caa8555a5507d3eaac1315023ec4851c19d5d652))
+* **oauth:** per-client scope ceiling strips membership scopes ([2b0f14d](https://github.com/mctlhq/mctl-telegram/commit/2b0f14d49d7c3ca66fb170d3f09ba3c68d8fc8d5))
+* **oauth:** stop config from silently dropping a scope ceiling ([998f25a](https://github.com/mctlhq/mctl-telegram/commit/998f25a326e7b8ce0e390a3d209c097936b65454))
+* **pa:** [#1343](https://github.com/mctlhq/mctl-telegram/issues/1343) P3s: misconfig alert, outbox refused, svc host, late listing ([b19ff31](https://github.com/mctlhq/mctl-telegram/commit/b19ff31f0db85175078d0d59bff33929ce79df1c))
+* **pa:** [#1352](https://github.com/mctlhq/mctl-telegram/issues/1352) follow-ups: migrate lock, callback answers, dead buttons ([5df81af](https://github.com/mctlhq/mctl-telegram/commit/5df81af15927bfd2a490a1f57930180169c97077))
+* **pa:** address [#1341](https://github.com/mctlhq/mctl-telegram/issues/1341) review round 2 ([cea04f9](https://github.com/mctlhq/mctl-telegram/commit/cea04f98ef333259b46d8ac0d20a731df282a74c)), closes [#1315](https://github.com/mctlhq/mctl-telegram/issues/1315)
+* **pa:** age pin observations out of every server's gauges ([9021b9d](https://github.com/mctlhq/mctl-telegram/commit/9021b9d4d7242aab8eb8260315f6b2d9ac7e73a3)), closes [#1315](https://github.com/mctlhq/mctl-telegram/issues/1315)
+* **pa:** answer presses, drop dead buttons, count reused update ids ([5ea1305](https://github.com/mctlhq/mctl-telegram/commit/5ea1305572ad6ed8edc656a984eb8a022536afa2)), closes [#1312](https://github.com/mctlhq/mctl-telegram/issues/1312)
+* **pa:** authorize a late listing call against the newer cached listing ([d38c6b3](https://github.com/mctlhq/mctl-telegram/commit/d38c6b356fa09445709467735800be4159c54e3a))
+* **pa:** back off failing PA jobs so one principal cannot block the queue ([1f0da24](https://github.com/mctlhq/mctl-telegram/commit/1f0da24bc6ad7025289254aa691f8dd035863091)), closes [#1313](https://github.com/mctlhq/mctl-telegram/issues/1313)
+* **pa:** backfill a legacy tg row in EnsurePAUser ([31dc1a8](https://github.com/mctlhq/mctl-telegram/commit/31dc1a8609b5f9b4cd7ecc02851ae18d7a7c291f))
+* **pa:** bound Bot API client and enforce trigger hiding by AST ([ee440dd](https://github.com/mctlhq/mctl-telegram/commit/ee440ddd12c71f0823175420e6329a19efb19fb9)), closes [#1313](https://github.com/mctlhq/mctl-telegram/issues/1313)
+* **pa:** bound refresh by one lease clock and close [#1332](https://github.com/mctlhq/mctl-telegram/issues/1332) gaps ([07843a8](https://github.com/mctlhq/mctl-telegram/commit/07843a8ac3c57d5869d614d304faa82ce35ccaf1))
+* **pa:** bound sealed fragments, consent only via button, wider purge ([ba46dcf](https://github.com/mctlhq/mctl-telegram/commit/ba46dcf752ab3b0e0f459e82442e252a10e3c1f8))
+* **pa:** bound security refusals and order the listing cache by start ([5f41111](https://github.com/mctlhq/mctl-telegram/commit/5f411117c8f858e5c990dfa378f234f169332f63))
+* **pa:** check a prompt's button only when parts remain to send ([f0c6fb8](https://github.com/mctlhq/mctl-telegram/commit/f0c6fb8db1dce85c94515d3751647a628e754d35)), closes [#1312](https://github.com/mctlhq/mctl-telegram/issues/1312)
+* **pa:** close [#1331](https://github.com/mctlhq/mctl-telegram/issues/1331) review follow-ups ([9d91e0b](https://github.com/mctlhq/mctl-telegram/commit/9d91e0bba9c445dcb8147eae9d3ac95d1753bf14)), closes [#1315](https://github.com/mctlhq/mctl-telegram/issues/1315)
+* **pa:** close egress guard gaps and tighten config edges ([0bef97e](https://github.com/mctlhq/mctl-telegram/commit/0bef97edc12c254c10c1a2886ab3a3a1583c0657))
+* **pa:** close independent-review P3s on the ingress slice ([a07e1fc](https://github.com/mctlhq/mctl-telegram/commit/a07e1fc7294edeef01a14854e45c064a89361c1d)), closes [#1313](https://github.com/mctlhq/mctl-telegram/issues/1313)
+* **pa:** count only principal refusals as outbox refused ([953b7a9](https://github.com/mctlhq/mctl-telegram/commit/953b7a934db134ce9f8df810d992504a37ab177e))
+* **pa:** detach refresh from callers and bound it by the lease ([1d878bc](https://github.com/mctlhq/mctl-telegram/commit/1d878bc60de506613715da2cebb57bf6c39d222b))
+* **pa:** detect links by Telegram's own boundaries, not by label shape ([222fb00](https://github.com/mctlhq/mctl-telegram/commit/222fb0041d9207f9bf0d71694a7a9b526e5b389e)), closes [#1313](https://github.com/mctlhq/mctl-telegram/issues/1313)
+* **pa:** gate the listing-unknown alert on failed listing attempts ([691de1f](https://github.com/mctlhq/mctl-telegram/commit/691de1f279822e45b8b53d37f42bebbfe4cf4916)), closes [#1315](https://github.com/mctlhq/mctl-telegram/issues/1315)
+* **pa:** guard the misconfig alert and narrow refused 403s ([79933c6](https://github.com/mctlhq/mctl-telegram/commit/79933c616bfef08fe7c30e144360745f094d2bc5))
+* **pa:** keep fresh drift through failures, bound audit by reason ([97fd6b8](https://github.com/mctlhq/mctl-telegram/commit/97fd6b85885dfbbcbd7ac33bf33fe079b7afb25f)), closes [#1315](https://github.com/mctlhq/mctl-telegram/issues/1315)
+* **pa:** keep result and refusal audit rows on a cancelled run ([e174f92](https://github.com/mctlhq/mctl-telegram/commit/e174f92c65a651a4dc05deb4d300b07a992c62a1))
+* **pa:** keep store faults from counting against a PA job ([b15f59f](https://github.com/mctlhq/mctl-telegram/commit/b15f59fd9a468ecc608e617223744e18440ac7ea)), closes [#1313](https://github.com/mctlhq/mctl-telegram/issues/1313)
+* **pa:** make defang idempotent and cap a reply at eight messages ([45418bc](https://github.com/mctlhq/mctl-telegram/commit/45418bce2883ca41495daf6dfbceac63a9bd249a)), closes [#1313](https://github.com/mctlhq/mctl-telegram/issues/1313)
+* **pa:** match commands case-insensitively ([d83b751](https://github.com/mctlhq/mctl-telegram/commit/d83b751635282cfe0e7774fa168d1c91b6196e5e))
+* **pa:** normalise taint before the connection refusal ([75ac0c0](https://github.com/mctlhq/mctl-telegram/commit/75ac0c027c7686dc7d391a9a916947e22dc2cd18))
+* **pa:** one clock for pending stamps and the stale sweep ([b229afd](https://github.com/mctlhq/mctl-telegram/commit/b229afd1e8e9456d3e328b35386af706dc6916f4))
+* **pa:** output follow-ups: safetext leaf package, idempotent Render ([7c5a21d](https://github.com/mctlhq/mctl-telegram/commit/7c5a21dc91f38cd8b6db1c274e222d13ac4f93d7))
+* **pa:** page webhook misconfiguration only after two bad checks ([07493a2](https://github.com/mctlhq/mctl-telegram/commit/07493a2ad2279422f0a4335f64d71edfae4eaa9f))
+* **pa:** rebuild an SQLite outbox from any earlier shape; runbook ([ed6f535](https://github.com/mctlhq/mctl-telegram/commit/ed6f53517e06d8dec90e2cadc7dd036164cf8514)), closes [#1348](https://github.com/mctlhq/mctl-telegram/issues/1348)
+* **pa:** reply body cap, cost cap, eager /new cancel, budget checks ([a05026d](https://github.com/mctlhq/mctl-telegram/commit/a05026df2523acc01753a9edf846179a2a00f714))
+* **pa:** require a dedicated signing key and test the job-token path ([8d75933](https://github.com/mctlhq/mctl-telegram/commit/8d75933aa2820d3781fa36d2725b5a26fc55526d))
+* **pa:** resolve PA users first and sweep stranded pending rows ([c7a8da5](https://github.com/mctlhq/mctl-telegram/commit/c7a8da57f9b36de46979a4339f9a9da0275fb9ea))
+* **pa:** send-once outbox, after-response delivery, review round 2 ([bb92823](https://github.com/mctlhq/mctl-telegram/commit/bb92823f77c93b55fc38ffc1ec5c65868ca0b76d))
+* **pa:** serialise a principal's updates; complete /new; unknown buttons ([45b105a](https://github.com/mctlhq/mctl-telegram/commit/45b105ad5ca40f2339f8a17175f49443f28113ee))
+* **pa:** sweep egress guard over every client-building package ([7a47a37](https://github.com/mctlhq/mctl-telegram/commit/7a47a37b8c6562f6444832c76f558beed3c6e534))
+* **pa:** sweep stale lock rows outside the sweep transaction ([75bdb0b](https://github.com/mctlhq/mctl-telegram/commit/75bdb0b95b2c5cee8eda0e60a4b7eec0b48aa54e))
+* **seo:** optimize landing page title and meta description ([e45f07c](https://github.com/mctlhq/mctl-telegram/commit/e45f07c78af63d146b581ec73eba5ab023b2f485))
+* **seo:** optimize landing page title and meta description ([f45fc21](https://github.com/mctlhq/mctl-telegram/commit/f45fc21970a8b4d652aa80026ba8263fd884c041))
+
 ## [0.139.5](https://github.com/mctlhq/mctl-telegram/compare/0.139.4...0.139.5) (2026-11-18)
 
 

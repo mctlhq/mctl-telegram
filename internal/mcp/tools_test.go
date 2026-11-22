@@ -14,6 +14,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 	"github.com/mctlhq/mctl-telegram/internal/telegram"
 )
 
@@ -1803,5 +1804,49 @@ func TestCleanupTools_NotRefusedBySendCap(t *testing.T) {
 		if limited != c.wantLimit {
 			t.Errorf("%s %v: rate-limited=%v, want %v (%s)", c.tool, c.args, limited, c.wantLimit, contentText(res))
 		}
+	}
+}
+
+// TestToolDelete_RefusedByPAConnection: a deletion refused because a linked
+// PA service still holds provider tokens returns the user message, not a
+// store error, and deletes nothing (#1338).
+func TestToolDelete_RefusedByPAConnection(t *testing.T) {
+	ctx := context.Background()
+	store := newToolsTestStore(t)
+	const aliceTGID int64 = 500100199
+	uid := seedAccountWithSession(t, store, aliceTGID, false)
+	a, err := store.AdmitPAConnection(ctx, aliceTGID)
+	if err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+	const pac = "pac_mcp_delete"
+	if err := store.CreatePAConnection(ctx, connection.Connection{
+		ID: pac, Principal: aliceTGID, Server: connection.ServerTG, State: connection.StatePendingLink, AuthorityRevision: 1,
+	}, connection.Sealed{KEKID: "test", WrappedDEK: []byte("wrapped")}, a); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	for _, tr := range []connection.Transition{
+		{From: connection.StatePendingLink, To: connection.StatePendingOAuth, ExpectRevision: 1},
+		{From: connection.StatePendingOAuth, To: connection.StatePendingReturn, ExpectRevision: 2, SealedCode: []byte("code")},
+		{From: connection.StatePendingReturn, To: connection.StatePendingConfirm, ExpectRevision: 3,
+			AccountID: "acct", GrantedScope: "telegram:dialogs:read", SealedTokens: []byte("tokens")},
+	} {
+		if _, err := store.TransitionPAConnection(ctx, aliceTGID, pac, tr); err != nil {
+			t.Fatalf("%s -> %s: %v", tr.From, tr.To, err)
+		}
+	}
+	srv := &Server{Store: store, Pool: telegram.NewClientPool(0, "", 0, store), DemoReviewerTGID: guardReviewerTGID}
+	ctx = auth.With(ctx, &auth.Identity{UserID: uid, TelegramID: aliceTGID, Scopes: []string{"telegram:messages:read", "account:manage"}})
+
+	_, handler := srv.toolDeleteAccount()
+	res, err := handler(ctx, mcplib.CallToolRequest{Params: mcplib.CallToolParams{Name: "delete_telegram_account"}})
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !res.IsError || contentText(res) != db.PAConnectionsNeedRevocationMessage {
+		t.Fatalf("result %q (error=%v), want the user message", contentText(res), res.IsError)
+	}
+	if n := totalAccountCount(t, store, uid); n == 0 {
+		t.Fatal("the account was deleted despite the refusal")
 	}
 }

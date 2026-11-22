@@ -104,7 +104,7 @@ var defs = `
 {{if .NoIndex}}<meta name="robots" content="noindex, follow">
 {{else}}<meta name="robots" content="max-image-preview:large, max-snippet:-1, max-video-preview:-1">
 {{end}}<title>{{.Title}}</title>
-<meta name="description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarize unread chats, draft replies, and search your history — no extra apps.{{end}}">
+<meta name="description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, and AI agents via MCP. Search chat history, summarize unread channels, and draft replies safely.{{end}}">
 {{if .CanonicalPath}}<link rel="canonical" href="{{.PublicBaseURL}}{{.CanonicalPath}}">
 {{end}}` + FaviconLink + `
 <link rel="icon" href="/favicon.ico" sizes="any">
@@ -112,7 +112,7 @@ var defs = `
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="MCTL Assistant">
 <meta property="og:title" content="{{.Title}}">
-<meta property="og:description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarize unread chats, draft replies, and search your history — no extra apps.{{end}}">
+<meta property="og:description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, and AI agents via MCP. Search chat history, summarize unread channels, and draft replies safely.{{end}}">
 <meta property="og:url" content="{{.PublicBaseURL}}{{if .CanonicalPath}}{{.CanonicalPath}}{{else}}/{{end}}">
 <meta property="og:image" content="{{.PublicBaseURL}}/og.png?v=3">
 <meta property="og:image:width" content="1200">
@@ -120,7 +120,7 @@ var defs = `
 <meta property="og:image:type" content="image/png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="{{.Title}}">
-<meta name="twitter:description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, or any AI assistant. Summarize unread chats, draft replies, and search your history — no extra apps.{{end}}">
+<meta name="twitter:description" content="{{if .Description}}{{.Description}}{{else}}Connect Telegram to Claude, ChatGPT, and AI agents via MCP. Search chat history, summarize unread channels, and draft replies safely.{{end}}">
 <meta name="twitter:image" content="{{.PublicBaseURL}}/og.png?v=3">
 {{if eq .CanonicalPath "/"}}<script type="application/ld+json">
 {

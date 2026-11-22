@@ -69,6 +69,9 @@ func paJobsSchema(pg bool) []string {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_pa_jobs_queued ON pa_jobs(principal) WHERE status IN ('pending', 'held')`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_pa_jobs_running ON pa_jobs(principal) WHERE status = 'claimed'`,
 		`CREATE INDEX IF NOT EXISTS idx_pa_jobs_status ON pa_jobs(status, created_at_ms)`,
+		// Every job of a principal, finished ones included (account
+		// deletion); the unique indexes above cover live jobs only.
+		`CREATE INDEX IF NOT EXISTS idx_pa_jobs_principal ON pa_jobs(principal)`,
 		`CREATE TABLE IF NOT EXISTS pa_usage (
 			id ` + idT + `,
 			job_id ` + intT + ` NOT NULL,
@@ -168,7 +171,7 @@ func (s *Store) AdmitPAMessage(ctx context.Context, tx *sql.Tx, principal int64,
 			return jobs.RateDecision{}, fmt.Errorf("pa rate: count: %w", err)
 		}
 	}
-	return jobs.RateDecision{Allowed: count <= int64(limit), Notify: count == int64(limit)+1}, nil
+	return jobs.RateDecision{Allowed: count <= int64(limit), Notify: count == int64(limit)+1, First: count == 1}, nil
 }
 
 // EnqueuePAJob implements jobs.Store. A queued job of the same conversation
@@ -583,8 +586,10 @@ func (s *Store) claimPicked(ctx context.Context, req jobs.ClaimRequest, pg bool,
 		// Consent still stands, the conversation does not: the request
 		// (perhaps held for days) is dropped, and the principal is told,
 		// through the outbox in this transaction.
-		if errors.Is(err, jobs.ErrConversationGone) {
-			res.Notices = []jobs.Notice{{Principal: j.Principal, JobID: j.ID, Kind: jobs.NoticeDropped}}
+		// A disabled or no longer allowed principal is told too
+		// (jobs.NoticeFor).
+		if kind, owed := jobs.NoticeFor(err); owed {
+			res.Notices = []jobs.Notice{{Principal: j.Principal, JobID: j.ID, Kind: kind}}
 			if err := enqueuePANotice(ctx, tx, res.Notices[0], nowMS); err != nil {
 				return jobs.ClaimResult{}, fmt.Errorf("claim pa job: %w", err)
 			}
@@ -818,10 +823,11 @@ func runGate(ctx context.Context, tx *sql.Tx, gate jobs.Gate, j jobs.Job, now ti
 	if cerr := cancelOne(ctx, tx, j, now.UnixMilli()); cerr != nil {
 		return cerr
 	}
-	if errors.Is(err, jobs.ErrConversationGone) {
-		// The request is dropped and the principal is owed a notice: it is
-		// written with the cancellation, so it cannot be lost after it.
-		if cerr := enqueuePANotice(ctx, tx, jobs.Notice{Principal: j.Principal, JobID: j.ID, Kind: jobs.NoticeDropped},
+	if kind, owed := jobs.NoticeFor(err); owed {
+		// The request is dropped (or the principal stopped) and the
+		// principal is owed a notice: it is written with the cancellation,
+		// so it cannot be lost after it.
+		if cerr := enqueuePANotice(ctx, tx, jobs.Notice{Principal: j.Principal, JobID: j.ID, Kind: kind},
 			now.UnixMilli()); cerr != nil {
 			return cerr
 		}
@@ -830,8 +836,10 @@ func runGate(ctx context.Context, tx *sql.Tx, gate jobs.Gate, j jobs.Job, now ti
 		return fmt.Errorf("cancel pa job: commit: %w", cerr)
 	}
 	// The gate's own error (it wraps ErrGone): the caller can tell a
-	// dropped conversation (ErrConversationGone), owed a notice, from a
-	// withdrawn consent. Only the call that cancelled sees it.
+	// dropped conversation (ErrConversationGone) or a stopped principal
+	// (ErrPrincipalDisabled, ErrPrincipalNotAllowed), owed a notice
+	// (jobs.NoticeFor), from a withdrawn consent. Only the call that
+	// cancelled sees it.
 	return err
 }
 
@@ -1084,6 +1092,30 @@ func (s *Store) FinishPAJob(ctx context.Context, ref jobs.Ref, req jobs.FinishRe
 		return jobs.Job{}, fmt.Errorf("finish pa job: commit: %w", err)
 	}
 	j.Status = jobs.StatusDone
+	return j, nil
+}
+
+// RecordPAToolResult implements jobs.Store: the job must still be running
+// under ref with the gate passing, and req.Record stores the result in the
+// same transaction (#1321). Nothing is committed unless all of it holds.
+func (s *Store) RecordPAToolResult(ctx context.Context, ref jobs.Ref, req jobs.ToolResultRequest) (jobs.Job, error) {
+	if !ref.Valid() || req.Record == nil {
+		return jobs.Job{}, fmt.Errorf("%w: tool result", jobs.ErrInvalid)
+	}
+	tx, j, err := s.beginRunning(ctx, ref, req.Now)
+	if err != nil {
+		return jobs.Job{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := runGate(ctx, tx, req.Gate, j, req.Now); err != nil {
+		return jobs.Job{}, err
+	}
+	if err := req.Record(ctx, tx, j); err != nil {
+		return jobs.Job{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return jobs.Job{}, fmt.Errorf("record pa tool result: commit: %w", err)
+	}
 	return j, nil
 }
 

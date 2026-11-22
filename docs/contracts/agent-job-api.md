@@ -57,7 +57,7 @@ A request value of zero or absent means "not named" and is not compared; a job t
 | `POST` | `/leads` | `save_job_lead` | Create or update a lead. |
 | `POST` | `/actions/request_owner_approval` | `request_owner_approval` | Ask the owner to decide. |
 | `POST` | `/notify/summary` | `send_owner_summary` | Tell the owner something. |
-| `POST` | `/autopilot/pause` | `pause_autopilot` | Pause or resume autopilot. |
+| `POST` | `/autopilot/pause` | `pause_autopilot` | Pause autopilot (resume is refused, see below). |
 | `POST` | `/jobs/claim` | none | Long-poll claim of the next job. |
 | `POST` | `/jobs/{id}/complete` | `complete_agent_job` | Finish a job. |
 | `POST` | `/jobs/{id}/cost` | none | Worker-only cost report. |
@@ -111,7 +111,7 @@ Claim errors: `503` `assistant disabled in the registry`, `assistant registry un
 - `POST /actions/propose_reply`: body `{"conversation_id","job_id","attempt","intent","text"}`. `text` is required. Policy runs; the response is `200 {"action_id","decision","reasons","status","approval_code"}`, where `decision` is `allow`, `require_approval` or `deny` and `status` is `approved`, `pending_approval` or `denied`. A denial is a `200` with `decision: deny` and its reasons, not an error status. The same job proposing again returns the stored action (idempotent per job and action type).
 - `POST /leads`: body `{"conversation_id","lead_id","job_id","attempt","company","role","recruiter_name","recruiter_tg_id","compensation","status","detail"}`; `200 {"lead_id"}`.
 - `POST /actions/request_owner_approval` and `POST /notify/summary`: body `{"conversation_id","job_id","attempt","intent","text"}`; `text` is required. `200 {"action_id","notification_id","decision"}`, or `200 {"suppressed":true,"reason"}` for a repeated manipulation alert within its window. An `intent` of `assistant_manipulation` on a summary is replaced server-side by a fixed notice.
-- `POST /autopilot/pause`: body `{"paused": bool}`; an empty body or omitted field means `true`. `200 {"autopilot_paused"}`.
+- `POST /autopilot/pause`: body `{"paused": bool}`; an empty body or omitted field means `true`. `200 {"autopilot_paused"}`. `{"paused": false}` is refused with `403`: resuming is the owner's `/mctl unpause`, and the refused attempt is audited as a denied `resume_autopilot`.
 - `POST /jobs/{id}/complete`: body `{"attempt","status","note","result_action_id","result_lead_id"}`. `status` is `completed`, `failed` or `ignored`. `completed` must link an exact persisted result (`result_action_id` or `result_lead_id`) that belongs to this job and account. `200 {"completed":true}`.
 - `POST /jobs/{id}/cost`: body `{"attempt","cost_usd"}`; `attempt` must be positive and `cost_usd` not negative. `200 {"recorded":true}`. Worker-only: it is not a tool and the model must not be able to call it.
 - `POST /jobs/{id}/retry`: body `{"attempt","outcome"}`; `outcome` is `invocation_failed` or `model_exited_without_completion` (a fixed vocabulary, never free text) and `attempt` must be positive for an account token (a job token supplies it). `200 {"status"}`. `pending` means the job was requeued after 5 s (first failed attempt) or 10 s (second); the attempt counts as failed. `processing` means nothing was changed and the job is left to the visibility sweeper: the failure is the third or later, the attempt is the last one, or the account switched runtime since the claim. This route never dead-letters a job. `409` when the claim is already gone (completed, requeued, re-claimed). Worker-only: not a tool.

@@ -445,12 +445,13 @@ func main() {
 	// Communication-agent notifier: delivers pending owner_notifications
 	// (summaries, approval requests) to Saved Messages.
 	go sweeper.AgentNotifier(ctx, agentNotifier)
-	// Personal Assistant state (issue #1313): purge unmarked fragments, then
-	// the hourly retention sweep. Nothing at all unless PA_ENABLED is true.
-	if _, err := startPAState(ctx, cfg, store); err != nil {
-		slog.Error("pa state", "err", err)
-		os.Exit(1)
-	}
+	// Personal Assistant principal lock rows (#1318): swept whether or not
+	// PA_ENABLED is on, since an account deletion can leave one behind as
+	// its fence. The only sweep of that table; the PA state sweep leaves it
+	// alone.
+	startPALockSweep(ctx, store)
+	// Personal Assistant state (issue #1313) starts after buildPA below, so
+	// the linking sweep can be given the linking flow it sweeps.
 	// PA webhook monitor (T4): reads getWebhookInfo every 5 minutes and
 	// exports what it saw; also only when PA_ENABLED is true.
 	if _, err := startPAWebhookMonitor(ctx, cfg, m, ""); err != nil {
@@ -547,8 +548,11 @@ func main() {
 	// Hoisted above the local-jwt block below (selectProvider depends only on
 	// cfg, store and this cache) so `provider` exists in time to be passed as
 	// web.ConnectConfig.Identifier when constructing the connect server.
-	workerTokenRevocationCache := localjwt.NewRevocationCache(store, cfg.WorkerTokenRevocationCacheTTL)
-	workerTokenRevocationCache.SetRefreshErrorHook(m.WorkerTokenRevocationRefreshFailuresTotal.Inc)
+	workerTokenRevocationCache, err := startWorkerTokenRevocation(ctx, store, cfg.WorkerTokenRevocationCacheTTL, m, nil)
+	if err != nil {
+		slog.Error("worker token revocation cache", "err", err)
+		os.Exit(1)
+	}
 
 	provider, err := selectProvider(cfg, store, workerTokenRevocationCache)
 	if err != nil {
@@ -926,13 +930,26 @@ func main() {
 	mountBotStartBridge(mux, store, m, bridgeAuth)
 
 	// Personal Assistant bot (issue #1313, wired by #1343): the webhook and
-	// the run-loop routes, plus the outbox retry loop. Nothing is built
-	// unless PA_ENABLED is explicitly true: with it off no PA route exists.
-	paRT, err := buildPA(cfg, store, workerTokenRevocationCache, m)
+	// the run-loop routes, plus the outbox retry loop; with a PA server
+	// enabled also the tools runtime (#1318 slice C2): account linking, its
+	// bot commands and the connector dispatcher. Nothing is built unless
+	// PA_ENABLED is explicitly true: with it off no PA route exists.
+	paRT, err := buildPA(ctx, cfg, store, workerTokenRevocationCache, m)
 	if err != nil {
 		slog.Error("pa runtime", "err", err)
 		os.Exit(1)
 	}
+	// PA state: purge unmarked fragments, then the hourly retention sweep,
+	// and the linking sweep when the linking flow runs (paRT.Links() is nil
+	// otherwise). Nothing at all unless PA_ENABLED is true. It runs before
+	// the server serves, so no update meets unmarked state.
+	if _, err := startPAState(ctx, cfg, store, paRT.Links()); err != nil {
+		slog.Error("pa state", "err", err)
+		os.Exit(1)
+	}
+	// Account deletion revokes the PA's provider tokens first when the
+	// tools runtime holds any (#1389).
+	wirePARevokers(paRT, accountHandlers, mcpSrv)
 	paRT.Mount(mux)
 	paRT.Start(ctx)
 

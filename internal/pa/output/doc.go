@@ -24,7 +24,11 @@
 //   - Sender sends plain text only (no parse_mode, no entities), with link
 //     previews disabled on every message, and inline keyboards made only of
 //     server-authored callback buttons. A URL, login, web app or inline
-//     query button cannot be expressed.
+//     query button cannot be expressed in a Keyboard.
+//   - The one exception is SendWebApp: a single web_app button whose URL
+//     must be exactly the configured linking Mini App URL (PA_APP_URL) with
+//     a link token, for /connect (threat model T1 step 1). Any other URL is
+//     refused before anything is sent.
 //
 // A static test (TestS1O1_SenderIsTheOnlyBotAPICallSite) keeps every Bot API
 // send method and raw Bot API URL under internal/pa inside sender.go.

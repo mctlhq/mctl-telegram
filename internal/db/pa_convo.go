@@ -33,7 +33,7 @@ var _ convo.Store = (*Store)(nil)
 //   - pa_conversations: expires_at_ms is created_at_ms + TTL and never
 //     moves. closed_at_ms > 0 means /new closed it; it is never loaded
 //     again. The partial unique index allows one open conversation per
-//     principal.
+//     principal. tainted (added by migratePAConvo) only ever rises.
 //   - pa_fragments: sealed text with its kind and mark in clear. provenance
 //     has no CHECK constraint on purpose: the Go layer refuses to write an
 //     unknown mark, and an unmarked row that exists anyway (older state, a
@@ -63,6 +63,9 @@ func paConvoSchema(pg bool) []string {
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_pa_conversations_open ON pa_conversations(principal) WHERE closed_at_ms = 0`,
 		`CREATE INDEX IF NOT EXISTS idx_pa_conversations_expiry ON pa_conversations(expires_at_ms)`,
+		// Every conversation of a principal, closed ones included (/forget,
+		// account deletion); idx_pa_conversations_open covers open ones only.
+		`CREATE INDEX IF NOT EXISTS idx_pa_conversations_principal ON pa_conversations(principal)`,
 		`CREATE TABLE IF NOT EXISTS pa_fragments (
 			conversation_id TEXT NOT NULL,
 			seq ` + intT + ` NOT NULL,
@@ -81,6 +84,14 @@ func paConvoSchema(pg bool) []string {
 			principal ` + intT + ` PRIMARY KEY,
 			locked_at_ms ` + intT + ` NOT NULL
 		)`,
+		// Admin per-principal disable (T11, S1-F4; pa_principal_disable.go).
+		// Not purged with the account, so deleting it cannot clear a disable.
+		`CREATE TABLE IF NOT EXISTS pa_principal_disables (
+			principal ` + intT + ` PRIMARY KEY,
+			disabled_at_ms ` + intT + ` NOT NULL,
+			disabled_by ` + intT + ` NOT NULL,
+			reason TEXT NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS pa_callbacks (
 			principal ` + intT + ` NOT NULL,
 			id TEXT NOT NULL,
@@ -98,7 +109,20 @@ func migratePAConvo(ctx context.Context, dbConn migrateDB, pg bool) error {
 			return fmt.Errorf("migrate pa conversation state: %w", err)
 		}
 	}
-	return nil
+	// purged_at_ms: when an account deletion last purged the principal
+	// (purgePAPrincipals), 0 if never. It fences a Begin admitted before the
+	// deletion (CreatePAConnection, #1338).
+	if err := addColumnIfMissing(ctx, dbConn, pg, "pa_principal_locks", "purged_at_ms",
+		"BIGINT NOT NULL DEFAULT 0", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	// tainted: 1 once external content entered the conversation (T5,
+	// #1321). The default is 1, so every row that existed before the column
+	// (whose history this build cannot prove clean) and any insert that
+	// does not name the column is tainted; OpenPAConversation alone writes
+	// a clean row, and only when it creates one.
+	return addColumnIfMissing(ctx, dbConn, pg, "pa_conversations", "tainted",
+		"INTEGER NOT NULL DEFAULT 1", "INTEGER NOT NULL DEFAULT 1")
 }
 
 func unreadable(op string, err error) error {
@@ -199,9 +223,11 @@ func (s *Store) OpenPAConversation(ctx context.Context, tx *sql.Tx, principal in
 		nowMS, principal); err != nil {
 		return convo.Conversation{}, fmt.Errorf("open pa conversation: close expired: %w", err)
 	}
+	// A new row starts clean. On a conflict the open row is kept as it
+	// is, its taint included: nothing here lowers a flag.
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO pa_conversations(id, principal, created_at_ms, expires_at_ms, closed_at_ms)
-		 VALUES($1, $2, $3, $4, 0)
+		`INSERT INTO pa_conversations(id, principal, created_at_ms, expires_at_ms, closed_at_ms, tainted)
+		 VALUES($1, $2, $3, $4, 0, 0)
 		 ON CONFLICT (principal) WHERE closed_at_ms = 0 DO NOTHING`,
 		newID, principal, nowMS, now.Add(ttl).UnixMilli()); err != nil {
 		return convo.Conversation{}, fmt.Errorf("open pa conversation: insert: %w", err)
@@ -285,7 +311,27 @@ func (s *Store) ForgetPAConversations(ctx context.Context, tx *sql.Tx, principal
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pa_conversations WHERE principal = $1`, principal); err != nil {
 		return fmt.Errorf("forget pa conversations: %w", err)
 	}
+	// A link the principal started before /forget or /consent withdraw
+	// must not finish after it: with its link token, state and confirm
+	// nonce gone, the Mini App, the callback and the confirm card are all
+	// refused. The connection rows are failed, and their tokens revoked,
+	// after the commit (pa.LinkAction.Retire) and, failing that, by the
+	// linking sweep once they are PendingMaxAge old.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pa_link_secrets WHERE principal = $1`, principal); err != nil {
+		return fmt.Errorf("forget pa conversations: link secrets: %w", err)
+	}
 	return nil
+}
+
+// ReadPAConsent is GetPAConsent in its own read transaction, for a caller
+// outside an update's transaction (the linking confirm press).
+func (s *Store) ReadPAConsent(ctx context.Context, principal int64) (convo.ConsentRecord, error) {
+	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return convo.ConsentRecord{}, storeFault("consent", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	return s.GetPAConsent(ctx, tx, principal)
 }
 
 // NextPAFragmentSeq implements convo.Store. The (conversation_id, seq)
@@ -336,7 +382,46 @@ func (s *Store) AppendPAFragment(ctx context.Context, tx *sql.Tx, f convo.Sealed
 	if n != 1 {
 		return convo.ErrNotFound
 	}
+	if !convo.Taints(f.Kind, f.Provenance) {
+		return nil
+	}
+	// The flag rises in the fragment's transaction: external content is
+	// never stored without it. An UPDATE that touches no row means the
+	// conversation was not observed, and the fragment is refused with it.
+	res, err = tx.ExecContext(ctx,
+		`UPDATE pa_conversations SET tainted = 1 WHERE id = $1 AND principal = $2`,
+		f.ConversationID, f.Principal)
+	if err != nil {
+		return fmt.Errorf("append pa fragment: taint: %w", err)
+	}
+	if n, err = res.RowsAffected(); err != nil {
+		return fmt.Errorf("append pa fragment: taint: rows affected: %w", err)
+	}
+	if n != 1 {
+		return fmt.Errorf("%w: append pa fragment: taint not recorded", convo.ErrUnreadable)
+	}
 	return nil
+}
+
+// ReadPAConversationTaint implements convo.Store. Only a row read with a
+// stored 0 is clean; any other value, a missing row and every failed
+// read are tainted (I9, S2-I10). The row is read whether or not it is
+// still open: a closed or expired conversation keeps the flag it had.
+func (s *Store) ReadPAConversationTaint(ctx context.Context, principal int64, conversationID string) (bool, error) {
+	if principal <= 0 || conversationID == "" {
+		return true, fmt.Errorf("%w: conversation taint", convo.ErrInvalid)
+	}
+	var tainted int64
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT tainted FROM pa_conversations WHERE id = $1 AND principal = $2`,
+		conversationID, principal).Scan(&tainted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, convo.ErrNotFound
+	}
+	if err != nil {
+		return true, rowRead("conversation taint", err)
+	}
+	return tainted != 0, nil
 }
 
 // LoadPAFragments implements convo.Store.
@@ -466,19 +551,36 @@ func (s *Store) PurgeUnmarkedPAState(ctx context.Context) (int64, error) {
 	return n, nil
 }
 
+// SweepPAPrincipalLocks deletes every principal lock row unused since
+// before, and returns how many it deleted. It is the only statement that
+// sweeps pa_principal_locks, and sweeper.PALocks runs it whatever
+// PA_ENABLED says (#1318): an account deletion raises the deletion mark on
+// an existing row and keeps the row (purgePAPrincipals), so a PA turned off
+// within pa.UpdatesRetention of a deletion would otherwise leave the row,
+// which carries the principal, forever.
+//
+// One autocommit statement, never inside a transaction that holds other PA
+// rows: a handler takes its principal's lock row before touching
+// conversations, so a sweep that held conversation rows and then waited for
+// a lock row could deadlock with it. Lock rows carry no state; one unused
+// for the dedup window goes.
+func (s *Store) SweepPAPrincipalLocks(ctx context.Context, before time.Time) (int64, error) {
+	res, err := s.DB.ExecContext(ctx, `DELETE FROM pa_principal_locks WHERE locked_at_ms < $1`, before.UnixMilli())
+	if err != nil {
+		return 0, fmt.Errorf("sweep pa principal locks: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("sweep pa principal locks: rows affected: %w", err)
+	}
+	return n, nil
+}
+
 // SweepPAState implements convo.Store. One transaction, so a conversation
-// and its fragments go together.
+// and its fragments go together. It does not sweep pa_principal_locks:
+// SweepPAPrincipalLocks owns that statement, and runs with the PA off too.
 func (s *Store) SweepPAState(ctx context.Context, now, updatesBefore time.Time) (convo.SweepResult, error) {
 	var r convo.SweepResult
-	// Stale lock rows go first, in their own statement and transaction: a
-	// handler takes its principal's lock row before touching conversations,
-	// so a sweep that held conversation rows and then waited for a lock row
-	// could deadlock with it. The sweep transaction below holds no lock row.
-	// Lock rows carry no state; one unused for the dedup window goes.
-	if _, err := s.DB.ExecContext(ctx, `DELETE FROM pa_principal_locks WHERE locked_at_ms < $1`,
-		updatesBefore.UnixMilli()); err != nil {
-		return r, fmt.Errorf("sweep pa state: locks: %w", err)
-	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return r, fmt.Errorf("sweep pa state: begin: %w", err)
@@ -506,6 +608,10 @@ func (s *Store) SweepPAState(ctx context.Context, now, updatesBefore time.Time) 
 		// Outbox rows that will not be sent again (#1313 slice d2). A
 		// pending or sending row is kept whatever its age.
 		{new(int64), `DELETE FROM pa_outbox WHERE status NOT IN ('pending', 'sending') AND updated_at_ms < $1`, []any{updatesBefore.UnixMilli()}},
+		// Linking secrets past PALinkSecretRetention after their expiry,
+		// consumed or not (#1338). A row that has not expired is kept, so
+		// a live secret is never deleted under its holder.
+		{&r.LinkSecrets, `DELETE FROM pa_link_secrets WHERE expires_at_ms < $1`, []any{now.Add(-PALinkSecretRetention).UnixMilli()}},
 	}
 	for _, st := range steps {
 		res, err := tx.ExecContext(ctx, st.q, st.args...)

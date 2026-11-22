@@ -376,6 +376,16 @@
       "reason": "Admin-only grant/revoke of the client access tier; refused upstream without admin:users."
     },
     {
+      "name": "set_pa_principal_disabled",
+      "enabled": false,
+      "reason": "Admin-only Personal Assistant kill switch for one user (mctlhq/mctl-telegram#1318). The PA is a preview behind PA_ENABLED, so the tool stays off the shared Cloudflare portal surface; operators call it on the tg server directly. upstream_gates is intentionally omitted while disabled."
+    },
+    {
+      "name": "get_pa_principal_status",
+      "enabled": false,
+      "reason": "Admin-only read of the Personal Assistant per-user disable (mctlhq/mctl-telegram#1318). Off the portal while the PA is a preview, like set_pa_principal_disabled; upstream_gates is intentionally omitted while disabled."
+    },
+    {
       "name": "prepare_broadcast",
       "enabled": true,
       "upstream_gates": [

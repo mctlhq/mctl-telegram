@@ -5,7 +5,9 @@ package pa
 // cannot live in package pa: the connector imports pa.
 
 import (
+	"encoding/json"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,12 +23,19 @@ const (
 
 // DispatchHarness is a run loop with a webhook, conversations and the job
 // ledger on one store.
-type DispatchHarness struct{ h *runLoopHarness }
+type DispatchHarness struct {
+	h           *runLoopHarness
+	failDisable atomic.Bool
+}
 
 // NewDispatchHarness builds the harness on store.
 func NewDispatchHarness(t *testing.T, store *db.Store) *DispatchHarness {
 	t.Helper()
-	return &DispatchHarness{h: newRunLoopHarnessOn(t, store)}
+	d := &DispatchHarness{}
+	d.h = newRunLoopHarnessOn(t, store, withStore(func(s *db.Store) RunLoopStore {
+		return &toggleDisable{Store: s, fail: &d.failDisable}
+	}))
+	return d
 }
 
 func (d *DispatchHarness) Loop() *RunLoop           { return d.h.loop }
@@ -47,10 +56,42 @@ func (d *DispatchHarness) Text(user int64, s string) {
 }
 func (d *DispatchHarness) Count(q string, args ...any) int { return d.h.count(q, args...) }
 
+// PoolToken is the pool credential a worker claims with.
+func (d *DispatchHarness) PoolToken() string { return d.h.pool }
+
+// SentTo returns what the bot sent to chat, once deliveries are done.
+func (d *DispatchHarness) SentTo(chat int64) []string { return d.h.sentTo(chat) }
+
+// FailDisableReads makes the run loop's principal-disable read fail (on)
+// or read the store again (off).
+func (d *DispatchHarness) FailDisableReads(on bool) { d.failDisable.Store(on) }
+
+// Deny takes user off the run loop's and the conversations' allowlist.
+func (d *DispatchHarness) Deny(user int64) { d.h.allow.deny(user) }
+
 // Claim claims the next job as the pool.
 func (d *DispatchHarness) Claim() (token string, jobID int64, attempt int, code int) {
 	c, code := d.h.claim()
 	return c.Token, c.JobID, c.Attempt, code
+}
+
+// ClaimRaw claims the next job as the pool and returns the response body
+// as the worker receives it (S1-K2 scans it for token material).
+func (d *DispatchHarness) ClaimRaw() (body []byte, token string, code int) {
+	w := d.h.post(RouteClaim, d.h.pool, nil)
+	var c claimResponse
+	if w.Code == http.StatusOK {
+		if err := json.Unmarshal(w.Body.Bytes(), &c); err != nil {
+			d.h.t.Fatal(err)
+		}
+	}
+	return w.Body.Bytes(), c.Token, w.Code
+}
+
+// TurnRaw asks for a model turn under token and returns the raw body.
+func (d *DispatchHarness) TurnRaw(token string) (body []byte, code int) {
+	w := d.h.post(RouteTurn, token, turnRequest{ContextTokens: 10})
+	return w.Body.Bytes(), w.Code
 }
 
 // RevokePool revokes the pool credential every job token inherits and

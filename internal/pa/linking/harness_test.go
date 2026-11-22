@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -23,6 +24,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/pa"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
+	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/linking"
 )
 
@@ -292,12 +294,35 @@ type harness struct {
 	revoker  *revoker
 	alice    int64
 	bob      int64
+	allow    *allowSet
+}
+
+// allowSet is a mutable preview allowlist: everyone is allowed until
+// deny.
+type allowSet struct {
+	mu     sync.Mutex
+	denied map[int64]bool
+}
+
+func (a *allowSet) Allowed(p int64) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return !a.denied[p]
+}
+
+func (a *allowSet) deny(p int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.denied == nil {
+		a.denied = map[int64]bool{}
+	}
+	a.denied[p] = true
 }
 
 func serverConfig(server connection.Server, enabled bool) linking.ServerConfig {
 	host := "https://as." + string(server) + ".example.test"
 	return linking.ServerConfig{
-		Enabled: enabled, Issuer: host, RequireIss: true,
+		Enabled: enabled, Issuer: host, Metadata: &linking.ASMetadata{Issuer: host, IssParameterSupported: true},
 		AuthorizationEndpoint: host + "/authorize", TokenEndpoint: host + "/token",
 		ClientID: "pa-client-" + string(server), RedirectURI: "https://pa.example.test/pa/oauth/callback/" + string(server),
 		Resource: "https://mcp." + string(server) + ".example.test/mcp", PromptConsent: true,
@@ -308,7 +333,7 @@ func serverConfig(server connection.Server, enabled bool) linking.ServerConfig {
 func newHarness(t *testing.T, s *db.Store, aliceEnabled bool) *harness {
 	t.Helper()
 	h := &harness{t: t, s: s, clock: &clock{t: time.Now().UTC().Truncate(time.Second)},
-		msgr: &messenger{}, revoker: &revoker{}}
+		msgr: &messenger{}, revoker: &revoker{}, allow: &allowSet{}}
 	h.as = map[connection.Server]*fakeAS{
 		connection.ServerTG: newFakeAS(connection.ServerTG), connection.ServerAlice: newFakeAS(connection.ServerAlice),
 	}
@@ -328,7 +353,7 @@ func newHarness(t *testing.T, s *db.Store, aliceEnabled bool) *harness {
 	h.svc, err = linking.New(linking.Config{
 		BotToken: paBotToken, LoginBotToken: loginBotToken, BotUsername: "fake_pa_bot", MiniAppName: "link",
 		AppURL: appURL, Servers: h.servers, Manager: h.m, Store: s, Tokens: tokenClient{h.as},
-		Accounts: h.accounts, Messenger: h.msgr, Now: h.clock.Now,
+		Accounts: h.accounts, Messenger: h.msgr, Allowed: h.allow, Now: h.clock.Now,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -339,14 +364,42 @@ func newHarness(t *testing.T, s *db.Store, aliceEnabled bool) *harness {
 	}
 	h.alice = 9_500_000_000 + n.Int64()*2
 	h.bob = h.alice + 1
+	// Alice consented to the data flow before /connect, as the
+	// conversation layer requires; a confirm checks it again.
+	h.consent(h.alice)
 	t.Cleanup(func() {
 		for _, p := range []int64{h.alice, h.bob} {
+			_, _ = s.DB.Exec(`DELETE FROM pa_consents WHERE principal = $1`, p)
 			_, _ = s.DB.Exec(`DELETE FROM pa_link_secrets WHERE principal = $1`, p)
 			_, _ = s.DB.Exec(`DELETE FROM pa_connections WHERE principal = $1`, p)
 			_, _ = s.DB.Exec(`DELETE FROM users WHERE telegram_login_id = $1`, p)
 		}
 	})
 	return h
+}
+
+// consent records principal's current data-flow consent.
+func (h *harness) consent(principal int64) {
+	h.t.Helper()
+	h.inTx(func(tx *sql.Tx) error {
+		return h.s.AcceptPAConsent(context.Background(), tx, principal, convo.ConsentVersion, convo.ConsentTextSHA256(), h.clock.Now())
+	})
+}
+
+// inTx runs fn in a committed store transaction.
+func (h *harness) inTx(fn func(tx *sql.Tx) error) {
+	h.t.Helper()
+	tx, err := h.s.DB.BeginTx(context.Background(), nil)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+		h.t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		h.t.Fatal(err)
+	}
 }
 
 // rebuild replaces the manager's store and the token client, keeping the
@@ -364,7 +417,7 @@ func (h *harness) rebuild(store connection.Store, tokens linking.TokenClient) {
 	h.svc, err = linking.New(linking.Config{
 		BotToken: paBotToken, LoginBotToken: loginBotToken, BotUsername: "fake_pa_bot", MiniAppName: "link",
 		AppURL: appURL, Servers: h.servers, Manager: h.m, Store: h.s, Tokens: tokens,
-		Accounts: h.accounts, Messenger: h.msgr, Now: h.clock.Now,
+		Accounts: h.accounts, Messenger: h.msgr, Allowed: h.allow, Now: h.clock.Now,
 	})
 	if err != nil {
 		h.t.Fatal(err)

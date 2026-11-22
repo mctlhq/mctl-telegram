@@ -93,7 +93,8 @@ type WebhookConfig struct {
 	// update queued (RunLoop.DeliverAfter, #1348) and answers a pressed
 	// button (RunLoop.AnswerCallbackAfter). It must not block. It does not
 	// run for a duplicate, a failed or a given-up update: only the
-	// delivery whose transaction committed answers the query.
+	// delivery whose transaction committed answers the query. Its ctx
+	// carries the handler's PostCommitAction, if any.
 	AfterCommit func(ctx context.Context, u VerifiedUpdate)
 }
 
@@ -167,7 +168,10 @@ func (h *webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var handlerErr error
-	accepted, err := h.dedup.AcceptPAUpdate(r.Context(), u.UpdateID(), func(ctx context.Context, tx *sql.Tx) error {
+	// One post-commit slot per delivery: the handler records a linking
+	// action in it, and AfterCommit reads it only after the commit.
+	ctx := WithPostCommit(r.Context())
+	accepted, err := h.dedup.AcceptPAUpdate(ctx, u.UpdateID(), func(ctx context.Context, tx *sql.Tx) error {
 		handlerErr = h.handler.HandleUpdate(ctx, tx, u)
 		return handlerErr
 	})
@@ -186,7 +190,7 @@ func (h *webhook) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		h.count(OutcomeAccepted)
 		if h.after != nil {
-			h.after(r.Context(), u)
+			h.after(ctx, u)
 		}
 		w.WriteHeader(http.StatusOK)
 	}

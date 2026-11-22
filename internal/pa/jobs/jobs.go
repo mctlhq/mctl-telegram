@@ -216,6 +216,14 @@ var (
 	// conversation while consent still stands: the principal is told that
 	// the request was dropped. errors.Is(err, ErrGone) holds for it.
 	ErrConversationGone = fmt.Errorf("%w: conversation", ErrGone)
+	// ErrPrincipalDisabled is the ErrGone of a principal an admin disabled
+	// (T11, S1-F4). The job is cancelled and the principal told that the
+	// assistant is not available (NoticePrincipalDisabled).
+	ErrPrincipalDisabled = fmt.Errorf("%w: principal disabled", ErrGone)
+	// ErrPrincipalNotAllowed is the ErrGone of a principal that is not on
+	// the preview allowlist (PA_ALLOWED_PRINCIPALS). It is told the same as
+	// a disabled one.
+	ErrPrincipalNotAllowed = fmt.Errorf("%w: principal not allowed", ErrGone)
 	// ErrToolCap: the run reached its tool-call cap (S1-R2).
 	ErrToolCap = errors.New("pa jobs: tool-call cap reached")
 	// ErrToolNotInSet: the tool is not in the job's signed tool set (S1-I1).
@@ -255,6 +263,10 @@ type RateDecision struct {
 	// Notify: this is the first refused message of the window, so the
 	// principal is told once, not on every message.
 	Notify bool
+	// First: this is the first message of the window. A principal who is
+	// refused outright (#1318) is answered only then, so a stream of
+	// updates cannot turn into a stream of replies.
+	First bool
 }
 
 // EnqueueRequest is what the conversation layer hands the store.
@@ -328,7 +340,23 @@ const (
 	// NoticeDropped: the conversation the job would answer closed or
 	// expired before the job ran (for example during a budget hold).
 	NoticeDropped
+	// NoticePrincipalDisabled: the principal was disabled, or left the
+	// allowlist, while the job was queued or running.
+	NoticePrincipalDisabled
 )
+
+// NoticeFor returns the notice a gate refusal owes the principal, if any:
+// a dropped conversation and a disabled or not-allowed principal are told,
+// a withdrawn consent is not (the withdrawal answered itself).
+func NoticeFor(err error) (NoticeKind, bool) {
+	switch {
+	case errors.Is(err, ErrConversationGone):
+		return NoticeDropped, true
+	case errors.Is(err, ErrPrincipalDisabled), errors.Is(err, ErrPrincipalNotAllowed):
+		return NoticePrincipalDisabled, true
+	}
+	return 0, false
+}
 
 // Notice is a server message owed to Principal about JobID.
 type Notice struct {
@@ -401,6 +429,17 @@ type FinishRequest struct {
 	Record func(ctx context.Context, tx *sql.Tx, j Job) error
 }
 
+// ToolResultRequest records a tool result before the worker sees it
+// (#1321).
+type ToolResultRequest struct {
+	Now  time.Time
+	Gate Gate
+	// Record runs in the step's transaction after the gate, to store the
+	// result as conversation state and taint the conversation. Its error
+	// rolls the step back, and the result is withheld.
+	Record func(ctx context.Context, tx *sql.Tx, j Job) error
+}
+
 // Store is the persistence contract (implemented by *db.Store).
 type Store interface {
 	// AdmitPAMessage counts one message of principal in its fixed rate
@@ -426,6 +465,9 @@ type Store interface {
 	AdmitPAToolCall(ctx context.Context, ref Ref, req ToolCallRequest) (Job, error)
 	// FinishPAJob settles the reservation and marks the job done.
 	FinishPAJob(ctx context.Context, ref Ref, req FinishRequest) (Job, error)
+	// RecordPAToolResult runs req.Record for the running job of ref,
+	// after the gate, in one transaction.
+	RecordPAToolResult(ctx context.Context, ref Ref, req ToolResultRequest) (Job, error)
 }
 
 // EstimateTokens is the conservative context estimate the run loop uses:

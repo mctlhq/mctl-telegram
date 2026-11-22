@@ -135,22 +135,27 @@ func regeneratePin(t *testing.T, current []byte, upstream map[string][]byte) []b
 }
 
 // TestPinMatchesUpstream is the drift gate: a change upstream to a pinned
-// tool's schema, description or annotations fails CI until pin.json is
-// regenerated, which makes the update a reviewed diff (ADR 0007 pattern).
+// tool's schema, description or annotations fails CI until pin.json (and
+// pin_phase2.json, which no runtime code loads) is regenerated, which makes
+// the update a reviewed diff (ADR 0007 pattern).
 func TestPinMatchesUpstream(t *testing.T) {
-	current, err := os.ReadFile("pin.json")
-	if err != nil {
-		t.Fatalf("read pin.json: %v", err)
-	}
-	want := regeneratePin(t, current, upstreamPages(t))
-	if *updatePin {
-		if err := os.WriteFile("pin.json", want, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
-	if !bytes.Equal(current, want) {
-		t.Fatalf("pin.json is out of date with its upstream descriptors; regenerate it with:\n  %s\nand review the diff", regenerateHint)
+	for _, file := range []string{"pin.json", "pin_phase2.json"} {
+		t.Run(file, func(t *testing.T) {
+			current, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatalf("read %s: %v", file, err)
+			}
+			want := regeneratePin(t, current, upstreamPages(t))
+			if *updatePin {
+				if err := os.WriteFile(file, want, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if !bytes.Equal(current, want) {
+				t.Fatalf("%s is out of date with its upstream descriptors; regenerate it with:\n  %s\nand review the diff", file, regenerateHint)
+			}
+		})
 	}
 }
 
@@ -247,6 +252,28 @@ func TestPinPolicyRules(t *testing.T) {
 			p.Annotations = json.RawMessage(`{"readOnlyHint":false}`)
 			return p
 		}(), false},
+		// The hint is read by its exact name; a case variant of it is
+		// refused, not ignored and not read as the hint.
+		{"read annotated ReadOnlyHint", "x_read", func() PinnedTool {
+			p := validTool()
+			p.Annotations = json.RawMessage(`{"ReadOnlyHint":true}`)
+			return p
+		}(), false},
+		{"read annotated READONLYHINT false", "x_read", func() PinnedTool {
+			p := validTool()
+			p.Annotations = json.RawMessage(`{"READONLYHINT":false}`)
+			return p
+		}(), false},
+		{"read annotated readOnlyHint not a bool", "x_read", func() PinnedTool {
+			p := validTool()
+			p.Annotations = json.RawMessage(`{"readOnlyHint":"yes"}`)
+			return p
+		}(), false},
+		{"read with other annotations only", "x_read", func() PinnedTool {
+			p := validTool()
+			p.Annotations = json.RawMessage(`{"title":"x"}`)
+			return p
+		}(), true},
 		{"schema hash mismatch", "x_read", func() PinnedTool {
 			p := validTool()
 			p.InputSchema = json.RawMessage(`{"type":"object","x":1}`)
@@ -328,5 +355,18 @@ func TestCommittedPinAcceptsItsUpstream(t *testing.T) {
 		if len(tools) != len(p.Servers[server].Tools) {
 			t.Fatalf("%s: %d usable tools, want %d; denied %v", server, len(tools), len(p.Servers[server].Tools), s.Denied())
 		}
+	}
+}
+
+// TestValidateRefusesModelNameOverLimit: server__tool must fit the
+// provider's tool-name limit, or the pin is refused at load instead of
+// every claim being refused by the worker. The boundary is inclusive.
+func TestValidateRefusesModelNameOverLimit(t *testing.T) {
+	fits := "a" + strings.Repeat("b", MaxModelToolName-len("alice__")-1)
+	if err := pinWith(fits, validTool()).Validate(); err != nil {
+		t.Fatalf("%d-character model name refused: %v", len("alice__"+fits), err)
+	}
+	if err := pinWith(fits+"c", validTool()).Validate(); !errors.Is(err, ErrInvalidPin) {
+		t.Fatalf("%d-character model name: Validate = %v, want ErrInvalidPin", len("alice__"+fits+"c"), err)
 	}
 }

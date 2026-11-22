@@ -176,6 +176,10 @@ Preview end-to-end evals are separate (see [Acceptance evals](#acceptance-evals)
 **Refresh.**
 - Refresh is single-flight per connection, so concurrent refreshes never present the same refresh token twice.
 - If the server reports refresh-token reuse, or returns `invalid_grant`, the connection becomes `expired` (or `revoked` when reuse is detected). It never falls back to an older token.
+- (#1318 slice C2b) The sealed token set records an absolute expiry stamped when the token response was received. A missing or zero `expires_in` is an unknown expiry: never refreshed ahead, never read as "does not expire"; only a 401 refreshes it. A known expiry is refreshed when less than 60s remains.
+- A 401 from the MCP server gets exactly one refresh and one retry per tool request; a 403 is refused with neither. A refresh that fails transiently, or whose lease another replica holds, is never retried: after a 401, or past the token's expiry, the call fails (`refresh_unavailable`); ahead of an expiry not yet reached, the current token is still used. A flight for a token generation already replaced does not rotate again.
+- The `active -> expired` change and the user's one "link it again" notice are written in one transaction; the notice is unique per (principal, connection). An expiry that could not be written is reported as a failed refresh, never as an expiry.
+- Activation revokes the principal's other `active` or `expired` connections on the same server in its transaction, and their tokens at the server, so a reconnect never leaves two connections a run could bind. The superseded rows are locked before they are read (`FOR UPDATE` on Postgres), because refresh rotations do not take the principal lock. It also re-reads the admin disable under the principal lock, fail-closed.
 
 **Scope escalation.** It always needs a fresh authorization and a fresh confirm, which means a new connection id (above). A connection never gains scope through refresh.
 
@@ -307,6 +311,9 @@ A crash between steps 1 and 3 leaves a `dispatching` record. On restart, that re
 - Once any `external` fragment is in a run's context, that run is tainted.
 - In a tainted run, every write needs a per-call card, even for a tool with a standing permission.
 - Taint is held in the conversation state. A read error on it means tainted.
+- The conversation's durable flag is the run's taint (#1321). It rises in the same transaction that stores any fragment other than user text: a forward, a caption, a reply, a quote, any unknown mark, and every tool result (a tool error included), which is stored as an external `tool` fragment before the worker receives it. A result that cannot be stored is withheld.
+- Model output is the one external-marked kind that does not raise the flag (owner decision, 2026-11-21). An answer written in a clean conversation saw no external content, and one written in a tainted conversation changes nothing, because the flag only rises. A summary of external content is therefore covered: the content it summarises tainted the conversation first.
+- The flag is trustworthy only once every replica runs a build with #1321. An older pod stores external fragments and returns tool results without raising it, so the PA is enabled only after the rollout completes (see the runbook).
 
 **Taint reset.** Taint resets only on:
 - `/new`, a user-only command the server recognises (the model cannot issue it);
@@ -541,17 +548,17 @@ CIMD documents are fetched by the authorization server from MCTL. They are not M
 - `PA_WRITES_ENABLED`: every write becomes `never`.
 - `PA_SERVER_<NAME>_ENABLED`: one server.
 
-An admin command can also disable a single principal.
+An admin command (`set_pa_principal_disabled`, #1318) can also disable a single principal. While the PA is a preview, only the principals listed in `PA_ALLOWED_PRINCIPALS` may use it at all; unset or empty allows nobody (owner decision 2026-11-21, #1318). Both are checked at ingress and at every run step, like the flags.
 
 All of these, plus consent, are checked again at **every dispatch**, not only at ingress, so a `pa-job` token already in flight cannot keep calling after a switch turns off.
 
 **Rollback.** Turn off the flags, then roll back the image. Connections stay sealed and unused. Deleting them is a separate, explicit action.
 
 **Tests.**
-- S1-F1: each flag disables exactly its own layer.
+- S1-F1: each flag disables exactly its own layer. For `PA_WRITES_ENABLED`, S1-F1 covers that reads are unaffected; that it disables writes is S2-F3 (owner decision 2026-11-21, #1318).
 - S1-F2: a missing flag means off.
 - S1-F4: switching off `PA_EXTERNAL_TOOLS_ENABLED`, a server flag, the principal or consent during a run refuses the run's next dispatch.
-- S2-F3: turning `PA_WRITES_ENABLED` off while an approval is pending refuses it at dispatch.
+- S2-F3: turning `PA_WRITES_ENABLED` off disables writes, and turning it off while an approval is pending refuses it at dispatch.
 
 ### T12 Audit
 
@@ -674,6 +681,8 @@ These run on preview after deployment, against dedicated test accounts on `tg` a
 - In Phase 1 (read tools only), every dispatched call is recorded with `taint=external`, because the server cannot prove a run clean. This is conservative, not a gap; accepted on #1315 (2026-11-20). The per-conversation taint of T5 governs once writes exist.
 - Downstream servers may not support token revocation. MCTL's revocation is effective, but the token may remain valid at the server until it expires. The ADR lists this per server.
 - A Vault administrator can grant themselves unwrap on the KEK (T3).
-- `alice` may not offer narrower scopes. Its Phase 1 boundary then rests on the pin and the executor (T8). That needs an owner decision before Alice linking.
+- `alice` scopes (T8), resolved. mctl-alice runs its own authorization server with `iot:view`, `iot:control` and `quasar`, and checks the scope per tool server-side (`TOOL_SCOPES` in mctl-alice `src/tools/handlers.ts`): only the four read tools accept `iot:view`. The PA requests and accepts exactly `iot:view` for `alice` (owner decision 2026-11-18 on #1314, `internal/pa/connection/scope.go`); a token response with any other scope is refused (`ErrScopeMismatch`). The pin and the executor remain a second layer. What stays: mctl-alice itself holds a Yandex token with `iot:control`, so the boundary for writes is mctl-alice's own per-tool check, not Yandex. The preview evals confirm that an `iot:view` connection is refused a control tool at mctl-alice.
 - For servers without a Telegram-bound identity (`alice`, Glovo), linking (T1) binds the account to the Telegram user who opens the completion link. A victim who confirms on the callback page and then forwards the link to an attacker within 5 minutes links their own account to the attacker. This is **not accepted by default**: each such server needs a recorded owner acceptance before its linking is enabled (S1-L14). It does not apply to `tg`, which is closed by T1 step 6.
+  - **`alice`: accepted by the owner on 2026-11-21 for the preview deployment and the closed Phase 3 pilot only** (#1312). The acceptance rests on the mitigations above: the 5-minute completion code, the callback page naming the masked Telegram account with "This is my Telegram account" and the never-forward warning, the provider consent screen, and the in-chat confirmation. It allows `PA_SERVER_ALICE_ENABLED` on preview and in the closed pilot. Wider production use needs a separate owner decision. Turning the flag on is a separate GO in each environment; this acceptance does not do that by itself. The `alice` scope decision (the residual above on narrower scopes, T8) is not covered by this acceptance.
+  - Glovo: not accepted.
 - The bot token is a high-value secret: whoever holds it can forge `initData`. Rotation invalidates every pending link (T3).

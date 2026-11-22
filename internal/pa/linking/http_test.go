@@ -1,7 +1,9 @@
 package linking_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -156,4 +158,130 @@ func formReq(path, body string) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	return req
+}
+
+// disableUnreadable is the linking store with the disable read failing.
+type disableUnreadable struct{ *db.Store }
+
+func (disableUnreadable) PAPrincipalDisabledState(context.Context, int64) (bool, error) {
+	return false, errors.New("injected: disable unreadable")
+}
+
+// Every step of the linking flow refuses, fail-closed, a principal the
+// webhook would refuse (#1318 A1): one not on the allowlist, one an admin
+// disabled, and one whose disable cannot be read. The HTTP routes answer
+// 403. A step that already holds the principal's connection fails it and
+// revokes any tokens; one that runs before consuming its secret changes
+// nothing, and the linking sweep fails the pending row.
+func TestLinking_RefusesUnadmittedPrincipal(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		refusals := map[string]func(h *harness){
+			"not allowlisted": func(h *harness) { h.allow.deny(h.alice) },
+			"disabled": func(h *harness) {
+				if err := s.SetPAPrincipalDisabled(context.Background(), h.alice, 1, "test", h.clock.Now()); err != nil {
+					h.t.Fatal(err)
+				}
+				h.t.Cleanup(func() { _, _ = s.DB.Exec(`DELETE FROM pa_principal_disables WHERE principal = $1`, h.alice) })
+			},
+			"disable unreadable": func(h *harness) {
+				var err error
+				h.svc, err = linking.New(linking.Config{
+					BotToken: paBotToken, LoginBotToken: loginBotToken, BotUsername: "fake_pa_bot", MiniAppName: "link",
+					AppURL: appURL, Servers: h.servers, Manager: h.m, Store: disableUnreadable{s}, Tokens: tokenClient{h.as},
+					Accounts: h.accounts, Messenger: h.msgr, Allowed: h.allow, Now: h.clock.Now,
+				})
+				if err != nil {
+					h.t.Fatal(err)
+				}
+			},
+		}
+		for mode, refuse := range refusals {
+			t.Run(mode, func(t *testing.T) {
+				ctx := context.Background()
+				t.Run("start", func(t *testing.T) {
+					h := newHarness(t, s, false)
+					refuse(h)
+					if _, err := h.svc.StartLink(ctx, principal(t, h.alice), connection.ServerTG); !errors.Is(err, linking.ErrPrincipalRefused) {
+						t.Fatalf("StartLink: %v", err)
+					}
+					if cs, err := h.m.List(ctx, h.alice); err != nil || len(cs) != 0 {
+						t.Fatalf("connections after a refused /connect: %d %v", len(cs), err)
+					}
+				})
+				t.Run("begin", func(t *testing.T) {
+					h := newHarness(t, s, false)
+					link := h.start(connection.ServerTG)
+					refuse(h)
+					if code := h.server(t).post(t, linking.BeginPath, `{"init_data":`+quote(h.initData(h.alice, ""))+`,"link":"`+link+`"}`); code != http.StatusForbidden {
+						t.Fatalf("begin %d", code)
+					}
+					if st := h.state(connection.ServerTG); st != connection.StatePendingLink {
+						t.Fatalf("state %s after a refused begin", st)
+					}
+				})
+				t.Run("callback", func(t *testing.T) {
+					h := newHarness(t, s, false)
+					cb := h.toCallback(connection.ServerTG, h.tgLogin(h.alice))
+					refuse(h)
+					resp, _ := h.server(t).do(t, httptest.NewRequest(http.MethodGet, "/pa/oauth/callback/tg?"+cb.Encode(), nil))
+					if resp.StatusCode != http.StatusForbidden || h.state(connection.ServerTG) != connection.StateFailed {
+						t.Fatalf("callback %d, state %s", resp.StatusCode, h.state(connection.ServerTG))
+					}
+				})
+				t.Run("handoff", func(t *testing.T) {
+					h := newHarness(t, s, false)
+					res, err := h.svc.Callback(ctx, connection.ServerTG, h.toCallback(connection.ServerTG, h.tgLogin(h.alice)))
+					if err != nil {
+						t.Fatal(err)
+					}
+					refuse(h)
+					resp, _ := h.server(t).do(t, formReq(linking.HandoffPath, "handoff="+url.QueryEscape(res.Handoff)))
+					if resp.StatusCode != http.StatusForbidden || h.state(connection.ServerTG) != connection.StateFailed {
+						t.Fatalf("handoff %d, state %s", resp.StatusCode, h.state(connection.ServerTG))
+					}
+				})
+				t.Run("complete", func(t *testing.T) {
+					h := newHarness(t, s, false)
+					code := h.toCompletion(connection.ServerTG, h.tgLogin(h.alice))
+					refuse(h)
+					if st := h.server(t).post(t, linking.CompletePath, `{"init_data":`+quote(h.initData(h.alice, code))+`}`); st != http.StatusForbidden {
+						t.Fatalf("complete %d", st)
+					}
+					if n := h.as[connection.ServerTG].exchangeCount(); n != 0 {
+						t.Fatalf("%d code exchanges for a refused principal", n)
+					}
+				})
+				t.Run("confirm", func(t *testing.T) {
+					h := newHarness(t, s, false)
+					confirm, _ := confirmData(h.toConfirm(connection.ServerTG, h.tgLogin(h.alice)))
+					refuse(h)
+					before := h.revoker.count()
+					handled, err := h.svc.HandleCallback(ctx, callbackUpdate(t, h.alice, confirm))
+					if !handled || !errors.Is(err, linking.ErrPrincipalRefused) {
+						t.Fatalf("confirm: handled=%v err=%v", handled, err)
+					}
+					c := h.connection(connection.ServerTG)
+					if c.State != connection.StateFailed || h.sealedTokens(c.ID) != 0 || h.revoker.count() <= before {
+						t.Fatalf("state %s, sealed %d bytes, revoked %d->%d", c.State, h.sealedTokens(c.ID), before, h.revoker.count())
+					}
+				})
+			})
+		}
+	})
+}
+
+// New refuses a configuration without the allowlist: there is no
+// "allow everyone" default.
+func TestLinking_NewNeedsAllowlist(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		h := newHarness(t, s, false)
+		_, err := linking.New(linking.Config{
+			BotToken: paBotToken, LoginBotToken: loginBotToken, BotUsername: "fake_pa_bot", MiniAppName: "link",
+			AppURL: appURL, Servers: h.servers, Manager: h.m, Store: s, Tokens: tokenClient{h.as},
+			Accounts: h.accounts, Messenger: h.msgr,
+		})
+		if !errors.Is(err, linking.ErrConfig) {
+			t.Fatalf("New without an allowlist: %v, want ErrConfig", err)
+		}
+	})
 }

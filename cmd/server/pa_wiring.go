@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -14,9 +15,15 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/config"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	mcpapp "github.com/mctlhq/mctl-telegram/internal/mcp"
 	"github.com/mctlhq/mctl-telegram/internal/pa"
+	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
+	"github.com/mctlhq/mctl-telegram/internal/pa/connector"
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
+	"github.com/mctlhq/mctl-telegram/internal/pa/linking"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output"
+	"github.com/mctlhq/mctl-telegram/internal/sweeper"
+	"github.com/mctlhq/mctl-telegram/internal/web"
 )
 
 // The production store satisfies the run loop's store; asserted here, where
@@ -28,6 +35,7 @@ type paMetrics interface {
 	pa.Counter
 	pa.OutboxCounter
 	pa.CallbackCounter
+	connector.Metrics
 }
 
 // paLoop is the part of *pa.RunLoop the server's lifecycle drives.
@@ -36,27 +44,47 @@ type paLoop interface {
 	WaitDeliveries()
 }
 
-// newPASender builds the PA bot's sender. A variable only so the wiring
-// tests can record what the wired runtime sends instead of calling the Bot
-// API; nothing else assigns it.
-var newPASender = func(token string) (pa.BotSender, error) {
-	return output.NewSender(output.Config{Token: token})
+// paBotSender is the PA bot's sender as the run loop and the linking flow
+// use it (*output.Sender).
+type paBotSender interface {
+	pa.BotSender
+	linking.BotSender
+}
+
+var _ paBotSender = (*output.Sender)(nil)
+
+// newPASender builds the PA bot's sender. webAppURL is the linking Mini App
+// URL, or "" when no linking flow runs (no web_app button can be sent). A
+// variable only so the wiring tests can record what the wired runtime
+// sends instead of calling the Bot API; nothing else assigns it.
+var newPASender = func(token, webAppURL string) (paBotSender, error) {
+	return output.NewSender(output.Config{Token: token, WebAppURL: webAppURL})
+}
+
+// runPADispatcher runs the dispatcher's pin refresh loop. A variable only
+// so the wiring tests can see that Start runs it, with which dispatcher and
+// interval, without waiting a PinRefreshInterval; nothing else assigns it.
+var runPADispatcher = func(ctx context.Context, d *connector.Dispatcher, every time.Duration) {
+	d.Run(ctx, every)
 }
 
 // paRuntime is the Personal Assistant's server half (#1313, wired by
 // #1343): the webhook with the Conversations handler, the run-loop routes
 // (claim, turn, reply), the outbox retry loop and its shutdown drain.
 //
-// It deliberately has no tools: Tools is pa.NoTools, and neither the
-// connector dispatcher (RouteTool), the connection manager, the KEK nor
-// account linking is built here. Those land together in the tools slice
-// (#1314), which must also start Dispatcher.Run. A nil *paRuntime is the
-// PA switched off, and every method on it does nothing.
+// With a PA server enabled (#1318 slice C2) it also runs the tools
+// runtime (pa_tools.go): the account-linking routes and bot commands, the
+// connector dispatcher (RouteTool) with its pin refresh loop, and the tool
+// resolver at claim. With every server off, tools is nil and none of that
+// exists: no linking or tool route, and runs bind no tool. A nil
+// *paRuntime is the PA switched off, and every method on it does nothing.
 type paRuntime struct {
-	loop    paLoop
-	webhook http.Handler
-	mount   func(chi.Router)
-	wg      sync.WaitGroup
+	loop       paLoop
+	webhook    http.Handler
+	mount      func(chi.Router)
+	tools      *paTools
+	dispatcher *connector.Dispatcher
+	wg         sync.WaitGroup
 }
 
 // buildPA builds the PA runtime when, and only when, cfg.PAEnabled is true;
@@ -64,8 +92,9 @@ type paRuntime struct {
 // already refused an enabled configuration without the bot token, webhook
 // secret, webhook URL, ENCRYPTION_KEY or OAuth signing key; buildPA checks
 // what it uses again, so a hand-built Config cannot start a half-configured
-// PA. Any error refuses startup.
-func buildPA(cfg *config.Config, store *db.Store, rc *localjwt.RevocationCache, m paMetrics) (*paRuntime, error) {
+// PA. Any error refuses startup. ctx is main's: a SIGTERM during startup
+// cancels the tools runtime's metadata fetch.
+func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *localjwt.RevocationCache, m paMetrics) (*paRuntime, error) {
 	if !cfg.PAEnabled {
 		return nil, nil
 	}
@@ -75,6 +104,10 @@ func buildPA(cfg *config.Config, store *db.Store, rc *localjwt.RevocationCache, 
 	secret := []byte(cfg.OAUTHJWTSecret)
 	if len(secret) == 0 || !cfg.OAUTHJWTSecretDedicated {
 		return nil, errors.New("pa: a dedicated OAUTH_JWT_SIGNING_KEY in AUTH_MODE=local-jwt is required")
+	}
+	tools, err := config.LoadPATools(cfg, os.Getenv)
+	if err != nil {
+		return nil, err
 	}
 	issuer := strings.TrimRight(cfg.PublicBaseURL, "/")
 	sealer, err := convo.NewSealer(cfg.EncryptionKey)
@@ -93,9 +126,21 @@ func buildPA(cfg *config.Config, store *db.Store, rc *localjwt.RevocationCache, 
 	if err != nil {
 		return nil, err
 	}
-	sender, err := newPASender(cfg.PABotToken)
+	var appURL string
+	if tools.AnyEnabled() {
+		appURL = tools.AppURL
+	}
+	sender, err := newPASender(cfg.PABotToken, appURL)
 	if err != nil {
 		return nil, err
+	}
+	pt, err := buildPATools(ctx, cfg, tools, store, sender)
+	if err != nil {
+		return nil, err
+	}
+	resolver := pa.ToolResolver(pa.NoTools)
+	if pt != nil {
+		resolver = pt.toolResolver(store)
 	}
 	// m is optional (tests pass nil); a nil m leaves both counters nil
 	// interfaces rather than wrapping it. main always passes a registry.
@@ -105,11 +150,18 @@ func buildPA(cfg *config.Config, store *db.Store, rc *localjwt.RevocationCache, 
 	if m != nil {
 		counter, outboxCounter, callbackCounter = m, m, m
 	}
+	// The preview allowlist (PA_ALLOWED_PRINCIPALS): checked at ingress and
+	// at every run step. Empty allows nobody, and says so at startup.
+	allowed := pa.NewAllowlist(cfg.PAAllowedPrincipals)
+	if allowed.Len() == 0 {
+		slog.Warn("pa allowlist is empty: every principal is refused", "env", config.PAAllowedPrincipalsEnv)
+	}
 	loop, err := pa.NewRunLoop(pa.RunLoopConfig{
 		Store: store, Sealer: sealer, Pool: pool, Minter: minter, Verifier: verifier, Sender: sender,
-		Tools:  pa.NoTools,
+		Tools:  resolver,
 		Limits: cfg.PALimits(), Budget: cfg.PABudget(),
 		Metrics: outboxCounter, CallbackMetrics: callbackCounter,
+		Allowed: allowed,
 	})
 	if err != nil {
 		return nil, err
@@ -120,6 +172,11 @@ func buildPA(cfg *config.Config, store *db.Store, rc *localjwt.RevocationCache, 
 	conv, err := pa.NewConversations(pa.ConversationsConfig{
 		Store: store, Sealer: sealer, TTL: cfg.PAConversationTTL, Runs: loop, Limiter: loop,
 		Replies: &pa.OutboxReplies{Store: store, Metrics: outboxCounter},
+		// The linking commands and buttons run after the commit, through
+		// pt.commands below; without a tools runtime they are answered
+		// "not available" in the transaction.
+		Linking: pt != nil,
+		Allowed: allowed,
 	})
 	if err != nil {
 		return nil, err
@@ -132,15 +189,54 @@ func buildPA(cfg *config.Config, store *db.Store, rc *localjwt.RevocationCache, 
 		// Deliver the rows the update queued once it committed; rows this
 		// does not reach stay due for RunOutbox. A pressed button is
 		// answered too, best effort, so the client stops its spinner.
+		// A linking command or button recorded in the transaction runs
+		// now, never inside it (internal/pa/postcommit.go).
 		AfterCommit: func(ctx context.Context, u pa.VerifiedUpdate) {
 			loop.DeliverAfter(ctx, u.Principal().TelegramID())
 			loop.AnswerCallbackAfter(ctx, u)
+			if pt != nil {
+				pt.commands.AfterCommit(ctx, u)
+			}
 		},
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &paRuntime{loop: loop, webhook: hook, mount: func(r chi.Router) { loop.Mount(r) }}, nil
+	rt := &paRuntime{loop: loop, webhook: hook, mount: func(r chi.Router) { loop.Mount(r) }, tools: pt}
+	if pt != nil {
+		// m is optional here too; a nil m must stay a nil interface.
+		var dm connector.Metrics
+		if m != nil {
+			dm = m
+		}
+		rt.dispatcher, err = connector.NewDispatcher(connector.DispatcherConfig{
+			Jobs: loop, Connections: pt.manager, Pin: pt.pin, Endpoints: pt.endpoints,
+			Executor: pt.executor, Flags: pt.flags, Metrics: dm,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return rt, nil
+}
+
+// Links is the linking flow's sweep for startPAState, or nil (an untyped
+// nil interface) when no linking flow runs.
+func (r *paRuntime) Links() sweeper.PALinkExpirer {
+	if r == nil || r.tools == nil {
+		return nil
+	}
+	return r.tools.links
+}
+
+// Connections is the connection manager, or nil when no tools runtime
+// runs. The account-delete handlers revoke a deleted principal's
+// connections through it (slice A2).
+func (r *paRuntime) Connections() *connection.Manager {
+	if r == nil || r.tools == nil {
+		return nil
+	}
+	return r.tools.manager
 }
 
 // Mount registers the webhook and the run-loop routes.
@@ -156,7 +252,35 @@ func (r *paRuntime) Mount(mux chi.Router) {
 	if r.mount != nil {
 		r.mount(mux)
 	}
-	slog.Info("pa bot enabled", "webhook", pa.WebhookPath, "tools", "none")
+	if r.tools == nil {
+		slog.Info("pa bot enabled", "webhook", pa.WebhookPath, "tools", "none")
+		return
+	}
+	r.tools.links.Mount(mux)
+	r.dispatcher.Mount(mux)
+	servers := make([]string, 0, len(r.tools.servers))
+	for _, s := range r.tools.servers {
+		servers = append(servers, string(s))
+	}
+	// Enabled servers only: each call still needs PA_EXTERNAL_TOOLS_ENABLED
+	// and its server flag at dispatch time (connector.EnvFlags).
+	slog.Info("pa bot enabled", "webhook", pa.WebhookPath, "tools", "linking and dispatch",
+		"servers", strings.Join(servers, ","), "route", connector.RouteTool)
+}
+
+// wirePARevokers gives the account-deletion surfaces (the web account page
+// and the MCP delete tool) the connection manager, so deleting an account
+// first revokes the provider tokens the PA holds for it (#1389). Only a
+// runtime with tools has a manager; otherwise both fields stay a nil
+// interface, never a typed-nil *connection.Manager, which would pass their
+// nil checks. Called before the server serves.
+func wirePARevokers(rt *paRuntime, account *web.AccountHandlers, srv *mcpapp.Server) {
+	m := rt.Connections()
+	if m == nil {
+		return
+	}
+	account.PARevoker = m
+	srv.PARevoker = m
 }
 
 // Start runs the outbox retry loop until ctx ends.
@@ -169,6 +293,15 @@ func (r *paRuntime) Start(ctx context.Context) {
 		defer r.wg.Done()
 		r.loop.RunOutbox(ctx, pa.OutboxInterval)
 	}()
+	if r.dispatcher != nil {
+		// Whoever serves RouteTool must also run this: it ages tools/list
+		// observations out of the pin gauges.
+		r.wg.Add(1)
+		go func() {
+			defer r.wg.Done()
+			runPADispatcher(ctx, r.dispatcher, connector.PinRefreshInterval)
+		}()
+	}
 }
 
 // Shutdown waits for the outbox loop (its context must already be done)
@@ -187,6 +320,9 @@ func (r *paRuntime) Shutdown(deadline time.Time) {
 	go func() {
 		r.wg.Wait()
 		r.loop.WaitDeliveries()
+		if r.tools != nil {
+			r.tools.commands.Wait()
+		}
 		close(done)
 	}()
 	select {

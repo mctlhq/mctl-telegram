@@ -40,6 +40,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa/catalog"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connector"
+	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 )
 
@@ -137,6 +138,11 @@ type fakeMCP struct {
 	out     []byte // tools/call result; nil = a short text result
 	// block makes tools/call wait for its context (or a 5s safety stop).
 	block bool
+	// listReject and callReject refuse one bearer token on tools/list or
+	// tools/call with the given error (a 401 or 403), before anything
+	// else; any other token gets the normal answer.
+	listReject map[string]error
+	callReject map[string]error
 }
 
 func (f *fakeMCP) Server() string { return f.server }
@@ -146,6 +152,9 @@ func (f *fakeMCP) ListTools(_ context.Context, tok connection.Secret) ([][]byte,
 	defer f.mu.Unlock()
 	f.bearers = append(f.bearers, tok.Reveal())
 	f.lists++
+	if err := f.listReject[tok.Reveal()]; err != nil {
+		return nil, err
+	}
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -157,7 +166,11 @@ func (f *fakeMCP) CallTool(ctx context.Context, tok connection.Secret, tool stri
 	f.bearers = append(f.bearers, tok.Reveal())
 	f.calls = append(f.calls, tool)
 	hook, err, out, block := f.onCall, f.callErr, f.out, f.block
+	reject := f.callReject[tok.Reveal()]
 	f.mu.Unlock()
+	if reject != nil {
+		return nil, reject
+	}
 	if hook != nil {
 		hook()
 	}
@@ -289,10 +302,34 @@ func (f *failingConns) List(ctx context.Context, p int64) ([]connection.Connecti
 	return cs, err
 }
 
-// failingJobs fails the ledger admission while fail is set.
+// failingJobs fails the ledger admission while fail is set, the taint
+// read while taintFail is set, and the tool-result record while
+// recordFail is set.
 type failingJobs struct {
 	*pa.RunLoop
-	fail atomic.Bool
+	fail       atomic.Bool
+	taintFail  atomic.Bool
+	recordFail atomic.Bool
+	// recorded is the output of the last RecordToolResult that reached
+	// the run loop: what the conversation stores for the worker's answer.
+	recorded atomic.Pointer[[]byte]
+}
+
+func (f *failingJobs) ConversationTainted(ctx context.Context, p pa.Policy) (bool, error) {
+	if f.taintFail.Load() {
+		// A broken reader that also says "clean": the error must win.
+		return false, errors.New("injected taint read error")
+	}
+	return f.RunLoop.ConversationTainted(ctx, p)
+}
+
+func (f *failingJobs) RecordToolResult(ctx context.Context, j pa.PAJob, out []byte) error {
+	if f.recordFail.Load() {
+		return errors.New("injected taint write error")
+	}
+	stored := bytes.Clone(out)
+	f.recorded.Store(&stored)
+	return f.RunLoop.RecordToolResult(ctx, j, out)
 }
 
 func (f *failingJobs) AdmitToolCall(ctx context.Context, j pa.PAJob, server, tool string) (pa.Policy, error) {
@@ -319,6 +356,10 @@ type dispatchEnv struct {
 	connA   connection.Connection
 	connB   connection.Connection
 	cfg     connector.DispatcherConfig
+	// refreshes counts refresh-token grants; refreshFn, when set, answers
+	// them instead of the default fresh token "fake-at-<account>-r".
+	refreshes atomic.Int32
+	refreshFn atomic.Pointer[connection.RefreshFunc]
 }
 
 func newDispatchEnv(t *testing.T, store *db.Store) *dispatchEnv {
@@ -336,7 +377,17 @@ func newDispatchEnv(t *testing.T, store *db.Store) *dispatchEnv {
 	}
 	e.sink = &failingSink{inner: connector.StoreSink{Store: store}}
 	fence := connector.FenceAudit{Sink: e.sink, Now: e.h.Now}
-	e.mgr, err = connection.NewManager(connection.Config{Store: store, KEK: kek, Revoker: noRevoker{}, Auditor: &fenceRecorder{inner: fence}})
+	e.mgr, err = connection.NewManager(connection.Config{
+		Store: store, KEK: kek, Revoker: noRevoker{}, Auditor: &fenceRecorder{inner: fence},
+		Refresh: func(ctx context.Context, server connection.Server, rt connection.Secret) ([]byte, error) {
+			e.refreshes.Add(1)
+			if fn := e.refreshFn.Load(); fn != nil {
+				return (*fn)(ctx, server, rt)
+			}
+			account := strings.TrimPrefix(rt.Reveal(), "fake-rt-")
+			return []byte(`{"access_token":"fake-at-` + account + `-r","token_type":"Bearer","expires_in":3600,"refresh_token":"fake-rt-` + account + `-r","scope":"` + tgScope + `"}`), nil
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,6 +458,21 @@ func (e *dispatchEnv) activeAlice(principal int64, account string) connection.Co
 
 func (e *dispatchEnv) active(principal int64, server connection.Server, account, scope string) connection.Connection {
 	e.t.Helper()
+	c := e.pendingConfirm(principal, server, account, scope)
+	acceptConsent(e.t, e.store, principal)
+	c, err := e.mgr.Confirm(context.Background(), principal, c.ID, c.AuthorityRevision)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return c
+}
+
+// pendingConfirm is a connection that has its tokens and waits for the
+// principal's confirm press. Unlike a second active connection on the
+// same server, which supersedes the first (#1318 C2b), it can sit next to
+// an active one.
+func (e *dispatchEnv) pendingConfirm(principal int64, server connection.Server, account, scope string) connection.Connection {
+	e.t.Helper()
 	ctx := context.Background()
 	m := e.mgr
 	c, err := m.Begin(ctx, principal, server)
@@ -423,10 +489,26 @@ func (e *dispatchEnv) active(principal int64, server connection.Server, account,
 	if c, err = m.CompleteExchange(ctx, principal, c.ID, c.AuthorityRevision, account, []byte(resp)); err != nil {
 		e.t.Fatal(err)
 	}
-	if c, err = m.Confirm(ctx, principal, c.ID, c.AuthorityRevision); err != nil {
-		e.t.Fatal(err)
-	}
 	return c
+}
+
+// acceptConsent records principal's current data-flow consent, which
+// activation (pending_confirm -> active) requires under the principal lock.
+func acceptConsent(t *testing.T, s *db.Store, principal int64) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AcceptPAConsent(ctx, tx, principal, convo.ConsentVersion, convo.ConsentTextSHA256(), time.Now()); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = s.DB.Exec(`DELETE FROM pa_consents WHERE principal = $1`, principal) })
 }
 
 // run starts a job for principal and returns its token.
@@ -1022,6 +1104,11 @@ func TestDispatch_OutputCap(t *testing.T) {
 		if a.code != http.StatusOK || !a.Truncated || len(a.Output) > jobs.MaxToolOutputBytes ||
 			!strings.HasSuffix(a.Output, jobs.TruncationMarker) {
 			t.Fatalf("code %d truncated %v len %d", a.code, a.Truncated, len(a.Output))
+		}
+		// The conversation stores exactly what the worker got: the capped
+		// output, never the whole one.
+		if got := e.jobs.recorded.Load(); got == nil || string(*got) != a.Output {
+			t.Fatal("the stored tool fragment is not the truncated output the worker received")
 		}
 		// The service failing the call is an error result, not output.
 		e.tg.mu.Lock()

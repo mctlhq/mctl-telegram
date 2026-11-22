@@ -24,6 +24,12 @@ type paFake struct {
 	answers map[string][]paAnswer
 	replies []map[string]any
 	auths   []string
+	// toolReqs are the /tool bodies and toolAuths their Authorization
+	// headers, in order.
+	toolReqs  []map[string]any
+	toolAuths []string
+	// toolDelay is how long /tool waits before answering.
+	toolDelay time.Duration
 }
 
 type paAnswer struct {
@@ -73,6 +79,18 @@ func (f *paFake) serve(w http.ResponseWriter, r *http.Request) {
 		f.replies = append(f.replies, m)
 		f.mu.Unlock()
 		f.record("reply")
+	case PARouteTool:
+		var m map[string]any
+		_ = json.Unmarshal(body, &m)
+		f.mu.Lock()
+		f.toolReqs = append(f.toolReqs, m)
+		f.toolAuths = append(f.toolAuths, r.Header.Get("Authorization"))
+		f.mu.Unlock()
+		f.record("tool")
+		f.mu.Lock()
+		d := f.toolDelay
+		f.mu.Unlock()
+		time.Sleep(d)
 	default:
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -103,15 +121,17 @@ type paScriptModel struct {
 	results []*ChatResult
 	errs    []error
 	inputs  [][]ChatMessage
+	tools   [][]PAModelTool
 }
 
-func (m *paScriptModel) ChatNoTools(_ context.Context, msgs []ChatMessage) (*ChatResult, error) {
+func (m *paScriptModel) ChatPA(_ context.Context, msgs []ChatMessage, tools []PAModelTool) (*ChatResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.f != nil {
 		m.f.record("chat")
 	}
 	m.inputs = append(m.inputs, append([]ChatMessage(nil), msgs...))
+	m.tools = append(m.tools, append([]PAModelTool(nil), tools...))
 	if len(m.errs) > 0 {
 		err := m.errs[0]
 		m.errs = m.errs[1:]
@@ -385,7 +405,7 @@ func TestPAWorker_LeaseDeadline(t *testing.T) {
 
 type paModelFunc func(context.Context, []ChatMessage) (*ChatResult, error)
 
-func (f paModelFunc) ChatNoTools(ctx context.Context, m []ChatMessage) (*ChatResult, error) {
+func (f paModelFunc) ChatPA(ctx context.Context, m []ChatMessage, _ []PAModelTool) (*ChatResult, error) {
 	return f(ctx, m)
 }
 
@@ -502,10 +522,10 @@ func TestPAWorker_NoRedirect(t *testing.T) {
 // TestPAWorker_ClientTimeout: requests are bounded by default, and a
 // configured timeout is kept.
 func TestPAWorker_ClientTimeout(t *testing.T) {
-	if got := (&PAWorker{}).client().Timeout; got != 30*time.Second {
+	if got := (&PAWorker{}).client(0).Timeout; got != 30*time.Second {
 		t.Fatalf("default timeout %s, want 30s", got)
 	}
-	if got := (&PAWorker{HTTP: &http.Client{Timeout: 5 * time.Second}}).client().Timeout; got != 5*time.Second {
+	if got := (&PAWorker{HTTP: &http.Client{Timeout: 5 * time.Second}}).client(0).Timeout; got != 5*time.Second {
 		t.Fatalf("configured timeout %s, want 5s", got)
 	}
 }

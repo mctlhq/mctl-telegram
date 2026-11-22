@@ -43,6 +43,7 @@ This file is a helper for Codex and other AI coding agents. Canonical contributo
 - Do not commit Telegram session data, OAuth tokens, API credentials (`TG_API_ID`/`TG_API_HASH`), or local SQLite databases.
 - Do not add logging of message bodies, phone numbers, Telegram session strings, or JWT secrets — the `internal/audit/redact.go` slog handler enforces this; new sensitive field names must be added there.
 - Treat all Telegram data as private user data.
+- Metric labels are an egress path into shared, long-retained storage (VictoriaMetrics): never put a Telegram id, handle or phone number in one. A new label name must be a bounded enum and is added to `boundedLabelNames` in `internal/metrics/metrics_test.go`; identifier labels (`user_id` is the internal `users.id`) are pinned per metric there.
 - Test fixtures must use synthetic Telegram identifiers — never a real account's
   numeric id, first name or @handle, including your own. This repository is public,
   and a fixture is committed forever. Reuse one of the personas already in the

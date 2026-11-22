@@ -87,6 +87,13 @@ type JobGate interface {
 	AuthenticateAttributed(r *http.Request) (pa.PAJob, pa.TokenRefusal, error)
 	AdmitToolCall(ctx context.Context, job pa.PAJob, server, tool string) (pa.Policy, error)
 	StillRunning(ctx context.Context, job pa.PAJob) error
+	// ConversationTainted reads the run's durable taint (T5, #1321). An
+	// error comes with true and the call is recorded tainted (S2-I10).
+	ConversationTainted(ctx context.Context, policy pa.Policy) (bool, error)
+	// RecordToolResult stores a result as external conversation state,
+	// which taints the conversation, before the worker sees it. An error
+	// withholds the result.
+	RecordToolResult(ctx context.Context, job pa.PAJob, output []byte) error
 }
 
 // Connections is the connection manager's half (*connection.Manager).
@@ -94,12 +101,27 @@ type Connections interface {
 	List(ctx context.Context, principal int64) ([]connection.Connection, error)
 	BeginCall(ctx context.Context, principal int64, id string, boundRevision int64) (*connection.Call, error)
 	AccessToken(ctx context.Context, principal int64, id string, boundRevision int64) (connection.Secret, connection.Connection, error)
+	// RefreshAccess is the 401 path: the server rejected the access token
+	// of generation rejected (see connection.Manager.RefreshAccess).
+	RefreshAccess(ctx context.Context, principal int64, id string, boundRevision, rejected int64) (connection.Secret, connection.Connection, error)
 }
 
 // Flags are the switches re-read at every dispatch (threat model T11).
 type Flags struct {
 	ExternalTools bool
-	Servers       map[string]bool
+	// Writes is PA_WRITES_ENABLED: off makes every write and disclosure
+	// "never" (T11). The dispatcher does not read it yet: no write path
+	// exists (P2-S1), so it is inert until the approval engine uses it.
+	// WritesErr is the error of reading it; when set, Writes is false and
+	// the gate decides writes off (gate.Input.WritesErr). It turns off
+	// writes only: reads keep their own switches (T11, S1-F1).
+	Writes    bool
+	WritesErr error
+	// Servers is PA_SERVER_<NAME>_ENABLED per server. A server whose flag
+	// cannot be read is off, with the error in ServerErrs; the other
+	// servers keep their own flags (S1-F1).
+	Servers    map[string]bool
+	ServerErrs map[string]error
 }
 
 // MCPEndpoint is one catalog server's MCP surface. *Endpoint is the only
@@ -440,8 +462,23 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	surface, listed := d.surface(ctx, ep, token, bound)
-	if !listed {
+	// One refresh per tool request (#1318 slice C2b): a 401 on tools/list
+	// or on tools/call gets exactly one refresh and one retry, and a 401
+	// after it is a refusal. A 403 is never retried: the server accepted
+	// the token and refused the request.
+	refreshed := false
+	surface, refusedErr := d.surface(ctx, ep, token, bound)
+	if errors.Is(refusedErr, ErrMCPTokenRejected) {
+		refreshed = true
+		var ref *refusal
+		token, conn, ref = d.refreshAccess(ctx, principal, req.Server, bound, conn)
+		if ref != nil {
+			d.refuse(w, r, with(base, ref.reason), ref.code)
+			return
+		}
+		surface, refusedErr = d.surface(ctx, ep, token, bound)
+	}
+	if refusedErr != nil {
 		// The server refused this connection's token on tools/list.
 		d.refuse(w, r, with(base, ReasonServerRefused), http.StatusBadGateway)
 		return
@@ -456,27 +493,45 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ConnectionID: bound.ConnectionID,
 		Tool:         req.Tool,
 		Args:         req.Arguments,
-		// The dispatcher cannot prove a run clean: everything the model
-		// saw may have come from a tool. Phase 1 has reads only, so this
-		// only labels the record.
-		Taint: TaintExternal,
+		Taint:        d.taint(ctx, policy),
 	}, func(ctx context.Context) (res Result, err error) {
 		dispatched = true
 		// The post-dispatch checks run whatever the call did, a panic
 		// included (the call is deregistered either way): a result that
 		// arrives after the connection changed, or after the job stopped
-		// running (cancelled, consent withdrawn), is discarded.
+		// running (cancelled, consent withdrawn), is discarded. So is one
+		// whose recording as conversation state failed: the worker never
+		// gets tool output that did not taint its conversation (#1321).
 		defer func() {
 			fctx := context.WithoutCancel(ctx)
 			ferr := call.Finish(fctx)
 			if ferr == nil {
 				ferr = d.cfg.Jobs.StillRunning(fctx, job)
 			}
-			if ferr != nil {
+			if ferr == nil && err == nil {
+				// Recorded as the worker will see it: capped.
+				out, _ := jobs.TruncateToolOutput(res.Output)
+				ferr = d.cfg.Jobs.RecordToolResult(fctx, job, out)
+			}
+			var rr *refreshRefusal
+			if ferr != nil && !errors.As(err, &rr) {
+				// A failed refresh after a 401 sent nothing that ran,
+				// and may itself have moved the connection (expired):
+				// its reason is the truthful one, not "fenced".
 				res, err = Result{}, fmt.Errorf("%w: %w", ErrDispatchFenced, ferr)
 			}
 		}()
 		out, cerr := ep.CallTool(ctx, token, req.Tool, req.Arguments)
+		if errors.Is(cerr, ErrMCPTokenRejected) && !refreshed {
+			// The server rejected the token before running the call,
+			// so it is sent once more with a refreshed token.
+			refreshed = true
+			fresh, _, ref := d.refreshAccess(ctx, principal, req.Server, bound, conn)
+			if ref != nil {
+				return Result{}, &refreshRefusal{ref: *ref}
+			}
+			out, cerr = ep.CallTool(ctx, fresh, req.Tool, req.Arguments)
+		}
 		if errors.Is(cerr, ErrMCPUnauthorized) {
 			return Result{}, fmt.Errorf("%w: %w", ErrDispatchRefused, cerr)
 		}
@@ -500,6 +555,22 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	out, truncated := jobs.TruncateToolOutput(res.Output)
 	d.count(req.Server, string(status), "")
 	writeJSON(w, http.StatusOK, toolResponse{Status: string(status), Output: string(out), Truncated: truncated})
+}
+
+// taint is the run's taint for the audit record: the conversation's
+// durable flag, read at dispatch (T5, #1321). Only a flag read as clean is
+// clean; a read error is external (S2-I10). It labels the record; no gate
+// is lowered by it here.
+func (d *Dispatcher) taint(ctx context.Context, policy pa.Policy) Taint {
+	tainted, err := d.cfg.Jobs.ConversationTainted(ctx, policy)
+	if err != nil {
+		slog.Warn("pa dispatch: conversation taint unreadable, recorded as external", "err", err)
+		return TaintExternal
+	}
+	if tainted {
+		return TaintExternal
+	}
+	return TaintClean
 }
 
 func (d *Dispatcher) callTimeout() time.Duration {
@@ -529,7 +600,10 @@ func (d *Dispatcher) answerExecuteError(w http.ResponseWriter, server string, er
 	var reason string
 	code := http.StatusForbidden
 	status := StatusRefused
+	var rr *refreshRefusal
 	switch {
+	case errors.As(err, &rr):
+		reason, code = rr.ref.reason, rr.ref.code
 	case errors.Is(err, ErrAuditUnavailable):
 		reason, code = ReasonAuditUnavailable, http.StatusServiceUnavailable
 	case errors.Is(err, ErrDispatchFenced):
@@ -554,6 +628,35 @@ func (d *Dispatcher) answerExecuteError(w http.ResponseWriter, server string, er
 	d.count(server, string(status), reason)
 	writeJSON(w, code, refusalResponse{Stop: reason})
 }
+
+// refreshAccess refreshes the connection's tokens after the server
+// rejected the token of conn's generation, and returns the token to retry
+// with once. The connection it opens must still be exactly the bound one
+// (S1-X3), as for AccessToken.
+func (d *Dispatcher) refreshAccess(ctx context.Context, principal int64, server string, bound pa.ConnectionRevision, conn connection.Connection) (connection.Secret, connection.Connection, *refusal) {
+	token, next, err := d.cfg.Connections.RefreshAccess(ctx, principal, bound.ConnectionID, bound.AuthorityRevision, conn.TokenGeneration)
+	if err != nil {
+		ref := connectionRefusal(err)
+		return connection.Secret{}, connection.Connection{}, &ref
+	}
+	if next.ID != bound.ConnectionID || next.Principal != principal || string(next.Server) != server {
+		return connection.Secret{}, connection.Connection{}, &refusal{ReasonConnectionUnbound, http.StatusForbidden}
+	}
+	return token, next, nil
+}
+
+// refreshRefusal is a dispatch closure's failure when the server rejected
+// the token and the refresh that would have let the call retry failed.
+// The server ran nothing, so it is recorded as refused, with the
+// connection's reason.
+type refreshRefusal struct{ ref refusal }
+
+func (e *refreshRefusal) Error() string {
+	return "pa connector: token refresh failed: " + e.ref.reason
+}
+
+// Unwrap makes the executor record the call as refused: nothing ran.
+func (e *refreshRefusal) Unwrap() error { return ErrDispatchRefused }
 
 // resolveConnection picks the run's bound connection for server. A named
 // connection must be bound to the run (S1-X3: a connection of another
@@ -609,8 +712,9 @@ func (d *Dispatcher) resolveConnection(ctx context.Context, policy pa.Policy, se
 // observation is cached: a failure is retried by the next call, and until
 // then the server is unavailable. listed is false when the server refused
 // this connection's token: that says nothing about the listing, so it is
-// counted but is not an observation.
-func (d *Dispatcher) surface(ctx context.Context, ep MCPEndpoint, token connection.Secret, bound pa.ConnectionRevision) (s *catalog.Surface, listed bool) {
+// counted but is not an observation. refused is the server's refusal of
+// the token (wrapping ErrMCPUnauthorized), nil when the listing was read.
+func (d *Dispatcher) surface(ctx context.Context, ep MCPEndpoint, token connection.Secret, bound pa.ConnectionRevision) (s *catalog.Surface, refused error) {
 	server := ep.Server()
 	key := listingKey{server: server, connection: bound.ConnectionID, revision: bound.AuthorityRevision}
 	now := d.now()
@@ -619,7 +723,7 @@ func (d *Dispatcher) surface(ctx context.Context, ep MCPEndpoint, token connecti
 	d.mu.Unlock()
 	if s != nil && s.Err() == nil {
 		if _, err := s.ModelTools(now); err == nil {
-			return s, true
+			return s, nil
 		}
 	}
 	pages, err := ep.ListTools(ctx, token)
@@ -631,7 +735,7 @@ func (d *Dispatcher) surface(ctx context.Context, ep MCPEndpoint, token connecti
 		d.uncacheLocked(key, now)
 		d.refreshPinsLocked(d.now())
 		d.mu.Unlock()
-		return nil, false
+		return nil, err
 	}
 	if err != nil {
 		d.countListingFailure(server, listingUnavailable)
@@ -679,7 +783,7 @@ func (d *Dispatcher) surface(ctx context.Context, ep MCPEndpoint, token connecti
 	d.observations[key] = o
 	d.pinServers[server] = true
 	d.refreshPinsLocked(d.now())
-	return s, true
+	return s, nil
 }
 
 // uncacheLocked drops key's cached listing unless it started after a
@@ -946,6 +1050,10 @@ func jobRefusal(err error) refusal {
 		return refusal{ReasonBudget, http.StatusConflict}
 	case errors.Is(err, jobs.ErrNotFound), errors.Is(err, jobs.ErrStale), errors.Is(err, pa.ErrNoJob):
 		return refusal{ReasonJobStale, http.StatusConflict}
+	case errors.Is(err, jobs.ErrPrincipalDisabled):
+		return refusal{ReasonPrincipalDisabled, http.StatusForbidden}
+	case errors.Is(err, jobs.ErrPrincipalNotAllowed):
+		return refusal{ReasonPrincipalNotAllowed, http.StatusForbidden}
 	case errors.Is(err, jobs.ErrGone):
 		return refusal{ReasonJobGone, http.StatusConflict}
 	case errors.Is(err, jobs.ErrInvalid):
@@ -958,9 +1066,21 @@ func jobRefusal(err error) refusal {
 // unreadable, never a pass.
 func connectionRefusal(err error) refusal {
 	switch {
+	case errors.Is(err, connection.ErrRefreshInProgress), errors.Is(err, connection.ErrRefreshFailed),
+		errors.Is(err, connection.ErrRefreshUnavailable):
+		// The connection is unchanged (an expiry that could not be
+		// recorded included); this call fails and nothing retries it.
+		// Checked first: a failed refresh is never reported as expired.
+		return refusal{ReasonRefreshUnavailable, http.StatusServiceUnavailable}
 	case errors.Is(err, connection.ErrRevisionMismatch):
 		return refusal{ReasonRevisionMismatch, http.StatusConflict}
-	case errors.Is(err, connection.ErrNotActive), errors.Is(err, connection.ErrNotFound):
+	case errors.Is(err, connection.ErrExpired), errors.Is(err, connection.ErrInvalidGrant),
+		errors.Is(err, connection.ErrNoRefreshToken):
+		// The service stopped accepting the connection; the principal is
+		// told once to link it again (#1318 slice C2b).
+		return refusal{ReasonConnectionExpired, http.StatusForbidden}
+	case errors.Is(err, connection.ErrNotActive), errors.Is(err, connection.ErrNotFound),
+		errors.Is(err, connection.ErrRefreshTokenReuse):
 		return refusal{ReasonConnectionInactive, http.StatusForbidden}
 	case errors.Is(err, connection.ErrScopeMismatch):
 		return refusal{ReasonScopeMismatch, http.StatusForbidden}

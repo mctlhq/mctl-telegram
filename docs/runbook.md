@@ -39,6 +39,7 @@ to do about it), see [docs/troubleshooting.md](troubleshooting.md) instead.
 - [MctlTelegramLoginSendCodeStalls — logins stalling at SendCode](#mctltelegramloginsendcodestalls)
 - [MctlTelegramLoginSlow — SendCode p95 above 30s](#mctltelegramloginslow)
 - [MctlBridgeDaemonsFlapping — Local Bridge daemons reconnecting](#mctlbridgedaemonsflapping)
+- [MctlWorkerTokenRevocationRefreshFailing — worker-token revocation list cannot be refreshed](#mctlworkertokenrevocationrefreshfailing)
 - [Auditing accounts with send disabled](#auditing-accounts-with-send-disabled)
 - [Canary](#canary)
 - [Deployment compatibility boundaries](#deployment-compatibility)
@@ -2997,6 +2998,159 @@ rather than re-applying the exemption.
 
 ---
 
+<a id="mctlworkertokenrevocationrefreshfailing"></a>
+## MctlWorkerTokenRevocationRefreshFailing — worker-token revocation list cannot be refreshed
+
+### Symptom
+
+- Alert `MctlWorkerTokenRevocationRefreshFailing` fires with severity
+  **critical** when the worker-token revocation snapshot of some pod has been
+  past its 15-second bound in every minute for 5 minutes running
+  (`max by (job) (max_over_time(mctl_worker_token_revocation_snapshot_age_seconds[1m])) > 15`).
+  The gauge is the snapshot's age from when its read began, the same measure
+  the bound uses, computed at each scrape. `> 15` is the bound itself: the
+  server refuses at an age above 15 seconds. `max_over_time` over `[1m]`
+  keeps a store that flaps between failing and healthy from resetting the
+  hold; the window is shorter than the hold, so one stale minute during a
+  failover cannot page.
+- What it means: since mctl-telegram#1346 (release 0.140.0) the revocation
+  cache fails closed. It serves its last good snapshot for at most 15
+  seconds (`localjwt.MaxRevocationSnapshotAge`). Past that, **every** token
+  checked against it is refused with 401: worker tokens, the managed pool
+  token, Local Bridge daemon tokens, agent job tokens and PA job tokens. All
+  of them share one cache in the server.
+- Why the age and not request traffic: an agent worker **exits** on its
+  first 401 (it reads its token once at start, so retrying cannot help) and
+  comes back only through Kubernetes `CrashLoopBackOff`, with restarts 10s,
+  20s, 40s … apart up to 5 minutes. The PA worker stops. After the first
+  minute of an outage there are almost no worker-token requests, so a signal
+  driven by requests goes quiet exactly when the outage is real. The server
+  therefore refreshes on its own: a background refresher reloads the list
+  every 5 seconds (`localjwt.RevocationRefreshInterval`), one read at a time,
+  each bounded by a 5-second deadline (`localjwt.RevocationRefreshTimeout`).
+  On a healthy store, even a slow one, the age stays at or under 10 seconds.
+  While the store is unreadable it climbs without limit, traffic or not.
+- A pod that starts into the outage and never loads the list reports its
+  age since the cache was created, never 0, so it pages too.
+- How the failure counter moves (diagnostic only):
+  `mctl_worker_token_revocation_refresh_failures_total` counts failed reads.
+  The refresher adds one per tick (at least one per 10 seconds while the
+  store hangs to its deadline), and a request that finds the snapshot stale
+  and refreshes inline adds its own. A read its caller abandons
+  (`context.Canceled`, including server shutdown) is not counted; a read
+  that hits its own deadline is.
+- On the client side: agent workers log the 401 and exit, then crash-loop
+  (`get_service_pods` shows restarts climbing); Local Bridge daemons
+  reconnect in a loop. `mctl_auth_failures_total` rises with
+  `reason="other"` (the refusal is a store failure, not a bad token) for the
+  worker providers.
+- The gauge exists only from the release containing #1360, the first one
+  after 0.140.0. **0.140.0 itself refuses tokens (#1347) and exports no
+  gauge, so on 0.140.0 a shared-pg outage stops every agent worker and pages
+  nothing**; the gap closes only when the release containing #1360 is
+  deployed, so ship it promptly. Releases before 0.140.0 fail open and have
+  nothing to page on. On any release without the gauge this rule has no
+  data and is silent. A server that is down or not scraped gives this rule
+  no data at all; that case is `ServiceUnavailable` (the `/healthz` probe),
+  not this alert.
+
+### Likely causes
+
+1. **shared-pg is down, restarting or failing over** for longer than the
+   15-second bound. The most likely cause, and usually visible as a
+   `SharedPg*` alert (`SharedPgNoPrimary`, `SharedPgInstanceDown`) at the
+   same time.
+2. **The database refuses the query**: connections exhausted on the
+   shared-pg side (`SharedPgConnectionsHigh`, `SharedPgRoleConnectionsHigh`),
+   credentials rotated without a restart, or the `worker_token_revocations`
+   table missing or unreadable after a bad migration.
+3. **Network path to shared-pg broken** from the mctl-telegram pod (network
+   policy change, DNS).
+
+4. **shared-pg hangs instead of failing**, or the server's own connection
+   pool is held by slow queries. Each refresh read has its own 5-second
+   deadline (`localjwt.RevocationRefreshTimeout`), derived from the
+   refresher's or the request's context, so a hung read ends as a counted
+   failure and the age climbs exactly as in an outright failure. A request
+   that has to refresh inline waits at most those 5 seconds and is then
+   refused: an inline refresh starts only once the snapshot is a TTL (10s)
+   old, so a read that runs to the deadline returns past the 15-second
+   bound. That is the fail-closed outcome, not a stale answer.
+
+### Diagnostic queries
+
+```promql
+# Snapshot age per pod, in seconds; above 15 that pod refuses worker tokens.
+mctl_worker_token_revocation_snapshot_age_seconds
+
+# Failed refresh reads per minute (refresher ticks plus inline refreshes).
+sum by (job) (rate(mctl_worker_token_revocation_refresh_failures_total[5m])) * 60
+
+# The refusals the outage causes, by provider.
+sum by (provider) (increase(mctl_auth_failures_total{reason="other"}[5m]))
+```
+
+Server logs (the platform MCP `get_service_logs` tool, for the
+mctl-telegram service in the `labs` tenant):
+
+- `auth failed` with `err` containing `check worker token revocation` or
+  `check pool token revocation`, followed by either
+  `revocation cache snapshot is older than its bound` (the snapshot aged
+  past 15s) or `revocation cache cold-start refresh` (a fresh pod that never
+  loaded the list). The wrapped database error after
+  `refresh worker token revocation cache:` names the real cause
+  (connection refused, too many clients, missing relation, or
+  `revocation refresh read exceeded RevocationRefreshTimeout` when the read
+  hung until its own deadline).
+- `worker token revocation refresher: refresh failing` (logged once when
+  the background refresher's reads start failing, with the same wrapped
+  error) and `worker token revocation refresher: refresh recovered`.
+- Unrelated database errors from other paths at the same time confirm the
+  store, not this cache, is the problem.
+
+Database: check the `SharedPg*` alerts in vmalert and the shared-pg cluster
+status (read only). The platform MCP `get_service_status` and
+`get_service_pods` tools show whether mctl-telegram itself is healthy and how
+many pods serve.
+
+### Impact
+
+Every agent worker, the managed pool worker, PA jobs and Local Bridge
+daemons are refused for as long as the store stays unreadable. Interactive
+users (OAuth sessions) are not affected: their tokens skip the revocation
+check. No data is lost; jobs stay pending and are claimed once workers are
+back. The server itself recovers within one refresher tick (5 seconds) of
+the database coming back; workers recover on their next CrashLoopBackOff
+restart, which can be up to 5 minutes later.
+
+### Mitigation
+
+1. Restore the database. This is the only fix. Within 5 seconds the
+   refresher loads a fresh snapshot (the age gauge drops under 10) and
+   token checks pass again. Crashed agent workers come back on their next
+   CrashLoopBackOff restart, up to 5 minutes later; to skip the wait,
+   restart the worker pods once the gauge is back under 10.
+2. If only mctl-telegram cannot reach a healthy shared-pg, restart the
+   mctl-telegram pods after fixing the path or credentials.
+3. **Do not raise or disable the 15-second bound** (no
+   `WORKER_TOKEN_REVOCATION_CACHE_TTL` change helps either: it is clamped to
+   15s). The bound is the promised propagation delay for a revocation; an
+   outage is exactly when a stolen or leaked worker token must not keep
+   working. Waiting for the store is the designed behaviour.
+
+### Escalation
+
+If shared-pg is healthy and refreshes still fail, or the outage lasts longer
+than 15 minutes, escalate to the platform owner with the wrapped database
+error from the log.
+
+### Postmortem trigger
+
+Any firing: every agent worker was stopped. Record how long the store was
+unreadable and whether a `SharedPg*` alert fired first.
+
+---
+
 <a id="auditing-accounts-with-send-disabled"></a>
 ## Auditing accounts with send disabled
 
@@ -4000,6 +4154,13 @@ mctl-gitops vm-rules is part of enabling the PA (#1318).
   This is also why `PA_ENABLED` must only be turned on once every replica
   runs a build with #1348: an older pod in the same rollout claims the
   same table.
+- **Conversation taint (#1321).** The same holds for the durable
+  conversation taint: a build from before #1321 appends forwarded text and
+  returns tool results without raising `pa_conversations.tainted`, so a
+  conversation opened clean by a newer pod could stay clean beside an
+  older one. Turn `PA_ENABLED` on only once every replica runs a build
+  with #1321. The column is added with default 1, so rows from before it
+  read as tainted.
 - **Callback answer.** Once a press's update committed, the server answers
   its callback query (`answerCallbackQuery`, no text) so the client stops
   the spinner on the button; the reply itself is an outbox row as above.
@@ -4153,6 +4314,41 @@ not be read; nothing was sent and the rows stay due. `button_expired` and
 and "Reused update id" in the outbox section above. Inspect rows by principal with `Store.PAOutboxRows`;
 rows carry no message text.
 
+## Personal Assistant: who may use it, and disabling one principal (issue #1318)
+
+Both controls exist only while `PA_ENABLED=true`, and both are checked at
+ingress (every update) and again at every run step (claim, turn, tool
+admission, reply), so neither needs a restart.
+
+- **Preview allowlist (`PA_ALLOWED_PRINCIPALS`).** A comma-separated list
+  of Telegram user ids. Only those principals may use the PA. Unset or
+  empty allows nobody: the server starts, logs `pa allowlist is empty:
+  every principal is refused`, and answers every message with the fixed
+  "not available" reply (owner decision on #1318, 2026-11-21). A malformed
+  entry (empty, not a positive integer) refuses startup with an error that
+  names the variable but not its value. Changing the list takes a rollout.
+- **Disable one principal.** Call the tg MCP tool
+  `set_pa_principal_disabled` (scope `admin:users`; not on the shared
+  portal surface) with `telegram_id`, `disabled: true` and a one-line
+  `reason` (at most 200 characters). Re-enable with `disabled: false`.
+  Read the state with `get_pa_principal_status` (`admin:users` or
+  `admin:users:read`). The call is audited to the admin; the row in
+  `pa_principal_disables` records the admin's user id, the time and the
+  reason, and survives the principal's account deletion.
+- **What the principal sees.** A disabled (or not allowed) principal gets
+  one fixed reply, "The assistant is not available for your account.
+  /forget still deletes your conversations.", to each message; nothing they
+  send is stored or queued and no consent prompt is offered. `/forget` and
+  `/consent withdraw` still run. A request already running is cancelled at
+  its next step, its reservation is held, and the principal is told once
+  (outbox kind `principal_stopped`). A tool call refused for this reason is
+  audited `refused` with `reason=principal_disabled` or
+  `reason=principal_not_allowed`.
+- **Unreadable status.** If `pa_principal_disables` cannot be read, the
+  update is answered 5xx for Telegram to retry and nothing is stored; a
+  run step is refused as unreadable and the job is kept, never treated as
+  "not disabled".
+
 ## Personal Assistant catalog pin (issue #1315)
 
 The PA dispatcher compares each catalog server's live `tools/list` with the
@@ -4228,12 +4424,58 @@ the count (` suppressed=N` in the record). A steady
 line rate: find the principal from its `refusals_suppressed_security` rows
 and stop its runs.
 
+### PA token refresh and expired connections
+
+A connection's access token is refreshed through the server's
+refresh-token grant (#1318 slice C2b):
+
+- ahead of time, when its expiry is known (the token response's
+  `expires_in`, counted from receipt) and less than 60s remains. An unknown
+  expiry is never treated as "does not expire" and is never refreshed
+  ahead;
+- after a 401 from the MCP server, once per tool request, followed by one
+  retry. A 403 is never retried.
+
+Concurrent calls share one refresh (per replica a single flight, across
+replicas the store lease), and a flight for a generation that another
+flight already replaced does not rotate again. A refresh that fails for a
+transient reason, or whose lease another replica holds, is not retried. A
+refresh ahead that fails that way still hands out the current token while
+it has not expired; past its expiry, and after a 401, the call fails as
+`refresh_unavailable` (503). A refresh the server
+answers `invalid_grant`, or a 401 on a connection without a refresh token,
+moves the connection to `expired`: its secrets are destroyed, every later
+call is refused as `connection_expired` (403) without contacting the
+server, `/connections` lists it as expired with the `/connect` hint, and
+the user gets one "link it again" message. That message is a
+`connection_expired` row in `pa_outbox`, written in the transaction of the
+`active -> expired` change and unique per (principal, connection), so a
+restart or a second replica never sends it twice. A new `/connect` on the
+same server revokes the expired connection (and any other active one there)
+when it is confirmed, so the user never has two connections a run could
+bind. A run bound after the expiry gets none of that server's tools: only
+`active` connections are bound.
+
+Rolling back past this change is safe for the outbox. A
+`connection_expired` row stores minus its own id as `update_id`, so the
+previous build's `idx_pa_outbox_update`, which its Migrate recreates at
+start, still builds when one principal has several such rows. The previous
+build has no template for that kind: it marks a pending row `failed` rather
+than sending it, so a "link it again" message still pending at rollback is
+not delivered. The connection itself stays `expired` and `/connections`
+still shows it.
+
 <a id="mctlpapinlistingunauthorized"></a>
 ### MctlPAPinListingUnauthorized
 
 `mctl_pa_pin_listing_failures_total{server,reason="unauthorized"}` has grown
 for 30 minutes: the server answers 401 to PA connection tokens on
-`tools/list`, and those calls are refused as `server_refused`. One user with
+`tools/list`. Since #1318 slice C2b a 401 is answered by one refresh of
+that connection's tokens and one retry; only a 401 after the refresh is
+refused as `server_refused` (a 403 is refused at once, never retried). Each
+401 is counted, the recovered first one included, so a server whose tokens
+carry no `expires_in` (never refreshed ahead) adds one count per token
+lifetime per active user. One user with
 a broken connection fires this only if they keep retrying; several users at
 once usually means the server stopped accepting our tokens (key rotation,
 changed audience, revoked client).

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 )
 
 // allowedScopes is the exact Phase 1 scope set per server (threat model T8).
@@ -47,30 +48,63 @@ type TokenSet struct {
 	RefreshToken Secret
 	// ExpiresIn is seconds, 0 when the server did not say.
 	ExpiresIn int64
+	// ExpiresAt is when the access token expires: the time its response
+	// was received plus ExpiresIn (#1318 slice C2b). The zero time means
+	// unknown, never "does not expire": the server did not say, said 0, or
+	// the set was sealed before expiries were kept. An unknown expiry is
+	// never refreshed ahead; only the server's 401 refreshes it.
+	ExpiresAt time.Time
 }
 
+// receivedAt stamps the expiry of a set parsed from a response received
+// at at. It is the receipt, not the time the set is sealed, that the
+// server's expires_in counts from. A lifetime past MaxExpiresIn is cut
+// to it: time.Duration overflows from about 9.2e9 seconds, and an
+// overflowed expiry would land in the past and refresh every call.
+func (t TokenSet) receivedAt(at time.Time) TokenSet {
+	t.ExpiresAt = time.Time{}
+	if t.ExpiresIn > 0 && !at.IsZero() {
+		t.ExpiresAt = at.Add(time.Duration(min(t.ExpiresIn, MaxExpiresIn)) * time.Second).UTC()
+	}
+	return t
+}
+
+// MaxExpiresIn is the longest access-token lifetime taken from a server,
+// in seconds: one year.
+const MaxExpiresIn = 365 * 24 * 60 * 60
+
 // tokenSetWire is the sealed form. It is only ever marshalled into a DEK
-// seal and never logged.
+// seal and never logged. ExpiresAtMS is absent from a set sealed before
+// #1318 slice C2b, which opens with an unknown expiry.
 type tokenSetWire struct {
 	AccessToken  string `json:"a"`
 	RefreshToken string `json:"r,omitempty"`
 	ExpiresIn    int64  `json:"e,omitempty"`
+	ExpiresAtMS  int64  `json:"x,omitempty"`
 }
 
 func (t TokenSet) marshal() ([]byte, error) {
-	return json.Marshal(tokenSetWire{
+	w := tokenSetWire{
 		AccessToken:  t.AccessToken.Reveal(),
 		RefreshToken: t.RefreshToken.Reveal(),
 		ExpiresIn:    t.ExpiresIn,
-	})
+	}
+	if !t.ExpiresAt.IsZero() {
+		w.ExpiresAtMS = t.ExpiresAt.UnixMilli()
+	}
+	return json.Marshal(w)
 }
 
 func unmarshalTokenSet(b []byte) (TokenSet, error) {
 	var w tokenSetWire
-	if err := json.Unmarshal(b, &w); err != nil || w.AccessToken == "" {
+	if err := json.Unmarshal(b, &w); err != nil || w.AccessToken == "" || w.ExpiresAtMS < 0 {
 		return TokenSet{}, fmt.Errorf("%w: sealed token set", ErrUnreadable)
 	}
-	return TokenSet{AccessToken: NewSecret(w.AccessToken), RefreshToken: NewSecret(w.RefreshToken), ExpiresIn: w.ExpiresIn}, nil
+	ts := TokenSet{AccessToken: NewSecret(w.AccessToken), RefreshToken: NewSecret(w.RefreshToken), ExpiresIn: w.ExpiresIn}
+	if w.ExpiresAtMS > 0 {
+		ts.ExpiresAt = time.UnixMilli(w.ExpiresAtMS).UTC()
+	}
+	return ts, nil
 }
 
 // ScopeCheck is the outcome of VerifyTokenResponse. Tokens is set whenever

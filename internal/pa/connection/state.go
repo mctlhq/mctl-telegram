@@ -232,6 +232,11 @@ var (
 	// ErrUnreadable: the row, or its secret material, could not be read.
 	// Never treated as active (I9, S1-C5).
 	ErrUnreadable = errors.New("pa connection: unreadable")
+	// ErrNoConsent: activation (pending_confirm -> active) found no
+	// current data-flow consent for the principal, read under the
+	// principal's lock in the activating transaction. The connection is
+	// left pending; the caller fails it and revokes its tokens.
+	ErrNoConsent = errors.New("pa connection: no current consent")
 	// ErrNotActive: the connection is in a state that refuses every call.
 	ErrNotActive = errors.New("pa connection: not active")
 	// ErrRevisionMismatch: the connection moved past the bound revision.
@@ -250,4 +255,51 @@ var (
 	// of a refresh token.
 	ErrInvalidGrant      = errors.New("pa connection: invalid_grant")
 	ErrRefreshTokenReuse = errors.New("pa connection: refresh token reuse detected")
+	// ErrTooManyPending: the principal already has MaxPendingConnections
+	// connections in a pending_* state (threat model T10).
+	ErrTooManyPending = errors.New("pa connection: too many connections being linked")
+	// ErrPrincipalDisabled: activation (pending_confirm -> active) found
+	// the principal disabled by an admin, or could not read whether it is,
+	// under the principal's lock in the activating transaction. The
+	// connection is left pending; the caller fails it and revokes its
+	// tokens (#1318).
+	ErrPrincipalDisabled = errors.New("pa connection: principal disabled")
+	// ErrNoRefreshToken: the server rejected the access token and the
+	// connection holds no refresh token, so only a new /connect can make it
+	// usable again. The connection is moved to expired.
+	ErrNoRefreshToken = errors.New("pa connection: no refresh token")
+	// ErrRefreshUnavailable: no refresh-token grant is configured.
+	ErrRefreshUnavailable = errors.New("pa connection: refresh not configured")
+	// ErrRefreshFailed wraps a refresh-token grant that failed for any
+	// reason other than invalid_grant or reported reuse (the network, the
+	// server, a timeout). The connection is unchanged; only the call that
+	// needed the refresh fails, and nothing retries it.
+	ErrRefreshFailed = errors.New("pa connection: refresh failed")
+	// ErrExpired is ErrNotActive for a connection in state expired: the
+	// service stopped accepting it, and only a new /connect helps. It
+	// wraps ErrNotActive, so every check for "not active" still refuses.
+	ErrExpired = fmt.Errorf("%w: connection expired", ErrNotActive)
+	// ErrPrincipalDeleted: the principal's account was deleted after this
+	// Begin was admitted, so it may not create a connection (#1338).
+	ErrPrincipalDeleted = errors.New("pa connection: the account was deleted")
 )
+
+// MaxPendingConnections is the per-principal cap on connections in a
+// pending_* state (threat model T10, #1338). Each Begin wraps a fresh DEK
+// with the KEK, which may be a Vault Transit call, and each pending row lives
+// up to the linking sweep's PendingMaxAge, so without a cap a principal
+// could have the server wrap keys and keep rows without bound. Three covers
+// a link attempt per catalog server plus one retry; a principal that hits it
+// waits for an attempt to finish or for the sweep to fail it.
+const MaxPendingConnections = 3
+
+// Admission is a store's permission for one Begin, read before the KEK wrap
+// (Store.AdmitPAConnection) and checked again when the row is created
+// (Store.CreatePAConnection). Its fields belong to the store; the manager
+// only passes it along.
+type Admission struct {
+	// PurgeMark is the principal's account-deletion mark when admitted.
+	PurgeMark int64
+	// ReadAt is when the store admitted the Begin, on the store's clock.
+	ReadAt time.Time
+}

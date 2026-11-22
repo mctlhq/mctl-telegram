@@ -747,3 +747,69 @@ func TestNew_RegistersUsageLedgerMetrics(t *testing.T) {
 		t.Error("UsageRunner clamp wrong")
 	}
 }
+
+// boundedLabelNames are label names whose values are drawn from a closed set
+// (enums, route patterns, tool names, model ids). A label not in this set, and
+// not in reviewedIdentifierLabels, fails TestMetricLabelNamesAreAllowlisted.
+var boundedLabelNames = map[string]bool{
+	"class": true, "client": true, "direction": true, "event": true,
+	"identity_kind": true, "kind": true, "method": true, "model": true,
+	"op": true, "outcome": true, "problem": true, "provider": true,
+	"reason": true, "result": true, "route": true, "runner": true,
+	"scope": true, "server": true, "status": true, "status_code": true,
+	"surface": true, "tool": true, "traffic": true, "ua_family": true,
+}
+
+// reviewedIdentifierLabels are labels that carry an identifier rather than an
+// enum. Each is pinned to the single metric it was reviewed on, so reusing the
+// same label name on a new metric still fails. user_id is the internal
+// users.id surrogate key, never a Telegram id, handle or phone number
+// (mctl-telegram#560). Metric labels are an egress path into shared,
+// long-retained storage: do not add a Telegram id, handle or phone number.
+var reviewedIdentifierLabels = map[string]string{
+	"user_id":    "mctl_bridge_connections_total",
+	"replica_id": "mctl_telegram_replica_id",
+	"domain_id":  "mctl_agent_credential_domain",
+}
+
+var variableLabelsRE = regexp.MustCompile(`fqName: "([^"]+)".*variableLabels: \{([^}]*)\}`)
+
+// TestMetricLabelNamesAreAllowlisted fails when any registered collector
+// carries a label name that has not been reviewed. Labels are read from the
+// collector descriptors, so vectors with no children yet are covered too. A
+// descriptor that cannot be parsed is a failure, never "no labels".
+func TestMetricLabelNamesAreAllowlisted(t *testing.T) {
+	reg := New()
+	ch := make(chan *prometheus.Desc, 1024)
+	reg.Prometheus.Describe(ch)
+	close(ch)
+
+	seen := 0
+	for d := range ch {
+		seen++
+		m := variableLabelsRE.FindStringSubmatch(d.String())
+		if m == nil {
+			t.Errorf("cannot parse descriptor %q: label set unknown, not assumed empty", d.String())
+			continue
+		}
+		name := m[1]
+		if m[2] == "" {
+			continue
+		}
+		for _, l := range strings.Split(m[2], ",") {
+			l = strings.TrimSpace(l)
+			if boundedLabelNames[l] {
+				continue
+			}
+			if owner, ok := reviewedIdentifierLabels[l]; ok && owner == name {
+				continue
+			}
+			t.Errorf("metric %s has unreviewed label %q: labels must be bounded enums; "+
+				"never a Telegram id, handle or phone number (see AGENTS.md, Safety rules). "+
+				"Add it to boundedLabelNames only if its values are a closed set", name, l)
+		}
+	}
+	if seen == 0 {
+		t.Fatal("no collector descriptors observed: cannot verify labels")
+	}
+}

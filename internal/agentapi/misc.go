@@ -98,10 +98,13 @@ type autopilotPauseRequest struct {
 }
 
 // handleAutopilotPause is POST /autopilot/pause. Body {"paused": bool} — an
-// omitted field defaults to true (pause), matching the tool's name; pass
-// {"paused": false} to resume. Distinct from the AGENT_KILL_SWITCH env var:
-// this is per-account and DB-backed (the operator or the agent itself can
-// toggle it), the kill switch is process-wide and env-only.
+// omitted field defaults to true (pause), matching the tool's name.
+// {"paused": false} is refused with 403: every credential this API accepts is
+// an agent credential (aud "agent" or "agent-job"), and resuming is the
+// owner's decision, made through /mctl unpause. Letting an agent token clear
+// the pause would let a prompt-injected message undo the owner's own
+// /mctl pause (#944). Distinct from the AGENT_KILL_SWITCH env var: this is
+// per-account and DB-backed, the kill switch is process-wide and env-only.
 func (s *Server) handleAutopilotPause(w http.ResponseWriter, r *http.Request) {
 	id, ok := identity(w, r)
 	if !ok {
@@ -120,6 +123,11 @@ func (s *Server) handleAutopilotPause(w http.ResponseWriter, r *http.Request) {
 	paused := true
 	if req.Paused != nil {
 		paused = *req.Paused
+	}
+	if !paused {
+		s.audit(r.Context(), id.UserID, "resume_autopilot", "denied", "agent credential cannot resume autopilot")
+		writeJSONError(w, http.StatusForbidden, "resuming autopilot is an owner decision: use /mctl unpause")
+		return
 	}
 	if err := s.Store.SetAgentAutopilotPaused(r.Context(), id.UserID, paused); err != nil {
 		if errors.Is(err, db.ErrAgentProfileNotFound) {

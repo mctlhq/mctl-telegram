@@ -112,6 +112,8 @@ var reviewerWriteRules = map[string]reviewerWriteRule{
 	"get_user_audit_log":         reviewerRefused,
 	"get_acquisition_report":     reviewerRefused,
 	"set_telegram_access":        reviewerRefused,
+	"set_pa_principal_disabled":  reviewerRefused,
+	"get_pa_principal_status":    reviewerRefused,
 	"set_account_send":           reviewerRefused,
 	"set_account_mode":           reviewerRefused,
 	"provision_local_account":    reviewerRefused,

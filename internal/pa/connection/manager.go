@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"sync"
 	"time"
@@ -17,14 +18,34 @@ import (
 // Every method is keyed by (principal, id); a row of another principal is
 // ErrNotFound. A failed read is an error, never a zero Connection.
 type Store interface {
-	CreatePAConnection(ctx context.Context, c Connection, s Sealed) error
+	// AdmitPAConnection decides whether principal may begin a connection:
+	// ErrTooManyPending when it has MaxPendingConnections pending ones. A
+	// failed read is an error, never an admission.
+	AdmitPAConnection(ctx context.Context, principal int64) (Admission, error)
+	// CreatePAConnection inserts a new pending_link row under the
+	// principal's lock, after checking again in the same transaction that
+	// the cap holds (ErrTooManyPending) and that the principal's account was
+	// not deleted since a was issued (ErrPrincipalDeleted).
+	CreatePAConnection(ctx context.Context, c Connection, s Sealed, a Admission) error
 	GetPAConnection(ctx context.Context, principal int64, id string) (Connection, error)
 	GetPAConnectionSealed(ctx context.Context, principal int64, id string) (Connection, Sealed, error)
 	ListPAConnections(ctx context.Context, principal int64) ([]Connection, error)
 	// TransitionPAConnection applies t by compare-and-set and returns the
 	// row after it. ErrNotFound, ErrConflict, ErrIllegalTransition and
-	// ErrInvalidTransition as documented on Transition.
+	// ErrInvalidTransition as documented on Transition. The activation
+	// edge is applied as ActivatePAConnection, every check included.
+	// Moving a row from active to expired also queues, in the same
+	// transaction, the one "link it again" notice that transition owes.
 	TransitionPAConnection(ctx context.Context, principal int64, id string, t Transition) (Connection, error)
+	// ActivatePAConnection applies the pending_confirm -> active edge t. In
+	// one transaction, under the principal's lock, it requires a current
+	// consent (ErrNoConsent) and a principal that is not disabled
+	// (ErrPrincipalDisabled; an unreadable disable refuses too), and then
+	// revokes every other active or expired connection of the principal on
+	// the same server: a reconnect never leaves two connections a run
+	// could bind. It returns the superseded rows with their secret
+	// material as it was just before, for remote revocation.
+	ActivatePAConnection(ctx context.Context, principal int64, id string, t Transition) (Connection, []Superseded, error)
 	// RevokePAConnection moves the row to revoked from whatever state it is
 	// in, bumps the revision and destroys every sealed secret, in one
 	// transaction. It returns the row after the change and the secret
@@ -32,6 +53,10 @@ type Store interface {
 	// token remotely. A row already revoked returns alreadyRevoked=true and
 	// changes nothing.
 	RevokePAConnection(ctx context.Context, principal int64, id, reason string) (c Connection, before Sealed, alreadyRevoked bool, err error)
+	// RevokePAConnectionAt is RevokePAConnection for one known row version:
+	// it changes the row only while it is still at revision and generation,
+	// and is ErrConflict otherwise. A row already revoked is ErrConflict too.
+	RevokePAConnectionAt(ctx context.Context, principal int64, id string, revision, generation int64, reason string) (Connection, error)
 	// ClaimPAConnectionRefresh takes the refresh lease of an active row at
 	// generation for owner until until, if no unexpired lease is held. It
 	// reports whether the lease was taken.
@@ -40,6 +65,13 @@ type Store interface {
 	ReleasePAConnectionRefresh(ctx context.Context, principal int64, id, owner string) error
 	// RotatePAConnectionTokens applies r by compare-and-set.
 	RotatePAConnectionTokens(ctx context.Context, principal int64, id string, r Rotation) (Connection, error)
+}
+
+// Superseded is a connection an activation on the same server revoked,
+// with its secret material as it was before (see ActivatePAConnection).
+type Superseded struct {
+	Connection Connection
+	Before     Sealed
 }
 
 // TokenHint is the RFC 7009 token_type_hint of a revocation.
@@ -91,7 +123,16 @@ type Config struct {
 	// RefreshLease bounds how long one replica may hold the refresh lease.
 	// Default 60s.
 	RefreshLease time.Duration
+	// Refresh is the refresh-token grant AccessToken and RefreshAccess use
+	// (#1318 slice C2b). Nil: no connection is ever refreshed, AccessToken
+	// hands out the stored token until the server rejects it, and
+	// RefreshAccess is ErrRefreshUnavailable.
+	Refresh RefreshFunc
 }
+
+// RefreshAhead is how long before its known expiry an access token is
+// refreshed instead of used (#1318 slice C2b).
+const RefreshAhead = 60 * time.Second
 
 // Manager is the connection logic over a Store. It is safe for concurrent
 // use. One Manager per process: its single-flight group and its in-flight
@@ -105,6 +146,7 @@ type Manager struct {
 	now     func() time.Time
 	lease   time.Duration
 	owner   string
+	grant   RefreshFunc
 
 	refreshes singleflight.Group
 
@@ -131,7 +173,7 @@ func NewManager(cfg Config) (*Manager, error) {
 	}
 	return &Manager{
 		store: cfg.Store, kek: cfg.KEK, revoker: cfg.Revoker, auditor: cfg.Auditor,
-		now: now, lease: lease, owner: owner,
+		now: now, lease: lease, owner: owner, grant: cfg.Refresh,
 		inflight: map[string]map[*Call]context.CancelFunc{},
 	}, nil
 }
@@ -163,12 +205,24 @@ func readErr(err error) error {
 // Begin creates a new connection in pending_link with its own DEK. Every
 // link attempt, every reconnect and every scope escalation calls Begin and
 // gets a new id (S1-C8); no method re-activates an existing row.
+//
+// The store admits the Begin before the KEK wrap, so a principal at
+// MaxPendingConnections costs no wrap (T10), and checks again when it
+// creates the row, under the principal's lock: concurrent Begins cannot
+// both pass the cap, and a Begin admitted before an account deletion
+// cannot leave a row after it (ErrPrincipalDeleted, #1338). Begin takes
+// the principal lock itself, so it must not be called while the caller's
+// transaction holds that lock: it would wait for itself until ctx ends.
 func (m *Manager) Begin(ctx context.Context, principal int64, server Server) (Connection, error) {
 	if err := validPrincipal(principal); err != nil {
 		return Connection{}, err
 	}
 	if !server.Valid() {
 		return Connection{}, errors.New("pa connection: unknown server")
+	}
+	adm, err := m.store.AdmitPAConnection(ctx, principal)
+	if err != nil {
+		return Connection{}, fmt.Errorf("pa connection: admit: %w", err)
 	}
 	id, err := randomID("pac_")
 	if err != nil {
@@ -188,7 +242,7 @@ func (m *Manager) Begin(ctx context.Context, principal int64, server Server) (Co
 		ID: id, Principal: principal, Server: server, State: StatePendingLink,
 		AuthorityRevision: 1, CreatedAt: now, UpdatedAt: now,
 	}
-	if err := m.store.CreatePAConnection(ctx, c, Sealed{KEKID: m.kek.ID(), WrappedDEK: wrapped}); err != nil {
+	if err := m.store.CreatePAConnection(ctx, c, Sealed{KEKID: m.kek.ID(), WrappedDEK: wrapped}, adm); err != nil {
 		return Connection{}, fmt.Errorf("pa connection: create: %w", err)
 	}
 	return c, nil
@@ -301,11 +355,15 @@ func (m *Manager) CompleteExchangeWith(ctx context.Context, principal int64, id 
 	if resolve == nil {
 		return Connection{}, errors.New("pa connection: exchange needs an account resolver")
 	}
+	// The response has just been received: its expires_in counts from
+	// here, not from when the tokens are sealed below.
+	received := m.now()
 	c, s, err := m.store.GetPAConnectionSealed(ctx, principal, id)
 	if err != nil {
 		return Connection{}, readErr(err)
 	}
 	check := VerifyTokenResponse(c.Server, tokenResponse)
+	check.Tokens = check.Tokens.receivedAt(received)
 	if c.State != StatePendingReturn || c.AuthorityRevision != expectRevision {
 		// The connection moved (for example a /disconnect) while the code was
 		// being exchanged: what the server issued is never stored, and is
@@ -359,10 +417,35 @@ func (m *Manager) RevokeTokenResponse(ctx context.Context, server Server, tokenR
 // Confirm moves pending_confirm -> active. The callback_query check (from.id
 // == principal within 10 minutes) is the linking slice's; this is the store
 // edge it ends in.
+//
+// Any other active or expired connection of the principal on the same
+// server is revoked in the same transaction (ActivatePAConnection), so a
+// /connect next to a dead connection leaves exactly one a run can bind.
+// The superseded connections' in-flight calls are cancelled and their
+// tokens revoked at the server, best-effort: a remote failure is logged
+// and does not undo the activation.
 func (m *Manager) Confirm(ctx context.Context, principal int64, id string, expectRevision int64) (Connection, error) {
-	return m.transition(ctx, principal, id, Transition{
-		From: StatePendingConfirm, To: StateActive, ExpectRevision: expectRevision,
+	out, superseded, err := m.store.ActivatePAConnection(ctx, principal, id, Transition{
+		From: StatePendingConfirm, To: StateActive, ExpectRevision: expectRevision, At: m.now().UTC(),
 	})
+	if err != nil {
+		return Connection{}, err
+	}
+	for _, old := range superseded {
+		m.cancelInflight(old.Connection.ID)
+		if len(old.Before.SealedTokens) == 0 {
+			continue
+		}
+		ts, err := m.openTokens(ctx, old.Connection, old.Before)
+		if err == nil {
+			err = m.revokeTokens(ctx, old.Connection.Server, ts)
+		}
+		if err != nil {
+			slog.Warn("pa connection: superseded connection not revoked at the server",
+				"server", string(old.Connection.Server), "err", err)
+		}
+	}
+	return out, nil
 }
 
 // Fail moves a non-terminal connection to failed.
@@ -489,6 +572,9 @@ func openTokensWithDEK(dek []byte, c Connection, s Sealed) (TokenSet, error) {
 // gate is the I4 check on a row already read: active and at the bound
 // revision. Any other state, including an unknown one, refuses.
 func gate(c Connection, boundRevision int64) error {
+	if c.State == StateExpired {
+		return ErrExpired
+	}
 	if c.State != StateActive {
 		return fmt.Errorf("%w: state %s", ErrNotActive, c.State)
 	}
@@ -517,19 +603,108 @@ func (m *Manager) Authorize(ctx context.Context, principal int64, id string, bou
 // AccessToken passes the gate and opens the connection's access token for
 // one outbound call. A token rotation does not change the revision, so a
 // run bound before a refresh keeps working after it (S1-C3).
+//
+// A token whose known expiry is less than RefreshAhead away is refreshed
+// first (#1318 slice C2b), through Refresh: concurrent calls share one
+// flight, and a flight is skipped when the generation it was asked for is
+// already gone. A refresh ahead that fails transiently, or whose lease
+// another replica holds, is not retried here; while the current token has
+// not yet expired it is still handed out (re-read and re-gated), since
+// the 401 path covers it if the server disagrees. Past its expiry, or on
+// any other failure (invalid_grant included), the call fails. An unknown
+// expiry is not refreshed ahead, and neither is a set without a refresh
+// token: both are used until the server rejects them (RefreshAccess).
 func (m *Manager) AccessToken(ctx context.Context, principal int64, id string, boundRevision int64) (Secret, Connection, error) {
+	token, c, ts, err := m.openAccess(ctx, principal, id, boundRevision)
+	if err != nil {
+		return Secret{}, Connection{}, err
+	}
+	if m.grant == nil || ts.ExpiresAt.IsZero() || ts.RefreshToken.Empty() || m.now().Before(ts.ExpiresAt.Add(-RefreshAhead)) {
+		return token, c, nil
+	}
+	if _, err := m.refreshFrom(ctx, principal, id, m.grant, c.TokenGeneration); err != nil {
+		if !refreshAheadTransient(err) || !m.now().Before(ts.ExpiresAt) {
+			return Secret{}, Connection{}, err
+		}
+		// Still valid: use it, as the store has it now.
+		slog.Warn("pa connection: refresh ahead failed, using the unexpired token",
+			"server", string(c.Server), "err", err)
+	}
+	token, c, _, err = m.openAccess(ctx, principal, id, boundRevision)
+	if err != nil {
+		return Secret{}, Connection{}, err
+	}
+	return token, c, nil
+}
+
+// refreshAheadTransient reports whether a failed refresh ahead left the
+// connection as it was: another replica holds the lease, or the grant
+// failed for a reason other than invalid_grant. An expiry that could not
+// be recorded joins ErrRefreshFailed with ErrInvalidGrant and is not
+// transient: the grant is dead.
+func refreshAheadTransient(err error) bool {
+	return (errors.Is(err, ErrRefreshInProgress) || errors.Is(err, ErrRefreshFailed)) &&
+		!errors.Is(err, ErrInvalidGrant)
+}
+
+// openAccess is AccessToken without the refresh ahead.
+func (m *Manager) openAccess(ctx context.Context, principal int64, id string, boundRevision int64) (Secret, Connection, TokenSet, error) {
 	c, s, err := m.store.GetPAConnectionSealed(ctx, principal, id)
 	if err != nil {
-		return Secret{}, Connection{}, readErr(err)
+		return Secret{}, Connection{}, TokenSet{}, readErr(err)
 	}
 	if err := gate(c, boundRevision); err != nil {
-		return Secret{}, Connection{}, err
+		return Secret{}, Connection{}, TokenSet{}, err
 	}
 	ts, err := m.openTokens(ctx, c, s)
 	if err != nil {
+		return Secret{}, Connection{}, TokenSet{}, err
+	}
+	return ts.AccessToken, c, ts, nil
+}
+
+// RefreshAccess is the 401 path (#1318 slice C2b): the server rejected the
+// access token of generation rejected, so the connection's tokens are
+// refreshed and the new access token is returned for exactly one retry.
+//
+//   - If the connection already moved past rejected (another call
+//     refreshed it meanwhile), its current token is returned and nothing
+//     is refreshed: concurrent rejections do one refresh, not one each.
+//   - A connection without a refresh token cannot recover: it moves to
+//     expired (which queues the "link it again" notice) and the result
+//     wraps ErrNoRefreshToken.
+//   - invalid_grant moves it to expired the same way (Refresh); reported
+//     reuse revokes it.
+//   - Any other refresh failure, ErrRefreshInProgress included, fails
+//     this call only. Nothing retries.
+func (m *Manager) RefreshAccess(ctx context.Context, principal int64, id string, boundRevision, rejected int64) (Secret, Connection, error) {
+	if m.grant == nil {
+		return Secret{}, Connection{}, ErrRefreshUnavailable
+	}
+	token, c, ts, err := m.openAccess(ctx, principal, id, boundRevision)
+	if err != nil {
 		return Secret{}, Connection{}, err
 	}
-	return ts.AccessToken, c, nil
+	if c.TokenGeneration != rejected {
+		return token, c, nil
+	}
+	if ts.RefreshToken.Empty() {
+		if _, terr := m.transition(ctx, principal, id, Transition{
+			From: StateActive, To: StateExpired, ExpectRevision: c.AuthorityRevision, Reason: "access_token_rejected",
+		}); terr != nil {
+			// Not recorded as expired, so not reported as expired.
+			return Secret{}, Connection{}, errors.Join(ErrRefreshFailed, terr)
+		}
+		return Secret{}, Connection{}, ErrNoRefreshToken
+	}
+	if _, err := m.refreshFrom(ctx, principal, id, m.grant, rejected); err != nil {
+		return Secret{}, Connection{}, err
+	}
+	token, c, _, err = m.openAccess(ctx, principal, id, boundRevision)
+	if err != nil {
+		return Secret{}, Connection{}, err
+	}
+	return token, c, nil
 }
 
 // Refresh rotates an active connection's tokens (threat model T2 Refresh).
@@ -558,11 +733,23 @@ func (m *Manager) AccessToken(ctx context.Context, principal int64, id string, b
 //     clock, and the store re-checks the lease end in the same CAS. Past it,
 //     the issued tokens are revoked and the result is ErrFenced.
 func (m *Manager) Refresh(ctx context.Context, principal int64, id string, fn RefreshFunc) (Connection, error) {
+	return m.refreshFrom(ctx, principal, id, fn, anyGeneration)
+}
+
+// anyGeneration asks refreshFrom to rotate whatever generation is stored.
+const anyGeneration = -1
+
+// refreshFrom is Refresh for the tokens of generation from: a flight that
+// finds the connection already past from (another flight, here or on
+// another replica, rotated it after the caller read it) returns the
+// current row without calling fn. So a caller that read generation G
+// never causes a second rotation once G is gone (#1318 C2b review).
+func (m *Manager) refreshFrom(ctx context.Context, principal int64, id string, fn RefreshFunc, from int64) (Connection, error) {
 	key := strconv.FormatInt(principal, 10) + "|" + id
 	ch := m.refreshes.DoChan(key, func() (any, error) {
 		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), flightBound*m.lease)
 		defer cancel()
-		return m.refresh(fctx, principal, id, fn)
+		return m.refresh(fctx, principal, id, fn, from)
 	})
 	select {
 	case r := <-ch:
@@ -593,13 +780,19 @@ func (m *Manager) untilByClock(t time.Time) time.Duration {
 	return t.Sub(m.now())
 }
 
-func (m *Manager) refresh(ctx context.Context, principal int64, id string, fn RefreshFunc) (Connection, error) {
+func (m *Manager) refresh(ctx context.Context, principal int64, id string, fn RefreshFunc, from int64) (Connection, error) {
 	c, s, err := m.store.GetPAConnectionSealed(ctx, principal, id)
 	if err != nil {
 		return Connection{}, readErr(err)
 	}
 	if err := gate(c, c.AuthorityRevision); err != nil {
 		return Connection{}, err
+	}
+	if from != anyGeneration && c.TokenGeneration != from {
+		// Already rotated past the caller's tokens: nothing to do. The
+		// lease claim below is a CAS on the generation read here, so a
+		// rotation committed after this read is caught there instead.
+		return c, nil
 	}
 	now := m.now().UTC()
 	leaseEnd := now.Add(m.lease)
@@ -637,6 +830,8 @@ func (m *Manager) refresh(ctx context.Context, principal int64, id string, fn Re
 	callCtx, cancelCall := context.WithTimeout(ctx, m.untilByClock(now.Add(m.callBudget())))
 	raw, err := fn(callCtx, c.Server, old.RefreshToken)
 	cancelCall()
+	// The response's expires_in counts from its receipt.
+	received := m.now()
 	switch {
 	case errors.Is(err, ErrRefreshTokenReuse):
 		_, _, _, rerr := m.store.RevokePAConnection(ctx, principal, id, "refresh_token_reuse")
@@ -646,10 +841,16 @@ func (m *Manager) refresh(ctx context.Context, principal int64, id string, fn Re
 		_, terr := m.transition(ctx, principal, id, Transition{
 			From: StateActive, To: StateExpired, ExpectRevision: c.AuthorityRevision, Reason: "invalid_grant",
 		})
-		return Connection{}, errors.Join(err, terr)
+		if terr != nil {
+			// The connection could not be recorded as expired: it is
+			// not reported as expired either (#1318 C2b). The next call
+			// meets the same answer and records it then.
+			return Connection{}, errors.Join(ErrRefreshFailed, err, terr)
+		}
+		return Connection{}, err
 	case err != nil:
 		release()
-		return Connection{}, fmt.Errorf("pa connection: refresh: %w", err)
+		return Connection{}, fmt.Errorf("%w: %w", ErrRefreshFailed, err)
 	}
 
 	check := VerifyTokenResponse(c.Server, raw)
@@ -663,7 +864,7 @@ func (m *Manager) refresh(ctx context.Context, principal int64, id string, fn Re
 		_, ferr := m.failAndRevoke(ctx, c, check.Tokens, "refresh_scope_check", check.Err)
 		return Connection{}, errors.Join(ferr, m.revokeTokens(ctx, c.Server, old))
 	}
-	next := check.Tokens
+	next := check.Tokens.receivedAt(received)
 	if next.RefreshToken.Empty() {
 		next.RefreshToken = old.RefreshToken
 	}
@@ -743,6 +944,90 @@ func (m *Manager) Disconnect(ctx context.Context, principal int64, id string) (D
 	}
 	res.RemoteErr = m.revokeTokens(ctx, c.Server, ts)
 	return res, nil
+}
+
+// RevokeHeldTokens revokes every connection of principal that still holds
+// provider tokens, for account deletion (#1338): at the provider first, and
+// locally only once the provider has taken the revocation.
+//
+// The order is the reverse of Disconnect's, on purpose. Disconnect revokes
+// locally first and calls the provider best-effort (S1-C6), which is right
+// for a connection that stays: its row keeps saying revoked. Account
+// deletion purges the row afterwards, so a token wiped locally before the
+// provider took its revocation could never be revoked by anyone. Here a
+// connection whose tokens cannot be read, or whose remote revocation fails,
+// keeps its row and its sealed tokens, and the failure is returned: the
+// caller refuses the deletion, which can be retried.
+//
+// The local revocation is a compare-and-set on the row's revision and token
+// generation. A connection that changed in between (a refresh rotated its
+// tokens, a confirm activated it) is read and revoked again, at most
+// revokeHeldAttempts times; the new tokens are revoked at the provider before
+// anything local changes. A connection without tokens is left as it is: the
+// purge deletes it. A connection that is gone (ErrNotFound) holds nothing.
+//
+// The error joins one error per connection not revoked, and a failed listing
+// is an error: nil means every connection the listing returned holds no
+// tokens now. The purge checks again in its own transaction, so a
+// connection that gains tokens after this returns still refuses the
+// deletion.
+//
+// A nil *Manager refuses rather than panics: a typed nil stored in a
+// db.PATokenRevoker passes the callers' nil checks, and the account
+// deletion must then refuse (409 / tool error), not crash the handler.
+func (m *Manager) RevokeHeldTokens(ctx context.Context, principal int64) error {
+	if m == nil {
+		return errors.New("pa connection: revoke held tokens: no manager")
+	}
+	if err := validPrincipal(principal); err != nil {
+		return err
+	}
+	list, err := m.store.ListPAConnections(ctx, principal)
+	if err != nil {
+		return readErr(err)
+	}
+	var errs []error
+	for _, c := range list {
+		if err := m.revokeHeld(ctx, principal, c.ID); err != nil {
+			errs = append(errs, fmt.Errorf("pa connection %s: %w", c.ID, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// revokeHeldAttempts bounds RevokeHeldTokens' retries on one connection.
+const revokeHeldAttempts = 3
+
+func (m *Manager) revokeHeld(ctx context.Context, principal int64, id string) error {
+	for range revokeHeldAttempts {
+		c, s, err := m.store.GetPAConnectionSealed(ctx, principal, id)
+		if errors.Is(err, ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return readErr(err)
+		}
+		if len(s.SealedTokens) == 0 {
+			return nil
+		}
+		ts, err := m.openTokens(ctx, c, s)
+		if err != nil {
+			return fmt.Errorf("pa connection: tokens for remote revocation: %w", err)
+		}
+		if err := m.revokeTokens(ctx, c.Server, ts); err != nil {
+			return err
+		}
+		_, err = m.store.RevokePAConnectionAt(ctx, principal, id, c.AuthorityRevision, c.TokenGeneration, "account_deleted")
+		if errors.Is(err, ErrConflict) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("pa connection: local revoke: %w", err)
+		}
+		m.cancelInflight(id)
+		return nil
+	}
+	return fmt.Errorf("%w: the connection kept changing while it was revoked", ErrConflict)
 }
 
 // Call is one outbound MCP call under the connection lease (threat model T2

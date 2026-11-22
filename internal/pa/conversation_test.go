@@ -77,6 +77,27 @@ func (unlimited) AdmitMessage(context.Context, *sql.Tx, Principal) (jobs.RateDec
 	return jobs.RateDecision{Allowed: true}, nil
 }
 
+// testAllowlist allows every principal but the ones a test denies: the
+// tests that are not about the allowlist run as if everyone were on it.
+type testAllowlist struct {
+	mu     sync.Mutex
+	denied map[int64]bool
+}
+
+func newTestAllowlist() *testAllowlist { return &testAllowlist{denied: map[int64]bool{}} }
+
+func (a *testAllowlist) Allowed(p int64) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return p > 0 && !a.denied[p]
+}
+
+func (a *testAllowlist) deny(p int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.denied[p] = true
+}
+
 // convoHarness drives Conversations through the real webhook and the real
 // SQLite dedup transaction, as production would.
 type convoHarness struct {
@@ -85,6 +106,7 @@ type convoHarness struct {
 	conv    *Conversations
 	runs    *enqueueRecorder
 	replies *replyRecorder
+	allow   *testAllowlist
 	hook    http.Handler
 	nextID  atomic.Int64
 	now     time.Time
@@ -114,9 +136,17 @@ func newConvoHarnessOn(t *testing.T, store *db.Store, runs RunEnqueuer, firstUpd
 	if l, ok := runs.(Limiter); ok {
 		lim = l
 	}
+	// A run loop's harness shares its allowlist with the conversations, as
+	// production does.
+	h.allow = newTestAllowlist()
+	if l, ok := runs.(*RunLoop); ok {
+		if a, ok := l.allowed.(*testAllowlist); ok {
+			h.allow = a
+		}
+	}
 	h.conv, err = NewConversations(ConversationsConfig{
 		Store: h.store, Sealer: sealer, TTL: DefaultConversationTTL,
-		Runs: enq, Replies: h.replies, Limiter: lim, Now: func() time.Time { return h.now },
+		Runs: enq, Replies: h.replies, Limiter: lim, Allowed: h.allow, Now: func() time.Time { return h.now },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -657,16 +687,17 @@ func TestNewConversations_RefusesBadConfig(t *testing.T) {
 	sealer, _ := convo.NewSealer(bytes.Repeat([]byte{7}, 32))
 	store := newStore(t)
 	for name, cfg := range map[string]ConversationsConfig{
-		"no store":   {Sealer: sealer, TTL: time.Hour},
-		"no sealer":  {Store: store, TTL: time.Hour},
-		"no ttl":     {Store: store, Sealer: sealer},
-		"ttl of 25h": {Store: store, Sealer: sealer, TTL: 25 * time.Hour},
+		"no store":     {Sealer: sealer, TTL: time.Hour, Allowed: NewAllowlist(nil)},
+		"no sealer":    {Store: store, TTL: time.Hour, Allowed: NewAllowlist(nil)},
+		"no ttl":       {Store: store, Sealer: sealer, Allowed: NewAllowlist(nil)},
+		"ttl of 25h":   {Store: store, Sealer: sealer, TTL: 25 * time.Hour, Allowed: NewAllowlist(nil)},
+		"no allowlist": {Store: store, Sealer: sealer, TTL: time.Hour},
 	} {
 		if _, err := NewConversations(cfg); !errors.Is(err, ErrConversationsConfig) {
 			t.Errorf("%s: err = %v", name, err)
 		}
 	}
-	c, err := NewConversations(ConversationsConfig{Store: store, Sealer: sealer, TTL: time.Hour})
+	c, err := NewConversations(ConversationsConfig{Store: store, Sealer: sealer, TTL: time.Hour, Allowed: NewAllowlist(nil)})
 	if err != nil {
 		t.Fatal(err)
 	}

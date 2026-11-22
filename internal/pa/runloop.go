@@ -139,6 +139,9 @@ type RunLoopConfig struct {
 	// CallbackMetrics counts callback answers (AnswerCallbackAfter).
 	// Optional.
 	CallbackMetrics CallbackCounter
+	// Allowed is the preview allowlist (PA_ALLOWED_PRINCIPALS), re-checked
+	// at every step by gate. Required; an empty list allows nobody.
+	Allowed PrincipalAllowlist
 }
 
 // RunLoop serves the run-loop routes and implements RunEnqueuer and
@@ -157,12 +160,17 @@ type RunLoop struct {
 	now      func() time.Time
 	metrics  OutboxCounter
 	cbCount  CallbackCounter
+	allowed  PrincipalAllowlist
 	// pending tracks the deliveries request paths started (deliverAfter).
 	pending sync.WaitGroup
 	// readTools is every tool the pin admits without approval, as
 	// "server/tool". Phase 1 has no other kind (catalog.LoadPin), and a
 	// resolver that offers anything else fails the claim.
 	readTools map[string]bool
+	// modelTools is the model's view of every readTools entry, built from
+	// the pin (catalog description and pinned schema), keyed the same way.
+	// The claim offers exactly the job's signed tool set from it.
+	modelTools map[string]catalog.ModelTool
 }
 
 var (
@@ -171,12 +179,12 @@ var (
 )
 
 // ErrRunLoopConfig reports an unusable RunLoopConfig.
-var ErrRunLoopConfig = errors.New("pa: run loop needs a store, sealer, pool, minter, verifier, sender, tool resolver, limits and a budget")
+var ErrRunLoopConfig = errors.New("pa: run loop needs a store, sealer, pool, minter, verifier, sender, tool resolver, allowlist, limits and a budget")
 
 // NewRunLoop builds the run loop. It is constructed only when PA_ENABLED.
 func NewRunLoop(cfg RunLoopConfig) (*RunLoop, error) {
 	if cfg.Store == nil || cfg.Sealer == nil || cfg.Pool == nil || cfg.Minter == nil || cfg.Verifier == nil ||
-		cfg.Sender == nil || cfg.Tools == nil || !cfg.Limits.Valid() || !cfg.Budget.Valid() ||
+		cfg.Sender == nil || cfg.Tools == nil || cfg.Allowed == nil || !cfg.Limits.Valid() || !cfg.Budget.Valid() ||
 		cfg.Budget.PerJobUSD > cfg.Budget.PrincipalDayUSD || cfg.Lease < 0 || cfg.Lease > localjwt.MaxPAJobTTL ||
 		// The per-turn floor of a run at its turn cap must fit the
 		// reservation, or the floor alone would settle above it.
@@ -188,10 +196,16 @@ func NewRunLoop(cfg RunLoopConfig) (*RunLoop, error) {
 		return nil, fmt.Errorf("pa run loop: %w", err)
 	}
 	read := map[string]bool{}
+	modelTools := map[string]catalog.ModelTool{}
 	for server, sp := range pin.Servers {
 		for name, t := range sp.Tools {
 			if t.Tier == catalog.TierAuto && t.Class == catalog.ClassRead {
+				mt, err := pin.ModelTool(server, name)
+				if err != nil {
+					return nil, fmt.Errorf("pa run loop: %w", err)
+				}
 				read[server+"/"+name] = true
+				modelTools[server+"/"+name] = mt
 			}
 		}
 	}
@@ -206,7 +220,8 @@ func NewRunLoop(cfg RunLoopConfig) (*RunLoop, error) {
 	return &RunLoop{
 		store: cfg.Store, sealer: cfg.Sealer, pool: cfg.Pool, minter: cfg.Minter, verifier: cfg.Verifier,
 		sender: cfg.Sender, tools: cfg.Tools, limits: cfg.Limits, budget: cfg.Budget, lease: lease, now: now,
-		readTools: read, metrics: cfg.Metrics, cbCount: cfg.CallbackMetrics,
+		readTools: read, modelTools: modelTools, metrics: cfg.Metrics, cbCount: cfg.CallbackMetrics,
+		allowed: cfg.Allowed,
 	}, nil
 }
 
@@ -240,11 +255,29 @@ func (l *RunLoop) AdmitMessage(ctx context.Context, tx *sql.Tx, p Principal) (jo
 	return l.store.AdmitPAMessage(ctx, tx, p.TelegramID(), l.now(), l.limits.RateMessages, l.limits.RateWindow)
 }
 
-// gate re-checks consent (current version and text, and the version the
-// job was admitted under) and the conversation, inside the store's
-// transaction (T11, T13). Absence or a change is jobs.ErrGone; a failed
-// read is an error that aborts the step.
+// gate re-checks the principal (the preview allowlist and the admin
+// disable), consent (current version and text, and the version the job was
+// admitted under) and the conversation, inside the store's transaction
+// (T11, T13). Every step runs it: claim, turn, tool admission, the
+// post-call StillRunning, reply and result recording. Absence or a change
+// is jobs.ErrGone (jobs.ErrPrincipalNotAllowed, jobs.ErrPrincipalDisabled
+// for the principal); a failed read is an error that aborts the step,
+// never a pass.
 func (l *RunLoop) gate(ctx context.Context, tx *sql.Tx, j jobs.Job, now time.Time) error {
+	// The allowlist changes only on restart, but a job queued before a
+	// restart that dropped its principal stops here too.
+	if !l.allowed.Allowed(j.Principal) {
+		return jobs.ErrPrincipalNotAllowed
+	}
+	disabled, err := l.store.PAPrincipalDisabled(ctx, tx, j.Principal)
+	switch {
+	case errors.Is(err, convo.ErrStoreFault):
+		return fmt.Errorf("%w: %w: principal disable: %v", jobs.ErrUnreadable, jobs.ErrStoreFault, err)
+	case err != nil:
+		return fmt.Errorf("%w: principal disable: %v", jobs.ErrUnreadable, err)
+	case disabled:
+		return jobs.ErrPrincipalDisabled
+	}
 	rec, err := l.store.GetPAConsent(ctx, tx, j.Principal)
 	switch {
 	case errors.Is(err, convo.ErrNotFound):
@@ -328,12 +361,21 @@ type (
 		MaxContextTokens   int     `json:"max_context_tokens"`
 		MaxToolOutputBytes int     `json:"max_tool_output_bytes"`
 	}
+	// wireTool is one tool the model may be offered. Name is the signed
+	// "server/tool"; Description and InputSchema come from the pin, never
+	// from the server's live listing (T8).
+	wireTool struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description"`
+		InputSchema json.RawMessage `json:"input_schema"`
+	}
 	claimResponse struct {
 		JobID      int64          `json:"job_id"`
 		Attempt    int            `json:"attempt"`
 		Token      string         `json:"token"`
 		LeaseUntil time.Time      `json:"lease_until"`
 		ToolSet    []string       `json:"tool_set"`
+		Tools      []wireTool     `json:"tools,omitempty"`
 		Limits     wireLimits     `json:"limits"`
 		Fragments  []wireFragment `json:"fragments"`
 	}
@@ -364,6 +406,8 @@ func stop(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, jobs.ErrNotFound), errors.Is(err, jobs.ErrStale):
 		writeJSON(w, http.StatusConflict, stopResponse{Stop: "stale"})
+	case errors.Is(err, jobs.ErrPrincipalDisabled), errors.Is(err, jobs.ErrPrincipalNotAllowed):
+		writeJSON(w, http.StatusConflict, stopResponse{Stop: "principal_disabled"})
 	case errors.Is(err, jobs.ErrGone):
 		writeJSON(w, http.StatusConflict, stopResponse{Stop: "gone"})
 	case errors.Is(err, jobs.ErrToolCap):
@@ -449,6 +493,14 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	frags = trimContext(frags, l.limits.MaxContextTokens)
+	tools, err := l.claimTools(j.ToolSet)
+	if err != nil {
+		// build admitted only pinned reads, so this is a server bug; it
+		// recurs on every attempt.
+		l.release(ctx, ref, jobs.ReleaseCancel, now)
+		stop(w, err)
+		return
+	}
 	ttl := j.LeaseUntil.Sub(now)
 	tok, err := l.minter.MintPAJob(localjwt.PAJob{
 		Principal: j.Principal, JobID: j.ID, Attempt: j.Attempts, ContextDigest: j.ContextDigest, Tools: j.ToolSet,
@@ -461,13 +513,32 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, claimResponse{
-		JobID: j.ID, Attempt: j.Attempts, Token: tok, LeaseUntil: j.LeaseUntil, ToolSet: j.ToolSet,
+		JobID: j.ID, Attempt: j.Attempts, Token: tok, LeaseUntil: j.LeaseUntil, ToolSet: j.ToolSet, Tools: tools,
 		Limits: wireLimits{
 			MaxToolCalls: l.limits.MaxToolCalls, MaxContextTokens: l.limits.MaxContextTokens,
 			MaxToolOutputBytes: jobs.MaxToolOutputBytes, MaxJobCostUSD: l.budget.PerJobUSD,
 		},
 		Fragments: frags,
 	})
+}
+
+// claimTools is the model's view of exactly the job's signed tool set, in
+// its order. A tool with no pinned read entry fails the claim rather than
+// being dropped: the worker must not be offered less, or other, than what
+// its token names.
+func (l *RunLoop) claimTools(set []string) ([]wireTool, error) {
+	if len(set) == 0 {
+		return nil, nil
+	}
+	out := make([]wireTool, 0, len(set))
+	for _, name := range set {
+		mt, ok := l.modelTools[name]
+		if !ok {
+			return nil, fmt.Errorf("%w: tool set names a tool with no pinned read entry", jobs.ErrInvalid)
+		}
+		out = append(out, wireTool{Name: name, Description: mt.Description, InputSchema: mt.InputSchema})
+	}
+	return out, nil
 }
 
 // loadFragments opens the conversation's marked fragments for principal.
@@ -670,19 +741,65 @@ func (l *RunLoop) release(ctx context.Context, ref jobs.Ref, mode jobs.ReleaseMo
 }
 
 // appendAssistant stores the model's answer as an external-marked
-// assistant fragment: model output is never user provenance (T5).
+// assistant fragment: model output is never user provenance (T5). The mark
+// does not taint the conversation (convo.Taints): an answer only saw what
+// the conversation already held.
 func (l *RunLoop) appendAssistant(ctx context.Context, tx *sql.Tx, j jobs.Job, text string) (int64, error) {
+	return l.appendFragment(ctx, tx, j, convo.NewFragment(convo.KindAssistant, convo.ProvenanceExternal, text))
+}
+
+// appendFragment stores f in the job's conversation, in tx.
+// AppendPAFragment taints the conversation in the same transaction when f
+// is external content.
+func (l *RunLoop) appendFragment(ctx context.Context, tx *sql.Tx, j jobs.Job, f convo.Fragment) (int64, error) {
 	seq, err := l.store.NextPAFragmentSeq(ctx, tx, j.Principal, j.ConversationID)
 	if err != nil {
 		return 0, err
 	}
-	sf, err := l.sealer.Seal(j.Principal, j.ConversationID, seq,
-		convo.NewFragment(convo.KindAssistant, convo.ProvenanceExternal, text))
+	sf, err := l.sealer.Seal(j.Principal, j.ConversationID, seq, f)
 	if err != nil {
 		return 0, err
 	}
 	sf.CreatedAt = l.now()
 	return seq, l.store.AppendPAFragment(ctx, tx, sf)
+}
+
+// ConversationTainted reports whether the run's conversation is tainted,
+// for the dispatcher's audit record and, once writes exist, its card gate
+// (threat model T5, #1321). It reads the durable flag, never the fragments
+// in the model's context: eviction and summaries do not lower it. Any
+// error comes with true, and the caller acts on taint (S2-I10).
+func (l *RunLoop) ConversationTainted(ctx context.Context, policy Policy) (bool, error) {
+	pid, conv := policy.Principal().TelegramID(), policy.ConversationID()
+	if pid <= 0 || conv == "" {
+		return true, ErrInvalidContext
+	}
+	tainted, err := l.store.ReadPAConversationTaint(ctx, pid, conv)
+	if err != nil {
+		return true, err
+	}
+	return tainted, nil
+}
+
+// RecordToolResult stores a tool result the dispatcher is about to return
+// to the worker as an external KindTool fragment of the job's
+// conversation, which taints it, in one transaction with the job's gate
+// (#1321). An error means nothing was stored and the result must be
+// withheld: the worker never holds tool output its conversation does not
+// record.
+func (l *RunLoop) RecordToolResult(ctx context.Context, job PAJob, output []byte) error {
+	if !job.ref.Valid() {
+		return ErrNoJob
+	}
+	_, err := l.store.RecordPAToolResult(ctx, job.ref, jobs.ToolResultRequest{
+		Now: l.now(), Gate: l.gate,
+		Record: func(ctx context.Context, tx *sql.Tx, j jobs.Job) error {
+			_, err := l.appendFragment(ctx, tx, j, convo.NewFragment(convo.KindTool, convo.ProvenanceExternal, string(output)))
+			return err
+		},
+	})
+	l.droppedNotice(ctx, job.ref, err)
+	return err
 }
 
 // PAJob is a verified pa-job credential, for the tool executor (#1315).
@@ -834,18 +951,19 @@ func policyFromJob(j jobs.Job, ref jobs.Ref) (Policy, error) {
 }
 
 // stopRun is stop for a step that ran the gate: a job cancelled because its
-// conversation expired mid-run owes the principal a notice.
+// conversation expired mid-run, or its principal was disabled or taken off
+// the allowlist, owes the principal a notice.
 func (l *RunLoop) stopRun(ctx context.Context, w http.ResponseWriter, ref jobs.Ref, err error) {
 	l.droppedNotice(ctx, ref, err)
 	stop(w, err)
 }
 
-// droppedNotice sends the dropped-request notice when err says this call
-// cancelled the job because its conversation closed or expired. The store
-// returns ErrConversationGone only to the call that cancelled, so it is
-// sent once.
+// droppedNotice sends the notice owed when err says this call cancelled the
+// job because its conversation closed or expired, or its principal was
+// disabled or left the allowlist (jobs.NoticeFor). The store returns those
+// errors only to the call that cancelled, so it is sent once.
 func (l *RunLoop) droppedNotice(ctx context.Context, ref jobs.Ref, err error) {
-	if errors.Is(err, jobs.ErrConversationGone) {
+	if _, owed := jobs.NoticeFor(err); owed {
 		// The store wrote the notice with the cancellation.
 		l.deliverAfter(ctx, ref.Principal)
 	}

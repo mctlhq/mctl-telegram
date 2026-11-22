@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -49,6 +50,10 @@ const (
 	// ReplyMessageTooLong refuses a message part over jobs.MaxMessageChars;
 	// nothing of the message is stored (S1-R1).
 	ReplyMessageTooLong Reply = "message_too_long"
+	// ReplyPrincipalDisabled refuses every update, other than /forget and
+	// /consent withdraw, of a principal an admin disabled or one not on the
+	// preview allowlist (T11, #1318). Nothing of the update is stored.
+	ReplyPrincipalDisabled Reply = "principal_disabled"
 )
 
 // ReplyQueue records a reply in the update's transaction, so it is sent
@@ -93,7 +98,7 @@ var (
 	// is refused; this is never treated as either consent or its absence.
 	ErrConsentUnreadable = errors.New("pa: consent record unreadable")
 	// ErrConversationsConfig reports an unusable ConversationsConfig.
-	ErrConversationsConfig = errors.New("pa: conversations need a store, a sealer, a TTL of at most 24h, and a limiter with a run loop")
+	ErrConversationsConfig = errors.New("pa: conversations need a store, a sealer, an allowlist, a TTL of at most 24h, and a limiter with a run loop")
 )
 
 // Command names handled server-side (PR #1329 decision for slice b). They
@@ -103,7 +108,22 @@ const (
 	CommandNew     = "/new"
 	CommandForget  = "/forget"
 	CommandConsent = "/consent"
+	// The account-linking commands (#1318 slice C2). The update's
+	// transaction only admits them (consent, rate window); the linking
+	// action runs after the commit (postcommit.go).
+	CommandConnect     = "/connect"
+	CommandDisconnect  = "/disconnect"
+	CommandConnections = "/connections"
 )
+
+// LinkButtonPrefixes are the callback_data prefixes of the linking confirm
+// card (linking.ConfirmCard). Such a button is not a pa_callbacks row: the
+// linking flow consumes its own nonce after the commit.
+var LinkButtonPrefixes = []string{"pa:lc:", "pa:lx:"}
+
+// ReplyLinkingUnavailable answers a linking command when the server runs
+// no linking flow (no PA server enabled).
+const ReplyLinkingUnavailable Reply = "linking_unavailable"
 
 // Callback actions. The stored action binds the consent version and text
 // hash the prompt showed, so a button pressed after the text changed does
@@ -126,6 +146,15 @@ type ConversationsConfig struct {
 	// Limiter is the per-principal rate window. Required with Runs: a run
 	// loop without a rate limit is refused.
 	Limiter Limiter
+	// Linking: the server runs the account-linking flow, so the linking
+	// commands and buttons are handed to AfterCommit (LinkAction). Off,
+	// a linking command is answered ReplyLinkingUnavailable and a linking
+	// button ReplyUnknownButton.
+	Linking bool
+	// Allowed is the preview allowlist (PA_ALLOWED_PRINCIPALS). Required:
+	// there is no "allow everyone" default, and an empty list allows
+	// nobody.
+	Allowed PrincipalAllowlist
 	// Now defaults to time.Now.
 	Now func() time.Time
 }
@@ -140,6 +169,8 @@ type Conversations struct {
 	runs    RunEnqueuer
 	replies ReplyQueue
 	limiter Limiter
+	linking bool
+	allowed PrincipalAllowlist
 	now     func() time.Time
 }
 
@@ -147,7 +178,7 @@ var _ Handler = (*Conversations)(nil)
 
 // NewConversations builds the handler.
 func NewConversations(cfg ConversationsConfig) (*Conversations, error) {
-	if cfg.Store == nil || cfg.Sealer == nil || cfg.TTL <= 0 || cfg.TTL > MaxConversationTTL ||
+	if cfg.Store == nil || cfg.Sealer == nil || cfg.Allowed == nil || cfg.TTL <= 0 || cfg.TTL > MaxConversationTTL ||
 		(cfg.Runs != nil && cfg.Limiter == nil) {
 		return nil, ErrConversationsConfig
 	}
@@ -155,7 +186,8 @@ func NewConversations(cfg ConversationsConfig) (*Conversations, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &Conversations{store: cfg.Store, sealer: cfg.Sealer, ttl: cfg.TTL, runs: cfg.Runs, replies: cfg.Replies, limiter: cfg.Limiter, now: now}, nil
+	return &Conversations{store: cfg.Store, sealer: cfg.Sealer, ttl: cfg.TTL, runs: cfg.Runs, replies: cfg.Replies, limiter: cfg.Limiter,
+		linking: cfg.Linking, allowed: cfg.Allowed, now: now}, nil
 }
 
 // HandleUpdate implements Handler. Any error rolls back the update's dedup
@@ -172,9 +204,39 @@ func (c *Conversations) HandleUpdate(ctx context.Context, tx *sql.Tx, u Verified
 	if err := c.store.LockPAPrincipal(ctx, tx, p.TelegramID()); err != nil {
 		return err
 	}
+	// A principal not on the allowlist, or one an admin disabled, gets
+	// the fixed refusal and nothing of the update is stored or queued
+	// (T11, #1318). The refusal goes through the rate window like any
+	// update and is sent only for the first update of the window: on a
+	// preview almost everyone is refused, so one reply per update would let
+	// any stranger flood the outbox and the bot's send rate. Without a
+	// limiter (no run loop, so nothing can run) the refusal is silent.
+	// /forget and /consent withdraw still run, so a refused principal can
+	// always delete their data. A disable that cannot be read is an error:
+	// the update rolls back and Telegram retries it.
+	if !erasure(u) {
+		refused, err := c.principalRefused(ctx, tx, p)
+		if err != nil {
+			return err
+		}
+		if refused {
+			if c.limiter == nil {
+				return nil
+			}
+			d, err := c.limiter.AdmitMessage(ctx, tx, p)
+			if err != nil {
+				return err
+			}
+			if d.First {
+				return c.reply(ctx, tx, u, ReplyPrincipalDisabled, "")
+			}
+			return nil
+		}
+	}
 	// The rate window counts every update, consent prompts and button
-	// presses included (#1313 slice d1), except the two that delete the
-	// principal's data: /forget and /consent withdraw always go through.
+	// presses included (#1313 slice d1). /forget and /consent withdraw
+	// always go through: the deletion runs first, and only its
+	// confirmation is counted (erasureReply).
 	if c.limiter != nil && !erasure(u) {
 		d, err := c.limiter.AdmitMessage(ctx, tx, p)
 		if err != nil {
@@ -230,6 +292,10 @@ func (c *Conversations) handleMessage(ctx context.Context, tx *sql.Tx, u Verifie
 		return err
 	}
 	now := c.now()
+	// Every fragment that is not exactly user text (a forward, caption,
+	// reply, quote, or an unknown mark) taints the conversation in this
+	// transaction: AppendPAFragment raises the flag with the insert, so the
+	// content and the taint commit together (T5, #1321).
 	for _, f := range frags {
 		sf, err := c.sealer.Seal(p.TelegramID(), conv.ID, seq, f)
 		if err != nil {
@@ -264,14 +330,20 @@ func (c *Conversations) handleCommand(ctx context.Context, tx *sql.Tx, u Verifie
 		if err := c.store.ForgetPAConversations(ctx, tx, p.TelegramID()); err != nil {
 			return err
 		}
-		return c.reply(ctx, tx, u, ReplyForgotten, "")
+		if err := c.retireLinks(ctx); err != nil {
+			return err
+		}
+		return c.erasureReply(ctx, tx, u, ReplyForgotten)
 	case CommandConsent:
 		switch arg {
 		case "withdraw":
 			if err := c.store.WithdrawPAConsent(ctx, tx, p.TelegramID(), c.now()); err != nil {
 				return err
 			}
-			return c.reply(ctx, tx, u, ReplyConsentWithdrawn, "")
+			if err := c.retireLinks(ctx); err != nil {
+				return err
+			}
+			return c.erasureReply(ctx, tx, u, ReplyConsentWithdrawn)
 		default:
 			// Anything else, "/consent accept" included, shows the text
 			// with its button: consent is recorded only from a button bound
@@ -279,12 +351,59 @@ func (c *Conversations) handleCommand(ctx context.Context, tx *sql.Tx, u Verifie
 			// words that need not follow any prompt.
 			return c.prompt(ctx, tx, u)
 		}
+	case CommandConnect, CommandDisconnect, CommandConnections:
+		return c.handleLinkCommand(ctx, tx, u, cmd, arg)
 	}
 	return fmt.Errorf("pa: unhandled command %q", cmd)
 }
 
+// handleLinkCommand admits a linking command in the update's transaction
+// and leaves the action to AfterCommit: Manager.Begin and Disconnect take
+// the principal lock this transaction holds (postcommit.go). Consent comes
+// first, as for any message; the rate window has already counted it.
+func (c *Conversations) handleLinkCommand(ctx context.Context, tx *sql.Tx, u VerifiedUpdate, cmd, arg string) error {
+	if !c.linking {
+		return c.reply(ctx, tx, u, ReplyLinkingUnavailable, "")
+	}
+	_, err := c.requireConsent(ctx, tx, u.Principal())
+	if errors.Is(err, ErrConsentRequired) {
+		return c.prompt(ctx, tx, u)
+	}
+	if err != nil {
+		return err
+	}
+	return setPostCommit(ctx, LinkAction{Command: cmd, Arg: arg})
+}
+
+// retireLinks records, with linking on, that the principal's unfinished
+// links are failed after the commit (LinkAction.Retire). The store already
+// deleted their link secrets in this transaction.
+func (c *Conversations) retireLinks(ctx context.Context) error {
+	if !c.linking {
+		return nil
+	}
+	return setPostCommit(ctx, LinkAction{Retire: true})
+}
+
+// linkButton reports whether data is a linking confirm card button.
+func linkButton(data string) bool {
+	for _, p := range LinkButtonPrefixes {
+		if strings.HasPrefix(data, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Conversations) handleCallback(ctx context.Context, tx *sql.Tx, u VerifiedUpdate) error {
 	p := u.Principal()
+	if c.linking && linkButton(u.CallbackData()) {
+		// The confirm card's nonce is the linking flow's, not a pa_callbacks
+		// id: consuming it here would answer "unknown button" and the
+		// card's press would never reach the flow. The flow checks the
+		// nonce, its principal and its expiry after the commit.
+		return setPostCommit(ctx, LinkAction{Button: true})
+	}
 	action, err := c.store.ConsumePACallback(ctx, tx, p.TelegramID(), u.CallbackData(), c.now())
 	if errors.Is(err, convo.ErrNotFound) {
 		// Unknown, expired, already used, or another principal's id: the
@@ -313,6 +432,20 @@ func (c *Conversations) handleCallback(ctx context.Context, tx *sql.Tx, u Verifi
 	return c.reply(ctx, tx, u, ReplyConsentAccepted, "")
 }
 
+// principalRefused reports whether p may not use the PA: not on the
+// allowlist, or disabled by an admin. A failed read of the disable is an
+// error, never "enabled".
+func (c *Conversations) principalRefused(ctx context.Context, tx *sql.Tx, p Principal) (bool, error) {
+	if !c.allowed.Allowed(p.TelegramID()) {
+		return true, nil
+	}
+	disabled, err := c.store.PAPrincipalDisabled(ctx, tx, p.TelegramID())
+	if err != nil {
+		return true, fmt.Errorf("pa: principal disable: %w", err)
+	}
+	return disabled, nil
+}
+
 // prompt issues a consent button bound to the current version and text.
 func (c *Conversations) prompt(ctx context.Context, tx *sql.Tx, u VerifiedUpdate) error {
 	p := u.Principal()
@@ -321,6 +454,47 @@ func (c *Conversations) prompt(ctx context.Context, tx *sql.Tx, u VerifiedUpdate
 		return err
 	}
 	return c.reply(ctx, tx, u, ReplyConsentPrompt, id)
+}
+
+// erasureReply confirms /forget or /consent withdraw, which has already
+// run: the deletion itself is never refused, rate-limited or blocked by
+// the allowlist. Its confirmation is not free, though. It counts in the
+// principal's rate window and is sent only while the window allows it
+// (at most RateMessages per window, allowed and refused principals alike),
+// then silently dropped, with no rate notice, so a stream of /forget cannot
+// flood the outbox or the bot's send rate (#1318 review). Without a limiter
+// (no run loop) the confirmation is silent, as the refusal is.
+//
+// An admission that cannot be read skips only the confirmation: it is
+// logged and the erasure still commits, so /forget never depends on
+// pa_rate. The admission runs under a savepoint that a failure rolls back,
+// because on Postgres a failed statement would otherwise abort the whole
+// transaction, the erasure with it.
+func (c *Conversations) erasureReply(ctx context.Context, tx *sql.Tx, u VerifiedUpdate, r Reply) error {
+	if c.limiter == nil {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `SAVEPOINT pa_erasure_admit`); err != nil {
+		slog.Warn("pa: erasure confirmation skipped", "stage", "savepoint", "err", err)
+		return nil
+	}
+	d, err := c.limiter.AdmitMessage(ctx, tx, u.Principal())
+	if err != nil {
+		if _, rerr := tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT pa_erasure_admit`); rerr != nil {
+			// The transaction cannot be saved: the update rolls back and
+			// Telegram retries it, erasure included.
+			return fmt.Errorf("pa: erasure admission: %w (rollback: %v)", err, rerr)
+		}
+		slog.Warn("pa: erasure confirmation skipped", "stage", "admission", "err", err)
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `RELEASE SAVEPOINT pa_erasure_admit`); err != nil {
+		return fmt.Errorf("pa: erasure admission: release: %w", err)
+	}
+	if !d.Allowed {
+		return nil
+	}
+	return c.reply(ctx, tx, u, r, "")
 }
 
 func (c *Conversations) reply(ctx context.Context, tx *sql.Tx, u VerifiedUpdate, r Reply, button string) error {
@@ -405,7 +579,7 @@ func userCommand(frags []convo.Fragment) (cmd, arg string, ok bool) {
 		name, _, _ := strings.Cut(fields[0], "@")
 		name = strings.ToLower(name)
 		switch name {
-		case CommandNew, CommandForget, CommandConsent:
+		case CommandNew, CommandForget, CommandConsent, CommandConnect, CommandDisconnect, CommandConnections:
 			if len(fields) > 1 {
 				arg = strings.ToLower(fields[1])
 			}
