@@ -40,6 +40,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa/catalog"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connector"
+	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 )
 
@@ -447,10 +448,30 @@ func (e *dispatchEnv) active(principal int64, server connection.Server, account,
 	if c, err = m.CompleteExchange(ctx, principal, c.ID, c.AuthorityRevision, account, []byte(resp)); err != nil {
 		e.t.Fatal(err)
 	}
+	acceptConsent(e.t, e.store, principal)
 	if c, err = m.Confirm(ctx, principal, c.ID, c.AuthorityRevision); err != nil {
 		e.t.Fatal(err)
 	}
 	return c
+}
+
+// acceptConsent records principal's current data-flow consent, which
+// activation (pending_confirm -> active) requires under the principal lock.
+func acceptConsent(t *testing.T, s *db.Store, principal int64) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AcceptPAConsent(ctx, tx, principal, convo.ConsentVersion, convo.ConsentTextSHA256(), time.Now()); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = s.DB.Exec(`DELETE FROM pa_consents WHERE principal = $1`, principal) })
 }
 
 // run starts a job for principal and returns its token.

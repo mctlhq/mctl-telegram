@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 )
 
@@ -456,6 +457,120 @@ func TestReadPAConsent(t *testing.T) {
 		cancel()
 		if _, err := s.ReadPAConsent(cctx, p); err == nil || errors.Is(err, convo.ErrNotFound) {
 			t.Fatalf("failed read: %v", err)
+		}
+	})
+}
+
+// withdrawPAConsentTx is /consent withdraw as a webhook update runs it: the
+// principal lock, then the withdrawal, in one committed transaction.
+func withdrawPAConsentTx(ctx context.Context, s *Store, p int64) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.LockPAPrincipal(ctx, tx, p); err != nil {
+		return err
+	}
+	if err := s.WithdrawPAConsent(ctx, tx, p, time.Now()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// Activation reads consent under the principal lock in its own
+// transaction (#1390 review): without a current consent, whether withdrawn
+// first, missing or unreadable, it refuses with connection.ErrNoConsent
+// and leaves the row pending_confirm with its tokens for the caller to
+// fail and revoke.
+func TestTransitionPAConnection_ActivationNeedsConsent(t *testing.T) {
+	paLinkDialects(t, func(t *testing.T, s *Store) {
+		for name, lose := range map[string]func(ctx context.Context, p int64) error{
+			"withdrawn first": func(ctx context.Context, p int64) error { return withdrawPAConsentTx(ctx, s, p) },
+			"no row": func(ctx context.Context, p int64) error {
+				_, err := s.DB.ExecContext(ctx, `DELETE FROM pa_consents WHERE principal = $1`, p)
+				return err
+			},
+			"unreadable": func(ctx context.Context, p int64) error {
+				_, err := s.DB.ExecContext(ctx, `UPDATE pa_consents SET state = 'bogus' WHERE principal = $1`, p)
+				return err
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				ctx := context.Background()
+				p := paLinkPrincipal(t, s)
+				acceptConsent(t, s, p)
+				id := seedPAConnectionWithTokens(t, s, p)
+				if err := lose(ctx, p); err != nil {
+					t.Fatal(err)
+				}
+				_, err := s.TransitionPAConnection(ctx, p, id, connection.Transition{
+					From: connection.StatePendingConfirm, To: connection.StateActive, ExpectRevision: 4})
+				if !errors.Is(err, connection.ErrNoConsent) {
+					t.Fatalf("activation without consent: %v, want ErrNoConsent", err)
+				}
+				c, sealed, err := s.GetPAConnectionSealed(ctx, p, id)
+				if err != nil || c.State != connection.StatePendingConfirm || c.AuthorityRevision != 4 || len(sealed.SealedTokens) == 0 {
+					t.Fatalf("after the refusal: %s rev %d, %d token bytes, %v; want it untouched", c.State, c.AuthorityRevision, len(sealed.SealedTokens), err)
+				}
+			})
+		}
+	})
+}
+
+// The race the review found: a /consent withdraw that commits after the
+// confirm button's own consent check and before the activation. The
+// activation holds the principal lock from its consent read to its commit,
+// so a withdraw that starts inside that window waits for the activation
+// instead of committing in it: the two are ordered, and the order the
+// activation saw is the order that happened. On SQLite (one connection)
+// the transactions serialise anyway; Postgres is where the lock decides.
+func TestTransitionPAConnection_WithdrawWaitsForActivation(t *testing.T) {
+	paLinkDialects(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		p := paLinkPrincipal(t, s)
+		acceptConsent(t, s, p)
+		id := seedPAConnectionWithTokens(t, s, p)
+
+		inWindow, release := make(chan struct{}), make(chan struct{})
+		paActivateAfterConsent = func(principal int64) {
+			if principal == p {
+				close(inWindow)
+				<-release
+			}
+		}
+		t.Cleanup(func() { paActivateAfterConsent = nil })
+
+		activated := make(chan error, 1)
+		go func() {
+			_, err := s.TransitionPAConnection(ctx, p, id, connection.Transition{
+				From: connection.StatePendingConfirm, To: connection.StateActive, ExpectRevision: 4})
+			activated <- err
+		}()
+		<-inWindow
+		withdrawn := make(chan error, 1)
+		go func() { withdrawn <- withdrawPAConsentTx(ctx, s, p) }()
+		select {
+		case err := <-withdrawn:
+			close(release)
+			<-activated
+			t.Fatalf("the withdraw committed inside the activation window (%v)", err)
+		case <-time.After(300 * time.Millisecond):
+		}
+		close(release)
+		if err := <-activated; err != nil {
+			t.Fatalf("activation: %v", err)
+		}
+		if err := <-withdrawn; err != nil {
+			t.Fatalf("withdraw after the activation: %v", err)
+		}
+		tx, err := s.DB.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		if rec, err := s.GetPAConsent(ctx, tx, p); err != nil || rec.State != convo.ConsentWithdrawn {
+			t.Fatalf("consent after both: %+v %v, want withdrawn", rec, err)
 		}
 	})
 }

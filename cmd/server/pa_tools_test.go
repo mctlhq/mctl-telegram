@@ -11,9 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/mctlhq/mctl-telegram/internal/db"
-	mcpapp "github.com/mctlhq/mctl-telegram/internal/mcp"
-	"github.com/mctlhq/mctl-telegram/internal/web"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -32,6 +29,8 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/config"
+	"github.com/mctlhq/mctl-telegram/internal/db"
+	mcpapp "github.com/mctlhq/mctl-telegram/internal/mcp"
 	"github.com/mctlhq/mctl-telegram/internal/pa"
 	"github.com/mctlhq/mctl-telegram/internal/pa/catalog"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
@@ -39,6 +38,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 	"github.com/mctlhq/mctl-telegram/internal/pa/linking"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
+	"github.com/mctlhq/mctl-telegram/internal/web"
 )
 
 // The tg server's fake endpoints. Hosts only: every request is routed to

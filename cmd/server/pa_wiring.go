@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	mcpapp "github.com/mctlhq/mctl-telegram/internal/mcp"
-	"github.com/mctlhq/mctl-telegram/internal/web"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,6 +15,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/config"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	mcpapp "github.com/mctlhq/mctl-telegram/internal/mcp"
 	"github.com/mctlhq/mctl-telegram/internal/pa"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connector"
@@ -24,6 +23,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa/linking"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output"
 	"github.com/mctlhq/mctl-telegram/internal/sweeper"
+	"github.com/mctlhq/mctl-telegram/internal/web"
 )
 
 // The production store satisfies the run loop's store; asserted here, where

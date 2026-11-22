@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
+	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 )
 
 var _ connection.Store = (*Store)(nil)
@@ -314,7 +315,25 @@ func missOrConflict(ctx context.Context, q paQuerier, principal int64, id string
 	return connection.ErrConflict
 }
 
+// paActivateAfterConsent is a test seam: when set, TransitionPAConnection
+// calls it during an activation, after the principal lock and the consent
+// read and before the update, inside the transaction, so a test can race a
+// /consent withdraw against exactly that window. Always nil outside tests.
+var paActivateAfterConsent func(principal int64)
+
 // TransitionPAConnection applies t (see connection.Transition).
+//
+// Activation (pending_confirm -> active) first takes the principal's lock,
+// the one every webhook update takes before it can withdraw consent or
+// /forget (pa.Conversations.HandleUpdate), and reads the principal's
+// consent in the same transaction. Without a current, accepted consent
+// it refuses with connection.ErrNoConsent and changes nothing. A withdraw
+// and an activation are therefore ordered: a withdraw that commits first
+// refuses the activation, and one that starts later waits for it. A
+// consent row that cannot be read refuses too, never activates.
+//
+// Like CreatePAConnection it must not be called inside a transaction that
+// holds the principal lock.
 func (s *Store) TransitionPAConnection(ctx context.Context, principal int64, id string, t connection.Transition) (connection.Connection, error) {
 	if err := t.Validate(); err != nil {
 		return connection.Connection{}, err
@@ -342,6 +361,11 @@ func (s *Store) TransitionPAConnection(ctx context.Context, principal int64, id 
 		return connection.Connection{}, fmt.Errorf("pa connection transition: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if t.From == connection.StatePendingConfirm && t.To == connection.StateActive {
+		if err := s.activationConsent(ctx, tx, principal); err != nil {
+			return connection.Connection{}, err
+		}
+	}
 	res, err := tx.ExecContext(ctx, `UPDATE pa_connections SET `+set+`
 		WHERE principal = $3 AND id = $4 AND state = $5 AND authority_revision = $6`, args...)
 	if err != nil {
@@ -362,6 +386,27 @@ func (s *Store) TransitionPAConnection(ctx context.Context, principal int64, id 
 		return connection.Connection{}, fmt.Errorf("pa connection transition: commit: %w", err)
 	}
 	return c, nil
+}
+
+// activationConsent takes principal's lock in tx and requires its
+// current consent (see TransitionPAConnection).
+func (s *Store) activationConsent(ctx context.Context, tx *sql.Tx, principal int64) error {
+	if err := s.LockPAPrincipal(ctx, tx, principal); err != nil {
+		return fmt.Errorf("pa connection activation: %w", err)
+	}
+	rec, err := s.GetPAConsent(ctx, tx, principal)
+	switch {
+	case errors.Is(err, convo.ErrNotFound):
+		return connection.ErrNoConsent
+	case err != nil:
+		return fmt.Errorf("%w: consent unreadable: %w", connection.ErrNoConsent, err)
+	case !convo.Satisfied(rec):
+		return connection.ErrNoConsent
+	}
+	if paActivateAfterConsent != nil {
+		paActivateAfterConsent(principal)
+	}
+	return nil
 }
 
 // paRevokeAfterRead is a test seam: when set, revokePAConnOnce calls it

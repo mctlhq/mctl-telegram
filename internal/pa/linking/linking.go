@@ -714,7 +714,15 @@ func (s *Service) HandleCallback(ctx context.Context, u pa.VerifiedUpdate) (bool
 		_, aerr := s.cfg.Manager.Abandon(ctx, l.Principal, l.ConnectionID, l.Revision, "unauditable")
 		return true, errors.Join(fmt.Errorf("pa linking: users row: %w", err), aerr)
 	}
+	// The check above keeps a principal without consent from getting a
+	// users row; the activation itself checks again under the principal
+	// lock, so a /consent withdraw that commits in between still refuses
+	// it (connection.ErrNoConsent).
 	_, err = s.cfg.Manager.Confirm(ctx, l.Principal, l.ConnectionID, l.Revision)
+	if errors.Is(err, connection.ErrNoConsent) {
+		_, aerr := s.cfg.Manager.Abandon(ctx, l.Principal, l.ConnectionID, l.Revision, "no_consent")
+		return true, errors.Join(ErrNoConsent, err, aerr)
+	}
 	return true, err
 }
 

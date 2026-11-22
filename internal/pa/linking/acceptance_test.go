@@ -611,12 +611,22 @@ type faultStore struct {
 	failTo      connection.State // fail transitions into this state
 	failSealed  bool             // fail every sealed read
 	failSealFor string           // fail sealed reads of this connection id
+	// beforeActivate runs once, just before a pending_confirm -> active
+	// transition reaches the store.
+	beforeActivate func()
 }
 
 func (f *faultStore) TransitionPAConnection(ctx context.Context, p int64, id string, t connection.Transition) (connection.Connection, error) {
 	f.mu.Lock()
 	to := f.failTo
+	before := f.beforeActivate
+	if t.To == connection.StateActive {
+		f.beforeActivate = nil
+	}
 	f.mu.Unlock()
+	if before != nil && t.To == connection.StateActive {
+		before()
+	}
 	if to != "" && t.To == to {
 		return connection.Connection{}, errors.New("injected: transition write failed")
 	}
@@ -932,6 +942,40 @@ func TestLinking_ForgetAndWithdrawRetireUnfinishedLinks(t *testing.T) {
 					t.Fatalf("the finished alice link was touched: %s", st)
 				}
 			})
+		}
+	})
+}
+
+// The review's race on the confirm button: a /consent withdraw that
+// commits after the button's own consent check and before the activation.
+// The activation reads consent again under the principal lock, refuses
+// (connection.ErrNoConsent), and the button fails the connection and
+// revokes its tokens: no active connection and no stored tokens remain.
+func TestLinking_WithdrawAfterConsentCheckRefusesConfirm(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		ctx := context.Background()
+		h := newHarness(t, s, false)
+		fs := &faultStore{Store: s, mu: &sync.Mutex{}}
+		h.rebuild(fs, tokenClient{h.as})
+		confirm, _ := confirmData(h.toConfirm(connection.ServerTG, h.tgLogin(h.alice)))
+		fs.set(func(f *faultStore) {
+			f.beforeActivate = func() {
+				h.inTx(func(tx *sql.Tx) error {
+					if err := s.LockPAPrincipal(ctx, tx, h.alice); err != nil {
+						return err
+					}
+					return s.WithdrawPAConsent(ctx, tx, h.alice, h.clock.Now())
+				})
+			}
+		})
+		before := h.revoker.count()
+		handled, err := h.svc.HandleCallback(ctx, callbackUpdate(t, h.alice, confirm))
+		if !handled || !errors.Is(err, linking.ErrNoConsent) || !errors.Is(err, connection.ErrNoConsent) {
+			t.Fatalf("confirm after a racing withdraw: handled=%v err=%v", handled, err)
+		}
+		c := h.connection(connection.ServerTG)
+		if c.State != connection.StateFailed || h.sealedTokens(c.ID) != 0 || h.revoker.count() <= before {
+			t.Fatalf("state %s, sealed %d bytes, revoked %d->%d", c.State, h.sealedTokens(c.ID), before, h.revoker.count())
 		}
 	})
 }

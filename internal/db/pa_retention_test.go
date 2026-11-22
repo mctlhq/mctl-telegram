@@ -327,6 +327,7 @@ func TestHardDeleteAccount_RefusesConnectionHoldingTokens(t *testing.T) {
 						AccountID: "acct", GrantedScope: "telegram:dialogs:read", SealedTokens: []byte("tokens")},
 				}
 				if active {
+					acceptConsent(t, s, tgID)
 					steps = append(steps, connection.Transition{From: connection.StatePendingConfirm, To: connection.StateActive, ExpectRevision: 4})
 				}
 				for _, tr := range steps {
