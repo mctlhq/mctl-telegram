@@ -185,12 +185,11 @@ func (s *Surface) ModelTools(now time.Time) ([]ModelTool, error) {
 	}
 	out := make([]ModelTool, 0, len(s.usable))
 	for name := range s.usable {
-		pt := s.pinned[name]
-		schema, err := canonicalObject(pt.InputSchema)
+		mt, err := modelTool(name, s.pinned[name])
 		if err != nil {
-			return nil, fmt.Errorf("pa catalog: pinned schema of %s: %w", name, err)
+			return nil, err
 		}
-		out = append(out, ModelTool{Name: name, Description: pt.CatalogDescription, InputSchema: schema})
+		out = append(out, mt)
 	}
 	slices.SortFunc(out, func(a, b ModelTool) int {
 		if a.Name < b.Name {
@@ -202,6 +201,33 @@ func (s *Surface) ModelTools(now time.Time) ([]ModelTool, error) {
 		return 0
 	})
 	return out, nil
+}
+
+// modelTool is what the model is shown for one pinned tool: the catalog
+// description and the canonical pinned schema. Nothing server-authored at
+// call time reaches it.
+func modelTool(name string, pt PinnedTool) (ModelTool, error) {
+	schema, err := canonicalObject(pt.InputSchema)
+	if err != nil {
+		return ModelTool{}, fmt.Errorf("pa catalog: pinned schema of %s: %w", name, err)
+	}
+	return ModelTool{Name: name, Description: pt.CatalogDescription, InputSchema: schema}, nil
+}
+
+// ModelTool returns the model's view of one pinned tool, from the pin
+// alone (the run loop's claim, #1318 slice C3). It is the entry
+// Surface.ModelTools gives for the same tool; it does not say the tool is
+// usable now, which only a fresh Surface does at dispatch.
+func (p *Pin) ModelTool(server, tool string) (ModelTool, error) {
+	sp, ok := p.Servers[server]
+	if !ok {
+		return ModelTool{}, ErrUnknownServer
+	}
+	pt, ok := sp.Tools[tool]
+	if !ok {
+		return ModelTool{}, ErrNotPinned
+	}
+	return modelTool(tool, pt)
 }
 
 // Denied returns the tools that cannot be used and why, sorted by name, for

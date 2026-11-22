@@ -121,3 +121,41 @@ func TestOpenAIClient_MaxOutputTokens(t *testing.T) {
 		}
 	}
 }
+
+// TestOpenAIClient_ChatPA: the PA call sends exactly the claim's tools,
+// with the pinned schema as the parameters, and tool_choice only when
+// there is a tool (providers refuse it on a request without tools).
+func TestOpenAIClient_ChatPA(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		tools []PAModelTool
+	}{
+		{"no tools", nil},
+		{"one tool", []PAModelTool{{Name: "tg__list_dialogs", Description: "List dialogs.", Parameters: json.RawMessage(`{"type":"object"}`)}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got map[string]json.RawMessage
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewDecoder(r.Body).Decode(&got)
+				_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+			}))
+			defer srv.Close()
+			c := &OpenAIClient{BaseURL: srv.URL, APIKey: "k", Model: "m", HTTP: srv.Client()}
+			if _, err := c.ChatPA(context.Background(), []ChatMessage{{Role: "user", Content: "hi"}}, tc.tools); err != nil {
+				t.Fatal(err)
+			}
+			choice, hasChoice := got["tool_choice"]
+			tools, hasTools := got["tools"]
+			if len(tc.tools) == 0 {
+				if hasChoice || hasTools {
+					t.Fatalf("tool_choice %s, tools %s on a request without tools", choice, tools)
+				}
+				return
+			}
+			if string(choice) != `"auto"` ||
+				string(tools) != `[{"type":"function","function":{"name":"tg__list_dialogs","description":"List dialogs.","parameters":{"type":"object"}}}]` {
+				t.Fatalf("tool_choice %s, tools %s", choice, tools)
+			}
+		})
+	}
+}

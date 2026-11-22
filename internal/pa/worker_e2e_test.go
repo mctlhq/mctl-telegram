@@ -24,7 +24,7 @@ type e2eModel struct {
 	inputs  [][]agentworker.ChatMessage
 }
 
-func (m *e2eModel) ChatNoTools(_ context.Context, msgs []agentworker.ChatMessage) (*agentworker.ChatResult, error) {
+func (m *e2eModel) ChatPA(_ context.Context, msgs []agentworker.ChatMessage, _ []agentworker.PAModelTool) (*agentworker.ChatResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.inputs = append(m.inputs, msgs)

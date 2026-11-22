@@ -24,6 +24,10 @@ type paFake struct {
 	answers map[string][]paAnswer
 	replies []map[string]any
 	auths   []string
+	// toolReqs are the /tool bodies and toolAuths their Authorization
+	// headers, in order.
+	toolReqs  []map[string]any
+	toolAuths []string
 }
 
 type paAnswer struct {
@@ -73,6 +77,14 @@ func (f *paFake) serve(w http.ResponseWriter, r *http.Request) {
 		f.replies = append(f.replies, m)
 		f.mu.Unlock()
 		f.record("reply")
+	case PARouteTool:
+		var m map[string]any
+		_ = json.Unmarshal(body, &m)
+		f.mu.Lock()
+		f.toolReqs = append(f.toolReqs, m)
+		f.toolAuths = append(f.toolAuths, r.Header.Get("Authorization"))
+		f.mu.Unlock()
+		f.record("tool")
 	default:
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -103,15 +115,17 @@ type paScriptModel struct {
 	results []*ChatResult
 	errs    []error
 	inputs  [][]ChatMessage
+	tools   [][]PAModelTool
 }
 
-func (m *paScriptModel) ChatNoTools(_ context.Context, msgs []ChatMessage) (*ChatResult, error) {
+func (m *paScriptModel) ChatPA(_ context.Context, msgs []ChatMessage, tools []PAModelTool) (*ChatResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.f != nil {
 		m.f.record("chat")
 	}
 	m.inputs = append(m.inputs, append([]ChatMessage(nil), msgs...))
+	m.tools = append(m.tools, append([]PAModelTool(nil), tools...))
 	if len(m.errs) > 0 {
 		err := m.errs[0]
 		m.errs = m.errs[1:]
@@ -385,7 +399,7 @@ func TestPAWorker_LeaseDeadline(t *testing.T) {
 
 type paModelFunc func(context.Context, []ChatMessage) (*ChatResult, error)
 
-func (f paModelFunc) ChatNoTools(ctx context.Context, m []ChatMessage) (*ChatResult, error) {
+func (f paModelFunc) ChatPA(ctx context.Context, m []ChatMessage, _ []PAModelTool) (*ChatResult, error) {
 	return f(ctx, m)
 }
 
