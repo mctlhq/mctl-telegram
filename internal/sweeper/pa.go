@@ -22,7 +22,8 @@ const PAStateSweeperInterval = time.Hour
 // expired callback ids, pa_updates dedup rows older than
 // pa.UpdatesRetention (issue #1313, owner decision 2026-11-18), and linking
 // secrets past db.PALinkSecretRetention after their expiry (#1338). It is
-// started only when PA_ENABLED is true.
+// started only when PA_ENABLED is true. Principal lock rows are not its
+// job: PALocks sweeps them, with the PA on or off.
 func PAState(ctx context.Context, store convo.Store) {
 	ticker := time.NewTicker(PAStateSweeperInterval)
 	defer ticker.Stop()
@@ -47,6 +48,50 @@ func PAStateSweepOnce(ctx context.Context, store convo.Store, now time.Time) {
 	if r != (convo.SweepResult{}) {
 		slog.Info("pa state sweep", "conversations", r.Conversations, "fragments", r.Fragments,
 			"callbacks", r.Callbacks, "updates", r.Updates, "link_secrets", r.LinkSecrets)
+	}
+}
+
+// PALockSweeperInterval is how often PALocks wakes up: the PAState
+// interval, so a lock row lives at most pa.UpdatesRetention plus one hour
+// unused, as it did while PAState swept it.
+const PALockSweeperInterval = PAStateSweeperInterval
+
+// PALockSweeper is the principal lock sweep: (*db.Store).SweepPAPrincipalLocks.
+type PALockSweeper interface {
+	SweepPAPrincipalLocks(ctx context.Context, before time.Time) (int64, error)
+}
+
+// PALocks deletes principal lock rows unused for pa.UpdatesRetention until
+// ctx is cancelled (#1318). The server starts it whatever PA_ENABLED says:
+// an account deletion keeps an admitted principal's lock row as the
+// deletion fence (db.purgePAPrincipals), and a PA turned off before the
+// row aged out must still delete it, since it carries the principal's
+// Telegram id. It is the only sweep of the table; PAState leaves it alone.
+func PALocks(ctx context.Context, s PALockSweeper) {
+	ticker := time.NewTicker(PALockSweeperInterval)
+	defer ticker.Stop()
+	PALocksSweepOnce(ctx, s, time.Now())
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			PALocksSweepOnce(ctx, s, time.Now())
+		}
+	}
+}
+
+// PALocksSweepOnce runs one pass at now: rows unused since now minus
+// pa.UpdatesRetention go. A failed pass is logged and retried at the next
+// interval; it never reads as "nothing to delete".
+func PALocksSweepOnce(ctx context.Context, s PALockSweeper, now time.Time) {
+	n, err := s.SweepPAPrincipalLocks(ctx, now.Add(-pa.UpdatesRetention))
+	if err != nil {
+		slog.Warn("pa lock sweep failed", "err", err)
+		return
+	}
+	if n > 0 {
+		slog.Info("pa lock sweep", "locks", n)
 	}
 }
 

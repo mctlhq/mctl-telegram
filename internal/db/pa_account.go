@@ -19,7 +19,7 @@ import (
 // ErrPAConnectionsNeedRevocation refuses an account deletion while a PA
 // connection of the account still holds provider tokens. Deleting the row
 // would wipe them locally and leave them live at the provider.
-// DeleteAccountRevokingPA revokes them first and returns it, joined with the
+// RevokeAccountPATokens revokes them first and returns it, joined with the
 // cause, for a connection whose revocation failed; HardDeleteAccount returns
 // it for a connection that holds tokens when the purge runs.
 var ErrPAConnectionsNeedRevocation = errors.New("delete account: a personal assistant connection still holds provider tokens")
@@ -37,33 +37,46 @@ type PATokenRevoker interface {
 }
 
 // DeleteAccountRevokingPA is HardDeleteAccount for a server that runs the
-// linking flow: before the deletion's transaction it revokes the provider
-// tokens of every PA connection of the account's Telegram ids through r, so
-// the purge finds none left to strand (#1338). A principal whose revocation
-// fails, or whose Telegram ids cannot be read, refuses the whole deletion
-// with ErrPAConnectionsNeedRevocation joined with the cause; nothing is
-// deleted, the connection keeps its row and sealed tokens, and the user can
-// retry. Connections already revoked on the way stay revoked.
-//
-// The revocation needs outbound calls, so it cannot run inside the
-// deletion's transaction. A connection that gains tokens after it, before
-// the purge, is caught by the purge's own check in the transaction
-// (ErrPAConnectionsNeedRevocation again), and a Begin admitted before the
-// purge cannot create a row after it (CreatePAConnection).
+// linking flow: RevokeAccountPATokens, then HardDeleteAccount. A failed
+// revocation refuses the whole deletion and nothing is deleted. The web and
+// MCP deletion surfaces call the two halves themselves, so that a refused
+// revocation never evicts the account's live Telegram client
+// (RemoveAtomic); this stays for callers outside the pool.
 func (s *Store) DeleteAccountRevokingPA(ctx context.Context, userID int64, r PATokenRevoker) (int64, error) {
+	if err := s.RevokeAccountPATokens(ctx, userID, r); err != nil {
+		return 0, err
+	}
+	return s.HardDeleteAccount(ctx, userID)
+}
+
+// RevokeAccountPATokens revokes, through r, the provider tokens of every PA
+// connection of the account's Telegram ids, so that the deletion's purge
+// finds none left to strand (#1338). It runs before the deletion's
+// transaction, because the revocation needs outbound calls. Any failure
+// returns ErrPAConnectionsNeedRevocation joined with the cause: a nil r, a
+// principal whose revocation fails, or Telegram ids that cannot be read
+// (connections that could not be listed are not absent). The caller must
+// then delete nothing; the connection keeps its row and sealed tokens, and
+// the user can retry. Connections already revoked on the way stay revoked.
+//
+// A connection that gains tokens after it, before the purge, is caught by
+// the purge's own check in the transaction (ErrPAConnectionsNeedRevocation
+// again), and a Begin admitted before the purge cannot create a row after it
+// (CreatePAConnection).
+func (s *Store) RevokeAccountPATokens(ctx context.Context, userID int64, r PATokenRevoker) error {
 	if r == nil {
-		return 0, errors.New("delete account: no pa token revoker")
+		return errors.Join(ErrPAConnectionsNeedRevocation, errors.New("delete account: no pa token revoker"))
 	}
 	tgIDs, err := s.accountTelegramIDs(ctx, userID)
 	if err != nil {
-		return 0, errors.Join(ErrPAConnectionsNeedRevocation, err)
+		return errors.Join(ErrPAConnectionsNeedRevocation, err)
 	}
 	for _, p := range slices.Sorted(slices.Values(tgIDs)) {
 		if err := r.RevokeHeldTokens(ctx, p); err != nil {
-			return 0, errors.Join(ErrPAConnectionsNeedRevocation, err)
+			return errors.Join(ErrPAConnectionsNeedRevocation, err)
 		}
 	}
-	return s.HardDeleteAccount(ctx, userID)
+	return nil
 }
 
 // accountTelegramIDs is userTelegramIDs outside the deletion's transaction.
@@ -81,12 +94,13 @@ func (s *Store) accountTelegramIDs(ctx context.Context, userID int64) ([]int64, 
 //   - pa_principal_locks, when the row already existed: it stays, with its
 //     purged_at_ms deletion mark raised, so a linking Begin admitted before
 //     the deletion cannot create a connection after it (CreatePAConnection).
-//     It carries the principal and two timestamps, and the PA lock sweep
-//     deletes it once unused for pa.UpdatesRetention. A row the purge had
-//     to create only to take the lock is deleted again before commit: no
-//     Begin can be in flight for a principal without a lock row, because
-//     admission writes one (AdmitPAConnection), so with the PA off (no
-//     sweep running) an account deletion leaves no row behind;
+//     It carries the principal and two timestamps, and the lock sweep
+//     (SweepPAPrincipalLocks, run whether or not the PA is on) deletes it
+//     once unused for pa.UpdatesRetention. A row the purge had to create
+//     only to take the lock is deleted again before commit: no Begin can be
+//     in flight for a principal without a lock row, because admission
+//     writes one (AdmitPAConnection), so an account deletion of a principal
+//     never admitted leaves no row behind;
 //   - pa_usage and pa_rate, the spend ledger and the message rate window
 //     behind the PA's caps: deleting them would let a delete-and-return
 //     reset the caps. They carry the principal, amounts and counts, no
@@ -165,7 +179,7 @@ func purgePAPrincipals(ctx context.Context, tx *sql.Tx, tgIDs []int64) error {
 			return fmt.Errorf("delete account: read pa connections: %w", err)
 		}
 		if holding > 0 {
-			// DeleteAccountRevokingPA revokes them before this transaction;
+			// RevokeAccountPATokens revokes them before this transaction;
 			// these gained tokens after that, or the caller did not revoke.
 			return ErrPAConnectionsNeedRevocation
 		}
