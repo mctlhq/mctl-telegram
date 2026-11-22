@@ -171,7 +171,7 @@ func (s *Store) AdmitPAMessage(ctx context.Context, tx *sql.Tx, principal int64,
 			return jobs.RateDecision{}, fmt.Errorf("pa rate: count: %w", err)
 		}
 	}
-	return jobs.RateDecision{Allowed: count <= int64(limit), Notify: count == int64(limit)+1}, nil
+	return jobs.RateDecision{Allowed: count <= int64(limit), Notify: count == int64(limit)+1, First: count == 1}, nil
 }
 
 // EnqueuePAJob implements jobs.Store. A queued job of the same conversation

@@ -40,12 +40,27 @@ func (s *Store) SetPAPrincipalDisabled(ctx context.Context, principal, by int64,
 	if reason == "" || utf8.RuneCountInString(reason) > MaxPAPrincipalDisableReason || strings.ContainsAny(reason, "\r\n") {
 		return ErrPADisableReason
 	}
-	if _, err := s.DB.ExecContext(ctx,
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("set pa principal disabled: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO pa_principal_disables(principal, disabled_at_ms, disabled_by, reason) VALUES($1, $2, $3, $4)
 		 ON CONFLICT (principal) DO UPDATE SET disabled_at_ms = excluded.disabled_at_ms,
 		   disabled_by = excluded.disabled_by, reason = excluded.reason`,
 		principal, now.UnixMilli(), by, reason); err != nil {
 		return fmt.Errorf("set pa principal disabled: %w", err)
+	}
+	// A refused principal is answered once per rate window, on its first
+	// update (conversation.go). Resetting the window here makes the next
+	// update the first, so a principal disabled mid-window is told at once
+	// instead of up to a window later.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pa_rate WHERE principal = $1`, principal); err != nil {
+		return fmt.Errorf("set pa principal disabled: reset rate window: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("set pa principal disabled: commit: %w", err)
 	}
 	return nil
 }

@@ -40,7 +40,7 @@ func TestLoadPA_AllowedPrincipals(t *testing.T) {
 			}
 		})
 	}
-	for _, bad := range []string{"4242001,", ",4242001", "4242001,,4242002", "0", "-4242001", "42420x1", "4242001;4242002", "99999999999999999999"} {
+	for _, bad := range []string{"4242001,", ",4242001", "4242001,,4242002", "0", "-4242001", "42420x1", "4242001;4242002", "99999999999999999999", "+4242001", "04242001", "4242001,+4242002"} {
 		t.Run("malformed "+bad, func(t *testing.T) {
 			enable(t)
 			t.Setenv(PAAllowedPrincipalsEnv, bad)

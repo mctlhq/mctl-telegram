@@ -266,12 +266,14 @@ S1-F4:
     - internal/db.TestPAPrincipalDisable_Store
     - internal/mcp.TestSetPAPrincipalDisabled_AdminOnly
     - internal/pa.TestConversations_DisabledPrincipalNotQueued
+    - internal/pa.TestConversations_RefusalIsRateBounded
     - internal/pa.TestDispatch_JobStoppedFencesResult
     - internal/pa.TestDispatch_S1F4
     - internal/pa.TestDispatch_S1F4_ConsentWithdrawnRefusesNextDispatch
     - internal/pa.TestDispatch_S1F4_PrincipalDisabledFencesInFlight
     - internal/pa.TestDispatch_S1F4_PrincipalDisabledRefusesNextDispatch
     - internal/pa.TestDispatch_S1F4_PrincipalStatusUnreadableRefuses
+    - internal/pa.TestRunLoop_PrincipalDisableStoreFaultChangesNothing
     - internal/pa.TestRunLoop_PrincipalDisabledStopsTurn
     - internal/pa/gate.TestStorePrincipalStatus_ErrorIsDisabled
 S1-U1:

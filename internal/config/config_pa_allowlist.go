@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -29,9 +30,15 @@ func loadPAAllowlist(c *Config) error {
 	return nil
 }
 
+// paPrincipalID is one canonical id: decimal digits with no sign and no
+// leading zero, so "+4242001" or "04242001" cannot pass for an id that
+// review reads differently.
+var paPrincipalID = regexp.MustCompile(`^[1-9][0-9]*$`)
+
 // parsePAAllowedPrincipals parses the list. Surrounding whitespace is
-// trimmed; an empty entry (",,", a trailing comma), a non-integer, zero or
-// a negative id is an error. Duplicates are kept once.
+// trimmed; an empty entry (",,", a trailing comma), a sign, a leading
+// zero, a non-integer, zero or an id that overflows is an error.
+// Duplicates are kept once.
 func parsePAAllowedPrincipals(v string) ([]int64, error) {
 	if strings.TrimSpace(v) == "" {
 		return nil, nil
@@ -39,7 +46,11 @@ func parsePAAllowedPrincipals(v string) ([]int64, error) {
 	var out []int64
 	seen := map[int64]bool{}
 	for _, f := range strings.Split(v, ",") {
-		id, err := strconv.ParseInt(strings.TrimSpace(f), 10, 64)
+		f = strings.TrimSpace(f)
+		if !paPrincipalID.MatchString(f) {
+			return nil, errPAAllowedPrincipals
+		}
+		id, err := strconv.ParseInt(f, 10, 64)
 		if err != nil || id <= 0 {
 			return nil, errPAAllowedPrincipals
 		}

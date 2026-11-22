@@ -15,6 +15,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
+	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
@@ -36,33 +37,46 @@ func (failingDisableStore) PAPrincipalDisabled(context.Context, *sql.Tx, int64) 
 }
 
 // TestConversations_DisabledPrincipalNotQueued: a disabled principal, and
-// one not on the allowlist, get the fixed refusal and nothing else: no
-// fragment, conversation, job, callback or consent prompt. /forget and
-// /consent withdraw still run. A disable that cannot be read rolls the
-// update back for Telegram to retry, and stores nothing.
+// one not on the allowlist, get the fixed refusal once per rate window and
+// nothing else: no fragment, conversation, job, callback or consent
+// prompt. /forget and /consent withdraw still run. A disable that cannot
+// be read rolls the update back for Telegram to retry, and stores nothing.
+// It runs under the run loop's real limiter.
 func TestConversations_DisabledPrincipalNotQueued(t *testing.T) {
-	for name, refuse := range map[string]func(h *convoHarness){
-		"disabled":    func(h *convoHarness) { disable(h.t, h.store, aliceID) },
-		"not allowed": func(h *convoHarness) { h.allow.deny(aliceID) },
+	for name, refuse := range map[string]func(h *runLoopHarness){
+		// Disabling resets the rate window, so the next update is told.
+		"disabled": func(h *runLoopHarness) { disable(h.t, h.convoHarness.store, aliceID) },
+		// The allowlist changes on restart only; a principal dropped from
+		// it is told on the first update of their next window.
+		"not allowed": func(h *runLoopHarness) {
+			h.allow.deny(aliceID)
+			h.now = h.now.Add(jobs.DefaultRateWindow)
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			h := newConvoHarness(t)
+			h := newRunLoopHarness(t)
+			jobsOf := func(p int64) int { return h.count(`SELECT count(*) FROM pa_jobs WHERE principal = $1`, p) }
 			h.consent(aliceID)
 			h.text(aliceID, "before")
-			if h.fragments(aliceID) != 1 || len(h.runs.calls()) != 1 {
+			if h.fragments(aliceID) != 1 || jobsOf(aliceID) != 1 {
 				t.Fatal("control: the message before the refusal was not stored and queued")
 			}
 			refuse(h)
 			callbacks := h.count(`SELECT count(*) FROM pa_callbacks`)
-			for _, msg := range []string{"after", "/consent", "/new"} {
+			replies := h.repliesTo(aliceID)
+			for i, msg := range []string{"after", "/consent", "/new"} {
 				if code := h.text(aliceID, msg); code != http.StatusOK {
 					t.Fatalf("%s: %d", msg, code)
 				}
-				if r := h.replies.last(aliceID); r.reply != ReplyPrincipalDisabled || r.button != "" {
-					t.Fatalf("%s: reply %+v, want the fixed refusal", msg, r)
+				got := h.repliesTo(aliceID)
+				if i == 0 && (len(got) != len(replies)+1 || got[len(got)-1].reply != ReplyPrincipalDisabled || got[len(got)-1].button != "") {
+					t.Fatalf("%s: replies %+v, want the fixed refusal once", msg, got[len(replies):])
+				}
+				if i > 0 && len(got) != len(replies)+1 {
+					t.Fatalf("%s: refusal repeated inside the window: %+v", msg, got[len(replies):])
 				}
 			}
-			if h.fragments(aliceID) != 1 || len(h.runs.calls()) != 1 ||
+			if h.fragments(aliceID) != 1 || jobsOf(aliceID) != 1 ||
 				h.count(`SELECT count(*) FROM pa_conversations WHERE principal = $1 AND closed_at_ms = 0`, aliceID) != 1 ||
 				h.count(`SELECT count(*) FROM pa_callbacks`) != callbacks {
 				t.Fatal("a refused principal's update stored or queued something")
@@ -113,6 +127,51 @@ func TestConversations_DisabledPrincipalNotQueued(t *testing.T) {
 		}
 	})
 }
+
+// TestConversations_RefusalIsRateBounded: a refused principal is answered
+// once per rate window however many updates they send, and gets no rate
+// notice either, so a stranger cannot flood the outbox or the bot's send
+// rate (#1318 review). Under the run loop's real limiter.
+func TestConversations_RefusalIsRateBounded(t *testing.T) {
+	lim := jobs.DefaultLimits()
+	lim.RateMessages = 3
+	h := newRunLoopHarness(t, withLimits(lim))
+	h.allow.deny(aliceID)
+	for i := range 3*lim.RateMessages + 1 {
+		if code := h.text(aliceID, fmt.Sprintf("hi %d", i)); code != http.StatusOK {
+			t.Fatalf("update %d: %d", i, code)
+		}
+	}
+	if got := h.repliesTo(aliceID); len(got) != 1 || got[0].reply != ReplyPrincipalDisabled {
+		t.Fatalf("replies %+v, want the refusal exactly once in the window", got)
+	}
+	if n := h.count(`SELECT count(*) FROM pa_jobs WHERE principal = $1`, aliceID); n != 0 {
+		t.Fatalf("%d jobs for a refused principal", n)
+	}
+	// The next window is told once more.
+	h.now = h.now.Add(lim.RateWindow)
+	for range 2 {
+		h.text(aliceID, "again")
+	}
+	if got := h.repliesTo(aliceID); len(got) != 2 || got[1].reply != ReplyPrincipalDisabled {
+		t.Fatalf("replies %+v, want one more refusal in the next window", got)
+	}
+}
+
+// to returns the replies queued for principal, in order.
+func (r *replyRecorder) to(principal int64) []queuedReply {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []queuedReply
+	for _, q := range r.replies {
+		if q.principal == principal {
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
+func (h *convoHarness) repliesTo(principal int64) []queuedReply { return h.replies.to(principal) }
 
 // TestRunLoop_PrincipalDisabledStopsTurn: a principal disabled, or taken
 // off the allowlist, after the claim is refused at the next turn; the job
@@ -194,6 +253,56 @@ type toggleDisable struct {
 func (d *toggleDisable) PAPrincipalDisabled(ctx context.Context, tx *sql.Tx, p int64) (bool, error) {
 	if d.fail.Load() {
 		return false, errors.New("disable table unreadable")
+	}
+	return d.Store.PAPrincipalDisabled(ctx, tx, p)
+}
+
+// faultedDisable makes every disable read a store fault.
+type faultedDisable struct{ *db.Store }
+
+func (faultedDisable) PAPrincipalDisabled(context.Context, *sql.Tx, int64) (bool, error) {
+	return true, fmt.Errorf("%w: %w: connection reset", convo.ErrUnreadable, convo.ErrStoreFault)
+}
+
+// TestRunLoop_PrincipalDisableStoreFaultChangesNothing: a store fault on
+// the disable read at the claim is "could not observe": it refuses the
+// claim, counts no failure against the job, never cancels it and tells
+// nobody, however long it lasts. The job is claimed once the store
+// recovers.
+func TestRunLoop_PrincipalDisableStoreFaultChangesNothing(t *testing.T) {
+	var fail atomic.Bool
+	h := newRunLoopHarness(t, withStore(func(s *db.Store) RunLoopStore { return &toggleFault{Store: s, fail: &fail} }))
+	h.consent(aliceID)
+	h.text(aliceID, "hello")
+	fail.Store(true)
+	for range 2 * jobs.MaxClaimFailures {
+		h.now = h.now.Add(10 * time.Minute)
+		if _, code := h.claim(); code != http.StatusServiceUnavailable {
+			t.Fatalf("claim under a disable store fault: %d", code)
+		}
+	}
+	if got := h.count(`SELECT count(*) FROM pa_jobs WHERE principal = $1 AND status = 'pending' AND claim_failures = 0`, aliceID); got != 1 {
+		t.Fatal("a store fault on the disable read counted against the job or ended it")
+	}
+	if len(h.sender.to(aliceID)) != 0 || h.count(`SELECT count(*) FROM pa_usage`) != 0 {
+		t.Fatal("a store fault sent a notice or reserved")
+	}
+	fail.Store(false)
+	h.now = h.now.Add(time.Hour)
+	if c := h.mustClaim(); c.Token == "" {
+		t.Fatal("not claimed once the store recovered")
+	}
+}
+
+// toggleFault returns faultedDisable's store fault once fail is set.
+type toggleFault struct {
+	*db.Store
+	fail *atomic.Bool
+}
+
+func (d *toggleFault) PAPrincipalDisabled(ctx context.Context, tx *sql.Tx, p int64) (bool, error) {
+	if d.fail.Load() {
+		return faultedDisable{}.PAPrincipalDisabled(ctx, tx, p)
 	}
 	return d.Store.PAPrincipalDisabled(ctx, tx, p)
 }

@@ -263,6 +263,10 @@ type RateDecision struct {
 	// Notify: this is the first refused message of the window, so the
 	// principal is told once, not on every message.
 	Notify bool
+	// First: this is the first message of the window. A principal who is
+	// refused outright (#1318) is answered only then, so a stream of
+	// updates cannot turn into a stream of replies.
+	First bool
 }
 
 // EnqueueRequest is what the conversation layer hands the store.

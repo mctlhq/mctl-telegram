@@ -182,18 +182,33 @@ func (c *Conversations) HandleUpdate(ctx context.Context, tx *sql.Tx, u Verified
 	if err := c.store.LockPAPrincipal(ctx, tx, p.TelegramID()); err != nil {
 		return err
 	}
-	// A principal not on the allowlist, or one an admin disabled, gets one
-	// fixed reply and nothing of the update is stored or queued (T11,
-	// #1318). /forget and /consent withdraw still run, so a refused
-	// principal can always delete their data. A disable that cannot be
-	// read is an error: the update rolls back and Telegram retries it.
+	// A principal not on the allowlist, or one an admin disabled, gets
+	// the fixed refusal and nothing of the update is stored or queued
+	// (T11, #1318). The refusal goes through the rate window like any
+	// update and is sent only for the first update of the window: on a
+	// preview almost everyone is refused, so one reply per update would let
+	// any stranger flood the outbox and the bot's send rate. Without a
+	// limiter (no run loop, so nothing can run) the refusal is silent.
+	// /forget and /consent withdraw still run, so a refused principal can
+	// always delete their data. A disable that cannot be read is an error:
+	// the update rolls back and Telegram retries it.
 	if !erasure(u) {
 		refused, err := c.principalRefused(ctx, tx, p)
 		if err != nil {
 			return err
 		}
 		if refused {
-			return c.reply(ctx, tx, u, ReplyPrincipalDisabled, "")
+			if c.limiter == nil {
+				return nil
+			}
+			d, err := c.limiter.AdmitMessage(ctx, tx, p)
+			if err != nil {
+				return err
+			}
+			if d.First {
+				return c.reply(ctx, tx, u, ReplyPrincipalDisabled, "")
+			}
+			return nil
 		}
 	}
 	// The rate window counts every update, consent prompts and button
