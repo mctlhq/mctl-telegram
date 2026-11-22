@@ -33,6 +33,7 @@ func TestPAConnection_RevokePinsTokenGeneration(t *testing.T) {
 	const principal = int64(9_100_000_001)
 	id := "pac_revoke_gen_" + randomSuffix(t)
 	t.Cleanup(func() { _, _ = s.DB.Exec(`DELETE FROM pa_connections WHERE id = $1`, id) })
+	acceptConsent(t, s, principal)
 
 	if err := s.CreatePAConnection(ctx, connection.Connection{
 		ID: id, Principal: principal, Server: connection.ServerTG, State: connection.StatePendingLink, AuthorityRevision: 1,
