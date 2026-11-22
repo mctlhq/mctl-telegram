@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.143.0](https://github.com/mctlhq/mctl-telegram/compare/0.142.0...0.143.0) (2026-11-22)
+
+
+### Features
+
+* **pa:** per-principal admin disable and preview allowlist ([3477f4b](https://github.com/mctlhq/mctl-telegram/commit/3477f4bc85c6ff089ed347a91815608da4d1bd26))
+* **pa:** refresh connection tokens and expire dead grants ([1fd33d0](https://github.com/mctlhq/mctl-telegram/commit/1fd33d04a387eaa201ae639dbb8e1e20ebf5b529))
+* **pa:** refresh connection tokens and expire dead grants ([297ad26](https://github.com/mctlhq/mctl-telegram/commit/297ad269f7d3b5e38af593e0dd12cd962c523df5))
+* **pa:** refuse unadmitted principals in the linking flow ([e32b786](https://github.com/mctlhq/mctl-telegram/commit/e32b7862c199463080c43f7448e162e570b15a65))
+* **pa:** wire linking, dispatcher and tool resolver in buildPA ([8b369cd](https://github.com/mctlhq/mctl-telegram/commit/8b369cd9fa4b9d5b1651acbfb0d31225ca17e547))
+* **pa:** worker tool loop over the server-side executor ([0ef3857](https://github.com/mctlhq/mctl-telegram/commit/0ef3857a700a56450952abc808c9a1f2b6983402))
+* **pa:** worker tool loop over the server-side executor ([4c14a28](https://github.com/mctlhq/mctl-telegram/commit/4c14a28d7fb056d58c847c2228e843bb779238d5))
+
+
+### Bug Fixes
+
+* **acquisition:** exclude non-user audit events from activation report ([eb1ac9c](https://github.com/mctlhq/mctl-telegram/commit/eb1ac9cdf2c6d774e73813befadc056ebe000f04))
+* **pa:** escape external data whole and bound worker tool calls ([65769f3](https://github.com/mctlhq/mctl-telegram/commit/65769f32a436ce1db4a0c28b8d4a0ec1b163affc))
+* **pa:** skip only the confirmation when erasure admission fails ([9cc2824](https://github.com/mctlhq/mctl-telegram/commit/9cc28248a69502845865c3790e2f12476cffefb7))
+* **pa:** survive rollback, lock superseded rows, keep live tokens ([ead5950](https://github.com/mctlhq/mctl-telegram/commit/ead59502f1cf8ad2d801b4ebe3f45a8c369421cc)), closes [#1318](https://github.com/mctlhq/mctl-telegram/issues/1318)
+
 ## [0.142.0](https://github.com/mctlhq/mctl-telegram/compare/0.141.0...0.142.0) (2026-11-22)
 
 
