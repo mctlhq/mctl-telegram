@@ -43,7 +43,8 @@ const (
 	forkEvalPerAccount24h   = 3
 	forkEvalGlobal24h       = 20
 	forkEvalScoredPerDigest = 2
-	// forkEvalMaxAttempts is one claim plus one infrastructure retry.
+	// forkEvalMaxAttempts is one claim plus one retry after a lease expires. An
+	// explicit infraFailed finish marks the run incomplete with no retry.
 	forkEvalMaxAttempts = 2
 
 	// forkEvalScored is the one predicate for "this run has a verdict".
@@ -299,8 +300,14 @@ func (s *Store) ClaimForkEvalTask(ctx context.Context, userID int64, now time.Ti
 // same transaction; the verdict comes only from score. infraFailed marks the
 // task infra_failed and the run incomplete. A task not claimed at attempt, or
 // a run not running, is ErrForkEvalTaskStale and nothing is written. A scorer
-// error rolls everything back. It returns the run's state after the call.
-func (s *Store) FinishForkEvalTask(ctx context.Context, runID int64, fixtureID string, attempt int, infraFailed bool, result []byte, score ForkEvalScorer, now time.Time) (string, error) {
+// error rolls everything back. userID > 0 restricts the finish to that
+// account's run, as in ClaimForkEvalTask (0 is the pool); a foreign run is
+// ErrForkEvalTaskStale. A run past ForkEvalRunTTL is stale too, so the TTL
+// means the same thing as at claim time. It returns the run's state after the call.
+func (s *Store) FinishForkEvalTask(ctx context.Context, userID, runID int64, fixtureID string, attempt int, infraFailed bool, result []byte, score ForkEvalScorer, now time.Time) (string, error) {
+	if userID < 0 {
+		return "", errors.New("user id invalid")
+	}
 	if !infraFailed && score == nil {
 		return "", errors.New("scorer required")
 	}
@@ -313,8 +320,15 @@ func (s *Store) FinishForkEvalTask(ctx context.Context, runID int64, fixtureID s
 
 	// The no-op write takes the run's row lock, so two finishers of one run
 	// serialize and the last one sees every other task done.
+	lockArgs := []any{runID, now.Add(-ForkEvalRunTTL)}
+	lockScope := ``
+	if userID > 0 {
+		lockScope = ` AND user_id = $3`
+		lockArgs = append(lockArgs, userID)
+	}
 	res, err := tx.ExecContext(ctx,
-		`UPDATE assistant_fork_eval_runs SET state = state WHERE id = $1 AND state = 'running'`, runID)
+		`UPDATE assistant_fork_eval_runs SET state = state
+		  WHERE id = $1 AND state = 'running' AND created_at > $2`+lockScope, lockArgs...)
 	if err != nil {
 		return "", fmt.Errorf("lock fork eval run: %w", err)
 	}

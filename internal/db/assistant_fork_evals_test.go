@@ -114,7 +114,7 @@ func (e *evalEnv) verdict(b ForkEvalBinding, passed bool, now time.Time) int64 {
 		if err != nil {
 			e.t.Fatalf("claim: %v", err)
 		}
-		if _, err := e.s.FinishForkEvalTask(e.ctx, run, task.FixtureID, task.Attempt, false, []byte(`{}`), scoreWith(passed, &calls), now); err != nil {
+		if _, err := e.s.FinishForkEvalTask(e.ctx, 0, run, task.FixtureID, task.Attempt, false, []byte(`{}`), scoreWith(passed, &calls), now); err != nil {
 			e.t.Fatalf("finish: %v", err)
 		}
 	}
@@ -185,33 +185,45 @@ func checkForkEvals(t *testing.T, s *Store) {
 	}
 	var calls int
 	// Stale: wrong attempt, unclaimed task.
-	if _, err := s.FinishForkEvalTask(ctx, run1, "f1", 2, false, nil, scoreWith(true, &calls), now); !errors.Is(err, ErrForkEvalTaskStale) {
+	if _, err := s.FinishForkEvalTask(ctx, 0, run1, "f1", 2, false, nil, scoreWith(true, &calls), now); !errors.Is(err, ErrForkEvalTaskStale) {
 		t.Fatalf("wrong attempt: %v", err)
 	}
-	if _, err := s.FinishForkEvalTask(ctx, run1, "f2", 1, false, nil, scoreWith(true, &calls), now); !errors.Is(err, ErrForkEvalTaskStale) {
+	if _, err := s.FinishForkEvalTask(ctx, 0, run1, "f2", 1, false, nil, scoreWith(true, &calls), now); !errors.Is(err, ErrForkEvalTaskStale) {
 		t.Fatalf("unclaimed task: %v", err)
+	}
+	// An account-scoped finish never touches another account's run, even with
+	// the right run id, fixture id and attempt.
+	if _, err := s.FinishForkEvalTask(ctx, bob, run1, "f1", 1, false, []byte(`{"a":1}`), scoreWith(true, &calls), now); !errors.Is(err, ErrForkEvalTaskStale) {
+		t.Fatalf("Bob finishes Alice's task: %v", err)
+	}
+	// A run past its TTL cannot be scored, whether or not the sweeper ran.
+	if _, err := s.FinishForkEvalTask(ctx, 0, run1, "f1", 1, false, []byte(`{"a":1}`), scoreWith(true, &calls), now.Add(ForkEvalRunTTL+time.Hour)); !errors.Is(err, ErrForkEvalTaskStale) {
+		t.Fatalf("finish past TTL: %v", err)
+	}
+	if calls != 0 || e.state(run1) != ForkEvalRunning {
+		t.Fatalf("refused finishes wrote something: calls=%d state=%s", calls, e.state(run1))
 	}
 	// A scorer error leaves task claimed and run running.
 	t2, err := s.ClaimForkEvalTask(ctx, alice, now, lease)
 	if err != nil || t2.FixtureID != "f2" {
 		t.Fatalf("second claim = %+v, %v", t2, err)
 	}
-	if _, err := s.FinishForkEvalTask(ctx, run1, "f1", 1, false, []byte(`{"a":1}`), scoreWith(true, &calls), now); err != nil {
+	if _, err := s.FinishForkEvalTask(ctx, 0, run1, "f1", 1, false, []byte(`{"a":1}`), scoreWith(true, &calls), now); err != nil {
 		t.Fatal(err)
 	}
 	boom := func([]ForkEvalTaskResult) (bool, []byte, error) { return false, nil, errors.New("boom") }
-	if _, err := s.FinishForkEvalTask(ctx, run1, "f2", 1, false, []byte(`{}`), boom, now); err == nil {
+	if _, err := s.FinishForkEvalTask(ctx, 0, run1, "f2", 1, false, []byte(`{}`), boom, now); err == nil {
 		t.Fatal("scorer error swallowed")
 	}
 	if e.state(run1) != ForkEvalRunning {
 		t.Fatalf("run state after scorer error = %s", e.state(run1))
 	}
 	// The scorer alone decides the verdict.
-	st, err := s.FinishForkEvalTask(ctx, run1, "f2", 1, false, []byte(`{"passed":true}`), scoreWith(false, &calls), now)
+	st, err := s.FinishForkEvalTask(ctx, 0, run1, "f2", 1, false, []byte(`{"passed":true}`), scoreWith(false, &calls), now)
 	if err != nil || st != ForkEvalFailed || calls != 1 {
 		t.Fatalf("finish = %s, %v, calls %d", st, err, calls)
 	}
-	if _, err := s.FinishForkEvalTask(ctx, run1, "f2", 1, false, nil, scoreWith(true, &calls), now); !errors.Is(err, ErrForkEvalTaskStale) {
+	if _, err := s.FinishForkEvalTask(ctx, 0, run1, "f2", 1, false, nil, scoreWith(true, &calls), now); !errors.Is(err, ErrForkEvalTaskStale) {
 		t.Fatalf("finish on a finished run: %v", err)
 	}
 	got, err := s.LatestScoredForkEvalRun(ctx, alice, ab.ForkDigest)
@@ -299,7 +311,7 @@ func checkForkEvals(t *testing.T, s *Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err = s.FinishForkEvalTask(ctx, r, task.FixtureID, task.Attempt, true, nil, nil, now)
+	st, err = s.FinishForkEvalTask(ctx, 0, r, task.FixtureID, task.Attempt, true, nil, nil, now)
 	if err != nil || st != ForkEvalIncomplete || e.state(r) != ForkEvalIncomplete {
 		t.Fatalf("infra failure = %s, %v", st, err)
 	}
