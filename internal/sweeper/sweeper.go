@@ -129,6 +129,38 @@ func refreshTokenSweepOnce(ctx context.Context, store *db.Store) {
 	}
 }
 
+// ForkEvalSweeperInterval is how often open fork eval runs past their TTL are
+// expired.
+const ForkEvalSweeperInterval = 15 * time.Minute
+
+// ForkEvals runs Store.ExpireForkEvalRuns at boot and then every
+// ForkEvalSweeperInterval until ctx is cancelled. A failure is logged and
+// retried on the next tick.
+func ForkEvals(ctx context.Context, store *db.Store) {
+	ticker := time.NewTicker(ForkEvalSweeperInterval)
+	defer ticker.Stop()
+	forkEvalSweepOnce(ctx, store)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			forkEvalSweepOnce(ctx, store)
+		}
+	}
+}
+
+func forkEvalSweepOnce(ctx context.Context, store *db.Store) {
+	n, err := store.ExpireForkEvalRuns(ctx, time.Now().UTC())
+	if err != nil {
+		slog.Warn("fork eval sweep failed", "err", err)
+		return
+	}
+	if n > 0 {
+		slog.Info("fork eval sweep", "expired_runs", n)
+	}
+}
+
 // JobLeads keeps job_leads in line with the privacy page until ctx is
 // cancelled: it deletes leads not updated within retention and encrypts any
 // that still have fields in the clear. It runs at boot and then daily.

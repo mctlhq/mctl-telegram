@@ -340,6 +340,15 @@ func (s *Store) DeleteAssistantFork(ctx context.Context, userID int64, name, ver
 	if pinned > 0 {
 		return 0, ErrForkInUse
 	}
+	// Runs still open for a deleted digest can no longer back anything.
+	cancelArgs := append(append([]any{}, args...), time.Now().UTC())
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE assistant_fork_eval_runs SET state = 'cancelled', finished_at = $`+strconv.Itoa(len(cancelArgs))+`
+		  WHERE user_id = $1 AND state IN ('queued','running')
+		    AND fork_digest IN (SELECT digest FROM assistant_forks WHERE `+where+`)`,
+		cancelArgs...); err != nil {
+		return 0, fmt.Errorf("cancel fork eval runs: %w", err)
+	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM assistant_forks WHERE `+where, args...)
 	if err != nil {
 		return 0, fmt.Errorf("delete assistant fork: %w", err)

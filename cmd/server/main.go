@@ -423,6 +423,9 @@ func main() {
 	// OAuth refresh-token cleanup: deletes rows past their absolute expiry so
 	// the table stays bounded. LookupRefreshToken is the authoritative gate.
 	go sweeper.RefreshTokens(ctx, store)
+	// Fork eval runs (P4.3 S2): expires runs left open past their TTL. Runs
+	// whether or not ASSISTANT_FORK_EVAL_ENABLED is on.
+	go sweeper.ForkEvals(ctx, store)
 	// Connect first-call reconciler: classifies grants whose window is over
 	// and deletes classified rows after connectfunnel.Retention.
 	go funnel.Run(ctx)
@@ -642,7 +645,7 @@ func main() {
 		assistantSvc.ForksEnabled = cfg.AssistantForksEnabled
 		assistantSvc.Managed = assistantinstall.ManagedRuntime{Enabled: cfg.ManagedRuntimeEnabled, MaxAccounts: cfg.ManagedRuntimeMaxAccounts}
 		slog.Info("managed runtime", "enabled", cfg.ManagedRuntimeEnabled, "max_accounts", cfg.ManagedRuntimeMaxAccounts)
-		slog.Info("assistant forks", "enabled", cfg.AssistantForksEnabled)
+		slog.Info("assistant forks", "enabled", cfg.AssistantForksEnabled, "eval_enabled", cfg.AssistantForkEvalEnabled)
 		// The public catalog page (the same entries as list_assistants) is
 		// mounted by web.MountPublic, which mounts it while assistantSvc is set.
 		ui.SetAssistantsMounted(true)
