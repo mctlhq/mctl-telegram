@@ -56,6 +56,12 @@ func (d *DispatchHarness) Text(user int64, s string) {
 }
 func (d *DispatchHarness) Count(q string, args ...any) int { return d.h.count(q, args...) }
 
+// PoolToken is the pool credential a worker claims with.
+func (d *DispatchHarness) PoolToken() string { return d.h.pool }
+
+// SentTo returns what the bot sent to chat, once deliveries are done.
+func (d *DispatchHarness) SentTo(chat int64) []string { return d.h.sentTo(chat) }
+
 // FailDisableReads makes the run loop's principal-disable read fail (on)
 // or read the store again (off).
 func (d *DispatchHarness) FailDisableReads(on bool) { d.failDisable.Store(on) }

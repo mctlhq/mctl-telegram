@@ -127,15 +127,26 @@ type openAIFunction struct {
 // Error bodies are drained for connection reuse but are never retained,
 // decoded, logged, or included in returned errors.
 func (c *OpenAIClient) Chat(ctx context.Context, msgs []ChatMessage, tools []toolDef) (*ChatResult, error) {
-	hc := c.HTTP
-	if hc == nil {
-		hc = http.DefaultClient
-	}
 	wireTools := make([]openAITool, 0, len(tools))
 	for _, d := range tools {
 		wireTools = append(wireTools, openAITool{Type: "function", Function: openAIFunction{
 			Name: d.Tool.Name, Description: d.Tool.Description, Parameters: d.Tool.InputSchema,
 		}})
+	}
+	return c.chat(ctx, msgs, wireTools)
+}
+
+// chat sends one request with the given wire tools. tool_choice is only
+// sent with at least one tool: providers refuse it on a request without
+// tools.
+func (c *OpenAIClient) chat(ctx context.Context, msgs []ChatMessage, wireTools []openAITool) (*ChatResult, error) {
+	hc := c.HTTP
+	if hc == nil {
+		hc = http.DefaultClient
+	}
+	toolChoice := ""
+	if len(wireTools) > 0 {
+		toolChoice = "auto"
 	}
 	body, err := json.Marshal(struct {
 		Model      string        `json:"model"`
@@ -144,7 +155,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []ChatMessage, tools []too
 		ToolChoice string        `json:"tool_choice,omitempty"`
 		Stream     bool          `json:"stream"`
 		MaxTokens  int           `json:"max_tokens,omitempty"`
-	}{Model: c.Model, Messages: msgs, Tools: wireTools, ToolChoice: "auto", Stream: false, MaxTokens: c.MaxOutputTokens})
+	}{Model: c.Model, Messages: msgs, Tools: wireTools, ToolChoice: toolChoice, Stream: false, MaxTokens: c.MaxOutputTokens})
 	if err != nil {
 		return nil, fmt.Errorf("encode chat request: %w", err)
 	}

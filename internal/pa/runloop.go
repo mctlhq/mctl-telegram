@@ -167,6 +167,10 @@ type RunLoop struct {
 	// "server/tool". Phase 1 has no other kind (catalog.LoadPin), and a
 	// resolver that offers anything else fails the claim.
 	readTools map[string]bool
+	// modelTools is the model's view of every readTools entry, built from
+	// the pin (catalog description and pinned schema), keyed the same way.
+	// The claim offers exactly the job's signed tool set from it.
+	modelTools map[string]catalog.ModelTool
 }
 
 var (
@@ -192,10 +196,16 @@ func NewRunLoop(cfg RunLoopConfig) (*RunLoop, error) {
 		return nil, fmt.Errorf("pa run loop: %w", err)
 	}
 	read := map[string]bool{}
+	modelTools := map[string]catalog.ModelTool{}
 	for server, sp := range pin.Servers {
 		for name, t := range sp.Tools {
 			if t.Tier == catalog.TierAuto && t.Class == catalog.ClassRead {
+				mt, err := pin.ModelTool(server, name)
+				if err != nil {
+					return nil, fmt.Errorf("pa run loop: %w", err)
+				}
 				read[server+"/"+name] = true
+				modelTools[server+"/"+name] = mt
 			}
 		}
 	}
@@ -210,7 +220,7 @@ func NewRunLoop(cfg RunLoopConfig) (*RunLoop, error) {
 	return &RunLoop{
 		store: cfg.Store, sealer: cfg.Sealer, pool: cfg.Pool, minter: cfg.Minter, verifier: cfg.Verifier,
 		sender: cfg.Sender, tools: cfg.Tools, limits: cfg.Limits, budget: cfg.Budget, lease: lease, now: now,
-		readTools: read, metrics: cfg.Metrics, cbCount: cfg.CallbackMetrics,
+		readTools: read, modelTools: modelTools, metrics: cfg.Metrics, cbCount: cfg.CallbackMetrics,
 		allowed: cfg.Allowed,
 	}, nil
 }
@@ -351,12 +361,21 @@ type (
 		MaxContextTokens   int     `json:"max_context_tokens"`
 		MaxToolOutputBytes int     `json:"max_tool_output_bytes"`
 	}
+	// wireTool is one tool the model may be offered. Name is the signed
+	// "server/tool"; Description and InputSchema come from the pin, never
+	// from the server's live listing (T8).
+	wireTool struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description"`
+		InputSchema json.RawMessage `json:"input_schema"`
+	}
 	claimResponse struct {
 		JobID      int64          `json:"job_id"`
 		Attempt    int            `json:"attempt"`
 		Token      string         `json:"token"`
 		LeaseUntil time.Time      `json:"lease_until"`
 		ToolSet    []string       `json:"tool_set"`
+		Tools      []wireTool     `json:"tools,omitempty"`
 		Limits     wireLimits     `json:"limits"`
 		Fragments  []wireFragment `json:"fragments"`
 	}
@@ -474,6 +493,14 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	frags = trimContext(frags, l.limits.MaxContextTokens)
+	tools, err := l.claimTools(j.ToolSet)
+	if err != nil {
+		// build admitted only pinned reads, so this is a server bug; it
+		// recurs on every attempt.
+		l.release(ctx, ref, jobs.ReleaseCancel, now)
+		stop(w, err)
+		return
+	}
 	ttl := j.LeaseUntil.Sub(now)
 	tok, err := l.minter.MintPAJob(localjwt.PAJob{
 		Principal: j.Principal, JobID: j.ID, Attempt: j.Attempts, ContextDigest: j.ContextDigest, Tools: j.ToolSet,
@@ -486,13 +513,32 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, claimResponse{
-		JobID: j.ID, Attempt: j.Attempts, Token: tok, LeaseUntil: j.LeaseUntil, ToolSet: j.ToolSet,
+		JobID: j.ID, Attempt: j.Attempts, Token: tok, LeaseUntil: j.LeaseUntil, ToolSet: j.ToolSet, Tools: tools,
 		Limits: wireLimits{
 			MaxToolCalls: l.limits.MaxToolCalls, MaxContextTokens: l.limits.MaxContextTokens,
 			MaxToolOutputBytes: jobs.MaxToolOutputBytes, MaxJobCostUSD: l.budget.PerJobUSD,
 		},
 		Fragments: frags,
 	})
+}
+
+// claimTools is the model's view of exactly the job's signed tool set, in
+// its order. A tool with no pinned read entry fails the claim rather than
+// being dropped: the worker must not be offered less, or other, than what
+// its token names.
+func (l *RunLoop) claimTools(set []string) ([]wireTool, error) {
+	if len(set) == 0 {
+		return nil, nil
+	}
+	out := make([]wireTool, 0, len(set))
+	for _, name := range set {
+		mt, ok := l.modelTools[name]
+		if !ok {
+			return nil, fmt.Errorf("%w: tool set names a tool with no pinned read entry", jobs.ErrInvalid)
+		}
+		out = append(out, wireTool{Name: name, Description: mt.Description, InputSchema: mt.InputSchema})
+	}
+	return out, nil
 }
 
 // loadFragments opens the conversation's marked fragments for principal.
