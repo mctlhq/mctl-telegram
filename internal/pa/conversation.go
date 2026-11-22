@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -388,16 +389,33 @@ func (c *Conversations) prompt(ctx context.Context, tx *sql.Tx, u VerifiedUpdate
 // (at most RateMessages per window, allowed and refused principals alike),
 // then silently dropped, with no rate notice, so a stream of /forget cannot
 // flood the outbox or the bot's send rate (#1318 review). Without a limiter
-// (no run loop) the confirmation is silent, as the refusal is. An
-// admission that cannot be read is an error: the update rolls back, the
-// erasure with it, and Telegram retries both.
+// (no run loop) the confirmation is silent, as the refusal is.
+//
+// An admission that cannot be read skips only the confirmation: it is
+// logged and the erasure still commits, so /forget never depends on
+// pa_rate. The admission runs under a savepoint that a failure rolls back,
+// because on Postgres a failed statement would otherwise abort the whole
+// transaction, the erasure with it.
 func (c *Conversations) erasureReply(ctx context.Context, tx *sql.Tx, u VerifiedUpdate, r Reply) error {
 	if c.limiter == nil {
 		return nil
 	}
+	if _, err := tx.ExecContext(ctx, `SAVEPOINT pa_erasure_admit`); err != nil {
+		slog.Warn("pa: erasure confirmation skipped", "stage", "savepoint", "err", err)
+		return nil
+	}
 	d, err := c.limiter.AdmitMessage(ctx, tx, u.Principal())
 	if err != nil {
-		return err
+		if _, rerr := tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT pa_erasure_admit`); rerr != nil {
+			// The transaction cannot be saved: the update rolls back and
+			// Telegram retries it, erasure included.
+			return fmt.Errorf("pa: erasure admission: %w (rollback: %v)", err, rerr)
+		}
+		slog.Warn("pa: erasure confirmation skipped", "stage", "admission", "err", err)
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `RELEASE SAVEPOINT pa_erasure_admit`); err != nil {
+		return fmt.Errorf("pa: erasure admission: release: %w", err)
 	}
 	if !d.Allowed {
 		return nil

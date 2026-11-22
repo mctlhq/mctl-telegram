@@ -4,6 +4,7 @@ package pa
 // A1, threat model T11, S1-F4) at ingress and at every run-loop step.
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -223,6 +224,68 @@ func TestConversations_ErasureIsRateBounded(t *testing.T) {
 			}
 			if n := h.count(`SELECT count(*) FROM pa_jobs WHERE principal = $1`, aliceID); n != jobsBefore {
 				t.Fatalf("erasure created jobs: %d, want %d", n, jobsBefore)
+			}
+		})
+	}
+}
+
+// faultyAdmission fails the rate admission with a real failed statement
+// on the update's transaction, which on Postgres aborts the transaction
+// unless the caller rolls back to a savepoint.
+type faultyAdmission struct{}
+
+func (faultyAdmission) AdmitMessage(ctx context.Context, tx *sql.Tx, _ Principal) (jobs.RateDecision, error) {
+	_, err := tx.ExecContext(ctx, `SELECT count(*) FROM pa_rate_does_not_exist`)
+	if err == nil {
+		err = errors.New("expected a failing statement")
+	}
+	return jobs.RateDecision{}, fmt.Errorf("%w: rate: %v", jobs.ErrUnreadable, err)
+}
+
+// TestConversations_ErasureSurvivesAdmissionFault: an admission that
+// cannot be read skips only the confirmation. /forget and /consent
+// withdraw still delete and commit, nothing is sent, and the update is
+// acknowledged rather than retried (#1318 review P3). On SQLite and, with
+// TEST_DATABASE_URL, on Postgres, where a failed statement would otherwise
+// abort the transaction.
+func TestConversations_ErasureSurvivesAdmissionFault(t *testing.T) {
+	stores := map[string]func(*testing.T) *db.Store{"sqlite": newStore, "postgres": newPostgresStore}
+	for name, open := range stores {
+		t.Run(name, func(t *testing.T) {
+			h := newRunLoopHarnessOn(t, open(t))
+			h.consent(aliceID)
+			h.text(aliceID, "keep me")
+			if h.fragments(aliceID) != 1 {
+				t.Fatal("control: the setup fragment was not stored")
+			}
+			sealer, err := convo.NewSealer(bytes.Repeat([]byte{7}, 32))
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.conv, err = NewConversations(ConversationsConfig{
+				Store: h.convoHarness.store, Sealer: sealer, TTL: DefaultConversationTTL,
+				Runs: h.loop, Limiter: faultyAdmission{}, Replies: h.replies, Allowed: h.allow,
+				Now: func() time.Time { return h.now },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.hook = newWebhook(t, h.convoHarness.store, h.conv, nil)
+			before := len(h.repliesTo(aliceID))
+			if code := h.text(aliceID, "/forget"); code != http.StatusOK {
+				t.Fatalf("/forget under an admission fault: %d, want 200", code)
+			}
+			if h.fragments(aliceID) != 0 {
+				t.Fatal("/forget under an admission fault did not delete")
+			}
+			if code := h.text(aliceID, "/consent withdraw"); code != http.StatusOK {
+				t.Fatalf("/consent withdraw under an admission fault: %d, want 200", code)
+			}
+			if n := h.count(`SELECT count(*) FROM pa_consents WHERE principal = $1 AND state = 'accepted'`, aliceID); n != 0 {
+				t.Fatal("/consent withdraw under an admission fault left consent accepted")
+			}
+			if got := h.repliesTo(aliceID)[before:]; len(got) != 0 {
+				t.Fatalf("confirmed under an admission fault: %+v", got)
 			}
 		})
 	}

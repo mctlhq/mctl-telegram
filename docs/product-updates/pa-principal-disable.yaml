@@ -15,7 +15,7 @@ delivery: docs_only
 high_value: false
 tools: [get_pa_principal_status, set_pa_principal_disabled]
 evidence:
-  from: 0.141.0
+  from: 0.142.0
   changes:
     - {tool: get_pa_principal_status, change: added}
     - {tool: set_pa_principal_disabled, change: added}
