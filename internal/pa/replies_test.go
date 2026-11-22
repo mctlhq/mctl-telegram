@@ -38,7 +38,7 @@ func newOutboxRepliesHarness(t *testing.T, store *db.Store, replies func(ReplyQu
 	}
 	h.conv, err = NewConversations(ConversationsConfig{
 		Store: store, Sealer: sealer, TTL: DefaultConversationTTL,
-		Runs: h.loop, Limiter: h.loop, Replies: q, Now: func() time.Time { return h.now },
+		Runs: h.loop, Limiter: h.loop, Replies: q, Allowed: h.loop.allowed, Now: func() time.Time { return h.now },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -280,7 +280,8 @@ func TestConsentPromptIsConsentText(t *testing.T) {
 // conversation-level kind, and each such kind to a non-empty server text.
 func TestEveryReplyHasAKindAndATemplate(t *testing.T) {
 	all := []Reply{ReplyConsentPrompt, ReplyConsentAccepted, ReplyConsentWithdrawn, ReplyConsentStale,
-		ReplyNewConversation, ReplyForgotten, ReplyUnknownButton, ReplyRateLimited, ReplyMessageTooLong}
+		ReplyNewConversation, ReplyForgotten, ReplyUnknownButton, ReplyRateLimited, ReplyMessageTooLong,
+		ReplyPrincipalDisabled}
 	if len(replyKinds) != len(all) || len(jobs.ConversationOutboxKinds()) != len(all) {
 		t.Fatalf("%d replies, %d mapped, %d kinds", len(all), len(replyKinds), len(jobs.ConversationOutboxKinds()))
 	}

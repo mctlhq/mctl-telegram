@@ -7,10 +7,12 @@ package pa_test
 // run loop, job ledger, connection manager and audit chain.
 
 import (
+	"context"
 	"encoding/base64"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connector"
@@ -188,6 +190,135 @@ func TestDispatch_S1X3_OwnUnboundConnectionRefused(t *testing.T) {
 		// The bound connection still works on the same run.
 		if a := e.call(token, req("tg", "list_dialogs", e.connA.ID)); a.code != http.StatusOK {
 			t.Fatalf("bound call %+v", a)
+		}
+	})
+}
+
+// disablePrincipal records an admin disable of principal, as the MCP tool
+// set_pa_principal_disabled does.
+func disablePrincipal(t *testing.T, s *db.Store, principal int64) {
+	t.Helper()
+	if err := s.SetPAPrincipalDisabled(context.Background(), principal, 4242999, "test", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDispatch_S1F4_PrincipalDisabledRefusesNextDispatch: an admin disable
+// (T11, #1318) takes effect at the principal's next dispatch, with no
+// restart: the call is refused and audited as principal_disabled, nothing
+// reaches the server, the job is cancelled and the principal told once.
+// Bob is not touched. Taking a principal off the preview allowlist does
+// the same, as principal_not_allowed.
+func TestDispatch_S1F4_PrincipalDisabledRefusesNextDispatch(t *testing.T) {
+	for _, tc := range []struct {
+		name, reason string
+		refuse       func(e *dispatchEnv)
+	}{
+		{"disabled", connector.ReasonPrincipalDisabled, func(e *dispatchEnv) { disablePrincipal(e.t, e.store, alice) }},
+		{"not allowed", connector.ReasonPrincipalNotAllowed, func(e *dispatchEnv) { e.h.Deny(alice) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			forEachDialect(t, func(t *testing.T, s *db.Store) {
+				e := newDispatchEnv(t, s)
+				token, jobID := e.run(alice)
+				if a := e.call(token, req("tg", "list_dialogs", "")); a.code != http.StatusOK {
+					t.Fatalf("first call %+v", a)
+				}
+				tokenB, _ := e.run(bob)
+				tc.refuse(e)
+				before := len(e.audit(alice))
+				e.wantRefusal(e.call(token, req("tg", "list_dialogs", "")), http.StatusForbidden, tc.reason, alice, before)
+				if calls, _, _ := e.tg.snapshot(); len(calls) != 1 {
+					t.Fatalf("calls after the refusal: %v", calls)
+				}
+				if st := e.h.Count(`SELECT count(*) FROM pa_jobs WHERE id = $1 AND status = 'cancelled'`, jobID); st != 1 {
+					t.Fatal("the refused principal's job was not cancelled")
+				}
+				if n := e.h.Count(`SELECT count(*) FROM pa_outbox WHERE principal = $1 AND kind = 'principal_stopped'`, alice); n != 1 {
+					t.Fatalf("%d unavailable notices, want 1", n)
+				}
+				if a := e.call(tokenB, req("tg", "list_dialogs", "")); a.code != http.StatusOK {
+					t.Fatalf("bob refused: %+v", a)
+				}
+			})
+		})
+	}
+}
+
+// TestDispatch_S1F4_PrincipalDisabledFencesInFlight: a disable that lands
+// while a call is in flight fences its result: the worker gets no output.
+func TestDispatch_S1F4_PrincipalDisabledFencesInFlight(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newDispatchEnv(t, s)
+		token, _ := e.run(alice)
+		e.tg.onCall = func() { disablePrincipal(t, s, alice) }
+		a := e.call(token, req("tg", "list_dialogs", ""))
+		if a.code != http.StatusConflict || a.Stop != connector.ReasonFenced || a.Output != "" || strings.Contains(a.raw, "result of") {
+			t.Fatalf("answer %+v", a)
+		}
+		rows := e.audit(alice)
+		if last := rows[len(rows)-1]; last.status != "fenced" {
+			t.Fatalf("last row %+v", last)
+		}
+	})
+}
+
+// TestDispatch_S1F4_PrincipalStatusUnreadableRefuses: a disable that
+// cannot be read refuses the dispatch as unreadable. It is neither
+// "enabled" (the call would run) nor "disabled" (the job would be
+// cancelled for a fault): the job stays and the next readable step goes on.
+func TestDispatch_S1F4_PrincipalStatusUnreadableRefuses(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newDispatchEnv(t, s)
+		token, jobID := e.run(alice)
+		e.h.FailDisableReads(true)
+		before := len(e.audit(alice))
+		e.wantRefusal(e.call(token, req("tg", "list_dialogs", "")), http.StatusServiceUnavailable, connector.ReasonJobUnreadable, alice, before)
+		if calls, _, _ := e.tg.snapshot(); len(calls) != 0 {
+			t.Fatalf("dispatched on an unreadable disable: %v", calls)
+		}
+		if n := e.h.Count(`SELECT count(*) FROM pa_jobs WHERE id = $1 AND status = 'cancelled'`, jobID); n != 0 {
+			t.Fatal("an unreadable disable cancelled the job")
+		}
+		e.h.FailDisableReads(false)
+		if a := e.call(token, req("tg", "list_dialogs", "")); a.code != http.StatusOK {
+			t.Fatalf("after the store recovers: %+v", a)
+		}
+	})
+}
+
+// TestDispatch_S1F1_WritesFlagLeavesReadsAlone: PA_WRITES_ENABLED gates
+// writes and disclosures only (T11; its "disables writes" half is S2-F3,
+// owner decision 2026-11-21, #1318). With it unset, "true", "false" or
+// malformed, a read dispatches identically: same status, same output, one
+// call to the server.
+func TestDispatch_S1F1_WritesFlagLeavesReadsAlone(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newDispatchEnv(t, s)
+		token, _ := e.run(alice)
+		var want *answer
+		for i, v := range []string{"<unset>", "true", "false", "yes"} {
+			env := map[string]string{connector.ExternalToolsFlagEnv: "true", "PA_SERVER_TG_ENABLED": "true"}
+			if v != "<unset>" {
+				env[connector.WritesFlagEnv] = v
+			}
+			e.reconfigure(func(c *connector.DispatcherConfig) {
+				c.Flags = connector.EnvFlags(func(k string) string { return env[k] })
+			})
+			a := e.call(token, req("tg", "list_dialogs", ""))
+			if calls, _, _ := e.tg.snapshot(); len(calls) != i+1 {
+				t.Fatalf("%s=%s: %d calls in all, want %d", connector.WritesFlagEnv, v, len(calls), i+1)
+			}
+			if want == nil {
+				if a.code != http.StatusOK || a.Output == "" {
+					t.Fatalf("control (%s unset): %+v", connector.WritesFlagEnv, a)
+				}
+				want = &a
+				continue
+			}
+			if a.code != want.code || a.Stop != want.Stop || a.Output != want.Output {
+				t.Fatalf("%s=%s: %+v, want the same as unset %+v", connector.WritesFlagEnv, v, a, *want)
+			}
 		}
 	})
 }

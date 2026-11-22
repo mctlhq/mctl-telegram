@@ -69,6 +69,8 @@ func enablePAEnv(t *testing.T) {
 	t.Setenv("AUTH_MODE", "local-jwt")
 	t.Setenv("OAUTH_JWT_SIGNING_KEY", testPASigningKey)
 	t.Setenv("PUBLIC_BASE_URL", testPABaseURL)
+	// The preview allowlist: the principals the wiring tests message.
+	t.Setenv("PA_ALLOWED_PRINCIPALS", "4242001,4242002")
 }
 
 // paRoutes lists every PA route the router has: the webhook and anything
@@ -188,6 +190,53 @@ func TestBuildPA_EnabledRoutes(t *testing.T) {
 		if w.Code != http.StatusMethodNotAllowed {
 			t.Fatalf("%s with secret: status = %d, want 405", method, w.Code)
 		}
+	}
+}
+
+// TestBuildPA_AllowlistRefusesOthers: the wired runtime carries
+// PA_ALLOWED_PRINCIPALS. A principal not on it gets the fixed refusal and
+// nothing else (no consent prompt, no callback); an empty list refuses the
+// principal that was on it.
+func TestBuildPA_AllowlistRefusesOthers(t *testing.T) {
+	for name, list := range map[string]string{"other principal": "4242001,4242002", "empty list": ""} {
+		t.Run(name, func(t *testing.T) {
+			store, conn := paTestStoreConn(t)
+			recordPASends(t)
+			enablePAEnv(t)
+			t.Setenv("PA_ALLOWED_PRINCIPALS", list)
+			cfg, err := config.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			rt, err := buildPA(cfg, store, localjwt.NewRevocationCache(store, localjwt.DefaultRevocationCacheTTL), nil)
+			if err != nil || rt == nil {
+				t.Fatalf("runtime=%v err=%v", rt, err)
+			}
+			mux := chi.NewRouter()
+			rt.Mount(mux)
+			from := "4242003"
+			if list == "" {
+				from = "4242001"
+			}
+			body := `{"update_id":5001,"message":{"message_id":7,"date":1,"text":"hello",` +
+				`"from":{"id":` + from + `,"is_bot":false,"first_name":"Bob"},"chat":{"id":` + from + `,"type":"private"}}}`
+			if code := postPAWebhook(mux, body); code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", code)
+			}
+			var callbacks, refusals, other int
+			for q, dst := range map[string]*int{
+				`SELECT COUNT(*) FROM pa_callbacks`:                                 &callbacks,
+				`SELECT COUNT(*) FROM pa_outbox WHERE kind = 'principal_disabled'`:  &refusals,
+				`SELECT COUNT(*) FROM pa_outbox WHERE kind <> 'principal_disabled'`: &other,
+			} {
+				if err := conn.QueryRowContext(context.Background(), q).Scan(dst); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if callbacks != 0 || refusals != 1 || other != 0 {
+				t.Fatalf("callbacks=%d refusals=%d other=%d, want 0 1 0", callbacks, refusals, other)
+			}
+		})
 	}
 }
 

@@ -139,6 +139,9 @@ type RunLoopConfig struct {
 	// CallbackMetrics counts callback answers (AnswerCallbackAfter).
 	// Optional.
 	CallbackMetrics CallbackCounter
+	// Allowed is the preview allowlist (PA_ALLOWED_PRINCIPALS), re-checked
+	// at every step by gate. Required; an empty list allows nobody.
+	Allowed PrincipalAllowlist
 }
 
 // RunLoop serves the run-loop routes and implements RunEnqueuer and
@@ -157,6 +160,7 @@ type RunLoop struct {
 	now      func() time.Time
 	metrics  OutboxCounter
 	cbCount  CallbackCounter
+	allowed  PrincipalAllowlist
 	// pending tracks the deliveries request paths started (deliverAfter).
 	pending sync.WaitGroup
 	// readTools is every tool the pin admits without approval, as
@@ -171,12 +175,12 @@ var (
 )
 
 // ErrRunLoopConfig reports an unusable RunLoopConfig.
-var ErrRunLoopConfig = errors.New("pa: run loop needs a store, sealer, pool, minter, verifier, sender, tool resolver, limits and a budget")
+var ErrRunLoopConfig = errors.New("pa: run loop needs a store, sealer, pool, minter, verifier, sender, tool resolver, allowlist, limits and a budget")
 
 // NewRunLoop builds the run loop. It is constructed only when PA_ENABLED.
 func NewRunLoop(cfg RunLoopConfig) (*RunLoop, error) {
 	if cfg.Store == nil || cfg.Sealer == nil || cfg.Pool == nil || cfg.Minter == nil || cfg.Verifier == nil ||
-		cfg.Sender == nil || cfg.Tools == nil || !cfg.Limits.Valid() || !cfg.Budget.Valid() ||
+		cfg.Sender == nil || cfg.Tools == nil || cfg.Allowed == nil || !cfg.Limits.Valid() || !cfg.Budget.Valid() ||
 		cfg.Budget.PerJobUSD > cfg.Budget.PrincipalDayUSD || cfg.Lease < 0 || cfg.Lease > localjwt.MaxPAJobTTL ||
 		// The per-turn floor of a run at its turn cap must fit the
 		// reservation, or the floor alone would settle above it.
@@ -207,6 +211,7 @@ func NewRunLoop(cfg RunLoopConfig) (*RunLoop, error) {
 		store: cfg.Store, sealer: cfg.Sealer, pool: cfg.Pool, minter: cfg.Minter, verifier: cfg.Verifier,
 		sender: cfg.Sender, tools: cfg.Tools, limits: cfg.Limits, budget: cfg.Budget, lease: lease, now: now,
 		readTools: read, metrics: cfg.Metrics, cbCount: cfg.CallbackMetrics,
+		allowed: cfg.Allowed,
 	}, nil
 }
 
@@ -240,11 +245,29 @@ func (l *RunLoop) AdmitMessage(ctx context.Context, tx *sql.Tx, p Principal) (jo
 	return l.store.AdmitPAMessage(ctx, tx, p.TelegramID(), l.now(), l.limits.RateMessages, l.limits.RateWindow)
 }
 
-// gate re-checks consent (current version and text, and the version the
-// job was admitted under) and the conversation, inside the store's
-// transaction (T11, T13). Absence or a change is jobs.ErrGone; a failed
-// read is an error that aborts the step.
+// gate re-checks the principal (the preview allowlist and the admin
+// disable), consent (current version and text, and the version the job was
+// admitted under) and the conversation, inside the store's transaction
+// (T11, T13). Every step runs it: claim, turn, tool admission, the
+// post-call StillRunning, reply and result recording. Absence or a change
+// is jobs.ErrGone (jobs.ErrPrincipalNotAllowed, jobs.ErrPrincipalDisabled
+// for the principal); a failed read is an error that aborts the step,
+// never a pass.
 func (l *RunLoop) gate(ctx context.Context, tx *sql.Tx, j jobs.Job, now time.Time) error {
+	// The allowlist changes only on restart, but a job queued before a
+	// restart that dropped its principal stops here too.
+	if !l.allowed.Allowed(j.Principal) {
+		return jobs.ErrPrincipalNotAllowed
+	}
+	disabled, err := l.store.PAPrincipalDisabled(ctx, tx, j.Principal)
+	switch {
+	case errors.Is(err, convo.ErrStoreFault):
+		return fmt.Errorf("%w: %w: principal disable: %v", jobs.ErrUnreadable, jobs.ErrStoreFault, err)
+	case err != nil:
+		return fmt.Errorf("%w: principal disable: %v", jobs.ErrUnreadable, err)
+	case disabled:
+		return jobs.ErrPrincipalDisabled
+	}
 	rec, err := l.store.GetPAConsent(ctx, tx, j.Principal)
 	switch {
 	case errors.Is(err, convo.ErrNotFound):
@@ -364,6 +387,8 @@ func stop(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, jobs.ErrNotFound), errors.Is(err, jobs.ErrStale):
 		writeJSON(w, http.StatusConflict, stopResponse{Stop: "stale"})
+	case errors.Is(err, jobs.ErrPrincipalDisabled), errors.Is(err, jobs.ErrPrincipalNotAllowed):
+		writeJSON(w, http.StatusConflict, stopResponse{Stop: "principal_disabled"})
 	case errors.Is(err, jobs.ErrGone):
 		writeJSON(w, http.StatusConflict, stopResponse{Stop: "gone"})
 	case errors.Is(err, jobs.ErrToolCap):
@@ -880,18 +905,19 @@ func policyFromJob(j jobs.Job, ref jobs.Ref) (Policy, error) {
 }
 
 // stopRun is stop for a step that ran the gate: a job cancelled because its
-// conversation expired mid-run owes the principal a notice.
+// conversation expired mid-run, or its principal was disabled or taken off
+// the allowlist, owes the principal a notice.
 func (l *RunLoop) stopRun(ctx context.Context, w http.ResponseWriter, ref jobs.Ref, err error) {
 	l.droppedNotice(ctx, ref, err)
 	stop(w, err)
 }
 
-// droppedNotice sends the dropped-request notice when err says this call
-// cancelled the job because its conversation closed or expired. The store
-// returns ErrConversationGone only to the call that cancelled, so it is
-// sent once.
+// droppedNotice sends the notice owed when err says this call cancelled the
+// job because its conversation closed or expired, or its principal was
+// disabled or left the allowlist (jobs.NoticeFor). The store returns those
+// errors only to the call that cancelled, so it is sent once.
 func (l *RunLoop) droppedNotice(ctx context.Context, ref jobs.Ref, err error) {
-	if errors.Is(err, jobs.ErrConversationGone) {
+	if _, owed := jobs.NoticeFor(err); owed {
 		// The store wrote the notice with the cancellation.
 		l.deliverAfter(ctx, ref.Principal)
 	}

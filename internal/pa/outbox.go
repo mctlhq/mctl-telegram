@@ -71,20 +71,22 @@ const outboxButtonMinLife = 5 * time.Minute
 // outboxTemplates maps every notice kind, job-level and conversation-level
 // (#1348), to its server text.
 var outboxTemplates = map[jobs.OutboxKind]safetext.Template{
-	jobs.OutboxReplyTooLong:   safetext.TextReplyTooLong,
-	jobs.OutboxBudgetHold:     safetext.TextBudgetHold,
-	jobs.OutboxRunFailed:      safetext.TextRunFailed,
-	jobs.OutboxRequestDropped: safetext.TextRequestDropped,
+	jobs.OutboxReplyTooLong:     safetext.TextReplyTooLong,
+	jobs.OutboxBudgetHold:       safetext.TextBudgetHold,
+	jobs.OutboxRunFailed:        safetext.TextRunFailed,
+	jobs.OutboxRequestDropped:   safetext.TextRequestDropped,
+	jobs.OutboxPrincipalStopped: safetext.TextAssistantUnavailable,
 
-	jobs.OutboxConsentPrompt:    safetext.TextConsentPrompt,
-	jobs.OutboxConsentAccepted:  safetext.TextConsentAccepted,
-	jobs.OutboxConsentWithdrawn: safetext.TextConsentWithdrawn,
-	jobs.OutboxConsentStale:     safetext.TextConsentStale,
-	jobs.OutboxNewConversation:  safetext.TextNewConversation,
-	jobs.OutboxForgotten:        safetext.TextForgotten,
-	jobs.OutboxUnknownButton:    safetext.TextUnknownButton,
-	jobs.OutboxRateLimited:      safetext.TextRateLimited,
-	jobs.OutboxMessageTooLong:   safetext.TextMessageTooLong,
+	jobs.OutboxConsentPrompt:     safetext.TextConsentPrompt,
+	jobs.OutboxConsentAccepted:   safetext.TextConsentAccepted,
+	jobs.OutboxConsentWithdrawn:  safetext.TextConsentWithdrawn,
+	jobs.OutboxConsentStale:      safetext.TextConsentStale,
+	jobs.OutboxNewConversation:   safetext.TextNewConversation,
+	jobs.OutboxForgotten:         safetext.TextForgotten,
+	jobs.OutboxUnknownButton:     safetext.TextUnknownButton,
+	jobs.OutboxRateLimited:       safetext.TextRateLimited,
+	jobs.OutboxMessageTooLong:    safetext.TextMessageTooLong,
+	jobs.OutboxPrincipalDisabled: safetext.TextAssistantUnavailable,
 }
 
 // outboxKeyboard is the keyboard a row is sent with: the consent prompt's

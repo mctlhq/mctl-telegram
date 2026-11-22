@@ -19,15 +19,16 @@ import (
 
 // replyKinds maps every Reply to its conversation-level outbox kind.
 var replyKinds = map[Reply]jobs.OutboxKind{
-	ReplyConsentPrompt:    jobs.OutboxConsentPrompt,
-	ReplyConsentAccepted:  jobs.OutboxConsentAccepted,
-	ReplyConsentWithdrawn: jobs.OutboxConsentWithdrawn,
-	ReplyConsentStale:     jobs.OutboxConsentStale,
-	ReplyNewConversation:  jobs.OutboxNewConversation,
-	ReplyForgotten:        jobs.OutboxForgotten,
-	ReplyUnknownButton:    jobs.OutboxUnknownButton,
-	ReplyRateLimited:      jobs.OutboxRateLimited,
-	ReplyMessageTooLong:   jobs.OutboxMessageTooLong,
+	ReplyConsentPrompt:     jobs.OutboxConsentPrompt,
+	ReplyConsentAccepted:   jobs.OutboxConsentAccepted,
+	ReplyConsentWithdrawn:  jobs.OutboxConsentWithdrawn,
+	ReplyConsentStale:      jobs.OutboxConsentStale,
+	ReplyNewConversation:   jobs.OutboxNewConversation,
+	ReplyForgotten:         jobs.OutboxForgotten,
+	ReplyUnknownButton:     jobs.OutboxUnknownButton,
+	ReplyRateLimited:       jobs.OutboxRateLimited,
+	ReplyMessageTooLong:    jobs.OutboxMessageTooLong,
+	ReplyPrincipalDisabled: jobs.OutboxPrincipalDisabled,
 }
 
 // ErrUnknownReply is a Reply with no outbox kind: a programming error. It

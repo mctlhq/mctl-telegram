@@ -985,6 +985,10 @@ func jobRefusal(err error) refusal {
 		return refusal{ReasonBudget, http.StatusConflict}
 	case errors.Is(err, jobs.ErrNotFound), errors.Is(err, jobs.ErrStale), errors.Is(err, pa.ErrNoJob):
 		return refusal{ReasonJobStale, http.StatusConflict}
+	case errors.Is(err, jobs.ErrPrincipalDisabled):
+		return refusal{ReasonPrincipalDisabled, http.StatusForbidden}
+	case errors.Is(err, jobs.ErrPrincipalNotAllowed):
+		return refusal{ReasonPrincipalNotAllowed, http.StatusForbidden}
 	case errors.Is(err, jobs.ErrGone):
 		return refusal{ReasonJobGone, http.StatusConflict}
 	case errors.Is(err, jobs.ErrInvalid):

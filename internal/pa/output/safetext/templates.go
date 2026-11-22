@@ -89,4 +89,9 @@ var (
 	// TextMessageTooLong refuses a message over the size limit; nothing of
 	// it was stored.
 	TextMessageTooLong = tpl("Your message is too long. Please send a shorter one.")
+	// TextAssistantUnavailable refuses a principal an admin disabled or one
+	// not on the preview allowlist, and tells a principal whose queued or
+	// running request was stopped for that reason (#1318). The same text
+	// for both, so the reply does not say which.
+	TextAssistantUnavailable = tpl("The assistant is not available for your account. /forget still deletes your conversations.")
 )

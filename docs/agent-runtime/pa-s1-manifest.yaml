@@ -248,13 +248,11 @@ S1-R3:
   tests:
     - internal/pa.TestRunLoop_S1R3
 S1-F1:
-  note: "PA_WRITES_ENABLED does not exist in Phase 1: there are no write tools (its own test is S2-F3)."
-  gaps:
-    - half: "PA_WRITES_ENABLED disables writes and nothing else"
-      tracked_by: "#1320"
+  note: "The half that PA_WRITES_ENABLED disables writes is S2-F3 (owner decision 2026-11-21, #1318); S1-F1 keeps that the flag leaves reads alone."
   tests:
     - cmd/server.TestBuildPA_InertByDefault
     - internal/pa.TestDispatch_S1F1_ExternalToolsFlagOnlyStopsTools
+    - internal/pa.TestDispatch_S1F1_WritesFlagLeavesReadsAlone
     - internal/pa/connector.TestEnvFlags_S1F1_EachVariableItsOwnSwitch
 S1-F2:
   tests:
@@ -263,14 +261,21 @@ S1-F2:
     - internal/pa/connector.TestEnvFlags
     - internal/pa/linking.TestLinking_S1L14_ServerFlagGatesLinking
 S1-F4:
-  note: "The admin command that disables a single principal is not implemented, so that half of S1-F4 has no guard to test."
-  gaps:
-    - half: "principal disable"
-      tracked_by: "#1318"
   tests:
+    - internal/db.TestPAPrincipalDisable_ReadErrorIsDisabled
+    - internal/db.TestPAPrincipalDisable_Store
+    - internal/mcp.TestSetPAPrincipalDisabled_AdminOnly
+    - internal/pa.TestConversations_DisabledPrincipalNotQueued
+    - internal/pa.TestConversations_RefusalIsRateBounded
     - internal/pa.TestDispatch_JobStoppedFencesResult
     - internal/pa.TestDispatch_S1F4
     - internal/pa.TestDispatch_S1F4_ConsentWithdrawnRefusesNextDispatch
+    - internal/pa.TestDispatch_S1F4_PrincipalDisabledFencesInFlight
+    - internal/pa.TestDispatch_S1F4_PrincipalDisabledRefusesNextDispatch
+    - internal/pa.TestDispatch_S1F4_PrincipalStatusUnreadableRefuses
+    - internal/pa.TestRunLoop_PrincipalDisableStoreFaultChangesNothing
+    - internal/pa.TestRunLoop_PrincipalDisabledStopsTurn
+    - internal/pa/gate.TestStorePrincipalStatus_ErrorIsDisabled
 S1-U1:
   tests:
     - internal/pa/connector.TestS1U1_NoBodyOrTokenInAuditOrLogs

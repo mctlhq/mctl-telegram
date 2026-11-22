@@ -7,6 +7,7 @@ package pa
 import (
 	"encoding/json"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,12 +23,19 @@ const (
 
 // DispatchHarness is a run loop with a webhook, conversations and the job
 // ledger on one store.
-type DispatchHarness struct{ h *runLoopHarness }
+type DispatchHarness struct {
+	h           *runLoopHarness
+	failDisable atomic.Bool
+}
 
 // NewDispatchHarness builds the harness on store.
 func NewDispatchHarness(t *testing.T, store *db.Store) *DispatchHarness {
 	t.Helper()
-	return &DispatchHarness{h: newRunLoopHarnessOn(t, store)}
+	d := &DispatchHarness{}
+	d.h = newRunLoopHarnessOn(t, store, withStore(func(s *db.Store) RunLoopStore {
+		return &toggleDisable{Store: s, fail: &d.failDisable}
+	}))
+	return d
 }
 
 func (d *DispatchHarness) Loop() *RunLoop           { return d.h.loop }
@@ -47,6 +55,13 @@ func (d *DispatchHarness) Text(user int64, s string) {
 	}
 }
 func (d *DispatchHarness) Count(q string, args ...any) int { return d.h.count(q, args...) }
+
+// FailDisableReads makes the run loop's principal-disable read fail (on)
+// or read the store again (off).
+func (d *DispatchHarness) FailDisableReads(on bool) { d.failDisable.Store(on) }
+
+// Deny takes user off the run loop's and the conversations' allowlist.
+func (d *DispatchHarness) Deny(user int64) { d.h.allow.deny(user) }
 
 // Claim claims the next job as the pool.
 func (d *DispatchHarness) Claim() (token string, jobID int64, attempt int, code int) {

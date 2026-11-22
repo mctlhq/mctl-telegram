@@ -171,7 +171,7 @@ func (s *Store) AdmitPAMessage(ctx context.Context, tx *sql.Tx, principal int64,
 			return jobs.RateDecision{}, fmt.Errorf("pa rate: count: %w", err)
 		}
 	}
-	return jobs.RateDecision{Allowed: count <= int64(limit), Notify: count == int64(limit)+1}, nil
+	return jobs.RateDecision{Allowed: count <= int64(limit), Notify: count == int64(limit)+1, First: count == 1}, nil
 }
 
 // EnqueuePAJob implements jobs.Store. A queued job of the same conversation
@@ -586,8 +586,10 @@ func (s *Store) claimPicked(ctx context.Context, req jobs.ClaimRequest, pg bool,
 		// Consent still stands, the conversation does not: the request
 		// (perhaps held for days) is dropped, and the principal is told,
 		// through the outbox in this transaction.
-		if errors.Is(err, jobs.ErrConversationGone) {
-			res.Notices = []jobs.Notice{{Principal: j.Principal, JobID: j.ID, Kind: jobs.NoticeDropped}}
+		// A disabled or no longer allowed principal is told too
+		// (jobs.NoticeFor).
+		if kind, owed := jobs.NoticeFor(err); owed {
+			res.Notices = []jobs.Notice{{Principal: j.Principal, JobID: j.ID, Kind: kind}}
 			if err := enqueuePANotice(ctx, tx, res.Notices[0], nowMS); err != nil {
 				return jobs.ClaimResult{}, fmt.Errorf("claim pa job: %w", err)
 			}
@@ -821,10 +823,11 @@ func runGate(ctx context.Context, tx *sql.Tx, gate jobs.Gate, j jobs.Job, now ti
 	if cerr := cancelOne(ctx, tx, j, now.UnixMilli()); cerr != nil {
 		return cerr
 	}
-	if errors.Is(err, jobs.ErrConversationGone) {
-		// The request is dropped and the principal is owed a notice: it is
-		// written with the cancellation, so it cannot be lost after it.
-		if cerr := enqueuePANotice(ctx, tx, jobs.Notice{Principal: j.Principal, JobID: j.ID, Kind: jobs.NoticeDropped},
+	if kind, owed := jobs.NoticeFor(err); owed {
+		// The request is dropped (or the principal stopped) and the
+		// principal is owed a notice: it is written with the cancellation,
+		// so it cannot be lost after it.
+		if cerr := enqueuePANotice(ctx, tx, jobs.Notice{Principal: j.Principal, JobID: j.ID, Kind: kind},
 			now.UnixMilli()); cerr != nil {
 			return cerr
 		}
@@ -833,8 +836,10 @@ func runGate(ctx context.Context, tx *sql.Tx, gate jobs.Gate, j jobs.Job, now ti
 		return fmt.Errorf("cancel pa job: commit: %w", cerr)
 	}
 	// The gate's own error (it wraps ErrGone): the caller can tell a
-	// dropped conversation (ErrConversationGone), owed a notice, from a
-	// withdrawn consent. Only the call that cancelled sees it.
+	// dropped conversation (ErrConversationGone) or a stopped principal
+	// (ErrPrincipalDisabled, ErrPrincipalNotAllowed), owed a notice
+	// (jobs.NoticeFor), from a withdrawn consent. Only the call that
+	// cancelled sees it.
 	return err
 }
 

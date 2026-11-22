@@ -4314,6 +4314,41 @@ not be read; nothing was sent and the rows stay due. `button_expired` and
 and "Reused update id" in the outbox section above. Inspect rows by principal with `Store.PAOutboxRows`;
 rows carry no message text.
 
+## Personal Assistant: who may use it, and disabling one principal (issue #1318)
+
+Both controls exist only while `PA_ENABLED=true`, and both are checked at
+ingress (every update) and again at every run step (claim, turn, tool
+admission, reply), so neither needs a restart.
+
+- **Preview allowlist (`PA_ALLOWED_PRINCIPALS`).** A comma-separated list
+  of Telegram user ids. Only those principals may use the PA. Unset or
+  empty allows nobody: the server starts, logs `pa allowlist is empty:
+  every principal is refused`, and answers every message with the fixed
+  "not available" reply (owner decision on #1318, 2026-11-21). A malformed
+  entry (empty, not a positive integer) refuses startup with an error that
+  names the variable but not its value. Changing the list takes a rollout.
+- **Disable one principal.** Call the tg MCP tool
+  `set_pa_principal_disabled` (scope `admin:users`; not on the shared
+  portal surface) with `telegram_id`, `disabled: true` and a one-line
+  `reason` (at most 200 characters). Re-enable with `disabled: false`.
+  Read the state with `get_pa_principal_status` (`admin:users` or
+  `admin:users:read`). The call is audited to the admin; the row in
+  `pa_principal_disables` records the admin's user id, the time and the
+  reason, and survives the principal's account deletion.
+- **What the principal sees.** A disabled (or not allowed) principal gets
+  one fixed reply, "The assistant is not available for your account.
+  /forget still deletes your conversations.", to each message; nothing they
+  send is stored or queued and no consent prompt is offered. `/forget` and
+  `/consent withdraw` still run. A request already running is cancelled at
+  its next step, its reservation is held, and the principal is told once
+  (outbox kind `principal_stopped`). A tool call refused for this reason is
+  audited `refused` with `reason=principal_disabled` or
+  `reason=principal_not_allowed`.
+- **Unreadable status.** If `pa_principal_disables` cannot be read, the
+  update is answered 5xx for Telegram to retry and nothing is stored; a
+  run step is refused as unreadable and the job is kept, never treated as
+  "not disabled".
+
 ## Personal Assistant catalog pin (issue #1315)
 
 The PA dispatcher compares each catalog server's live `tools/list` with the

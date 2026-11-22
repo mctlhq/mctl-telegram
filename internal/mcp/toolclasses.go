@@ -37,6 +37,7 @@ var toolClasses = map[string]toolClass{
 	// Reads.
 	"draft_reply":                     {tier: tierRead, idempotent: false},
 	"get_acquisition_report":          {tier: tierRead, idempotent: true},
+	"get_pa_principal_status":         {tier: tierRead, idempotent: true},
 	"get_broadcast":                   {tier: tierRead, idempotent: true},
 	"get_media":                       {tier: tierRead, idempotent: false},
 	"get_messages":                    {tier: tierRead, idempotent: true},
@@ -85,6 +86,7 @@ var toolClasses = map[string]toolClass{
 	"save_draft":                      {tier: tierDestructive, idempotent: false},
 	"set_reaction":                    {tier: tierDestructive, idempotent: false},
 	"set_send_consent":                {tier: tierDestructive, idempotent: false},
+	"set_pa_principal_disabled":       {tier: tierDestructive, idempotent: false},
 	"set_telegram_access":             {tier: tierDestructive, idempotent: false},
 	"update_install":                  {tier: tierDestructive, idempotent: false},
 }
