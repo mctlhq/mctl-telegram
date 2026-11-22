@@ -156,10 +156,13 @@ func testAcquisitionLabelsAndReport(t *testing.T, s *Store) {
 		}
 	}
 	now := time.Now().UTC()
-	// A returned activity report only counts events on/after sign-up.
-	// Backdate Alice's registration so both genuine calls are post-sign-up.
-	if _, err := s.DB.Exec(`UPDATE users SET created_at=$1 WHERE id=$2`, now.Add(-72*time.Hour), alice); err != nil {
-		t.Fatal(err)
+	// Backdate the synthetic registrations so every intended successful
+	// call is after signup. Bob's two calls on the same day then exercise
+	// UTC-day deduplication rather than silently losing the earlier row.
+	for _, uid := range []int64{alice, bob} {
+		if _, err := s.DB.Exec(`UPDATE users SET created_at=$1 WHERE id=$2`, now.Add(-72*time.Hour), uid); err != nil {
+			t.Fatal(err)
+		}
 	}
 	ins(alice, now)
 	ins(alice, now.Add(-30*time.Hour))
