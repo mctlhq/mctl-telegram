@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
+	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 )
 
 // TestPAConnection_RevokePinsTokenGeneration covers the token_generation
@@ -32,6 +33,7 @@ func TestPAConnection_RevokePinsTokenGeneration(t *testing.T) {
 	const principal = int64(9_100_000_001)
 	id := "pac_revoke_gen_" + randomSuffix(t)
 	t.Cleanup(func() { _, _ = s.DB.Exec(`DELETE FROM pa_connections WHERE id = $1`, id) })
+	acceptConsent(t, s, principal)
 
 	if err := s.CreatePAConnection(ctx, connection.Connection{
 		ID: id, Principal: principal, Server: connection.ServerTG, State: connection.StatePendingLink, AuthorityRevision: 1,
@@ -132,4 +134,23 @@ func TestPALinkSecret_ConsumeCASPinsUnconsumed(t *testing.T) {
 	if !fired {
 		t.Fatal("the test seam never fired")
 	}
+}
+
+// acceptConsent records principal's current data-flow consent, which
+// activation (pending_confirm -> active) requires under the principal lock.
+func acceptConsent(t *testing.T, s *Store, principal int64) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AcceptPAConsent(ctx, tx, principal, convo.ConsentVersion, convo.ConsentTextSHA256(), time.Now()); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = s.DB.Exec(`DELETE FROM pa_consents WHERE principal = $1`, principal) })
 }

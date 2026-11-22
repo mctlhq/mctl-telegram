@@ -49,7 +49,7 @@ var (
 // servers' MCP endpoints.
 type IdentityAccounts struct {
 	// Endpoints maps a server to its MCP endpoint. Only tg is used.
-	Endpoints map[connection.Server]*Endpoint
+	Endpoints map[connection.Server]MCPEndpoint
 }
 
 var _ linking.AccountSource = IdentityAccounts{}
@@ -63,7 +63,7 @@ func (s IdentityAccounts) Account(ctx context.Context, server connection.Server,
 		return linking.Account{}, fmt.Errorf("%w (%s)", ErrAccountSourceUnsupported, server)
 	}
 	ep := s.Endpoints[server]
-	if ep == nil {
+	if ep == nil || ep.Server() != string(server) {
 		return linking.Account{}, fmt.Errorf("%w: no MCP endpoint for %s", ErrAccountSourceConfig, server)
 	}
 	if accessToken.Empty() {

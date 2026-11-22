@@ -73,6 +73,9 @@ const (
 	OutboxUnknownButton    OutboxKind = "unknown_button"
 	OutboxRateLimited      OutboxKind = "rate_limited"
 	OutboxMessageTooLong   OutboxKind = "message_too_long"
+	// OutboxLinkingUnavailable answers a linking command while no PA
+	// server is enabled (#1318 slice C2).
+	OutboxLinkingUnavailable OutboxKind = "linking_unavailable"
 	// OutboxPrincipalDisabled refuses an update of a disabled principal or
 	// one not on the allowlist (T11, #1318).
 	OutboxPrincipalDisabled OutboxKind = "principal_disabled"
@@ -91,6 +94,7 @@ func jobOutboxKinds() []OutboxKind {
 func ConversationOutboxKinds() []OutboxKind {
 	return []OutboxKind{OutboxConsentPrompt, OutboxConsentAccepted, OutboxConsentWithdrawn, OutboxConsentStale,
 		OutboxNewConversation, OutboxForgotten, OutboxUnknownButton, OutboxRateLimited, OutboxMessageTooLong,
+		OutboxLinkingUnavailable,
 		OutboxPrincipalDisabled}
 }
 

@@ -89,6 +89,24 @@ var (
 	// TextMessageTooLong refuses a message over the size limit; nothing of
 	// it was stored.
 	TextMessageTooLong = tpl("Your message is too long. Please send a shorter one.")
+
+	// The account-linking replies (#1318 slice C2). Each is sent after the
+	// update's commit, except TextLinkingUnavailable, an outbox row.
+	TextLinkingUnavailable = tpl("Connecting accounts is not available.")
+	TextConnectUsage       = tpl("Send /connect tg to connect your Telegram account, /connections to see your connections, or /disconnect tg to remove one.")
+	TextConnectFailed      = tpl("The connection could not be started. Please try again.")
+	TextConnected          = tpl("Your account is connected.")
+	TextConnectCancelled   = tpl("The connection is cancelled.")
+	TextConnectButtonGone  = tpl("This button is no longer valid. Send /connect to start again.")
+	TextDisconnected       = tpl("Your connection is removed and the service revoked its access.")
+	// TextDisconnectedLocal: the connection is gone here, but the service
+	// did not confirm the revocation (S1-C6): the user is told, never
+	// shown a success it cannot back.
+	TextDisconnectedLocal = tpl("Your connection is removed here, but the service did not confirm that its access was revoked. You can also revoke it in the service's settings.")
+	TextDisconnectNone    = tpl("You have no connection to remove for this service.")
+	TextDisconnectFailed  = tpl("The connection could not be removed. Please try again.")
+	TextConnectionsNone   = tpl("You have no connected accounts.")
+	TextConnectionsFailed = tpl("Your connections could not be read. Please try again.")
 	// TextAssistantUnavailable refuses a principal an admin disabled or one
 	// not on the preview allowlist, and tells a principal whose queued or
 	// running request was stopped for that reason (#1318). The same text

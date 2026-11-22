@@ -16,7 +16,7 @@ const aliceTG = 100001
 // the new token and returns its structured telegram_id.
 func TestS1L13_IdentityAccountsReadsTelegramID(t *testing.T) {
 	f := &fakeServer{callResult: `{"content":[{"type":"text","text":"{}"}],"structuredContent":{"telegram_id":100001,"username":"alice","display_name":"Alice"}}`}
-	src := IdentityAccounts{Endpoints: map[connection.Server]*Endpoint{connection.ServerTG: testEndpoint(t, f)}}
+	src := IdentityAccounts{Endpoints: map[connection.Server]MCPEndpoint{connection.ServerTG: testEndpoint(t, f)}}
 	acct, err := src.Account(context.Background(), connection.ServerTG, tok)
 	if err != nil {
 		t.Fatalf("Account: %v", err)
@@ -52,14 +52,14 @@ func TestIdentityAccounts_FailsClosed(t *testing.T) {
 	}
 	for name, res := range bad {
 		f := &fakeServer{callResult: res}
-		src := IdentityAccounts{Endpoints: map[connection.Server]*Endpoint{connection.ServerTG: testEndpoint(t, f)}}
+		src := IdentityAccounts{Endpoints: map[connection.Server]MCPEndpoint{connection.ServerTG: testEndpoint(t, f)}}
 		if acct, err := src.Account(context.Background(), connection.ServerTG, tok); err == nil {
 			t.Errorf("%s: account %+v, want an error", name, acct)
 		}
 	}
 	// A transport refusal is an error too.
 	f := &fakeServer{status: 401}
-	src := IdentityAccounts{Endpoints: map[connection.Server]*Endpoint{connection.ServerTG: testEndpoint(t, f)}}
+	src := IdentityAccounts{Endpoints: map[connection.Server]MCPEndpoint{connection.ServerTG: testEndpoint(t, f)}}
 	if _, err := src.Account(context.Background(), connection.ServerTG, tok); !errors.Is(err, ErrMCPUnauthorized) {
 		t.Errorf("401: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestIdentityAccounts_FailsClosed(t *testing.T) {
 func TestIdentityAccounts_UnsupportedAndUnconfigured(t *testing.T) {
 	f := &fakeServer{}
 	ep := testEndpoint(t, f)
-	src := IdentityAccounts{Endpoints: map[connection.Server]*Endpoint{connection.ServerTG: ep, connection.ServerAlice: ep}}
+	src := IdentityAccounts{Endpoints: map[connection.Server]MCPEndpoint{connection.ServerTG: ep, connection.ServerAlice: ep}}
 	if _, err := src.Account(context.Background(), connection.ServerAlice, tok); !errors.Is(err, ErrAccountSourceUnsupported) {
 		t.Errorf("alice: %v", err)
 	}
@@ -78,6 +78,13 @@ func TestIdentityAccounts_UnsupportedAndUnconfigured(t *testing.T) {
 	// "tg is unsupported".
 	if _, err := (IdentityAccounts{}).Account(context.Background(), connection.ServerTG, tok); !errors.Is(err, ErrAccountSourceConfig) || errors.Is(err, ErrAccountSourceUnsupported) {
 		t.Errorf("no endpoint: %v", err)
+	}
+	// An endpoint wired under tg that serves another server is the same
+	// fault: the identity call must never go to the wrong server.
+	other := &Endpoint{server: "alice", url: ep.url, client: ep.client}
+	wrong := IdentityAccounts{Endpoints: map[connection.Server]MCPEndpoint{connection.ServerTG: other}}
+	if _, err := wrong.Account(context.Background(), connection.ServerTG, tok); !errors.Is(err, ErrAccountSourceConfig) {
+		t.Errorf("endpoint for another server: %v", err)
 	}
 	if _, err := src.Account(context.Background(), connection.ServerTG, connection.Secret{}); err == nil {
 		t.Error("empty token accepted")

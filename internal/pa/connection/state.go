@@ -232,6 +232,11 @@ var (
 	// ErrUnreadable: the row, or its secret material, could not be read.
 	// Never treated as active (I9, S1-C5).
 	ErrUnreadable = errors.New("pa connection: unreadable")
+	// ErrNoConsent: activation (pending_confirm -> active) found no
+	// current data-flow consent for the principal, read under the
+	// principal's lock in the activating transaction. The connection is
+	// left pending; the caller fails it and revokes its tokens.
+	ErrNoConsent = errors.New("pa connection: no current consent")
 	// ErrNotActive: the connection is in a state that refuses every call.
 	ErrNotActive = errors.New("pa connection: not active")
 	// ErrRevisionMismatch: the connection moved past the bound revision.

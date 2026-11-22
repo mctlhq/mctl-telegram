@@ -5,11 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"go/parser"
-	"go/token"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -70,7 +67,7 @@ func enablePAEnv(t *testing.T) {
 	t.Setenv("OAUTH_JWT_SIGNING_KEY", testPASigningKey)
 	t.Setenv("PUBLIC_BASE_URL", testPABaseURL)
 	// The preview allowlist: the principals the wiring tests message.
-	t.Setenv("PA_ALLOWED_PRINCIPALS", "4242001,4242002")
+	t.Setenv("PA_ALLOWED_PRINCIPALS", "4242001,4242002,4242003")
 }
 
 // paRoutes lists every PA route the router has: the webhook and anything
@@ -103,7 +100,7 @@ func buildEnabledPA(t *testing.T, store *db.Store) (*config.Config, *paRuntime) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt, err := buildPA(cfg, store, localjwt.NewRevocationCache(store, localjwt.DefaultRevocationCacheTTL), nil)
+	rt, err := buildPA(context.Background(), cfg, store, localjwt.NewRevocationCache(store, localjwt.DefaultRevocationCacheTTL), nil)
 	if err != nil || rt == nil {
 		t.Fatalf("PA_ENABLED on: runtime=%v err=%v", rt, err)
 	}
@@ -121,7 +118,7 @@ func TestBuildPA_InertByDefault(t *testing.T) {
 	if cfg.PAEnabled {
 		t.Fatal("PA_ENABLED unset loaded as enabled")
 	}
-	rt, err := buildPA(cfg, store, localjwt.NewRevocationCache(store, time.Second), nil)
+	rt, err := buildPA(context.Background(), cfg, store, localjwt.NewRevocationCache(store, time.Second), nil)
 	if err != nil || rt != nil {
 		t.Fatalf("PA_ENABLED unset: runtime=%v err=%v, want nil nil", rt, err)
 	}
@@ -143,9 +140,10 @@ func TestBuildPA_InertByDefault(t *testing.T) {
 	}
 }
 
-// TestBuildPA_EnabledRoutes: with the PA on, exactly the webhook and the
-// three run-loop routes are mounted. The connector's tool route is not:
-// it arrives with the tools slice (#1314), not here.
+// TestBuildPA_EnabledRoutes: with the PA on and no PA server enabled,
+// exactly the webhook and the three run-loop routes are mounted. Neither the
+// connector's tool route nor any linking route is: they exist only with a
+// server enabled (TestBuildPA_WiresToolsOnlyWhenEnabled).
 func TestBuildPA_EnabledRoutes(t *testing.T) {
 	store := paTestStore(t)
 	_, rt := buildEnabledPA(t, store)
@@ -208,7 +206,7 @@ func TestBuildPA_AllowlistRefusesOthers(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			rt, err := buildPA(cfg, store, localjwt.NewRevocationCache(store, localjwt.DefaultRevocationCacheTTL), nil)
+			rt, err := buildPA(context.Background(), cfg, store, localjwt.NewRevocationCache(store, localjwt.DefaultRevocationCacheTTL), nil)
 			if err != nil || rt == nil {
 				t.Fatalf("runtime=%v err=%v", rt, err)
 			}
@@ -303,12 +301,24 @@ type paSend struct {
 	chat   int64
 	text   string
 	button string
+	// buttons are every button's data, for a card sent with Send.
+	buttons []string
+	// webApp is the URL of a web_app button (SendWebApp).
+	webApp string
 }
 
 type paSendRecorder struct {
 	mu       sync.Mutex
 	sent     []paSend
 	answered []string
+	// real is a production output.Sender built from the same token and
+	// Mini App URL buildPA passed: SendWebApp runs every one of its
+	// checks on what the wired runtime asked to send, so a test sees
+	// StartLink's real URL go through checkWebAppURL. Only the Bot API
+	// call itself is cut off (a cancelled context), so nothing leaves.
+	real *output.Sender
+	// refused collects what the real sender refused before its request.
+	refused []error
 }
 
 func (r *paSendRecorder) AnswerCallback(_ context.Context, id string, _ safetext.Template) error {
@@ -338,6 +348,46 @@ func (r *paSendRecorder) SendFrom(_ context.Context, chat int64, text safetext.T
 	return nil
 }
 
+func (r *paSendRecorder) Send(_ context.Context, chat int64, text safetext.Text, kb output.Keyboard) error {
+	s := paSend{chat: chat, text: text.String()}
+	for _, row := range kb {
+		for _, b := range row {
+			s.buttons = append(s.buttons, b.Data)
+		}
+	}
+	r.mu.Lock()
+	r.sent = append(r.sent, s)
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *paSendRecorder) SendWebApp(_ context.Context, chat int64, text safetext.Text, label safetext.Template, appURL string) error {
+	if r.real != nil {
+		// A cancelled context stops the request before it is written,
+		// so the only errors that can come back are the sender's own
+		// refusals and "request failed: context canceled". Anything
+		// else is a refusal of what the runtime built.
+		cctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := r.real.SendWebApp(cctx, chat, text, label, appURL); err == nil || !strings.Contains(err.Error(), "request failed: context canceled") {
+			r.mu.Lock()
+			r.refused = append(r.refused, err)
+			r.mu.Unlock()
+			return err
+		}
+	}
+	r.mu.Lock()
+	r.sent = append(r.sent, paSend{chat: chat, text: text.String(), webApp: appURL})
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *paSendRecorder) refusals() []error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]error(nil), r.refused...)
+}
+
 func (r *paSendRecorder) get() []paSend {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -349,7 +399,16 @@ func recordPASends(t *testing.T) *paSendRecorder {
 	t.Helper()
 	r := &paSendRecorder{}
 	prev := newPASender
-	newPASender = func(string) (pa.BotSender, error) { return r, nil }
+	newPASender = func(token, webAppURL string) (paBotSender, error) {
+		if webAppURL != "" {
+			real, err := output.NewSender(output.Config{Token: token, WebAppURL: webAppURL})
+			if err != nil {
+				return nil, err
+			}
+			r.real = real
+		}
+		return r, nil
+	}
 	t.Cleanup(func() { newPASender = prev })
 	return r
 }
@@ -485,7 +544,7 @@ func TestBuildPA_RefusesMissingSecrets(t *testing.T) {
 			PABudgetUSDJob: 0.25, PABudgetUSDDay: 2, PABudgetUSDMonth: 20, ManagedBudgetUSDGlobalDay: 20, PAMinTurnUSD: 0.005,
 		}
 	}
-	if rt, err := buildPA(base(), store, rc, nil); err != nil || rt == nil {
+	if rt, err := buildPA(context.Background(), base(), store, rc, nil); err != nil || rt == nil {
 		t.Fatalf("control: runtime=%v err=%v", rt, err)
 	}
 	for name, mutate := range map[string]func(*config.Config){
@@ -498,11 +557,11 @@ func TestBuildPA_RefusesMissingSecrets(t *testing.T) {
 	} {
 		c := base()
 		mutate(c)
-		if rt, err := buildPA(c, store, rc, nil); err == nil || rt != nil {
+		if rt, err := buildPA(context.Background(), c, store, rc, nil); err == nil || rt != nil {
 			t.Fatalf("%s: runtime=%v err=%v, want refusal", name, rt, err)
 		}
 	}
-	if _, err := buildPA(base(), store, nil, nil); err == nil {
+	if _, err := buildPA(context.Background(), base(), store, nil, nil); err == nil {
 		t.Fatal("no revocation cache: want refusal")
 	}
 }
@@ -594,43 +653,5 @@ func TestPARuntime_ShutdownBoundedByDeadline(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("shutdown ignored its 100ms deadline")
-	}
-}
-
-// TestPAWiring_NoToolsSliceImports: the server does not build the tools
-// slice yet. Its packages (dispatcher, connections and KEK, linking) arrive
-// with #1314; until then no non-test file of cmd/server may import them.
-func TestPAWiring_NoToolsSliceImports(t *testing.T) {
-	forbidden := []string{
-		"github.com/mctlhq/mctl-telegram/internal/pa/connector",
-		"github.com/mctlhq/mctl-telegram/internal/pa/connection",
-		"github.com/mctlhq/mctl-telegram/internal/pa/linking",
-	}
-	files, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	fset := token.NewFileSet()
-	checked := 0
-	for _, name := range files {
-		if strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(fset, name, nil, parser.ImportsOnly)
-		if err != nil {
-			t.Fatal(err)
-		}
-		checked++
-		for _, imp := range f.Imports {
-			path := strings.Trim(imp.Path.Value, `"`)
-			for _, bad := range forbidden {
-				if path == bad || strings.HasPrefix(path, bad+"/") {
-					t.Errorf("%s imports %s before the tools slice", name, path)
-				}
-			}
-		}
-	}
-	if checked == 0 {
-		t.Fatal("no source files read: the guard checked nothing")
 	}
 }

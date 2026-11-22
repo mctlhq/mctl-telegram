@@ -152,7 +152,7 @@ func TestLinking_RequireIssFromMetadata(t *testing.T) {
 			cfg := linking.Config{
 				BotToken: paBotToken, LoginBotToken: loginBotToken, BotUsername: "fake_pa_bot", MiniAppName: "link",
 				AppURL: appURL, Servers: h.servers, Manager: h.m, Store: s, Tokens: tokenClient{h.as},
-				Accounts: h.accounts, Messenger: h.msgr,
+				Accounts: h.accounts, Messenger: h.msgr, Allowed: h.allow,
 			}
 			if _, err := linking.New(cfg); !errors.Is(err, linking.ErrConfig) {
 				t.Errorf("%s: New %v, want ErrConfig", name, err)
@@ -167,4 +167,28 @@ func cloneValues(v url.Values) url.Values {
 		out[k] = append([]string(nil), vv...)
 	}
 	return out
+}
+
+// The endpoint fields are read for the startup cross-check (#1318 C2):
+// absent is "", and a present value that is not a non-empty string is
+// unreadable, never absent.
+func TestParseASMetadata_Endpoints(t *testing.T) {
+	const iss = "https://as.tg.example.test"
+	md, err := linking.ParseASMetadata([]byte(`{"issuer":"`+iss+`","authorization_endpoint":"`+iss+`/a",`+
+		`"token_endpoint":"`+iss+`/t","revocation_endpoint":"`+iss+`/r"}`), iss)
+	if err != nil || md.AuthorizationEndpoint != iss+"/a" || md.TokenEndpoint != iss+"/t" || md.RevocationEndpoint != iss+"/r" {
+		t.Fatalf("%+v, %v", md, err)
+	}
+	if md, err := linking.ParseASMetadata([]byte(`{"issuer":"`+iss+`"}`), iss); err != nil ||
+		md.AuthorizationEndpoint != "" || md.TokenEndpoint != "" || md.RevocationEndpoint != "" {
+		t.Fatalf("absent: %+v, %v", md, err)
+	}
+	for _, field := range []string{"authorization_endpoint", "token_endpoint", "revocation_endpoint"} {
+		for _, v := range []string{`""`, `null`, `7`, `["x"]`} {
+			body := `{"issuer":"` + iss + `","` + field + `":` + v + `}`
+			if _, err := linking.ParseASMetadata([]byte(body), iss); !errors.Is(err, linking.ErrASMetadata) {
+				t.Errorf("%s=%s: %v, want ErrASMetadata", field, v, err)
+			}
+		}
+	}
 }
