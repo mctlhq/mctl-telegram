@@ -81,11 +81,47 @@ func TestPAPrincipalDisable_Store(t *testing.T) {
 			t.Fatal("account deletion cleared the disable")
 		}
 
+		// Both set and clear reset the rate window (refused updates count
+		// in it), and only the principal's own.
+		rateRows := func(p int64) int {
+			t.Helper()
+			var n int
+			if err := s.DB.QueryRowContext(ctx, `SELECT count(*) FROM pa_rate WHERE principal = $1`, p).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			return n
+		}
+		spend := func(p int64) {
+			t.Helper()
+			tx, err := s.DB.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := s.AdmitPAMessage(ctx, tx, p, now, 3, time.Hour); err != nil {
+				t.Fatal(err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		spend(aliceID)
+		spend(bobID)
+		if err := s.SetPAPrincipalDisabled(ctx, aliceID, admin, "again", now); err != nil {
+			t.Fatal(err)
+		}
+		if rateRows(aliceID) != 0 || rateRows(bobID) != 1 {
+			t.Fatal("disable did not reset only the principal's rate window")
+		}
+		spend(aliceID)
 		if err := s.ClearPAPrincipalDisabled(ctx, aliceID); err != nil {
 			t.Fatal(err)
 		}
 		if read(aliceID) {
 			t.Fatal("clear left the principal disabled")
+		}
+		if rateRows(aliceID) != 0 || rateRows(bobID) != 1 {
+			t.Fatal("clear did not reset only the principal's rate window")
 		}
 		if err := s.ClearPAPrincipalDisabled(ctx, aliceID); err != nil {
 			t.Fatalf("clearing twice: %v", err)

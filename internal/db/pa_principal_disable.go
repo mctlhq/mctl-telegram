@@ -71,8 +71,22 @@ func (s *Store) ClearPAPrincipalDisabled(ctx context.Context, principal int64) e
 	if principal <= 0 {
 		return fmt.Errorf("%w: principal disable", convo.ErrInvalid)
 	}
-	if _, err := s.DB.ExecContext(ctx, `DELETE FROM pa_principal_disables WHERE principal = $1`, principal); err != nil {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("clear pa principal disabled: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pa_principal_disables WHERE principal = $1`, principal); err != nil {
 		return fmt.Errorf("clear pa principal disabled: %w", err)
+	}
+	// Refused updates count in the window too, so a principal who kept
+	// writing while disabled would come back already limited. Resetting it
+	// here, as SetPAPrincipalDisabled does, starts them on a fresh window.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pa_rate WHERE principal = $1`, principal); err != nil {
+		return fmt.Errorf("clear pa principal disabled: reset rate window: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("clear pa principal disabled: commit: %w", err)
 	}
 	return nil
 }
