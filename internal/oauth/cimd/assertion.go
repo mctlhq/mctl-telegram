@@ -247,8 +247,8 @@ func (r *Resolver) fetchKeys(ctx context.Context, uri string) ([]jose.JSONWebKey
 	if !ok {
 		return nil, 0, fmt.Errorf("%w: jwks_uri is not an https URL", ErrFetch)
 	}
-	if !r.hostAllowed(u.Hostname()) {
-		return nil, 0, ErrNotAllowed
+	if _, allowed := r.match(u); !allowed {
+		return nil, 0, r.missError(u)
 	}
 	select {
 	case r.sem <- struct{}{}:

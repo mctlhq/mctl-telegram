@@ -117,6 +117,9 @@ type Document struct {
 	// on the client_id's own host.
 	SigningAlg string
 	JWKSURI    string
+	// AllowEntry is the OAUTH_CIMD_ALLOWED_HOSTS entry that admitted the
+	// client_id. It is set by Resolve and is not part of the document.
+	AllowEntry string
 }
 
 // Token endpoint authentication methods a document may declare.
@@ -174,33 +177,85 @@ func parseCIMDURL(s string) (*url.URL, bool) {
 	return u, true
 }
 
+// allowEntry is one parsed OAUTH_CIMD_ALLOWED_HOSTS entry.
+type allowEntry struct {
+	raw    string // normalized entry text, for logs
+	host   string // lowercased host, without the leading "." of a suffix
+	suffix bool   // ".example.com" form
+	prefix string // "" for host-level entries; "/a/b/" for path-scoped ones
+}
+
+// parseAllowEntry validates and normalizes one entry: a host name, a ".suffix",
+// or "host/path-prefix/" (host lowercased, path kept byte for byte).
+func parseAllowEntry(e string) (allowEntry, error) {
+	e = strings.TrimSpace(e)
+	hostPart, pathPart, hasPath := strings.Cut(e, "/")
+	hostPart = strings.ToLower(hostPart)
+	h := strings.TrimPrefix(hostPart, ".")
+	if h == "" || strings.ContainsAny(h, ":@*? #\\") || strings.HasPrefix(h, ".") || strings.HasSuffix(h, ".") {
+		return allowEntry{}, fmt.Errorf("OAUTH_CIMD_ALLOWED_HOSTS: %q is not a host name or .suffix", e)
+	}
+	if net.ParseIP(h) != nil {
+		return allowEntry{}, fmt.Errorf("OAUTH_CIMD_ALLOWED_HOSTS: %q is an IP literal", e)
+	}
+	suffix := strings.HasPrefix(hostPart, ".")
+	if suffix && !belowPublicSuffix(h) {
+		return allowEntry{}, fmt.Errorf("OAUTH_CIMD_ALLOWED_HOSTS: %q covers a public suffix; name a registrable domain", e)
+	}
+	if !hasPath {
+		return allowEntry{raw: hostPart, host: h, suffix: suffix}, nil
+	}
+	if suffix {
+		return allowEntry{}, fmt.Errorf("OAUTH_CIMD_ALLOWED_HOSTS: %q: a .suffix entry cannot carry a path", e)
+	}
+	prefix := "/" + pathPart
+	if prefix == "/" {
+		return allowEntry{}, fmt.Errorf("OAUTH_CIMD_ALLOWED_HOSTS: %q: path prefix \"/\" is a host-wide entry; list the host alone", e)
+	}
+	if !strings.HasSuffix(prefix, "/") {
+		return allowEntry{}, fmt.Errorf("OAUTH_CIMD_ALLOWED_HOSTS: %q: path prefix must end with \"/\"", e)
+	}
+	if strings.ContainsAny(prefix, "%\\?#@* \t\r\n\v\f") {
+		return allowEntry{}, fmt.Errorf("OAUTH_CIMD_ALLOWED_HOSTS: %q: path prefix contains a forbidden character", e)
+	}
+	for _, seg := range strings.Split(strings.TrimSuffix(prefix[1:], "/"), "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return allowEntry{}, fmt.Errorf("OAUTH_CIMD_ALLOWED_HOSTS: %q: empty, \".\" or \"..\" path segment", e)
+		}
+	}
+	if _, ok := parseCIMDURL("https://" + h + prefix + "x"); !ok {
+		return allowEntry{}, fmt.Errorf("OAUTH_CIMD_ALLOWED_HOSTS: %q: not a valid client_id prefix", e)
+	}
+	return allowEntry{raw: h + prefix, host: h, prefix: prefix}, nil
+}
+
 // ParseAllowedHosts parses OAUTH_CIMD_ALLOWED_HOSTS: a comma list of exact
-// host names or ".suffix" entries (matching subdomains). An empty list, an
-// empty entry, or an entry that is not a plain host name is an error. A
-// ".suffix" entry must name a registrable domain or something below it: a
-// single label (".com") or a public suffix (".co.uk", ".github.io") would
-// admit every site registered under it.
+// host names, ".suffix" entries (matching subdomains), or path-scoped
+// "host/path-prefix/" entries that admit only client_ids whose path starts
+// with the prefix on whole segments. An empty list, an empty entry, or an
+// entry that is not one of these is an error. A ".suffix" entry must name a
+// registrable domain or something below it: a single label (".com") or a
+// public suffix (".co.uk", ".github.io") would admit every site registered
+// under it.
 func ParseAllowedHosts(raw string) ([]string, error) {
 	var out []string
 	for _, e := range strings.Split(raw, ",") {
-		e = strings.ToLower(strings.TrimSpace(e))
+		e = strings.TrimSpace(e)
 		if e == "" {
 			if strings.TrimSpace(raw) == "" {
 				break
 			}
 			return nil, errors.New("OAUTH_CIMD_ALLOWED_HOSTS: empty entry")
 		}
-		h := strings.TrimPrefix(e, ".")
-		if h == "" || strings.ContainsAny(h, "/:@*? #\\") || strings.HasPrefix(h, ".") || strings.HasSuffix(h, ".") {
-			return nil, fmt.Errorf("OAUTH_CIMD_ALLOWED_HOSTS: %q is not a host name or .suffix", e)
+		ent, err := parseAllowEntry(e)
+		if err != nil {
+			return nil, err
 		}
-		if net.ParseIP(h) != nil {
-			return nil, fmt.Errorf("OAUTH_CIMD_ALLOWED_HOSTS: %q is an IP literal", e)
+		if ent.suffix {
+			out = append(out, "."+ent.host)
+		} else {
+			out = append(out, ent.host+ent.prefix)
 		}
-		if strings.HasPrefix(e, ".") && !belowPublicSuffix(h) {
-			return nil, fmt.Errorf("OAUTH_CIMD_ALLOWED_HOSTS: %q covers a public suffix; name a registrable domain", e)
-		}
-		out = append(out, e)
 	}
 	if len(out) == 0 {
 		return nil, errors.New("OAUTH_CIMD_ALLOWED_HOSTS: required (and non-empty) when OAUTH_CIMD_ACCEPT=true")
@@ -236,7 +291,7 @@ type Options struct {
 
 // Resolver fetches, validates and caches metadata documents.
 type Resolver struct {
-	allowed []string
+	allowed []allowEntry
 	client  *http.Client
 	now     func() time.Time
 	perHost int
@@ -291,9 +346,11 @@ func NewResolver(o Options) *Resolver {
 	if timeout <= 0 {
 		timeout = fetchTimeout
 	}
-	allowed := make([]string, 0, len(o.AllowedHosts))
+	allowed := make([]allowEntry, 0, len(o.AllowedHosts))
 	for _, h := range o.AllowedHosts {
-		allowed = append(allowed, strings.ToLower(strings.TrimSpace(h)))
+		if ent, err := parseAllowEntry(h); err == nil {
+			allowed = append(allowed, ent)
+		}
 	}
 	return &Resolver{
 		allowed: allowed, client: c, now: now, perHost: per, timeout: timeout,
@@ -307,21 +364,46 @@ func NewResolver(o Options) *Resolver {
 // it is refused while it is full of hosts seen within the last minute.
 const maxRateHosts = 1024
 
-func (r *Resolver) hostAllowed(host string) bool {
-	host = strings.ToLower(host)
+// match returns the entry that admits u, or ok=false. Host-level entries are
+// checked first. Path-scoped entries need an equal host and a clean escaped
+// path (no encoded separators or percent signs) that starts with the prefix.
+func (r *Resolver) match(u *url.URL) (string, bool) {
+	host := strings.ToLower(u.Hostname())
 	for _, a := range r.allowed {
-		if a == "" {
+		if a.prefix != "" {
 			continue
 		}
-		if strings.HasPrefix(a, ".") {
-			if strings.HasSuffix(host, a) && len(host) > len(a) {
-				return true
+		if a.suffix {
+			if strings.HasSuffix(host, "."+a.host) && len(host) > len(a.host)+1 {
+				return a.raw, true
 			}
-		} else if host == a {
-			return true
+		} else if host == a.host {
+			return a.raw, true
 		}
 	}
-	return false
+	p := u.EscapedPath()
+	lp := strings.ToLower(p)
+	if strings.Contains(lp, "%2f") || strings.Contains(lp, "%5c") || strings.Contains(lp, "%25") {
+		return "", false
+	}
+	for _, a := range r.allowed {
+		if a.prefix != "" && host == a.host && strings.HasPrefix(p, a.prefix) {
+			return a.raw, true
+		}
+	}
+	return "", false
+}
+
+// missError wraps ErrNotAllowed, noting when the host is named by
+// path-scoped entries only.
+func (r *Resolver) missError(u *url.URL) error {
+	host := strings.ToLower(u.Hostname())
+	for _, a := range r.allowed {
+		if a.prefix != "" && a.host == host {
+			return fmt.Errorf("%w; host has path-scoped entries only", ErrNotAllowed)
+		}
+	}
+	return ErrNotAllowed
 }
 
 // Resolve returns the validated document for clientID.
@@ -330,10 +412,14 @@ func (r *Resolver) Resolve(ctx context.Context, clientID string) (Document, erro
 	if !ok {
 		return Document{}, fmt.Errorf("%w: not a CIMD URL", ErrInvalidDocument)
 	}
-	if !r.hostAllowed(u.Hostname()) {
-		return Document{}, ErrNotAllowed
+	entry, allowed := r.match(u)
+	if !allowed {
+		return Document{}, r.missError(u)
 	}
 	if doc, err, hit := r.cached(clientID); hit {
+		if err == nil {
+			doc.AllowEntry = entry
+		}
 		return doc, err
 	}
 	v, err, _ := r.sf.Do(clientID, func() (any, error) {
@@ -361,7 +447,9 @@ func (r *Resolver) Resolve(ctx context.Context, clientID string) (Document, erro
 	if err != nil {
 		return Document{}, err
 	}
-	return v.(Document), nil
+	doc := v.(Document)
+	doc.AllowEntry = entry
+	return doc, nil
 }
 
 func (r *Resolver) cached(key string) (Document, error, bool) {
