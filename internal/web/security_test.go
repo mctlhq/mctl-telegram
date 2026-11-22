@@ -457,7 +457,7 @@ func TestLanding_UntestedClientsLabelled(t *testing.T) {
 		// the "Other clients" tab; Windsurf is named in the FAQ answer, which
 		// carries the label too (TestUntestedClients_LabelledEverywhere).
 		`<span class="tag-untested">not yet tested</span>`,
-		"Claude Code, Gemini, Cursor, VS Code, Grok, Notion, Rayrun, Hermes Agent and other MCP clients are not yet tested",
+		"Gemini, Cursor, VS Code, Notion, Rayrun, Hermes Agent and other MCP clients are not yet tested",
 		`href="mailto:support@mctl.ai">support@mctl.ai</a>`,
 		"Your client does not work? Write to",
 	} {
@@ -502,7 +502,7 @@ func TestUntestedClients_LabelledEverywhere(t *testing.T) {
 	for src, blocks := range sources {
 		for _, block := range blocks {
 			block = strings.Join(strings.Fields(block), " ")
-			for _, client := range []string{"Cursor", "VS Code", "Windsurf", "Grok", "Notion", "Rayrun", "Hermes", "Gemini"} {
+			for _, client := range []string{"Cursor", "VS Code", "Windsurf", "Notion", "Rayrun", "Hermes", "Gemini"} {
 				if strings.Contains(block, client) && !strings.Contains(block, "not yet tested") && !strings.Contains(block, "not tested") {
 					t.Errorf("%s: %s is named without \"not yet tested\" or \"not tested\" in: %s", src, client, block)
 				}
