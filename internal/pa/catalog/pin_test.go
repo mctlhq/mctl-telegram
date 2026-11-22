@@ -357,3 +357,16 @@ func TestCommittedPinAcceptsItsUpstream(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateRefusesModelNameOverLimit: server__tool must fit the
+// provider's tool-name limit, or the pin is refused at load instead of
+// every claim being refused by the worker. The boundary is inclusive.
+func TestValidateRefusesModelNameOverLimit(t *testing.T) {
+	fits := "a" + strings.Repeat("b", MaxModelToolName-len("alice__")-1)
+	if err := pinWith(fits, validTool()).Validate(); err != nil {
+		t.Fatalf("%d-character model name refused: %v", len("alice__"+fits), err)
+	}
+	if err := pinWith(fits+"c", validTool()).Validate(); !errors.Is(err, ErrInvalidPin) {
+		t.Fatalf("%d-character model name: Validate = %v, want ErrInvalidPin", len("alice__"+fits+"c"), err)
+	}
+}

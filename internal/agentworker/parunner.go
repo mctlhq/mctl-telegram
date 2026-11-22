@@ -59,6 +59,25 @@ const (
 	PAMaxContextTokens = jobs.DefaultMaxContextTokens
 )
 
+// Tool-call wire bounds, mirrored from the server (the worker does not
+// import it; tests in internal/pa and internal/pa/connector keep them in
+// step).
+const (
+	// PAToolCallTimeout is the HTTP timeout of one /tool request. The
+	// dispatcher may spend connector.DefaultCallTimeout on the call
+	// itself, plus the listing, audit and token refresh around it, so the
+	// worker waits longer than that: a slow call that the server completes
+	// must not be abandoned here. The run's deadline still bounds it.
+	PAToolCallTimeout = 90 * time.Second
+	// PAMaxToolRequestBytes is the dispatcher's request body bound
+	// (connector maxToolRequestBytes). A larger request is answered
+	// locally instead of being refused by the server.
+	PAMaxToolRequestBytes = 64 << 10
+	// PAModelToolNameMax is the provider's limit on a tool name, which
+	// the pin enforces for server__tool (catalog.MaxModelToolName).
+	PAModelToolNameMax = 64
+)
+
 // paLeaseMargin is how long before the lease ends the run gives up, so the
 // reply reaches the server while the token is still valid.
 const paLeaseMargin = 20 * time.Second
@@ -172,8 +191,11 @@ type PAOutcome string
 
 const (
 	PAReplied PAOutcome = "replied"
-	// PAStopped: the server refused a turn or the reply; the job is over
-	// and the server owes the principal any notice.
+	// PAStopped: the server refused a turn, a tool call or the reply, and
+	// the run ends. A refused turn or reply ends the job on the server,
+	// which owes the principal any notice. A refused tool call does not:
+	// the job stays leased until the lease runs out, and the server then
+	// sends the run-failed notice, as for PAAbandoned.
 	PAStopped PAOutcome = "stopped"
 	// PAAbandoned: the worker gave up (budget, deadline, empty answer, a
 	// model failure); the lease runs out and the server sends the
@@ -201,7 +223,10 @@ func (w *PAWorker) now() time.Time {
 	return time.Now()
 }
 
-func (w *PAWorker) client() *http.Client {
+// client is the HTTP client for one request. Its timeout is the
+// configured one (30s by default), raised to minTimeout when that is
+// longer.
+func (w *PAWorker) client(minTimeout time.Duration) *http.Client {
 	var c http.Client
 	if w.HTTP != nil {
 		c = *w.HTTP
@@ -209,6 +234,7 @@ func (w *PAWorker) client() *http.Client {
 	if c.Timeout <= 0 {
 		c.Timeout = 30 * time.Second
 	}
+	c.Timeout = max(c.Timeout, minTimeout)
 	// The requests carry a bearer credential: never follow a redirect.
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &c
@@ -217,6 +243,12 @@ func (w *PAWorker) client() *http.Client {
 // post sends body to route with token and decodes a 200 answer into out.
 // It returns (status, error); a non-2xx status is a *paHTTPError.
 func (w *PAWorker) post(ctx context.Context, route, token string, body, out any) (int, error) {
+	return w.postTimeout(ctx, route, token, body, out, 0)
+}
+
+// postTimeout is post with the client timeout raised to at least
+// minTimeout.
+func (w *PAWorker) postTimeout(ctx context.Context, route, token string, body, out any, minTimeout time.Duration) (int, error) {
 	var buf bytes.Buffer
 	if body != nil {
 		if err := json.NewEncoder(&buf).Encode(body); err != nil {
@@ -229,7 +261,7 @@ func (w *PAWorker) post(ctx context.Context, route, token string, body, out any)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := w.client().Do(req)
+	resp, err := w.client(minTimeout).Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("pa worker: %s: request failed: %w", route, err)
 	}
@@ -371,13 +403,19 @@ func (w *PAWorker) Run(ctx context.Context, c *PAClaim) (PAOutcome, error) {
 	costKnown := true
 	toolCalls := 0
 	for {
-		tokens := paContextTokens(msgs)
+		// Once the cap is used up the model is offered no tools: any call
+		// it made would end the run, so it is asked only to answer.
+		offer := tools
+		if toolCalls >= maxTools {
+			offer = nil
+		}
+		tokens := paContextTokens(msgs, offer)
 		// Defence in depth: whatever the server would admit, the worker
 		// does not send more than its own ceiling.
 		if tokens > maxContext {
 			return PAAbandoned, errors.New("pa worker: context over the limit")
 		}
-		res, out, err := w.chat(ctx, c.Token, tokens, msgs, tools)
+		res, out, err := w.chat(ctx, c.Token, tokens, msgs, offer)
 		if err != nil {
 			return out, err
 		}
@@ -515,6 +553,7 @@ func (w *PAWorker) chat(ctx context.Context, token string, tokens int, msgs []Ch
 const (
 	paToolUnavailable = "This tool is not available. Answer without it."
 	paToolBadArgs     = "The tool arguments were not a JSON object. Nothing was run."
+	paToolArgsTooBig  = "The tool arguments were too large. Nothing was run."
 	paToolCut         = "(The tool output was cut at the size limit.)"
 )
 
@@ -534,8 +573,14 @@ func (w *PAWorker) callTool(ctx context.Context, token string, byName map[string
 	if !paJSONObject(args) {
 		return paToolBadArgs, "", nil
 	}
+	req := paToolRequest{Server: ref.Server, Tool: ref.Tool, Arguments: args}
+	if b, err := json.Marshal(req); err != nil || len(b)+1 > PAMaxToolRequestBytes {
+		// The server would refuse it as bad_request, ending the run; the
+		// model gets a fixed answer instead. +1: the encoder's newline.
+		return paToolArgsTooBig, "", nil
+	}
 	var res paToolResponse
-	_, err := w.post(ctx, PARouteTool, token, paToolRequest{Server: ref.Server, Tool: ref.Tool, Arguments: args}, &res)
+	_, err := w.postTimeout(ctx, PARouteTool, token, req, &res, PAToolCallTimeout)
 	if err != nil {
 		var he *paHTTPError
 		if errors.As(err, &he) && he.Stop != "" {
@@ -586,7 +631,7 @@ var (
 // no "_", so the first "__" splits it unambiguously.
 func paModelToolName(server, tool string) (string, bool) {
 	n := server + "__" + tool
-	return n, len(n) <= 64
+	return n, len(n) <= PAModelToolNameMax
 }
 
 // paClaimTools checks the claim's tools against its signed tool set and
@@ -656,14 +701,32 @@ func paMessages(frags []paFragment) []ChatMessage {
 	return msgs
 }
 
-// paExternalTag matches anything that could open or close an
-// external_data block, in any case and with any whitespace after the "<"
-// or the "/": "<external_data", "</EXTERNAL_DATA", "< / External_Data".
-var paExternalTag = regexp.MustCompile(`(?i)<\s*(/?)\s*external_data`)
+// paExternalEscaper escapes external text unconditionally: every "<" and
+// ">" becomes an entity, as does "&" so an entity in the text stays
+// literal, and so do the angle-bracket lookalikes a model may read as a
+// tag (fullwidth, small form, single guillemets, CJK and mathematical
+// angle brackets, modifier letters). No pattern of the tag is matched:
+// no spelling of a tag (control characters, NBSP, zero-width or bidi
+// characters inside it, another case, a hyphen) survives, because no
+// bracket does.
+var paExternalEscaper = strings.NewReplacer(
+	"&", "&amp;", "<", "&lt;", ">", "&gt;",
+	"\uFF1C", "&#xFF1C;", "\uFF1E", "&#xFF1E;", // fullwidth
+	"\uFE64", "&#xFE64;", "\uFE65", "&#xFE65;", // small form
+	"\u2039", "&#x2039;", "\u203A", "&#x203A;", // single guillemets
+	"\u2329", "&#x2329;", "\u232A", "&#x232A;", // angle brackets
+	"\u3008", "&#x3008;", "\u3009", "&#x3009;", // CJK angle brackets
+	"\u27E8", "&#x27E8;", "\u27E9", "&#x27E9;", // mathematical angle brackets
+	"\u276C", "&#x276C;", "\u276D", "&#x276D;", // ornament angle brackets
+	"\u276E", "&#x276E;", "\u276F", "&#x276F;",
+	"\u2770", "&#x2770;", "\u2771", "&#x2771;",
+	"\u02C2", "&#x02C2;", "\u02C3", "&#x02C3;", // modifier arrowheads
+	"\u1438", "&#x1438;", "\u1433", "&#x1433;", // syllabics lookalikes
+)
 
-// paExternalBlock wraps external text. Every opening or closing tag inside
-// the text is defused, whatever its case, so the text can neither end its
-// own block nor fake a new one.
+// paExternalBlock wraps external text. The text is escaped whole
+// (paExternalEscaper), so it can neither end its own block nor fake a new
+// one: the fence's own two tags are the only brackets in the result.
 func paExternalBlock(f paFragment) string {
 	kind := strings.Map(func(r rune) rune {
 		if r >= 'a' && r <= 'z' || r == '_' {
@@ -671,16 +734,18 @@ func paExternalBlock(f paFragment) string {
 		}
 		return -1
 	}, f.Kind)
-	text := paExternalTag.ReplaceAllStringFunc(f.Text, func(m string) string {
-		return "&lt;" + m[1:]
-	})
+	text := paExternalEscaper.Replace(f.Text)
 	return `<external_data kind="` + kind + `">` + "\n" + text + "\n</external_data>"
 }
 
 // paContextTokens estimates the input size the way the server budgets it:
-// one token per four bytes, rounded up, over every message.
-func paContextTokens(msgs []ChatMessage) int {
+// one token per four bytes, rounded up, over every message and every
+// offered tool's name, description and schema (they are input too).
+func paContextTokens(msgs []ChatMessage, tools []PAModelTool) int {
 	n := 0
+	for _, t := range tools {
+		n += len(t.Name) + len(t.Description) + len(t.Parameters)
+	}
 	for _, m := range msgs {
 		n += len(m.Role) + len(m.Content) + len(m.ToolCallID)
 		for _, tc := range m.ToolCalls {

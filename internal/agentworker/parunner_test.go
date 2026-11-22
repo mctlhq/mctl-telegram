@@ -28,6 +28,8 @@ type paFake struct {
 	// headers, in order.
 	toolReqs  []map[string]any
 	toolAuths []string
+	// toolDelay is how long /tool waits before answering.
+	toolDelay time.Duration
 }
 
 type paAnswer struct {
@@ -85,6 +87,10 @@ func (f *paFake) serve(w http.ResponseWriter, r *http.Request) {
 		f.toolAuths = append(f.toolAuths, r.Header.Get("Authorization"))
 		f.mu.Unlock()
 		f.record("tool")
+		f.mu.Lock()
+		d := f.toolDelay
+		f.mu.Unlock()
+		time.Sleep(d)
 	default:
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -516,10 +522,10 @@ func TestPAWorker_NoRedirect(t *testing.T) {
 // TestPAWorker_ClientTimeout: requests are bounded by default, and a
 // configured timeout is kept.
 func TestPAWorker_ClientTimeout(t *testing.T) {
-	if got := (&PAWorker{}).client().Timeout; got != 30*time.Second {
+	if got := (&PAWorker{}).client(0).Timeout; got != 30*time.Second {
 		t.Fatalf("default timeout %s, want 30s", got)
 	}
-	if got := (&PAWorker{HTTP: &http.Client{Timeout: 5 * time.Second}}).client().Timeout; got != 5*time.Second {
+	if got := (&PAWorker{HTTP: &http.Client{Timeout: 5 * time.Second}}).client(0).Timeout; got != 5*time.Second {
 		t.Fatalf("configured timeout %s, want 5s", got)
 	}
 }

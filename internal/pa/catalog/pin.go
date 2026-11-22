@@ -161,6 +161,11 @@ var (
 	sha256HexRE  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
+// MaxModelToolName is the provider's limit on a tool name. The worker
+// names a tool server__tool (agentworker.PAModelToolNameMax), and Validate
+// refuses a pin entry whose name would not fit.
+const MaxModelToolName = 64
+
 // maxCatalogDescription bounds what the catalog shows the model per tool.
 const maxCatalogDescription = 1000
 
@@ -238,6 +243,12 @@ func (p *Pin) Validate() error {
 		for name, t := range sp.Tools {
 			if err := validateTool(name, t); err != nil {
 				return fmt.Errorf("%w: %s/%s: %v", ErrInvalidPin, server, name, err)
+			}
+			// The worker offers the tool to the model as server__tool;
+			// a pin it cannot offer fails here, at startup, rather than
+			// as a refused claim per job.
+			if n := len(server) + len("__") + len(name); n > MaxModelToolName {
+				return fmt.Errorf("%w: %s/%s: model-facing name is %d characters, over %d", ErrInvalidPin, server, name, n, MaxModelToolName)
 			}
 		}
 	}

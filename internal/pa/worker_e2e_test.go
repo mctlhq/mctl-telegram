@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/agentworker"
+	"github.com/mctlhq/mctl-telegram/internal/pa/catalog"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
@@ -71,6 +72,9 @@ func TestPARoutesMatchServer(t *testing.T) {
 	}
 	if agentworker.PAMaxToolCalls != jobs.DefaultMaxToolCalls || agentworker.PAMaxContextTokens != jobs.DefaultMaxContextTokens {
 		t.Fatal("agentworker PA ceilings differ from the job defaults")
+	}
+	if agentworker.PAModelToolNameMax != catalog.MaxModelToolName {
+		t.Fatal("agentworker model tool-name limit differs from the pin's")
 	}
 }
 
