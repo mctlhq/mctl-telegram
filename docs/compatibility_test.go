@@ -97,10 +97,17 @@ func TestCompatibilityMatrixEvidence(t *testing.T) {
 	}
 }
 
-func TestCompatibilityMatrixTownNotWorks(t *testing.T) {
+// Town was held at "not tested" until a completed token and tool call were
+// seen. The owner observed both on 2026-11-22, so "works" is allowed now, but
+// only while the row says whose observation it rests on: an uncited "works"
+// for Town is what this guard exists to refuse.
+func TestCompatibilityMatrixTownWorksOnlyWithRecordedObservation(t *testing.T) {
 	for _, r := range readMatrix(t) {
-		if r.host == "Town" && r.status == "works" {
-			t.Errorf("Town must not be %q: no token or tool call is proven", r.status)
+		if r.host != "Town" || r.status != "works" {
+			continue
+		}
+		if !strings.Contains(r.evidence, "Owner-observed on "+r.date) {
+			t.Errorf("Town is %q on %s but its evidence does not record the owner's observation of that date", r.status, r.date)
 		}
 	}
 }
