@@ -20,6 +20,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
+	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 )
 
 var _ connection.Store = (*Store)(nil)
@@ -315,36 +316,116 @@ func missOrConflict(ctx context.Context, q paQuerier, principal int64, id string
 	return connection.ErrConflict
 }
 
-// paActivateAfterConsent is a test seam: when set, TransitionPAConnection
+// paActivateAfterConsent is a test seam: when set, ActivatePAConnection
 // calls it during an activation, after the principal lock and the consent
-// read and before the update, inside the transaction, so a test can race a
-// /consent withdraw against exactly that window. Always nil outside tests.
+// and disable reads and before the update, inside the transaction, so a
+// test can race a /consent withdraw or an admin disable against exactly
+// that window. Always nil outside tests.
 var paActivateAfterConsent func(principal int64)
 
-// TransitionPAConnection applies t (see connection.Transition).
+// TransitionPAConnection applies t (see connection.Transition). The
+// activation edge is ActivatePAConnection, with every one of its checks:
+// there is no way to activate a connection that skips the consent, disable
+// or supersede step. Called here, the superseded rows are revoked locally
+// only; Manager.Confirm, the production path, calls ActivatePAConnection
+// itself so it can also revoke their tokens at the server.
 //
-// Activation (pending_confirm -> active) first takes the principal's lock,
-// the one every webhook update takes before it can withdraw consent or
-// /forget (pa.Conversations.HandleUpdate), and reads the principal's
-// consent in the same transaction. Without a current, accepted consent
-// it refuses with connection.ErrNoConsent and changes nothing. A withdraw
-// and an activation are therefore ordered: a withdraw that commits first
-// refuses the activation, and one that starts later waits for it. A
-// consent row that cannot be read refuses too, never activates.
-//
-// Like CreatePAConnection it must not be called inside a transaction that
-// holds the principal lock.
+// active -> expired also queues the connection's "link it again" notice in
+// the same transaction (jobs.OutboxConnectionExpired), once per connection:
+// a connection is never re-activated, so the row is keyed on that one
+// transition, and a second replica or a restart cannot send it twice.
 func (s *Store) TransitionPAConnection(ctx context.Context, principal int64, id string, t connection.Transition) (connection.Connection, error) {
 	if err := t.Validate(); err != nil {
 		return connection.Connection{}, err
 	}
-	now := time.Now().UTC().UnixMilli()
-	if !t.At.IsZero() {
-		now = t.At.UTC().UnixMilli()
+	if t.From == connection.StatePendingConfirm && t.To == connection.StateActive {
+		c, _, err := s.ActivatePAConnection(ctx, principal, id, t)
+		return c, err
 	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return connection.Connection{}, fmt.Errorf("pa connection transition: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	c, err := transitionPAConnTx(ctx, tx, principal, id, t)
+	if err != nil {
+		return connection.Connection{}, err
+	}
+	if t.To == connection.StateExpired {
+		if err := enqueuePAOutbox(ctx, tx, jobs.OutboxItem{
+			Principal: principal, Kind: jobs.OutboxConnectionExpired, ConnectionID: id,
+		}, transitionAtMS(t)); err != nil {
+			return connection.Connection{}, fmt.Errorf("pa connection transition: expiry notice: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return connection.Connection{}, fmt.Errorf("pa connection transition: commit: %w", err)
+	}
+	return c, nil
+}
+
+// ActivatePAConnection applies the activation edge (see
+// connection.Store).
+//
+// It first takes the principal's lock, the one every webhook update takes
+// before it can withdraw consent or /forget (pa.Conversations.HandleUpdate),
+// and in the same transaction reads the principal's consent and its admin
+// disable. Without a current, accepted consent it refuses with
+// connection.ErrNoConsent; a disabled principal, or one whose disable
+// cannot be read, is connection.ErrPrincipalDisabled. Either changes
+// nothing. A withdraw and an activation are therefore ordered: a withdraw
+// that commits first refuses the activation, and one that starts later
+// waits for it.
+//
+// Then, still in that transaction, every other active or expired
+// connection of the principal on the same server is revoked (state
+// revoked, revision bumped, secrets destroyed), and returned with the
+// secret material it held for remote revocation. A failed read of those
+// rows fails the activation: it is never "no other connection".
+//
+// Like CreatePAConnection it must not be called inside a transaction that
+// holds the principal lock.
+func (s *Store) ActivatePAConnection(ctx context.Context, principal int64, id string, t connection.Transition) (connection.Connection, []connection.Superseded, error) {
+	if err := t.Validate(); err != nil {
+		return connection.Connection{}, nil, err
+	}
+	if t.From != connection.StatePendingConfirm || t.To != connection.StateActive {
+		return connection.Connection{}, nil, fmt.Errorf("%w: not the activation edge", connection.ErrInvalidTransition)
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return connection.Connection{}, nil, fmt.Errorf("pa connection activation: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.activationAdmitted(ctx, tx, principal); err != nil {
+		return connection.Connection{}, nil, err
+	}
+	c, err := transitionPAConnTx(ctx, tx, principal, id, t)
+	if err != nil {
+		return connection.Connection{}, nil, err
+	}
+	superseded, err := supersedePAConns(ctx, tx, c, transitionAtMS(t))
+	if err != nil {
+		return connection.Connection{}, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return connection.Connection{}, nil, fmt.Errorf("pa connection activation: commit: %w", err)
+	}
+	return c, superseded, nil
+}
+
+func transitionAtMS(t connection.Transition) int64 {
+	if !t.At.IsZero() {
+		return t.At.UTC().UnixMilli()
+	}
+	return time.Now().UTC().UnixMilli()
+}
+
+// transitionPAConnTx is the compare-and-set of a transition in tx.
+func transitionPAConnTx(ctx context.Context, tx *sql.Tx, principal int64, id string, t connection.Transition) (connection.Connection, error) {
 	set := `state = $1, authority_revision = authority_revision + 1, updated_at_ms = $2,
 		refresh_lease_owner = '', refresh_lease_until_ms = 0`
-	args := []any{string(t.To), now, principal, id, string(t.From), t.ExpectRevision}
+	args := []any{string(t.To), transitionAtMS(t), principal, id, string(t.From), t.ExpectRevision}
 	switch {
 	case t.To == connection.StatePendingReturn:
 		set += `, sealed_code = $7`
@@ -355,16 +436,6 @@ func (s *Store) TransitionPAConnection(ctx context.Context, principal int64, id 
 	case t.To.WipesSecrets():
 		set += `, wrapped_dek = NULL, sealed_code = NULL, sealed_tokens = NULL, failure_reason = $7`
 		args = append(args, t.Reason)
-	}
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return connection.Connection{}, fmt.Errorf("pa connection transition: begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if t.From == connection.StatePendingConfirm && t.To == connection.StateActive {
-		if err := s.activationConsent(ctx, tx, principal); err != nil {
-			return connection.Connection{}, err
-		}
 	}
 	res, err := tx.ExecContext(ctx, `UPDATE pa_connections SET `+set+`
 		WHERE principal = $3 AND id = $4 AND state = $5 AND authority_revision = $6`, args...)
@@ -378,19 +449,56 @@ func (s *Store) TransitionPAConnection(ctx context.Context, principal int64, id 
 	if n != 1 {
 		return connection.Connection{}, missOrConflict(ctx, tx, principal, id)
 	}
-	c, err := getPAConn(ctx, tx, principal, id, nil)
-	if err != nil {
-		return connection.Connection{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return connection.Connection{}, fmt.Errorf("pa connection transition: commit: %w", err)
-	}
-	return c, nil
+	return getPAConn(ctx, tx, principal, id, nil)
 }
 
-// activationConsent takes principal's lock in tx and requires its
-// current consent (see TransitionPAConnection).
-func (s *Store) activationConsent(ctx context.Context, tx *sql.Tx, principal int64) error {
+// supersedePAConns revokes, in tx, every active or expired connection of
+// c's principal on c's server other than c, and returns them as they were.
+// The rows are read in tx after the principal lock, so no row moves
+// between the read and the update.
+func supersedePAConns(ctx context.Context, tx *sql.Tx, c connection.Connection, nowMS int64) ([]connection.Superseded, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM pa_connections
+		WHERE principal = $1 AND server = $2 AND id <> $3 AND state IN ($4, $5) ORDER BY created_at_ms, id`,
+		c.Principal, string(c.Server), c.ID, string(connection.StateActive), string(connection.StateExpired))
+	if err != nil {
+		return nil, fmt.Errorf("%w: superseded connections: %v", connection.ErrUnreadable, err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("%w: superseded connections: %v", connection.ErrUnreadable, err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("%w: superseded connections: %v", connection.ErrUnreadable, err)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("%w: superseded connections: %v", connection.ErrUnreadable, err)
+	}
+	var out []connection.Superseded
+	for _, id := range ids {
+		var before connection.Sealed
+		cur, err := getPAConn(ctx, tx, c.Principal, id, &before)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := transitionPAConnTx(ctx, tx, c.Principal, id, connection.Transition{
+			From: cur.State, To: connection.StateRevoked, ExpectRevision: cur.AuthorityRevision,
+			Reason: "superseded", At: time.UnixMilli(nowMS),
+		}); err != nil {
+			return nil, fmt.Errorf("pa connection activation: supersede: %w", err)
+		}
+		out = append(out, connection.Superseded{Connection: cur, Before: before})
+	}
+	return out, nil
+}
+
+// activationAdmitted takes principal's lock in tx and requires its current
+// consent and that it is not disabled (see ActivatePAConnection).
+func (s *Store) activationAdmitted(ctx context.Context, tx *sql.Tx, principal int64) error {
 	if err := s.LockPAPrincipal(ctx, tx, principal); err != nil {
 		return fmt.Errorf("pa connection activation: %w", err)
 	}
@@ -402,6 +510,13 @@ func (s *Store) activationConsent(ctx context.Context, tx *sql.Tx, principal int
 		return fmt.Errorf("%w: consent unreadable: %w", connection.ErrNoConsent, err)
 	case !convo.Satisfied(rec):
 		return connection.ErrNoConsent
+	}
+	disabled, err := s.PAPrincipalDisabled(ctx, tx, principal)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w: disable unreadable: %w", connection.ErrPrincipalDisabled, err)
+	case disabled:
+		return connection.ErrPrincipalDisabled
 	}
 	if paActivateAfterConsent != nil {
 		paActivateAfterConsent(principal)

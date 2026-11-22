@@ -788,6 +788,11 @@ func (s *Service) HandleCallback(ctx context.Context, u pa.VerifiedUpdate) (bool
 		_, aerr := s.cfg.Manager.Abandon(ctx, l.Principal, l.ConnectionID, l.Revision, "no_consent")
 		return true, errors.Join(ErrNoConsent, err, aerr)
 	}
+	// An admin disable that commits after admitted above, or one that
+	// cannot be read, refuses the activation under the same lock (#1318).
+	if errors.Is(err, connection.ErrPrincipalDisabled) {
+		return true, s.refuseLink(ctx, l, errors.Join(ErrPrincipalRefused, err))
+	}
 	return true, err
 }
 

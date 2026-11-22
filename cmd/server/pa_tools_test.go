@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -165,11 +166,22 @@ type paFakeMCP struct {
 	principal int64
 	mu        sync.Mutex
 	calls     []string
+	// lists records the bearer of every tools/list; reject answers
+	// tools/list with a 401 for the tokens in it.
+	lists  []string
+	reject map[string]bool
 }
 
 func (m *paFakeMCP) Server() string { return "tg" }
 
-func (m *paFakeMCP) ListTools(context.Context, connection.Secret) ([][]byte, error) {
+func (m *paFakeMCP) ListTools(_ context.Context, token connection.Secret) ([][]byte, error) {
+	m.mu.Lock()
+	m.lists = append(m.lists, token.Reveal())
+	rejected := m.reject[token.Reveal()]
+	m.mu.Unlock()
+	if rejected {
+		return nil, connector.ErrMCPTokenRejected
+	}
 	raw, err := os.ReadFile(filepath.Join("..", "..", "docs", "tool-descriptors.json"))
 	if err != nil {
 		return nil, err
@@ -229,6 +241,8 @@ type paToolsFakes struct {
 	revoker *paFakeRevoker
 	// built counts newPAServerNet calls.
 	built int
+	// refreshes counts the refresh-token grants the server's Refresh got.
+	refreshes atomic.Int32
 }
 
 // fakePAServerNet points newPAServerNet at the fakes for the test.
@@ -243,7 +257,12 @@ func fakePAServerNet(t *testing.T, principal int64) *paToolsFakes {
 	newPAServerNet = func(s config.PAServer) (paServerNet, error) {
 		f.built++
 		return paServerNet{Metadata: client, Revoker: f.revoker,
-			Tokens:   linking.FormTokenClient{Clients: map[connection.Server]*http.Client{s.Name: client}},
+			Tokens: linking.FormTokenClient{Clients: map[connection.Server]*http.Client{s.Name: client}},
+			Refresh: func(context.Context, connection.Server, connection.Secret) ([]byte, error) {
+				f.refreshes.Add(1)
+				return []byte(`{"access_token":"fake-at-refreshed","token_type":"Bearer","expires_in":3600,` +
+					`"refresh_token":"fake-rt-refreshed","scope":"` + paTGScope + `"}`), nil
+			},
 			Endpoint: f.mcp}, nil
 	}
 	t.Cleanup(func() { newPAServerNet = prev })
@@ -787,5 +806,101 @@ func TestMainWiresPARevokersBeforeServing(t *testing.T) {
 	at, build, serve := strings.Index(s, call), strings.Index(s, "paRT, err := buildPA("), strings.Index(s, "srv.ListenAndServe()")
 	if build < 0 || serve < 0 || !(build < at && at < serve) {
 		t.Fatalf("wirePARevokers at %d, want between buildPA (%d) and ListenAndServe (%d)", at, build, serve)
+	}
+}
+
+// paTGScope is tg's canonical scope, which a refresh response must carry.
+var paTGScope, _ = connection.CanonicalScope(connection.ServerTG)
+
+// TestPATools_RefreshOnRejectedToken (#1318 slice C2b): the server's
+// refresh-token grant reaches the connection manager through
+// newPAServerNet and the per-server dispatch. A 401 on tools/list is
+// answered by one refresh and one retry with the refreshed token.
+func TestPATools_RefreshOnRejectedToken(t *testing.T) {
+	e := newPAE2E(t)
+	ctx := context.Background()
+	f, rt, mux, carol := e.f, e.rt, e.mux, e.user
+	e.consent()
+	card := e.toCard()
+	e.press(card.buttons[0])
+	conns, err := rt.Connections().List(ctx, carol)
+	if err != nil || len(conns) != 1 || conns[0].State != connection.StateActive {
+		t.Fatalf("connections %+v err %v", conns, err)
+	}
+	issued := f.as.issued[len(f.as.issued)-1]
+	f.mcp.mu.Lock()
+	f.mcp.reject = map[string]bool{issued: true}
+	f.mcp.mu.Unlock()
+
+	e.text("what is in my dialogs")
+	iss, err := localjwt.NewIssuer([]byte(testPASigningKey), testPABaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := iss.Mint(localjwt.Claims{
+		Subject: "pool:main", Audience: []string{localjwt.PoolAudience}, Jti: "pool-jti-refresh",
+		OriginalIssuedAt: time.Now().Add(-time.Minute).Unix(),
+	}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(route, token, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, route, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		return w
+	}
+	w := post(pa.RouteClaim, pool, "")
+	var claim struct {
+		Token string `json:"token"`
+	}
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &claim) != nil || claim.Token == "" {
+		t.Fatalf("claim: %d %s", w.Code, w.Body.String())
+	}
+	call, _ := json.Marshal(map[string]any{"server": "tg", "tool": "list_dialogs", "connection_id": conns[0].ID, "arguments": map[string]any{}})
+	w = post(connector.RouteTool, claim.Token, string(call))
+	if w.Code != http.StatusOK {
+		t.Fatalf("tool call after a 401: %d %s", w.Code, w.Body.String())
+	}
+	f.mcp.mu.Lock()
+	lists := slices.Clone(f.mcp.lists)
+	f.mcp.mu.Unlock()
+	if n := f.refreshes.Load(); n != 1 || !slices.Equal(lists, []string{issued, "fake-at-refreshed"}) {
+		t.Fatalf("refreshes %d, tools/list bearers %v; want one refresh and a retry with the refreshed token", n, lists)
+	}
+	if calls := f.mcp.got(); !slices.Contains(calls, "list_dialogs fake-at-refreshed") {
+		t.Fatalf("MCP calls %v, want list_dialogs with the refreshed token", calls)
+	}
+}
+
+// TestNewPAServerNet_CarriesRefresh: the production builder hands the
+// OAuth client's refresh-token grant on; without it no connection would
+// ever refresh.
+func TestNewPAServerNet_CarriesRefresh(t *testing.T) {
+	n, err := newPAServerNet(config.PAServer{
+		Name: connection.ServerTG, ClientID: "client-x",
+		TokenEndpoint: "https://as.example.test/token", RevocationEndpoint: "https://as.example.test/revoke",
+		Resource: "https://mcp.example.test/mcp", AllowedHosts: []string{"as.example.test", "mcp.example.test"},
+		MCPURL: "https://mcp.example.test/mcp",
+	})
+	if err != nil {
+		t.Fatalf("newPAServerNet: %v", err)
+	}
+	if n.Refresh == nil || n.Revoker == nil || n.Tokens == nil || n.Endpoint == nil {
+		t.Fatalf("server net %+v: a client is missing", n)
+	}
+}
+
+// TestPARefreshers: a server without a refresh client fails the refresh,
+// never answers it.
+func TestPARefreshers(t *testing.T) {
+	r := paRefreshers{}
+	if _, err := r.Refresh(context.Background(), connection.ServerTG, connection.NewSecret("fake-rt")); err == nil {
+		t.Fatal("refresh without a client succeeded")
+	}
+	r[connection.ServerTG] = func(context.Context, connection.Server, connection.Secret) ([]byte, error) { return []byte("ok"), nil }
+	if b, err := r.Refresh(context.Background(), connection.ServerTG, connection.NewSecret("fake-rt")); err != nil || string(b) != "ok" {
+		t.Fatalf("refresh %q %v", b, err)
 	}
 }

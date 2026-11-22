@@ -258,6 +258,27 @@ var (
 	// ErrTooManyPending: the principal already has MaxPendingConnections
 	// connections in a pending_* state (threat model T10).
 	ErrTooManyPending = errors.New("pa connection: too many connections being linked")
+	// ErrPrincipalDisabled: activation (pending_confirm -> active) found
+	// the principal disabled by an admin, or could not read whether it is,
+	// under the principal's lock in the activating transaction. The
+	// connection is left pending; the caller fails it and revokes its
+	// tokens (#1318).
+	ErrPrincipalDisabled = errors.New("pa connection: principal disabled")
+	// ErrNoRefreshToken: the server rejected the access token and the
+	// connection holds no refresh token, so only a new /connect can make it
+	// usable again. The connection is moved to expired.
+	ErrNoRefreshToken = errors.New("pa connection: no refresh token")
+	// ErrRefreshUnavailable: no refresh-token grant is configured.
+	ErrRefreshUnavailable = errors.New("pa connection: refresh not configured")
+	// ErrRefreshFailed wraps a refresh-token grant that failed for any
+	// reason other than invalid_grant or reported reuse (the network, the
+	// server, a timeout). The connection is unchanged; only the call that
+	// needed the refresh fails, and nothing retries it.
+	ErrRefreshFailed = errors.New("pa connection: refresh failed")
+	// ErrExpired is ErrNotActive for a connection in state expired: the
+	// service stopped accepting it, and only a new /connect helps. It
+	// wraps ErrNotActive, so every check for "not active" still refuses.
+	ErrExpired = fmt.Errorf("%w: connection expired", ErrNotActive)
 	// ErrPrincipalDeleted: the principal's account was deleted after this
 	// Begin was admitted, so it may not create a connection (#1338).
 	ErrPrincipalDeleted = errors.New("pa connection: the account was deleted")

@@ -310,3 +310,30 @@ func TestOutboxBackoff(t *testing.T) {
 		}
 	}
 }
+
+// TestRunLoop_OutboxConnectionExpired (#1318 slice C2b): the connection
+// expiry notice is a connection-level row, keyed on the connection, and
+// goes out once through output.Sender as its server text.
+func TestRunLoop_OutboxConnectionExpired(t *testing.T) {
+	h := newRunLoopHarness(t)
+	st := h.convoHarness.store
+	for range 2 {
+		// The same transition queued twice is one row (the key, not memory).
+		if _, err := st.DB.Exec(`INSERT INTO pa_outbox(principal, job_id, update_id, kind, connection_id, status, attempts,
+			next_at_ms, created_at_ms, updated_at_ms) VALUES($1, NULL, 0, $2, 'conn-x', 'pending', 0, 0, 0, 0)
+			ON CONFLICT (principal, connection_id, kind) WHERE connection_id <> '' DO NOTHING`,
+			aliceID, string(jobs.OutboxConnectionExpired)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.loop.deliver(context.Background(), 0)
+	h.loop.deliver(context.Background(), 0)
+	sent := h.sender.to(aliceID)
+	want := safetext.ServerText(safetext.TextConnectionExpired)
+	if len(sent) != 1 || !strings.Contains(sent[0], "/connect") || want.Parts() != 1 {
+		t.Fatalf("sent %q, want the expiry notice once", sent)
+	}
+	if got := h.outboxStatus(jobs.OutboxConnectionExpired); got != string(jobs.OutboxSent) {
+		t.Fatalf("status %q, want sent", got)
+	}
+}

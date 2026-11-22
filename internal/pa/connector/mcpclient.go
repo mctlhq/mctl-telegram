@@ -60,6 +60,14 @@ var (
 	// ErrMCPUnauthorized is a 401 or 403 from the server: it refused the
 	// connection's token.
 	ErrMCPUnauthorized = errors.New("pa connector: mcp server refused the token")
+	// ErrMCPTokenRejected is the 401 case of ErrMCPUnauthorized: the server
+	// did not accept the token as a credential, which a refreshed token
+	// can fix. The request was rejected before it ran (#1318 slice C2b).
+	ErrMCPTokenRejected = fmt.Errorf("%w: token rejected (401)", ErrMCPUnauthorized)
+	// ErrMCPForbidden is the 403 case of ErrMCPUnauthorized: the server
+	// accepted the token and refused the request. A refresh does not
+	// change that, so it is never retried.
+	ErrMCPForbidden = fmt.Errorf("%w: forbidden (403)", ErrMCPUnauthorized)
 )
 
 // Endpoint is one catalog server's MCP URL with its egress client.
@@ -286,8 +294,11 @@ func (s *session) post(ctx context.Context, m rpcRequest) (*http.Response, error
 }
 
 func statusErr(code int) error {
-	if code == http.StatusUnauthorized || code == http.StatusForbidden {
-		return fmt.Errorf("%w: status %d", ErrMCPUnauthorized, code)
+	switch code {
+	case http.StatusUnauthorized:
+		return ErrMCPTokenRejected
+	case http.StatusForbidden:
+		return ErrMCPForbidden
 	}
 	return fmt.Errorf("%w: status %d", ErrMCPProtocol, code)
 }

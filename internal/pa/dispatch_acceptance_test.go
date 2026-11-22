@@ -138,6 +138,11 @@ type fakeMCP struct {
 	out     []byte // tools/call result; nil = a short text result
 	// block makes tools/call wait for its context (or a 5s safety stop).
 	block bool
+	// listReject and callReject refuse one bearer token on tools/list or
+	// tools/call with the given error (a 401 or 403), before anything
+	// else; any other token gets the normal answer.
+	listReject map[string]error
+	callReject map[string]error
 }
 
 func (f *fakeMCP) Server() string { return f.server }
@@ -147,6 +152,9 @@ func (f *fakeMCP) ListTools(_ context.Context, tok connection.Secret) ([][]byte,
 	defer f.mu.Unlock()
 	f.bearers = append(f.bearers, tok.Reveal())
 	f.lists++
+	if err := f.listReject[tok.Reveal()]; err != nil {
+		return nil, err
+	}
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -158,7 +166,11 @@ func (f *fakeMCP) CallTool(ctx context.Context, tok connection.Secret, tool stri
 	f.bearers = append(f.bearers, tok.Reveal())
 	f.calls = append(f.calls, tool)
 	hook, err, out, block := f.onCall, f.callErr, f.out, f.block
+	reject := f.callReject[tok.Reveal()]
 	f.mu.Unlock()
+	if reject != nil {
+		return nil, reject
+	}
 	if hook != nil {
 		hook()
 	}
@@ -344,6 +356,10 @@ type dispatchEnv struct {
 	connA   connection.Connection
 	connB   connection.Connection
 	cfg     connector.DispatcherConfig
+	// refreshes counts refresh-token grants; refreshFn, when set, answers
+	// them instead of the default fresh token "fake-at-<account>-r".
+	refreshes atomic.Int32
+	refreshFn atomic.Pointer[connection.RefreshFunc]
 }
 
 func newDispatchEnv(t *testing.T, store *db.Store) *dispatchEnv {
@@ -361,7 +377,17 @@ func newDispatchEnv(t *testing.T, store *db.Store) *dispatchEnv {
 	}
 	e.sink = &failingSink{inner: connector.StoreSink{Store: store}}
 	fence := connector.FenceAudit{Sink: e.sink, Now: e.h.Now}
-	e.mgr, err = connection.NewManager(connection.Config{Store: store, KEK: kek, Revoker: noRevoker{}, Auditor: &fenceRecorder{inner: fence}})
+	e.mgr, err = connection.NewManager(connection.Config{
+		Store: store, KEK: kek, Revoker: noRevoker{}, Auditor: &fenceRecorder{inner: fence},
+		Refresh: func(ctx context.Context, server connection.Server, rt connection.Secret) ([]byte, error) {
+			e.refreshes.Add(1)
+			if fn := e.refreshFn.Load(); fn != nil {
+				return (*fn)(ctx, server, rt)
+			}
+			account := strings.TrimPrefix(rt.Reveal(), "fake-rt-")
+			return []byte(`{"access_token":"fake-at-` + account + `-r","token_type":"Bearer","expires_in":3600,"refresh_token":"fake-rt-` + account + `-r","scope":"` + tgScope + `"}`), nil
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,6 +458,21 @@ func (e *dispatchEnv) activeAlice(principal int64, account string) connection.Co
 
 func (e *dispatchEnv) active(principal int64, server connection.Server, account, scope string) connection.Connection {
 	e.t.Helper()
+	c := e.pendingConfirm(principal, server, account, scope)
+	acceptConsent(e.t, e.store, principal)
+	c, err := e.mgr.Confirm(context.Background(), principal, c.ID, c.AuthorityRevision)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return c
+}
+
+// pendingConfirm is a connection that has its tokens and waits for the
+// principal's confirm press. Unlike a second active connection on the
+// same server, which supersedes the first (#1318 C2b), it can sit next to
+// an active one.
+func (e *dispatchEnv) pendingConfirm(principal int64, server connection.Server, account, scope string) connection.Connection {
+	e.t.Helper()
 	ctx := context.Background()
 	m := e.mgr
 	c, err := m.Begin(ctx, principal, server)
@@ -446,10 +487,6 @@ func (e *dispatchEnv) active(principal int64, server connection.Server, account,
 	}
 	resp := `{"access_token":"fake-at-` + account + `","token_type":"Bearer","expires_in":3600,"refresh_token":"fake-rt-` + account + `","scope":"` + scope + `"}`
 	if c, err = m.CompleteExchange(ctx, principal, c.ID, c.AuthorityRevision, account, []byte(resp)); err != nil {
-		e.t.Fatal(err)
-	}
-	acceptConsent(e.t, e.store, principal)
-	if c, err = m.Confirm(ctx, principal, c.ID, c.AuthorityRevision); err != nil {
 		e.t.Fatal(err)
 	}
 	return c

@@ -176,6 +176,10 @@ Preview end-to-end evals are separate (see [Acceptance evals](#acceptance-evals)
 **Refresh.**
 - Refresh is single-flight per connection, so concurrent refreshes never present the same refresh token twice.
 - If the server reports refresh-token reuse, or returns `invalid_grant`, the connection becomes `expired` (or `revoked` when reuse is detected). It never falls back to an older token.
+- (#1318 slice C2b) The sealed token set records an absolute expiry stamped when the token response was received. A missing or zero `expires_in` is an unknown expiry: never refreshed ahead, never read as "does not expire"; only a 401 refreshes it. A known expiry is refreshed when less than 60s remains.
+- A 401 from the MCP server gets exactly one refresh and one retry per tool request; a 403 is refused with neither. A refresh that fails transiently, or whose lease another replica holds, fails that call (`refresh_unavailable`) and nothing retries it.
+- The `active -> expired` change and the user's one "link it again" notice are written in one transaction; the notice is unique per (principal, connection). An expiry that could not be written is reported as a failed refresh, never as an expiry.
+- Activation revokes the principal's other `active` or `expired` connections on the same server in its transaction, and their tokens at the server, so a reconnect never leaves two connections a run could bind. It also re-reads the admin disable under the principal lock, fail-closed.
 
 **Scope escalation.** It always needs a fresh authorization and a fresh confirm, which means a new connection id (above). A connection never gains scope through refresh.
 

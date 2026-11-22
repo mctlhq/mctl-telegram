@@ -633,6 +633,23 @@ func (f *faultStore) TransitionPAConnection(ctx context.Context, p int64, id str
 	return f.Store.TransitionPAConnection(ctx, p, id, t)
 }
 
+// ActivatePAConnection is the activation edge Manager.Confirm takes; it
+// gets the same injected faults as a transition into active.
+func (f *faultStore) ActivatePAConnection(ctx context.Context, p int64, id string, t connection.Transition) (connection.Connection, []connection.Superseded, error) {
+	f.mu.Lock()
+	to := f.failTo
+	before := f.beforeActivate
+	f.beforeActivate = nil
+	f.mu.Unlock()
+	if before != nil {
+		before()
+	}
+	if to == connection.StateActive {
+		return connection.Connection{}, nil, errors.New("injected: activation write failed")
+	}
+	return f.Store.ActivatePAConnection(ctx, p, id, t)
+}
+
 func (f *faultStore) GetPAConnectionSealed(ctx context.Context, p int64, id string) (connection.Connection, connection.Sealed, error) {
 	f.mu.Lock()
 	fail := f.failSealed || (f.failSealFor != "" && f.failSealFor == id)
@@ -972,6 +989,37 @@ func TestLinking_WithdrawAfterConsentCheckRefusesConfirm(t *testing.T) {
 		handled, err := h.svc.HandleCallback(ctx, callbackUpdate(t, h.alice, confirm))
 		if !handled || !errors.Is(err, linking.ErrNoConsent) || !errors.Is(err, connection.ErrNoConsent) {
 			t.Fatalf("confirm after a racing withdraw: handled=%v err=%v", handled, err)
+		}
+		c := h.connection(connection.ServerTG)
+		if c.State != connection.StateFailed || h.sealedTokens(c.ID) != 0 || h.revoker.count() <= before {
+			t.Fatalf("state %s, sealed %d bytes, revoked %d->%d", c.State, h.sealedTokens(c.ID), before, h.revoker.count())
+		}
+	})
+}
+
+// TestLinking_DisableAfterAdmissionRefusesConfirm (#1318 C2b, review P3 of
+// #1390): an admin disable that commits after HandleCallback's admission
+// check is still seen by the activation, under the principal lock; the
+// connection is failed and its tokens revoked, never activated.
+func TestLinking_DisableAfterAdmissionRefusesConfirm(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		ctx := context.Background()
+		h := newHarness(t, s, false)
+		fs := &faultStore{Store: s, mu: &sync.Mutex{}}
+		h.rebuild(fs, tokenClient{h.as})
+		confirm, _ := confirmData(h.toConfirm(connection.ServerTG, h.tgLogin(h.alice)))
+		fs.set(func(f *faultStore) {
+			f.beforeActivate = func() {
+				if err := s.SetPAPrincipalDisabled(ctx, h.alice, 4242001, "test", h.clock.Now()); err != nil {
+					t.Error(err)
+				}
+			}
+		})
+		t.Cleanup(func() { _ = s.ClearPAPrincipalDisabled(context.Background(), h.alice) })
+		before := h.revoker.count()
+		handled, err := h.svc.HandleCallback(ctx, callbackUpdate(t, h.alice, confirm))
+		if !handled || !errors.Is(err, linking.ErrPrincipalRefused) || !errors.Is(err, connection.ErrPrincipalDisabled) {
+			t.Fatalf("confirm after a racing disable: handled=%v err=%v", handled, err)
 		}
 		c := h.connection(connection.ServerTG)
 		if c.State != connection.StateFailed || h.sealedTokens(c.ID) != 0 || h.revoker.count() <= before {

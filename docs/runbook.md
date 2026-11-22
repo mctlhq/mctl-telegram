@@ -4424,12 +4424,45 @@ the count (` suppressed=N` in the record). A steady
 line rate: find the principal from its `refusals_suppressed_security` rows
 and stop its runs.
 
+### PA token refresh and expired connections
+
+A connection's access token is refreshed through the server's
+refresh-token grant (#1318 slice C2b):
+
+- ahead of time, when its expiry is known (the token response's
+  `expires_in`, counted from receipt) and less than 60s remains. An unknown
+  expiry is never treated as "does not expire" and is never refreshed
+  ahead;
+- after a 401 from the MCP server, once per tool request, followed by one
+  retry. A 403 is never retried.
+
+Concurrent calls share one refresh (per replica a single flight, across
+replicas the store lease). A refresh that fails for a transient reason, or
+whose lease another replica holds, fails only that call, as
+`refresh_unavailable` (503); nothing retries it. A refresh the server
+answers `invalid_grant`, or a 401 on a connection without a refresh token,
+moves the connection to `expired`: its secrets are destroyed, every later
+call is refused as `connection_expired` (403) without contacting the
+server, `/connections` lists it as expired with the `/connect` hint, and
+the user gets one "link it again" message. That message is a
+`connection_expired` row in `pa_outbox`, written in the transaction of the
+`active -> expired` change and unique per (principal, connection), so a
+restart or a second replica never sends it twice. A new `/connect` on the
+same server revokes the expired connection (and any other active one there)
+when it is confirmed, so the user never has two connections a run could
+bind.
+
 <a id="mctlpapinlistingunauthorized"></a>
 ### MctlPAPinListingUnauthorized
 
 `mctl_pa_pin_listing_failures_total{server,reason="unauthorized"}` has grown
 for 30 minutes: the server answers 401 to PA connection tokens on
-`tools/list`, and those calls are refused as `server_refused`. One user with
+`tools/list`. Since #1318 slice C2b a 401 is answered by one refresh of
+that connection's tokens and one retry; only a 401 after the refresh is
+refused as `server_refused` (a 403 is refused at once, never retried). Each
+401 is counted, the recovered first one included, so a server whose tokens
+carry no `expires_in` (never refreshed ahead) adds one count per token
+lifetime per active user. One user with
 a broken connection fires this only if they keep retrying; several users at
 once usually means the server stopped accepting our tokens (key rotation,
 changed audience, revoked client).

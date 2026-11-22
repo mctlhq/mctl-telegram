@@ -361,12 +361,16 @@ const (
 	ReasonJobGone           = "job_gone"
 	// The run's principal was disabled by an admin, or is not on the
 	// preview allowlist (T11, S1-F4, #1318).
-	ReasonPrincipalDisabled    = "principal_disabled"
-	ReasonPrincipalNotAllowed  = "principal_not_allowed"
-	ReasonJobUnreadable        = "job_unreadable"
-	ReasonConnectionUnbound    = "connection_unbound"
-	ReasonConnectionAmbiguous  = "connection_ambiguous"
-	ReasonConnectionInactive   = "connection_not_active"
+	ReasonPrincipalDisabled   = "principal_disabled"
+	ReasonPrincipalNotAllowed = "principal_not_allowed"
+	ReasonJobUnreadable       = "job_unreadable"
+	ReasonConnectionUnbound   = "connection_unbound"
+	ReasonConnectionAmbiguous = "connection_ambiguous"
+	ReasonConnectionInactive  = "connection_not_active"
+	// The service stopped accepting the connection (expired, #1318 C2b).
+	ReasonConnectionExpired = "connection_expired"
+	// A refresh the call needed failed or is held by another replica.
+	ReasonRefreshUnavailable   = "refresh_unavailable"
 	ReasonRevisionMismatch     = "revision_mismatch"
 	ReasonConnectionUnreadable = "connection_unreadable"
 	ReasonScopeMismatch        = "scope_mismatch"

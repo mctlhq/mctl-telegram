@@ -180,7 +180,9 @@ var errFakeTransport error = fakeTransportError{}
 func TestDispatch_S1X3_OwnUnboundConnectionRefused(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, s *db.Store) {
 		e := newDispatchEnv(t, s)
-		unbound := e.activeTG(alice, "acct-alice-2")
+		// Not active: a second active connection on tg would supersede
+		// the bound one (#1318 C2b). Unbound is refused whatever its state.
+		unbound := e.pendingConfirm(alice, "tg", "acct-alice-2", tgScope)
 		token, _ := e.run(alice)
 		e.wantRefusal(e.call(token, req("tg", "list_dialogs", unbound.ID)), http.StatusForbidden, connector.ReasonConnectionUnbound, alice, 0)
 		e.noDispatch()

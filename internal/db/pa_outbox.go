@@ -37,6 +37,7 @@ func paOutboxTable(pg bool, name string) string {
 			button TEXT NOT NULL DEFAULT '',
 			conversation_id TEXT NOT NULL DEFAULT '',
 			fragment_seq ` + intT + ` NOT NULL DEFAULT 0,
+			connection_id TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL,
 			attempts ` + intT + ` NOT NULL DEFAULT 0,
 			sent_parts ` + intT + ` NOT NULL DEFAULT 0,
@@ -49,10 +50,24 @@ func paOutboxTable(pg bool, name string) string {
 }
 
 // paOutboxIndexes run after the table has every column.
+//
+// A connection-level row (#1318 slice C2b) has no job and no update, so it
+// is keyed by idx_pa_outbox_connection, once per (principal, connection,
+// kind), and left out of the update key: two connections of one principal
+// both expiring must give two rows. idx_pa_outbox_update_v2 is
+// idx_pa_outbox_update with that predicate; the old index is dropped once
+// the new one exists. A replica still running the previous build infers
+// its ON CONFLICT target from the old index, so its conversation-level
+// enqueue fails until it is replaced; the webhook answers Telegram an
+// error and the update is redelivered to a replica on this build.
 var paOutboxIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_pa_outbox_due ON pa_outbox(status, next_at_ms)`,
 	`CREATE INDEX IF NOT EXISTS idx_pa_outbox_principal ON pa_outbox(principal, id)`,
-	`CREATE UNIQUE INDEX IF NOT EXISTS idx_pa_outbox_update ON pa_outbox(principal, update_id, kind) WHERE job_id IS NULL`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_pa_outbox_update_v2 ON pa_outbox(principal, update_id, kind)
+	   WHERE job_id IS NULL AND connection_id = ''`,
+	`DROP INDEX IF EXISTS idx_pa_outbox_update`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_pa_outbox_connection ON pa_outbox(principal, connection_id, kind)
+	   WHERE connection_id <> ''`,
 }
 
 // migratePAOutbox creates pa_outbox, or brings a table created before #1348
@@ -82,6 +97,10 @@ func migratePAOutbox(ctx context.Context, dbConn migrateDB, pg bool) error {
 		} else if err := rebuildSQLitePAOutbox(ctx, dbConn); err != nil {
 			return err
 		}
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "pa_outbox", "connection_id",
+		`TEXT NOT NULL DEFAULT ''`, `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("migrate pa outbox: %w", err)
 	}
 	for _, q := range paOutboxIndexes {
 		if _, err := dbConn.ExecContext(ctx, q); err != nil {
@@ -139,7 +158,7 @@ func rebuildSQLitePAOutbox(ctx context.Context, dbConn migrateDB) error {
 		return fmt.Errorf("migrate pa outbox: read columns: %w", err)
 	}
 	var keep []string
-	for _, c := range []string{"id", "principal", "job_id", "kind", "conversation_id", "fragment_seq", "status",
+	for _, c := range []string{"id", "principal", "job_id", "kind", "conversation_id", "fragment_seq", "connection_id", "status",
 		"attempts", "sent_parts", "next_at_ms", "lease_until_ms", "created_at_ms", "updated_at_ms"} {
 		if have[c] {
 			keep = append(keep, c)
@@ -170,12 +189,25 @@ func enqueuePAOutbox(ctx context.Context, tx *sql.Tx, item jobs.OutboxItem, nowM
 	if tx == nil || !item.Valid() {
 		return fmt.Errorf("%w: outbox item", jobs.ErrInvalid)
 	}
+	if item.Kind.ConnectionLevel() {
+		// Once per connection and kind: a second enqueue for the same
+		// transition is a no-op, never a second message.
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO pa_outbox(principal, job_id, update_id, kind, connection_id, status, attempts,
+			                       next_at_ms, created_at_ms, updated_at_ms)
+			 VALUES($1, NULL, 0, $2, $3, $4, 0, $5, $5, $5)
+			 ON CONFLICT (principal, connection_id, kind) WHERE connection_id <> '' DO NOTHING`,
+			item.Principal, string(item.Kind), item.ConnectionID, string(jobs.OutboxPending), nowMS); err != nil {
+			return fmt.Errorf("pa outbox: enqueue: %w", err)
+		}
+		return nil
+	}
 	if item.Kind.ConversationLevel() {
 		r, err := tx.ExecContext(ctx,
 			`INSERT INTO pa_outbox(principal, job_id, update_id, kind, button, status, attempts,
 			                       next_at_ms, created_at_ms, updated_at_ms)
 			 VALUES($1, NULL, $2, $3, $4, $5, 0, $6, $6, $6)
-			 ON CONFLICT (principal, update_id, kind) WHERE job_id IS NULL DO NOTHING`,
+			 ON CONFLICT (principal, update_id, kind) WHERE job_id IS NULL AND connection_id = '' DO NOTHING`,
 			item.Principal, item.UpdateID, string(item.Kind), item.Button,
 			string(jobs.OutboxPending), nowMS)
 		if err != nil {
@@ -221,14 +253,14 @@ func (s *Store) EnqueuePAOutbox(ctx context.Context, tx *sql.Tx, item jobs.Outbo
 
 // paOutboxColumns reads a conversation-level row's NULL job_id as 0.
 const paOutboxColumns = `id, principal, COALESCE(job_id, 0), update_id, kind, button, conversation_id, fragment_seq,
-	attempts, sent_parts, status, next_at_ms`
+	connection_id, attempts, sent_parts, status, next_at_ms`
 
 func scanPAOutbox(row interface{ Scan(...any) error }) (jobs.OutboxItem, error) {
 	var it jobs.OutboxItem
 	var kind, status string
 	var nextMS int64
 	if err := row.Scan(&it.ID, &it.Principal, &it.JobID, &it.UpdateID, &kind, &it.Button, &it.ConversationID, &it.FragmentSeq,
-		&it.Attempts, &it.SentParts, &status, &nextMS); err != nil {
+		&it.ConnectionID, &it.Attempts, &it.SentParts, &status, &nextMS); err != nil {
 		return jobs.OutboxItem{}, err
 	}
 	// An unknown kind is handed to the deliverer as is: it refuses to send

@@ -145,7 +145,7 @@ S2-I6:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.527s
     - id: P2S7-I6c
-      guard: internal/pa/connector/dispatch.go:496
+      guard: internal/pa/connector/dispatch.go:514
       guard_text: 'ferr = d.cfg.Jobs.RecordToolResult(fctx, job, out)'
       mutation: "dispatcher no longer records the tool result: `ferr = d.cfg.Jobs.RecordToolResult(fctx, job, out)` -> `_ = out`"
       killed_by:
@@ -327,7 +327,7 @@ S2-I10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.458s
     - id: P2S7-I10c
-      guard: internal/pa/connector/dispatch.go:536
+      guard: internal/pa/connector/dispatch.go:567
       guard_text: "\"pa dispatch: conversation taint unreadable, recorded as external\", \"err\", err)\n\t\treturn TaintExternal"
       mutation: "Dispatcher.taint read error recorded clean: `return TaintExternal` -> `return TaintClean` in the error branch"
       killed_by:

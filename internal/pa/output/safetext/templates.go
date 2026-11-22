@@ -107,6 +107,10 @@ var (
 	TextDisconnectFailed  = tpl("The connection could not be removed. Please try again.")
 	TextConnectionsNone   = tpl("You have no connected accounts.")
 	TextConnectionsFailed = tpl("Your connections could not be read. Please try again.")
+	// TextConnectionExpired tells the principal, once per connection, that
+	// the service stopped accepting a connection and it must be linked
+	// again (#1318 slice C2b).
+	TextConnectionExpired = tpl("One of your connections has expired and can no longer be used. Send /connections to see which one, then /connect to link it again.")
 	// TextAssistantUnavailable refuses a principal an admin disabled or one
 	// not on the preview allowlist, and tells a principal whose queued or
 	// running request was stopped for that reason (#1318). The same text
