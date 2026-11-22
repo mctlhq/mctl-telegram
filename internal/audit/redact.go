@@ -125,6 +125,10 @@ var sensitiveKeys = map[string]struct{}{
 	"pabottoken":        {},
 	"pa_webhook_secret": {},
 	"pawebhooksecret":   {},
+	// The PA preview allowlist (#1318): Telegram user ids, under the env
+	// name and the Go field name.
+	"pa_allowed_principals": {},
+	"paallowedprincipals":   {},
 	// PA connections (issue #1314, threat model T3): downstream OAuth tokens,
 	// the authorization code and PKCE verifier, the per-server DCR client
 	// credentials, and the DEK/KEK material that seals them. "code" and

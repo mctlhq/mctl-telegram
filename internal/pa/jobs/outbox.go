@@ -57,6 +57,8 @@ const (
 	OutboxRunFailed OutboxKind = "run_failed"
 	// OutboxRequestDropped is NoticeDropped.
 	OutboxRequestDropped OutboxKind = "request_dropped"
+	// OutboxPrincipalStopped is NoticePrincipalDisabled.
+	OutboxPrincipalStopped OutboxKind = "principal_stopped"
 )
 
 // Conversation-level kinds (#1348), one per pa.Reply, with the same names.
@@ -74,6 +76,9 @@ const (
 	// OutboxLinkingUnavailable answers a linking command while no PA
 	// server is enabled (#1318 slice C2).
 	OutboxLinkingUnavailable OutboxKind = "linking_unavailable"
+	// OutboxPrincipalDisabled refuses an update of a disabled principal or
+	// one not on the allowlist (T11, #1318).
+	OutboxPrincipalDisabled OutboxKind = "principal_disabled"
 )
 
 // OutboxKinds lists every kind this build writes.
@@ -82,14 +87,15 @@ func OutboxKinds() []OutboxKind {
 }
 
 func jobOutboxKinds() []OutboxKind {
-	return []OutboxKind{OutboxReply, OutboxReplyTooLong, OutboxBudgetHold, OutboxRunFailed, OutboxRequestDropped}
+	return []OutboxKind{OutboxReply, OutboxReplyTooLong, OutboxBudgetHold, OutboxRunFailed, OutboxRequestDropped, OutboxPrincipalStopped}
 }
 
 // ConversationOutboxKinds lists the conversation-level kinds.
 func ConversationOutboxKinds() []OutboxKind {
 	return []OutboxKind{OutboxConsentPrompt, OutboxConsentAccepted, OutboxConsentWithdrawn, OutboxConsentStale,
 		OutboxNewConversation, OutboxForgotten, OutboxUnknownButton, OutboxRateLimited, OutboxMessageTooLong,
-		OutboxLinkingUnavailable}
+		OutboxLinkingUnavailable,
+		OutboxPrincipalDisabled}
 }
 
 // ConversationLevel reports whether k is a conversation-level kind, whose
@@ -115,8 +121,11 @@ func (k OutboxKind) Valid() bool {
 
 // OutboxKindOf maps a Notice to its outbox kind.
 func OutboxKindOf(k NoticeKind) OutboxKind {
-	if k == NoticeDropped {
+	switch k {
+	case NoticeDropped:
 		return OutboxRequestDropped
+	case NoticePrincipalDisabled:
+		return OutboxPrincipalStopped
 	}
 	return OutboxRunFailed
 }

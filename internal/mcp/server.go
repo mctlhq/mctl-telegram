@@ -566,6 +566,14 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 		s.addTool(srv, t, h)
 	}
 	{
+		t, h := s.toolSetPAPrincipalDisabled()
+		s.addTool(srv, t, h)
+	}
+	{
+		t, h := s.toolGetPAPrincipalStatus()
+		s.addTool(srv, t, h)
+	}
+	{
 		t, h := s.toolSetAccountSend()
 		s.addTool(srv, t, h)
 	}

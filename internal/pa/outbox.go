@@ -71,10 +71,11 @@ const outboxButtonMinLife = 5 * time.Minute
 // outboxTemplates maps every notice kind, job-level and conversation-level
 // (#1348), to its server text.
 var outboxTemplates = map[jobs.OutboxKind]safetext.Template{
-	jobs.OutboxReplyTooLong:   safetext.TextReplyTooLong,
-	jobs.OutboxBudgetHold:     safetext.TextBudgetHold,
-	jobs.OutboxRunFailed:      safetext.TextRunFailed,
-	jobs.OutboxRequestDropped: safetext.TextRequestDropped,
+	jobs.OutboxReplyTooLong:     safetext.TextReplyTooLong,
+	jobs.OutboxBudgetHold:       safetext.TextBudgetHold,
+	jobs.OutboxRunFailed:        safetext.TextRunFailed,
+	jobs.OutboxRequestDropped:   safetext.TextRequestDropped,
+	jobs.OutboxPrincipalStopped: safetext.TextAssistantUnavailable,
 
 	jobs.OutboxConsentPrompt:      safetext.TextConsentPrompt,
 	jobs.OutboxConsentAccepted:    safetext.TextConsentAccepted,
@@ -86,6 +87,7 @@ var outboxTemplates = map[jobs.OutboxKind]safetext.Template{
 	jobs.OutboxRateLimited:        safetext.TextRateLimited,
 	jobs.OutboxMessageTooLong:     safetext.TextMessageTooLong,
 	jobs.OutboxLinkingUnavailable: safetext.TextLinkingUnavailable,
+	jobs.OutboxPrincipalDisabled:  safetext.TextAssistantUnavailable,
 }
 
 // outboxKeyboard is the keyboard a row is sent with: the consent prompt's

@@ -126,15 +126,18 @@ func checkGaps(id string, gaps []paGap) []string {
 	var problems []string
 	halves := map[string]bool{}
 	for _, g := range gaps {
+		// Halves are compared trimmed: " principal disable" is the same
+		// gap as "principal disable", not a second one.
+		half := strings.TrimSpace(g.Half)
 		switch {
-		case strings.TrimSpace(g.Half) == "":
+		case half == "":
 			problems = append(problems, fmt.Sprintf("%s: a gap without a half", id))
 		case !paIssueRef.MatchString(g.TrackedBy):
 			problems = append(problems, fmt.Sprintf("%s: gap %q is not tracked by an issue (tracked_by %q, want #NNNN)", id, g.Half, g.TrackedBy))
-		case halves[g.Half]:
-			problems = append(problems, fmt.Sprintf("%s: gap %q listed twice", id, g.Half))
+		case halves[half]:
+			problems = append(problems, fmt.Sprintf("%s: gap %q listed twice", id, half))
 		}
-		halves[g.Half] = true
+		halves[half] = true
 	}
 	return problems
 }

@@ -59,7 +59,7 @@
       <li><strong>Claude Code:</strong> add the server, then run <code>/mcp</code> to sign in.
 <pre><code>claude mcp add --transport http --scope user mctl {{.MCPURL}}</code></pre></li>
       <li id="chatgpt-setup"><strong>ChatGPT:</strong> open <a href="https://chatgpt.com/plugins?directoryTab=personal" target="_blank" rel="noopener">Plugins &#8594; Personal</a>, choose <em>Add &#8594; Add custom MCP server</em>, set the name to <code>MCTL Assistant</code>, the server URL to <code class="url">{{.MCPURL}}</code>, authentication to <em>OAuth</em>, and click <em>Create as a plugin</em>. MCTL is not listed in the public plugin directory; adding it as your own plugin is the supported path.</li>
-      <li id="other-clients-setup"><strong>Any other MCP client</strong> (for example Grok, Gemini, Cursor, VS Code, Notion, Rayrun, Hermes Agent or Town, all not tested): add <code class="url">{{.MCPURL}}</code> as a <em>remote MCP server</em> (Streamable HTTP) by URL, choose OAuth, and sign in with Telegram when the client opens the browser. No client ID or secret is needed. A client works only if its sign-in host is admitted on tg.mctl.ai; if the client reports a rejected redirect or a failed registration, it is not admitted yet. See the status table below, and for per-client snippets the <a href="/#connect">Other MCP clients</a> tab.</li>
+      <li id="other-clients-setup"><strong>Any other MCP client</strong> (for example Gemini, Cursor, VS Code, Notion, Rayrun or Hermes Agent, all not tested): add <code class="url">{{.MCPURL}}</code> as a <em>remote MCP server</em> (Streamable HTTP) by URL, choose OAuth, and sign in with Telegram when the client opens the browser. No client ID or secret is needed. A client works only if its sign-in host is admitted on tg.mctl.ai; if the client reports a rejected redirect or a failed registration, it is not admitted yet. See the status table below, and for per-client snippets the <a href="/#connect">Other MCP clients</a> tab.</li>
     </ol>
     <h3 id="client-status">Client status</h3>
     <p>Status words follow the <a href="https://github.com/mctlhq/mctl-telegram/blob/main/docs/platforms/compatibility.md" target="_blank" rel="noopener">compatibility matrix</a>: <em>works</em> means a recorded run completed sign-in and a tool call against tg.mctl.ai; <em>works with caveats</em> means it completed with a stated limitation; <em>not tested</em> means anything else, including a host that is only admitted. A client is never listed as working without a recorded run.</p>
@@ -67,18 +67,17 @@
     <table>
       <thead><tr><th>Client</th><th>Status</th><th>Notes</th></tr></thead>
       <tbody>
-        <tr><td>Claude (web, desktop, mobile)</td><td>works with caveats</td><td>Connects by URL through CIMD. The recorded proof ran against the sibling mctl-api service, not tg.mctl.ai.</td></tr>
-        <tr><td>Claude Code</td><td>not tested</td><td>Loopback sign-in is always accepted and read-only calls were seen in one session, but the connection path was not recorded.</td></tr>
-        <tr><td>ChatGPT (by URL)</td><td>works with caveats</td><td>CIMD; the recorded proof ran against mctl-api. MCP Apps are deferred.</td></tr>
-        <tr><td>Grok (grok.com)</td><td>not tested</td><td>Not admitted yet: admission is in progress. Tracked in <a href="https://github.com/mctlhq/mctl-telegram/issues/1381" target="_blank" rel="noopener">#1381</a>.</td></tr>
+        <tr><td>Claude (web, desktop, mobile)</td><td>works</td><td>Connects by URL through CIMD. Signed in and called tools against tg.mctl.ai (observed 2026-11-22).</td></tr>
+        <tr><td>Claude Code</td><td>works</td><td>Loopback sign-in is always accepted. Signed in and called tools against tg.mctl.ai (observed 2026-11-22).</td></tr>
+        <tr><td>ChatGPT (by URL)</td><td>works</td><td>CIMD. Signed in and called tools against tg.mctl.ai (observed 2026-11-22). MCP Apps are deferred.</td></tr>
+        <tr><td>Grok (grok.com)</td><td>works</td><td>Admitted on 2026-11-21. Signed in and called tools against tg.mctl.ai (observed 2026-11-22). Matrix run tracked in <a href="https://github.com/mctlhq/mctl-telegram/issues/1381" target="_blank" rel="noopener">#1381</a>.</td></tr>
         <tr><td>Gemini and Google (Gemini custom connectors, Antigravity)</td><td>not tested</td><td>Hosts are admitted; no sign-in is verified. Tracked in <a href="https://github.com/mctlhq/mctl-telegram/issues/1386" target="_blank" rel="noopener">#1386</a>.</td></tr>
         <tr><td>Cursor</td><td>not tested</td><td>Hosted callback is admitted; the <code>cursor://</code> scheme is refused, so sign-in may fail. Tracked in <a href="https://github.com/mctlhq/mctl-telegram/issues/1385" target="_blank" rel="noopener">#1385</a>.</td></tr>
         <tr><td>Notion (app.notion.com)</td><td>not tested</td><td>Not admitted yet. Tracked in <a href="https://github.com/mctlhq/mctl-telegram/issues/1382" target="_blank" rel="noopener">#1382</a>.</td></tr>
         <tr><td>Rayrun (ray.run)</td><td>not tested</td><td>Not admitted yet. Tracked in <a href="https://github.com/mctlhq/mctl-telegram/issues/1383" target="_blank" rel="noopener">#1383</a>.</td></tr>
         <tr><td>Hermes Agent</td><td>not tested</td><td>Signs in from a per-user subdomain of agentspodium.com, which cannot be admitted as one host. Tracked in <a href="https://github.com/mctlhq/mctl-telegram/issues/1384" target="_blank" rel="noopener">#1384</a>.</td></tr>
         <tr><td>VS Code</td><td>not tested</td><td>CIMD host admitted; no run is recorded.</td></tr>
-        <tr><td>Town</td><td>not tested</td><td>Admitted with a restricted reply-only tool profile; sign-in reaches Telegram, but a completed token and tool call are not proven.</td></tr>
-        <tr><td>Other MCP clients</td><td>not tested</td><td>Loopback redirects work for local clients; hosted clients need their redirect host admitted.</td></tr>
+        <tr><td><a href="https://www.town.com/" target="_blank" rel="noopener">Town</a></td><td>works</td><td>Admitted with a restricted reply-only tool profile, which applies. Signed in and called tools against tg.mctl.ai (observed 2026-11-22).</td></tr>
       </tbody>
     </table>
     </div>

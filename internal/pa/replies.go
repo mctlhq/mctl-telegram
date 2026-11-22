@@ -29,6 +29,7 @@ var replyKinds = map[Reply]jobs.OutboxKind{
 	ReplyRateLimited:        jobs.OutboxRateLimited,
 	ReplyMessageTooLong:     jobs.OutboxMessageTooLong,
 	ReplyLinkingUnavailable: jobs.OutboxLinkingUnavailable,
+	ReplyPrincipalDisabled:  jobs.OutboxPrincipalDisabled,
 }
 
 // ErrUnknownReply is a Reply with no outbox kind: a programming error. It

@@ -570,6 +570,10 @@ type Config struct {
 	// fragment. Required when PAEnabled; the getWebhookInfo monitor alerts
 	// when Telegram reports any other URL (T4). Read only when PAEnabled.
 	PAWebhookURL string
+	// PAAllowedPrincipals is the preview allowlist (PA_ALLOWED_PRINCIPALS,
+	// config_pa_allowlist.go): the only Telegram user ids the PA serves.
+	// Read only when PAEnabled; empty allows nobody.
+	PAAllowedPrincipals []int64
 	// PAConversationTTL is the PA conversation lifetime, anchored at
 	// creation (PA_CONVERSATION_TTL, default 24h, at most 24h because the
 	// consent text promises it). Read only when PAEnabled is true; an
@@ -666,6 +670,9 @@ func loadPA(c *Config) error {
 			return errors.New("PA_CONVERSATION_TTL must be a duration between 1m and 24h")
 		}
 		c.PAConversationTTL = d
+	}
+	if err := loadPAAllowlist(c); err != nil {
+		return err
 	}
 	return loadPALimits(c)
 }

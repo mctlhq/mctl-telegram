@@ -167,23 +167,40 @@ func TestDecideNeverLowersWithoutEveryCondition(t *testing.T) {
 	}
 }
 
-// TestNoPrincipalStatusFailsClosed: the stub reports every principal
-// disabled with an error, and Decide treats that as never.
-func TestNoPrincipalStatusFailsClosed(t *testing.T) {
-	var ps PrincipalStatus = NoPrincipalStatus{}
-	disabled, err := ps.PrincipalDisabled(context.Background(), 42)
-	if !errors.Is(err, ErrPrincipalStatusUnavailable) || !disabled {
-		t.Fatalf("stub = %v, %v", disabled, err)
+type fakeDisableReader struct {
+	disabled bool
+	err      error
+}
+
+func (f fakeDisableReader) PAPrincipalDisabledState(context.Context, int64) (bool, error) {
+	return f.disabled, f.err
+}
+
+// TestStorePrincipalStatus_ErrorIsDisabled: the store-backed status passes
+// a read through, and turns a read error, even one that came with "not
+// disabled", or a missing store into disabled with the error; Decide then
+// answers never.
+func TestStorePrincipalStatus_ErrorIsDisabled(t *testing.T) {
+	ctx := context.Background()
+	for _, want := range []bool{false, true} {
+		got, err := StorePrincipalStatus{Store: fakeDisableReader{disabled: want}}.PrincipalDisabled(ctx, 42)
+		if err != nil || got != want {
+			t.Fatalf("read %v: %v, %v", want, got, err)
+		}
 	}
-	in := open()
-	in.PrincipalErr = err
-	if got := Decide(in); got.Outcome != OutcomeNever {
-		t.Fatalf("Decide with the stub = %+v", got)
-	}
-	// Even a stub that said "not disabled" alongside its error is decided
-	// by the error.
-	in.PrincipalDisabled = false
-	if got := Decide(in); got != (Decision{OutcomeNever, ReasonPrincipalDisabled}) {
-		t.Fatalf("error with disabled=false: %+v", got)
+	readErr := errors.New("injected read error")
+	for name, ps := range map[string]PrincipalStatus{
+		"read error": StorePrincipalStatus{Store: fakeDisableReader{disabled: false, err: readErr}},
+		"no store":   StorePrincipalStatus{},
+	} {
+		disabled, err := ps.PrincipalDisabled(ctx, 42)
+		if err == nil || !disabled {
+			t.Fatalf("%s: %v, %v, want disabled with an error", name, disabled, err)
+		}
+		in := open()
+		in.PrincipalDisabled, in.PrincipalErr = false, err
+		if got := Decide(in); got != (Decision{OutcomeNever, ReasonPrincipalDisabled}) {
+			t.Fatalf("%s: Decide = %+v", name, got)
+		}
 	}
 }

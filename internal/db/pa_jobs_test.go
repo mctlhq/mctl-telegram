@@ -973,8 +973,8 @@ func runPAJobsSuite(t *testing.T, s *Store) {
 			return d
 		}
 		for i := range 3 {
-			if d := admit(f.now); !d.Allowed {
-				t.Fatalf("message %d refused", i+1)
+			if d := admit(f.now); !d.Allowed || d.First != (i == 0) {
+				t.Fatalf("message %d = %+v, want allowed, first only for the first", i+1, d)
 			}
 		}
 		if d := admit(f.now); d.Allowed || !d.Notify {
@@ -983,8 +983,8 @@ func runPAJobsSuite(t *testing.T, s *Store) {
 		if d := admit(f.now); d.Allowed || d.Notify {
 			t.Fatalf("fifth = %+v, want refused silently", d)
 		}
-		if d := admit(f.now.Add(time.Hour)); !d.Allowed {
-			t.Fatal("new window refused")
+		if d := admit(f.now.Add(time.Hour)); !d.Allowed || !d.First {
+			t.Fatalf("new window = %+v, want allowed and first", d)
 		}
 	})
 

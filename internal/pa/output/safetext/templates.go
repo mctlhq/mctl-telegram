@@ -107,4 +107,9 @@ var (
 	TextDisconnectFailed  = tpl("The connection could not be removed. Please try again.")
 	TextConnectionsNone   = tpl("You have no connected accounts.")
 	TextConnectionsFailed = tpl("Your connections could not be read. Please try again.")
+	// TextAssistantUnavailable refuses a principal an admin disabled or one
+	// not on the preview allowlist, and tells a principal whose queued or
+	// running request was stopped for that reason (#1318). The same text
+	// for both, so the reply does not say which.
+	TextAssistantUnavailable = tpl("The assistant is not available for your account. /forget still deletes your conversations.")
 )

@@ -267,7 +267,9 @@ func paPurgeMark(t *testing.T, s *Store, principal int64) int64 {
 func TestPAPrincipalPurges_CoverEveryPrincipalTable(t *testing.T) {
 	s := newTestStore(t)
 	// pa_principal_locks stays as the deletion fence (see paPrincipalPurges).
-	kept := map[string]bool{"pa_usage": true, "pa_rate": true, "pa_principal_locks": true}
+	// pa_principal_disables must survive the deletion, or deleting the
+	// account and coming back would clear an admin disable (#1318).
+	kept := map[string]bool{"pa_usage": true, "pa_rate": true, "pa_principal_locks": true, "pa_principal_disables": true}
 	purged := map[string]bool{}
 	for _, st := range paPrincipalPurges {
 		purged[st.table] = true

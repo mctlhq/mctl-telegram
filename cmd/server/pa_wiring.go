@@ -150,11 +150,18 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 	if m != nil {
 		counter, outboxCounter, callbackCounter = m, m, m
 	}
+	// The preview allowlist (PA_ALLOWED_PRINCIPALS): checked at ingress and
+	// at every run step. Empty allows nobody, and says so at startup.
+	allowed := pa.NewAllowlist(cfg.PAAllowedPrincipals)
+	if allowed.Len() == 0 {
+		slog.Warn("pa allowlist is empty: every principal is refused", "env", config.PAAllowedPrincipalsEnv)
+	}
 	loop, err := pa.NewRunLoop(pa.RunLoopConfig{
 		Store: store, Sealer: sealer, Pool: pool, Minter: minter, Verifier: verifier, Sender: sender,
 		Tools:  resolver,
 		Limits: cfg.PALimits(), Budget: cfg.PABudget(),
 		Metrics: outboxCounter, CallbackMetrics: callbackCounter,
+		Allowed: allowed,
 	})
 	if err != nil {
 		return nil, err
@@ -169,6 +176,7 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 		// pt.commands below; without a tools runtime they are answered
 		// "not available" in the transaction.
 		Linking: pt != nil,
+		Allowed: allowed,
 	})
 	if err != nil {
 		return nil, err

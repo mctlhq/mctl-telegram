@@ -194,6 +194,11 @@ type Store interface {
 	// updates of one principal apply one after another. Callers take it
 	// before any other read in tx.
 	LockPAPrincipal(ctx context.Context, tx *sql.Tx, principal int64) error
+	// PAPrincipalDisabled reports whether an admin disabled the
+	// principal's PA (T11, S1-F4). Only an absent row is false; any error
+	// wraps ErrUnreadable (and ErrStoreFault for a failed read) and comes
+	// with true.
+	PAPrincipalDisabled(ctx context.Context, tx *sql.Tx, principal int64) (bool, error)
 	// GetPAConsent returns ErrNotFound only when no row exists, and wraps
 	// ErrUnreadable for every other failure.
 	GetPAConsent(ctx context.Context, tx *sql.Tx, principal int64) (ConsentRecord, error)

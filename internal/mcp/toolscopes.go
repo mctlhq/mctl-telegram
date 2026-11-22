@@ -111,15 +111,17 @@ var toolScopes = map[string][]string{
 	"list_telegram_identities": {"admin:users", "admin:users:read"},
 	"get_user_audit_log":       {"admin:users", "admin:users:read"},
 	"get_acquisition_report":   {"admin:users", "admin:users:read"},
+	"get_pa_principal_status":  {"admin:users", "admin:users:read"},
 
 	// Operator writes.
-	"set_telegram_access":     {"admin:users"},
-	"set_account_send":        {"admin:users"},
-	"set_account_mode":        {"admin:users"},
-	"provision_local_account": {"admin:users"},
-	"revoke_telegram_session": {"admin:users"},
-	"revoke_worker_token":     {"admin:users"},
-	"mint_worker_token":       {"admin:users"},
+	"set_telegram_access":       {"admin:users"},
+	"set_pa_principal_disabled": {"admin:users"},
+	"set_account_send":          {"admin:users"},
+	"set_account_mode":          {"admin:users"},
+	"provision_local_account":   {"admin:users"},
+	"revoke_telegram_session":   {"admin:users"},
+	"revoke_worker_token":       {"admin:users"},
+	"mint_worker_token":         {"admin:users"},
 
 	// Broadcast operators.
 	"prepare_broadcast": {BroadcastScope},

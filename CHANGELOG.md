@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.142.0](https://github.com/mctlhq/mctl-telegram/compare/0.141.0...0.142.0) (2026-11-22)
+
+
+### Features
+
+* **pa:** revoke PA tokens before account delete eviction ([d6e3380](https://github.com/mctlhq/mctl-telegram/commit/d6e33803a436244300a59031941ae5c49f0955d2))
+
+
+### Bug Fixes
+
+* **pa:** guard lock-sweep wiring and typed-nil PA revoker ([c3de2ee](https://github.com/mctlhq/mctl-telegram/commit/c3de2ee07d3e032d567e00dc4cda207ec7f211a8))
+
 ## [0.141.0](https://github.com/mctlhq/mctl-telegram/compare/0.140.1...0.141.0) (2026-11-21)
 
 

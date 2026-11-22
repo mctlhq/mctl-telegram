@@ -84,6 +84,14 @@ func paConvoSchema(pg bool) []string {
 			principal ` + intT + ` PRIMARY KEY,
 			locked_at_ms ` + intT + ` NOT NULL
 		)`,
+		// Admin per-principal disable (T11, S1-F4; pa_principal_disable.go).
+		// Not purged with the account, so deleting it cannot clear a disable.
+		`CREATE TABLE IF NOT EXISTS pa_principal_disables (
+			principal ` + intT + ` PRIMARY KEY,
+			disabled_at_ms ` + intT + ` NOT NULL,
+			disabled_by ` + intT + ` NOT NULL,
+			reason TEXT NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS pa_callbacks (
 			principal ` + intT + ` NOT NULL,
 			id TEXT NOT NULL,

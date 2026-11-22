@@ -241,6 +241,14 @@ func TestPAS1ManifestCheckDetects(t *testing.T) {
 			m["S1-A2"] = s1Entry{Tests: []string{"internal/x.TestCovers"}, Gaps: []s1Gap{{Half: "principal disable", TrackedBy: "later"}}}
 			return ids
 		}, "is not tracked by an issue"},
+		{"duplicate gap", func(ids []string, m map[string]s1Entry, f map[string]bool) []string {
+			m["S1-A2"] = s1Entry{Tests: []string{"internal/x.TestCovers"}, Gaps: []s1Gap{{Half: "principal disable", TrackedBy: "#1"}, {Half: "principal disable", TrackedBy: "#2"}}}
+			return ids
+		}, `S1-A2: gap "principal disable" listed twice`},
+		{"duplicate gap after trimming", func(ids []string, m map[string]s1Entry, f map[string]bool) []string {
+			m["S1-A2"] = s1Entry{Tests: []string{"internal/x.TestCovers"}, Gaps: []s1Gap{{Half: "principal disable", TrackedBy: "#1"}, {Half: "  principal disable ", TrackedBy: "#1"}}}
+			return ids
+		}, `S1-A2: gap "principal disable" listed twice`},
 		{"gap without a half", func(ids []string, m map[string]s1Entry, f map[string]bool) []string {
 			m["S1-A2"] = s1Entry{Tests: []string{"internal/x.TestCovers"}, Gaps: []s1Gap{{TrackedBy: "#1"}}}
 			return ids
