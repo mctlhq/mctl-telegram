@@ -3793,6 +3793,7 @@ func (s *Server) validateClient(ctx context.Context, clientID, redirectURI strin
 		if err != nil {
 			return err
 		}
+		s.logger().Info("oauth: cimd client admitted", "client_id", clientID, "allow_entry", doc.AllowEntry)
 		return s.validateCIMDRedirect(doc, redirectURI)
 	}
 	if s.useDB {

@@ -28,7 +28,10 @@ Use one gitops PR per step and verify each before the next.
    platform works whatever discovery says.
 2. `OAUTH_CIMD_ALLOWED_HOSTS`: admit the CIMD host. Keep the implicit entry
    until the platform is confirmed on CIMD and its connections have
-   re-authorized.
+   re-authorized. For a multi-tenant host, admit one tenant with a
+   path-scoped entry `host/path-prefix/` (trailing `/` required) and pair it
+   with a `client_id` binding in step 3: an admitted client without a profile
+   record still gets the default scope surface.
 3. `MCP_CLIENT_PROFILES`: optional. Prefer a `client_id` binding (the CIMD
    URL). A malformed table stops the server at startup. A `redirect_uri`
    record refuses pre-0.87.0 refresh families. See
@@ -60,8 +63,8 @@ startup refuses otherwise.
 ### 5. Rollback
 
 - Revert the gitops PR.
-- Removing a host from `OAUTH_CIMD_ALLOWED_HOSTS` also cuts off that client's
-  refreshes. Turning `OAUTH_CIMD_ACCEPT` off does not.
+- Removing a host (or a path-scoped entry) from `OAUTH_CIMD_ALLOWED_HOSTS`
+  also cuts off that client's (or tenant's) refreshes. Turning `OAUTH_CIMD_ACCEPT` off does not.
 - Setting `OAUTH_CIMD_ADVERTISE=false` returns clients to DCR at their next
   sign-in.
 - Removing a profile binding from `MCP_CLIENT_PROFILES` takes effect at the

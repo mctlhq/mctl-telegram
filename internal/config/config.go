@@ -134,8 +134,8 @@ type Config struct {
 	// (mctl-telegram#773).
 	OAUTHCIMDAdvertise bool
 	// OAUTHCIMDAllowedHosts is the mandatory host allowlist for CIMD
-	// client_ids (OAUTH_CIMD_ALLOWED_HOSTS): exact host names or ".suffix"
-	// entries. Required and non-empty when OAUTHCIMDAccept is true.
+	// client_ids (OAUTH_CIMD_ALLOWED_HOSTS): exact host names, ".suffix"
+	// entries, or "host/path-prefix/" entries scoped to one path prefix. Required and non-empty when OAUTHCIMDAccept is true.
 	OAUTHCIMDAllowedHosts []string
 	// AllowSharedHMACLegacy opts in to AUTH_MODE=shared-hmac-legacy. The
 	// alias is gated off by default: it is the audit-2026-08 leftover that
