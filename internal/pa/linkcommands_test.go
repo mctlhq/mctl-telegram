@@ -12,6 +12,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
+	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 )
 
 // linkHarness is the conversation harness with the linking flow on and an
@@ -42,6 +43,11 @@ func (s consumeCounter) ConsumePACallback(ctx context.Context, tx *sql.Tx, princ
 
 func newLinkHarness(t *testing.T, linking bool) *linkHarness {
 	t.Helper()
+	return newLinkHarnessWith(t, linking, NewAllowlist([]int64{100001, 100002, 100003, 100004}), unlimited{})
+}
+
+func newLinkHarnessWith(t *testing.T, linking bool, allowed PrincipalAllowlist, lim Limiter) *linkHarness {
+	t.Helper()
 	base := newConvoHarness(t)
 	h := &linkHarness{convoHarness: base}
 	sealer, err := convo.NewSealer(bytes.Repeat([]byte{7}, 32))
@@ -50,7 +56,7 @@ func newLinkHarness(t *testing.T, linking bool) *linkHarness {
 	}
 	base.conv, err = NewConversations(ConversationsConfig{
 		Store: consumeCounter{Store: base.store, h: h}, Sealer: sealer, TTL: DefaultConversationTTL,
-		Runs: base.runs, Replies: base.replies, Limiter: unlimited{}, Linking: linking,
+		Runs: base.runs, Replies: base.replies, Limiter: lim, Linking: linking, Allowed: allowed,
 		Now: func() time.Time { return base.now },
 	})
 	if err != nil {
@@ -134,6 +140,57 @@ func TestConversations_ConnectRunsAfterCommit(t *testing.T) {
 	}
 	if r := h.replies.last(alice); r.reply == ReplyUnknownButton {
 		t.Fatal("a linking button was answered as unknown in the transaction")
+	}
+}
+
+// firstInWindow admits every update as the first of its window, so a
+// refused principal is always answered.
+type firstInWindow struct{}
+
+func (firstInWindow) AdmitMessage(context.Context, *sql.Tx, Principal) (jobs.RateDecision, error) {
+	return jobs.RateDecision{Allowed: true, First: true}, nil
+}
+
+// TestConversations_LinkingRefusesUnadmittedPrincipal: with linking on,
+// /connect, /disconnect, /connections and a linking button of a consenting
+// principal that is not on the allowlist, or that an admin disabled, get
+// the fixed refusal in the transaction (#1318 A1). Nothing reaches
+// AfterCommit, so no linking step runs, and the button is not consumed.
+func TestConversations_LinkingRefusesUnadmittedPrincipal(t *testing.T) {
+	const erin = 100005
+	for mode, refuse := range map[string]func(h *linkHarness, allow *testAllowlist){
+		"not allowlisted": func(_ *linkHarness, allow *testAllowlist) { allow.deny(erin) },
+		"disabled": func(h *linkHarness, _ *testAllowlist) {
+			if err := h.store.SetPAPrincipalDisabled(context.Background(), erin, 1, "test", h.now); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _, _ = h.store.DB.Exec(`DELETE FROM pa_principal_disables WHERE principal = $1`, erin) })
+		},
+	} {
+		t.Run(mode, func(t *testing.T) {
+			allow := newTestAllowlist()
+			h := newLinkHarnessWith(t, true, allow, firstInWindow{})
+			h.consent(erin)
+			refuse(h, allow)
+			for _, text := range []string{"/connect tg", "/disconnect tg", "/connections"} {
+				if code := h.text(erin, text); code != http.StatusOK {
+					t.Fatalf("%s: status %d", text, code)
+				}
+				if r := h.replies.last(erin); r.reply != ReplyPrincipalDisabled {
+					t.Fatalf("%s: reply %q, want the refusal", text, r.reply)
+				}
+			}
+			before := h.consumed
+			if code := h.press(erin, "pa:lc:"+strings.Repeat("A", 43)); code != http.StatusOK {
+				t.Fatal("press")
+			}
+			if r := h.replies.last(erin); r.reply != ReplyPrincipalDisabled || h.consumed != before {
+				t.Fatalf("button: reply %q, consumed %d", r.reply, h.consumed-before)
+			}
+			if got, _ := h.actions(); len(got) != 0 {
+				t.Fatalf("actions for a refused principal: %+v", got)
+			}
+		})
 	}
 }
 

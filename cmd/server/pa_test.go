@@ -67,7 +67,7 @@ func enablePAEnv(t *testing.T) {
 	t.Setenv("OAUTH_JWT_SIGNING_KEY", testPASigningKey)
 	t.Setenv("PUBLIC_BASE_URL", testPABaseURL)
 	// The preview allowlist: the principals the wiring tests message.
-	t.Setenv("PA_ALLOWED_PRINCIPALS", "4242001,4242002")
+	t.Setenv("PA_ALLOWED_PRINCIPALS", "4242001,4242002,4242003")
 }
 
 // paRoutes lists every PA route the router has: the webhook and anything

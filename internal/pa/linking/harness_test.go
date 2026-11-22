@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"math/big"
 	"net/url"
 	"os"
@@ -25,6 +24,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/pa"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
+	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/linking"
 )
 
@@ -294,6 +294,29 @@ type harness struct {
 	revoker  *revoker
 	alice    int64
 	bob      int64
+	allow    *allowSet
+}
+
+// allowSet is a mutable preview allowlist: everyone is allowed until
+// deny.
+type allowSet struct {
+	mu     sync.Mutex
+	denied map[int64]bool
+}
+
+func (a *allowSet) Allowed(p int64) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return !a.denied[p]
+}
+
+func (a *allowSet) deny(p int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.denied == nil {
+		a.denied = map[int64]bool{}
+	}
+	a.denied[p] = true
 }
 
 func serverConfig(server connection.Server, enabled bool) linking.ServerConfig {
@@ -310,7 +333,7 @@ func serverConfig(server connection.Server, enabled bool) linking.ServerConfig {
 func newHarness(t *testing.T, s *db.Store, aliceEnabled bool) *harness {
 	t.Helper()
 	h := &harness{t: t, s: s, clock: &clock{t: time.Now().UTC().Truncate(time.Second)},
-		msgr: &messenger{}, revoker: &revoker{}}
+		msgr: &messenger{}, revoker: &revoker{}, allow: &allowSet{}}
 	h.as = map[connection.Server]*fakeAS{
 		connection.ServerTG: newFakeAS(connection.ServerTG), connection.ServerAlice: newFakeAS(connection.ServerAlice),
 	}
@@ -330,7 +353,7 @@ func newHarness(t *testing.T, s *db.Store, aliceEnabled bool) *harness {
 	h.svc, err = linking.New(linking.Config{
 		BotToken: paBotToken, LoginBotToken: loginBotToken, BotUsername: "fake_pa_bot", MiniAppName: "link",
 		AppURL: appURL, Servers: h.servers, Manager: h.m, Store: s, Tokens: tokenClient{h.as},
-		Accounts: h.accounts, Messenger: h.msgr, Now: h.clock.Now,
+		Accounts: h.accounts, Messenger: h.msgr, Allowed: h.allow, Now: h.clock.Now,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -394,7 +417,7 @@ func (h *harness) rebuild(store connection.Store, tokens linking.TokenClient) {
 	h.svc, err = linking.New(linking.Config{
 		BotToken: paBotToken, LoginBotToken: loginBotToken, BotUsername: "fake_pa_bot", MiniAppName: "link",
 		AppURL: appURL, Servers: h.servers, Manager: h.m, Store: h.s, Tokens: tokens,
-		Accounts: h.accounts, Messenger: h.msgr, Now: h.clock.Now,
+		Accounts: h.accounts, Messenger: h.msgr, Allowed: h.allow, Now: h.clock.Now,
 	})
 	if err != nil {
 		h.t.Fatal(err)

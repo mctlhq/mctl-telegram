@@ -78,7 +78,7 @@ func status(err error) int {
 		return http.StatusBadRequest
 	case errors.Is(err, ErrInitDataSignature), errors.Is(err, ErrInitDataExpired),
 		errors.Is(err, ErrWrongUser), errors.Is(err, ErrRefused), errors.Is(err, ErrNotOwner),
-		errors.Is(err, connection.ErrConflict):
+		errors.Is(err, connection.ErrConflict), errors.Is(err, ErrPrincipalRefused):
 		return http.StatusForbidden
 	}
 	return http.StatusInternalServerError

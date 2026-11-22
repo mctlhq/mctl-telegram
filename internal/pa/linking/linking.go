@@ -79,6 +79,14 @@ type Store interface {
 	// ReadPAConsent is convo.Store's GetPAConsent in its own transaction:
 	// convo.ErrNotFound only when no row exists.
 	ReadPAConsent(ctx context.Context, principal int64) (convo.ConsentRecord, error)
+	// PAPrincipalDisabledState reads an admin's disable of principal
+	// (#1318 A1). Any error refuses.
+	PAPrincipalDisabledState(ctx context.Context, principal int64) (bool, error)
+}
+
+// Allowlist is the preview allowlist (PA_ALLOWED_PRINCIPALS, *pa.Allowlist).
+type Allowlist interface {
+	Allowed(principal int64) bool
 }
 
 var _ Store = (*db.Store)(nil)
@@ -193,6 +201,10 @@ type Config struct {
 	Tokens    TokenClient
 	Accounts  AccountSource
 	Messenger Messenger
+	// Allowed is the preview allowlist the webhook and the run loop use.
+	// Required: every step of the flow refuses a principal not on it, or
+	// one an admin disabled, the same way the webhook refuses its updates.
+	Allowed Allowlist
 	// Now defaults to time.Now.
 	Now func() time.Time
 }
@@ -214,6 +226,9 @@ var (
 	// was withdrawn after /connect, or cannot be read), so a link is not
 	// activated.
 	ErrNoConsent = errors.New("pa linking: no current consent")
+	// ErrPrincipalRefused: the principal is not on the preview allowlist,
+	// or an admin disabled it, or its disable could not be read.
+	ErrPrincipalRefused = errors.New("pa linking: principal refused")
 )
 
 // New validates cfg.
@@ -227,6 +242,8 @@ func New(cfg Config) (*Service, error) {
 		return nil, fmt.Errorf("%w: bot username, Mini App name and app URL are required", ErrConfig)
 	case cfg.Manager == nil || cfg.Store == nil || cfg.Tokens == nil || cfg.Accounts == nil || cfg.Messenger == nil:
 		return nil, fmt.Errorf("%w: manager, store, token client, account source and messenger are required", ErrConfig)
+	case cfg.Allowed == nil:
+		return nil, fmt.Errorf("%w: the principal allowlist is required", ErrConfig)
 	}
 	for name, sc := range cfg.Servers {
 		if !name.Valid() {
@@ -248,6 +265,32 @@ func New(cfg Config) (*Service, error) {
 		now = time.Now
 	}
 	return &Service{cfg: cfg, now: now}, nil
+}
+
+// admitted refuses, fail-closed, a principal the webhook would refuse: one
+// not on the allowlist, one an admin disabled, and one whose disable
+// cannot be read. The linking HTTP routes and the post-commit steps do not
+// pass through the webhook's gate, so every step that acts for a principal
+// checks it here.
+func (s *Service) admitted(ctx context.Context, principal int64) error {
+	if principal <= 0 || !s.cfg.Allowed.Allowed(principal) {
+		return ErrPrincipalRefused
+	}
+	disabled, err := s.cfg.Store.PAPrincipalDisabledState(ctx, principal)
+	if err != nil {
+		return fmt.Errorf("%w: disable unreadable: %w", ErrPrincipalRefused, err)
+	}
+	if disabled {
+		return ErrPrincipalRefused
+	}
+	return nil
+}
+
+// refuseLink fails, and revokes any tokens of, the connection behind l
+// when its principal is no longer admitted.
+func (s *Service) refuseLink(ctx context.Context, l db.PALinkSecret, err error) error {
+	_, aerr := s.cfg.Manager.Abandon(ctx, l.Principal, l.ConnectionID, l.Revision, "principal_refused")
+	return errors.Join(err, aerr)
 }
 
 // server returns the config of an enabled server, or ErrServerDisabled. A
@@ -313,6 +356,9 @@ func (s *Service) StartLink(ctx context.Context, principal pa.Principal, server 
 		return "", err
 	}
 	p := principal.TelegramID()
+	if err := s.admitted(ctx, p); err != nil {
+		return "", err
+	}
 	c, err := s.cfg.Manager.Begin(ctx, p, server)
 	if err != nil {
 		return "", err
@@ -362,6 +408,11 @@ func (s *Service) consume(ctx context.Context, kind db.PALinkKind, value string,
 func (s *Service) BeginOAuth(ctx context.Context, rawInitData, linkToken string) (string, error) {
 	id, err := VerifyInitData(rawInitData, s.cfg.BotToken, s.now())
 	if err != nil {
+		return "", err
+	}
+	// Refused before the token is consumed: nothing changes, and the
+	// linking sweep fails the pending connection.
+	if err := s.admitted(ctx, id.UserID); err != nil {
 		return "", err
 	}
 	l, err := s.consume(ctx, db.PALinkToken, linkToken, func(l db.PALinkSecret) error {
@@ -487,6 +538,9 @@ func (s *Service) Callback(ctx context.Context, server connection.Server, query 
 	if err != nil {
 		return CallbackResult{}, err
 	}
+	if err := s.admitted(ctx, l.Principal); err != nil {
+		return CallbackResult{}, s.refuseLink(ctx, l, err)
+	}
 	if providerErr {
 		// The user declined, or the server failed: this attempt is over.
 		_, _ = s.cfg.Manager.Abandon(ctx, l.Principal, l.ConnectionID, l.Revision, "provider_error")
@@ -519,6 +573,9 @@ func (s *Service) Handoff(ctx context.Context, handoff string) (string, connecti
 	l, err := s.consume(ctx, db.PALinkHandoff, handoff, nil)
 	if err != nil {
 		return "", "", err
+	}
+	if err := s.admitted(ctx, l.Principal); err != nil {
+		return "", "", s.refuseLink(ctx, l, err)
 	}
 	if _, err := s.server(connection.Server(l.Server)); err != nil {
 		return "", "", err
@@ -557,6 +614,11 @@ func (s *Service) Complete(ctx context.Context, rawInitData string) error {
 	}
 	if id.StartParam == "" {
 		return fmt.Errorf("%w: no completion code in start_param", ErrRefused)
+	}
+	// Refused before the code is consumed or exchanged; the linking sweep
+	// fails the pending connection.
+	if err := s.admitted(ctx, id.UserID); err != nil {
+		return err
 	}
 	l, err := s.consume(ctx, db.PALinkCompletion, id.StartParam, func(l db.PALinkSecret) error {
 		if l.Principal != id.UserID {
@@ -705,6 +767,9 @@ func (s *Service) HandleCallback(ctx context.Context, u pa.VerifiedUpdate) (bool
 	if !s.enabled(connection.Server(l.Server)) {
 		_, aerr := s.cfg.Manager.Abandon(ctx, l.Principal, l.ConnectionID, l.Revision, "server_disabled")
 		return true, errors.Join(ErrServerDisabled, aerr)
+	}
+	if err := s.admitted(ctx, l.Principal); err != nil {
+		return true, s.refuseLink(ctx, l, err)
 	}
 	if err := s.consented(ctx, l.Principal); err != nil {
 		_, aerr := s.cfg.Manager.Abandon(ctx, l.Principal, l.ConnectionID, l.Revision, "no_consent")

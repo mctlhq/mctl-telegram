@@ -152,7 +152,7 @@ func TestLinking_RequireIssFromMetadata(t *testing.T) {
 			cfg := linking.Config{
 				BotToken: paBotToken, LoginBotToken: loginBotToken, BotUsername: "fake_pa_bot", MiniAppName: "link",
 				AppURL: appURL, Servers: h.servers, Manager: h.m, Store: s, Tokens: tokenClient{h.as},
-				Accounts: h.accounts, Messenger: h.msgr,
+				Accounts: h.accounts, Messenger: h.msgr, Allowed: h.allow,
 			}
 			if _, err := linking.New(cfg); !errors.Is(err, linking.ErrConfig) {
 				t.Errorf("%s: New %v, want ErrConfig", name, err)

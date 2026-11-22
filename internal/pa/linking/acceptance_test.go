@@ -106,7 +106,7 @@ func TestLinking_S1L2_LoginBotInitDataRefused(t *testing.T) {
 		cfg := linking.Config{
 			BotToken: loginBotToken, LoginBotToken: loginBotToken, BotUsername: "fake_pa_bot", MiniAppName: "link",
 			AppURL: appURL, Servers: h.servers, Manager: h.m, Store: s, Tokens: tokenClient{h.as},
-			Accounts: h.accounts, Messenger: h.msgr,
+			Accounts: h.accounts, Messenger: h.msgr, Allowed: h.allow,
 		}
 		if _, err := linking.New(cfg); !errors.Is(err, linking.ErrConfig) {
 			t.Fatalf("same token for both bots accepted: %v", err)

@@ -166,6 +166,8 @@ func buildPATools(ctx context.Context, cfg *config.Config, tools *config.PATools
 		Servers: servers, Manager: t.manager, Store: store, Tokens: tokens,
 		Accounts:  connector.IdentityAccounts{Endpoints: identity},
 		Messenger: linking.BotMessenger{Sender: sender},
+		// The same allowlist the webhook and the run loop check.
+		Allowed: pa.NewAllowlist(cfg.PAAllowedPrincipals),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("pa tools: linking: %w", err)
