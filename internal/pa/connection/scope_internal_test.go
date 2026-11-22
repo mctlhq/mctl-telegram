@@ -62,3 +62,31 @@ func TestTokenSet_NegativeExpiryUnreadable(t *testing.T) {
 		t.Fatalf("negative expiry: %v, want ErrUnreadable", err)
 	}
 }
+
+// An absurd expires_in is cut to MaxExpiresIn (#1397 review): without the
+// cap, a lifetime past about 9.2e9s overflows time.Duration, the expiry
+// lands in the past, and every call refreshes ahead.
+func TestTokenSet_ExpiresInCapped(t *testing.T) {
+	at := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	want := at.Add(MaxExpiresIn * time.Second)
+	for _, raw := range []string{"9223372036854775807", "10000000000", "31536001"} {
+		check := VerifyTokenResponse(ServerTG, []byte(`{"access_token":"fake-at","token_type":"Bearer","scope":"`+
+			mustCanonical(t)+`","expires_in":`+raw+`}`))
+		if check.Err != nil {
+			t.Fatalf("expires_in %s: %v", raw, check.Err)
+		}
+		got := check.Tokens.receivedAt(at)
+		if !got.ExpiresAt.Equal(want) {
+			t.Fatalf("expires_in %s: expiry %v, want %v (capped)", raw, got.ExpiresAt, want)
+		}
+	}
+}
+
+func mustCanonical(t *testing.T) string {
+	t.Helper()
+	s, ok := CanonicalScope(ServerTG)
+	if !ok {
+		t.Fatal("no canonical tg scope")
+	}
+	return s
+}

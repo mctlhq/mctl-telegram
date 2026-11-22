@@ -177,12 +177,27 @@ func TestConnection_C2b_ConcurrentCallsOneRefresh(t *testing.T) {
 				toks[i], errs[i] = tok.Reveal(), err
 			}(i)
 		}
-		for r.calls.Load() == 0 {
+		// Every wait is bounded, so a regression fails here by name
+		// instead of hanging until the go test timeout.
+		var open sync.Once
+		release := func() { open.Do(func() { close(r.gate) }) }
+		t.Cleanup(release)
+		for deadline := time.Now().Add(10 * time.Second); r.calls.Load() == 0; {
+			if time.Now().After(deadline) {
+				release()
+				t.Fatal("no refresh started within 10s")
+			}
 			time.Sleep(5 * time.Millisecond)
 		}
 		time.Sleep(150 * time.Millisecond) // let every caller join the flight
-		close(r.gate)
-		wg.Wait()
+		release()
+		done := make(chan struct{})
+		go func() { wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("callers still waiting 10s after the refresh was released (refreshes %d)", r.calls.Load())
+		}
 		if got := r.calls.Load(); got != 1 {
 			t.Fatalf("refreshes %d, want 1", got)
 		}
@@ -284,25 +299,91 @@ func TestConnection_C2b_NoRefreshTokenExpires(t *testing.T) {
 	})
 }
 
-// A refresh ahead that fails fails the call: the old token is not handed
-// out, the connection stays active, and nothing retries.
-func TestConnection_C2b_RefreshAheadFailureFailsCall(t *testing.T) {
+// A refresh ahead that fails transiently is not retried, and does not
+// fail the call while the current token has not expired: that token is
+// handed out (P3 of the #1397 review). Past its expiry the call fails. A
+// lease held by another replica is the same. invalid_grant always fails
+// the call and expires the connection.
+func TestConnection_C2b_RefreshAheadFailure(t *testing.T) {
+	down := func(int32) ([]byte, error) { return nil, errors.New("fake: down") }
 	forEachDialect(t, func(t *testing.T, s *db.Store) {
 		ctx := context.Background()
 		e := newEnv(t, s)
 		c0 := &clock{at: t0}
-		r := &refresher{answer: func(int32) ([]byte, error) { return nil, errors.New("fake: down") }}
+		r := &refresher{answer: down}
 		e.withRefresh(t, c0, r)
+		alice, bob := principals(t, s)
+		c := e.activeWith(t, alice, tokenResponse("fake-at-old", "fake-rt-old", tgScope)) // expires t0+1h
+
+		// Inside the window, not yet expired: the current token.
+		c0.set(t0.Add(time.Hour - time.Second))
+		tok, _, err := e.m.AccessToken(ctx, alice, c.ID, c.AuthorityRevision)
+		if err != nil || tok.Reveal() != "fake-at-old" || r.calls.Load() != 1 {
+			t.Fatalf("unexpired, refresh down: %q %v, refreshes %d; want the current token after one attempt", tok.Reveal(), err, r.calls.Load())
+		}
+		// At its expiry: the call fails, no token.
+		c0.set(t0.Add(time.Hour))
+		tok, _, err = e.m.AccessToken(ctx, alice, c.ID, c.AuthorityRevision)
+		if !errors.Is(err, connection.ErrRefreshFailed) || !tok.Empty() {
+			t.Fatalf("expired, refresh down: %q %v, want no token and ErrRefreshFailed", tok.Reveal(), err)
+		}
+		if got, err := e.m.Get(ctx, alice, c.ID); err != nil || got.State != connection.StateActive {
+			t.Fatalf("state %s (%v), want active", got.State, err)
+		}
+
+		// Another replica holds the lease: the same, without a call.
+		c0.set(t0.Add(time.Hour - time.Second))
+		cur, err := e.m.Get(ctx, alice, c.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := s.ClaimPAConnectionRefresh(ctx, alice, c.ID, cur.TokenGeneration, "replica-b", t0, t0.Add(2*time.Hour)); err != nil || !ok {
+			t.Fatalf("lease: %v %v", ok, err)
+		}
+		before := r.calls.Load()
+		tok, _, err = e.m.AccessToken(ctx, alice, c.ID, c.AuthorityRevision)
+		if err != nil || tok.Reveal() != "fake-at-old" || r.calls.Load() != before {
+			t.Fatalf("lease held elsewhere, unexpired: %q %v; want the current token, no call", tok.Reveal(), err)
+		}
+		c0.set(t0.Add(time.Hour))
+		if _, _, err = e.m.AccessToken(ctx, alice, c.ID, c.AuthorityRevision); !errors.Is(err, connection.ErrRefreshInProgress) {
+			t.Fatalf("lease held elsewhere, expired: %v, want ErrRefreshInProgress", err)
+		}
+
+		// invalid_grant inside the window: refused and expired.
+		r2 := &refresher{answer: func(int32) ([]byte, error) { return nil, connection.ErrInvalidGrant }}
+		c1 := &clock{at: t0}
+		e.withRefresh(t, c1, r2)
+		b := e.activeWith(t, bob, tokenResponse("fake-at-bob", "fake-rt-bob", tgScope))
+		c1.set(t0.Add(time.Hour - time.Second))
+		tok, _, err = e.m.AccessToken(ctx, bob, b.ID, b.AuthorityRevision)
+		if !errors.Is(err, connection.ErrInvalidGrant) || !tok.Empty() {
+			t.Fatalf("invalid_grant, unexpired: %q %v, want no token and ErrInvalidGrant", tok.Reveal(), err)
+		}
+		if got, err := e.m.Get(ctx, bob, b.ID); err != nil || got.State != connection.StateExpired {
+			t.Fatalf("state %s (%v), want expired", got.State, err)
+		}
+	})
+}
+
+// A flight asked for a generation that is already gone does not rotate
+// again (P3 of the #1397 review): the caller that read it before another
+// flight finished gets the current row, and the grant is not called.
+func TestConnection_C2b_RefreshFromStaleGenerationIsNoop(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		ctx := context.Background()
+		e := newEnv(t, s)
+		r := &refresher{}
+		e.withRefresh(t, &clock{at: t0}, r)
 		alice, _ := principals(t, s)
 		c := e.activeWith(t, alice, tokenResponse("fake-at-old", "fake-rt-old", tgScope))
-		c0.set(t0.Add(time.Hour))
-		tok, _, err := e.m.AccessToken(ctx, alice, c.ID, c.AuthorityRevision)
-		if !errors.Is(err, connection.ErrRefreshFailed) || !tok.Empty() {
-			t.Fatalf("%q %v, want no token and ErrRefreshFailed", tok.Reveal(), err)
+		if _, err := e.m.RefreshFrom(ctx, alice, c.ID, r.fn, c.TokenGeneration); err != nil || r.calls.Load() != 1 {
+			t.Fatalf("first flight: %v, refreshes %d", err, r.calls.Load())
 		}
-		got, err := e.m.Get(ctx, alice, c.ID)
-		if err != nil || got.State != connection.StateActive || r.calls.Load() != 1 {
-			t.Fatalf("state %s (%v), refreshes %d; want active after one attempt", got.State, err, r.calls.Load())
+		got, err := e.m.RefreshFrom(ctx, alice, c.ID, r.fn, c.TokenGeneration)
+		if err != nil || r.calls.Load() != 1 || got.TokenGeneration != c.TokenGeneration+1 {
+			t.Fatalf("late flight for the old generation: gen %d %v, refreshes %d; want the current row and no second rotation",
+				got.TokenGeneration, err, r.calls.Load())
 		}
 	})
 }
@@ -514,6 +595,15 @@ func TestConnection_C2b_UnrecordedExpiryIsAFailedRefresh(t *testing.T) {
 			if cc.ID == noRT.ID && errors.Is(err, connection.ErrNoRefreshToken) {
 				t.Fatalf("unrecorded expiry reported as ErrNoRefreshToken: %v", err)
 			}
+		}
+		// A refresh ahead that hits invalid_grant and cannot record the
+		// expiry does not fall back to the unexpired token: the grant is
+		// dead even though the row still reads active.
+		ahead := &clock{at: t0}
+		e.withRefresh(t, ahead, r)
+		ahead.set(t0.Add(time.Hour - time.Second))
+		if tok, _, err := e.m.AccessToken(ctx, alice, c.ID, c.AuthorityRevision); !errors.Is(err, connection.ErrInvalidGrant) || !tok.Empty() {
+			t.Fatalf("refresh ahead, invalid_grant, expiry unrecorded: %q %v; want no token", tok.Reveal(), err)
 		}
 		e.store = healthy
 		e.withRefresh(t, &clock{at: t0}, r)

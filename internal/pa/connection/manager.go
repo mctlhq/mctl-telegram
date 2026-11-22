@@ -606,10 +606,14 @@ func (m *Manager) Authorize(ctx context.Context, principal int64, id string, bou
 //
 // A token whose known expiry is less than RefreshAhead away is refreshed
 // first (#1318 slice C2b), through Refresh: concurrent calls share one
-// flight. A failed refresh fails the call; it is never retried here, and
-// the old token is not handed out. An unknown expiry is not refreshed
-// ahead, and neither is a set without a refresh token: both are used
-// until the server rejects them (RefreshAccess).
+// flight, and a flight is skipped when the generation it was asked for is
+// already gone. A refresh ahead that fails transiently, or whose lease
+// another replica holds, is not retried here; while the current token has
+// not yet expired it is still handed out (re-read and re-gated), since
+// the 401 path covers it if the server disagrees. Past its expiry, or on
+// any other failure (invalid_grant included), the call fails. An unknown
+// expiry is not refreshed ahead, and neither is a set without a refresh
+// token: both are used until the server rejects them (RefreshAccess).
 func (m *Manager) AccessToken(ctx context.Context, principal int64, id string, boundRevision int64) (Secret, Connection, error) {
 	token, c, ts, err := m.openAccess(ctx, principal, id, boundRevision)
 	if err != nil {
@@ -618,14 +622,29 @@ func (m *Manager) AccessToken(ctx context.Context, principal int64, id string, b
 	if m.grant == nil || ts.ExpiresAt.IsZero() || ts.RefreshToken.Empty() || m.now().Before(ts.ExpiresAt.Add(-RefreshAhead)) {
 		return token, c, nil
 	}
-	if _, err := m.Refresh(ctx, principal, id, m.grant); err != nil {
-		return Secret{}, Connection{}, err
+	if _, err := m.refreshFrom(ctx, principal, id, m.grant, c.TokenGeneration); err != nil {
+		if !refreshAheadTransient(err) || !m.now().Before(ts.ExpiresAt) {
+			return Secret{}, Connection{}, err
+		}
+		// Still valid: use it, as the store has it now.
+		slog.Warn("pa connection: refresh ahead failed, using the unexpired token",
+			"server", string(c.Server), "err", err)
 	}
 	token, c, _, err = m.openAccess(ctx, principal, id, boundRevision)
 	if err != nil {
 		return Secret{}, Connection{}, err
 	}
 	return token, c, nil
+}
+
+// refreshAheadTransient reports whether a failed refresh ahead left the
+// connection as it was: another replica holds the lease, or the grant
+// failed for a reason other than invalid_grant. An expiry that could not
+// be recorded joins ErrRefreshFailed with ErrInvalidGrant and is not
+// transient: the grant is dead.
+func refreshAheadTransient(err error) bool {
+	return (errors.Is(err, ErrRefreshInProgress) || errors.Is(err, ErrRefreshFailed)) &&
+		!errors.Is(err, ErrInvalidGrant)
 }
 
 // openAccess is AccessToken without the refresh ahead.
@@ -678,7 +697,7 @@ func (m *Manager) RefreshAccess(ctx context.Context, principal int64, id string,
 		}
 		return Secret{}, Connection{}, ErrNoRefreshToken
 	}
-	if _, err := m.Refresh(ctx, principal, id, m.grant); err != nil {
+	if _, err := m.refreshFrom(ctx, principal, id, m.grant, rejected); err != nil {
 		return Secret{}, Connection{}, err
 	}
 	token, c, _, err = m.openAccess(ctx, principal, id, boundRevision)
@@ -714,11 +733,23 @@ func (m *Manager) RefreshAccess(ctx context.Context, principal int64, id string,
 //     clock, and the store re-checks the lease end in the same CAS. Past it,
 //     the issued tokens are revoked and the result is ErrFenced.
 func (m *Manager) Refresh(ctx context.Context, principal int64, id string, fn RefreshFunc) (Connection, error) {
+	return m.refreshFrom(ctx, principal, id, fn, anyGeneration)
+}
+
+// anyGeneration asks refreshFrom to rotate whatever generation is stored.
+const anyGeneration = -1
+
+// refreshFrom is Refresh for the tokens of generation from: a flight that
+// finds the connection already past from (another flight, here or on
+// another replica, rotated it after the caller read it) returns the
+// current row without calling fn. So a caller that read generation G
+// never causes a second rotation once G is gone (#1318 C2b review).
+func (m *Manager) refreshFrom(ctx context.Context, principal int64, id string, fn RefreshFunc, from int64) (Connection, error) {
 	key := strconv.FormatInt(principal, 10) + "|" + id
 	ch := m.refreshes.DoChan(key, func() (any, error) {
 		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), flightBound*m.lease)
 		defer cancel()
-		return m.refresh(fctx, principal, id, fn)
+		return m.refresh(fctx, principal, id, fn, from)
 	})
 	select {
 	case r := <-ch:
@@ -749,13 +780,19 @@ func (m *Manager) untilByClock(t time.Time) time.Duration {
 	return t.Sub(m.now())
 }
 
-func (m *Manager) refresh(ctx context.Context, principal int64, id string, fn RefreshFunc) (Connection, error) {
+func (m *Manager) refresh(ctx context.Context, principal int64, id string, fn RefreshFunc, from int64) (Connection, error) {
 	c, s, err := m.store.GetPAConnectionSealed(ctx, principal, id)
 	if err != nil {
 		return Connection{}, readErr(err)
 	}
 	if err := gate(c, c.AuthorityRevision); err != nil {
 		return Connection{}, err
+	}
+	if from != anyGeneration && c.TokenGeneration != from {
+		// Already rotated past the caller's tokens: nothing to do. The
+		// lease claim below is a CAS on the generation read here, so a
+		// rotation committed after this read is caught there instead.
+		return c, nil
 	}
 	now := m.now().UTC()
 	leaseEnd := now.Add(m.lease)

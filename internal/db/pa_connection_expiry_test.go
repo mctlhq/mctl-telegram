@@ -245,3 +245,136 @@ func TestMigratePAOutbox_ConnectionLevel(t *testing.T) {
 		}
 	})
 }
+
+// A refresh rotation racing the supersede of its connection (#1318 C2b
+// review): the superseded row is locked before it is read, so a rotation
+// that starts after the read cannot commit before the revoke. It misses
+// its CAS once the activation commits (the refresh then revokes what it
+// was issued), and the tokens the activation returns for revocation are
+// the ones the row really held.
+func TestActivatePAConnection_SupersedeLocksRotation(t *testing.T) {
+	paLinkDialects(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		p := paLinkPrincipal(t, s)
+		acceptConsent(t, s, p)
+		t.Cleanup(func() { _, _ = s.DB.Exec(`DELETE FROM pa_connections WHERE principal = $1`, p) })
+		old := activatePAConn(t, s, p, seedPAConnectionWithTokens(t, s, p))
+		now := time.Now().UTC()
+		ok, err := s.ClaimPAConnectionRefresh(ctx, p, old.ID, old.TokenGeneration, "replica-b", now, now.Add(time.Minute))
+		if err != nil || !ok {
+			t.Fatalf("lease: %v %v", ok, err)
+		}
+		rotated := make(chan error, 1)
+		prev := paSupersedeAfterRead
+		t.Cleanup(func() { paSupersedeAfterRead = prev })
+		paSupersedeAfterRead = func(id string) {
+			if id != old.ID {
+				return
+			}
+			go func() {
+				_, err := s.RotatePAConnectionTokens(context.Background(), p, old.ID, connection.Rotation{
+					ExpectRevision: old.AuthorityRevision, ExpectGeneration: old.TokenGeneration,
+					GrantedScope: old.GrantedScope, LeaseOwner: "replica-b",
+					SealedTokens: []byte("rotated"), Now: time.Now().UTC(),
+				})
+				rotated <- err
+			}()
+			// Give an unlocked rotation every chance to commit first.
+			select {
+			case err := <-rotated:
+				rotated <- err
+			case <-time.After(500 * time.Millisecond):
+			}
+		}
+		_, sup, err := s.ActivatePAConnection(ctx, p, seedPAConnectionWithTokens(t, s, p), connection.Transition{
+			From: connection.StatePendingConfirm, To: connection.StateActive, ExpectRevision: 4})
+		if err != nil {
+			t.Fatalf("activation: %v", err)
+		}
+		var rerr error
+		select {
+		case rerr = <-rotated:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the rotation never finished")
+		}
+		if rerr == nil {
+			t.Fatal("a rotation committed on a connection being superseded: its tokens are orphaned")
+		}
+		if len(sup) != 1 || string(sup[0].Before.SealedTokens) != "tokens" {
+			t.Fatalf("superseded %+v, want the stored tokens", sup)
+		}
+		got, sealed, err := s.GetPAConnectionSealed(ctx, p, old.ID)
+		if err != nil || got.State != connection.StateRevoked || len(sealed.SealedTokens) != 0 {
+			t.Fatalf("superseded row %s with %d sealed bytes (%v), want revoked and wiped", got.State, len(sealed.SealedTokens), err)
+		}
+	})
+}
+
+// An activation that cannot tell the dialect does not run: on Postgres,
+// guessing SQLite would drop the supersede row lock.
+func TestActivatePAConnection_UnknownDialectRefused(t *testing.T) {
+	paLinkDialects(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		p := paLinkPrincipal(t, s)
+		acceptConsent(t, s, p)
+		t.Cleanup(func() { _, _ = s.DB.Exec(`DELETE FROM pa_connections WHERE principal = $1`, p) })
+		id := seedPAConnectionWithTokens(t, s, p)
+		s.pgMu.Lock()
+		s.pgResolved = false
+		s.pgMu.Unlock()
+		s.probeFail = func() error { return errors.New("driver: bad connection") }
+		_, _, err := s.ActivatePAConnection(ctx, p, id, connection.Transition{
+			From: connection.StatePendingConfirm, To: connection.StateActive, ExpectRevision: 4})
+		s.probeFail = nil
+		if !errors.Is(err, connection.ErrUnreadable) {
+			t.Fatalf("err %v, want ErrUnreadable", err)
+		}
+		if got, _ := s.GetPAConnection(ctx, p, id); got.State != connection.StatePendingConfirm {
+			t.Fatalf("activated with an unknown dialect: %s", got.State)
+		}
+	})
+}
+
+// Rolling back past C2b (#1397 review): the previous build's Migrate
+// recreates idx_pa_outbox_update over (principal, update_id, kind) WHERE
+// job_id IS NULL. Two connection notices of one principal, written by this
+// build or left over from before connection rows took -id, must not fail
+// it, or that build crash-loops at start.
+func TestPAOutbox_ConnectionRowsSurviveRollbackIndex(t *testing.T) {
+	const oldIndex = `CREATE UNIQUE INDEX IF NOT EXISTS idx_pa_outbox_update ON pa_outbox(principal, update_id, kind)
+	   WHERE job_id IS NULL`
+	paLinkDialects(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		p := paLinkPrincipal(t, s)
+		acceptConsent(t, s, p)
+		t.Cleanup(func() {
+			_, _ = s.DB.Exec(`DROP INDEX IF EXISTS idx_pa_outbox_update`)
+			_, _ = s.DB.Exec(`DELETE FROM pa_outbox WHERE principal = $1`, p)
+			_, _ = s.DB.Exec(`DELETE FROM pa_connections WHERE principal = $1`, p)
+		})
+		a := activatePAConn(t, s, p, seedPAConnectionWithTokens(t, s, p))
+		expirePAConn(t, s, p, a)
+		b := activatePAConn(t, s, p, seedPAConnectionWithTokens(t, s, p))
+		expirePAConn(t, s, p, b)
+		if got := paExpiryNotices(t, s, p); len(got) != 2 {
+			t.Fatalf("notices %v, want two", got)
+		}
+		if _, err := s.DB.ExecContext(ctx, oldIndex); err != nil {
+			t.Fatalf("previous build's update index on two connection notices: %v", err)
+		}
+		if _, err := s.DB.ExecContext(ctx, `DROP INDEX idx_pa_outbox_update`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Rows from before -id: Migrate repairs them.
+		if _, err := s.DB.ExecContext(ctx, `UPDATE pa_outbox SET update_id = 0 WHERE principal = $1`, p); err != nil {
+			t.Fatal(err)
+		}
+		if err := migratePAOutbox(ctx, s.DB, s.isPostgres(ctx)); err != nil {
+			t.Fatalf("migrate: %v", err)
+		}
+		if _, err := s.DB.ExecContext(ctx, oldIndex); err != nil {
+			t.Fatalf("previous build's update index after migrate: %v", err)
+		}
+	})
+}

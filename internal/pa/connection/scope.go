@@ -58,14 +58,20 @@ type TokenSet struct {
 
 // receivedAt stamps the expiry of a set parsed from a response received
 // at at. It is the receipt, not the time the set is sealed, that the
-// server's expires_in counts from.
+// server's expires_in counts from. A lifetime past MaxExpiresIn is cut
+// to it: time.Duration overflows from about 9.2e9 seconds, and an
+// overflowed expiry would land in the past and refresh every call.
 func (t TokenSet) receivedAt(at time.Time) TokenSet {
 	t.ExpiresAt = time.Time{}
 	if t.ExpiresIn > 0 && !at.IsZero() {
-		t.ExpiresAt = at.Add(time.Duration(t.ExpiresIn) * time.Second).UTC()
+		t.ExpiresAt = at.Add(time.Duration(min(t.ExpiresIn, MaxExpiresIn)) * time.Second).UTC()
 	}
 	return t
 }
+
+// MaxExpiresIn is the longest access-token lifetime taken from a server,
+// in seconds: one year.
+const MaxExpiresIn = 365 * 24 * 60 * 60
 
 // tokenSetWire is the sealed form. It is only ever marshalled into a DEK
 // seal and never logged. ExpiresAtMS is absent from a set sealed before

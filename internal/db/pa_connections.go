@@ -323,6 +323,10 @@ func missOrConflict(ctx context.Context, q paQuerier, principal int64, id string
 // that window. Always nil outside tests.
 var paActivateAfterConsent func(principal int64)
 
+// paSupersedeAfterRead is a test seam: it runs between a superseded row's
+// read and its update.
+var paSupersedeAfterRead func(id string)
+
 // TransitionPAConnection applies t (see connection.Transition). The
 // activation edge is ActivatePAConnection, with every one of its checks:
 // there is no way to activate a connection that skips the consent, disable
@@ -392,6 +396,13 @@ func (s *Store) ActivatePAConnection(ctx context.Context, principal int64, id st
 	if t.From != connection.StatePendingConfirm || t.To != connection.StateActive {
 		return connection.Connection{}, nil, fmt.Errorf("%w: not the activation edge", connection.ErrInvalidTransition)
 	}
+	// Read before the transaction: on SQLite the pool has one connection,
+	// which the transaction then holds. An unresolved dialect is not taken
+	// for SQLite: on Postgres that would drop the supersede row lock.
+	pg, resolved := s.resolveDialect(ctx)
+	if !resolved {
+		return connection.Connection{}, nil, fmt.Errorf("%w: activation: database dialect unknown", connection.ErrUnreadable)
+	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return connection.Connection{}, nil, fmt.Errorf("pa connection activation: begin: %w", err)
@@ -404,7 +415,7 @@ func (s *Store) ActivatePAConnection(ctx context.Context, principal int64, id st
 	if err != nil {
 		return connection.Connection{}, nil, err
 	}
-	superseded, err := supersedePAConns(ctx, tx, c, transitionAtMS(t))
+	superseded, err := supersedePAConns(ctx, tx, c, transitionAtMS(t), pg)
 	if err != nil {
 		return connection.Connection{}, nil, err
 	}
@@ -454,11 +465,27 @@ func transitionPAConnTx(ctx context.Context, tx *sql.Tx, principal int64, id str
 
 // supersedePAConns revokes, in tx, every active or expired connection of
 // c's principal on c's server other than c, and returns them as they were.
-// The rows are read in tx after the principal lock, so no row moves
-// between the read and the update.
-func supersedePAConns(ctx context.Context, tx *sql.Tx, c connection.Connection, nowMS int64) ([]connection.Superseded, error) {
+//
+// The principal lock does not keep these rows still: a refresh flight's
+// RotatePAConnectionTokens, and the transitions it and the dispatcher make
+// (active -> expired on invalid_grant, revoked on reuse), write a row
+// without taking it. So the rows themselves are locked before they are
+// read. On Postgres that is SELECT ... FOR UPDATE: a rotation or
+// transition that commits first is what the read sees (read committed
+// re-checks the row); one that comes later waits for this transaction,
+// then misses its CAS on the revoked row, and refresh revokes what it was
+// issued. Without the lock, a rotation committing between the read and
+// the update would have its fresh tokens wiped while Before held the old
+// ones, orphaning the live pair at the server. On SQLite this transaction
+// already holds the database write lock (the principal lock and the
+// activation are writes), so no other writer commits in between.
+func supersedePAConns(ctx context.Context, tx *sql.Tx, c connection.Connection, nowMS int64, pg bool) ([]connection.Superseded, error) {
+	lock := ""
+	if pg {
+		lock = " FOR UPDATE"
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT id FROM pa_connections
-		WHERE principal = $1 AND server = $2 AND id <> $3 AND state IN ($4, $5) ORDER BY created_at_ms, id`,
+		WHERE principal = $1 AND server = $2 AND id <> $3 AND state IN ($4, $5) ORDER BY created_at_ms, id`+lock,
 		c.Principal, string(c.Server), c.ID, string(connection.StateActive), string(connection.StateExpired))
 	if err != nil {
 		return nil, fmt.Errorf("%w: superseded connections: %v", connection.ErrUnreadable, err)
@@ -484,6 +511,9 @@ func supersedePAConns(ctx context.Context, tx *sql.Tx, c connection.Connection, 
 		cur, err := getPAConn(ctx, tx, c.Principal, id, &before)
 		if err != nil {
 			return nil, err
+		}
+		if paSupersedeAfterRead != nil {
+			paSupersedeAfterRead(id)
 		}
 		if _, err := transitionPAConnTx(ctx, tx, c.Principal, id, connection.Transition{
 			From: cur.State, To: connection.StateRevoked, ExpectRevision: cur.AuthorityRevision,

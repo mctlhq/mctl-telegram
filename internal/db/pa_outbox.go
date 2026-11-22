@@ -60,6 +60,15 @@ func paOutboxTable(pg bool, name string) string {
 // its ON CONFLICT target from the old index, so its conversation-level
 // enqueue fails until it is replaced; the webhook answers Telegram an
 // error and the update is redelivered to a replica on this build.
+//
+// A connection-level row's update_id is minus its own id, never 0: the
+// previous build's Migrate recreates idx_pa_outbox_update over (principal,
+// update_id, kind) WHERE job_id IS NULL, and two connection rows of one
+// principal sharing a constant would fail that index and crash-loop a
+// rollback (#1397 review). id is the primary key, so -id is unique; a
+// conversation-level update_id is a Telegram update id, always positive
+// (OutboxItem.Valid), so the two never meet. The previous build has no
+// template for a connection kind and fails such a row instead of sending.
 var paOutboxIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_pa_outbox_due ON pa_outbox(status, next_at_ms)`,
 	`CREATE INDEX IF NOT EXISTS idx_pa_outbox_principal ON pa_outbox(principal, id)`,
@@ -106,6 +115,12 @@ func migratePAOutbox(ctx context.Context, dbConn migrateDB, pg bool) error {
 		if _, err := dbConn.ExecContext(ctx, q); err != nil {
 			return fmt.Errorf("migrate pa outbox: %w", err)
 		}
+	}
+	// Rows written before connection rows took -id (none outside a
+	// pre-release build, but a rollback must not meet one).
+	if _, err := dbConn.ExecContext(ctx,
+		`UPDATE pa_outbox SET update_id = -id WHERE connection_id <> '' AND update_id >= 0`); err != nil {
+		return fmt.Errorf("migrate pa outbox: connection update ids: %w", err)
 	}
 	return nil
 }
@@ -200,6 +215,13 @@ func enqueuePAOutbox(ctx context.Context, tx *sql.Tx, item jobs.OutboxItem, nowM
 			item.Principal, string(item.Kind), item.ConnectionID, string(jobs.OutboxPending), nowMS); err != nil {
 			return fmt.Errorf("pa outbox: enqueue: %w", err)
 		}
+		// update_id = -id, unique, so the previous build's update index
+		// still builds on rollback (see paOutboxIndexes).
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE pa_outbox SET update_id = -id WHERE principal = $1 AND connection_id = $2 AND kind = $3 AND update_id = 0`,
+			item.Principal, item.ConnectionID, string(item.Kind)); err != nil {
+			return fmt.Errorf("pa outbox: enqueue: update id: %w", err)
+		}
 		return nil
 	}
 	if item.Kind.ConversationLevel() {
@@ -266,6 +288,11 @@ func scanPAOutbox(row interface{ Scan(...any) error }) (jobs.OutboxItem, error) 
 	// An unknown kind is handed to the deliverer as is: it refuses to send
 	// it and fails the row, rather than the claim failing for every row.
 	it.Kind, it.Status, it.NextAt = jobs.OutboxKind(kind), jobs.OutboxStatus(status), time.UnixMilli(nextMS).UTC()
+	// A connection row stores -id as its update_id (paOutboxIndexes); the
+	// item has none. Any other stored value is left for Valid to refuse.
+	if it.Kind.ConnectionLevel() && it.UpdateID == -it.ID {
+		it.UpdateID = 0
+	}
 	return it, nil
 }
 
