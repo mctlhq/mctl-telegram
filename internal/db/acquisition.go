@@ -185,8 +185,12 @@ type AcquisitionBucket struct {
 }
 
 // AcquisitionReport groups users created at or after since by source label:
-// sign-ups, users with at least one audited tool call, and users with tool
-// calls on two or more distinct UTC days.
+// sign-ups, users with at least one successful user-facing MCP tool call since
+// signup, and users making such calls on two or more distinct UTC days.
+// The source window limits signup time, not tool use (this is NOT a 24h
+// activation or D7 retention cohort metric). Reuse publicToolFilter so
+// onboarding, web, local bridge keepalives, PA and failed calls do not turn
+// into product activation.
 func (s *Store) AcquisitionReport(ctx context.Context, since time.Time) ([]AcquisitionBucket, error) {
 	pg, err := s.postgresDialect(ctx)
 	if err != nil {
@@ -196,15 +200,20 @@ func (s *Store) AcquisitionReport(ctx context.Context, since time.Time) ([]Acqui
 	if pg {
 		day = `(l.created_at AT TIME ZONE 'UTC')::date`
 	}
-	// pa:* rows are the Personal Assistant's connector audit: a call the
-	// assistant made for the user is not the user using the connector, so
-	// it counts neither as activation nor as a return visit (as in
-	// public_stats.go).
+	// A signup's connect:* rows live in the same audit table as MCP calls.
+	// Never count those (or failed/web/bridge/PA rows) as activation. Restrict
+	// activity to events at or after the user's signup timestamp as well.
+	// publicToolFilter is shared with PublicStatsQuery; it is deliberately
+	// evaluated against the l audit_logs alias in each correlated subquery.
 	rows, err := s.DB.QueryContext(ctx,
 		`WITH per_user AS (
 		     SELECT u.id AS uid, `+acquisitionLabelSQL+` AS label,
-		            (SELECT COUNT(*) FROM audit_logs l WHERE l.user_id = u.id AND l.tool_name NOT LIKE 'pa:%') AS calls,
-		            (SELECT COUNT(DISTINCT `+day+`) FROM audit_logs l WHERE l.user_id = u.id AND l.tool_name NOT LIKE 'pa:%') AS days
+		            (SELECT COUNT(*) FROM audit_logs l
+		             WHERE l.user_id = u.id AND l.created_at >= u.created_at
+		               AND `+publicToolFilter+`) AS calls,
+		            (SELECT COUNT(DISTINCT `+day+`) FROM audit_logs l
+		             WHERE l.user_id = u.id AND l.created_at >= u.created_at
+		               AND `+publicToolFilter+`) AS days
 		     FROM users u
 		     LEFT JOIN user_acquisition a ON a.user_id = u.id
 		     LEFT JOIN acquisition_capture_epoch e ON e.id = 1
