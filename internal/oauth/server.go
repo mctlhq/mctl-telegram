@@ -1487,13 +1487,20 @@ type Router interface {
 
 // ----- /.well-known/oauth-authorization-server -----
 
-func (s *Server) handleAuthorizationServerMetadata(w http.ResponseWriter, _ *http.Request) {
-	body := map[string]any{
-		"issuer":                                     s.cfg.Issuer,
-		"authorization_endpoint":                     s.cfg.Issuer + "/oauth/authorize",
-		"token_endpoint":                             s.cfg.Issuer + "/oauth/token",
-		"registration_endpoint":                      s.cfg.Issuer + "/oauth/register",
-		"revocation_endpoint":                        s.cfg.Issuer + "/oauth/revoke",
+// MetadataDocument is the RFC 8414 document this authorization server
+// publishes for issuer at /.well-known/oauth-authorization-server, without
+// the fields that depend on CIMD advertising. The handler serves exactly this
+// map plus those fields, so a caller in the same process that needs the
+// document (the PA's tg server, whose issuer is this server: #1318 G6) reads
+// it here instead of fetching its own public URL, which no pod answers while
+// a Recreate rollout is starting the only one.
+func MetadataDocument(issuer string) map[string]any {
+	return map[string]any{
+		"issuer":                                     issuer,
+		"authorization_endpoint":                     issuer + "/oauth/authorize",
+		"token_endpoint":                             issuer + "/oauth/token",
+		"registration_endpoint":                      issuer + "/oauth/register",
+		"revocation_endpoint":                        issuer + "/oauth/revoke",
 		"response_types_supported":                   []string{"code"},
 		"grant_types_supported":                      []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":           []string{"S256"},
@@ -1510,6 +1517,10 @@ func (s *Server) handleAuthorizationServerMetadata(w http.ResponseWriter, _ *htt
 		// metadata field.
 		"scopes_supported": DCRNegotiableScopes,
 	}
+}
+
+func (s *Server) handleAuthorizationServerMetadata(w http.ResponseWriter, _ *http.Request) {
+	body := MetadataDocument(s.cfg.Issuer)
 	// CIMD and private_key_jwt are announced together and only when
 	// advertising is on: announcing private_key_jwt alone could steer a DCR
 	// client toward a method /oauth/register never grants.

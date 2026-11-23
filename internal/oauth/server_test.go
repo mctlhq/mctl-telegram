@@ -1737,3 +1737,34 @@ func (m *mockRouter) serve(method, p string, w http.ResponseWriter, r *http.Requ
 	}
 	h(w, r)
 }
+
+// TestMetadataDocumentMatchesHandler: the in-process document the PA reads
+// for a self-issued tg server (#1318 G6) is what the well-known handler
+// serves, field for field, so the two cannot drift apart.
+func TestMetadataDocumentMatchesHandler(t *testing.T) {
+	srv := newTestServer(t)
+	mux := newMockRouter()
+	srv.Register(mux)
+	rec := httptest.NewRecorder()
+	mux.serve("GET", "/.well-known/oauth-authorization-server", rec, httptest.NewRequest("GET", "/.well-known/oauth-authorization-server", nil))
+	var served map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&served); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	raw, err := json.Marshal(MetadataDocument(testIssuer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc) == 0 {
+		t.Fatal("empty metadata document")
+	}
+	for k, v := range doc {
+		if !reflect.DeepEqual(served[k], v) {
+			t.Errorf("%s: handler serves %v, MetadataDocument has %v", k, served[k], v)
+		}
+	}
+}

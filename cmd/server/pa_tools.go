@@ -12,16 +12,19 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/config"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/oauth"
 	"github.com/mctlhq/mctl-telegram/internal/pa"
 	"github.com/mctlhq/mctl-telegram/internal/pa/catalog"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
@@ -154,7 +157,7 @@ func buildPATools(ctx context.Context, cfg *config.Config, tools *config.PATools
 		if err != nil {
 			return nil, err
 		}
-		md, err := paServerMetadata(ctx, n.Metadata, s)
+		md, err := paServerMetadata(ctx, n.Metadata, s, paSelfIssuer(cfg))
 		if err != nil {
 			return nil, err
 		}
@@ -201,8 +204,27 @@ func buildPATools(ctx context.Context, cfg *config.Config, tools *config.PATools
 // endpoints are; a configuration that disagrees with it, or metadata that
 // cannot be read, refuses startup (#1338 item 2). Errors name the variable,
 // never a value.
-func paServerMetadata(ctx context.Context, client *http.Client, s config.PAServer) (linking.ASMetadata, error) {
-	md, err := linking.FetchASMetadata(ctx, client, s.Issuer)
+//
+// When s's issuer is this process's own authorization server (self, see
+// paSelfIssuer), the document is the one this process publishes
+// (oauth.MetadataDocument), read in process rather than fetched: the fetch
+// would go out to the public URL before this server listens, and with the
+// Deployment's Recreate strategy nothing answers there at that moment, so
+// every start would refuse itself (gitops#2961 crash-looped preview on
+// "HTTP 503"). The document goes through the same parser and the same
+// comparisons, so a configuration that disagrees with what this server
+// publishes still refuses startup.
+func paServerMetadata(ctx context.Context, client *http.Client, s config.PAServer, self string) (linking.ASMetadata, error) {
+	var md linking.ASMetadata
+	var err error
+	if self != "" && s.Issuer == self {
+		var body []byte
+		if body, err = json.Marshal(oauth.MetadataDocument(self)); err == nil {
+			md, err = linking.ParseASMetadata(body, s.Issuer)
+		}
+	} else {
+		md, err = linking.FetchASMetadata(ctx, client, s.Issuer)
+	}
 	if err != nil {
 		return linking.ASMetadata{}, fmt.Errorf("pa tools: %s metadata: %w", config.PAServerEnv(s.Name, "ISSUER"), err)
 	}
@@ -216,6 +238,16 @@ func paServerMetadata(ctx context.Context, client *http.Client, s config.PAServe
 		return linking.ASMetadata{}, paMetadataMismatch(s.Name, "REVOCATION_ENDPOINT")
 	}
 	return md, nil
+}
+
+// paSelfIssuer is the issuer of the authorization server this process
+// serves, or "" when it serves none: main mounts the OAuth server, with
+// PUBLIC_BASE_URL as its issuer, only in AUTH_MODE=local-jwt.
+func paSelfIssuer(cfg *config.Config) string {
+	if cfg == nil || !strings.EqualFold(cfg.AuthMode, "local-jwt") {
+		return ""
+	}
+	return strings.TrimRight(cfg.PublicBaseURL, "/")
 }
 
 // errPAMetadataMismatch is a configured endpoint the server's metadata does

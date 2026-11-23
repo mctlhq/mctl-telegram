@@ -904,3 +904,84 @@ func TestPARefreshers(t *testing.T) {
 		t.Fatalf("refresh %q %v", b, err)
 	}
 }
+
+// enableSelfIssuedTGEnv points the tg server at this process's own
+// authorization server, as preview does: the issuer is PUBLIC_BASE_URL and
+// the endpoints are the ones oauth.MetadataDocument publishes.
+func enableSelfIssuedTGEnv(t *testing.T) {
+	t.Helper()
+	enablePAToolsEnv(t)
+	for k, v := range map[string]string{
+		"PA_SERVER_TG_ISSUER":                 testPABaseURL,
+		"PA_SERVER_TG_AUTHORIZATION_ENDPOINT": testPABaseURL + "/oauth/authorize",
+		"PA_SERVER_TG_TOKEN_ENDPOINT":         testPABaseURL + "/oauth/token",
+		"PA_SERVER_TG_REVOCATION_ENDPOINT":    testPABaseURL + "/oauth/revoke",
+		"PA_SERVER_TG_ALLOWED_HOSTS":          "tg.example,mcp.tg.example.test",
+	} {
+		t.Setenv(k, v)
+	}
+}
+
+// TestBuildPA_SelfIssuerMetadataInProcess: when the tg server's issuer is
+// this process's own authorization server, startup reads the metadata this
+// process publishes instead of fetching its public URL, which answers 503
+// while a Recreate rollout starts the only pod (gitops#2961). The fake AS
+// answers 503 to every metadata request, so a fetch would refuse the start.
+func TestBuildPA_SelfIssuerMetadataInProcess(t *testing.T) {
+	f := fakePAServerNet(t, 4242003)
+	f.as.status = http.StatusServiceUnavailable
+	enableSelfIssuedTGEnv(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := buildPA(context.Background(), cfg, paTestStore(t), localjwt.NewRevocationCache(paTestStore(t), localjwt.DefaultRevocationCacheTTL), nil)
+	if err != nil || rt == nil || rt.tools == nil {
+		t.Fatalf("buildPA with a self-issued tg server = %v, %v; want the tools runtime built without a fetch", rt, err)
+	}
+}
+
+// TestBuildPA_SelfIssuerMetadataStillChecked: the in-process document goes
+// through the same comparisons, so a configured endpoint this server does
+// not publish still refuses startup and names the variable.
+func TestBuildPA_SelfIssuerMetadataStillChecked(t *testing.T) {
+	for _, tc := range []struct{ env, want string }{
+		{"PA_SERVER_TG_AUTHORIZATION_ENDPOINT", "PA_SERVER_TG_AUTHORIZATION_ENDPOINT"},
+		{"PA_SERVER_TG_TOKEN_ENDPOINT", "PA_SERVER_TG_TOKEN_ENDPOINT"},
+		{"PA_SERVER_TG_REVOCATION_ENDPOINT", "PA_SERVER_TG_REVOCATION_ENDPOINT"},
+	} {
+		t.Run(tc.env, func(t *testing.T) {
+			fakePAServerNet(t, 4242003)
+			enableSelfIssuedTGEnv(t)
+			t.Setenv(tc.env, testPABaseURL+"/other")
+			cfg, err := config.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			rt, err := buildPA(context.Background(), cfg, paTestStore(t), localjwt.NewRevocationCache(paTestStore(t), localjwt.DefaultRevocationCacheTTL), nil)
+			if err == nil || rt != nil || !errors.Is(err, errPAMetadataMismatch) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("buildPA = %v, %v; want errPAMetadataMismatch naming %s", rt, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestPASelfIssuer: only AUTH_MODE=local-jwt mounts this process's OAuth
+// server, so only then is PUBLIC_BASE_URL a self issuer.
+func TestPASelfIssuer(t *testing.T) {
+	for _, tc := range []struct {
+		mode, base, want string
+	}{
+		{"local-jwt", "https://tg.example", "https://tg.example"},
+		{"LOCAL-JWT", "https://tg.example/", "https://tg.example"},
+		{"shared-hmac", "https://tg.example", ""},
+		{"local-dev", "https://tg.example", ""},
+	} {
+		if got := paSelfIssuer(&config.Config{AuthMode: tc.mode, PublicBaseURL: tc.base}); got != tc.want {
+			t.Errorf("paSelfIssuer(%s, %s) = %q, want %q", tc.mode, tc.base, got, tc.want)
+		}
+	}
+	if got := paSelfIssuer(nil); got != "" {
+		t.Errorf("paSelfIssuer(nil) = %q", got)
+	}
+}
