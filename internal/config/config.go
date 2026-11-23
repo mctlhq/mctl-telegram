@@ -1080,6 +1080,19 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("MCP_CLIENT_PROFILES: %w", err)
 	}
 	c.ClientProfiles = *profiles
+	// A client_id_prefix ceiling bounds CIMD clients only, so a prefix no
+	// OAUTH_CIMD_ALLOWED_HOSTS entry admits bounds nobody. That is a typo
+	// of the host or path the operator meant, and it would leave those
+	// clients without their ceiling, so it stops the server. With CIMD off
+	// no client is below any prefix and the table is left alone: turning
+	// OAUTH_CIMD_ACCEPT off must stay possible without editing it.
+	if c.OAUTHCIMDAccept {
+		for prefix := range c.ClientProfiles.ScopeCeilingByClientIDPrefix {
+			if !cimd.AdmitsBelow(c.OAUTHCIMDAllowedHosts, prefix) {
+				return nil, fmt.Errorf("MCP_CLIENT_PROFILES: client_id_prefix %q can never match: no OAUTH_CIMD_ALLOWED_HOSTS entry admits a client_id below it", prefix)
+			}
+		}
+	}
 	c.AllowedOrigins = parseStringCSV(os.Getenv("ALLOWED_ORIGINS"))
 	if len(c.AllowedOrigins) == 0 {
 		if origin := originOf(c.PublicBaseURL); origin != "" {
