@@ -102,3 +102,37 @@ func TestCIMDUnmapped_RefusePolicyAtAuthorize(t *testing.T) {
 		}
 	}
 }
+
+// TestRefreshGrantLogCoversClientsWithoutACeiling: the refresh audit line used
+// to be written only for ceiling clients, so a refresh by a DCR or unmapped
+// CIMD client left no trace of what it held afterwards. It is now written for
+// every client, with the groups and whether a ceiling applied.
+func TestRefreshGrantLogCoversClientsWithoutACeiling(t *testing.T) {
+	stub := &stubCIMD{}
+	stub.set(platformDoc(), nil)
+	srv := newTestServer(t, withCIMD(stub), withDanaInEveryAdminMembership)
+	mux := newMockRouter()
+	srv.Register(mux)
+	logs := captureServerLogFor(t, srv)
+	seedSession(t, srv, danaTelegramID)
+
+	resp := tokenFor(t, srv, mux, danaTelegramID, "dana_tg", cimdClientID, cimdCallback, "telegram:dialogs:read")
+	if status, body := refreshResp(t, mux, resp["refresh_token"].(string), cimdClientID); status != http.StatusOK {
+		t.Fatalf("refresh = %d %s", status, body)
+	}
+	out := logs.String()
+	if got := strings.Count(out, refreshGrantLine); got != 1 {
+		t.Fatalf("a refresh by an unmapped CIMD client logged %d grant lines, want 1:\n%s", got, out)
+	}
+	var line string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, refreshGrantLine) {
+			line = l
+		}
+	}
+	for _, want := range []string{"client_id=" + cimdClientID, "granted_scope=telegram:dialogs:read", `groups=""`, "scope_ceiling_applied=false"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("refresh grant line lacks %s:\n%s", want, line)
+		}
+	}
+}
