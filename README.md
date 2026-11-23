@@ -308,6 +308,7 @@ Key variables:
 | `OAUTH_CIMD_ACCEPT`           | optional, default off. Accept an https URL as a `client_id` and take its redirect URIs from the Client ID Metadata Document at that URL. Requires `OAUTH_CIMD_ALLOWED_HOSTS`. See [SECURITY.md](SECURITY.md) and [ADR 0004](docs/adr/0004-own-authorization-server.md) |
 | `OAUTH_CIMD_ALLOWED_HOSTS`    | comma-separated hosts whose documents may be fetched; use exact hosts in production. A `host/path-prefix/` entry (trailing `/` required) admits only client_ids under that prefix on whole path segments, for multi-tenant hosts; a host named only by path entries is not admitted host-wide. Removing an entry also stops that client's refreshes |
 | `OAUTH_CIMD_ADVERTISE`        | optional, default off. Announce CIMD and `private_key_jwt` in discovery. Clients that prefer CIMD switch to it with no DCR fallback, so list every such client's host first |
+| `OAUTH_CIMD_UNMAPPED_POLICY`  | optional, `default-scope` (default) or `refuse`. What `/oauth/authorize` does with an admitted CIMD client that no `MCP_CLIENT_PROFILES` record names by `client_id` (a profile or a `scope_ceiling`): `refuse` answers `invalid_client` (reason only in the WARN log). Under either value an unmapped CIMD client never receives membership scopes (`admin:users`, `admin:users:read`, `admin:broadcast`) or tier groups; only a `scope_ceiling` that names them grants them (#1414) |
 
 > `OAUTH_JWT_SECRET` is a deprecated alias of `OAUTH_JWT_SIGNING_KEY`. It is
 > still accepted as a fallback but logs a warning at startup. Use

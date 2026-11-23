@@ -133,6 +133,14 @@ type Config struct {
 	// turn it on only once the allowlist covers every CIMD client in use
 	// (mctl-telegram#773).
 	OAUTHCIMDAdvertise bool
+	// OAUTHCIMDUnmappedPolicy is what /oauth/authorize does with an admitted
+	// CIMD client that no MCP_CLIENT_PROFILES record names by client_id
+	// (OAUTH_CIMD_UNMAPPED_POLICY): "default-scope" (default, the client gets
+	// the unprofiled scope surface) or "refuse" (invalid_client, the reason
+	// only in the WARN log). Independent of the policy, an unmapped CIMD
+	// client never receives membership scopes such as admin:users
+	// (mctl-telegram#1414).
+	OAUTHCIMDUnmappedPolicy string
 	// OAUTHCIMDAllowedHosts is the mandatory host allowlist for CIMD
 	// client_ids (OAUTH_CIMD_ALLOWED_HOSTS): exact host names, ".suffix"
 	// entries, or "host/path-prefix/" entries scoped to one path prefix. Required and non-empty when OAUTHCIMDAccept is true.
@@ -791,6 +799,7 @@ func Load() (*Config, error) {
 		OAUTHAllowImplicitClient:        envBool("OAUTH_ALLOW_IMPLICIT_CLIENT", false),
 		OAUTHCIMDAccept:                 envBool("OAUTH_CIMD_ACCEPT", false),
 		OAUTHCIMDAdvertise:              envBool("OAUTH_CIMD_ADVERTISE", false),
+		OAUTHCIMDUnmappedPolicy:         envOr("OAUTH_CIMD_UNMAPPED_POLICY", "default-scope"),
 		AllowSharedHMACLegacy:           envBool("AUTH_ALLOW_SHARED_HMAC_LEGACY", false),
 		OAUTHRegisterRatePerMin:         envInt("OAUTH_REGISTER_RATE_PER_MIN", 10),
 		AutoApproveClients:              envBool("AUTO_APPROVE_CLIENTS", false),
@@ -962,6 +971,11 @@ func Load() (*Config, error) {
 	c.ToolFilter = envOr("MCP_TOOL_FILTER", "all")
 	if c.OAUTHCIMDAdvertise && !c.OAUTHCIMDAccept {
 		return nil, fmt.Errorf("OAUTH_CIMD_ADVERTISE=true requires OAUTH_CIMD_ACCEPT=true: advertising documents the server would refuse leaves CIMD clients with no DCR fallback")
+	}
+	switch c.OAUTHCIMDUnmappedPolicy {
+	case "default-scope", "refuse":
+	default:
+		return nil, fmt.Errorf("OAUTH_CIMD_UNMAPPED_POLICY must be \"default-scope\" or \"refuse\", got %q", c.OAUTHCIMDUnmappedPolicy)
 	}
 	if c.OAUTHCIMDAccept {
 		hosts, err := cimd.ParseAllowedHosts(os.Getenv("OAUTH_CIMD_ALLOWED_HOSTS"))

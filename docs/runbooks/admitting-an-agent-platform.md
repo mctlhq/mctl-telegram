@@ -67,6 +67,11 @@ startup refuses otherwise.
   also cuts off that client's (or tenant's) refreshes. Turning `OAUTH_CIMD_ACCEPT` off does not.
 - Setting `OAUTH_CIMD_ADVERTISE=false` returns clients to DCR at their next
   sign-in.
+- `OAUTH_CIMD_UNMAPPED_POLICY=refuse` refuses every admitted CIMD client that
+  has no `MCP_CLIENT_PROFILES` record (profile or `scope_ceiling`) for its exact
+  `client_id`; set it only once each admitted client has a record. With the
+  default `default-scope` an unmapped client still never holds `admin:users`,
+  `admin:users:read` or `admin:broadcast` (#1414).
 - Removing a profile binding from `MCP_CLIENT_PROFILES` takes effect at the
   next refresh.
 
