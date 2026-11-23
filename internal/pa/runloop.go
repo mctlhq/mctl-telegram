@@ -252,7 +252,7 @@ func (l *RunLoop) EnqueueRun(ctx context.Context, tx *sql.Tx, req RunRequest) er
 		Now:            l.now(),
 	})
 	if err == nil {
-		l.typing.queued(req.Principal.TelegramID())
+		markRunQueued(ctx)
 	}
 	return err
 }
@@ -534,6 +534,8 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 		stop(w, err)
 		return
 	}
+	// Before the response: a fast worker's first turn must find the run.
+	l.timer.claimed(j.ID, j.CreatedAt)
 	writeJSON(w, http.StatusOK, claimResponse{
 		JobID: j.ID, Attempt: j.Attempts, Token: tok, LeaseUntil: j.LeaseUntil, ToolSet: j.ToolSet, Tools: tools,
 		Limits: wireLimits{
@@ -543,7 +545,6 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 		Fragments: frags,
 	})
 	l.typing.start(j.Principal, j.ID, j.LeaseUntil)
-	l.timer.claimed(j.ID, j.CreatedAt)
 }
 
 // claimTools is the model's view of exactly the job's signed tool set, in

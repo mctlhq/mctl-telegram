@@ -168,15 +168,17 @@ func (t *runTimer) replied(job int64) {
 		t.obs.ObservePARunPhase(PhaseTool, r.tool)
 	}
 	t.obs.ObservePARunPhase(PhaseRun, run)
-	total := run
+	// No principal and no text: ids and durations only. The wait and the
+	// total are logged only when the creation time is usable, as in the
+	// histogram: a zero or later creation time is unknown, not zero.
+	attrs := []any{"job_id", job, "turns", r.turns, "tool_calls", r.tools,
+		"model_ms", r.model.Milliseconds(), "tool_ms", r.tool.Milliseconds(), "run_ms", run.Milliseconds()}
 	if !r.created.IsZero() && !r.claimed.Before(r.created) {
-		total = now.Sub(r.created)
+		total := now.Sub(r.created)
 		t.obs.ObservePARunPhase(PhaseTotal, total)
+		attrs = append(attrs, "queue_ms", r.claimed.Sub(r.created).Milliseconds(), "total_ms", total.Milliseconds())
 	}
-	// No principal and no text: ids and durations only.
-	slog.Info("pa run timing", "job_id", job, "turns", r.turns, "tool_calls", r.tools,
-		"queue_ms", r.claimed.Sub(r.created).Milliseconds(), "model_ms", r.model.Milliseconds(),
-		"tool_ms", r.tool.Milliseconds(), "run_ms", run.Milliseconds(), "total_ms", total.Milliseconds())
+	slog.Info("pa run timing", attrs...)
 }
 
 // drop forgets a run that ended without a reply.

@@ -4243,6 +4243,8 @@ mctl-gitops vm-rules is part of enabling the PA (#1318).
   not reported at all: a missing sample means "not observed", never "fast".
   The time between the reply and the message appearing in the chat (the
   outbox send) is not part of any phase.
+  `queue` and `total` start at the job's creation, so a job claimed again
+  after a released or expired attempt counts the earlier attempts as wait.
 
 <a id="mctlpawebhookinfounreadable"></a>
 ### MctlPAWebhookInfoUnreadable

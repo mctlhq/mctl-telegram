@@ -51,16 +51,13 @@ type typingTracker struct {
 
 	mu   sync.Mutex
 	runs map[int64]*typingRun // by job id
-	// queuedAt is when a principal's message last queued a run, until
-	// TypingAfter shows it (queued).
-	queuedAt map[int64]time.Time
 }
 
 func newTypingTracker(sender TypingSender, now func() time.Time) *typingTracker {
 	if sender == nil {
 		return nil
 	}
-	return &typingTracker{sender: sender, now: now, interval: typingInterval, idle: typingIdle, runs: map[int64]*typingRun{}, queuedAt: map[int64]time.Time{}}
+	return &typingTracker{sender: sender, now: now, interval: typingInterval, idle: typingIdle, runs: map[int64]*typingRun{}}
 }
 
 // start begins the status for job in principal's chat until until. A job
@@ -83,41 +80,13 @@ func (t *typingTracker) start(principal, job int64, until time.Time) {
 	go t.loop(ctx, principal, job, r)
 }
 
-// typingQueuedFor is how long a queued run may wait for its transaction to
-// commit before TypingAfter ignores it. A transaction that rolled back
-// leaves its mark behind; after this it shows nothing.
-const typingQueuedFor = 10 * time.Second
-
-// queued marks that principal's message queued a run, inside the update's
-// transaction. Nothing is sent here: the transaction may still roll back.
-func (t *typingTracker) queued(principal int64) {
-	if t == nil || principal <= 0 {
-		return
-	}
-	t.mu.Lock()
-	t.queuedAt[principal] = t.now()
-	t.mu.Unlock()
-}
-
-// takeQueued reports whether principal has a run queued just now, once.
-func (t *typingTracker) takeQueued(principal int64) bool {
-	if t == nil {
-		return false
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	at, ok := t.queuedAt[principal]
-	delete(t.queuedAt, principal)
-	return ok && t.now().Sub(at) <= typingQueuedFor
-}
-
 // TypingAfter shows the status once, after the update that queued a run
 // committed, so the chat is not silent until a worker claims the job
 // (serveClaim starts the repeated status). An update that queued no run,
 // a command or a button, shows nothing. It never blocks the caller.
 func (l *RunLoop) TypingAfter(ctx context.Context, principal int64) {
 	t := l.typing
-	if !t.takeQueued(principal) {
+	if t == nil || principal <= 0 || !runQueuedIn(ctx) {
 		return
 	}
 	l.pending.Add(1)
