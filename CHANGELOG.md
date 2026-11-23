@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.144.0](https://github.com/mctlhq/mctl-telegram/compare/0.143.0...0.144.0) (2026-11-23)
+
+
+### Features
+
+* **agents:** issue-1404-feat-oauth-path-scoped-entries-in-oauth ([051dbfc](https://github.com/mctlhq/mctl-telegram/commit/051dbfc4133eb4893d7324c285d566fe63caa979))
+* **agents:** issue-1404-feat-oauth-path-scoped-entries-in-oauth ([ac52028](https://github.com/mctlhq/mctl-telegram/commit/ac52028b7649740abb1dc00751fc0d08fdf82e98))
+* **agents:** issue-1405-feat-forks-s2-eval-runs-tasks-1-3-config ([3aab3cb](https://github.com/mctlhq/mctl-telegram/commit/3aab3cbda2cceb59fa4d1aa77c1732acde1aa70c))
+* **agents:** issue-1405-feat-forks-s2-eval-runs-tasks-1-3-config ([20d801f](https://github.com/mctlhq/mctl-telegram/commit/20d801f60a54e0895a76b1afa6df2fcc09b1bf11))
+
+
+### Bug Fixes
+
+* **db:** scope FinishForkEvalTask to the account and honour the run TTL ([174d72b](https://github.com/mctlhq/mctl-telegram/commit/174d72bdcbdcce63313122055540d9f263cb04a4))
+
 ## [0.143.0](https://github.com/mctlhq/mctl-telegram/compare/0.142.0...0.143.0) (2026-11-22)
 
 
