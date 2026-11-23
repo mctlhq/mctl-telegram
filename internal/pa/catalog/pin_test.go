@@ -25,6 +25,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mctlhq/mctl-telegram/internal/toolprofile"
 )
 
 var updatePin = flag.Bool("update-pin", false, "rewrite internal/pa/catalog/pin.json's server-derived fields from the upstream descriptors")
@@ -34,15 +36,19 @@ const regenerateHint = "go test ./internal/pa/catalog -run TestPinMatchesUpstrea
 // upstreamPages returns the tools/list result page each pinned server's
 // fields are derived from:
 //
-//   - tg: docs/tool-descriptors.json, which TestToolDescriptorsSnapshotMatchesRegistry
-//     in internal/mcp keeps equal to the registered tools. A change to a
-//     pinned tg tool therefore fails that test until the snapshot is
-//     regenerated, and then this one until the pin is.
+//   - tg: docs/tool-descriptors.core-readonly.json, the surface tools/list
+//     serves to a client bound to the core-readonly tool profile, which is
+//     what the PA's tg OAuth client is (MCP_CLIENT_PROFILES in gitops).
+//     Pinning the unprofiled surface instead made the live get_messages and
+//     search_messages differ from the pin, so the PA denied both (#1318 G6
+//     smoke). internal/mcp keeps that snapshot equal to the registry, so a
+//     change to a pinned tg tool fails there until the snapshot is
+//     regenerated, and then here until the pin is.
 //   - alice: testdata/alice.tools.json, the tools/list of mctl-alice at the
 //     commit the pin's "upstream" field names.
 func upstreamPages(t *testing.T) map[string][]byte {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "tool-descriptors.json"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "tool-descriptors."+toolprofile.CoreReadonly+".json"))
 	if err != nil {
 		t.Fatalf("read tg descriptors: %v", err)
 	}
