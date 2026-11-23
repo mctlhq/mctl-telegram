@@ -77,7 +77,11 @@ jobs:
       # -race is not optional here: internal/bridge is a Hub of goroutines and
       # channels, and #495 was a send-on-closed-channel that plain `go test`
       # could never surface. The whole module passes under -race on main.
-      - run: go test -race ./...
+      # internal/pa and internal/db run close to go test's default 10m
+      # per-package timeout under -race on the hosted runner, and crossed it
+      # on #1421 and #1432 with no test failing; 20m keeps a real hang
+      # bounded without failing on runner speed.
+      - run: go test -race -timeout 20m ./...
       # The PA S1 gate in closing mode (#1317, #1318): any open gap in
       # docs/agent-runtime/pa-s1-manifest.yaml fails the build, so a gap
       # cannot be added back without this step being changed in review.
