@@ -141,6 +141,10 @@ type Config struct {
 	// client never receives membership scopes such as admin:users
 	// (mctl-telegram#1414).
 	OAUTHCIMDUnmappedPolicy string
+	// AgentsPodiumPartnerURL (AGENTSPODIUM_PARTNER_URL) is the partner link
+	// the landing page's hosted-agent card points at. Empty hides the card.
+	// It must be https on an AgentsPodium host.
+	AgentsPodiumPartnerURL string
 	// OAUTHCIMDAllowedHosts is the mandatory host allowlist for CIMD
 	// client_ids (OAUTH_CIMD_ALLOWED_HOSTS): exact host names, ".suffix"
 	// entries, or "host/path-prefix/" entries scoped to one path prefix. Required and non-empty when OAUTHCIMDAccept is true.
@@ -800,6 +804,7 @@ func Load() (*Config, error) {
 		OAUTHCIMDAccept:                 envBool("OAUTH_CIMD_ACCEPT", false),
 		OAUTHCIMDAdvertise:              envBool("OAUTH_CIMD_ADVERTISE", false),
 		OAUTHCIMDUnmappedPolicy:         envOr("OAUTH_CIMD_UNMAPPED_POLICY", "default-scope"),
+		AgentsPodiumPartnerURL:          strings.TrimSpace(os.Getenv("AGENTSPODIUM_PARTNER_URL")),
 		AllowSharedHMACLegacy:           envBool("AUTH_ALLOW_SHARED_HMAC_LEGACY", false),
 		OAUTHRegisterRatePerMin:         envInt("OAUTH_REGISTER_RATE_PER_MIN", 10),
 		AutoApproveClients:              envBool("AUTO_APPROVE_CLIENTS", false),
@@ -976,6 +981,16 @@ func Load() (*Config, error) {
 	case "default-scope", "refuse":
 	default:
 		return nil, fmt.Errorf("OAUTH_CIMD_UNMAPPED_POLICY must be \"default-scope\" or \"refuse\", got %q", c.OAUTHCIMDUnmappedPolicy)
+	}
+	if c.AgentsPodiumPartnerURL != "" {
+		u, err := url.Parse(c.AgentsPodiumPartnerURL)
+		host := ""
+		if err == nil {
+			host = u.Hostname()
+		}
+		if err != nil || u.Scheme != "https" || u.User != nil || (host != "agentspodium.com" && host != "www.agentspodium.com") {
+			return nil, fmt.Errorf("AGENTSPODIUM_PARTNER_URL must be an https URL on agentspodium.com")
+		}
 	}
 	if c.OAUTHCIMDAccept {
 		hosts, err := cimd.ParseAllowedHosts(os.Getenv("OAUTH_CIMD_ALLOWED_HOSTS"))

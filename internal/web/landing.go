@@ -5,6 +5,7 @@ package web
 import (
 	_ "embed"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/mctlhq/mctl-telegram/internal/ui"
@@ -81,13 +82,49 @@ type landingData struct {
 	// sampled yet (or the sampler is disabled). The template renders the
 	// stats strip only when it is non-nil; it never shows zeros.
 	Stats *StatsSnapshot
+	// PartnerURL is the AgentsPodium partner link with campaign tags, or ""
+	// when the hosted-agent card is off. The template renders the card only
+	// when it is set.
+	PartnerURL string
 }
 
 // LandingOption adjusts Landing without widening its positional signature.
 type LandingOption func(*landingConfig)
 
 type landingConfig struct {
-	stats *StatsCache
+	stats      *StatsCache
+	partnerURL string
+}
+
+// partnerHosts are the only hosts the hosted-agent card may link to.
+var partnerHosts = map[string]bool{"agentspodium.com": true, "www.agentspodium.com": true}
+
+// ValidPartnerURL reports whether raw is an https link on an AgentsPodium host.
+func ValidPartnerURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.Scheme == "https" && partnerHosts[u.Hostname()] && u.User == nil
+}
+
+// WithPartnerLink turns on the hosted-agent card and points it at raw, with
+// campaign tags added (utm_source=mctl, utm_medium=referral,
+// utm_campaign=hermes-integration, utm_content=landing) unless raw already
+// sets them. A URL that is not https on an AgentsPodium host leaves the card
+// off: the card must never link somewhere else by configuration accident.
+func WithPartnerLink(raw string) LandingOption {
+	return func(c *landingConfig) {
+		if !ValidPartnerURL(raw) {
+			return
+		}
+		u, _ := url.Parse(raw)
+		q := u.Query()
+		for k, v := range map[string]string{"utm_source": "mctl", "utm_medium": "referral", "utm_campaign": "hermes-integration", "utm_content": "landing"} {
+			if q.Get(k) == "" {
+				q.Set(k, v)
+			}
+		}
+		u.RawQuery = q.Encode()
+		c.partnerURL = u.String()
+	}
 }
 
 // WithStats makes the landing page render the usage strip from cache. A nil
@@ -130,6 +167,7 @@ func Landing(publicBaseURL, mcpPath, authServer string, showManage bool, opts ..
 		MCPURL:       base + mcpPath,
 		WellKnownURL: base + "/.well-known/oauth-protected-resource",
 		AuthServer:   authServer,
+		PartnerURL:   lc.partnerURL,
 	}
 	if lc.stats == nil {
 		return chromePage(landingTmpl, "landing", data)
