@@ -26,15 +26,46 @@ How long it is kept: a conversation is kept on our servers for at most 24 hours 
 
 The assistant only reads in this version; it cannot send, change or delete anything on your behalf.`
 
-// ConsentTextSHA256 is the hex SHA-256 of ConsentText. A stored consent is
-// valid only for this exact text.
-func ConsentTextSHA256() string {
-	sum := sha256.Sum256([]byte(ConsentText))
+// ConsentTextRU is ConsentText in Russian, shown to a principal whose
+// Telegram client is in Russian. It describes the same data flow, word for
+// word, so it is the same ConsentVersion; it has its own hash, and a
+// principal is bound to the hash of the text their prompt showed
+// (ConsentTextSHA256For). It is pinned like ConsentText: changing it needs
+// a version bump too (TestConsentTextPinnedToVersion_S1N3).
+const ConsentTextRU = `Прежде чем ассистент ответит вам, ему нужно ваше согласие на эту передачу данных (pa-data-flow/v1).
+
+Что передаётся: сообщения, которые вы пишете этому боту, любой текст, который вы здесь пересылаете, на который отвечаете или который цитируете, а также результаты, которые ассистент читает из подключённых вами сервисов (например, ваших чатов Telegram или умного дома).
+
+Куда: в Nebius, провайдеру ИИ-модели, которая генерирует ответы, через Cloudflare AI Gateway. Они обрабатывают данные на условиях своих API. Подробнее: https://tg.mctl.ai/privacy.
+
+Сколько хранится: разговор хранится на наших серверах не более 24 часов с его начала. /new начинает новый разговор, /forget сразу удаляет все ваши разговоры, а /consent withdraw останавливает ассистента и удаляет ваши разговоры.
+
+В этой версии ассистент только читает: он не может ничего отправлять, изменять или удалять от вашего имени.`
+
+// ConsentTextSHA256 is the hex SHA-256 of ConsentText, the English text.
+func ConsentTextSHA256() string { return textSHA256(ConsentText) }
+
+// ConsentTextSHA256RU is the hex SHA-256 of ConsentTextRU.
+func ConsentTextSHA256RU() string { return textSHA256(ConsentTextRU) }
+
+// ConsentTextSHA256For is the hash of the text a prompt in Russian (ru)
+// or English shows: the hash its button binds and an acceptance stores.
+func ConsentTextSHA256For(ru bool) string {
+	if ru {
+		return ConsentTextSHA256RU()
+	}
+	return ConsentTextSHA256()
+}
+
+func textSHA256(s string) string {
+	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
 }
 
-// Satisfied reports whether rec is consent to the current version and text.
-// A withdrawn record, another version or another text is not (S1-N3).
+// Satisfied reports whether rec is consent to the current version and to
+// one of its texts, English or Russian. A withdrawn record, another version
+// or any other text is not (S1-N3).
 func Satisfied(rec ConsentRecord) bool {
-	return rec.State == ConsentAccepted && rec.Version == ConsentVersion && rec.TextSHA256 == ConsentTextSHA256()
+	return rec.State == ConsentAccepted && rec.Version == ConsentVersion &&
+		(rec.TextSHA256 == ConsentTextSHA256() || rec.TextSHA256 == ConsentTextSHA256RU())
 }

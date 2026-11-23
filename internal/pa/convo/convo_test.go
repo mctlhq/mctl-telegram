@@ -27,6 +27,14 @@ var pinnedConsent = map[string]string{
 	"pa-data-flow/v1": "3f17dd0710ee22d18cec23bbf8a35633bf5a9018626b3a07797930792120718f",
 }
 
+// pinnedConsentRU pins ConsentTextRU the same way. Added to v1 on
+// 2026-11-23 (owner decision on #1318): a translation of the same data
+// flow, with its own hash, so a principal who accepted the English text is
+// still bound to exactly that text.
+var pinnedConsentRU = map[string]string{
+	"pa-data-flow/v1": "346462f326d6a5a0b4b59376a07ec69cc6f944f97c163d76c7e5f8dcf77c6822",
+}
+
 // TestConsentTextPinnedToVersion_S1N3 is the CI half of S1-N3: changing the
 // consent text without bumping ConsentVersion fails here, so nobody is held
 // to a text they did not see. Bumping the version adds a new pin; the old
@@ -46,6 +54,16 @@ func TestConsentTextPinnedToVersion_S1N3(t *testing.T) {
 			t.Errorf("consent text does not mention %q", must)
 		}
 	}
+	if got, want := ConsentTextSHA256RU(), pinnedConsentRU[ConsentVersion]; got != want {
+		t.Fatalf("Russian consent text for %s changed (sha256 %s, pinned %s): bump ConsentVersion and pin the new texts", ConsentVersion, got, want)
+	}
+	// The translation names the same recipients, categories, retention
+	// and commands.
+	for _, must := range []string{ConsentVersion, "провайдеру ИИ-модели", "Nebius", "Cloudflare AI Gateway", "/privacy", "сообщения, которые вы пишете", "пересылаете", "24 часов", "/consent withdraw", "/forget", "/new", "только читает"} {
+		if !strings.Contains(ConsentTextRU, must) {
+			t.Errorf("Russian consent text does not mention %q", must)
+		}
+	}
 }
 
 // TestSatisfied_S1N3: only an accepted record of the current version and
@@ -54,6 +72,11 @@ func TestSatisfied_S1N3(t *testing.T) {
 	cur := ConsentRecord{Principal: aliceID, Version: ConsentVersion, TextSHA256: ConsentTextSHA256(), State: ConsentAccepted}
 	if !Satisfied(cur) {
 		t.Fatal("current accepted consent not satisfied")
+	}
+	ru := cur
+	ru.TextSHA256 = ConsentTextSHA256RU()
+	if !Satisfied(ru) {
+		t.Fatal("current accepted Russian consent not satisfied")
 	}
 	for name, mut := range map[string]func(*ConsentRecord){
 		"old version":   func(r *ConsentRecord) { r.Version = "pa-data-flow/v0" },

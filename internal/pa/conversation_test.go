@@ -705,3 +705,51 @@ func TestNewConversations_RefusesBadConfig(t *testing.T) {
 		t.Fatalf("zero context: %v", err)
 	}
 }
+
+// A client in Russian gets the Russian prompt, whose button binds the
+// Russian text's hash, and that hash is what the acceptance stores; a
+// client in any other language gets the English prompt as before. The
+// binding is the prompt's: a Russian button pressed from a client now in
+// English still records the Russian text, the one that was shown.
+func TestConversations_ConsentPromptInRussian(t *testing.T) {
+	h := newConvoHarness(t)
+	ruFrom := map[string]any{"id": aliceID, "is_bot": false, "first_name": "Alice", "language_code": "ru"}
+	if code := h.message(aliceID, map[string]any{"text": "/consent", "from": ruFrom}); code != http.StatusOK {
+		t.Fatalf("/consent: %d", code)
+	}
+	r := h.replies.last(aliceID)
+	if r.reply != ReplyConsentPromptRU || r.button == "" {
+		t.Fatalf("reply %+v, want the Russian prompt", r)
+	}
+	if code := h.press(aliceID, r.button); code != http.StatusOK {
+		t.Fatalf("press: %d", code)
+	}
+	if got := h.replies.last(aliceID).reply; got != ReplyConsentAccepted {
+		t.Fatalf("after press: %q", got)
+	}
+	var sha string
+	if err := h.store.DB.QueryRow(`SELECT text_sha256 FROM pa_consents WHERE principal = $1`, aliceID).Scan(&sha); err != nil {
+		t.Fatal(err)
+	}
+	if sha != convo.ConsentTextSHA256RU() {
+		t.Fatalf("stored text hash %s, want the Russian text's", sha)
+	}
+	h.text(aliceID, "hello")
+	if n := len(h.runs.calls()); n != 1 {
+		t.Fatalf("a Russian consent does not admit a run: %d runs", n)
+	}
+
+	// Bob's client is in English: the English prompt and hash.
+	enFrom := map[string]any{"id": bobID, "is_bot": false, "first_name": "Bob", "language_code": "en"}
+	h.message(bobID, map[string]any{"text": "/consent", "from": enFrom})
+	if r := h.replies.last(bobID); r.reply != ReplyConsentPrompt {
+		t.Fatalf("Bob got %q, want the English prompt", r.reply)
+	}
+	h.press(bobID, h.replies.last(bobID).button)
+	if err := h.store.DB.QueryRow(`SELECT text_sha256 FROM pa_consents WHERE principal = $1`, bobID).Scan(&sha); err != nil {
+		t.Fatal(err)
+	}
+	if sha != convo.ConsentTextSHA256() {
+		t.Fatalf("Bob's stored hash %s, want the English text's", sha)
+	}
+}

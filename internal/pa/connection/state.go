@@ -60,6 +60,19 @@ func (s Server) LabelRU() string {
 	return string(s)
 }
 
+// NameRU is the server's name in Russian, in the nominative case, for a
+// list line ("Умный дом Алиса (активно)"); LabelRU is the genitive the
+// confirm card needs.
+func (s Server) NameRU() string {
+	switch s {
+	case ServerTG:
+		return "Telegram"
+	case ServerAlice:
+		return "Умный дом Алиса"
+	}
+	return string(s)
+}
+
 // StateRU names a connection state in Russian for /connections.
 func StateRU(st State) string {
 	switch st {

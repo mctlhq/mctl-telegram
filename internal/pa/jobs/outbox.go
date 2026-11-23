@@ -63,9 +63,12 @@ const (
 )
 
 // Conversation-level kinds (#1348), one per pa.Reply, with the same names.
-// Only OutboxConsentPrompt carries a button.
+// Only the two consent prompts carry a button (CarriesButton).
 const (
-	OutboxConsentPrompt    OutboxKind = "consent_prompt"
+	OutboxConsentPrompt OutboxKind = "consent_prompt"
+	// OutboxConsentPromptRU is the consent prompt in Russian
+	// (convo.ConsentTextRU), its button bound to that text's hash.
+	OutboxConsentPromptRU  OutboxKind = "consent_prompt_ru"
 	OutboxConsentAccepted  OutboxKind = "consent_accepted"
 	OutboxConsentWithdrawn OutboxKind = "consent_withdrawn"
 	OutboxConsentStale     OutboxKind = "consent_stale"
@@ -104,6 +107,13 @@ func (k OutboxKind) ConnectionLevel() bool {
 	return slices.Contains(ConnectionOutboxKinds(), k)
 }
 
+// CarriesButton reports whether a row of kind k is sent with one button,
+// the consent prompt's: such a row needs its callback id, any other row
+// must not have one.
+func (k OutboxKind) CarriesButton() bool {
+	return k == OutboxConsentPrompt || k == OutboxConsentPromptRU
+}
+
 // OutboxKinds lists every kind this build writes.
 func OutboxKinds() []OutboxKind {
 	return slices.Concat(jobOutboxKinds(), ConversationOutboxKinds(), ConnectionOutboxKinds())
@@ -115,7 +125,7 @@ func jobOutboxKinds() []OutboxKind {
 
 // ConversationOutboxKinds lists the conversation-level kinds.
 func ConversationOutboxKinds() []OutboxKind {
-	return []OutboxKind{OutboxConsentPrompt, OutboxConsentAccepted, OutboxConsentWithdrawn, OutboxConsentStale,
+	return []OutboxKind{OutboxConsentPrompt, OutboxConsentPromptRU, OutboxConsentAccepted, OutboxConsentWithdrawn, OutboxConsentStale,
 		OutboxNewConversation, OutboxForgotten, OutboxUnknownButton, OutboxRateLimited, OutboxMessageTooLong,
 		OutboxLinkingUnavailable,
 		OutboxPrincipalDisabled}
@@ -222,7 +232,7 @@ func (o OutboxItem) Valid() bool {
 		if len(o.Button) > MaxOutboxButton {
 			return false
 		}
-		return (o.Kind == OutboxConsentPrompt) == (o.Button != "")
+		return o.Kind.CarriesButton() == (o.Button != "")
 	}
 	if o.JobID <= 0 || o.UpdateID != 0 || o.Button != "" {
 		return false
