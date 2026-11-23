@@ -471,6 +471,12 @@ type Config struct {
 	// allowlist then gets a 400 with no DCR fallback (mctl-api#693). Ignored
 	// while CIMD is nil.
 	CIMDAdvertise bool
+	// CIMDUnmappedPolicy decides what an admitted CIMD client does when no
+	// MCP_CLIENT_PROFILES record names its client_id: CIMDPolicyRefuse
+	// refuses it at /oauth/authorize, anything else (including empty) keeps
+	// the unprofiled scope surface. Membership scopes are withheld from an
+	// unmapped CIMD client under either value (#1414).
+	CIMDUnmappedPolicy string
 	// DCRRedirectURIs is an exact-match allowlist of redirect URIs that an
 	// RFC 7591 registration may claim WITHOUT passing AllowedImplicitHosts.
 	// It exists for the Cloudflare MCP portal in automatic (DCR) mode
@@ -3222,7 +3228,25 @@ const ceilingLeavesNoScopeDescription = "this account holds no scope within this
 func (s *Server) applyClientScopeCeiling(clientID string, groups, scopes []string) (outGroups, outScopes []string, applied bool) {
 	ceiling, ok := s.cfg.ClientProfiles.ScopeCeiling(clientID)
 	outGroups, outScopes = applyScopeCeiling(ceiling, ok, groups, scopes)
+	if !ok && s.cimdEnabled() && cimd.IsCIMDURL(clientID) {
+		// A CIMD client reaches this server on the strength of a document
+		// the operator did not author, so membership scopes (admin:users,
+		// admin:users:read, admin:broadcast) and tier groups reach it only
+		// through a scope_ceiling that names them (#1414). narrowGrant keeps
+		// those scopes because a client cannot ask for them; without this a
+		// client that requested one read scope still held admin:users.
+		outGroups, outScopes = withoutMembership(scopes)
+	}
 	return outGroups, outScopes, ok
+}
+
+// cimdClientMapped reports whether MCP_CLIENT_PROFILES names this CIMD client:
+// a client_id or redirect_uri profile binding, or a scope ceiling.
+func (s *Server) cimdClientMapped(clientID, redirectURI string) bool {
+	if _, ok := s.cfg.ClientProfiles.ScopeCeiling(clientID); ok {
+		return true
+	}
+	return s.cfg.ClientProfiles.Resolve(clientID, redirectURI) != ""
 }
 
 // tokenOrigin is what a token's tool profile is resolved from: the client it
@@ -3804,7 +3828,13 @@ func (s *Server) validateClient(ctx context.Context, clientID, redirectURI strin
 		if err != nil {
 			return err
 		}
-		s.logger().Info("oauth: cimd client admitted", "client_id", clientID, "allow_entry", doc.AllowEntry)
+		if s.cfg.CIMDUnmappedPolicy == CIMDPolicyRefuse && !s.cimdClientMapped(clientID, redirectURI) {
+			s.logger().Warn("oauth: cimd client refused", "where", "authorize", "client_id", clientID,
+				"err", "no MCP_CLIENT_PROFILES record for this client_id (OAUTH_CIMD_UNMAPPED_POLICY=refuse)", "reason", "no_profile")
+			return errCIMDRefused
+		}
+		s.logger().Info("oauth: cimd client admitted", "client_id", clientID, "allow_entry", doc.AllowEntry,
+			"mapped", s.cimdClientMapped(clientID, redirectURI))
 		return s.validateCIMDRedirect(doc, redirectURI)
 	}
 	if s.useDB {

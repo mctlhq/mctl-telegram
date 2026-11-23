@@ -159,3 +159,20 @@ func withinScopeCeiling(ceiling []string, groups, scopes []string) bool {
 	}
 	return true
 }
+
+// CIMDPolicyRefuse is the OAUTH_CIMD_UNMAPPED_POLICY value that refuses an
+// admitted CIMD client no MCP_CLIENT_PROFILES record names (#1414).
+const CIMDPolicyRefuse = "refuse"
+
+// withoutMembership removes the membership-granted scopes and the tier
+// groups from a grant. It is the no-ceiling counterpart of applyScopeCeiling
+// for a CIMD client: the telegram:* scopes the client asked for are kept.
+func withoutMembership(scopes []string) ([]string, []string) {
+	out := make([]string, 0, len(scopes))
+	for _, sc := range scopes {
+		if !slices.Contains(membershipScopes, sc) {
+			out = append(out, sc)
+		}
+	}
+	return nil, out
+}
