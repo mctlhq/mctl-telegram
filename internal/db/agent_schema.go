@@ -866,6 +866,37 @@ func agentSchemaSQLite() []string {
 			ON assistant_forks(user_id, digest)`,
 		`CREATE INDEX IF NOT EXISTS idx_assistant_forks_base
 			ON assistant_forks(base_digest)`,
+		// Fork eval runs (P4.3 S2, docs/assistants/adr-forks.md): one run
+		// scores one fork version against one suite. Rows hold ids, states
+		// and an opaque report; never model output text.
+		`CREATE TABLE IF NOT EXISTS assistant_fork_eval_runs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			fork_digest TEXT NOT NULL,
+			base_digest TEXT NOT NULL,
+			suite_digest TEXT NOT NULL,
+			harness_version TEXT NOT NULL,
+			state TEXT NOT NULL,
+			created_at DATETIME NOT NULL,
+			finished_at DATETIME,
+			report_json BLOB
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_fork_eval_runs_digest
+			ON assistant_fork_eval_runs(user_id, fork_digest, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_fork_eval_runs_state
+			ON assistant_fork_eval_runs(state, created_at)`,
+		`CREATE TABLE IF NOT EXISTS assistant_fork_eval_tasks (
+			run_id INTEGER NOT NULL REFERENCES assistant_fork_eval_runs(id) ON DELETE CASCADE,
+			fixture_id TEXT NOT NULL,
+			seq INTEGER NOT NULL,
+			attempt INTEGER NOT NULL DEFAULT 0,
+			state TEXT NOT NULL,
+			deadline DATETIME,
+			result_json BLOB,
+			PRIMARY KEY (run_id, fixture_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_fork_eval_tasks_claim
+			ON assistant_fork_eval_tasks(state, deadline)`,
 	}
 }
 
@@ -1241,5 +1272,36 @@ func agentSchemaPG() []string {
 			ON assistant_forks(user_id, digest)`,
 		`CREATE INDEX IF NOT EXISTS idx_assistant_forks_base
 			ON assistant_forks(base_digest)`,
+		// Fork eval runs (P4.3 S2, docs/assistants/adr-forks.md): one run
+		// scores one fork version against one suite. Rows hold ids, states
+		// and an opaque report; never model output text.
+		`CREATE TABLE IF NOT EXISTS assistant_fork_eval_runs (
+			id BIGSERIAL PRIMARY KEY,
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			fork_digest TEXT NOT NULL,
+			base_digest TEXT NOT NULL,
+			suite_digest TEXT NOT NULL,
+			harness_version TEXT NOT NULL,
+			state TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL,
+			finished_at TIMESTAMPTZ,
+			report_json BYTEA
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_fork_eval_runs_digest
+			ON assistant_fork_eval_runs(user_id, fork_digest, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_fork_eval_runs_state
+			ON assistant_fork_eval_runs(state, created_at)`,
+		`CREATE TABLE IF NOT EXISTS assistant_fork_eval_tasks (
+			run_id BIGINT NOT NULL REFERENCES assistant_fork_eval_runs(id) ON DELETE CASCADE,
+			fixture_id TEXT NOT NULL,
+			seq INTEGER NOT NULL,
+			attempt INTEGER NOT NULL DEFAULT 0,
+			state TEXT NOT NULL,
+			deadline TIMESTAMPTZ,
+			result_json BYTEA,
+			PRIMARY KEY (run_id, fixture_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_fork_eval_tasks_claim
+			ON assistant_fork_eval_tasks(state, deadline)`,
 	}
 }

@@ -65,6 +65,19 @@ func TestHardDeleteAccount_PurgesAgentData(t *testing.T) {
 		`INSERT INTO agent_usage(job_id, attempt, user_id, runtime, status) VALUES(1, 1, $1, 'managed', 'held')`, uid); err != nil {
 		t.Fatalf("usage row: %v", err)
 	}
+	var runID int64
+	if err := s.DB.QueryRowContext(ctx,
+		`INSERT INTO assistant_fork_eval_runs(user_id, fork_digest, base_digest, suite_digest, harness_version, state, created_at)
+		 VALUES($1, 'fd', 'bd', 'sd', 'h', 'queued', $2) RETURNING id`, uid, time.Now().UTC()).Scan(&runID); err != nil {
+		t.Fatalf("eval run: %v", err)
+	}
+	for i, fx := range []string{"f1", "f2"} {
+		if _, err := s.DB.ExecContext(ctx,
+			`INSERT INTO assistant_fork_eval_tasks(run_id, fixture_id, seq, state) VALUES($1, $2, $3, 'pending')`,
+			runID, fx, i); err != nil {
+			t.Fatalf("eval task: %v", err)
+		}
+	}
 	// A telegram_accounts row so HardDeleteAccount has something to delete.
 	if _, err := s.DB.ExecContext(ctx,
 		`INSERT INTO telegram_accounts(user_id, session_encrypted) VALUES($1, $2)`,
@@ -77,11 +90,17 @@ func TestHardDeleteAccount_PurgesAgentData(t *testing.T) {
 		t.Fatalf("hard delete: %v", err)
 	}
 
+	var evalTasks int
+	if err := s.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM assistant_fork_eval_tasks WHERE run_id = $1`, runID).Scan(&evalTasks); err != nil || evalTasks != 0 {
+		t.Fatalf("eval tasks after account delete = %d, err %v", evalTasks, err)
+	}
+
 	// Every agent table must be empty for this user.
 	tables := []string{
 		"agent_profiles", "incoming_events", "agent_sent_messages", "conversations", "job_leads",
 		"agent_actions", "owner_notifications", "tg_update_state", "tg_channel_state",
-		"agent_saved_command_cursors", "agent_usage",
+		"agent_saved_command_cursors", "agent_usage", "assistant_fork_eval_runs",
 	}
 	for _, tbl := range tables {
 		var n int

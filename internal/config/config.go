@@ -509,6 +509,10 @@ type Config struct {
 	// stops the jobs of every account that runs a fork. Deleting a fork
 	// stays possible. Set via ASSISTANT_FORKS_ENABLED.
 	AssistantForksEnabled bool
+	// AssistantForkEvalEnabled is the P4.3 S2 switch for fork eval runs
+	// (docs/assistants/adr-forks.md). Off by default; nothing reads it yet
+	// beyond the startup log. Set via ASSISTANT_FORK_EVAL_ENABLED.
+	AssistantForkEvalEnabled bool
 	// ManagedRuntimeEnabled lets an account choose runtime "managed" for its
 	// assistant (ADR 0008). Off by default: switching to managed is then
 	// refused. Set via MANAGED_RUNTIME_ENABLED. On, Load requires
@@ -803,6 +807,7 @@ func Load() (*Config, error) {
 		WorkContextEnabled:              envBool("WORK_CONTEXT_ENABLED", false),
 		AssistantRegistryEnabled:        envBool("ASSISTANT_REGISTRY_ENABLED", false),
 		AssistantForksEnabled:           envBool("ASSISTANT_FORKS_ENABLED", false),
+		AssistantForkEvalEnabled:        envBool("ASSISTANT_FORK_EVAL_ENABLED", false),
 		ManagedRuntimeEnabled:           envBool("MANAGED_RUNTIME_ENABLED", false),
 		ManagedRuntimeMaxAccounts:       envInt("MANAGED_RUNTIME_MAX_ACCOUNTS", 1),
 		ManagedMaxInflightPerAccount:    envInt("MANAGED_MAX_INFLIGHT_PER_ACCOUNT", 1),

@@ -484,3 +484,26 @@ func TestMigrate_CreatesUsageLedger(t *testing.T) {
 		t.Fatal("duplicate (job_id, attempt) accepted")
 	}
 }
+
+// TestMigrate_CreatesForkEvalTables: both fork eval tables and their indexes
+// exist after Migrate, and a second Migrate is a no-op.
+func TestMigrate_CreatesForkEvalTables(t *testing.T) {
+	ctx := context.Background()
+	conn, err := Open(ctx, "file:forkeval_schema?mode=memory&cache=shared", 0, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	for i := 0; i < 2; i++ {
+		if err := Migrate(ctx, conn); err != nil {
+			t.Fatalf("migrate %d: %v", i, err)
+		}
+	}
+	for _, name := range []string{"assistant_fork_eval_runs", "assistant_fork_eval_tasks",
+		"idx_fork_eval_runs_digest", "idx_fork_eval_runs_state", "idx_fork_eval_tasks_claim"} {
+		var n int
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE name = $1`, name).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("%s: n=%d err=%v", name, n, err)
+		}
+	}
+}

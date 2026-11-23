@@ -796,6 +796,8 @@ func purgeAgentData(ctx context.Context, ex execer, userID int64) error {
 		`DELETE FROM tg_update_state WHERE user_id = $1`,
 		// Private assistant forks are user data (#1043): their instructions
 		// go with the account, like the install's owner notes.
+		`DELETE FROM assistant_fork_eval_tasks WHERE run_id IN (SELECT id FROM assistant_fork_eval_runs WHERE user_id = $1)`,
+		`DELETE FROM assistant_fork_eval_runs WHERE user_id = $1`,
 		`DELETE FROM assistant_forks WHERE user_id = $1`,
 		`DELETE FROM agent_profiles WHERE user_id = $1`,
 	}
