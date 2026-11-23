@@ -47,3 +47,36 @@ func TestPathScopedMatch(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// AdmitsBelow answers whether a client_id_prefix can ever match a client the
+// allowlist admits.
+func TestAdmitsBelow(t *testing.T) {
+	allowed, err := ParseAllowedHosts("chatgpt.com, .agents.example.test, vendor.example.test/oauth/mcp/clients/acme/")
+	if err != nil {
+		t.Fatalf("ParseAllowedHosts: %v", err)
+	}
+	for prefix, want := range map[string]bool{
+		"https://chatgpt.com/":                                     true,
+		"https://chatgpt.com/oauth/":                               true,
+		"https://chatgtp.com/oauth/":                               false,
+		"https://sub.chatgpt.com/oauth/":                           false,
+		"https://a.agents.example.test/x/":                         true,
+		"https://agents.example.test/x/":                           false,
+		"https://vendor.example.test/":                             true,
+		"https://vendor.example.test/oauth/":                       true,
+		"https://vendor.example.test/oauth/mcp/clients/acme/":      true,
+		"https://vendor.example.test/oauth/mcp/clients/acme/team/": true,
+		"https://vendor.example.test/oauth/mcp/clients/other/":     false,
+		"https://vendor.example.test/oauthx/":                      false,
+		"https://nowhere.example.test/":                            false,
+		"https://chatgpt.com":                                      false,
+		"":                                                         false,
+	} {
+		if got := AdmitsBelow(allowed, prefix); got != want {
+			t.Errorf("AdmitsBelow(%q) = %v, want %v", prefix, got, want)
+		}
+	}
+	if AdmitsBelow(nil, "https://chatgpt.com/oauth/") {
+		t.Error("an empty allowlist admits a prefix")
+	}
+}

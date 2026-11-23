@@ -34,7 +34,12 @@ Use one gitops PR per step and verify each before the next.
    record still gets the default scope surface.
 3. `MCP_CLIENT_PROFILES`: optional. Prefer a `client_id` binding (the CIMD
    URL). A malformed table stops the server at startup. A `redirect_uri`
-   record refuses pre-0.87.0 refresh families. See
+   record refuses pre-0.87.0 refresh families. A platform that registers
+   one client per install (ChatGPT, Codex) shares neither a `client_id` nor
+   a callback between installs: bound it with a `client_id_prefix` record.
+   Read the platform's metadata document before writing any record, and
+   confirm `scope_ceiling_applied=true` on its first grant line afterwards.
+   See
    [Client tool profiles](../runbook.md#client-tool-profiles) rather than a
    copy here.
 
@@ -69,7 +74,7 @@ startup refuses otherwise.
   sign-in.
 - `OAUTH_CIMD_UNMAPPED_POLICY=refuse` refuses every admitted CIMD client that
   has no `MCP_CLIENT_PROFILES` record (profile or `scope_ceiling`) for its exact
-  `client_id` or its `redirect_uri`; set it only once each admitted client has a record. With the
+  `client_id`, a `client_id_prefix` it is below or its `redirect_uri`; set it only once each admitted client has a record. With the
   default `default-scope` an unmapped client still never holds `admin:users`,
   `admin:users:read` or `admin:broadcast` (#1414).
 - Removing a profile binding from `MCP_CLIENT_PROFILES` takes effect at the
