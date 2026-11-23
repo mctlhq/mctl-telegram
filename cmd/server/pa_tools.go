@@ -193,7 +193,7 @@ func buildPATools(ctx context.Context, cfg *config.Config, tools *config.PATools
 	if err != nil {
 		return nil, fmt.Errorf("pa tools: linking: %w", err)
 	}
-	t.commands = &linking.Commands{Links: t.links, Connections: t.manager, Sender: sender}
+	t.commands = &linking.Commands{Links: t.links, Connections: t.manager, Sender: sender, Servers: t.servers}
 	return t, nil
 }
 

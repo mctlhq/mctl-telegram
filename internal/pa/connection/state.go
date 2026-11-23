@@ -37,6 +37,18 @@ func (s Server) Valid() bool {
 	return ok
 }
 
+// Label is the name a person reads for s, in place of its short command
+// name: "tg" means nothing to someone who did not write the catalog.
+func (s Server) Label() string {
+	switch s {
+	case ServerTG:
+		return "Telegram"
+	case ServerAlice:
+		return "Alice smart home"
+	}
+	return string(s)
+}
+
 // State is a connection's lifecycle state (threat model T2):
 //
 //	pending_link -> pending_oauth -> pending_return -> pending_confirm -> active
