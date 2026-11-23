@@ -14,6 +14,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
+	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
 // DefaultConversationTTL and MaxConversationTTL bound PA_CONVERSATION_TTL.
@@ -37,7 +38,10 @@ const UpdatesRetention = 48 * time.Hour
 type Reply string
 
 const (
-	ReplyConsentPrompt    Reply = "consent_prompt"
+	ReplyConsentPrompt Reply = "consent_prompt"
+	// ReplyConsentPromptRU is the consent prompt in Russian, for a
+	// principal whose client is in Russian.
+	ReplyConsentPromptRU  Reply = "consent_prompt_ru"
 	ReplyConsentAccepted  Reply = "consent_accepted"
 	ReplyConsentWithdrawn Reply = "consent_withdrawn"
 	ReplyConsentStale     Reply = "consent_stale"
@@ -419,14 +423,22 @@ func (c *Conversations) handleCallback(ctx context.Context, tx *sql.Tx, u Verifi
 		// and have Telegram redeliver the update forever.
 		return c.reply(ctx, tx, u, ReplyUnknownButton, "")
 	}
-	if action != consentAcceptAction() {
+	// The button binds the version and the hash of the text its prompt
+	// showed, English or Russian; that hash is what is stored.
+	var textSHA string
+	switch action {
+	case consentAcceptAction(false):
+		textSHA = convo.ConsentTextSHA256For(false)
+	case consentAcceptAction(true):
+		textSHA = convo.ConsentTextSHA256For(true)
+	default:
 		// The text changed after the prompt was shown: ask again.
 		if err := c.reply(ctx, tx, u, ReplyConsentStale, ""); err != nil {
 			return err
 		}
 		return c.prompt(ctx, tx, u)
 	}
-	if err := c.store.AcceptPAConsent(ctx, tx, p.TelegramID(), convo.ConsentVersion, convo.ConsentTextSHA256(), c.now()); err != nil {
+	if err := c.store.AcceptPAConsent(ctx, tx, p.TelegramID(), convo.ConsentVersion, textSHA, c.now()); err != nil {
 		return err
 	}
 	return c.reply(ctx, tx, u, ReplyConsentAccepted, "")
@@ -446,14 +458,23 @@ func (c *Conversations) principalRefused(ctx context.Context, tx *sql.Tx, p Prin
 	return disabled, nil
 }
 
-// prompt issues a consent button bound to the current version and text.
+// prompt issues a consent button bound to the current version and to the
+// text the prompt shows: Russian when the update's client is in Russian,
+// else English. The language is fixed here, with the binding, and the
+// prompt row is one language only (safetext.TextConsentPromptRU), so the
+// text shown is always the text whose hash the button binds.
 func (c *Conversations) prompt(ctx context.Context, tx *sql.Tx, u VerifiedUpdate) error {
 	p := u.Principal()
+	ru := safetext.LangOf(u.LanguageCode()) == safetext.LangRU
 	id := newOpaqueID()
-	if err := c.store.CreatePACallback(ctx, tx, p.TelegramID(), id, consentAcceptAction(), c.now().Add(ConsentPromptTTL)); err != nil {
+	if err := c.store.CreatePACallback(ctx, tx, p.TelegramID(), id, consentAcceptAction(ru), c.now().Add(ConsentPromptTTL)); err != nil {
 		return err
 	}
-	return c.reply(ctx, tx, u, ReplyConsentPrompt, id)
+	r := ReplyConsentPrompt
+	if ru {
+		r = ReplyConsentPromptRU
+	}
+	return c.reply(ctx, tx, u, r, id)
 }
 
 // erasureReply confirms /forget or /consent withdraw, which has already
@@ -552,8 +573,8 @@ func (c *Conversations) Load(ctx context.Context, ec ExecutionContext) ([]convo.
 	return out, nil
 }
 
-func consentAcceptAction() string {
-	return actionConsentAcceptPrefix + convo.ConsentVersion + ":" + convo.ConsentTextSHA256()
+func consentAcceptAction(ru bool) string {
+	return actionConsentAcceptPrefix + convo.ConsentVersion + ":" + convo.ConsentTextSHA256For(ru)
 }
 
 // userCommand reports whether the message is a server-side command: its

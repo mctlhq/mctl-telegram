@@ -274,12 +274,25 @@ func TestConsentPromptIsConsentText(t *testing.T) {
 	if txt.String() != convo.ConsentText || txt.Parts() != 1 {
 		t.Fatalf("consent prompt differs from convo.ConsentText (parts %d)", txt.Parts())
 	}
+	// Each prompt shows its own text in every chat language: the Sender
+	// must not swap a prompt for the other language's text, whose hash
+	// its button does not bind.
+	for tpl, want := range map[safetext.Template]string{
+		safetext.TextConsentPrompt: convo.ConsentText, safetext.TextConsentPromptRU: convo.ConsentTextRU,
+	} {
+		for _, l := range []safetext.Lang{safetext.LangEN, safetext.LangRU} {
+			got := safetext.ServerText(tpl).In(l)
+			if got.String() != want || got.Parts() != 1 {
+				t.Fatalf("consent prompt in language %d differs from its convo text (parts %d)", l, got.Parts())
+			}
+		}
+	}
 }
 
 // TestEveryReplyHasAKindAndATemplate: each Reply maps to its own
 // conversation-level kind, and each such kind to a non-empty server text.
 func TestEveryReplyHasAKindAndATemplate(t *testing.T) {
-	all := []Reply{ReplyConsentPrompt, ReplyConsentAccepted, ReplyConsentWithdrawn, ReplyConsentStale,
+	all := []Reply{ReplyConsentPrompt, ReplyConsentPromptRU, ReplyConsentAccepted, ReplyConsentWithdrawn, ReplyConsentStale,
 		ReplyNewConversation, ReplyForgotten, ReplyUnknownButton, ReplyRateLimited, ReplyMessageTooLong,
 		ReplyLinkingUnavailable, ReplyPrincipalDisabled}
 	if len(replyKinds) != len(all) || len(jobs.ConversationOutboxKinds()) != len(all) {
@@ -311,6 +324,12 @@ func TestOutboxKeyboard(t *testing.T) {
 	}
 	if _, ok := outboxKeyboard(jobs.OutboxItem{Kind: jobs.OutboxConsentPrompt}); ok {
 		t.Fatal("a prompt without its button is sendable")
+	}
+	if kb, ok := outboxKeyboard(jobs.OutboxItem{Kind: jobs.OutboxConsentPromptRU, Button: "id"}); !ok || len(kb) != 1 || kb[0][0].Data != "id" {
+		t.Fatalf("Russian prompt keyboard = %+v, %v", kb, ok)
+	}
+	if _, ok := outboxKeyboard(jobs.OutboxItem{Kind: jobs.OutboxConsentPromptRU}); ok {
+		t.Fatal("a Russian prompt without its button is sendable")
 	}
 	if kb, ok := outboxKeyboard(jobs.OutboxItem{Kind: jobs.OutboxForgotten}); !ok || kb != nil {
 		t.Fatalf("forgotten keyboard = %+v, %v", kb, ok)

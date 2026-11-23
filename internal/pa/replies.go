@@ -20,6 +20,7 @@ import (
 // replyKinds maps every Reply to its conversation-level outbox kind.
 var replyKinds = map[Reply]jobs.OutboxKind{
 	ReplyConsentPrompt:      jobs.OutboxConsentPrompt,
+	ReplyConsentPromptRU:    jobs.OutboxConsentPromptRU,
 	ReplyConsentAccepted:    jobs.OutboxConsentAccepted,
 	ReplyConsentWithdrawn:   jobs.OutboxConsentWithdrawn,
 	ReplyConsentStale:       jobs.OutboxConsentStale,

@@ -43,7 +43,8 @@ func TestTemplatesAreTranslated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	untranslated := map[string]bool{"TextConsentPrompt": true}
+	// The two consent prompts are one language each (TextConsentPromptRU).
+	untranslated := map[string]bool{"TextConsentPrompt": true, "TextConsentPromptRU": true}
 	seen := 0
 	ast.Inspect(f, func(n ast.Node) bool {
 		vs, ok := n.(*ast.ValueSpec)
@@ -58,7 +59,7 @@ func TestTemplatesAreTranslated(t *testing.T) {
 		name := vs.Names[0].Name
 		if untranslated[name] {
 			if len(call.Args) != 1 {
-				t.Errorf("%s is translated: change convo.ConsentText handling first", name)
+				t.Errorf("%s is translated: a consent prompt must show exactly the text its button binds", name)
 			}
 			return true
 		}

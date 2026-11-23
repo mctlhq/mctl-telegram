@@ -77,6 +77,13 @@ var (
 	// the prompt's button binds (TestConsentPromptIsConsentText). Change
 	// both together, and bump convo.ConsentVersion.
 	TextConsentPrompt = tpl("Before the assistant answers you, it needs your consent to this data flow (pa-data-flow/v1).\n\nWhat is sent: the messages you write to this bot, any text you forward, reply to or quote here, and the results the assistant reads from the services you connect (for example your Telegram chats or your smart home).\n\nWhere it goes: to Nebius, the AI model provider that generates the answers, reached through Cloudflare AI Gateway. They process it under their API terms. See https://tg.mctl.ai/privacy.\n\nHow long it is kept: a conversation is kept on our servers for at most 24 hours from its start. /new starts a fresh conversation, /forget deletes all of your conversations now, and /consent withdraw stops the assistant and deletes your conversations.\n\nThe assistant only reads in this version; it cannot send, change or delete anything on your behalf.")
+	// TextConsentPromptRU is convo.ConsentTextRU, verbatim, sent to a
+	// principal whose client is in Russian. It is a template of its own,
+	// not a translation of TextConsentPrompt: the prompt's button binds
+	// the hash of the text it shows, so each prompt is in exactly one
+	// language, fixed when the prompt is queued, whatever the Sender's
+	// language for the chat is at send time.
+	TextConsentPromptRU = tpl("Прежде чем ассистент ответит вам, ему нужно ваше согласие на эту передачу данных (pa-data-flow/v1).\n\nЧто передаётся: сообщения, которые вы пишете этому боту, любой текст, который вы здесь пересылаете, на который отвечаете или который цитируете, а также результаты, которые ассистент читает из подключённых вами сервисов (например, ваших чатов Telegram или умного дома).\n\nКуда: в Nebius, провайдеру ИИ-модели, которая генерирует ответы, через Cloudflare AI Gateway. Они обрабатывают данные на условиях своих API. Подробнее: https://tg.mctl.ai/privacy.\n\nСколько хранится: разговор хранится на наших серверах не более 24 часов с его начала. /new начинает новый разговор, /forget сразу удаляет все ваши разговоры, а /consent withdraw останавливает ассистента и удаляет ваши разговоры.\n\nВ этой версии ассистент только читает: он не может ничего отправлять, изменять или удалять от вашего имени.")
 	// TextConsentAccepted answers the consent button. A message sent before
 	// consent was not stored, so the principal is asked to send it again.
 	TextConsentAccepted = tpl("Thank you, your consent is recorded. Send your request and the assistant will answer it.", "Спасибо, ваше согласие записано. Отправьте запрос, и ассистент на него ответит.")

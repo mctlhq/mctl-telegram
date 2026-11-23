@@ -78,6 +78,7 @@ var outboxTemplates = map[jobs.OutboxKind]safetext.Template{
 	jobs.OutboxPrincipalStopped: safetext.TextAssistantUnavailable,
 
 	jobs.OutboxConsentPrompt:      safetext.TextConsentPrompt,
+	jobs.OutboxConsentPromptRU:    safetext.TextConsentPromptRU,
 	jobs.OutboxConsentAccepted:    safetext.TextConsentAccepted,
 	jobs.OutboxConsentWithdrawn:   safetext.TextConsentWithdrawn,
 	jobs.OutboxConsentStale:       safetext.TextConsentStale,
@@ -96,7 +97,7 @@ var outboxTemplates = map[jobs.OutboxKind]safetext.Template{
 // single button, carrying the opaque callback id stored with the row, and
 // none for every other kind. A prompt row without its id cannot be sent.
 func outboxKeyboard(it jobs.OutboxItem) (output.Keyboard, bool) {
-	if it.Kind != jobs.OutboxConsentPrompt {
+	if !it.Kind.CarriesButton() {
 		return nil, it.Button == ""
 	}
 	if it.Button == "" {
@@ -235,7 +236,7 @@ func (l *RunLoop) sendItem(ctx context.Context, it jobs.OutboxItem) (jobs.Outbox
 	// Only a prompt that still has parts to send is checked: one delivered
 	// in full on an earlier attempt was sent, whatever its button became
 	// since (a press consumes it).
-	if it.Kind == jobs.OutboxConsentPrompt {
+	if it.Kind.CarriesButton() {
 		live, err := l.buttonLive(ctx, it, now)
 		if err != nil {
 			// Could not read the button: nothing is known about it and
