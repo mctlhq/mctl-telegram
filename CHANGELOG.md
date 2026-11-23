@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.145.0](https://github.com/mctlhq/mctl-telegram/compare/0.144.0...0.145.0) (2026-11-23)
+
+
+### Features
+
+* **oauth:** withhold membership scopes from unmapped CIMD clients ([9435850](https://github.com/mctlhq/mctl-telegram/commit/94358502c986eb3760401ba105b06f79bf00268c))
+* **oauth:** withhold membership scopes from unmapped CIMD clients ([184763c](https://github.com/mctlhq/mctl-telegram/commit/184763c21ba4c269540949b0756e8045d30a3437)), closes [#1414](https://github.com/mctlhq/mctl-telegram/issues/1414)
+
+
+### Bug Fixes
+
+* **pa:** read a self-issued tg server's metadata in process ([2090da2](https://github.com/mctlhq/mctl-telegram/commit/2090da216535fa3a769747411eca3ad31136f0d0))
+* **pa:** read a self-issued tg server's metadata in process ([3c85c56](https://github.com/mctlhq/mctl-telegram/commit/3c85c5607fb37b72e513ea3289b1cc030b90b87f)), closes [#1318](https://github.com/mctlhq/mctl-telegram/issues/1318)
+
 ## [0.144.0](https://github.com/mctlhq/mctl-telegram/compare/0.143.0...0.144.0) (2026-11-23)
 
 
