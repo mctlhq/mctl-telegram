@@ -111,7 +111,7 @@ S2-I6:
     - internal/pa.TestS2I6_FailedToolRecordIsAnError
   mutations:
     - id: P2S7-I6a
-      guard: internal/pa/runloop.go:803
+      guard: internal/pa/runloop.go:813
       guard_text: 'return tainted, nil'
       mutation: "ConversationTainted returns the durable flag as clean: `return tainted, nil` -> `return tainted && false, nil`"
       killed_by:
@@ -184,7 +184,7 @@ S2-I6:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.443s
     - id: P2S7-I6f
-      guard: internal/pa/runloop.go:819
+      guard: internal/pa/runloop.go:829
       guard_text: "convo.ProvenanceExternal, string(output)))\n\t\t\treturn err"
       mutation: "RecordToolResult swallows a failed fragment append: `return err` -> `_ = err; return nil`"
       killed_by:
@@ -314,7 +314,7 @@ S2-I10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.404s
     - id: P2S7-I10b
-      guard: internal/pa/runloop.go:801
+      guard: internal/pa/runloop.go:811
       guard_text: 'return true, err'
       mutation: "ConversationTainted store error returns clean: `return true, err` -> `return false, err`"
       killed_by:

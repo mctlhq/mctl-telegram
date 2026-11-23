@@ -200,3 +200,44 @@ func TestTyping_Bounds(t *testing.T) {
 		}
 	})
 }
+
+// TestRunLoop_TypingAfterQueuedRun: a message that queued a run shows the
+// status once after its commit, before any worker claims the job. An
+// update that queued nothing, a stale mark and a loop without a sender
+// show nothing.
+func TestRunLoop_TypingAfterQueuedRun(t *testing.T) {
+	ctx := context.Background()
+	rec := &typingRecorder{}
+	h := newRunLoopHarness(t, withTyping(rec))
+	h.consent(aliceID)
+	h.loop.TypingAfter(ctx, aliceID)
+	h.loop.WaitDeliveries()
+	if n := rec.count(aliceID); n != 0 {
+		t.Fatalf("typing after the consent flow, which queued no run = %d", n)
+	}
+
+	h.text(aliceID, "hello")
+	h.loop.TypingAfter(ctx, bobID)
+	h.loop.TypingAfter(ctx, aliceID)
+	h.loop.TypingAfter(ctx, aliceID) // the mark is taken once
+	h.loop.WaitDeliveries()
+	if a, b := rec.count(aliceID), rec.count(bobID); a != 1 || b != 0 {
+		t.Fatalf("typing shown: principal %d, another principal %d; want 1, 0", a, b)
+	}
+	h.finishRun("hi")
+
+	// A mark whose transaction never committed is ignored once it is old.
+	h.text(aliceID, "again")
+	before := rec.count(aliceID) // the claimed run above showed its own
+	h.now = h.now.Add(typingQueuedFor + time.Second)
+	h.loop.TypingAfter(ctx, aliceID)
+	h.loop.WaitDeliveries()
+	if n := rec.count(aliceID); n != before {
+		t.Fatalf("typing shown for a stale mark: %d -> %d", before, n)
+	}
+
+	// No sender: nothing, and no panic.
+	plain := &RunLoop{}
+	plain.TypingAfter(ctx, aliceID)
+	plain.WaitDeliveries()
+}
