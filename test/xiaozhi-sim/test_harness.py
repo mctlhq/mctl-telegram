@@ -46,6 +46,7 @@ class ProtocolUnitTests(unittest.TestCase):
         old = mcp_request("2024-11-05", "initialize")
         modern = mcp_request("2026-07-28", "server/discover")
         self.assertNotIn("_meta", old["payload"]["params"])
+        self.assertEqual(old["payload"]["params"]["protocolVersion"], "2024-11-05")
         self.assertEqual(modern["payload"]["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"], "2026-07-28")
         self.assertEqual(mcp_request("2026-07-28", cursor="cursor-2")["payload"]["params"]["cursor"], "cursor-2")
         with self.assertRaises(ProtocolError):
@@ -54,6 +55,7 @@ class ProtocolUnitTests(unittest.TestCase):
     def test_mcp_ids_payload_and_fail_closed(self):
         good = {"jsonrpc": "2.0", "id": 1, "result": {"tools": [{"name": "self.audio_speaker.set_volume"}]}}
         self.assertTrue(valid_mcp_response(good, {1}))
+        self.assertTrue(valid_mcp_response(dict(good, id="request-1"), {"request-1"}))
         for invalid in [dict(good, id=True), dict(good, id=123),
                         dict(good, id=1.5), dict(good, result={"tools": None}),
                         dict(good, jsonrpc="1.0")]:
@@ -177,8 +179,69 @@ class LiveLoopbackTests(unittest.IsolatedAsyncioTestCase):
             await ws.send(json.dumps({"type": "mcp", "payload": payload}))
             await ws.send(json.dumps({"type": "mcp", "payload": {**payload, "id": 1}}))
             await asyncio.sleep(0.05)
-            self.assertEqual(self.gateway.mcp_dropped, 1)
-            self.assertEqual(self.gateway.mcp_accepted, 1)
+            # The gateway never asked this device for any tools.
+            self.assertEqual(self.gateway.mcp_dropped, 2)
+            self.assertEqual(self.gateway.mcp_accepted, 0)
+        finally:
+            await ws.close()
+
+
+    async def test_live_mcp_modern_discovery_and_pagination(self):
+        ws, _ = await self.open_device({**HELLO, "features": {"mcp": True, "mcp_20260728": True}})
+        try:
+            discover = json.loads(await ws.recv())["payload"]
+            self.assertEqual(discover["method"], "server/discover")
+            self.assertEqual(discover["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"], "2026-07-28")
+            await ws.send(json.dumps({"type": "mcp", "payload": {
+                "jsonrpc": "2.0", "id": discover["id"],
+                "result": {"resultType": "complete", "supportedVersions": ["2026-07-28", "2024-11-05"]}}}))
+            listing = json.loads(await ws.recv())["payload"]
+            self.assertEqual(listing["method"], "tools/list")
+            await ws.send(json.dumps({"type": "mcp", "payload": {"jsonrpc": "2.0", "id": listing["id"],
+                             "result": {"tools": [{"name": "self.audio_speaker.set_volume"}], "nextCursor": "c2"}}}))
+            page2 = json.loads(await ws.recv())["payload"]
+            self.assertEqual(page2["params"]["cursor"], "c2")
+            await ws.send(json.dumps({"type": "mcp", "payload": {"jsonrpc": "2.0", "id": page2["id"],
+                             "result": {"tools": []}}}))
+            await asyncio.sleep(0.04)
+            self.assertEqual(self.gateway.mcp_accepted, 3)
+            self.assertEqual(self.gateway.mcp_dropped, 0)
+        finally:
+            await ws.close()
+
+    async def test_live_mcp_legacy_initialize(self):
+        ws, _ = await self.open_device({**HELLO, "features": {"mcp": True}})
+        try:
+            initial = json.loads(await ws.recv())["payload"]
+            self.assertEqual(initial["method"], "initialize")
+            await ws.send(json.dumps({"type": "mcp", "payload": {"jsonrpc": "2.0", "id": initial["id"],
+                      "result": {"protocolVersion": "2024-11-05", "capabilities": {}}}}))
+            listing = json.loads(await ws.recv())["payload"]
+            self.assertEqual(listing["method"], "tools/list")
+            self.assertNotIn("_meta", listing["params"])
+            await ws.send(json.dumps({"type": "mcp", "payload": {"jsonrpc": "2.0", "id": listing["id"],
+                      "result": {"tools": []}}}))
+            await asyncio.sleep(0.04)
+            self.assertEqual(self.gateway.mcp_accepted, 2)
+        finally:
+            await ws.close()
+
+    async def test_live_mcp_modern_method_not_found_legacy_fallback(self):
+        ws, _ = await self.open_device({**HELLO, "features": {"mcp": True, "mcp_20260728": True}})
+        try:
+            initial = json.loads(await ws.recv())["payload"]
+            await ws.send(json.dumps({"type": "mcp", "payload": {"jsonrpc": "2.0", "id": initial["id"],
+                      "error": {"code": -32601, "message": "not found"}}}))
+            fallback = json.loads(await ws.recv())["payload"]
+            self.assertEqual(fallback["method"], "initialize")
+            await ws.send(json.dumps({"type": "mcp", "payload": {"jsonrpc": "2.0", "id": fallback["id"],
+                      "result": {"protocolVersion": "2024-11-05", "capabilities": {}}}}))
+            listing = json.loads(await ws.recv())["payload"]
+            self.assertEqual(listing["method"], "tools/list")
+            await ws.send(json.dumps({"type": "mcp", "payload": {"jsonrpc": "2.0", "id": listing["id"],
+                      "result": {"tools": []}}}))
+            await asyncio.sleep(0.04)
+            self.assertEqual(self.gateway.mcp_accepted, 3)
         finally:
             await ws.close()
 
