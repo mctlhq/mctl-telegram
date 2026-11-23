@@ -274,7 +274,7 @@ func (c *Commands) list(ctx context.Context, p pa.Principal) safetext.Text {
 			continue
 		}
 		line := conn.Server.Label() + " (" + string(conn.State) + ")"
-		lineRU := conn.Server.Label() + " (" + connection.StateRU(conn.State) + ")"
+		lineRU := conn.Server.NameRU() + " (" + connection.StateRU(conn.State) + ")"
 		if conn.AccountID != "" {
 			line += ": " + conn.AccountID
 			lineRU += ": " + conn.AccountID

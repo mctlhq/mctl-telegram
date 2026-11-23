@@ -17,6 +17,7 @@ package output
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
@@ -125,6 +126,17 @@ func TestSender_SetCommands(t *testing.T) {
 		if err := s.SetCommands(context.Background(), bad); err == nil {
 			t.Errorf("SetCommands(%v) accepted", bad)
 		}
+	}
+	// A description valid in English but too long in Russian refuses the
+	// whole menu: no language is set alone.
+	s.describe = func(c Command, l safetext.Lang) string {
+		if l == safetext.LangRU {
+			return strings.Repeat("д", 257)
+		}
+		return c.Description.In(l)
+	}
+	if err := s.SetCommands(context.Background(), cmds); err == nil {
+		t.Error("a menu with an over-long Russian description accepted")
 	}
 	if len(f.calls) != 2 {
 		t.Fatal("a refused menu was sent")

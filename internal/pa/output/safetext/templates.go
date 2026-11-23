@@ -70,8 +70,12 @@ var (
 	// limit. The reply is never truncated (#1313 slice d1).
 	TextReplyTooLong = tpl("The answer was too long to send. Please ask for a shorter answer.", "Ответ получился слишком длинным для отправки. Попросите ответить короче.")
 
-	// LabelConsentAccept is the consent prompt's only button (#1348).
-	LabelConsentAccept = tpl("I agree", "Согласен")
+	// LabelConsentAccept is the English consent prompt's only button
+	// (#1348), and LabelConsentAcceptRU the Russian one's. Like the two
+	// prompts, each is one language: a button is in the language of the
+	// text it accepts, whatever the chat's language at send time.
+	LabelConsentAccept   = tpl("I agree")
+	LabelConsentAcceptRU = tpl("Согласен")
 
 	// TextConsentPrompt is convo.ConsentText, verbatim: the text whose hash
 	// the prompt's button binds (TestConsentPromptIsConsentText). Change

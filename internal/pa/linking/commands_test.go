@@ -210,6 +210,12 @@ func TestCommands_List(t *testing.T) {
 	if got, want := s.last(), "Your connections:\nTelegram (expired): telegram:100001 - send /connect tg to link it again"; got != want {
 		t.Fatalf("expired list %q, want %q", got, want)
 	}
+	// A Russian line names the server in the nominative.
+	conns.conns[0] = connection.Connection{ID: "c3", Server: connection.ServerAlice, State: connection.StateActive}
+	cmd.Run(context.Background(), u, pa.LinkAction{Command: pa.CommandConnections})
+	if got, want := s.lastRU(), "Ваши подключения:\nУмный дом Алиса (активно)"; got != want {
+		t.Fatalf("Russian Alice list %q, want %q", got, want)
+	}
 	conns.conns = conns.conns[1:]
 	cmd.Run(context.Background(), u, pa.LinkAction{Command: pa.CommandConnections})
 	if got := s.last(); got != srv(safetext.TextConnectionsNone) {

@@ -103,7 +103,11 @@ func outboxKeyboard(it jobs.OutboxItem) (output.Keyboard, bool) {
 	if it.Button == "" {
 		return nil, false
 	}
-	return output.Keyboard{{{Label: safetext.LabelConsentAccept, Data: it.Button}}}, true
+	label := safetext.LabelConsentAccept
+	if it.Kind == jobs.OutboxConsentPromptRU {
+		label = safetext.LabelConsentAcceptRU
+	}
+	return output.Keyboard{{{Label: label, Data: it.Button}}}, true
 }
 
 const (

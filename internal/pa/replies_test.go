@@ -319,13 +319,13 @@ func TestEveryReplyHasAKindAndATemplate(t *testing.T) {
 // TestOutboxKeyboard: only a consent prompt carries a button, and a prompt
 // row without its id is not sendable.
 func TestOutboxKeyboard(t *testing.T) {
-	if kb, ok := outboxKeyboard(jobs.OutboxItem{Kind: jobs.OutboxConsentPrompt, Button: "id"}); !ok || len(kb) != 1 || kb[0][0].Data != "id" {
+	if kb, ok := outboxKeyboard(jobs.OutboxItem{Kind: jobs.OutboxConsentPrompt, Button: "id"}); !ok || len(kb) != 1 || kb[0][0].Data != "id" || kb[0][0].Label != safetext.LabelConsentAccept {
 		t.Fatalf("prompt keyboard = %+v, %v", kb, ok)
 	}
 	if _, ok := outboxKeyboard(jobs.OutboxItem{Kind: jobs.OutboxConsentPrompt}); ok {
 		t.Fatal("a prompt without its button is sendable")
 	}
-	if kb, ok := outboxKeyboard(jobs.OutboxItem{Kind: jobs.OutboxConsentPromptRU, Button: "id"}); !ok || len(kb) != 1 || kb[0][0].Data != "id" {
+	if kb, ok := outboxKeyboard(jobs.OutboxItem{Kind: jobs.OutboxConsentPromptRU, Button: "id"}); !ok || len(kb) != 1 || kb[0][0].Data != "id" || kb[0][0].Label != safetext.LabelConsentAcceptRU {
 		t.Fatalf("Russian prompt keyboard = %+v, %v", kb, ok)
 	}
 	if _, ok := outboxKeyboard(jobs.OutboxItem{Kind: jobs.OutboxConsentPromptRU}); ok {
