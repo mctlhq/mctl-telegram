@@ -65,6 +65,7 @@ func (c *cmdConns) Disconnect(_ context.Context, _ int64, id string) (connection
 type cmdSender struct {
 	mu     sync.Mutex
 	texts  []string
+	textRU []string
 	webApp []string
 	// webAppErrs are returned by successive SendWebApp calls, in order;
 	// once used up, calls succeed.
@@ -76,7 +77,17 @@ func (s *cmdSender) Send(_ context.Context, _ int64, text safetext.Text, _ outpu
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.texts = append(s.texts, text.String())
+	s.textRU = append(s.textRU, text.In(safetext.LangRU).String())
 	return nil
+}
+
+func (s *cmdSender) lastRU() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.textRU) == 0 {
+		return ""
+	}
+	return s.textRU[len(s.textRU)-1]
 }
 
 func (s *cmdSender) SendWebApp(_ context.Context, _ int64, _ safetext.Text, _ safetext.Template, appURL string) error {
@@ -188,6 +199,9 @@ func TestCommands_List(t *testing.T) {
 	cmd.Run(context.Background(), u, pa.LinkAction{Command: pa.CommandConnections})
 	if got, want := s.last(), "Your connections:\nTelegram (active): telegram:100001"; got != want {
 		t.Fatalf("list %q, want %q", got, want)
+	}
+	if got, want := s.lastRU(), "Ваши подключения:\nTelegram (активно): telegram:100001"; got != want {
+		t.Fatalf("Russian list %q, want %q", got, want)
 	}
 	// An expired connection is listed as it is, with the way back
 	// (#1318 slice C2b).

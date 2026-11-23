@@ -38,12 +38,17 @@ var fieldUsers = map[string]bool{
 	"Text.Part":       true,
 	"ServerText":      true,
 	"Render":          true,
+	// The language half (lang.go): pick or join translations of texts
+	// that are already safe.
+	"Template.In": true,
+	"Text.In":     true,
+	"WithRussian": true,
 }
 
 // guardedFields are the unexported fields of Text and Template. Any
 // selector or literal key with one of these names counts, whatever its
 // type: the scan has no type information, so it fails closed.
-var guardedFields = map[string]bool{"s": true, "parts": true}
+var guardedFields = map[string]bool{"s": true, "parts": true, "ru": true}
 
 // unwrapType strips parentheses and pointer stars, so (Text), *Text and
 // (*Text) all name Text.
@@ -196,10 +201,14 @@ func scanTemplates(fset *token.FileSet, f *ast.File, file string) []string {
 				if file != templatesFile {
 					report(x, "tpl called outside "+templatesFile)
 				}
-				if len(x.Args) != 1 {
-					report(x, "tpl needs one argument")
-				} else if lit, ok := x.Args[0].(*ast.BasicLit); !ok || lit.Kind != token.STRING {
-					report(x, "tpl argument is not a string literal")
+				// The English text and, optionally, its Russian translation.
+				if len(x.Args) < 1 || len(x.Args) > 2 || x.Ellipsis.IsValid() {
+					report(x, "tpl needs one or two arguments")
+				}
+				for _, a := range x.Args {
+					if lit, ok := a.(*ast.BasicLit); !ok || lit.Kind != token.STRING {
+						report(x, "tpl argument is not a string literal")
+					}
 				}
 			}
 			return true
@@ -251,6 +260,11 @@ func TestTemplatesGuardDetects(t *testing.T) {
 		{"render.go", pkg + `var x = tpl("hi")`, 1},
 		{templatesFile, pkg + `func tpl(s string) Template { return Template{s: s} }; func f(s string) Template { return tpl(s) }`, 1},
 		{templatesFile, pkg + `func tpl(s string) Template { return Template{s: s} }; var x = tpl("a" + "b")`, 1},
+		// The Russian argument is held to the same rule as the English.
+		{templatesFile, pkg + `func tpl(s string, ru ...string) Template { return Template{s: s} }; var y = "b"; var x = tpl("a", y)`, 1},
+		{templatesFile, pkg + `func tpl(s string, ru ...string) Template { return Template{s: s} }; var x = tpl("a", "b", "c")`, 1},
+		{templatesFile, pkg + `func tpl(s string, ru ...string) Template { return Template{s: s} }; var ys = []string{"b"}; var x = tpl("a", ys...)`, 2},
+		{"render.go", pkg + `func f(t *Template, s string) { t.ru = s }`, 1},
 		{"render.go", pkg + `func f(s string) Template { var t Template; t.s = s; return t }`, 1},
 		{"render.go", pkg + `func f(s string) Template { return Template(struct{ s string }{s}) }`, 2},
 		{"render.go", pkg + `func f(s string) Template { return (Template)(struct{ s string }{s}) }`, 2},

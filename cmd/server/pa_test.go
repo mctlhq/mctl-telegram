@@ -297,6 +297,25 @@ func TestBuildPA_WebhookRunsConversations(t *testing.T) {
 	}
 }
 
+// The webhook records the language of each accepted update's sender
+// before it delivers anything, so the first answer is already in it.
+func TestBuildPA_WebhookRecordsLanguage(t *testing.T) {
+	store, _ := paTestStoreConn(t)
+	sent := recordPASends(t)
+	_, rt := buildEnabledPA(t, store)
+	mux := chi.NewRouter()
+	rt.Mount(mux)
+	body := `{"update_id":5101,"message":{"message_id":7,"date":1,"text":"hello",` +
+		`"from":{"id":4242001,"is_bot":false,"first_name":"Alice","language_code":"ru"},"chat":{"id":4242001,"type":"private"}}}`
+	if code := postPAWebhook(mux, body); code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", code)
+	}
+	rt.loop.WaitDeliveries()
+	if sent.langs == nil || sent.langs.Of(4242001) != safetext.LangRU {
+		t.Fatal("the sender's Languages did not get the update's language")
+	}
+}
+
 type paSend struct {
 	chat   int64
 	text   string
@@ -308,6 +327,8 @@ type paSend struct {
 }
 
 type paSendRecorder struct {
+	// langs is what buildPA handed the sender.
+	langs    *output.Languages
 	mu       sync.Mutex
 	sent     []paSend
 	answered []string
@@ -399,7 +420,8 @@ func recordPASends(t *testing.T) *paSendRecorder {
 	t.Helper()
 	r := &paSendRecorder{}
 	prev := newPASender
-	newPASender = func(token, webAppURL string) (paBotSender, error) {
+	newPASender = func(token, webAppURL string, langs *output.Languages) (paBotSender, error) {
+		r.langs = langs
 		if webAppURL != "" {
 			real, err := output.NewSender(output.Config{Token: token, WebAppURL: webAppURL})
 			if err != nil {

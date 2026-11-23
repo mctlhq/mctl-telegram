@@ -49,6 +49,13 @@ func (m BotMessenger) SendCard(ctx context.Context, chatID int64, card Card) err
 	if err != nil {
 		return fmt.Errorf("pa linking: card text: %w", err)
 	}
+	if card.TextRU != "" {
+		ru, err := safetext.Render(card.TextRU, safetext.UserText{})
+		if err != nil {
+			return fmt.Errorf("pa linking: card text: %w", err)
+		}
+		text = safetext.WithRussian(text, ru)
+	}
 	row := make([]output.Button, 0, len(card.Buttons))
 	for _, b := range card.Buttons {
 		label, ok := cardLabels[b.Label]

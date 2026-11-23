@@ -138,7 +138,10 @@ type Button struct {
 
 // Card is a plain-text bot message with an inline keyboard.
 type Card struct {
-	Text    string
+	Text string
+	// TextRU is Text in Russian, sent to a principal whose Telegram client
+	// is in Russian; "" sends Text to everyone.
+	TextRU  string
 	Buttons []Button
 }
 
@@ -709,6 +712,8 @@ func ConfirmCard(server connection.Server, accountID, nonce string) Card {
 	return Card{
 		Text: "Link this " + server.Label() + " account to the assistant?\n\nAccount: " + accountID +
 			"\n\nConfirm only if this is your account. Nothing is linked until you do.",
+		TextRU: "Подключить этот аккаунт " + server.LabelRU() + " к ассистенту?\n\nАккаунт: " + accountID +
+			"\n\nПодтвердите, только если это ваш аккаунт. Пока вы не подтвердите, ничего не подключается.",
 		Buttons: []Button{
 			{Label: safetext.LabelConfirm.String(), Data: confirmPrefix + nonce},
 			{Label: safetext.LabelCancel.String(), Data: cancelPrefix + nonce},

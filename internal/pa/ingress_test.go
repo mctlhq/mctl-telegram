@@ -261,3 +261,20 @@ func TestFilter_S1B1(t *testing.T) {
 		})
 	}
 }
+
+// from.language_code is kept for the bot's own texts, on messages and
+// button presses; an update without it has "".
+func TestFilter_LanguageCode(t *testing.T) {
+	msg := fmt.Sprintf(`{"update_id":12,"message":{"message_id":7,"date":1,`+
+		`"from":{"id":%d,"is_bot":false,"first_name":"Alice","language_code":"ru"},`+
+		`"chat":{"id":%d,"type":"private"},"text":"hello"}}`, aliceID, aliceID)
+	cb := fmt.Sprintf(`{"update_id":13,"callback_query":{"id":"cb1","chat_instance":"x","data":"opaque-1",`+
+		`"from":{"id":%d,"is_bot":false,"language_code":"ru-RU"},`+
+		`"message":{"message_id":9,"date":1,"chat":{"id":%d,"type":"private"}}}}`, aliceID, aliceID)
+	for body, want := range map[string]string{msg: "ru", cb: "ru-RU", privateMessage(14, aliceID, ""): ""} {
+		u, outcome := Filter([]byte(body))
+		if outcome != OutcomeAccepted || u.LanguageCode() != want {
+			t.Errorf("outcome %q, language %q, want %q", outcome, u.LanguageCode(), want)
+		}
+	}
+}
