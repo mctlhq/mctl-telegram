@@ -230,7 +230,7 @@ func observeTG(t *testing.T, mutate func([]map[string]any) []map[string]any) *ca
 // mutate when it is not nil.
 func tgListing(t *testing.T, mutate func([]map[string]any) []map[string]any) []byte {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "tool-descriptors.json"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "tool-descriptors.core-readonly.json")) // the PA client is bound to core-readonly
 	if err != nil {
 		t.Fatal(err)
 	}

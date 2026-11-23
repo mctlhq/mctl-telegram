@@ -22,6 +22,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/linking"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output"
+	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 	"github.com/mctlhq/mctl-telegram/internal/sweeper"
 	"github.com/mctlhq/mctl-telegram/internal/web"
 )
@@ -57,8 +58,33 @@ var _ paBotSender = (*output.Sender)(nil)
 // URL, or "" when no linking flow runs (no web_app button can be sent). A
 // variable only so the wiring tests can record what the wired runtime
 // sends instead of calling the Bot API; nothing else assigns it.
-var newPASender = func(token, webAppURL string) (paBotSender, error) {
-	return output.NewSender(output.Config{Token: token, WebAppURL: webAppURL})
+var newPASender = func(token, webAppURL string, langs *output.Languages) (paBotSender, error) {
+	return output.NewSender(output.Config{Token: token, WebAppURL: webAppURL, Languages: langs})
+}
+
+// paMenuSetter is the part of *output.Sender that sets the bot's command
+// menu. The wiring tests' recorder does not implement it, so Start sets no
+// menu there.
+type paMenuSetter interface {
+	SetCommands(ctx context.Context, cmds []output.Command) error
+}
+
+// paMenu is the command menu for the commands this server answers: the
+// linking commands only when a linking flow runs.
+func paMenu(linking bool) []output.Command {
+	cmds := []output.Command{
+		{Name: "new", Description: safetext.CmdNew},
+		{Name: "forget", Description: safetext.CmdForget},
+		{Name: "consent", Description: safetext.CmdConsent},
+	}
+	if linking {
+		cmds = append(cmds,
+			output.Command{Name: "connect", Description: safetext.CmdConnect},
+			output.Command{Name: "connections", Description: safetext.CmdConnections},
+			output.Command{Name: "disconnect", Description: safetext.CmdDisconnect},
+		)
+	}
+	return cmds
 }
 
 // runPADispatcher runs the dispatcher's pin refresh loop. A variable only
@@ -84,8 +110,15 @@ type paRuntime struct {
 	mount      func(chi.Router)
 	tools      *paTools
 	dispatcher *connector.Dispatcher
-	wg         sync.WaitGroup
+	// menu sets menuCommands as the bot's command menu at Start; nil when
+	// the sender cannot (the wiring tests' recorder).
+	menu         paMenuSetter
+	menuCommands []output.Command
+	wg           sync.WaitGroup
 }
+
+// paMenuTimeout bounds the one setMyCommands round at Start.
+const paMenuTimeout = 30 * time.Second
 
 // buildPA builds the PA runtime when, and only when, cfg.PAEnabled is true;
 // with it off it constructs nothing and returns nil, nil. config.Load has
@@ -130,7 +163,10 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 	if tools.AnyEnabled() {
 		appURL = tools.AppURL
 	}
-	sender, err := newPASender(cfg.PABotToken, appURL)
+	// The language of each principal's client, from their latest update:
+	// the sender answers in it (output.Languages).
+	langs := output.NewLanguages()
+	sender, err := newPASender(cfg.PABotToken, appURL, langs)
 	if err != nil {
 		return nil, err
 	}
@@ -192,6 +228,7 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 		// A linking command or button recorded in the transaction runs
 		// now, never inside it (internal/pa/postcommit.go).
 		AfterCommit: func(ctx context.Context, u pa.VerifiedUpdate) {
+			langs.Set(u.Principal().TelegramID(), u.LanguageCode())
 			loop.DeliverAfter(ctx, u.Principal().TelegramID())
 			loop.AnswerCallbackAfter(ctx, u)
 			if pt != nil {
@@ -203,6 +240,9 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 		return nil, err
 	}
 	rt := &paRuntime{loop: loop, webhook: hook, mount: func(r chi.Router) { loop.Mount(r) }, tools: pt}
+	if ms, ok := sender.(paMenuSetter); ok {
+		rt.menu, rt.menuCommands = ms, paMenu(pt != nil)
+	}
 	if pt != nil {
 		// m is optional here too; a nil m must stay a nil interface.
 		var dm connector.Metrics
@@ -293,6 +333,18 @@ func (r *paRuntime) Start(ctx context.Context) {
 		defer r.wg.Done()
 		r.loop.RunOutbox(ctx, pa.OutboxInterval)
 	}()
+	if r.menu != nil {
+		// Best effort: without it the bot works, only the menu is stale.
+		r.wg.Add(1)
+		go func() {
+			defer r.wg.Done()
+			mctx, cancel := context.WithTimeout(ctx, paMenuTimeout)
+			defer cancel()
+			if err := r.menu.SetCommands(mctx, r.menuCommands); err != nil {
+				slog.Warn("pa bot: command menu not set", "err", err)
+			}
+		}()
+	}
 	if r.dispatcher != nil {
 		// Whoever serves RouteTool must also run this: it ages tools/list
 		// observations out of the pin gauges.

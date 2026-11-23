@@ -203,7 +203,7 @@ func (f *fakeMCP) setPages(p [][]byte) { f.mu.Lock(); f.pages = p; f.mu.Unlock()
 // snapshot, every tool, writes included.
 func tgPage(t *testing.T, mutate func(tools []map[string]any) []map[string]any) []byte {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "docs", "tool-descriptors.json"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docs", "tool-descriptors.core-readonly.json")) // the PA client is bound to core-readonly
 	if err != nil {
 		t.Fatal(err)
 	}

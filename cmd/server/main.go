@@ -491,6 +491,10 @@ func main() {
 		canaryIDs = append(canaryIDs, id)
 	}
 	web.StartStatsSampler(ctx, store, statsCache, canaryIDs, cfg.PublicStatsRefresh)
+	landingOptions := []web.LandingOption{web.WithStats(statsCache)}
+	if cfg.AgentsPodiumPartnerURL != "" {
+		landingOptions = append(landingOptions, web.WithPartnerLink(cfg.AgentsPodiumPartnerURL))
+	}
 
 	mux := chi.NewRouter()
 	mux.Use(middleware.RequestID)
@@ -913,7 +917,7 @@ func main() {
 		ProductUpdates:    productupdate.RenderDocs(productUpdates.Feed),
 		ProductUpdatesErr: productUpdates.Err,
 		Assistants:        assistantSvc,
-		LandingOptions:    []web.LandingOption{web.WithStats(statsCache)},
+		LandingOptions:    landingOptions,
 		Root: func(landing http.Handler) http.Handler {
 			return web.RootMCP(landing, guarded, m.CountRootMCPRequest)
 		},

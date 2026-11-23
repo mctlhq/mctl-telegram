@@ -235,6 +235,19 @@
   .bridge .title { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 18px; font-weight: 600; color: var(--surface-fg); }
   .bridge .sub { font-size: 14px; color: var(--surface-fg-muted); }
   .bridge .btn-secondary { white-space: nowrap; }
+  .hosted {
+    max-width: 960px; margin: 0 auto; padding: 24px 28px;
+    display: flex; align-items: center; gap: 24px;
+    background: var(--surface-elevated);
+    border: 1px solid var(--surface-line);
+    border-radius: var(--mctl-radius-lg);
+  }
+  .hosted-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+  .hosted .title { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 18px; font-weight: 600; color: var(--surface-fg); }
+  .hosted .sub { font-size: 14px; color: var(--surface-fg-muted); }
+  .hosted-list { margin: 4px 0 0; padding-left: 18px; font-size: 14px; color: var(--surface-fg); display: flex; flex-direction: column; gap: 4px; }
+  .hosted .disclosure { font-size: 12px; color: var(--surface-fg-muted); }
+  .hosted .cta-btn { white-space: nowrap; text-decoration: none; }
   .beta {
     padding: 2px 8px;
     font-family: var(--font-mono); font-size: 10.5px; font-weight: 600;
@@ -276,7 +289,7 @@
     .flow-link { width: auto; flex-direction: row; gap: 10px; padding: 8px 0; }
     .flow-link::after { width: 1px; height: 22px; }
     .mctl-site-hero__actions { flex-direction: column; align-items: stretch; }
-    .bridge { flex-direction: column; align-items: flex-start; }
+    .bridge, .hosted { flex-direction: column; align-items: flex-start; }
   }
 </style>
 </head>
@@ -434,6 +447,26 @@
       <a class="btn-secondary" href="/docs/local-bridge/quickstart">Quick start &#8594;</a>
     </div>
   </section>
+
+  {{if .PartnerURL}}
+  <!-- ============ Hosted agent (partner link) ============ -->
+  <section id="hosted-agent" class="mctl-site-container mctl-site-section">
+    <div class="hosted">
+      <div class="hosted-body">
+        <span class="title">Run it in an always-on agent <span class="beta">Partner</span></span>
+        <span class="sub">Hermes Agent on <a href="https://agentspodium.com/" target="_blank" rel="noopener">AgentsPodium</a> runs around the clock in its own hosted pod and connects to MCTL through the same OAuth sign-in. We checked this setup end to end, read-only.</span>
+        <ul class="hosted-list">
+          <li>An agent that keeps working when your laptop is closed.</li>
+          <li>Sign-in uses a client identity document on agentspodium.com: no secret to paste.</li>
+          <li>Start read-only by limiting the agent to <code>telegram:dialogs:read telegram:messages:read</code>.</li>
+          <li>Signing in needs no model key; tool calls from chat need your own.</li>
+        </ul>
+        <span class="disclosure">Partner link: AgentsPodium pays MCTL a share of what a pod costs. The link carries only a referral code and campaign tags, nothing about your Telegram account.</span>
+      </div>
+      <a class="cta-btn" href="{{.PartnerURL}}" target="_blank" rel="sponsored noopener" data-umami-event="agentspodium-partner-click" data-umami-event-placement="landing">Try Hermes on AgentsPodium &#8594;</a>
+    </div>
+  </section>
+  {{end}}
 
   <!-- ============ FAQ ============ -->
   <section id="faq" class="mctl-site-container mctl-site-section">

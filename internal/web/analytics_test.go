@@ -96,3 +96,39 @@ func directiveAllows(csp, directive, source string) bool {
 	}
 	return false
 }
+
+// TestLandingPartnerCard: the hosted-agent card appears only when a valid
+// AgentsPodium partner link is configured, carries campaign tags, is marked
+// sponsored, is counted by an Umami event, and discloses the partner link.
+func TestLandingPartnerCard(t *testing.T) {
+	const base = "https://tg.mctl.ai"
+	render := func(opts ...LandingOption) string {
+		rec := httptest.NewRecorder()
+		Landing(base, "/mcp", base, true, opts...)(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d", rec.Code)
+		}
+		return rec.Body.String()
+	}
+	if body := render(); strings.Contains(body, "hosted-agent") || strings.Contains(body, "agentspodium.com/?") {
+		t.Fatal("the card is rendered without a partner link configured")
+	}
+	for _, bad := range []string{"https://evil.example/?ref=x", "http://agentspodium.com/?ref=x", "https://agentspodium.com.evil.example/?ref=x", "not a url", ""} {
+		if body := render(WithPartnerLink(bad)); strings.Contains(body, "hosted-agent") {
+			t.Fatalf("the card is rendered for the invalid link %q", bad)
+		}
+	}
+	body := render(WithPartnerLink("https://agentspodium.com/?ref=TESTREF"))
+	for _, want := range []string{
+		`id="hosted-agent"`, "ref=TESTREF", "utm_source=mctl", "utm_medium=referral", "utm_campaign=hermes-integration",
+		`rel="sponsored noopener"`, `data-umami-event="agentspodium-partner-click"`, "Partner link:",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the partner card lacks %q", want)
+		}
+	}
+	// A tag already set on the link wins over the default.
+	if body := render(WithPartnerLink("https://agentspodium.com/?ref=TESTREF&utm_source=custom")); !strings.Contains(body, "utm_source=custom") || strings.Contains(body, "utm_source=mctl") {
+		t.Error("an explicit utm_source was overwritten")
+	}
+}

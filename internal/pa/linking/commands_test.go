@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
@@ -64,19 +65,42 @@ func (c *cmdConns) Disconnect(_ context.Context, _ int64, id string) (connection
 type cmdSender struct {
 	mu     sync.Mutex
 	texts  []string
+	textRU []string
 	webApp []string
+	// webAppErrs are returned by successive SendWebApp calls, in order;
+	// once used up, calls succeed.
+	webAppErrs []error
+	attempts   int
 }
 
 func (s *cmdSender) Send(_ context.Context, _ int64, text safetext.Text, _ output.Keyboard) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.texts = append(s.texts, text.String())
+	s.textRU = append(s.textRU, text.In(safetext.LangRU).String())
 	return nil
+}
+
+func (s *cmdSender) lastRU() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.textRU) == 0 {
+		return ""
+	}
+	return s.textRU[len(s.textRU)-1]
 }
 
 func (s *cmdSender) SendWebApp(_ context.Context, _ int64, _ safetext.Text, _ safetext.Template, appURL string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.attempts++
+	if len(s.webAppErrs) > 0 {
+		err := s.webAppErrs[0]
+		s.webAppErrs = s.webAppErrs[1:]
+		if err != nil {
+			return err
+		}
+	}
 	s.webApp = append(s.webApp, appURL)
 	return nil
 }
@@ -173,14 +197,17 @@ func TestCommands_List(t *testing.T) {
 	}}
 	cmd := &linking.Commands{Links: &cmdLinks{}, Connections: conns, Sender: s}
 	cmd.Run(context.Background(), u, pa.LinkAction{Command: pa.CommandConnections})
-	if got, want := s.last(), "Your connections:\ntg (active): telegram:100001"; got != want {
+	if got, want := s.last(), "Your connections:\nTelegram (active): telegram:100001"; got != want {
 		t.Fatalf("list %q, want %q", got, want)
+	}
+	if got, want := s.lastRU(), "Ваши подключения:\nTelegram (активно): telegram:100001"; got != want {
+		t.Fatalf("Russian list %q, want %q", got, want)
 	}
 	// An expired connection is listed as it is, with the way back
 	// (#1318 slice C2b).
 	conns.conns[0].State = connection.StateExpired
 	cmd.Run(context.Background(), u, pa.LinkAction{Command: pa.CommandConnections})
-	if got, want := s.last(), "Your connections:\ntg (expired): telegram:100001 - send /connect tg to link it again"; got != want {
+	if got, want := s.last(), "Your connections:\nTelegram (expired): telegram:100001 - send /connect tg to link it again"; got != want {
 		t.Fatalf("expired list %q, want %q", got, want)
 	}
 	conns.conns = conns.conns[1:]
@@ -266,6 +293,73 @@ func TestConfirmCardButtonsAreLinkButtons(t *testing.T) {
 	for i, b := range card.Buttons {
 		if !strings.HasPrefix(b.Data, pa.LinkButtonPrefixes[i]) {
 			t.Errorf("button %q does not start with %q", b.Data, pa.LinkButtonPrefixes[i])
+		}
+	}
+}
+
+// With one enabled server a bare /connect and /disconnect mean that server;
+// with none or several configured, a bare command still answers the usage.
+func TestCommands_BareCommandUsesTheOnlyServer(t *testing.T) {
+	u := messageUpdate(t)
+	links := &cmdLinks{startURL: "https://tg.example/pa/link/app?link=x"}
+	s := &cmdSender{}
+	cmd := &linking.Commands{Links: links, Connections: &cmdConns{}, Sender: s, Servers: []connection.Server{connection.ServerTG}}
+	cmd.Run(context.Background(), u, pa.LinkAction{Command: pa.CommandConnect})
+	if len(links.started) != 1 || links.started[0] != connection.ServerTG || len(s.webApp) != 1 {
+		t.Fatalf("bare /connect started %v, sent %v", links.started, s.webApp)
+	}
+	conns := &cmdConns{conns: []connection.Connection{{ID: "c1", Server: connection.ServerTG, State: connection.StateActive}}}
+	cmd = &linking.Commands{Links: &cmdLinks{}, Connections: conns, Sender: s, Servers: []connection.Server{connection.ServerTG}}
+	cmd.Run(context.Background(), u, pa.LinkAction{Command: pa.CommandDisconnect})
+	if fmt.Sprint(conns.disconnects) != "[c1]" {
+		t.Fatalf("bare /disconnect disconnected %v", conns.disconnects)
+	}
+	for name, servers := range map[string][]connection.Server{
+		"none":    nil,
+		"several": {connection.ServerAlice, connection.ServerTG},
+	} {
+		links := &cmdLinks{}
+		s := &cmdSender{}
+		cmd := &linking.Commands{Links: links, Connections: &cmdConns{}, Sender: s, Servers: servers}
+		cmd.Run(context.Background(), u, pa.LinkAction{Command: pa.CommandConnect})
+		if len(links.started) != 0 || s.last() != srv(safetext.TextConnectUsage) {
+			t.Errorf("%s: bare /connect started %v, answered %q", name, links.started, s.last())
+		}
+	}
+}
+
+// The Connect button is sent again only when the request provably never
+// reached the Bot API. A refusal or an unknown outcome is not retried: the
+// first is final, and the second may already have shown the button.
+func TestCommands_ConnectButtonRetry(t *testing.T) {
+	u := messageUpdate(t)
+	notSent := errors.New("pa output sendWebApp: request failed: connection reset by peer")
+	unknown := fmt.Errorf("%w: request failed after it was sent", output.ErrOutcomeUnknown)
+	refused := &output.APIError{Method: "sendMessage", Status: 400, Code: 400, Description: "Bad Request"}
+	for name, c := range map[string]struct {
+		errs     []error
+		attempts int
+		sent     bool
+	}{
+		"reset once":        {errs: []error{notSent}, attempts: 2, sent: true},
+		"reset twice":       {errs: []error{notSent, notSent}, attempts: 3, sent: true},
+		"reset every time":  {errs: []error{notSent, notSent, notSent}, attempts: 3},
+		"refused":           {errs: []error{refused}, attempts: 1},
+		"outcome unknown":   {errs: []error{unknown}, attempts: 1},
+		"reset then refuse": {errs: []error{notSent, refused}, attempts: 2},
+	} {
+		links := &cmdLinks{startURL: "https://tg.example/pa/link/app?link=x"}
+		s := &cmdSender{webAppErrs: c.errs}
+		cmd := &linking.Commands{Links: links, Connections: &cmdConns{}, Sender: s, ButtonWaits: []time.Duration{0, 0}}
+		cmd.Run(context.Background(), u, pa.LinkAction{Command: pa.CommandConnect, Arg: "tg"})
+		if s.attempts != c.attempts {
+			t.Errorf("%s: %d attempts, want %d", name, s.attempts, c.attempts)
+		}
+		if c.sent && (len(s.webApp) != 1 || s.last() != "") {
+			t.Errorf("%s: button %v, reply %q", name, s.webApp, s.last())
+		}
+		if !c.sent && (len(s.webApp) != 0 || s.last() != srv(safetext.TextConnectFailed)) {
+			t.Errorf("%s: button %v, reply %q; want the connect-failed answer", name, s.webApp, s.last())
 		}
 	}
 }

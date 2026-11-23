@@ -17,6 +17,7 @@ const messengerChat int64 = 100001
 type sent struct {
 	chat   int64
 	text   string
+	ru     string
 	labels []string
 	data   []string
 	appURL string
@@ -25,7 +26,7 @@ type sent struct {
 type fakeBotSender struct{ calls []sent }
 
 func (f *fakeBotSender) Send(_ context.Context, chatID int64, text safetext.Text, kb output.Keyboard) error {
-	c := sent{chat: chatID, text: text.String()}
+	c := sent{chat: chatID, text: text.String(), ru: text.In(safetext.LangRU).String()}
 	for _, row := range kb {
 		for _, b := range row {
 			c.labels = append(c.labels, b.Label.String())
@@ -51,15 +52,20 @@ func TestBotMessenger_ConfirmCard(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := f.calls[0]
-	if c.chat != messengerChat || c.text != "Connect tg account telegram:100001?" ||
+	if c.chat != messengerChat || c.text != "Link this Telegram account to the assistant?\n\nAccount: telegram:100001\n\nConfirm only if this is your account. Nothing is linked until you do." ||
 		strings.Join(c.labels, ",") != "Confirm,Cancel" || c.data[0] != confirmPrefix+nonce || c.data[1] != cancelPrefix+nonce {
 		t.Fatalf("card = %+v", c)
 	}
 	if err := m.SendCard(context.Background(), messengerChat, ConfirmCard(connection.ServerAlice, "evil.example/x", nonce)); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(f.calls[1].text, "evil.example/x") {
-		t.Errorf("link-shaped account id sent live: %q", f.calls[1].text)
+	if strings.Contains(f.calls[1].text, "evil.example/x") || strings.Contains(f.calls[1].ru, "evil.example/x") {
+		t.Errorf("link-shaped account id sent live: %q / %q", f.calls[1].text, f.calls[1].ru)
+	}
+	// The Russian card, for a client in Russian, says the same and keeps
+	// the stable account id.
+	if want := "Подключить этот аккаунт Telegram к ассистенту?\n\nАккаунт: telegram:100001\n\nПодтвердите, только если это ваш аккаунт. Пока вы не подтвердите, ничего не подключается."; c.ru != want {
+		t.Errorf("Russian card %q", c.ru)
 	}
 }
 

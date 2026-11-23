@@ -19,6 +19,7 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/pa"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
+	"github.com/mctlhq/mctl-telegram/internal/pa/output"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
@@ -48,8 +49,62 @@ type Commands struct {
 	Links       Links
 	Connections Connections
 	Sender      BotSender
+	// Servers are the enabled servers. With exactly one, a bare /connect
+	// or /disconnect means that one, so nobody has to know its short name.
+	Servers []connection.Server
+	// ButtonWaits are the pauses before each extra attempt to send the
+	// Connect button; nil means DefaultButtonWaits.
+	ButtonWaits []time.Duration
 
 	wg sync.WaitGroup
+}
+
+// DefaultButtonWaits: two more attempts, the first soon, the second after a
+// pause. A reset on the way to the Bot API was the only failure seen on
+// preview, and the link it would have carried is already created.
+var DefaultButtonWaits = []time.Duration{500 * time.Millisecond, 2 * time.Second}
+
+// serverArg reads a /connect or /disconnect argument, defaulting an empty
+// one to the only enabled server.
+func (c *Commands) serverArg(arg string) (connection.Server, bool) {
+	if strings.TrimSpace(arg) == "" && len(c.Servers) == 1 {
+		return c.Servers[0], true
+	}
+	return commandServer(arg)
+}
+
+// sendButton sends the Connect button, again after a pause when the
+// request provably never reached the Bot API. A Bot API refusal and an
+// outcome that is unknown (the request went out, no answer came back) are
+// not retried: the first is final, and the second may already have shown
+// the button, which a retry would show twice.
+func (c *Commands) sendButton(ctx context.Context, chat int64, appURL string) error {
+	m := BotMessenger{Sender: c.Sender}
+	waits := c.ButtonWaits
+	if waits == nil {
+		waits = DefaultButtonWaits
+	}
+	err := m.SendConnectButton(ctx, chat, appURL)
+	for _, w := range waits {
+		if err == nil || !retryableSend(err) {
+			return err
+		}
+		t := time.NewTimer(w)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return errors.Join(err, ctx.Err())
+		case <-t.C:
+		}
+		err = m.SendConnectButton(ctx, chat, appURL)
+	}
+	return err
+}
+
+func retryableSend(err error) bool {
+	var api *output.APIError
+	return !errors.As(err, &api) && !errors.Is(err, output.ErrOutcomeUnknown) &&
+		!errors.Is(err, ErrConfig) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }
 
 // AfterCommit runs the action the update's handler recorded in ctx, if any,
@@ -73,7 +128,8 @@ func (c *Commands) AfterCommit(ctx context.Context, u pa.VerifiedUpdate) {
 func (c *Commands) Wait() { c.wg.Wait() }
 
 // Run performs one action and answers the principal. Every failure is
-// answered with a fixed text and logged without content; none is retried.
+// answered with a fixed text and logged without content. Only the Connect
+// button is sent again, and only when it provably never left (sendButton).
 func (c *Commands) Run(ctx context.Context, u pa.VerifiedUpdate, a pa.LinkAction) {
 	p := u.Principal()
 	if p.IsZero() {
@@ -134,7 +190,7 @@ func commandServer(arg string) (connection.Server, bool) {
 // zero Template when the button was sent, and the answer otherwise: a
 // disabled server is "not available", anything else "could not start".
 func (c *Commands) connect(ctx context.Context, p pa.Principal, arg string) safetext.Template {
-	server, ok := commandServer(arg)
+	server, ok := c.serverArg(arg)
 	if !ok {
 		return safetext.TextConnectUsage
 	}
@@ -149,7 +205,7 @@ func (c *Commands) connect(ctx context.Context, p pa.Principal, arg string) safe
 		slog.Warn("pa linking: /connect refused", "server", string(server), "err", err)
 		return safetext.TextConnectFailed
 	}
-	if err := (BotMessenger{Sender: c.Sender}).SendConnectButton(ctx, p.TelegramID(), appURL); err != nil {
+	if err := c.sendButton(ctx, p.TelegramID(), appURL); err != nil {
 		// The link token is unusable without its button; it expires and
 		// the sweep fails the pending connection.
 		slog.Warn("pa linking: connect button not sent", "server", string(server), "err", err)
@@ -162,7 +218,7 @@ func (c *Commands) connect(ctx context.Context, p pa.Principal, arg string) safe
 // is not already revoked or failed: locally first, then at the server
 // (Manager.Disconnect, threat model T2).
 func (c *Commands) disconnect(ctx context.Context, p pa.Principal, arg string) safetext.Template {
-	server, ok := commandServer(arg)
+	server, ok := c.serverArg(arg)
 	if !ok {
 		return safetext.TextConnectUsage
 	}
@@ -212,31 +268,41 @@ func (c *Commands) list(ctx context.Context, p pa.Principal) safetext.Text {
 		slog.Warn("pa linking: /connections list failed", "err", err)
 		return safetext.ServerText(safetext.TextConnectionsFailed)
 	}
-	var lines []string
+	var lines, linesRU []string
 	for _, conn := range conns {
 		if conn.State == connection.StateRevoked || conn.State == connection.StateFailed {
 			continue
 		}
-		line := string(conn.Server) + " (" + string(conn.State) + ")"
+		line := conn.Server.Label() + " (" + string(conn.State) + ")"
+		lineRU := conn.Server.Label() + " (" + connection.StateRU(conn.State) + ")"
 		if conn.AccountID != "" {
 			line += ": " + conn.AccountID
+			lineRU += ": " + conn.AccountID
 		}
 		if conn.State == connection.StateExpired {
 			// The service stopped accepting it (#1318 slice C2b).
 			line += " - send /connect " + string(conn.Server) + " to link it again"
+			lineRU += " - отправьте /connect " + string(conn.Server) + ", чтобы подключить снова"
 		}
 		lines = append(lines, line)
+		linesRU = append(linesRU, lineRU)
 	}
 	if len(lines) == 0 {
 		return safetext.ServerText(safetext.TextConnectionsNone)
 	}
 	sort.Strings(lines)
+	sort.Strings(linesRU)
 	text, err := safetext.Render("Your connections:\n"+strings.Join(lines, "\n"), safetext.UserText{})
 	if err != nil {
 		slog.Warn("pa linking: /connections not renderable", "err", err)
 		return safetext.ServerText(safetext.TextConnectionsFailed)
 	}
-	return text
+	ru, err := safetext.Render("Ваши подключения:\n"+strings.Join(linesRU, "\n"), safetext.UserText{})
+	if err != nil {
+		// The English list is still right; only its translation is lost.
+		return text
+	}
+	return safetext.WithRussian(text, ru)
 }
 
 // button runs a confirm card press.

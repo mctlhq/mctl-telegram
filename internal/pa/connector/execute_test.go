@@ -63,7 +63,7 @@ func alicePolicy(t *testing.T) pa.Policy {
 // tgSurface observes the committed pin against tg's real descriptors.
 func tgSurface(t *testing.T) *catalog.Surface {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "tool-descriptors.json"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "tool-descriptors.core-readonly.json")) // the PA client is bound to core-readonly
 	if err != nil {
 		t.Fatal(err)
 	}

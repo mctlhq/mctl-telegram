@@ -37,6 +37,40 @@ func (s Server) Valid() bool {
 	return ok
 }
 
+// Label is the name a person reads for s, in place of its short command
+// name: "tg" means nothing to someone who did not write the catalog.
+func (s Server) Label() string {
+	switch s {
+	case ServerTG:
+		return "Telegram"
+	case ServerAlice:
+		return "Alice smart home"
+	}
+	return string(s)
+}
+
+// LabelRU is Label in Russian.
+func (s Server) LabelRU() string {
+	switch s {
+	case ServerTG:
+		return "Telegram"
+	case ServerAlice:
+		return "умного дома Алиса"
+	}
+	return string(s)
+}
+
+// StateRU names a connection state in Russian for /connections.
+func StateRU(st State) string {
+	switch st {
+	case StateActive:
+		return "активно"
+	case StateExpired:
+		return "истекло"
+	}
+	return "в процессе"
+}
+
 // State is a connection's lifecycle state (threat model T2):
 //
 //	pending_link -> pending_oauth -> pending_return -> pending_confirm -> active

@@ -49,6 +49,9 @@ import (
 // empty and Sender refuses it.
 type Text struct {
 	parts []string
+	// ru is the Russian translation of a server text, cut the same way;
+	// nil for model text (Text.In).
+	ru []string
 }
 
 // String returns the text exactly as it will be sent, parts joined.
@@ -67,7 +70,11 @@ func (t Text) Part(i int) string { return t.parts[i] }
 // A registry template longer than MaxParts messages is a programming error;
 // Sender refuses the resulting Text.
 func ServerText(t Template) Text {
-	return Text{parts: split(t.s, MaxPartUTF16)}
+	out := Text{parts: split(t.s, MaxPartUTF16)}
+	if t.ru != "" {
+		out.ru = split(t.ru, MaxPartUTF16)
+	}
+	return out
 }
 
 // UserText is the set of tokens the principal typed themselves in this

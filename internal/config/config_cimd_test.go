@@ -102,3 +102,29 @@ func TestLoadOAuthCIMDUnmappedPolicy(t *testing.T) {
 		}
 	})
 }
+
+// TestLoadAgentsPodiumPartnerURL: empty by default, accepts https on an
+// AgentsPodium host, refuses to start on anything else.
+func TestLoadAgentsPodiumPartnerURL(t *testing.T) {
+	t.Run("default empty", func(t *testing.T) {
+		cfg, err := Load()
+		if err != nil || cfg.AgentsPodiumPartnerURL != "" {
+			t.Fatalf("Load() = %q, %v; want empty, nil", cfg.AgentsPodiumPartnerURL, err)
+		}
+	})
+	t.Run("valid", func(t *testing.T) {
+		t.Setenv("AGENTSPODIUM_PARTNER_URL", "https://agentspodium.com/?ref=TESTREF")
+		cfg, err := Load()
+		if err != nil || cfg.AgentsPodiumPartnerURL != "https://agentspodium.com/?ref=TESTREF" {
+			t.Fatalf("Load() = %q, %v", cfg.AgentsPodiumPartnerURL, err)
+		}
+	})
+	for _, bad := range []string{"http://agentspodium.com/", "https://agentspodium.com.evil.example/", "https://evil.example/", "https://u:p@agentspodium.com/", "::"} {
+		t.Run("refuses "+bad, func(t *testing.T) {
+			t.Setenv("AGENTSPODIUM_PARTNER_URL", bad)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "AGENTSPODIUM_PARTNER_URL") {
+				t.Fatalf("Load() = %v, want a refusal naming AGENTSPODIUM_PARTNER_URL", err)
+			}
+		})
+	}
+}
