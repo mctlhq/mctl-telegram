@@ -3014,14 +3014,16 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	// Logged only once the token is minted and the family rotated, like the
 	// code-exchange grant line: an audit line saying "grant" must mean a
 	// token was issued, so a refused or failed refresh never writes one.
-	if ceilingApplied {
-		s.logger().Info("oauth: token refresh_token grant",
-			"client_id", rt.ClientID,
-			"user_id", rt.UserID,
-			"granted_scope", strings.Join(scopes, " "),
-			"scope_ceiling_applied", true,
-		)
-	}
+	// Written for every client, not only ones with a scope ceiling: a refresh
+	// by a DCR or unmapped CIMD client was silent, so what such a client held
+	// after a refresh could be read only from the database (#1414 follow-up).
+	s.logger().Info("oauth: token refresh_token grant",
+		"client_id", rt.ClientID,
+		"user_id", rt.UserID,
+		"granted_scope", strings.Join(scopes, " "),
+		"groups", strings.Join(groups, ","),
+		"scope_ceiling_applied", ceilingApplied,
+	)
 	writeTokenJSON(w, tok, newRefresh, int(s.cfg.AccessTokenTTL.Seconds()), scopes)
 }
 
