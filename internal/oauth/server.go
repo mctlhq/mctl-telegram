@@ -3303,12 +3303,21 @@ func (s *Server) profileFor(origin tokenOrigin) (string, error) {
 	if origin.RedirectURIKnown {
 		return b.Resolve(origin.ClientID, origin.RedirectURI), nil
 	}
+	// A redirect_uri scope ceiling may bound this client, and without the
+	// redirect_uri whether it does is unknown: a token minted without it would
+	// be wider than the operator allowed. This is checked before the client_id
+	// profile is returned, or a client with a profile and no client_id ceiling
+	// would skip it. A client_id ceiling wins over a redirect_uri one, so a
+	// client holding its own keeps refreshing.
+	if len(b.ScopeCeilingByRedirectURI) > 0 {
+		if _, own := b.ScopeCeilingByClientID[origin.ClientID]; !own {
+			return "", errProfileUnresolvable
+		}
+	}
 	if p, ok := b.ByClientID[origin.ClientID]; ok {
 		return p, nil
 	}
-	// A redirect_uri scope ceiling is unresolvable the same way: a token
-	// minted without it would be wider than the operator allowed.
-	if len(b.ByRedirectURI) > 0 || len(b.ScopeCeilingByRedirectURI) > 0 {
+	if len(b.ByRedirectURI) > 0 {
 		return "", errProfileUnresolvable
 	}
 	return "", nil

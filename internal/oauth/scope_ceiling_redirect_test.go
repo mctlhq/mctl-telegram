@@ -127,3 +127,52 @@ func TestScopeCeilingByRedirect_MalformedFailsConstruction(t *testing.T) {
 		})
 	}
 }
+
+// A client_id profile must not let a family with no stored redirect_uri skip a
+// redirect_uri ceiling, and a client holding its own client_id ceiling keeps
+// refreshing because that ceiling wins.
+func TestScopeCeilingByRedirect_UnknownRedirectWithClientProfile(t *testing.T) {
+	seed := func(t *testing.T, srv *Server, family string) string {
+		t.Helper()
+		uid, err := srv.store.EnsureUserByTelegramID(context.Background(), danaTelegramID, "dana_tg", "")
+		if err != nil {
+			t.Fatalf("ensure user: %v", err)
+		}
+		rt := db.RefreshToken{
+			FamilyID: family, UserID: uid, ClientID: "claude.ai", TelegramID: danaTelegramID, TelegramUsername: "dana_tg",
+			Scope: "telegram:dialogs:read admin:users", RedirectURIKnown: false, ExpiresAt: time.Now().Add(time.Hour),
+		}
+		plain := family + "-token"
+		if err := srv.store.SaveRefreshToken(context.Background(), plain, rt); err != nil {
+			t.Fatalf("save refresh token: %v", err)
+		}
+		return plain
+	}
+	t.Run("profile without client_id ceiling is refused", func(t *testing.T) {
+		srv := newTestServer(t, withDanaInEveryAdminMembership, withRedirectCeiling, func(c *Config) {
+			c.ClientProfiles.ByClientID = map[string]string{"claude.ai": toolprofile.CoreReadonly}
+		})
+		mux := newMockRouter()
+		srv.Register(mux)
+		status, body := refreshResp(t, mux, seed(t, srv, "legacy-profile-no-ceiling"), "claude.ai")
+		if status != http.StatusBadRequest || jsonField(t, body, "error_description") != profileUnresolvableDescription {
+			t.Fatalf("refresh = %d %s, want 400 %q", status, body, profileUnresolvableDescription)
+		}
+	})
+	t.Run("own client_id ceiling still refreshes", func(t *testing.T) {
+		srv := newTestServer(t, withDanaInEveryAdminMembership, withRedirectCeiling, func(c *Config) {
+			c.ClientProfiles.ByClientID = map[string]string{"claude.ai": toolprofile.CoreReadonly}
+			c.ClientProfiles.ScopeCeilingByClientID = map[string][]string{"claude.ai": strings.Fields(ceilingTwoRead)}
+		})
+		mux := newMockRouter()
+		srv.Register(mux)
+		seedSession(t, srv, danaTelegramID)
+		status, body := refreshResp(t, mux, seed(t, srv, "legacy-own-ceiling"), "claude.ai")
+		if status != http.StatusOK {
+			t.Fatalf("refresh = %d %s, want 200 under the client_id ceiling", status, body)
+		}
+		if got := jsonField(t, body, "scope"); got != "telegram:dialogs:read" {
+			t.Fatalf("scope = %q, want only the requested read scope within the ceiling", got)
+		}
+	})
+}
