@@ -268,31 +268,41 @@ func (c *Commands) list(ctx context.Context, p pa.Principal) safetext.Text {
 		slog.Warn("pa linking: /connections list failed", "err", err)
 		return safetext.ServerText(safetext.TextConnectionsFailed)
 	}
-	var lines []string
+	var lines, linesRU []string
 	for _, conn := range conns {
 		if conn.State == connection.StateRevoked || conn.State == connection.StateFailed {
 			continue
 		}
 		line := conn.Server.Label() + " (" + string(conn.State) + ")"
+		lineRU := conn.Server.Label() + " (" + connection.StateRU(conn.State) + ")"
 		if conn.AccountID != "" {
 			line += ": " + conn.AccountID
+			lineRU += ": " + conn.AccountID
 		}
 		if conn.State == connection.StateExpired {
 			// The service stopped accepting it (#1318 slice C2b).
 			line += " - send /connect " + string(conn.Server) + " to link it again"
+			lineRU += " - отправьте /connect " + string(conn.Server) + ", чтобы подключить снова"
 		}
 		lines = append(lines, line)
+		linesRU = append(linesRU, lineRU)
 	}
 	if len(lines) == 0 {
 		return safetext.ServerText(safetext.TextConnectionsNone)
 	}
 	sort.Strings(lines)
+	sort.Strings(linesRU)
 	text, err := safetext.Render("Your connections:\n"+strings.Join(lines, "\n"), safetext.UserText{})
 	if err != nil {
 		slog.Warn("pa linking: /connections not renderable", "err", err)
 		return safetext.ServerText(safetext.TextConnectionsFailed)
 	}
-	return text
+	ru, err := safetext.Render("Ваши подключения:\n"+strings.Join(linesRU, "\n"), safetext.UserText{})
+	if err != nil {
+		// The English list is still right; only its translation is lost.
+		return text
+	}
+	return safetext.WithRussian(text, ru)
 }
 
 // button runs a confirm card press.

@@ -68,11 +68,18 @@ type VerifiedUpdate struct {
 	callbackID   string
 	callbackData string
 	fragments    []convo.Fragment
+	languageCode string
 }
 
 func (u VerifiedUpdate) UpdateID() int64      { return u.updateID }
 func (u VerifiedUpdate) Kind() Kind           { return u.kind }
 func (u VerifiedUpdate) Principal() Principal { return u.principal }
+
+// LanguageCode is the sender's from.language_code, the language of their
+// Telegram client, or "" when the update has none. It picks the language
+// of the bot's own texts only (output.Languages); it is user-controlled
+// and authorizes nothing.
+func (u VerifiedUpdate) LanguageCode() string { return u.languageCode }
 
 // MessageID is the message_id of a message update, or of the message a
 // callback button was attached to.
@@ -92,8 +99,9 @@ func (u VerifiedUpdate) CallbackData() string { return u.callbackData }
 func (u VerifiedUpdate) Fragments() []convo.Fragment { return slices.Clone(u.fragments) }
 
 type tgUser struct {
-	ID    int64 `json:"id"`
-	IsBot bool  `json:"is_bot"`
+	ID           int64  `json:"id"`
+	IsBot        bool   `json:"is_bot"`
+	LanguageCode string `json:"language_code"`
 }
 
 type tgChat struct {
@@ -165,7 +173,7 @@ func filterMessage(updateID int64, raw json.RawMessage) (VerifiedUpdate, string)
 	if outcome := rejectMessageKeys(fields); outcome != "" {
 		return VerifiedUpdate{}, outcome
 	}
-	principal, messageID, outcome := privateSender(fields, fields)
+	principal, messageID, lang, outcome := privateSender(fields, fields)
 	if outcome != "" {
 		return VerifiedUpdate{}, outcome
 	}
@@ -174,11 +182,12 @@ func filterMessage(updateID int64, raw json.RawMessage) (VerifiedUpdate, string)
 		return VerifiedUpdate{}, DropMalformed
 	}
 	return VerifiedUpdate{
-		updateID:  updateID,
-		kind:      KindMessage,
-		principal: principal,
-		messageID: messageID,
-		fragments: frags,
+		updateID:     updateID,
+		kind:         KindMessage,
+		principal:    principal,
+		languageCode: lang,
+		messageID:    messageID,
+		fragments:    frags,
 	}, OutcomeAccepted
 }
 
@@ -280,7 +289,7 @@ func filterCallback(updateID int64, raw json.RawMessage) (VerifiedUpdate, string
 	}
 	// The sender is the callback's from (who pressed the button); the chat is
 	// the one the button's message is in. Both must be the same private chat.
-	principal, messageID, outcome := privateSender(fields, msg)
+	principal, messageID, lang, outcome := privateSender(fields, msg)
 	if outcome != "" {
 		return VerifiedUpdate{}, outcome
 	}
@@ -298,6 +307,7 @@ func filterCallback(updateID int64, raw json.RawMessage) (VerifiedUpdate, string
 		updateID:     updateID,
 		kind:         KindCallbackQuery,
 		principal:    principal,
+		languageCode: lang,
 		messageID:    messageID,
 		callbackID:   id,
 		callbackData: data,
@@ -307,42 +317,42 @@ func filterCallback(updateID int64, raw json.RawMessage) (VerifiedUpdate, string
 // privateSender extracts the principal from fromObj["from"] and checks it
 // against msgObj["chat"]: a human sender in a private chat whose id is the
 // sender's own id. msgObj also supplies message_id.
-func privateSender(fromObj, msgObj map[string]json.RawMessage) (Principal, int64, string) {
+func privateSender(fromObj, msgObj map[string]json.RawMessage) (Principal, int64, string, string) {
 	rawFrom, present := fromObj["from"]
 	if !present || isNull(rawFrom) {
-		return Principal{}, 0, DropNoSender
+		return Principal{}, 0, "", DropNoSender
 	}
 	var from tgUser
 	if err := json.Unmarshal(rawFrom, &from); err != nil {
-		return Principal{}, 0, DropMalformed
+		return Principal{}, 0, "", DropMalformed
 	}
 	if from.ID <= 0 {
-		return Principal{}, 0, DropNoSender
+		return Principal{}, 0, "", DropNoSender
 	}
 	if from.IsBot {
-		return Principal{}, 0, DropBotSender
+		return Principal{}, 0, "", DropBotSender
 	}
 	rawChat, present := msgObj["chat"]
 	if !present || isNull(rawChat) {
-		return Principal{}, 0, DropMalformed
+		return Principal{}, 0, "", DropMalformed
 	}
 	var chat tgChat
 	if err := json.Unmarshal(rawChat, &chat); err != nil {
-		return Principal{}, 0, DropMalformed
+		return Principal{}, 0, "", DropMalformed
 	}
 	if chat.Type != "private" {
-		return Principal{}, 0, DropNotPrivate
+		return Principal{}, 0, "", DropNotPrivate
 	}
 	if chat.ID != from.ID {
-		return Principal{}, 0, DropChatMismatch
+		return Principal{}, 0, "", DropChatMismatch
 	}
 	var messageID int64
 	if rawMID, ok := msgObj["message_id"]; ok {
 		if err := json.Unmarshal(rawMID, &messageID); err != nil {
-			return Principal{}, 0, DropMalformed
+			return Principal{}, 0, "", DropMalformed
 		}
 	}
-	return Principal{telegramID: from.ID}, messageID, ""
+	return Principal{telegramID: from.ID}, messageID, from.LanguageCode, ""
 }
 
 // rejectMessageKeys returns the drop outcome of the first messageRejectKeys

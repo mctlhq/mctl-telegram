@@ -42,6 +42,7 @@ const (
 
 	methodSendMessage         = "sendMessage"
 	methodAnswerCallbackQuery = "answerCallbackQuery"
+	methodSetMyCommands       = "setMyCommands"
 
 	// maxCallbackData is the Bot API limit on callback_data, in bytes.
 	maxCallbackData = 64
@@ -91,6 +92,9 @@ type Config struct {
 	// without query, fragment or userinfo. SendWebApp accepts this URL
 	// with a link token and nothing else. Empty disables SendWebApp.
 	WebAppURL string
+	// Languages picks each chat's language for server texts and labels
+	// (Text.In, Template.In); nil sends English.
+	Languages *Languages
 }
 
 // Sender sends bot messages. It is safe for concurrent use.
@@ -101,6 +105,9 @@ type Sender struct {
 	// webApp is the only URL a web_app button may open (SendWebApp), nil
 	// when none is configured.
 	webApp *url.URL
+	// langs picks the language of each chat's server texts and button
+	// labels; nil sends English.
+	langs *Languages
 }
 
 // NewSender builds a Sender whose requests go through the PA egress client
@@ -118,7 +125,7 @@ func NewSender(cfg Config) (*Sender, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pa output: egress client: %w", err)
 	}
-	s := &Sender{hc: hc, base: botAPIBaseURL, token: cfg.Token}
+	s := &Sender{hc: hc, base: botAPIBaseURL, token: cfg.Token, langs: cfg.Languages}
 	if cfg.WebAppURL != "" {
 		u, err := parseWebAppBase(cfg.WebAppURL)
 		if err != nil {
@@ -207,17 +214,19 @@ func (s *Sender) Send(ctx context.Context, chatID int64, text safetext.Text, kb 
 // send and is returned as is. Every part is checked before the first one
 // is sent: a part that would be refused never leaves earlier parts behind.
 func (s *Sender) SendFrom(ctx context.Context, chatID int64, text safetext.Text, kb Keyboard, from int, sent func(delivered int) error) error {
+	lang := s.langs.Of(chatID)
+	text = text.In(lang)
 	parts := make([]string, text.Parts())
 	for i := range parts {
 		parts[i] = text.Part(i)
 	}
-	return s.sendParts(ctx, chatID, parts, kb, from, sent)
+	return s.sendParts(ctx, chatID, parts, kb.in(lang), from, sent)
 }
 
 // sendParts is SendFrom on the parts of a Text. It takes a plain slice only
 // so that tests can hand it parts Render and ServerText never produce; the
 // only production caller is SendFrom.
-func (s *Sender) sendParts(ctx context.Context, chatID int64, parts []string, kb Keyboard, from int, sent func(delivered int) error) error {
+func (s *Sender) sendParts(ctx context.Context, chatID int64, parts []string, kb localKeyboard, from int, sent func(delivered int) error) error {
 	if chatID <= 0 {
 		// The PA serves private chats only, whose id is the user id.
 		return ErrInvalidChat
@@ -284,7 +293,10 @@ func (s *Sender) SendWebApp(ctx context.Context, chatID int64, text safetext.Tex
 	if err := s.checkWebAppURL(appURL); err != nil {
 		return err
 	}
-	if strings.TrimSpace(label.String()) == "" {
+	lang := s.langs.Of(chatID)
+	text = text.In(lang)
+	labelText := label.In(lang)
+	if strings.TrimSpace(labelText) == "" {
 		return fmt.Errorf("%w: empty label", ErrInvalidKeyboard)
 	}
 	if text.Parts() != 1 {
@@ -305,7 +317,7 @@ func (s *Sender) SendWebApp(ctx context.Context, chatID int64, text safetext.Tex
 		Text:               part,
 		LinkPreviewOptions: linkPreviewOptions{IsDisabled: true},
 		ReplyMarkup: webAppMarkup{InlineKeyboard: [][]webAppButton{{
-			{Text: label.String(), WebApp: webAppInfo{URL: appURL}},
+			{Text: labelText, WebApp: webAppInfo{URL: appURL}},
 		}}},
 	})
 }
@@ -346,7 +358,31 @@ func (s *Sender) AnswerCallback(ctx context.Context, callbackQueryID string, not
 	})
 }
 
-func (kb Keyboard) wire() (*wireMarkup, error) {
+// in returns kb with each label's text in lang. Labels stay registry
+// templates; only which of their literals is sent changes.
+func (kb Keyboard) in(lang safetext.Lang) localKeyboard {
+	if len(kb) == 0 {
+		return nil
+	}
+	out := make(localKeyboard, len(kb))
+	for i, row := range kb {
+		out[i] = make([]localButton, len(row))
+		for j, b := range row {
+			out[i][j] = localButton{label: b.Label.In(lang), data: b.Data}
+		}
+	}
+	return out
+}
+
+// localKeyboard is a Keyboard with its labels resolved to one language.
+type localKeyboard [][]localButton
+
+type localButton struct {
+	label string
+	data  string
+}
+
+func (kb localKeyboard) wire() (*wireMarkup, error) {
 	if len(kb) == 0 {
 		return nil, nil
 	}
@@ -357,17 +393,65 @@ func (kb Keyboard) wire() (*wireMarkup, error) {
 		}
 		wr := make([]wireButton, 0, len(row))
 		for _, b := range row {
-			if strings.TrimSpace(b.Label.String()) == "" {
+			if strings.TrimSpace(b.label) == "" {
 				return nil, fmt.Errorf("%w: empty label", ErrInvalidKeyboard)
 			}
-			if b.Data == "" || len(b.Data) > maxCallbackData || !utf8.ValidString(b.Data) {
+			if b.data == "" || len(b.data) > maxCallbackData || !utf8.ValidString(b.data) {
 				return nil, fmt.Errorf("%w: callback data must be 1..%d bytes of UTF-8", ErrInvalidKeyboard, maxCallbackData)
 			}
-			wr = append(wr, wireButton{Text: b.Label.String(), CallbackData: b.Data})
+			wr = append(wr, wireButton{Text: b.label, CallbackData: b.data})
 		}
 		m.InlineKeyboard = append(m.InlineKeyboard, wr)
 	}
 	return m, nil
+}
+
+// Command is one entry of the bot's command menu: a command name without
+// the slash and its description, a registry template.
+type Command struct {
+	Name        string
+	Description safetext.Template
+}
+
+// commandName is what the Bot API accepts as a command: 1-32 lowercase
+// letters, digits and underscores.
+var commandName = regexp.MustCompile(`^[a-z0-9_]{1,32}$`)
+
+type botCommand struct {
+	Command     string `json:"command"`
+	Description string `json:"description"`
+}
+
+type setMyCommandsRequest struct {
+	Commands     []botCommand `json:"commands"`
+	LanguageCode string       `json:"language_code,omitempty"`
+}
+
+// SetCommands sets the bot's command menu: the English descriptions for
+// every client, and the Russian ones for clients in Russian. It replaces
+// whatever menu was set before, so the menu always matches the commands
+// this server answers.
+func (s *Sender) SetCommands(ctx context.Context, cmds []Command) error {
+	if len(cmds) == 0 || len(cmds) > 100 {
+		return fmt.Errorf("%w: %d commands", ErrInvalidConfig, len(cmds))
+	}
+	for _, lang := range []struct {
+		code string
+		l    safetext.Lang
+	}{{"", safetext.LangEN}, {"ru", safetext.LangRU}} {
+		req := setMyCommandsRequest{LanguageCode: lang.code}
+		for _, c := range cmds {
+			d := c.Description.In(lang.l)
+			if !commandName.MatchString(c.Name) || strings.TrimSpace(d) == "" || utf8.RuneCountInString(d) > 256 {
+				return fmt.Errorf("%w: command %q", ErrInvalidConfig, c.Name)
+			}
+			req.Commands = append(req.Commands, botCommand{Command: c.Name, Description: d})
+		}
+		if err := s.call(ctx, methodSetMyCommands, req); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // call posts one Bot API method. Any failure -- transport, non-200, ok:false,
