@@ -9,7 +9,6 @@ import json
 import os
 import socket
 import struct
-from uuid import UUID
 
 from websockets.asyncio.server import serve
 
@@ -91,9 +90,15 @@ def valid_server_hello(data):
 def mcp_request(version, method="tools/list", request_id=1, cursor=None):
     if version not in ("2024-11-05", "2026-07-28"):
         raise ProtocolError("unsupported MCP version")
-    params = {} if method != "tools/list" else {"withUserTools": False}
-    if cursor is not None:
-        params["cursor"] = cursor
+    if not isinstance(request_id, (str, int)) or isinstance(request_id, bool) or (isinstance(request_id, int) and abs(request_id) > 2**53 - 1):
+        raise ProtocolError("unsafe MCP request id")
+    if method == "initialize":
+        params = {"protocolVersion": "2024-11-05", "capabilities": {},
+                  "clientInfo": {"name": "synthetic-simulator", "version": "0"}}
+    else:
+        params = {} if method != "tools/list" else {"withUserTools": False}
+        if cursor is not None:
+            params["cursor"] = cursor
     if version == "2026-07-28":
         params["_meta"] = {
             "io.modelcontextprotocol/protocolVersion": version,
@@ -103,16 +108,28 @@ def mcp_request(version, method="tools/list", request_id=1, cursor=None):
     return {"type": "mcp", "payload": {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}}
 
 
-def valid_mcp_response(payload, outstanding):
+def valid_mcp_response(payload, outstanding, method="tools/list"):
     if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
         return False
     rid = payload.get("id")
-    if isinstance(rid, bool) or not isinstance(rid, int) or rid not in outstanding:
+    if (isinstance(rid, bool) or not isinstance(rid, (str, int))
+            or (isinstance(rid, int) and abs(rid) > 2**53 - 1)
+            or rid not in outstanding):
         return False
     result = payload.get("result")
-    if not isinstance(result, dict) or not isinstance(result.get("tools"), list):
+    if not isinstance(result, dict):
+        return False
+    if method == "initialize":
+        return result.get("protocolVersion") == "2024-11-05" and isinstance(result.get("capabilities"), dict)
+    if method == "server/discover":
+        return (result.get("resultType") == "complete"
+                and isinstance(result.get("supportedVersions"), list)
+                and "2026-07-28" in result["supportedVersions"])
+    if method != "tools/list" or not isinstance(result.get("tools"), list):
         return False
     if len(result["tools"]) > 20:
+        return False
+    if "nextCursor" in result and not isinstance(result["nextCursor"], str):
         return False
     return all(isinstance(t, dict) and isinstance(t.get("name"), str) for t in result["tools"])
 
@@ -140,6 +157,9 @@ class SimulatorGateway:
 
     async def handler(self, ws):
         task = None
+        pending_mcp = {}
+        mcp_version = None
+        mcp_seq = 0
         self.counter += 1
         session = f"synthetic-{self.counter}"
         self.sessions.add(session)
@@ -165,6 +185,13 @@ class SimulatorGateway:
                 return
             version = hello["version"]
             await ws.send(json.dumps({"type": "hello", "transport": "websocket", "session_id": session}))
+            features = hello.get("features") or {}
+            if isinstance(features, dict) and features.get("mcp") is True:
+                mcp_version = "2026-07-28" if features.get("mcp_20260728") is True else "2024-11-05"
+                initial = "server/discover" if mcp_version == "2026-07-28" else "initialize"
+                pending_mcp[1] = initial
+                mcp_seq = 1
+                await ws.send(json.dumps(mcp_request(mcp_version, initial, request_id=1)))
             active = False
             async for raw in ws:
                 if isinstance(raw, bytes):
@@ -209,10 +236,37 @@ class SimulatorGateway:
                     await ws.send(json.dumps({"type": "tts", "state": "stop"}))
                 elif kind == "mcp":
                     payload = message.get("payload")
-                    if valid_mcp_response(payload, {1}):
-                        self.mcp_accepted += 1
-                    else:
+                    rid = payload.get("id") if isinstance(payload, dict) else None
+                    # Malformed/unsolicited replies have no authority to trigger tool use.
+                    if not isinstance(rid, (str, int)) or isinstance(rid, bool) or rid not in pending_mcp:
                         self.mcp_dropped += 1
+                        continue
+                    method = pending_mcp[rid]
+                    # Only -32601 on modern discovery permits a fallback to legacy.
+                    if (method == "server/discover" and isinstance(payload.get("error"), dict) and payload["error"].get("code") == -32601):
+                        del pending_mcp[rid]
+                        self.mcp_accepted += 1
+                        mcp_version = "2024-11-05"
+                        mcp_seq += 1
+                        pending_mcp[mcp_seq] = "initialize"
+                        await ws.send(json.dumps(mcp_request(mcp_version, "initialize", request_id=mcp_seq)))
+                        continue
+                    if not valid_mcp_response(payload, {rid}, method=method):
+                        self.mcp_dropped += 1
+                        continue
+                    del pending_mcp[rid]
+                    self.mcp_accepted += 1
+                    if method in ("server/discover", "initialize"):
+                        mcp_seq += 1
+                        pending_mcp[mcp_seq] = "tools/list"
+                        await ws.send(json.dumps(mcp_request(mcp_version, "tools/list", request_id=mcp_seq)))
+                    elif method == "tools/list":
+                        # Catalog is never executed, and descriptions are discarded.
+                        cursor = payload["result"].get("nextCursor")
+                        if cursor:
+                            mcp_seq += 1
+                            pending_mcp[mcp_seq] = "tools/list"
+                            await ws.send(json.dumps(mcp_request(mcp_version, "tools/list", request_id=mcp_seq, cursor=cursor)))
                 else:
                     self.denied_calls += 1
                     await ws.close(code=1008, reason="unrecognized message")
