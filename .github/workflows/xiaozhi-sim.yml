@@ -1,0 +1,24 @@
+name: XiaoZhi protocol simulator (CI only)
+on:
+  pull_request:
+    paths:
+      - 'test/xiaozhi-sim/**'
+      - '.github/workflows/xiaozhi-sim.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  protocol-sim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Install pinned simulator dependency
+        run: python -m pip install --disable-pip-version-check -r test/xiaozhi-sim/requirements.txt
+      - name: Run loopback-only protocol simulator
+        run: python test/xiaozhi-sim/run.py
