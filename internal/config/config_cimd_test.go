@@ -80,3 +80,25 @@ func TestLoadOAuthCIMDRefusesURLShapedPreregisteredClient(t *testing.T) {
 		t.Fatalf("CIMD on: Load() = %v, want an OAUTH_PREREGISTERED_CLIENTS refusal", err)
 	}
 }
+
+// TestLoadOAuthCIMDUnmappedPolicy pins OAUTH_CIMD_UNMAPPED_POLICY (#1414):
+// default-scope by default, refuse on request, anything else refuses to start.
+func TestLoadOAuthCIMDUnmappedPolicy(t *testing.T) {
+	for _, tc := range []struct{ env, want string }{{"", "default-scope"}, {"default-scope", "default-scope"}, {"refuse", "refuse"}} {
+		t.Run("value "+tc.env, func(t *testing.T) {
+			if tc.env != "" {
+				t.Setenv("OAUTH_CIMD_UNMAPPED_POLICY", tc.env)
+			}
+			cfg, err := Load()
+			if err != nil || cfg.OAUTHCIMDUnmappedPolicy != tc.want {
+				t.Fatalf("policy = %q, err %v; want %q", cfg.OAUTHCIMDUnmappedPolicy, err, tc.want)
+			}
+		})
+	}
+	t.Run("unknown value", func(t *testing.T) {
+		t.Setenv("OAUTH_CIMD_UNMAPPED_POLICY", "allow")
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "OAUTH_CIMD_UNMAPPED_POLICY") {
+			t.Fatalf("Load() = %v, want a refusal naming OAUTH_CIMD_UNMAPPED_POLICY", err)
+		}
+	})
+}
