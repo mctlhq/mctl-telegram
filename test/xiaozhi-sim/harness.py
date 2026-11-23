@@ -238,7 +238,10 @@ class SimulatorGateway:
                     payload = message.get("payload")
                     rid = payload.get("id") if isinstance(payload, dict) else None
                     # Malformed/unsolicited replies have no authority to trigger tool use.
-                    if not isinstance(rid, (str, int)) or isinstance(rid, bool) or rid not in pending_mcp:
+                    if (not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0"
+                            or not isinstance(rid, (str, int)) or isinstance(rid, bool)
+                            or (isinstance(rid, int) and abs(rid) > 2**53 - 1)
+                            or rid not in pending_mcp):
                         self.mcp_dropped += 1
                         continue
                     method = pending_mcp[rid]
