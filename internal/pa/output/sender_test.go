@@ -275,3 +275,26 @@ func TestNewSenderUsesEgress(t *testing.T) {
 		t.Fatalf("egress client must refuse a non-Bot-API host, got %v", err)
 	}
 }
+
+// TestSender_SendTyping: the typing status is a sendChatAction with exactly
+// chat_id and action "typing", and carries no text; a refusal is an error.
+func TestSender_SendTyping(t *testing.T) {
+	f, s := newFake(t)
+	if err := s.SendTyping(context.Background(), aliceChat); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 1 || !strings.HasSuffix(f.calls[0].path, "/sendChatAction") {
+		t.Fatalf("calls = %+v", f.calls)
+	}
+	b := f.calls[0].body
+	if len(b) != 2 || b["action"] != "typing" || b["chat_id"] != float64(aliceChat) {
+		t.Fatalf("body = %v", b)
+	}
+	f.reply = func(w http.ResponseWriter) {
+		_, _ = io.WriteString(w, `{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}`)
+	}
+	var apiErr *APIError
+	if err := s.SendTyping(context.Background(), aliceChat); !errors.As(err, &apiErr) || apiErr.Code != 403 {
+		t.Fatalf("refused status: %v", err)
+	}
+}

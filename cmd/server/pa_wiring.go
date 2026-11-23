@@ -49,6 +49,7 @@ type paLoop interface {
 // use it (*output.Sender).
 type paBotSender interface {
 	pa.BotSender
+	pa.TypingSender
 	linking.BotSender
 }
 
@@ -197,7 +198,7 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 		Tools:  resolver,
 		Limits: cfg.PALimits(), Budget: cfg.PABudget(),
 		Metrics: outboxCounter, CallbackMetrics: callbackCounter,
-		Allowed: allowed,
+		Allowed: allowed, Typing: sender,
 	})
 	if err != nil {
 		return nil, err

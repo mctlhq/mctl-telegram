@@ -196,6 +196,13 @@ type webAppInfo struct {
 	URL string `json:"url"`
 }
 
+// chatActionRequest is the sendChatAction body. The action is a fixed
+// constant set by SendTyping; the body carries no text.
+type chatActionRequest struct {
+	ChatID int64  `json:"chat_id"`
+	Action string `json:"action"`
+}
+
 // answerCallbackRequest has no url field: a callback answer never opens a
 // link or a game.
 type answerCallbackRequest struct {
@@ -466,6 +473,14 @@ func (s *Sender) SetCommands(ctx context.Context, cmds []Command) error {
 		}
 	}
 	return nil
+}
+
+// SendTyping shows the "typing" status in a private chat (sendChatAction).
+// Telegram clears it after about five seconds or when the bot's next
+// message arrives, so a caller repeats it while an answer is being made.
+// It carries no text and so goes through no Render.
+func (s *Sender) SendTyping(ctx context.Context, chatID int64) error {
+	return s.call(ctx, "sendChatAction", chatActionRequest{ChatID: chatID, Action: "typing"})
 }
 
 // call posts one Bot API method. Any failure -- transport, non-200, ok:false,
