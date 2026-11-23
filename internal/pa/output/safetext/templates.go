@@ -46,7 +46,7 @@ var (
 	LabelConnect = tpl("Connect")
 
 	// TextConnectOpen goes with the /connect web_app button.
-	TextConnectOpen = tpl("Tap Connect to link your account. The button works once and expires in 10 minutes.")
+	TextConnectOpen = tpl("Tap Connect, then Continue in the browser, and sign in there. Come back here to confirm. The button works once and expires in 10 minutes.")
 
 	// TextBudgetHold is sent once per held run when a spending limit is
 	// reached (#1313 slice d1, S1-R3): no model call was made.

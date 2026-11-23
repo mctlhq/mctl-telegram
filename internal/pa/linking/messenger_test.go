@@ -51,7 +51,7 @@ func TestBotMessenger_ConfirmCard(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := f.calls[0]
-	if c.chat != messengerChat || c.text != "Connect tg account telegram:100001?" ||
+	if c.chat != messengerChat || c.text != "Link this Telegram account to the assistant?\n\nAccount: telegram:100001\n\nConfirm only if this is your account. Nothing is linked until you do." ||
 		strings.Join(c.labels, ",") != "Confirm,Cancel" || c.data[0] != confirmPrefix+nonce || c.data[1] != cancelPrefix+nonce {
 		t.Fatalf("card = %+v", c)
 	}

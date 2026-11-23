@@ -185,7 +185,7 @@ func (s *Service) serveHandoff(w http.ResponseWriter, r *http.Request) {
 	}
 	renderPage(w, http.StatusOK, nonce, pageData{
 		Title:   "Finish in Telegram",
-		Body:    "Open the assistant to finish linking " + string(server) + ". The link works once, for five minutes, and only for your Telegram account.",
+		Body:    "Open the assistant to finish linking " + server.Label() + ". The link works once, for five minutes, and only for your Telegram account.",
 		Warning: "Do not share this link or open it for anyone else.",
 		Link:    link,
 	})

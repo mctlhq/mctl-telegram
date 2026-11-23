@@ -707,7 +707,8 @@ func (s *Service) sendConfirmCard(ctx context.Context, c connection.Connection) 
 // account id; it never takes a display name (S1-L10).
 func ConfirmCard(server connection.Server, accountID, nonce string) Card {
 	return Card{
-		Text: "Connect " + string(server) + " account " + accountID + "?",
+		Text: "Link this " + server.Label() + " account to the assistant?\n\nAccount: " + accountID +
+			"\n\nConfirm only if this is your account. Nothing is linked until you do.",
 		Buttons: []Button{
 			{Label: safetext.LabelConfirm.String(), Data: confirmPrefix + nonce},
 			{Label: safetext.LabelCancel.String(), Data: cancelPrefix + nonce},
