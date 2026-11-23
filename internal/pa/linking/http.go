@@ -219,7 +219,8 @@ func renderPage(w http.ResponseWriter, code int, nonce string, d pageData) {
 // theme, and default black text on a dark theme is unreadable (#1318).
 const style = `:root{color-scheme:light dark}body{font-family:system-ui,sans-serif;max-width:32rem;margin:2rem auto;padding:0 1rem;line-height:1.5;background:#fff;color:#111}
 @media (prefers-color-scheme:dark){body{background:#17212b;color:#f5f5f5}.warn{color:#fdba74}}
-.acct{font-size:1.25rem;font-weight:600}.warn{color:#9a3412}button,a.btn{display:inline-block;padding:.6rem 1rem;font-size:1rem}`
+.acct{font-size:1.25rem;font-weight:600}.warn{color:#9a3412}button,a.btn{display:inline-block;padding:.6rem 1rem;font-size:1rem}
+[hidden]{display:none!important}`
 
 var page = template.Must(template.New("page").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
