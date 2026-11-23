@@ -95,6 +95,19 @@ func TestLinking_HTTPPages(t *testing.T) {
 			t.Fatalf("app page %d", resp.StatusCode)
 		}
 		checkPageHeaders(t, resp, body, true)
+		// Telegram opens an external link only from a user gesture, so the
+		// page must offer a button wired by script (an inline handler would
+		// break the CSP), hidden until /begin answers (the button rule
+		// would otherwise override the hidden attribute), and it must set
+		// its colours for dark themes.
+		for _, want := range []string{`id="go"`, `addEventListener("click"`, "prefers-color-scheme:dark", "[hidden]{display:none!important}"} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("app page lacks %s", want)
+			}
+		}
+		if strings.Contains(body, "onclick=") {
+			t.Fatal("app page uses an inline handler the CSP blocks")
+		}
 
 		link := h.start(connection.ServerTG)
 		req := httptest.NewRequest(http.MethodPost, linking.BeginPath,

@@ -215,8 +215,12 @@ func renderPage(w http.ResponseWriter, code int, nonce string, d pageData) {
 	_ = page.Execute(w, d)
 }
 
-const style = `body{font-family:system-ui,sans-serif;max-width:32rem;margin:2rem auto;padding:0 1rem;line-height:1.5}
-.acct{font-size:1.25rem;font-weight:600}.warn{color:#9a3412}button,a.btn{display:inline-block;padding:.6rem 1rem;font-size:1rem}`
+// style sets its own colours: Telegram paints its webview in the chat
+// theme, and default black text on a dark theme is unreadable (#1318).
+const style = `:root{color-scheme:light dark}body{font-family:system-ui,sans-serif;max-width:32rem;margin:2rem auto;padding:0 1rem;line-height:1.5;background:#fff;color:#111}
+@media (prefers-color-scheme:dark){body{background:#17212b;color:#f5f5f5}.warn{color:#fdba74}}
+.acct{font-size:1.25rem;font-weight:600}.warn{color:#9a3412}button,a.btn{display:inline-block;padding:.6rem 1rem;font-size:1rem}
+[hidden]{display:none!important}`
 
 var page = template.Must(template.New("page").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -239,6 +243,7 @@ var appPage = template.Must(template.New("app").Parse(`<!doctype html>
 <meta name="referrer" content="no-referrer"><title>Connect an account</title>
 <style nonce="{{.Nonce}}">` + style + `</style></head><body>
 <h1>Connect an account</h1><p id="msg">Working…</p>
+<p><button type="button" id="go" hidden>Continue in the browser</button></p>
 <script nonce="{{.Nonce}}">
 (function(){
   var msg=document.getElementById("msg");
@@ -257,7 +262,16 @@ var appPage = template.Must(template.New("app").Parse(`<!doctype html>
   if(link){
     post({{.Begin}},{init_data:initData,link:link}).then(function(r){
       if(!r.ok){throw new Error();}return r.json();
-    }).then(function(j){msg.textContent="Continue in the browser to sign in.";openLink(j.url);})
+    }).then(function(j){
+      // Telegram clients ignore web_app_open_link without a user gesture,
+      // so the automatic attempt can do nothing: the button opens it from
+      // a tap, as often as needed, without spending another link.
+      msg.textContent="Tap the button to sign in in your browser.";
+      var go=document.getElementById("go");
+      go.hidden=false;
+      go.addEventListener("click",function(){openLink(j.url);});
+      openLink(j.url);
+    })
     .catch(function(){msg.textContent="This link is not valid any more. Send /connect again.";});
   }else{
     post({{.Complete}},{init_data:initData}).then(function(r){
