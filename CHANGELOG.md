@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.146.0](https://github.com/mctlhq/mctl-telegram/compare/0.145.0...0.146.0) (2026-11-23)
+
+
+### Features
+
+* **oauth:** allow a scope_ceiling on redirect_uri records ([255a3cb](https://github.com/mctlhq/mctl-telegram/commit/255a3cb8bf7e3e47601892764a692e39ac2a05a6))
+* **oauth:** allow a scope_ceiling on redirect_uri records ([1aec225](https://github.com/mctlhq/mctl-telegram/commit/1aec2259416fe0daa05f46804889951db7906245))
+* **oauth:** log every refresh grant, not only ceiling clients ([ccaa392](https://github.com/mctlhq/mctl-telegram/commit/ccaa39212261b58e1358f977d1bed7361f9f5b9d))
+* **oauth:** log every refresh grant, not only ceiling clients ([18b0b1f](https://github.com/mctlhq/mctl-telegram/commit/18b0b1f0076681ba2fcb83cdf9e40cd491e297bb))
+* **pa:** Russian bot texts and a command menu ([6623542](https://github.com/mctlhq/mctl-telegram/commit/6623542d974b07628cf2be85724d3cdcfe331dc3))
+* **pa:** Russian bot texts and a command menu ([9e0ebc9](https://github.com/mctlhq/mctl-telegram/commit/9e0ebc95d48326922c9ac05e3eabb702b7946946)), closes [#1318](https://github.com/mctlhq/mctl-telegram/issues/1318)
+* **pa:** Russian consent prompt bound to its own text ([ac27fb6](https://github.com/mctlhq/mctl-telegram/commit/ac27fb6a929f60e73eca835da6231914c567a298))
+* **pa:** Russian consent prompt bound to its own text ([4b5ea88](https://github.com/mctlhq/mctl-telegram/commit/4b5ea8842f687468013310dac644f6eefc1b11b1)), closes [#1318](https://github.com/mctlhq/mctl-telegram/issues/1318)
+* **pa:** smoother account linking in the PA bot ([fad19ea](https://github.com/mctlhq/mctl-telegram/commit/fad19eab6f4f4d69c1402873f260c8003edf30bd))
+* **pa:** smoother account linking in the PA bot ([ad25db6](https://github.com/mctlhq/mctl-telegram/commit/ad25db6cdc656da708c2f0d9f68ac112093d1500)), closes [#1318](https://github.com/mctlhq/mctl-telegram/issues/1318)
+
+
+### Bug Fixes
+
+* **oauth:** refuse a no-redirect refresh before returning a client_id profile ([22451d2](https://github.com/mctlhq/mctl-telegram/commit/22451d283d13b662362c6c4d4577f13e46938fdb))
+* **pa:** address the [#1427](https://github.com/mctlhq/mctl-telegram/issues/1427) review notes ([c82a37b](https://github.com/mctlhq/mctl-telegram/commit/c82a37bfe65b5d17b73789ddab82f8fbe51edc4e)), closes [#1318](https://github.com/mctlhq/mctl-telegram/issues/1318)
+* **pa:** keep the Mini App button hidden until /begin answers ([6c1bb88](https://github.com/mctlhq/mctl-telegram/commit/6c1bb883bcfd7755caf966595aded9af973ecc37)), closes [#1318](https://github.com/mctlhq/mctl-telegram/issues/1318)
+* **pa:** open the sign-in link from a tap in the Mini App ([e25bc8d](https://github.com/mctlhq/mctl-telegram/commit/e25bc8dbba0b986bed531e6fa094050046af1cbf))
+* **pa:** pin the tg tools as the core-readonly profile serves them ([279ca09](https://github.com/mctlhq/mctl-telegram/commit/279ca09bab73b993ed76f2cfea382061e0a1ddf0))
+* **pa:** pin the tg tools as the core-readonly profile serves them ([2802795](https://github.com/mctlhq/mctl-telegram/commit/2802795c5a22eb3a0e2bf9ece05f7e4e77d67740)), closes [#1318](https://github.com/mctlhq/mctl-telegram/issues/1318)
+
 ## [0.145.0](https://github.com/mctlhq/mctl-telegram/compare/0.144.0...0.145.0) (2026-11-23)
 
 
