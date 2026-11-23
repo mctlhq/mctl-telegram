@@ -263,6 +263,38 @@ func ParseAllowedHosts(raw string) ([]string, error) {
 	return out, nil
 }
 
+// AdmitsBelow reports whether any client_id below prefix could be admitted
+// by allowed, the entries ParseAllowedHosts returned. prefix is a
+// client_id_prefix of MCP_CLIENT_PROFILES ("https://host/" or
+// "https://host/path/", validated by toolprofile.ValidateClientIDPrefix). A
+// host entry or a ".suffix" entry admits the whole host; a path-scoped entry
+// admits it when one path is a prefix of the other. A prefix nothing admits
+// can never match a client: a mistyped host there would leave the clients it
+// was meant for without their ceiling, silently.
+func AdmitsBelow(allowed []string, prefix string) bool {
+	host, path, ok := strings.Cut(strings.TrimPrefix(prefix, "https://"), "/")
+	if !ok || host == "" {
+		return false
+	}
+	path = "/" + path
+	for _, e := range allowed {
+		a, err := parseAllowEntry(e)
+		if err != nil {
+			continue
+		}
+		switch {
+		case a.suffix:
+			if strings.HasSuffix(host, "."+a.host) {
+				return true
+			}
+		case a.host != host:
+		case a.prefix == "" || strings.HasPrefix(a.prefix, path) || strings.HasPrefix(path, a.prefix):
+			return true
+		}
+	}
+	return false
+}
+
 // belowPublicSuffix reports whether h is a registrable domain or a name under
 // one, using the public suffix list (ICANN and private sections). A name
 // with no dot is never one, whatever the list says about unknown TLDs.

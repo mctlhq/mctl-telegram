@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.147.0](https://github.com/mctlhq/mctl-telegram/compare/0.146.0...0.147.0) (2026-11-23)
+
+
+### Features
+
+* **pa:** show "typing" while an answer is being made ([97a0647](https://github.com/mctlhq/mctl-telegram/commit/97a064782ba716b8d5b15d9b6d61c856a4379271))
+* **pa:** show "typing" while an answer is being made ([04c23e5](https://github.com/mctlhq/mctl-telegram/commit/04c23e5143723d7893e8b314c3d29ead1af102f0))
+
+
+### Bug Fixes
+
+* **pa:** move the S2 manifest guard lines after the typing hooks ([c9b34bb](https://github.com/mctlhq/mctl-telegram/commit/c9b34bbf93baff12c9fe49487a0811a73382ef91))
+
 ## [0.146.0](https://github.com/mctlhq/mctl-telegram/compare/0.145.0...0.146.0) (2026-11-23)
 
 
