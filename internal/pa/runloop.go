@@ -329,10 +329,22 @@ func (l *RunLoop) build(ctx context.Context, tx *sql.Tx, j jobs.Job, reservation
 		// recurs on every attempt, so the claim cancels the job.
 		return nil, "", nil, fmt.Errorf("%w: execution context: %v", jobs.ErrInvalid, err)
 	}
+	// The context names the text the principal accepted, English or
+	// Russian: the record the claim check just found satisfied, read again
+	// in the same transaction. A failed read fails the claim.
+	rec, err := l.store.GetPAConsent(ctx, tx, j.Principal)
+	switch {
+	case errors.Is(err, convo.ErrNotFound):
+		return nil, "", nil, jobs.ErrGone
+	case err != nil:
+		return nil, "", nil, fmt.Errorf("%w: consent: %v", jobs.ErrUnreadable, err)
+	case !convo.Satisfied(rec):
+		return nil, "", nil, jobs.ErrGone
+	}
 	rc := runContext{
 		V: 1, Principal: ec.Principal().TelegramID(), Trigger: TriggerInteractive, ConversationID: ec.ConversationID(),
 		JobID: j.ID, Attempt: j.Attempts, Connections: ec.Connections(), Budget: ec.Budget().ID,
-		ConsentVersion: ec.ConsentVersion(), ConsentSHA256: convo.ConsentTextSHA256(), ToolSet: tools,
+		ConsentVersion: ec.ConsentVersion(), ConsentSHA256: rec.TextSHA256, ToolSet: tools,
 	}
 	if rc.Connections == nil {
 		rc.Connections = []ConnectionRevision{}

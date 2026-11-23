@@ -108,6 +108,10 @@ type Sender struct {
 	// langs picks the language of each chat's server texts and button
 	// labels; nil sends English.
 	langs *Languages
+	// describe renders a menu command's description in a language; nil
+	// means Command.Description.In. Tests set it to reach a description
+	// no literal template has.
+	describe func(Command, safetext.Lang) string
 }
 
 // NewSender builds a Sender whose requests go through the PA egress client
@@ -435,6 +439,10 @@ func (s *Sender) SetCommands(ctx context.Context, cmds []Command) error {
 	if len(cmds) == 0 || len(cmds) > 100 {
 		return fmt.Errorf("%w: %d commands", ErrInvalidConfig, len(cmds))
 	}
+	// Every language's menu is built and checked before the first call,
+	// so a bad description refuses the whole menu rather than leaving the
+	// languages mismatched.
+	var reqs []setMyCommandsRequest
 	for _, lang := range []struct {
 		code string
 		l    safetext.Lang
@@ -442,11 +450,17 @@ func (s *Sender) SetCommands(ctx context.Context, cmds []Command) error {
 		req := setMyCommandsRequest{LanguageCode: lang.code}
 		for _, c := range cmds {
 			d := c.Description.In(lang.l)
+			if s.describe != nil {
+				d = s.describe(c, lang.l)
+			}
 			if !commandName.MatchString(c.Name) || strings.TrimSpace(d) == "" || utf8.RuneCountInString(d) > 256 {
 				return fmt.Errorf("%w: command %q", ErrInvalidConfig, c.Name)
 			}
 			req.Commands = append(req.Commands, botCommand{Command: c.Name, Description: d})
 		}
+		reqs = append(reqs, req)
+	}
+	for _, req := range reqs {
 		if err := s.call(ctx, methodSetMyCommands, req); err != nil {
 			return err
 		}

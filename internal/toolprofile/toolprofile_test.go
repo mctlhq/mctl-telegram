@@ -52,22 +52,26 @@ func TestParseBindings(t *testing.T) {
 		// encoding/json would keep the last of a repeated key, and match
 		// keys case-insensitively: each of these would silently drop the
 		// ceiling or move it to another client.
-		"repeated ceiling, null last": {`[{"client_id":"pa.example","profile":"core-readonly","scope_ceiling":["telegram:dialogs:read"],"scope_ceiling":null}]`, `duplicate JSON key "scope_ceiling"`},
-		"repeated ceiling, list last": {`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read"],"scope_ceiling":["telegram:messages:read"]}]`, `duplicate JSON key "scope_ceiling"`},
-		"repeated client_id key":      {`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read"],"client_id":"other.example"}]`, `duplicate JSON key "client_id"`},
-		"repeated profile key":        {`[{"client_id":"pa.example","profile":"core-reply","profile":"core-readonly"}]`, `duplicate JSON key "profile"`},
-		"ceiling key alias, null":     {`[{"client_id":"pa.example","profile":"core-readonly","scope_ceiling":["telegram:dialogs:read"],"SCOPE_CEILING":null}]`, "keys are matched exactly"},
-		"client_id key alias":         {`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read"],"Client_ID":"other.example"}]`, "keys are matched exactly"},
-		"ceiling key alias alone":     {`[{"client_id":"pa.example","Scope_Ceiling":["telegram:dialogs:read"]}]`, "keys are matched exactly"},
-		"ceiling blank entry":         {`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read",""]}]`, `entry "" is not a single scope token`},
-		"ceiling space-joined":        {`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read telegram:messages:read"]}]`, "is not a single scope token"},
-		"ceiling padded entry":        {`[{"client_id":"pa.example","scope_ceiling":[" telegram:dialogs:read"]}]`, "is not a single scope token"},
-		"ceiling duplicate entry":     {`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read","telegram:dialogs:read"]}]`, "duplicate scope"},
-		"ceiling on redirect_uri":     {`[{"redirect_uri":"https://pa.example.test/cb","profile":"core-readonly","scope_ceiling":["telegram:dialogs:read"]}]`, "keyed by client_id only"},
-		"ceiling with bad profile":    {`[{"client_id":"pa.example","profile":"core-readnoly","scope_ceiling":["telegram:dialogs:read"]}]`, `unknown profile "core-readnoly"`},
-		"ceiling duplicate client":    {`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read"]},{"client_id":"pa.example","profile":"core-readonly"}]`, "duplicate client_id"},
-		"ceiling duplicate client2":   {`[{"client_id":"pa.example","profile":"core-readonly"},{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read"]}]`, "duplicate client_id"},
-		"ceiling reserved client":     {`[{"client_id":"mctl_self_connect","scope_ceiling":["telegram:dialogs:read"]}]`, "cannot be bound"},
+		"repeated ceiling, null last":         {`[{"client_id":"pa.example","profile":"core-readonly","scope_ceiling":["telegram:dialogs:read"],"scope_ceiling":null}]`, `duplicate JSON key "scope_ceiling"`},
+		"repeated ceiling, list last":         {`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read"],"scope_ceiling":["telegram:messages:read"]}]`, `duplicate JSON key "scope_ceiling"`},
+		"repeated client_id key":              {`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read"],"client_id":"other.example"}]`, `duplicate JSON key "client_id"`},
+		"repeated profile key":                {`[{"client_id":"pa.example","profile":"core-reply","profile":"core-readonly"}]`, `duplicate JSON key "profile"`},
+		"ceiling key alias, null":             {`[{"client_id":"pa.example","profile":"core-readonly","scope_ceiling":["telegram:dialogs:read"],"SCOPE_CEILING":null}]`, "keys are matched exactly"},
+		"client_id key alias":                 {`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read"],"Client_ID":"other.example"}]`, "keys are matched exactly"},
+		"ceiling key alias alone":             {`[{"client_id":"pa.example","Scope_Ceiling":["telegram:dialogs:read"]}]`, "keys are matched exactly"},
+		"ceiling blank entry":                 {`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read",""]}]`, `entry "" is not a single scope token`},
+		"ceiling space-joined":                {`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read telegram:messages:read"]}]`, "is not a single scope token"},
+		"ceiling padded entry":                {`[{"client_id":"pa.example","scope_ceiling":[" telegram:dialogs:read"]}]`, "is not a single scope token"},
+		"ceiling duplicate entry":             {`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read","telegram:dialogs:read"]}]`, "duplicate scope"},
+		"ceiling null on redirect_uri":        {`[{"redirect_uri":"https://pa.example.test/cb","scope_ceiling":null}]`, "is null"},
+		"ceiling empty on redirect_uri":       {`[{"redirect_uri":"https://pa.example.test/cb","scope_ceiling":[]}]`, "is empty"},
+		"ceiling redirect bad profile":        {`[{"redirect_uri":"https://pa.example.test/cb","profile":"core-readnoly","scope_ceiling":["telegram:dialogs:read"]}]`, `unknown profile "core-readnoly"`},
+		"ceiling redirect duplicate":          {`[{"redirect_uri":"https://pa.example.test/cb","scope_ceiling":["telegram:dialogs:read"]},{"redirect_uri":"https://pa.example.test/cb","profile":"core-readonly"}]`, "duplicate redirect_uri"},
+		"redirect without profile or ceiling": {`[{"redirect_uri":"https://pa.example.test/cb"}]`, "unknown profile"},
+		"ceiling with bad profile":            {`[{"client_id":"pa.example","profile":"core-readnoly","scope_ceiling":["telegram:dialogs:read"]}]`, `unknown profile "core-readnoly"`},
+		"ceiling duplicate client":            {`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read"]},{"client_id":"pa.example","profile":"core-readonly"}]`, "duplicate client_id"},
+		"ceiling duplicate client2":           {`[{"client_id":"pa.example","profile":"core-readonly"},{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read"]}]`, "duplicate client_id"},
+		"ceiling reserved client":             {`[{"client_id":"mctl_self_connect","scope_ceiling":["telegram:dialogs:read"]}]`, "cannot be bound"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, err := ParseBindings(tc.raw)
@@ -226,5 +230,42 @@ func TestParseBindings_ScopeCeiling(t *testing.T) {
 	ceilingOnly, err := ParseBindings(`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read"]}]`)
 	if err != nil || ceilingOnly.Empty() {
 		t.Fatalf("ceiling-only table = %v, %v; want non-empty", ceilingOnly, err)
+	}
+}
+
+// TestParseBindings_ScopeCeilingByRedirectURI: a redirect_uri record may carry
+// a ceiling, with or without a profile, and ScopeCeilingFor resolves it with
+// the client_id ceiling winning.
+func TestParseBindings_ScopeCeilingByRedirectURI(t *testing.T) {
+	const cb = "https://pa.example.test/cb"
+	b, err := ParseBindings(`[
+	  {"redirect_uri":"` + cb + `","scope_ceiling":["telegram:dialogs:read","telegram:messages:read"]},
+	  {"redirect_uri":"https://other.example.test/cb","profile":"core-readonly","scope_ceiling":["telegram:dialogs:read"]},
+	  {"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read"]}]`)
+	if err != nil {
+		t.Fatalf("ParseBindings: %v", err)
+	}
+	if got, ok := b.ScopeCeilingFor("any-client", cb); !ok || len(got) != 2 {
+		t.Fatalf("ScopeCeilingFor(any-client, cb) = %v, %v; want the two-scope redirect ceiling", got, ok)
+	}
+	if _, ok := b.ScopeCeilingFor("any-client", ""); ok {
+		t.Fatal("an unknown redirect_uri must match no redirect_uri ceiling")
+	}
+	if _, ok := b.ScopeCeilingFor("any-client", "https://unlisted.example.test/cb"); ok {
+		t.Fatal("an unlisted redirect_uri matched a ceiling")
+	}
+	// The client_id ceiling wins over a redirect_uri ceiling for the same call.
+	if got, ok := b.ScopeCeilingFor("pa.example", cb); !ok || len(got) != 1 || got[0] != "telegram:dialogs:read" {
+		t.Fatalf("ScopeCeilingFor(pa.example, cb) = %v, %v; want the client_id ceiling", got, ok)
+	}
+	// A ceiling-only redirect record binds no profile; a record that names one does.
+	if p := b.Resolve("any-client", cb); p != "" {
+		t.Fatalf("a ceiling-only redirect record bound profile %q", p)
+	}
+	if p := b.Resolve("any-client", "https://other.example.test/cb"); p != "core-readonly" {
+		t.Fatalf("redirect record with a profile resolved %q, want core-readonly", p)
+	}
+	if b.Empty() {
+		t.Fatal("a table with redirect_uri ceilings is not empty")
 	}
 }

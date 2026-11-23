@@ -1341,3 +1341,30 @@ func TestRunLoop_FinishGate(t *testing.T) {
 		t.Fatalf("job %s usage %s", js, us)
 	}
 }
+
+// TestRunLoop_ContextNamesTheAcceptedText: the signed execution context
+// names the consent text the principal accepted, Russian or English, not
+// always the English one.
+func TestRunLoop_ContextNamesTheAcceptedText(t *testing.T) {
+	h := newRunLoopHarness(t)
+	ruFrom := map[string]any{"id": aliceID, "is_bot": false, "first_name": "Alice", "language_code": "ru"}
+	h.message(aliceID, map[string]any{"text": "/consent", "from": ruFrom})
+	r := h.replies.last(aliceID)
+	if r.reply != ReplyConsentPromptRU {
+		t.Fatalf("reply %q, want the Russian prompt", r.reply)
+	}
+	h.press(aliceID, r.button)
+	h.text(aliceID, "hello")
+	c := h.mustClaim()
+	var raw string
+	if err := h.convoHarness.store.DB.QueryRow(`SELECT execution_context FROM pa_jobs WHERE id = $1`, c.JobID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var rc runContext
+	if err := json.Unmarshal([]byte(raw), &rc); err != nil {
+		t.Fatal(err)
+	}
+	if rc.ConsentSHA256 != convo.ConsentTextSHA256RU() || rc.ConsentVersion != convo.ConsentVersion {
+		t.Fatalf("context consent %s %s, want the Russian text's hash", rc.ConsentVersion, rc.ConsentSHA256)
+	}
+}

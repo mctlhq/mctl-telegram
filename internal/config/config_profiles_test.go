@@ -54,7 +54,7 @@ func TestLoadClientProfiles(t *testing.T) {
 		for _, raw := range []string{
 			`[{"client_id":"pa.example","scope_ceiling":[]}]`,
 			`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read telegram:messages:read"]}]`,
-			`[{"redirect_uri":"https://pa.example.test/cb","profile":"core-readonly","scope_ceiling":["telegram:dialogs:read"]}]`,
+			`[{"redirect_uri":"https://pa.example.test/cb","scope_ceiling":null}]`,
 			`[{"client_id":"pa.example","profile":"core-readonly","scope_ceiling":null}]`,
 			`[{"client_id":"pa.example","profile":"core-readonly","scope_ceiling":["telegram:dialogs:read"],"scope_ceiling":null}]`,
 			`[{"client_id":"pa.example","scope_ceiling":["telegram:dialogs:read"],"client_id":"other.example"}]`,

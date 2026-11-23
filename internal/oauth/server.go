@@ -949,6 +949,26 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 			}
 		}
 	}
+	// The same checks for ceilings keyed by redirect_uri, plus the two that
+	// apply to redirect_uri bindings: the callback must be one this server
+	// could ever accept, and must not be the self-connect client's, whose
+	// token the manage page needs unbounded.
+	for uri, ceiling := range cfg.ClientProfiles.ScopeCeilingByRedirectURI {
+		if uri == connectRedirectURI(cfg.Issuer) {
+			return nil, fmt.Errorf("oauth: scope ceiling for redirect_uri %q: it is the built-in self-connect client's callback, which a bounded credential cannot use to open the manage page", uri)
+		}
+		if err := validateExactRedirectURI(uri); err != nil {
+			return nil, fmt.Errorf("oauth: scope ceiling for redirect_uri %q can never match an authorization: %w", uri, err)
+		}
+		if len(ceiling) == 0 {
+			return nil, fmt.Errorf("oauth: scope ceiling for redirect_uri %q is empty", uri)
+		}
+		for _, sc := range ceiling {
+			if !grantableScope(sc) {
+				return nil, fmt.Errorf("oauth: scope ceiling for redirect_uri %q names %q, which this server never grants", uri, sc)
+			}
+		}
+	}
 	return s, nil
 }
 
@@ -1113,7 +1133,7 @@ func (s *Server) ExchangeConnect(ctx context.Context, code, verifier, clientID, 
 	// in any deployed configuration. It is here so that every exchange
 	// path applies the ceiling in the same place, and mintAccessToken
 	// refuses a token that skipped it.
-	groups, scopes, ceilingApplied := s.applyClientScopeCeiling(clientID, groups, scopes)
+	groups, scopes, ceilingApplied := s.applyClientScopeCeiling(clientID, entry.RedirectURI, groups, scopes)
 	if ceilingApplied && len(scopes) == 0 {
 		return "", errors.New("invalid_scope: " + ceilingLeavesNoScopeDescription)
 	}
@@ -2600,7 +2620,7 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	scopes = narrowGrant(scopes, entry.Scope)
 	// Then the client's scope ceiling, if it has one (#1326). It is the
 	// only bound that also strips membership-granted scopes and groups.
-	groups, scopes, ceilingApplied := s.applyClientScopeCeiling(clientID, groups, scopes)
+	groups, scopes, ceilingApplied := s.applyClientScopeCeiling(clientID, entry.RedirectURI, groups, scopes)
 	// A ceiling client whose bounded grant is empty gets no token at all.
 	// Elsewhere an empty grant is a deliberate, working state (#584), but
 	// a ceiling client exists to hold exactly its ceiling, and a scopeless
@@ -2765,7 +2785,7 @@ func (s *Server) attemptGraceRecovery(w http.ResponseWriter, r *http.Request, re
 		return graceServerError
 	}
 	groups, scopes = boundRefreshGrant(groups, scopes, child.Scope)
-	groups, scopes, ceilingApplied := s.applyClientScopeCeiling(child.ClientID, groups, scopes)
+	groups, scopes, ceilingApplied := s.applyClientScopeCeiling(child.ClientID, child.RedirectURI, groups, scopes)
 	if ceilingApplied && len(scopes) == 0 {
 		s.logger().Warn("oauth: refresh refused: nothing within the client's scope ceiling",
 			"client_id", child.ClientID, "family_id", familyID, "path", "grace_replay")
@@ -2905,7 +2925,7 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	// family at the code exchange: a family issued before the ceiling was
 	// configured, or before it was tightened, is bounded by the current
 	// ceiling from its next refresh on (#1326).
-	groups, scopes, ceilingApplied := s.applyClientScopeCeiling(rt.ClientID, groups, scopes)
+	groups, scopes, ceilingApplied := s.applyClientScopeCeiling(rt.ClientID, rt.RedirectURI, groups, scopes)
 	if ceilingApplied && len(scopes) == 0 {
 		// Refused before refreshGrantStillValid: that check lets a family
 		// that never held a grant keep refreshing scopeless (#584), which a
@@ -3190,7 +3210,7 @@ func writeRevokeSuccess(w http.ResponseWriter) {
 // would mint a token wider than its client's ceiling, so the mint refuses
 // it with errScopeCeilingViolated instead (#1326).
 func (s *Server) mintAccessToken(origin tokenOrigin, tgID int64, tgUsername string, groups, scopes []string) (string, error) {
-	if ceiling, ok := s.cfg.ClientProfiles.ScopeCeiling(origin.ClientID); ok && !withinScopeCeiling(ceiling, groups, scopes) {
+	if ceiling, ok := s.cfg.ClientProfiles.ScopeCeilingFor(origin.ClientID, origin.RedirectURI); ok && !withinScopeCeiling(ceiling, groups, scopes) {
 		s.logger().Error("oauth: refusing to mint a token wider than its client's scope ceiling",
 			"client_id", origin.ClientID, "scopes", strings.Join(scopes, " "), "groups", len(groups))
 		return "", errScopeCeilingViolated
@@ -3227,8 +3247,8 @@ const ceilingLeavesNoScopeDescription = "this account holds no scope within this
 // to a grant that ResolveScopes and narrowGrant or boundRefreshGrant have
 // already settled. applied reports whether a ceiling was configured, not
 // whether it removed anything, so the log shows every bounded grant.
-func (s *Server) applyClientScopeCeiling(clientID string, groups, scopes []string) (outGroups, outScopes []string, applied bool) {
-	ceiling, ok := s.cfg.ClientProfiles.ScopeCeiling(clientID)
+func (s *Server) applyClientScopeCeiling(clientID, redirectURI string, groups, scopes []string) (outGroups, outScopes []string, applied bool) {
+	ceiling, ok := s.cfg.ClientProfiles.ScopeCeilingFor(clientID, redirectURI)
 	outGroups, outScopes = applyScopeCeiling(ceiling, ok, groups, scopes)
 	if !ok && s.cimdEnabled() && cimd.IsCIMDURL(clientID) {
 		// A CIMD client reaches this server on the strength of a document
@@ -3245,7 +3265,7 @@ func (s *Server) applyClientScopeCeiling(clientID string, groups, scopes []strin
 // cimdClientMapped reports whether MCP_CLIENT_PROFILES names this CIMD client:
 // a client_id or redirect_uri profile binding, or a scope ceiling.
 func (s *Server) cimdClientMapped(clientID, redirectURI string) bool {
-	if _, ok := s.cfg.ClientProfiles.ScopeCeiling(clientID); ok {
+	if _, ok := s.cfg.ClientProfiles.ScopeCeilingFor(clientID, redirectURI); ok {
 		return true
 	}
 	return s.cfg.ClientProfiles.Resolve(clientID, redirectURI) != ""
@@ -3282,6 +3302,17 @@ func (s *Server) profileFor(origin tokenOrigin) (string, error) {
 	b := s.cfg.ClientProfiles
 	if origin.RedirectURIKnown {
 		return b.Resolve(origin.ClientID, origin.RedirectURI), nil
+	}
+	// A redirect_uri scope ceiling may bound this client, and without the
+	// redirect_uri whether it does is unknown: a token minted without it would
+	// be wider than the operator allowed. This is checked before the client_id
+	// profile is returned, or a client with a profile and no client_id ceiling
+	// would skip it. A client_id ceiling wins over a redirect_uri one, so a
+	// client holding its own keeps refreshing.
+	if len(b.ScopeCeilingByRedirectURI) > 0 {
+		if _, own := b.ScopeCeilingByClientID[origin.ClientID]; !own {
+			return "", errProfileUnresolvable
+		}
 	}
 	if p, ok := b.ByClientID[origin.ClientID]; ok {
 		return p, nil
