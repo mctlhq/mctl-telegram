@@ -144,15 +144,21 @@ service outage unless new authorization-code flows also fail.
   `admin:users`, `admin:users:read` and `admin:broadcast`, so an admin
   signing in through a read-only client gets a read-only token. It is
   re-applied at each refresh, so adding or tightening it reaches existing
-  connections at their next refresh. It is keyed by `client_id` only: a
-  `redirect_uri` record with a ceiling, a `null` or empty list, a blank,
+  connections at their next refresh. A `redirect_uri` record may carry a
+  ceiling too, with or without a `profile`: it bounds every client that
+  authorizes with that exact callback, which is how a client without a
+  stable `client_id` (ChatGPT's per-install CIMD ids, dynamic registration)
+  gets one. When both match, the `client_id` ceiling wins. A refresh family
+  that stored no `redirect_uri` is refused while any `redirect_uri`
+  ceiling exists (`authorize again`), never minted unbounded. A `null` or
+  empty list, a blank,
   padded, space-joined or repeated entry, a repeated JSON key (a second
   `scope_ceiling` or `client_id` in one record) and a key spelled other
   than exactly `client_id`, `redirect_uri`, `profile`, `scope_ceiling`
   stop the server at startup
   (`MCP_CLIENT_PROFILES: record N: ...`), and so does an entry naming a
   scope the server never grants (`oauth init failed: ... scope ceiling for
-  client_id ...`). A client without a ceiling keeps its grant exactly. The
+  client_id ...` or `... for redirect_uri ...`). A client without a ceiling keeps its grant exactly. The
   code-exchange log line carries `scope_ceiling_applied`; a bounded refresh
   logs `oauth: token refresh_token grant` with the same field. A principal
   holding nothing within the ceiling (for example a lookup admin, whose
