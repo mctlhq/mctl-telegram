@@ -142,6 +142,9 @@ type RunLoopConfig struct {
 	// Allowed is the preview allowlist (PA_ALLOWED_PRINCIPALS), re-checked
 	// at every step by gate. Required; an empty list allows nobody.
 	Allowed PrincipalAllowlist
+	// Typing shows "typing..." in the principal's chat while a run is in
+	// progress (typing.go). Optional; nil shows nothing.
+	Typing TypingSender
 }
 
 // RunLoop serves the run-loop routes and implements RunEnqueuer and
@@ -161,6 +164,7 @@ type RunLoop struct {
 	metrics  OutboxCounter
 	cbCount  CallbackCounter
 	allowed  PrincipalAllowlist
+	typing   *typingTracker
 	// pending tracks the deliveries request paths started (deliverAfter).
 	pending sync.WaitGroup
 	// readTools is every tool the pin admits without approval, as
@@ -221,7 +225,7 @@ func NewRunLoop(cfg RunLoopConfig) (*RunLoop, error) {
 		store: cfg.Store, sealer: cfg.Sealer, pool: cfg.Pool, minter: cfg.Minter, verifier: cfg.Verifier,
 		sender: cfg.Sender, tools: cfg.Tools, limits: cfg.Limits, budget: cfg.Budget, lease: lease, now: now,
 		readTools: read, modelTools: modelTools, metrics: cfg.Metrics, cbCount: cfg.CallbackMetrics,
-		allowed: cfg.Allowed,
+		allowed: cfg.Allowed, typing: newTypingTracker(cfg.Typing, now),
 	}, nil
 }
 
@@ -532,6 +536,7 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 		},
 		Fragments: frags,
 	})
+	l.typing.start(j.Principal, j.ID, j.LeaseUntil)
 }
 
 // claimTools is the model's view of exactly the job's signed tool set, in
@@ -638,6 +643,7 @@ func (l *RunLoop) serveTurn(w http.ResponseWriter, r *http.Request) {
 		l.stopRun(r.Context(), w, ref, err)
 		return
 	}
+	l.typing.touch(ref.JobID)
 	writeJSON(w, http.StatusOK, map[string]int{"turns": j.Turns, "tool_calls": j.ToolCalls})
 }
 
@@ -646,6 +652,9 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// The answer is here: the status stops before it is queued, so the
+	// chat never shows "typing" under the answer.
+	l.typing.stop(ref.JobID)
 	var req replyRequest
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxReplyBody))
 	var tooBig *http.MaxBytesError
@@ -742,6 +751,7 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 // release undoes a claim whose token was never handed out and sends the
 // notice it may owe.
 func (l *RunLoop) release(ctx context.Context, ref jobs.Ref, mode jobs.ReleaseMode, now time.Time) {
+	l.typing.stop(ref.JobID)
 	n, err := l.store.ReleasePAClaim(ctx, ref, mode, now)
 	if err != nil {
 		slog.Warn("pa claim not released", "job_id", ref.JobID, "err", err)
@@ -913,8 +923,10 @@ func (l *RunLoop) AdmitToolCall(ctx context.Context, job PAJob, server, tool str
 	})
 	l.droppedNotice(ctx, job.ref, err)
 	if err != nil {
+		l.typing.stop(job.ref.JobID)
 		return Policy{}, err
 	}
+	l.typing.touch(job.ref.JobID)
 	return policyFromJob(j, job.ref)
 }
 
@@ -930,6 +942,11 @@ func (l *RunLoop) StillRunning(ctx context.Context, job PAJob) error {
 	}
 	_, err := l.store.RunningPAJob(ctx, job.ref, l.now(), l.gate)
 	l.droppedNotice(ctx, job.ref, err)
+	if err != nil {
+		l.typing.stop(job.ref.JobID)
+	} else {
+		l.typing.touch(job.ref.JobID)
+	}
 	return err
 }
 
@@ -966,6 +983,7 @@ func policyFromJob(j jobs.Job, ref jobs.Ref) (Policy, error) {
 // conversation expired mid-run, or its principal was disabled or taken off
 // the allowlist, owes the principal a notice.
 func (l *RunLoop) stopRun(ctx context.Context, w http.ResponseWriter, ref jobs.Ref, err error) {
+	l.typing.stop(ref.JobID)
 	l.droppedNotice(ctx, ref, err)
 	stop(w, err)
 }

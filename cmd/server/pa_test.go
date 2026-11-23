@@ -332,6 +332,7 @@ type paSendRecorder struct {
 	mu       sync.Mutex
 	sent     []paSend
 	answered []string
+	typing   int
 	// real is a production output.Sender built from the same token and
 	// Mini App URL buildPA passed: SendWebApp runs every one of its
 	// checks on what the wired runtime asked to send, so a test sees
@@ -345,6 +346,14 @@ type paSendRecorder struct {
 func (r *paSendRecorder) AnswerCallback(_ context.Context, id string, _ safetext.Template) error {
 	r.mu.Lock()
 	r.answered = append(r.answered, id)
+	r.mu.Unlock()
+	return nil
+}
+
+// SendTyping counts the typing statuses the wired run loop sent.
+func (r *paSendRecorder) SendTyping(context.Context, int64) error {
+	r.mu.Lock()
+	r.typing++
 	r.mu.Unlock()
 	return nil
 }
