@@ -2,9 +2,9 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "mctl-assistant",
   "version": "0.1.0",
-  "description": "Unofficial Telegram connector for MCP clients. MCTL Assistant uses the Telegram API and OAuth to connect your account. Search and read messages with read-only access by default. Sessions are encrypted.",
+  "description": "MCTL Assistant is an independent, unofficial, open-source connector for messaging workflows in MCP clients. It uses the Telegram API and OAuth for authorized account access, with read-only permissions by default and encrypted sessions.",
   "author": {
-    "name": "MCTL Assistant",
+    "name": "MCTL",
     "email": "support@mctl.ai",
     "url": "https://tg.mctl.ai/"
   },
