@@ -563,9 +563,9 @@ S2-I8:
 
 S2-I9:
   status: pending
-  slice: P2-S6
+  slice: P2-S11
   tracked_by: "#1321"
-  note: "a reset never lowers the disclosure card gate. The tests are of the inert gate.Decide (#1370): rule 4 cards a disclosure whatever the taint. Nothing in the runtime calls Decide yet, so the id stays pending."
+  note: "a reset never lowers the disclosure card gate. The tests are of the inert gate.Decide (#1370): rule 4 cards a disclosure whatever the taint. Nothing in the runtime calls Decide yet, so the id stays pending. Moved from P2-S6 to P2-S11: the row needs standing permissions and lowering to exist."
   tests:
     - internal/pa/gate.TestDecideOrder
     - internal/pa/gate.TestDecideNeverLowersWithoutEveryCondition
@@ -624,9 +624,9 @@ S2-I10:
 
 S2-D1:
   status: pending
-  slice: P2-S6
+  slice: P2-S11
   tracked_by: "#1322"
-  note: "disclosure class: card always. The tests are of the inert gate.Decide (#1370): rule 4 cards a disclosure ahead of taint and standing permissions. Nothing in the runtime calls Decide yet, so the id stays pending."
+  note: "disclosure class: card always. The tests are of the inert gate.Decide (#1370): rule 4 cards a disclosure ahead of taint and standing permissions. Nothing in the runtime calls Decide yet, so the id stays pending. Moved from P2-S6 to P2-S11: the row needs standing permissions and lowering to exist."
   tests:
     - internal/pa/gate.TestDecideOrder
     - internal/pa/gate.TestDecideNeverLowersWithoutEveryCondition
