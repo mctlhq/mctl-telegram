@@ -29,6 +29,7 @@ import (
 	"errors"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -182,6 +183,7 @@ func (e *disclosureEnv) refused(name, tool, args string, code int, reason string
 }
 
 func (e *disclosureEnv) splitOffers() []string {
+	e.h.Loop().WaitDeliveries()
 	return e.strings(`SELECT status FROM pa_outbox WHERE kind = 'disclosure_too_long' ORDER BY id`)
 }
 
@@ -418,6 +420,40 @@ func TestS2D2_ApprovalBindsTextAndDevice(t *testing.T) {
 	hashes := e.strings(`SELECT args_sha FROM pa_approvals WHERE id IN ($1, $2)`, a.id, b.id)
 	if len(hashes) != 2 || hashes[0] == hashes[1] {
 		t.Fatalf("args_sha of two devices: %v", hashes)
+	}
+}
+
+// TestDisclosure_OneCapForEveryTool: the notice of a refused text names
+// the cap as a number, so the cap is that number for every disclosure
+// tool: the Phase 2 pin holds it, and a pin with another cap gets no card.
+func TestDisclosure_OneCapForEveryTool(t *testing.T) {
+	limit := strconv.Itoa(catalog.MaxDisclosureText)
+	for _, l := range []safetext.Lang{safetext.LangEN, safetext.LangRU} {
+		if !strings.Contains(safetext.TextDisclosureTooLong.In(l), limit+" ") {
+			t.Errorf("the notice does not name the cap of %s: %q", limit, safetext.TextDisclosureTooLong.In(l))
+		}
+	}
+	pin := disclosurePin(t)
+	for tool, arg := range map[string]string{sayTool: "phrase", commandTool: "command"} {
+		if got := pin.Servers["tg"].Tools[tool].Constraints.TextCap[arg]; got != catalog.MaxDisclosureText {
+			t.Errorf("the Phase 2 pin caps %s.%s at %d, the notice says %s", tool, arg, got, limit)
+		}
+	}
+	// A lower cap in the pin: the notice would name the wrong number.
+	low := pin.Servers["tg"].Tools[sayTool]
+	c := *low.Constraints
+	c.TextCap = map[string]int{"phrase": 500, "device": 200}
+	low.Constraints = &c
+	pin.Servers["tg"].Tools[sayTool] = low
+	sp := &fakeSpeakers{list: testSpeakers()}
+	e := &disclosureEnv{cardEnv: newCardEnvOn(t, sqliteStore(t), pin, disclosureFresh{}, func(c *connector.CardConfig) {
+		c.Speakers = map[string]connector.SpeakerReader{"tg": sp}
+	}), speakers: sp}
+	e.refused("a cap of 500", sayTool, kitchenSay, http.StatusForbidden, connector.ReasonNoWritePath)
+	e.refused("a cap of 500, long text", sayTool, `{"device":"`+kitchenID+`","phrase":"`+strings.Repeat("a", 700)+`"}`, http.StatusForbidden, connector.ReasonNoWritePath)
+	e.nothingWritten()
+	if got := e.splitOffers(); len(got) != 0 {
+		t.Fatalf("split offers %v", got)
 	}
 }
 

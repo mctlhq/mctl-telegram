@@ -183,7 +183,10 @@ func precheckDisclosure(tool string, pinned catalog.PinnedTool, canonical []byte
 	if pinned.Constraints != nil {
 		limit = pinned.Constraints.TextCap[spec.textArg]
 	}
-	if limit < 1 || limit > catalog.MaxDisclosureText {
+	// One cap for every disclosure: it is the number the refusal's notice
+	// (safetext.TextDisclosureTooLong) tells the principal. A pin with
+	// another cap, or none, has no card path.
+	if limit != catalog.MaxDisclosureText {
 		return disclosureCall{}, &refusal{ReasonNoWritePath, http.StatusForbidden}
 	}
 	text, device, hasDevice, err := disclosureText(spec, canonical)

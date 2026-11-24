@@ -647,7 +647,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.677s
     - id: P2S6-D2b
-      guard: internal/pa/connector/disclosure.go:233
+      guard: internal/pa/connector/disclosure.go:236
       guard_text: "if s.ID == call.device {"
       mutation: "a speaker's name is accepted as the target"
       killed_by:
@@ -660,7 +660,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.563s
     - id: P2S6-D2c
-      guard: internal/pa/connector/disclosure.go:200
+      guard: internal/pa/connector/disclosure.go:203
       guard_text: "if !hasDevice || device == \"\" {"
       mutation: "an omitted device falls back to a default speaker instead of a refusal"
       killed_by:
@@ -673,7 +673,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.547s
     - id: P2S6-D2d
-      guard: internal/pa/connector/disclosure.go:219
+      guard: internal/pa/connector/disclosure.go:222
       guard_text: "if err != nil || len(speakers) == 0 {"
       mutation: "a failed speaker read that came with a list is used"
       killed_by:
@@ -685,6 +685,19 @@ S2-D2:
         FAIL
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.593s
+    - id: P2S6-D2e
+      guard: internal/pa/connector/alice_speakers.go:156
+      guard_text: "for _, l := range rest {"
+      mutation: "the speaker reader does not look at what follows the list, so a name with line breaks can end the list early after speaker lines of its own"
+      killed_by:
+        - internal/pa/connector.TestAliceSpeakers_UnreadableIsAnError
+      red: |-
+        --- FAIL: TestAliceSpeakers_UnreadableIsAnError (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.481s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.347s
   gaps:
     - half: "production wiring: nothing in cmd/server constructs connector.Cards (TestNoRuntimePhase2Use forbids NewCards outside tests) or a SpeakerReader, the Phase 2 pin is not loadable at runtime and the run loop admits no approve-tier tool, so no disclosure call reaches these checks outside tests; the switch-on is P2-S14"
       tracked_by: "#1323"
@@ -694,14 +707,15 @@ S2-D2:
 S2-D3:
   status: green
   slice: P2-S6
-  note: "Disclosure text cap (#1322 P2-S6): the text of a disclosure is counted in characters (runes) against the pin's text_cap (1000) before anything is read or written; longer text is refused text_too_long with no approval row, and the principal is sent TextDisclosureTooLong once per run, offering to send it in parts. The server never cuts or splits the text. Text holding a link is refused text_has_link (Phase 2 default). catalog.MaxDisclosureText = 1000 and a text_cap over it is refused by the pin validation (#1370)."
+  note: "Disclosure text cap (#1322 P2-S6): the text of a disclosure is counted in characters (runes) against the pin's text_cap, which must be 1000, before anything is read or written; longer text is refused text_too_long with no approval row, and the principal is sent TextDisclosureTooLong once per run, offering to send it in parts. The server never cuts or splits the text. Text holding a link is refused text_has_link (Phase 2 default). catalog.MaxDisclosureText = 1000 and a text_cap over it is refused by the pin validation (#1370)."
   tests:
     - internal/pa/catalog.TestValidatePhase2Rules
     - internal/pa.TestS2D3_TextCapIsCountedInCharacters
     - internal/pa.TestDisclosure_TextRefusals
+    - internal/pa.TestDisclosure_OneCapForEveryTool
   mutations:
     - id: P2S6-D3a
-      guard: internal/pa/connector/disclosure.go:194
+      guard: internal/pa/connector/disclosure.go:197
       guard_text: "if utf8.RuneCountInString(text) > limit {"
       mutation: "the cap counts bytes, so 1000 Cyrillic characters are refused"
       killed_by:
@@ -714,7 +728,7 @@ S2-D3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.463s
     - id: P2S6-D3b
-      guard: internal/pa/connector/disclosure.go:194
+      guard: internal/pa/connector/disclosure.go:197
       guard_text: "if utf8.RuneCountInString(text) > limit {"
       mutation: "the cap is 1001 characters"
       killed_by:
@@ -739,6 +753,19 @@ S2-D3:
         FAIL
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.472s
+    - id: P2S6-D3d
+      guard: internal/pa/connector/disclosure.go:189
+      guard_text: "if limit != catalog.MaxDisclosureText {"
+      mutation: "a pin with a lower cap than the one the notice names gets a card path"
+      killed_by:
+        - internal/pa.TestDisclosure_OneCapForEveryTool
+      red: |-
+        --- FAIL: TestDisclosure_OneCapForEveryTool (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.636s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.522s
   gaps:
     - half: "production wiring: nothing in cmd/server constructs connector.Cards (TestNoRuntimePhase2Use forbids NewCards outside tests) or a SpeakerReader, the Phase 2 pin is not loadable at runtime and the run loop admits no approve-tier tool, so no disclosure call reaches these checks outside tests; the switch-on is P2-S14"
       tracked_by: "#1323"
@@ -803,7 +830,7 @@ S2-D4:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.502s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/output/safetext	0.604s
     - id: P2S6-D4d
-      guard: internal/pa/connector/disclosure.go:245
+      guard: internal/pa/connector/disclosure.go:248
       guard_text: "Home: target.Home, Room: target.Room, Name: target.Name, ID: target.ID,"
       mutation: "the card names the room and the name of another speaker than the target"
       killed_by:

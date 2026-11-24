@@ -42,6 +42,7 @@ const (
 	aliceListArgs      = `{"only_speakers":true}`
 	maxAliceSpeakers   = 64
 	aliceSpeakerPrefix = "- **"
+	aliceTitle         = "### Умный дом Яндекса"
 )
 
 // The fixed parts of a speaker line, in order:
@@ -120,38 +121,47 @@ func parseAliceSpeakers(raw []byte) ([]Speaker, error) {
 	if t := *res.Content[0].Text; len(t) == 0 || t[0] != '"' || json.Unmarshal(t, &text) != nil {
 		return bad("result is not one text")
 	}
+	// The text opens with the title, an empty line and the head of the
+	// speaker list, before any text of the account's.
 	lines := strings.Split(text, "\n")
-	head, want := -1, 0
-	for i, l := range lines {
-		m := aliceSpeakersHead.FindStringSubmatch(l)
-		if m == nil {
-			continue
-		}
-		if head >= 0 {
-			return bad("two speaker lists")
-		}
-		head = i
-		want, _ = strconv.Atoi(m[1])
-	}
-	if head < 0 {
+	if len(lines) < 4 || lines[0] != aliceTitle || lines[1] != "" {
 		return bad("no speaker list")
 	}
+	m := aliceSpeakersHead.FindStringSubmatch(lines[2])
+	if m == nil {
+		return bad("no speaker list")
+	}
+	want, _ := strconv.Atoi(m[1])
 	if want < 1 || want > maxAliceSpeakers {
 		// No speaker is not a list a target can be in.
 		return bad("speaker count")
 	}
 	var out []Speaker
 	seen := map[string]bool{}
-	for _, l := range lines[head+1:] {
-		if l == "" {
-			break
-		}
-		s, ok := parseAliceSpeakerLine(l)
+	rest := lines[3:]
+	for len(rest) > 0 && rest[0] != "" {
+		s, ok := parseAliceSpeakerLine(rest[0])
 		if !ok || seen[s.ID] {
 			return bad("speaker line")
 		}
 		seen[s.ID] = true
 		out = append(out, s)
+		rest = rest[1:]
+	}
+	// The list ends at the first empty line. A name that holds line breaks
+	// could end it early, after speaker lines of its own making, and so
+	// meet the count; the rest of its real line, and every real line after
+	// it, then follows here. Nothing after the list may look like a part
+	// of one: the sections that do follow (rooms, scenarios) never do.
+	for _, l := range rest {
+		if strings.HasPrefix(l, aliceSpeakerPrefix) || aliceSpeakersHead.MatchString(l) {
+			return bad("speaker line after the list")
+		}
+		for _, mark := range aliceSpeakerMarks {
+			if strings.Contains(l, mark) {
+				return bad("speaker line after the list")
+			}
+		}
 	}
 	// The server's own count: a line a name forged, or one it lost, shows.
 	if len(out) != want {

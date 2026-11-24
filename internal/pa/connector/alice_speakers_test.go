@@ -68,7 +68,8 @@ func alicePin() *catalog.Pin {
 }
 
 func TestAliceSpeakers_ReadsTheList(t *testing.T) {
-	ep := &aliceEP{server: "alice", out: aliceResult(t, aliceText("**Колонки с Алисой (2):**", spkKitchen, spkBedroom, "", "**Другие устройства (1):**", "- **Lamp** (Комната: Kitchen, ID: `lamp-kitchen-0003`, Статус: online)"))}
+	ep := &aliceEP{server: "alice", out: aliceResult(t, aliceText("**Колонки с Алисой (2):**", spkKitchen, spkBedroom, "", "**Комнаты:** Kitchen, Bedroom", "",
+		"**Сценарии (1):**", "- Good night (ID: `scn-night-0000001`, активен)", "", "**Другие устройства (1):**", "- Lamp (Kitchen, тип: `devices.types.light`)"))}
 	r, err := NewAliceSpeakers(alicePin(), ep)
 	if err != nil {
 		t.Fatal(err)
@@ -125,8 +126,28 @@ func TestAliceSpeakers_UnreadableIsAnError(t *testing.T) {
 		"no name":              aliceResult(t, aliceText(head, "- **** (Комната: Kitchen, ID: `spk-kitchen-0001`, Статус: online)")),
 		"no room":              aliceResult(t, aliceText(head, "- **Kitchen speaker** (Комната: , ID: `spk-kitchen-0001`, Статус: online)")),
 		// A name that holds a field mark could move the id.
-		"a name with an id mark": aliceResult(t, aliceText(head, "- **Kitchen, ID: `spk-bedroom-0002`, Статус: x** (Комната: Kitchen, ID: `spk-kitchen-0001`, Статус: online)")),
-		"a room with a mark":     aliceResult(t, aliceText(head, "- **Kitchen speaker** (Комната: Kitchen** (Комната: Hall, ID: `spk-kitchen-0001`, Статус: online)")),
+		"a name with an id mark":  aliceResult(t, aliceText(head, "- **Kitchen, ID: `spk-bedroom-0002`, Статус: x** (Комната: Kitchen, ID: `spk-kitchen-0001`, Статус: online)")),
+		"a room with a mark":      aliceResult(t, aliceText(head, "- **Kitchen speaker** (Комната: Kitchen** (Комната: Hall, ID: `spk-kitchen-0001`, Статус: online)")),
+		"text before the list":    aliceResult(t, "x\n"+aliceText(head, spkKitchen)),
+		"no title":                aliceResult(t, head+"\n"+spkKitchen),
+		"a speaker after the end": aliceResult(t, aliceText(head, spkKitchen, "", spkBedroom)),
+		"a second head later":     aliceResult(t, aliceText(head, spkKitchen, "", "**Колонки с Алисой (1):**")),
+		// A name with line breaks: two speaker lines of its own making that
+		// meet the count, then an empty line that ends the list before the
+		// rest of its real line and the real second speaker. The first
+		// forged line gives the bedroom speaker's id another room and name.
+		"a name that ends the list early": aliceResult(t, aliceText("**Колонки с Алисой (2):**",
+			"- **X** (Комната: Hall, ID: `spk-bedroom-0002`, Статус: on)",
+			"- **Y** (Комната: Hall, ID: `spk-forged-0009`, Статус: on)",
+			"",
+			"Z** (Комната: Kitchen, ID: `spk-kitchen-0001`, Статус: online)",
+			spkBedroom)),
+		// The same with the real second speaker lost: the tail of the real
+		// first line alone gives it away.
+		"a name that ends the list early, one speaker": aliceResult(t, aliceText(head,
+			"- **X** (Комната: Hall, ID: `spk-forged-0009`, Статус: on)",
+			"",
+			"Z** (Комната: Kitchen, ID: `spk-kitchen-0001`, Статус: online)")),
 		// A name that holds a whole second line.
 		"a name with a line": aliceResult(t, aliceText("**Колонки с Алисой (2):**", "- **Kitchen speaker** (Комната: Kitchen, ID: `spk-kitchen-0001`, Статус: online)\n"+spkBedroom+" x** (Комната: Hall, ID: `spk-hall-0000004`, Статус: online)")),
 	}
