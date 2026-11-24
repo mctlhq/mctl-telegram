@@ -66,6 +66,17 @@
 # also pass on Postgres. P2-S4 built the FreshSurface (connector.PinFresh)
 # but nothing constructs a WriteExecutor outside tests, so the P2-S3 gap
 # is reworded on each id, not closed.
+#
+# The P2S5-* records (S2-X5, S2-A5, S2-A7, S2-A10, S2-D7) ran on the P2-S5
+# branch after merging e4c612b8 (main with P2-S4), the same way, on sqlite,
+# restored from saved bytes; the tests also pass on Postgres. P2-S5 built
+# the approval card and its Approve and Cancel callbacks. In the tests a
+# card's Approve reaches DispatchApproved through the webhook's AfterCommit;
+# nothing in cmd/server constructs the cards or the executor, so the "no
+# caller" gap of the executor ids is reworded, not closed. The change moved
+# lines in internal/pa/runloop.go, internal/pa/conversation.go and
+# internal/pa/connector/dispatch.go, so the P2S7 guards in those files were
+# pointed at their new line numbers; their code did not change.
 
 S2-C9:
   status: pending
@@ -152,7 +163,7 @@ S2-C11:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.614s
   gaps:
-    - half: "a caller: nothing in the service invokes DispatchApproved until the cards (P2-S5)"
+    - half: "a caller in the service: a card's Approve hands the approval to the webhook's AfterCommit (pa.PostCommitApproval, P2-S5) and the tests pass it to DispatchApproved, but cmd/server builds no WriteExecutor and no connector.Cards, so nothing deployed invokes DispatchApproved"
       tracked_by: "#1320"
     - half: "connector.PinFresh (P2-S4) is not wired: no WriteExecutor is built in cmd/server, and the Phase 2 pin is not loadable at runtime (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests; the switch-on is P2-S14"
       tracked_by: "#1323"
@@ -295,7 +306,7 @@ S2-C13:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.772s
   gaps:
-    - half: "a caller: nothing in the service invokes DispatchApproved until the cards (P2-S5)"
+    - half: "a caller in the service: a card's Approve hands the approval to the webhook's AfterCommit (pa.PostCommitApproval, P2-S5) and the tests pass it to DispatchApproved, but cmd/server builds no WriteExecutor and no connector.Cards, so nothing deployed invokes DispatchApproved"
       tracked_by: "#1320"
     - half: "connector.PinFresh (P2-S4) is not wired: no WriteExecutor is built in cmd/server, and the Phase 2 pin is not loadable at runtime (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests; the switch-on is P2-S14"
       tracked_by: "#1323"
@@ -303,16 +314,45 @@ S2-C13:
       tracked_by: "#1320"
 
 S2-X5:
-  status: pending
+  status: green
   slice: P2-S5
-  tracked_by: "#1320"
-  note: "callback check from.id == principal on approval cards"
+  note: "Approval card callbacks (#1320 P2-S5): a press is consumed and its approval looked up under the principal who pressed (the verified from.id of a private chat), never by callback id alone. Another principal sending the owner's callback_data, or a guessed id, is answered unknown button; the owner's callbacks and approval stay as they were and nothing is dispatched."
+  tests:
+    - internal/pa.TestS2X5_AnotherPrincipalsButtonIsUnknown
+  mutations:
+    - id: P2S5-X5a
+      guard: internal/db/pa_convo.go:509
+      guard_text: "DELETE FROM pa_callbacks WHERE principal = $1 AND id = $2 AND expires_at_ms > $3 RETURNING action"
+      mutation: "the callback is consumed by id only: `principal = $1` -> `$1 = $1` in ConsumePACallback, so another principal's press deletes the owner's button"
+      killed_by:
+        - internal/pa.TestS2X5_AnotherPrincipalsButtonIsUnknown
+      red: |-
+        --- FAIL: TestS2X5_AnotherPrincipalsButtonIsUnknown (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.690s
+    - id: P2S5-X5b
+      guard: internal/db/pa_approvals.go:237
+      guard_text: "WHERE principal = $1 AND (approve_cb_id = $2 OR cancel_cb_id = $3)"
+      mutation: "the approval is looked up by callback id only: `principal = $1` -> `$1 = $1` in LookupPAApprovalByCallback, so another principal is told about the owner's approval"
+      killed_by:
+        - internal/pa.TestS2X5_AnotherPrincipalsButtonIsUnknown
+      red: |-
+        --- FAIL: TestS2X5_AnotherPrincipalsButtonIsUnknown (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.493s
+  gaps:
+    - half: "production wiring: nothing in cmd/server constructs connector.Cards or sets ConversationsConfig.Approvals (TestNoRuntimePhase2Use forbids NewCards outside tests), and its AfterCommit does not pass pa.PostCommitApproval to a WriteExecutor, so no card is emitted and no card button is handled outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
 
 S2-I5:
   status: pending
   slice: P2-S5
   tracked_by: "#1321"
-  note: "the card gate reads the durable taint; P2-S11 (lowering) must keep it. The tests are of the inert gate.Decide (#1370): rule 6 cards a tainted or unreadable taint. Nothing in the runtime calls Decide yet, so the id stays pending."
+  note: "the card gate reads the durable taint; P2-S11 (lowering) must keep it. The tests are of the inert gate.Decide (#1370): rule 6 cards a tainted or unreadable taint. The card emitter (connector.Cards, P2-S5) calls Decide with the durable taint inside its transaction and the card warns about external content (internal/pa.TestApprovalCard_TaintedConversationIsFlagged), but no lowering exists, so 'even with a standing permission' cannot be shown yet and nothing deployed constructs the emitter: the id stays pending."
   tests:
     - internal/pa/gate.TestDecideOrder
     - internal/pa/gate.TestDecideNeverLowersWithoutEveryCondition
@@ -334,7 +374,7 @@ S2-I6:
     - internal/pa.TestS2I6_FailedToolRecordIsAnError
   mutations:
     - id: P2S7-I6a
-      guard: internal/pa/runloop.go:814
+      guard: internal/pa/runloop.go:819
       guard_text: 'return tainted, nil'
       mutation: "ConversationTainted returns the durable flag as clean: `return tainted, nil` -> `return tainted && false, nil`"
       killed_by:
@@ -368,7 +408,7 @@ S2-I6:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.527s
     - id: P2S7-I6c
-      guard: internal/pa/connector/dispatch.go:514
+      guard: internal/pa/connector/dispatch.go:535
       guard_text: 'ferr = d.cfg.Jobs.RecordToolResult(fctx, job, out)'
       mutation: "dispatcher no longer records the tool result: `ferr = d.cfg.Jobs.RecordToolResult(fctx, job, out)` -> `_ = out`"
       killed_by:
@@ -407,7 +447,7 @@ S2-I6:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.443s
     - id: P2S7-I6f
-      guard: internal/pa/runloop.go:830
+      guard: internal/pa/runloop.go:835
       guard_text: "convo.ProvenanceExternal, string(output)))\n\t\t\treturn err"
       mutation: "RecordToolResult swallows a failed fragment append: `return err` -> `_ = err; return nil`"
       killed_by:
@@ -476,7 +516,7 @@ S2-I8:
     - internal/db.TestS2I8_NoStatementLowersTaint
   mutations:
     - id: P2S7-I8a
-      guard: internal/pa/conversation.go:590
+      guard: internal/pa/conversation.go:602
       guard_text: 'if prov != convo.ProvenanceUser {'
       mutation: "userCommand accepts a command of any provenance: `if prov != convo.ProvenanceUser {` -> `if false && prov != convo.ProvenanceUser {`"
       killed_by:
@@ -537,7 +577,7 @@ S2-I10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.404s
     - id: P2S7-I10b
-      guard: internal/pa/runloop.go:812
+      guard: internal/pa/runloop.go:817
       guard_text: 'return true, err'
       mutation: "ConversationTainted store error returns clean: `return true, err` -> `return false, err`"
       killed_by:
@@ -550,7 +590,7 @@ S2-I10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.458s
     - id: P2S7-I10c
-      guard: internal/pa/connector/dispatch.go:567
+      guard: internal/pa/connector/dispatch.go:588
       guard_text: "\"pa dispatch: conversation taint unreadable, recorded as external\", \"err\", err)\n\t\treturn TaintExternal"
       mutation: "Dispatcher.taint read error recorded clean: `return TaintExternal` -> `return TaintClean` in the error branch"
       killed_by:
@@ -610,6 +650,7 @@ S2-D7:
   note: "Write executor (#1320 P2-S3): the stored canonical bytes of the approval are unsealed, checked against args_sha and written into the tools/call body as they are (Endpoint.CallToolExact); they are never decoded and marshalled again."
   tests:
     - internal/pa.TestS2D7_ApprovedBytesAreSentVerbatim
+    - internal/pa.TestS2D7_CardShowsTheBytesThatAreSent
     - internal/pa/connector.TestS2D7_CallToolExactSendsTheBytes
   mutations:
     - id: P2S3-D7a
@@ -636,12 +677,24 @@ S2-D7:
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.525s
+    - id: P2S5-D7c
+      guard: internal/pa/connector/card.go:346
+      guard_text: "text, err := safetext.Card(cardToolName(a.Server, a.Tool), string(args), tainted || terr != nil)"
+      mutation: "the card is rendered from other bytes than the sealed arguments (the last byte dropped)"
+      killed_by:
+        - internal/pa.TestS2D7_CardShowsTheBytesThatAreSent
+      red: |-
+        --- FAIL: TestS2D7_CardShowsTheBytesThatAreSent (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.497s
   gaps:
-    - half: "a caller: nothing in the service invokes DispatchApproved until the cards (P2-S5)"
+    - half: "a caller in the service: a card's Approve hands the approval to the webhook's AfterCommit (pa.PostCommitApproval, P2-S5) and the tests pass it to DispatchApproved, but cmd/server builds no WriteExecutor and no connector.Cards, so nothing deployed invokes DispatchApproved"
       tracked_by: "#1322"
     - half: "connector.PinFresh (P2-S4) is not wired: no WriteExecutor is built in cmd/server, and the Phase 2 pin is not loadable at runtime (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests; the switch-on is P2-S14"
       tracked_by: "#1323"
-    - half: "the card showing the same bytes the executor sends (P2-S5)"
+    - half: "a card is byte for byte the sealed arguments only when they hold nothing safetext rewrites: a link-like token is shown defanged (a[.]b) while the call sends it as it is, and arguments that already hold a defang mark are refused card_unshowable. Owner decision: show such values raw on a card, or keep the defang (P2-S5 kept it)"
       tracked_by: "#1322"
 
 S2-A1:
@@ -696,8 +749,8 @@ S2-A1:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.475s
   gaps:
-    - half: "the Approve and Cancel callbacks of a card, double tap included (P2-S5)"
-      tracked_by: "#1320"
+    - half: "the Approve and Cancel callbacks of a card are built and tested (P2-S5, S2-A7); production wiring: nothing in cmd/server constructs connector.Cards or sets ConversationsConfig.Approvals (TestNoRuntimePhase2Use forbids NewCards outside tests), and its AfterCommit does not pass pa.PostCommitApproval to a WriteExecutor, so no card is emitted and no card button is handled outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
 
 S2-A2:
   status: green
@@ -755,8 +808,8 @@ S2-A2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.802s
   gaps:
-    - half: "the executor and the card callbacks refusing an expired approval to the principal (P2-S3, P2-S5)"
-      tracked_by: "#1320"
+    - half: "the card callbacks answer an expired approval to the principal (internal/pa.TestApprovalCard_ExpiredButtons, P2-S5) and the executor refuses one (P2-S3), in tests only; production wiring: nothing in cmd/server constructs connector.Cards or sets ConversationsConfig.Approvals (TestNoRuntimePhase2Use forbids NewCards outside tests), and its AfterCommit does not pass pa.PostCommitApproval to a WriteExecutor, so no card is emitted and no card button is handled outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
 
 S2-A3:
   status: green
@@ -791,7 +844,7 @@ S2-A3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.510s
   gaps:
-    - half: "a caller: nothing in the service invokes DispatchApproved until the cards (P2-S5)"
+    - half: "a caller in the service: a card's Approve hands the approval to the webhook's AfterCommit (pa.PostCommitApproval, P2-S5) and the tests pass it to DispatchApproved, but cmd/server builds no WriteExecutor and no connector.Cards, so nothing deployed invokes DispatchApproved"
       tracked_by: "#1320"
     - half: "connector.PinFresh (P2-S4) is not wired: no WriteExecutor is built in cmd/server, and the Phase 2 pin is not loadable at runtime (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests; the switch-on is P2-S14"
       tracked_by: "#1323"
@@ -864,8 +917,8 @@ S2-A4:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.829s
   gaps:
-    - half: "a callback tapped by another principal in a chat, end to end (P2-S5)"
-      tracked_by: "#1320"
+    - half: "a callback tapped by another principal is refused end to end in the tests (S2-X5, P2-S5); production wiring: nothing in cmd/server constructs connector.Cards or sets ConversationsConfig.Approvals (TestNoRuntimePhase2Use forbids NewCards outside tests), and its AfterCommit does not pass pa.PostCommitApproval to a WriteExecutor, so no card is emitted and no card button is handled outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
 
 S2-A5:
   status: green
@@ -873,6 +926,8 @@ S2-A5:
   note: "Fresh listing at dispatch (#1320 P2-S4): connector.PinFresh lists the server once per dispatch through its endpoint, never from the read path's 60 s cache, and catalog.Pin.ObserveTool refuses a tool that is missing or whose schema, description or annotations differ from the pin; the executor then compares the three hashes of that listing with the ones the approval recorded. Either mismatch refuses tool_changed with no tools/call, and the approval is ended. The row names schema and description; annotations are compared the same way."
   tests:
     - internal/pa.TestS2A5_DriftBetweenApproveAndDispatchIsRefused
+    - internal/pa.TestS2A5_CardRecordsTheListedDefinition
+    - internal/pa.TestS2A5_DriftAfterTheCardIsRefused
     - internal/pa/catalog.TestS2A5_ObserveToolRefusesDrift
     - internal/pa/connector.TestS2A5_FreshListingSeesDriftOverHTTP
   mutations:
@@ -958,13 +1013,23 @@ S2-A5:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.703s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/catalog	0.261s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.474s
+    - id: P2S5-A5c
+      guard: internal/pa/connector/card.go:225
+      guard_text: "SchemaSHA: fresh.SchemaSHA, DescriptionSHA: fresh.DescriptionSHA, AnnotationSHA: fresh.AnnotationSHA,"
+      mutation: "the card records another hash as the description hash of the definition it listed"
+      killed_by:
+        - internal/pa.TestS2A5_CardRecordsTheListedDefinition
+      red: |-
+        --- FAIL: TestS2A5_CardRecordsTheListedDefinition (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.532s
   gaps:
-    - half: "a caller: nothing in the service invokes DispatchApproved until the cards (P2-S5)"
+    - half: "a caller in the service: a card's Approve hands the approval to the webhook's AfterCommit (pa.PostCommitApproval, P2-S5) and the tests pass it to DispatchApproved, but cmd/server builds no WriteExecutor and no connector.Cards, so nothing deployed invokes DispatchApproved"
       tracked_by: "#1320"
     - half: "connector.PinFresh (P2-S4) is not wired: no WriteExecutor is built in cmd/server, and the Phase 2 pin is not loadable at runtime (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests; the switch-on is P2-S14"
       tracked_by: "#1323"
-    - half: "the card recording the three hashes of the definition it showed, computed as catalog.ToolDefinition computes them (P2-S5): until then every approval in the tests is built by hand"
-      tracked_by: "#1320"
     - half: "drift on a real MCP server through internal/pa/egress: the HTTP tests reach a fake server with the httptest client, because egress refuses loopback"
       tracked_by: "#1320"
 
@@ -1029,7 +1094,7 @@ S2-A6:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/catalog	0.246s
   gaps:
-    - half: "a caller: nothing in the service invokes DispatchApproved until the cards (P2-S5)"
+    - half: "a caller in the service: a card's Approve hands the approval to the webhook's AfterCommit (pa.PostCommitApproval, P2-S5) and the tests pass it to DispatchApproved, but cmd/server builds no WriteExecutor and no connector.Cards, so nothing deployed invokes DispatchApproved"
       tracked_by: "#1320"
     - half: "connector.PinFresh (P2-S4) is not wired: no WriteExecutor is built in cmd/server, and the Phase 2 pin is not loadable at runtime (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests; the switch-on is P2-S14"
       tracked_by: "#1323"
@@ -1039,10 +1104,45 @@ S2-A6:
       tracked_by: "#1320"
 
 S2-A7:
-  status: pending
-  slice: P2-S2
-  tracked_by: "#1320"
-  note: "the dispatch ledger dispatches a double tap once"
+  status: green
+  slice: P2-S5
+  note: "Approval card callbacks (#1320 P2-S5) over the ledger of P2-S2: the Approve callback is consumed and the row moved pending -> approved in the webhook's transaction, the dispatch runs after commit, and a redelivered update is dropped by the update dedup. A second or concurrent tap finds no callback and is answered from the approval row (already approved), with no second dispatch. The receipt compare-and-set and the dispatch record's unique key (S2-A1) hold the call at one even if the approve step is broken; P2S5-A7a shows the approve step on its own."
+  tests:
+    - internal/pa.TestS2A7_DoubleTapDispatchesOnce
+    - internal/pa.TestS2A7_ConcurrentTapsDispatchOnce
+    - internal/pa.TestS2A7_ApproveStepRefusesAnApprovedRow
+  mutations:
+    - id: P2S5-A7a
+      guard: internal/db/pa_approvals.go:317
+      guard_text: "WHERE principal = $3 AND id = $4 AND status = $5 AND expires_at_ms > $2"
+      mutation: "the approve step no longer requires status = pending: `AND status = $5` -> `AND $5 = $5` in ApprovePAApproval, so a restored button approves an approved row again"
+      killed_by:
+        - internal/pa.TestS2A7_ApproveStepRefusesAnApprovedRow
+      red: |-
+        --- FAIL: TestS2A7_ApproveStepRefusesAnApprovedRow (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.528s
+    - id: P2S5-A7b
+      guard: internal/pa/card.go:216
+      guard_text: "case approval.StatusApproved, approval.StatusDispatching, approval.StatusDone:\n\t\treturn c.reply(ctx, tx, u, ReplyApprovalAlreadyDone, \"\")"
+      mutation: "a spent button of an approved card is answered unknown button instead of from the approval row"
+      killed_by:
+        - internal/pa.TestS2A7_DoubleTapDispatchesOnce
+        - internal/pa.TestS2A7_ConcurrentTapsDispatchOnce
+      red: |-
+        --- FAIL: TestS2A7_DoubleTapDispatchesOnce (0.06s)
+        --- FAIL: TestS2A7_ConcurrentTapsDispatchOnce (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.634s
+  gaps:
+    - half: "production wiring: nothing in cmd/server constructs connector.Cards or sets ConversationsConfig.Approvals (TestNoRuntimePhase2Use forbids NewCards outside tests), and its AfterCommit does not pass pa.PostCommitApproval to a WriteExecutor, so no card is emitted and no card button is handled outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
+    - half: "two taps handled by two replicas of the service against one Postgres: the concurrent test runs both in one process"
+      tracked_by: "#1320"
 
 S2-A8:
   status: pending
@@ -1057,10 +1157,29 @@ S2-A9:
   note: "standing permissions bound to revision and expiry"
 
 S2-A10:
-  status: pending
-  slice: P2-S10
-  tracked_by: "#1320"
-  note: "grants only through /permissions, never from a card"
+  status: green
+  slice: P2-S5
+  note: "Approval card (#1320 P2-S5), the card half of the row: a card's keyboard is built from one registry of two buttons, Approve and Cancel; the test enumerates the registry, the keyboard of every outbox kind, the card's server texts and the ledger calls a press can reach, and finds no third button, no wording that offers a standing permission and no call other than lookup, approve and cancel. Standing permissions do not exist yet, so 'grants come only from /permissions' is a gap."
+  tests:
+    - internal/pa.TestS2A10_CardOffersOnlyApproveAndCancel
+  mutations:
+    - id: P2S5-A10a
+      guard: internal/pa/card.go:68
+      guard_text: "{Label: safetext.LabelCancel, Action: ActionApprovalCancel},"
+      mutation: "a third button, \"Always allow\" (a new safetext label), is added to the card registry"
+      killed_by:
+        - internal/pa.TestS2A10_CardOffersOnlyApproveAndCancel
+      red: |-
+        --- FAIL: TestS2A10_CardOffersOnlyApproveAndCancel (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.432s
+  gaps:
+    - half: "the /permissions route and a check that it is the only writer of standing permissions: neither exists until P2-S10, which must also keep this test's enumeration current for any card it adds"
+      tracked_by: "#1320"
+    - half: "production wiring: nothing in cmd/server constructs connector.Cards or sets ConversationsConfig.Approvals (TestNoRuntimePhase2Use forbids NewCards outside tests), and its AfterCommit does not pass pa.PostCommitApproval to a WriteExecutor, so no card is emitted and no card button is handled outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
 
 S2-F3:
   status: green
@@ -1094,7 +1213,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.521s
   gaps:
-    - half: "a caller: nothing in the service invokes DispatchApproved until the cards (P2-S5)"
+    - half: "a caller in the service: a card's Approve hands the approval to the webhook's AfterCommit (pa.PostCommitApproval, P2-S5) and the tests pass it to DispatchApproved, but cmd/server builds no WriteExecutor and no connector.Cards, so nothing deployed invokes DispatchApproved"
       tracked_by: "#1320"
     - half: "connector.PinFresh (P2-S4) is not wired: no WriteExecutor is built in cmd/server, and the Phase 2 pin is not loadable at runtime (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests; the switch-on is P2-S14"
       tracked_by: "#1323"

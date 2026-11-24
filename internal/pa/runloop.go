@@ -147,6 +147,9 @@ type RunLoopConfig struct {
 	Typing TypingSender
 	// Phases records where a run's time goes (timing.go). Optional.
 	Phases PhaseObserver
+	// Cards builds an approval card when its outbox row is sent (card.go).
+	// Optional: without it such a row cannot be built and fails.
+	Cards CardRenderer
 }
 
 // RunLoop serves the run-loop routes and implements RunEnqueuer and
@@ -168,6 +171,7 @@ type RunLoop struct {
 	allowed  PrincipalAllowlist
 	typing   *typingTracker
 	timer    *runTimer
+	cards    CardRenderer
 	// pending tracks the deliveries request paths started (deliverAfter).
 	pending sync.WaitGroup
 	// readTools is every tool the pin admits without approval, as
@@ -229,6 +233,7 @@ func NewRunLoop(cfg RunLoopConfig) (*RunLoop, error) {
 		sender: cfg.Sender, tools: cfg.Tools, limits: cfg.Limits, budget: cfg.Budget, lease: lease, now: now,
 		readTools: read, modelTools: modelTools, metrics: cfg.Metrics, cbCount: cfg.CallbackMetrics,
 		allowed: cfg.Allowed, typing: newTypingTracker(cfg.Typing, now), timer: newRunTimer(cfg.Phases, now),
+		cards: cfg.Cards,
 	}, nil
 }
 
@@ -861,6 +866,9 @@ func (l *RunLoop) Authenticate(r *http.Request) (PAJob, error) {
 
 // Principal returns the principal the job's token was minted for.
 func (j PAJob) Principal() int64 { return j.ref.Principal }
+
+// JobID returns the id of the job the token was minted for.
+func (j PAJob) JobID() int64 { return j.ref.JobID }
 
 // TokenRefusal says why a request's pa-job token was refused, for the
 // executor's audit record (#1315).

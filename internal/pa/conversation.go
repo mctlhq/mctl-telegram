@@ -159,6 +159,11 @@ type ConversationsConfig struct {
 	// there is no "allow everyone" default, and an empty list allows
 	// nobody.
 	Allowed PrincipalAllowlist
+	// Approvals is the approval ledger behind the buttons of an approval
+	// card (card.go, #1320 slice P2-S5). Optional: without it such a
+	// button is answered ReplyUnknownButton. No production wiring sets it
+	// yet.
+	Approvals ApprovalCallbacks
 	// Now defaults to time.Now.
 	Now func() time.Time
 }
@@ -175,7 +180,9 @@ type Conversations struct {
 	limiter Limiter
 	linking bool
 	allowed PrincipalAllowlist
-	now     func() time.Time
+	// approvals is nil unless approval cards are wired (card.go).
+	approvals ApprovalCallbacks
+	now       func() time.Time
 }
 
 var _ Handler = (*Conversations)(nil)
@@ -191,7 +198,7 @@ func NewConversations(cfg ConversationsConfig) (*Conversations, error) {
 		now = time.Now
 	}
 	return &Conversations{store: cfg.Store, sealer: cfg.Sealer, ttl: cfg.TTL, runs: cfg.Runs, replies: cfg.Replies, limiter: cfg.Limiter,
-		linking: cfg.Linking, allowed: cfg.Allowed, now: now}, nil
+		linking: cfg.Linking, allowed: cfg.Allowed, approvals: cfg.Approvals, now: now}, nil
 }
 
 // HandleUpdate implements Handler. Any error rolls back the update's dedup
@@ -411,11 +418,16 @@ func (c *Conversations) handleCallback(ctx context.Context, tx *sql.Tx, u Verifi
 	action, err := c.store.ConsumePACallback(ctx, tx, p.TelegramID(), u.CallbackData(), c.now())
 	if errors.Is(err, convo.ErrNotFound) {
 		// Unknown, expired, already used, or another principal's id: the
-		// lookup is under (principal, id), so all four look the same.
-		return c.reply(ctx, tx, u, ReplyUnknownButton, "")
+		// lookup is under (principal, id), so all four look the same. A
+		// spent button of the principal's own approval card is answered
+		// from the approval (card.go).
+		return c.spentButton(ctx, tx, u)
 	}
 	if err != nil {
 		return err
+	}
+	if c.approvals != nil && (action == ActionApprovalApprove || action == ActionApprovalCancel) {
+		return c.approvalButton(ctx, tx, u, action)
 	}
 	if !strings.HasPrefix(action, actionConsentAcceptPrefix) {
 		// An action this build does not know: the id is consumed and the

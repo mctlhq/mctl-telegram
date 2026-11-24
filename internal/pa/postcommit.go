@@ -46,6 +46,9 @@ type postCommitKey struct{}
 // postCommitSlot holds at most one action per update delivery.
 type postCommitSlot struct {
 	action *LinkAction
+	// approval is the id of the approval this update's Approve press
+	// marked approved; the write is dispatched after the commit.
+	approval string
 	// runQueued: the update's handler queued a run (RunLoop.EnqueueRun).
 	// TypingAfter reads it after the commit, so an update that rolled
 	// back, or queued nothing, shows no status.
@@ -82,6 +85,31 @@ func setPostCommit(ctx context.Context, a LinkAction) error {
 	}
 	s.action = &a
 	return nil
+}
+
+// setPostCommitApproval records that this update approved approvalID. The
+// dispatch belongs after the commit (threat model T2): an approval that
+// rolled back must not be dispatched, and no call is made inside the
+// webhook's transaction.
+func setPostCommitApproval(ctx context.Context, approvalID string) error {
+	s, ok := ctx.Value(postCommitKey{}).(*postCommitSlot)
+	if !ok || s == nil {
+		return ErrNoPostCommit
+	}
+	s.approval = approvalID
+	return nil
+}
+
+// PostCommitApproval returns the id of the approval this update's Approve
+// press marked approved, if any. Only AfterCommit calls it, after the
+// transaction committed, and hands the id to the write executor
+// (connector.WriteExecutor.DispatchApproved) with the update's principal.
+func PostCommitApproval(ctx context.Context) (string, bool) {
+	s, ok := ctx.Value(postCommitKey{}).(*postCommitSlot)
+	if !ok || s == nil || s.approval == "" {
+		return "", false
+	}
+	return s.approval, true
 }
 
 // PostCommitAction returns the action the update's handler recorded, if

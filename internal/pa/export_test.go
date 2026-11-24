@@ -5,8 +5,11 @@ package pa
 // cannot live in package pa: the connector imports pa.
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -104,4 +107,123 @@ func (d *DispatchHarness) RevokePool(t *testing.T) {
 	if err := d.h.cache.Refresh(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// SentCard is one message the bot sent, with its buttons as (label,
+// callback data) pairs, row by row.
+type SentCard struct {
+	Text    string
+	Buttons [][][2]string
+}
+
+// MessagesTo returns the completed sends to chat with their keyboards,
+// once deliveries are done.
+func (d *DispatchHarness) MessagesTo(chat int64) []SentCard {
+	d.h.loop.WaitDeliveries()
+	var out []SentCard
+	for _, m := range d.h.sender.messagesTo(chat) {
+		c := SentCard{Text: m.text}
+		for _, row := range m.kb {
+			var r [][2]string
+			for _, b := range row {
+				r = append(r, [2]string{b.Label.String(), b.Data})
+			}
+			c.Buttons = append(c.Buttons, r)
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// EnableApprovalCards wires what no production wiring does yet (#1320
+// slice P2-S5): the run loop sends approval cards built by cards, the
+// conversations handle a card's buttons against the store's approval
+// ledger, and the webhook hands an approved approval to approved after the
+// update's transaction committed, as cmd/server will hand it to the write
+// executor.
+func (d *DispatchHarness) EnableApprovalCards(cards CardRenderer, approvals ApprovalCallbacks,
+	approved func(ctx context.Context, principal int64, approvalID string)) {
+	h := d.h
+	h.loop.cards = cards
+	h.conv.approvals = approvals
+	wh, err := NewWebhookHandler(WebhookConfig{
+		Secret: testSecret, Dedup: h.convoHarness.store, Handler: h.conv, Failures: h.convoHarness.store,
+		AfterCommit: func(ctx context.Context, u VerifiedUpdate) {
+			if id, ok := PostCommitApproval(ctx); ok {
+				approved(ctx, u.Principal().TelegramID(), id)
+			}
+			h.loop.DeliverAfter(ctx, u.Principal().TelegramID())
+		},
+	})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	h.hook = wh
+}
+
+// PressConcurrently delivers n presses of the button by user at the same
+// time, each as a new update, and returns the webhook's statuses. The
+// deliveries are waited for once, after every press returned: a WaitGroup
+// may not be waited on while another press is still adding to it.
+func (d *DispatchHarness) PressConcurrently(user int64, data string, n int) []int {
+	codes := make([]int, n)
+	var wg sync.WaitGroup
+	for i := range codes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			codes[i] = d.h.press(user, data)
+		}()
+	}
+	wg.Wait()
+	d.h.loop.WaitDeliveries()
+	return codes
+}
+
+// Press delivers a press of the button with callback data by user, as a
+// new update, and returns the webhook's status.
+func (d *DispatchHarness) Press(user int64, data string) int {
+	code := d.h.press(user, data)
+	d.h.loop.WaitDeliveries()
+	return code
+}
+
+// PressUpdate is Press with a given update id, for a redelivery.
+func (d *DispatchHarness) PressUpdate(updateID, user int64, data string) int {
+	body := fmt.Sprintf(`{"update_id":%d,"callback_query":{"id":"cb","data":%q,"from":{"id":%d,"is_bot":false},`+
+		`"message":{"message_id":9,"date":1,"chat":{"id":%d,"type":"private"}}}}`, updateID, data, user, user)
+	code := deliver(d.h.hook, testSecret, body)
+	d.h.loop.WaitDeliveries()
+	return code
+}
+
+// NextUpdateID reserves an update id no other update of the harness uses.
+func (d *DispatchHarness) NextUpdateID() int64 { return d.h.nextID.Add(1) }
+
+// Replies returns every reply the conversations queued for user, oldest
+// first.
+func (d *DispatchHarness) Replies(user int64) []Reply {
+	r := d.h.replies
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []Reply
+	for _, q := range r.replies {
+		if q.principal == user {
+			out = append(out, q.reply)
+		}
+	}
+	return out
+}
+
+// DeliverNow sends principal's due outbox rows and waits for it.
+func (d *DispatchHarness) DeliverNow(principal int64) {
+	d.h.loop.DeliverAfter(context.Background(), principal)
+	d.h.loop.WaitDeliveries()
+}
+
+// FailSends makes every send fail with err (nil sends again).
+func (d *DispatchHarness) FailSends(err error) {
+	d.h.sender.mu.Lock()
+	d.h.sender.fail = err
+	d.h.sender.mu.Unlock()
 }

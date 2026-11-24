@@ -102,3 +102,36 @@ func TestOutboxItemValid_ConnectionLevel(t *testing.T) {
 		t.Error("connection_expired is not a known kind")
 	}
 }
+
+// TestOutboxItemValid_CardLevel: a card row has its Approve callback id
+// and nothing else (#1320 slice P2-S5).
+func TestOutboxItemValid_CardLevel(t *testing.T) {
+	ok := OutboxItem{Principal: 4242001, Kind: OutboxApprovalCard, Button: "cb"}
+	if !ok.Valid() {
+		t.Fatal("a card row with its button is invalid")
+	}
+	for name, o := range map[string]OutboxItem{
+		"no button":      {Principal: 4242001, Kind: OutboxApprovalCard},
+		"long button":    {Principal: 4242001, Kind: OutboxApprovalCard, Button: strings.Repeat("a", MaxOutboxButton+1)},
+		"an update":      {Principal: 4242001, Kind: OutboxApprovalCard, Button: "cb", UpdateID: 7},
+		"a job":          {Principal: 4242001, Kind: OutboxApprovalCard, Button: "cb", JobID: 1},
+		"a conversation": {Principal: 4242001, Kind: OutboxApprovalCard, Button: "cb", ConversationID: "pcv"},
+		"a connection":   {Principal: 4242001, Kind: OutboxApprovalCard, Button: "cb", ConnectionID: "pac"},
+		"an approval":    {Principal: 4242001, Kind: OutboxApprovalCard, Button: "cb", ApprovalID: "apr"},
+		"no principal":   {Kind: OutboxApprovalCard, Button: "cb"},
+	} {
+		if o.Valid() {
+			t.Errorf("%s: valid", name)
+		}
+	}
+	if !OutboxApprovalCard.Valid() || !OutboxApprovalCard.CardLevel() || OutboxApprovalCard.ConversationLevel() ||
+		OutboxApprovalCard.CarriesButton() {
+		t.Fatal("the card kind is not a card-level kind of its own")
+	}
+	// The answers to a card's buttons are plain conversation replies.
+	for _, k := range []OutboxKind{OutboxApprovalCancelled, OutboxApprovalAlreadyDone, OutboxApprovalExpired} {
+		if !k.ConversationLevel() || k.CardLevel() || k.CarriesButton() {
+			t.Errorf("%s is not a plain conversation-level kind", k)
+		}
+	}
+}

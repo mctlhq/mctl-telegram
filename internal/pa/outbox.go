@@ -90,6 +90,10 @@ var outboxTemplates = map[jobs.OutboxKind]safetext.Template{
 	jobs.OutboxLinkingUnavailable: safetext.TextLinkingUnavailable,
 	jobs.OutboxPrincipalDisabled:  safetext.TextAssistantUnavailable,
 
+	jobs.OutboxApprovalCancelled:   safetext.TextApprovalCancelled,
+	jobs.OutboxApprovalAlreadyDone: safetext.TextApprovalAlreadyDone,
+	jobs.OutboxApprovalExpired:     safetext.TextApprovalExpired,
+
 	jobs.OutboxConnectionExpired: safetext.TextConnectionExpired,
 
 	jobs.OutboxWriteDone:    safetext.TextWriteDone,
@@ -209,7 +213,38 @@ func (l *RunLoop) count(outcome string) {
 func (l *RunLoop) sendItem(ctx context.Context, it jobs.OutboxItem) (jobs.OutboxCompletion, string) {
 	now := l.now()
 	var text safetext.Text
+	var kb output.Keyboard
 	switch {
+	case it.Kind.CardLevel():
+		card, err := l.approvalCard(ctx, it)
+		switch {
+		case err == nil:
+		case errors.Is(err, ErrCardGone):
+			// Answered, cancelled or expired before the card went out.
+			return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxDropped}, OutboxOutcomeDropped
+		case errors.Is(err, ErrCardUnreadable):
+			// Could not read the approval: nothing is known about it and
+			// nothing was sent. It is due again. Only the kind of the
+			// error is logged: a store error may quote a row.
+			kind := "store"
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				kind = "context"
+			}
+			slog.Warn("pa outbox approval card not readable", "kind", kind)
+			return l.retry(it, now, 0)
+		default:
+			return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxFailed}, OutboxOutcomeFailed
+		}
+		var ok bool
+		if kb, ok = approvalCardKeyboard(card); !ok {
+			return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxFailed}, OutboxOutcomeFailed
+		}
+		// Only a card that still has to be sent is checked, like a
+		// prompt: one delivered on an earlier attempt was sent.
+		if it.SentParts < card.Text.Parts() && !card.ExpiresAt.After(now.Add(cardMinLife)) {
+			return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxDropped}, OutboxOutcomeButtonExpired
+		}
+		text = card.Text
 	case it.Kind == jobs.OutboxReply:
 		t, err := l.renderReply(ctx, it)
 		switch {
@@ -234,9 +269,11 @@ func (l *RunLoop) sendItem(ctx context.Context, it jobs.OutboxItem) (jobs.Outbox
 		}
 		text = safetext.ServerText(tpl)
 	}
-	kb, ok := outboxKeyboard(it)
-	if !ok {
-		return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxFailed}, OutboxOutcomeFailed
+	if !it.Kind.CardLevel() {
+		var ok bool
+		if kb, ok = outboxKeyboard(it); !ok {
+			return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxFailed}, OutboxOutcomeFailed
+		}
 	}
 	if it.SentParts >= text.Parts() {
 		// Every part was delivered on an earlier attempt and only the
@@ -269,6 +306,24 @@ func (l *RunLoop) sendItem(ctx context.Context, it jobs.OutboxItem) (jobs.Outbox
 		return nil
 	})
 	return l.sendOutcome(it, err)
+}
+
+// approvalCard builds the card of a card-level row from its approval, for
+// the row's principal. Without a renderer no card can be built.
+func (l *RunLoop) approvalCard(ctx context.Context, it jobs.OutboxItem) (ApprovalCard, error) {
+	if l.cards == nil {
+		return ApprovalCard{}, errors.New("pa outbox: no approval card renderer")
+	}
+	card, err := l.cards.RenderApprovalCard(ctx, it.Principal, it.Button)
+	if err != nil {
+		return ApprovalCard{}, err
+	}
+	// The row names the card by its Approve callback: a renderer that
+	// answered with another card is a bug, and nothing is sent.
+	if card.Approve != it.Button || card.Text.Parts() != 1 {
+		return ApprovalCard{}, errors.New("pa outbox: renderer returned another card")
+	}
+	return card, nil
 }
 
 // buttonLive reports whether a consent prompt's button still resolves for

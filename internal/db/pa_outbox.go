@@ -259,6 +259,30 @@ func enqueuePAOutbox(ctx context.Context, tx *sql.Tx, item jobs.OutboxItem, nowM
 		}
 		return nil
 	}
+	if item.Kind.CardLevel() {
+		// Once per card: the Approve callback id is new for every approval,
+		// so a conflict means the id was issued twice. That is an error,
+		// never a card silently left out: the approval this row belongs to
+		// is written in the same transaction and must not exist without it.
+		r, err := tx.ExecContext(ctx,
+			`INSERT INTO pa_outbox(principal, job_id, update_id, kind, button, status, attempts,
+			                       next_at_ms, created_at_ms, updated_at_ms)
+			 VALUES($1, NULL, $2, $3, $4, $5, 0, $6, $6, $6)
+			 ON CONFLICT (principal, update_id, kind) WHERE job_id IS NULL AND connection_id = '' DO NOTHING`,
+			item.Principal, paApprovalOutboxUpdateID(item.Button), string(item.Kind), item.Button,
+			string(jobs.OutboxPending), nowMS)
+		if err != nil {
+			return fmt.Errorf("pa outbox: enqueue: %w", err)
+		}
+		n, err := r.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("pa outbox: enqueue: rows affected: %w", err)
+		}
+		if n != 1 {
+			return fmt.Errorf("pa outbox: enqueue: %w: card", jobs.ErrOutboxUpdateReused)
+		}
+		return nil
+	}
 	if item.Kind.ConversationLevel() {
 		r, err := tx.ExecContext(ctx,
 			`INSERT INTO pa_outbox(principal, job_id, update_id, kind, button, status, attempts,
@@ -295,7 +319,8 @@ func enqueuePAOutbox(ctx context.Context, tx *sql.Tx, item jobs.OutboxItem, nowM
 
 // paApprovalOutboxUpdateID is the update_id stored on an approval-level
 // row: negative, never 0, and a function of the approval id alone (see
-// paOutboxIndexes). A conversation-level update_id is a Telegram update id,
+// paOutboxIndexes). A card-level row stores the same function of its
+// Approve callback id, which is unique in the same way. A conversation-level update_id is a Telegram update id,
 // always positive, so the two never meet.
 func paApprovalOutboxUpdateID(approvalID string) int64 {
 	sum := sha256.Sum256([]byte(approvalID))
@@ -339,6 +364,10 @@ func scanPAOutbox(row interface{ Scan(...any) error }) (jobs.OutboxItem, error) 
 	}
 	// An approval row stores a negative update_id too; the item has none.
 	if it.Kind.ApprovalLevel() && it.ApprovalID != "" && it.UpdateID == paApprovalOutboxUpdateID(it.ApprovalID) {
+		it.UpdateID = 0
+	}
+	// A card row stores a negative update_id as well, from its button.
+	if it.Kind.CardLevel() && it.Button != "" && it.UpdateID == paApprovalOutboxUpdateID(it.Button) {
 		it.UpdateID = 0
 	}
 	return it, nil

@@ -43,6 +43,9 @@ var fieldUsers = map[string]bool{
 	"Template.In": true,
 	"Text.In":     true,
 	"WithRussian": true,
+	// The approval card (card.go): registry templates around two values
+	// that are neutralised like model text.
+	"Card": true,
 }
 
 // guardedFields are the unexported fields of Text and Template. Any

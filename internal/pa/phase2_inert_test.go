@@ -31,6 +31,10 @@ var phase2Idents = map[string]map[string]bool{
 	"ValidatePhase2":  {"internal/pa/catalog/pin.go:LoadPinPhase2": true},
 	"pinPhase2JSON":   {"internal/pa/catalog/pin.go:LoadPinPhase2": true},
 	"AuthorizeWrites": {"internal/pa/catalog/surface.go:Surface.Authorize": true},
+	// The approval card emitter (#1320 slice P2-S5) exists and is tested,
+	// but no runtime code builds one: without it the tool route never
+	// takes the card path (connector.DispatcherConfig.Cards is nil).
+	"NewCards": {},
 }
 
 // phase2PinFile is the Phase 2 pin, module-relative. Only phase2PinEmbedder
@@ -41,8 +45,16 @@ const (
 	phase2PinEmbedder = "internal/pa/catalog/pin.go"
 )
 
-// phase2Package is the write gate; no runtime package imports it yet.
+// phase2Package is the write gate. Outside the package itself only
+// phase2GateImporters import it.
 const phase2Package = "github.com/mctlhq/mctl-telegram/internal/pa/gate"
+
+// phase2GateImporters are the files allowed to import the gate: the card
+// emitter, which calls gate.Decide for an approve-tier call and which
+// nothing constructs at runtime (NewCards above).
+var phase2GateImporters = map[string]bool{
+	"internal/pa/connector/card.go": true,
+}
 
 // TestNoRuntimePhase2Use walks every non-test Go file of the module and
 // fails on any use of a Phase 2 identifier outside its allowlist and on any
@@ -96,7 +108,7 @@ func TestNoRuntimePhase2Use(t *testing.T) {
 
 func phase2Violations(fset *token.FileSet, f *ast.File, rel string) []string {
 	var out []string
-	if !strings.HasPrefix(rel, "internal/pa/gate/") {
+	if !strings.HasPrefix(rel, "internal/pa/gate/") && !phase2GateImporters[rel] {
 		for _, imp := range f.Imports {
 			if p, _ := strconv.Unquote(imp.Path.Value); p == phase2Package {
 				out = append(out, fmt.Sprintf("%s: imports %s", fset.Position(imp.Pos()), phase2Package))
