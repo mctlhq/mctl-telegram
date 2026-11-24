@@ -46,7 +46,11 @@ func (s *Store) PAApprovalForCard(ctx context.Context, principal int64, approveC
 
 // PAJobHasApproval reports, inside tx, whether a card was already emitted
 // for principal's run jobID: any approval row of that job, whatever its
-// status, counts. The tool route asks under the principal's lock
+// status, counts. That includes the row of a call a standing permission
+// handled without a card (connector lower.go): a run that wrote under a
+// permission gets no card afterwards
+// (pa.TestLowering_ALoweredWriteUsesTheRunsCard), which is the stricter
+// reading of the rule. The tool route asks under the principal's lock
 // (BeginPAWrite), so two calls of one run cannot both read false (threat
 // model T10, "one approval card per run", S2-A7). A failed read wraps
 // approval.ErrUnreadable and is never "no card yet" (I9).

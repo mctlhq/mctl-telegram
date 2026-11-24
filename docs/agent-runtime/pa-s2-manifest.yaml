@@ -2747,7 +2747,7 @@ S2-A7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.493s
     - id: P2S14-A7c
-      guard: internal/db/pa_approval_card.go:59
+      guard: internal/db/pa_approval_card.go:63
       guard_text: "FROM pa_approvals WHERE principal = $1 AND job_id = $2`"
       mutation: "PAJobHasApproval counts the principal's approvals of every job, not of this run"
       killed_by:
@@ -2759,7 +2759,7 @@ S2-A7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.427s
     - id: P2S14-A7d
-      guard: internal/db/pa_approval_card.go:60
+      guard: internal/db/pa_approval_card.go:64
       guard_text: "return false, approvalUnreadable(\"approvals of a job\", err)"
       mutation: "PAJobHasApproval answers \"no card\" when its read failed"
       killed_by:

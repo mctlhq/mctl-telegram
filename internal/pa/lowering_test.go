@@ -1023,3 +1023,23 @@ func TestLowering_ExecutorMatchesThePermissionToTheCall(t *testing.T) {
 		}
 	})
 }
+
+// TestLowering_ALoweredWriteUsesTheRunsCard: a call a standing permission
+// handled leaves an approval row of the run, and "one approval card per
+// run" (S2-A7) counts every row. So a run that already wrote under a
+// permission gets no card afterwards: the call is refused, nothing is
+// sent, and a further call the permission covers still runs.
+func TestLowering_ALoweredWriteUsesTheRunsCard(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newLowerEnv(t, s)
+		e.grant("prm_vol", volumeTool, 5, kitchenID)
+		e.lowered("the granted call", "prm_vol", volumeTool, volume5)
+		cards := len(e.sentCards(alice))
+		e.refused("one above the ceiling, after a lowered write", volumeTool, volume6,
+			http.StatusConflict, connector.ReasonCardAlreadySent)
+		if got := len(e.sentCards(alice)); got != cards {
+			t.Fatalf("%d cards after the refusal, %d before", got, cards)
+		}
+		e.lowered("the granted call again", "prm_vol", volumeTool, volume5)
+	})
+}
