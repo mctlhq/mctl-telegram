@@ -2,7 +2,7 @@
   "schema": "mctl-telegram.pa-catalog-pin/v1",
   "servers": {
     "alice": {
-      "upstream": "mctlhq/mctl-alice@41930eb86aff1cca01f1c2a2a9e190c9943cd9f7 src/tools/definitions.ts, snapshot internal/pa/catalog/testdata/alice.tools.json",
+      "upstream": "mctlhq/mctl-alice@c49449a4a16c40437c3ed806b60558145cce7e07 src/tools/definitions.ts, snapshot internal/pa/catalog/testdata/alice.tools.json",
       "tools": {
         "alice_get_device_history": {
           "tier": "auto",
@@ -50,7 +50,12 @@
             "type": "object"
           },
           "input_schema_sha256": "0d43f8c20df503acfe205635447d9a1d47e138565c4f3798a5c36f73772b2730",
-          "annotations": {}
+          "annotations": {
+            "idempotentHint": true,
+            "openWorldHint": true,
+            "readOnlyHint": true,
+            "title": "Get device history (self-hosted only)"
+          }
         },
         "alice_get_device_state": {
           "tier": "auto",
@@ -75,7 +80,12 @@
             "type": "object"
           },
           "input_schema_sha256": "2a24b1a85c563bad80896357ebabbeed8db076e6cd53d64fb840a20c47384433",
-          "annotations": {}
+          "annotations": {
+            "idempotentHint": true,
+            "openWorldHint": true,
+            "readOnlyHint": true,
+            "title": "Get device state"
+          }
         },
         "alice_get_home_summary": {
           "tier": "auto",
@@ -93,7 +103,12 @@
             "type": "object"
           },
           "input_schema_sha256": "1a02a5dfeb3394f2ffa26803188d9dfaba3fc8756c08f5a09c6c27bf11607d7e",
-          "annotations": {}
+          "annotations": {
+            "idempotentHint": true,
+            "openWorldHint": true,
+            "readOnlyHint": true,
+            "title": "Get home summary"
+          }
         },
         "alice_list_devices": {
           "tier": "auto",
@@ -111,7 +126,12 @@
             "type": "object"
           },
           "input_schema_sha256": "1122b4cfb71fb743a94f9aaad65ae59c1f6e7c84f35b6e78b1c273744ee3d9ab",
-          "annotations": {}
+          "annotations": {
+            "idempotentHint": true,
+            "openWorldHint": true,
+            "readOnlyHint": true,
+            "title": "List Alice devices and rooms"
+          }
         }
       }
     },

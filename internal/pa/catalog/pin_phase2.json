@@ -2,7 +2,7 @@
   "schema": "mctl-telegram.pa-catalog-pin/v1",
   "servers": {
     "alice": {
-      "upstream": "mctlhq/mctl-alice@41930eb86aff1cca01f1c2a2a9e190c9943cd9f7 src/tools/definitions.ts, snapshot internal/pa/catalog/testdata/alice.tools.json",
+      "upstream": "mctlhq/mctl-alice@c49449a4a16c40437c3ed806b60558145cce7e07 src/tools/definitions.ts, snapshot internal/pa/catalog/testdata/alice.tools.json",
       "tools": {
         "alice_control_device": {
           "tier": "approve",
@@ -56,7 +56,13 @@
             "type": "object"
           },
           "input_schema_sha256": "01a941711b77e0de2070266235982c00e2afbd2db0a76ccfad42c6616b7c8020",
-          "annotations": {}
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true,
+            "readOnlyHint": false,
+            "title": "Control a device"
+          }
         },
         "alice_control_room": {
           "tier": "approve",
@@ -96,7 +102,13 @@
             "type": "object"
           },
           "input_schema_sha256": "fb7fdd55cc1689b55f98a74225971e2d13d811a952e9e9ea0551bf6a2fb0f44b",
-          "annotations": {}
+          "annotations": {
+            "destructiveHint": true,
+            "idempotentHint": true,
+            "openWorldHint": true,
+            "readOnlyHint": false,
+            "title": "Switch devices in a room or the whole home"
+          }
         },
         "alice_get_device_history": {
           "tier": "auto",
@@ -144,7 +156,12 @@
             "type": "object"
           },
           "input_schema_sha256": "0d43f8c20df503acfe205635447d9a1d47e138565c4f3798a5c36f73772b2730",
-          "annotations": {}
+          "annotations": {
+            "idempotentHint": true,
+            "openWorldHint": true,
+            "readOnlyHint": true,
+            "title": "Get device history (self-hosted only)"
+          }
         },
         "alice_get_device_state": {
           "tier": "auto",
@@ -169,7 +186,12 @@
             "type": "object"
           },
           "input_schema_sha256": "2a24b1a85c563bad80896357ebabbeed8db076e6cd53d64fb840a20c47384433",
-          "annotations": {}
+          "annotations": {
+            "idempotentHint": true,
+            "openWorldHint": true,
+            "readOnlyHint": true,
+            "title": "Get device state"
+          }
         },
         "alice_get_home_summary": {
           "tier": "auto",
@@ -187,7 +209,12 @@
             "type": "object"
           },
           "input_schema_sha256": "1a02a5dfeb3394f2ffa26803188d9dfaba3fc8756c08f5a09c6c27bf11607d7e",
-          "annotations": {}
+          "annotations": {
+            "idempotentHint": true,
+            "openWorldHint": true,
+            "readOnlyHint": true,
+            "title": "Get home summary"
+          }
         },
         "alice_list_devices": {
           "tier": "auto",
@@ -205,7 +232,12 @@
             "type": "object"
           },
           "input_schema_sha256": "1122b4cfb71fb743a94f9aaad65ae59c1f6e7c84f35b6e78b1c273744ee3d9ab",
-          "annotations": {}
+          "annotations": {
+            "idempotentHint": true,
+            "openWorldHint": true,
+            "readOnlyHint": true,
+            "title": "List Alice devices and rooms"
+          }
         },
         "alice_media_control": {
           "tier": "approve",
@@ -249,7 +281,13 @@
             "type": "object"
           },
           "input_schema_sha256": "6dfc43ae675c2c58f1fef8a5fea098aaedcb2e07fda35e8a4eb3a84882a1a30a",
-          "annotations": {}
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": true,
+            "readOnlyHint": false,
+            "title": "Control speaker playback"
+          }
         },
         "alice_say_phrase": {
           "tier": "approve",
@@ -280,7 +318,13 @@
             "type": "object"
           },
           "input_schema_sha256": "a6a62a3d23651cea5a62ebc8d225bb626bd21231ddcc7aadc412be7a0b3071ce",
-          "annotations": {}
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": true,
+            "readOnlyHint": false,
+            "title": "Make a speaker say a phrase"
+          }
         },
         "alice_send_command": {
           "tier": "approve",
@@ -311,7 +355,13 @@
             "type": "object"
           },
           "input_schema_sha256": "1d369d6c16e45260d5b24dd4a22c0ed5ea618447b3e4e6d5369524b9999fee19",
-          "annotations": {}
+          "annotations": {
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": true,
+            "readOnlyHint": false,
+            "title": "Send a voice command to Alice"
+          }
         },
         "alice_set_light": {
           "tier": "approve",
@@ -386,7 +436,13 @@
             "type": "object"
           },
           "input_schema_sha256": "ab2c600213e7fcf48725e3b1f5e0fb464528ba05086aa8b99fdd36b8746fdb12",
-          "annotations": {}
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true,
+            "readOnlyHint": false,
+            "title": "Control a light"
+          }
         },
         "alice_set_volume": {
           "tier": "approve",
@@ -419,7 +475,13 @@
             "type": "object"
           },
           "input_schema_sha256": "49fd970ccd50fe3b89ecd264dc0bd0a349abc2c8083f7774d3b0e4c433171fb0",
-          "annotations": {}
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true,
+            "readOnlyHint": false,
+            "title": "Set speaker volume"
+          }
         },
         "alice_trigger_scenario": {
           "tier": "approve",
@@ -440,7 +502,13 @@
             "type": "object"
           },
           "input_schema_sha256": "96cad25442a89fb1e65932949cb1518ce4cbbcaad74cf3b29336b1afacf55ca6",
-          "annotations": {}
+          "annotations": {
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": true,
+            "readOnlyHint": false,
+            "title": "Run a smart home scenario"
+          }
         }
       }
     },

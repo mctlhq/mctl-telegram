@@ -360,12 +360,16 @@ func TestS1T6_PinnedWriteHasNoPath(t *testing.T) {
 			continue
 		}
 		schema, _ := canonicalObject(w.InputSchema)
+		ann, err := canonicalAnnotations(w.Annotations)
+		if err != nil {
+			t.Fatal(err)
+		}
 		p.Servers["alice"].Tools["alice_set_light"] = PinnedTool{
 			Tier: TierApprove, Class: ClassWrite, Lowerable: LowerableYes,
 			CatalogDescription: "Set a light.",
 			DescriptionSHA256:  sha256Hex([]byte(*w.Description)),
 			InputSchema:        schema, InputSchemaSHA256: sha256Hex(schema),
-			Annotations: json.RawMessage(`{}`),
+			Annotations: ann,
 		}
 	}
 	if err := p.Validate(); err != nil {
