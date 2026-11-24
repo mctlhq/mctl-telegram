@@ -127,7 +127,8 @@ func seedPAPrincipalState(t *testing.T, s *Store, principal int64) {
 	conv := fmt.Sprintf("pcv_%d_%s", principal, randomSuffix(t))
 	t.Cleanup(func() {
 		for _, tb := range []string{"pa_consents", "pa_conversations", "pa_fragments", "pa_principal_locks",
-			"pa_callbacks", "pa_jobs", "pa_usage", "pa_rate", "pa_outbox", "pa_approvals", "pa_dispatches"} {
+			"pa_callbacks", "pa_jobs", "pa_usage", "pa_rate", "pa_outbox", "pa_approvals", "pa_dispatches",
+			"pa_permissions"} {
 			_, _ = s.DB.Exec(`DELETE FROM `+tb+` WHERE principal = $1`, principal)
 		}
 	})
@@ -157,6 +158,11 @@ func seedPAPrincipalState(t *testing.T, s *Store, principal int64) {
 				idempotency_key, status, lease_until_ms, created_at_ms, updated_at_ms)
 			VALUES($1, 'dsp1', 'apr0', 'pac_seed', 1, 'alice', 'alice_set_volume', 'h', $2, 'dispatching', $3, $4, $4)`,
 			[]any{principal, "idem-d-" + conv, now + 60_000, now}},
+		// A standing permission in force.
+		{`INSERT INTO pa_permissions(principal, id, connection_id, authority_revision, server, tool, device_ids, ceiling,
+				created_at_ms, expires_at_ms, revoked_at_ms)
+			VALUES($1, 'prm1', 'pac_seed', 1, 'alice', 'alice_set_volume', '["dev-1"]', 5, $2, $3, 0)`,
+			[]any{principal, now, now + 3_600_000}},
 	}
 	for _, st := range stmts {
 		if _, err := s.DB.ExecContext(ctx, st.q, st.args...); err != nil {
@@ -194,7 +200,7 @@ func paUsageStatus(t *testing.T, s *Store, principal int64) string {
 var paSeededRows = map[string]int{
 	"pa_outbox": 1, "pa_jobs": 1, "pa_callbacks": 1, "pa_fragments": 1, "pa_conversations": 1,
 	"pa_consents": 1, "pa_link_secrets": 2, "pa_connections": 2, "pa_principal_locks": 1,
-	"pa_usage": 1, "pa_rate": 1, "pa_approvals": 1, "pa_dispatches": 1,
+	"pa_usage": 1, "pa_rate": 1, "pa_approvals": 1, "pa_dispatches": 1, "pa_permissions": 1,
 }
 
 func TestHardDeleteAccount_PurgesPAState(t *testing.T) {
@@ -223,7 +229,7 @@ func TestHardDeleteAccount_PurgesPAState(t *testing.T) {
 		// Listed here, not taken from paPrincipalPurges, so dropping a table
 		// from that list fails this test.
 		purged := []string{"pa_outbox", "pa_jobs", "pa_callbacks", "pa_fragments", "pa_conversations",
-			"pa_consents", "pa_link_secrets", "pa_connections", "pa_approvals", "pa_dispatches"}
+			"pa_consents", "pa_link_secrets", "pa_connections", "pa_approvals", "pa_dispatches", "pa_permissions"}
 		for _, p := range []int64{aliceLogin, aliceSession} {
 			for _, table := range purged {
 				if n := paRowsIn(t, s, table, p); n != 0 {

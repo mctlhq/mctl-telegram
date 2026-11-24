@@ -460,6 +460,12 @@ func transitionPAConnTx(ctx context.Context, tx *sql.Tx, principal int64, id str
 	if n != 1 {
 		return connection.Connection{}, missOrConflict(ctx, tx, principal, id)
 	}
+	// Every transition bumps the revision, so every transition revokes the
+	// standing permissions bound to the connection, in this transaction
+	// (threat model T7, S2-A9).
+	if err := revokePAPermissionsOfConnTx(ctx, tx, principal, id, transitionAtMS(t)); err != nil {
+		return connection.Connection{}, err
+	}
 	return getPAConn(ctx, tx, principal, id, nil)
 }
 
@@ -611,6 +617,9 @@ func (s *Store) revokePAConnOnce(ctx context.Context, principal int64, id, reaso
 	if n != 1 {
 		return connection.Connection{}, connection.Sealed{}, false, connection.ErrConflict
 	}
+	if err := revokePAPermissionsOfConnTx(ctx, tx, principal, id, time.Now().UTC().UnixMilli()); err != nil {
+		return connection.Connection{}, connection.Sealed{}, false, err
+	}
 	c, err := getPAConn(ctx, tx, principal, id, nil)
 	if err != nil {
 		return connection.Connection{}, connection.Sealed{}, false, err
@@ -651,6 +660,9 @@ func (s *Store) RevokePAConnectionAt(ctx context.Context, principal int64, id st
 			return connection.Connection{}, err
 		}
 		return connection.Connection{}, connection.ErrConflict
+	}
+	if err := revokePAPermissionsOfConnTx(ctx, tx, principal, id, time.Now().UTC().UnixMilli()); err != nil {
+		return connection.Connection{}, err
 	}
 	c, err := getPAConn(ctx, tx, principal, id, nil)
 	if err != nil {

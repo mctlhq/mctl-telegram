@@ -88,6 +88,13 @@ const (
 	OutboxApprovalCancelled   OutboxKind = "approval_cancelled"
 	OutboxApprovalAlreadyDone OutboxKind = "approval_already_done"
 	OutboxApprovalExpired     OutboxKind = "approval_expired"
+	// The fixed answers of /permissions (#1320 slice P2-S10): the command
+	// where standing permissions are not offered, and the outcome of a
+	// grant or revoke button. The screens themselves are not outbox rows.
+	OutboxPermissionsUnavailable OutboxKind = "permissions_unavailable"
+	OutboxPermissionGranted      OutboxKind = "permission_granted"
+	OutboxPermissionRevoked      OutboxKind = "permission_revoked"
+	OutboxPermissionRefused      OutboxKind = "permission_refused"
 )
 
 // Connection-level kinds (#1318 slice C2b). A row belongs to one
@@ -191,7 +198,8 @@ func ConversationOutboxKinds() []OutboxKind {
 		OutboxNewConversation, OutboxForgotten, OutboxUnknownButton, OutboxRateLimited, OutboxMessageTooLong,
 		OutboxLinkingUnavailable,
 		OutboxPrincipalDisabled,
-		OutboxApprovalCancelled, OutboxApprovalAlreadyDone, OutboxApprovalExpired}
+		OutboxApprovalCancelled, OutboxApprovalAlreadyDone, OutboxApprovalExpired,
+		OutboxPermissionsUnavailable, OutboxPermissionGranted, OutboxPermissionRevoked, OutboxPermissionRefused}
 }
 
 // ConversationLevel reports whether k is a conversation-level kind, whose

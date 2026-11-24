@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,6 +18,9 @@ import (
 
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
+	"github.com/mctlhq/mctl-telegram/internal/pa/output"
+	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
 // Synthetic personas of this package's tests.
@@ -29,6 +34,10 @@ const (
 type DispatchHarness struct {
 	h           *runLoopHarness
 	failDisable atomic.Bool
+	// approved and perms are what the webhook's AfterCommit hands over to
+	// (EnableApprovalCards, EnablePermissions).
+	approved func(ctx context.Context, principal int64, approvalID string)
+	perms    *PermissionCommands
 }
 
 // NewDispatchHarness builds the harness on store.
@@ -143,14 +152,25 @@ func (d *DispatchHarness) MessagesTo(chat int64) []SentCard {
 // executor.
 func (d *DispatchHarness) EnableApprovalCards(cards CardRenderer, approvals ApprovalCallbacks,
 	approved func(ctx context.Context, principal int64, approvalID string)) {
+	d.h.loop.cards = cards
+	d.h.conv.approvals = approvals
+	d.approved = approved
+	d.rebuildHook()
+}
+
+// rebuildHook replaces the webhook with one whose AfterCommit does what
+// cmd/server's will: hand over an approved approval, run an admitted
+// /permissions command, deliver the outbox.
+func (d *DispatchHarness) rebuildHook() {
 	h := d.h
-	h.loop.cards = cards
-	h.conv.approvals = approvals
 	wh, err := NewWebhookHandler(WebhookConfig{
 		Secret: testSecret, Dedup: h.convoHarness.store, Handler: h.conv, Failures: h.convoHarness.store,
 		AfterCommit: func(ctx context.Context, u VerifiedUpdate) {
-			if id, ok := PostCommitApproval(ctx); ok {
-				approved(ctx, u.Principal().TelegramID(), id)
+			if id, ok := PostCommitApproval(ctx); ok && d.approved != nil {
+				d.approved(ctx, u.Principal().TelegramID(), id)
+			}
+			if d.perms != nil {
+				d.perms.AfterCommit(ctx, u)
 			}
 			h.loop.DeliverAfter(ctx, u.Principal().TelegramID())
 		},
@@ -160,6 +180,65 @@ func (d *DispatchHarness) EnableApprovalCards(cards CardRenderer, approvals Appr
 	}
 	h.hook = wh
 }
+
+// EnablePermissions wires what no production wiring does yet (#1320 slice
+// P2-S10): the conversations handle /permissions and the buttons of its
+// screens with cfg, and the webhook runs an admitted command with cmds
+// after the update's transaction committed. cmds sends through the
+// harness's recorder when it has no sender. A nil cfg unwires it again.
+func (d *DispatchHarness) EnablePermissions(cfg *PermissionsConfig, cmds *PermissionCommands) {
+	if cfg != nil && !cfg.valid() {
+		d.h.t.Fatal("invalid permissions config")
+	}
+	if cmds != nil && cmds.Sender == nil {
+		cmds.Sender = recorderSender{d.h.sender}
+	}
+	d.h.conv.permissions = cfg
+	d.perms = cmds
+	d.rebuildHook()
+}
+
+// recorderSender is the harness's recorder as a PermissionSender.
+type recorderSender struct{ s *sendRecorder }
+
+func (r recorderSender) Send(ctx context.Context, chatID int64, text safetext.Text, kb output.Keyboard) error {
+	return r.s.SendFrom(ctx, chatID, text, kb, 0, nil)
+}
+
+// TextStatus delivers a text message from user and returns the webhook's
+// status, once the /permissions command it may have admitted has run.
+func (d *DispatchHarness) TextStatus(user int64, s string) int {
+	code := d.h.text(user, s)
+	if d.perms != nil {
+		d.perms.Wait()
+	}
+	d.h.loop.WaitDeliveries()
+	return code
+}
+
+// PostJobRoute posts body to one of the run loop's job routes under
+// token and returns the status.
+func (d *DispatchHarness) PostJobRoute(route, token, body string) int {
+	req := httptest.NewRequest(http.MethodPost, route, strings.NewReader(body))
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	w := httptest.NewRecorder()
+	mux := http.NewServeMux()
+	d.h.loop.Mount(mux)
+	mux.ServeHTTP(w, req)
+	d.h.loop.WaitDeliveries()
+	return w.Code
+}
+
+// JobRoutes are the routes the run loop mounts.
+func JobRoutes() []string { return []string{RouteClaim, RouteTurn, RouteReply} }
+
+// PermissionKeyboard is permissionKeyboard.
+func PermissionKeyboard(verb, id string) (output.Keyboard, bool) { return permissionKeyboard(verb, id) }
+
+// OutboxKeyboardOf is outboxKeyboard.
+func OutboxKeyboardOf(it jobs.OutboxItem) (output.Keyboard, bool) { return outboxKeyboard(it) }
 
 // PressConcurrently delivers n presses of the button by user at the same
 // time, each as a new update, and returns the webhook's statuses. The
@@ -226,4 +305,15 @@ func (d *DispatchHarness) FailSends(err error) {
 	d.h.sender.mu.Lock()
 	d.h.sender.fail = err
 	d.h.sender.mu.Unlock()
+}
+
+// ForwardStatus delivers s as a message forwarded to the bot by user,
+// which is not user-provenance text, and returns the webhook's status.
+func (d *DispatchHarness) ForwardStatus(user int64, s string) int {
+	code := d.h.message(user, map[string]any{"text": s, "forward_origin": bobForward})
+	if d.perms != nil {
+		d.perms.Wait()
+	}
+	d.h.loop.WaitDeliveries()
+	return code
 }

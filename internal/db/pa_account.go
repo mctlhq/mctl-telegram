@@ -116,6 +116,8 @@ var paPrincipalPurges = []struct{ table, q string }{
 	// finish then finds no row (approval.ErrNotFound).
 	{"pa_approvals", `DELETE FROM pa_approvals WHERE principal = $1`},
 	{"pa_dispatches", `DELETE FROM pa_dispatches WHERE principal = $1`},
+	// Standing permissions, revoked or not: authority of a deleted account.
+	{"pa_permissions", `DELETE FROM pa_permissions WHERE principal = $1`},
 	{"pa_fragments", `DELETE FROM pa_fragments WHERE principal = $1`},
 	{"pa_conversations", `DELETE FROM pa_conversations WHERE principal = $1`},
 	{"pa_consents", `DELETE FROM pa_consents WHERE principal = $1`},

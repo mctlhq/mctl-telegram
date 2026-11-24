@@ -46,6 +46,10 @@ var fieldUsers = map[string]bool{
 	// The approval card (card.go): registry templates around two values
 	// that are neutralised like model text.
 	"Card": true,
+	// The /permissions screens (permission.go): registry templates around
+	// values held to a plain alphabet.
+	"PermissionScreen": true,
+	"PermissionList":   true,
 }
 
 // guardedFields are the unexported fields of Text and Template. Any

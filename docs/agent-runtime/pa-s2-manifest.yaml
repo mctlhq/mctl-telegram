@@ -77,6 +77,15 @@
 # lines in internal/pa/runloop.go, internal/pa/conversation.go and
 # internal/pa/connector/dispatch.go, so the P2S7 guards in those files were
 # pointed at their new line numbers; their code did not change.
+#
+# The P2S10-* records (S2-A8, S2-A9, S2-A10) ran on the P2-S10 branch, cut
+# from b55d1955, the same way, on sqlite, restored from saved bytes; the
+# tests also pass on Postgres. P2-S10 built the pa_permissions table and
+# the /permissions command. Nothing in cmd/server wires the command (it
+# needs the Phase 2 pin), nothing reads a permission at dispatch (P2-S11)
+# and no device-type rule exists, so outside tests no permission can be
+# granted. The change moved lines in internal/pa/conversation.go, so the
+# P2S7-I8a guard was pointed at its new line; its code did not change.
 
 S2-C9:
   status: pending
@@ -516,7 +525,7 @@ S2-I8:
     - internal/db.TestS2I8_NoStatementLowersTaint
   mutations:
     - id: P2S7-I8a
-      guard: internal/pa/conversation.go:602
+      guard: internal/pa/conversation.go:618
       guard_text: 'if prov != convo.ProvenanceUser {'
       mutation: "userCommand accepts a command of any provenance: `if prov != convo.ProvenanceUser {` -> `if false && prov != convo.ProvenanceUser {`"
       killed_by:
@@ -636,7 +645,7 @@ S2-D5:
   status: pending
   slice: P2-S10
   tracked_by: "#1322"
-  note: "standing permission device allowlist; type read fresh at dispatch. Open question (#1323): the fresh type read at dispatch may belong to P2-S8 (Alice iot writes) or P2-S11 (lowering) rather than P2-S10."
+  note: "standing permission device allowlist; type read fresh at dispatch. P2-S10 built the grant-time half that needs no device type: a grant is refused for alice_control_room, alice_trigger_scenario, any never-lowerable or disclosure tool and any device id absent from a fresh device read (internal/pa/permissions.TestCheckTool, TestValidatorCheck, internal/pa.TestPermissions_GrantRefusals); with no device-type rule installed every grant is refused. The per-tool device-type allowlist and the type read at dispatch are P2-S11."
 
 S2-D6:
   status: pending
@@ -1145,23 +1154,148 @@ S2-A7:
       tracked_by: "#1320"
 
 S2-A8:
-  status: pending
+  status: green
   slice: P2-S10
-  tracked_by: "#1320"
-  note: "standing permissions: no grant route reachable from the worker. Open question (#1323): the 'no tool reachable from the worker' half may be co-owned by P2-S13 (worker tool path)."
+  note: "Standing permissions (#1320 P2-S10): a permission is inserted by one function with one caller, the handler of a pressed Grant button of a /permissions screen, whose callback id was consumed for the principal who pressed. /permissions is a command only as the text of a user message; an assistant or external fragment that reads \"/permissions grant ...\" is not parsed. The four job-token routes are driven with payloads that name a grant and the table stays empty; a static scan finds no other writer of pa_permissions. The half about tools reachable from the worker is P2-S13's to re-check when the worker gets a write tool path."
+  tests:
+    - internal/pa.TestS2A8_OnlyUserTextIsAPermissionsCommand
+    - internal/pa.TestS2A8_NoJobRouteGrantsAPermission
+    - internal/pa.TestS2A8_GrantInsertHasOneCaller
+  mutations:
+    - id: P2S10-A8a
+      guard: internal/pa/permissions.go:152
+      guard_text: "\t\tif prov != convo.ProvenanceUser {\n\t\t\treturn nil"
+      mutation: "the /permissions arguments are read from a fragment of any provenance"
+      killed_by:
+        - internal/pa.TestS2A8_OnlyUserTextIsAPermissionsCommand
+      red: |-
+        --- FAIL: TestS2A8_OnlyUserTextIsAPermissionsCommand (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.838s
+    - id: P2S10-A8b
+      guard: internal/pa/permissions.go:196
+      guard_text: "err := c.permissions.Grants.InsertPAPermission(ctx, tx, permissions.Permission{"
+      mutation: "a second grant path: /api/pa/v1/jobs/reply inserts a permission when the answer text starts with \"/permissions grant \" (a new db.Store method called from serveReply)"
+      killed_by:
+        - internal/pa.TestS2A8_NoJobRouteGrantsAPermission
+        - internal/pa.TestS2A8_GrantInsertHasOneCaller
+      red: |-
+        --- FAIL: TestS2A8_NoJobRouteGrantsAPermission (0.02s)
+        --- FAIL: TestS2A8_GrantInsertHasOneCaller (0.18s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.838s
+  gaps:
+    - half: "production wiring: nothing in cmd/server sets ConversationsConfig.Permissions or constructs pa.PermissionCommands (the tool policy needs the Phase 2 pin, which TestNoRuntimePhase2Use keeps out of the runtime), so a deployed bot answers /permissions with \"not available\" and no permission can be granted outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
+    - half: "the audit chain has no record of a grant or a revoke: the audit sink records tool calls and has no event shape for a permission change; the pa_permissions row (who, when, revoked_at_ms) is the only trace"
+      tracked_by: "#1320"
+    - half: "a worker tool path does not exist yet; P2-S13 must extend TestS2A8_NoJobRouteGrantsAPermission to any route or pseudo-tool it adds"
+      tracked_by: "#1320"
 
 S2-A9:
-  status: pending
+  status: green
   slice: P2-S10
-  tracked_by: "#1320"
-  note: "standing permissions bound to revision and expiry"
+  note: "Standing permissions (#1320 P2-S10), the store: a lookup returns a permission only for the connection's current authority_revision and before expires_at_ms, and the listing joins the active connection at an equal revision; every revision bump (transition, /disconnect, RevokePAConnectionAt) marks the connection's permissions revoked in the same transaction; a grant longer than 30 days is refused by the insert. A read that fails, or a row that does not decode, is an error and never an empty list. Nothing consults a permission at dispatch yet (P2-S11)."
+  tests:
+    - internal/db.TestS2A9_RevisionChangeRevokesPermission
+    - internal/db.TestS2A9_ExpiredPermissionIsNotReturned
+    - internal/db.TestS2A9_GrantLongerThan30DaysRefused
+    - internal/pa.TestS2A9_RevisionChangeRevokesAGrantedPermission
+  mutations:
+    - id: P2S10-A9a
+      guard: internal/db/pa_permissions.go:214
+      guard_text: "AND p.revoked_at_ms = 0 AND p.authority_revision = $5 AND p.expires_at_ms > $6"
+      mutation: "the lookup no longer compares the revision: `p.authority_revision = $5` -> `$5 = $5`"
+      killed_by:
+        - internal/db.TestS2A9_RevisionChangeRevokesPermission
+      red: |-
+        --- FAIL: TestS2A9_RevisionChangeRevokesPermission (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.601s
+    - id: P2S10-A9b
+      guard: internal/db/pa_permissions.go:214
+      guard_text: "AND p.revoked_at_ms = 0 AND p.authority_revision = $5 AND p.expires_at_ms > $6"
+      mutation: "the lookup no longer compares the expiry: `p.expires_at_ms > $6` -> `$6 = $6`"
+      killed_by:
+        - internal/db.TestS2A9_ExpiredPermissionIsNotReturned
+      red: |-
+        --- FAIL: TestS2A9_ExpiredPermissionIsNotReturned (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.601s
+    - id: P2S10-A9c
+      guard: internal/db/pa_permissions.go:179
+      guard_text: "AND cn.state = $3 AND cn.authority_revision = p.authority_revision"
+      mutation: "the listing no longer requires the connection to be at the permission's revision: predicate -> `AND 1 = 1`"
+      killed_by:
+        - internal/db.TestS2A9_RevisionChangeRevokesPermission
+      red: |-
+        --- FAIL: TestS2A9_RevisionChangeRevokesPermission (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.601s
+    - id: P2S10-A9d
+      guard: internal/db/pa_permissions.go:178
+      guard_text: "WHERE p.principal = $1 AND p.revoked_at_ms = 0 AND p.expires_at_ms > $2"
+      mutation: "the listing no longer compares the expiry: `p.expires_at_ms > $2` -> `$2 = $2`"
+      killed_by:
+        - internal/db.TestS2A9_ExpiredPermissionIsNotReturned
+      red: |-
+        --- FAIL: TestS2A9_ExpiredPermissionIsNotReturned (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.601s
+    - id: P2S10-A9e
+      guard: internal/db/pa_connections.go:466
+      guard_text: "if err := revokePAPermissionsOfConnTx(ctx, tx, principal, id, transitionAtMS(t)); err != nil {"
+      mutation: "a connection transition no longer revokes the connection's permissions"
+      killed_by:
+        - internal/db.TestS2A9_RevisionChangeRevokesPermission
+      red: |-
+        --- FAIL: TestS2A9_RevisionChangeRevokesPermission (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.601s
+    - id: P2S10-A9f
+      guard: internal/pa/permissions/permissions.go:225
+      guard_text: "if p.ExpiresAtMS <= nowMS || p.ExpiresAtMS > nowMS+MaxTTL.Milliseconds() {"
+      mutation: "the 30-day limit on a grant is dropped"
+      killed_by:
+        - internal/db.TestS2A9_GrantLongerThan30DaysRefused
+      red: |-
+        --- FAIL: TestS2A9_GrantLongerThan30DaysRefused (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.601s
+  gaps:
+    - half: "nothing consults a standing permission at dispatch: the lowering of an approve-tier call, and the re-check of revision and expiry inside the pre-dispatch transaction, are P2-S11"
+      tracked_by: "#1320"
+    - half: "revoked and expired rows are kept until the account is forgotten or deleted: no sweep or retention rule removes them"
+      tracked_by: "#1320"
+    - half: "/disconnect and a pending approval or permission on Postgres under a concurrent grant press: the insert reads the connection row in its own statement, with no test of the interleaving"
+      tracked_by: "#1320"
+    - half: "production wiring: nothing in cmd/server sets ConversationsConfig.Permissions or constructs pa.PermissionCommands (the tool policy needs the Phase 2 pin, which TestNoRuntimePhase2Use keeps out of the runtime), so a deployed bot answers /permissions with \"not available\" and no permission can be granted outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
 
 S2-A10:
   status: green
   slice: P2-S5
-  note: "Approval card (#1320 P2-S5), the card half of the row: a card's keyboard is built from one registry of two buttons, Approve and Cancel; the test enumerates the registry, the keyboard of every outbox kind, the card's server texts and the ledger calls a press can reach, and finds no third button, no wording that offers a standing permission and no call other than lookup, approve and cancel. Standing permissions do not exist yet, so 'grants come only from /permissions' is a gap."
+  note: "Approval card (#1320 P2-S5), the card half of the row: a card's keyboard is built from one registry of two buttons, Approve and Cancel; the test enumerates the registry, the keyboard of every outbox kind, the card's server texts and the ledger calls a press can reach, and finds no third button, no wording that offers a standing permission and no call other than lookup, approve and cancel. The /permissions half (P2-S10): each /permissions screen carries one button, Grant or Revoke, built from its own registry and routed to its own callback action; approving a card writes no permission, and the insert has one caller (S2-A8)."
   tests:
     - internal/pa.TestS2A10_CardOffersOnlyApproveAndCancel
+    - internal/pa.TestS2A10_PermissionScreensRouteToTheirOwnCallbacks
+    - internal/pa.TestS2A10_ApprovingACardGrantsNoPermission
   mutations:
     - id: P2S5-A10a
       guard: internal/pa/card.go:68
@@ -1175,9 +1309,33 @@ S2-A10:
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.432s
+    - id: P2S10-A10a
+      guard: internal/pa/permissions.go:246
+      guard_text: "{Label: safetext.LabelPermissionRevoke, Verb: permissionVerbRevoke},"
+      mutation: "a third button (the Approve label, verb \"always\") is added to the /permissions screen registry"
+      killed_by:
+        - internal/pa.TestS2A10_PermissionScreensRouteToTheirOwnCallbacks
+      red: |-
+        --- FAIL: TestS2A10_PermissionScreensRouteToTheirOwnCallbacks (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.811s
+    - id: P2S10-A10b
+      guard: internal/pa/card.go:175
+      guard_text: "return setPostCommitApproval(ctx, a.ID)"
+      mutation: "a pressed Approve also inserts a standing permission for the approved tool"
+      killed_by:
+        - internal/pa.TestS2A10_ApprovingACardGrantsNoPermission
+      red: |-
+        --- FAIL: TestS2A10_ApprovingACardGrantsNoPermission (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.811s
   gaps:
-    - half: "the /permissions route and a check that it is the only writer of standing permissions: neither exists until P2-S10, which must also keep this test's enumeration current for any card it adds"
-      tracked_by: "#1320"
+    - half: "production wiring: nothing in cmd/server sets ConversationsConfig.Permissions or constructs pa.PermissionCommands (the tool policy needs the Phase 2 pin, which TestNoRuntimePhase2Use keeps out of the runtime), so a deployed bot answers /permissions with \"not available\" and no permission can be granted outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
     - half: "production wiring: nothing in cmd/server constructs connector.Cards or sets ConversationsConfig.Approvals (TestNoRuntimePhase2Use forbids NewCards outside tests), and its AfterCommit does not pass pa.PostCommitApproval to a WriteExecutor, so no card is emitted and no card button is handled outside tests; the switch-on is P2-S14"
       tracked_by: "#1323"
 

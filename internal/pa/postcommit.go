@@ -49,6 +49,9 @@ type postCommitSlot struct {
 	// approval is the id of the approval this update's Approve press
 	// marked approved; the write is dispatched after the commit.
 	approval string
+	// permission is the /permissions command this update admitted
+	// (permissions.go); its screen is built after the commit.
+	permission *PermissionAction
 	// runQueued: the update's handler queued a run (RunLoop.EnqueueRun).
 	// TypingAfter reads it after the commit, so an update that rolled
 	// back, or queued nothing, shows no status.

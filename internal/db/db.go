@@ -582,6 +582,11 @@ func migrate(ctx context.Context, dbConn migrateDB, pg bool, ttlExemptTelegramID
 	if err := migratePAApprovals(ctx, dbConn, pg); err != nil {
 		return err
 	}
+	// Personal Assistant standing permissions (issue #1320 slice P2-S10);
+	// DDL in pa_permissions.go.
+	if err := migratePAPermissions(ctx, dbConn, pg); err != nil {
+		return err
+	}
 	return dropLegacyColumns(ctx, dbConn, pg)
 }
 
