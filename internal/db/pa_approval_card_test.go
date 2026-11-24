@@ -135,3 +135,68 @@ func TestPAOutbox_CardRow(t *testing.T) {
 		}
 	})
 }
+
+// TestPAJobHasApproval: a run has had a card once any approval row of its
+// job exists, whatever became of it, and only for that principal and that
+// job (#1320 slice P2-S14, "one approval card per run").
+func TestPAJobHasApproval(t *testing.T) {
+	paApprovalDialects(t, func(t *testing.T, s *Store, alice, bob int64) {
+		ctx := context.Background()
+		wa := seedPAApprovalWorld(t, s, alice)
+		seedPAApprovalWorld(t, s, bob)
+		job := wa.binding().JobID
+		has := func(principal, jobID int64) bool {
+			t.Helper()
+			var got bool
+			must(t, inTx(t, s, func(tx *sql.Tx) error {
+				var err error
+				got, err = s.PAJobHasApproval(ctx, tx, principal, jobID)
+				return err
+			}))
+			return got
+		}
+		if has(alice, job) {
+			t.Fatal("a job with no approval reads as carded")
+		}
+		a := wa.pending(t, t0)
+		if !has(alice, job) {
+			t.Fatal("the job's pending approval is not seen")
+		}
+		if has(alice, job+1) || has(bob, job) {
+			t.Fatal("another job, or another principal's job of the same id, reads as carded")
+		}
+		// An approval that ended still counts: the run had its card.
+		must(t, inTx(t, s, func(tx *sql.Tx) error {
+			_, err := s.CancelPAApproval(ctx, tx, alice, a.ID, t0.Add(time.Second))
+			return err
+		}))
+		if !has(alice, job) {
+			t.Fatal("after the card was cancelled the job reads as not carded")
+		}
+		for name, args := range map[string][2]int64{"no principal": {0, job}, "no job": {alice, 0}} {
+			err := inTx(t, s, func(tx *sql.Tx) error {
+				_, err := s.PAJobHasApproval(ctx, tx, args[0], args[1])
+				return err
+			})
+			if !errors.Is(err, approval.ErrInvalid) {
+				t.Errorf("%s: err = %v, want ErrInvalid", name, err)
+			}
+		}
+		if _, err := s.PAJobHasApproval(ctx, nil, alice, job); !errors.Is(err, approval.ErrInvalid) {
+			t.Errorf("no transaction: err = %v, want ErrInvalid", err)
+		}
+	})
+}
+
+// TestPAJobHasApproval_UnreadableIsNotAbsence: a failed read is never "no
+// card yet" (I9).
+func TestPAJobHasApproval_UnreadableIsNotAbsence(t *testing.T) {
+	s := newTestStore(t)
+	tx, err := s.DB.BeginTx(context.Background(), nil)
+	must(t, err)
+	must(t, tx.Rollback())
+	carded, err := s.PAJobHasApproval(context.Background(), tx, 555, 7)
+	if carded || !errors.Is(err, approval.ErrUnreadable) {
+		t.Fatalf("read on a finished transaction: carded=%v err=%v, want ErrUnreadable", carded, err)
+	}
+}

@@ -418,6 +418,7 @@ func TestS2D2_DeviceWriteApprovalBindsDeviceAndValue(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			forEachDialect(t, func(t *testing.T, s *db.Store) {
 				e := newDeviceWriteEnv(t, s)
+				e.manyCardsPerRun()
 				row := e.emitTool(volumeTool, approved)
 				bound := e.strings(`SELECT args_sha FROM pa_approvals WHERE id = $1`, row.id)
 				if len(bound) != 1 || bound[0] != sha(approved) {
@@ -441,6 +442,7 @@ func TestS2D2_DeviceWriteApprovalBindsDeviceAndValue(t *testing.T) {
 	}
 	// Two calls that differ only in the value are two different approvals.
 	e := newDeviceWriteEnv(t, sqliteStore(t))
+	e.manyCardsPerRun()
 	a := e.emitTool(volumeTool, approved)
 	b := e.emitTool(volumeTool, `{"device":"`+kitchenID+`","level":6}`)
 	hashes := e.strings(`SELECT args_sha FROM pa_approvals WHERE id IN ($1, $2)`, a.id, b.id)

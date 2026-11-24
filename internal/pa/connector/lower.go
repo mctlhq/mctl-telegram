@@ -53,7 +53,7 @@ package connector
 // field ("permission:<id>"); the approval id there is the ledger row the
 // call consumed.
 //
-// Nothing here runs in a deployed service: nothing constructs Cards.
+// It runs only with the write path built (cmd/server buildPAWrites).
 
 import (
 	"bytes"

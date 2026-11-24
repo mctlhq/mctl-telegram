@@ -418,6 +418,8 @@ func newPinnedDeviceEnv(t *testing.T, s *db.Store, write func(*connector.WriteCo
 		c.Speakers = map[string]connector.SpeakerReader{"tg": sp}
 		c.Lights = map[string]connector.LightReader{"tg": li}
 	})
+	// These tests make a card per case in one run (S2-A7 has its own).
+	ce.manyCardsPerRun()
 	return &deviceWriteEnv{disclosureEnv: &disclosureEnv{cardEnv: ce, speakers: sp}, lights: li}
 }
 

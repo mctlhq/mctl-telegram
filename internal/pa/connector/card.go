@@ -26,10 +26,10 @@ package connector
 // A call a standing permission covers gets no card: Emit hands it to the
 // write executor (lower.go). Everything else stays a card or a refusal.
 //
-// Nothing here runs in a deployed service: no production wiring builds
-// Cards (TestNoRuntimePhase2Use fails on any non-test call of NewCards),
-// the run loop admits no approve-tier tool, and Emit refuses every call
-// while PA_WRITES_ENABLED is off.
+// It runs in a service only when cmd/server built the write path: NewCards
+// has one non-test caller, buildPAWrites, behind its check of the flag
+// (TestNoRuntimePhase2Use). Emit refuses every call while
+// PA_WRITES_ENABLED reads off, whatever was built.
 
 import (
 	"context"
@@ -77,6 +77,10 @@ const (
 	ReasonCardUnshowable = "card_unshowable"
 	// ReasonNoCard: the gate decided something a card cannot serve.
 	ReasonNoCard = "no_card"
+	// ReasonCardAlreadySent: the run already has an approval card. A run
+	// gets one (threat model T10); the worker stops dispatching after its
+	// first approval_pending, and a worker that does not is refused here.
+	ReasonCardAlreadySent = "card_already_sent"
 )
 
 // CardStore is what Cards persists through (*db.Store).
@@ -85,6 +89,9 @@ type CardStore interface {
 	BeginPAWrite(ctx context.Context, principal int64, budget bool) (*sql.Tx, error)
 	PAPrincipalDisabled(ctx context.Context, tx *sql.Tx, principal int64) (bool, error)
 	PAConversationTaintIn(ctx context.Context, tx *sql.Tx, principal int64, conversationID string) (bool, error)
+	// PAJobHasApproval reports whether the run already got a card, read
+	// under the principal's lock.
+	PAJobHasApproval(ctx context.Context, tx *sql.Tx, principal, jobID int64) (bool, error)
 	CreatePAApproval(ctx context.Context, tx *sql.Tx, a approval.Approval) error
 	CreatePACallback(ctx context.Context, tx *sql.Tx, principal int64, id, action string, expiresAt time.Time) error
 	EnqueuePAOutbox(ctx context.Context, tx *sql.Tx, item jobs.OutboxItem, now time.Time) error
@@ -99,7 +106,7 @@ type CardConfig struct {
 	Store  CardStore
 	Sealer *approval.Sealer
 	// Pin names the approve-tier tools. It is the pin the write path runs
-	// on; production loads none with such a tool yet (P2-S14).
+	// on: the Phase 2 pin, loaded only with the write path (P2-S14).
 	Pin *catalog.Pin
 	// Fresh reads the tool's definition as the server lists it now; the
 	// approval binds those hashes (T7).
@@ -415,6 +422,15 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) (*WriteOutcome, *refu
 	// admits gets a card.
 	if d := gate.Decide(in); d.Outcome != gate.OutcomeCard {
 		return nil, gateRefusal(d, in.PrincipalErr)
+	}
+	// One card per run (T10, S2-A7), decided by the server: the worker's
+	// own rule (it dispatches nothing after approval_pending) is not what
+	// this rests on. Read under the principal's lock, so two calls of one
+	// run cannot both find none; an unreadable ledger refuses (I9).
+	if carded, err := c.cfg.Store.PAJobHasApproval(ctx, tx, principal, req.JobID); err != nil {
+		return nil, &refusal{ReasonStateUnreadable, http.StatusServiceUnavailable}
+	} else if carded {
+		return nil, &refusal{ReasonCardAlreadySent, http.StatusConflict}
 	}
 	// One transaction: an approval without its card, or a card without
 	// its approval, never commits.

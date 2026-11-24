@@ -28,7 +28,7 @@ import (
 const ExternalToolsFlagEnv = "PA_EXTERNAL_TOOLS_ENABLED"
 
 // WritesFlagEnv makes every PA write and disclosure "never" when off
-// (threat model T11). Nothing dispatches a write yet (P2-S1).
+// (threat model T11), and decides at startup whether a write path exists.
 const WritesFlagEnv = "PA_WRITES_ENABLED"
 
 // EnvFlags reads the dispatch switches from the environment on every call,
@@ -45,10 +45,10 @@ const WritesFlagEnv = "PA_WRITES_ENABLED"
 //     that server off and records ServerErrs, and the others are unaffected.
 //
 // An unreadable switch is unknown, not off, so its error is recorded
-// (WritesErr, ServerErrs) rather than folded into a plain false. Nothing
-// reads those errors yet: they are kept for the slice that wires the gate
-// (gate.Input.WritesErr) and for tests. Today the dispatcher looks only at
-// the bools, so a malformed server flag is refused, and audited, exactly
+// (WritesErr, ServerErrs) rather than folded into a plain false. The
+// write gate reads WritesErr (gate.Input.WritesErr), and cmd/server reads
+// it at startup and per claim. The read dispatcher looks only at the
+// bools, so a malformed server flag is refused, and audited, exactly
 // like an off one, as ReasonFlagOff.
 func EnvFlags(getenv func(string) string) func() (Flags, error) {
 	return func() (Flags, error) {
