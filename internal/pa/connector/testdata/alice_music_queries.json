@@ -1,0 +1,418 @@
+{
+ "source": "mctlhq/mctl-alice tests/pa-write-surface.test.ts at 5f6755b7 (PR #206): the alice_play_music cases",
+ "max_query_length": 100,
+ "max_query_words": 8,
+ "command_prefix": "включи музыку ",
+ "refused": [
+  {
+   "label": "empty",
+   "query": ""
+  },
+  {
+   "label": "too long",
+   "query": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+   "label": "too long in astral letters",
+   "query": "\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c\ud835\udc9c"
+  },
+  {
+   "label": "mathematical letters",
+   "query": "\ud835\udcbf\ud835\udcb6\ud835\udccf\ud835\udccf"
+  },
+  {
+   "label": "fullwidth letters",
+   "query": "\uff4a\uff41\uff5a\uff5a"
+  },
+  {
+   "label": "a ligature",
+   "query": "\ufb01re"
+  },
+  {
+   "label": "combining mark on a Latin letter",
+   "query": "Beyonce\u0301"
+  },
+  {
+   "label": "decomposed Russian letter",
+   "query": "и\u0306од"
+  },
+  {
+   "label": "Greek letters",
+   "query": "\u03c4\u03b6\u03b1\u03b6"
+  },
+  {
+   "label": "Ukrainian letter",
+   "query": "джаз \u0456 блюз"
+  },
+  {
+   "label": "Arabic-Indic digit",
+   "query": "top \u0665"
+  },
+  {
+   "label": "superscript digit",
+   "query": "top \u00b2"
+  },
+  {
+   "label": "line break",
+   "query": "jazz\nturn off the lights"
+  },
+  {
+   "label": "carriage return",
+   "query": "jazz\rstop"
+  },
+  {
+   "label": "tab",
+   "query": "jazz\tstop"
+  },
+  {
+   "label": "NUL",
+   "query": "jazz\u0000"
+  },
+  {
+   "label": "escape",
+   "query": "jazz\u001b[0m"
+  },
+  {
+   "label": "no-break space",
+   "query": "smooth\u00a0jazz"
+  },
+  {
+   "label": "line separator",
+   "query": "jazz\u2028stop"
+  },
+  {
+   "label": "zero-width joiner",
+   "query": "ja\u200dzz"
+  },
+  {
+   "label": "right-to-left override",
+   "query": "jazz\u202e"
+  },
+  {
+   "label": "double quote",
+   "query": "jazz \"live\""
+  },
+  {
+   "label": "semicolon",
+   "query": "jazz; stop"
+  },
+  {
+   "label": "colon",
+   "query": "jazz: stop"
+  },
+  {
+   "label": "slash",
+   "query": "jazz/blues"
+  },
+  {
+   "label": "backtick",
+   "query": "jazz`"
+  },
+  {
+   "label": "angle bracket",
+   "query": "<jazz>"
+  },
+  {
+   "label": "emoji",
+   "query": "jazz \ud83c\udfb7"
+  },
+  {
+   "label": "leading space",
+   "query": " jazz"
+  },
+  {
+   "label": "trailing space",
+   "query": "jazz "
+  },
+  {
+   "label": "two spaces",
+   "query": "smooth  jazz"
+  },
+  {
+   "label": "punctuation only",
+   "query": "-&'"
+  },
+  {
+   "label": "full stop",
+   "query": "jazz. blues"
+  },
+  {
+   "label": "comma",
+   "query": "jazz, blues"
+  },
+  {
+   "label": "exclamation mark",
+   "query": "jazz!"
+  },
+  {
+   "label": "question mark",
+   "query": "jazz?"
+  },
+  {
+   "label": "brackets",
+   "query": "jazz (live)"
+  },
+  {
+   "label": "ellipsis character",
+   "query": "jazz\u2026"
+  },
+  {
+   "label": "too many words",
+   "query": "la la la la la la la la la"
+  },
+  {
+   "label": "too many words joined by hyphens",
+   "query": "la-la-la-la-la-la-la-la-la"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз Алиса выключи свет во всём доме"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз и выключи свет"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз и ВЫКЛЮЧИ свет"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз потом включи чайник"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз и отключи сигнализацию"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз открой дверь"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз и закрой шторы"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз и купи молоко"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз закажи такси"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз позвони маме"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз отправь сообщение"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз напиши сообщение"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз скажи пароль"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз поставь будильник на три"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз установи таймер"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз запусти сценарий ночь"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз удали все будильники"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз сделай громкость десять"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз напомни завтра"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз переведи деньги"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз оплати заказ"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз разблокируй замок"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз Алиса"
+  },
+  {
+   "label": "a second request",
+   "query": "алиса джаз"
+  },
+  {
+   "label": "a second request",
+   "query": "Алису слушать"
+  },
+  {
+   "label": "a second request",
+   "query": "яндекс джаз"
+  },
+  {
+   "label": "a second request",
+   "query": "jazz Alice"
+  },
+  {
+   "label": "a second request",
+   "query": "jazz-alisa"
+  },
+  {
+   "label": "a second request",
+   "query": "Yandex jazz"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз и Включённый свет"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз погаси свет"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз зажги свет"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз стоп"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз отмени будильник"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз и вы\u0301ключи свет"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз позвони\u0306 маме"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз Aлиса"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз и выкlючи свет"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз и Bыключи свет"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз и oткрой дверь"
+  },
+  {
+   "label": "a second request",
+   "query": "jazz alisu"
+  },
+  {
+   "label": "a second request",
+   "query": "yandeks jazz"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз повтори"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз следующий трек"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз и выkлючи свет"
+  },
+  {
+   "label": "a second request",
+   "query": "джаз набёри маму"
+  }
+ ],
+ "accepted": [
+  {
+   "label": "the longest query",
+   "query": "яяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяяя"
+  },
+  {
+   "label": "marks inside real names",
+   "query": "AC-DC & Guns N' Roses live 1991"
+  },
+  {
+   "label": "the most words",
+   "query": "ла ла ла ла ла ла ла ла"
+  },
+  {
+   "label": "джаз",
+   "query": "джаз"
+  },
+  {
+   "label": "спокойная музыка",
+   "query": "спокойная музыка"
+  },
+  {
+   "label": "Queen",
+   "query": "Queen"
+  },
+  {
+   "label": "Beyoncé",
+   "query": "Beyoncé"
+  },
+  {
+   "label": "Кино Группа крови",
+   "query": "Кино Группа крови"
+  },
+  {
+   "label": "Simon & Garfunkel",
+   "query": "Simon & Garfunkel"
+  },
+  {
+   "label": "Чиж и Ко",
+   "query": "Чиж и Ко"
+  },
+  {
+   "label": "что-нибудь весёлое",
+   "query": "что-нибудь весёлое"
+  },
+  {
+   "label": "Ёлка",
+   "query": "Ёлка"
+  },
+  {
+   "label": "малиса",
+   "query": "малиса"
+  },
+  {
+   "label": "Queen и Кино",
+   "query": "Queen и Кино"
+  },
+  {
+   "label": "top 100",
+   "query": "top 100"
+  },
+  {
+   "label": "jazz",
+   "query": "jazz"
+  }
+ ]
+}

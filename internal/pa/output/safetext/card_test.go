@@ -89,7 +89,7 @@ func TestCard_LinksAreDefanged(t *testing.T) {
 // TestCard_ServerTextIsNotDefanged: the templates hold no link token of
 // their own, so the pass over the whole card leaves them as written.
 func TestCard_ServerTextIsNotDefanged(t *testing.T) {
-	for _, tp := range slices.Concat(CardTemplates(), DisclosureCardTemplates(), ScenarioCardTemplates(), DeviceWriteCardTemplates()) {
+	for _, tp := range slices.Concat(CardTemplates(), DisclosureCardTemplates(), MusicCardTemplates(), ScenarioCardTemplates(), DeviceWriteCardTemplates()) {
 		for _, l := range []Lang{LangEN, LangRU} {
 			if s := tp.In(l); neutralise(s, UserText{}) != s || s == "" {
 				t.Errorf("template %q changes under neutralise or is empty", s)
@@ -186,6 +186,87 @@ func TestDisclosureCard_Layout(t *testing.T) {
 	if !strings.Contains(got, "\nHome: "+TextCardHomeUnknown.String()+"\n") || !strings.Contains(got, TextCardExternal.String()) {
 		t.Fatalf("card without a home, with external content:\n%s", got)
 	}
+	// A room the service did not report is said so, like a home: the line
+	// is never left out and never filled with a placeholder name.
+	d.Room = ""
+	if c, err = DisclosureCard("alice_send_command (alice)", disclosureArgs, d, false); err != nil ||
+		!strings.Contains(c.String(), "\nRoom: "+TextCardHomeUnknown.String()+"\n") ||
+		!strings.Contains(c.In(LangRU).String(), TextCardRoom.In(LangRU)+" "+TextCardHomeUnknown.In(LangRU)+"\n") {
+		t.Fatalf("card without a room: %v\n%s", err, c.String())
+	}
+}
+
+const musicArgs = `{"device":"spk-kitchen-0001","query":"джаз"}`
+
+func testMusic() Music {
+	return Music{Home: "Alice home", Room: "Kitchen", Name: "Kitchen speaker", ID: "spk-kitchen-0001",
+		Query: "джаз", Command: "включи музыку джаз"}
+}
+
+// TestMusicCard_Layout: the card of a music request shows the speaker,
+// the query and the whole command, each text on a line of its own, in both
+// languages.
+func TestMusicCard_Layout(t *testing.T) {
+	c, err := MusicCard("alice_play_music (alice)", musicArgs, testMusic(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := TextCardHead.String() + "\n\n" + TextCardAction.String() + "\nalice_play_music (alice)\n\n" +
+		TextCardSpeaker.String() + "\nHome: Alice home\nRoom: Kitchen\nName: Kitchen speaker\nDevice id: spk-kitchen-0001\n\n" +
+		TextCardMusicQuery.String() + "\nджаз\n\n" + TextCardMusicCommand.String() + "\nвключи музыку джаз\n\n" +
+		TextCardArgs.String() + "\n" + musicArgs + "\n\n" + TextCardFoot.String()
+	if got := c.String(); got != want {
+		t.Fatalf("card:\n got %q\nwant %q", got, want)
+	}
+	ru := c.In(LangRU).String()
+	for _, tp := range MusicCardTemplates() {
+		if tp == TextCardHomeUnknown {
+			continue
+		}
+		if !strings.Contains(ru, tp.In(LangRU)) || tp.In(LangRU) == tp.In(LangEN) {
+			t.Errorf("Russian card lacks %q", tp.In(LangRU))
+		}
+	}
+	if !strings.Contains(ru, "\nджаз\n") || !strings.Contains(ru, "\nвключи музыку джаз\n") || !strings.Contains(ru, " spk-kitchen-0001\n") {
+		t.Fatalf("Russian card lacks the query, the command or the id:\n%s", ru)
+	}
+	if strings.Contains(c.String(), TextCardRoomWarning.String()) || strings.Contains(c.String(), TextCardPhrase.String()) ||
+		strings.Contains(c.String(), TextCardCommand.String()) {
+		t.Fatalf("a music card holds a disclosure's text:\n%s", c.String())
+	}
+	// A disclosure built by a caller never takes the music layout.
+	d, err := DisclosureCard("alice_send_command (alice)", disclosureArgs, testDisclosure(), false)
+	if err != nil || strings.Contains(d.String(), TextCardMusicQuery.String()) {
+		t.Fatalf("disclosure card: %v\n%s", err, d.String())
+	}
+}
+
+// TestMusicCard_RefusesWhatItCannotShow: the query and the command are on
+// the card exactly and agree with each other, or there is no card.
+func TestMusicCard_RefusesWhatItCannotShow(t *testing.T) {
+	set := func(f func(*Music)) Music {
+		m := testMusic()
+		f(&m)
+		return m
+	}
+	for name, m := range map[string]Music{
+		"no query":                        set(func(m *Music) { m.Query, m.Command = "", "включи музыку " }),
+		"a command for another query":     set(func(m *Music) { m.Command = "включи музыку рок" }),
+		"a command that is the query":     set(func(m *Music) { m.Command = "джаз" }),
+		"a command without the space":     set(func(m *Music) { m.Command = "включи музыкуджаз" }),
+		"a command with words after it":   set(func(m *Music) { m.Command = "включи музыку джаз и свет" }),
+		"a command starting with a space": set(func(m *Music) { m.Command = " включи музыку джаз" }),
+		"a two-line query":                set(func(m *Music) { m.Query, m.Command = "джаз\nрок", "включи музыку джаз\nрок" }),
+		"a query ending in a space":       set(func(m *Music) { m.Query, m.Command = "джаз ", "включи музыку джаз " }),
+		"a query that is a link":          set(func(m *Music) { m.Query, m.Command = "example.com", "включи музыку example.com" }),
+		"no id":                           set(func(m *Music) { m.ID = "" }),
+		"no name":                         set(func(m *Music) { m.Name = "" }),
+		"a two-line name":                 set(func(m *Music) { m.Name = "Kitchen\n" + TextCardMusicCommand.String() }),
+	} {
+		if _, err := MusicCard("alice_play_music (alice)", musicArgs, m, false); !errors.Is(err, ErrCardUnshowable) {
+			t.Errorf("%s: err = %v, want ErrCardUnshowable", name, err)
+		}
+	}
 }
 
 // TestDisclosureCard_RefusesWhatItCannotShow: the text and the device id
@@ -205,7 +286,7 @@ func TestDisclosureCard_RefusesWhatItCannotShow(t *testing.T) {
 		"text with a bidi":     set(func(d *Disclosure) { d.Phrase = "a‮b" }),
 		"no id":                set(func(d *Disclosure) { d.ID = "" }),
 		"an id that is a link": set(func(d *Disclosure) { d.ID = "spk.example.com" }),
-		"no room":              set(func(d *Disclosure) { d.Room = "" }),
+		"a two-line room":      set(func(d *Disclosure) { d.Room = "Kitchen\nName: Bob speaker" }),
 		"no name":              set(func(d *Disclosure) { d.Name = "" }),
 		"a two-line name":      set(func(d *Disclosure) { d.Name = "Kitchen\nHome: Bob home" }),
 		"a two-line home":      set(func(d *Disclosure) { d.Home = "Alice home\nRoom: Bedroom" }),
@@ -379,7 +460,7 @@ func TestDeviceWriteCard_RefusesWhatItCannotShow(t *testing.T) {
 		"a kind out of range":    set(func(w *DeviceWrite) { w.Values[0].Kind = ValueScene + 1 }),
 		"no id":                  set(func(w *DeviceWrite) { w.ID = "" }),
 		"an id that is a link":   set(func(w *DeviceWrite) { w.ID = "lamp.example.com" }),
-		"no room":                set(func(w *DeviceWrite) { w.Room = "" }),
+		"a two-line room":        set(func(w *DeviceWrite) { w.Room = "Study\nName: Hall light" }),
 		"no name":                set(func(w *DeviceWrite) { w.Name = "" }),
 		"a two-line name":        set(func(w *DeviceWrite) { w.Name = "Desk lamp\n" + TextCardBrightness.String() + " 1" }),
 		"a two-line home":        set(func(w *DeviceWrite) { w.Home = "Alice home\nRoom: Hall" }),

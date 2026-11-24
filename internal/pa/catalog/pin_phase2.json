@@ -2,7 +2,7 @@
   "schema": "mctl-telegram.pa-catalog-pin/v1",
   "servers": {
     "alice": {
-      "upstream": "mctlhq/mctl-alice@148cab11f31c870f9905d2085731cae3c1124454 src/tools/definitions.ts, snapshot internal/pa/catalog/testdata/alice.tools.json",
+      "upstream": "mctlhq/mctl-alice@5f6755b7ae9e8764952dad4e5cb7eaabc78ca48c src/tools/definitions.ts, snapshot internal/pa/catalog/testdata/alice.tools.json",
       "tools": {
         "alice_control_device": {
           "tier": "approve",
@@ -287,6 +287,47 @@
             "openWorldHint": true,
             "readOnlyHint": false,
             "title": "Control speaker playback"
+          }
+        },
+        "alice_play_music": {
+          "tier": "approve",
+          "class": "write",
+          "lowerable": "never",
+          "catalog_description": "Start music on one Alice speaker from a short query: an artist, a track, an album, a genre or a mood. The speaker is named by its exact device id. Always needs the principal's approval on a card showing the speaker, the query and the command the speaker receives. At most 100 characters and 8 words; letters, digits, single spaces and the marks ' & - only; no assistant name and no command words.",
+          "constraints": {
+            "text_cap": {
+              "device": 128,
+              "query": 100
+            }
+          },
+          "description_sha256": "fe4a3463f5fe50f3328f201b993d297af1a91972542e512e24004e7ebf83b57d",
+          "input_schema": {
+            "additionalProperties": false,
+            "properties": {
+              "device": {
+                "description": "Exact device ID of the target speaker, as listed by alice_list_devices. Not a name and not a room.",
+                "type": "string"
+              },
+              "query": {
+                "description": "What to play: an artist, a track, an album, a genre or a mood. 1 to 100 characters and at most 8 words; Latin and Russian letters, the digits 0-9, single spaces and the marks ' & - only. No sentence punctuation, no line breaks, no word mixing Latin and Cyrillic, no assistant name and no command words (e.g. 'включи', 'выключи'). It is sent as written or refused, never trimmed or rewritten.",
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "device",
+              "query"
+            ],
+            "type": "object"
+          },
+          "input_schema_sha256": "c35576335d379cd2cf4d91485c9fcefaaa4ce809a863b555f64bea06db93c0bb",
+          "annotations": {
+            "destructiveHint": false,
+            "idempotentHint": false,
+            "openWorldHint": true,
+            "readOnlyHint": false,
+            "title": "Play music on a speaker by query"
           }
         },
         "alice_say_phrase": {

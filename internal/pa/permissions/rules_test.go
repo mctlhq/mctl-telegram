@@ -20,6 +20,7 @@ package permissions
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -27,7 +28,9 @@ import (
 )
 
 const (
-	speakerType = "devices.types.media_device.speaker"
+	// speakerType is what mctl-alice reports for a speaker with the
+	// assistant (its tests: devices.types.smart_speaker.yandex.station).
+	speakerType = "devices.types.smart_speaker.yandex.station"
 	lightType   = "devices.types.light"
 )
 
@@ -81,6 +84,9 @@ func TestS2D5_GrantRuleRefusals(t *testing.T) {
 		{"light of a socket", "alice_set_light", []Device{{ID: "dev-5", Type: "devices.types.socket"}}, NoCeiling, ErrRuleDeviceType},
 		{"a type that only contains the word", "alice_set_light", []Device{{ID: "dev-5", Type: "devices.types.socket.light"}}, NoCeiling, ErrRuleDeviceType},
 		{"a type that only starts like it", "alice_set_light", []Device{{ID: "dev-5", Type: lightType + "house"}}, NoCeiling, ErrRuleDeviceType},
+		{"a speaker type that only starts like it", "alice_set_volume", []Device{{ID: "dev-5", Type: TypeSmartSpeaker + "phone"}}, 5, ErrRuleDeviceType},
+		{"a media type that only starts like it", "alice_media_control", []Device{{ID: "dev-5", Type: TypeMediaDevice + "s"}}, NoCeiling, ErrRuleDeviceType},
+		{"a light type ending in a dot", "alice_set_light", []Device{{ID: "dev-5", Type: "devices.types.ligh.t"}}, NoCeiling, ErrRuleDeviceType},
 		{"a device without a type", "alice_set_volume", []Device{{ID: "dev-1"}}, 5, ErrRuleDeviceType},
 		{"volume without a ceiling", "alice_set_volume", speakers, NoCeiling, ErrRuleCeiling},
 		{"volume ceiling zero", "alice_set_volume", speakers, 0, ErrRuleCeiling},
@@ -164,8 +170,9 @@ func TestRules_AgreeWithThePhase2Pin(t *testing.T) {
 			t.Errorf("%s has a rule but the pin does not make it a lowerable write: %+v", name, pt)
 			continue
 		}
-		if r.typePrefix != TypeMediaDevice && r.typePrefix != TypeLight {
-			t.Errorf("%s: device type %q", name, r.typePrefix)
+		speaker := slices.Equal(r.typePrefixes, []string{TypeSmartSpeaker, TypeMediaDevice})
+		if !speaker && !slices.Equal(r.typePrefixes, []string{TypeLight}) {
+			t.Errorf("%s: device types %q", name, r.typePrefixes)
 		}
 		if r.ceilingArg == "" {
 			continue
@@ -314,6 +321,55 @@ func TestCovers_SirenAndAlarmScenesNeedACard(t *testing.T) {
 		c.Strings = strs
 		if p.Covers(c, now) {
 			t.Errorf("%v is covered", strs)
+		}
+	}
+}
+
+// TestTypeHasPrefix_IsExactAndDotted: a type matches a prefix when it is
+// the prefix or continues it after a dot, and never otherwise. The type
+// strings are the ones mctl-alice reports (its structured device listing).
+func TestTypeHasPrefix_IsExactAndDotted(t *testing.T) {
+	for _, tc := range []struct {
+		deviceType, prefix string
+		want               bool
+	}{
+		{"devices.types.light", TypeLight, true},
+		{"devices.types.light.strip", TypeLight, true},
+		{"devices.types.lighthouse", TypeLight, false},
+		{"devices.types.light_strip", TypeLight, false},
+		{"devices.types.socket.light", TypeLight, false},
+		{"devices.types.ligh", TypeLight, false},
+		{"", TypeLight, false},
+		{"devices.types.light", "", false},
+		{"devices.types.smart_speaker.yandex.station.mini", TypeSmartSpeaker, true},
+		{"devices.types.smart_speaker", TypeSmartSpeaker, true},
+		{"devices.types.smart_speakers", TypeSmartSpeaker, false},
+		{"devices.types.media_device.tv", TypeMediaDevice, true},
+		{"devices.types.thermostat", TypeMediaDevice, false},
+	} {
+		if got := TypeHasPrefix(tc.deviceType, tc.prefix); got != tc.want {
+			t.Errorf("TypeHasPrefix(%q, %q) = %v, want %v", tc.deviceType, tc.prefix, got, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		tool, deviceType string
+		want             bool
+	}{
+		{"alice_set_volume", speakerType, true},
+		{"alice_media_control", speakerType, true},
+		{"alice_set_volume", "devices.types.media_device.tv", true},
+		{"alice_set_volume", lightType, false},
+		{"alice_set_volume", "", false},
+		{"alice_set_light", lightType, true},
+		{"alice_set_light", speakerType, false},
+		{"alice_set_light", lightType + "house", false},
+		// No rule: never, whatever the type.
+		{"alice_play_music", speakerType, false},
+		{"alice_say_phrase", speakerType, false},
+		{"alice_control_device", lightType, false},
+	} {
+		if got := TypeAllowed(tc.tool, tc.deviceType); got != tc.want {
+			t.Errorf("TypeAllowed(%q, %q) = %v, want %v", tc.tool, tc.deviceType, got, tc.want)
 		}
 	}
 }
