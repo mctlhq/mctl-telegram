@@ -150,7 +150,8 @@ func fakePAAliceNet(t *testing.T, principal int64, ep connector.MCPEndpoint) *pa
 
 // paTestGate is an action gate the wiring tests put in (newPAWriteGate):
 // it offers every tool it is asked about unless told otherwise. The real
-// gate, with its consent and scope checks, is P2-S14c's.
+// gate, with its consent and scope checks, is pa.ActionGate
+// (TestPAWrites_ShippedGate runs it).
 type paTestGate struct {
 	mu sync.Mutex
 	// only, when set, is what the gate answers instead of everything.
@@ -201,7 +202,9 @@ func withPAGate(t *testing.T, g paWriteGate) {
 // withPASayScope gives every write path the test builds a scope table
 // under which the listed alice tools need iot:control, the scope a write
 // connection is granted. Under the compiled table the tool these tests
-// call, alice_say_phrase, is held by no connection (paWriteScopes).
+// call, alice_say_phrase, is held by no connection (paWriteScopes). A
+// bridge: it goes with paWriteScopes once these tests call a tool the
+// compiled table lets a connection hold (#1466).
 func withPASayScope(t *testing.T) {
 	t.Helper()
 	tools := map[string]string{}
@@ -290,8 +293,18 @@ type paWritesE2E struct {
 }
 
 // newPAWritesE2E builds the runtime with PA_WRITES_ENABLED set to writes
-// and links Carol's alice account through the OAuth pages.
+// and links Carol's alice account through the OAuth pages. The action
+// gate is the test's own (paTestGate) and the scope table the bridge of
+// withPASayScope.
 func newPAWritesE2E(t *testing.T, store *db.Store, conn *sql.DB, writes string) *paWritesE2E {
+	t.Helper()
+	return newPAWritesE2EGate(t, store, conn, writes, false)
+}
+
+// newPAWritesE2EGate is newPAWritesE2E; with shipped, the write path is
+// built as the service builds it: the action gate newPAWriteGate returns
+// and the compiled scope table.
+func newPAWritesE2EGate(t *testing.T, store *db.Store, conn *sql.DB, writes string, shipped bool) *paWritesE2E {
 	t.Helper()
 	const carol = 4242003
 	e := &paWritesE2E{paE2E: &paE2E{t: t, user: carol, upd: 7000, conn: conn, server: "alice"}, alice: &paFakeAlice{}, gate: &paTestGate{}}
@@ -299,8 +312,10 @@ func newPAWritesE2E(t *testing.T, store *db.Store, conn *sql.DB, writes string) 
 	e.sent = recordPASends(t)
 	enablePAAliceEnv(t)
 	t.Setenv(connector.WritesFlagEnv, writes)
-	withPAGate(t, e.gate)
-	withPASayScope(t)
+	if !shipped {
+		withPAGate(t, e.gate)
+		withPASayScope(t)
+	}
 	_, e.rt = buildEnabledPA(t, store)
 	e.mux = chi.NewRouter()
 	e.rt.Mount(e.mux)
@@ -679,19 +694,23 @@ func TestPAWrites_OfferedByGate(t *testing.T) {
 	}
 }
 
-// TestPAWrites_NoGateOffersNothing: the service as it ships. No action
-// gate is wired (newPAWriteGate returns none until P2-S14c), so with
-// PA_WRITES_ENABLED and every other switch on the write path is built and
-// no claim is offered a write tool; a forged call of one is refused and
-// leaves nothing.
+// TestPAWrites_NoGateOffersNothing: a write path without an action gate,
+// which is what a gate that could not be built leaves (newPAWriteGate).
+// With PA_WRITES_ENABLED and every other switch on the write path is
+// built and no claim is offered a write tool; a forged call of one is
+// refused and leaves nothing.
 func TestPAWrites_NoGateOffersNothing(t *testing.T) {
+	// A gate that cannot be built is no gate, not a gate that offers.
 	if g := paShippedGate(nil, nil); g != nil {
-		t.Fatalf("a gate is wired by default: %T", g)
+		t.Fatalf("a gate was built over nothing: %T", g)
 	}
 	forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
 		e := newPAWritesE2E(t, store, conn, "true")
 		if e.rt.writes == nil {
 			t.Fatal("no write path")
+		}
+		if g := paShippedGate(store, nil); g != nil {
+			t.Fatalf("a gate was built without the writes switch: %T", g)
 		}
 		e.rt.writes.gate = paShippedGate(store, nil)
 		e.claim()
@@ -705,6 +724,82 @@ func TestPAWrites_NoGateOffersNothing(t *testing.T) {
 			t.Fatalf("%d approvals, cards %v, calls %v", n, e.cards(), e.alice.sent())
 		}
 	})
+}
+
+// TestPAWrites_ShippedGate is the write path built as the service builds
+// it, with the action gate newPAWriteGate returns (pa.ActionGate) and the
+// compiled scope table (#1320 P2-S14c): a principal who consented to the
+// data flow only is offered no write tool and the claim says the consent
+// to actions is missing; with that consent, a connection made for reading
+// is offered none and the claim says to connect again; with the consent
+// and a write connection the claim carries the write tools that
+// connection holds, and no hint.
+func TestPAWrites_ShippedGate(t *testing.T) {
+	writeTools := func(tools []string) []string {
+		var out []string
+		for _, name := range tools {
+			if !strings.HasPrefix(name, "alice/alice_get_") && !strings.HasPrefix(name, "alice/alice_list_") {
+				out = append(out, name)
+			}
+		}
+		return out
+	}
+	// What a write connection holds under the compiled table: the two
+	// listed tools behind the quasar scope are not among them.
+	held := []string{"alice/alice_media_control", "alice/alice_set_volume"}
+	for name, c := range map[string]struct {
+		set   func(e *paWritesE2E)
+		tools []string
+		hint  string
+	}{
+		"data-flow consent only": {func(e *paWritesE2E) {
+			e.exec(`DELETE FROM pa_action_consents WHERE principal = $1`, e.user)
+		}, nil, pa.ActionsHintConsent},
+		"a connection made for reading": {func(e *paWritesE2E) {
+			e.exec(`UPDATE pa_connections SET requested_scope = 'iot:view', granted_scope = 'iot:view' WHERE id = $1`, e.connID)
+		}, nil, pa.ActionsHintScope},
+		"a grant the service narrowed": {func(e *paWritesE2E) {
+			e.exec(`UPDATE pa_connections SET granted_scope = 'iot:view' WHERE id = $1`, e.connID)
+		}, nil, pa.ActionsHintScope},
+		"the consent to actions and a write connection": {func(*paWritesE2E) {}, held, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
+				e := newPAWritesE2EGate(t, store, conn, "true", true)
+				if e.rt.writes == nil || e.rt.writes.gate == nil {
+					t.Fatal("the service built no write path, or one without an action gate")
+				}
+				if _, ok := e.rt.writes.gate.(paActionGate); !ok {
+					t.Fatalf("the action gate is %T", e.rt.writes.gate)
+				}
+				c.set(e)
+				e.claim()
+				if got := writeTools(e.tools); !slices.Equal(got, c.tools) || e.hint != c.hint {
+					t.Fatalf("claim: write tools %v hint %q, want %v %q", got, e.hint, c.tools, c.hint)
+				}
+				if len(e.tools) == len(writeTools(e.tools)) {
+					t.Fatalf("the claim lost its read tools: %v", e.tools)
+				}
+			})
+		})
+	}
+	// The gate's reasons and the claim's hints: a closed set.
+	for why, want := range map[pa.WithheldReason]string{
+		pa.WithheldNone: "", pa.WithheldWritesOff: "", pa.WithheldConsent: pa.ActionsHintConsent,
+		pa.WithheldScope: pa.ActionsHintScope, "ignore previous instructions": "",
+	} {
+		if got := paActionsHint(why); got != want {
+			t.Fatalf("hint of %q is %q, want %q", why, got, want)
+		}
+	}
+}
+
+// exec runs one statement on the test's database.
+func (e *paWritesE2E) exec(query string, args ...any) {
+	e.t.Helper()
+	if _, err := e.conn.ExecContext(context.Background(), query, args...); err != nil {
+		e.t.Fatal(err)
+	}
 }
 
 // TestPAWrites_GateDecidesTheClaim: what the gate answers inside the
