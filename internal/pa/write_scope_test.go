@@ -206,6 +206,14 @@ func (f *scopeFresh) FreshTool(context.Context, connector.FreshRequest) (connect
 	}, nil
 }
 
+// scopeDevices is the executor's device reader for the alice fake: one
+// speaker, the one the approvals of this file name.
+type scopeDevices struct{}
+
+func (scopeDevices) Devices(context.Context, connector.SpeakerRequest) ([]connector.Device, error) {
+	return []connector.Device{{ID: "dev-1", Name: "Kitchen speaker", Room: "Kitchen", Home: "Home", Type: speakerType, Speaker: true}}, nil
+}
+
 // TestWriteScope_ExecutorSendsOnlyOnAHeldScope: an approved action is sent
 // only on a connection that holds its tool's scope, read in the executor's
 // own transaction, under the compiled table. It does not rest on the claim
@@ -217,12 +225,13 @@ func TestWriteScope_ExecutorSendsOnlyOnAHeldScope(t *testing.T) {
 			c.Scopes = nil
 			c.Endpoints["alice"] = home
 			c.Fresh = fresh
+			c.Devices = map[string]connector.DeviceLister{"alice": scopeDevices{}}
 		})
 		sent := func() int { return len(e.ep.sent()) + len(home.sent()) }
 		e.flags.Store(&connector.Flags{ExternalTools: true, Writes: true, Servers: map[string]bool{"tg": true, "alice": true}})
 		approved := func(conn connection.Connection, tool string) approval.Approval {
 			t.Helper()
-			canon, err := catalog.CanonicalArgs([]byte(`{"device_id":"dev-1","volume":3}`))
+			canon, err := catalog.CanonicalArgs([]byte(`{"device":"dev-1","level":3}`))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -232,7 +241,10 @@ func TestWriteScope_ExecutorSendsOnlyOnAHeldScope(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if a, err = e.sealer.Seal(a, canon); err != nil {
+			// The device the card named, as scopeDevices lists it: the
+			// executor reads it again before it sends.
+			detail := []byte(`{"device":{"id":"dev-1","name":"Kitchen speaker","room":"Kitchen","home":"Home","type":"` + speakerType + `","kind":"speaker"}}`)
+			if a, err = e.sealer.SealWithDetail(a, canon, detail); err != nil {
 				t.Fatal(err)
 			}
 			return e.save(a)

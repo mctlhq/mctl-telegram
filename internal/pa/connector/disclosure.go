@@ -58,6 +58,10 @@ const (
 	// ReasonDevicesUnreadable: the speakers could not be read, or the read
 	// was empty or malformed. That is not "no such device".
 	ReasonDevicesUnreadable = "devices_unreadable"
+	// ReasonDeviceChanged: at dispatch the device is listed under another
+	// name, room, home, type or kind than the card was made from
+	// (device_recheck.go).
+	ReasonDeviceChanged = "device_changed"
 	// ReasonTextTooLong: the text is over the pin's cap (S2-D3).
 	ReasonTextTooLong = "text_too_long"
 	// ReasonTextHasLink: the text holds a URL or another link token.
@@ -70,9 +74,13 @@ const (
 type Speaker struct {
 	// ID is the device id, the only form of a target a card accepts.
 	ID string
-	// Name and Room are required. Home is "" when the server does not
+	// Name is required. Room and Home are "" when the server does not
 	// report one; the card then says so.
 	Name, Room, Home string
+	// Type is the device type the server reports, "" when it reports
+	// none. It is not shown; it is sealed with the card and compared at
+	// dispatch.
+	Type string
 }
 
 // SpeakerRequest names the connection whose speakers are read.
@@ -84,15 +92,16 @@ type SpeakerRequest struct {
 	Token             connection.Secret
 }
 
-// ErrSpeakersUnreadable is any speaker read that did not yield a complete,
-// well-formed, non-empty list.
+// ErrSpeakersUnreadable is any device read that did not yield a complete,
+// well-formed list.
 var ErrSpeakersUnreadable = errors.New("pa connector: speakers unreadable")
 
 // SpeakerReader reads the speakers of one connection from its server, now.
 // It never answers from a cache, and it returns an error for anything but a
 // complete list it could parse: a failed call, a tool error, a result it
-// does not recognise, a list with no speaker. "Could not read" is never an
-// empty list.
+// does not recognise. "Could not read" is never an empty list. A list that
+// was read in full and holds no speaker is ErrNoSuchDevices, which is not
+// "unreadable"; an empty list with no error is treated as unreadable.
 type SpeakerReader interface {
 	Speakers(ctx context.Context, req SpeakerRequest) ([]Speaker, error)
 }
@@ -128,7 +137,17 @@ type detailSpeaker struct {
 	Name string `json:"name"`
 	Room string `json:"room"`
 	Home string `json:"home"`
+	// Type is the device type the read reported, "" for none. Kind is
+	// detailKindSpeaker or detailKindLight: what the read said the device
+	// is. Both are compared with a read made at dispatch.
+	Type string `json:"type"`
+	Kind string `json:"kind"`
 }
+
+const (
+	detailKindSpeaker = "speaker"
+	detailKindLight   = "light"
+)
 
 // stringArg returns the string value of args[name]. ok is false when the
 // member is missing or is not a JSON string.
@@ -218,32 +237,11 @@ func (c *Cards) disclosureTarget(ctx context.Context, req CardRequest, call disc
 	if reader == nil {
 		return d, nil, &refusal{ReasonNoWritePath, http.StatusForbidden}
 	}
-	speakers, err := reader.Speakers(ctx, SpeakerRequest{
-		Principal: req.Policy.Principal().TelegramID(), ConnectionID: req.ConnectionID,
-		AuthorityRevision: req.AuthorityRevision, Server: req.Server, Token: req.Token,
-	})
-	if err != nil || len(speakers) == 0 {
-		return d, nil, &refusal{ReasonDevicesUnreadable, http.StatusServiceUnavailable}
+	target, ref := listedSpeaker(ctx, reader, req, call.device)
+	if ref != nil {
+		return d, nil, ref
 	}
-	var target *Speaker
-	seen := make(map[string]bool, len(speakers))
-	for i := range speakers {
-		s := &speakers[i]
-		// A list with a speaker it cannot name, or one id twice, is not a
-		// list this card can be built from.
-		if s.ID == "" || s.Name == "" || s.Room == "" || seen[s.ID] {
-			return d, nil, &refusal{ReasonDevicesUnreadable, http.StatusServiceUnavailable}
-		}
-		seen[s.ID] = true
-		// The id, byte for byte. A name or a room never matches here.
-		if s.ID == call.device {
-			target = s
-		}
-	}
-	if target == nil {
-		return d, nil, &refusal{ReasonDeviceNotListed, http.StatusUnprocessableEntity}
-	}
-	detail, err = json.Marshal(cardDetail{Speaker: &detailSpeaker{ID: target.ID, Name: target.Name, Room: target.Room, Home: target.Home}})
+	detail, err := json.Marshal(cardDetail{Speaker: target})
 	if err != nil {
 		return d, nil, &refusal{ReasonInternal, http.StatusInternalServerError}
 	}
@@ -251,6 +249,45 @@ func (c *Cards) disclosureTarget(ctx context.Context, req CardRequest, call disc
 		Home: target.Home, Room: target.Room, Name: target.Name, ID: target.ID,
 		Phrase: call.text, Spoken: call.spec.spoken,
 	}, detail, nil
+}
+
+// listedSpeaker reads the connection's speakers and returns the one whose
+// id is device, byte for byte, as the detail a card seals. A read that
+// failed, came back empty without saying so, or holds a speaker without an
+// id or a name or one id twice is unreadable; a list read in full that
+// does not hold the id is "not listed".
+func listedSpeaker(ctx context.Context, reader SpeakerReader, req CardRequest, device string) (*detailSpeaker, *refusal) {
+	speakers, err := reader.Speakers(ctx, SpeakerRequest{
+		Principal: req.Policy.Principal().TelegramID(), ConnectionID: req.ConnectionID,
+		AuthorityRevision: req.AuthorityRevision, Server: req.Server, Token: req.Token,
+	})
+	if errors.Is(err, ErrNoSuchDevices) {
+		return nil, &refusal{ReasonDeviceNotListed, http.StatusUnprocessableEntity}
+	}
+	if err != nil || len(speakers) == 0 {
+		return nil, &refusal{ReasonDevicesUnreadable, http.StatusServiceUnavailable}
+	}
+	var target *Speaker
+	seen := make(map[string]bool, len(speakers))
+	for i := range speakers {
+		s := &speakers[i]
+		// A list with a speaker it cannot name, or one id twice, is not a
+		// list this card can be built from.
+		if s.ID == "" || s.Name == "" || seen[s.ID] {
+			return nil, &refusal{ReasonDevicesUnreadable, http.StatusServiceUnavailable}
+		}
+		seen[s.ID] = true
+		// The id, byte for byte. A name or a room never matches here.
+		if s.ID == device {
+			target = s
+		}
+	}
+	if target == nil {
+		return nil, &refusal{ReasonDeviceNotListed, http.StatusUnprocessableEntity}
+	}
+	return &detailSpeaker{
+		ID: target.ID, Name: target.Name, Room: target.Room, Home: target.Home, Type: target.Type, Kind: detailKindSpeaker,
+	}, nil
 }
 
 // disclosureOf rebuilds what a disclosure card shows from the approval's
@@ -272,7 +309,7 @@ func disclosureOf(tool string, args, detail []byte) (safetext.Disclosure, error)
 	if err := dec.Decode(&cd); err != nil || cd.Speaker == nil {
 		return safetext.Disclosure{}, errors.New("pa card: disclosure detail unreadable")
 	}
-	if cd.Speaker.ID != device || cd.Speaker.Name == "" || cd.Speaker.Room == "" {
+	if cd.Speaker.ID != device || cd.Speaker.Name == "" || cd.Speaker.Kind != detailKindSpeaker {
 		return safetext.Disclosure{}, errors.New("pa card: disclosure detail does not match the arguments")
 	}
 	return safetext.Disclosure{

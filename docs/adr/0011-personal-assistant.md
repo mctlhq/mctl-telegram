@@ -116,6 +116,7 @@ This record is Phase 0 of the Personal Assistant epic (#1312). Refs #1048, the s
   - volume, up to a ceiling;
   - light;
   - device control, only for device ids listed in the permission and of type `light` or `media_device`. The type is read fresh at dispatch, and an unknown type is not lowerable.
+  - (amended, P2-S14b) the type strings are the ones mctl-alice reports: a speaker is `devices.types.smart_speaker.*` (not `media_device`, which is a television or a set-top box) and a light is `devices.types.light`. `alice_play_music` is a write that is never lowerable: it hands a speaker text the caller chose.
 
   The following are never lowerable: appliances, relays, sockets, `alice_control_room` and `trigger_scenario`. The `trigger_scenario` card shows the scenario's steps.
 - **Phase 1 has no write path.** Write tools are not in the signed tool set.

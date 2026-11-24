@@ -190,6 +190,11 @@ var (
 	TextCardPhrase      = tpl("Text the speaker will say aloud:", "Текст, который колонка произнесёт вслух:")
 	TextCardCommand     = tpl("Command the speaker will carry out as if it was said to it:", "Команда, которую колонка выполнит так, как если бы её произнесли:")
 	TextCardRoomWarning = tpl("Warning: everyone in the room will hear it, and it cannot be undone.", "Внимание: это услышат все, кто находится в комнате, и отменить это нельзя.")
+	// The card of a music request (#1322 slice P2-S14b): MusicCard shows
+	// the speaker, the query exactly as it is sent, and the whole command
+	// the service hands the speaker for it.
+	TextCardMusicQuery   = tpl("Music to play (the query, exactly as it is sent):", "Какую музыку включить (запрос, ровно в том виде, в котором он будет отправлен):")
+	TextCardMusicCommand = tpl("Command the speaker receives:", "Команда, которую получит колонка:")
 	// The card of a device write (#1322 slice P2-S8, threat model T6):
 	// DeviceWriteCard shows the speaker or the light, as the service
 	// listed it when the card was made, and every value that is sent, each

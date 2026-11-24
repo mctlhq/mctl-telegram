@@ -55,8 +55,8 @@ const (
 
 func testLights() []connector.Light {
 	return []connector.Light{
-		{ID: deskLampID, Name: "Desk lamp", Room: "Study", Home: "Alice home"},
-		{ID: hallLampID, Name: "Hall light", Room: "Hall"},
+		{ID: deskLampID, Name: "Desk lamp", Room: "Study", Home: "Alice home", Type: lightType},
+		{ID: hallLampID, Name: "Hall light", Room: "Hall", Type: lightType + ".ceiling"},
 	}
 }
 
@@ -112,7 +112,7 @@ func deviceWritePin(t *testing.T) *catalog.Pin {
 		t.Fatal(err)
 	}
 	tools := map[string]catalog.PinnedTool{"get_messages": {Tier: catalog.TierAuto, Class: catalog.ClassRead}}
-	for _, name := range []string{mediaTool, volumeTool, lightTool, deviceTool, roomTool, scenarioRun} {
+	for _, name := range []string{mediaTool, volumeTool, lightTool, deviceTool, roomTool, scenarioRun, musicTool} {
 		pt, ok := p2.Servers["alice"].Tools[name]
 		if !ok || pt.Class != catalog.ClassWrite || pt.Tier != catalog.TierApprove {
 			t.Fatalf("the Phase 2 pin does not hold %s as an approve-tier write: %+v", name, pt)
@@ -469,7 +469,6 @@ func TestDeviceWrite_UnreadableDevicesRefuse(t *testing.T) {
 			"failed with data": {testSpeakers(), connector.ErrSpeakersUnreadable},
 			"an empty list":    {nil, nil},
 			"a nameless one":   {[]connector.Speaker{{ID: kitchenID, Room: "Kitchen"}}, nil},
-			"a roomless one":   {[]connector.Speaker{{ID: kitchenID, Name: "Kitchen speaker"}}, nil},
 			"one without an id": {[]connector.Speaker{{ID: kitchenID, Name: "Kitchen speaker", Room: "Kitchen"},
 				{Name: "Bedroom speaker", Room: "Bedroom"}}, nil},
 			"one id twice": {[]connector.Speaker{{ID: kitchenID, Name: "Kitchen speaker", Room: "Kitchen"},
@@ -487,7 +486,6 @@ func TestDeviceWrite_UnreadableDevicesRefuse(t *testing.T) {
 			"failed with lights":    {testLights(), connector.ErrSpeakersUnreadable},
 			"no light":              {nil, nil},
 			"a nameless light":      {[]connector.Light{{ID: deskLampID, Room: "Study"}}, nil},
-			"a roomless light":      {[]connector.Light{{ID: deskLampID, Name: "Desk lamp"}}, nil},
 			"one light id twice": {[]connector.Light{{ID: deskLampID, Name: "Desk lamp", Room: "Study"},
 				{ID: deskLampID, Name: "Hall light", Room: "Hall"}}, nil},
 		} {
@@ -543,7 +541,7 @@ func TestDeviceWrite_OtherPhase2WritesHaveNoCard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	withCard := []string{mediaTool, volumeTool, lightTool}
+	withCard := []string{mediaTool, volumeTool, lightTool, musicTool}
 	without := []string{deviceTool, roomTool, scenarioRun}
 	for name, pt := range p2.Servers["alice"].Tools {
 		if pt.Class == catalog.ClassWrite && !slices.Contains(withCard, name) && !slices.Contains(without, name) {
