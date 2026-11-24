@@ -256,7 +256,7 @@ func buildPAWrites(cfg *config.Config, pt *paTools, store *db.Store, sender paBo
 	w.permissions = &pa.PermissionsConfig{Grants: store, Policy: policy, Writes: writes}
 	// A grant reads the devices it lists through grantDevices. It is nil
 	// only when no enabled server has such a reader; the Validator then
-	// refuses every grant devices_unread (S2-D5), which is fail closed.
+	// refuses every grant devices_unreadable (S2-D5), which is fail closed.
 	w.commands = &pa.PermissionCommands{
 		Store: store, Sender: sender, Writes: writes,
 		Validator: &permissions.Validator{Policy: policy, Devices: grantDevices, Rule: permissions.Rules{}},
