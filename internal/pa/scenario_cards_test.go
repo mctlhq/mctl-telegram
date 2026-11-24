@@ -27,6 +27,7 @@ import (
 	"errors"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -152,7 +153,7 @@ func scenarioCardText(l safetext.Lang, args string, sc connector.Scenario) strin
 		safetext.TextCardScenarioID.In(l) + " " + sc.ID + "\n\n" +
 		safetext.TextCardScenarioSteps.In(l)
 	for i, step := range sc.Steps {
-		s += "\n" + string(rune('1'+i)) + ". " + step
+		s += "\n" + strconv.Itoa(i+1) + ". " + step
 	}
 	return s + "\n\n" + safetext.TextCardArgs.In(l) + "\n" + args + "\n\n" + safetext.TextCardFoot.In(l)
 }
