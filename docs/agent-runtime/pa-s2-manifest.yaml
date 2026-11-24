@@ -153,25 +153,27 @@
 # again on this branch and are red.
 #
 # The P2S14-* records (no letter before the dash) ran on the P2-S14a
-# branches, last after main at 369f3ae1 was merged, the same way, on
+# branches, last after main at 3a3ff188 was merged, the same way, on
 # sqlite, restored from saved bytes; the tests also pass on Postgres.
 # P2-S14a wired the write path into cmd/server behind PA_WRITES_ENABLED:
 # one constructor (buildPAWrites) loads the Phase 2 pin and builds the
 # approval sealer, connector.PinFresh, connector.Cards with the
-# AliceDevices reader for speakers and lights, the WriteExecutor,
-# /permissions with the GrantDevices reader and the action gate
-# (pa.ActionGate, P2-S14c), and the webhook's AfterCommit hands an
-# approved call to the executor. With the flag not true none of it exists
-# (TestNoRuntimePhase2Use allows the Phase 2 constructors in that one
-# function, behind its check of the flag, and nowhere else). The same
-# slice made "one approval card per run" the server's rule and the worker
-# prompt depend on the claim's tools. One record is listed under every id
-# whose "no caller in the service" or "not wired" gap it closes, so the
-# same P2S14 id recurs across ids. Gaps that stay name what is still
-# missing: no reader of scenario steps, no lowered call run end to end in
-# cmd/server, and no deployed run of any of it. The change moved lines in
-# card.go, runloop.go and parunner.go, so the guards of earlier slices in
-# those files were pointed at their new lines; their code did not change.
+# AliceDevices reader for speakers and lights, the WriteExecutor and
+# /permissions with the GrantDevices reader, and the webhook's
+# AfterCommit hands an approved call to the executor. With the flag not
+# true none of it exists (TestNoRuntimePhase2Use allows the Phase 2
+# constructors in that one function, behind its check of the flag, and
+# nowhere else). The same slice made "one approval card per run" the
+# server's rule and the worker prompt depend on the claim's tools. One
+# record is listed under every id whose "no caller in the service" or
+# "not wired" gap it closes, so the same P2S14 id recurs across ids. Gaps
+# that stay name what is still missing: no reader of scenario steps and no
+# lowered call run end to end in cmd/server. It shipped without an action
+# gate; P2-S14c put pa.ActionGate into that seam (P2S14c-F3x to
+# P2S14c-F3ac, run the same way on its branch after this change was
+# merged into it). The change moved lines in card.go, runloop.go and
+# parunner.go, so the guards of earlier slices in those files were pointed
+# at their new lines; their code did not change.
 #
 # The P2S14B-* records (S2-D1, S2-D2, S2-D4, S2-D5) ran on the P2-S14b
 # branch, cut from cfce1134, on sqlite: each mutation was applied by a
@@ -519,7 +521,7 @@ S2-C9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:406
+      guard: cmd/server/pa_writes.go:410
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -529,7 +531,7 @@ S2-C9:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.102s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.086s
   gaps:
     - half: "the /disconnect command itself: the tests end the connection through connection.Manager.Disconnect and the store, not through the webhook's command, which the dispatch harness does not wire"
       tracked_by: "#1320"
@@ -624,7 +626,7 @@ S2-C11:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.614s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:406
+      guard: cmd/server/pa_writes.go:410
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -634,9 +636,9 @@ S2-C11:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.102s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.086s
     - id: P2S14-FRESHa
-      guard: cmd/server/pa_writes.go:261
+      guard: cmd/server/pa_writes.go:271
       guard_text: "Sealer: sealer, Flags: pt.flags, Allowed: allowed.Allowed, Fresh: fresh, Metrics: m,"
       mutation: "the write executor is built without the fresh listing (connector.PinFresh)"
       killed_by:
@@ -646,7 +648,7 @@ S2-C11:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.116s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.136s
   gaps:
     - half: "the outcome against a real MCP server and its real timeout and 5xx bodies"
       tracked_by: "#1320"
@@ -788,7 +790,7 @@ S2-C13:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.772s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:406
+      guard: cmd/server/pa_writes.go:410
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -798,9 +800,9 @@ S2-C13:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.102s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.086s
     - id: P2S14-FRESHa
-      guard: cmd/server/pa_writes.go:261
+      guard: cmd/server/pa_writes.go:271
       guard_text: "Sealer: sealer, Flags: pt.flags, Allowed: allowed.Allowed, Fresh: fresh, Metrics: m,"
       mutation: "the write executor is built without the fresh listing (connector.PinFresh)"
       killed_by:
@@ -810,7 +812,7 @@ S2-C13:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.116s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.136s
   gaps:
     - half: "the /disconnect command end to end against an in-flight write, with its reply sent before the call returns (P2-S12 cancels what was not dispatched and added no such test)"
       tracked_by: "#1320"
@@ -848,7 +850,7 @@ S2-X5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.493s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:406
+      guard: cmd/server/pa_writes.go:410
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -858,7 +860,7 @@ S2-X5:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.102s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.086s
 
 S2-I5:
   status: green
@@ -1652,7 +1654,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.735s
     - id: P2S14-SPKa
-      guard: cmd/server/pa_writes.go:243
+      guard: cmd/server/pa_writes.go:253
       guard_text: "speakers[name], lights[name], devices[name] = r, r, r"
       mutation: "the card emitter is built without the production speaker reader (connector.AliceDevices)"
       killed_by:
@@ -1664,9 +1666,9 @@ S2-D2:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.370s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.392s
     - id: P2S14-DEVa
-      guard: cmd/server/pa_writes.go:262
+      guard: cmd/server/pa_writes.go:272
       guard_text: "Devices: devices, Scopes: paWriteScopes,"
       mutation: "the write executor is built without the device reader, so it cannot read the device again before it sends"
       killed_by:
@@ -1676,9 +1678,9 @@ S2-D2:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.219s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.192s
     - id: P2S14-LGTa
-      guard: cmd/server/pa_writes.go:243
+      guard: cmd/server/pa_writes.go:253
       guard_text: "speakers[name], lights[name], devices[name] = r, r, r"
       mutation: "the card emitter is built without the light reader while alice_set_light is offered"
       killed_by:
@@ -1690,9 +1692,9 @@ S2-D2:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.423s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.349s
   gaps:
-    - half: "device writes are wired (P2-S14): cmd/server builds connector.Cards with connector.AliceDevices as the speaker and the light reader and gives the same reader to the WriteExecutor for its read before a send, so alice_media_control, alice_set_volume, alice_set_light and alice_play_music are offered under the action gate and reach the value and device checks, but only alice_say_phrase runs end to end in the cmd/server tests"
+    - half: "device writes are wired (P2-S14): cmd/server builds connector.Cards with connector.AliceDevices as the speaker and the light reader and gives the same reader to the WriteExecutor for its read before a send, so alice_media_control, alice_set_volume, alice_set_light and alice_play_music can be offered and reach the value and device checks, but only alice_say_phrase runs end to end in the cmd/server tests"
       tracked_by: "#1323"
     - half: "the structured device listing is in mctl-alice main (5f6755b7, PR #206) and in no release: against the released 2.18.0, whose alice_list_devices result has no structuredContent, every device read is unreadable and every device write, disclosure and alice_play_music call is refused devices_unreadable. There is no fallback to the text listing, by design. connector.AliceDevices is proven on fixtures copied from mctl-alice's own tests at that commit and was never run against a real server"
       tracked_by: "#1322"
@@ -1776,7 +1778,7 @@ S2-D3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.522s
     - id: P2S14-SPKa
-      guard: cmd/server/pa_writes.go:243
+      guard: cmd/server/pa_writes.go:253
       guard_text: "speakers[name], lights[name], devices[name] = r, r, r"
       mutation: "the card emitter is built without the production speaker reader (connector.AliceDevices)"
       killed_by:
@@ -1788,7 +1790,7 @@ S2-D3:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.370s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.392s
 
 S2-D4:
   status: green
@@ -2068,7 +2070,7 @@ S2-D4:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.470s
     - id: P2S14-SPKa
-      guard: cmd/server/pa_writes.go:243
+      guard: cmd/server/pa_writes.go:253
       guard_text: "speakers[name], lights[name], devices[name] = r, r, r"
       mutation: "the card emitter is built without the production speaker reader (connector.AliceDevices)"
       killed_by:
@@ -2080,7 +2082,7 @@ S2-D4:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.370s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.392s
     - id: P2S14-MUSa
       guard: internal/pa/connector/card_path.go:49
       guard_text: "if tool == musicTool {"
@@ -2089,12 +2091,12 @@ S2-D4:
         - cmd/server.TestPAWrites_EndToEnd
         - cmd/server.TestBuildPAWrites_RefusesAHalfWiredStart
       red: |-
-        --- FAIL: TestPAWrites_EndToEnd (0.34s)
-        --- FAIL: TestBuildPAWrites_RefusesAHalfWiredStart (0.28s)
+        --- FAIL: TestPAWrites_EndToEnd (0.33s)
+        --- FAIL: TestBuildPAWrites_RefusesAHalfWiredStart (0.27s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.467s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.380s
   gaps:
     - half: "the music query rules and the spoken prefix are PA's copy of mctl-alice's: the pin hashes the tool's schema, description and annotations only, so a server that changes a rule or the prefix without changing those is not noticed until testdata/alice_music_queries.json is regenerated from its tests. Until then a card could show a command the server no longer sends, or be refused here for a query the server would take"
       tracked_by: "#1322"
@@ -2654,7 +2656,7 @@ S2-D7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.497s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:406
+      guard: cmd/server/pa_writes.go:410
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -2664,9 +2666,9 @@ S2-D7:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.102s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.086s
     - id: P2S14-FRESHa
-      guard: cmd/server/pa_writes.go:261
+      guard: cmd/server/pa_writes.go:271
       guard_text: "Sealer: sealer, Flags: pt.flags, Allowed: allowed.Allowed, Fresh: fresh, Metrics: m,"
       mutation: "the write executor is built without the fresh listing (connector.PinFresh)"
       killed_by:
@@ -2676,7 +2678,7 @@ S2-D7:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.116s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.136s
   gaps:
     - half: "a card is byte for byte the sealed arguments only when they hold nothing safetext rewrites: a link-like token is shown defanged (a[.]b) while the call sends it as it is, and arguments that already hold a defang mark are refused card_unshowable. Owner decision: show such values raw on a card, or keep the defang (P2-S5 kept it)"
       tracked_by: "#1322"
@@ -2734,7 +2736,7 @@ S2-A1:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.475s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:406
+      guard: cmd/server/pa_writes.go:410
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -2744,7 +2746,7 @@ S2-A1:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.102s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.086s
 
 S2-A2:
   status: green
@@ -2803,7 +2805,7 @@ S2-A2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.802s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:406
+      guard: cmd/server/pa_writes.go:410
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -2813,7 +2815,7 @@ S2-A2:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.102s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.086s
 
 S2-A3:
   status: green
@@ -2849,7 +2851,7 @@ S2-A3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.510s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:406
+      guard: cmd/server/pa_writes.go:410
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -2859,9 +2861,9 @@ S2-A3:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.102s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.086s
     - id: P2S14-FRESHa
-      guard: cmd/server/pa_writes.go:261
+      guard: cmd/server/pa_writes.go:271
       guard_text: "Sealer: sealer, Flags: pt.flags, Allowed: allowed.Allowed, Fresh: fresh, Metrics: m,"
       mutation: "the write executor is built without the fresh listing (connector.PinFresh)"
       killed_by:
@@ -2871,7 +2873,7 @@ S2-A3:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.116s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.136s
 
 S2-A4:
   status: green
@@ -2942,7 +2944,7 @@ S2-A4:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.829s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:406
+      guard: cmd/server/pa_writes.go:410
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -2952,7 +2954,7 @@ S2-A4:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.102s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.086s
 
 S2-A5:
   status: green
@@ -3062,7 +3064,7 @@ S2-A5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.532s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:406
+      guard: cmd/server/pa_writes.go:410
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -3072,9 +3074,9 @@ S2-A5:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.102s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.086s
     - id: P2S14-FRESHa
-      guard: cmd/server/pa_writes.go:261
+      guard: cmd/server/pa_writes.go:271
       guard_text: "Sealer: sealer, Flags: pt.flags, Allowed: allowed.Allowed, Fresh: fresh, Metrics: m,"
       mutation: "the write executor is built without the fresh listing (connector.PinFresh)"
       killed_by:
@@ -3084,21 +3086,21 @@ S2-A5:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.116s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.136s
     - id: P2S14-FRESHb
-      guard: cmd/server/pa_writes.go:271
+      guard: cmd/server/pa_writes.go:281
       guard_text: "Store: store, Sealer: sealer, Pin: pin, Fresh: fresh, Speakers: speakers,"
       mutation: "the card emitter is built without the fresh listing (connector.PinFresh)"
       killed_by:
         - cmd/server.TestPAWrites_EndToEnd
         - cmd/server.TestBuildPAWrites_RefusesAHalfWiredStart
       red: |-
-        --- FAIL: TestPAWrites_EndToEnd (0.32s)
-        --- FAIL: TestBuildPAWrites_RefusesAHalfWiredStart (0.27s)
+        --- FAIL: TestPAWrites_EndToEnd (0.36s)
+        --- FAIL: TestBuildPAWrites_RefusesAHalfWiredStart (0.31s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.379s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.399s
   gaps:
     - half: "drift on a real MCP server through internal/pa/egress: the HTTP tests reach a fake server with the httptest client, because egress refuses loopback"
       tracked_by: "#1320"
@@ -3165,7 +3167,7 @@ S2-A6:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/catalog	0.246s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:406
+      guard: cmd/server/pa_writes.go:410
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -3175,9 +3177,9 @@ S2-A6:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.102s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.086s
     - id: P2S14-FRESHa
-      guard: cmd/server/pa_writes.go:261
+      guard: cmd/server/pa_writes.go:271
       guard_text: "Sealer: sealer, Flags: pt.flags, Allowed: allowed.Allowed, Fresh: fresh, Metrics: m,"
       mutation: "the write executor is built without the fresh listing (connector.PinFresh)"
       killed_by:
@@ -3187,7 +3189,7 @@ S2-A6:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.116s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.136s
   gaps:
     - half: "owner decision: a transient listing failure ends the approval like any refusal (fail closed); refusing without consuming, so the tap can be repeated until the 5 minute expiry, was proposed and not decided"
       tracked_by: "#1320"
@@ -3240,7 +3242,7 @@ S2-A7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.634s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:406
+      guard: cmd/server/pa_writes.go:410
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -3250,7 +3252,7 @@ S2-A7:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.102s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.086s
     - id: P2S14-SETf
       guard: cmd/server/pa_tools.go:329
       guard_text: "tools = append(tools, wt...)"
@@ -3262,7 +3264,7 @@ S2-A7:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.125s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.119s
     - id: P2S14-A7a
       guard: internal/pa/connector/card.go:453
       guard_text: "} else if carded {"
@@ -3278,8 +3280,8 @@ S2-A7:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.515s
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.194s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.533s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.154s
     - id: P2S14-A7b
       guard: internal/pa/connector/card.go:451
       guard_text: "PAJobHasApproval(ctx, tx, principal, req.JobID); err != nil {"
@@ -3291,7 +3293,7 @@ S2-A7:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.534s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.529s
     - id: P2S14-A7c
       guard: internal/db/pa_approval_card.go:63
       guard_text: "FROM pa_approvals WHERE principal = $1 AND job_id = $2`"
@@ -3303,7 +3305,7 @@ S2-A7:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.593s
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.652s
     - id: P2S14-A7d
       guard: internal/db/pa_approval_card.go:64
       guard_text: "return false, approvalUnreadable(\"approvals of a job\", err)"
@@ -3315,7 +3317,7 @@ S2-A7:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.441s
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.439s
     - id: P2S14-PROMPTa
       guard: internal/agentworker/parunner.go:151
       guard_text: "slices.Sort(writes)"
@@ -3329,7 +3331,7 @@ S2-A7:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/agentworker
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/agentworker	0.519s
+        ok  	github.com/mctlhq/mctl-telegram/internal/agentworker	0.515s
     - id: P2S14-PROMPTb
       guard: internal/agentworker/parunner.go:134
       guard_text: "if !t.Approval {"
@@ -3343,7 +3345,7 @@ S2-A7:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/agentworker
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/agentworker	0.397s
+        ok  	github.com/mctlhq/mctl-telegram/internal/agentworker	0.412s
     - id: P2S14-PROMPTc
       guard: internal/pa/runloop.go:689
       guard_text: "InputSchema: mt.InputSchema, Approval: l.approveTools[name]})"
@@ -3355,7 +3357,7 @@ S2-A7:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.614s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.583s
   gaps:
     - half: "two taps handled by two replicas of the service against one Postgres: the concurrent test runs both in one process"
       tracked_by: "#1320"
@@ -3473,9 +3475,9 @@ S2-A8:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.127s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.318s
     - id: P2S14-GRNTa
-      guard: cmd/server/pa_writes.go:301
+      guard: cmd/server/pa_writes.go:311
       guard_text: "Validator: &permissions.Validator{Policy: policy, Devices: grantDevices, Rule: permissions.Rules{}},"
       mutation: "the grant validator is built without the device reader (connector.GrantDevices)"
       killed_by:
@@ -3485,7 +3487,7 @@ S2-A8:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.087s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.088s
     - id: P2S14-SCPa
       guard: internal/pa/connector/alice_devices.go:362
       guard_text: "if !connection.ScopeAccepted(conn) {"
@@ -3493,11 +3495,11 @@ S2-A8:
       killed_by:
         - cmd/server.TestPAWrites_EndToEnd
       red: |-
-        --- FAIL: TestPAWrites_EndToEnd (0.39s)
+        --- FAIL: TestPAWrites_EndToEnd (0.40s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.088s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.102s
   gaps:
     - half: "the audit chain has no record of a grant or a revoke: the audit sink records tool calls and has no event shape for a permission change; the pa_permissions row (who, when, revoked_at_ms) is the only trace"
       tracked_by: "#1320"
@@ -3739,9 +3741,9 @@ S2-A9:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.127s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.318s
     - id: P2S14-GRNTa
-      guard: cmd/server/pa_writes.go:301
+      guard: cmd/server/pa_writes.go:311
       guard_text: "Validator: &permissions.Validator{Policy: policy, Devices: grantDevices, Rule: permissions.Rules{}},"
       mutation: "the grant validator is built without the device reader (connector.GrantDevices)"
       killed_by:
@@ -3751,7 +3753,7 @@ S2-A9:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.087s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.088s
     - id: P2S14-SCPa
       guard: internal/pa/connector/alice_devices.go:362
       guard_text: "if !connection.ScopeAccepted(conn) {"
@@ -3759,11 +3761,11 @@ S2-A9:
       killed_by:
         - cmd/server.TestPAWrites_EndToEnd
       red: |-
-        --- FAIL: TestPAWrites_EndToEnd (0.39s)
+        --- FAIL: TestPAWrites_EndToEnd (0.40s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.088s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.102s
   gaps:
     - half: "a revoke, an expiry or a revision change that commits after the executor's pre-dispatch transaction does not stop the lowered call that transaction admitted: as with an approved call, the fence ends at that commit"
       tracked_by: "#1320"
@@ -3825,7 +3827,7 @@ S2-A10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.811s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:406
+      guard: cmd/server/pa_writes.go:410
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -3835,7 +3837,7 @@ S2-A10:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.102s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.086s
     - id: P2S14-PERMa
       guard: cmd/server/pa_wiring.go:245
       guard_text: "convCfg.Approvals, convCfg.Permissions = pw.approvals, pw.permissions"
@@ -3847,9 +3849,9 @@ S2-A10:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.127s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.318s
     - id: P2S14-GRNTa
-      guard: cmd/server/pa_writes.go:301
+      guard: cmd/server/pa_writes.go:311
       guard_text: "Validator: &permissions.Validator{Policy: policy, Devices: grantDevices, Rule: permissions.Rules{}},"
       mutation: "the grant validator is built without the device reader (connector.GrantDevices)"
       killed_by:
@@ -3859,7 +3861,7 @@ S2-A10:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.087s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.088s
     - id: P2S14-SCPa
       guard: internal/pa/connector/alice_devices.go:362
       guard_text: "if !connection.ScopeAccepted(conn) {"
@@ -3867,11 +3869,11 @@ S2-A10:
       killed_by:
         - cmd/server.TestPAWrites_EndToEnd
       red: |-
-        --- FAIL: TestPAWrites_EndToEnd (0.39s)
+        --- FAIL: TestPAWrites_EndToEnd (0.40s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.088s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.102s
 
 S2-F3:
   status: green
@@ -3890,6 +3892,7 @@ S2-F3:
     - internal/pa.TestActionConsent_WritesOffNeverShown
     - internal/pa/linking.TestLinking_WriteScopeAskedOnlyWithWritesOn
     - cmd/server.TestPAWritesSwitch
+    - cmd/server.TestPAWrites_ShippedGate
     - internal/pa.TestActionConsent_DataFlowConsentAloneGetsNoAction
     - internal/pa.TestActionConsent_TextChangeNeedsConsentAgain
     - internal/pa/convo.TestActionsSatisfied
@@ -3909,7 +3912,7 @@ S2-F3:
     - cmd/server.TestBuildPAWrites_SealerKey
     - cmd/server.TestPAWrites_SwitchOffAtClaim
     - cmd/server.TestPAWrites_OfferedByGate
-    - cmd/server.TestPAWrites_ShippedGate
+    - cmd/server.TestPAWrites_NoGateOffersNothing
     - cmd/server.TestPAWrites_EndToEnd
     - cmd/server.TestPAWrites_GateDecidesTheClaim
     - internal/pa.TestRunLoop_ClaimActionsHint
@@ -4016,7 +4019,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/linking	0.963s
     - id: P2S14c-F3g
-      guard: cmd/server/pa_writes.go:165
+      guard: cmd/server/pa_writes.go:175
       guard_text: "// read: the writes switch is unknown, so off.\n\t\treturn false, err"
       mutation: "the writes switch (paWritesSwitch, read through paWritesEnabled) answers the flags' value without an error when the flags could not be read"
       killed_by:
@@ -4028,7 +4031,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.777s
     - id: P2S14c-F3h
-      guard: cmd/server/pa_writes.go:168
+      guard: cmd/server/pa_writes.go:178
       guard_text: "if f.WritesErr != nil {\n\t\treturn false, f.WritesErr"
       mutation: "the writes switch (paWritesSwitch, read through paWritesEnabled) drops the parse error of PA_WRITES_ENABLED and answers the value"
       killed_by:
@@ -4259,8 +4262,82 @@ S2-F3:
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
+    - id: P2S14c-F3x
+      guard: cmd/server/pa_writes.go:313
+      guard_text: "w.gate = newPAWriteGate(store, writes)"
+      mutation: "buildPAWrites leaves the write path without an action gate"
+      killed_by:
+        - cmd/server.TestPAWrites_ShippedGate
+      red: |-
+        --- FAIL: TestPAWrites_ShippedGate (0.17s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/cmd/server
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.247s
+    - id: P2S14c-F3y
+      guard: cmd/server/pa_writes.go:127
+      guard_text: "case pa.WithheldConsent:\n\t\treturn pa.ActionsHintConsent"
+      mutation: "the wired gate drops its reason when the consent to actions is missing: the claim carries no hint"
+      killed_by:
+        - cmd/server.TestPAWrites_ShippedGate
+      red: |-
+        --- FAIL: TestPAWrites_ShippedGate (0.17s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/cmd/server
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.247s
+    - id: P2S14c-F3z
+      guard: cmd/server/pa_writes.go:129
+      guard_text: "case pa.WithheldScope:\n\t\treturn pa.ActionsHintScope"
+      mutation: "the wired gate drops its reason when the connection holds no write scope: the claim carries no hint"
+      killed_by:
+        - cmd/server.TestPAWrites_ShippedGate
+      red: |-
+        --- FAIL: TestPAWrites_ShippedGate (0.17s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/cmd/server
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.247s
+    - id: P2S14c-F3aa
+      guard: internal/pa/action_consent.go:242
+      guard_text: "if errors.Is(err, ErrActionConsentRequired) {\n\t\treturn nil, WithheldConsent, nil"
+      mutation: "pa.ActionGate offers write tools to a principal without the consent to actions, seen through the service's own claim"
+      killed_by:
+        - cmd/server.TestPAWrites_ShippedGate
+      red: |-
+        --- FAIL: TestPAWrites_ShippedGate (0.17s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/cmd/server
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.247s
+    - id: P2S14c-F3ab
+      guard: internal/pa/action_consent.go:260
+      guard_text: "if g.scopes.Holds(conn, tool) {"
+      mutation: "pa.ActionGate offers every listed write tool whatever the connection's grant holds, seen through the service's own claim"
+      killed_by:
+        - cmd/server.TestPAWrites_ShippedGate
+      red: |-
+        --- FAIL: TestPAWrites_ShippedGate (0.17s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/cmd/server
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.247s
+    - id: P2S14c-F3ac
+      guard: cmd/server/pa_writes.go:305
+      guard_text: "Writes: writes, Connections: store, Scopes: paWriteScopes}"
+      mutation: "buildPAWrites builds /permissions without the connection read: the conversations refuse the configuration and the service does not start with writes on"
+      killed_by:
+        - cmd/server.TestPAWrites_EndToEnd
+        - cmd/server.TestPAWrites_ShippedGate
+      red: |-
+        --- FAIL: TestPAWrites_EndToEnd (0.17s)
+        --- FAIL: TestPAWrites_ShippedGate (0.17s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/cmd/server
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.247s
     - id: P2S14-GATEa
-      guard: cmd/server/pa_writes.go:198
+      guard: cmd/server/pa_writes.go:208
       guard_text: "if !on {"
       mutation: "buildPAWrites no longer returns when PA_WRITES_ENABLED is not true: the write path is built with the flag off"
       killed_by:
@@ -4268,7 +4345,7 @@ S2-F3:
         - cmd/server.TestPAWrites_OffIsPhase1
         - cmd/server.TestBuildPAWrites_RefusesAHalfWiredStart
       red: |-
-        --- FAIL: TestNoRuntimePhase2Use (0.12s)
+        --- FAIL: TestNoRuntimePhase2Use (0.11s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
         --- FAIL: TestPAWrites_OffIsPhase1 (0.24s)
@@ -4276,10 +4353,10 @@ S2-F3:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.589s
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.203s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.588s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.216s
     - id: P2S14-GATEb
-      guard: cmd/server/pa_writes.go:168
+      guard: cmd/server/pa_writes.go:178
       guard_text: "if f.WritesErr != nil {"
       mutation: "an unreadable PA_WRITES_ENABLED reads as on at startup"
       killed_by:
@@ -4291,9 +4368,9 @@ S2-F3:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.970s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.924s
     - id: P2S14-STARTa
-      guard: cmd/server/pa_writes.go:281
+      guard: cmd/server/pa_writes.go:291
       guard_text: "if !w.cards.CardPath(string(server), tool) {"
       mutation: "a listed tool with no approval card path (its reader is missing) no longer refuses the start"
       killed_by:
@@ -4303,9 +4380,9 @@ S2-F3:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.090s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.033s
     - id: P2S14-STARTc
-      guard: cmd/server/pa_writes.go:231
+      guard: cmd/server/pa_writes.go:241
       guard_text: "return nil, fmt.Errorf(\"pa writes: the %s endpoint cannot send approved arguments\", name)"
       mutation: "an endpoint that cannot send approved bytes no longer refuses the start"
       killed_by:
@@ -4315,21 +4392,21 @@ S2-F3:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.988s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.002s
     - id: P2S14-STARTd
-      guard: cmd/server/pa_writes.go:208
+      guard: cmd/server/pa_writes.go:218
       guard_text: "return nil, errors.New(\"pa writes: ENCRYPTION_KEY does not key the approval sealer\")"
       mutation: "an approval sealer that cannot be keyed starts the service without a write path instead of refusing the start"
       killed_by:
         - cmd/server.TestBuildPAWrites_SealerKey
       red: |-
-        --- FAIL: TestBuildPAWrites_SealerKey (0.04s)
+        --- FAIL: TestBuildPAWrites_SealerKey (0.05s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.750s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.757s
     - id: P2S14-SETa
-      guard: cmd/server/pa_writes.go:339
+      guard: cmd/server/pa_writes.go:343
       guard_text: "if w == nil || !f.ExternalTools || !f.Writes || f.WritesErr != nil ||"
       mutation: "a claim offers write tools with PA_WRITES_ENABLED read as false"
       killed_by:
@@ -4341,9 +4418,9 @@ S2-F3:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.823s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.877s
     - id: P2S14-SETb
-      guard: cmd/server/pa_writes.go:339
+      guard: cmd/server/pa_writes.go:343
       guard_text: "if w == nil || !f.ExternalTools || !f.Writes || f.WritesErr != nil ||"
       mutation: "a claim offers write tools with PA_WRITES_ENABLED unreadable"
       killed_by:
@@ -4353,9 +4430,9 @@ S2-F3:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.763s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.805s
     - id: P2S14-SETc
-      guard: cmd/server/pa_writes.go:339
+      guard: cmd/server/pa_writes.go:343
       guard_text: "if w == nil || !f.ExternalTools || !f.Writes || f.WritesErr != nil ||"
       mutation: "a claim offers write tools with PA_EXTERNAL_TOOLS_ENABLED off"
       killed_by:
@@ -4365,9 +4442,9 @@ S2-F3:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.835s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.826s
     - id: P2S14-SETd
-      guard: cmd/server/pa_writes.go:340
+      guard: cmd/server/pa_writes.go:344
       guard_text: "!f.Servers[string(c.Server)] || f.ServerErrs[string(c.Server)] != nil {"
       mutation: "a claim offers a server's write tools with that server's switch off"
       killed_by:
@@ -4377,19 +4454,21 @@ S2-F3:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.781s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.828s
     - id: P2S14-SETe
-      guard: cmd/server/pa_writes.go:344
+      guard: cmd/server/pa_writes.go:348
       guard_text: "if w.gate == nil || len(listed) == 0 {"
       mutation: "a write path without an action gate offers every listed write tool instead of none"
       killed_by:
         - cmd/server.TestPAWrites_OfferedByGate
+        - cmd/server.TestPAWrites_NoGateOffersNothing
       red: |-
         --- FAIL: TestPAWrites_OfferedByGate (0.04s)
+        --- FAIL: TestPAWrites_NoGateOffersNothing (0.04s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.935s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.448s
     - id: P2S14-SETf
       guard: cmd/server/pa_tools.go:329
       guard_text: "tools = append(tools, wt...)"
@@ -4401,9 +4480,9 @@ S2-F3:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.125s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.119s
     - id: P2S14-SETg
-      guard: cmd/server/pa_writes.go:347
+      guard: cmd/server/pa_writes.go:351
       guard_text: "got, withheld, err := w.gate.Offer(ctx, tx, principal, c.ID, slices.Clone(listed))"
       mutation: "an action gate that could not be read reads as \"no write tool\" instead of failing the claim"
       killed_by:
@@ -4411,13 +4490,13 @@ S2-F3:
         - cmd/server.TestPAWrites_GateDecidesTheClaim
       red: |-
         --- FAIL: TestPAWrites_OfferedByGate (0.04s)
-        --- FAIL: TestPAWrites_GateDecidesTheClaim (0.32s)
+        --- FAIL: TestPAWrites_GateDecidesTheClaim (0.37s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.098s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.252s
     - id: P2S14-SETh
-      guard: cmd/server/pa_writes.go:354
+      guard: cmd/server/pa_writes.go:358
       guard_text: "if slices.Contains(listed, tool) {"
       mutation: "the action gate can add a tool the write path does not list"
       killed_by:
@@ -4427,55 +4506,7 @@ S2-F3:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.715s
-    - id: P2S14-AGa
-      guard: cmd/server/pa_writes.go:308
-      guard_text: "return nil, errors.New(\"pa writes: no action gate\")"
-      mutation: "a write path with no action gate is built instead of refusing the start"
-      killed_by:
-        - cmd/server.TestPAWrites_ShippedGate
-      red: |-
-        --- FAIL: TestPAWrites_ShippedGate (0.16s)
-        FAIL
-        FAIL	github.com/mctlhq/mctl-telegram/cmd/server
-      green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.866s
-    - id: P2S14-AGb
-      guard: cmd/server/pa_writes.go:102
-      guard_text: "return got, pa.ActionsHintConsent, nil"
-      mutation: "a claim withheld for the missing consent to actions carries no hint"
-      killed_by:
-        - cmd/server.TestPAWrites_ShippedGate
-      red: |-
-        --- FAIL: TestPAWrites_ShippedGate (0.17s)
-        FAIL
-        FAIL	github.com/mctlhq/mctl-telegram/cmd/server
-      green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.887s
-    - id: P2S14-AGc
-      guard: cmd/server/pa_writes.go:104
-      guard_text: "return got, pa.ActionsHintScope, nil"
-      mutation: "a claim withheld for the missing write scope carries no hint"
-      killed_by:
-        - cmd/server.TestPAWrites_ShippedGate
-      red: |-
-        --- FAIL: TestPAWrites_ShippedGate (0.17s)
-        FAIL
-        FAIL	github.com/mctlhq/mctl-telegram/cmd/server
-      green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.864s
-    - id: P2S14-AGd
-      guard: cmd/server/pa_writes.go:96
-      guard_text: "got, why, err := g.gate.Offer(ctx, tx, principal, connectionID, tools)"
-      mutation: "the shipped gate offers every listed tool without asking pa.ActionGate for the consent and the scope"
-      killed_by:
-        - cmd/server.TestPAWrites_ShippedGate
-      red: |-
-        --- FAIL: TestPAWrites_ShippedGate (0.17s)
-        FAIL
-        FAIL	github.com/mctlhq/mctl-telegram/cmd/server
-      green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.862s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.740s
     - id: P2S14-HINTa
       guard: internal/pa/runloop.go:339
       guard_text: "case ActionsHintConsent, ActionsHintScope:"
@@ -4484,14 +4515,14 @@ S2-F3:
         - internal/pa.TestRunLoop_ClaimActionsHint
         - cmd/server.TestPAWrites_GateDecidesTheClaim
       red: |-
-        --- FAIL: TestRunLoop_ClaimActionsHint (0.32s)
+        --- FAIL: TestRunLoop_ClaimActionsHint (0.33s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
         --- FAIL: TestPAWrites_GateDecidesTheClaim (0.33s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.797s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.767s
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.042s
     - id: P2S14-HINTb
       guard: internal/pa/runloop.go:335
@@ -4500,11 +4531,11 @@ S2-F3:
       killed_by:
         - internal/pa.TestRunLoop_ClaimActionsHint
       red: |-
-        --- FAIL: TestRunLoop_ClaimActionsHint (0.32s)
+        --- FAIL: TestRunLoop_ClaimActionsHint (0.33s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.788s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.943s
     - id: P2S14-HINTc
       guard: internal/agentworker/parunner.go:146
       guard_text: "if hint, ok := paActionsHint[c.ActionsHint]; ok {"
@@ -4528,9 +4559,9 @@ S2-F3:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.092s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.027s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:406
+      guard: cmd/server/pa_writes.go:410
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -4540,9 +4571,9 @@ S2-F3:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.102s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.086s
     - id: P2S14-FRESHa
-      guard: cmd/server/pa_writes.go:261
+      guard: cmd/server/pa_writes.go:271
       guard_text: "Sealer: sealer, Flags: pt.flags, Allowed: allowed.Allowed, Fresh: fresh, Metrics: m,"
       mutation: "the write executor is built without the fresh listing (connector.PinFresh)"
       killed_by:
@@ -4552,9 +4583,9 @@ S2-F3:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.116s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.136s
   gaps:
-    - half: "the action gate is plugged in and has not run in a deployed service: cmd/server newPAWriteGate builds pa.ActionGate over the store, the writes switch and the scope table of the write path, and a start without a gate is refused (cmd/server.TestPAWrites_ShippedGate), so a claim carries a write tool only with the consent to actions and the tool's scope, and otherwise says which is missing (actions_hint). ActionGate.Notify has no caller in cmd/server: the two once-per-connection notices are not queued when a claim withholds a tool. Under the compiled table alice_say_phrase and alice_send_command are held by no connection (they need the quasar scope, which a write connection does not ask for) while cmd/server lists them, so they are never offered; its end-to-end tests run them under a table of their own (paWriteScopes)"
+    - half: "the action gate is wired and no deployed service has run it: cmd/server newPAWriteGate returns pa.ActionGate over the store, the writes switch and the compiled scope table, and cmd/server.TestPAWrites_ShippedGate claims through it in process (data-flow consent only, a view-only or narrowed connection, the consent and a write connection). PA_WRITES_ENABLED is off everywhere, so no real claim, alice connection or worker hint has passed through it. cmd/server still lists alice_say_phrase and alice_send_command, which no connection holds under the compiled table (they need the quasar scope, which a write connection does not ask for): the gate never offers them, and the other wiring tests run them under a table of their own (paWriteScopes) until the two leave the list (#1466)"
       tracked_by: "#1323"
     - half: "the alice authorization server was read, not called: that it lists iot:control in scopes_supported, puts no scope ceiling on this client and reports the granted scope in the token response is taken from the mctl-alice source; no exchange ran against it"
       tracked_by: "#1320"
