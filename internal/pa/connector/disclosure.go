@@ -118,6 +118,9 @@ var disclosureTools = map[string]disclosureTool{
 type cardDetail struct {
 	// Speaker is the target of a disclosure, as read for the card.
 	Speaker *detailSpeaker `json:"speaker,omitempty"`
+	// Scenario is the scenario of a scenario call, with its steps
+	// (scenario.go).
+	Scenario *detailScenario `json:"scenario,omitempty"`
 }
 
 type detailSpeaker struct {
