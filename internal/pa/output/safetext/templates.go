@@ -149,9 +149,9 @@ var (
 	LabelApprove     = tpl("Approve", "Подтвердить")
 	TextCardHead     = tpl("The assistant wants to do this on your behalf. Nothing happens until you tap Approve.", "Ассистент хочет выполнить это действие от вашего имени. Ничего не произойдёт, пока вы не нажмёте «Подтвердить».")
 	TextCardAction   = tpl("Action:", "Действие:")
-	TextCardArgs     = tpl("Exactly what will be sent:", "Что именно будет отправлено:")
+	TextCardArgs     = tpl("What will be sent (in links and addresses a dot, colon or @ is shown in brackets, like [.], so that they cannot be opened from this message):", "Что будет отправлено (в ссылках и адресах точка, двоеточие и @ показаны в скобках, например [.], чтобы их нельзя было открыть из этого сообщения):")
 	TextCardExternal = tpl("Warning: this conversation contains content that did not come from you (forwarded text or results read from a service). The values above may come from that content. Check them carefully.", "Внимание: в этом разговоре есть содержимое, которое пришло не от вас (пересланный текст или результаты, прочитанные из сервиса). Значения выше могут быть взяты из него. Проверьте их внимательно.")
-	TextCardFoot     = tpl("The buttons work once and expire in 5 minutes.", "Кнопки срабатывают один раз и действуют 5 минут.")
+	TextCardFoot     = tpl("The buttons work once and stop working within 5 minutes.", "Кнопки срабатывают один раз и перестают действовать не позже чем через 5 минут.")
 	// The answers to a card's buttons. A button of a card that already
 	// ended is answered from the approval's own state, for its owner only.
 	TextApprovalCancelled   = tpl("Cancelled. Nothing was sent.", "Отменено. Ничего не отправлено.")

@@ -224,8 +224,13 @@ func (l *RunLoop) sendItem(ctx context.Context, it jobs.OutboxItem) (jobs.Outbox
 			return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxDropped}, OutboxOutcomeDropped
 		case errors.Is(err, ErrCardUnreadable):
 			// Could not read the approval: nothing is known about it and
-			// nothing was sent. It is due again.
-			slog.Warn("pa outbox approval card not readable", "err", err)
+			// nothing was sent. It is due again. Only the kind of the
+			// error is logged: a store error may quote a row.
+			kind := "store"
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				kind = "context"
+			}
+			slog.Warn("pa outbox approval card not readable", "kind", kind)
 			return l.retry(it, now, 0)
 		default:
 			return jobs.OutboxCompletion{Now: now, Status: jobs.OutboxFailed}, OutboxOutcomeFailed
