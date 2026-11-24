@@ -83,11 +83,15 @@ func (f *PinFresh) FreshTool(ctx context.Context, req FreshRequest) (FreshTool, 
 	if err != nil {
 		return FreshTool{}, err
 	}
+	// ToolDefinition found the tool in the pin above.
+	rule := f.pin.Servers[req.Server].Tools[req.Tool]
 	return FreshTool{
 		SchemaSHA:      def.SchemaSHA256,
 		DescriptionSHA: def.DescriptionSHA256,
 		AnnotationSHA:  def.AnnotationsSHA256,
 		Tier:           def.Tier,
 		Class:          def.Class,
+		Lowerable:      rule.Lowerable,
+		Constraints:    rule.Constraints,
 	}, nil
 }

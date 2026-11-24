@@ -468,14 +468,23 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if d.cfg.Cards != nil && d.cfg.Cards.Covers(req.Server, req.Tool) {
-		// An approve-tier tool is never called from here. The call was
-		// admitted and counted toward the run's call cap above (T10).
-		if ref := d.cfg.Cards.Emit(ctx, CardRequest{
+		// An approve-tier tool is never called from here: it gets a card,
+		// or, for a write a standing permission covers, the write executor
+		// sends it. The call was admitted and counted toward the run's
+		// call cap above (T10).
+		lowered, ref := d.cfg.Cards.Emit(ctx, CardRequest{
 			Policy: policy, JobID: job.JobID(), ConnectionID: bound.ConnectionID,
 			AuthorityRevision: bound.AuthorityRevision, Server: req.Server, Tool: req.Tool,
 			Args: req.Arguments, Token: token, Flags: flags,
-		}); ref != nil {
+		})
+		if ref != nil {
 			d.refuse(w, r, with(base, ref.reason), ref.code)
+			return
+		}
+		if lowered != nil {
+			// A standing permission stood in for the card and the write
+			// executor handled the call (lower.go).
+			d.answerLowered(w, req.Server, *lowered)
 			return
 		}
 		d.count(req.Server, StatusApprovalPending, "")
@@ -645,6 +654,43 @@ func (d *Dispatcher) answerExecuteError(w http.ResponseWriter, server string, er
 	default:
 		// The call was dispatched and its outcome is unknown.
 		reason, code, status = ReasonOutcomeUnknown, http.StatusBadGateway, StatusOutcomeUnknown
+	}
+	d.count(server, string(status), reason)
+	writeJSON(w, code, refusalResponse{Stop: reason})
+}
+
+// answerLowered maps the outcome of a call that ran under a standing
+// permission to the worker's answer. The write executor has already
+// audited it and queued the principal's notice. The tool's own output is
+// never passed on: the answer is server text, so it is not conversation
+// state and raises no taint.
+func (d *Dispatcher) answerLowered(w http.ResponseWriter, server string, out WriteOutcome) {
+	switch out.Status {
+	case StatusOK:
+		d.count(server, string(StatusOK), "")
+		writeJSON(w, http.StatusOK, toolResponse{Status: string(StatusOK), Output: loweredDoneOutput})
+		return
+	case StatusToolError:
+		d.count(server, string(StatusToolError), "")
+		writeJSON(w, http.StatusOK, toolResponse{Status: string(StatusToolError), Output: loweredFailedOutput})
+		return
+	}
+	status, reason, code := out.Status, out.Reason, http.StatusForbidden
+	switch {
+	case status == StatusFenced:
+		code = http.StatusConflict
+	case status == StatusRefused && reason == ReasonServerRefused:
+		code = http.StatusBadGateway
+	case status == StatusRefused && (reason == ReasonAuditUnavailable || reason == ReasonStateUnreadable ||
+		reason == ReasonServerUnavailable || reason == ReasonListingStale):
+		code = http.StatusServiceUnavailable
+	case status == StatusRefused:
+	default:
+		// Sent, and what became of it is not known.
+		status, reason, code = StatusOutcomeUnknown, ReasonOutcomeUnknown, http.StatusBadGateway
+	}
+	if reason == "" {
+		reason = ReasonInternal
 	}
 	d.count(server, string(status), reason)
 	writeJSON(w, code, refusalResponse{Stop: reason})

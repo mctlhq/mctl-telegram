@@ -23,9 +23,11 @@
 // a button the principal presses; no tool, route or model output creates
 // one (S2-A8).
 //
-// The package is pure: stores and the bot live elsewhere. Nothing consults
-// a permission at dispatch yet (P2-S11), and no deployed wiring builds a
-// Validator, so the package is inert in a running service.
+// The package is pure: stores and the bot live elsewhere. What a permission
+// of each tool means, and when it covers a call, is in rules.go; the card
+// emitter and the write executor consult it at dispatch (connector/lower.go,
+// P2-S11). No deployed wiring builds a Validator or those two, so the
+// package is inert in a running service.
 package permissions
 
 import (
@@ -297,8 +299,9 @@ type DeviceReader interface {
 }
 
 // GrantRule is the tool-specific half of grant validation: which device
-// types a tool may be lowered for, and whether it needs a ceiling. The
-// rules arrive with P2-S11; without one every grant is refused.
+// types a tool may be lowered for, and whether it needs a ceiling. Rules
+// (rules.go) is the rule of the Phase 2 tools; without one every grant is
+// refused.
 type GrantRule interface {
 	CheckGrant(tool string, devices []Device, ceiling int64) error
 }

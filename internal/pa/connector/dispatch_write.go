@@ -51,8 +51,14 @@ package connector
 // audit result entry. That is step 7 here, or StaleWriteSweeper for a
 // record whose executor died or could not write step 7; never both.
 //
-// Nothing calls DispatchApproved yet (the card callbacks are P2-S5), and
-// PA_WRITES_ENABLED is off everywhere.
+// DispatchLowered (lower.go, P2-S11) sends a call a standing permission
+// covers through the same steps. It has no approval row to read in step 1;
+// the row is created, approved and consumed inside the transaction of step
+// 4, after the permission and the taint were read again there.
+//
+// Nothing in a deployed service calls either: the card callbacks and the
+// card emitter are built in tests only, and PA_WRITES_ENABLED is off
+// everywhere.
 
 import (
 	"bytes"
@@ -70,6 +76,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
+	"github.com/mctlhq/mctl-telegram/internal/pa/permissions"
 )
 
 // Refusal reasons of the write executor, next to the Reason* set in
@@ -115,6 +122,9 @@ type WriteStore interface {
 	// PAConversationTaintIn returns true with any error (S2-I10).
 	PAConversationTaintIn(ctx context.Context, tx *sql.Tx, principal int64, conversationID string) (bool, error)
 	EnqueuePAOutbox(ctx context.Context, tx *sql.Tx, item jobs.OutboxItem, now time.Time) error
+	// PAPermissionIn reads one standing permission in tx, whatever its
+	// state, and keeps the row still. Only DispatchLowered uses it.
+	PAPermissionIn(ctx context.Context, tx *sql.Tx, principal int64, id string) (permissions.Permission, error)
 }
 
 // WriteConnections is the connection manager's half (*connection.Manager).
@@ -151,6 +161,12 @@ type FreshTool struct {
 	AnnotationSHA  string
 	Tier           catalog.Tier
 	Class          catalog.Class
+	// Lowerable and Constraints are what the pin says of the tool, not
+	// the listing: whether a standing permission may lower it and on what
+	// condition. Only a lowered dispatch reads them; the zero value is
+	// "not lowerable".
+	Lowerable   catalog.Lowerable
+	Constraints *catalog.Constraints
 }
 
 // FreshSurface fetches a tool's definition with a fresh tools/list at
@@ -356,6 +372,14 @@ func (w *WriteExecutor) DispatchApproved(ctx context.Context, principal int64, a
 		w.count(invalidServer, StatusRefused, reason)
 		return WriteOutcome{Status: StatusRefused, Reason: reason}, nil
 	}
+	return w.run(ctx, a, reason, nil), nil
+}
+
+// run is steps 2 to 7 of a dispatch, for an approval a card got approved
+// (low is nil) and for a call a standing permission covers. reason is what
+// step 1 refused it for, or "".
+func (w *WriteExecutor) run(ctx context.Context, a approval.Approval, reason string, low *LoweredCall) WriteOutcome {
+	principal := a.Principal
 	dispatchID := approval.NewID()
 	base := Entry{
 		CallID:            dispatchID,
@@ -370,18 +394,24 @@ func (w *WriteExecutor) DispatchApproved(ctx context.Context, principal int64, a
 		Taint:      TaintExternal,
 		ApprovalID: a.ID,
 	}
-	if a.Approver > 0 {
+	switch {
+	case low != nil:
+		// No principal approved this call: the record names the standing
+		// permission that stands in for the card.
+		base.Approver = permissionApprover(low.PermissionID)
+	case a.Approver > 0:
 		base.Approver = strconv.FormatInt(a.Approver, 10)
 	}
 	// refuse ends a dispatch that sent nothing. burn is false only for an
 	// approval that is not this dispatch's to end (not approved, or
-	// already ended).
-	refuse := func(reason string, burn bool) (WriteOutcome, error) {
-		if burn {
+	// already ended). A lowered call has no approval row before the
+	// pre-dispatch transaction commits, so there is nothing to burn.
+	refuse := func(reason string, burn bool) WriteOutcome {
+		if burn && low == nil {
 			w.burn(ctx, a)
 		}
 		w.record(ctx, base, StatusRefused, reason, nil)
-		return WriteOutcome{Status: StatusRefused, Reason: reason}, nil
+		return WriteOutcome{Status: StatusRefused, Reason: reason}
 	}
 	if reason != "" {
 		return refuse(reason, a.Status == approval.StatusApproved)
@@ -430,6 +460,15 @@ func (w *WriteExecutor) DispatchApproved(ctx context.Context, principal int64, a
 		return refuse(ReasonToolChanged, true)
 	}
 	base.Tier = fresh.Tier
+	if low != nil {
+		// The pin, asked again here: a tool it does not make lowerable,
+		// or a call that does not meet the tool's condition, is not sent
+		// without a card whatever the caller decided.
+		pinned := catalog.PinnedTool{Class: fresh.Class, Lowerable: fresh.Lowerable, Constraints: fresh.Constraints}
+		if met, err := loweringCondition(pinned, low.Args); !lowerable(a.Tool, pinned) || err != nil || !met {
+			return refuse(ReasonNotLowerable, false)
+		}
+	}
 	if r := cancelRefusal(ctx, cctx); r != "" {
 		return refuse(r, true)
 	}
@@ -446,13 +485,15 @@ func (w *WriteExecutor) DispatchApproved(ctx context.Context, principal int64, a
 	pre.Phase, pre.Status, pre.At = PhasePreDispatch, StatusDispatching, w.now()
 	if err := w.cfg.Executor.Sink.Append(sctx, pre); err != nil {
 		slog.Error("pa write: pre-dispatch audit append failed; call refused", "server", a.Server, "tool", base.Tool, "err", err)
-		w.burn(ctx, a)
+		if low == nil {
+			w.burn(ctx, a)
+		}
 		w.count(a.Server, StatusRefused, ReasonAuditUnavailable)
-		return WriteOutcome{Status: StatusRefused, Reason: ReasonAuditUnavailable}, nil
+		return WriteOutcome{Status: StatusRefused, Reason: ReasonAuditUnavailable}
 	}
 
 	// Step 4: the pre-dispatch transaction.
-	c := w.consume(sctx, a, dispatchID)
+	c := w.consume(sctx, a, dispatchID, low)
 	base.Taint = c.taint
 	if c.reason != "" {
 		if c.unsettled {
@@ -461,7 +502,7 @@ func (w *WriteExecutor) DispatchApproved(ctx context.Context, principal int64, a
 			if w.settleUnsent(ctx, a, dispatchID) {
 				w.record(ctx, base, StatusRefused, c.reason, nil)
 			}
-			return WriteOutcome{Status: StatusRefused, Reason: c.reason}, nil
+			return WriteOutcome{Status: StatusRefused, Reason: c.reason}
 		}
 		return refuse(c.reason, true)
 	}
@@ -472,7 +513,7 @@ func (w *WriteExecutor) DispatchApproved(ctx context.Context, principal int64, a
 		if w.settleUnsent(ctx, a, dispatchID) {
 			w.record(ctx, base, StatusRefused, r, nil)
 		}
-		return WriteOutcome{Status: StatusRefused, Reason: r, DispatchID: dispatchID}, nil
+		return WriteOutcome{Status: StatusRefused, Reason: r, DispatchID: dispatchID}
 	}
 
 	// Step 5: the call, once. No transaction is open here.
@@ -480,7 +521,7 @@ func (w *WriteExecutor) DispatchApproved(ctx context.Context, principal int64, a
 	out, callErr := w.callOnce(cctx, ep, token, a.Tool, c.args)
 
 	// Steps 6 and 7.
-	return w.finish(ctx, call, a, c.dispatch, base, out, callErr), nil
+	return w.finish(ctx, call, a, c.dispatch, base, out, callErr)
 }
 
 // cancelRefusal says why a dispatch whose call context has ended before
@@ -543,7 +584,7 @@ type consumed struct {
 // consume is the pre-dispatch transaction (threat model T2 step 1, I4).
 // Every return with a reason leaves the transaction rolled back, except
 // unsettled.
-func (w *WriteExecutor) consume(ctx context.Context, a approval.Approval, dispatchID string) consumed {
+func (w *WriteExecutor) consume(ctx context.Context, a approval.Approval, dispatchID string, low *LoweredCall) consumed {
 	out := consumed{taint: TaintExternal}
 	tx, err := w.cfg.Store.BeginPAWrite(ctx, a.Principal, true)
 	if err != nil {
@@ -581,6 +622,15 @@ func (w *WriteExecutor) consume(ctx context.Context, a approval.Approval, dispat
 	// Only a flag read as clean is clean (S2-I10). It labels the record.
 	if tainted, err := w.cfg.Store.PAConversationTaintIn(ctx, tx, a.Principal, a.ConversationID); err == nil && !tainted {
 		out.taint = TaintClean
+	}
+
+	if low != nil {
+		// A lowered call has no card to stand on, so what let it through
+		// is read again here, under the locks this transaction holds, and
+		// only then is its ledger row written.
+		if out.reason = w.lower(ctx, tx, &a, conn, *low, out.taint, now); out.reason != "" {
+			return out
+		}
 	}
 
 	got, d, err := w.cfg.Store.ConsumePAApproval(ctx, tx, approval.ConsumeRequest{
