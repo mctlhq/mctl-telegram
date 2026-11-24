@@ -183,7 +183,9 @@ func (t *typingTracker) stop(job int64) {
 func (t *typingTracker) sendDraft(ctx context.Context, r *typingRun, principal, job int64, text safetext.Text) error {
 	r.sendMu.Lock()
 	defer r.sendMu.Unlock()
-	if r.stopped || ctx.Err() != nil {
+	// r.ctx: stop cancels before it takes sendMu, so a request that wins
+	// the lock in between must not start a call that is cancelled at once.
+	if r.stopped || ctx.Err() != nil || r.ctx.Err() != nil {
 		return context.Canceled
 	}
 	cctx, cancel := context.WithTimeout(ctx, draftCallDeadline)
