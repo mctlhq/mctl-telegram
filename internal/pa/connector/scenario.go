@@ -187,7 +187,8 @@ func (c *Cards) scenarioTarget(ctx context.Context, req CardRequest, name string
 
 // scenarioOf rebuilds what a scenario card shows from the approval's
 // sealed arguments and detail. The detail must be of the scenario the
-// arguments name, and must hold its steps.
+// arguments name, must hold its steps, and must pass the reserved check
+// again.
 func scenarioOf(tool string, args, detail []byte) (safetext.Scenario, error) {
 	name, ok := scenarioArg(tool, args)
 	if !ok {
@@ -201,6 +202,11 @@ func scenarioOf(tool string, args, detail []byte) (safetext.Scenario, error) {
 	}
 	if cd.Scenario.ID != name || cd.Scenario.Name == "" || len(cd.Scenario.Steps) == 0 || len(cd.Scenario.Steps) > MaxScenarioSteps {
 		return safetext.Scenario{}, errors.New("pa card: scenario detail does not match the arguments")
+	}
+	// As when the card was made: one of the service's own is never shown
+	// for approval.
+	if reservedScenario(cd.Scenario.ID) || reservedScenario(cd.Scenario.Name) {
+		return safetext.Scenario{}, errors.New("pa card: scenario is reserved")
 	}
 	return safetext.Scenario{ID: cd.Scenario.ID, Name: cd.Scenario.Name, Steps: cd.Scenario.Steps}, nil
 }
