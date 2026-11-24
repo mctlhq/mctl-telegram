@@ -844,6 +844,286 @@ func (e *paWritesE2E) exec(query string, args ...any) {
 	}
 }
 
+// paBuiltGate is newPAWritesE2E with the action gate the service builds
+// (pa.ActionGate, newPAWriteGate) and the compiled scope table in every
+// part of the write path, as a deployed service has them.
+func paBuiltGate(t *testing.T, store *db.Store, conn *sql.DB) *paWritesE2E {
+	t.Helper()
+	e := newPAWritesE2EGate(t, store, conn, "true", true)
+	if _, ok := e.rt.writes.gate.(paActionGate); !ok {
+		t.Fatalf("the service built the gate %T", e.rt.writes.gate)
+	}
+	return e
+}
+
+// notices are the texts sent to Carol that are one of the two notices of
+// the action gate, after everything queued for her was delivered.
+func (e *paWritesE2E) notices() []string {
+	e.t.Helper()
+	e.rt.writes.deliverTo(context.Background(), e.user)
+	e.rt.loop.WaitDeliveries()
+	var out []string
+	for _, m := range e.sent.get() {
+		if m.text == safetext.TextActionConsentNeeded.String() || m.text == safetext.TextWriteScopeNeeded.String() {
+			out = append(out, m.text)
+		}
+	}
+	return out
+}
+
+// TestPAWrites_GateNoticeOncePerConnection (#1320 P2-S14c): a claim the
+// gate leaves without a write tool, for the consent to actions or for the
+// connection's scope, also tells the principal what to do, in a fixed
+// notice queued in the claim's transaction. It is sent once per
+// connection, however many claims the gate answers the same way; a claim
+// that carries a write tool queues none.
+func TestPAWrites_GateNoticeOncePerConnection(t *testing.T) {
+	// again asks the gate as two more claims would, each in a transaction
+	// of its own.
+	again := func(t *testing.T, e *paWritesE2E, hint string) {
+		t.Helper()
+		for range 2 {
+			tx, err := e.conn.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, why, err := e.rt.writes.gate.Offer(context.Background(), tx, e.user, e.connID, []string{"alice_set_volume"})
+			if err != nil || len(got) != 0 || why != hint {
+				t.Fatalf("asked again: %v %q %v", got, why, err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for name, c := range map[string]struct {
+		set  func(e *paWritesE2E)
+		hint string
+		kind string
+		text string
+	}{
+		"no consent to actions": {func(e *paWritesE2E) {
+			e.exec(`DELETE FROM pa_action_consents WHERE principal = $1`, e.user)
+		}, pa.ActionsHintConsent, "action_consent_needed", safetext.TextActionConsentNeeded.String()},
+		"a connection made for reading": {func(e *paWritesE2E) {
+			read, ok := connection.CanonicalScope(connection.ServerAlice)
+			if !ok {
+				e.t.Fatal("alice has no read scope")
+			}
+			e.exec(`UPDATE pa_connections SET requested_scope = $1, granted_scope = $1 WHERE id = $2`, read, e.connID)
+		}, pa.ActionsHintScope, "write_scope_needed", safetext.TextWriteScopeNeeded.String()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
+				e := paBuiltGate(t, store, conn)
+				c.set(e)
+				if got := e.notices(); len(got) != 0 {
+					t.Fatalf("notices before any claim: %q", got)
+				}
+				e.claim()
+				if e.hint != c.hint {
+					t.Fatalf("hint %q, want %q", e.hint, c.hint)
+				}
+				again(t, e, c.hint)
+				if n := e.count(`SELECT COUNT(*) FROM pa_outbox WHERE principal = $1 AND kind = $2 AND connection_id = $3`, e.user, c.kind, e.connID); n != 1 {
+					t.Fatalf("%d %s rows, want one", n, c.kind)
+				}
+				if got := e.notices(); !slices.Equal(got, []string{c.text}) {
+					t.Fatalf("notices %q, want one %q", got, c.text)
+				}
+			})
+		})
+	}
+	// A reason outside the closed set of hints (here: the gate's own
+	// switch reads off) reaches the claim as no hint and queues nothing.
+	t.Run("writes off is not a hint", func(t *testing.T) {
+		forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
+			e := paBuiltGate(t, store, conn)
+			e.exec(`DELETE FROM pa_action_consents WHERE principal = $1`, e.user)
+			g := paShippedGate(store, func() (bool, error) { return false, nil })
+			if g == nil {
+				t.Fatal("no gate was built")
+			}
+			tx, err := conn.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, why, err := g.Offer(context.Background(), tx, e.user, e.connID, []string{"alice_set_volume"})
+			if err != nil || len(got) != 0 || why != "" {
+				t.Fatalf("writes off: %v %q %v", got, why, err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			if n := e.count(`SELECT COUNT(*) FROM pa_outbox WHERE principal = $1 AND kind IN ('action_consent_needed', 'write_scope_needed')`, e.user); n != 0 {
+				t.Fatalf("%d notice rows with writes off", n)
+			}
+		})
+	})
+	// A connection that holds some of the listed tools is offered those:
+	// the claim carries a write tool, so it carries no hint
+	// (paWrites.offered) and the principal gets no notice either.
+	t.Run("some tools held queues no notice", func(t *testing.T) {
+		forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
+			e := paBuiltGate(t, store, conn)
+			tx, err := conn.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// alice_say_phrase needs a scope no connection holds.
+			got, _, err := e.rt.writes.gate.Offer(context.Background(), tx, e.user, e.connID, []string{"alice_say_phrase", "alice_set_volume"})
+			if err != nil || !slices.Equal(got, []string{"alice_set_volume"}) {
+				t.Fatalf("offered %v %v", got, err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			if n := e.count(`SELECT COUNT(*) FROM pa_outbox WHERE principal = $1 AND kind IN ('action_consent_needed', 'write_scope_needed')`, e.user); n != 0 {
+				t.Fatalf("%d notice rows for a claim that carries a write tool", n)
+			}
+		})
+	})
+	t.Run("a claim with a write tool queues no notice", func(t *testing.T) {
+		forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
+			e := paBuiltGate(t, store, conn)
+			e.claim()
+			if !slices.Contains(e.tools, "alice/alice_set_volume") || e.hint != "" {
+				t.Fatalf("tools %v hint %q", e.tools, e.hint)
+			}
+			if n := e.count(`SELECT COUNT(*) FROM pa_outbox WHERE principal = $1 AND kind IN ('action_consent_needed', 'write_scope_needed')`, e.user); n != 0 || len(e.notices()) != 0 {
+				t.Fatalf("%d notice rows, sent %q", n, e.notices())
+			}
+		})
+	})
+}
+
+// TestPAWrites_ConnectAsksForWriteScopeOnlyWithAWritePath (#1320
+// P2-S14c): /connect asks the authorization server for the write scopes
+// only in a process that has a write path and reads the flag on. A
+// service started with writes off asks for the read scopes also after
+// the flag turns on, and one started with writes on asks for the read
+// scopes as soon as the flag turns off.
+func TestPAWrites_ConnectAsksForWriteScopeOnlyWithAWritePath(t *testing.T) {
+	const read = ""
+	wide, ok := connection.WriteRequestScope(connection.ServerAlice)
+	if !ok || wide == read {
+		t.Fatalf("alice write request scope %q", wide)
+	}
+	// reconnect drops Carol's connection and links alice again, and
+	// returns the scope the new connection records as asked for: the
+	// write set, or nothing for a connection that asked for the read set.
+	reconnect := func(e *paWritesE2E) string {
+		e.t.Helper()
+		e.exec(`DELETE FROM pa_connections WHERE principal = $1`, e.user)
+		card := e.toCard()
+		e.press(card.buttons[0])
+		var asked string
+		if err := e.conn.QueryRowContext(context.Background(),
+			`SELECT requested_scope FROM pa_connections WHERE principal = $1`, e.user).Scan(&asked); err != nil {
+			e.t.Fatal(err)
+		}
+		return asked
+	}
+	for name, c := range map[string]struct {
+		start, later, want string
+	}{
+		"write path and flag on":              {"true", "true", wide},
+		"write path, flag turned off later":   {"true", "false", read},
+		"no write path, flag turned on later": {"false", "true", read},
+		"no write path and flag off":          {"false", "false", read},
+	} {
+		t.Run(name, func(t *testing.T) {
+			forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
+				e := newPAWritesE2E(t, store, conn, c.start)
+				if built := e.rt.writes != nil; built != (c.start == "true") {
+					t.Fatalf("write path built: %v", built)
+				}
+				t.Setenv(connector.WritesFlagEnv, c.later)
+				if got := reconnect(e); got != c.want {
+					t.Fatalf("/connect asked for %q, want %q", got, c.want)
+				}
+			})
+		})
+	}
+}
+
+// TestPAWrites_ConsentCommandShowsActions (#1320 P2-S14c): /consent of
+// the built service. With PA_WRITES_ENABLED true it shows the consent to
+// actions to a principal who has consented to the data flow only, with a
+// button that records it; with the switch off it shows nothing of the
+// kind, and the principal's state is what it was.
+func TestPAWrites_ConsentCommandShowsActions(t *testing.T) {
+	t.Run("writes on", func(t *testing.T) {
+		forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
+			e := paBuiltGate(t, store, conn)
+			e.exec(`DELETE FROM pa_action_consents WHERE principal = $1`, e.user)
+			e.text("/consent")
+			prompt := e.last()
+			if prompt.text != convo.ActionConsentText || prompt.button == "" {
+				t.Fatalf("/consent sent %q with button %q", prompt.text, prompt.button)
+			}
+			e.press(prompt.button)
+			if n := e.count(`SELECT COUNT(*) FROM pa_action_consents WHERE principal = $1 AND state = 'accepted' AND version = $2 AND text_sha256 = $3`,
+				e.user, convo.ActionConsentVersion, convo.ActionConsentTextSHA256For(false)); n != 1 {
+				t.Fatalf("%d accepted consents to actions after the press", n)
+			}
+			e.claim()
+			if !slices.Contains(e.tools, "alice/alice_set_volume") || e.hint != "" {
+				t.Fatalf("after accepting: tools %v hint %q", e.tools, e.hint)
+			}
+		})
+	})
+	// A service started with writes off has no write path until it
+	// restarts: the flag turned on later does not make /consent ask for a
+	// consent to actions this process cannot carry out.
+	t.Run("no write path, flag turned on later", func(t *testing.T) {
+		forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
+			e := newPAWritesE2E(t, store, conn, "false")
+			if e.rt.writes != nil {
+				t.Fatal("a write path was built with writes off")
+			}
+			e.exec(`DELETE FROM pa_action_consents WHERE principal = $1`, e.user)
+			t.Setenv(connector.WritesFlagEnv, "true")
+			e.text("/consent")
+			for _, m := range e.sent.get() {
+				if m.text == convo.ActionConsentText || m.text == convo.ActionConsentTextRU {
+					t.Fatal("/consent offered the consent to actions with no write path")
+				}
+			}
+		})
+	})
+	// Turning the flag off is read at once, with the write path built.
+	t.Run("flag turned off later", func(t *testing.T) {
+		forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
+			e := paBuiltGate(t, store, conn)
+			e.exec(`DELETE FROM pa_action_consents WHERE principal = $1`, e.user)
+			t.Setenv(connector.WritesFlagEnv, "false")
+			before := len(e.sent.get())
+			e.text("/consent")
+			for _, m := range e.sent.get()[before:] {
+				if m.text == convo.ActionConsentText || m.text == convo.ActionConsentTextRU {
+					t.Fatal("/consent offered the consent to actions after the flag was turned off")
+				}
+			}
+		})
+	})
+	t.Run("writes off", func(t *testing.T) {
+		forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
+			e := newPAWritesE2E(t, store, conn, "false")
+			e.exec(`DELETE FROM pa_action_consents WHERE principal = $1`, e.user)
+			e.text("/consent")
+			for _, m := range e.sent.get() {
+				if m.text == convo.ActionConsentText || m.text == convo.ActionConsentTextRU {
+					t.Fatal("/consent showed the consent to actions with writes off")
+				}
+			}
+			if n := e.count(`SELECT COUNT(*) FROM pa_action_consents WHERE principal = $1`, e.user); n != 0 {
+				t.Fatalf("%d consent-to-actions rows with writes off", n)
+			}
+		})
+	})
+}
+
 // TestPAWrites_GateDecidesTheClaim: what the gate answers inside the
 // claim transaction is what the claim signs. A withheld reason of the
 // closed set reaches the claim as actions_hint, any other reason does

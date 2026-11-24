@@ -231,13 +231,15 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 		Linking: pt != nil,
 		Allowed: allowed,
 	}
-	if pt != nil {
-		// PA_WRITES_ENABLED, read where the dispatcher reads it: while it
-		// is on, /consent shows the consent to actions (#1320 P2-S14c).
-		convCfg.Writes = paWritesSwitch(pt.flags)
-	}
 	var cards *connector.Cards
 	if pw != nil {
+		// PA_WRITES_ENABLED, read where the dispatcher reads it: while it
+		// is on, /consent shows the consent to actions (#1320 P2-S14c).
+		// Only with a built write path: a service started with writes off
+		// has none until it restarts, so it never asks for a consent to
+		// actions it cannot carry out, whatever the flag reads later.
+		// Turning the flag off is read at once.
+		convCfg.Writes = paWritesSwitch(pt.flags)
 		// A typed nil must not reach these interfaces: they are set only
 		// here, from a built write path.
 		cards = pw.cards

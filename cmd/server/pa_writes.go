@@ -111,12 +111,25 @@ var newPAWriteGate = func(store *db.Store, writes func() (bool, error)) paWriteG
 // turned into the claim's hint here, and only for a reason the principal
 // can act on: the consent to actions, or connecting the service again.
 // Writes off, and any reason this build does not know, is no hint.
+//
+// When it offers nothing because the consent to actions is missing or the
+// connection holds no write scope, it also queues the gate's notice for
+// that connection in the claim's transaction (pa.ActionGate.Notify). The
+// row is keyed by the connection, so the principal is told once per
+// connection however many claims follow; the hint is what tells the
+// worker every time. A notice that cannot be queued fails the claim: the
+// transaction it would have been written in is the claim's own.
 type paActionGate struct{ gate *pa.ActionGate }
 
 func (g paActionGate) Offer(ctx context.Context, tx *sql.Tx, principal int64, connectionID string, tools []string) ([]string, string, error) {
 	offered, why, err := g.gate.Offer(ctx, tx, principal, connectionID, tools)
 	if err != nil {
 		return nil, "", err
+	}
+	if len(offered) == 0 {
+		if err := g.gate.Notify(ctx, tx, principal, connectionID, why, time.Now()); err != nil {
+			return nil, "", fmt.Errorf("pa writes: action notice: %w", err)
+		}
 	}
 	return offered, paActionsHint(why), nil
 }
