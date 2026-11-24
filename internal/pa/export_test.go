@@ -40,13 +40,33 @@ type DispatchHarness struct {
 	perms    *PermissionCommands
 }
 
+// HarnessOption configures the run loop a DispatchHarness builds.
+type HarnessOption = rlOption
+
+// DraftLog is what a harness built WithStreaming sent as drafts.
+type DraftLog struct{ r *draftRecorder }
+
+// Texts returns the drafts in the order they were sent.
+func (l *DraftLog) Texts() []string { return l.r.all() }
+
+// WithStreaming wires a draft and a typing recorder into the run loop and
+// sets PA_STREAMING_ENABLED to flag (streaming.go, #1431).
+func WithStreaming(flag string) (HarnessOption, *DraftLog) {
+	rec := &draftRecorder{}
+	return withDrafts(rec, flag), &DraftLog{rec}
+}
+
+// NoDraftPause lets a test post drafts without the server's minimum
+// interval between them; the per-job cap still holds.
+func (d *DispatchHarness) NoDraftPause() { d.h.loop.limiter.minInterval = 0 }
+
 // NewDispatchHarness builds the harness on store.
-func NewDispatchHarness(t *testing.T, store *db.Store) *DispatchHarness {
+func NewDispatchHarness(t *testing.T, store *db.Store, opts ...HarnessOption) *DispatchHarness {
 	t.Helper()
 	d := &DispatchHarness{}
-	d.h = newRunLoopHarnessOn(t, store, withStore(func(s *db.Store) RunLoopStore {
+	d.h = newRunLoopHarnessOn(t, store, append([]rlOption{withStore(func(s *db.Store) RunLoopStore {
 		return &toggleDisable{Store: s, fail: &d.failDisable}
-	}))
+	})}, opts...)...)
 	return d
 }
 

@@ -571,6 +571,125 @@ func TestBuildPA_JobTokenRoundTrip(t *testing.T) {
 	}
 }
 
+// presence returns how many typing statuses and drafts were sent.
+func (r *paSendRecorder) presence() (typing, drafts int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.typing, r.drafts
+}
+
+// TestBuildPA_StreamingWiring drives one run through the built runtime
+// and asks for a draft. The built sender is the run loop's typing and
+// draft sender, and PA_STREAMING_ENABLED is read from the environment at
+// request time: unset, the claim has no streaming field, the draft route
+// answers 404 and no draft is sent; "true", the same request is shown.
+// A run loop built without Drafts or Getenv would fail the second half,
+// one built without Typing the typing count.
+func TestBuildPA_StreamingWiring(t *testing.T) {
+	for _, tc := range []struct {
+		name, flag string
+		set        bool
+		wantCode   int
+		wantDrafts int
+	}{
+		{"flag unset", "", false, http.StatusNotFound, 0},
+		{"flag false", "false", true, http.StatusNotFound, 0},
+		{"flag unreadable", "yes", true, http.StatusNotFound, 0},
+		{"flag true", "true", true, http.StatusOK, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.set {
+				t.Setenv(pa.StreamingFlagEnv, tc.flag)
+			}
+			store, conn := paTestStoreConn(t)
+			sent := recordPASends(t)
+			_, rt := buildEnabledPA(t, store)
+			mux := chi.NewRouter()
+			rt.Mount(mux)
+			const user = 4242003
+			update := int64(7000)
+			send := func(kind, payload string) {
+				t.Helper()
+				update++
+				body := fmt.Sprintf(`{"update_id":%d,%q:%s}`, update, kind, payload)
+				if code := postPAWebhook(mux, body); code != http.StatusOK {
+					t.Fatalf("%s update: status %d", kind, code)
+				}
+			}
+			text := func(s string) {
+				send("message", fmt.Sprintf(`{"message_id":7,"date":1,"text":%q,`+
+					`"from":{"id":%d,"is_bot":false,"first_name":"Carol"},"chat":{"id":%d,"type":"private"}}`, s, user, user))
+			}
+			text("hello")
+			rt.loop.WaitDeliveries()
+			var button string
+			if err := conn.QueryRowContext(context.Background(), `SELECT id FROM pa_callbacks WHERE principal = ?`, user).Scan(&button); err != nil {
+				t.Fatalf("consent callback: %v", err)
+			}
+			send("callback_query", fmt.Sprintf(`{"id":"cb","data":%q,"from":{"id":%d,"is_bot":false},`+
+				`"message":{"message_id":9,"date":1,"chat":{"id":%d,"type":"private"}}}`, button, user, user))
+			text("what is on my calendar")
+
+			iss, err := localjwt.NewIssuer([]byte(testPASigningKey), testPABaseURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pool, err := iss.Mint(localjwt.Claims{
+				Subject: "pool:main", Audience: []string{localjwt.PoolAudience}, Jti: "pool-jti-streaming",
+				OriginalIssuedAt: time.Now().Add(-time.Minute).Unix(),
+			}, time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+			post := func(route, token, body string) *httptest.ResponseRecorder {
+				req := httptest.NewRequest(http.MethodPost, route, strings.NewReader(body))
+				req.Header.Set("Authorization", "Bearer "+token)
+				w := httptest.NewRecorder()
+				mux.ServeHTTP(w, req)
+				return w
+			}
+			w := post(pa.RouteClaim, pool, "")
+			if w.Code != http.StatusOK {
+				t.Fatalf("claim: status %d, want 200", w.Code)
+			}
+			var claim struct {
+				Token     string `json:"token"`
+				Streaming *bool  `json:"streaming"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &claim); err != nil || claim.Token == "" {
+				t.Fatalf("claim response without a job token: %v", err)
+			}
+			wantOn := tc.wantCode == http.StatusOK
+			if on := claim.Streaming != nil && *claim.Streaming; on != wantOn || (!wantOn && claim.Streaming != nil) {
+				t.Fatalf("claim streaming field = %v, want on = %v (absent when off)", claim.Streaming, wantOn)
+			}
+			d := post(pa.RouteDraft, claim.Token, `{"text":"Checking your calendar now. "}`)
+			if d.Code != tc.wantCode {
+				t.Fatalf("draft: status %d, want %d; body %s", d.Code, tc.wantCode, d.Body.String())
+			}
+			if wantOn && !strings.Contains(d.Body.String(), `"shown":true`) {
+				t.Fatalf("draft not shown: %s", d.Body.String())
+			}
+			// The run is still the worker's to finish.
+			if r := post(pa.RouteReply, claim.Token, `{"text":"Nothing today.","cost_usd":0.001}`); r.Code != http.StatusOK {
+				t.Fatalf("reply: status %d; body %s", r.Code, r.Body.String())
+			}
+			rt.loop.WaitDeliveries()
+			typing, drafts := sent.presence()
+			if drafts != tc.wantDrafts {
+				t.Fatalf("drafts sent = %d, want %d", drafts, tc.wantDrafts)
+			}
+			if typing == 0 {
+				t.Fatal("no typing status: the built sender is not the run loop's typing sender")
+			}
+			got := sent.get()
+			if len(got) == 0 || got[len(got)-1].text != "Nothing today." {
+				t.Fatalf("sent = %+v", got)
+			}
+		})
+	}
+}
+
 // TestBuildPA_RefusesMissingSecrets: buildPA refuses a hand-built enabled
 // configuration without what the run loop is keyed from.
 func TestBuildPA_RefusesMissingSecrets(t *testing.T) {
