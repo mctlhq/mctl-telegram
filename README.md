@@ -191,7 +191,7 @@ that uses the Telegram API. To install it from this repository in Cursor Desktop
 See the [MCTL documentation](https://tg.mctl.ai/docs),
 [privacy policy](https://tg.mctl.ai/privacy), and
 [Cursor local plugin setup](https://cursor.com/docs/plugins#test-plugins-locally).
-The [MCTL Assistant publisher logo](assets/mctl-assistant.png) is included in
+The [MCTL Assistant publisher logo](assets/mctl-assistant.svg) is included in
 this repository.
 
 ### Your own deployment
