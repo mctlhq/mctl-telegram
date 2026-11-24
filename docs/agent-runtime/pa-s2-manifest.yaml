@@ -1461,7 +1461,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.593s
     - id: P2S14B-D2e
-      guard: internal/pa/connector/alice_devices.go:333
+      guard: internal/pa/connector/alice_devices.go:336
       guard_text: "if d.Name, ok = aliceLabel(l, \"name\"); !ok {"
       mutation: "the device reader skips a device it cannot name instead of failing the whole read"
       killed_by:
@@ -1664,7 +1664,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.483s
     - id: P2S14B-D2f
-      guard: internal/pa/connector/alice_devices.go:305
+      guard: internal/pa/connector/alice_devices.go:308
       guard_text: "return bad(\"no structured listing\")"
       mutation: "a device listing without structured content is read as an empty list"
       killed_by:
@@ -1677,7 +1677,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.428s
     - id: P2S14B-D2g
-      guard: internal/pa/connector/alice_devices.go:328
+      guard: internal/pa/connector/alice_devices.go:331
       guard_text: "if seen[d.ID] {"
       mutation: "the device reader accepts a listing that has one id twice"
       killed_by:
@@ -1731,7 +1731,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.545s
     - id: P2S14B-D2k
-      guard: internal/pa/connector/alice_devices.go:199
+      guard: internal/pa/connector/alice_devices.go:202
       guard_text: "out = append(out, Speaker{ID: d.ID, Name: d.Name, Room: d.Room, Home: d.Home, Type: d.Type})\n\t\t}\n\t}\n\tif len(out) == 0 {"
       mutation: "a listing read in full that holds no speaker is returned as an empty list instead of ErrNoSuchDevices, which the card path reads as unreadable"
       killed_by:
@@ -2267,7 +2267,7 @@ S2-D4:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.389s
     - id: P2S15c-D4b
-      guard: internal/pa/connector/alice_devices.go:172
+      guard: internal/pa/connector/alice_devices.go:175
       guard_text: "_, _ = r.audit.dispatchRecorded(ctx, base, func(ctx context.Context) (Result, error) {"
       mutation: "a device read writes no result entry: the audit chain holds the entry made before the request and nothing about its answer"
       killed_by:
@@ -2714,7 +2714,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.681s
     - id: P2S14B-D5d
-      guard: internal/pa/connector/alice_devices.go:394
+      guard: internal/pa/connector/alice_devices.go:397
       guard_text: "if c.ID != connectionID || c.Principal != principal || string(c.Server) != aliceServer || c.State != connection.StateActive {"
       mutation: "the grant's device reader reads through a connection of another principal"
       killed_by:
@@ -3874,7 +3874,7 @@ S2-A8:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.088s
     - id: P2S14-SCPa
-      guard: internal/pa/connector/alice_devices.go:409
+      guard: internal/pa/connector/alice_devices.go:412
       guard_text: "if !connection.ScopeAccepted(conn) {"
       mutation: "a grant reads devices only on a connection made for reading, so on a write connection every grant is refused devices_unreadable"
       killed_by:
@@ -4141,7 +4141,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.088s
     - id: P2S14-SCPa
-      guard: internal/pa/connector/alice_devices.go:409
+      guard: internal/pa/connector/alice_devices.go:412
       guard_text: "if !connection.ScopeAccepted(conn) {"
       mutation: "a grant reads devices only on a connection made for reading, so on a write connection every grant is refused devices_unreadable"
       killed_by:
@@ -4261,7 +4261,7 @@ S2-A10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.088s
     - id: P2S14-SCPa
-      guard: internal/pa/connector/alice_devices.go:409
+      guard: internal/pa/connector/alice_devices.go:412
       guard_text: "if !connection.ScopeAccepted(conn) {"
       mutation: "a grant reads devices only on a connection made for reading, so on a write connection every grant is refused devices_unreadable"
       killed_by:

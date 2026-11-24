@@ -168,20 +168,23 @@ func (r *AliceDevices) Devices(ctx context.Context, req SpeakerRequest) ([]Devic
 	if err := r.audit.Sink.Append(ctx, pre); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrSpeakersUnreadable, ErrAuditUnavailable)
 	}
+	// Unreadable until the read below says otherwise: a path through the
+	// closure that sets nothing is not an empty listing.
+	readErr := fmt.Errorf("%w: %s was not read", ErrSpeakersUnreadable, aliceListTool)
 	var devices []Device
 	_, _ = r.audit.dispatchRecorded(ctx, base, func(ctx context.Context) (Result, error) {
 		raw, callErr := r.ep.CallTool(ctx, req.Token, aliceListTool, json.RawMessage(aliceListArgs))
 		if callErr != nil {
-			err = fmt.Errorf("%w: %s failed", ErrSpeakersUnreadable, aliceListTool)
-			return Result{}, err
+			readErr = fmt.Errorf("%w: %s failed", ErrSpeakersUnreadable, aliceListTool)
+			return Result{}, readErr
 		}
-		devices, err = parseAliceDevices(raw)
+		devices, readErr = parseAliceDevices(raw)
 		// An answer that cannot be read is recorded as the tool's error,
 		// with its digest: the request was made and answered.
-		return Result{Output: raw, ToolError: err != nil}, nil
+		return Result{Output: raw, ToolError: readErr != nil}, nil
 	})
-	if err != nil {
-		return nil, err
+	if readErr != nil {
+		return nil, readErr
 	}
 	return devices, nil
 }
