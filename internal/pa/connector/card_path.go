@@ -46,6 +46,10 @@ func (c *Cards) CardPath(server, tool string) bool {
 	if _, ok := scenarioTools[tool]; ok {
 		return c.cfg.Scenarios[server] != nil
 	}
+	if tool == musicTool {
+		// Its own card (alice_music.go), built from the speaker read.
+		return c.cfg.Speakers[server] != nil
+	}
 	if spec, ok := deviceWriteTools[tool]; ok {
 		if spec.light {
 			return c.cfg.Lights[server] != nil
