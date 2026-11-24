@@ -70,9 +70,10 @@ var paWriteTools = map[connection.Server][]string{
 // the compiled table (connection.DefaultWriteScopes, #1320 P2-S14c). Under
 // that table alice_say_phrase and alice_send_command are held by no
 // connection: mctl-alice puts them behind its quasar scope, which a write
-// connection does not ask for, so the two are listed above and refused at
-// every check until that is decided. A variable so the wiring tests can
-// run a listed tool to the end; nothing else assigns it.
+// connection does not ask for, so the two are listed above, never offered
+// by the gate and refused at every check. A variable only as a bridge for
+// the wiring tests, which still call alice_say_phrase: it goes when the
+// two tools leave paWriteTools (#1466). Nothing else assigns it.
 var paWriteScopes *connection.WriteScopes
 
 // paWriteGate decides, inside the claim transaction, which of a
@@ -82,14 +83,34 @@ var paWriteScopes *connection.WriteScopes
 // tool it may name why, as one of the pa.ActionsHint values; any other
 // reason is dropped. A failed read is an error, never an empty answer.
 //
-// The consent and scope checks are not this file's: they are
-// pa.ActionGate's (P2-S14c), which paActionGate adapts to this seam.
+// The consent and scope checks are not this file's: the gate is
+// pa.ActionGate (P2-S14c), behind paActionGate.
 type paWriteGate interface {
 	Offer(ctx context.Context, tx *sql.Tx, principal int64, connectionID string, tools []string) (offered []string, withheld string, err error)
 }
 
-// paActionGate is pa.ActionGate behind the seam: the same answer, with the
-// reason it withheld a tool named as the hint a claim may carry.
+// newPAWriteGate builds the action gate of a write path: pa.ActionGate
+// over the store, the writes switch and the scope table the rest of the
+// write path uses (paWriteScopes). A gate that cannot be built is no
+// gate, and a write path without one offers no tool to anyone: every
+// card, tap and dispatch is built and reachable by no claim. A variable so
+// the wiring tests can put a gate of their own in.
+var newPAWriteGate = func(store *db.Store, writes func() (bool, error)) paWriteGate {
+	if store == nil || writes == nil {
+		return nil
+	}
+	g, err := pa.NewActionGate(store, writes, paWriteScopes)
+	if err != nil {
+		slog.Error("pa writes: the action gate was not built", "err", err)
+		return nil
+	}
+	return paActionGate{gate: g}
+}
+
+// paActionGate is pa.ActionGate as the claim asks it. The gate's reason is
+// turned into the claim's hint here, and only for a reason the principal
+// can act on: the consent to actions, or connecting the service again.
+// Writes off, and any reason this build does not know, is no hint.
 //
 // When it offers nothing because the consent to actions is missing or the
 // connection holds no write scope, it also queues the gate's notice for
@@ -101,38 +122,27 @@ type paWriteGate interface {
 type paActionGate struct{ gate *pa.ActionGate }
 
 func (g paActionGate) Offer(ctx context.Context, tx *sql.Tx, principal int64, connectionID string, tools []string) ([]string, string, error) {
-	got, why, err := g.gate.Offer(ctx, tx, principal, connectionID, tools)
+	offered, why, err := g.gate.Offer(ctx, tx, principal, connectionID, tools)
 	if err != nil {
 		return nil, "", err
 	}
-	if len(got) == 0 {
+	if len(offered) == 0 {
 		if err := g.gate.Notify(ctx, tx, principal, connectionID, why, time.Now()); err != nil {
 			return nil, "", fmt.Errorf("pa writes: action notice: %w", err)
 		}
 	}
-	switch why {
-	case pa.WithheldConsent:
-		return got, pa.ActionsHintConsent, nil
-	case pa.WithheldScope:
-		return got, pa.ActionsHintScope, nil
-	}
-	return got, "", nil
+	return offered, paActionsHint(why), nil
 }
 
-// newPAWriteGate builds the action gate of a write path: pa.ActionGate
-// over the store, the writes switch and the scope table the rest of the
-// write path uses. A write path with no gate offers no tool to anyone, so
-// buildPAWrites refuses to start without one. A variable so the wiring
-// tests can put a gate in.
-var newPAWriteGate = func(store *db.Store, writes func() (bool, error)) (paWriteGate, error) {
-	if store == nil {
-		return nil, errors.New("the action gate needs a store")
+// paActionsHint is the pa.ActionsHint value for why, or "".
+func paActionsHint(why pa.WithheldReason) string {
+	switch why {
+	case pa.WithheldConsent:
+		return pa.ActionsHintConsent
+	case pa.WithheldScope:
+		return pa.ActionsHintScope
 	}
-	g, err := pa.NewActionGate(store, writes, paWriteScopes)
-	if err != nil {
-		return nil, err
-	}
-	return paActionGate{gate: g}, nil
+	return ""
 }
 
 // paApprovedDispatchTimeout bounds the dispatch of one approved call after
@@ -313,17 +323,11 @@ func buildPAWrites(cfg *config.Config, pt *paTools, store *db.Store, sender paBo
 		Store: store, Sender: sender, Writes: writes, Scopes: paWriteScopes,
 		Validator: &permissions.Validator{Policy: policy, Devices: grantDevices, Rule: permissions.Rules{}},
 	}
-	w.gate, err = newPAWriteGate(store, writes)
-	if err != nil {
-		return nil, fmt.Errorf("pa writes: %w", err)
-	}
-	if w.gate == nil {
-		return nil, errors.New("pa writes: no action gate")
-	}
+	w.gate = newPAWriteGate(store, writes)
 	offered := slices.Sorted(maps.Keys(w.approveTools))
-	slog.Info("pa writes on", "env", connector.WritesFlagEnv, "tools", strings.Join(offered, ","))
+	slog.Info("pa writes on", "env", connector.WritesFlagEnv, "tools", strings.Join(offered, ","), "gate", w.gate != nil)
 	if w.gate == nil {
-		slog.Warn("pa writes: no action gate is wired, so no write tool is offered to any run")
+		slog.Error("pa writes: no action gate was built, so no write tool is offered to any run")
 	}
 	return w, nil
 }
