@@ -35,18 +35,24 @@ package main
 // seen on preview only.
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/agentworker"
+	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
+	"github.com/mctlhq/mctl-telegram/internal/config"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connector"
@@ -116,7 +122,13 @@ type paEval struct {
 
 func newPAEval(t *testing.T, store *db.Store, conn *sql.DB) *paEval {
 	t.Helper()
-	e := &paEval{paWritesE2E: newPAWritesE2EGate(t, store, conn, "true", true)}
+	return newPAEvalEnv(t, store, conn, nil)
+}
+
+// newPAEvalEnv is newPAEval with env set over the harness's environment.
+func newPAEvalEnv(t *testing.T, store *db.Store, conn *sql.DB, env map[string]string) *paEval {
+	t.Helper()
+	e := &paEval{paWritesE2E: newPAWritesE2EEnv(t, store, conn, "true", true, env)}
 	if e.rt.writes == nil {
 		t.Fatal("PA_WRITES_ENABLED=true built no write path")
 	}
@@ -717,4 +729,121 @@ func TestPAWrites_EveryOfferedToolRunsEndToEnd(t *testing.T) {
 			})
 		})
 	}
+}
+
+// paPreviewEnv is the PA environment of the preview service with writes
+// turned on: PA, external tools, the tg and the alice server. The hosts
+// are stand-ins, and both servers name the one fake authorization server
+// the tests have.
+func paPreviewEnv(t *testing.T) {
+	t.Helper()
+	enablePAAliceEnv(t)
+	t.Setenv("PA_SERVER_TG_ENABLED", "true")
+	t.Setenv(connector.WritesFlagEnv, "true")
+}
+
+// paPreviewNet leaves the network clients the service builds for a server
+// as they are, the MCP endpoint among them (the start checks its type),
+// and replaces one: the client that fetches the authorization server
+// metadata while the service starts, which would need the network.
+func paPreviewNet(t *testing.T) {
+	t.Helper()
+	as := httptest.NewServer(newPAFakeAS())
+	t.Cleanup(as.Close)
+	target, err := url.Parse(as.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	real := newPAServerNet
+	newPAServerNet = func(s config.PAServer) (paServerNet, error) {
+		n, err := real(s)
+		n.Metadata = &http.Client{Transport: paRewrite{target: target}, Timeout: 5 * time.Second}
+		return n, err
+	}
+	t.Cleanup(func() { newPAServerNet = real })
+}
+
+// paShippedTools is what the service offers when writes are on.
+var paShippedTools = []string{"alice/alice_media_control", "alice/alice_play_music", "alice/alice_set_light", "alice/alice_set_volume"}
+
+// TestPAWrites_StartsAsPreviewWill builds the runtime as the preview
+// service will be started with PA_WRITES_ENABLED=true: both servers on,
+// the list of tools the service ships, the compiled scope table, the
+// embedded Phase 2 pin, the action gate the service builds, and the
+// network clients the service builds, except the one that fetches the
+// authorization server metadata (paPreviewNet).
+// A start check that refused any of it would stop the process there, so
+// the test fails on an error, on a write path that was not built, and on
+// any other set of tools than the four; it also pins the line the start
+// logs.
+func TestPAWrites_StartsAsPreviewWill(t *testing.T) {
+	store := paTestStore(t)
+	paPreviewEnv(t)
+	paPreviewNet(t)
+	var logged bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := buildPA(context.Background(), cfg, store, localjwt.NewRevocationCache(store, localjwt.DefaultRevocationCacheTTL), nil)
+	if err != nil || rt == nil {
+		t.Fatalf("the preview configuration with writes on: runtime=%v err=%v\n%s", rt, err, logged.String())
+	}
+	if rt.writes == nil {
+		t.Fatalf("no write path was built:\n%s", logged.String())
+	}
+	if _, ok := rt.writes.gate.(paActionGate); !ok {
+		t.Fatalf("the action gate is %T, not the shipped one", rt.writes.gate)
+	}
+	if got := slices.Sorted(maps.Keys(rt.writes.approveTools)); !slices.Equal(got, paShippedTools) {
+		t.Fatalf("the write path offers %v, want %v", got, paShippedTools)
+	}
+	if got := rt.writes.tools; len(got) != 1 || !slices.Equal(got[connection.ServerAlice], paWriteTools[connection.ServerAlice]) {
+		t.Fatalf("write tools by server: %v", got)
+	}
+	want := `msg="pa writes on" env=PA_WRITES_ENABLED tools=` + strings.Join(paShippedTools, ",") + ` gate=true`
+	if !strings.Contains(logged.String(), want) {
+		t.Fatalf("the start did not log %q:\n%s", want, logged.String())
+	}
+	if strings.Contains(logged.String(), "level=ERROR") {
+		t.Fatalf("the start logged an error:\n%s", logged.String())
+	}
+}
+
+// TestPAWrites_PreviewOffersTheFourTools: with both servers on and the
+// shipped gate, a principal who accepted the consent to actions and holds
+// a write connection is offered exactly the four write tools, at the claim
+// and in the model call. The network is a fake; everything else is what
+// the service builds.
+func TestPAWrites_PreviewOffersTheFourTools(t *testing.T) {
+	forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
+		e := newPAEvalEnv(t, store, conn, map[string]string{"PA_SERVER_TG_ENABLED": "true"})
+		_, m := e.turn("hello")
+		reads := func(name string) bool {
+			return strings.HasPrefix(name, "alice_get_") || strings.HasPrefix(name, "alice_list_")
+		}
+		var claimed, shown []string
+		for _, name := range e.tools {
+			if tool, ok := strings.CutPrefix(name, "alice/"); ok && !reads(tool) {
+				claimed = append(claimed, name)
+			}
+		}
+		if len(m.offered) == 0 {
+			t.Fatal("the model was not called")
+		}
+		for _, name := range m.offered[0] {
+			if tool, ok := strings.CutPrefix(name, "alice__"); ok && !reads(tool) {
+				shown = append(shown, "alice/"+tool)
+			}
+		}
+		slices.Sort(claimed)
+		slices.Sort(shown)
+		if !slices.Equal(claimed, paShippedTools) || !slices.Equal(shown, paShippedTools) {
+			t.Fatalf("the claim holds %v and the model was offered %v, want %v", claimed, shown, paShippedTools)
+		}
+	})
 }
