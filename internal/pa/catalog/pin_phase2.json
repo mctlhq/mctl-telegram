@@ -2,7 +2,7 @@
   "schema": "mctl-telegram.pa-catalog-pin/v1",
   "servers": {
     "alice": {
-      "upstream": "mctlhq/mctl-alice@c49449a4a16c40437c3ed806b60558145cce7e07 src/tools/definitions.ts, snapshot internal/pa/catalog/testdata/alice.tools.json",
+      "upstream": "mctlhq/mctl-alice@148cab11f31c870f9905d2085731cae3c1124454 src/tools/definitions.ts, snapshot internal/pa/catalog/testdata/alice.tools.json",
       "tools": {
         "alice_control_device": {
           "tier": "approve",

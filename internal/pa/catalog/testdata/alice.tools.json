@@ -407,6 +407,20 @@
         "idempotentHint": true,
         "openWorldHint": true
       }
+    },
+    {
+      "name": "alice_get_my_identity",
+      "description": "Get the stable account ID of the mctl-alice account this connection is signed in to. Returns only the ID that the account page shows as \"ID\"; no name, login, e-mail, home or device data. Takes no arguments, reads nothing from Yandex and changes nothing. Works on the hosted service only.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "annotations": {
+        "title": "Get my mctl-alice account ID",
+        "readOnlyHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
     }
   ]
 }
