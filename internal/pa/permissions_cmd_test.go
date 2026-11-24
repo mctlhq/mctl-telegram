@@ -42,6 +42,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa/catalog"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connector"
+	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 	"github.com/mctlhq/mctl-telegram/internal/pa/permissions"
@@ -492,6 +493,28 @@ func TestPermissions_ConfirmationRechecks(t *testing.T) {
 		}
 		e.policy.pin.Store(permPin())
 		e.nothingGranted("policy changed")
+
+		// Consent was withdrawn after the screen was sent. /consent
+		// withdraw erases the principal's callbacks, so the button is
+		// gone; a consent that ended any other way (the row alone changed)
+		// makes the press ask for consent again. Neither grants.
+		grant = e.button(e.one(alice, grantCmd), safetext.LabelPermissionGrant)
+		e.h.Text(alice, "/consent withdraw")
+		if r := e.press(alice, grant); r != pa.ReplyUnknownButton {
+			t.Fatalf("press after /consent withdraw answered %q", r)
+		}
+		e.h.Consent(alice)
+		grant = e.button(e.one(alice, grantCmd), safetext.LabelPermissionGrant)
+		if _, err := s.DB.Exec(`UPDATE pa_consents SET state = $1 WHERE principal = $2`, string(convo.ConsentWithdrawn), alice); err != nil {
+			t.Fatal(err)
+		}
+		if r := e.press(alice, grant); r != pa.ReplyConsentPrompt {
+			t.Fatalf("press without consent answered %q", r)
+		}
+		if rows := e.rows(); len(rows) != 0 {
+			t.Fatalf("granted without consent: %+v", rows)
+		}
+		e.h.Consent(alice)
 
 		// The button expired.
 		grant = e.button(e.one(alice, grantCmd), safetext.LabelPermissionGrant)

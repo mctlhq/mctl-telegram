@@ -167,8 +167,8 @@ func commandArgs(frags []convo.Fragment) []string {
 // was sent to never gets here (T4). The permission belongs to that
 // principal, whatever the action says.
 //
-// A grant is checked again here, in the update's transaction: the writes
-// switch, the tool against the pin, and (inside the insert statement) the
+// A grant is checked again here, in the update's transaction: consent, the
+// writes switch, the tool against the pin, and (inside the insert statement) the
 // connection, its state and its authority revision. The device read was
 // made when the screen was built, at most permissions.ScreenTTL ago.
 func (c *Conversations) permissionButton(ctx context.Context, tx *sql.Tx, u VerifiedUpdate, action string) error {
@@ -186,6 +186,16 @@ func (c *Conversations) permissionButton(ctx context.Context, tx *sql.Tx, u Veri
 	if !ok {
 		return c.reply(ctx, tx, u, ReplyUnknownButton, "")
 	}
+	// Consent may have been withdrawn since the screen was sent: the
+	// command required it, and so does the press. Unreadable consent fails
+	// the update, which rolls the consume back.
+	_, err := c.requireConsent(ctx, tx, u.Principal())
+	if errors.Is(err, ErrConsentRequired) {
+		return c.prompt(ctx, tx, u)
+	}
+	if err != nil {
+		return err
+	}
 	if !writesOn(c.permissions.Writes) {
 		return c.reply(ctx, tx, u, ReplyPermissionsUnavailable, "")
 	}
@@ -193,7 +203,7 @@ func (c *Conversations) permissionButton(ctx context.Context, tx *sql.Tx, u Veri
 		slog.Warn("pa permissions: grant refused at confirmation", "reason", string(permissions.ReasonOf(err)))
 		return c.reply(ctx, tx, u, ReplyPermissionRefused, "")
 	}
-	err := c.permissions.Grants.InsertPAPermission(ctx, tx, permissions.Permission{
+	err = c.permissions.Grants.InsertPAPermission(ctx, tx, permissions.Permission{
 		Principal: principal, ID: newOpaqueID(),
 		ConnectionID: prop.ConnectionID, AuthorityRevision: prop.AuthorityRevision,
 		Server: prop.Server, Tool: prop.Tool, DeviceIDs: prop.DeviceIDs, Ceiling: prop.Ceiling,

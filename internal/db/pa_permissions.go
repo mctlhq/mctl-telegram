@@ -142,6 +142,24 @@ func (s *Store) InsertPAPermission(ctx context.Context, tx *sql.Tx, p permission
 	if active >= permissions.MaxActive {
 		return permissions.Refuse(permissions.ReasonTooMany)
 	}
+	// The connection row is locked until this transaction ends, by an
+	// update that changes nothing: on Postgres a transition that does not
+	// hold the principal lock (the refresh flight) cannot commit between
+	// the read below and this insert becoming visible, so its revocation
+	// always sees the new row. No dialect probe is needed, and on SQLite
+	// the statement is a no-op under the write lock the transaction holds.
+	held, err := tx.ExecContext(ctx,
+		`UPDATE pa_connections SET authority_revision = authority_revision
+		  WHERE principal = $1 AND id = $2 AND state = $3 AND authority_revision = $4 AND server = $5`,
+		p.Principal, p.ConnectionID, string(connection.StateActive), p.AuthorityRevision, p.Server)
+	if err != nil {
+		return fmt.Errorf("insert pa permission: lock connection: %w", err)
+	}
+	if n, err := held.RowsAffected(); err != nil {
+		return fmt.Errorf("insert pa permission: lock connection: rows affected: %w", err)
+	} else if n != 1 {
+		return permissions.Refuse(permissions.ReasonConnectionChange)
+	}
 	res, err := tx.ExecContext(ctx,
 		`INSERT INTO pa_permissions(principal, id, connection_id, authority_revision, server, tool, device_ids,
 			ceiling, created_at_ms, expires_at_ms, revoked_at_ms)

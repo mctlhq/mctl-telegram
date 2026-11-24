@@ -1175,8 +1175,8 @@ S2-A8:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.838s
     - id: P2S10-A8b
-      guard: internal/pa/permissions.go:196
-      guard_text: "err := c.permissions.Grants.InsertPAPermission(ctx, tx, permissions.Permission{"
+      guard: internal/pa/permissions.go:206
+      guard_text: "err = c.permissions.Grants.InsertPAPermission(ctx, tx, permissions.Permission{"
       mutation: "a second grant path: /api/pa/v1/jobs/reply inserts a permission when the answer text starts with \"/permissions grant \" (a new db.Store method called from serveReply)"
       killed_by:
         - internal/pa.TestS2A8_NoJobRouteGrantsAPermission
@@ -1207,7 +1207,7 @@ S2-A9:
     - internal/pa.TestS2A9_RevisionChangeRevokesAGrantedPermission
   mutations:
     - id: P2S10-A9a
-      guard: internal/db/pa_permissions.go:214
+      guard: internal/db/pa_permissions.go:232
       guard_text: "AND p.revoked_at_ms = 0 AND p.authority_revision = $5 AND p.expires_at_ms > $6"
       mutation: "the lookup no longer compares the revision: `p.authority_revision = $5` -> `$5 = $5`"
       killed_by:
@@ -1219,7 +1219,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.601s
     - id: P2S10-A9b
-      guard: internal/db/pa_permissions.go:214
+      guard: internal/db/pa_permissions.go:232
       guard_text: "AND p.revoked_at_ms = 0 AND p.authority_revision = $5 AND p.expires_at_ms > $6"
       mutation: "the lookup no longer compares the expiry: `p.expires_at_ms > $6` -> `$6 = $6`"
       killed_by:
@@ -1231,7 +1231,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.601s
     - id: P2S10-A9c
-      guard: internal/db/pa_permissions.go:179
+      guard: internal/db/pa_permissions.go:197
       guard_text: "AND cn.state = $3 AND cn.authority_revision = p.authority_revision"
       mutation: "the listing no longer requires the connection to be at the permission's revision: predicate -> `AND 1 = 1`"
       killed_by:
@@ -1243,7 +1243,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.601s
     - id: P2S10-A9d
-      guard: internal/db/pa_permissions.go:178
+      guard: internal/db/pa_permissions.go:196
       guard_text: "WHERE p.principal = $1 AND p.revoked_at_ms = 0 AND p.expires_at_ms > $2"
       mutation: "the listing no longer compares the expiry: `p.expires_at_ms > $2` -> `$2 = $2`"
       killed_by:
@@ -1283,7 +1283,7 @@ S2-A9:
       tracked_by: "#1320"
     - half: "revoked and expired rows are kept until the account is forgotten or deleted: no sweep or retention rule removes them"
       tracked_by: "#1320"
-    - half: "/disconnect and a pending approval or permission on Postgres under a concurrent grant press: the insert reads the connection row in its own statement, with no test of the interleaving"
+    - half: "no test on Postgres of a transition racing a Grant press: the insert locks the connection row with a no-op update before it reads it, and that ordering is not exercised under concurrency"
       tracked_by: "#1320"
     - half: "production wiring: nothing in cmd/server sets ConversationsConfig.Permissions or constructs pa.PermissionCommands (the tool policy needs the Phase 2 pin, which TestNoRuntimePhase2Use keeps out of the runtime), so a deployed bot answers /permissions with \"not available\" and no permission can be granted outside tests; the switch-on is P2-S14"
       tracked_by: "#1323"
@@ -1310,7 +1310,7 @@ S2-A10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.432s
     - id: P2S10-A10a
-      guard: internal/pa/permissions.go:246
+      guard: internal/pa/permissions.go:256
       guard_text: "{Label: safetext.LabelPermissionRevoke, Verb: permissionVerbRevoke},"
       mutation: "a third button (the Approve label, verb \"always\") is added to the /permissions screen registry"
       killed_by:
