@@ -482,6 +482,20 @@ func changedDevices() []changedDevice {
 	}
 }
 
+// someChangedDevices is the short list a tool gets when another tool of
+// the same kind already ran every change: the device gone, renamed and
+// retyped. It keeps the Postgres run of these tests in minutes.
+func someChangedDevices() []changedDevice {
+	var out []changedDevice
+	for _, tc := range changedDevices() {
+		switch tc.name {
+		case "removed", "renamed", "retyped":
+			out = append(out, tc)
+		}
+	}
+	return out
+}
+
 // deviceCalls is one call of every tool whose card names a device.
 func deviceCalls() map[string][2]string {
 	return map[string][2]string{
@@ -509,7 +523,14 @@ func TestS2D2_DispatchReadsTheDeviceAgain(t *testing.T) {
 					e.h.Loop().WaitDeliveries()
 					return len(e.strings(`SELECT kind FROM pa_outbox WHERE kind = 'write_not_sent'`))
 				}
-				for i, tc := range changedDevices() {
+				// Every change for one speaker tool and for the light; the
+				// other speaker tools share the code path and get the short
+				// list.
+				changes := someChangedDevices()
+				if callName == "music" || callName == "light" {
+					changes = changedDevices()
+				}
+				for i, tc := range changes {
 					e.speakers.set(testSpeakers(), nil)
 					e.lights.set(testLights(), nil)
 					row := e.emitTool(call[0], call[1])
@@ -608,11 +629,19 @@ func TestS2D5_LoweredDispatchReadsTheDeviceAgain(t *testing.T) {
 		e := newLowerEnv(t, s)
 		e.grant("prm_vol", volumeTool, 5, kitchenID)
 		e.grant("prm_light", lightTool, permissions.NoCeiling, deskLampID)
+		short := map[string]bool{}
+		for _, tc := range someChangedDevices() {
+			short[tc.name] = true
+		}
 		for _, tc := range changedDevices() {
 			for _, call := range [][2]string{
 				{volumeTool, volume5},
 				{lightTool, `{"brightness":40,"device":"` + deskLampID + `"}`},
 			} {
+				// Every change for the volume, the short list for the light.
+				if call[0] == lightTool && !short[tc.name] {
+					continue
+				}
 				name := call[0] + " " + tc.name
 				e.speakers.set(testSpeakers(), nil)
 				e.lights.set(testLights(), nil)
