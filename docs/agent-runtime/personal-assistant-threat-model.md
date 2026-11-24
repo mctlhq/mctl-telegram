@@ -365,6 +365,7 @@ Read tools are auto from Phase 1: `alice_list_devices`, `alice_get_device_state`
 **Limits and binding.**
 - `disclosure` text is capped at 1000 characters. Longer text is refused, with an offer to split it into parts, each approved separately.
 - An approval binds the device id and the hash of the **exact arguments sent**. The executor never transforms arguments. For example, the model converts "55" into the device's 1–10 scale before the card is shown. That conversion depends on the model reading the device's range correctly, and it is acceptable only because the card shows the final value the principal approves.
+- A numeric value is never rounded or clamped on the way to a card. A value outside the range the pin states for it (volume 1–10, brightness 1–100, color temperature 1500–6500 K), or one not written as a plain integer, is refused before any card: "volume 55" sent as 55 gets no card, not a card for 10. The target of a device write is a device id that a read made for the card lists, as for a disclosure.
 
 **Tests.**
 - S2-D1: `disclosure` tools never run without a card, whatever the taint, standing permissions or settings.

@@ -96,6 +96,20 @@
 # internal/pa/connector/disclosure.go and
 # internal/pa/output/safetext/card.go, so the P2S5 and P2S6 guards in those
 # files were pointed at their new line numbers; their code did not change.
+#
+# The P2S8-* records (S2-D2) ran on the P2-S8 branch, cut from fac5a5aa, the
+# same way, on sqlite, restored from saved bytes; the tests also pass on
+# Postgres. P2-S8 owns no S2 id: it built the checks and the card of a
+# write to one device (alice_media_control, alice_set_volume,
+# alice_set_light), which S2-D2 names as "value". Nothing constructs the
+# cards or a device reader outside tests, and no reader of lights exists
+# at all; both are gaps of S2-D2. The change moved lines in
+# internal/pa/connector/card.go, so the P2S5-A5c, P2S5-D7c, P2S6-D2a,
+# P2S6-D3c and P2S6-D4b guards were pointed at their new line numbers; in
+# P2S5-D7c the guarded call is now in the last branch, for a card that is
+# neither a disclosure nor a Phase 2 write. The branch then merged main
+# with P2-S9: the P2S8 mutations were run again on the merged code, and
+# the guards of both slices were pointed at the merged line numbers.
 
 S2-C9:
   status: pending
@@ -634,16 +648,23 @@ S2-D1:
 S2-D2:
   status: green
   slice: P2-S6
-  note: "Disclosure target and binding (#1322 P2-S6): alice_say_phrase and alice_send_command get a card only for a device id that a speaker read made for this card lists, byte for byte; a name, a room, an unlisted id and an omitted device are refused (device_not_listed), and a read that failed, was empty or malformed is refused as devices_unreadable, never as not listed. The approval's args_sha is over all of the canonical arguments, the device id included, and the executor refuses stored arguments that do not hash to it (args_changed)."
+  note: "Disclosure target and binding (#1322 P2-S6): alice_say_phrase and alice_send_command get a card only for a device id that a speaker read made for this card lists, byte for byte; a name, a room, an unlisted id and an omitted device are refused (device_not_listed), and a read that failed, was empty or malformed is refused as devices_unreadable, never as not listed. The approval's args_sha is over all of the canonical arguments, the device id included, and the executor refuses stored arguments that do not hash to it (args_changed). Device writes (#1322 P2-S8): alice_media_control, alice_set_volume and alice_set_light get a card only for the id of a speaker, or of a light, that a read made for the card lists, and only for values the pin allows: an integer in its plain spelling inside integer_bounds, or a string the pinned schema lists. A value outside its range, 5.0, 5e0 and a quoted number are refused (value_not_allowed), never rounded or clamped, so the card shows the value in device units and args_sha binds that spelling. A Phase 2 write without a card of its own (alice_control_device, alice_control_room) is refused, never shown as a plain card; alice_trigger_scenario has its own path (S2-D6)."
   tests:
     - internal/pa.TestS2D2_TargetMustBeAListedDeviceID
     - internal/pa.TestS2D2_ApprovalBindsTextAndDevice
     - internal/pa.TestDisclosure_UnreadableSpeakersRefuse
     - internal/pa/connector.TestAliceSpeakers_ReadsTheList
     - internal/pa/connector.TestAliceSpeakers_UnreadableIsAnError
+    - internal/pa.TestS2D2_DeviceWriteTargetMustBeAListedDeviceID
+    - internal/pa.TestS2D2_DeviceWriteApprovalBindsDeviceAndValue
+    - internal/pa.TestDeviceWrite_CardShowsTheValuesThatAreSent
+    - internal/pa.TestDeviceWrite_ValuesAreRefusedNeverClamped
+    - internal/pa.TestDeviceWrite_UnreadableDevicesRefuse
+    - internal/pa.TestDeviceWrite_OtherPhase2WritesHaveNoCard
+    - internal/pa.TestDeviceWrite_PinAndCardAgree
   mutations:
     - id: P2S6-D2a
-      guard: internal/pa/connector/card.go:282
+      guard: internal/pa/connector/card.go:307
       guard_text: "sum := sha256.Sum256(canonical)"
       mutation: "the approval hash leaves the device field out (at the card, the seal and the executor)"
       killed_by:
@@ -707,10 +728,152 @@ S2-D2:
         FAIL
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.347s
+    - id: P2S8-D2a
+      guard: internal/pa/connector/device_write.go:181
+      guard_text: "if err != nil || strconv.FormatInt(n, 10) != text || n < v.bound.Min || n > v.bound.Max {"
+      mutation: "a value outside its range is clamped into it, as the server does, instead of refused"
+      killed_by:
+        - internal/pa.TestDeviceWrite_ValuesAreRefusedNeverClamped
+      red: |-
+        --- FAIL: TestDeviceWrite_ValuesAreRefusedNeverClamped (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.604s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.483s
+    - id: P2S8-D2b
+      guard: internal/pa/connector/device_write.go:181
+      guard_text: "if err != nil || strconv.FormatInt(n, 10) != text || n < v.bound.Min || n > v.bound.Max {"
+      mutation: "the upper bound of a number is one wider than the pin states"
+      killed_by:
+        - internal/pa.TestDeviceWrite_ValuesAreRefusedNeverClamped
+      red: |-
+        --- FAIL: TestDeviceWrite_ValuesAreRefusedNeverClamped (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.574s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.563s
+    - id: P2S8-D2c
+      guard: internal/pa/connector/device_write.go:181
+      guard_text: "if err != nil || strconv.FormatInt(n, 10) != text || n < v.bound.Min || n > v.bound.Max {"
+      mutation: "the lower bound of a number is one wider than the pin states"
+      killed_by:
+        - internal/pa.TestDeviceWrite_ValuesAreRefusedNeverClamped
+      red: |-
+        --- FAIL: TestDeviceWrite_ValuesAreRefusedNeverClamped (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.580s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.476s
+    - id: P2S8-D2d
+      guard: internal/pa/connector/device_write.go:181
+      guard_text: "if err != nil || strconv.FormatInt(n, 10) != text || n < v.bound.Min || n > v.bound.Max {"
+      mutation: "a number is read by its value, so 5.0 and 5e0 pass as 5"
+      killed_by:
+        - internal/pa.TestDeviceWrite_ValuesAreRefusedNeverClamped
+      red: |-
+        --- FAIL: TestDeviceWrite_ValuesAreRefusedNeverClamped (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.566s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.537s
+    - id: P2S8-D2e
+      guard: internal/pa/connector/device_write.go:282
+      guard_text: "if d.ID == call.device {"
+      mutation: "a device's name is accepted as the target"
+      killed_by:
+        - internal/pa.TestS2D2_DeviceWriteTargetMustBeAListedDeviceID
+      red: |-
+        --- FAIL: TestS2D2_DeviceWriteTargetMustBeAListedDeviceID (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.573s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.473s
+    - id: P2S8-D2f
+      guard: internal/pa/connector/device_write.go:195
+      guard_text: "if _, present := args[spec.roomArg]; present {"
+      mutation: "a room next to the device id is let through to the server"
+      killed_by:
+        - internal/pa.TestS2D2_DeviceWriteTargetMustBeAListedDeviceID
+      red: |-
+        --- FAIL: TestS2D2_DeviceWriteTargetMustBeAListedDeviceID (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.634s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.487s
+    - id: P2S8-D2g
+      guard: internal/pa/connector/device_write.go:248
+      guard_text: "speakers, err := reader.Speakers(ctx, sreq)\n\t\tif err != nil {"
+      mutation: "a failed speaker read that came with a list is used"
+      killed_by:
+        - internal/pa.TestDeviceWrite_UnreadableDevicesRefuse
+      red: |-
+        --- FAIL: TestDeviceWrite_UnreadableDevicesRefuse (0.08s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.598s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.506s
+    - id: P2S8-D2h
+      guard: internal/pa/connector/device_write.go:318
+      guard_text: "Light: call.spec.light, Home: wd.Device.Home, Room: wd.Device.Room, Name: wd.Device.Name, ID: call.device,\n\t\tValues: call.values,"
+      mutation: "the card that is sent shows fewer values than the sealed arguments set"
+      killed_by:
+        - internal/pa.TestDeviceWrite_CardShowsTheValuesThatAreSent
+      red: |-
+        --- FAIL: TestDeviceWrite_CardShowsTheValuesThatAreSent (0.14s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.651s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.560s
+    - id: P2S8-D2i
+      guard: internal/pa/connector/device_write.go:160
+      guard_text: "if pinned.Constraints == nil || pinned.Constraints.IntegerBounds[v.arg] != *v.bound {"
+      mutation: "the pin's bounds are not compared with the range the card's label names"
+      killed_by:
+        - internal/pa.TestDeviceWrite_PinAndCardAgree
+      red: |-
+        --- FAIL: TestDeviceWrite_PinAndCardAgree (0.12s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.641s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.573s
+    - id: P2S8-D2j
+      guard: internal/pa/connector/card.go:238
+      guard_text: "} else if pinned.Class == catalog.ClassWrite && catalog.Phase2Tool(req.Tool) {"
+      mutation: "a Phase 2 write without a card of its own falls through to the plain card of raw arguments"
+      killed_by:
+        - internal/pa.TestDeviceWrite_OtherPhase2WritesHaveNoCard
+      red: |-
+        --- FAIL: TestDeviceWrite_OtherPhase2WritesHaveNoCard (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.568s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.476s
   gaps:
     - half: "production wiring: nothing in cmd/server constructs connector.Cards (TestNoRuntimePhase2Use forbids NewCards outside tests) or a SpeakerReader, the Phase 2 pin is not loadable at runtime and the run loop admits no approve-tier tool, so no disclosure call reaches these checks outside tests; the switch-on is P2-S14"
       tracked_by: "#1323"
     - half: "the speakers are read when the card is made and not again at dispatch: a speaker removed, renamed or moved to another room within the approval's five minutes is still called by its id. Owner decision: re-read at dispatch, or accept the window"
+      tracked_by: "#1322"
+    - half: "device writes are not wired at runtime either (P2-S8): nothing in cmd/server constructs connector.Cards, a SpeakerReader or a LightReader, so no alice_media_control, alice_set_volume or alice_set_light call reaches the value and device checks outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
+    - half: "alice_set_light has no card against the real server: alice_list_devices prints a device id for speakers only, so no LightReader of alice can be built and every alice_set_light call is refused no_write_path. mctl-alice must list the ids (and types) of the other devices, in a form a reader can parse, before a light can be a target"
+      tracked_by: "#1322"
+    - half: "the server still changes a value that is inside the pin's range: mctl-alice clamps volume, brightness and color temperature into the range the device itself reports, drops a value the device has no capability for, and reports success. The pin's range is refused here, the device's own range is not read. Closing it needs mctl-alice to refuse instead of clamping, or the device's ranges in the read made for the card"
+      tracked_by: "#1322"
+    - half: "the value and device checks of a device write run on the card path only (Cards.Emit). alice_set_volume and alice_set_light are lowerable and alice_media_control is conditionally lowerable, and nothing acts on gate.OutcomeLowered yet: the code that will send a lowered call without a card must run precheckDeviceWrite and deviceWriteTarget first, or the server's rounding, clamping and name matching come back for calls a standing permission covers"
+      tracked_by: "#1322"
+    - half: "alice_control_device and alice_control_room have no card path and are refused no_write_path. Owner decision: build the control_device card (it needs the device type from a fresh read and a temperature range), and whether control_room ever gets one"
+      tracked_by: "#1322"
+    - half: "how mctl-alice carries out an approved alice_set_volume or alice_media_control was read in its source, not run: with a Quasar cookie it sends a voice command to the speaker and falls back to the IoT action when that fails, so one approved call may reach the speaker twice"
       tracked_by: "#1322"
 
 S2-D3:
@@ -750,7 +913,7 @@ S2-D3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.565s
     - id: P2S6-D3c
-      guard: internal/pa/connector/card.go:209
+      guard: internal/pa/connector/card.go:212
       guard_text: "c.offerSplit(ctx, principal, req.JobID)"
       mutation: "text over the cap is refused without the offer to split it"
       killed_by:
@@ -808,7 +971,7 @@ S2-D4:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.698s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/output/safetext	0.253s
     - id: P2S6-D4b
-      guard: internal/pa/connector/card.go:451
+      guard: internal/pa/connector/card.go:476
       guard_text: "text, err = safetext.DisclosureCard(cardToolName(a.Server, a.Tool), string(args), d, tainted || terr != nil)"
       mutation: "the delivered card of a disclosure is the plain card: no speaker, no text line, no warning"
       killed_by:
@@ -880,7 +1043,7 @@ S2-D6:
     - internal/pa/output/safetext.TestScenarioCard_NeverWithoutSteps
   mutations:
     - id: P2S9-D6a
-      guard: internal/pa/connector/card.go:270
+      guard: internal/pa/connector/card.go:295
       guard_text: "shown, sealed, ref := c.scenarioTarget(ctx, req, scenario)"
       mutation: "a scenario whose steps could not be read gets the plain card, without steps"
       killed_by:
@@ -1020,7 +1183,7 @@ S2-D7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.525s
     - id: P2S5-D7c
-      guard: internal/pa/connector/card.go:454
+      guard: internal/pa/connector/card.go:489
       guard_text: "text, err = safetext.Card(cardToolName(a.Server, a.Tool), string(args), tainted || terr != nil)"
       mutation: "the card is rendered from other bytes than the sealed arguments (the last byte dropped)"
       killed_by:
@@ -1356,7 +1519,7 @@ S2-A5:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/catalog	0.261s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.474s
     - id: P2S5-A5c
-      guard: internal/pa/connector/card.go:287
+      guard: internal/pa/connector/card.go:312
       guard_text: "SchemaSHA: fresh.SchemaSHA, DescriptionSHA: fresh.DescriptionSHA, AnnotationSHA: fresh.AnnotationSHA,"
       mutation: "the card records another hash as the description hash of the definition it listed"
       killed_by:
