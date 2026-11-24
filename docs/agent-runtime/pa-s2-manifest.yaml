@@ -218,6 +218,25 @@
 # internal/pa/connector/card.go, dispatch_write.go, internal/db/pa_convo.go
 # and pa_connections.go: the guards of earlier slices were pointed at their
 # new lines; their code did not change.
+#
+# The P2S15A-C12*, -A9b to -A9i and -A6* records (S2-C12, S2-A9, S2-A6)
+# ran on the second P2-S15a branch, cut from 3da701ce, the same way, on
+# SQLite and against a local PostgreSQL 16. The slice adds a send mark to
+# the dispatch record: the executor sets it in a statement of its own
+# before the request and makes no request without it, so the stale sweep
+# ends a record that lacks the mark as refused (dispatch_never_sent) and
+# every other one as outcome_unknown. The mark says "may have been sent":
+# a process killed between the mark and the request leaves a marked
+# record, and so does a row written before the column existed; both are
+# outcome_unknown. The ledger rows of a lowered call now name the
+# permission and no approver, ended permissions are deleted
+# permissions.Retention after they ended, and a write refused by its
+# fresh listing is counted. P2S2-C12e guards the sweep statement this
+# slice rewrote: its guard_text was moved to the new line and the
+# mutation ("the sweep leaves a stale record dispatching") was applied
+# again and seen red on TestS2C12_CrashedDispatchBecomesOutcomeUnknown.
+# The other guards of earlier slices in the files this slice edits were
+# pointed at their new lines; their code did not change.
 
 S2-C9:
   status: green
@@ -289,7 +308,7 @@ S2-C9:
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
     - id: P2S12-C9d
-      guard: internal/db/pa_approvals.go:467
+      guard: internal/db/pa_approvals.go:489
       guard_text: "if _, err := cancelPAApprovalsWithNotice(ctx, tx, principal, nowMS, \"\"); err != nil {"
       mutation: "/forget and consent withdrawal delete the approvals without cancelling them first (no notice)"
       killed_by:
@@ -351,7 +370,7 @@ S2-C9:
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
     - id: P2S12-C9g
-      guard: internal/db/pa_convo.go:369
+      guard: internal/db/pa_convo.go:371
       guard_text: "if err := revokePAPermissionsOfPrincipalTx(ctx, tx, principal, nowMS); err != nil {"
       mutation: "/forget and consent withdrawal no longer revoke the standing permissions"
       killed_by:
@@ -373,7 +392,7 @@ S2-C9:
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
     - id: P2S12-C9h
-      guard: internal/db/pa_approvals.go:374
+      guard: internal/db/pa_approvals.go:396
       guard_text: "where := `status IN ('pending', 'approved') AND ($2 = '' OR connection_id = $2)`"
       mutation: "only pending approvals are cancelled, an approved one that was not dispatched stays approved"
       killed_by:
@@ -393,7 +412,7 @@ S2-C9:
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
     - id: P2S12-C9i
-      guard: internal/db/pa_approvals.go:374
+      guard: internal/db/pa_approvals.go:396
       guard_text: "where := `status IN ('pending', 'approved') AND ($2 = '' OR connection_id = $2)`"
       mutation: "the connection predicate is dropped: ending one connection cancels the approvals of every connection of the principal"
       killed_by:
@@ -407,7 +426,7 @@ S2-C9:
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
     - id: P2S12-C9j
-      guard: internal/db/pa_approvals.go:380
+      guard: internal/db/pa_approvals.go:402
       guard_text: "WHERE principal = $1 AND `+where+` RETURNING id`"
       mutation: "the principal predicate of the cancel is dropped: it cancels other principals' approvals"
       killed_by:
@@ -421,7 +440,7 @@ S2-C9:
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
     - id: P2S12-C9k
-      guard: internal/db/pa_permissions.go:348
+      guard: internal/db/pa_permissions.go:360
       guard_text: "`UPDATE pa_permissions SET revoked_at_ms = $1 WHERE principal = $2 AND revoked_at_ms = 0`"
       mutation: "the principal predicate of the principal-wide revoke is dropped: it revokes every principal's permissions"
       killed_by:
@@ -435,7 +454,7 @@ S2-C9:
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
     - id: P2S12-C9l
-      guard: internal/db/pa_approvals.go:375
+      guard: internal/db/pa_approvals.go:397
       guard_text: "if err := deletePAApprovalCallbacks(ctx, tx, principal, where, connectionID); err != nil {"
       mutation: "the cancel no longer deletes the callbacks of the cancelled approvals"
       killed_by:
@@ -457,7 +476,7 @@ S2-C9:
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
     - id: P2S12-C9m
-      guard: internal/db/pa_approvals.go:416
+      guard: internal/db/pa_approvals.go:438
       guard_text: "if err != nil || len(ids) == 0 {"
       mutation: "no notice is queued for cancelled approvals"
       killed_by:
@@ -495,7 +514,7 @@ S2-C9:
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
     - id: P2S12-C9o
-      guard: internal/db/pa_approvals.go:379
+      guard: internal/db/pa_approvals.go:401
       guard_text: "`UPDATE pa_approvals SET status = 'cancelled', sealed_args = NULL, finished_at_ms = $3, updated_at_ms = $3\n\t\t WHERE principal = $1 AND `+where"
       mutation: "a cancelled approval keeps its sealed arguments"
       killed_by:
@@ -529,7 +548,7 @@ S2-C9:
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
     - id: P2S14c-C9a
-      guard: internal/db/pa_convo.go:243
+      guard: internal/db/pa_convo.go:245
       guard_text: "`UPDATE pa_action_consents SET state = $1, updated_at_ms = $2 WHERE principal = $3`,"
       mutation: "/consent withdraw leaves the consent to actions accepted"
       killed_by:
@@ -584,7 +603,7 @@ S2-C10:
     - internal/db.TestS2C10_OldAuthorityRevisionIsRefused
   mutations:
     - id: P2S2-C10a
-      guard: internal/db/pa_approvals.go:510
+      guard: internal/db/pa_approvals.go:532
       guard_text: "AND c.authority_revision = pa_approvals.authority_revision)"
       mutation: "the consume no longer compares the connection's authority_revision with the bound one: predicate -> `AND 1 = 1`"
       killed_by:
@@ -596,7 +615,7 @@ S2-C10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	1.027s
     - id: P2S2-C10b
-      guard: internal/db/pa_approvals.go:509
+      guard: internal/db/pa_approvals.go:531
       guard_text: "AND c.state = $6"
       mutation: "the consume no longer requires the connection to be active: `AND c.state = $6` -> `AND $6 = $6`"
       killed_by:
@@ -620,7 +639,7 @@ S2-C11:
     - cmd/server.TestPAWrites_EndToEnd
   mutations:
     - id: P2S3-C11a
-      guard: internal/pa/connector/dispatch_write.go:738
+      guard: internal/pa/connector/dispatch_write.go:802
       guard_text: "return ep.CallToolExact(ctx, token, tool, args)"
       mutation: "a failed tools/call is sent a second time"
       killed_by:
@@ -632,7 +651,7 @@ S2-C11:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.592s
     - id: P2S3-C11b
-      guard: internal/pa/connector/dispatch_write.go:773
+      guard: internal/pa/connector/dispatch_write.go:837
       guard_text: "case callErr != nil:\n\t\treturn StatusOutcomeUnknown, ReasonOutcomeUnknown"
       mutation: "a transport failure is recorded as tool_error instead of outcome_unknown"
       killed_by:
@@ -644,7 +663,7 @@ S2-C11:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.558s
     - id: P2S3-C11c
-      guard: internal/pa/connector/dispatch_write.go:780
+      guard: internal/pa/connector/dispatch_write.go:844
       guard_text: "case isErr && upstreamSilent(out):"
       mutation: "the upstream's \"did not respond\" tool error is recorded as tool_error instead of outcome_unknown"
       killed_by:
@@ -688,13 +707,15 @@ S2-C11:
 S2-C12:
   status: green
   slice: P2-S2
-  note: "Commit-then-call ledger (store half, #1320 P2-S2): the dispatching record commits with the consumed receipt; SweepStalePADispatches moves a record whose lease ran out to outcome_unknown and its approval to done, and nothing makes it dispatchable again. The service runs the sweep at start and every minute (P2-S3, connector.StaleWriteSweeper), with the outcome_unknown notice queued in the sweep's transaction and a result entry in the audit chain."
+  note: "Commit-then-call ledger (store half, #1320 P2-S2): the dispatching record commits with the consumed receipt; SweepStalePADispatches moves a record whose lease ran out to outcome_unknown, or to refused when it lacks the send mark the executor sets before its request (P2-S15a: such a call was never sent, and its result entry and notice say so), and its approval to done, and nothing makes it dispatchable again. The service runs the sweep at start and every minute (P2-S3, connector.StaleWriteSweeper), with the outcome_unknown notice queued in the sweep's transaction and a result entry in the audit chain."
   tests:
     - internal/db.TestS2C12_CrashedDispatchBecomesOutcomeUnknown
     - internal/pa.TestS2C12_StaleSweepOwnsTheRecord
+    - internal/db.TestS2C12_UnsentDispatchIsSweptAsRefused
+    - internal/pa.TestS2C12_CommittedAndNeverSentIsNotUnknown
   mutations:
     - id: P2S2-C12a
-      guard: internal/db/pa_approvals.go:616
+      guard: internal/db/pa_approvals.go:671
       guard_text: "WHERE status = $3 AND lease_until_ms <= $2"
       mutation: "the restart sweep ignores the lease: `AND lease_until_ms <= $2` -> `AND $2 = $2`"
       killed_by:
@@ -706,7 +727,7 @@ S2-C12:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.830s
     - id: P2S2-C12b
-      guard: internal/db/pa_approvals.go:566
+      guard: internal/db/pa_approvals.go:590
       guard_text: "SET status = 'done', finished_at_ms = $1, updated_at_ms = $1"
       mutation: "a resolved dispatch makes its approval approved again instead of done"
       killed_by:
@@ -720,7 +741,7 @@ S2-C12:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.872s
     - id: P2S2-C12c
-      guard: internal/db/pa_approvals.go:578
+      guard: internal/db/pa_approvals.go:629
       guard_text: "AND id = $4 AND status = $5\n\t\t RETURNING `+paDispatchCols"
       mutation: "FinishPADispatch overwrites a dispatch that is no longer dispatching: `AND status = $5` -> `AND $5 = $5`"
       killed_by:
@@ -734,7 +755,7 @@ S2-C12:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.856s
     - id: P2S2-C12d
-      guard: internal/db/pa_approvals.go:616
+      guard: internal/db/pa_approvals.go:671
       guard_text: "WHERE status = $3 AND lease_until_ms <= $2"
       mutation: "the restart sweep moves records that are not dispatching: `WHERE status = $3` -> `WHERE $3 = $3`"
       killed_by:
@@ -746,8 +767,8 @@ S2-C12:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.851s
     - id: P2S2-C12e
-      guard: internal/db/pa_approvals.go:618
-      guard_text: "string(approval.DispatchOutcomeUnknown), nowMS, string(approval.DispatchDispatching))"
+      guard: internal/db/pa_approvals.go:673
+      guard_text: "string(approval.DispatchOutcomeUnknown), nowMS, string(approval.DispatchDispatching),"
       mutation: "the restart sweep leaves a stale record dispatching instead of outcome_unknown"
       killed_by:
         - internal/db.TestS2C12_CrashedDispatchBecomesOutcomeUnknown
@@ -758,7 +779,7 @@ S2-C12:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	1.282s
     - id: P2S3-C12a
-      guard: internal/db/pa_approvals.go:643
+      guard: internal/db/pa_approvals.go:700
       guard_text: "if err := enqueueStaleWriteNotices(ctx, tx, out, nowMS); err != nil {"
       mutation: "the stale sweep queues no notice for the records it moved"
       killed_by:
@@ -770,7 +791,7 @@ S2-C12:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.486s
     - id: P2S3-C12b
-      guard: internal/pa/connector/dispatch_write.go:995
+      guard: internal/pa/connector/dispatch_write.go:1061
       guard_text: "for _, d := range moved {\n\t\t// The record keeps hashes"
       mutation: "the stale sweeper appends no audit entry for the records it moved"
       killed_by:
@@ -781,10 +802,125 @@ S2-C12:
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.690s
+    - id: P2S15A-C12a
+      guard: internal/db/pa_approvals.go:669
+      guard_text: "status = CASE WHEN send_state = $4 THEN $5 ELSE $1 END,"
+      mutation: "the stale sweep ends a record that was never sent as outcome_unknown, like any other"
+      killed_by:
+        - internal/db.TestS2C12_UnsentDispatchIsSweptAsRefused
+        - internal/pa.TestS2C12_CommittedAndNeverSentIsNotUnknown
+      red: |-
+        --- FAIL: TestS2C12_UnsentDispatchIsSweptAsRefused (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db
+        --- FAIL: TestS2C12_CommittedAndNeverSentIsNotUnknown (0.54s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.618s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.685s
+    - id: P2S15A-C12b
+      guard: internal/db/pa_approvals.go:669
+      guard_text: "status = CASE WHEN send_state = $4 THEN $5 ELSE $1 END,"
+      mutation: "the stale sweep ends every record as refused, one marked as sent included"
+      killed_by:
+        - internal/db.TestS2C12_CrashedDispatchBecomesOutcomeUnknown
+        - internal/db.TestS2C12_UnsentDispatchIsSweptAsRefused
+        - internal/pa.TestS2C12_StaleSweepOwnsTheRecord
+      red: |-
+        --- FAIL: TestS2C12_CrashedDispatchBecomesOutcomeUnknown (0.13s)
+        --- FAIL: TestS2C12_UnsentDispatchIsSweptAsRefused (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db
+        --- FAIL: TestS2C12_StaleSweepOwnsTheRecord (0.28s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.570s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.606s
+    - id: P2S15A-C12c
+      guard: internal/pa/connector/dispatch_write.go:609
+      guard_text: "markErr := w.cfg.Store.MarkPADispatchSent(mctx, principal, dispatchID, w.now())"
+      mutation: "the executor sends the request without marking the record as sent"
+      killed_by:
+        - internal/pa.TestS2C12_StaleSweepOwnsTheRecord
+        - internal/pa.TestS2C12_CommittedAndNeverSentIsNotUnknown
+      red: |-
+        --- FAIL: TestS2C12_StaleSweepOwnsTheRecord (0.28s)
+        --- FAIL: TestS2C12_CommittedAndNeverSentIsNotUnknown (0.52s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.719s
+    - id: P2S15A-C12d
+      guard: internal/pa/connector/dispatch_write.go:618
+      guard_text: "slog.Error(\"pa write: dispatch not marked as sent; call refused\", \"server\", a.Server, \"err\", err)"
+      mutation: "a mark that could not be written does not stop the request"
+      killed_by:
+        - internal/pa.TestS2C12_CommittedAndNeverSentIsNotUnknown
+      red: |-
+        --- FAIL: TestS2C12_CommittedAndNeverSentIsNotUnknown (0.64s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	2.341s
+    - id: P2S15A-C12e
+      guard: internal/pa/connector/dispatch_write.go:612
+      guard_text: "case errors.Is(err, approval.ErrDispatchStale):"
+      mutation: "a mark refused because the lease ran out does not stop the request"
+      killed_by:
+        - internal/pa.TestS2C12_CommittedAndNeverSentIsNotUnknown
+      red: |-
+        --- FAIL: TestS2C12_CommittedAndNeverSentIsNotUnknown (0.90s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	2.425s
+    - id: P2S15A-C12f
+      guard: internal/db/pa_approvals.go:605
+      guard_text: " AND send_state = $6 AND lease_until_ms > $2`,"
+      mutation: "the mark is written on a record whose lease has run out"
+      killed_by:
+        - internal/db.TestS2C12_CrashedDispatchBecomesOutcomeUnknown
+        - internal/db.TestS2C12_UnsentDispatchIsSweptAsRefused
+      red: |-
+        --- FAIL: TestS2C12_CrashedDispatchBecomesOutcomeUnknown (0.16s)
+        --- FAIL: TestS2C12_UnsentDispatchIsSweptAsRefused (0.07s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.726s
+    - id: P2S15A-C12g
+      guard: internal/pa/connector/dispatch_write.go:1066
+      guard_text: "if d.Status == approval.DispatchRefused {"
+      mutation: "the sweeper writes the result entry of a never-sent record as outcome_unknown (dispatch_lease_expired)"
+      killed_by:
+        - internal/pa.TestS2C12_CommittedAndNeverSentIsNotUnknown
+      red: |-
+        --- FAIL: TestS2C12_CommittedAndNeverSentIsNotUnknown (0.82s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	2.309s
+    - id: P2S15A-C12h
+      guard: internal/db/pa_writes.go:116
+      guard_text: "if d.Status == approval.DispatchRefused {"
+      mutation: "the sweep queues the \"may or may not have happened\" notice for a record that was never sent"
+      killed_by:
+        - internal/db.TestS2C12_UnsentDispatchIsSweptAsRefused
+        - internal/pa.TestS2C12_CommittedAndNeverSentIsNotUnknown
+      red: |-
+        --- FAIL: TestS2C12_UnsentDispatchIsSweptAsRefused (0.08s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db
+        --- FAIL: TestS2C12_CommittedAndNeverSentIsNotUnknown (0.57s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.598s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.610s
   gaps:
     - half: "a real process kill between the pre-dispatch commit and the result"
-      tracked_by: "#1320"
-    - half: "a committed record of a call that was never sent and could not be settled as refused is resolved by the sweep as outcome_unknown (dispatch_lease_expired), not under a reason of its own that says nothing was sent"
       tracked_by: "#1320"
 
 S2-C13:
@@ -796,7 +932,7 @@ S2-C13:
     - cmd/server.TestPAWrites_EndToEnd
   mutations:
     - id: P2S3-C13a
-      guard: internal/pa/connector/dispatch_write.go:826
+      guard: internal/pa/connector/dispatch_write.go:890
       guard_text: "if fenceErr != nil {\n\t\tstatus, reason = StatusFenced, ReasonFenced\n\t}"
       mutation: "a refused call.Finish (the connection was revoked during the call) no longer fences the result"
       killed_by:
@@ -808,7 +944,7 @@ S2-C13:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.491s
     - id: P2S3-C13b
-      guard: internal/pa/connector/dispatch_write.go:843
+      guard: internal/pa/connector/dispatch_write.go:907
       guard_text: "if r := w.principalRefusal(fctx, tx, a, now); r != \"\" {"
       mutation: "the finish transaction no longer re-checks the principal's state before recording the result"
       killed_by:
@@ -857,7 +993,7 @@ S2-X5:
     - cmd/server.TestPAEval_A5_ReplayedExpiredForeignChanged
   mutations:
     - id: P2S5-X5a
-      guard: internal/db/pa_convo.go:561
+      guard: internal/db/pa_convo.go:563
       guard_text: "DELETE FROM pa_callbacks WHERE principal = $1 AND id = $2 AND expires_at_ms > $3 RETURNING action"
       mutation: "the callback is consumed by id only: `principal = $1` -> `$1 = $1` in ConsumePACallback, so another principal's press deletes the owner's button"
       killed_by:
@@ -869,7 +1005,7 @@ S2-X5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.690s
     - id: P2S5-X5b
-      guard: internal/db/pa_approvals.go:239
+      guard: internal/db/pa_approvals.go:260
       guard_text: "WHERE principal = $1 AND (approve_cb_id = $2 OR cancel_cb_id = $3)"
       mutation: "the approval is looked up by callback id only: `principal = $1` -> `$1 = $1` in LookupPAApprovalByCallback, so another principal is told about the owner's approval"
       killed_by:
@@ -1006,7 +1142,7 @@ S2-I6:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.682s
     - id: P2S7-I6b
-      guard: internal/db/pa_convo.go:456
+      guard: internal/db/pa_convo.go:458
       guard_text: 'UPDATE pa_conversations SET tainted = 1 WHERE id = $1'
       mutation: "AppendPAFragment taint UPDATE made a no-op: `SET tainted = 1` -> `SET tainted = tainted`"
       killed_by:
@@ -1023,7 +1159,7 @@ S2-I6:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.527s
     - id: P2S7-I6c
-      guard: internal/pa/connector/dispatch.go:544
+      guard: internal/pa/connector/dispatch.go:550
       guard_text: 'ferr = d.cfg.Jobs.RecordToolResult(fctx, job, out)'
       mutation: "dispatcher no longer records the tool result: `ferr = d.cfg.Jobs.RecordToolResult(fctx, job, out)` -> `_ = out`"
       killed_by:
@@ -1098,7 +1234,7 @@ S2-I7:
     - internal/db.TestS2I7_MigrationTaintsExistingRows
   mutations:
     - id: P2S7-I7a
-      guard: internal/db/pa_convo.go:274
+      guard: internal/db/pa_convo.go:276
       guard_text: 'VALUES($1, $2, $3, $4, 0, 0)'
       mutation: "a new conversation row starts tainted, so no reset path ever yields a clean row: `VALUES($1, $2, $3, $4, 0, 0)` -> `VALUES($1, $2, $3, $4, 0, 1)`"
       killed_by:
@@ -1121,7 +1257,7 @@ S2-I7:
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.432s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.464s
     - id: P2S7-I7b
-      guard: internal/db/pa_convo.go:137
+      guard: internal/db/pa_convo.go:139
       guard_text: '"INTEGER NOT NULL DEFAULT 1", "INTEGER NOT NULL DEFAULT 1"'
       mutation: "migration default lowered: `INTEGER NOT NULL DEFAULT 1` -> `DEFAULT 0` in both dialects"
       killed_by:
@@ -1156,7 +1292,7 @@ S2-I8:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.447s
     - id: P2S7-I8b
-      guard: internal/db/pa_convo.go:456
+      guard: internal/db/pa_convo.go:458
       guard_text: 'UPDATE pa_conversations SET tainted = 1 WHERE id = $1'
       mutation: "a statement that lowers the flag: `SET tainted = 1` -> `SET tainted = 0`"
       killed_by:
@@ -1209,7 +1345,7 @@ S2-I10:
     - internal/pa.TestS2I10_DispatchTaintFromConversation
   mutations:
     - id: P2S7-I10a
-      guard: internal/db/pa_convo.go:486
+      guard: internal/db/pa_convo.go:488
       guard_text: 'return true, rowRead("conversation taint", err)'
       mutation: "ReadPAConversationTaint read error returns clean: `return true, rowRead(...)` -> `return false, rowRead(...)`"
       killed_by:
@@ -1237,7 +1373,7 @@ S2-I10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.458s
     - id: P2S7-I10c
-      guard: internal/pa/connector/dispatch.go:597
+      guard: internal/pa/connector/dispatch.go:603
       guard_text: "\"pa dispatch: conversation taint unreadable, recorded as external\", \"err\", err)\n\t\treturn TaintExternal"
       mutation: "Dispatcher.taint read error recorded clean: `return TaintExternal` -> `return TaintClean` in the error branch"
       killed_by:
@@ -1279,7 +1415,7 @@ S2-D1:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/gate	0.238s
     - id: P2S11-D1b
-      guard: internal/pa/connector/lower.go:308
+      guard: internal/pa/connector/lower.go:311
       guard_text: "return pinned.Class == catalog.ClassWrite &&"
       mutation: "a permission is looked up for a disclosure"
       killed_by:
@@ -1589,7 +1725,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.476s
     - id: P2S14B-D2a
-      guard: internal/pa/connector/dispatch_write.go:552
+      guard: internal/pa/connector/dispatch_write.go:585
       guard_text: "if targetsDevice(a.Tool) {"
       mutation: "the executor does not read the device list again before it sends"
       killed_by:
@@ -2411,7 +2547,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.556s
     - id: P2S11-CNa
-      guard: internal/pa/connector/lower.go:337
+      guard: internal/pa/connector/lower.go:340
       guard_text: "return slices.Contains(c.PlaybackActions.Values, action), nil"
       mutation: "any playback action meets the condition"
       killed_by:
@@ -2437,7 +2573,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/gate	0.328s
     - id: P2S11-XPa
-      guard: internal/pa/connector/dispatch_write.go:505
+      guard: internal/pa/connector/dispatch_write.go:538
       guard_text: "if met, err := loweringCondition(pinned, low.Args); !lowerable(a.Tool, pinned) || err != nil || !met {"
       mutation: "the executor sends a lowered call that does not meet the tool condition"
       killed_by:
@@ -2449,7 +2585,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.575s
     - id: P2S11-XPb
-      guard: internal/pa/connector/dispatch_write.go:505
+      guard: internal/pa/connector/dispatch_write.go:538
       guard_text: "if met, err := loweringCondition(pinned, low.Args); !lowerable(a.Tool, pinned) || err != nil || !met {"
       mutation: "the executor does not ask whether the pin makes the tool lowerable"
       killed_by:
@@ -2779,7 +2915,7 @@ S2-D7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.398s
     - id: P2S3-D7b
-      guard: internal/pa/connector/dispatch_write.go:572
+      guard: internal/pa/connector/dispatch_write.go:636
       guard_text: "out, callErr := w.callOnce(cctx, ep, token, a.Tool, c.args)"
       mutation: "the executor sends bytes that differ from the approved ones (`<` re-escaped)"
       killed_by:
@@ -2844,7 +2980,7 @@ S2-A1:
     - cmd/server.TestPAEval_A1_PlayMusicOneCardRunsOnce
   mutations:
     - id: P2S2-A1a
-      guard: internal/db/pa_approvals.go:505
+      guard: internal/db/pa_approvals.go:527
       guard_text: "AND status = $5\n\t\t   AND expires_at_ms > $2"
       mutation: "the receipt compare-and-set no longer requires status = approved: `AND status = $5` -> `AND $5 = $5` in ConsumePAApproval"
       killed_by:
@@ -2861,7 +2997,7 @@ S2-A1:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	1.041s
     - id: P2S2-A1b
-      guard: internal/db/pa_approvals.go:550
+      guard: internal/db/pa_approvals.go:573
       guard_text: "if n != 1 {\n\t\t// A dispatch already holds"
       mutation: "a dispatch insert that conflicted on the idempotency key is accepted: `if n != 1` -> `if n > 1` in ConsumePAApproval"
       killed_by:
@@ -2873,7 +3009,7 @@ S2-A1:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.929s
     - id: P2S3-A1a
-      guard: internal/pa/connector/dispatch_write.go:720
+      guard: internal/pa/connector/dispatch_write.go:784
       guard_text: "if err := tx.Commit(); err != nil {\n\t\tslog.Error(\"pa write: pre-dispatch commit failed; call refused\""
       mutation: "the pre-dispatch transaction is rolled back instead of committed before the call"
       killed_by:
@@ -2919,7 +3055,7 @@ S2-A2:
     - cmd/server.TestPAEval_A5_ReplayedExpiredForeignChanged
   mutations:
     - id: P2S2-A2a
-      guard: internal/db/pa_approvals.go:506
+      guard: internal/db/pa_approvals.go:528
       guard_text: "AND expires_at_ms > $2\n\t\t   AND EXISTS (SELECT 1 FROM pa_connections c"
       mutation: "the consume no longer checks the expiry: `AND expires_at_ms > $2` -> `AND $2 = $2`"
       killed_by:
@@ -2931,7 +3067,7 @@ S2-A2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.884s
     - id: P2S2-A2b
-      guard: internal/db/pa_approvals.go:506
+      guard: internal/db/pa_approvals.go:528
       guard_text: "AND expires_at_ms > $2\n\t\t   AND EXISTS (SELECT 1 FROM pa_connections c"
       mutation: "the consume accepts an approval at its expiry: `expires_at_ms > $2` -> `expires_at_ms >= $2`"
       killed_by:
@@ -2943,7 +3079,7 @@ S2-A2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.852s
     - id: P2S2-A2c
-      guard: internal/db/pa_approvals.go:319
+      guard: internal/db/pa_approvals.go:341
       guard_text: "AND id = $4 AND status = $5 AND expires_at_ms > $2"
       mutation: "ApprovePAApproval no longer checks the expiry: `AND expires_at_ms > $2` -> `AND $2 = $2`"
       killed_by:
@@ -2955,7 +3091,7 @@ S2-A2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.764s
     - id: P2S2-A2d
-      guard: internal/db/pa_approvals.go:207
+      guard: internal/db/pa_approvals.go:227
       guard_text: "a.CreatedAt.Add(approval.TTL).UnixMilli()"
       mutation: "CreatePAApproval stores the caller's expiry instead of created + TTL"
       killed_by:
@@ -2979,7 +3115,7 @@ S2-A2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.086s
     - id: P2S14D-A5a
-      guard: internal/db/pa_approvals.go:262
+      guard: internal/db/pa_approvals.go:283
       guard_text: "if a.ExpiresAt.UnixMilli() <= nowMS {"
       mutation: "the compare-and-set of an approval no longer refuses one whose five minutes have passed"
       killed_by:
@@ -3002,7 +3138,7 @@ S2-A3:
     - cmd/server.TestPAEval_A5_ReplayedExpiredForeignChanged
   mutations:
     - id: P2S3-A3a
-      guard: internal/pa/connector/dispatch_write.go:716
+      guard: internal/pa/connector/dispatch_write.go:780
       guard_text: "|| digest(args) != got.ArgsSHA {"
       mutation: "the pre-dispatch transaction no longer compares the hash of the unsealed arguments with the approval's args_sha"
       killed_by:
@@ -3014,7 +3150,7 @@ S2-A3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.492s
     - id: P2S3-A3b
-      guard: internal/pa/connector/dispatch_write.go:716
+      guard: internal/pa/connector/dispatch_write.go:780
       guard_text: "!bytes.Equal(canonical, args)"
       mutation: "the pre-dispatch transaction accepts stored bytes that are not in canonical form"
       killed_by:
@@ -3060,7 +3196,7 @@ S2-A4:
     - cmd/server.TestPAEval_A5_ReplayedExpiredForeignChanged
   mutations:
     - id: P2S2-A4a
-      guard: internal/db/pa_approvals.go:504
+      guard: internal/db/pa_approvals.go:526
       guard_text: "WHERE principal = $3 AND id = $4\n\t\t   AND status = $5"
       mutation: "the consume is no longer keyed by principal: `WHERE principal = $3` -> `WHERE $3 = $3`"
       killed_by:
@@ -3072,7 +3208,7 @@ S2-A4:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.771s
     - id: P2S2-A4b
-      guard: internal/db/pa_approvals.go:319
+      guard: internal/db/pa_approvals.go:341
       guard_text: "AND id = $4 AND status = $5 AND expires_at_ms > $2"
       mutation: "ApprovePAApproval is no longer keyed by principal: `WHERE principal = $3` -> `WHERE $3 = $3`"
       killed_by:
@@ -3084,7 +3220,7 @@ S2-A4:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.865s
     - id: P2S2-A4c
-      guard: internal/db/pa_approvals.go:346
+      guard: internal/db/pa_approvals.go:368
       guard_text: "WHERE principal = $3 AND id = $4 AND status IN ($5, $6)"
       mutation: "Cancel/Refuse are no longer keyed by principal: `WHERE principal = $3` -> `WHERE $3 = $3` in endPAApproval"
       killed_by:
@@ -3096,7 +3232,7 @@ S2-A4:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.872s
     - id: P2S2-A4d
-      guard: internal/db/pa_approvals.go:229
+      guard: internal/db/pa_approvals.go:250
       guard_text: "FROM pa_approvals WHERE principal = $1 AND id = $2`, principal, id), nil)"
       mutation: "GetPAApproval is no longer keyed by principal: `WHERE principal = $1` -> `WHERE $1 = $1`"
       killed_by:
@@ -3108,7 +3244,7 @@ S2-A4:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.877s
     - id: P2S2-A4e
-      guard: internal/db/pa_approvals.go:239
+      guard: internal/db/pa_approvals.go:260
       guard_text: "WHERE principal = $1 AND (approve_cb_id = $2 OR cancel_cb_id = $3)"
       mutation: "LookupPAApprovalByCallback is no longer keyed by principal: `WHERE principal = $1` -> `WHERE $1 = $1`"
       killed_by:
@@ -3147,7 +3283,7 @@ S2-A5:
     - cmd/server.TestPAEval_A5_ReplayedExpiredForeignChanged
   mutations:
     - id: P2S4-A5a
-      guard: internal/pa/connector/dispatch_write.go:495
+      guard: internal/pa/connector/dispatch_write.go:527
       guard_text: "if fresh.SchemaSHA != a.SchemaSHA || fresh.DescriptionSHA != a.DescriptionSHA ||"
       mutation: "the executor compares the fresh definition with the pin only: the three approval hashes are no longer compared"
       killed_by:
@@ -3291,6 +3427,7 @@ S2-A6:
     - internal/pa/catalog.TestS2A6_ObserveToolRefusesUnreadListing
     - internal/pa/connector.TestS2A6_FreshListingOverHTTPIsNeverPartial
     - cmd/server.TestPAWrites_EndToEnd
+    - internal/pa.TestS2A6_ListingRefusalAtDispatchIsCounted
   mutations:
     - id: P2S4-A6a
       guard: internal/pa/connector/fresh.go:82
@@ -3367,10 +3504,46 @@ S2-A6:
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.136s
+    - id: P2S15A-A6a
+      guard: internal/pa/connector/dispatch_write.go:523
+      guard_text: "reason := PinRefusalReason(err)"
+      mutation: "a failed listing at dispatch is not counted"
+      killed_by:
+        - internal/pa.TestS2A6_ListingRefusalAtDispatchIsCounted
+      red: |-
+        --- FAIL: TestS2A6_ListingRefusalAtDispatchIsCounted (2.12s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	6.069s
+    - id: P2S15A-A6b
+      guard: internal/pa/connector/dispatch_write.go:529
+      guard_text: "w.countListingRefusal(a.Server, ReasonToolChanged)"
+      mutation: "a listed tool that differs from the card is not counted"
+      killed_by:
+        - internal/pa.TestS2A6_ListingRefusalAtDispatchIsCounted
+      red: |-
+        --- FAIL: TestS2A6_ListingRefusalAtDispatchIsCounted (2.15s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	7.449s
+    - id: P2S15A-A6c
+      guard: internal/pa/connector/dispatch_write.go:240
+      guard_text: "if cfg.Metrics != nil {"
+      mutation: "the refusal series are not created at 0"
+      killed_by:
+        - internal/pa.TestS2A6_ListingRefusalAtDispatchIsCounted
+      red: |-
+        --- FAIL: TestS2A6_ListingRefusalAtDispatchIsCounted (2.11s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	8.935s
   gaps:
     - half: "owner decision: a transient listing failure ends the approval like any refusal (fail closed); refusing without consuming, so the tap can be repeated until the 5 minute expiry, was proposed and not decided"
       tracked_by: "#1320"
-    - half: "a failed listing on a real MCP server through internal/pa/egress, and a metric or alert for dispatch-time listing failures (the read path counts its own)"
+    - half: "a failed listing on a real MCP server through internal/pa/egress. A write refused by the executor's own listing is counted (mctl_pa_write_listing_refusals_total, P2S15A-A6a to -A6c); no alert reads the counter, and the listing the card emitter makes when the call is decided is not in it"
       tracked_by: "#1320"
 
 S2-A7:
@@ -3394,7 +3567,7 @@ S2-A7:
     - cmd/server.TestPAEval_A1_PlayMusicOneCardRunsOnce
   mutations:
     - id: P2S5-A7a
-      guard: internal/db/pa_approvals.go:319
+      guard: internal/db/pa_approvals.go:341
       guard_text: "WHERE principal = $3 AND id = $4 AND status = $5 AND expires_at_ms > $2"
       mutation: "the approve step no longer requires status = pending: `AND status = $5` -> `AND $5 = $5` in ApprovePAApproval, so a restored button approves an approved row again"
       killed_by:
@@ -3713,9 +3886,11 @@ S2-A9:
     - internal/pa/gate.TestDecideNeverLowersWithoutEveryCondition
     - cmd/server.TestPAWrites_EndToEnd
     - cmd/server.TestPAWrites_StandingPermission
+    - internal/pa.TestS2A9_LedgerNamesThePermissionOfALoweredCall
+    - internal/db.TestS2A9_EndedPermissionsAreSwept
   mutations:
     - id: P2S10-A9a
-      guard: internal/db/pa_permissions.go:238
+      guard: internal/db/pa_permissions.go:250
       guard_text: "AND p.revoked_at_ms = 0 AND p.authority_revision = $5 AND p.expires_at_ms > $6"
       mutation: "the lookup no longer compares the revision: `p.authority_revision = $5` -> `$5 = $5`"
       killed_by:
@@ -3727,7 +3902,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.601s
     - id: P2S10-A9b
-      guard: internal/db/pa_permissions.go:238
+      guard: internal/db/pa_permissions.go:250
       guard_text: "AND p.revoked_at_ms = 0 AND p.authority_revision = $5 AND p.expires_at_ms > $6"
       mutation: "the lookup no longer compares the expiry: `p.expires_at_ms > $6` -> `$6 = $6`"
       killed_by:
@@ -3739,7 +3914,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.601s
     - id: P2S10-A9c
-      guard: internal/db/pa_permissions.go:202
+      guard: internal/db/pa_permissions.go:214
       guard_text: "AND cn.state = $3 AND cn.authority_revision = p.authority_revision"
       mutation: "the listing no longer requires the connection to be at the permission's revision: predicate -> `AND 1 = 1`"
       killed_by:
@@ -3751,7 +3926,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.601s
     - id: P2S10-A9d
-      guard: internal/db/pa_permissions.go:201
+      guard: internal/db/pa_permissions.go:213
       guard_text: "WHERE p.principal = $1 AND p.revoked_at_ms = 0 AND p.expires_at_ms > $2"
       mutation: "the listing no longer compares the expiry: `p.expires_at_ms > $2` -> `$2 = $2`"
       killed_by:
@@ -3775,7 +3950,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.601s
     - id: P2S10-A9f
-      guard: internal/pa/permissions/permissions.go:231
+      guard: internal/pa/permissions/permissions.go:239
       guard_text: "if p.ExpiresAtMS <= nowMS || p.ExpiresAtMS > nowMS+MaxTTL.Milliseconds() {"
       mutation: "the 30-day limit on a grant is dropped"
       killed_by:
@@ -3847,7 +4022,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.669s
     - id: P2S11-A9g
-      guard: internal/db/pa_permissions.go:281
+      guard: internal/db/pa_permissions.go:293
       guard_text: "WHERE p.principal = $1 AND p.id = $2"
       mutation: "the in-transaction read returns a row of any principal"
       killed_by:
@@ -3910,7 +4085,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.520s
     - id: P2S11-AUa
-      guard: internal/pa/connector/dispatch_write.go:432
+      guard: internal/pa/connector/dispatch_write.go:462
       guard_text: "base.Approver = permissionApprover(low.PermissionID)"
       mutation: "the audit record of a lowered call does not name the permission"
       killed_by:
@@ -3969,17 +4144,109 @@ S2-A9:
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.003s
+    - id: P2S15A-A9b
+      guard: internal/pa/connector/lower.go:292
+      guard_text: "a.PermissionID = p.ID"
+      mutation: "the ledger row of a lowered call does not name the permission"
+      killed_by:
+        - internal/pa.TestS2A9_LedgerNamesThePermissionOfALoweredCall
+      red: |-
+        --- FAIL: TestS2A9_LedgerNamesThePermissionOfALoweredCall (0.35s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	7.029s
+    - id: P2S15A-A9c
+      guard: internal/db/pa_approvals.go:340
+      guard_text: "approver = CASE WHEN permission_id = '' THEN principal ELSE 0 END, updated_at_ms = $2"
+      mutation: "the ledger row of a lowered call carries the principal as approver"
+      killed_by:
+        - internal/pa.TestS2A9_LedgerNamesThePermissionOfALoweredCall
+      red: |-
+        --- FAIL: TestS2A9_LedgerNamesThePermissionOfALoweredCall (0.72s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	6.769s
+    - id: P2S15A-A9d
+      guard: internal/pa/connector/dispatch_write.go:1095
+      guard_text: "if d.PermissionID != \"\" {"
+      mutation: "the stale sweep's result entry of a lowered call names the principal as approver"
+      killed_by:
+        - internal/pa.TestS2A9_LedgerNamesThePermissionOfALoweredCall
+      red: |-
+        --- FAIL: TestS2A9_LedgerNamesThePermissionOfALoweredCall (0.36s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	4.995s
+    - id: P2S15A-A9e
+      guard: internal/db/pa_approvals.go:563
+      guard_text: "string(approval.SendUnsent), a.PermissionID)"
+      mutation: "the dispatch record of a lowered call does not carry the permission"
+      killed_by:
+        - internal/pa.TestS2A9_LedgerNamesThePermissionOfALoweredCall
+      red: |-
+        --- FAIL: TestS2A9_LedgerNamesThePermissionOfALoweredCall (0.34s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	4.860s
+    - id: P2S15A-A9f
+      guard: internal/db/pa_permissions.go:52
+      guard_text: "WHERE (revoked_at_ms > 0 AND revoked_at_ms < $1) OR expires_at_ms < $1`"
+      mutation: "the retention sweep keeps revoked permissions"
+      killed_by:
+        - internal/db.TestS2A9_EndedPermissionsAreSwept
+      red: |-
+        --- FAIL: TestS2A9_EndedPermissionsAreSwept (0.13s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.522s
+    - id: P2S15A-A9g
+      guard: internal/db/pa_permissions.go:52
+      guard_text: "WHERE (revoked_at_ms > 0 AND revoked_at_ms < $1) OR expires_at_ms < $1`"
+      mutation: "the retention sweep keeps expired permissions"
+      killed_by:
+        - internal/db.TestS2A9_EndedPermissionsAreSwept
+      red: |-
+        --- FAIL: TestS2A9_EndedPermissionsAreSwept (0.13s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.534s
+    - id: P2S15A-A9h
+      guard: internal/db/pa_permissions.go:52
+      guard_text: "WHERE (revoked_at_ms > 0 AND revoked_at_ms < $1) OR expires_at_ms < $1`"
+      mutation: "the retention sweep deletes permissions that are in force"
+      killed_by:
+        - internal/db.TestS2A9_EndedPermissionsAreSwept
+      red: |-
+        --- FAIL: TestS2A9_EndedPermissionsAreSwept (0.12s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.517s
+    - id: P2S15A-A9i
+      guard: internal/db/pa_convo.go:692
+      guard_text: "sweepEndedPAPermissions, []any{now.Add(-permissions.Retention).UnixMilli()}"
+      mutation: "the retention sweep deletes a permission the moment it ends"
+      killed_by:
+        - internal/db.TestS2A9_EndedPermissionsAreSwept
+      red: |-
+        --- FAIL: TestS2A9_EndedPermissionsAreSwept (0.17s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.509s
   gaps:
     - half: "a revoke, an expiry or a revision change that commits after the executor's pre-dispatch transaction does not stop the lowered call that transaction admitted: as with an approved call, the fence ends at that commit"
-      tracked_by: "#1320"
-    - half: "the ledger row of a lowered call (pa_approvals) carries the principal as approver; only the audit records name the permission (approver=permission:<id>), and the stale-dispatch sweep writes its result record from the ledger row"
       tracked_by: "#1320"
     - half: "a lowered call lists the server's tools twice (the emitter, then the executor), and the principal is told of the write by the notice an approved call sends; neither was measured or reviewed for wording"
       tracked_by: "#1320"
     - half: "lowering runs end to end in process only: cmd/server.TestPAWrites_StandingPermission (P2-S14d) makes a grant with /permissions on a write connection and, through the service's own constructor and the worker of internal/agentworker, has a covered call lowered and sent once, a call above the ceiling carded and a revoke bring the card back; cmd/server.TestPAEval_A4_InjectionMakesNoUnapprovedCall has the same grant lower nothing once the conversation holds external content. No deployed service has a permission row: PA_WRITES_ENABLED is off everywhere, so a lowered call never reached a real mctl-alice"
       tracked_by: "#1323"
-    - half: "revoked and expired rows are kept until the account is forgotten or deleted: no sweep or retention rule removes them"
-      tracked_by: "#1320"
     - half: "no test on Postgres of a transition racing a Grant press: the insert locks the connection row with a no-op update before it reads it, and that ordering is not exercised under concurrency"
       tracked_by: "#1320"
 
@@ -4125,7 +4392,7 @@ S2-F3:
     - internal/agentworker.TestPASystemPrompt_ActionsHint
   mutations:
     - id: P2S3-F3a
-      guard: internal/pa/connector/dispatch_write.go:293
+      guard: internal/pa/connector/dispatch_write.go:323
       guard_text: "if f.WritesErr != nil || !f.Writes {"
       mutation: "the writes switch is never read: the flag check is `if false`"
       killed_by:
@@ -4137,7 +4404,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.511s
     - id: P2S3-F3b
-      guard: internal/pa/connector/dispatch_write.go:676
+      guard: internal/pa/connector/dispatch_write.go:740
       guard_text: "if out.reason = w.admit(ctx, tx, a, now); out.reason != \"\" {"
       mutation: "the pre-dispatch transaction keeps the flags of the first check instead of reading them again"
       killed_by:
@@ -4299,7 +4566,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14c-F3m
-      guard: internal/pa/connector/dispatch_write.go:337
+      guard: internal/pa/connector/dispatch_write.go:367
       guard_text: "return ReasonActionConsentRequired"
       mutation: "the write executor sends an approved action of a principal without the consent to actions"
       killed_by:
@@ -4433,7 +4700,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14c-F3u
-      guard: internal/pa/connector/dispatch_write.go:482
+      guard: internal/pa/connector/dispatch_write.go:512
       guard_text: "if !w.scopes().Holds(conn, a.Tool) {"
       mutation: "the executor does not check the write scope before it asks the server for its tools"
       killed_by:
@@ -4445,7 +4712,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14c-F3v
-      guard: internal/pa/connector/dispatch_write.go:665
+      guard: internal/pa/connector/dispatch_write.go:729
       guard_text: "case !w.scopes().Holds(conn, a.Tool):"
       mutation: "the transaction that commits the dispatch does not check the write scope of the locked connection row"
       killed_by:

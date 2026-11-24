@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -29,8 +30,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/mctlhq/mctl-telegram/internal/crypto"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 	"github.com/mctlhq/mctl-telegram/internal/pa/approval"
 	"github.com/mctlhq/mctl-telegram/internal/pa/catalog"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
@@ -979,6 +983,75 @@ func TestWriteDispatch_Refusals(t *testing.T) {
 	}
 }
 
+// TestS2A6_ListingRefusalAtDispatchIsCounted: a write that the executor's
+// own tools/list refused is counted in
+// mctl_pa_write_listing_refusals_total under the reason of the refusal,
+// and under no other. Every reason of the endpoint exists at 0 before the
+// first refusal, and a dispatch that the listing let through, or one
+// refused before any listing was asked, counts nothing.
+func TestS2A6_ListingRefusalAtDispatchIsCounted(t *testing.T) {
+	series := func(reg *metrics.Registry) map[string]float64 {
+		out := map[string]float64{}
+		for _, r := range connector.WriteListingRefusalReasons {
+			if v := testutil.ToFloat64(reg.PAWriteListingRefusals.WithLabelValues("tg", r)); v != 0 {
+				out[r] = v
+			}
+		}
+		return out
+	}
+	cases := []struct {
+		name string
+		set  func(e *writeEnv)
+		want map[string]float64
+	}{
+		{"the server cannot be listed", func(e *writeEnv) { e.fresh.err = catalog.ErrServerUnavailable },
+			map[string]float64{connector.ReasonServerUnavailable: 1}},
+		{"the listing is unusable", func(e *writeEnv) { e.fresh.err = catalog.ErrListingStale },
+			map[string]float64{connector.ReasonListingStale: 1}},
+		{"the tool is gone from the listing", func(e *writeEnv) { e.fresh.err = catalog.ErrNotPinned },
+			map[string]float64{connector.ReasonNotPinned: 1}},
+		{"the listed tool is not the pinned one", func(e *writeEnv) { e.fresh.err = catalog.ErrToolChanged },
+			map[string]float64{connector.ReasonToolChanged: 1}},
+		{"an error the executor does not know", func(e *writeEnv) { e.fresh.err = errors.New("tools/list failed") },
+			map[string]float64{connector.ReasonInternal: 1}},
+		{"the listed tool is not the one on the card", func(e *writeEnv) { e.fresh.tool.SchemaSHA = shaHex([]byte("new schema")) },
+			map[string]float64{connector.ReasonToolChanged: 1}},
+		{"the listing agrees", nil, map[string]float64{}},
+		{"refused before the listing", func(e *writeEnv) { e.denied.Store(true) }, map[string]float64{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			forEachDialect(t, func(t *testing.T, s *db.Store) {
+				reg := metrics.New()
+				e := newWriteEnv(t, s, func(c *connector.WriteConfig) { c.Metrics = reg })
+				if n := testutil.CollectAndCount(reg.PAWriteListingRefusals); n != len(connector.WriteListingRefusalReasons) {
+					t.Fatalf("%d series before the first dispatch, want one per reason (%d)", n, len(connector.WriteListingRefusalReasons))
+				}
+				if got := series(reg); len(got) != 0 {
+					t.Fatalf("counted before any dispatch: %v", got)
+				}
+				a := e.approved(writeArgs)
+				if tc.set != nil {
+					tc.set(e)
+				}
+				out := e.dispatch(a.ID)
+				if got := series(reg); !maps.Equal(got, tc.want) {
+					t.Fatalf("listing refusals %v, want %v (outcome %+v)", got, tc.want, out)
+				}
+				for reason := range tc.want {
+					if out.Status != connector.StatusRefused || out.Reason != reason || len(e.ep.sent()) != 0 {
+						t.Fatalf("outcome %+v, want refused %s with nothing sent", out, reason)
+					}
+					// The same refusal stays in the dispatch counter.
+					if v := testutil.ToFloat64(reg.PADispatchTotal.WithLabelValues("tg", "refused", reason)); v != 1 {
+						t.Fatalf("dispatch counter for %s is %v, want 1", reason, v)
+					}
+				}
+			})
+		})
+	}
+}
+
 // TestWriteDispatch_NotApproved: an approval nobody approved, another
 // principal's approval and an unknown id are refused without a call, and
 // a pending approval is left pending for its card.
@@ -1082,6 +1155,114 @@ func TestS2C12_StaleSweepOwnsTheRecord(t *testing.T) {
 			t.Fatalf("second sweep: %d %v", n, err)
 		}
 	})
+}
+
+// markFaultStore is the ledger with a sent mark the test decides: mark,
+// when set, stands in for MarkPADispatchSent; finishErr fails every
+// FinishPADispatch, so a call that was not sent cannot be settled by its
+// executor.
+type markFaultStore struct {
+	*db.Store
+	mark      func(ctx context.Context, principal int64, dispatchID string, now time.Time) error
+	finishErr error
+}
+
+func (m *markFaultStore) MarkPADispatchSent(ctx context.Context, principal int64, dispatchID string, now time.Time) error {
+	if m.mark != nil {
+		return m.mark(ctx, principal, dispatchID, now)
+	}
+	return m.Store.MarkPADispatchSent(ctx, principal, dispatchID, now)
+}
+
+func (m *markFaultStore) FinishPADispatch(ctx context.Context, tx *sql.Tx, principal int64, dispatchID string, status approval.DispatchStatus, now time.Time) (approval.Dispatch, error) {
+	if m.finishErr != nil {
+		return approval.Dispatch{}, m.finishErr
+	}
+	return m.Store.FinishPADispatch(ctx, tx, principal, dispatchID, status, now)
+}
+
+// TestS2C12_CommittedAndNeverSentIsNotUnknown: a dispatch whose record was
+// committed, whose request was never made and which its executor could
+// not settle is ended by the sweep under a reason of its own. The record
+// is refused, the audit result entry says dispatch_never_sent and the
+// principal is told the action was not carried out, not that it may have
+// happened. Two ways there: the sent mark could not be written, and the
+// lease ran out before the mark.
+func TestS2C12_CommittedAndNeverSentIsNotUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		wantReason string
+		arrange    func(e *writeEnv, fs *markFaultStore, sweeper connector.StaleWriteSweeper)
+	}{
+		{"the mark cannot be written", connector.ReasonStateUnreadable,
+			func(_ *writeEnv, fs *markFaultStore, _ connector.StaleWriteSweeper) {
+				fs.mark = func(context.Context, int64, string, time.Time) error {
+					return fmt.Errorf("%w: injected", approval.ErrUnreadable)
+				}
+				fs.finishErr = fmt.Errorf("%w: injected", approval.ErrUnreadable)
+			}},
+		{"the lease ran out before the mark", connector.ReasonLeaseExpired,
+			func(e *writeEnv, fs *markFaultStore, sweeper connector.StaleWriteSweeper) {
+				fs.mark = func(ctx context.Context, principal int64, id string, _ time.Time) error {
+					e.h.Advance(approval.MaxDispatchLease + time.Minute)
+					if n, err := sweeper.SweepOnce(ctx); err != nil || n != 1 {
+						e.t.Errorf("sweep before the mark: %d %v, want 1", n, err)
+					}
+					return fs.Store.MarkPADispatchSent(ctx, principal, id, e.h.Now())
+				}
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			forEachDialect(t, func(t *testing.T, s *db.Store) {
+				fs := &markFaultStore{Store: s}
+				e := newWriteEnv(t, s, func(c *connector.WriteConfig) { c.Store = fs; c.CallTimeout = time.Second })
+				sweeper := connector.StaleWriteSweeper{Store: s, Executor: &connector.Executor{Sink: e.sink, Now: e.h.Now}}
+				tc.arrange(e, fs, sweeper)
+				a := e.approved(writeArgs)
+				out := e.dispatch(a.ID)
+				if out.Status != connector.StatusRefused || out.Reason != tc.wantReason || out.Output != nil {
+					t.Fatalf("outcome %+v, want refused (%s)", out, tc.wantReason)
+				}
+				if n := len(e.ep.sent()); n != 0 {
+					t.Fatalf("%d calls were sent for a dispatch that was not marked as sent", n)
+				}
+				// The executor could not settle the first; the sweep does,
+				// once its lease has run out.
+				fs.mark, fs.finishErr = nil, nil
+				e.h.Advance(approval.MaxDispatchLease + time.Minute)
+				if _, err := sweeper.SweepOnce(context.Background()); err != nil {
+					t.Fatalf("sweep: %v", err)
+				}
+				if d := e.dispatches(); !slices.Equal(d, []string{"refused"}) {
+					t.Fatalf("dispatch records %v, want one refused", d)
+				}
+				if st := e.approvalState(a.ID); st != "done/erased" {
+					t.Fatalf("approval is %s, want done/erased", st)
+				}
+				if n := e.notices(); !slices.Equal(n, []string{"write_not_sent"}) {
+					t.Fatalf("notices %v, want exactly one write_not_sent", n)
+				}
+				st, rows := e.writeAudit()
+				if !slices.Equal(st, []string{"dispatching", "refused"}) {
+					t.Fatalf("audit %v, want one pre-dispatch and one refused result entry", st)
+				}
+				if field(rows[0].peer, "call") != field(rows[1].peer, "call") || field(rows[1].peer, "approval") != a.ID ||
+					field(rows[1].peer, "reason") != connector.ReasonNeverSent {
+					t.Fatalf("sweep result entry %s, want reason %s", rows[1].peer, connector.ReasonNeverSent)
+				}
+				// The receipt is spent: a second tap sends nothing.
+				if out := e.dispatch(a.ID); out.Status != connector.StatusRefused {
+					t.Fatalf("second dispatch %+v", out)
+				}
+				if n := len(e.ep.sent()); n != 0 {
+					t.Fatalf("%d calls after the second dispatch", n)
+				}
+				if n, err := sweeper.SweepOnce(context.Background()); err != nil || n != 0 {
+					t.Fatalf("second sweep: %d %v", n, err)
+				}
+			})
+		})
+	}
 }
 
 // TestWriteNotices_NeverClaimNothingHappened: the texts for a fenced and

@@ -104,11 +104,19 @@ type lowerEP struct {
 	mu    sync.Mutex
 	tools []string
 	calls [][]byte
+	// onCall runs while a call is on the wire.
+	onCall func()
 }
 
 func (f *lowerEP) Server() string { return "tg" }
 
 func (f *lowerEP) CallToolExact(_ context.Context, tok connection.Secret, tool string, args []byte) ([]byte, error) {
+	f.mu.Lock()
+	onCall := f.onCall
+	f.mu.Unlock()
+	if onCall != nil {
+		onCall()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.tools = append(f.tools, tool)
@@ -406,6 +414,11 @@ func (e *lowerEnv) lowered(name, id, tool, args string) {
 	if len(made) != 1 || made[0].status != "done" {
 		e.t.Fatalf("%s: ledger rows of the call %+v", name, made)
 	}
+	// The ledger names the permission, on both rows, and no approver:
+	// nobody tapped (S2-A9).
+	if perm, approver := e.ledgerPermission(made[0].id); perm != [2]string{id, id} || approver != 0 {
+		e.t.Fatalf("%s: ledger rows carry permission %v and approver %d, want %s on both and no approver", name, perm, approver, id)
+	}
 	audit := e.auditOf(tool)
 	if len(audit) < 2 {
 		e.t.Fatalf("%s: audit %+v", name, audit)
@@ -430,6 +443,68 @@ func (e *lowerEnv) lowered(name, id, tool, args string) {
 	if e.tainted() {
 		e.t.Fatalf("%s: a lowered call tainted the conversation", name)
 	}
+}
+
+// ledgerPermission reads what the ledger says stood behind a call: the
+// permission on the approval row and on its dispatch record, and the
+// approver of the approval row.
+func (e *lowerEnv) ledgerPermission(approvalID string) (perm [2]string, approver int64) {
+	e.t.Helper()
+	if err := e.store.DB.QueryRow(`SELECT permission_id, approver FROM pa_approvals WHERE principal = $1 AND id = $2`,
+		alice, approvalID).Scan(&perm[0], &approver); err != nil {
+		e.t.Fatal(err)
+	}
+	if err := e.store.DB.QueryRow(`SELECT permission_id FROM pa_dispatches WHERE principal = $1 AND approval_id = $2`,
+		alice, approvalID).Scan(&perm[1]); err != nil {
+		e.t.Fatal(err)
+	}
+	return perm, approver
+}
+
+// TestS2A9_LedgerNamesThePermissionOfALoweredCall: the ledger rows of a
+// lowered call name the standing permission and carry no approver, so a
+// record written from the ledger alone says who stood behind the call. The
+// stale sweep writes such a record: for a lowered call whose executor is
+// gone its result entry names the permission, as the pre-dispatch entry
+// did, and not the principal. A call the principal approved keeps the
+// principal as approver and names no permission.
+func TestS2A9_LedgerNamesThePermissionOfALoweredCall(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newLowerEnv(t, s)
+		e.grant("prm_vol", volumeTool, 5, kitchenID)
+		sweeper := connector.StaleWriteSweeper{Store: s, Executor: &connector.Executor{Sink: e.sink, Now: e.h.Now}}
+		// The lease runs out while the call is on the wire and the sweep
+		// ends the record: the executor that comes back writes no more.
+		e.lep.onCall = func() {
+			e.h.Advance(approval.MaxDispatchLease + time.Minute)
+			if n, err := sweeper.SweepOnce(context.Background()); err != nil || n != 1 {
+				t.Errorf("sweep: %d %v, want 1", n, err)
+			}
+		}
+		out := e.dispatchLowered(e.loweredCall("prm_vol", volumeTool, volume5, catalog.ClassWrite))
+		if out.Status != connector.StatusOutcomeUnknown {
+			t.Fatalf("outcome %+v, want outcome_unknown", out)
+		}
+		rows := e.approvals(alice)
+		if len(rows) != 1 {
+			t.Fatalf("ledger rows %+v, want the one of the lowered call", rows)
+		}
+		if perm, approver := e.ledgerPermission(rows[0].id); perm != [2]string{"prm_vol", "prm_vol"} || approver != 0 {
+			t.Fatalf("ledger rows carry permission %v and approver %d", perm, approver)
+		}
+		audit := e.auditOf(volumeTool)
+		if len(audit) != 2 || audit[0].status != "dispatching" || audit[1].status != "outcome_unknown" {
+			t.Fatalf("audit %+v, want one pre-dispatch and one result entry", audit)
+		}
+		for i, r := range audit {
+			if got := field(r.peer, "approver"); got != "permission:prm_vol" {
+				t.Errorf("audit record %d names approver %q, want permission:prm_vol (%s)", i, got, r.peer)
+			}
+		}
+		if field(audit[1].peer, "reason") != connector.ReasonLeaseExpired || field(audit[1].peer, "approval") != rows[0].id {
+			t.Fatalf("sweep result entry %s", audit[1].peer)
+		}
+	})
 }
 
 const (

@@ -49,6 +49,14 @@ const (
 	// DefaultTTL is the expiry /permissions grants with. The threat model
 	// fixes only the maximum; the default is an open owner decision.
 	DefaultTTL = MaxTTL
+	// Retention is how long a row is kept after it stopped counting: after
+	// it was revoked, or after its expiry. The conversation sweep deletes
+	// it then (S2-A9). It is the retention of the approval ledger
+	// (approval.Retention), whose rows name the permission of a lowered
+	// call: a ledger row is written while the permission is in force and
+	// is deleted that long after, so no ledger row outlives the permission
+	// it names. The audit chain keeps the grant and the revocation.
+	Retention = 24 * time.Hour
 	// ScreenTTL is how long a grant or revoke screen's button works. It
 	// also bounds the age of the device read a grant was checked against.
 	ScreenTTL = 5 * time.Minute

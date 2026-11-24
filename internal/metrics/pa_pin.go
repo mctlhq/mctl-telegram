@@ -49,6 +49,13 @@ type paMetrics struct {
 	// PADispatchTotal counts dispatcher outcomes: an executed call's status
 	// (reason "") or a refusal's reason (status "refused").
 	PADispatchTotal *prometheus.CounterVec
+	// PAWriteListingRefusals counts writes refused at dispatch because of
+	// the fresh tools/list the write executor reads for that one call:
+	// the listing could not be read or used, or the tool in it is not the
+	// one the pin and the card name. The reason set is closed
+	// (connector.WriteListingRefusalReasons) and every reason of every
+	// write endpoint exists at 0 from the executor's construction.
+	PAWriteListingRefusals *prometheus.CounterVec
 }
 
 func newPAMetrics(reg *prometheus.Registry) paMetrics {
@@ -73,8 +80,13 @@ func newPAMetrics(reg *prometheus.Registry) paMetrics {
 			Name: "mctl_pa_dispatch_total",
 			Help: "PA connector dispatcher outcomes, by server, status and refusal reason.",
 		}, []string{"server", "status", "reason"}),
+		PAWriteListingRefusals: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "mctl_pa_write_listing_refusals_total",
+			Help: "PA writes refused at dispatch because of the tool's fresh tools/list, by server and reason.",
+		}, []string{"server", "reason"}),
 	}
-	reg.MustRegister(m.PAPinDrift, m.PAPinListingUnknown, m.PAPinDeniedTools, m.PAPinListingFailures, m.PADispatchTotal)
+	reg.MustRegister(m.PAPinDrift, m.PAPinListingUnknown, m.PAPinDeniedTools, m.PAPinListingFailures, m.PADispatchTotal,
+		m.PAWriteListingRefusals)
 	return m
 }
 
@@ -119,4 +131,18 @@ func (r *Registry) PreparePAListingFailures(server string, reasons []string) {
 // CountPADispatch counts one dispatcher outcome.
 func (r *Registry) CountPADispatch(server, status, reason string) {
 	r.PADispatchTotal.WithLabelValues(server, status, reason).Inc()
+}
+
+// CountPAWriteListingRefusal counts one write refused at dispatch because
+// of the tool's fresh listing.
+func (r *Registry) CountPAWriteListingRefusal(server, reason string) {
+	r.PAWriteListingRefusals.WithLabelValues(server, reason).Inc()
+}
+
+// PreparePAWriteListingRefusals creates server's series at 0, so that
+// increase() sees the first refusal.
+func (r *Registry) PreparePAWriteListingRefusals(server string, reasons []string) {
+	for _, reason := range reasons {
+		r.PAWriteListingRefusals.WithLabelValues(server, reason).Add(0)
+	}
 }

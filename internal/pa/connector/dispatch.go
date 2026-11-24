@@ -142,6 +142,12 @@ type Metrics interface {
 	// every reason, so the first failure is an increase, not a new series.
 	PreparePAListingFailures(server string, reasons []string)
 	CountPADispatch(server, status, reason string)
+	// CountPAWriteListingRefusal counts one write refused at dispatch
+	// because of the tool's fresh listing (WriteListingRefusalReasons).
+	CountPAWriteListingRefusal(server, reason string)
+	// PreparePAWriteListingRefusals creates server's series at 0 for
+	// every reason.
+	PreparePAWriteListingRefusals(server string, reasons []string)
 }
 
 // DefaultCallTimeout bounds one dispatch from opening the token to the

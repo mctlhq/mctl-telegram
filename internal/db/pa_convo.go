@@ -23,6 +23,8 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa/approval"
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
+
+	"github.com/mctlhq/mctl-telegram/internal/pa/permissions"
 )
 
 var _ convo.Store = (*Store)(nil)
@@ -685,6 +687,9 @@ func (s *Store) SweepPAState(ctx context.Context, now, updatesBefore time.Time) 
 			WHERE status IN ('pending', 'approved') AND expires_at_ms <= $1`, []any{nowMS}},
 		{new(int64), `DELETE FROM pa_approvals WHERE created_at_ms < $1 AND NOT EXISTS (SELECT 1 FROM pa_dispatches d WHERE d.principal = pa_approvals.principal AND d.approval_id = pa_approvals.id AND d.status = 'dispatching')`, []any{now.Add(-approval.Retention).UnixMilli()}},
 		{new(int64), `DELETE FROM pa_dispatches WHERE status <> 'dispatching' AND created_at_ms < $1`, []any{now.Add(-approval.Retention).UnixMilli()}},
+		// Standing permissions that stopped counting permissions.Retention
+		// ago (S2-A9).
+		{new(int64), sweepEndedPAPermissions, []any{now.Add(-permissions.Retention).UnixMilli()}},
 	}
 	for _, st := range steps {
 		res, err := tx.ExecContext(ctx, st.q, st.args...)

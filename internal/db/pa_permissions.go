@@ -25,6 +25,11 @@ package db
 // executor's pre-dispatch transaction. No deployed wiring reaches either,
 // or the insert.
 //
+// A row that stopped counting is kept permissions.Retention after its
+// revocation or its expiry and is then deleted by SweepPAState; /forget,
+// a consent withdrawal and account deletion delete the principal's rows
+// at once.
+//
 // Timestamps are unix milliseconds, as in pa_connections.go.
 
 import (
@@ -38,6 +43,13 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 	"github.com/mctlhq/mctl-telegram/internal/pa/permissions"
 )
+
+// sweepEndedPAPermissions is the retention statement SweepPAState runs:
+// it deletes the rows that were revoked before $1 or expired before $1. A
+// row in force is kept whatever its age; revoked_at_ms is 0 on such a row,
+// so the first arm asks for a revocation before it compares the time.
+const sweepEndedPAPermissions = `DELETE FROM pa_permissions
+	WHERE (revoked_at_ms > 0 AND revoked_at_ms < $1) OR expires_at_ms < $1`
 
 // paPermissionsSchema returns the DDL of pa_permissions. device_ids is the
 // canonical JSON array of permissions.EncodeDevices; ceiling is

@@ -39,9 +39,12 @@
 //
 //	dispatching -> ok | tool_error | refused | fenced | outcome_unknown
 //
-// The dispatching row is committed before the outbound call. A row whose
-// lease ran out (a crash between that commit and the result) becomes
-// outcome_unknown and nothing else: it is never dispatched again.
+// The dispatching row is committed before the outbound call, and marked
+// as sent (MarkPADispatchSent) immediately before the request is made. A
+// row whose lease ran out (a crash between that commit and the result) is
+// never dispatched again: one that carries the mark, or was written by a
+// build that had no mark, becomes outcome_unknown; one that is known not to
+// have been sent becomes refused.
 //
 // Retention: the sealed arguments leave the row in the transaction that
 // ends pending/approved (consume, cancel, expire, refuse). Rows hold
@@ -78,7 +81,8 @@ const TTL = 5 * time.Minute
 const Retention = 24 * time.Hour
 
 // MaxDispatchLease bounds a dispatch lease, so a crashed dispatch is
-// resolved to outcome_unknown within minutes.
+// resolved (outcome_unknown, or refused when it was never sent) within
+// minutes.
 const MaxDispatchLease = 10 * time.Minute
 
 // Status is an approval's state.
@@ -207,7 +211,12 @@ type Approval struct {
 	// ConsumePAApproval returns it; every other read leaves it nil.
 	SealedArgs []byte
 	Status     Status
-	// Approver is the principal that tapped Approve, 0 before that.
+	// PermissionID is the standing permission a lowered call stands on: the
+	// ledger row of such a call is created with it, and no principal
+	// approves it. "" for a call that has a card.
+	PermissionID string
+	// Approver is the principal that tapped Approve; 0 before that, and 0
+	// for a lowered call, which nobody tapped.
 	Approver   int64
 	CreatedAt  time.Time
 	ExpiresAt  time.Time
@@ -227,9 +236,37 @@ type Dispatch struct {
 	ArgsSHA           string
 	IdempotencyKey    string
 	Status            DispatchStatus
-	LeaseUntil        time.Time
-	CreatedAt         time.Time
-	FinishedAt        time.Time
+	// Send says whether the request was made (see SendState).
+	Send SendState
+	// PermissionID is the standing permission that stood in for the card
+	// of a lowered call, "" for a call the principal approved.
+	PermissionID string
+	LeaseUntil   time.Time
+	CreatedAt    time.Time
+	FinishedAt   time.Time
+}
+
+// SendState records, on a dispatch record, whether its request was made.
+// The executor commits SendSent immediately before the one request, in a
+// statement that fails once the record is no longer dispatching or its
+// lease ran out, so a record that still reads SendUnsent was not sent and
+// never will be.
+type SendState string
+
+const (
+	// SendNotRecorded is a record written by a build that did not record
+	// the state: nothing is known about its request.
+	SendNotRecorded SendState = ""
+	// SendUnsent: the pre-dispatch transaction committed and the request
+	// has not been made.
+	SendUnsent SendState = "unsent"
+	// SendSent: the request may have been made.
+	SendSent SendState = "sent"
+)
+
+// Valid reports whether s is a send state this build knows.
+func (s SendState) Valid() bool {
+	return s == SendNotRecorded || s == SendUnsent || s == SendSent
 }
 
 // newOpaqueID returns 128 random bits, base64url (22 bytes).
@@ -308,7 +345,7 @@ type ConsumeRequest struct {
 	DispatchID string
 	Now        time.Time
 	// Lease is how long the dispatch may stay dispatching before the sweep
-	// resolves it to outcome_unknown; at most MaxDispatchLease.
+	// ends it; at most MaxDispatchLease.
 	Lease time.Duration
 }
 
@@ -367,13 +404,22 @@ type Store interface {
 	// The caller must roll back on every error: some are returned after
 	// the receipt was moved in this transaction.
 	ConsumePAApproval(ctx context.Context, tx *sql.Tx, req ConsumeRequest) (Approval, Dispatch, error)
+	// MarkPADispatchSent records, in a statement of its own, that the
+	// request of the dispatching record is about to be made. It succeeds
+	// only for a record that is dispatching, unsent and inside its lease;
+	// any other is ErrDispatchStale, and the caller must not send. An
+	// error that is not ErrDispatchStale leaves the mark unknown, and the
+	// caller must not send either.
+	MarkPADispatchSent(ctx context.Context, principal int64, dispatchID string, now time.Time) error
 	// FinishPADispatch moves dispatching -> status (a Final one) and its
 	// approval to done. A dispatch that is no longer dispatching is
 	// ErrDispatchStale and keeps the status it has.
 	FinishPADispatch(ctx context.Context, tx *sql.Tx, principal int64, dispatchID string, status DispatchStatus, now time.Time) (Dispatch, error)
-	// SweepStalePADispatches moves every dispatching record whose lease ran
-	// out to outcome_unknown, and its approval to done, in one transaction
-	// of its own, and returns the records it moved. It never makes a
-	// receipt usable again.
+	// SweepStalePADispatches ends every dispatching record whose lease ran
+	// out, and moves its approval to done, in one transaction of its own,
+	// and returns the records it moved with the status it gave them:
+	// refused for a record that is SendUnsent (nothing was sent),
+	// outcome_unknown for every other. It never makes a receipt usable
+	// again.
 	SweepStalePADispatches(ctx context.Context, now time.Time) ([]Dispatch, error)
 }
