@@ -1876,7 +1876,7 @@ S2-D4:
     - id: P2S14B-D4k
       guard: internal/pa/connector/alice_music.go:148
       guard_text: "if len(words) > maxMusicQueryWords {"
-      mutation: "a query of more than twelve words is accepted"
+      mutation: "a query of more than eight words is accepted"
       killed_by:
         - internal/pa/connector.TestMusicQuery_AgreesWithUpstreamCases
       red: |-
