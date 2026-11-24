@@ -67,6 +67,21 @@ type paFakeAlice struct {
 	// summary, when set, is the text alice_get_home_summary returns: a
 	// read whose content the tests choose.
 	summary atomic.Value
+	// hold, when set, keeps the next approved call on the wire until the
+	// test releases it (paAliceHold).
+	hold atomic.Pointer[paAliceHold]
+}
+
+// paAliceHold is one approved call held on the wire. entered is closed
+// when the server has the call, cancelled when the caller's context ends
+// while it is held, and the call returns only once release is closed: a
+// server that keeps working after its client gave up.
+type paAliceHold struct {
+	entered, cancelled, release chan struct{}
+}
+
+func newPAAliceHold() *paAliceHold {
+	return &paAliceHold{entered: make(chan struct{}), cancelled: make(chan struct{}), release: make(chan struct{})}
 }
 
 var _ connector.WriteEndpoint = (*paFakeAlice)(nil)
@@ -99,10 +114,19 @@ func (a *paFakeAlice) CallTool(_ context.Context, _ connection.Secret, tool stri
 	return []byte(`{"content":[{"type":"text","text":"nothing"}]}`), nil
 }
 
-func (a *paFakeAlice) CallToolExact(_ context.Context, _ connection.Secret, tool string, args []byte) ([]byte, error) {
+func (a *paFakeAlice) CallToolExact(ctx context.Context, _ connection.Secret, tool string, args []byte) ([]byte, error) {
 	a.mu.Lock()
 	a.exact = append(a.exact, tool+" "+string(args))
 	a.mu.Unlock()
+	if h := a.hold.Swap(nil); h != nil {
+		close(h.entered)
+		select {
+		case <-ctx.Done():
+			close(h.cancelled)
+			<-h.release
+		case <-h.release:
+		}
+	}
 	return []byte(`{"content":[{"type":"text","text":"done"}]}`), nil
 }
 
