@@ -2283,7 +2283,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.404s
   gaps:
-    - half: "alice_control_device can be neither granted nor lowered: it has no card path and no rule, and its pin condition (allowed_type_prefixes) is answered \"cannot be checked\". The structured listing now reports the id and type that rule would need. Owner decision: accept as a documented limitation, or build it"
+    - half: "alice_control_device can be neither granted nor lowered: it has no card path and no rule, and its pin condition (allowed_type_prefixes) is answered \"cannot be checked\". The structured listing (mctl-alice#206, merged, not released) reports the id and type that rule would need, and P2-S14b reads it. Owner decision: accept as a documented limitation, or build it"
       tracked_by: "#1322"
     - half: "a lowered call whose device changed between the emitter's read and the executor's is refused (device_changed, device_not_listed, devices_unreadable) and not turned into a card: the principal is told it was not carried out and the next call gets a card or a refusal from the emitter"
       tracked_by: "#1322"
