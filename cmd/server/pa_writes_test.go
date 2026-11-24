@@ -960,6 +960,29 @@ func TestPAWrites_GateNoticeOncePerConnection(t *testing.T) {
 			}
 		})
 	})
+	// A connection that holds some of the listed tools is offered those:
+	// the claim carries a write tool, so it carries no hint
+	// (paWrites.offered) and the principal gets no notice either.
+	t.Run("some tools held queues no notice", func(t *testing.T) {
+		forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
+			e := paBuiltGate(t, store, conn)
+			tx, err := conn.BeginTx(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// alice_say_phrase needs a scope no connection holds.
+			got, _, err := e.rt.writes.gate.Offer(context.Background(), tx, e.user, e.connID, []string{"alice_say_phrase", "alice_set_volume"})
+			if err != nil || !slices.Equal(got, []string{"alice_set_volume"}) {
+				t.Fatalf("offered %v %v", got, err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			if n := e.count(`SELECT COUNT(*) FROM pa_outbox WHERE principal = $1 AND kind IN ('action_consent_needed', 'write_scope_needed')`, e.user); n != 0 {
+				t.Fatalf("%d notice rows for a claim that carries a write tool", n)
+			}
+		})
+	})
 	t.Run("a claim with a write tool queues no notice", func(t *testing.T) {
 		forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
 			e := paBuiltGate(t, store, conn)

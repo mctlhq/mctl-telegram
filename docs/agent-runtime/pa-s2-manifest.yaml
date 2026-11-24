@@ -4351,6 +4351,18 @@ S2-F3:
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.975s
+    - id: P2S14c-NTCg
+      guard: cmd/server/pa_writes.go:129
+      guard_text: "if len(offered) == 0 {"
+      mutation: "the notice is queued on the gate's reason alone, also for a claim that carries a write tool because the connection holds some of the listed tools"
+      killed_by:
+        - cmd/server.TestPAWrites_GateNoticeOncePerConnection
+      red: |-
+        --- FAIL: TestPAWrites_GateNoticeOncePerConnection (0.17s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/cmd/server
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.975s
     - id: P2S14c-NTCb
       guard: cmd/server/pa_writes.go:130
       guard_text: "if err := g.gate.Notify(ctx, tx, principal, connectionID, why, time.Now()); err != nil {"
