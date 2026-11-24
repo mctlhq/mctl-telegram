@@ -975,3 +975,33 @@ func TestLowering_SirenAndAlarmScenesNeedACard(t *testing.T) {
 		e.lowered("another scene", "prm_light", lightTool, scene("night"))
 	})
 }
+
+// TestLowering_ExecutorMatchesThePermissionToTheCall: the executor is
+// handed a permission id, and the row behind it must be for this call: a
+// permission of another tool that lists the same device, one of another
+// server and an id that names no row are refused with nothing sent.
+func TestLowering_ExecutorMatchesThePermissionToTheCall(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newLowerEnv(t, s)
+		// The same device and no ceiling: only the tool tells them apart.
+		e.grant("prm_media", mediaTool, permissions.NoCeiling, deskLampID)
+		e.grant("prm_light", lightTool, permissions.NoCeiling, deskLampID)
+		light := `{"device":"` + deskLampID + `","state":"on"}`
+		gone := func(name, id string) {
+			t.Helper()
+			out := e.dispatchLowered(e.loweredCall(id, lightTool, light, catalog.ClassWrite))
+			if out.Status != connector.StatusRefused || out.Reason != connector.ReasonPermissionGone || out.DispatchID != "" {
+				t.Fatalf("%s: %+v", name, out)
+			}
+			e.nothingSent(name)
+		}
+		gone("a permission of another tool", "prm_media")
+		gone("an id that names no row", "prm_none")
+		e.exec(`UPDATE pa_permissions SET server = 'other' WHERE id = 'prm_light'`)
+		gone("a permission of another server", "prm_light")
+		e.exec(`UPDATE pa_permissions SET server = 'tg' WHERE id = 'prm_light'`)
+		if out := e.dispatchLowered(e.loweredCall("prm_light", lightTool, light, catalog.ClassWrite)); out.Status != connector.StatusOK {
+			t.Fatalf("the call's own permission: %+v", out)
+		}
+	})
+}

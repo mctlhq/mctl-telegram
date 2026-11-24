@@ -754,11 +754,11 @@ S2-I5:
       killed_by:
         - internal/pa.TestS2I5_ReadThenWriteNeedsACard
       red: |-
-        --- FAIL: TestS2I5_ReadThenWriteNeedsACard (0.06s)
+        --- FAIL: TestS2I5_ReadThenWriteNeedsACard (0.05s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.536s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.475s
     - id: P2S11-I5b
       guard: internal/pa/connector/lower.go:259
       guard_text: "if taint != TaintClean {"
@@ -766,11 +766,11 @@ S2-I5:
       killed_by:
         - internal/pa.TestS2I5_ExecutorRefusesATaintedRun
       red: |-
-        --- FAIL: TestS2I5_ExecutorRefusesATaintedRun (0.06s)
+        --- FAIL: TestS2I5_ExecutorRefusesATaintedRun (0.05s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.560s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.508s
     - id: P2S11-I5c
       guard: internal/pa/connector/card.go:434
       guard_text: "in.Tainted, in.TaintErr = c.cfg.Store.PAConversationTaintIn(ctx, tx, principal, conversationID)"
@@ -782,7 +782,7 @@ S2-I5:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.505s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.577s
   gaps:
     - half: "owner decision: the result of a lowered call is not handed to the model (the worker gets fixed server text) and does not taint the run, so a second covered write in the same clean run is lowered too; only a read taints"
       tracked_by: "#1322"
@@ -994,7 +994,7 @@ S2-I9:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa/gate
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa/gate	0.222s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/gate	0.279s
   gaps:
     - half: "the internal/pa test starts in a fresh conversation row instead of driving /new or the TTL through the bot and then running a job; that a reset yields such a row is S2-I7"
       tracked_by: "#1320"
@@ -1078,7 +1078,7 @@ S2-D1:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa/gate
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa/gate	0.226s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/gate	0.238s
     - id: P2S11-D1b
       guard: internal/pa/connector/lower.go:292
       guard_text: "return pinned.Class == catalog.ClassWrite &&"
@@ -1090,7 +1090,7 @@ S2-D1:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa/connector
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.394s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.374s
     - id: P2S11-D1c
       guard: internal/pa/connector/lower.go:225
       guard_text: "if call.Binding.Class != catalog.ClassWrite || !permissions.HasRule"
@@ -1102,7 +1102,7 @@ S2-D1:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.749s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.496s
     - id: P2S11-D1d
       guard: internal/pa/permissions/rules.go:204
       guard_text: "if !ok || !r.ceilingValid(p.Ceiling) {"
@@ -1114,7 +1114,7 @@ S2-D1:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa/permissions
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.221s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.260s
   gaps:
     - half: "the executor's rule check (permissions.HasRule) and its device read (loweredTarget) accept the same three tools today, so removing either alone changes no outcome; connector.TestLowerable_OnlyDeviceWritesWithARule pins that the two tables agree"
       tracked_by: "#1320"
@@ -1514,6 +1514,7 @@ S2-D5:
     - internal/pa/connector.TestLoweringCondition
     - internal/pa.TestLowering_ExecutorChecksThePinAndTheCondition
     - internal/pa.TestLowering_SirenAndAlarmScenesNeedACard
+    - internal/pa.TestLowering_ExecutorMatchesThePermissionToTheCall
     - internal/pa/permissions.TestCovers_SirenAndAlarmScenesNeedACard
     - internal/pa/gate.TestDecideOrder
     - internal/pa/gate.TestDecideNeverLowersWithoutEveryCondition
@@ -1532,7 +1533,7 @@ S2-D5:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa/permissions
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.329s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.230s
     - id: P2S11-D5b
       guard: internal/pa/permissions/rules.go:91
       guard_text: "if catalog.IsNeverLowerable(tool) {"
@@ -1544,7 +1545,7 @@ S2-D5:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa/permissions
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.302s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	3.731s
     - id: P2S11-D5c
       guard: internal/pa/permissions/rules.go:150
       guard_text: "if len(devices) == 0 {"
@@ -1556,7 +1557,7 @@ S2-D5:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa/permissions
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.229s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.605s
     - id: P2S11-D5d
       guard: internal/pa/permissions/rules.go:154
       guard_text: "if !typeAllowed(r.typePrefix, d.Type) {"
@@ -1570,7 +1571,7 @@ S2-D5:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa/permissions
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.221s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.498s
     - id: P2S11-D5e
       guard: internal/pa/permissions/rules.go:117
       guard_text: "strings.HasPrefix(deviceType, prefix+\".\"))"
@@ -1582,7 +1583,7 @@ S2-D5:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa/permissions
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.236s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.464s
     - id: P2S11-D5f
       guard: internal/pa/permissions/rules.go:158
       guard_text: "if !r.ceilingValid(ceiling) {"
@@ -1596,7 +1597,7 @@ S2-D5:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa/permissions
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.235s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.213s
     - id: P2S11-D5g
       guard: internal/pa/permissions/rules.go:126
       guard_text: "return ceiling >= r.ceilingMin && ceiling <= r.ceilingMax"
@@ -1608,7 +1609,7 @@ S2-D5:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa/permissions
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.243s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.220s
     - id: P2S11-D5h
       guard: internal/pa/permissions/rules.go:124
       guard_text: "return ceiling == NoCeiling"
@@ -1620,7 +1621,7 @@ S2-D5:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa/permissions
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.249s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.633s
     - id: P2S11-D5i
       guard: internal/pa/connector/device_write.go:296
       guard_text: "if d.ID == call.device {"
@@ -1632,7 +1633,7 @@ S2-D5:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.497s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.505s
     - id: P2S11-D5j
       guard: internal/pa/connector/device_write.go:262
       guard_text: "speakers, err := reader.Speakers(ctx, sreq)"
@@ -1644,7 +1645,7 @@ S2-D5:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.522s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.451s
     - id: P2S11-CEa
       guard: internal/pa/permissions/rules.go:212
       guard_text: "if !set || v > p.Ceiling {"
@@ -1656,7 +1657,7 @@ S2-D5:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.512s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.554s
     - id: P2S11-CEb
       guard: internal/pa/permissions/rules.go:212
       guard_text: "if !set || v > p.Ceiling {"
@@ -1668,7 +1669,7 @@ S2-D5:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa/permissions
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.256s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.332s
     - id: P2S11-DVa
       guard: internal/pa/permissions/rules.go:207
       guard_text: "if c.Device == \"\" || !slices.Contains(p.DeviceIDs, c.Device) {"
@@ -1680,7 +1681,7 @@ S2-D5:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.523s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.556s
     - id: P2S11-CNa
       guard: internal/pa/connector/lower.go:321
       guard_text: "return slices.Contains(c.PlaybackActions.Values, action), nil"
@@ -1688,11 +1689,11 @@ S2-D5:
       killed_by:
         - internal/pa/connector.TestLoweringCondition
       red: |-
-        --- FAIL: TestLoweringCondition (0.01s)
+        --- FAIL: TestLoweringCondition (0.00s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa/connector
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.873s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.397s
     - id: P2S11-CNb
       guard: internal/pa/gate/decide.go:140
       guard_text: "case in.Lowerable == catalog.LowerableConditional && (in.ConditionErr != nil || !in.ConditionMet):"
@@ -1706,7 +1707,7 @@ S2-D5:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa/gate
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa/gate	0.239s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/gate	0.328s
     - id: P2S11-XPa
       guard: internal/pa/connector/dispatch_write.go:468
       guard_text: "if met, err := loweringCondition(pinned, low.Args); !lowerable(a.Tool, pinned) || err != nil || !met {"
@@ -1714,11 +1715,11 @@ S2-D5:
       killed_by:
         - internal/pa.TestLowering_ExecutorChecksThePinAndTheCondition
       red: |-
-        --- FAIL: TestLowering_ExecutorChecksThePinAndTheCondition (0.05s)
+        --- FAIL: TestLowering_ExecutorChecksThePinAndTheCondition (0.06s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.528s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.575s
     - id: P2S11-XPb
       guard: internal/pa/connector/dispatch_write.go:468
       guard_text: "if met, err := loweringCondition(pinned, low.Args); !lowerable(a.Tool, pinned) || err != nil || !met {"
@@ -1726,11 +1727,11 @@ S2-D5:
       killed_by:
         - internal/pa.TestLowering_ExecutorChecksThePinAndTheCondition
       red: |-
-        --- FAIL: TestLowering_ExecutorChecksThePinAndTheCondition (0.05s)
+        --- FAIL: TestLowering_ExecutorChecksThePinAndTheCondition (0.06s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.556s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.508s
     - id: P2S11-XPc
       guard: internal/pa/connector/fresh.go:94
       guard_text: "Lowerable:      rule.Lowerable,"
@@ -1742,7 +1743,7 @@ S2-D5:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa/connector
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.392s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.390s
     - id: P2S11-SCa
       guard: internal/pa/permissions/rules.go:217
       guard_text: "if v, set := c.Strings[arg]; set && slices.Contains(values, v) {"
@@ -1754,7 +1755,7 @@ S2-D5:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.589s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.537s
     - id: P2S11-SCb
       guard: internal/pa/connector/lower.go:175
       guard_text: "strs[v.arg] = text"
@@ -1762,11 +1763,11 @@ S2-D5:
       killed_by:
         - internal/pa.TestLowering_SirenAndAlarmScenesNeedACard
       red: |-
-        --- FAIL: TestLowering_SirenAndAlarmScenesNeedACard (0.05s)
+        --- FAIL: TestLowering_SirenAndAlarmScenesNeedACard (0.06s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.482s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.586s
     - id: P2S11-SCc
       guard: internal/pa/connector/device_write.go:199
       guard_text: "call.strs[v.arg] = text"
@@ -1774,11 +1775,35 @@ S2-D5:
       killed_by:
         - internal/pa.TestLowering_SirenAndAlarmScenesNeedACard
       red: |-
-        --- FAIL: TestLowering_SirenAndAlarmScenesNeedACard (0.05s)
+        --- FAIL: TestLowering_SirenAndAlarmScenesNeedACard (0.06s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.483s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.512s
+    - id: P2S11-PMa
+      guard: internal/pa/permissions/rules.go:200
+      guard_text: "p.Server == \"\" || p.Server != c.Server || p.Tool != c.Tool {"
+      mutation: "a permission of one tool covers a call of another"
+      killed_by:
+        - internal/pa.TestLowering_ExecutorMatchesThePermissionToTheCall
+      red: |-
+        --- FAIL: TestLowering_ExecutorMatchesThePermissionToTheCall (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.579s
+    - id: P2S11-PMb
+      guard: internal/pa/permissions/rules.go:200
+      guard_text: "p.Server == \"\" || p.Server != c.Server || p.Tool != c.Tool {"
+      mutation: "a permission of one server covers a call to another"
+      killed_by:
+        - internal/pa.TestLowering_ExecutorMatchesThePermissionToTheCall
+      red: |-
+        --- FAIL: TestLowering_ExecutorMatchesThePermissionToTheCall (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.480s
   gaps:
     - half: "alice_control_device can be neither granted nor lowered: the server lists no id for a device that is not a speaker, the tool has no card path, and nothing reads a device type, so its pin condition (allowed_type_prefixes) is answered \"cannot be checked\" and no rule exists for it"
       tracked_by: "#1322"
@@ -2571,11 +2596,11 @@ S2-A9:
       killed_by:
         - internal/pa.TestS2A9_PermissionGoneAtDispatchIsACard
       red: |-
-        --- FAIL: TestS2A9_PermissionGoneAtDispatchIsACard (0.21s)
+        --- FAIL: TestS2A9_PermissionGoneAtDispatchIsACard (0.22s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.718s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.673s
     - id: P2S11-A9b
       guard: internal/pa/permissions/rules.go:195
       guard_text: "if !p.RevokedAt.IsZero() || !p.ExpiresAt.After(now) {"
@@ -2583,11 +2608,11 @@ S2-A9:
       killed_by:
         - internal/pa.TestS2A9_PermissionGoneAtDispatchIsACard
       red: |-
-        --- FAIL: TestS2A9_PermissionGoneAtDispatchIsACard (0.20s)
+        --- FAIL: TestS2A9_PermissionGoneAtDispatchIsACard (0.22s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.665s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.658s
     - id: P2S11-A9c
       guard: internal/pa/permissions/rules.go:195
       guard_text: "if !p.RevokedAt.IsZero() || !p.ExpiresAt.After(now) {"
@@ -2599,7 +2624,7 @@ S2-A9:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.695s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.663s
     - id: P2S11-A9d
       guard: internal/pa/permissions/rules.go:199
       guard_text: "p.AuthorityRevision <= 0 || p.AuthorityRevision != c.AuthorityRevision ||"
@@ -2607,11 +2632,11 @@ S2-A9:
       killed_by:
         - internal/pa.TestS2A9_PermissionGoneAtDispatchIsACard
       red: |-
-        --- FAIL: TestS2A9_PermissionGoneAtDispatchIsACard (0.21s)
+        --- FAIL: TestS2A9_PermissionGoneAtDispatchIsACard (0.22s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.684s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.659s
     - id: P2S11-A9e
       guard: internal/pa/connector/card.go:360
       guard_text: "if !unlowered(out) {"
@@ -2623,7 +2648,7 @@ S2-A9:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.633s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.669s
     - id: P2S11-A9g
       guard: internal/db/pa_permissions.go:281
       guard_text: "WHERE p.principal = $1 AND p.id = $2"
@@ -2635,7 +2660,7 @@ S2-A9:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.530s
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.446s
     - id: P2S11-UNa
       guard: internal/pa/connector/lower.go:266
       guard_text: "case err != nil:"
@@ -2643,11 +2668,11 @@ S2-A9:
       killed_by:
         - internal/pa.TestS2A9_PermissionGoneAtDispatchIsACard
       red: |-
-        --- FAIL: TestS2A9_PermissionGoneAtDispatchIsACard (0.22s)
+        --- FAIL: TestS2A9_PermissionGoneAtDispatchIsACard (0.21s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.714s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.777s
     - id: P2S11-UNb
       guard: internal/pa/gate/decide.go:142
       guard_text: "case in.PermissionErr == nil && in.PermissionMatch:"
@@ -2661,7 +2686,7 @@ S2-A9:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa/gate
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa/gate	0.364s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/gate	0.229s
     - id: P2S11-BYc
       guard: internal/pa/connector/lower.go:179
       guard_text: "if err != nil || strconv.FormatInt(n, 10) != string(raw) {"
@@ -2673,7 +2698,7 @@ S2-A9:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa/connector
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.371s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.359s
     - id: P2S11-BYd
       guard: internal/pa/connector/card.go:354
       guard_text: "Binding: binding, Args: canonical, PermissionID: perm.ID,"
@@ -2681,11 +2706,11 @@ S2-A9:
       killed_by:
         - internal/pa.TestLowering_PermissionReplacesTheCardOfACleanRun
       red: |-
-        --- FAIL: TestLowering_PermissionReplacesTheCardOfACleanRun (0.19s)
+        --- FAIL: TestLowering_PermissionReplacesTheCardOfACleanRun (0.06s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.547s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.520s
     - id: P2S11-AUa
       guard: internal/pa/connector/dispatch_write.go:401
       guard_text: "base.Approver = permissionApprover(low.PermissionID)"
@@ -2693,11 +2718,11 @@ S2-A9:
       killed_by:
         - internal/pa.TestLowering_PermissionReplacesTheCardOfACleanRun
       red: |-
-        --- FAIL: TestLowering_PermissionReplacesTheCardOfACleanRun (0.19s)
+        --- FAIL: TestLowering_PermissionReplacesTheCardOfACleanRun (0.07s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.572s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.524s
   gaps:
     - half: "a revoke, an expiry or a revision change that commits after the executor's pre-dispatch transaction does not stop the lowered call that transaction admitted: as with an approved call, the fence ends at that commit"
       tracked_by: "#1320"
