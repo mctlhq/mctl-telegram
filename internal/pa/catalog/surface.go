@@ -131,19 +131,7 @@ func (p *Pin) Observe(server string, pages [][]byte, fetchErr error, observedAt 
 			s.denied[name] = []DenyReason{DenyMissing}
 			continue
 		}
-		var reasons []DenyReason
-		if lt.inputSchemaSHA256 != pt.InputSchemaSHA256 {
-			reasons = append(reasons, DenyChangedSchema)
-		}
-		if lt.descriptionSHA256 != pt.DescriptionSHA256 {
-			reasons = append(reasons, DenyChangedDescription)
-		}
-		// Validate already proved the pinned annotations canonicalise.
-		pinnedAnn, _ := canonicalAnnotations(pt.Annotations)
-		if !bytes.Equal(lt.annotations, pinnedAnn) {
-			reasons = append(reasons, DenyChangedAnnotations)
-		}
-		if len(reasons) > 0 {
+		if reasons := pinDrift(lt, pt); len(reasons) > 0 {
 			s.denied[name] = reasons
 			continue
 		}
@@ -155,6 +143,111 @@ func (p *Pin) Observe(server string, pages [][]byte, fetchErr error, observedAt 
 		}
 	}
 	return s
+}
+
+// pinDrift is every way the live tool lt differs from its pin pt; none
+// when the server lists exactly what was pinned.
+func pinDrift(lt liveTool, pt PinnedTool) []DenyReason {
+	var reasons []DenyReason
+	if lt.inputSchemaSHA256 != pt.InputSchemaSHA256 {
+		reasons = append(reasons, DenyChangedSchema)
+	}
+	if lt.descriptionSHA256 != pt.DescriptionSHA256 {
+		reasons = append(reasons, DenyChangedDescription)
+	}
+	// Validate already proved the pinned annotations canonicalise.
+	pinnedAnn, _ := canonicalAnnotations(pt.Annotations)
+	if !bytes.Equal(lt.annotations, pinnedAnn) {
+		reasons = append(reasons, DenyChangedAnnotations)
+	}
+	return reasons
+}
+
+// ToolDefinition is one tool's definition reduced to the three hashes an
+// approval is bound to (threat model T7), with the pin's policy for it.
+// SchemaSHA256 is the hash of the canonical input schema, DescriptionSHA256
+// of the server's description text (absent hashes as empty), and
+// AnnotationsSHA256 of the canonical annotations object (absent or null
+// hashes as "{}").
+type ToolDefinition struct {
+	Server            string
+	Tool              string
+	SchemaSHA256      string
+	DescriptionSHA256 string
+	AnnotationsSHA256 string
+	Tier              Tier
+	Class             Class
+}
+
+// ToolDefinition is the definition of tool as the pin records it: what a
+// live listing must hash to for ObserveTool to return it.
+func (p *Pin) ToolDefinition(server, tool string) (ToolDefinition, error) {
+	if p == nil {
+		return ToolDefinition{}, ErrUnknownServer
+	}
+	sp, ok := p.Servers[server]
+	if !ok {
+		return ToolDefinition{}, ErrUnknownServer
+	}
+	pt, ok := sp.Tools[tool]
+	if !ok {
+		return ToolDefinition{}, ErrNotPinned
+	}
+	ann, err := canonicalAnnotations(pt.Annotations)
+	if err != nil {
+		return ToolDefinition{}, fmt.Errorf("%w: %s/%s: annotations: %v", ErrInvalidPin, server, tool, err)
+	}
+	return ToolDefinition{
+		Server: server, Tool: tool,
+		SchemaSHA256: pt.InputSchemaSHA256, DescriptionSHA256: pt.DescriptionSHA256,
+		AnnotationsSHA256: sha256Hex(ann), Tier: pt.Tier, Class: pt.Class,
+	}, nil
+}
+
+// ObserveTool reads one tool out of a tools/list fetched for one dispatch
+// (threat model T7 "Approval-time drift") and returns its definition as the
+// server lists it now. pages and fetchErr are as for Observe. Unlike a
+// Surface the answer has no lifetime: it describes this listing only, and
+// the caller must have fetched the listing for this one decision.
+//
+// It fails, and never returns a definition, when the listing could not be
+// fetched, is malformed or is cut off (ErrServerUnavailable, I9), when the
+// pin does not have the server or the tool, and when the listed tool is
+// missing or differs from its pin in schema, description or annotations
+// (ErrToolChanged). The hashes returned are computed from the listing, not
+// copied from the pin, so the caller's comparison with an approval's hashes
+// is a comparison with what the server said.
+func (p *Pin) ObserveTool(server, tool string, pages [][]byte, fetchErr error) (ToolDefinition, error) {
+	if p == nil {
+		return ToolDefinition{}, ErrUnknownServer
+	}
+	sp, ok := p.Servers[server]
+	if !ok {
+		return ToolDefinition{}, ErrUnknownServer
+	}
+	pt, ok := sp.Tools[tool]
+	if !ok {
+		return ToolDefinition{}, ErrNotPinned
+	}
+	if fetchErr != nil {
+		return ToolDefinition{}, fmt.Errorf("%w: tools/list failed: %w", ErrServerUnavailable, fetchErr)
+	}
+	live, err := parseListing(pages)
+	if err != nil {
+		return ToolDefinition{}, fmt.Errorf("%w: %w", ErrServerUnavailable, err)
+	}
+	lt, ok := live.tools[tool]
+	if !ok {
+		return ToolDefinition{}, fmt.Errorf("%w: %s", ErrToolChanged, DenyMissing)
+	}
+	if reasons := pinDrift(lt, pt); len(reasons) > 0 {
+		return ToolDefinition{}, fmt.Errorf("%w: %v", ErrToolChanged, reasons)
+	}
+	return ToolDefinition{
+		Server: server, Tool: tool,
+		SchemaSHA256: lt.inputSchemaSHA256, DescriptionSHA256: lt.descriptionSHA256,
+		AnnotationsSHA256: sha256Hex(lt.annotations), Tier: pt.Tier, Class: pt.Class,
+	}, nil
 }
 
 // Server returns the server this surface describes.

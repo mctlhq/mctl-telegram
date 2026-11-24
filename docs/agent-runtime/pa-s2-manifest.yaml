@@ -60,6 +60,12 @@
 # on the P2-S3 branch the same way, on sqlite, restored from saved bytes.
 # They cover the write executor, which has no caller and no FreshSurface
 # yet: both are gaps of every id P2-S3 turned green.
+#
+# The P2S4-* records (S2-A5, S2-A6) ran on the P2-S4 branch, cut from
+# 10bd4080, the same way, on sqlite, restored from saved bytes; the tests
+# also pass on Postgres. P2-S4 built the FreshSurface (connector.PinFresh)
+# but nothing constructs a WriteExecutor outside tests, so the P2-S3 gap
+# is reworded on each id, not closed.
 
 S2-C9:
   status: pending
@@ -148,7 +154,7 @@ S2-C11:
   gaps:
     - half: "a caller: nothing in the service invokes DispatchApproved until the cards (P2-S5)"
       tracked_by: "#1320"
-    - half: "a FreshSurface implementation: without one every dispatch is refused no_write_path (P2-S4)"
+    - half: "connector.PinFresh (P2-S4) given to an executor: nothing in cmd/server builds a WriteExecutor, and no runtime code may load the Phase 2 pin (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests"
       tracked_by: "#1320"
     - half: "the outcome against a real MCP server and its real timeout and 5xx bodies"
       tracked_by: "#1320"
@@ -291,7 +297,7 @@ S2-C13:
   gaps:
     - half: "a caller: nothing in the service invokes DispatchApproved until the cards (P2-S5)"
       tracked_by: "#1320"
-    - half: "a FreshSurface implementation: without one every dispatch is refused no_write_path (P2-S4)"
+    - half: "connector.PinFresh (P2-S4) given to an executor: nothing in cmd/server builds a WriteExecutor, and no runtime code may load the Phase 2 pin (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests"
       tracked_by: "#1320"
     - half: "the /disconnect command end to end against an in-flight write, with its reply sent before the call returns (P2-S12)"
       tracked_by: "#1320"
@@ -633,7 +639,7 @@ S2-D7:
   gaps:
     - half: "a caller: nothing in the service invokes DispatchApproved until the cards (P2-S5)"
       tracked_by: "#1322"
-    - half: "a FreshSurface implementation: without one every dispatch is refused no_write_path (P2-S4)"
+    - half: "connector.PinFresh (P2-S4) given to an executor: nothing in cmd/server builds a WriteExecutor, and no runtime code may load the Phase 2 pin (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests"
       tracked_by: "#1322"
     - half: "the card showing the same bytes the executor sends (P2-S5)"
       tracked_by: "#1322"
@@ -787,7 +793,7 @@ S2-A3:
   gaps:
     - half: "a caller: nothing in the service invokes DispatchApproved until the cards (P2-S5)"
       tracked_by: "#1320"
-    - half: "a FreshSurface implementation: without one every dispatch is refused no_write_path (P2-S4)"
+    - half: "connector.PinFresh (P2-S4) given to an executor: nothing in cmd/server builds a WriteExecutor, and no runtime code may load the Phase 2 pin (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests"
       tracked_by: "#1320"
 
 S2-A4:
@@ -862,16 +868,175 @@ S2-A4:
       tracked_by: "#1320"
 
 S2-A5:
-  status: pending
+  status: green
   slice: P2-S4
-  tracked_by: "#1320"
-  note: "fresh tools/list at dispatch compared with pin and approval"
+  note: "Fresh listing at dispatch (#1320 P2-S4): connector.PinFresh lists the server once per dispatch through its endpoint, never from the read path's 60 s cache, and catalog.Pin.ObserveTool refuses a tool that is missing or whose schema, description or annotations differ from the pin; the executor then compares the three hashes of that listing with the ones the approval recorded. Either mismatch refuses tool_changed with no tools/call, and the approval is ended. The row names schema and description; annotations are compared the same way."
+  tests:
+    - internal/pa.TestS2A5_DriftBetweenApproveAndDispatchIsRefused
+    - internal/pa/catalog.TestS2A5_ObserveToolRefusesDrift
+    - internal/pa/connector.TestS2A5_FreshListingSeesDriftOverHTTP
+  mutations:
+    - id: P2S4-A5a
+      guard: internal/pa/connector/dispatch_write.go:428
+      guard_text: "if fresh.SchemaSHA != a.SchemaSHA || fresh.DescriptionSHA != a.DescriptionSHA ||"
+      mutation: "the executor compares the fresh definition with the pin only: the three approval hashes are no longer compared"
+      killed_by:
+        - internal/pa.TestS2A5_DriftBetweenApproveAndDispatchIsRefused
+      red: |-
+        --- FAIL: TestS2A5_DriftBetweenApproveAndDispatchIsRefused (0.16s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.904s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.726s
+    - id: P2S4-A5b
+      guard: internal/pa/catalog/surface.go:243
+      guard_text: "if reasons := pinDrift(lt, pt); len(reasons) > 0 {\n\t\treturn ToolDefinition{}"
+      mutation: "the fresh definition is compared with the approval only: ObserveTool no longer refuses a tool that differs from the pin"
+      killed_by:
+        - internal/pa.TestS2A5_DriftBetweenApproveAndDispatchIsRefused
+        - internal/pa/catalog.TestS2A5_ObserveToolRefusesDrift
+        - internal/pa/connector.TestS2A5_FreshListingSeesDriftOverHTTP
+      red: |-
+        --- FAIL: TestS2A5_DriftBetweenApproveAndDispatchIsRefused (0.16s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.817s
+        FAIL
+        --- FAIL: TestS2A5_ObserveToolRefusesDrift (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/catalog	0.358s
+        FAIL
+        --- FAIL: TestS2A5_FreshListingSeesDriftOverHTTP (0.02s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.553s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.710s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/catalog	0.339s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.572s
+    - id: P2S4-A5c
+      guard: internal/pa/connector/fresh.go:81
+      guard_text: "pages, fetchErr := ep.ListTools(ctx, req.Token)"
+      mutation: "the cached listing is used: PinFresh keeps a server's first clean listing and answers later calls from it"
+      killed_by:
+        - internal/pa.TestS2A5_DriftBetweenApproveAndDispatchIsRefused
+        - internal/pa/connector.TestS2A5_FreshListingSeesDriftOverHTTP
+      red: |-
+        --- FAIL: TestS2A5_DriftBetweenApproveAndDispatchIsRefused (0.16s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.828s
+        FAIL
+        --- FAIL: TestS2A5_FreshListingSeesDriftOverHTTP (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.497s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.703s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.471s
+    - id: P2S4-A5d
+      guard: internal/pa/catalog/surface.go:160
+      guard_text: "if !bytes.Equal(lt.annotations, pinnedAnn) {"
+      mutation: "annotations are no longer compared with the pin"
+      killed_by:
+        - internal/pa.TestS2A5_DriftBetweenApproveAndDispatchIsRefused
+        - internal/pa/catalog.TestS2A5_ObserveToolRefusesDrift
+        - internal/pa/connector.TestS2A5_FreshListingSeesDriftOverHTTP
+      red: |-
+        --- FAIL: TestS2A5_DriftBetweenApproveAndDispatchIsRefused (0.16s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.853s
+        FAIL
+        --- FAIL: TestS2A5_ObserveToolRefusesDrift (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/catalog	0.392s
+        FAIL
+        --- FAIL: TestS2A5_FreshListingSeesDriftOverHTTP (0.03s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.583s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.703s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/catalog	0.261s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.474s
+  gaps:
+    - half: "a caller: nothing in the service invokes DispatchApproved until the cards (P2-S5)"
+      tracked_by: "#1320"
+    - half: "connector.PinFresh given to an executor: nothing in cmd/server builds a WriteExecutor, and no runtime code may load the Phase 2 pin (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests"
+      tracked_by: "#1320"
+    - half: "the card recording the three hashes of the definition it showed, computed as catalog.ToolDefinition computes them (P2-S5): until then every approval in the tests is built by hand"
+      tracked_by: "#1320"
+    - half: "drift on a real MCP server through internal/pa/egress: the HTTP tests reach a fake server with the httptest client, because egress refuses loopback"
+      tracked_by: "#1320"
 
 S2-A6:
-  status: pending
+  status: green
   slice: P2-S4
-  tracked_by: "#1320"
-  note: "a failed fresh tools/list refuses"
+  note: "Fresh listing at dispatch (#1320 P2-S4): a tools/list that fails (5xx, refused token, timeout), answers a body that is not a listing, is cut off, or fails or is malformed on a later page after a first page that has the tool, is a failed read: PinFresh returns no definition, keeps no earlier listing to fall back to, and the dispatch is refused server_unavailable with no tools/call. The refusal ends the approval, like every refusal before the receipt is consumed."
+  tests:
+    - internal/pa.TestS2A6_FailedFreshListingIsRefused
+    - internal/pa/catalog.TestS2A6_ObserveToolRefusesUnreadListing
+    - internal/pa/connector.TestS2A6_FreshListingOverHTTPIsNeverPartial
+  mutations:
+    - id: P2S4-A6a
+      guard: internal/pa/connector/fresh.go:82
+      guard_text: "def, err := f.pin.ObserveTool(req.Server, req.Tool, pages, fetchErr)"
+      mutation: "a failed listing falls back to the last clean listing of that server"
+      killed_by:
+        - internal/pa.TestS2A6_FailedFreshListingIsRefused
+        - internal/pa/connector.TestS2A6_FreshListingOverHTTPIsNeverPartial
+      red: |-
+        --- FAIL: TestS2A6_FailedFreshListingIsRefused (0.13s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.842s
+        FAIL
+        --- FAIL: TestS2A6_FreshListingOverHTTPIsNeverPartial (0.07s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.588s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.725s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.526s
+    - id: P2S4-A6b
+      guard: internal/pa/catalog/listing.go:77
+      guard_text: "if last && hasCursor {"
+      mutation: "a listing cut off after a page that announces another is accepted as complete"
+      killed_by:
+        - internal/pa.TestS2A6_FailedFreshListingIsRefused
+        - internal/pa/catalog.TestS2A6_ObserveToolRefusesUnreadListing
+      red: |-
+        --- FAIL: TestS2A6_FailedFreshListingIsRefused (0.12s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.910s
+        FAIL
+        --- FAIL: TestS2A6_ObserveToolRefusesUnreadListing (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/catalog	0.374s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.789s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/catalog	0.329s
+    - id: P2S4-A6c
+      guard: internal/pa/catalog/surface.go:232
+      guard_text: "if fetchErr != nil {\n\t\treturn ToolDefinition{}"
+      mutation: "ObserveTool ignores the fetch error and reads whatever pages it was handed"
+      killed_by:
+        - internal/pa/catalog.TestS2A6_ObserveToolRefusesUnreadListing
+      red: |-
+        --- FAIL: TestS2A6_ObserveToolRefusesUnreadListing (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/catalog	0.364s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/catalog	0.246s
+  gaps:
+    - half: "a caller: nothing in the service invokes DispatchApproved until the cards (P2-S5)"
+      tracked_by: "#1320"
+    - half: "connector.PinFresh given to an executor: nothing in cmd/server builds a WriteExecutor, and no runtime code may load the Phase 2 pin (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests"
+      tracked_by: "#1320"
+    - half: "owner decision: a transient listing failure ends the approval like any refusal (fail closed); refusing without consuming, so the tap can be repeated until the 5 minute expiry, was proposed and not decided"
+      tracked_by: "#1320"
+    - half: "a failed listing on a real MCP server through internal/pa/egress, and a metric or alert for dispatch-time listing failures (the read path counts its own)"
+      tracked_by: "#1320"
 
 S2-A7:
   status: pending
@@ -931,5 +1096,5 @@ S2-F3:
   gaps:
     - half: "a caller: nothing in the service invokes DispatchApproved until the cards (P2-S5)"
       tracked_by: "#1320"
-    - half: "a FreshSurface implementation: without one every dispatch is refused no_write_path (P2-S4)"
+    - half: "connector.PinFresh (P2-S4) given to an executor: nothing in cmd/server builds a WriteExecutor, and no runtime code may load the Phase 2 pin (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests"
       tracked_by: "#1320"
