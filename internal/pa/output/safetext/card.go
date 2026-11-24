@@ -115,7 +115,7 @@ func cardValue(v string) bool {
 // The card is one message. A card that does not fit one is refused with
 // ErrTooLong, never cut: its buttons belong to all of it.
 func Card(tool, args string, external bool) (Text, error) {
-	return card(tool, args, nil, external)
+	return card(tool, args, nil, nil, external)
 }
 
 // DisclosureCard is Card for a disclosure (threat model T6, S2-D4): above
@@ -140,7 +140,7 @@ func DisclosureCard(tool, args string, d Disclosure, external bool) (Text, error
 	if strings.TrimSpace(d.Phrase) != d.Phrase || strings.TrimSpace(d.ID) != d.ID {
 		return Text{}, ErrCardUnshowable
 	}
-	return card(tool, args, &d, external)
+	return card(tool, args, &d, nil, external)
 }
 
 // ScenarioCard is Card for a call that runs a scenario (S2-D6): above the
@@ -216,7 +216,7 @@ func hasLinePrefix(lines []string, prefix string) bool {
 	return false
 }
 
-func card(tool, args string, d *Disclosure, external bool) (Text, error) {
+func card(tool, args string, d *Disclosure, w *DeviceWrite, external bool) (Text, error) {
 	for _, v := range []string{tool, args} {
 		if !cardValue(v) {
 			return Text{}, ErrCardUnshowable
@@ -256,6 +256,31 @@ func card(tool, args string, d *Disclosure, external bool) (Text, error) {
 				b.WriteString("\n\n")
 			}
 		}
+		var valueLines []string
+		if w != nil {
+			home, head := w.Home, TextCardSpeaker
+			if home == "" {
+				home = TextCardHomeUnknown.In(l)
+			}
+			if w.Light {
+				head = TextCardLight
+			}
+			idLine = TextCardDeviceID.In(l) + " " + w.ID
+			b.WriteString(head.In(l))
+			b.WriteString("\n" + TextCardHome.In(l) + " " + home)
+			b.WriteString("\n" + TextCardRoom.In(l) + " " + w.Room)
+			b.WriteString("\n" + TextCardDeviceName.In(l) + " " + w.Name)
+			b.WriteString("\n" + idLine)
+			b.WriteString("\n\n")
+			b.WriteString(TextCardValues.In(l))
+			for _, v := range w.Values {
+				label, _ := v.Kind.label()
+				line := label.In(l) + " " + v.Value
+				valueLines = append(valueLines, line)
+				b.WriteString("\n" + line)
+			}
+			b.WriteString("\n\n")
+		}
 		b.WriteString(TextCardArgs.In(l))
 		b.WriteString("\n")
 		b.WriteString(args)
@@ -275,6 +300,17 @@ func card(tool, args string, d *Disclosure, external bool) (Text, error) {
 			lines := strings.Split(s, "\n")
 			if !containsLine(lines, d.Phrase) || !containsLine(lines, idLine) {
 				return "", ErrCardUnshowable
+			}
+		}
+		if w != nil {
+			// The device id and every value are on the card exactly as
+			// they are sent, each on a line of its own, or there is no
+			// card.
+			lines := strings.Split(s, "\n")
+			for _, want := range append(valueLines, idLine) {
+				if !containsLine(lines, want) {
+					return "", ErrCardUnshowable
+				}
 			}
 		}
 		if UTF16Len(s) > MaxPartUTF16 {
@@ -300,4 +336,101 @@ func containsLine(lines []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// DeviceWriteCardTemplates lists every server text a device write card can
+// hold besides CardTemplates: the device block (TextCardLight for a light,
+// TextCardSpeaker for a speaker) and the label of each value.
+func DeviceWriteCardTemplates() []Template {
+	return []Template{TextCardSpeaker, TextCardLight, TextCardHome, TextCardHomeUnknown, TextCardRoom, TextCardDeviceName,
+		TextCardDeviceID, TextCardValues, TextCardPlayback, TextCardVolume, TextCardPower, TextCardBrightness,
+		TextCardColorTemp, TextCardScene}
+}
+
+// ValueKind names what a value of a device write sets. Each kind has one
+// label in the registry, which says the unit and the range.
+type ValueKind int
+
+// The kinds of value a device write card can show.
+const (
+	ValuePlayback ValueKind = iota + 1
+	ValueVolume
+	ValuePower
+	ValueBrightness
+	ValueColorTemp
+	ValueScene
+)
+
+// label returns the registry text written before a value of kind k.
+func (k ValueKind) label() (Template, bool) {
+	switch k {
+	case ValuePlayback:
+		return TextCardPlayback, true
+	case ValueVolume:
+		return TextCardVolume, true
+	case ValuePower:
+		return TextCardPower, true
+	case ValueBrightness:
+		return TextCardBrightness, true
+	case ValueColorTemp:
+		return TextCardColorTemp, true
+	case ValueScene:
+		return TextCardScene, true
+	}
+	return TextCardValues, false
+}
+
+// CardValue is one value a device write sends: Value is its text exactly
+// as the arguments hold it, Kind says what it sets.
+type CardValue struct {
+	Kind  ValueKind
+	Value string
+}
+
+// DeviceWrite is what the card of a device write shows besides the tool
+// and the arguments (threat model T6): the device and the values.
+type DeviceWrite struct {
+	// Light: the device is a light; otherwise it is a speaker.
+	Light bool
+	// Home, Room and Name are the device's, as the service listed them
+	// when the card was made; ID is its device id, the one in the
+	// arguments. An empty Home is shown as not reported, never left out.
+	Home, Room, Name, ID string
+	// Values are every value the call sets, in the order they are shown.
+	Values []CardValue
+}
+
+// DeviceWriteCard is Card for a write to one device (threat model T6):
+// above the arguments it shows the device (home, room, name and device id)
+// and every value on a line of its own after its label.
+//
+// Every value is shown exactly or the card is refused (ErrCardUnshowable),
+// as in Card; the device id and the values are stricter, as the text of a
+// DisclosureCard is: a card on which one of them would be defanged is
+// refused. A write without a value has no card.
+func DeviceWriteCard(tool, args string, w DeviceWrite, external bool) (Text, error) {
+	if len(w.Values) == 0 {
+		return Text{}, ErrCardUnshowable
+	}
+	exact := []string{w.ID}
+	for _, v := range w.Values {
+		if _, ok := v.Kind.label(); !ok {
+			return Text{}, ErrCardUnshowable
+		}
+		exact = append(exact, v.Value)
+	}
+	for _, v := range exact {
+		if !cardValue(v) || strings.TrimSpace(v) != v {
+			return Text{}, ErrCardUnshowable
+		}
+	}
+	for _, v := range []string{w.Room, w.Name} {
+		if !cardValue(v) {
+			return Text{}, ErrCardUnshowable
+		}
+	}
+	if w.Home != "" && !cardValue(w.Home) {
+		return Text{}, ErrCardUnshowable
+	}
+	return card(tool, args, nil, &w, external)
 }
