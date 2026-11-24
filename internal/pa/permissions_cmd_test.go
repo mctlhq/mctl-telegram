@@ -95,7 +95,8 @@ func (f *fakeDevices) set(ids ...string) {
 	f.devices.Store(&ds)
 }
 
-// allowRule stands in for the device-type rules of P2-S11.
+// allowRule stands in for the device-type rules (permissions.Rules), which
+// have tests of their own.
 type allowRule struct{ err atomic.Pointer[error] }
 
 func (r *allowRule) CheckGrant(string, []permissions.Device, int64) error {
@@ -391,8 +392,8 @@ func TestPermissions_GrantRefusals(t *testing.T) {
 	e.devices.set("dev-1", "dev-2")
 	e.nothingGranted("device reads")
 
-	// The tool-specific rule: none refuses (the default until P2-S11), and
-	// so does one that objects.
+	// The tool-specific rule: none refuses (the default), and so does one
+	// that objects.
 	e.validator.Rule = nil
 	e.refused(alice, grantCmd, refused)
 	e.validator.Rule = e.rule

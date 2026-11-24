@@ -391,3 +391,63 @@ func TestPAPermission_CallbackAndConnections(t *testing.T) {
 		}
 	})
 }
+
+// TestPAPermission_ReadInTransaction: the read the write executor makes
+// inside its pre-dispatch transaction (P2-S11) returns the row as it is,
+// revoked or expired included, so that the caller decides; it finds
+// nothing for another principal, and a row that does not decode is
+// unreadable, never absent.
+func TestPAPermission_ReadInTransaction(t *testing.T) {
+	paConvoDialects(t, func(t *testing.T, s *Store, alice, bob int64) {
+		ctx := context.Background()
+		w := newPAPermWorld(t, s, alice)
+		must(t, w.insert(t, w.perm("prm_tx"), t0))
+		// The executor's transaction has resolved the dialect by the time
+		// it reads a permission (BeginPAWrite); a bare transaction of this
+		// test has not.
+		if _, err := s.postgresDialect(ctx); err != nil {
+			t.Fatal(err)
+		}
+		read := func(principal int64, id string) (permissions.Permission, error) {
+			var p permissions.Permission
+			err := inTx(t, s, func(tx *sql.Tx) error {
+				var err error
+				p, err = s.PAPermissionIn(ctx, tx, principal, id)
+				return err
+			})
+			return p, err
+		}
+		p, err := read(alice, "prm_tx")
+		must(t, err)
+		if p.ID != "prm_tx" || p.Principal != alice || p.ConnectionID != w.conn || p.AuthorityRevision != w.rev ||
+			p.Tool != paPermTool || fmt.Sprint(p.DeviceIDs) != "[dev-1 dev-2]" || p.Ceiling != 5 ||
+			!p.ExpiresAt.Equal(t0.Add(24*time.Hour)) || !p.RevokedAt.IsZero() {
+			t.Fatalf("read back %+v", p)
+		}
+		if _, err := read(bob, "prm_tx"); !errors.Is(err, permissions.ErrNotFound) {
+			t.Fatalf("bob reads alice's permission: %v", err)
+		}
+		if _, err := read(alice, "prm_none"); !errors.Is(err, permissions.ErrNotFound) {
+			t.Fatalf("an unknown id: %v", err)
+		}
+		if _, err := read(alice, "not an id"); !errors.Is(err, permissions.ErrInvalid) {
+			t.Fatalf("a malformed id: %v", err)
+		}
+		if _, err := s.PAPermissionIn(ctx, nil, alice, "prm_tx"); !errors.Is(err, permissions.ErrInvalid) {
+			t.Fatalf("no transaction: %v", err)
+		}
+		// A revoked row is returned, with its revocation.
+		must(t, inTx(t, s, func(tx *sql.Tx) error { return s.RevokePAPermission(ctx, tx, alice, "prm_tx", t0.Add(time.Hour)) }))
+		p, err = read(alice, "prm_tx")
+		must(t, err)
+		if !p.RevokedAt.Equal(t0.Add(time.Hour)) {
+			t.Fatalf("revoked row read back %+v", p)
+		}
+		// A row that does not decode is unreadable.
+		_, err = s.DB.Exec(`UPDATE pa_permissions SET device_ids = 'not json' WHERE principal = $1 AND id = $2`, alice, "prm_tx")
+		must(t, err)
+		if _, err := read(alice, "prm_tx"); !errors.Is(err, permissions.ErrUnreadable) || errors.Is(err, permissions.ErrNotFound) {
+			t.Fatalf("an undecodable row: %v", err)
+		}
+	})
+}

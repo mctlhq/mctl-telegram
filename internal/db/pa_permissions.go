@@ -20,14 +20,17 @@ package db
 // (TestS2A8_GrantInsertHasOneCaller in internal/pa). A failed read wraps
 // permissions.ErrUnreadable and is never an empty list (I9).
 //
-// Nothing reads a permission at dispatch yet (P2-S11), and no deployed
-// wiring reaches the insert.
+// LookupPAPermissions and PAPermissionIn are the reads of lowering
+// (P2-S11): the first when a call is decided, the second inside the write
+// executor's pre-dispatch transaction. No deployed wiring reaches either,
+// or the insert.
 //
 // Timestamps are unix milliseconds, as in pa_connections.go.
 
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -223,7 +226,8 @@ func (s *Store) ListActivePAPermissions(ctx context.Context, principal int64, no
 // at any other revision, an expired one and a revoked one are not
 // returned. A failed read is an error, never "no permission" (I9).
 //
-// It is the read P2-S11 will make at the gate; nothing calls it yet.
+// It is the read the card emitter makes before the gate decides
+// (connector.Cards, P2-S11).
 func (s *Store) LookupPAPermissions(ctx context.Context, principal int64, connectionID string, revision int64, server, tool string, now time.Time) ([]permissions.Permission, error) {
 	if principal <= 0 || connectionID == "" || revision <= 0 || server == "" || tool == "" {
 		return nil, fmt.Errorf("%w: permission lookup", permissions.ErrInvalid)
@@ -250,6 +254,39 @@ func (s *Store) LookupPAPermissions(ctx context.Context, principal int64, connec
 		return nil, permissionUnreadable("lookup", err)
 	}
 	return out, nil
+}
+
+// PAPermissionIn reads principal's permission id inside tx, the write
+// executor's pre-dispatch transaction, and keeps the row still until tx
+// ends. On Postgres that is SELECT ... FOR UPDATE: a revocation either
+// committed before the read, and is what it returns, or waits for tx. On
+// SQLite the writer lock tx holds does the same. The row is returned as it
+// is, revoked, expired or granted at another revision included; the caller
+// decides with permissions.Permission.Covers. permissions.ErrNotFound: no
+// such row of this principal. Any other error is a failed read and never
+// "no permission" (I9).
+func (s *Store) PAPermissionIn(ctx context.Context, tx *sql.Tx, principal int64, id string) (permissions.Permission, error) {
+	if tx == nil || principal <= 0 || !permissions.ValidID(id) {
+		return permissions.Permission{}, fmt.Errorf("%w: permission", permissions.ErrInvalid)
+	}
+	pg, err := s.postgresDialect(ctx)
+	if err != nil {
+		return permissions.Permission{}, permissionUnreadable("read in transaction: dialect", err)
+	}
+	lock := ""
+	if pg {
+		lock = " FOR UPDATE"
+	}
+	p, err := scanPAPermission(tx.QueryRowContext(ctx,
+		`SELECT `+paPermissionCols+` FROM pa_permissions p WHERE p.principal = $1 AND p.id = $2`+lock,
+		principal, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return permissions.Permission{}, permissions.ErrNotFound
+	}
+	if err != nil {
+		return permissions.Permission{}, permissionUnreadable("read in transaction", err)
+	}
+	return p, nil
 }
 
 // RevokePAPermission revokes principal's permission id in tx.
