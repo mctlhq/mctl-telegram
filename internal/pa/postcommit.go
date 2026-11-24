@@ -46,6 +46,25 @@ type postCommitKey struct{}
 // postCommitSlot holds at most one action per update delivery.
 type postCommitSlot struct {
 	action *LinkAction
+	// runQueued: the update's handler queued a run (RunLoop.EnqueueRun).
+	// TypingAfter reads it after the commit, so an update that rolled
+	// back, or queued nothing, shows no status.
+	runQueued bool
+}
+
+// markRunQueued records that this delivery queued a run. Without a slot
+// (a caller outside a webhook delivery) it does nothing: the status is
+// presentation only.
+func markRunQueued(ctx context.Context) {
+	if s, ok := ctx.Value(postCommitKey{}).(*postCommitSlot); ok && s != nil {
+		s.runQueued = true
+	}
+}
+
+// runQueuedIn reports whether this delivery queued a run.
+func runQueuedIn(ctx context.Context) bool {
+	s, ok := ctx.Value(postCommitKey{}).(*postCommitSlot)
+	return ok && s != nil && s.runQueued
 }
 
 // WithPostCommit returns ctx with an empty slot for one update's action.
