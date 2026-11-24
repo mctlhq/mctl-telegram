@@ -105,6 +105,8 @@ var ErrNoSuchDevices = errors.New("pa connector: no device of this kind is liste
 // SpeakerReader and a LightReader over one tool.
 type AliceDevices struct {
 	ep MCPEndpoint
+	// audit records every read: see Devices.
+	audit *Executor
 }
 
 var (
@@ -115,28 +117,73 @@ var (
 
 // NewAliceDevices builds the reader over the alice endpoint. pin must list
 // alice_list_devices as an auto-tier read: the reader calls nothing else.
-func NewAliceDevices(pin *catalog.Pin, ep MCPEndpoint) (*AliceDevices, error) {
+// audit is the executor whose sink records the reads; a reader without
+// one is not built, so no read goes unrecorded.
+func NewAliceDevices(pin *catalog.Pin, ep MCPEndpoint, audit *Executor) (*AliceDevices, error) {
 	if pin == nil || ep == nil || ep.Server() != aliceServer {
 		return nil, errors.New("pa connector: alice devices need the pin and the alice endpoint")
+	}
+	if audit == nil || audit.Sink == nil {
+		return nil, errors.New("pa connector: alice devices need an audit sink")
 	}
 	t, ok := pin.Servers[aliceServer].Tools[aliceListTool]
 	if !ok || t.Tier != catalog.TierAuto || t.Class != catalog.ClassRead {
 		return nil, fmt.Errorf("pa connector: %s is not a pinned auto read", aliceListTool)
 	}
-	return &AliceDevices{ep: ep}, nil
+	return &AliceDevices{ep: ep, audit: audit}, nil
 }
 
 // Devices implements DeviceLister with one tools/call. It is not retried:
 // a rejected token, a failed call and a tool error all are unreadable.
+//
+// The read is a tools/call the server makes on its own, for a card, for
+// a grant or right before a dispatch, and it is recorded in the audit
+// chain like any call (#1322 P2-S15c; S2-D4): a pre-dispatch entry before
+// the request and a result entry after it, with the connection, the tool,
+// the digest of the fixed arguments and the digest of the answer, and
+// never the answer itself. The read made for a dispatch carries the
+// approval it is made for. A read whose pre-dispatch entry cannot be
+// written is not made (I9, T12): the devices are then unreadable.
+//
+// The entry's taint is clean: the arguments are a constant of this file,
+// so nothing of a conversation shapes the request, and the answer is
+// never handed to the model.
 func (r *AliceDevices) Devices(ctx context.Context, req SpeakerRequest) ([]Device, error) {
 	if req.Server != aliceServer {
 		return nil, fmt.Errorf("%w: not the alice server", ErrSpeakersUnreadable)
 	}
-	raw, err := r.ep.CallTool(ctx, req.Token, aliceListTool, json.RawMessage(aliceListArgs))
+	callID, err := newCallID()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s failed", ErrSpeakersUnreadable, aliceListTool)
+		return nil, fmt.Errorf("%w: no call id", ErrSpeakersUnreadable)
 	}
-	return parseAliceDevices(raw)
+	base := Entry{
+		CallID: callID, Principal: req.Principal,
+		ConnectionID: req.ConnectionID, AuthorityRevision: req.AuthorityRevision,
+		Server: aliceServer, Tool: aliceListTool, ArgsSHA256: digest([]byte(aliceListArgs)),
+		Tier: catalog.TierAuto, Class: catalog.ClassRead, Taint: TaintClean,
+		ApprovalID: recordable(req.ApprovalID, invalidMarker),
+	}
+	pre := base
+	pre.Phase, pre.Status, pre.At = PhasePreDispatch, StatusDispatching, r.audit.now()
+	if err := r.audit.Sink.Append(ctx, pre); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrSpeakersUnreadable, ErrAuditUnavailable)
+	}
+	var devices []Device
+	_, _ = r.audit.dispatchRecorded(ctx, base, func(ctx context.Context) (Result, error) {
+		raw, callErr := r.ep.CallTool(ctx, req.Token, aliceListTool, json.RawMessage(aliceListArgs))
+		if callErr != nil {
+			err = fmt.Errorf("%w: %s failed", ErrSpeakersUnreadable, aliceListTool)
+			return Result{}, err
+		}
+		devices, err = parseAliceDevices(raw)
+		// An answer that cannot be read is recorded as the tool's error,
+		// with its digest: the request was made and answered.
+		return Result{Output: raw, ToolError: err != nil}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return devices, nil
 }
 
 // Speakers implements SpeakerReader: the listed devices the server calls

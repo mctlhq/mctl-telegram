@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/catalog"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
@@ -72,11 +73,115 @@ func alicePin() *catalog.Pin {
 func aliceReader(t *testing.T, out string) (*AliceDevices, *aliceEP) {
 	t.Helper()
 	ep := &aliceEP{server: "alice", out: []byte(out)}
-	r, err := NewAliceDevices(alicePin(), ep)
+	r, err := NewAliceDevices(alicePin(), ep, aliceAudit(&fakeSink{ev: &events{}}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return r, ep
+}
+
+// aliceAudit is an executor over sink with a fixed clock.
+func aliceAudit(sink Sink) *Executor {
+	return &Executor{Sink: sink, Now: func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }}
+}
+
+// TestS2D4_DeviceReadIsAudited (#1322 P2-S15c): a device read is a
+// tools/call the server makes on its own, and it leaves the two entries
+// of any call in the audit chain: one before the request and one after
+// it, naming the connection, the tool, the fixed arguments by digest and
+// the answer by digest. The read made for a dispatch names its approval.
+// Nothing of the answer is in an entry, and every entry is one the chain
+// can store. A read whose first entry cannot be written is not made.
+func TestS2D4_DeviceReadIsAudited(t *testing.T) {
+	req := SpeakerRequest{Principal: 4242001, ConnectionID: "pac_a", AuthorityRevision: 3, Server: "alice"}
+	storable := func(name string, entries []Entry) {
+		t.Helper()
+		for _, e := range entries {
+			rec, err := FormatRecord(e)
+			if err != nil {
+				t.Fatalf("%s: the chain cannot store %+v: %v", name, e, err)
+			}
+			for _, leak := range []string{"Kitchen", "spk-0000", "Synthetic"} {
+				if strings.Contains(rec, leak) {
+					t.Fatalf("%s: the record holds %q of the answer: %s", name, leak, rec)
+				}
+			}
+		}
+	}
+	for name, tc := range map[string]struct {
+		out      string
+		callErr  error
+		approval string
+		status   Status
+		digest   bool
+		readable bool
+	}{
+		"a read for a card":             {out: aliceListing, status: StatusOK, digest: true, readable: true},
+		"a read at dispatch":            {out: aliceListing, approval: "apr_0123456789abcdef", status: StatusOK, digest: true, readable: true},
+		"an answer that cannot be read": {out: `{"content":[]}`, status: StatusToolError, digest: true},
+		"a call that failed":            {out: aliceListing, callErr: errors.New("injected"), status: StatusOutcomeUnknown},
+	} {
+		sink := &fakeSink{ev: &events{}}
+		ep := &aliceEP{server: "alice", out: []byte(tc.out), err: tc.callErr}
+		r, err := NewAliceDevices(alicePin(), ep, aliceAudit(sink))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rq := req
+		rq.ApprovalID = tc.approval
+		devices, err := r.Devices(context.Background(), rq)
+		if tc.readable != (err == nil) || tc.readable != (len(devices) > 0) {
+			t.Fatalf("%s: %d devices, %v", name, len(devices), err)
+		}
+		if !tc.readable && !errors.Is(err, ErrSpeakersUnreadable) {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(sink.entries) != 2 {
+			t.Fatalf("%s: %d audit entries, want one before the call and one after: %+v", name, len(sink.entries), sink.entries)
+		}
+		pre, post := sink.entries[0], sink.entries[1]
+		want := Entry{
+			CallID: pre.CallID, Phase: PhasePreDispatch, Principal: 4242001, ConnectionID: "pac_a", AuthorityRevision: 3,
+			Server: "alice", Tool: "alice_list_devices", ArgsSHA256: digest([]byte(`{}`)),
+			Tier: catalog.TierAuto, Class: catalog.ClassRead, Taint: TaintClean, ApprovalID: tc.approval,
+			Status: StatusDispatching, At: pre.At,
+		}
+		if pre != want || pre.CallID == "" || pre.At.IsZero() {
+			t.Fatalf("%s: pre-dispatch entry\n got %+v\nwant %+v", name, pre, want)
+		}
+		want.Phase, want.Status, want.At = PhaseResult, tc.status, post.At
+		if tc.digest {
+			want.ResultSHA256 = digest([]byte(tc.out))
+		}
+		if post != want || post.At.IsZero() {
+			t.Fatalf("%s: result entry\n got %+v\nwant %+v", name, post, want)
+		}
+		if got := sink.ev.list(); !slices.Equal(got, []string{"append:pre_dispatch:dispatching", "append:result:" + string(tc.status)}) {
+			t.Fatalf("%s: order %v", name, got)
+		}
+		storable(name, sink.entries)
+	}
+
+	// The entry before the request cannot be written: no request.
+	sink := &fakeSink{ev: &events{}, failOn: PhasePreDispatch}
+	ep := &aliceEP{server: "alice", out: []byte(aliceListing)}
+	r, err := NewAliceDevices(alicePin(), ep, aliceAudit(sink))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if devices, err := r.Devices(context.Background(), req); !errors.Is(err, ErrSpeakersUnreadable) || !errors.Is(err, ErrAuditUnavailable) || devices != nil {
+		t.Fatalf("an unwritable audit entry: %+v, %v", devices, err)
+	}
+	if len(ep.calls) != 0 {
+		t.Fatalf("the read was made without its audit entry: %v", ep.calls)
+	}
+
+	// A reader is not built without a sink.
+	for name, x := range map[string]*Executor{"no executor": nil, "no sink": {}} {
+		if _, err := NewAliceDevices(alicePin(), ep, x); err == nil {
+			t.Errorf("%s: a reader that records nothing was built", name)
+		}
+	}
 }
 
 // structured is a result whose structuredContent is body.
@@ -156,7 +261,7 @@ func TestAliceDevices_ReadsTheStructuredListing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewAliceDevices(p2, ep); err != nil {
+	if _, err := NewAliceDevices(p2, ep, aliceAudit(&fakeSink{ev: &events{}})); err != nil {
 		t.Fatalf("over the Phase 2 pin: %v", err)
 	}
 }
@@ -272,7 +377,7 @@ func TestAliceDevices_UnreadableIsAnError(t *testing.T) {
 		"the call failed":           {server: "alice", err: errors.New("injected")},
 		"the call failed with data": {server: "alice", out: []byte(aliceListing), err: errors.New("injected")},
 	} {
-		r, err := NewAliceDevices(alicePin(), ep)
+		r, err := NewAliceDevices(alicePin(), ep, aliceAudit(&fakeSink{ev: &events{}}))
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -90,6 +90,9 @@ type SpeakerRequest struct {
 	AuthorityRevision int64
 	Server            string
 	Token             connection.Secret
+	// ApprovalID is the approval a read at dispatch is made for, for the
+	// audit entry of the read; "" for a read made for a card or a grant.
+	ApprovalID string
 }
 
 // ErrSpeakersUnreadable is any device read that did not yield a complete,

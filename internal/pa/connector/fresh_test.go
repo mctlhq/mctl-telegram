@@ -171,6 +171,11 @@ func TestPinFresh_ListsTheServerEveryCall(t *testing.T) {
 		if pinned := freshPin(t, tools).Servers["tg"].Tools[freshWrite]; got.Lowerable != pinned.Lowerable || got.Constraints != pinned.Constraints {
 			t.Fatalf("fresh lowerable %q %v, the pin's %q %v", got.Lowerable, got.Constraints, pinned.Lowerable, pinned.Constraints)
 		}
+		// The pin's input schema too: a lowered dispatch reads the values
+		// a string argument may take from it (S2-D2).
+		if pinned := freshPin(t, tools).Servers["tg"].Tools[freshWrite]; got.InputSchema == "" || got.InputSchema != string(pinned.InputSchema) {
+			t.Fatalf("fresh input schema %q, the pin's %q", got.InputSchema, pinned.InputSchema)
+		}
 		if _, lists := f.seen(); lists != 2*i {
 			t.Fatalf("call %d: %d tools/list requests, want %d (two pages per call)", i, lists, 2*i)
 		}
