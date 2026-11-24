@@ -487,13 +487,32 @@ func TestS2C10_OldAuthorityRevisionIsRefused(t *testing.T) {
 			must(t, err)
 		},
 	}
+	cancelling := map[string]bool{"disconnect": true, "expired by a failed refresh": true}
 	for name, move := range refused {
 		t.Run(name, func(t *testing.T) {
 			paApprovalDialects(t, func(t *testing.T, s *Store, alice, _ int64) {
 				w := seedPAApprovalWorld(t, s, alice)
 				a := w.approved(t, t0)
 				move(t, s, w)
-				if _, _, err := paConsume(t, s, alice, a.ID, t0.Add(time.Minute)); !errors.Is(err, approval.ErrAuthorityChanged) {
+				_, _, err := paConsume(t, s, alice, a.ID, t0.Add(time.Minute))
+				if cancelling[name] {
+					// A transition made by the store also cancels the
+					// approval in its own transaction (S2-C9, P2-S12),
+					// so the consume meets a cancelled row before it
+					// compares anything. The raw updates above are what
+					// prove the comparison itself.
+					if !errors.Is(err, approval.ErrCancelled) {
+						t.Fatalf("consume: err = %v, want ErrCancelled", err)
+					}
+					if r := readPAApprovalRow(t, s, alice, a.ID); r.status != string(approval.StatusCancelled) || r.sealed != nil {
+						t.Fatalf("row is status %q, args %q; want cancelled and erased", r.status, r.sealed)
+					}
+					if got := paDispatchStatuses(t, s, alice); len(got) != 0 {
+						t.Fatalf("dispatch records %v, want none", got)
+					}
+					return
+				}
+				if !errors.Is(err, approval.ErrAuthorityChanged) {
 					t.Fatalf("consume: err = %v, want ErrAuthorityChanged", err)
 				}
 				wantUntouched(t, s, alice, a)

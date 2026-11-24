@@ -921,7 +921,13 @@ type DisconnectResult struct {
 //     every sealed secret destroyed, in one store transaction that waits for
 //     nothing remote;
 //  2. cancel in-flight calls on the connection;
-//  3. (jobs, approvals and standing permissions bound to it are #1315 / S2);
+//  3. the approvals bound to it that were not dispatched are cancelled and
+//     its standing permissions revoked, by the store in the transaction of
+//     step 1 (RevokePAConnection, #1320 slice P2-S12, S2-C9), with one
+//     notice when an approval was cancelled. A call already on the wire is
+//     not an approval any more: step 2 cancels it and its result is
+//     fenced. Queued jobs are not bound to a connection: a job's next call
+//     on this connection is refused by the revision check (#1318);
 //  4. call the server's revocation endpoint with the tokens read in step 1,
 //     best-effort: a failure is reported in the result and changes nothing
 //     locally (S1-C6).

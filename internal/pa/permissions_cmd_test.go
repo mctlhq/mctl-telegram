@@ -793,7 +793,7 @@ func TestS2A8_GrantInsertHasOneCaller(t *testing.T) {
 	)
 	idents, literals := mentions(t,
 		[]string{"InsertPAPermission", "permissionButton", "IssuePAPermissionCallback", "RevokePAPermission",
-			"revokePAPermissionsOfConnTx", "PermissionGrants", "Grants"},
+			"revokePAPermissionsOfConnTx", "revokePAPermissionsOfPrincipalTx", "PermissionGrants", "Grants"},
 		[]string{"insert into pa_permissions", "update pa_permissions", "delete from pa_permissions", "pa_permissions"})
 	site := func(file, fn string) useSite { return useSite{file, fn} }
 	check := func(what string, got, want []useSite) {
@@ -834,8 +834,15 @@ func TestS2A8_GrantInsertHasOneCaller(t *testing.T) {
 		site("internal/db/pa_connections.go", "RevokePAConnectionAt"), site("internal/db/pa_connections.go", "revokePAConnOnce"),
 		site("internal/db/pa_connections.go", "transitionPAConnTx"), site(dbFile, "revokePAPermissionsOfConnTx"),
 	})
+	// And for a whole principal: consent withdrawal, /forget, an admin
+	// disable (#1320 slice P2-S12).
+	check("revokePAPermissionsOfPrincipalTx", idents["revokePAPermissionsOfPrincipalTx"], []useSite{
+		site("internal/db/pa_convo.go", "ForgetPAConversations"), site("internal/db/pa_principal_disable.go", "SetPAPrincipalDisabled"),
+		site(dbFile, "revokePAPermissionsOfPrincipalTx"),
+	})
 	check("UPDATE pa_permissions", literals["update pa_permissions"], []useSite{
 		site(dbFile, "RevokePAPermission"), site(dbFile, "revokePAPermissionsOfConnTx"),
+		site(dbFile, "revokePAPermissionsOfPrincipalTx"),
 	})
 	check("DELETE FROM pa_permissions", literals["delete from pa_permissions"], []useSite{site("internal/db/pa_account.go", "(package)")})
 	// No other file names the table in SQL at all.

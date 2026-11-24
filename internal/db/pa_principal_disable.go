@@ -59,6 +59,19 @@ func (s *Store) SetPAPrincipalDisabled(ctx context.Context, principal, by int64,
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pa_rate WHERE principal = $1`, principal); err != nil {
 		return fmt.Errorf("set pa principal disabled: reset rate window: %w", err)
 	}
+	// What the principal was asked to approve, or approved and was not
+	// sent yet, is cancelled on every connection, and the standing
+	// permissions are revoked, in the transaction that records the disable
+	// (#1320 slice P2-S12): the dispatch already refuses a disabled
+	// principal, and this ends the cards and keeps a later re-enable from
+	// bringing a permission back. The principal gets one notice when an
+	// approval was cancelled. A failure here fails the disable.
+	if _, err := cancelPAApprovalsWithNotice(ctx, tx, principal, now.UnixMilli(), ""); err != nil {
+		return fmt.Errorf("set pa principal disabled: %w", err)
+	}
+	if err := revokePAPermissionsOfPrincipalTx(ctx, tx, principal, now.UnixMilli()); err != nil {
+		return fmt.Errorf("set pa principal disabled: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("set pa principal disabled: commit: %w", err)
 	}

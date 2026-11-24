@@ -124,7 +124,8 @@
 # branch, cut from f49ad63c and merged with f66c8a7b (main with P2-S13),
 # the same way, on sqlite, restored from saved bytes; the tests also pass
 # on Postgres. All of them were run again after the review fix that made
-# the executor ask the pin. P2-S11 built the lowering of a clean run's
+# the executor ask the pin, and once more after the merge with d42dcc68
+# (main with P2-S12). P2-S11 built the lowering of a clean run's
 # write under a standing permission (connector/lower.go) and the grant
 # rules (permissions/rules.go). Nothing in cmd/server gives the card
 # emitter a permission lookup or an executor, so no call is lowered
@@ -137,12 +138,340 @@
 # moved lines in dispatch_write.go, card.go, dispatch.go, device_write.go
 # and internal/db/pa_permissions.go: the guards of earlier slices were
 # pointed at their new lines; their code did not change.
+#
+# The P2S12-* records (S2-C9) ran on the P2-S12 branch, cut from f49ad63c,
+# the same way, on sqlite, restored from saved bytes; the tests also pass
+# on Postgres. P2-S12 made the store cancel approvals and revoke
+# permissions when a connection or a principal's authority ends. The
+# change moved lines in internal/db/pa_approvals.go, pa_convo.go and
+# pa_permissions.go, so the guards of the earlier records in those files
+# were pointed at their new line numbers; their code did not change.
+# TestS2C10_OldAuthorityRevisionIsRefused now expects ErrCancelled after a
+# disconnect or an expiry made by the store (the row is cancelled before
+# the consume compares anything); its two raw updates of the connection
+# row still prove the comparison, and P2S2-C10a and P2S2-C10b were run
+# again on this branch and are red.
 
 S2-C9:
-  status: pending
+  status: green
   slice: P2-S12
-  tracked_by: "#1320"
-  note: "disconnect cancels a pending approval and a standing permission"
+  note: "/disconnect and every other end of a connection, a consent withdrawal, /forget and an admin disable (#1320 P2-S12): the store cancels the approvals that were not dispatched (pending, and approved but not consumed), erases their sealed arguments, deletes their callbacks and revokes the standing permissions, in the transaction of the change: per connection for a revocation, an expiry or a supersede, on every connection of the principal for the other three. One actions_cancelled notice (a safetext template, EN and RU) is queued when an approval was cancelled, none otherwise. A failure of any of these statements fails the change: the connection stays active, the consent given, the principal enabled. A call already on the wire is not touched: its executor fences the result (S2-C13) or the stale sweep ends it (S2-C12). /forget and a consent withdrawal then delete the cancelled rows with the conversations, as before."
+  tests:
+    - internal/db.TestS2C9_ConnectionEndCancelsItsApprovalsAndPermissions
+    - internal/db.TestS2C9_PrincipalEndCancelsOnEveryConnection
+    - internal/db.TestS2C9_NothingCancelledQueuesNoNotice
+    - internal/db.TestS2C9_CancelFailureFailsTheChange
+    - internal/pa.TestS2C9_CancelledCardAnswersCancelled
+    - internal/pa.TestS2C9_ForgetAndWithdrawCancel
+    - internal/pa.TestActionsCancelledNotice_SaysNothingWasSent
+  mutations:
+    - id: P2S12-C9a
+      guard: internal/db/pa_connections.go:632
+      guard_text: "if err := cancelPAApprovalsOfConnTx(ctx, tx, principal, id, nowMS); err != nil {\n\t\treturn connection.Connection{}, connection.Sealed{}, false, err"
+      mutation: "/disconnect (RevokePAConnection) no longer cancels the approvals of the connection"
+      killed_by:
+        - internal/db.TestS2C9_CancelFailureFailsTheChange
+        - internal/pa.TestS2C9_CancelledCardAnswersCancelled
+        - internal/db.TestS2C9_ConnectionEndCancelsItsApprovalsAndPermissions
+      red: |-
+        --- FAIL: TestS2C9_ConnectionEndCancelsItsApprovalsAndPermissions (0.03s)
+        --- FAIL: TestS2C9_CancelFailureFailsTheChange (0.17s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.795s
+        --- FAIL: TestS2C9_CancelledCardAnswersCancelled (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.757s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
+    - id: P2S12-C9b
+      guard: internal/db/pa_connections.go:680
+      guard_text: "if err := cancelPAApprovalsOfConnTx(ctx, tx, principal, id, nowMS); err != nil {\n\t\treturn connection.Connection{}, err"
+      mutation: "revoke-on-reuse (RevokePAConnectionAt) no longer cancels the approvals of the connection"
+      killed_by:
+        - internal/db.TestS2C9_CancelFailureFailsTheChange
+        - internal/db.TestS2C9_ConnectionEndCancelsItsApprovalsAndPermissions
+      red: |-
+        --- FAIL: TestS2C9_ConnectionEndCancelsItsApprovalsAndPermissions (0.03s)
+        --- FAIL: TestS2C9_CancelFailureFailsTheChange (0.16s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.891s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
+    - id: P2S12-C9c
+      guard: internal/db/pa_connections.go:471
+      guard_text: "if err := cancelPAApprovalsOfConnTx(ctx, tx, principal, id, transitionAtMS(t)); err != nil {"
+      mutation: "a connection transition (expiry, supersede) no longer cancels the approvals of the connection"
+      killed_by:
+        - internal/db.TestS2C9_CancelFailureFailsTheChange
+        - internal/db.TestS2C9_ConnectionEndCancelsItsApprovalsAndPermissions
+      red: |-
+        --- FAIL: TestS2C9_ConnectionEndCancelsItsApprovalsAndPermissions (0.03s)
+        --- FAIL: TestS2C9_CancelFailureFailsTheChange (0.22s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.933s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
+    - id: P2S12-C9d
+      guard: internal/db/pa_approvals.go:467
+      guard_text: "if _, err := cancelPAApprovalsWithNotice(ctx, tx, principal, nowMS, \"\"); err != nil {"
+      mutation: "/forget and consent withdrawal delete the approvals without cancelling them first (no notice)"
+      killed_by:
+        - internal/db.TestS2C9_CancelFailureFailsTheChange
+        - internal/pa.TestS2C9_ForgetAndWithdrawCancel
+        - internal/db.TestS2C9_PrincipalEndCancelsOnEveryConnection
+      red: |-
+        --- FAIL: TestS2C9_PrincipalEndCancelsOnEveryConnection (0.03s)
+        --- FAIL: TestS2C9_CancelFailureFailsTheChange (0.18s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.822s
+        --- FAIL: TestS2C9_ForgetAndWithdrawCancel (0.02s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.689s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
+    - id: P2S12-C9e
+      guard: internal/db/pa_principal_disable.go:69
+      guard_text: "if _, err := cancelPAApprovalsWithNotice(ctx, tx, principal, now.UnixMilli(), \"\"); err != nil {"
+      mutation: "an admin disable no longer cancels the approvals of the principal"
+      killed_by:
+        - internal/db.TestS2C9_CancelFailureFailsTheChange
+        - internal/pa.TestS2C9_CancelledCardAnswersCancelled
+        - internal/db.TestS2C9_PrincipalEndCancelsOnEveryConnection
+      red: |-
+        --- FAIL: TestS2C9_PrincipalEndCancelsOnEveryConnection (0.03s)
+        --- FAIL: TestS2C9_CancelFailureFailsTheChange (0.17s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.893s
+        --- FAIL: TestS2C9_CancelledCardAnswersCancelled (0.07s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.647s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
+    - id: P2S12-C9f
+      guard: internal/db/pa_principal_disable.go:72
+      guard_text: "if err := revokePAPermissionsOfPrincipalTx(ctx, tx, principal, now.UnixMilli()); err != nil {"
+      mutation: "an admin disable no longer revokes the standing permissions"
+      killed_by:
+        - internal/db.TestS2C9_CancelFailureFailsTheChange
+        - internal/pa.TestS2C9_CancelledCardAnswersCancelled
+        - internal/db.TestS2C9_NothingCancelledQueuesNoNotice
+        - internal/db.TestS2C9_PrincipalEndCancelsOnEveryConnection
+      red: |-
+        --- FAIL: TestS2C9_PrincipalEndCancelsOnEveryConnection (0.02s)
+        --- FAIL: TestS2C9_NothingCancelledQueuesNoNotice (0.04s)
+        --- FAIL: TestS2C9_CancelFailureFailsTheChange (0.17s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.813s
+        --- FAIL: TestS2C9_CancelledCardAnswersCancelled (0.07s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.630s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
+    - id: P2S12-C9g
+      guard: internal/db/pa_convo.go:326
+      guard_text: "if err := revokePAPermissionsOfPrincipalTx(ctx, tx, principal, nowMS); err != nil {"
+      mutation: "/forget and consent withdrawal no longer revoke the standing permissions"
+      killed_by:
+        - internal/db.TestS2C9_CancelFailureFailsTheChange
+        - internal/pa.TestS2C9_ForgetAndWithdrawCancel
+        - internal/db.TestS2C9_NothingCancelledQueuesNoNotice
+        - internal/db.TestS2C9_PrincipalEndCancelsOnEveryConnection
+      red: |-
+        --- FAIL: TestS2C9_PrincipalEndCancelsOnEveryConnection (0.03s)
+        --- FAIL: TestS2C9_NothingCancelledQueuesNoNotice (0.05s)
+        --- FAIL: TestS2C9_CancelFailureFailsTheChange (0.21s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.861s
+        --- FAIL: TestS2C9_ForgetAndWithdrawCancel (0.02s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.655s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
+    - id: P2S12-C9h
+      guard: internal/db/pa_approvals.go:374
+      guard_text: "where := `status IN ('pending', 'approved') AND ($2 = '' OR connection_id = $2)`"
+      mutation: "only pending approvals are cancelled, an approved one that was not dispatched stays approved"
+      killed_by:
+        - internal/pa.TestS2C9_CancelledCardAnswersCancelled
+        - internal/db.TestS2C9_ConnectionEndCancelsItsApprovalsAndPermissions
+        - internal/db.TestS2C9_PrincipalEndCancelsOnEveryConnection
+      red: |-
+        --- FAIL: TestS2C9_ConnectionEndCancelsItsApprovalsAndPermissions (0.03s)
+        --- FAIL: TestS2C9_PrincipalEndCancelsOnEveryConnection (0.02s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.829s
+        --- FAIL: TestS2C9_CancelledCardAnswersCancelled (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.650s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
+    - id: P2S12-C9i
+      guard: internal/db/pa_approvals.go:374
+      guard_text: "where := `status IN ('pending', 'approved') AND ($2 = '' OR connection_id = $2)`"
+      mutation: "the connection predicate is dropped: ending one connection cancels the approvals of every connection of the principal"
+      killed_by:
+        - internal/db.TestS2C9_ConnectionEndCancelsItsApprovalsAndPermissions
+      red: |-
+        --- FAIL: TestS2C9_ConnectionEndCancelsItsApprovalsAndPermissions (0.03s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.829s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
+    - id: P2S12-C9j
+      guard: internal/db/pa_approvals.go:380
+      guard_text: "WHERE principal = $1 AND `+where+` RETURNING id`"
+      mutation: "the principal predicate of the cancel is dropped: it cancels other principals' approvals"
+      killed_by:
+        - internal/db.TestS2C9_PrincipalEndCancelsOnEveryConnection
+      red: |-
+        --- FAIL: TestS2C9_PrincipalEndCancelsOnEveryConnection (0.03s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.838s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
+    - id: P2S12-C9k
+      guard: internal/db/pa_permissions.go:348
+      guard_text: "`UPDATE pa_permissions SET revoked_at_ms = $1 WHERE principal = $2 AND revoked_at_ms = 0`"
+      mutation: "the principal predicate of the principal-wide revoke is dropped: it revokes every principal's permissions"
+      killed_by:
+        - internal/db.TestS2C9_PrincipalEndCancelsOnEveryConnection
+      red: |-
+        --- FAIL: TestS2C9_PrincipalEndCancelsOnEveryConnection (0.03s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.828s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
+    - id: P2S12-C9l
+      guard: internal/db/pa_approvals.go:375
+      guard_text: "if err := deletePAApprovalCallbacks(ctx, tx, principal, where, connectionID); err != nil {"
+      mutation: "the cancel no longer deletes the callbacks of the cancelled approvals"
+      killed_by:
+        - internal/db.TestS2C9_CancelFailureFailsTheChange
+        - internal/pa.TestS2C9_CancelledCardAnswersCancelled
+        - internal/db.TestS2C9_ConnectionEndCancelsItsApprovalsAndPermissions
+        - internal/db.TestS2C9_PrincipalEndCancelsOnEveryConnection
+      red: |-
+        --- FAIL: TestS2C9_ConnectionEndCancelsItsApprovalsAndPermissions (0.03s)
+        --- FAIL: TestS2C9_PrincipalEndCancelsOnEveryConnection (0.03s)
+        --- FAIL: TestS2C9_CancelFailureFailsTheChange (0.17s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.851s
+        --- FAIL: TestS2C9_CancelledCardAnswersCancelled (0.07s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.642s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
+    - id: P2S12-C9m
+      guard: internal/db/pa_approvals.go:416
+      guard_text: "if err != nil || len(ids) == 0 {"
+      mutation: "no notice is queued for cancelled approvals"
+      killed_by:
+        - internal/db.TestS2C9_CancelFailureFailsTheChange
+        - internal/pa.TestS2C9_CancelledCardAnswersCancelled
+        - internal/db.TestS2C9_ConnectionEndCancelsItsApprovalsAndPermissions
+        - internal/pa.TestS2C9_ForgetAndWithdrawCancel
+        - internal/db.TestS2C9_PrincipalEndCancelsOnEveryConnection
+      red: |-
+        --- FAIL: TestS2C9_ConnectionEndCancelsItsApprovalsAndPermissions (0.03s)
+        --- FAIL: TestS2C9_PrincipalEndCancelsOnEveryConnection (0.03s)
+        --- FAIL: TestS2C9_CancelFailureFailsTheChange (0.18s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.816s
+        --- FAIL: TestS2C9_CancelledCardAnswersCancelled (0.06s)
+        --- FAIL: TestS2C9_ForgetAndWithdrawCancel (0.02s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.638s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
+    - id: P2S12-C9n
+      guard: internal/db/pa_connections.go:632
+      guard_text: "if err := cancelPAApprovalsOfConnTx(ctx, tx, principal, id, nowMS); err != nil {\n\t\treturn connection.Connection{}, connection.Sealed{}, false, err"
+      mutation: "a failed cancellation no longer fails /disconnect: the revocation commits without it"
+      killed_by:
+        - internal/db.TestS2C9_CancelFailureFailsTheChange
+      red: |-
+        --- FAIL: TestS2C9_CancelFailureFailsTheChange (0.18s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.819s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
+    - id: P2S12-C9o
+      guard: internal/db/pa_approvals.go:379
+      guard_text: "`UPDATE pa_approvals SET status = 'cancelled', sealed_args = NULL, finished_at_ms = $3, updated_at_ms = $3\n\t\t WHERE principal = $1 AND `+where"
+      mutation: "a cancelled approval keeps its sealed arguments"
+      killed_by:
+        - internal/pa.TestS2C9_CancelledCardAnswersCancelled
+        - internal/db.TestS2C9_ConnectionEndCancelsItsApprovalsAndPermissions
+        - internal/db.TestS2C9_PrincipalEndCancelsOnEveryConnection
+      red: |-
+        --- FAIL: TestS2C9_ConnectionEndCancelsItsApprovalsAndPermissions (0.03s)
+        --- FAIL: TestS2C9_PrincipalEndCancelsOnEveryConnection (0.03s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.856s
+        --- FAIL: TestS2C9_CancelledCardAnswersCancelled (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.640s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
+    - id: P2S12-C9p
+      guard: internal/db/pa_principal_disable.go:69
+      guard_text: "if _, err := cancelPAApprovalsWithNotice(ctx, tx, principal, now.UnixMilli(), \"\"); err != nil {"
+      mutation: "a failed cancellation no longer fails the admin disable"
+      killed_by:
+        - internal/db.TestS2C9_CancelFailureFailsTheChange
+      red: |-
+        --- FAIL: TestS2C9_CancelFailureFailsTheChange (0.18s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.839s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.939s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.668s
+  gaps:
+    - half: "not wired at runtime: nothing in cmd/server constructs connector.Cards, a WriteExecutor or pa.PermissionCommands (TestNoRuntimePhase2Use), so a deployed service has no approval and no permission row and these statements run on empty tables; the switch-on is P2-S14"
+      tracked_by: "#1323"
+    - half: "the /disconnect command itself: the tests end the connection through connection.Manager.Disconnect and the store, not through the webhook's command, which the dispatch harness does not wire"
+      tracked_by: "#1320"
+    - half: "Postgres: an approval or a permission committed by a transaction concurrent with the change is not seen by it. CreatePAApproval takes no lock on the connection row, and the admin disable takes no principal lock, so such an approval stays pending; the consume still refuses it (revision, disabled principal) and it expires in five minutes, but its card answers the refusal, not \"cancelled\", and no notice is queued. No concurrent test exists"
+      tracked_by: "#1320"
+    - half: "queued jobs are not cancelled by /disconnect (threat model T2 step 4 names them): a job is bound to no connection, and its next call on the ended connection is refused by the revision check (#1318)"
+      tracked_by: "#1320"
+    - half: "owner decision: a consent withdrawal, /forget and an admin disable revoke the standing permissions, so they do not come back with a new consent or a re-enable. The owner decided the approvals and had not decided the permissions"
+      tracked_by: "#1320"
+    - half: "after /forget and a consent withdrawal the approval rows are deleted, so a tap on such a card is answered as an unknown button, and a disabled principal's tap is answered by the disable refusal: the \"cancelled\" answer is given after a connection ended only"
+      tracked_by: "#1320"
+    - half: "the audit chain has no record of a cancellation or of a permission revoked this way: the rows (status, finished_at_ms, revoked_at_ms) and the notice are the only trace"
+      tracked_by: "#1320"
 
 S2-C10:
   status: green
@@ -152,7 +481,7 @@ S2-C10:
     - internal/db.TestS2C10_OldAuthorityRevisionIsRefused
   mutations:
     - id: P2S2-C10a
-      guard: internal/db/pa_approvals.go:441
+      guard: internal/db/pa_approvals.go:510
       guard_text: "AND c.authority_revision = pa_approvals.authority_revision)"
       mutation: "the consume no longer compares the connection's authority_revision with the bound one: predicate -> `AND 1 = 1`"
       killed_by:
@@ -164,7 +493,7 @@ S2-C10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	1.027s
     - id: P2S2-C10b
-      guard: internal/db/pa_approvals.go:440
+      guard: internal/db/pa_approvals.go:509
       guard_text: "AND c.state = $6"
       mutation: "the consume no longer requires the connection to be active: `AND c.state = $6` -> `AND $6 = $6`"
       killed_by:
@@ -241,7 +570,7 @@ S2-C12:
     - internal/pa.TestS2C12_StaleSweepOwnsTheRecord
   mutations:
     - id: P2S2-C12a
-      guard: internal/db/pa_approvals.go:547
+      guard: internal/db/pa_approvals.go:616
       guard_text: "WHERE status = $3 AND lease_until_ms <= $2"
       mutation: "the restart sweep ignores the lease: `AND lease_until_ms <= $2` -> `AND $2 = $2`"
       killed_by:
@@ -253,7 +582,7 @@ S2-C12:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.830s
     - id: P2S2-C12b
-      guard: internal/db/pa_approvals.go:497
+      guard: internal/db/pa_approvals.go:566
       guard_text: "SET status = 'done', finished_at_ms = $1, updated_at_ms = $1"
       mutation: "a resolved dispatch makes its approval approved again instead of done"
       killed_by:
@@ -267,7 +596,7 @@ S2-C12:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.872s
     - id: P2S2-C12c
-      guard: internal/db/pa_approvals.go:509
+      guard: internal/db/pa_approvals.go:578
       guard_text: "AND id = $4 AND status = $5\n\t\t RETURNING `+paDispatchCols"
       mutation: "FinishPADispatch overwrites a dispatch that is no longer dispatching: `AND status = $5` -> `AND $5 = $5`"
       killed_by:
@@ -281,7 +610,7 @@ S2-C12:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.856s
     - id: P2S2-C12d
-      guard: internal/db/pa_approvals.go:547
+      guard: internal/db/pa_approvals.go:616
       guard_text: "WHERE status = $3 AND lease_until_ms <= $2"
       mutation: "the restart sweep moves records that are not dispatching: `WHERE status = $3` -> `WHERE $3 = $3`"
       killed_by:
@@ -293,7 +622,7 @@ S2-C12:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.851s
     - id: P2S2-C12e
-      guard: internal/db/pa_approvals.go:549
+      guard: internal/db/pa_approvals.go:618
       guard_text: "string(approval.DispatchOutcomeUnknown), nowMS, string(approval.DispatchDispatching))"
       mutation: "the restart sweep leaves a stale record dispatching instead of outcome_unknown"
       killed_by:
@@ -305,7 +634,7 @@ S2-C12:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	1.282s
     - id: P2S3-C12a
-      guard: internal/db/pa_approvals.go:574
+      guard: internal/db/pa_approvals.go:643
       guard_text: "if err := enqueueStaleWriteNotices(ctx, tx, out, nowMS); err != nil {"
       mutation: "the stale sweep queues no notice for the records it moved"
       killed_by:
@@ -370,7 +699,7 @@ S2-C13:
       tracked_by: "#1320"
     - half: "connector.PinFresh (P2-S4) is not wired: no WriteExecutor is built in cmd/server, and the Phase 2 pin is not loadable at runtime (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests; the switch-on is P2-S14"
       tracked_by: "#1323"
-    - half: "the /disconnect command end to end against an in-flight write, with its reply sent before the call returns (P2-S12)"
+    - half: "the /disconnect command end to end against an in-flight write, with its reply sent before the call returns (P2-S12 cancels what was not dispatched and added no such test)"
       tracked_by: "#1320"
 
 S2-X5:
@@ -381,7 +710,7 @@ S2-X5:
     - internal/pa.TestS2X5_AnotherPrincipalsButtonIsUnknown
   mutations:
     - id: P2S5-X5a
-      guard: internal/db/pa_convo.go:509
+      guard: internal/db/pa_convo.go:518
       guard_text: "DELETE FROM pa_callbacks WHERE principal = $1 AND id = $2 AND expires_at_ms > $3 RETURNING action"
       mutation: "the callback is consumed by id only: `principal = $1` -> `$1 = $1` in ConsumePACallback, so another principal's press deletes the owner's button"
       killed_by:
@@ -393,7 +722,7 @@ S2-X5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.690s
     - id: P2S5-X5b
-      guard: internal/db/pa_approvals.go:237
+      guard: internal/db/pa_approvals.go:239
       guard_text: "WHERE principal = $1 AND (approve_cb_id = $2 OR cancel_cb_id = $3)"
       mutation: "the approval is looked up by callback id only: `principal = $1` -> `$1 = $1` in LookupPAApprovalByCallback, so another principal is told about the owner's approval"
       killed_by:
@@ -494,7 +823,7 @@ S2-I6:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.682s
     - id: P2S7-I6b
-      guard: internal/db/pa_convo.go:404
+      guard: internal/db/pa_convo.go:413
       guard_text: 'UPDATE pa_conversations SET tainted = 1 WHERE id = $1'
       mutation: "AppendPAFragment taint UPDATE made a no-op: `SET tainted = 1` -> `SET tainted = tainted`"
       killed_by:
@@ -632,7 +961,7 @@ S2-I8:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.447s
     - id: P2S7-I8b
-      guard: internal/db/pa_convo.go:404
+      guard: internal/db/pa_convo.go:413
       guard_text: 'UPDATE pa_conversations SET tainted = 1 WHERE id = $1'
       mutation: "a statement that lowers the flag: `SET tainted = 1` -> `SET tainted = 0`"
       killed_by:
@@ -685,7 +1014,7 @@ S2-I10:
     - internal/pa.TestS2I10_DispatchTaintFromConversation
   mutations:
     - id: P2S7-I10a
-      guard: internal/db/pa_convo.go:434
+      guard: internal/db/pa_convo.go:443
       guard_text: 'return true, rowRead("conversation taint", err)'
       mutation: "ReadPAConversationTaint read error returns clean: `return true, rowRead(...)` -> `return false, rowRead(...)`"
       killed_by:
@@ -1647,7 +1976,7 @@ S2-A1:
     - internal/pa.TestS2A1_ExecutorConsumesBeforeTheCall
   mutations:
     - id: P2S2-A1a
-      guard: internal/db/pa_approvals.go:436
+      guard: internal/db/pa_approvals.go:505
       guard_text: "AND status = $5\n\t\t   AND expires_at_ms > $2"
       mutation: "the receipt compare-and-set no longer requires status = approved: `AND status = $5` -> `AND $5 = $5` in ConsumePAApproval"
       killed_by:
@@ -1664,7 +1993,7 @@ S2-A1:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	1.041s
     - id: P2S2-A1b
-      guard: internal/db/pa_approvals.go:481
+      guard: internal/db/pa_approvals.go:550
       guard_text: "if n != 1 {\n\t\t// A dispatch already holds"
       mutation: "a dispatch insert that conflicted on the idempotency key is accepted: `if n != 1` -> `if n > 1` in ConsumePAApproval"
       killed_by:
@@ -1699,7 +2028,7 @@ S2-A2:
     - internal/db.TestS2A2_ExpiredApprovalIsRefused
   mutations:
     - id: P2S2-A2a
-      guard: internal/db/pa_approvals.go:437
+      guard: internal/db/pa_approvals.go:506
       guard_text: "AND expires_at_ms > $2\n\t\t   AND EXISTS (SELECT 1 FROM pa_connections c"
       mutation: "the consume no longer checks the expiry: `AND expires_at_ms > $2` -> `AND $2 = $2`"
       killed_by:
@@ -1711,7 +2040,7 @@ S2-A2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.884s
     - id: P2S2-A2b
-      guard: internal/db/pa_approvals.go:437
+      guard: internal/db/pa_approvals.go:506
       guard_text: "AND expires_at_ms > $2\n\t\t   AND EXISTS (SELECT 1 FROM pa_connections c"
       mutation: "the consume accepts an approval at its expiry: `expires_at_ms > $2` -> `expires_at_ms >= $2`"
       killed_by:
@@ -1723,7 +2052,7 @@ S2-A2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.852s
     - id: P2S2-A2c
-      guard: internal/db/pa_approvals.go:317
+      guard: internal/db/pa_approvals.go:319
       guard_text: "AND id = $4 AND status = $5 AND expires_at_ms > $2"
       mutation: "ApprovePAApproval no longer checks the expiry: `AND expires_at_ms > $2` -> `AND $2 = $2`"
       killed_by:
@@ -1735,7 +2064,7 @@ S2-A2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.764s
     - id: P2S2-A2d
-      guard: internal/db/pa_approvals.go:205
+      guard: internal/db/pa_approvals.go:207
       guard_text: "a.CreatedAt.Add(approval.TTL).UnixMilli()"
       mutation: "CreatePAApproval stores the caller's expiry instead of created + TTL"
       killed_by:
@@ -1796,7 +2125,7 @@ S2-A4:
     - internal/db.TestS2A4_OtherPrincipalIsRefused
   mutations:
     - id: P2S2-A4a
-      guard: internal/db/pa_approvals.go:435
+      guard: internal/db/pa_approvals.go:504
       guard_text: "WHERE principal = $3 AND id = $4\n\t\t   AND status = $5"
       mutation: "the consume is no longer keyed by principal: `WHERE principal = $3` -> `WHERE $3 = $3`"
       killed_by:
@@ -1808,7 +2137,7 @@ S2-A4:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.771s
     - id: P2S2-A4b
-      guard: internal/db/pa_approvals.go:317
+      guard: internal/db/pa_approvals.go:319
       guard_text: "AND id = $4 AND status = $5 AND expires_at_ms > $2"
       mutation: "ApprovePAApproval is no longer keyed by principal: `WHERE principal = $3` -> `WHERE $3 = $3`"
       killed_by:
@@ -1820,7 +2149,7 @@ S2-A4:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.865s
     - id: P2S2-A4c
-      guard: internal/db/pa_approvals.go:344
+      guard: internal/db/pa_approvals.go:346
       guard_text: "WHERE principal = $3 AND id = $4 AND status IN ($5, $6)"
       mutation: "Cancel/Refuse are no longer keyed by principal: `WHERE principal = $3` -> `WHERE $3 = $3` in endPAApproval"
       killed_by:
@@ -1832,7 +2161,7 @@ S2-A4:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.872s
     - id: P2S2-A4d
-      guard: internal/db/pa_approvals.go:227
+      guard: internal/db/pa_approvals.go:229
       guard_text: "FROM pa_approvals WHERE principal = $1 AND id = $2`, principal, id), nil)"
       mutation: "GetPAApproval is no longer keyed by principal: `WHERE principal = $1` -> `WHERE $1 = $1`"
       killed_by:
@@ -1844,7 +2173,7 @@ S2-A4:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.877s
     - id: P2S2-A4e
-      guard: internal/db/pa_approvals.go:237
+      guard: internal/db/pa_approvals.go:239
       guard_text: "WHERE principal = $1 AND (approve_cb_id = $2 OR cancel_cb_id = $3)"
       mutation: "LookupPAApprovalByCallback is no longer keyed by principal: `WHERE principal = $1` -> `WHERE $1 = $1`"
       killed_by:
@@ -2052,7 +2381,7 @@ S2-A7:
     - internal/pa.TestS2A7_ApproveStepRefusesAnApprovedRow
   mutations:
     - id: P2S5-A7a
-      guard: internal/db/pa_approvals.go:317
+      guard: internal/db/pa_approvals.go:319
       guard_text: "WHERE principal = $3 AND id = $4 AND status = $5 AND expires_at_ms > $2"
       mutation: "the approve step no longer requires status = pending: `AND status = $5` -> `AND $5 = $5` in ApprovePAApproval, so a restored button approves an approved row again"
       killed_by:
@@ -2064,7 +2393,7 @@ S2-A7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.528s
     - id: P2S5-A7b
-      guard: internal/pa/card.go:216
+      guard: internal/pa/card.go:215
       guard_text: "case approval.StatusApproved, approval.StatusDispatching, approval.StatusDone:\n\t\treturn c.reply(ctx, tx, u, ReplyApprovalAlreadyDone, \"\")"
       mutation: "a spent button of an approved card is answered unknown button instead of from the approval row"
       killed_by:
@@ -2164,7 +2493,7 @@ S2-A9:
     - internal/pa/gate.TestDecideNeverLowersWithoutEveryCondition
   mutations:
     - id: P2S10-A9a
-      guard: internal/db/pa_permissions.go:236
+      guard: internal/db/pa_permissions.go:238
       guard_text: "AND p.revoked_at_ms = 0 AND p.authority_revision = $5 AND p.expires_at_ms > $6"
       mutation: "the lookup no longer compares the revision: `p.authority_revision = $5` -> `$5 = $5`"
       killed_by:
@@ -2176,7 +2505,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.601s
     - id: P2S10-A9b
-      guard: internal/db/pa_permissions.go:236
+      guard: internal/db/pa_permissions.go:238
       guard_text: "AND p.revoked_at_ms = 0 AND p.authority_revision = $5 AND p.expires_at_ms > $6"
       mutation: "the lookup no longer compares the expiry: `p.expires_at_ms > $6` -> `$6 = $6`"
       killed_by:
@@ -2188,7 +2517,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.601s
     - id: P2S10-A9c
-      guard: internal/db/pa_permissions.go:200
+      guard: internal/db/pa_permissions.go:202
       guard_text: "AND cn.state = $3 AND cn.authority_revision = p.authority_revision"
       mutation: "the listing no longer requires the connection to be at the permission's revision: predicate -> `AND 1 = 1`"
       killed_by:
@@ -2200,7 +2529,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.601s
     - id: P2S10-A9d
-      guard: internal/db/pa_permissions.go:199
+      guard: internal/db/pa_permissions.go:201
       guard_text: "WHERE p.principal = $1 AND p.revoked_at_ms = 0 AND p.expires_at_ms > $2"
       mutation: "the listing no longer compares the expiry: `p.expires_at_ms > $2` -> `$2 = $2`"
       killed_by:
@@ -2296,7 +2625,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.633s
     - id: P2S11-A9g
-      guard: internal/db/pa_permissions.go:279
+      guard: internal/db/pa_permissions.go:281
       guard_text: "WHERE p.principal = $1 AND p.id = $2"
       mutation: "the in-transaction read returns a row of any principal"
       killed_by:
