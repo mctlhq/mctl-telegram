@@ -65,14 +65,93 @@ func TestIdentityAccounts_FailsClosed(t *testing.T) {
 	}
 }
 
-// alice has no account source, and an unconfigured or empty call is
-// refused before anything is sent.
+// alice's account is read with the new token through
+// alice_get_my_identity, and only the well-formed account id is taken. It
+// carries no Telegram id: nothing binds it to the principal.
+func TestIdentityAccounts_ReadsAliceAccountID(t *testing.T) {
+	f := &fakeServer{callResult: `{"content":[{"type":"text","text":"account_id: 700000001"}],"structuredContent":{"account_id":"700000001"}}`}
+	ep := testEndpoint(t, f)
+	ep.server = "alice"
+	src := IdentityAccounts{Endpoints: map[connection.Server]MCPEndpoint{connection.ServerAlice: ep}}
+	acct, err := src.Account(context.Background(), connection.ServerAlice, tok)
+	if err != nil {
+		t.Fatalf("Account: %v", err)
+	}
+	if acct.ID != "700000001" || acct.TelegramID != 0 || acct.DisplayName != "" {
+		t.Fatalf("account = %+v", acct)
+	}
+	if len(f.calls) != 1 || !strings.Contains(f.calls[0], `"name":"alice_get_my_identity"`) {
+		t.Fatalf("tools/call params = %v", f.calls)
+	}
+	for _, b := range f.bearers {
+		if b != "Bearer "+tok.Reveal() {
+			t.Errorf("request with bearer %q, want the new token only", b)
+		}
+	}
+	// The other id shapes mctl-alice issues.
+	for _, id := range []string{"iot_0a1b2c3d-0000-4000-8000-000000000001_9f8e7d", strings.Repeat("a", 128)} {
+		f.callResult = `{"structuredContent":{"account_id":"` + id + `"}}`
+		if acct, err := src.Account(context.Background(), connection.ServerAlice, tok); err != nil || acct.ID != id {
+			t.Errorf("%q: account %+v, err %v", id, acct, err)
+		}
+	}
+}
+
+// Anything but a successful result with a well-formed account_id string is
+// an error, never an account (I9). The id is printed on the confirm card,
+// so text that could read as a link, markup or a second line is refused.
+func TestIdentityAccounts_AliceFailsClosed(t *testing.T) {
+	bad := map[string]string{
+		"error result":       `{"isError":true,"structuredContent":{"account_id":"700000001"}}`,
+		"no structured":      `{"content":[{"type":"text","text":"account_id: 700000001"}]}`,
+		"null structured":    `{"structuredContent":null}`,
+		"structured not obj": `{"structuredContent":["700000001"]}`,
+		"no account_id":      `{"structuredContent":{"telegram_id":100001}}`,
+		"null account_id":    `{"structuredContent":{"account_id":null}}`,
+		"number":             `{"structuredContent":{"account_id":700000001}}`,
+		"empty":              `{"structuredContent":{"account_id":""}}`,
+		"too long":           `{"structuredContent":{"account_id":"` + strings.Repeat("a", 129) + `"}}`,
+		"space":              `{"structuredContent":{"account_id":"700 000"}}`,
+		"newline":            `{"structuredContent":{"account_id":"700\n000"}}`,
+		"link":               `{"structuredContent":{"account_id":"https://t.example/x"}}`,
+		"dot":                `{"structuredContent":{"account_id":"t.example"}}`,
+		"markup":             `{"structuredContent":{"account_id":"<b>7</b>"}}`,
+		"non ascii":          `{"structuredContent":{"account_id":"\u0430\u043b\u0438\u0441\u0430"}}`,
+		"result not object":  `[1]`,
+	}
+	for name, res := range bad {
+		f := &fakeServer{callResult: res}
+		ep := testEndpoint(t, f)
+		ep.server = "alice"
+		src := IdentityAccounts{Endpoints: map[connection.Server]MCPEndpoint{connection.ServerAlice: ep}}
+		if acct, err := src.Account(context.Background(), connection.ServerAlice, tok); err == nil {
+			t.Errorf("%s: account %+v, want an error", name, acct)
+		}
+	}
+	f := &fakeServer{status: 401}
+	ep := testEndpoint(t, f)
+	ep.server = "alice"
+	src := IdentityAccounts{Endpoints: map[connection.Server]MCPEndpoint{connection.ServerAlice: ep}}
+	if _, err := src.Account(context.Background(), connection.ServerAlice, tok); !errors.Is(err, ErrMCPUnauthorized) {
+		t.Errorf("401: %v", err)
+	}
+}
+
+// A server with no identity source is refused, and an unconfigured or
+// empty call is refused before anything is sent.
 func TestIdentityAccounts_UnsupportedAndUnconfigured(t *testing.T) {
 	f := &fakeServer{}
 	ep := testEndpoint(t, f)
 	src := IdentityAccounts{Endpoints: map[connection.Server]MCPEndpoint{connection.ServerTG: ep, connection.ServerAlice: ep}}
-	if _, err := src.Account(context.Background(), connection.ServerAlice, tok); !errors.Is(err, ErrAccountSourceUnsupported) {
-		t.Errorf("alice: %v", err)
+	if _, err := src.Account(context.Background(), connection.Server("glovo"), tok); !errors.Is(err, ErrAccountSourceUnsupported) {
+		t.Errorf("a server without an identity source: %v", err)
+	}
+	// The alice call must not go to the tg endpoint, nor run unconfigured.
+	if _, err := src.Account(context.Background(), connection.ServerAlice, tok); !errors.Is(err, ErrAccountSourceConfig) {
+		t.Errorf("alice wired to the tg endpoint: %v", err)
+	}
+	if _, err := (IdentityAccounts{}).Account(context.Background(), connection.ServerAlice, tok); !errors.Is(err, ErrAccountSourceConfig) {
+		t.Errorf("alice with no endpoint: %v", err)
 	}
 	// A missing tg endpoint is a configuration fault, never reported as
 	// "tg is unsupported".

@@ -122,9 +122,12 @@ var paHostFormat = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]
 //     (issuer, token, revocation, MCP) must be on its allowlist;
 //   - with any server enabled, the KEK must build (connection.NewKEK) and
 //     the linking settings must be complete, with PA_APP_URL exactly
-//     PUBLIC_BASE_URL + PAAppPath;
-//   - alice cannot be enabled: it has no account source yet, so a link
-//     would be refused only after the code exchange.
+//     PUBLIC_BASE_URL + PAAppPath.
+//
+// alice is enabled like any other server. Its accounts are not Telegram
+// identities, so turning its flag on needs the owner's recorded acceptance
+// of that residual for the environment (threat model T1, S1-L14); the flag
+// is that decision, and nothing here can check it.
 //
 // Errors name the variable, never its value.
 func LoadPATools(c *Config, getenv func(string) string) (*PATools, error) {
@@ -141,9 +144,6 @@ func LoadPATools(c *Config, getenv func(string) string) (*PATools, error) {
 	}
 	if !t.AnyEnabled() {
 		return t, nil
-	}
-	if t.Servers[connection.ServerAlice].Enabled {
-		return nil, fmt.Errorf("%s=true is not supported: alice has no account source, so its links cannot be verified", PAServerEnv(connection.ServerAlice, "ENABLED"))
 	}
 	base, err := paPublicBase(c.PublicBaseURL)
 	if err != nil {
