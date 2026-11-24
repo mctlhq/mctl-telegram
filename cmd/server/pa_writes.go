@@ -53,14 +53,17 @@ import (
 // to start when a listed tool of an enabled server is not an approve-tier
 // tool of the Phase 2 pin or has no card path (connector.Cards.CardPath),
 // so a missing reader is a refused start and not a tool that fails on
-// every call. Not listed today, and so never offered: alice_set_light (no
-// light reader), alice_trigger_scenario (no scenario reader),
-// alice_control_device and alice_control_room (no card).
+// every call. Not listed today, and so never offered:
+// alice_trigger_scenario (no scenario reader), alice_control_device and
+// alice_control_room (no card).
 //
 // A variable only so the wiring tests can list a tool that must refuse the
 // start; nothing else assigns it.
 var paWriteTools = map[connection.Server][]string{
-	connection.ServerAlice: {"alice_media_control", "alice_say_phrase", "alice_send_command", "alice_set_volume"},
+	connection.ServerAlice: {
+		"alice_media_control", "alice_play_music", "alice_say_phrase", "alice_send_command",
+		"alice_set_light", "alice_set_volume",
+	},
 }
 
 // paWriteGate decides, inside the claim transaction, which of a
@@ -177,7 +180,9 @@ func buildPAWrites(cfg *config.Config, pt *paTools, store *db.Store, sender paBo
 	}
 	endpoints := map[string]connector.WriteEndpoint{}
 	speakers := map[string]connector.SpeakerReader{}
+	lights := map[string]connector.LightReader{}
 	devices := map[string]connector.DeviceLister{}
+	var grantDevices permissions.DeviceReader
 	for _, server := range pt.servers {
 		listed := paWriteTools[server]
 		if len(listed) == 0 {
@@ -191,13 +196,19 @@ func buildPAWrites(cfg *config.Config, pt *paTools, store *db.Store, sender paBo
 		endpoints[name] = ep
 		if server == connection.ServerAlice {
 			// One reader of the structured device listing: the card reads
-			// the speaker through it and the executor reads the device
-			// again before it sends.
+			// the speaker or the light through it, the executor reads the
+			// device again before it sends, and a grant reads the devices
+			// it lists.
 			r, err := connector.NewAliceDevices(pin, pt.endpoints[name])
 			if err != nil {
 				return nil, fmt.Errorf("pa writes: %w", err)
 			}
-			speakers[name], devices[name] = r, r
+			speakers[name], lights[name], devices[name] = r, r, r
+			g, err := connector.NewGrantDevices(r, pt.manager)
+			if err != nil {
+				return nil, fmt.Errorf("pa writes: %w", err)
+			}
+			grantDevices = g
 		}
 		w.tools[server] = slices.Sorted(slices.Values(listed))
 	}
@@ -216,11 +227,11 @@ func buildPAWrites(cfg *config.Config, pt *paTools, store *db.Store, sender paBo
 	if err != nil {
 		return nil, fmt.Errorf("pa writes: %w", err)
 	}
-	// Lights and Scenarios stay nil: paWriteTools lists none of their
-	// tools, and every call of one is refused. A light reader exists
-	// (connector.AliceDevices); a scenario reader does not.
+	// Scenarios stays nil until a reader of scenario steps exists: every
+	// call of alice_trigger_scenario is refused, and paWriteTools does not
+	// list it.
 	w.cards, err = connector.NewCards(connector.CardConfig{
-		Store: store, Sealer: sealer, Pin: pin, Fresh: fresh, Speakers: speakers,
+		Store: store, Sealer: sealer, Pin: pin, Fresh: fresh, Speakers: speakers, Lights: lights,
 		Permissions: store, Lowered: w.executor,
 		Deliver: func(ctx context.Context, principal int64) { w.deliverTo(ctx, principal) },
 	})
@@ -243,12 +254,12 @@ func buildPAWrites(cfg *config.Config, pt *paTools, store *db.Store, sender paBo
 	policy := permissions.PinPolicy{Pin: pin}
 	writes := func() (bool, error) { return paWritesEnabled(pt.flags) }
 	w.permissions = &pa.PermissionsConfig{Grants: store, Policy: policy, Writes: writes}
-	// Devices is nil, so every grant is refused devices_unread; listing
-	// and revoking work. The reader a grant needs exists
-	// (connector.GrantDevices) and is not wired here yet (S2-D5).
+	// A grant reads the devices it lists through grantDevices. It is nil
+	// only when no enabled server has such a reader; the Validator then
+	// refuses every grant devices_unread (S2-D5), which is fail closed.
 	w.commands = &pa.PermissionCommands{
 		Store: store, Sender: sender, Writes: writes,
-		Validator: &permissions.Validator{Policy: policy, Rule: permissions.Rules{}},
+		Validator: &permissions.Validator{Policy: policy, Devices: grantDevices, Rule: permissions.Rules{}},
 	}
 	w.gate = newPAWriteGate(store, writes)
 	offered := slices.Sorted(maps.Keys(w.approveTools))

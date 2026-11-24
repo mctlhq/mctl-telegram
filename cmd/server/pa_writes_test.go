@@ -93,6 +93,13 @@ func (a *paFakeAlice) CallToolExact(_ context.Context, _ connection.Secret, tool
 	return []byte(`{"content":[{"type":"text","text":"done"}]}`), nil
 }
 
+// read is every tool read so far, in order.
+func (a *paFakeAlice) read() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Clone(a.reads)
+}
+
 func (a *paFakeAlice) sent() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -437,6 +444,35 @@ func TestPAWrites_EndToEnd(t *testing.T) {
 			}
 		})
 	})
+	t.Run("a grant reads the devices it lists", func(t *testing.T) {
+		forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
+			e := newPAWritesE2E(t, store, conn, "true")
+			grants := func() int { return e.count(`SELECT COUNT(*) FROM pa_permissions WHERE principal = $1`, e.user) }
+			// A device the server does not list: read, and refused.
+			e.text("/permissions grant alice_set_volume spk-attic-0009 5")
+			if s := e.last(); len(s.buttons) != 0 || s.button != "" || grants() != 0 {
+				t.Fatalf("a grant for an unlisted device: %+v, %d rows", s, grants())
+			}
+			// The listed speaker: a screen with a button, then one row.
+			reads := len(e.alice.read())
+			e.text("/permissions grant alice_set_volume " + paKitchenID + " 5")
+			screen := e.last()
+			if !strings.Contains(screen.text, paKitchenID) || (screen.button == "" && len(screen.buttons) == 0) {
+				t.Fatalf("grant screen: %+v", screen)
+			}
+			if len(e.alice.read()) == reads {
+				t.Fatal("the grant read no device listing")
+			}
+			button := screen.button
+			if button == "" {
+				button = screen.buttons[0]
+			}
+			e.press(button)
+			if grants() != 1 {
+				t.Fatalf("%d permission rows after the press: %+v", grants(), e.last())
+			}
+		})
+	})
 	t.Run("a drifted definition gets no card", func(t *testing.T) {
 		forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
 			e := newPAWritesE2E(t, store, conn, "true")
@@ -566,7 +602,7 @@ func TestPAWrites_OfferedByGate(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = tx.Rollback() })
 	const carol = 4242003
-	all := []string{"alice/alice_media_control", "alice/alice_say_phrase", "alice/alice_send_command", "alice/alice_set_volume"}
+	all := []string{"alice/alice_media_control", "alice/alice_play_music", "alice/alice_say_phrase", "alice/alice_send_command", "alice/alice_set_light", "alice/alice_set_volume"}
 	on := func() connector.Flags {
 		return connector.Flags{ExternalTools: true, Writes: true, Servers: map[string]bool{"alice": true}, ServerErrs: map[string]error{}}
 	}
@@ -591,7 +627,7 @@ func TestPAWrites_OfferedByGate(t *testing.T) {
 	}
 	// The gate narrows the list and cannot add to it.
 	gate.set(func(g *paTestGate) {
-		g.only = []string{paSayTool, "alice_set_light", "alice_list_devices", "tg_send_message"}
+		g.only = []string{paSayTool, "alice_trigger_scenario", "alice_list_devices", "tg_send_message"}
 	})
 	if got, why := offered(w, on(), alice); !slices.Equal(got, []string{"alice/" + paSayTool}) || why != "" {
 		t.Fatalf("a gate that offers one tool and three unlisted: %v %q", got, why)
@@ -693,7 +729,7 @@ func TestPAWrites_GateDecidesTheClaim(t *testing.T) {
 		tools []string
 		hint  string
 	}{
-		"everything":            {func(*paTestGate) {}, []string{"alice/alice_media_control", "alice/alice_say_phrase", "alice/alice_send_command", "alice/alice_set_volume"}, ""},
+		"everything":            {func(*paTestGate) {}, []string{"alice/alice_media_control", "alice/alice_play_music", "alice/alice_say_phrase", "alice/alice_send_command", "alice/alice_set_light", "alice/alice_set_volume"}, ""},
 		"one tool":              {func(g *paTestGate) { g.only = []string{paSayTool} }, []string{"alice/" + paSayTool}, ""},
 		"nothing, no reason":    {func(g *paTestGate) { g.only = []string{} }, nil, ""},
 		"no consent to actions": {func(g *paTestGate) { g.withheld = pa.ActionsHintConsent }, nil, pa.ActionsHintConsent},
@@ -742,7 +778,7 @@ func TestPAWrites_GateDecidesTheClaim(t *testing.T) {
 // list is a change of what a model can ask for.
 func TestPAWriteTools_Table(t *testing.T) {
 	want := map[connection.Server][]string{
-		connection.ServerAlice: {"alice_media_control", "alice_say_phrase", "alice_send_command", "alice_set_volume"},
+		connection.ServerAlice: {"alice_media_control", "alice_play_music", "alice_say_phrase", "alice_send_command", "alice_set_light", "alice_set_volume"},
 	}
 	if len(paWriteTools) != len(want) {
 		t.Fatalf("servers %v", paWriteTools)
@@ -786,14 +822,13 @@ func TestBuildPAWrites_RefusesAHalfWiredStart(t *testing.T) {
 		tools []string
 	}{
 		"an endpoint that cannot send approved bytes": {ep: func() connector.MCPEndpoint { return paReadOnlyAlice{inner: &paFakeAlice{}} }},
-		// alice_set_light needs a light reader and alice_trigger_scenario
-		// a scenario reader; neither exists.
-		"a tool whose reader is missing":   {tools: []string{"alice_set_light"}},
-		"a scenario tool with no reader":   {tools: []string{"alice_trigger_scenario"}},
+		// alice_trigger_scenario needs a reader of scenario steps; none
+		// exists.
+		"a tool whose reader is missing":   {tools: []string{"alice_trigger_scenario"}},
 		"a tool with no card":              {tools: []string{"alice_control_device"}},
 		"a tool the Phase 2 pin lacks":     {tools: []string{"alice_open_the_door"}},
 		"a read tool listed as a write":    {tools: []string{"alice_list_devices"}},
-		"one good tool and one without it": {tools: []string{paSayTool, "alice_set_light"}},
+		"one good tool and one without it": {tools: []string{paSayTool, "alice_trigger_scenario"}},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
