@@ -152,6 +152,23 @@ var (
 	TextCardArgs     = tpl("What will be sent (in links and addresses a dot, colon or @ is shown in brackets, like [.], so that they cannot be opened from this message):", "Что будет отправлено (в ссылках и адресах точка, двоеточие и @ показаны в скобках, например [.], чтобы их нельзя было открыть из этого сообщения):")
 	TextCardExternal = tpl("Warning: this conversation contains content that did not come from you (forwarded text or results read from a service). The values above may come from that content. Check them carefully.", "Внимание: в этом разговоре есть содержимое, которое пришло не от вас (пересланный текст или результаты, прочитанные из сервиса). Значения выше могут быть взяты из него. Проверьте их внимательно.")
 	TextCardFoot     = tpl("The buttons work once and stop working within 5 minutes.", "Кнопки срабатывают один раз и перестают действовать не позже чем через 5 минут.")
+	// The card of a disclosure (#1322 slice P2-S6, threat model T6):
+	// DisclosureCard adds the target speaker, as the service listed it
+	// when the card was made, and the full text on a line of its own.
+	// TextCardRoomWarning is on the card of a text that is said aloud.
+	TextCardSpeaker     = tpl("Speaker:", "Колонка:")
+	TextCardHome        = tpl("Home:", "Дом:")
+	TextCardHomeUnknown = tpl("not reported by the service", "сервис не сообщил")
+	TextCardRoom        = tpl("Room:", "Комната:")
+	TextCardDeviceName  = tpl("Name:", "Название:")
+	TextCardDeviceID    = tpl("Device id:", "Идентификатор устройства:")
+	TextCardPhrase      = tpl("Text the speaker will say aloud:", "Текст, который колонка произнесёт вслух:")
+	TextCardCommand     = tpl("Command the speaker will carry out as if it was said to it:", "Команда, которую колонка выполнит так, как если бы её произнесли:")
+	TextCardRoomWarning = tpl("Warning: everyone in the room will hear it, and it cannot be undone.", "Внимание: это услышат все, кто находится в комнате, и отменить это нельзя.")
+	// TextDisclosureTooLong refuses a disclosure whose text is over the
+	// cap (S2-D3). Nothing was sent and no card was made; the text is never
+	// cut or split by the server.
+	TextDisclosureTooLong = tpl("The text for the speaker is longer than 1000 characters, so nothing was sent. Ask for it in parts of up to 1000 characters; you approve each part separately.", "Текст для колонки длиннее 1000 символов, поэтому ничего не отправлено. Попросите передать его частями до 1000 символов: каждую часть вы подтверждаете отдельно.")
 	// The answers to a card's buttons. A button of a card that already
 	// ended is answered from the approval's own state, for its owner only.
 	TextApprovalCancelled   = tpl("Cancelled. Nothing was sent.", "Отменено. Ничего не отправлено.")
