@@ -60,6 +60,10 @@ const (
 	OutboxRequestDropped OutboxKind = "request_dropped"
 	// OutboxPrincipalStopped is NoticePrincipalDisabled.
 	OutboxPrincipalStopped OutboxKind = "principal_stopped"
+	// OutboxDisclosureTooLong tells the principal, once per job, that a
+	// text for a speaker was over the cap and was not sent, and offers to
+	// send it in parts (#1322 slice P2-S6, S2-D3). No card was made.
+	OutboxDisclosureTooLong OutboxKind = "disclosure_too_long"
 )
 
 // Conversation-level kinds (#1348), one per pa.Reply, with the same names.
@@ -189,7 +193,8 @@ func OutboxKinds() []OutboxKind {
 }
 
 func jobOutboxKinds() []OutboxKind {
-	return []OutboxKind{OutboxReply, OutboxReplyTooLong, OutboxBudgetHold, OutboxRunFailed, OutboxRequestDropped, OutboxPrincipalStopped}
+	return []OutboxKind{OutboxReply, OutboxReplyTooLong, OutboxBudgetHold, OutboxRunFailed, OutboxRequestDropped, OutboxPrincipalStopped,
+		OutboxDisclosureTooLong}
 }
 
 // ConversationOutboxKinds lists the conversation-level kinds.

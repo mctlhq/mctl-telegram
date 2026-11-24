@@ -43,9 +43,10 @@ var fieldUsers = map[string]bool{
 	"Template.In": true,
 	"Text.In":     true,
 	"WithRussian": true,
-	// The approval card (card.go): registry templates around two values
-	// that are neutralised like model text.
-	"Card": true,
+	// The approval card (card.go): registry templates around values that
+	// are neutralised like model text. card is the one builder behind
+	// Card and DisclosureCard.
+	"card": true,
 	// The /permissions screens (permission.go): registry templates around
 	// values held to a plain alphabet.
 	"PermissionScreen": true,

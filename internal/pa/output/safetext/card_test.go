@@ -88,7 +88,7 @@ func TestCard_LinksAreDefanged(t *testing.T) {
 // TestCard_ServerTextIsNotDefanged: the templates hold no link token of
 // their own, so the pass over the whole card leaves them as written.
 func TestCard_ServerTextIsNotDefanged(t *testing.T) {
-	for _, tp := range CardTemplates() {
+	for _, tp := range append(CardTemplates(), DisclosureCardTemplates()...) {
 		for _, l := range []Lang{LangEN, LangRU} {
 			if s := tp.In(l); neutralise(s, UserText{}) != s || s == "" {
 				t.Errorf("template %q changes under neutralise or is empty", s)
@@ -137,5 +137,95 @@ func TestCard_OneMessageOrNone(t *testing.T) {
 	}
 	if _, err := Card("send_message", fits[:len(fits)-2]+`a"}`, true); !errors.Is(err, ErrTooLong) {
 		t.Fatalf("one over: err = %v, want ErrTooLong", err)
+	}
+}
+
+func testDisclosure() Disclosure {
+	return Disclosure{Home: "Alice home", Room: "Kitchen", Name: "Kitchen speaker", ID: "spk-kitchen-0001",
+		Phrase: "Dinner is ready", Spoken: true}
+}
+
+const disclosureArgs = `{"device":"spk-kitchen-0001","phrase":"Dinner is ready"}`
+
+// TestDisclosureCard_Layout is S2-D4 at the builder: the speaker, the
+// whole text on its own line, and the room warning for spoken text only.
+func TestDisclosureCard_Layout(t *testing.T) {
+	c, err := DisclosureCard("alice_say_phrase (alice)", disclosureArgs, testDisclosure(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := TextCardHead.String() + "\n\n" + TextCardAction.String() + "\nalice_say_phrase (alice)\n\n" +
+		TextCardSpeaker.String() + "\nHome: Alice home\nRoom: Kitchen\nName: Kitchen speaker\nDevice id: spk-kitchen-0001\n\n" +
+		TextCardPhrase.String() + "\nDinner is ready\n\n" + TextCardRoomWarning.String() + "\n\n" +
+		TextCardArgs.String() + "\n" + disclosureArgs + "\n\n" + TextCardFoot.String()
+	if got := c.String(); got != want {
+		t.Fatalf("card:\n got %q\nwant %q", got, want)
+	}
+	ru := c.In(LangRU).String()
+	for _, tp := range []Template{TextCardSpeaker, TextCardHome, TextCardRoom, TextCardDeviceName, TextCardDeviceID, TextCardPhrase, TextCardRoomWarning} {
+		if !strings.Contains(ru, tp.In(LangRU)) || tp.In(LangRU) == tp.In(LangEN) {
+			t.Errorf("Russian card lacks %q", tp.In(LangRU))
+		}
+	}
+	if !strings.Contains(ru, "\nDinner is ready\n") || !strings.Contains(ru, " spk-kitchen-0001\n") {
+		t.Fatalf("Russian card lacks the text or the id:\n%s", ru)
+	}
+
+	d := testDisclosure()
+	d.Spoken, d.Home = false, ""
+	c, err = DisclosureCard("alice_send_command (alice)", disclosureArgs, d, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := c.String()
+	if strings.Contains(got, TextCardRoomWarning.String()) || strings.Contains(got, TextCardPhrase.String()) ||
+		!strings.Contains(got, TextCardCommand.String()+"\nDinner is ready\n") {
+		t.Fatalf("command card:\n%s", got)
+	}
+	if !strings.Contains(got, "\nHome: "+TextCardHomeUnknown.String()+"\n") || !strings.Contains(got, TextCardExternal.String()) {
+		t.Fatalf("card without a home, with external content:\n%s", got)
+	}
+}
+
+// TestDisclosureCard_RefusesWhatItCannotShow: the text and the device id
+// are on the card exactly, or there is no card; nothing is cut.
+func TestDisclosureCard_RefusesWhatItCannotShow(t *testing.T) {
+	set := func(f func(*Disclosure)) Disclosure {
+		d := testDisclosure()
+		f(&d)
+		return d
+	}
+	for name, d := range map[string]Disclosure{
+		"no text":              set(func(d *Disclosure) { d.Phrase = "" }),
+		"two lines of text":    set(func(d *Disclosure) { d.Phrase = "one\ntwo" }),
+		"text with a link":     set(func(d *Disclosure) { d.Phrase = "open example.com" }),
+		"text with a mention":  set(func(d *Disclosure) { d.Phrase = "ask @example_bot" }),
+		"text ending in space": set(func(d *Disclosure) { d.Phrase = "Dinner " }),
+		"text with a bidi":     set(func(d *Disclosure) { d.Phrase = "a‮b" }),
+		"no id":                set(func(d *Disclosure) { d.ID = "" }),
+		"an id that is a link": set(func(d *Disclosure) { d.ID = "spk.example.com" }),
+		"no room":              set(func(d *Disclosure) { d.Room = "" }),
+		"no name":              set(func(d *Disclosure) { d.Name = "" }),
+		"a two-line name":      set(func(d *Disclosure) { d.Name = "Kitchen\nHome: Bob home" }),
+		"a two-line home":      set(func(d *Disclosure) { d.Home = "Alice home\nRoom: Bedroom" }),
+		"a defang mark":        set(func(d *Disclosure) { d.Room = "a[.]b" }),
+	} {
+		if _, err := DisclosureCard("alice_say_phrase (alice)", disclosureArgs, d, false); !errors.Is(err, ErrCardUnshowable) {
+			t.Errorf("%s: err = %v, want ErrCardUnshowable", name, err)
+		}
+	}
+	long := set(func(d *Disclosure) { d.Phrase = strings.Repeat("a", MaxPartUTF16) })
+	if _, err := DisclosureCard("alice_say_phrase (alice)", disclosureArgs, long, false); !errors.Is(err, ErrTooLong) {
+		t.Errorf("a text over one message: err = %v, want ErrTooLong", err)
+	}
+	// A link-like speaker name is shown defanged, as on any card; the text
+	// and the id are not touched by it.
+	named := set(func(d *Disclosure) { d.Name = "speaker.example.com" })
+	c, err := DisclosureCard("alice_say_phrase (alice)", disclosureArgs, named, false)
+	if err != nil || !strings.Contains(c.String(), "Name: speaker[.]example[.]com\n") {
+		t.Fatalf("link-like name: %v\n%s", err, c.String())
+	}
+	if !ContainsLink("see example.com") || ContainsLink("Dinner at 19:30. Table for 2!") {
+		t.Fatal("ContainsLink")
 	}
 }
