@@ -141,6 +141,13 @@ var (
 	TextWriteNotSent = tpl("The action you approved was not carried out. Ask again if you still want it.", "Действие, которое вы подтвердили, не выполнено. Попросите ещё раз, если оно всё ещё нужно.")
 	TextWriteFenced  = tpl("The action you approved was stopped because your connection or settings changed. It may already have happened: please check before asking again.", "Действие, которое вы подтвердили, остановлено, потому что изменилось подключение или настройки. Оно могло уже произойти: проверьте, прежде чем просить снова.")
 	TextWriteUnknown = tpl("The service did not confirm the action you approved. It may or may not have happened, and it will not be repeated automatically: please check before asking again.", "Сервис не подтвердил действие, которое вы подтвердили. Оно могло произойти, а могло и нет, и автоматически повторяться не будет: проверьте, прежде чем просить снова.")
+	// TextActionsCancelled tells the principal that approvals still waiting
+	// were cancelled by /disconnect, a connection that ended, a consent
+	// withdrawal, /forget or an admin disable (#1320 slice P2-S12, S2-C9).
+	// Only approvals that were never sent are cancelled that way, so the
+	// text may say nothing was sent; a call already on the wire gets
+	// TextWriteFenced or TextWriteUnknown instead.
+	TextActionsCancelled = tpl("Actions that were waiting for your approval or about to be carried out were cancelled, because your connection or settings changed. Nothing was sent for them.", "Действия, которые ждали вашего подтверждения или выполнения, отменены, потому что изменилось подключение или настройки. По ним ничего не отправлено.")
 	// The approval card (#1320 slice P2-S5, threat model T7, T14). Card
 	// puts them around the tool name and the exact arguments; nothing
 	// else of a card is server text. A card has two buttons, LabelApprove

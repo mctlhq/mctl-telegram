@@ -21,11 +21,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/approval"
 	"github.com/mctlhq/mctl-telegram/internal/pa/catalog"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
+	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 )
 
 var _ approval.Store = (*Store)(nil)
@@ -364,32 +366,91 @@ func (s *Store) RefusePAApproval(ctx context.Context, tx *sql.Tx, principal int6
 
 // cancelPAApprovals cancels every pending or approved approval of
 // principal, or only those bound to connectionID when it is not empty,
-// erasing their arguments and deleting their callbacks. A consumed
-// receipt is left as it is.
-func cancelPAApprovals(ctx context.Context, tx *sql.Tx, principal, nowMS int64, connectionID string) (int64, error) {
+// erasing their arguments and deleting their callbacks, and returns the
+// ids it cancelled. A consumed receipt is left as it is: a call on the
+// wire is ended by its executor's post-dispatch check (fenced) or by the
+// stale sweep (outcome_unknown), never by a cancel.
+func cancelPAApprovals(ctx context.Context, tx *sql.Tx, principal, nowMS int64, connectionID string) ([]string, error) {
 	where := `status IN ('pending', 'approved') AND ($2 = '' OR connection_id = $2)`
 	if err := deletePAApprovalCallbacks(ctx, tx, principal, where, connectionID); err != nil {
-		return 0, err
+		return nil, err
 	}
-	res, err := tx.ExecContext(ctx,
+	rows, err := tx.QueryContext(ctx,
 		`UPDATE pa_approvals SET status = 'cancelled', sealed_args = NULL, finished_at_ms = $3, updated_at_ms = $3
-		 WHERE principal = $1 AND `+where, principal, connectionID, nowMS)
+		 WHERE principal = $1 AND `+where+` RETURNING id`, principal, connectionID, nowMS)
 	if err != nil {
-		return 0, fmt.Errorf("cancel pa approvals: %w", err)
+		return nil, fmt.Errorf("cancel pa approvals: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, approvalUnreadable("cancel approvals: rows affected", err)
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, approvalUnreadable("cancel approvals: scan", err)
+		}
+		ids = append(ids, id)
 	}
-	return n, nil
+	if err := rows.Close(); err != nil {
+		return nil, approvalUnreadable("cancel approvals: close", err)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("cancel pa approvals: %w", err)
+	}
+	return ids, nil
 }
 
-// CancelPAApprovalsForConnection implements approval.Store.
+// cancelPAApprovalsWithNotice is cancelPAApprovals for a change the
+// principal did not make card by card: a connection that ended, a consent
+// withdrawal, /forget, an admin disable (#1320 slice P2-S12, S2-C9). When
+// it cancelled anything it queues, in tx, one jobs.OutboxActionsCancelled
+// notice for all of it, keyed on the smallest cancelled id: the outbox
+// holds one approval-level row per approval, so that approval can get no
+// second report, and the executor reports nothing for an approval somebody
+// else ended. When nothing was cancelled nothing is queued.
+//
+// Any failure fails tx: the caller's change (the revocation, the
+// withdrawal, the disable) does not commit without the cancellation, nor
+// the cancellation without its notice.
+func cancelPAApprovalsWithNotice(ctx context.Context, tx *sql.Tx, principal, nowMS int64, connectionID string) (int64, error) {
+	ids, err := cancelPAApprovals(ctx, tx, principal, nowMS, connectionID)
+	if err != nil || len(ids) == 0 {
+		return 0, err
+	}
+	if err := enqueuePAOutbox(ctx, tx, jobs.OutboxItem{
+		Principal: principal, Kind: jobs.OutboxActionsCancelled, ApprovalID: slices.Min(ids),
+	}, nowMS); err != nil {
+		return 0, fmt.Errorf("cancel pa approvals: notice: %w", err)
+	}
+	return int64(len(ids)), nil
+}
+
+// cancelPAApprovalsOfConnTx cancels, in tx, the approvals of principal that
+// are bound to the connection and were not dispatched, with their notice.
+// Every statement that changes a connection's authority revision calls it
+// in the transaction of that change, next to
+// revokePAPermissionsOfConnTx (threat model T2 "/disconnect" step 4): the
+// revision compare-and-set of the consume already refuses such an
+// approval, and this ends it, so its card answers "cancelled" and its
+// arguments are erased at once. A failure fails the change.
+func cancelPAApprovalsOfConnTx(ctx context.Context, tx *sql.Tx, principal int64, connectionID string, nowMS int64) error {
+	if connectionID == "" {
+		// An empty id would cancel every approval of the principal.
+		return fmt.Errorf("%w: cancel approvals of a connection", approval.ErrInvalid)
+	}
+	if _, err := cancelPAApprovalsWithNotice(ctx, tx, principal, nowMS, connectionID); err != nil {
+		return fmt.Errorf("pa connection: %w", err)
+	}
+	return nil
+}
+
+// CancelPAApprovalsForConnection implements approval.Store. It queues no
+// notice: the connection transitions use cancelPAApprovalsOfConnTx.
 func (s *Store) CancelPAApprovalsForConnection(ctx context.Context, tx *sql.Tx, principal int64, connectionID string, now time.Time) (int64, error) {
 	if tx == nil || principal <= 0 || connectionID == "" || now.IsZero() {
 		return 0, fmt.Errorf("%w: cancel approvals of a connection", approval.ErrInvalid)
 	}
-	return cancelPAApprovals(ctx, tx, principal, now.UnixMilli(), connectionID)
+	ids, err := cancelPAApprovals(ctx, tx, principal, now.UnixMilli(), connectionID)
+	return int64(len(ids)), err
 }
 
 // forgetPAApprovals deletes the principal's approvals and dispatch records
@@ -397,7 +458,15 @@ func (s *Store) CancelPAApprovalsForConnection(ctx context.Context, tx *sql.Tx, 
 // rows: they hold no arguments, and deleting them would erase the only
 // record that a write may have happened. FinishPADispatch or the stale
 // sweep ends them, and SweepPAState deletes them after that.
-func forgetPAApprovals(ctx context.Context, tx *sql.Tx, principal int64) error {
+//
+// What was still waiting is cancelled first, on every connection of the
+// principal, so that the principal is told once that it will not run
+// (cancelPAApprovalsWithNotice, #1320 slice P2-S12); the rows then go like
+// the rest. The notice names no call and survives the deletion.
+func forgetPAApprovals(ctx context.Context, tx *sql.Tx, principal int64, nowMS int64) error {
+	if _, err := cancelPAApprovalsWithNotice(ctx, tx, principal, nowMS, ""); err != nil {
+		return err
+	}
 	if err := deletePAApprovalCallbacks(ctx, tx, principal, `status <> 'dispatching'`); err != nil {
 		return err
 	}

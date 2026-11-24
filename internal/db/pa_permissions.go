@@ -7,9 +7,11 @@ package db
 // A row is bound to its principal, one connection and that connection's
 // authority revision. It stops counting in three independent ways, and a
 // reader needs all three to hold:
-//   - revoked_at_ms is set: by /permissions, or by any change of the
+//   - revoked_at_ms is set: by /permissions, by any change of the
 //     connection's revision, in the transaction of that change
-//     (revokePAPermissionsOfConnTx);
+//     (revokePAPermissionsOfConnTx), or by a consent withdrawal, /forget
+//     or an admin disable of the principal
+//     (revokePAPermissionsOfPrincipalTx);
 //   - the revision it was granted at is not the revision asked for;
 //   - expires_at_ms is not after now.
 //
@@ -294,6 +296,21 @@ func revokePAPermissionsOfConnTx(ctx context.Context, tx *sql.Tx, principal int6
 		  WHERE principal = $2 AND connection_id = $3 AND revoked_at_ms = 0`,
 		paRevokedAtMS(nowMS), principal, connectionID); err != nil {
 		return fmt.Errorf("pa connection: revoke standing permissions: %w", err)
+	}
+	return nil
+}
+
+// revokePAPermissionsOfPrincipalTx revokes, in tx, every standing
+// permission of principal, on all of its connections (#1320 slice P2-S12).
+// A consent withdrawal, /forget and an admin disable call it in the
+// transaction of that change: none of them moves a connection's revision,
+// so without it the permissions would be in force again the moment consent
+// is given again or the disable is cleared. A failure fails the change.
+func revokePAPermissionsOfPrincipalTx(ctx context.Context, tx *sql.Tx, principal int64, nowMS int64) error {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE pa_permissions SET revoked_at_ms = $1 WHERE principal = $2 AND revoked_at_ms = 0`,
+		paRevokedAtMS(nowMS), principal); err != nil {
+		return fmt.Errorf("pa principal: revoke standing permissions: %w", err)
 	}
 	return nil
 }

@@ -312,9 +312,18 @@ func (s *Store) ForgetPAConversations(ctx context.Context, tx *sql.Tx, principal
 	if err := deletePAOutboxNotices(ctx, tx, principal); err != nil {
 		return err
 	}
+	nowMS := time.Now().UnixMilli()
 	// Approvals carry sealed arguments derived from the conversation
-	// (#1320): they go with it.
-	if err := forgetPAApprovals(ctx, tx, principal); err != nil {
+	// (#1320): they go with it, on every connection of the principal, and
+	// the principal is told once when any was still waiting (P2-S12).
+	if err := forgetPAApprovals(ctx, tx, principal, nowMS); err != nil {
+		return err
+	}
+	// So do the standing permissions: /forget and a consent withdrawal
+	// move no connection's revision, so nothing else would revoke them
+	// (P2-S12; consent is the basis of every action taken for the
+	// principal).
+	if err := revokePAPermissionsOfPrincipalTx(ctx, tx, principal, nowMS); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pa_fragments WHERE principal = $1`, principal); err != nil {
