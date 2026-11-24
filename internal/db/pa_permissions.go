@@ -362,7 +362,10 @@ func (s *Store) ActivePAConnectionRefs(ctx context.Context, principal int64) ([]
 	var out []permissions.ConnectionRef
 	for _, c := range conns {
 		if c.State == connection.StateActive {
-			out = append(out, permissions.ConnectionRef{ID: c.ID, Server: string(c.Server), AuthorityRevision: c.AuthorityRevision})
+			out = append(out, permissions.ConnectionRef{
+				ID: c.ID, Server: string(c.Server), AuthorityRevision: c.AuthorityRevision,
+				GrantedScope: c.GrantedScope, RequestedScope: c.RequestedScope,
+			})
 		}
 	}
 	return out, nil

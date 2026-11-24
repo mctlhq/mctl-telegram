@@ -63,6 +63,15 @@ var paWriteTools = map[connection.Server][]string{
 	connection.ServerAlice: {"alice_media_control", "alice_say_phrase", "alice_send_command", "alice_set_volume"},
 }
 
+// paWriteScopes names the scope each write tool needs; nil, as shipped, is
+// the compiled table (connection.DefaultWriteScopes, #1320 P2-S14c). Under
+// that table alice_say_phrase and alice_send_command are held by no
+// connection: mctl-alice puts them behind its quasar scope, which a write
+// connection does not ask for, so the two are listed above and refused at
+// every check until that is decided. A variable so the wiring tests can
+// run a listed tool to the end; nothing else assigns it.
+var paWriteScopes *connection.WriteScopes
+
 // paWriteGate decides, inside the claim transaction, which of a
 // connection's write tools the principal may be offered: it holds the
 // consent to actions and the connection's grant holds the scope each tool
@@ -211,7 +220,7 @@ func buildPAWrites(cfg *config.Config, pt *paTools, store *db.Store, sender paBo
 	w.executor, err = connector.NewWriteExecutor(connector.WriteConfig{
 		Store: store, Connections: pt.manager, Endpoints: endpoints, Executor: pt.executor,
 		Sealer: sealer, Flags: pt.flags, Allowed: allowed.Allowed, Fresh: fresh, Metrics: m,
-		Devices: devices,
+		Devices: devices, Scopes: paWriteScopes,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("pa writes: %w", err)
@@ -221,7 +230,7 @@ func buildPAWrites(cfg *config.Config, pt *paTools, store *db.Store, sender paBo
 	// (connector.AliceDevices); a scenario reader does not.
 	w.cards, err = connector.NewCards(connector.CardConfig{
 		Store: store, Sealer: sealer, Pin: pin, Fresh: fresh, Speakers: speakers,
-		Permissions: store, Lowered: w.executor,
+		Permissions: store, Lowered: w.executor, Scopes: paWriteScopes,
 		Deliver: func(ctx context.Context, principal int64) { w.deliverTo(ctx, principal) },
 	})
 	if err != nil {
@@ -242,12 +251,14 @@ func buildPAWrites(cfg *config.Config, pt *paTools, store *db.Store, sender paBo
 	}
 	policy := permissions.PinPolicy{Pin: pin}
 	writes := func() (bool, error) { return paWritesEnabled(pt.flags) }
-	w.permissions = &pa.PermissionsConfig{Grants: store, Policy: policy, Writes: writes}
+	// Connections: a grant is given only on a connection whose grant
+	// holds the tool's write scope (P2-S14c), read from the store.
+	w.permissions = &pa.PermissionsConfig{Grants: store, Policy: policy, Writes: writes, Connections: store, Scopes: paWriteScopes}
 	// Devices is nil, so every grant is refused devices_unread; listing
 	// and revoking work. The reader a grant needs exists
 	// (connector.GrantDevices) and is not wired here yet (S2-D5).
 	w.commands = &pa.PermissionCommands{
-		Store: store, Sender: sender, Writes: writes,
+		Store: store, Sender: sender, Writes: writes, Scopes: paWriteScopes,
 		Validator: &permissions.Validator{Policy: policy, Rule: permissions.Rules{}},
 	}
 	w.gate = newPAWriteGate(store, writes)

@@ -64,10 +64,18 @@ func migratePAConnections(ctx context.Context, dbConn migrateDB, pg bool) error 
 			return fmt.Errorf("migrate pa_connections: %w", err)
 		}
 	}
+	// What the connection asked for (#1320 slice P2-S14c). Empty on every
+	// row made before the column, and on every read-only connection: the
+	// read set. A previous build ignores the column, and its inserts take
+	// the default.
+	if err := addColumnIfMissing(ctx, dbConn, pg, "pa_connections", "requested_scope",
+		"TEXT NOT NULL DEFAULT ''", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrate pa_connections: requested_scope: %w", err)
+	}
 	return nil
 }
 
-const paConnCols = `id, principal, server, state, account_id, granted_scope,
+const paConnCols = `id, principal, server, state, account_id, granted_scope, requested_scope,
 	authority_revision, token_generation, failure_reason, created_at_ms, updated_at_ms`
 
 const paConnSealedCols = paConnCols + `, kek_id, wrapped_dek, sealed_code, sealed_tokens`
@@ -84,7 +92,7 @@ func scanPAConn(r paRowScanner, sealed *connection.Sealed) (connection.Connectio
 		server, state    string
 		createdMS, updMS int64
 	)
-	dest := []any{&c.ID, &c.Principal, &server, &state, &c.AccountID, &c.GrantedScope,
+	dest := []any{&c.ID, &c.Principal, &server, &state, &c.AccountID, &c.GrantedScope, &c.RequestedScope,
 		&c.AuthorityRevision, &c.TokenGeneration, &c.FailureReason, &createdMS, &updMS}
 	if sealed != nil {
 		dest = append(dest, &sealed.KEKID, &sealed.WrappedDEK, &sealed.SealedCode, &sealed.SealedTokens)
@@ -235,9 +243,9 @@ func (s *Store) CreatePAConnection(ctx context.Context, c connection.Connection,
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO pa_connections(id, principal, server, state, authority_revision, token_generation,
-			kek_id, wrapped_dek, created_at_ms, updated_at_ms)
-		 VALUES($1, $2, $3, $4, 1, 0, $5, $6, $7, $7)`,
-		c.ID, c.Principal, string(c.Server), string(c.State), sealed.KEKID, sealed.WrappedDEK, now); err != nil {
+			kek_id, wrapped_dek, created_at_ms, updated_at_ms, requested_scope)
+		 VALUES($1, $2, $3, $4, 1, 0, $5, $6, $7, $7, $8)`,
+		c.ID, c.Principal, string(c.Server), string(c.State), sealed.KEKID, sealed.WrappedDEK, now, c.RequestedScope); err != nil {
 		return fmt.Errorf("create pa connection: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

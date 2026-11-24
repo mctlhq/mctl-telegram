@@ -67,7 +67,7 @@ const (
 )
 
 // Conversation-level kinds (#1348), one per pa.Reply, with the same names.
-// Only the two consent prompts carry a button (CarriesButton).
+// Only the consent prompts carry a button (CarriesButton).
 const (
 	OutboxConsentPrompt OutboxKind = "consent_prompt"
 	// OutboxConsentPromptRU is the consent prompt in Russian
@@ -99,6 +99,13 @@ const (
 	OutboxPermissionGranted      OutboxKind = "permission_granted"
 	OutboxPermissionRevoked      OutboxKind = "permission_revoked"
 	OutboxPermissionRefused      OutboxKind = "permission_refused"
+	// The consent to actions (#1320 slice P2-S14c): its prompt in English
+	// and in Russian, each with a button bound to the text it shows
+	// (convo.ActionConsentText, convo.ActionConsentTextRU), and the answer
+	// to that button. Queued only while PA_WRITES_ENABLED is on.
+	OutboxActionConsentPrompt   OutboxKind = "action_consent_prompt"
+	OutboxActionConsentPromptRU OutboxKind = "action_consent_prompt_ru"
+	OutboxActionConsentAccepted OutboxKind = "action_consent_accepted"
 )
 
 // Connection-level kinds (#1318 slice C2b). A row belongs to one
@@ -110,11 +117,20 @@ const (
 	// OutboxConnectionExpired asks the principal to link a connection the
 	// service stopped accepting again (active -> expired).
 	OutboxConnectionExpired OutboxKind = "connection_expired"
+	// OutboxActionConsentNeeded tells the principal that an action on
+	// this connection waits for the consent to actions, and
+	// OutboxWriteScopeNeeded that the connection only allows reading and
+	// the service must be connected again before the assistant can act
+	// through it (#1320 slice P2-S14c). Once per connection each, by the
+	// same key as every connection-level row: the principal is told once,
+	// not on every request.
+	OutboxActionConsentNeeded OutboxKind = "action_consent_needed"
+	OutboxWriteScopeNeeded    OutboxKind = "write_scope_needed"
 )
 
 // ConnectionOutboxKinds lists the connection-level kinds.
 func ConnectionOutboxKinds() []OutboxKind {
-	return []OutboxKind{OutboxConnectionExpired}
+	return []OutboxKind{OutboxConnectionExpired, OutboxActionConsentNeeded, OutboxWriteScopeNeeded}
 }
 
 // ConnectionLevel reports whether k is a connection-level kind, whose rows
@@ -189,10 +205,11 @@ func (k OutboxKind) CardLevel() bool {
 }
 
 // CarriesButton reports whether a row of kind k is sent with one button,
-// the consent prompt's: such a row needs its callback id, any other row
+// a consent prompt's: such a row needs its callback id, any other row
 // must not have one.
 func (k OutboxKind) CarriesButton() bool {
-	return k == OutboxConsentPrompt || k == OutboxConsentPromptRU
+	return k == OutboxConsentPrompt || k == OutboxConsentPromptRU ||
+		k == OutboxActionConsentPrompt || k == OutboxActionConsentPromptRU
 }
 
 // OutboxKinds lists every kind this build writes.
@@ -212,7 +229,8 @@ func ConversationOutboxKinds() []OutboxKind {
 		OutboxLinkingUnavailable,
 		OutboxPrincipalDisabled,
 		OutboxApprovalCancelled, OutboxApprovalAlreadyDone, OutboxApprovalExpired,
-		OutboxPermissionsUnavailable, OutboxPermissionGranted, OutboxPermissionRevoked, OutboxPermissionRefused}
+		OutboxPermissionsUnavailable, OutboxPermissionGranted, OutboxPermissionRevoked, OutboxPermissionRefused,
+		OutboxActionConsentPrompt, OutboxActionConsentPromptRU, OutboxActionConsentAccepted}
 }
 
 // ConversationLevel reports whether k is a conversation-level kind, whose

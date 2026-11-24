@@ -133,7 +133,7 @@ const ReplyLinkingUnavailable Reply = "linking_unavailable"
 // Callback actions. The stored action binds the consent version and text
 // hash the prompt showed, so a button pressed after the text changed does
 // not accept a text the principal never saw.
-const actionConsentAcceptPrefix = "consent_accept:"
+const consentAcceptPrefix = "consent_accept:"
 
 // ConversationsConfig configures NewConversations.
 type ConversationsConfig struct {
@@ -170,6 +170,12 @@ type ConversationsConfig struct {
 	// command is answered ReplyPermissionsUnavailable and such a button
 	// ReplyUnknownButton. No production wiring sets it yet.
 	Permissions *PermissionsConfig
+	// Writes reads PA_WRITES_ENABLED for the consent to actions
+	// (action_consent.go, #1320 slice P2-S14c). Optional: unset, it is
+	// Permissions.Writes when Permissions is set, and otherwise off, in
+	// which case the consent to actions is never asked for and /consent
+	// answers as it always did.
+	Writes WritesSwitch
 	// Now defaults to time.Now.
 	Now func() time.Time
 }
@@ -190,7 +196,9 @@ type Conversations struct {
 	approvals ApprovalCallbacks
 	// permissions is nil unless /permissions is wired (permissions.go).
 	permissions *PermissionsConfig
-	now         func() time.Time
+	// writes is nil unless the writes switch is wired (action_consent.go).
+	writes WritesSwitch
+	now    func() time.Time
 }
 
 var _ Handler = (*Conversations)(nil)
@@ -208,8 +216,12 @@ func NewConversations(cfg ConversationsConfig) (*Conversations, error) {
 	if now == nil {
 		now = time.Now
 	}
+	writes := cfg.Writes
+	if writes == nil && cfg.Permissions != nil {
+		writes = cfg.Permissions.Writes
+	}
 	return &Conversations{store: cfg.Store, sealer: cfg.Sealer, ttl: cfg.TTL, runs: cfg.Runs, replies: cfg.Replies, limiter: cfg.Limiter,
-		linking: cfg.Linking, allowed: cfg.Allowed, approvals: cfg.Approvals, permissions: cfg.Permissions, now: now}, nil
+		linking: cfg.Linking, allowed: cfg.Allowed, approvals: cfg.Approvals, permissions: cfg.Permissions, writes: writes, now: now}, nil
 }
 
 // HandleUpdate implements Handler. Any error rolls back the update's dedup
@@ -370,8 +382,10 @@ func (c *Conversations) handleCommand(ctx context.Context, tx *sql.Tx, u Verifie
 			// Anything else, "/consent accept" included, shows the text
 			// with its button: consent is recorded only from a button bound
 			// to the text the principal was shown (T13), never from typed
-			// words that need not follow any prompt.
-			return c.prompt(ctx, tx, u)
+			// words that need not follow any prompt. With writes on, a
+			// principal who already gave the data-flow consent is shown
+			// the consent to actions instead (action_consent.go).
+			return c.consentCommand(ctx, tx, u)
 		}
 	case CommandConnect, CommandDisconnect, CommandConnections:
 		return c.handleLinkCommand(ctx, tx, u, cmd, arg)
@@ -445,7 +459,10 @@ func (c *Conversations) handleCallback(ctx context.Context, tx *sql.Tx, u Verifi
 	if c.permissions != nil && permissions.IsAction(action) {
 		return c.permissionButton(ctx, tx, u, action)
 	}
-	if !strings.HasPrefix(action, actionConsentAcceptPrefix) {
+	if isActionConsentAction(action) {
+		return c.actionConsentButton(ctx, tx, u, action)
+	}
+	if !strings.HasPrefix(action, consentAcceptPrefix) {
 		// An action this build does not know: the id is consumed and the
 		// press answered, never an error, which would roll the consume back
 		// and have Telegram redeliver the update forever.
@@ -602,7 +619,7 @@ func (c *Conversations) Load(ctx context.Context, ec ExecutionContext) ([]convo.
 }
 
 func consentAcceptAction(ru bool) string {
-	return actionConsentAcceptPrefix + convo.ConsentVersion + ":" + convo.ConsentTextSHA256For(ru)
+	return consentAcceptPrefix + convo.ConsentVersion + ":" + convo.ConsentTextSHA256For(ru)
 }
 
 // userCommand reports whether the message is a server-side command: its

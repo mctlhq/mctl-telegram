@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -295,6 +296,21 @@ type harness struct {
 	alice    int64
 	bob      int64
 	allow    *allowSet
+	writes   *writesFlag
+}
+
+// writesFlag is PA_WRITES_ENABLED as the linking flow reads it: off until
+// a test turns it on, and unreadable while failing is set.
+type writesFlag struct {
+	on, failing atomic.Bool
+}
+
+func (w *writesFlag) read() (bool, error) {
+	if w.failing.Load() {
+		// The value next to the error is what a careless reader would use.
+		return true, errors.New("injected flag error")
+	}
+	return w.on.Load(), nil
 }
 
 // allowSet is a mutable preview allowlist: everyone is allowed until
@@ -333,7 +349,7 @@ func serverConfig(server connection.Server, enabled bool) linking.ServerConfig {
 func newHarness(t *testing.T, s *db.Store, aliceEnabled bool) *harness {
 	t.Helper()
 	h := &harness{t: t, s: s, clock: &clock{t: time.Now().UTC().Truncate(time.Second)},
-		msgr: &messenger{}, revoker: &revoker{}, allow: &allowSet{}}
+		msgr: &messenger{}, revoker: &revoker{}, allow: &allowSet{}, writes: &writesFlag{}}
 	h.as = map[connection.Server]*fakeAS{
 		connection.ServerTG: newFakeAS(connection.ServerTG), connection.ServerAlice: newFakeAS(connection.ServerAlice),
 	}
@@ -354,6 +370,7 @@ func newHarness(t *testing.T, s *db.Store, aliceEnabled bool) *harness {
 		BotToken: paBotToken, LoginBotToken: loginBotToken, BotUsername: "fake_pa_bot", MiniAppName: "link",
 		AppURL: appURL, Servers: h.servers, Manager: h.m, Store: s, Tokens: tokenClient{h.as},
 		Accounts: h.accounts, Messenger: h.msgr, Allowed: h.allow, Now: h.clock.Now,
+		Writes: h.writes.read,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -418,6 +435,7 @@ func (h *harness) rebuild(store connection.Store, tokens linking.TokenClient) {
 		BotToken: paBotToken, LoginBotToken: loginBotToken, BotUsername: "fake_pa_bot", MiniAppName: "link",
 		AppURL: appURL, Servers: h.servers, Manager: h.m, Store: h.s, Tokens: tokens,
 		Accounts: h.accounts, Messenger: h.msgr, Allowed: h.allow, Now: h.clock.Now,
+		Writes: h.writes.read,
 	})
 	if err != nil {
 		h.t.Fatal(err)

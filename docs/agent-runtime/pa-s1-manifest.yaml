@@ -96,6 +96,9 @@ S1-C7:
 S1-C8:
   tests:
     - internal/pa/connection.TestConnection_S1C8_ScopeEscalationNeedsNewConnection
+    - internal/pa.TestWriteScope_OnlyAConnectionThatHoldsTheScopeGetsAWriteTool
+    - internal/pa.TestWriteScope_ReconnectSupersedesAndRevokes
+    - internal/pa/linking.TestLinking_WriteScopeAskedOnlyWithWritesOn
 S1-K1:
   tests:
     - internal/pa/connection.TestConnection_S1K1_RedactionDropsTokens
@@ -196,9 +199,13 @@ S1-T9:
   tests:
     - internal/pa/connection.TestConnection_S1T9_ExchangeScopeCheck
     - internal/pa/connection.TestConnection_S1T9_FinalExchangeWriteFailureRevokes
+    - internal/pa/connection.TestWriteScope_TokenResponseDecidesWhatIsHeld
+    - internal/pa/connection.TestWriteScope_ConnectionRecordsWhatWasGranted
+    - internal/pa/linking.TestLinking_WriteScopeIsWhatTheServerGranted
 S1-T10:
   tests:
     - internal/pa/connection.TestConnection_S1T10_RefreshWiderScopeFails
+    - internal/pa/connection.TestWriteScope_RefreshKeepsTheGrant
 S1-T11:
   tests:
     - internal/oauth.TestScopeCeiling_S1T11_ClientWithoutCeilingKeepsTodaysGrant
@@ -303,6 +310,9 @@ S1-N3:
     - internal/pa.TestConversations_S1N3
     - internal/pa/convo.TestConsentTextPinnedToVersion_S1N3
     - internal/pa/convo.TestSatisfied_S1N3
+    - internal/pa.TestActionConsent_TextChangeNeedsConsentAgain
+    - internal/pa/convo.TestActionConsentTextPinnedToVersion
+    - internal/pa/convo.TestActionsSatisfied
 S1-N4:
   tests:
     - internal/db.TestPAPrincipalLock_SerialisesWithdraw

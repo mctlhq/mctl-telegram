@@ -260,6 +260,7 @@ func newLowerEnv(t *testing.T, s *db.Store) *lowerEnv {
 		},
 		Allowed: func(int64) bool { return !ce.denied.Load() },
 		Fresh:   l.fresh,
+		Scopes:  testWriteScopes(t),
 		Devices: map[string]connector.DeviceLister{"tg": ce.devices},
 	})
 	if err != nil {

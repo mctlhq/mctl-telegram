@@ -34,6 +34,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connector"
+	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
@@ -197,6 +198,25 @@ func withPAGate(t *testing.T, g paWriteGate) {
 	t.Cleanup(func() { newPAWriteGate = prev })
 }
 
+// withPASayScope gives every write path the test builds a scope table
+// under which the listed alice tools need iot:control, the scope a write
+// connection is granted. Under the compiled table the tool these tests
+// call, alice_say_phrase, is held by no connection (paWriteScopes).
+func withPASayScope(t *testing.T) {
+	t.Helper()
+	tools := map[string]string{}
+	for _, tool := range paWriteTools[connection.ServerAlice] {
+		tools[tool] = "iot:control"
+	}
+	ws, err := connection.NewWriteScopes(map[connection.Server]map[string]string{connection.ServerAlice: tools})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := paWriteScopes
+	paWriteScopes = &ws
+	t.Cleanup(func() { paWriteScopes = prev })
+}
+
 // paPostgresStoreConn is a store on a fresh schema of TEST_DATABASE_URL.
 func paPostgresStoreConn(t *testing.T, dsn string) (*db.Store, *sql.DB) {
 	t.Helper()
@@ -280,6 +300,7 @@ func newPAWritesE2E(t *testing.T, store *db.Store, conn *sql.DB, writes string) 
 	enablePAAliceEnv(t)
 	t.Setenv(connector.WritesFlagEnv, writes)
 	withPAGate(t, e.gate)
+	withPASayScope(t)
 	_, e.rt = buildEnabledPA(t, store)
 	e.mux = chi.NewRouter()
 	e.rt.Mount(e.mux)
@@ -307,6 +328,19 @@ func newPAWritesE2E(t *testing.T, store *db.Store, conn *sql.DB, writes string) 
 		t.Fatalf("connections %+v err %v", conns, err)
 	}
 	e.connID = conns[0].ID
+	// Carol accepted the consent to actions (P2-S14c): without it every
+	// card and dispatch below is refused action_consent_required.
+	tx, err := conn.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AcceptPAActionConsent(context.Background(), tx, carol, convo.ActionConsentVersion,
+		convo.ActionConsentTextSHA256For(false), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
 	return e
 }
 

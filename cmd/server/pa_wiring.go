@@ -231,6 +231,11 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 		Linking: pt != nil,
 		Allowed: allowed,
 	}
+	if pt != nil {
+		// PA_WRITES_ENABLED, read where the dispatcher reads it: while it
+		// is on, /consent shows the consent to actions (#1320 P2-S14c).
+		convCfg.Writes = paWritesSwitch(pt.flags)
+	}
 	var cards *connector.Cards
 	if pw != nil {
 		// A typed nil must not reach these interfaces: they are set only

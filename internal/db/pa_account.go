@@ -121,6 +121,7 @@ var paPrincipalPurges = []struct{ table, q string }{
 	{"pa_fragments", `DELETE FROM pa_fragments WHERE principal = $1`},
 	{"pa_conversations", `DELETE FROM pa_conversations WHERE principal = $1`},
 	{"pa_consents", `DELETE FROM pa_consents WHERE principal = $1`},
+	{"pa_action_consents", `DELETE FROM pa_action_consents WHERE principal = $1`},
 	{"pa_link_secrets", `DELETE FROM pa_link_secrets WHERE principal = $1`},
 	// Only rows without provider tokens; see purgePAPrincipals.
 	{"pa_connections", `DELETE FROM pa_connections WHERE principal = $1 AND sealed_tokens IS NULL`},

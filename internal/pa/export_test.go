@@ -81,6 +81,10 @@ func (d *DispatchHarness) SetConns(conns map[int64][]ConnectionRevision) {
 	d.h.conns = conns
 }
 func (d *DispatchHarness) Consent(user int64) { d.h.consent(user) }
+
+// ConsentActions records user's consent to actions (the English text),
+// as a press of the action-consent prompt's button does.
+func (d *DispatchHarness) ConsentActions(user int64) { d.h.consentActions(user) }
 func (d *DispatchHarness) Text(user int64, s string) {
 	if code := d.h.text(user, s); code != http.StatusOK {
 		d.h.t.Fatalf("message: %d", code)
@@ -214,6 +218,12 @@ func (d *DispatchHarness) EnablePermissions(cfg *PermissionsConfig, cmds *Permis
 		cmds.Sender = recorderSender{d.h.sender}
 	}
 	d.h.conv.permissions = cfg
+	// The consent to actions reads the same switch, as NewConversations
+	// arranges when Permissions is set in its config.
+	d.h.conv.writes = nil
+	if cfg != nil {
+		d.h.conv.writes = cfg.Writes
+	}
 	d.perms = cmds
 	d.rebuildHook()
 }
@@ -298,6 +308,13 @@ func (d *DispatchHarness) PressUpdate(updateID, user int64, data string) int {
 
 // NextUpdateID reserves an update id no other update of the harness uses.
 func (d *DispatchHarness) NextUpdateID() int64 { return d.h.nextID.Add(1) }
+
+// LastReply returns the last reply the conversations queued for user and
+// the callback id of its button, "" when it carries none.
+func (d *DispatchHarness) LastReply(user int64) (Reply, string) {
+	r := d.h.replies.last(user)
+	return r.reply, r.button
+}
 
 // Replies returns every reply the conversations queued for user, oldest
 // first.
