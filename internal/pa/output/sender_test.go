@@ -298,3 +298,69 @@ func TestSender_SendTyping(t *testing.T) {
 		t.Fatalf("refused status: %v", err)
 	}
 }
+
+// TestSender_SendDraft: a draft is one sendMessageDraft whose body is
+// exactly chat_id, draft_id and text, the three parameters checked against
+// the Bot API reference (10.5): no parse_mode, no entities, no can_stop.
+// A zero draft id (the API requires non-zero), a chat that is not private,
+// an empty text and a text of more than one part are refused before
+// anything is sent; none is cut down to fit.
+func TestSender_SendDraft(t *testing.T) {
+	f, s := newFake(t)
+	ctx := context.Background()
+	txt := mustRender(t, "Working on it.", safetext.UserText{})
+	if err := s.SendDraft(ctx, aliceChat, 7, txt); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 1 || !strings.HasSuffix(f.calls[0].path, "/sendMessageDraft") {
+		t.Fatalf("calls = %+v", f.calls)
+	}
+	b := f.calls[0].body
+	if len(b) != 3 || b["chat_id"] != float64(aliceChat) || b["draft_id"] != float64(7) || b["text"] != "Working on it." {
+		t.Fatalf("body = %v", b)
+	}
+	if err := s.SendDraft(ctx, aliceChat, 0, txt); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("draft id 0: %v", err)
+	}
+	for _, chat := range []int64{-5, 0} {
+		if err := s.SendDraft(ctx, chat, 7, txt); !errors.Is(err, ErrInvalidChat) {
+			t.Fatalf("chat %d: %v", chat, err)
+		}
+	}
+	if err := s.SendDraft(ctx, aliceChat, 7, safetext.Text{}); !errors.Is(err, ErrEmptyText) {
+		t.Fatalf("empty text: %v", err)
+	}
+	if err := s.SendDraft(ctx, aliceChat, 7, mustRender(t, " \n ", safetext.UserText{})); !errors.Is(err, ErrEmptyText) {
+		t.Fatalf("blank text: %v", err)
+	}
+	long := mustRender(t, strings.Repeat("Bob wrote a long message. ", 400), safetext.UserText{})
+	if long.Parts() < 2 {
+		t.Fatalf("fixture is %d part(s)", long.Parts())
+	}
+	if err := s.SendDraft(ctx, aliceChat, 7, long); !errors.Is(err, ErrPartTooLong) {
+		t.Fatalf("multi-part: %v", err)
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("refused drafts were sent: %d calls", len(f.calls))
+	}
+}
+
+// TestSender_SendDraftLanguage: a server status is sent in the chat's
+// language, like every other server text.
+func TestSender_SendDraftLanguage(t *testing.T) {
+	f, s := newFake(t)
+	s.langs = NewLanguages()
+	s.langs.Set(aliceChat, "ru")
+	ctx := context.Background()
+	status := safetext.ServerText(safetext.TextStatusReadingMessages)
+	if err := s.SendDraft(ctx, aliceChat, 7, status); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SendDraft(ctx, bobChat, 8, status); err != nil {
+		t.Fatal(err)
+	}
+	ru, en := f.calls[0].body["text"], f.calls[1].body["text"]
+	if ru != safetext.TextStatusReadingMessages.In(safetext.LangRU) || en != safetext.TextStatusReadingMessages.String() || ru == en {
+		t.Fatalf("ru %q en %q", ru, en)
+	}
+}
