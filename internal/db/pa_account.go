@@ -118,6 +118,9 @@ var paPrincipalPurges = []struct{ table, q string }{
 	{"pa_dispatches", `DELETE FROM pa_dispatches WHERE principal = $1`},
 	// Standing permissions, revoked or not: authority of a deleted account.
 	{"pa_permissions", `DELETE FROM pa_permissions WHERE principal = $1`},
+	// Audit events not yet appended: the chain they were queued for goes
+	// with the account.
+	{"pa_audit_events", `DELETE FROM pa_audit_events WHERE principal = $1`},
 	{"pa_fragments", `DELETE FROM pa_fragments WHERE principal = $1`},
 	{"pa_conversations", `DELETE FROM pa_conversations WHERE principal = $1`},
 	{"pa_consents", `DELETE FROM pa_consents WHERE principal = $1`},

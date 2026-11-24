@@ -315,6 +315,9 @@ func TestBuildPA_WiresToolsOnlyWhenEnabled(t *testing.T) {
 	if off.staleWrites != nil {
 		t.Fatal("stale write sweep wired without a tools runtime")
 	}
+	if off.auditEvents != nil {
+		t.Fatal("audit event sweep wired without a tools runtime")
+	}
 	if off.tools != nil || off.dispatcher != nil || off.Links() != nil || off.Connections() != nil || f.built != 0 {
 		t.Fatalf("tools built with every server off (built %d)", f.built)
 	}
@@ -322,6 +325,9 @@ func TestBuildPA_WiresToolsOnlyWhenEnabled(t *testing.T) {
 	_, on := buildEnabledPA(t, paTestStore(t))
 	if on.staleWrites == nil || on.staleWrites.Store == nil || on.staleWrites.Executor != on.tools.executor {
 		t.Fatal("stale write sweep not wired to the store and the audited executor")
+	}
+	if on.auditEvents == nil || on.auditEvents.Store == nil {
+		t.Fatal("audit event sweep not wired to the store")
 	}
 	if on.tools == nil || on.dispatcher == nil || on.Links() == nil || on.Connections() == nil || f.built != 1 {
 		t.Fatalf("tools not built with tg enabled (built %d)", f.built)
@@ -1000,4 +1006,50 @@ func TestPASelfIssuer(t *testing.T) {
 	if got := paSelfIssuer(nil); got != "" {
 		t.Errorf("paSelfIssuer(nil) = %q", got)
 	}
+}
+
+// TestS2A8_StartRunsTheAuditEventSweep: the runtime that serves writes
+// runs the sweep that moves queued permission and approval events into the
+// audit chain. A queued event of a principal with a users row is in that
+// principal's chain, and off the queue, soon after Start.
+func TestS2A8_StartRunsTheAuditEventSweep(t *testing.T) {
+	fakePAServerNet(t, 4242003)
+	enablePAToolsEnv(t)
+	store, conn := paTestStoreConn(t)
+	_, on := buildEnabledPA(t, store)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	user, err := store.EnsureUserByTelegramID(ctx, 4242001, "alice", "Alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(ctx, `INSERT INTO pa_audit_events(principal, kind, subject, server, tool, connection_id, authority_revision, reason, created_at_ms)
+		VALUES(4242001, 'permission_revoked', 'prm_1', 'alice', 'alice_set_volume', 'pac_1', 5, 'by_principal', 1000)`); err != nil {
+		t.Fatal(err)
+	}
+	on.Start(ctx)
+	deadline := time.Now().Add(5 * time.Second)
+	var status, record string
+	for {
+		err := conn.QueryRowContext(ctx, `SELECT status, peer_redacted FROM audit_logs WHERE user_id = $1 AND tool_name = 'pa:alice/alice_set_volume'`, user).Scan(&status, &record)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the queued event did not reach the audit chain: Start runs no audit event sweep")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if want := "pa-event/v1 event=permission_revoked principal=4242001 server=alice tool=alice_set_volume conn=pac_1 rev=5 permission=prm_1 approval=- args=- reason=by_principal at=1000"; status != "permission_revoked" || record != want {
+		t.Fatalf("audit row %q %q, want permission_revoked %q", status, record, want)
+	}
+	var queued int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pa_audit_events`).Scan(&queued); err != nil || queued != 0 {
+		t.Fatalf("%d events still queued, %v", queued, err)
+	}
+	cancel()
+	on.Shutdown(time.Now().Add(5 * time.Second))
 }

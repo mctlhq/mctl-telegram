@@ -2336,6 +2336,26 @@ func (s *Store) LogToolCallChecked(ctx context.Context, c ToolCall) error {
 	// cancelled request must not lose the row. Context values stay.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
 	defer cancel()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("audit %s: begin: %w", c.Tool, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := logToolCallTx(ctx, tx, c); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("audit %s: commit: %w", c.Tool, err)
+	}
+	return nil
+}
+
+// logToolCallTx is the audit insert itself, in the caller's transaction:
+// it reads the user's previous entry hash and inserts the chained,
+// scrubbed row. LogToolCallChecked is its caller for every audit row but
+// one kind: DrainPAAuditEvents uses it to append a queued Personal
+// Assistant event and delete the queue row in one commit.
+func logToolCallTx(ctx context.Context, tx *sql.Tx, c ToolCall) error {
 	userID, tool, peerRedacted, status := c.UserID, c.Tool, c.PeerRedacted, c.Status
 	errMsg, callPath, reason := c.ErrMsg, c.CallPath, c.Reason
 	createdAt := time.Now().UTC()
@@ -2368,12 +2388,6 @@ func (s *Store) LogToolCallChecked(ctx context.Context, c ToolCall) error {
 		MCPName:         ec.MCPName,
 		ProtocolVersion: ec.ProtocolVersion,
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("audit %s: begin: %w", tool, err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
 	prev, err := previousAuditHash(ctx, tx, userID)
 	if err != nil {
 		return fmt.Errorf("audit %s: select: %w", tool, err)
@@ -2388,9 +2402,6 @@ func (s *Store) LogToolCallChecked(ctx context.Context, c ToolCall) error {
 		nullable(edge.RequestID), nullable(edge.Route), nullable(edge.MCPMethod), nullable(edge.MCPName), nullable(edge.ProtocolVersion), nullable(reason),
 	); err != nil {
 		return fmt.Errorf("audit %s: insert: %w", tool, err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("audit %s: commit: %w", tool, err)
 	}
 	return nil
 }

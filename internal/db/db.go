@@ -587,6 +587,11 @@ func migrate(ctx context.Context, dbConn migrateDB, pg bool, ttlExemptTelegramID
 	if err := migratePAPermissions(ctx, dbConn, pg); err != nil {
 		return err
 	}
+	// Queue of Personal Assistant audit events that are not tool calls
+	// (issue #1320 slice P2-S15a); DDL in pa_audit_events.go.
+	if err := migratePAAuditEvents(ctx, dbConn, pg); err != nil {
+		return err
+	}
 	return dropLegacyColumns(ctx, dbConn, pg)
 }
 
