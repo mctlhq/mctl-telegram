@@ -328,12 +328,22 @@ func newPAWritesE2E(t *testing.T, store *db.Store, conn *sql.DB, writes string) 
 // and the compiled scope table.
 func newPAWritesE2EGate(t *testing.T, store *db.Store, conn *sql.DB, writes string, shipped bool) *paWritesE2E {
 	t.Helper()
+	return newPAWritesE2EEnv(t, store, conn, writes, shipped, nil)
+}
+
+// newPAWritesE2EEnv is newPAWritesE2EGate with env set over the harness's
+// own environment before the runtime is built.
+func newPAWritesE2EEnv(t *testing.T, store *db.Store, conn *sql.DB, writes string, shipped bool, env map[string]string) *paWritesE2E {
+	t.Helper()
 	const carol = 4242003
 	e := &paWritesE2E{paE2E: &paE2E{t: t, user: carol, upd: 7000, conn: conn, server: "alice"}, alice: &paFakeAlice{}, gate: &paTestGate{}}
 	e.f = fakePAAliceNet(t, carol, e.alice)
 	e.sent = recordPASends(t)
 	enablePAAliceEnv(t)
 	t.Setenv(connector.WritesFlagEnv, writes)
+	for k, v := range env {
+		t.Setenv(k, v)
+	}
 	if !shipped {
 		withPAGate(t, e.gate)
 	}
