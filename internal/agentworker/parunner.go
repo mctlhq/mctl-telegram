@@ -602,12 +602,13 @@ const PAToolApprovalPending = "Not done yet. The user was sent a card with this 
 // callTool runs one tool call the model made and returns the tool message
 // content, and whether the call now waits for the principal's approval
 // (PAStatusApprovalPending): the content is then PAToolApprovalPending and
-// the caller dispatches nothing more in this run. A name outside the claim's tools, or arguments that are not a
-// JSON object, is answered here and never dispatched. Everything else is
-// sent to the server with the pa-job token, and its output comes back
-// wrapped as external data (T5). Any refusal from the server ends the run
-// (PAStopped); a transport failure or a malformed answer abandons it. A
-// call is never retried: the server counted it.
+// the caller dispatches nothing more in this run. A name outside the
+// claim's tools, or arguments that are not a JSON object, is answered here
+// and never dispatched. Everything else is sent to the server with the
+// pa-job token, and its output comes back wrapped as external data (T5).
+// Any refusal from the server ends the run (PAStopped); a transport
+// failure or a malformed answer abandons it. A call is never retried: the
+// server counted it.
 func (w *PAWorker) callTool(ctx context.Context, token string, byName map[string]paToolRef, tc ToolCall, maxOutput int) (content string, pending bool, out PAOutcome, err error) {
 	ref, ok := byName[tc.Name]
 	if !ok {
