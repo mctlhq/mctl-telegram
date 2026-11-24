@@ -5,7 +5,8 @@ package pa
 // arrives. It is presentation only: it carries no text, decides nothing,
 // and a failed or skipped status changes no run.
 //
-// A run's status starts when the worker is handed the job (serveClaim),
+// The status is shown once when a message queues a run (TypingAfter). A
+// run's repeated status starts when the worker is handed the job (serveClaim),
 // is refreshed by every turn and tool admission, and stops when the reply
 // arrives, when the run is stopped or released, after typingIdle with no
 // activity, or at the lease end, whichever comes first. The idle bound
@@ -77,6 +78,26 @@ func (t *typingTracker) start(principal, job int64, until time.Time) {
 	r := &typingRun{cancel: cancel, done: make(chan struct{}), last: t.now()}
 	t.runs[job] = r
 	go t.loop(ctx, principal, job, r)
+}
+
+// TypingAfter shows the status once, after the update that queued a run
+// committed, so the chat is not silent until a worker claims the job
+// (serveClaim starts the repeated status). An update that queued no run,
+// a command or a button, shows nothing. It never blocks the caller.
+func (l *RunLoop) TypingAfter(ctx context.Context, principal int64) {
+	t := l.typing
+	if t == nil || principal <= 0 || !runQueuedIn(ctx) {
+		return
+	}
+	l.pending.Add(1)
+	go func() {
+		defer l.pending.Done()
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), typingCallDeadline)
+		defer cancel()
+		if err := t.sender.SendTyping(cctx, principal); err != nil {
+			slog.Debug("pa typing status not shown", "err", err)
+		}
+	}()
 }
 
 // touch records activity on job, keeping its status alive.

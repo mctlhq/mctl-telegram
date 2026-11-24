@@ -133,3 +133,14 @@ func TestPAWebhookProblemChecks_CountsChecks(t *testing.T) {
 		}
 	}
 }
+
+// TestPARunPhase_ClosedLabelSet: a known phase is observed, and a phase
+// outside the set creates no series.
+func TestPARunPhase_ClosedLabelSet(t *testing.T) {
+	r := New()
+	r.ObservePARunPhase("model", 3*time.Second)
+	r.ObservePARunPhase("nonsense", time.Second)
+	if n := testutil.CollectAndCount(r.pa.phases); n != 1 {
+		t.Fatalf("phase series = %d, want 1", n)
+	}
+}

@@ -754,7 +754,7 @@ func TestNew_RegistersUsageLedgerMetrics(t *testing.T) {
 var boundedLabelNames = map[string]bool{
 	"class": true, "client": true, "direction": true, "event": true,
 	"identity_kind": true, "kind": true, "method": true, "model": true,
-	"op": true, "outcome": true, "problem": true, "provider": true,
+	"op": true, "outcome": true, "phase": true, "problem": true, "provider": true,
 	"reason": true, "result": true, "route": true, "runner": true,
 	"scope": true, "server": true, "status": true, "status_code": true,
 	"surface": true, "tool": true, "traffic": true, "ua_family": true,

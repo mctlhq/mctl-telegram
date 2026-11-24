@@ -200,3 +200,51 @@ func TestTyping_Bounds(t *testing.T) {
 		}
 	})
 }
+
+// TestRunLoop_TypingAfterQueuedRun: a message that queued a run shows the
+// status once after its commit, before any worker claims the job. An
+// update that queued nothing, a stale mark and a loop without a sender
+// show nothing.
+func TestRunLoop_TypingAfterQueuedRun(t *testing.T) {
+	rec := &typingRecorder{}
+	h := newRunLoopHarness(t, withTyping(rec))
+	// The real webhook path: the handler marks the delivery's slot and the
+	// hook reads it after the commit, as cmd/server wires it.
+	h.hook.(*webhook).after = func(ctx context.Context, u VerifiedUpdate) {
+		h.loop.TypingAfter(ctx, u.Principal().TelegramID())
+	}
+	h.consent(aliceID)
+	h.loop.WaitDeliveries()
+	if n := rec.count(aliceID); n != 0 {
+		t.Fatalf("typing after the consent flow, which queued no run = %d", n)
+	}
+
+	h.text(aliceID, "hello")
+	h.loop.WaitDeliveries()
+	if a, b := rec.count(aliceID), rec.count(bobID); a != 1 || b != 0 {
+		t.Fatalf("typing shown: principal %d, another principal %d; want 1, 0", a, b)
+	}
+
+	// The mark belongs to its delivery. A run queued in a transaction that
+	// never committed leaves nothing for the principal's next update: a
+	// later delivery that queues no run shows nothing.
+	stale := WithPostCommit(context.Background())
+	markRunQueued(stale)
+	before := rec.count(aliceID)
+	h.loop.TypingAfter(WithPostCommit(context.Background()), aliceID)
+	h.loop.TypingAfter(context.Background(), aliceID) // no slot at all
+	h.loop.WaitDeliveries()
+	if n := rec.count(aliceID); n != before {
+		t.Fatalf("typing shown for a delivery that queued no run: %d -> %d", before, n)
+	}
+	h.loop.TypingAfter(stale, aliceID)
+	h.loop.WaitDeliveries()
+	if n := rec.count(aliceID); n != before+1 {
+		t.Fatalf("typing for the delivery that queued a run: %d -> %d, want one more", before, n)
+	}
+
+	// No sender: nothing, and no panic.
+	plain := &RunLoop{}
+	plain.TypingAfter(stale, aliceID)
+	plain.WaitDeliveries()
+}

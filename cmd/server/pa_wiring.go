@@ -36,6 +36,7 @@ type paMetrics interface {
 	pa.Counter
 	pa.OutboxCounter
 	pa.CallbackCounter
+	pa.PhaseObserver
 	connector.Metrics
 }
 
@@ -184,8 +185,9 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 	var counter pa.Counter
 	var outboxCounter pa.OutboxCounter
 	var callbackCounter pa.CallbackCounter
+	var phases pa.PhaseObserver
 	if m != nil {
-		counter, outboxCounter, callbackCounter = m, m, m
+		counter, outboxCounter, callbackCounter, phases = m, m, m, m
 	}
 	// The preview allowlist (PA_ALLOWED_PRINCIPALS): checked at ingress and
 	// at every run step. Empty allows nobody, and says so at startup.
@@ -198,7 +200,7 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 		Tools:  resolver,
 		Limits: cfg.PALimits(), Budget: cfg.PABudget(),
 		Metrics: outboxCounter, CallbackMetrics: callbackCounter,
-		Allowed: allowed, Typing: sender,
+		Allowed: allowed, Typing: sender, Phases: phases,
 	})
 	if err != nil {
 		return nil, err
@@ -230,6 +232,7 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 		// now, never inside it (internal/pa/postcommit.go).
 		AfterCommit: func(ctx context.Context, u pa.VerifiedUpdate) {
 			langs.Set(u.Principal().TelegramID(), u.LanguageCode())
+			loop.TypingAfter(ctx, u.Principal().TelegramID())
 			loop.DeliverAfter(ctx, u.Principal().TelegramID())
 			loop.AnswerCallbackAfter(ctx, u)
 			if pt != nil {
