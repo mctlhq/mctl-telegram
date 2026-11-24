@@ -1985,15 +1985,24 @@ S2-A7:
       tracked_by: "#1323"
     - half: "two taps handled by two replicas of the service against one Postgres: the concurrent test runs both in one process"
       tracked_by: "#1320"
+    - half: "the server never emits approval_pending at runtime (P2-S13): the tool route answers it only through connector.Cards, which nothing deployed builds, and no job is offered an approve-tier tool, so the worker's handling of the answer (one fixed sentence to the model, nothing dispatched after it, one more model call without tools) runs in tests only; the switch-on is P2-S14"
+      tracked_by: "#1323"
+    - half: "one card per run is the worker's rule, not the server's (P2-S13): the tool route emits a card for every admitted approve-tier call of a run, up to the call cap of 8 (TestApprovalCard_CountsTowardTheCallCap), so a worker that ignores approval_pending can queue up to eight cards for one request. Each still needs its own Approve. Owner decision: refuse a second card of a run at the route, or accept the cap as the bound"
+      tracked_by: "#1320"
+    - half: "the worker's system prompt (paSystemPrompt) still tells the model that its tools are read-only and that it cannot change anything (P2-S13 left it byte-identical while writes are off); it must describe approval before a claim offers a write tool"
+      tracked_by: "#1323"
+    - half: "a run whose model asks for a tool again after a card is abandoned (P2-S13), so the principal gets the card and, when the lease runs out, the run-failed notice. Owner decision: keep that, or end such a run with a fixed reply"
+      tracked_by: "#1320"
 
 S2-A8:
   status: green
   slice: P2-S10
-  note: "Standing permissions (#1320 P2-S10): a permission is inserted by one function with one caller, the handler of a pressed Grant button of a /permissions screen, whose callback id was consumed for the principal who pressed. /permissions is a command only as the text of a user message; an assistant or external fragment that reads \"/permissions grant ...\" is not parsed. The four job-token routes are driven with payloads that name a grant and the table stays empty; a static scan finds no other writer of pa_permissions. The half about tools reachable from the worker is P2-S13's to re-check when the worker gets a write tool path."
+  note: "Standing permissions (#1320 P2-S10): a permission is inserted by one function with one caller, the handler of a pressed Grant button of a /permissions screen, whose callback id was consumed for the principal who pressed. /permissions is a command only as the text of a user message; an assistant or external fragment that reads \"/permissions grant ...\" is not parsed. The four job-token routes are driven with payloads that name a grant and the table stays empty; a static scan finds no other writer of pa_permissions. The worker (#1320 P2-S13): its tool path (#1318 C3) and its approval_pending handling go through the tool route and add no route and no pseudo-tool; a static scan of internal/agentworker and cmd/agent-worker finds exactly the four routes that the route test drives. A tool the worker calls is a (server, tool) pair of the claim that the server executes downstream, so no tool reachable from the worker writes pa_permissions (the single-writer scan)."
   tests:
     - internal/pa.TestS2A8_OnlyUserTextIsAPermissionsCommand
     - internal/pa.TestS2A8_NoJobRouteGrantsAPermission
     - internal/pa.TestS2A8_GrantInsertHasOneCaller
+    - internal/pa.TestS2A8_WorkerReachesOnlyTheDrivenJobRoutes
   mutations:
     - id: P2S10-A8a
       guard: internal/pa/permissions.go:152
@@ -2021,12 +2030,22 @@ S2-A8:
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.838s
+    - id: P2S13-A8a
+      guard: internal/agentworker/parunner.go:55
+      guard_text: "\tPARouteTool = \"/api/pa/v1/jobs/tool\""
+      mutation: "the worker names a fifth route: a constant PARouteGrant = \"/api/pa/v1/jobs/grant\" is added next to PARouteTool"
+      killed_by:
+        - internal/pa.TestS2A8_WorkerReachesOnlyTheDrivenJobRoutes
+      red: |-
+        --- FAIL: TestS2A8_WorkerReachesOnlyTheDrivenJobRoutes (0.11s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.932s
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.208s
   gaps:
     - half: "production wiring: nothing in cmd/server sets ConversationsConfig.Permissions or constructs pa.PermissionCommands (the tool policy needs the Phase 2 pin, which TestNoRuntimePhase2Use keeps out of the runtime), so a deployed bot answers /permissions with \"not available\" and no permission can be granted outside tests; the switch-on is P2-S14"
       tracked_by: "#1323"
     - half: "the audit chain has no record of a grant or a revoke: the audit sink records tool calls and has no event shape for a permission change; the pa_permissions row (who, when, revoked_at_ms) is the only trace"
-      tracked_by: "#1320"
-    - half: "a worker tool path does not exist yet; P2-S13 must extend TestS2A8_NoJobRouteGrantsAPermission to any route or pseudo-tool it adds"
       tracked_by: "#1320"
 
 S2-A9:
