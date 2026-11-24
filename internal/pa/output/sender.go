@@ -311,7 +311,6 @@ func (s *Sender) SendWebApp(ctx context.Context, chatID int64, text safetext.Tex
 	if strings.TrimSpace(labelText) == "" {
 		return fmt.Errorf("%w: empty label", ErrInvalidKeyboard)
 	}
-	text = text.In(s.langs.Of(chatID))
 	if text.Parts() != 1 {
 		if text.Parts() == 0 {
 			return ErrEmptyText

@@ -5,7 +5,7 @@ import "github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 // toolStatus is the server-authored status shown while a pinned read tool
 // runs. It names the kind of work only: no model text, tool argument or
 // chat title. A tool with no entry gets the generic text
-// (TestToolStatusCoversPinnedReads makes a newly pinned tool a decision).
+// (TestToolStatus makes a newly pinned tool a decision).
 func toolStatus(name string) safetext.Template {
 	switch name {
 	case "tg/get_messages":

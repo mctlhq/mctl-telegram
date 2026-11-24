@@ -50,12 +50,12 @@ const (
 	PARouteClaim = "/api/pa/v1/jobs/claim"
 	PARouteTurn  = "/api/pa/v1/jobs/turn"
 	PARouteReply = "/api/pa/v1/jobs/reply"
-	// PARouteDraft shows a partial answer as a draft (internal/pa
-	// RouteDraft).
-	PARouteDraft = "/api/pa/v1/jobs/draft"
 	// PARouteTool is the server-side tool executor (internal/pa/connector
 	// RouteTool; TestPAToolRouteMatchesWorker keeps them equal).
 	PARouteTool = "/api/pa/v1/jobs/tool"
+	// PARouteDraft shows a partial answer as a draft (internal/pa
+	// RouteDraft).
+	PARouteDraft = "/api/pa/v1/jobs/draft"
 )
 
 // Worker-side ceilings. The claim's limits apply, but never above these:
@@ -161,6 +161,12 @@ type PAWorker struct {
 	// (AGENT_PA_STREAMING). A job streams only when the server's claim
 	// also says streaming.
 	Streaming bool
+	// DraftInterval and DraftDelta batch the drafts of a streamed job: at
+	// most one post per interval, and only once the text grew by that many
+	// UTF-16 units. Zero means the defaults (paDraftMinInterval,
+	// paDraftMinDelta).
+	DraftInterval time.Duration
+	DraftDelta    int
 }
 
 type (
@@ -428,12 +434,13 @@ func (w *PAWorker) Run(ctx context.Context, c *PAClaim) (PAOutcome, error) {
 	}
 	msgs := paMessages(c.Fragments)
 
+	// The job is streamed only when the worker's own switch is on, the
+	// server's claim says it shows drafts, and the model can stream. A
+	// claim from a server without the draft route has no such field.
 	var dr *paDrafter
-	var onText func(string)
 	if _, ok := w.Model.(PAStreamModel); ok && w.Streaming && c.Streaming {
 		dr = newPADrafter(ctx, w, c.Token)
 		defer dr.close()
-		onText = dr.update
 	}
 
 	var cost float64
@@ -457,7 +464,7 @@ func (w *PAWorker) Run(ctx context.Context, c *PAClaim) (PAOutcome, error) {
 		if tokens > maxContext {
 			return PAAbandoned, errors.New("pa worker: context over the limit")
 		}
-		res, out, err := w.chat(ctx, c.Token, tokens, msgs, offer, onText)
+		res, out, err := w.chat(ctx, c.Token, tokens, msgs, offer, dr)
 		if err != nil {
 			return out, err
 		}
@@ -475,6 +482,9 @@ func (w *PAWorker) Run(ctx context.Context, c *PAClaim) (PAOutcome, error) {
 			// second card for one request.
 			if cardQueued {
 				return PAAbandoned, errors.New("pa worker: tool call after an approval card")
+			}
+			if dr != nil {
+				dr.reset()
 			}
 			// Every call the model asks for counts toward the cap,
 			// dispatched or not. The cap is inclusive, as on the server
@@ -578,7 +588,11 @@ func (w *PAWorker) reply(ctx context.Context, token, text string, cost *float64)
 // the server first. 429 and 5xx from the provider are retried, at most
 // paModelAttempts attempts within the run's deadline. A refused /turn
 // ends the run with the outcome it calls for.
-func (w *PAWorker) chat(ctx context.Context, token string, tokens int, msgs []ChatMessage, tools []PAModelTool, onText func(string)) (*ChatResult, PAOutcome, error) {
+//
+// With a drafter the call is streamed and the growing text goes to it,
+// until the server answers a draft 404: the calls after that are not
+// streamed.
+func (w *PAWorker) chat(ctx context.Context, token string, tokens int, msgs []ChatMessage, tools []PAModelTool, dr *paDrafter) (*ChatResult, PAOutcome, error) {
 	backoff := time.Second
 	var last error
 	for attempt := 0; attempt < paModelAttempts; attempt++ {
@@ -587,8 +601,8 @@ func (w *PAWorker) chat(ctx context.Context, token string, tokens int, msgs []Ch
 		}
 		var res *ChatResult
 		var err error
-		if sm, ok := w.Model.(PAStreamModel); ok && onText != nil {
-			res, err = sm.ChatPAStream(ctx, msgs, tools, onText)
+		if sm, ok := w.Model.(PAStreamModel); ok && dr.streaming() {
+			res, err = sm.ChatPAStream(ctx, msgs, tools, dr.update)
 		} else {
 			res, err = w.Model.ChatPA(ctx, msgs, tools)
 		}

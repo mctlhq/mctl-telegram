@@ -7,17 +7,20 @@ package pa
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
 // StreamingFlagEnv switches draft streaming on. It is re-read on every
-// claim and every draft: missing or empty is off, "true" is on, and
-// anything else is unreadable and fails closed (off).
+// claim, draft, tool status and draft refresh: missing or empty is off,
+// "true" is on, and anything else is unreadable, which is an error to the
+// caller and never "on".
 const StreamingFlagEnv = "PA_STREAMING_ENABLED"
 
 // streamingOn reads the flag.
@@ -50,10 +53,27 @@ const (
 	maxDraftBody = 6*safetext.MaxPartUTF16 + 1<<10
 )
 
-// draftLimiter caps drafts per job, in memory like the presence state.
+// errStreamingOff ends a job's draft presence when the flag is no longer on.
+var errStreamingOff = errors.New("pa: streaming is off")
+
+// draftLimiter caps the drafts one attempt of a job may ask for, whatever
+// the worker does. It is in memory per replica, like the presence state.
+// It counts every request that reaches it, shown or not, and keeps
+// counting after the job stopped, so a worker that keeps posting for a
+// stopped job is answered 429 and costs no further job read. Entries are
+// forgotten draftLimiterTTL after their last request, which is longer than
+// any lease.
 type draftLimiter struct {
+	minInterval time.Duration
+	maxPerJob   int
+
 	mu   sync.Mutex
-	jobs map[int64]*draftCount
+	jobs map[draftKey]*draftCount
+}
+
+type draftKey struct {
+	job     int64
+	attempt int
 }
 
 type draftCount struct {
@@ -61,27 +81,37 @@ type draftCount struct {
 	n    int
 }
 
-func newDraftLimiter() *draftLimiter { return &draftLimiter{jobs: map[int64]*draftCount{}} }
+const (
+	draftLimiterTTL   = time.Hour
+	draftLimiterSweep = 1024 // entries above which allow sweeps old ones
+)
 
-// allow reports whether job may send a draft at now, and counts it.
-func (d *draftLimiter) allow(job int64, now time.Time) bool {
+func newDraftLimiter() *draftLimiter {
+	return &draftLimiter{minInterval: draftMinInterval, maxPerJob: draftMaxPerJob, jobs: map[draftKey]*draftCount{}}
+}
+
+// allow reports whether ref's attempt may send a draft at now, and counts
+// it.
+func (d *draftLimiter) allow(ref jobs.Ref, now time.Time) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	c := d.jobs[job]
+	if len(d.jobs) > draftLimiterSweep {
+		for k, c := range d.jobs {
+			if now.Sub(c.last) > draftLimiterTTL {
+				delete(d.jobs, k)
+			}
+		}
+	}
+	k := draftKey{ref.JobID, ref.Attempt}
+	c := d.jobs[k]
 	if c == nil {
 		c = &draftCount{}
-		d.jobs[job] = c
+		d.jobs[k] = c
 	}
-	if c.n >= draftMaxPerJob || (c.n > 0 && now.Sub(c.last) < draftMinInterval) {
+	if c.n >= d.maxPerJob || (c.n > 0 && now.Sub(c.last) < d.minInterval) {
 		return false
 	}
 	c.n++
 	c.last = now
 	return true
-}
-
-func (d *draftLimiter) drop(job int64) {
-	d.mu.Lock()
-	delete(d.jobs, job)
-	d.mu.Unlock()
 }

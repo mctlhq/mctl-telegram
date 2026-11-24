@@ -254,7 +254,13 @@ func NewRunLoop(cfg RunLoopConfig) (*RunLoop, error) {
 	}
 	if loop.typing != nil && cfg.Drafts != nil {
 		loop.typing.drafts = cfg.Drafts
+		// A draft is only re-sent for a job that still runs under the same
+		// attempt, context and gate, with the flag still on. A read that
+		// fails is a refusal, like any other.
 		loop.typing.check = func(ctx context.Context, ref jobs.Ref) error {
+			if !loop.streaming() {
+				return errStreamingOff
+			}
 			_, err := loop.store.RunningPAJob(ctx, ref, loop.now(), loop.gate)
 			loop.droppedNotice(ctx, ref, err)
 			return err
@@ -263,23 +269,23 @@ func NewRunLoop(cfg RunLoopConfig) (*RunLoop, error) {
 	return loop, nil
 }
 
-// streaming reports whether draft streaming is on right now. An unreadable
-// flag is off.
+// streaming reports whether draft streaming is on right now. It is read
+// again on every claim, draft, tool status and draft refresh. A flag that
+// cannot be read is not "on": nothing is streamed and no draft is sent,
+// and the fault is logged so it is not mistaken for a flag set to false.
 func (l *RunLoop) streaming() bool {
 	if l.drafts == nil || l.typing == nil {
 		return false
 	}
 	on, err := streamingOn(l.getenv)
-	return err == nil && on
+	if err != nil {
+		slog.Warn("pa streaming flag unreadable: drafts refused", "err", err)
+		return false
+	}
+	return on
 }
 
-// endPresence stops job's typing and draft presence and its draft cap.
-func (l *RunLoop) endPresence(job int64) {
-	l.typing.stop(job)
-	l.limiter.drop(job)
-}
-
-// Mount registers the three routes.
+// Mount registers the run-loop routes.
 func (l *RunLoop) Mount(mux interface{ Handle(string, http.Handler) }) {
 	mux.Handle(RouteClaim, http.HandlerFunc(l.serveClaim))
 	mux.Handle(RouteTurn, http.HandlerFunc(l.serveTurn))
@@ -713,7 +719,7 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 	}
 	// The answer is here: the status stops before it is queued, so the
 	// chat never shows "typing" under the answer.
-	l.endPresence(ref.JobID)
+	l.typing.stop(ref.JobID)
 	var req replyRequest
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxReplyBody))
 	var tooBig *http.MaxBytesError
@@ -843,7 +849,7 @@ func (l *RunLoop) serveDraft(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]bool{"shown": false})
 		return
 	}
-	if !l.limiter.allow(ref.JobID, l.now()) {
+	if !l.limiter.allow(ref, l.now()) {
 		writeJSON(w, http.StatusTooManyRequests, stopResponse{Stop: "rate"})
 		return
 	}
@@ -874,7 +880,7 @@ func (l *RunLoop) serveDraft(w http.ResponseWriter, r *http.Request) {
 // release undoes a claim whose token was never handed out and sends the
 // notice it may owe.
 func (l *RunLoop) release(ctx context.Context, ref jobs.Ref, mode jobs.ReleaseMode, now time.Time) {
-	l.endPresence(ref.JobID)
+	l.typing.stop(ref.JobID)
 	l.timer.drop(ref.JobID)
 	n, err := l.store.ReleasePAClaim(ctx, ref, mode, now)
 	if err != nil {
@@ -1050,7 +1056,7 @@ func (l *RunLoop) AdmitToolCall(ctx context.Context, job PAJob, server, tool str
 	})
 	l.droppedNotice(ctx, job.ref, err)
 	if err != nil {
-		l.endPresence(job.ref.JobID)
+		l.typing.stop(job.ref.JobID)
 		l.timer.drop(job.ref.JobID)
 		return Policy{}, err
 	}
@@ -1075,7 +1081,7 @@ func (l *RunLoop) StillRunning(ctx context.Context, job PAJob) error {
 	_, err := l.store.RunningPAJob(ctx, job.ref, l.now(), l.gate)
 	l.droppedNotice(ctx, job.ref, err)
 	if err != nil {
-		l.endPresence(job.ref.JobID)
+		l.typing.stop(job.ref.JobID)
 		l.timer.drop(job.ref.JobID)
 	} else {
 		l.typing.touch(job.ref.JobID)
@@ -1117,7 +1123,7 @@ func policyFromJob(j jobs.Job, ref jobs.Ref) (Policy, error) {
 // conversation expired mid-run, or its principal was disabled or taken off
 // the allowlist, owes the principal a notice.
 func (l *RunLoop) stopRun(ctx context.Context, w http.ResponseWriter, ref jobs.Ref, err error) {
-	l.endPresence(ref.JobID)
+	l.typing.stop(ref.JobID)
 	l.timer.drop(ref.JobID)
 	l.droppedNotice(ctx, ref, err)
 	stop(w, err)

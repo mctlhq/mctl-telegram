@@ -74,10 +74,16 @@ func (c *OpenAIClient) chatStream(ctx context.Context, msgs []ChatMessage, wireT
 				} `json:"delta"`
 				FinishReason *string `json:"finish_reason"`
 			} `json:"choices"`
-			Usage *ChatUsage `json:"usage"`
+			Usage *ChatUsage      `json:"usage"`
+			Error json.RawMessage `json:"error"`
 		}
 		if err := json.Unmarshal(data, &chunk); err != nil {
 			return nil, errors.New("decode chat stream: malformed chunk")
+		}
+		if len(chunk.Error) > 0 && string(chunk.Error) != "null" {
+			// A provider fault reported inside a 200 stream. Its text is
+			// not kept: it may echo the request.
+			return nil, errors.New("read chat stream: provider reported an error")
 		}
 		if chunk.Usage != nil {
 			usage = chunk.Usage

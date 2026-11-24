@@ -12,6 +12,17 @@ package pa
 // activity, or at the lease end, whichever comes first. The idle bound
 // also covers a run whose reply reaches another replica: that replica
 // cannot stop this one's status, which then lapses on its own.
+//
+// With draft streaming on (streaming.go, #1431) the same loop is the job's
+// whole presence: it shows typing until the first draft, and after that
+// never typing again. A draft is sent either on request (showDraft, from
+// the draft route) or by the loop itself: a tool status handed over by
+// showStatus, and the re-send of the last draft before Telegram drops it
+// (refresh). The loop re-sends only after check, the run gate, passed
+// again, so a cancelled run's draft is not kept alive. Every send goes
+// through sendDraft under the run's sendMu, and stop sets stopped under
+// the same lock: nothing is sent after stop returns. No draft text is
+// stored anywhere but in this in-memory run.
 
 import (
 	"context"
@@ -97,7 +108,9 @@ func (t *typingTracker) begin(ref jobs.Ref, until time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if r, ok := t.runs[job]; ok {
-		r.last = t.now()
+		// A later attempt of the same job: the draft check must ask about
+		// the attempt that runs now.
+		r.last, r.ref = t.now(), ref
 		return
 	}
 	// The lease is on the run loop's clock; the timer runs on the remaining
@@ -162,7 +175,7 @@ func (t *typingTracker) stop(job int64) {
 // sendDraft sends text as job's draft, unless the run was stopped. It
 // never sends for a job with no presence run (other replica, stopped,
 // idle): a draft needs a live run to be stopped with.
-func (t *typingTracker) sendDraft(ctx context.Context, r *typingRun, principal int64, text safetext.Text) error {
+func (t *typingTracker) sendDraft(ctx context.Context, r *typingRun, principal, job int64, text safetext.Text) error {
 	r.sendMu.Lock()
 	defer r.sendMu.Unlock()
 	if r.stopped || ctx.Err() != nil {
@@ -170,7 +183,7 @@ func (t *typingTracker) sendDraft(ctx context.Context, r *typingRun, principal i
 	}
 	cctx, cancel := context.WithTimeout(ctx, draftCallDeadline)
 	defer cancel()
-	if err := t.drafts.SendDraft(cctx, principal, draftID(r.ref), text); err != nil {
+	if err := t.drafts.SendDraft(cctx, principal, draftID(job), text); err != nil {
 		return err
 	}
 	t.mu.Lock()
@@ -179,9 +192,9 @@ func (t *typingTracker) sendDraft(ctx context.Context, r *typingRun, principal i
 	return nil
 }
 
-// draftID is the job's draft id: positive, and stable across attempts, so
-// a retry animates the same draft.
-func draftID(ref jobs.Ref) int64 { return ref.JobID }
+// draftID is the job's draft id: non-zero, as sendMessageDraft requires,
+// and stable across attempts, so a retry animates the same draft.
+func draftID(job int64) int64 { return job }
 
 // run returns job's live presence run.
 func (t *typingTracker) run(job int64) *typingRun {
@@ -203,7 +216,7 @@ func (t *typingTracker) showDraft(ctx context.Context, ref jobs.Ref, text safete
 	t.mu.Lock()
 	r.pending = nil
 	t.mu.Unlock()
-	return t.sendDraft(ctx, r, ref.Principal, text) == nil
+	return t.sendDraft(ctx, r, ref.Principal, ref.JobID, text) == nil
 }
 
 // showStatus hands a server status to job's presence loop, which shows it
@@ -269,6 +282,11 @@ func (t *typingTracker) loop(ctx context.Context, principal, job int64, r *typin
 			delete(t.runs, job)
 		}
 		t.mu.Unlock()
+		// A loop that ended on its own (idle, lease, a failed check) ends
+		// the run's drafts too: a request that still holds r sends nothing.
+		r.sendMu.Lock()
+		r.stopped = true
+		r.sendMu.Unlock()
 		r.cancel()
 	}()
 	tick := time.NewTicker(t.interval)
@@ -282,24 +300,24 @@ func (t *typingTracker) loop(ctx context.Context, principal, job int64, r *typin
 		}
 		t.mu.Lock()
 		pending, drafted, due := r.pending, r.drafted, r.drafted && t.now().Sub(r.draftAt) >= t.refresh
-		last := r.draft
+		last, ref := r.draft, r.ref
 		r.pending = nil
 		t.mu.Unlock()
 		var err error
 		switch {
 		case t.drafts != nil && pending != nil:
 			// A draft failure is cosmetic and never ends the loop.
-			if derr := t.sendDraft(ctx, r, principal, *pending); derr != nil {
+			if derr := t.sendDraft(ctx, r, principal, job, *pending); derr != nil {
 				slog.Debug("pa status draft not shown", "job_id", job, "err", derr)
 			}
 		case t.drafts != nil && drafted:
 			if due {
 				if t.check != nil {
-					if cerr := t.check(ctx, r.ref); cerr != nil {
+					if cerr := t.check(ctx, ref); cerr != nil {
 						return
 					}
 				}
-				if derr := t.sendDraft(ctx, r, principal, last); derr != nil {
+				if derr := t.sendDraft(ctx, r, principal, job, last); derr != nil {
 					slog.Debug("pa draft not refreshed", "job_id", job, "err", derr)
 				}
 			}

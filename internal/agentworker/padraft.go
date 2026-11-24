@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
@@ -35,6 +36,9 @@ type paDrafter struct {
 	mu      sync.Mutex
 	latest  string
 	stopped bool
+	// off is set once the server answered that it has no draft route or
+	// that streaming is off (404): the rest of the job is not streamed.
+	off atomic.Bool
 }
 
 func newPADrafter(parent context.Context, w *PAWorker, token string) *paDrafter {
@@ -42,6 +46,12 @@ func newPADrafter(parent context.Context, w *PAWorker, token string) *paDrafter 
 	d := &paDrafter{
 		w: w, token: token, ctx: ctx, stop: cancel, done: make(chan struct{}), wake: make(chan struct{}, 1),
 		minInterval: paDraftMinInterval, minDelta: paDraftMinDelta,
+	}
+	if w.DraftInterval > 0 {
+		d.minInterval = w.DraftInterval
+	}
+	if w.DraftDelta > 0 {
+		d.minDelta = w.DraftDelta
 	}
 	go d.loop()
 	return d
@@ -58,6 +68,17 @@ func (d *paDrafter) update(text string) {
 	default:
 	}
 }
+
+// reset forgets the text of a model call that ended in tool calls, so it
+// is not posted over the tool status the server shows next.
+func (d *paDrafter) reset() {
+	d.mu.Lock()
+	d.latest = ""
+	d.mu.Unlock()
+}
+
+// streaming reports whether the next model call should still be streamed.
+func (d *paDrafter) streaming() bool { return d != nil && !d.off.Load() }
 
 // close stops the drafter and waits for an in-flight post to end.
 func (d *paDrafter) close() {
@@ -90,8 +111,9 @@ func (d *paDrafter) loop() {
 			continue
 		}
 		if safetext.UTF16Len(text) > safetext.MaxPartUTF16 {
-			// The server would skip it, and every longer text too.
-			return
+			// The server would skip it, and every longer text of this
+			// model call too. A later call starts a new text.
+			continue
 		}
 		if posted != "" && len(text) >= len(posted) && safetext.UTF16Len(text)-safetext.UTF16Len(posted) < d.minDelta {
 			continue
@@ -106,8 +128,15 @@ func (d *paDrafter) loop() {
 		cancel()
 		posted = text
 		var he *paHTTPError
-		if errors.As(err, &he) && (he.Status == http.StatusNotFound || he.Status == http.StatusConflict) {
-			// Streaming is off or the run is over: no more drafts.
+		if errors.As(err, &he) && he.Status == http.StatusNotFound {
+			// The server has no draft route, or streaming was turned off:
+			// no more drafts, and the job's later model calls are not
+			// streamed either.
+			d.off.Store(true)
+			return
+		}
+		if errors.As(err, &he) && he.Status == http.StatusConflict {
+			// The run is over; its next /turn or reply will say so.
 			return
 		}
 	}
