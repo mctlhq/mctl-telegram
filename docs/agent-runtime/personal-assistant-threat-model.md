@@ -350,6 +350,7 @@ Eviction from the model's context window never resets taint. Neither do model ou
 | `alice_say_phrase` | disclosure | approve | never | Target device (home, room, name, id) and the full text. Warns that everyone in the room will hear it. |
 | `alice_send_command` | disclosure | approve | never | Target device and the full command text. |
 | `alice_media_control` | write | approve | yes (playback controls only) | Device and action. A free-text search query carries the query, capped at 64 characters. A query from external content needs a card. |
+| `alice_play_music` | write | approve | never | Target speaker (home, room, name, id), the exact query and the fixed spoken command the server sends ("включи музыку " followed by the query). The query passes the server's own rule set (letters of the Latin and Russian alphabets, digits and a short list of marks; at most 100 characters and 12 words; no command stems, no assistant name, no mixed-script word) or there is no card: it is refused, never trimmed or rewritten. |
 | `alice_set_volume` | write | approve | yes, up to a volume ceiling stored in the permission | Device and the exact value sent, in device units. |
 | `alice_set_light` | write | approve | yes | Device and the exact values. |
 | `alice_control_device` | write | approve | only for device ids listed in the permission, and only if the device type is `light` or `media_device` | Device and action. Every other device type (heaters, kettles, ovens, locks, sockets, relays, and any type the user can relabel) is approve, never lowerable. |
@@ -361,6 +362,9 @@ Read tools are auto from Phase 1: `alice_list_devices`, `alice_get_device_state`
 **Device type.** The device type comes from Yandex, and a user can relabel it. It is therefore never the only basis for lowering:
 - Lowering also requires the device id to be listed in the permission.
 - The type is read fresh at dispatch. An unknown or unreadable type means the call is not lowerable (I9).
+- The type strings are the ones mctl-alice reports in the structured result of `alice_list_devices` (`structuredContent.devices[].type`): `devices.types.smart_speaker.*` for a speaker and `devices.types.light` for a light, matched exactly or on a dot boundary. The table's `media_device` is the Yandex type of a television or a set-top box; a speaker tool accepts it only together with the listing's own `is_speaker` flag.
+- The listing is read as structured content only. A result without it, or with any part of it missing or malformed, is unreadable and the call is refused: it is never read as "no devices", and the listing's text is never parsed instead.
+- The device list is read again right before an approved or a lowered call to one device is sent (device writes, disclosures and `alice_play_music`). A device that is gone, or whose name, room, home, type or kind differs from what the card showed, is not called; the approval is spent and the principal is told the action was not carried out.
 
 **Limits and binding.**
 - `disclosure` text is capped at 1000 characters. Longer text is refused, with an offer to split it into parts, each approved separately.

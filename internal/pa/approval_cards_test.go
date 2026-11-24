@@ -84,6 +84,9 @@ type cardEnv struct {
 	cstore *cardStore
 	cards  *connector.Cards
 	token  string
+	// devices is the write executor's device reader; it lists what the
+	// card emitter's speaker and light fakes hold.
+	devices *listedDevices
 
 	mu       sync.Mutex
 	approved []string
@@ -102,11 +105,25 @@ func newCardEnv(t *testing.T, s *db.Store) *cardEnv {
 // service; nil keeps the write env's fake.
 func newCardEnvOn(t *testing.T, s *db.Store, pin *catalog.Pin, fresh connector.FreshSurface, opts ...func(*connector.CardConfig)) *cardEnv {
 	t.Helper()
-	var mutate func(*connector.WriteConfig)
-	if fresh != nil {
-		mutate = func(c *connector.WriteConfig) { c.Fresh = fresh }
+	return newCardEnvWith(t, s, pin, fresh, nil, opts...)
+}
+
+// newCardEnvWith is newCardEnvOn with a last change to the write
+// executor's configuration.
+func newCardEnvWith(t *testing.T, s *db.Store, pin *catalog.Pin, fresh connector.FreshSurface,
+	write func(*connector.WriteConfig), opts ...func(*connector.CardConfig)) *cardEnv {
+	t.Helper()
+	devices := &listedDevices{}
+	mutate := func(c *connector.WriteConfig) {
+		c.Devices = map[string]connector.DeviceLister{"tg": devices}
+		if fresh != nil {
+			c.Fresh = fresh
+		}
+		if write != nil {
+			write(c)
+		}
 	}
-	e := &cardEnv{writeEnv: newWriteEnv(t, s, mutate), cstore: &cardStore{Store: s}}
+	e := &cardEnv{writeEnv: newWriteEnv(t, s, mutate), cstore: &cardStore{Store: s}, devices: devices}
 	if fresh == nil {
 		fresh = e.fresh
 	}
@@ -121,6 +138,8 @@ func newCardEnvOn(t *testing.T, s *db.Store, pin *catalog.Pin, fresh connector.F
 	for _, o := range opts {
 		o(&cfg)
 	}
+	devices.sp, _ = cfg.Speakers["tg"].(*fakeSpeakers)
+	devices.li, _ = cfg.Lights["tg"].(*fakeLights)
 	var err error
 	if e.cards, err = connector.NewCards(cfg); err != nil {
 		t.Fatal(err)

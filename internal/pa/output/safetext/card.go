@@ -36,12 +36,34 @@ func CardTemplates() []Template {
 }
 
 // DisclosureCardTemplates lists every server text a disclosure card can
-// hold besides CardTemplates. TextCardHomeUnknown stands in for a home the
-// service did not report, one of TextCardPhrase and TextCardCommand is
-// present, and TextCardRoomWarning only on a text that is said aloud.
+// hold besides CardTemplates. TextCardHomeUnknown stands in for a home or a
+// room the service did not report, one of TextCardPhrase and
+// TextCardCommand is present, and TextCardRoomWarning only on a text that
+// is said aloud.
 func DisclosureCardTemplates() []Template {
 	return []Template{TextCardSpeaker, TextCardHome, TextCardHomeUnknown, TextCardRoom, TextCardDeviceName,
 		TextCardDeviceID, TextCardPhrase, TextCardCommand, TextCardRoomWarning}
+}
+
+// MusicCardTemplates lists every server text a music card holds besides
+// CardTemplates.
+func MusicCardTemplates() []Template {
+	return []Template{TextCardSpeaker, TextCardHome, TextCardHomeUnknown, TextCardRoom, TextCardDeviceName,
+		TextCardDeviceID, TextCardMusicQuery, TextCardMusicCommand}
+}
+
+// Music is what the card of a music request shows besides the tool and
+// the arguments (alice_play_music): the speaker, the query, and the
+// command the speaker receives for it.
+type Music struct {
+	// Home, Room, Name and ID are the speaker's, as in Disclosure. An
+	// empty Home or Room is shown as not reported.
+	Home, Room, Name, ID string
+	// Query is the query, exactly as it is sent.
+	Query string
+	// Command is the whole text the speaker is handed: the service's fixed
+	// words followed by Query.
+	Command string
 }
 
 // Disclosure is what a disclosure card shows besides the tool and the
@@ -49,12 +71,16 @@ func DisclosureCardTemplates() []Template {
 type Disclosure struct {
 	// Home, Room and Name are the speaker's, as the service listed them
 	// when the card was made; ID is its device id, the one in the
-	// arguments. An empty Home is shown as not reported, never left out.
+	// arguments. An empty Home or Room is shown as not reported, never
+	// left out.
 	Home, Room, Name, ID string
 	// Phrase is the whole text, exactly as it is sent.
 	Phrase string
 	// Spoken: the text is said aloud, so the card warns about the room.
 	Spoken bool
+	// query is set by MusicCard only: the card then shows the query and,
+	// as Phrase, the command built from it.
+	query string
 }
 
 // ScenarioCardTemplates lists every server text a scenario card holds
@@ -129,18 +155,44 @@ func Card(tool, args string, external bool) (Text, error) {
 // reads is the text that is sent and the id it is sent to. The text is
 // never cut: a card that does not fit one message is ErrTooLong.
 func DisclosureCard(tool, args string, d Disclosure, external bool) (Text, error) {
-	for _, v := range []string{d.Room, d.Name, d.ID, d.Phrase} {
+	d.query = ""
+	return disclosureCard(tool, args, d, external)
+}
+
+func disclosureCard(tool, args string, d Disclosure, external bool) (Text, error) {
+	for _, v := range []string{d.Name, d.ID, d.Phrase} {
 		if !cardValue(v) {
 			return Text{}, ErrCardUnshowable
 		}
 	}
-	if d.Home != "" && !cardValue(d.Home) {
-		return Text{}, ErrCardUnshowable
+	for _, v := range []string{d.Home, d.Room} {
+		if v != "" && !cardValue(v) {
+			return Text{}, ErrCardUnshowable
+		}
 	}
 	if strings.TrimSpace(d.Phrase) != d.Phrase || strings.TrimSpace(d.ID) != d.ID {
 		return Text{}, ErrCardUnshowable
 	}
 	return card(tool, args, &d, nil, external)
+}
+
+// MusicCard is Card for a music request (alice_play_music): above the
+// arguments it shows the speaker, the query on a line of its own, and the
+// command the speaker receives on another. The command must end with the
+// query, after words of the service's that end in a space: a card whose
+// two lines disagree is not built.
+//
+// The query, the command and the device id are shown exactly or the card
+// is refused (ErrCardUnshowable), as the text of a DisclosureCard is.
+func MusicCard(tool, args string, m Music, external bool) (Text, error) {
+	prefix, ok := strings.CutSuffix(m.Command, m.Query)
+	if !ok || !cardValue(m.Query) || strings.TrimSpace(m.Query) != m.Query ||
+		len(prefix) < 2 || !strings.HasSuffix(prefix, " ") || strings.TrimSpace(prefix) != prefix[:len(prefix)-1] {
+		return Text{}, ErrCardUnshowable
+	}
+	return disclosureCard(tool, args, Disclosure{
+		Home: m.Home, Room: m.Room, Name: m.Name, ID: m.ID, Phrase: m.Command, query: m.Query,
+	}, external)
 }
 
 // ScenarioCard is Card for a call that runs a scenario (S2-D6): above the
@@ -232,20 +284,27 @@ func card(tool, args string, d *Disclosure, w *DeviceWrite, external bool) (Text
 		b.WriteString("\n\n")
 		idLine := ""
 		if d != nil {
-			home := d.Home
+			home, room := d.Home, d.Room
 			if home == "" {
 				home = TextCardHomeUnknown.In(l)
+			}
+			if room == "" {
+				room = TextCardHomeUnknown.In(l)
 			}
 			idLine = TextCardDeviceID.In(l) + " " + d.ID
 			b.WriteString(TextCardSpeaker.In(l))
 			b.WriteString("\n" + TextCardHome.In(l) + " " + home)
-			b.WriteString("\n" + TextCardRoom.In(l) + " " + d.Room)
+			b.WriteString("\n" + TextCardRoom.In(l) + " " + room)
 			b.WriteString("\n" + TextCardDeviceName.In(l) + " " + d.Name)
 			b.WriteString("\n" + idLine)
 			b.WriteString("\n\n")
-			if d.Spoken {
+			switch {
+			case d.query != "":
+				b.WriteString(TextCardMusicQuery.In(l) + "\n" + d.query + "\n\n")
+				b.WriteString(TextCardMusicCommand.In(l))
+			case d.Spoken:
 				b.WriteString(TextCardPhrase.In(l))
-			} else {
+			default:
 				b.WriteString(TextCardCommand.In(l))
 			}
 			b.WriteString("\n")
@@ -258,9 +317,12 @@ func card(tool, args string, d *Disclosure, w *DeviceWrite, external bool) (Text
 		}
 		var valueLines []string
 		if w != nil {
-			home, head := w.Home, TextCardSpeaker
+			home, room, head := w.Home, w.Room, TextCardSpeaker
 			if home == "" {
 				home = TextCardHomeUnknown.In(l)
+			}
+			if room == "" {
+				room = TextCardHomeUnknown.In(l)
 			}
 			if w.Light {
 				head = TextCardLight
@@ -268,7 +330,7 @@ func card(tool, args string, d *Disclosure, w *DeviceWrite, external bool) (Text
 			idLine = TextCardDeviceID.In(l) + " " + w.ID
 			b.WriteString(head.In(l))
 			b.WriteString("\n" + TextCardHome.In(l) + " " + home)
-			b.WriteString("\n" + TextCardRoom.In(l) + " " + w.Room)
+			b.WriteString("\n" + TextCardRoom.In(l) + " " + room)
 			b.WriteString("\n" + TextCardDeviceName.In(l) + " " + w.Name)
 			b.WriteString("\n" + idLine)
 			b.WriteString("\n\n")
@@ -299,6 +361,9 @@ func card(tool, args string, d *Disclosure, w *DeviceWrite, external bool) (Text
 			// are sent, each on a line of its own, or there is no card.
 			lines := strings.Split(s, "\n")
 			if !containsLine(lines, d.Phrase) || !containsLine(lines, idLine) {
+				return "", ErrCardUnshowable
+			}
+			if d.query != "" && !containsLine(lines, d.query) {
 				return "", ErrCardUnshowable
 			}
 		}
@@ -394,7 +459,8 @@ type DeviceWrite struct {
 	Light bool
 	// Home, Room and Name are the device's, as the service listed them
 	// when the card was made; ID is its device id, the one in the
-	// arguments. An empty Home is shown as not reported, never left out.
+	// arguments. An empty Home or Room is shown as not reported, never
+	// left out.
 	Home, Room, Name, ID string
 	// Values are every value the call sets, in the order they are shown.
 	Values []CardValue
@@ -424,13 +490,13 @@ func DeviceWriteCard(tool, args string, w DeviceWrite, external bool) (Text, err
 			return Text{}, ErrCardUnshowable
 		}
 	}
-	for _, v := range []string{w.Room, w.Name} {
-		if !cardValue(v) {
+	if !cardValue(w.Name) {
+		return Text{}, ErrCardUnshowable
+	}
+	for _, v := range []string{w.Home, w.Room} {
+		if v != "" && !cardValue(v) {
 			return Text{}, ErrCardUnshowable
 		}
-	}
-	if w.Home != "" && !cardValue(w.Home) {
-		return Text{}, ErrCardUnshowable
 	}
 	return card(tool, args, nil, &w, external)
 }

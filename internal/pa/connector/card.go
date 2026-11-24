@@ -110,6 +110,8 @@ type CardConfig struct {
 	Speakers map[string]SpeakerReader
 	// Lights reads a server's lights for the card of a write to a light
 	// (device_write.go), by server name, as Speakers does for a speaker.
+	// The write executor reads the devices again before it sends
+	// (WriteConfig.Devices).
 	Lights map[string]LightReader
 	// Scenarios reads the steps of a server's scenario for the card of a
 	// scenario call (scenario.go), by server name. A scenario call on a
@@ -236,6 +238,7 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) (*WriteOutcome, *refu
 	// Every other Phase 2 write has no card here: it is never shown as a
 	// plain card, which could not say what it does.
 	var write *deviceWriteCall
+	var music *musicCall
 	if isScenario {
 		name, ref := c.precheckScenario(req.Server, req.Tool, canonical)
 		if ref != nil {
@@ -248,6 +251,14 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) (*WriteOutcome, *refu
 			return nil, ref
 		}
 		write = &call
+	} else if req.Tool == musicTool && pinned.Class == catalog.ClassWrite {
+		// A music request has checks of its own (alice_music.go): the
+		// query passes the server's rule set or there is no card.
+		call, ref := precheckMusic(req.Tool, pinned, canonical)
+		if ref != nil {
+			return nil, ref
+		}
+		music = &call
 	} else if pinned.Class == catalog.ClassWrite && catalog.Phase2Tool(req.Tool) {
 		return nil, &refusal{ReasonNoWritePath, http.StatusForbidden}
 	}
@@ -302,6 +313,16 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) (*WriteOutcome, *refu
 		}
 		detail = sealed
 	}
+	if music != nil {
+		shown, sealed, ref := c.musicTarget(ctx, req, *music)
+		if ref != nil {
+			return nil, ref
+		}
+		if _, err := safetext.MusicCard(cardToolName(req.Server, req.Tool), string(canonical), shown, true); err != nil {
+			return nil, cardTextRefusal(err)
+		}
+		detail = sealed
+	}
 	// The steps of a scenario are read now too: the card lists them, or
 	// there is no card.
 	if isScenario {
@@ -321,7 +342,10 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) (*WriteOutcome, *refu
 	now := c.cfg.Now()
 	var perm *permissions.Permission
 	var covered permissions.Call
-	if write != nil && lowerable(req.Tool, pinned) {
+	// The device's type, as that read reported it, must be one the tool's
+	// rule allows: a device that was a light when the permission was
+	// granted and is something else now gets a card (S2-D5).
+	if write != nil && lowerable(req.Tool, pinned) && lowerableTarget(req.Tool, detail) {
 		covered = permissions.Call{
 			Principal: principal, ConnectionID: req.ConnectionID, AuthorityRevision: req.AuthorityRevision,
 			Server: req.Server, Tool: req.Tool, Device: write.device, Ints: write.ints, Strings: write.strs,
@@ -351,7 +375,7 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) (*WriteOutcome, *refu
 		}
 		if d.Outcome == gate.OutcomeLowered {
 			out, err := c.cfg.Lowered.DispatchLowered(ctx, LoweredCall{
-				Binding: binding, Args: canonical, PermissionID: perm.ID,
+				Binding: binding, Args: canonical, PermissionID: perm.ID, Target: detail,
 			})
 			if err != nil {
 				slog.Warn("pa card: lowered call not dispatched", "err", err)
@@ -548,6 +572,16 @@ func (c *Cards) RenderApprovalCard(ctx context.Context, principal int64, approve
 		var d safetext.Disclosure
 		if d, err = disclosureOf(a.Tool, args, detail); err == nil {
 			text, err = safetext.DisclosureCard(cardToolName(a.Server, a.Tool), string(args), d, tainted || terr != nil)
+		}
+	} else if a.Tool == musicTool {
+		// A music request has its own card or none.
+		pinned, pinnedOK := c.approveTool(a.Server, a.Tool)
+		if !pinnedOK || a.Class != catalog.ClassWrite {
+			return pa.ApprovalCard{}, errors.New("pa card: no card for this write")
+		}
+		var m safetext.Music
+		if m, err = musicOf(a.Tool, pinned, args, detail); err == nil {
+			text, err = safetext.MusicCard(cardToolName(a.Server, a.Tool), string(args), m, tainted || terr != nil)
 		}
 	} else if _, ok := deviceWriteTools[a.Tool]; ok || catalog.Phase2Tool(a.Tool) {
 		// A Phase 2 write has its own card or none, like a disclosure.

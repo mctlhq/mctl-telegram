@@ -65,15 +65,17 @@ const ReasonValueNotAllowed = "value_not_allowed"
 type Light struct {
 	ID               string
 	Name, Room, Home string
+	Type             string
 }
 
 // LightReader reads the lights of one connection from its server, now,
-// under the rules of SpeakerReader: never from a cache, and an error for
-// anything but a complete, non-empty list it could parse.
+// under the rules of SpeakerReader: never from a cache, an error for
+// anything but a complete list it could parse, and ErrNoSuchDevices for a
+// list read in full that holds no light.
 //
-// No reader of the alice server exists: its alice_list_devices prints an
-// id for speakers only, so a light's id cannot be read and
-// alice_set_light gets no card there.
+// AliceDevices is the reader of the alice server (alice_devices.go): a
+// light is a device whose type is devices.types.light, by exact dotted
+// prefix, in the structured listing of alice_list_devices.
 type LightReader interface {
 	Lights(ctx context.Context, req SpeakerRequest) ([]Light, error)
 }
@@ -133,6 +135,13 @@ type deviceWriteCall struct {
 	// string arguments it sets, device aside.
 	ints map[string]int64
 	strs map[string]string
+}
+
+func detailKindOf(light bool) string {
+	if light {
+		return detailKindLight
+	}
+	return detailKindSpeaker
 }
 
 // writeDetail is what the card of a device write shows that the arguments
@@ -248,11 +257,14 @@ func (c *Cards) readDevices(ctx context.Context, req CardRequest, light bool) ([
 			return nil, &refusal{ReasonNoWritePath, http.StatusForbidden}
 		}
 		lights, err := reader.Lights(ctx, sreq)
+		if errors.Is(err, ErrNoSuchDevices) {
+			return nil, &refusal{ReasonDeviceNotListed, http.StatusUnprocessableEntity}
+		}
 		if err != nil {
 			return nil, unreadable
 		}
 		for _, l := range lights {
-			out = append(out, detailSpeaker{ID: l.ID, Name: l.Name, Room: l.Room, Home: l.Home})
+			out = append(out, detailSpeaker{ID: l.ID, Name: l.Name, Room: l.Room, Home: l.Home, Type: l.Type, Kind: detailKindLight})
 		}
 	} else {
 		reader := c.cfg.Speakers[req.Server]
@@ -260,11 +272,14 @@ func (c *Cards) readDevices(ctx context.Context, req CardRequest, light bool) ([
 			return nil, &refusal{ReasonNoWritePath, http.StatusForbidden}
 		}
 		speakers, err := reader.Speakers(ctx, sreq)
+		if errors.Is(err, ErrNoSuchDevices) {
+			return nil, &refusal{ReasonDeviceNotListed, http.StatusUnprocessableEntity}
+		}
 		if err != nil {
 			return nil, unreadable
 		}
 		for _, s := range speakers {
-			out = append(out, detailSpeaker{ID: s.ID, Name: s.Name, Room: s.Room, Home: s.Home})
+			out = append(out, detailSpeaker{ID: s.ID, Name: s.Name, Room: s.Room, Home: s.Home, Type: s.Type, Kind: detailKindSpeaker})
 		}
 	}
 	if len(out) == 0 {
@@ -288,7 +303,7 @@ func (c *Cards) deviceWriteTarget(ctx context.Context, req CardRequest, call dev
 		d := &devices[i]
 		// A list with a device it cannot name, or one id twice, is not a
 		// list this card can be built from.
-		if d.ID == "" || d.Name == "" || d.Room == "" || seen[d.ID] {
+		if d.ID == "" || d.Name == "" || seen[d.ID] {
 			return w, nil, &refusal{ReasonDevicesUnreadable, http.StatusServiceUnavailable}
 		}
 		seen[d.ID] = true
@@ -325,7 +340,7 @@ func deviceWriteOf(tool string, pinned catalog.PinnedTool, args, detail []byte) 
 	if err := dec.Decode(&wd); err != nil || wd.Device == nil {
 		return safetext.DeviceWrite{}, errors.New("pa card: device write detail unreadable")
 	}
-	if wd.Device.ID != call.device || wd.Device.Name == "" || wd.Device.Room == "" {
+	if wd.Device.ID != call.device || wd.Device.Name == "" || wd.Device.Kind != detailKindOf(call.spec.light) {
 		return safetext.DeviceWrite{}, errors.New("pa card: device write detail does not match the arguments")
 	}
 	return safetext.DeviceWrite{

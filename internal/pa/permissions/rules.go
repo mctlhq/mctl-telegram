@@ -21,16 +21,17 @@ package permissions
 // A tool without a rule can be neither granted nor lowered. Three tools
 // have one:
 //
-//   - alice_set_volume: media devices; a ceiling is required and is the
-//     highest "level" (device units, 1 to 10) the permission covers;
-//   - alice_media_control: media devices; no ceiling;
+//   - alice_set_volume: speakers and media devices; a ceiling is required
+//     and is the highest "level" (device units, 1 to 10) the permission
+//     covers;
+//   - alice_media_control: speakers and media devices; no ceiling;
 //   - alice_set_light: lights; no ceiling. The "siren" and "alarm" scenes
 //     are never covered: they are made to be noticed, so each one gets a
 //     card.
 //
-// alice_control_device has none: the server lists no id for a device that
-// is not a speaker, so its type cannot be read, at a grant or at dispatch.
-// alice_control_room and alice_trigger_scenario are never lowerable.
+// alice_control_device has none: the tool has no card path, so nothing
+// could run the checks a lowered call must pass. alice_control_room,
+// alice_trigger_scenario and alice_play_music are never lowerable.
 //
 // The package stays pure and inert: Rules is a value a Validator may be
 // given, and Covers is called by the card emitter and the write executor,
@@ -48,10 +49,18 @@ import (
 // The device types a rule allows, as the server reports them. A type
 // matches when it is the prefix itself or continues it after a dot
 // ("devices.types.light.strip"); a type that merely contains the word does
-// not ("devices.types.socket.light").
+// not ("devices.types.socket.light"), and neither does one that only
+// starts with the same letters ("devices.types.lighthouse").
+//
+// TypeSmartSpeaker is what mctl-alice reports for a speaker with the
+// assistant ("devices.types.smart_speaker.yandex.station.mini"): the only
+// devices alice_set_volume and alice_media_control get a card for.
+// TypeMediaDevice is the type the threat model names for them; no speaker
+// reports it, and it stays allowed for a device that does.
 const (
-	TypeMediaDevice = "devices.types.media_device"
-	TypeLight       = "devices.types.light"
+	TypeMediaDevice  = "devices.types.media_device"
+	TypeSmartSpeaker = "devices.types.smart_speaker"
+	TypeLight        = "devices.types.light"
 )
 
 // Errors of Rules.CheckGrant, one per refused shape.
@@ -68,8 +77,9 @@ var (
 
 // toolRule is the rule of one tool.
 type toolRule struct {
-	// typePrefix is the device type every listed device must have.
-	typePrefix string
+	// typePrefixes are the device types a listed device may have: each
+	// device must match one of them.
+	typePrefixes []string
 	// ceilingArg is the integer argument the ceiling bounds; "" for a tool
 	// whose permission has no ceiling. ceilingMin and ceilingMax are the
 	// range a ceiling may be in: the range the pin states for the argument.
@@ -79,10 +89,12 @@ type toolRule struct {
 	carded map[string][]string
 }
 
+var speakerTypes = []string{TypeSmartSpeaker, TypeMediaDevice}
+
 var toolRules = map[string]toolRule{
-	"alice_set_volume":    {typePrefix: TypeMediaDevice, ceilingArg: "level", ceilingMin: 1, ceilingMax: 10},
-	"alice_media_control": {typePrefix: TypeMediaDevice},
-	"alice_set_light":     {typePrefix: TypeLight, carded: map[string][]string{"scene": {"siren", "alarm"}}},
+	"alice_set_volume":    {typePrefixes: speakerTypes, ceilingArg: "level", ceilingMin: 1, ceilingMax: 10},
+	"alice_media_control": {typePrefixes: speakerTypes},
+	"alice_set_light":     {typePrefixes: []string{TypeLight}, carded: map[string][]string{"scene": {"siren", "alarm"}}},
 }
 
 // ruleOf returns the rule of tool. A tool the threat model makes never
@@ -112,9 +124,25 @@ func CeilingArg(tool string) (arg string, lo, hi int64, ok bool) {
 	return r.ceilingArg, r.ceilingMin, r.ceilingMax, true
 }
 
-// typeAllowed is the exact, dotted-prefix match of a device type.
-func typeAllowed(prefix, deviceType string) bool {
-	return deviceType != "" && (deviceType == prefix || strings.HasPrefix(deviceType, prefix+"."))
+// TypeHasPrefix is the exact, dotted-prefix match of a device type: the
+// type is the prefix or continues it after a dot. An empty type matches
+// nothing.
+func TypeHasPrefix(deviceType, prefix string) bool {
+	return deviceType != "" && prefix != "" && (deviceType == prefix || strings.HasPrefix(deviceType, prefix+"."))
+}
+
+// typeAllowed reports whether a device of deviceType may be listed in a
+// permission of the rule's tool.
+func (r toolRule) typeAllowed(deviceType string) bool {
+	return slices.ContainsFunc(r.typePrefixes, func(prefix string) bool { return TypeHasPrefix(deviceType, prefix) })
+}
+
+// TypeAllowed reports whether a device of deviceType, as a read made now
+// reports it, may be the target of a call of tool that runs without a
+// card. It is false for a tool without a rule and for an unknown type.
+func TypeAllowed(tool, deviceType string) bool {
+	r, ok := ruleOf(tool)
+	return ok && r.typeAllowed(deviceType)
 }
 
 // ceilingValid reports whether ceiling is one a permission of the rule's
@@ -151,7 +179,7 @@ func (Rules) CheckGrant(tool string, devices []Device, ceiling int64) error {
 		return ErrRuleDeviceType
 	}
 	for _, d := range devices {
-		if !typeAllowed(r.typePrefix, d.Type) {
+		if !r.typeAllowed(d.Type) {
 			return ErrRuleDeviceType
 		}
 	}
