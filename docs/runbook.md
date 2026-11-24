@@ -4249,6 +4249,19 @@ mctl-gitops vm-rules is part of enabling the PA (#1318).
   resumes after them. A reply whose conversation was closed, forgotten or
   withdrawn before it went out is dropped with it; `/forget` also deletes
   the principal's pending job notices.
+- **Where a run's time goes.** `mctl_pa_run_phase_seconds{phase}` is a
+  histogram per phase: `queue` (job created to claimed), `model` and `tool`
+  (each summed over the run), `run` (claimed to reply) and `total` (created
+  to reply). Each finished run also logs one `pa run timing` line with the
+  job id, turns, tool calls and the same durations in milliseconds; it
+  carries no principal and no text. `tool` is absent for a run that called
+  no tool. The timing is kept in the replica's memory, so a run whose
+  requests reached more than one replica, or that ended without a reply, is
+  not reported at all: a missing sample means "not observed", never "fast".
+  The time between the reply and the message appearing in the chat (the
+  outbox send) is not part of any phase.
+  `queue` and `total` start at the job's creation, so a job claimed again
+  after a released or expired attempt counts the earlier attempts as wait.
 
 <a id="mctlpawebhookinfounreadable"></a>
 ### MctlPAWebhookInfoUnreadable

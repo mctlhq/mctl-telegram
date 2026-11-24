@@ -337,7 +337,9 @@ func TestS1T6_ToolOutsidePinRefused(t *testing.T) {
 		}
 	}
 	alice := loadPin(t).Observe("alice", [][]byte{upstreamPages(t)["alice"]}, nil, t0)
-	for _, name := range []string{"alice_say_phrase", "alice_send_command", "alice_set_light", "alice_control_device", "list_dialogs"} {
+	// alice_get_my_identity is on the server but not in the pin: only the
+	// linking account source calls it, with a fresh token, never the model.
+	for _, name := range []string{"alice_say_phrase", "alice_send_command", "alice_set_light", "alice_control_device", "alice_get_my_identity", "list_dialogs"} {
 		if _, err := alice.Authorize(name, t0); !errors.Is(err, ErrNotPinned) {
 			t.Errorf("alice Authorize(%q) = %v, want ErrNotPinned", name, err)
 		}
@@ -360,12 +362,16 @@ func TestS1T6_PinnedWriteHasNoPath(t *testing.T) {
 			continue
 		}
 		schema, _ := canonicalObject(w.InputSchema)
+		ann, err := canonicalAnnotations(w.Annotations)
+		if err != nil {
+			t.Fatal(err)
+		}
 		p.Servers["alice"].Tools["alice_set_light"] = PinnedTool{
 			Tier: TierApprove, Class: ClassWrite, Lowerable: LowerableYes,
 			CatalogDescription: "Set a light.",
 			DescriptionSHA256:  sha256Hex([]byte(*w.Description)),
 			InputSchema:        schema, InputSchemaSHA256: sha256Hex(schema),
-			Annotations: json.RawMessage(`{}`),
+			Annotations: ann,
 		}
 	}
 	if err := p.Validate(); err != nil {

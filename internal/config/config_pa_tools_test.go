@@ -40,6 +40,41 @@ func getenvFrom(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }
 }
 
+// alice is enabled by its own registration, next to tg or alone, and gets
+// its own redirect URI. Without a registration its flag is an error (the
+// "alice enabled" case below), never a silently disabled server.
+func TestLoadPATools_AliceEnabled(t *testing.T) {
+	alice := map[string]string{
+		"PA_SERVER_ALICE_ENABLED":                "true",
+		"PA_SERVER_ALICE_CLIENT_ID":              "pa-preview",
+		"PA_SERVER_ALICE_ISSUER":                 "https://alice.example",
+		"PA_SERVER_ALICE_AUTHORIZATION_ENDPOINT": "https://alice.example/oauth/authorize",
+		"PA_SERVER_ALICE_TOKEN_ENDPOINT":         "https://alice.example/oauth/token",
+		"PA_SERVER_ALICE_MCP_URL":                "https://alice.example/mcp",
+		"PA_SERVER_ALICE_RESOURCE":               "https://alice.example/mcp",
+		"PA_SERVER_ALICE_ALLOWED_HOSTS":          "alice.example",
+	}
+	for _, tgOn := range []string{"true", "false"} {
+		env := paToolsEnv()
+		for k, v := range alice {
+			env[k] = v
+		}
+		env["PA_SERVER_TG_ENABLED"] = tgOn
+		got, err := LoadPATools(paToolsConfig(), getenvFrom(env))
+		if err != nil {
+			t.Fatalf("tg=%s: LoadPATools: %v", tgOn, err)
+		}
+		a := got.Servers[connection.ServerAlice]
+		if !a.Enabled || a.ClientID != "pa-preview" || a.RedirectURI != "https://pa.example/pa/oauth/callback/alice" ||
+			len(a.AllowedHosts) != 1 || a.AllowedHosts[0] != "alice.example" {
+			t.Fatalf("tg=%s: alice = %+v", tgOn, a)
+		}
+		if got.Servers[connection.ServerTG].Enabled != (tgOn == "true") {
+			t.Fatalf("tg=%s: tg = %+v", tgOn, got.Servers[connection.ServerTG])
+		}
+	}
+}
+
 func TestLoadPATools_Valid(t *testing.T) {
 	got, err := LoadPATools(paToolsConfig(), getenvFrom(paToolsEnv()))
 	if err != nil {
@@ -100,18 +135,6 @@ func TestLoadPATools_FailClosed(t *testing.T) {
 		{"malformed flag", map[string]string{"PA_SERVER_TG_ENABLED": "yes"}, "PA_SERVER_TG_ENABLED"},
 		{"malformed alice flag", map[string]string{"PA_SERVER_ALICE_ENABLED": "1"}, "PA_SERVER_ALICE_ENABLED"},
 		{"alice enabled", map[string]string{"PA_SERVER_ALICE_ENABLED": "true"}, "PA_SERVER_ALICE_ENABLED"},
-		// A complete alice registration is still refused: there is no
-		// account source to verify its links.
-		{"alice fully configured", map[string]string{
-			"PA_SERVER_ALICE_ENABLED":                "true",
-			"PA_SERVER_ALICE_CLIENT_ID":              "pa-preview",
-			"PA_SERVER_ALICE_ISSUER":                 "https://alice.example",
-			"PA_SERVER_ALICE_AUTHORIZATION_ENDPOINT": "https://alice.example/oauth/authorize",
-			"PA_SERVER_ALICE_TOKEN_ENDPOINT":         "https://alice.example/oauth/token",
-			"PA_SERVER_ALICE_MCP_URL":                "https://alice.example/mcp",
-			"PA_SERVER_ALICE_RESOURCE":               "https://alice.example/mcp",
-			"PA_SERVER_ALICE_ALLOWED_HOSTS":          "alice.example",
-		}, "alice has no account source"},
 		{"no kek mode", map[string]string{"PA_KEK_MODE": ""}, "PA_KEK_MODE"},
 		{"unknown kek mode", map[string]string{"PA_KEK_MODE": secretish}, "PA_KEK_MODE"},
 		{"transit kek", map[string]string{"PA_KEK_MODE": "transit"}, "transit"},

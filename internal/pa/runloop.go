@@ -145,6 +145,8 @@ type RunLoopConfig struct {
 	// Typing shows "typing..." in the principal's chat while a run is in
 	// progress (typing.go). Optional; nil shows nothing.
 	Typing TypingSender
+	// Phases records where a run's time goes (timing.go). Optional.
+	Phases PhaseObserver
 }
 
 // RunLoop serves the run-loop routes and implements RunEnqueuer and
@@ -165,6 +167,7 @@ type RunLoop struct {
 	cbCount  CallbackCounter
 	allowed  PrincipalAllowlist
 	typing   *typingTracker
+	timer    *runTimer
 	// pending tracks the deliveries request paths started (deliverAfter).
 	pending sync.WaitGroup
 	// readTools is every tool the pin admits without approval, as
@@ -225,7 +228,7 @@ func NewRunLoop(cfg RunLoopConfig) (*RunLoop, error) {
 		store: cfg.Store, sealer: cfg.Sealer, pool: cfg.Pool, minter: cfg.Minter, verifier: cfg.Verifier,
 		sender: cfg.Sender, tools: cfg.Tools, limits: cfg.Limits, budget: cfg.Budget, lease: lease, now: now,
 		readTools: read, modelTools: modelTools, metrics: cfg.Metrics, cbCount: cfg.CallbackMetrics,
-		allowed: cfg.Allowed, typing: newTypingTracker(cfg.Typing, now),
+		allowed: cfg.Allowed, typing: newTypingTracker(cfg.Typing, now), timer: newRunTimer(cfg.Phases, now),
 	}, nil
 }
 
@@ -248,6 +251,9 @@ func (l *RunLoop) EnqueueRun(ctx context.Context, tx *sql.Tx, req RunRequest) er
 		ConsentVersion: req.ConsentVersion,
 		Now:            l.now(),
 	})
+	if err == nil {
+		markRunQueued(ctx)
+	}
 	return err
 }
 
@@ -528,6 +534,8 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 		stop(w, err)
 		return
 	}
+	// Before the response: a fast worker's first turn must find the run.
+	l.timer.claimed(j.ID, j.CreatedAt)
 	writeJSON(w, http.StatusOK, claimResponse{
 		JobID: j.ID, Attempt: j.Attempts, Token: tok, LeaseUntil: j.LeaseUntil, ToolSet: j.ToolSet, Tools: tools,
 		Limits: wireLimits{
@@ -644,6 +652,7 @@ func (l *RunLoop) serveTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	l.typing.touch(ref.JobID)
+	l.timer.turn(ref.JobID)
 	writeJSON(w, http.StatusOK, map[string]int{"turns": j.Turns, "tool_calls": j.ToolCalls})
 }
 
@@ -745,6 +754,7 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 	// transaction and never holds up the worker. A failed send leaves the
 	// row due again; the worker's part is done either way.
 	writeJSON(w, http.StatusOK, map[string]bool{"queued": true})
+	l.timer.replied(ref.JobID)
 	l.deliverAfter(ctx, j.Principal)
 }
 
@@ -752,6 +762,7 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 // notice it may owe.
 func (l *RunLoop) release(ctx context.Context, ref jobs.Ref, mode jobs.ReleaseMode, now time.Time) {
 	l.typing.stop(ref.JobID)
+	l.timer.drop(ref.JobID)
 	n, err := l.store.ReleasePAClaim(ctx, ref, mode, now)
 	if err != nil {
 		slog.Warn("pa claim not released", "job_id", ref.JobID, "err", err)
@@ -924,9 +935,11 @@ func (l *RunLoop) AdmitToolCall(ctx context.Context, job PAJob, server, tool str
 	l.droppedNotice(ctx, job.ref, err)
 	if err != nil {
 		l.typing.stop(job.ref.JobID)
+		l.timer.drop(job.ref.JobID)
 		return Policy{}, err
 	}
 	l.typing.touch(job.ref.JobID)
+	l.timer.toolStart(job.ref.JobID)
 	return policyFromJob(j, job.ref)
 }
 
@@ -944,8 +957,10 @@ func (l *RunLoop) StillRunning(ctx context.Context, job PAJob) error {
 	l.droppedNotice(ctx, job.ref, err)
 	if err != nil {
 		l.typing.stop(job.ref.JobID)
+		l.timer.drop(job.ref.JobID)
 	} else {
 		l.typing.touch(job.ref.JobID)
+		l.timer.toolEnd(job.ref.JobID)
 	}
 	return err
 }
@@ -984,6 +999,7 @@ func policyFromJob(j jobs.Job, ref jobs.Ref) (Policy, error) {
 // the allowlist, owes the principal a notice.
 func (l *RunLoop) stopRun(ctx context.Context, w http.ResponseWriter, ref jobs.Ref, err error) {
 	l.typing.stop(ref.JobID)
+	l.timer.drop(ref.JobID)
 	l.droppedNotice(ctx, ref, err)
 	stop(w, err)
 }

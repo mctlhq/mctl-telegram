@@ -350,6 +350,27 @@ func TestLinking_S1L10_CardShowsStableID(t *testing.T) {
 	})
 }
 
+// An account source that answers without an account id links nothing: the
+// id is all the confirm card can show for a server whose accounts are not
+// Telegram identities, so no card is sent and no connection waits for a
+// confirmation.
+func TestLinking_EmptyAccountIDLinksNothing(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		h := newHarness(t, s, true)
+		code := h.toCompletion(connection.ServerAlice, linking.Account{DisplayName: "Bob"})
+		before := len(h.msgr.all())
+		if err := h.svc.Complete(context.Background(), h.initData(h.alice, code)); err == nil {
+			t.Fatal("completion with no account id succeeded")
+		}
+		if cards := h.msgr.all(); len(cards) != before {
+			t.Fatalf("a confirm card was sent: %+v", cards[before:])
+		}
+		if st := h.state(connection.ServerAlice); st == connection.StatePendingConfirm || st == connection.StateActive {
+			t.Fatalf("connection is %s", st)
+		}
+	})
+}
+
 // S1-L11: a completion code opened by the principal succeeds even when the
 // provider login was done by someone else. This pins the exact scope of the
 // step 4 check: it binds the Telegram user who opens the link, not the

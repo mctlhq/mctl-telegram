@@ -24,8 +24,9 @@ func FlagServers() []connection.Server {
 //
 // alice is off unless its flag says otherwise. Its accounts are not
 // Telegram identities, so the get_my_identity owner binding of S1-L13 does
-// not apply to it; the owner turns the flag on only after recording
-// acceptance of that residual risk (S1-L14).
+// not apply to it: its account source (alice_get_my_identity) only names
+// the account on the confirm card. The owner turns the flag on only after
+// recording acceptance of that residual risk (S1-L14).
 func ServerFlag(getenv func(string) string, s connection.Server) (bool, error) {
 	switch strings.TrimSpace(getenv(FlagEnv(s))) {
 	case "", "false":

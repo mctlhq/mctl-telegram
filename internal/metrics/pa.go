@@ -33,7 +33,13 @@ var PAUpdateOutcomes = []string{
 	"bad_secret", "bad_method", "too_large", "read_error", "dedup_error", "handler_error", "gave_up",
 }
 
+// PARunPhases is the closed phase label set of mctl_pa_run_phase_seconds
+// (pa.RunPhases(); TestPARunPhaseLabels in internal/pa keeps them equal).
+var PARunPhases = []string{"queue", "model", "tool", "run", "total"}
+
 type paCollectors struct {
+	// phases is where a run's time went, per phase (internal/pa/timing.go).
+	phases  *prometheus.HistogramVec
 	updates *prometheus.CounterVec
 	outbox  *prometheus.CounterVec
 	answers *prometheus.CounterVec
@@ -56,6 +62,11 @@ type paCollectors struct {
 
 func newPACollectors() *paCollectors {
 	c := &paCollectors{
+		phases: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "mctl_pa_run_phase_seconds",
+			Help:    "Time a Personal Assistant run spent per phase: queue (created to claimed), model and tool (summed over the run), run (claimed to reply), total (created to reply). Only runs one replica saw end to end.",
+			Buckets: []float64{0.25, 0.5, 1, 2, 4, 8, 15, 30, 60, 120, 300},
+		}, []string{"phase"}),
 		updates: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mctl_pa_updates_total",
 			Help: "PA webhook deliveries by outcome. bad_secret counts requests without the PA_WEBHOOK_SECRET token.",
@@ -117,12 +128,23 @@ func newPACollectors() *paCollectors {
 }
 
 func (c *paCollectors) collectors() []prometheus.Collector {
-	return []prometheus.Collector{c.updates, c.outbox, c.answers, c.checks, c.problemChecks, c.up, c.ok, c.lastOK, c.problem, c.pending, c.lastErr}
+	return []prometheus.Collector{c.phases, c.updates, c.outbox, c.answers, c.checks, c.problemChecks, c.up, c.ok, c.lastOK, c.problem, c.pending, c.lastErr}
 }
 
 // CountPAUpdate counts one webhook delivery. Satisfies pa.Counter.
 func (r *Registry) CountPAUpdate(outcome string) {
 	r.pa.updates.WithLabelValues(outcome).Inc()
+}
+
+// ObservePARunPhase records one run phase duration. Satisfies
+// pa.PhaseObserver. A phase outside the closed set is dropped.
+func (r *Registry) ObservePARunPhase(phase string, d time.Duration) {
+	for _, p := range PARunPhases {
+		if p == phase {
+			r.pa.phases.WithLabelValues(phase).Observe(d.Seconds())
+			return
+		}
+	}
 }
 
 // CountPAOutbox counts one outbox outcome. Satisfies pa.OutboxCounter.
