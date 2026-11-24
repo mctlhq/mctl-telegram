@@ -4342,6 +4342,8 @@ S2-F3:
     - cmd/server.TestPAWrites_GateDecidesTheClaim
     - internal/pa.TestRunLoop_ClaimActionsHint
     - internal/agentworker.TestPASystemPrompt_ActionsHint
+    - cmd/server.TestPAWrites_StartsAsPreviewWill
+    - cmd/server.TestPAWrites_PreviewOffersTheFourTools
   mutations:
     - id: P2S3-F3a
       guard: internal/pa/connector/dispatch_write.go:293
@@ -5093,8 +5095,34 @@ S2-F3:
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.051s
+    - id: P2S14D-PREVa
+      guard: cmd/server/pa_writes.go:68
+      guard_text: "connection.ServerAlice: {\"alice_media_control\", \"alice_play_music\", \"alice_set_light\", \"alice_set_volume\"},"
+      mutation: "the service lists alice_trigger_scenario, which has no reader of a scenario's steps, among its write tools: the start is refused"
+      killed_by:
+        - cmd/server.TestPAWrites_StartsAsPreviewWill
+      red: |-
+        --- FAIL: TestPAWrites_StartsAsPreviewWill (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/cmd/server
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.755s
+    - id: P2S14D-PREVb
+      guard: cmd/server/pa_writes.go:68
+      guard_text: "connection.ServerAlice: {\"alice_media_control\", \"alice_play_music\", \"alice_set_light\", \"alice_set_volume\"},"
+      mutation: "alice_set_light is not in the list of offered write tools"
+      killed_by:
+        - cmd/server.TestPAWrites_StartsAsPreviewWill
+        - cmd/server.TestPAWrites_PreviewOffersTheFourTools
+      red: |-
+        --- FAIL: TestPAWrites_StartsAsPreviewWill (0.04s)
+        --- FAIL: TestPAWrites_PreviewOffersTheFourTools (0.04s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/cmd/server
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.784s
   gaps:
-    - half: "the action gate is wired and no deployed service has run it: cmd/server newPAWriteGate returns pa.ActionGate over the store, the writes switch and the compiled scope table, and cmd/server.TestPAWrites_ShippedGate claims through it in process (data-flow consent only, a view-only or narrowed connection, the consent and a write connection), and the cmd/server TestPAEval_A* tests run whole turns through it. A claim the gate leaves without a write tool for the consent or the scope queues the gate's notice in its own transaction, once per connection (cmd/server.TestPAWrites_GateNoticeOncePerConnection); the notice leaves with the next outbox pass, and how long that is in a deployed service was not measured. A process started with writes off has no write path until it restarts: there /consent does not offer the consent to actions and /connect asks for the read scopes, whatever the flag reads later. PA_WRITES_ENABLED is off everywhere, so no real claim, alice connection or worker hint has passed through it."
+    - half: "the action gate is wired and no deployed service has run it: cmd/server newPAWriteGate returns pa.ActionGate over the store, the writes switch and the compiled scope table, and cmd/server.TestPAWrites_ShippedGate claims through it in process (data-flow consent only, a view-only or narrowed connection, the consent and a write connection), and the cmd/server TestPAEval_A* tests run whole turns through it. A claim the gate leaves without a write tool for the consent or the scope queues the gate's notice in its own transaction, once per connection (cmd/server.TestPAWrites_GateNoticeOncePerConnection); the notice leaves with the next outbox pass, and how long that is in a deployed service was not measured. A process started with writes off has no write path until it restarts: there /consent does not offer the consent to actions and /connect asks for the read scopes, whatever the flag reads later. cmd/server.TestPAWrites_StartsAsPreviewWill builds the runtime with both servers on and writes on, as preview will be started, with stand-in hosts and a fake authorization server metadata; the real environment, its secrets and its hosts were not used. PA_WRITES_ENABLED is off everywhere, so no real claim, alice connection or worker hint has passed through it."
       tracked_by: "#1323"
     - half: "the alice authorization server was read, not called: that it lists iot:control in scopes_supported, puts no scope ceiling on this client and reports the granted scope in the token response is taken from the mctl-alice source; no exchange ran against it"
       tracked_by: "#1320"
