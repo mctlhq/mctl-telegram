@@ -16,6 +16,7 @@ package safetext
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -88,7 +89,7 @@ func TestCard_LinksAreDefanged(t *testing.T) {
 // TestCard_ServerTextIsNotDefanged: the templates hold no link token of
 // their own, so the pass over the whole card leaves them as written.
 func TestCard_ServerTextIsNotDefanged(t *testing.T) {
-	for _, tp := range append(CardTemplates(), DisclosureCardTemplates()...) {
+	for _, tp := range slices.Concat(CardTemplates(), DisclosureCardTemplates(), DeviceWriteCardTemplates()) {
 		for _, l := range []Lang{LangEN, LangRU} {
 			if s := tp.In(l); neutralise(s, UserText{}) != s || s == "" {
 				t.Errorf("template %q changes under neutralise or is empty", s)
@@ -227,5 +228,93 @@ func TestDisclosureCard_RefusesWhatItCannotShow(t *testing.T) {
 	}
 	if !ContainsLink("see example.com") || ContainsLink("Dinner at 19:30. Table for 2!") {
 		t.Fatal("ContainsLink")
+	}
+}
+
+const deviceWriteArgs = `{"brightness":40,"device":"lamp-desk-0003","state":"on"}`
+
+func testDeviceWrite() DeviceWrite {
+	return DeviceWrite{
+		Light: true, Home: "Alice home", Room: "Study", Name: "Desk lamp", ID: "lamp-desk-0003",
+		Values: []CardValue{{Kind: ValuePower, Value: "on"}, {Kind: ValueBrightness, Value: "40"}},
+	}
+}
+
+// TestDeviceWriteCard_Layout: the device, then every value on a line of
+// its own after its label, in both languages.
+func TestDeviceWriteCard_Layout(t *testing.T) {
+	c, err := DeviceWriteCard("alice_set_light (alice)", deviceWriteArgs, testDeviceWrite(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := TextCardHead.String() + "\n\n" + TextCardAction.String() + "\nalice_set_light (alice)\n\n" +
+		TextCardLight.String() + "\nHome: Alice home\nRoom: Study\nName: Desk lamp\nDevice id: lamp-desk-0003\n\n" +
+		TextCardValues.String() + "\n" + TextCardPower.String() + " on\n" + TextCardBrightness.String() + " 40\n\n" +
+		TextCardArgs.String() + "\n" + deviceWriteArgs + "\n\n" + TextCardFoot.String()
+	if got := c.String(); got != want {
+		t.Fatalf("card:\n got %q\nwant %q", got, want)
+	}
+	ru := c.In(LangRU).String()
+	for _, line := range []string{TextCardLight.In(LangRU), TextCardValues.In(LangRU), TextCardPower.In(LangRU) + " on", TextCardBrightness.In(LangRU) + " 40"} {
+		if !slices.Contains(strings.Split(ru, "\n"), line) {
+			t.Errorf("no line of the Russian card is %q", line)
+		}
+	}
+	for _, tp := range DeviceWriteCardTemplates() {
+		if tp.In(LangRU) == tp.In(LangEN) {
+			t.Errorf("template %q has no Russian text", tp.In(LangEN))
+		}
+	}
+
+	// A speaker, no home, external content.
+	w := DeviceWrite{Room: "Kitchen", Name: "Kitchen speaker", ID: "spk-kitchen-0001", Values: []CardValue{{Kind: ValueVolume, Value: "5"}}}
+	c, err = DeviceWriteCard("alice_set_volume (alice)", `{"device":"spk-kitchen-0001","level":5}`, w, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := c.String()
+	if !strings.Contains(got, TextCardSpeaker.String()+"\nHome: "+TextCardHomeUnknown.String()+"\n") ||
+		!strings.Contains(got, "\n"+TextCardVolume.String()+" 5\n") || !strings.Contains(got, TextCardExternal.String()) ||
+		strings.Contains(got, TextCardLight.String()) {
+		t.Fatalf("speaker card:\n%s", got)
+	}
+	// Every kind has a label of its own, listed with the card's templates.
+	seen := map[string]bool{}
+	for k := ValuePlayback; k <= ValueScene; k++ {
+		label, ok := k.label()
+		if !ok || seen[label.String()] || !slices.Contains(DeviceWriteCardTemplates(), label) {
+			t.Errorf("kind %d: label %q", k, label)
+		}
+		seen[label.String()] = true
+	}
+}
+
+// TestDeviceWriteCard_RefusesWhatItCannotShow: the device id and every
+// value are on the card exactly, or there is no card.
+func TestDeviceWriteCard_RefusesWhatItCannotShow(t *testing.T) {
+	set := func(f func(*DeviceWrite)) DeviceWrite {
+		w := testDeviceWrite()
+		w.Values = slices.Clone(w.Values)
+		f(&w)
+		return w
+	}
+	for name, w := range map[string]DeviceWrite{
+		"no value":               set(func(w *DeviceWrite) { w.Values = nil }),
+		"an empty value":         set(func(w *DeviceWrite) { w.Values[1].Value = "" }),
+		"a two-line value":       set(func(w *DeviceWrite) { w.Values[1].Value = "40\n" + TextCardBrightness.String() + " 100" }),
+		"a value with a space":   set(func(w *DeviceWrite) { w.Values[1].Value = "40 " }),
+		"a value that is a link": set(func(w *DeviceWrite) { w.Values[0].Value = "example.com" }),
+		"a value of no kind":     set(func(w *DeviceWrite) { w.Values[0].Kind = 0 }),
+		"a kind out of range":    set(func(w *DeviceWrite) { w.Values[0].Kind = ValueScene + 1 }),
+		"no id":                  set(func(w *DeviceWrite) { w.ID = "" }),
+		"an id that is a link":   set(func(w *DeviceWrite) { w.ID = "lamp.example.com" }),
+		"no room":                set(func(w *DeviceWrite) { w.Room = "" }),
+		"no name":                set(func(w *DeviceWrite) { w.Name = "" }),
+		"a two-line name":        set(func(w *DeviceWrite) { w.Name = "Desk lamp\n" + TextCardBrightness.String() + " 1" }),
+		"a two-line home":        set(func(w *DeviceWrite) { w.Home = "Alice home\nRoom: Hall" }),
+	} {
+		if _, err := DeviceWriteCard("alice_set_light (alice)", deviceWriteArgs, w, false); !errors.Is(err, ErrCardUnshowable) {
+			t.Errorf("%s: err = %v, want ErrCardUnshowable", name, err)
+		}
 	}
 }

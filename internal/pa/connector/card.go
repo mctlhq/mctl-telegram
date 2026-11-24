@@ -104,7 +104,10 @@ type CardConfig struct {
 	// (disclosure.go), by server name. A disclosure on a server without a
 	// reader is refused (ReasonNoWritePath).
 	Speakers map[string]SpeakerReader
-	Now      func() time.Time
+	// Lights reads a server's lights for the card of a write to a light
+	// (device_write.go), by server name, as Speakers does for a speaker.
+	Lights map[string]LightReader
+	Now    func() time.Time
 	// Deliver is called after a card committed, to send it without
 	// waiting for the next outbox pass (pa.RunLoop.DeliverAfter). Optional.
 	Deliver func(ctx context.Context, principal int64)
@@ -207,6 +210,19 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) *refusal {
 		}
 		disclosure = &call
 	}
+	// A write to one device has checks of its own too (device_write.go).
+	// Every other Phase 2 write has no card here: it is never shown as a
+	// plain card, which could not say what it does.
+	var write *deviceWriteCall
+	if _, ok := deviceWriteTools[req.Tool]; ok && pinned.Class == catalog.ClassWrite {
+		call, ref := precheckDeviceWrite(req.Tool, pinned, canonical)
+		if ref != nil {
+			return ref
+		}
+		write = &call
+	} else if pinned.Class == catalog.ClassWrite && catalog.Phase2Tool(req.Tool) {
+		return &refusal{ReasonNoWritePath, http.StatusForbidden}
+	}
 	if len(canonical) > MaxCardArgsBytes {
 		return &refusal{ReasonCardTooLarge, http.StatusRequestEntityTooLarge}
 	}
@@ -244,6 +260,16 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) *refusal {
 			return ref
 		}
 		if _, err := safetext.DisclosureCard(cardToolName(req.Server, req.Tool), string(canonical), shown, true); err != nil {
+			return cardTextRefusal(err)
+		}
+		detail = sealed
+	}
+	if write != nil {
+		shown, sealed, ref := c.deviceWriteTarget(ctx, req, *write)
+		if ref != nil {
+			return ref
+		}
+		if _, err := safetext.DeviceWriteCard(cardToolName(req.Server, req.Tool), string(canonical), shown, true); err != nil {
 			return cardTextRefusal(err)
 		}
 		detail = sealed
@@ -414,6 +440,16 @@ func (c *Cards) RenderApprovalCard(ctx context.Context, principal int64, approve
 		var d safetext.Disclosure
 		if d, err = disclosureOf(a.Tool, args, detail); err == nil {
 			text, err = safetext.DisclosureCard(cardToolName(a.Server, a.Tool), string(args), d, tainted || terr != nil)
+		}
+	} else if _, ok := deviceWriteTools[a.Tool]; ok || catalog.Phase2Tool(a.Tool) {
+		// A Phase 2 write has its own card or none, like a disclosure.
+		pinned, pinnedOK := c.approveTool(a.Server, a.Tool)
+		if !ok || !pinnedOK || a.Class != catalog.ClassWrite {
+			return pa.ApprovalCard{}, errors.New("pa card: no card for this write")
+		}
+		var w safetext.DeviceWrite
+		if w, err = deviceWriteOf(a.Tool, pinned, args, detail); err == nil {
+			text, err = safetext.DeviceWriteCard(cardToolName(a.Server, a.Tool), string(args), w, tainted || terr != nil)
 		}
 	} else {
 		text, err = safetext.Card(cardToolName(a.Server, a.Tool), string(args), tainted || terr != nil)

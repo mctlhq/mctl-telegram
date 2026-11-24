@@ -719,3 +719,25 @@ func (p *Pin) ServerNames() []string {
 	slices.Sort(names)
 	return names
 }
+
+// Phase2Tool reports whether name is one of the write or disclosure tools
+// of the T6 table (phase2Policy), whatever pin it is read from.
+func Phase2Tool(name string) bool {
+	_, ok := phase2Policy[name]
+	return ok
+}
+
+// EnumValues returns the values the pinned input schema lists for the
+// string argument arg. ok is false when the schema cannot be read, has no
+// such argument, or the argument is not a string with a non-empty enum.
+func (t PinnedTool) EnumValues(arg string) (values []string, ok bool) {
+	props, err := schemaProperties(t.InputSchema)
+	if err != nil {
+		return nil, false
+	}
+	pr, found := props[arg]
+	if !found || pr.Type != "string" || len(pr.Enum) == 0 {
+		return nil, false
+	}
+	return slices.Clone(pr.Enum), true
+}

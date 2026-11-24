@@ -165,6 +165,20 @@ var (
 	TextCardPhrase      = tpl("Text the speaker will say aloud:", "Текст, который колонка произнесёт вслух:")
 	TextCardCommand     = tpl("Command the speaker will carry out as if it was said to it:", "Команда, которую колонка выполнит так, как если бы её произнесли:")
 	TextCardRoomWarning = tpl("Warning: everyone in the room will hear it, and it cannot be undone.", "Внимание: это услышат все, кто находится в комнате, и отменить это нельзя.")
+	// The card of a device write (#1322 slice P2-S8, threat model T6):
+	// DeviceWriteCard shows the speaker or the light, as the service
+	// listed it when the card was made, and every value that is sent, each
+	// on a line of its own after its label. The ranges in the labels are
+	// the ones the pin bounds the values by; a pin with other bounds gets
+	// no card (connector.deviceWriteTools).
+	TextCardLight      = tpl("Light:", "Светильник:")
+	TextCardValues     = tpl("What will be set (exactly these values, in the device's own units):", "Что будет установлено (ровно эти значения, в единицах самого устройства):")
+	TextCardPlayback   = tpl("Playback action:", "Действие с воспроизведением:")
+	TextCardVolume     = tpl("Volume (on the speaker's scale from 1 to 10, not percent):", "Громкость (по шкале колонки от 1 до 10, не в процентах):")
+	TextCardPower      = tpl("Power:", "Питание:")
+	TextCardBrightness = tpl("Brightness (percent, from 1 to 100):", "Яркость (в процентах, от 1 до 100):")
+	TextCardColorTemp  = tpl("Color temperature (kelvin, from 1500 to 6500):", "Цветовая температура (в кельвинах, от 1500 до 6500):")
+	TextCardScene      = tpl("Lighting scene:", "Световая сцена:")
 	// TextDisclosureTooLong refuses a disclosure whose text is over the
 	// cap (S2-D3). Nothing was sent and no card was made; the text is never
 	// cut or split by the server.
