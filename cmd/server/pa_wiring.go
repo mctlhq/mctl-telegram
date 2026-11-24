@@ -51,6 +51,7 @@ type paLoop interface {
 type paBotSender interface {
 	pa.BotSender
 	pa.TypingSender
+	pa.PermissionSender
 	linking.BotSender
 }
 
@@ -107,10 +108,13 @@ var runPADispatcher = func(ctx context.Context, d *connector.Dispatcher, every t
 // exists: no linking or tool route, and runs bind no tool. A nil
 // *paRuntime is the PA switched off, and every method on it does nothing.
 type paRuntime struct {
-	loop       paLoop
-	webhook    http.Handler
-	mount      func(chi.Router)
-	tools      *paTools
+	loop    paLoop
+	webhook http.Handler
+	mount   func(chi.Router)
+	tools   *paTools
+	// writes is the write path (pa_writes.go): nil unless
+	// PA_WRITES_ENABLED read true at startup.
+	writes     *paWrites
 	dispatcher *connector.Dispatcher
 	// staleWrites resolves approved-call dispatch records nobody finished
 	// (slice P2-S3). Set with the dispatcher.
@@ -179,8 +183,26 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 	if err != nil {
 		return nil, err
 	}
+	// The preview allowlist (PA_ALLOWED_PRINCIPALS): checked at ingress and
+	// at every run step. Empty allows nobody, and says so at startup.
+	allowed := pa.NewAllowlist(cfg.PAAllowedPrincipals)
+	if allowed.Len() == 0 {
+		slog.Warn("pa allowlist is empty: every principal is refused", "env", config.PAAllowedPrincipalsEnv)
+	}
+	// m is optional (tests pass nil); a nil m must stay a nil interface.
+	var dm connector.Metrics
+	if m != nil {
+		dm = m
+	}
+	// The write path, or nil: everything below that names pw is the whole
+	// of its wiring, and with pw nil each of those is what it was before.
+	pw, err := buildPAWrites(cfg, pt, store, sender, allowed, dm)
+	if err != nil {
+		return nil, err
+	}
 	resolver := pa.ToolResolver(pa.NoTools)
 	if pt != nil {
+		pt.writes = pw
 		resolver = pt.toolResolver(store)
 	}
 	// m is optional (tests pass nil); a nil m leaves both counters nil
@@ -192,34 +214,40 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 	if m != nil {
 		counter, outboxCounter, callbackCounter, phases = m, m, m, m
 	}
-	// The preview allowlist (PA_ALLOWED_PRINCIPALS): checked at ingress and
-	// at every run step. Empty allows nobody, and says so at startup.
-	allowed := pa.NewAllowlist(cfg.PAAllowedPrincipals)
-	if allowed.Len() == 0 {
-		slog.Warn("pa allowlist is empty: every principal is refused", "env", config.PAAllowedPrincipalsEnv)
-	}
-	loop, err := pa.NewRunLoop(pa.RunLoopConfig{
+	loopCfg := pa.RunLoopConfig{
 		Store: store, Sealer: sealer, Pool: pool, Minter: minter, Verifier: verifier, Sender: sender,
 		Tools:  resolver,
 		Limits: cfg.PALimits(), Budget: cfg.PABudget(),
 		Metrics: outboxCounter, CallbackMetrics: callbackCounter,
 		Allowed: allowed, Typing: sender, Phases: phases,
-	})
-	if err != nil {
-		return nil, err
 	}
-	// The conversation's own answers (the consent prompt and its button,
-	// /new, /forget, /consent) are conversation-level outbox rows (#1348),
-	// written in the update's transaction and delivered after its commit.
-	conv, err := pa.NewConversations(pa.ConversationsConfig{
-		Store: store, Sealer: sealer, TTL: cfg.PAConversationTTL, Runs: loop, Limiter: loop,
+	convCfg := pa.ConversationsConfig{
+		Store: store, Sealer: sealer, TTL: cfg.PAConversationTTL,
 		Replies: &pa.OutboxReplies{Store: store, Metrics: outboxCounter},
 		// The linking commands and buttons run after the commit, through
 		// pt.commands below; without a tools runtime they are answered
 		// "not available" in the transaction.
 		Linking: pt != nil,
 		Allowed: allowed,
-	})
+	}
+	var cards *connector.Cards
+	if pw != nil {
+		// A typed nil must not reach these interfaces: they are set only
+		// here, from a built write path.
+		cards = pw.cards
+		loopCfg.Cards, loopCfg.ApproveTools, loopCfg.ActionsHint = pw.cards, pw.approveTools, pw.hint
+		convCfg.Approvals, convCfg.Permissions = pw.approvals, pw.permissions
+	}
+	loop, err := pa.NewRunLoop(loopCfg)
+	if err != nil {
+		return nil, err
+	}
+	pw.bind(loop.DeliverAfter)
+	// The conversation's own answers (the consent prompt and its button,
+	// /new, /forget, /consent) are conversation-level outbox rows (#1348),
+	// written in the update's transaction and delivered after its commit.
+	convCfg.Runs, convCfg.Limiter = loop, loop
+	conv, err := pa.NewConversations(convCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -241,24 +269,25 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 			if pt != nil {
 				pt.commands.AfterCommit(ctx, u)
 			}
+			// An approved call is dispatched and an admitted /permissions
+			// command run, now, after the commit; nothing without a write
+			// path.
+			pw.afterCommit(ctx, u)
 		},
 	})
 	if err != nil {
 		return nil, err
 	}
-	rt := &paRuntime{loop: loop, webhook: hook, mount: func(r chi.Router) { loop.Mount(r) }, tools: pt}
+	rt := &paRuntime{loop: loop, webhook: hook, mount: func(r chi.Router) { loop.Mount(r) }, tools: pt, writes: pw}
 	if ms, ok := sender.(paMenuSetter); ok {
 		rt.menu, rt.menuCommands = ms, paMenu(pt != nil)
 	}
 	if pt != nil {
-		// m is optional here too; a nil m must stay a nil interface.
-		var dm connector.Metrics
-		if m != nil {
-			dm = m
-		}
+		// Cards is nil without a write path: the tool route then has no
+		// card path and serves pinned reads only.
 		rt.dispatcher, err = connector.NewDispatcher(connector.DispatcherConfig{
 			Jobs: loop, Connections: pt.manager, Pin: pt.pin, Endpoints: pt.endpoints,
-			Executor: pt.executor, Flags: pt.flags, Metrics: dm,
+			Executor: pt.executor, Flags: pt.flags, Metrics: dm, Cards: cards,
 		})
 		if err != nil {
 			return nil, err
@@ -266,8 +295,8 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 		// The approval ledger's dispatch records have no other owner once
 		// their executor is gone (threat model T2, S2-C12): this resolves
 		// them to outcome_unknown with the notice and the audit entry. It
-		// dispatches nothing, and finds nothing while PA_WRITES_ENABLED is
-		// off.
+		// dispatches nothing, and finds nothing while no write path is
+		// built.
 		rt.staleWrites = &connector.StaleWriteSweeper{Store: store, Executor: pt.executor}
 	}
 	return rt, nil
@@ -318,7 +347,7 @@ func (r *paRuntime) Mount(mux chi.Router) {
 	// Enabled servers only: each call still needs PA_EXTERNAL_TOOLS_ENABLED
 	// and its server flag at dispatch time (connector.EnvFlags).
 	slog.Info("pa bot enabled", "webhook", pa.WebhookPath, "tools", "linking and dispatch",
-		"servers", strings.Join(servers, ","), "route", connector.RouteTool)
+		"servers", strings.Join(servers, ","), "route", connector.RouteTool, "writes", r.writes != nil)
 }
 
 // wirePARevokers gives the account-deletion surfaces (the web account page
@@ -391,6 +420,9 @@ func (r *paRuntime) Shutdown(deadline time.Time) {
 	done := make(chan struct{})
 	go func() {
 		r.wg.Wait()
+		// The write path first: a dispatch it started ends by starting a
+		// delivery, and the deliveries are waited for after it.
+		r.writes.wait()
 		r.loop.WaitDeliveries()
 		if r.tools != nil {
 			r.tools.commands.Wait()

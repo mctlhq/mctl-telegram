@@ -70,6 +70,23 @@ func (c *cardJobs) AdmitToolCall(ctx context.Context, j pa.PAJob, server, tool s
 type cardStore struct {
 	*db.Store
 	failCard atomic.Bool
+	// manyCards lets one run get more than one card (PAJobHasApproval).
+	manyCards atomic.Bool
+	// failHas fails the read of a run's earlier cards.
+	failHas atomic.Bool
+}
+
+// PAJobHasApproval is the store's unless manyCards is set: a test that
+// compares several cards of one run opts out of "one card per run"
+// (S2-A7), which TestS2A7_OneCardPerRunIsTheServersRule covers.
+func (c *cardStore) PAJobHasApproval(ctx context.Context, tx *sql.Tx, principal, jobID int64) (bool, error) {
+	if c.failHas.Load() {
+		return false, errors.New("injected approvals-of-a-job failure")
+	}
+	if c.manyCards.Load() {
+		return false, nil
+	}
+	return c.Store.PAJobHasApproval(ctx, tx, principal, jobID)
 }
 
 func (c *cardStore) EnqueuePAOutbox(ctx context.Context, tx *sql.Tx, item jobs.OutboxItem, now time.Time) error {
@@ -148,6 +165,10 @@ func newCardEnvOn(t *testing.T, s *db.Store, pin *catalog.Pin, fresh connector.F
 	})
 	return e
 }
+
+// manyCardsPerRun switches the server's one-card-per-run rule off for this
+// env: the test asks for several cards in one run to compare them.
+func (e *cardEnv) manyCardsPerRun() { e.cstore.manyCards.Store(true) }
 
 func writeCall(args string) string {
 	return `{"server":"tg","tool":"` + writeTool + `","arguments":` + args + `}`
@@ -345,11 +366,57 @@ func TestApprovalCard_Emitted(t *testing.T) {
 	})
 }
 
+// TestS2A7_OneCardPerRunIsTheServersRule: the tool route itself refuses a
+// second card in a run (#1320 slice P2-S14). The worker stops dispatching
+// after its first approval_pending, but a worker that does not is refused
+// here: same arguments or others, while the first card is pending and
+// after it was answered. A failed read of the run's cards refuses too,
+// and is never "no card yet".
+func TestS2A7_OneCardPerRunIsTheServersRule(t *testing.T) {
+	const other = `{"text":"and one more","to":"Carol"}`
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newCardEnv(t, s)
+		// The read of the run's cards fails: no card, and no "first card".
+		e.cstore.failHas.Store(true)
+		if a := e.call(e.token, writeCall(writeArgs)); a.code != http.StatusServiceUnavailable || a.Stop != connector.ReasonStateUnreadable {
+			t.Fatalf("with the run's cards unreadable: %+v", a)
+		}
+		e.nothingWritten()
+		e.cstore.failHas.Store(false)
+
+		first := e.emit(writeArgs)
+		refused := func(when string) {
+			t.Helper()
+			for _, args := range []string{writeArgs, other} {
+				a := e.call(e.token, writeCall(args))
+				e.h.Loop().WaitDeliveries()
+				if a.code != http.StatusConflict || a.Stop != connector.ReasonCardAlreadySent {
+					t.Fatalf("%s, a second write call (%s): %+v", when, args, a)
+				}
+			}
+			if rows := e.approvals(alice); len(rows) != 1 || rows[0].id != first.id {
+				t.Fatalf("%s: approvals %+v, want the first card's only", when, rows)
+			}
+			if rows := e.cardRows(); len(rows) != 1 {
+				t.Fatalf("%s: card rows %v", when, rows)
+			}
+			if cbs := e.cardCallbacks(alice); len(cbs) > 2 {
+				t.Fatalf("%s: callbacks %v", when, cbs)
+			}
+		}
+		refused("while the first card is pending")
+		e.press(alice, first.cancel)
+		refused("after the first card was cancelled")
+		e.noCalls()
+	})
+}
+
 // TestApprovalCard_CountsTowardTheCallCap: card calls use the run's call
 // budget like any call, so a run cannot ask for more cards than calls.
 func TestApprovalCard_CountsTowardTheCallCap(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, s *db.Store) {
 		e := newCardEnv(t, s)
+		e.manyCardsPerRun()
 		max := jobs.DefaultLimits().MaxToolCalls
 		for range max {
 			e.emit(writeArgs)
@@ -556,6 +623,7 @@ func TestApprovalCard_CoversOnlyApproveTier(t *testing.T) {
 func TestApprovalCard_TaintedConversationIsFlagged(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, s *db.Store) {
 		e := newCardEnv(t, s)
+		e.manyCardsPerRun()
 		e.emit(writeArgs)
 		// A tool result is external content.
 		if a := e.call(e.token, req("tg", "get_messages", "")); a.code != http.StatusOK {

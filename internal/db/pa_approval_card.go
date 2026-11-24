@@ -16,6 +16,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/approval"
@@ -41,4 +42,22 @@ func (s *Store) PAApprovalForCard(ctx context.Context, principal int64, approveC
 	}
 	a.SealedArgs = sealed
 	return a, nil
+}
+
+// PAJobHasApproval reports, inside tx, whether a card was already emitted
+// for principal's run jobID: any approval row of that job, whatever its
+// status, counts. The tool route asks under the principal's lock
+// (BeginPAWrite), so two calls of one run cannot both read false (threat
+// model T10, "one approval card per run", S2-A7). A failed read wraps
+// approval.ErrUnreadable and is never "no card yet" (I9).
+func (s *Store) PAJobHasApproval(ctx context.Context, tx *sql.Tx, principal, jobID int64) (bool, error) {
+	if tx == nil || principal <= 0 || jobID <= 0 {
+		return false, fmt.Errorf("%w: approvals of a job", approval.ErrInvalid)
+	}
+	var n int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pa_approvals WHERE principal = $1 AND job_id = $2`, principal, jobID).Scan(&n); err != nil {
+		return false, approvalUnreadable("approvals of a job", err)
+	}
+	return n > 0, nil
 }

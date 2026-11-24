@@ -120,6 +120,9 @@ type paTools struct {
 	pin       *catalog.Pin
 	executor  *connector.Executor
 	flags     func() (connector.Flags, error)
+	// writes is the write path, or nil (pa_writes.go). The resolver asks
+	// it which write tools a connection may be offered.
+	writes *paWrites
 }
 
 // buildPATools builds the tools runtime for tools, or nil when no server is
@@ -271,6 +274,13 @@ type paConnectionLister interface {
 // at all; a server whose flag is off or unreadable contributes nothing.
 // A failed store read wraps jobs.ErrStoreFault (pa.ToolResolver): it is
 // never an empty set.
+//
+// With a write path built (t.writes, pa_writes.go) a connection also
+// contributes the approve-tier tools the action gate offers it
+// (paWriteGate), while PA_WRITES_ENABLED reads true in the same read of
+// the switches.
+// Without one, or with that switch off or unreadable, the set is the
+// pinned reads and nothing else.
 func (t *paTools) toolResolver(store paConnectionLister) pa.ToolResolver {
 	return func(ctx context.Context, tx *sql.Tx, principal int64) ([]pa.ConnectionRevision, []string, error) {
 		f, err := t.flags()
@@ -283,14 +293,33 @@ func (t *paTools) toolResolver(store paConnectionLister) pa.ToolResolver {
 		}
 		var bound []pa.ConnectionRevision
 		used := map[connection.Server]bool{}
+		var tools []string
+		var wrote bool
+		var withheld string
 		for _, c := range conns {
 			if c.State != connection.StateActive || !slices.Contains(t.servers, c.Server) || !f.Servers[string(c.Server)] {
 				continue
 			}
 			bound = append(bound, pa.ConnectionRevision{ConnectionID: c.ID, AuthorityRevision: c.AuthorityRevision})
 			used[c.Server] = true
+			// Write tools: none without a write path, none with
+			// PA_WRITES_ENABLED off or unreadable in this same read of the
+			// switches, and only those the action gate offers this
+			// connection. A gate that could not be read fails the claim.
+			wt, why, err := t.writes.offered(ctx, tx, f, principal, c)
+			if err != nil {
+				return nil, nil, fmt.Errorf("%w: pa action gate: %v", jobs.ErrStoreFault, err)
+			}
+			tools = append(tools, wt...)
+			wrote = wrote || len(wt) > 0
+			if withheld == "" {
+				withheld = why
+			}
 		}
-		var tools []string
+		if wrote {
+			withheld = ""
+		}
+		t.writes.note(principal, withheld)
 		for server := range used {
 			for name, tool := range t.pin.Servers[string(server)].Tools {
 				if tool.Class == catalog.ClassRead && tool.Tier == catalog.TierAuto {

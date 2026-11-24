@@ -129,7 +129,20 @@ func (f *lowerEP) sent() ([]string, [][]byte) {
 type lowerStore struct {
 	*db.Store
 	failPermission, failTaint atomic.Bool
+	// manyCards lets one run get more than one card (S2-A7 is covered by
+	// TestS2A7_OneCardPerRunIsTheServersRule).
+	manyCards atomic.Bool
 }
+
+func (s *lowerStore) PAJobHasApproval(ctx context.Context, tx *sql.Tx, principal, jobID int64) (bool, error) {
+	if s.manyCards.Load() {
+		return false, nil
+	}
+	return s.Store.PAJobHasApproval(ctx, tx, principal, jobID)
+}
+
+// manyCardsPerRun is cardEnv's, for the store this env's emitter uses.
+func (e *lowerEnv) manyCardsPerRun() { e.cstore.manyCards.Store(true) }
 
 func (s *lowerStore) PAPermissionIn(ctx context.Context, tx *sql.Tx, principal int64, id string) (permissions.Permission, error) {
 	if s.failPermission.Load() {
@@ -470,6 +483,7 @@ func TestLowering_PermissionReplacesTheCardOfACleanRun(t *testing.T) {
 func TestLowering_CeilingAndDeviceBoundThePermission(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, s *db.Store) {
 		e := newLowerEnv(t, s)
+		e.manyCardsPerRun()
 		e.grant("prm_vol", volumeTool, 5, kitchenID)
 		e.grant("prm_light", lightTool, permissions.NoCeiling, deskLampID)
 		e.carded("one above the ceiling", volumeTool, volume6)
@@ -526,6 +540,7 @@ func TestS2D5_DeviceGoneOrUnreadableAtDispatchIsNotLowered(t *testing.T) {
 func TestS2I5_ReadThenWriteNeedsACard(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, s *db.Store) {
 		e := newLowerEnv(t, s)
+		e.manyCardsPerRun()
 		e.grant("prm_vol", volumeTool, 5, kitchenID)
 		e.grant("prm_light", lightTool, permissions.NoCeiling, deskLampID)
 
@@ -627,6 +642,7 @@ func TestS2D1_NoPermissionLowersADisclosure(t *testing.T) {
 func TestS2I9_DisclosureAfterAResetStillNeedsACard(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, s *db.Store) {
 		e := newLowerEnv(t, s)
+		e.manyCardsPerRun()
 		var rows, tainted int
 		if err := s.DB.QueryRow(`SELECT COUNT(*), COALESCE(SUM(tainted), 0) FROM pa_conversations WHERE principal = $1`,
 			alice).Scan(&rows, &tainted); err != nil || rows != 1 || tainted != 0 {
@@ -642,6 +658,7 @@ func TestS2I9_DisclosureAfterAResetStillNeedsACard(t *testing.T) {
 
 func (e *lowerEnv) forcedPermissionsLowerNothing() {
 	e.t.Helper()
+	e.manyCardsPerRun()
 	for i, tool := range []string{sayTool, commandTool, roomTool, scenarioRun, deviceTool} {
 		e.grant("prm_forced_"+string(rune('a'+i)), tool, permissions.NoCeiling, kitchenID, deskLampID)
 		e.grant("prm_forced5_"+string(rune('a'+i)), tool, 5, kitchenID, deskLampID)
@@ -957,6 +974,7 @@ func TestLowering_ExecutorChecksThePinAndTheCondition(t *testing.T) {
 func TestLowering_SirenAndAlarmScenesNeedACard(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, s *db.Store) {
 		e := newLowerEnv(t, s)
+		e.manyCardsPerRun()
 		e.grant("prm_light", lightTool, permissions.NoCeiling, deskLampID)
 		scene := func(name string) string { return `{"device":"` + deskLampID + `","scene":"` + name + `"}` }
 		e.carded("siren", lightTool, scene("siren"))

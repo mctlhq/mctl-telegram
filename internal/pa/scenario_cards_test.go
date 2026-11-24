@@ -165,6 +165,7 @@ func TestS2D6_ScenarioCardShowsEveryStep(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, s *db.Store) {
 		reader := &fakeScenarios{sc: nightScenario()}
 		e := newScenarioEnv(t, s, reader)
+		e.manyCardsPerRun()
 		row := e.emitTool(scenarioTool, nightCall)
 		e.noCalls()
 		if !slices.Equal(reader.asked, []string{nightID}) {

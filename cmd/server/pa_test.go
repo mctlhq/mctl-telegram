@@ -368,6 +368,13 @@ func (r *paSendRecorder) SendFrom(_ context.Context, chat int64, text safetext.T
 	s := paSend{chat: chat, text: text.String()}
 	if len(kb) == 1 && len(kb[0]) == 1 {
 		s.button = kb[0][0].Data
+	} else {
+		// A card with several buttons (an approval card).
+		for _, row := range kb {
+			for _, b := range row {
+				s.buttons = append(s.buttons, b.Data)
+			}
+		}
 	}
 	r.mu.Lock()
 	r.sent = append(r.sent, s)

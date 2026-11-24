@@ -220,6 +220,7 @@ func disclosureCardText(l safetext.Lang, tool, args string, sp connector.Speaker
 func TestS2D4_CardShowsTheWholeTextAndTheSpeaker(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, s *db.Store) {
 		e := newDisclosureEnv(t, s)
+		e.manyCardsPerRun()
 		kitchen := testSpeakers()[0]
 		// A long text with punctuation, quotes and Cyrillic: nothing of
 		// it may be cut, escaped or rewritten on its own line.
@@ -389,6 +390,7 @@ func TestS2D2_ApprovalBindsTextAndDevice(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			forEachDialect(t, func(t *testing.T, s *db.Store) {
 				e := newDisclosureEnv(t, s)
+				e.manyCardsPerRun()
 				row := e.emitTool(sayTool, kitchenSay)
 				bound := e.strings(`SELECT args_sha FROM pa_approvals WHERE id = $1`, row.id)
 				if len(bound) != 1 || bound[0] != sha(kitchenSay) {
@@ -415,6 +417,7 @@ func TestS2D2_ApprovalBindsTextAndDevice(t *testing.T) {
 	// Two calls that differ only in the device are two different
 	// approvals.
 	e := newDisclosureEnv(t, sqliteStore(t))
+	e.manyCardsPerRun()
 	a := e.emitTool(sayTool, kitchenSay)
 	b := e.emitTool(sayTool, `{"device":"`+bedroomID+`","phrase":"Dinner is ready"}`)
 	hashes := e.strings(`SELECT args_sha FROM pa_approvals WHERE id IN ($1, $2)`, a.id, b.id)

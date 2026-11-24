@@ -150,6 +150,21 @@ type RunLoopConfig struct {
 	// Cards builds an approval card when its outbox row is sent (card.go).
 	// Optional: without it such a row cannot be built and fails.
 	Cards CardRenderer
+	// ApproveTools are the approve-tier tools a run may be offered next to
+	// the pinned reads, as "server/tool" with the model's view of each
+	// (#1320 slice P2-S14). A call of one never reaches its server from
+	// the tool route: it gets an approval card (connector.Cards). Optional:
+	// nil, the Phase 1 state, admits pinned reads only. Only the one
+	// flag-gated constructor of the write path sets it
+	// (TestNoRuntimePhase2Use); a name that is also a pinned read refuses
+	// the configuration.
+	ApproveTools map[string]catalog.ModelTool
+	// ActionsHint says why the claim just built for a principal was
+	// offered no approve-tier tool, as one of the ActionsHint values, or
+	// "". Optional, and set with ApproveTools only. The claim passes a
+	// known value to the worker, whose prompt then tells the model what to
+	// ask the person to do; anything else is dropped.
+	ActionsHint func(principal int64) string
 }
 
 // RunLoop serves the run-loop routes and implements RunEnqueuer and
@@ -182,6 +197,10 @@ type RunLoop struct {
 	// the pin (catalog description and pinned schema), keyed the same way.
 	// The claim offers exactly the job's signed tool set from it.
 	modelTools map[string]catalog.ModelTool
+	// approveTools is RunLoopConfig.ApproveTools by name: empty unless the
+	// write path is wired. Its entries are in modelTools too.
+	approveTools map[string]bool
+	actionsHint  func(principal int64) string
 }
 
 var (
@@ -220,6 +239,14 @@ func NewRunLoop(cfg RunLoopConfig) (*RunLoop, error) {
 			}
 		}
 	}
+	approve := map[string]bool{}
+	for name, mt := range cfg.ApproveTools {
+		if read[name] || name == "" || !json.Valid(mt.InputSchema) {
+			return nil, fmt.Errorf("pa run loop: %w: approve tool set", ErrRunLoopConfig)
+		}
+		approve[name] = true
+		modelTools[name] = mt
+	}
 	lease := cfg.Lease
 	if lease == 0 {
 		lease = jobs.DefaultLease
@@ -233,8 +260,37 @@ func NewRunLoop(cfg RunLoopConfig) (*RunLoop, error) {
 		sender: cfg.Sender, tools: cfg.Tools, limits: cfg.Limits, budget: cfg.Budget, lease: lease, now: now,
 		readTools: read, modelTools: modelTools, metrics: cfg.Metrics, cbCount: cfg.CallbackMetrics,
 		allowed: cfg.Allowed, typing: newTypingTracker(cfg.Typing, now), timer: newRunTimer(cfg.Phases, now),
-		cards: cfg.Cards,
+		cards: cfg.Cards, approveTools: approve, actionsHint: cfg.ActionsHint,
 	}, nil
+}
+
+// The reasons a claim may carry for offering no approve-tier tool
+// (claimResponse.ActionsHint). The set is closed: the worker has one fixed
+// sentence for each and none for anything else.
+const (
+	// ActionsHintConsent: the principal has not agreed to actions yet.
+	ActionsHintConsent = "consent_v2_needed"
+	// ActionsHintScope: the connection's grant does not cover actions.
+	ActionsHintScope = "write_scope_needed"
+)
+
+// claimActionsHint is the hint of a claim with these tools: nothing
+// without the write path, nothing when the claim offers an approve-tier
+// tool, and nothing that is not one of the known reasons.
+func (l *RunLoop) claimActionsHint(principal int64, tools []wireTool) string {
+	if l.actionsHint == nil {
+		return ""
+	}
+	// Taken even when unused: the note is of this claim only.
+	hint := l.actionsHint(principal)
+	if slices.ContainsFunc(tools, func(t wireTool) bool { return t.Approval }) {
+		return ""
+	}
+	switch hint {
+	case ActionsHintConsent, ActionsHintScope:
+		return hint
+	}
+	return ""
 }
 
 // Mount registers the three routes.
@@ -329,9 +385,10 @@ func (l *RunLoop) build(ctx context.Context, tx *sql.Tx, j jobs.Job, reservation
 		return nil, "", nil, err
 	}
 	for _, t := range tools {
-		if !l.readTools[t] {
-			// Only pinned reads exist in Phase 1 (I5): a resolver offering
-			// anything else is a bug, and the run does not start.
+		if !l.readTools[t] && !l.approveTools[t] {
+			// Only pinned reads exist in Phase 1 (I5), and with the write
+			// path wired the approve-tier tools it named: a resolver
+			// offering anything else is a bug, and the run does not start.
 			return nil, "", nil, fmt.Errorf("%w: tool set offers a tool that is not a pinned read", jobs.ErrInvalid)
 		}
 	}
@@ -391,10 +448,15 @@ type (
 	// wireTool is one tool the model may be offered. Name is the signed
 	// "server/tool"; Description and InputSchema come from the pin, never
 	// from the server's live listing (T8).
+	//
+	// Approval marks an approve-tier tool: calling it sends the principal
+	// a card and does nothing else. It is absent for a read, so a claim
+	// without a write tool is byte for byte what it was before P2-S14.
 	wireTool struct {
 		Name        string          `json:"name"`
 		Description string          `json:"description"`
 		InputSchema json.RawMessage `json:"input_schema"`
+		Approval    bool            `json:"approval,omitempty"`
 	}
 	claimResponse struct {
 		JobID      int64          `json:"job_id"`
@@ -405,6 +467,11 @@ type (
 		Tools      []wireTool     `json:"tools,omitempty"`
 		Limits     wireLimits     `json:"limits"`
 		Fragments  []wireFragment `json:"fragments"`
+		// ActionsHint is why this claim offers no approve-tier tool
+		// although the write path is on (an ActionsHint value). Absent
+		// otherwise, so a claim of a service without the write path is
+		// byte for byte what it was.
+		ActionsHint string `json:"actions_hint,omitempty"`
 	}
 	turnRequest struct {
 		ContextTokens int `json:"context_tokens"`
@@ -543,6 +610,7 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 	l.timer.claimed(j.ID, j.CreatedAt)
 	writeJSON(w, http.StatusOK, claimResponse{
 		JobID: j.ID, Attempt: j.Attempts, Token: tok, LeaseUntil: j.LeaseUntil, ToolSet: j.ToolSet, Tools: tools,
+		ActionsHint: l.claimActionsHint(j.Principal, tools),
 		Limits: wireLimits{
 			MaxToolCalls: l.limits.MaxToolCalls, MaxContextTokens: l.limits.MaxContextTokens,
 			MaxToolOutputBytes: jobs.MaxToolOutputBytes, MaxJobCostUSD: l.budget.PerJobUSD,
@@ -566,7 +634,7 @@ func (l *RunLoop) claimTools(set []string) ([]wireTool, error) {
 		if !ok {
 			return nil, fmt.Errorf("%w: tool set names a tool with no pinned read entry", jobs.ErrInvalid)
 		}
-		out = append(out, wireTool{Name: name, Description: mt.Description, InputSchema: mt.InputSchema})
+		out = append(out, wireTool{Name: name, Description: mt.Description, InputSchema: mt.InputSchema, Approval: l.approveTools[name]})
 	}
 	return out, nil
 }
@@ -934,7 +1002,7 @@ func (l *RunLoop) AdmitToolCall(ctx context.Context, job PAJob, server, tool str
 		return Policy{}, ErrNoJob
 	}
 	name := server + "/" + tool
-	if server == "" || tool == "" || !slices.Contains(job.tools, name) || !l.readTools[name] {
+	if server == "" || tool == "" || !slices.Contains(job.tools, name) || (!l.readTools[name] && !l.approveTools[name]) {
 		return Policy{}, jobs.ErrToolNotInSet
 	}
 	j, err := l.store.AdmitPAToolCall(ctx, job.ref, jobs.ToolCallRequest{

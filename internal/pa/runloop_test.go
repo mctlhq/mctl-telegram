@@ -166,6 +166,8 @@ type runLoopHarness struct {
 	tools  []string
 	conns  map[int64][]ConnectionRevision
 	store  RunLoopStore
+	// cfg is the configuration the loop was built from.
+	cfg RunLoopConfig
 }
 
 type rlOption func(*RunLoopConfig, *runLoopHarness)
@@ -228,7 +230,7 @@ func newRunLoopHarnessOn(t *testing.T, store *db.Store, opts ...rlOption) *runLo
 	for _, o := range opts {
 		o(&cfg, h)
 	}
-	h.store = cfg.Store
+	h.store, h.cfg = cfg.Store, cfg
 	h.loop, err = NewRunLoop(cfg)
 	if err != nil {
 		t.Fatal(err)
