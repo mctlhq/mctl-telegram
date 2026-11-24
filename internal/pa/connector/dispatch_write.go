@@ -194,6 +194,10 @@ type WriteConfig struct {
 	// Allowed is the preview allowlist (PA_ALLOWED_PRINCIPALS).
 	Allowed func(principal int64) bool
 	Fresh   FreshSurface
+	// Devices reads a server's devices right before a call to one device
+	// is sent, by server name (device_recheck.go). A call to a device on
+	// a server without a reader is refused (ReasonNoWritePath).
+	Devices map[string]DeviceLister
 	Metrics Metrics
 	// CallTimeout bounds token, tools/list, the pre-dispatch transaction
 	// and tools/call of one dispatch; 0 is DefaultCallTimeout.
@@ -507,6 +511,20 @@ func (w *WriteExecutor) run(ctx context.Context, a approval.Approval, reason str
 		return refuse(c.reason, true)
 	}
 
+	// The device the call goes to is read again, now, with the receipt
+	// already consumed and nothing left between this read and the
+	// request: it must still be the device the card was made from (S2-D2,
+	// S2-D5; device_recheck.go). One read; nothing is sent when it fails
+	// or differs, and the record says "refused", not "unknown".
+	if targetsDevice(a.Tool) {
+		if r := w.recheckTarget(cctx, a, token, c.args, c.detail, low != nil); r != "" {
+			if w.settleUnsent(ctx, a, dispatchID) {
+				w.record(ctx, base, StatusRefused, r, nil)
+			}
+			return WriteOutcome{Status: StatusRefused, Reason: r, DispatchID: dispatchID}
+		}
+	}
+
 	if r := cancelRefusal(ctx, cctx); r != "" {
 		// Cancelled between the commit and the request: nothing was sent,
 		// and the record says so rather than "unknown".
@@ -572,8 +590,11 @@ func (w *WriteExecutor) precheck(ctx context.Context, principal int64, approvalI
 type consumed struct {
 	dispatch approval.Dispatch
 	// args are the canonical argument bytes to send.
-	args  []byte
-	taint Taint
+	args []byte
+	// detail is what was sealed next to them: the device the card was
+	// made from, for a call to one device. Nil for a call without one.
+	detail []byte
+	taint  Taint
 	// reason is why nothing may be sent, "" after a commit.
 	reason string
 	// unsettled: the commit failed, so the receipt may or may not be
@@ -646,7 +667,7 @@ func (w *WriteExecutor) consume(ctx context.Context, a approval.Approval, dispat
 		out.reason = ReasonApprovalUnreadable
 		return out
 	}
-	args, err := w.cfg.Sealer.Open(got)
+	args, detail, err := w.cfg.Sealer.OpenWithDetail(got)
 	if err != nil {
 		out.reason = ReasonApprovalUnreadable
 		return out
@@ -664,7 +685,7 @@ func (w *WriteExecutor) consume(ctx context.Context, a approval.Approval, dispat
 		out.reason, out.unsettled = ReasonStateUnreadable, true
 		return out
 	}
-	out.dispatch, out.args = d, args
+	out.dispatch, out.args, out.detail = d, args, detail
 	return out
 }
 

@@ -260,6 +260,7 @@ func newLowerEnv(t *testing.T, s *db.Store) *lowerEnv {
 		},
 		Allowed: func(int64) bool { return !ce.denied.Load() },
 		Fresh:   l.fresh,
+		Devices: map[string]connector.DeviceLister{"tg": ce.devices},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -570,8 +571,47 @@ func (e *lowerEnv) loweredCall(id, tool, args string, class catalog.Class) conne
 			AnnotationSHA: shaHex([]byte("annotations")), ArgsSHA: shaHex([]byte(args)),
 			ConversationID: e.conv, JobID: e.job,
 		},
-		Args: []byte(args), PermissionID: id,
+		Args: []byte(args), PermissionID: id, Target: e.targetOf(args),
 	}
+}
+
+// sealedDevice is the target of a call as the card emitter seals it and
+// hands it to the executor: the device as the read for the card reported
+// it.
+func sealedDevice(id, name, room, home, typ, kind string, wrap string) []byte {
+	b, err := json.Marshal(map[string]any{wrap: map[string]string{
+		"id": id, "name": name, "room": room, "home": home, "type": typ, "kind": kind,
+	}})
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+// targetOf is the target of the device args names, read from the fakes:
+// nil when the arguments name no device the fakes list.
+func (e *lowerEnv) targetOf(args string) []byte {
+	var decoded struct {
+		Device string `json:"device"`
+	}
+	_ = json.Unmarshal([]byte(args), &decoded)
+	e.speakers.mu.Lock()
+	speakers := slices.Clone(e.speakers.list)
+	e.speakers.mu.Unlock()
+	for _, s := range speakers {
+		if s.ID == decoded.Device {
+			return sealedDevice(s.ID, s.Name, s.Room, s.Home, s.Type, "speaker", "device")
+		}
+	}
+	e.lights.mu.Lock()
+	lights := slices.Clone(e.lights.list)
+	e.lights.mu.Unlock()
+	for _, l := range lights {
+		if l.ID == decoded.Device {
+			return sealedDevice(l.ID, l.Name, l.Room, l.Home, l.Type, "light", "device")
+		}
+	}
+	return nil
 }
 
 func (e *lowerEnv) dispatchLowered(call connector.LoweredCall) connector.WriteOutcome {

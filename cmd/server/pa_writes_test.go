@@ -37,10 +37,11 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
-// Synthetic speaker, in the text alice_list_devices answers with.
+// Synthetic speaker, as the structured listing of alice_list_devices
+// reports it.
 const (
 	paKitchenID      = "spk-kitchen-0001"
-	paKitchenSpeaker = "- **Kitchen speaker** (Комната: Kitchen, ID: `" + paKitchenID + "`, Статус: online)"
+	paKitchenSpeaker = `{"id":"` + paKitchenID + `","name":"Kitchen speaker","type":"devices.types.smart_speaker.yandex.station","is_speaker":true,"room":"Kitchen","household":"Home"}`
 	// paSayCanonical is the canonical form of the arguments the tests send
 	// in another key order: what an approval seals and a dispatch sends.
 	paSayCanonical = `{"device":"` + paKitchenID + `","phrase":"Dinner is ready"}`
@@ -80,8 +81,7 @@ func (a *paFakeAlice) CallTool(_ context.Context, _ connection.Secret, tool stri
 	case "alice_get_my_identity":
 		return []byte(`{"content":[{"type":"text","text":"{}"}],"structuredContent":{"account_id":"acct-carol-0001"}}`), nil
 	case "alice_list_devices":
-		text := "### Умный дом Яндекса\n\n**Колонки с Алисой (1):**\n" + paKitchenSpeaker + "\n"
-		return json.Marshal(map[string]any{"content": []map[string]string{{"type": "text", "text": text}}})
+		return []byte(`{"content":[{"type":"text","text":"one speaker"}],"structuredContent":{"only_speakers":false,"devices":[` + paKitchenSpeaker + `]}}`), nil
 	}
 	return []byte(`{"content":[{"type":"text","text":"nothing"}]}`), nil
 }

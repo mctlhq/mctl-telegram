@@ -38,10 +38,12 @@ package connector
 //     write the call's ledger row, already consumed, in that same
 //     transaction.
 //
-// The executor does not read the device list: it has no device reader.
-// That the device is still a speaker, or a light, is checked by Emit
-// alone, moments before; the executor checks the id against the permission
-// row. DispatchLowered therefore has one intended caller, Emit.
+// The executor reads the device list itself, once, after the
+// pre-dispatch transaction and right before it sends (device_recheck.go):
+// the device must be listed, be what Emit read (LoweredCall.Target, sealed
+// into the call's ledger row), and be of a type the tool's rule allows.
+// A device that is gone or changed is a refusal with nothing sent; a
+// caller that hands the executor no target gets nothing sent either.
 //
 // Whatever cannot be read (the permissions, the taint, the devices) is a
 // card or a refusal, never a call. When the executor finds the permission
@@ -127,6 +129,11 @@ type LoweredCall struct {
 	Args []byte
 	// PermissionID is the standing permission that covered the call.
 	PermissionID string
+	// Target is the device the caller's read reported for the call, in
+	// the form a card of the tool seals. It is sealed into the call's
+	// ledger row, and the executor compares its own read with it before
+	// it sends (device_recheck.go). Required.
+	Target []byte
 	// device, ints and strs are the target and the arguments, read by the
 	// executor from Args: it does not take the caller's word for what the
 	// bytes say.
@@ -202,7 +209,7 @@ func unlowered(out WriteOutcome) bool {
 // tool no permission may lower: a disclosure never runs from here, whatever
 // the caller decided (S2-D1). After the fresh tools/list it refuses a tool
 // the pin does not make lowerable and a call that does not meet the tool's
-// condition. It does not read the device list (see the file comment).
+// condition, and it reads the device list (see the file comment).
 func (w *WriteExecutor) DispatchLowered(ctx context.Context, call LoweredCall) (WriteOutcome, error) {
 	if w == nil || call.Binding.Validate() != nil || !permissions.ValidID(call.PermissionID) {
 		return WriteOutcome{}, fmt.Errorf("%w: lowered dispatch needs a binding and a permission", ErrInvalidCall)
@@ -213,7 +220,12 @@ func (w *WriteExecutor) DispatchLowered(ctx context.Context, call LoweredCall) (
 	}
 	now := w.now()
 	a, err := approval.New(call.Binding, now)
-	if err == nil {
+	switch {
+	case err != nil:
+	case len(call.Target) != 0:
+		a, err = w.cfg.Sealer.SealWithDetail(a, call.Args, call.Target)
+	default:
+		// No target: refused below, before anything is read.
 		a, err = w.cfg.Sealer.Seal(a, call.Args)
 	}
 	if err != nil {
@@ -222,7 +234,11 @@ func (w *WriteExecutor) DispatchLowered(ctx context.Context, call LoweredCall) (
 	reason := ""
 	target := false
 	call.device, call.ints, call.strs, target = loweredTarget(call.Binding.Tool, call.Args)
-	if call.Binding.Class != catalog.ClassWrite || !permissions.HasRule(call.Binding.Tool) || !target {
+	// The target the caller read must be readable, name the device the
+	// bytes name, and be of a type the tool's rule allows.
+	sealed, terr := sealedTarget(call.Binding.Tool, call.Target)
+	if call.Binding.Class != catalog.ClassWrite || !permissions.HasRule(call.Binding.Tool) || !target ||
+		terr != nil || sealed.ID != call.device || !permissions.TypeAllowed(call.Binding.Tool, sealed.Type) {
 		reason = ReasonNotLowerable
 	} else {
 		reason = w.precheckLowered(ctx, a, now)

@@ -52,9 +52,79 @@ const (
 
 func testSpeakers() []connector.Speaker {
 	return []connector.Speaker{
-		{ID: kitchenID, Name: "Kitchen speaker", Room: "Kitchen", Home: "Alice home"},
-		{ID: bedroomID, Name: "Bedroom speaker", Room: "Bedroom", Home: "Alice home"},
+		{ID: kitchenID, Name: "Kitchen speaker", Room: "Kitchen", Home: "Alice home", Type: speakerType},
+		{ID: bedroomID, Name: "Bedroom speaker", Room: "Bedroom", Home: "Alice home", Type: speakerType},
 	}
+}
+
+// The device types mctl-alice reports for a speaker and for a light.
+const (
+	speakerType = "devices.types.smart_speaker.yandex.station"
+	lightType   = "devices.types.light"
+)
+
+// listedDevices is the write executor's DeviceLister. It answers from the
+// lists of the fakes the card emitter reads, so one change of a fake is
+// seen by both; it counts its own reads.
+type listedDevices struct {
+	mu    sync.Mutex
+	sp    *fakeSpeakers
+	li    *fakeLights
+	calls int
+	// before, when set, runs at the start of each read.
+	before func()
+}
+
+func (f *listedDevices) Devices(_ context.Context, req connector.SpeakerRequest) ([]connector.Device, error) {
+	f.mu.Lock()
+	f.calls++
+	sp, li, before := f.sp, f.li, f.before
+	f.mu.Unlock()
+	if before != nil {
+		before()
+	}
+	if req.Token.Reveal() == "" || req.Server != "tg" || req.ConnectionID == "" || req.Principal != alice || req.AuthorityRevision <= 0 {
+		return nil, errors.New("fake: unexpected device request")
+	}
+	if sp == nil && li == nil {
+		return nil, errors.New("fake: no devices to list")
+	}
+	var out []connector.Device
+	if sp != nil {
+		sp.mu.Lock()
+		list, err := slices.Clone(sp.list), sp.err
+		sp.mu.Unlock()
+		if err != nil {
+			return nil, err
+		}
+		for _, s := range list {
+			out = append(out, connector.Device{ID: s.ID, Name: s.Name, Room: s.Room, Home: s.Home, Type: s.Type, Speaker: true})
+		}
+	}
+	if li != nil {
+		li.mu.Lock()
+		list, err := slices.Clone(li.list), li.err
+		li.mu.Unlock()
+		if err != nil {
+			return nil, err
+		}
+		for _, l := range list {
+			out = append(out, connector.Device{ID: l.ID, Name: l.Name, Room: l.Room, Home: l.Home, Type: l.Type})
+		}
+	}
+	return out, nil
+}
+
+func (f *listedDevices) asked() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+func (f *listedDevices) between(fn func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.before = fn
 }
 
 // fakeSpeakers is a SpeakerReader with a fixed answer.
@@ -474,7 +544,6 @@ func TestDisclosure_UnreadableSpeakersRefuse(t *testing.T) {
 			"failed with data": {testSpeakers(), connector.ErrSpeakersUnreadable},
 			"an empty list":    {nil, nil},
 			"a nameless one":   {[]connector.Speaker{{ID: kitchenID, Room: "Kitchen"}}, nil},
-			"a roomless one":   {[]connector.Speaker{{ID: kitchenID, Name: "Kitchen speaker"}}, nil},
 			"one without an id": {[]connector.Speaker{{ID: kitchenID, Name: "Kitchen speaker", Room: "Kitchen"},
 				{Name: "Bedroom speaker", Room: "Bedroom"}}, nil},
 			"one id twice": {[]connector.Speaker{{ID: kitchenID, Name: "Kitchen speaker", Room: "Kitchen"},

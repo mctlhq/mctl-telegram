@@ -67,6 +67,9 @@ var neverLowerable = map[string]Class{
 	"alice_send_command":     ClassDisclosure,
 	"alice_control_room":     ClassWrite,
 	"alice_trigger_scenario": ClassWrite,
+	// Not a T6 "never" row of its own making: alice_play_music hands a
+	// speaker text the caller chose, so every call gets a card (P2-S14b).
+	"alice_play_music": ClassWrite,
 }
 
 // PinnedTool is one tool entry of the pin. The json field names are the
@@ -387,10 +390,16 @@ var phase2Policy = map[string]struct {
 	"alice_control_device":   {ClassWrite, LowerableConditional},
 	"alice_control_room":     {ClassWrite, LowerableNever},
 	"alice_trigger_scenario": {ClassWrite, LowerableNever},
+	"alice_play_music":       {ClassWrite, LowerableNever},
 }
 
 // MaxDisclosureText is the T6 cap on disclosure text, in characters.
 const MaxDisclosureText = 1000
+
+// MaxMusicQuery is the cap on the query of alice_play_music, in characters:
+// the number mctl-alice enforces (MAX_MUSIC_QUERY_LENGTH). The pin states it
+// as the tool's text_cap, and a pin with another cap has no card path.
+const MaxMusicQuery = 100
 
 // allowedDeviceTypePrefixes are the only device types T6 lets a standing
 // permission cover (alice_control_device): lights and media devices.
