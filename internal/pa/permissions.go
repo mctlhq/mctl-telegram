@@ -114,10 +114,7 @@ type PermissionsConfig struct {
 }
 
 func (p *PermissionsConfig) scopes() connection.WriteScopes {
-	if p.Scopes != nil {
-		return *p.Scopes
-	}
-	return connection.DefaultWriteScopes()
+	return connection.ScopesOrDefault(p.Scopes)
 }
 
 func (p *PermissionsConfig) valid() bool {
@@ -524,11 +521,7 @@ func (c *PermissionCommands) grantScreen(ctx context.Context, principal int64, a
 	// reading, or one whose grant the service narrowed, holds no write
 	// scope: the principal is told to connect the service again, and no
 	// button is issued.
-	scopes := connection.DefaultWriteScopes()
-	if c.Scopes != nil {
-		scopes = *c.Scopes
-	}
-	if !scopes.Holds(connection.Connection{
+	if !connection.ScopesOrDefault(c.Scopes).Holds(connection.Connection{
 		Server: connection.Server(on[0].Server), GrantedScope: on[0].GrantedScope, RequestedScope: on[0].RequestedScope,
 	}, tool) {
 		slog.Warn("pa permissions: grant refused", "reason", "write_scope")

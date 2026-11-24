@@ -79,6 +79,21 @@ func TestWriteScope_TokenResponseDecidesWhatIsHeld(t *testing.T) {
 // the table does not know hold nothing.
 func TestWriteScope_Holds(t *testing.T) {
 	ws := connection.DefaultWriteScopes()
+	// An optional table: unset is the compiled one, set is that one.
+	wideConn := connection.Connection{Server: connection.ServerAlice, RequestedScope: "iot:control iot:view", GrantedScope: "iot:control iot:view"}
+	other, err := connection.NewWriteScopes(map[connection.Server]map[string]string{connection.ServerAlice: {"alice_say_phrase": "iot:control"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def := connection.ScopesOrDefault(nil); !def.Holds(wideConn, "alice_set_volume") || def.Holds(wideConn, "alice_say_phrase") {
+		t.Fatal("an unset table is not the compiled one")
+	}
+	if set := connection.ScopesOrDefault(&other); set.Holds(wideConn, "alice_set_volume") || !set.Holds(wideConn, "alice_say_phrase") {
+		t.Fatal("a set table is not used")
+	}
+	if zero := (connection.WriteScopes{}); zero.Holds(wideConn, "alice_set_volume") || zero.HoldsAny(wideConn) {
+		t.Fatal("the zero table holds something")
+	}
 	conn := func(requested, granted string) connection.Connection {
 		return connection.Connection{Server: connection.ServerAlice, RequestedScope: requested, GrantedScope: granted}
 	}

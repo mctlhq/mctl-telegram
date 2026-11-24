@@ -545,7 +545,7 @@ S2-C11:
     - internal/pa.TestS2C11_UnknownOutcomeIsNeverRetried
   mutations:
     - id: P2S3-C11a
-      guard: internal/pa/connector/dispatch_write.go:720
+      guard: internal/pa/connector/dispatch_write.go:717
       guard_text: "return ep.CallToolExact(ctx, token, tool, args)"
       mutation: "a failed tools/call is sent a second time"
       killed_by:
@@ -557,7 +557,7 @@ S2-C11:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.592s
     - id: P2S3-C11b
-      guard: internal/pa/connector/dispatch_write.go:755
+      guard: internal/pa/connector/dispatch_write.go:752
       guard_text: "case callErr != nil:\n\t\treturn StatusOutcomeUnknown, ReasonOutcomeUnknown"
       mutation: "a transport failure is recorded as tool_error instead of outcome_unknown"
       killed_by:
@@ -569,7 +569,7 @@ S2-C11:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.558s
     - id: P2S3-C11c
-      guard: internal/pa/connector/dispatch_write.go:762
+      guard: internal/pa/connector/dispatch_write.go:759
       guard_text: "case isErr && upstreamSilent(out):"
       mutation: "the upstream's \"did not respond\" tool error is recorded as tool_error instead of outcome_unknown"
       killed_by:
@@ -675,7 +675,7 @@ S2-C12:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.486s
     - id: P2S3-C12b
-      guard: internal/pa/connector/dispatch_write.go:977
+      guard: internal/pa/connector/dispatch_write.go:974
       guard_text: "for _, d := range moved {\n\t\t// The record keeps hashes"
       mutation: "the stale sweeper appends no audit entry for the records it moved"
       killed_by:
@@ -700,7 +700,7 @@ S2-C13:
     - internal/pa.TestS2C13_ResultAfterDisconnectIsFenced
   mutations:
     - id: P2S3-C13a
-      guard: internal/pa/connector/dispatch_write.go:808
+      guard: internal/pa/connector/dispatch_write.go:805
       guard_text: "if fenceErr != nil {\n\t\tstatus, reason = StatusFenced, ReasonFenced\n\t}"
       mutation: "a refused call.Finish (the connection was revoked during the call) no longer fences the result"
       killed_by:
@@ -712,7 +712,7 @@ S2-C13:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.491s
     - id: P2S3-C13b
-      guard: internal/pa/connector/dispatch_write.go:825
+      guard: internal/pa/connector/dispatch_write.go:822
       guard_text: "if r := w.principalRefusal(fctx, tx, a, now); r != \"\" {"
       mutation: "the finish transaction no longer re-checks the principal's state before recording the result"
       killed_by:
@@ -1476,7 +1476,7 @@ S2-D4:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.698s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/output/safetext	0.253s
     - id: P2S6-D4b
-      guard: internal/pa/connector/card.go:653
+      guard: internal/pa/connector/card.go:650
       guard_text: "text, err = safetext.DisclosureCard(cardToolName(a.Server, a.Tool), string(args), d, tainted || terr != nil)"
       mutation: "the delivered card of a disclosure is the plain card: no speaker, no text line, no warning"
       killed_by:
@@ -1738,7 +1738,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/gate	0.328s
     - id: P2S11-XPa
-      guard: internal/pa/connector/dispatch_write.go:504
+      guard: internal/pa/connector/dispatch_write.go:501
       guard_text: "if met, err := loweringCondition(pinned, low.Args); !lowerable(a.Tool, pinned) || err != nil || !met {"
       mutation: "the executor sends a lowered call that does not meet the tool condition"
       killed_by:
@@ -1750,7 +1750,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.575s
     - id: P2S11-XPb
-      guard: internal/pa/connector/dispatch_write.go:504
+      guard: internal/pa/connector/dispatch_write.go:501
       guard_text: "if met, err := loweringCondition(pinned, low.Args); !lowerable(a.Tool, pinned) || err != nil || !met {"
       mutation: "the executor does not ask whether the pin makes the tool lowerable"
       killed_by:
@@ -1988,7 +1988,7 @@ S2-D7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.398s
     - id: P2S3-D7b
-      guard: internal/pa/connector/dispatch_write.go:557
+      guard: internal/pa/connector/dispatch_write.go:554
       guard_text: "out, callErr := w.callOnce(cctx, ep, token, a.Tool, c.args)"
       mutation: "the executor sends bytes that differ from the approved ones (`<` re-escaped)"
       killed_by:
@@ -2000,7 +2000,7 @@ S2-D7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.525s
     - id: P2S5-D7c
-      guard: internal/pa/connector/card.go:666
+      guard: internal/pa/connector/card.go:663
       guard_text: "text, err = safetext.Card(cardToolName(a.Server, a.Tool), string(args), tainted || terr != nil)"
       mutation: "the card is rendered from other bytes than the sealed arguments (the last byte dropped)"
       killed_by:
@@ -2059,7 +2059,7 @@ S2-A1:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.929s
     - id: P2S3-A1a
-      guard: internal/pa/connector/dispatch_write.go:702
+      guard: internal/pa/connector/dispatch_write.go:699
       guard_text: "if err := tx.Commit(); err != nil {\n\t\tslog.Error(\"pa write: pre-dispatch commit failed; call refused\""
       mutation: "the pre-dispatch transaction is rolled back instead of committed before the call"
       killed_by:
@@ -2142,7 +2142,7 @@ S2-A3:
     - internal/pa.TestS2A3_NonCanonicalStoredBytesAreRefused
   mutations:
     - id: P2S3-A3a
-      guard: internal/pa/connector/dispatch_write.go:698
+      guard: internal/pa/connector/dispatch_write.go:695
       guard_text: "|| digest(args) != got.ArgsSHA {"
       mutation: "the pre-dispatch transaction no longer compares the hash of the unsealed arguments with the approval's args_sha"
       killed_by:
@@ -2154,7 +2154,7 @@ S2-A3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.492s
     - id: P2S3-A3b
-      guard: internal/pa/connector/dispatch_write.go:698
+      guard: internal/pa/connector/dispatch_write.go:695
       guard_text: "!bytes.Equal(canonical, args)"
       mutation: "the pre-dispatch transaction accepts stored bytes that are not in canonical form"
       killed_by:
@@ -2254,7 +2254,7 @@ S2-A5:
     - internal/pa/connector.TestS2A5_FreshListingSeesDriftOverHTTP
   mutations:
     - id: P2S4-A5a
-      guard: internal/pa/connector/dispatch_write.go:494
+      guard: internal/pa/connector/dispatch_write.go:491
       guard_text: "if fresh.SchemaSHA != a.SchemaSHA || fresh.DescriptionSHA != a.DescriptionSHA ||"
       mutation: "the executor compares the fresh definition with the pin only: the three approval hashes are no longer compared"
       killed_by:
@@ -2488,7 +2488,7 @@ S2-A8:
     - internal/pa.TestWriteScope_OnlyAConnectionThatHoldsTheScopeGetsAWriteTool
   mutations:
     - id: P2S10-A8a
-      guard: internal/pa/permissions.go:189
+      guard: internal/pa/permissions.go:186
       guard_text: "\t\tif prov != convo.ProvenanceUser {\n\t\t\treturn nil"
       mutation: "the /permissions arguments are read from a fragment of any provenance"
       killed_by:
@@ -2500,7 +2500,7 @@ S2-A8:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.838s
     - id: P2S10-A8b
-      guard: internal/pa/permissions.go:265
+      guard: internal/pa/permissions.go:262
       guard_text: "err = c.permissions.Grants.InsertPAPermission(ctx, tx, permissions.Permission{"
       mutation: "a second grant path: /api/pa/v1/jobs/reply inserts a permission when the answer text starts with \"/permissions grant \" (a new db.Store method called from serveReply)"
       killed_by:
@@ -2526,7 +2526,7 @@ S2-A8:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.208s
     - id: P2S14c-A8a
-      guard: internal/pa/permissions.go:169
+      guard: internal/pa/permissions.go:166
       guard_text: "err := RequireActionConsent(ctx, tx, c.store, u.Principal().TelegramID())"
       mutation: "/permissions runs for a principal without the consent to actions"
       killed_by:
@@ -2538,7 +2538,7 @@ S2-A8:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14c-A8b
-      guard: internal/pa/permissions.go:242
+      guard: internal/pa/permissions.go:239
       guard_text: "err = RequireActionConsent(ctx, tx, c.store, principal)"
       mutation: "a pressed Grant button does not read the consent to actions again"
       killed_by:
@@ -2550,7 +2550,7 @@ S2-A8:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14c-A8c
-      guard: internal/pa/permissions.go:533
+      guard: internal/pa/permissions.go:526
       guard_text: "}, tool) {"
       mutation: "the grant screen is issued for a connection that does not hold the tool's write scope"
       killed_by:
@@ -2562,7 +2562,7 @@ S2-A8:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14c-A8d
-      guard: internal/pa/permissions.go:257
+      guard: internal/pa/permissions.go:254
       guard_text: "!c.permissions.scopes().Holds(conn, prop.Tool) {"
       mutation: "a pressed Grant button does not read the connection's write scope again"
       killed_by:
@@ -2792,7 +2792,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.520s
     - id: P2S11-AUa
-      guard: internal/pa/connector/dispatch_write.go:431
+      guard: internal/pa/connector/dispatch_write.go:428
       guard_text: "base.Approver = permissionApprover(low.PermissionID)"
       mutation: "the audit record of a lowered call does not name the permission"
       killed_by:
@@ -2841,7 +2841,7 @@ S2-A10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.432s
     - id: P2S10-A10a
-      guard: internal/pa/permissions.go:315
+      guard: internal/pa/permissions.go:312
       guard_text: "{Label: safetext.LabelPermissionRevoke, Verb: permissionVerbRevoke},"
       mutation: "a third button (the Approve label, verb \"always\") is added to the /permissions screen registry"
       killed_by:
@@ -2899,7 +2899,7 @@ S2-F3:
     - internal/pa.TestWriteScope_RefusedCallTellsThePrincipalOnce
   mutations:
     - id: P2S3-F3a
-      guard: internal/pa/connector/dispatch_write.go:292
+      guard: internal/pa/connector/dispatch_write.go:289
       guard_text: "if f.WritesErr != nil || !f.Writes {"
       mutation: "the writes switch is never read: the flag check is `if false`"
       killed_by:
@@ -2911,7 +2911,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.511s
     - id: P2S3-F3b
-      guard: internal/pa/connector/dispatch_write.go:658
+      guard: internal/pa/connector/dispatch_write.go:655
       guard_text: "if out.reason = w.admit(ctx, tx, a, now); out.reason != \"\" {"
       mutation: "the pre-dispatch transaction keeps the flags of the first check instead of reading them again"
       killed_by:
@@ -2937,7 +2937,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14c-F3b
-      guard: internal/pa/permissions.go:168
+      guard: internal/pa/permissions.go:165
       guard_text: "if writesOn(c.permissions.Writes) && !(len(args) > 0 && strings.ToLower(args[0]) == permissionVerbRevoke) {"
       mutation: "/permissions asks for the consent to actions with writes off"
       killed_by:
@@ -2949,7 +2949,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14c-F3c
-      guard: internal/pa/action_consent.go:242
+      guard: internal/pa/action_consent.go:238
       guard_text: "if !writesOn(g.writes) {"
       mutation: "pa.ActionGate offers write tools without reading the writes switch"
       killed_by:
@@ -2973,7 +2973,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/linking	0.963s
     - id: P2S14c-F3e
-      guard: internal/pa/permissions.go:133
+      guard: internal/pa/permissions.go:130
       guard_text: "return err == nil && on"
       mutation: "writesOn ignores the read error of the switch: an unreadable flag that says true is on"
       killed_by:
@@ -3049,7 +3049,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14c-F3k
-      guard: internal/pa/action_consent.go:247
+      guard: internal/pa/action_consent.go:243
       guard_text: "return nil, WithheldConsent, nil"
       mutation: "pa.ActionGate offers write tools to a principal without the consent to actions"
       killed_by:
@@ -3061,7 +3061,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14c-F3l
-      guard: internal/pa/connector/card.go:515
+      guard: internal/pa/connector/card.go:512
       guard_text: "return &refusal{ReasonActionConsentRequired, http.StatusForbidden}"
       mutation: "the card emitter does not refuse a write call of a principal without the consent to actions"
       killed_by:
@@ -3073,7 +3073,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14c-F3m
-      guard: internal/pa/connector/dispatch_write.go:336
+      guard: internal/pa/connector/dispatch_write.go:333
       guard_text: "return ReasonActionConsentRequired"
       mutation: "the write executor sends an approved action of a principal without the consent to actions"
       killed_by:
@@ -3135,7 +3135,7 @@ S2-F3:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connection	1.430s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/linking	0.963s
     - id: P2S14c-F3q
-      guard: internal/pa/connection/write_scope.go:149
+      guard: internal/pa/connection/write_scope.go:153
       guard_text: "got, err := parseScope(c.GrantedScope)"
       mutation: "WriteScopes.Holds reads the requested scope instead of the granted one"
       killed_by:
@@ -3158,7 +3158,7 @@ S2-F3:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connection	1.430s
     - id: P2S14c-F3r
-      guard: internal/pa/connection/write_scope.go:153
+      guard: internal/pa/connection/write_scope.go:157
       guard_text: "return slices.Contains(got, need)"
       mutation: "WriteScopes.Holds is true for any connection with a readable granted scope, a view-only one included"
       killed_by:
@@ -3183,7 +3183,7 @@ S2-F3:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connection	1.430s
     - id: P2S14c-F3s
-      guard: internal/pa/action_consent.go:264
+      guard: internal/pa/action_consent.go:260
       guard_text: "if g.scopes.Holds(conn, tool) {"
       mutation: "pa.ActionGate offers every write tool of the server on a view-only connection"
       killed_by:
@@ -3195,7 +3195,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14c-F3t
-      guard: internal/pa/connector/card.go:527
+      guard: internal/pa/connector/card.go:524
       guard_text: "case !c.scopes().Holds(conn, req.Tool):"
       mutation: "the card emitter does not check the connection's write scope"
       killed_by:
@@ -3207,7 +3207,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14c-F3u
-      guard: internal/pa/connector/dispatch_write.go:481
+      guard: internal/pa/connector/dispatch_write.go:478
       guard_text: "if !w.scopes().Holds(conn, a.Tool) {"
       mutation: "the executor does not check the write scope before it asks the server for its tools"
       killed_by:
@@ -3219,7 +3219,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14c-F3v
-      guard: internal/pa/connector/dispatch_write.go:647
+      guard: internal/pa/connector/dispatch_write.go:644
       guard_text: "case !w.scopes().Holds(conn, a.Tool):"
       mutation: "the transaction that commits the dispatch does not check the write scope of the locked connection row"
       killed_by:

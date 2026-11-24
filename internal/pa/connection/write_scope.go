@@ -97,16 +97,20 @@ type WriteScopes struct {
 	tools map[Server]map[string]string
 }
 
-// DefaultWriteScopes is the compiled table (writeToolScopes).
+// DefaultWriteScopes is the compiled table (writeToolScopes). A WriteScopes
+// is never written through, so the table is shared, not copied.
 func DefaultWriteScopes() WriteScopes {
-	out := map[Server]map[string]string{}
-	for server, tools := range writeToolScopes {
-		out[server] = map[string]string{}
-		for tool, scope := range tools {
-			out[server][tool] = scope
-		}
+	return WriteScopes{tools: writeToolScopes}
+}
+
+// ScopesOrDefault is the table a component configured with custom uses:
+// custom when it is set, else the compiled one. Every place that takes an
+// optional table resolves it here, so they cannot come to disagree.
+func ScopesOrDefault(custom *WriteScopes) WriteScopes {
+	if custom != nil {
+		return *custom
 	}
-	return WriteScopes{tools: out}
+	return DefaultWriteScopes()
 }
 
 // NewWriteScopes builds a table from tools (server, tool, scope). It

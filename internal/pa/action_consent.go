@@ -222,11 +222,7 @@ func NewActionGate(store ActionStore, writes WritesSwitch, scopes *connection.Wr
 	if store == nil || writes == nil {
 		return nil, errors.New("pa: action gate needs a store and the writes switch")
 	}
-	g := &ActionGate{store: store, writes: writes, scopes: connection.DefaultWriteScopes()}
-	if scopes != nil {
-		g.scopes = *scopes
-	}
-	return g, nil
+	return &ActionGate{store: store, writes: writes, scopes: connection.ScopesOrDefault(scopes)}, nil
 }
 
 // Offer returns the write tools of tools that a claim may carry for

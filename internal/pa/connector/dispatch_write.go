@@ -276,10 +276,7 @@ func (w *WriteExecutor) count(server string, status Status, reason string) {
 
 // scopes is the table of write tools and their scopes.
 func (w *WriteExecutor) scopes() connection.WriteScopes {
-	if w.cfg.Scopes != nil {
-		return *w.cfg.Scopes
-	}
-	return connection.DefaultWriteScopes()
+	return connection.ScopesOrDefault(w.cfg.Scopes)
 }
 
 // flagsRefusal re-reads the switches and returns why server's writes are

@@ -488,10 +488,7 @@ func (c *Cards) offerSplit(ctx context.Context, principal, jobID int64) {
 
 // scopes is the table of write tools and their scopes.
 func (c *Cards) scopes() connection.WriteScopes {
-	if c.cfg.Scopes != nil {
-		return *c.cfg.Scopes
-	}
-	return connection.DefaultWriteScopes()
+	return connection.ScopesOrDefault(c.cfg.Scopes)
 }
 
 // actionsRefusal is actionsRefusalIn in a short transaction of its own
