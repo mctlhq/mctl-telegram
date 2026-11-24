@@ -345,8 +345,8 @@ func (s *Store) endPAApproval(ctx context.Context, tx *sql.Tx, principal int64, 
 		 RETURNING `+paApprovalCols,
 		string(to), nowMS, principal, id, string(approval.StatusPending), string(approval.StatusApproved)), nil)
 	if errors.Is(err, approval.ErrNotFound) {
-		// A miss on an open, unexpired row cannot happen in one
-		// transaction; an expired one is reported as expired.
+		// The statement has no expiry predicate: a card past its five
+		// minutes that the sweep has not reached is cancelled like any other.
 		return approval.Approval{}, s.paApprovalRefusal(ctx, tx, principal, id, nowMS, false)
 	}
 	return a, err
@@ -466,7 +466,7 @@ func (s *Store) ConsumePAApproval(ctx context.Context, tx *sql.Tx, req approval.
 		`INSERT INTO pa_dispatches(principal, id, approval_id, connection_id, authority_revision, server, tool,
 			args_sha, idempotency_key, status, lease_until_ms, created_at_ms, updated_at_ms)
 		 VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-		 ON CONFLICT DO NOTHING`,
+		 ON CONFLICT (idempotency_key) DO NOTHING`,
 		a.Principal, req.DispatchID, a.ID, a.ConnectionID, a.AuthorityRevision, a.Server, a.Tool,
 		a.ArgsSHA, a.IdempotencyKey, string(approval.DispatchDispatching), leaseMS, nowMS, nowMS)
 	if err != nil {
@@ -479,8 +479,8 @@ func (s *Store) ConsumePAApproval(ctx context.Context, tx *sql.Tx, req approval.
 		return approval.Approval{}, approval.Dispatch{}, approvalUnreadable("consume: dispatch record: rows affected", err)
 	}
 	if n != 1 {
-		// A dispatch already holds this idempotency key or id: the receipt
-		// paid for a call before, whatever the approval row says now.
+		// A dispatch already holds this idempotency key: the receipt paid
+		// for a call before, whatever the approval row says now.
 		return approval.Approval{}, approval.Dispatch{}, fmt.Errorf("%w: a dispatch record exists", approval.ErrConsumed)
 	}
 	a.Status = approval.StatusDispatching

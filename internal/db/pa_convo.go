@@ -627,11 +627,11 @@ func (s *Store) SweepPAState(ctx context.Context, now, updatesBefore time.Time) 
 		// Approvals (#1320). One past its five minutes is expired and loses
 		// its sealed arguments, tapped or not; its callbacks expire with
 		// it. Rows without arguments, and dispatch records, are deleted
-		// approval.Retention after they were created. A dispatching row is
-		// never touched here: SweepStalePADispatches resolves it first.
+		// approval.Retention after they were created, except the two rows
+		// of a call still on the wire: SweepStalePADispatches ends those.
 		{new(int64), `UPDATE pa_approvals SET status = 'expired', sealed_args = NULL, finished_at_ms = $1, updated_at_ms = $1
 			WHERE status IN ('pending', 'approved') AND expires_at_ms <= $1`, []any{nowMS}},
-		{new(int64), `DELETE FROM pa_approvals WHERE status <> 'dispatching' AND created_at_ms < $1`, []any{now.Add(-approval.Retention).UnixMilli()}},
+		{new(int64), `DELETE FROM pa_approvals WHERE created_at_ms < $1 AND NOT EXISTS (SELECT 1 FROM pa_dispatches d WHERE d.principal = pa_approvals.principal AND d.approval_id = pa_approvals.id AND d.status = 'dispatching')`, []any{now.Add(-approval.Retention).UnixMilli()}},
 		{new(int64), `DELETE FROM pa_dispatches WHERE status <> 'dispatching' AND created_at_ms < $1`, []any{now.Add(-approval.Retention).UnixMilli()}},
 	}
 	for _, st := range steps {

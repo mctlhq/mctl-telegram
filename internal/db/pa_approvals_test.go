@@ -318,6 +318,37 @@ func TestS2A1_DispatchRecordRefusesASecondDispatch(t *testing.T) {
 	})
 }
 
+// A dispatch id that is already taken is a failed write, not a consumed
+// receipt, and the rollback the contract asks for leaves the receipt whole.
+func TestPAApproval_ReusedDispatchIDIsNotAConsume(t *testing.T) {
+	paApprovalDialects(t, func(t *testing.T, s *Store, alice, _ int64) {
+		ctx := context.Background()
+		w := seedPAApprovalWorld(t, s, alice)
+		first, second := w.approved(t, t0), w.approved(t, t0)
+		now := t0.Add(time.Minute)
+		_, d, err := paConsume(t, s, alice, first.ID, now)
+		must(t, err)
+
+		tx, err := s.DB.BeginTx(ctx, nil)
+		must(t, err)
+		_, _, err = s.ConsumePAApproval(ctx, tx, approval.ConsumeRequest{
+			Principal: alice, ApprovalID: second.ID, DispatchID: d.ID, Now: now, Lease: time.Minute})
+		must(t, tx.Rollback())
+		if !errors.Is(err, approval.ErrUnreadable) || errors.Is(err, approval.ErrConsumed) {
+			t.Fatalf("consume with a taken dispatch id: err = %v, want ErrUnreadable and not ErrConsumed", err)
+		}
+		if r := readPAApprovalRow(t, s, alice, second.ID); r.status != "approved" || !bytes.Equal(r.sealed, second.SealedArgs) {
+			t.Fatalf("after the rollback the receipt is %+v, want approved with its arguments", r)
+		}
+		if got := paDispatchStatuses(t, s, alice); len(got) != 1 {
+			t.Fatalf("dispatch records = %v, want only the first", got)
+		}
+		if _, _, err := paConsume(t, s, alice, second.ID, now); err != nil {
+			t.Fatalf("consume with a fresh dispatch id: %v", err)
+		}
+	})
+}
+
 // S2-A2: an expired approval is refused, at the expiry itself and after
 // it, by Approve and by the consume, and no caller can set a longer expiry.
 func TestS2A2_ExpiredApprovalIsRefused(t *testing.T) {
@@ -973,6 +1004,12 @@ func TestSweepPAState_ApprovalRetention(t *testing.T) {
 			_, err := s.FinishPADispatch(ctx, tx, alice, dd.ID, approval.DispatchOK, t0.Add(90*time.Second))
 			return err
 		}))
+		// A consume that failed after its compare-and-set, committed against
+		// the contract: a dispatching approval that no dispatch record owns.
+		orphan := w.approved(t, t0)
+		if _, err := s.DB.ExecContext(ctx, `UPDATE pa_approvals SET status = 'dispatching', sealed_args = NULL WHERE id = $1`, orphan.ID); err != nil {
+			t.Fatal(err)
+		}
 		sweep := func(now time.Time) {
 			t.Helper()
 			if _, err := s.SweepPAState(ctx, now, now.Add(-48*time.Hour)); err != nil {
@@ -1013,7 +1050,7 @@ func TestSweepPAState_ApprovalRetention(t *testing.T) {
 		// Just inside the retention nothing is deleted.
 		sweep(t0.Add(approval.Retention))
 		wantStatuses("at +24h", map[string]string{pend.ID: "expired", appr.ID: "expired", fresh.ID: "expired",
-			disp.ID: "dispatching", done.ID: "done"})
+			disp.ID: "dispatching", done.ID: "done", orphan.ID: "dispatching"})
 		if got := paDispatchStatuses(t, s, alice); len(got) != 2 {
 			t.Errorf("at +24h: dispatch records %v, want both", got)
 		}
@@ -1021,7 +1058,7 @@ func TestSweepPAState_ApprovalRetention(t *testing.T) {
 		// Past it the ended rows go; the dispatching pair stays.
 		sweep(t0.Add(approval.Retention + 5*time.Minute))
 		wantStatuses("past retention", map[string]string{pend.ID: "(deleted)", appr.ID: "(deleted)", fresh.ID: "(deleted)",
-			disp.ID: "dispatching", done.ID: "(deleted)"})
+			disp.ID: "dispatching", done.ID: "(deleted)", orphan.ID: "(deleted)"})
 		if got := paDispatchStatuses(t, s, alice); len(got) != 1 || got[0] != "dispatching" {
 			t.Errorf("past retention: dispatch records %v, want only the dispatching one", got)
 		}

@@ -26,7 +26,7 @@
 // Approval states:
 //
 //	pending -> approved                the principal tapped Approve
-//	pending | approved -> cancelled    Cancel, /new, /forget, withdraw, disconnect
+//	pending | approved -> cancelled    Cancel, /new, disconnect
 //	pending | approved -> expired      five minutes passed
 //	pending | approved -> refused      the executor burned it (drift)
 //	approved -> dispatching            the receipt was consumed (compare-and-set)
@@ -45,8 +45,10 @@
 //
 // Retention: the sealed arguments leave the row in the transaction that
 // ends pending/approved (consume, cancel, expire, refuse). Rows hold
-// hashes only after that and are deleted by the conversation sweep,
-// /forget and consent withdrawal.
+// hashes only after that. The conversation sweep deletes them Retention
+// after they were created; /forget and consent withdrawal delete them at
+// once, except the two rows of a call that is on the wire; account
+// deletion deletes every row.
 //
 // Nothing in the running service calls this package yet (P2-S2 is the
 // store only); PA_WRITES_ENABLED stays off.
@@ -353,14 +355,17 @@ type Store interface {
 	// ConsumePAApproval is the receipt compare-and-set of the pre-dispatch
 	// transaction (T2 step 1): approved -> dispatching, only before the
 	// expiry, only while the bound connection is active at the bound
-	// authority_revision and only while the bound conversation is open. In the same transaction it takes the arguments
-	// off the row and inserts the dispatching record. It returns the
-	// approval as consumed, with its sealed arguments, and the dispatch.
+	// authority_revision and only while the bound conversation is open. In
+	// the same transaction it takes the arguments off the row and inserts
+	// the dispatching record. It returns the approval as consumed, with
+	// its sealed arguments, and the dispatch.
 	//
-	// Any refusal changes nothing and names its reason: ErrNotFound,
-	// ErrNotApproved, ErrConsumed, ErrCancelled, ErrRefused, ErrExpired,
-	// ErrAuthorityChanged, ErrConversationClosed, or ErrUnreadable when the reason could not be
-	// read. The caller must roll back on every error.
+	// A refusal names its reason: ErrNotFound, ErrNotApproved,
+	// ErrConsumed, ErrCancelled, ErrRefused, ErrExpired,
+	// ErrAuthorityChanged, ErrConversationClosed, or ErrUnreadable when
+	// the reason could not be read or the dispatch could not be recorded.
+	// The caller must roll back on every error: some are returned after
+	// the receipt was moved in this transaction.
 	ConsumePAApproval(ctx context.Context, tx *sql.Tx, req ConsumeRequest) (Approval, Dispatch, error)
 	// FinishPADispatch moves dispatching -> status (a Final one) and its
 	// approval to done. A dispatch that is no longer dispatching is

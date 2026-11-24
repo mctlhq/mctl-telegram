@@ -76,11 +76,11 @@ S2-C10:
       killed_by:
         - internal/db.TestS2C10_OldAuthorityRevisionIsRefused
       red: |-
-        --- FAIL: TestS2C10_OldAuthorityRevisionIsRefused (0.04s)
+        --- FAIL: TestS2C10_OldAuthorityRevisionIsRefused (0.05s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.835s
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	1.027s
     - id: P2S2-C10b
       guard: internal/db/pa_approvals.go:440
       guard_text: "AND c.state = $6"
@@ -88,11 +88,11 @@ S2-C10:
       killed_by:
         - internal/db.TestS2C10_OldAuthorityRevisionIsRefused
       red: |-
-        --- FAIL: TestS2C10_OldAuthorityRevisionIsRefused (0.04s)
+        --- FAIL: TestS2C10_OldAuthorityRevisionIsRefused (0.05s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.771s
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.997s
   gaps:
     - half: "the executor running the consume under the connection lock before a real call (P2-S3)"
       tracked_by: "#1320"
@@ -121,7 +121,7 @@ S2-C12:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.810s
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.830s
     - id: P2S2-C12b
       guard: internal/db/pa_approvals.go:497
       guard_text: "SET status = 'done', finished_at_ms = $1, updated_at_ms = $1"
@@ -129,13 +129,13 @@ S2-C12:
       killed_by:
         - internal/db.TestS2C12_CrashedDispatchBecomesOutcomeUnknown
       red: |-
-        --- FAIL: TestS2A1_ReceiptIsConsumedOnce (0.05s)
+        --- FAIL: TestS2A1_ReceiptIsConsumedOnce (0.04s)
         --- FAIL: TestS2C12_CrashedDispatchBecomesOutcomeUnknown (0.01s)
         --- FAIL: TestSweepPAState_ApprovalRetention (0.01s)
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.790s
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.872s
     - id: P2S2-C12c
       guard: internal/db/pa_approvals.go:509
       guard_text: "AND id = $4 AND status = $5\n\t\t RETURNING `+paDispatchCols"
@@ -149,7 +149,7 @@ S2-C12:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.753s
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.856s
     - id: P2S2-C12d
       guard: internal/db/pa_approvals.go:547
       guard_text: "WHERE status = $3 AND lease_until_ms <= $2"
@@ -161,7 +161,7 @@ S2-C12:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.765s
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.851s
     - id: P2S2-C12e
       guard: internal/db/pa_approvals.go:549
       guard_text: "string(approval.DispatchOutcomeUnknown), nowMS, string(approval.DispatchDispatching))"
@@ -173,7 +173,7 @@ S2-C12:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.750s
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	1.282s
   gaps:
     - half: "the service running the sweep at start and on a timer, with the audit row and the notice of an unknown outcome (P2-S3)"
       tracked_by: "#1320"
@@ -519,7 +519,7 @@ S2-A1:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/db	1.010s
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	1.041s
     - id: P2S2-A1b
       guard: internal/db/pa_approvals.go:481
       guard_text: "if n != 1 {\n\t\t// A dispatch already holds"
@@ -531,7 +531,7 @@ S2-A1:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.910s
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.929s
   gaps:
     - half: "the executor consuming the receipt before the MCP call (P2-S3)"
       tracked_by: "#1320"
@@ -556,7 +556,7 @@ S2-A2:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.809s
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.884s
     - id: P2S2-A2b
       guard: internal/db/pa_approvals.go:437
       guard_text: "AND expires_at_ms > $2\n\t\t   AND EXISTS (SELECT 1 FROM pa_connections c"
@@ -568,7 +568,7 @@ S2-A2:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.831s
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.852s
     - id: P2S2-A2c
       guard: internal/db/pa_approvals.go:317
       guard_text: "AND id = $4 AND status = $5 AND expires_at_ms > $2"
@@ -580,7 +580,7 @@ S2-A2:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.760s
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.764s
     - id: P2S2-A2d
       guard: internal/db/pa_approvals.go:205
       guard_text: "a.CreatedAt.Add(approval.TTL).UnixMilli()"
@@ -592,7 +592,7 @@ S2-A2:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.847s
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.802s
   gaps:
     - half: "the executor and the card callbacks refusing an expired approval to the principal (P2-S3, P2-S5)"
       tracked_by: "#1320"
@@ -621,7 +621,7 @@ S2-A4:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.793s
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.771s
     - id: P2S2-A4b
       guard: internal/db/pa_approvals.go:317
       guard_text: "AND id = $4 AND status = $5 AND expires_at_ms > $2"
@@ -633,7 +633,7 @@ S2-A4:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.734s
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.865s
     - id: P2S2-A4c
       guard: internal/db/pa_approvals.go:344
       guard_text: "WHERE principal = $3 AND id = $4 AND status IN ($5, $6)"
@@ -645,7 +645,7 @@ S2-A4:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.743s
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.872s
     - id: P2S2-A4d
       guard: internal/db/pa_approvals.go:227
       guard_text: "FROM pa_approvals WHERE principal = $1 AND id = $2`, principal, id), nil)"
@@ -657,7 +657,7 @@ S2-A4:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.763s
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.877s
     - id: P2S2-A4e
       guard: internal/db/pa_approvals.go:237
       guard_text: "WHERE principal = $1 AND (approve_cb_id = $2 OR cancel_cb_id = $3)"
@@ -669,7 +669,7 @@ S2-A4:
         FAIL
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
-        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.806s
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.829s
   gaps:
     - half: "a callback tapped by another principal in a chat, end to end (P2-S5)"
       tracked_by: "#1320"
