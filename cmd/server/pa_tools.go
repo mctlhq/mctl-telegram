@@ -199,8 +199,17 @@ func buildPATools(ctx context.Context, cfg *config.Config, tools *config.PATools
 		// The same allowlist the webhook and the run loop check.
 		Allowed: pa.NewAllowlist(cfg.PAAllowedPrincipals),
 		// The same switch the dispatcher reads: while it is on, a new
-		// link asks for the server's write scopes too.
-		Writes: paWritesSwitch(t.flags),
+		// link asks for the server's write scopes too. Only in a process
+		// with a write path (t.writes, set once at startup, before any
+		// request is served): one started with writes off cannot send a
+		// write until it restarts, so it asks for the read scopes
+		// whatever the flag reads later. Off is read at every use.
+		Writes: func() (bool, error) {
+			if t.writes == nil {
+				return false, nil
+			}
+			return paWritesEnabled(t.flags)
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("pa tools: linking: %w", err)

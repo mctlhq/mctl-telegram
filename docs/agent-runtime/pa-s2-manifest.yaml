@@ -3252,7 +3252,7 @@ S2-A7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.102s
     - id: P2S14-SETf
-      guard: cmd/server/pa_tools.go:329
+      guard: cmd/server/pa_tools.go:338
       guard_text: "tools = append(tools, wt...)"
       mutation: "the tool resolver never offers a write tool"
       killed_by:
@@ -3912,6 +3912,7 @@ S2-F3:
     - cmd/server.TestPAWrites_ShippedGate
     - cmd/server.TestPAWrites_GateNoticeOncePerConnection
     - cmd/server.TestPAWrites_ConsentCommandShowsActions
+    - cmd/server.TestPAWrites_ConnectAsksForWriteScopeOnlyWithAWritePath
     - cmd/server.TestPAWrites_EndToEnd
     - cmd/server.TestPAWrites_GateDecidesTheClaim
     - internal/pa.TestRunLoop_ClaimActionsHint
@@ -4393,7 +4394,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.935s
     - id: P2S14-SETf
-      guard: cmd/server/pa_tools.go:329
+      guard: cmd/server/pa_tools.go:338
       guard_text: "tools = append(tools, wt...)"
       mutation: "the tool resolver never offers a write tool"
       killed_by:
@@ -4526,6 +4527,30 @@ S2-F3:
         FAIL	github.com/mctlhq/mctl-telegram/cmd/server
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.973s
+    - id: P2S14c-NTCe
+      guard: cmd/server/pa_tools.go:208
+      guard_text: "if t.writes == nil {"
+      mutation: "a process with no write path asks a new link for the write scopes once the flag reads on"
+      killed_by:
+        - cmd/server.TestPAWrites_ConnectAsksForWriteScopeOnlyWithAWritePath
+      red: |-
+        --- FAIL: TestPAWrites_ConnectAsksForWriteScopeOnlyWithAWritePath (0.18s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/cmd/server
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.975s
+    - id: P2S14c-NTCf
+      guard: cmd/server/pa_tools.go:211
+      guard_text: "return paWritesEnabled(t.flags)"
+      mutation: "a process with a write path asks a new link for the write scopes whatever the flag reads now"
+      killed_by:
+        - cmd/server.TestPAWrites_ConnectAsksForWriteScopeOnlyWithAWritePath
+      red: |-
+        --- FAIL: TestPAWrites_ConnectAsksForWriteScopeOnlyWithAWritePath (0.18s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/cmd/server
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.975s
     - id: P2S14-HINTa
       guard: internal/pa/runloop.go:339
       guard_text: "case ActionsHintConsent, ActionsHintScope:"

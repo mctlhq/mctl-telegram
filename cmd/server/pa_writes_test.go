@@ -953,6 +953,56 @@ func TestPAWrites_GateNoticeOncePerConnection(t *testing.T) {
 	})
 }
 
+// TestPAWrites_ConnectAsksForWriteScopeOnlyWithAWritePath (#1320
+// P2-S14c): /connect asks the authorization server for the write scopes
+// only in a process that has a write path and reads the flag on. A
+// service started with writes off asks for the read scopes also after
+// the flag turns on, and one started with writes on asks for the read
+// scopes as soon as the flag turns off.
+func TestPAWrites_ConnectAsksForWriteScopeOnlyWithAWritePath(t *testing.T) {
+	const read = ""
+	wide, ok := connection.WriteRequestScope(connection.ServerAlice)
+	if !ok || wide == read {
+		t.Fatalf("alice write request scope %q", wide)
+	}
+	// reconnect drops Carol's connection and links alice again, and
+	// returns the scope the new connection records as asked for: the
+	// write set, or nothing for a connection that asked for the read set.
+	reconnect := func(e *paWritesE2E) string {
+		e.t.Helper()
+		e.exec(`DELETE FROM pa_connections WHERE principal = $1`, e.user)
+		card := e.toCard()
+		e.press(card.buttons[0])
+		var asked string
+		if err := e.conn.QueryRowContext(context.Background(),
+			`SELECT requested_scope FROM pa_connections WHERE principal = $1`, e.user).Scan(&asked); err != nil {
+			e.t.Fatal(err)
+		}
+		return asked
+	}
+	for name, c := range map[string]struct {
+		start, later, want string
+	}{
+		"write path and flag on":              {"true", "true", wide},
+		"write path, flag turned off later":   {"true", "false", read},
+		"no write path, flag turned on later": {"false", "true", read},
+		"no write path and flag off":          {"false", "false", read},
+	} {
+		t.Run(name, func(t *testing.T) {
+			forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
+				e := newPAWritesE2E(t, store, conn, c.start)
+				if built := e.rt.writes != nil; built != (c.start == "true") {
+					t.Fatalf("write path built: %v", built)
+				}
+				t.Setenv(connector.WritesFlagEnv, c.later)
+				if got := reconnect(e); got != c.want {
+					t.Fatalf("/connect asked for %q, want %q", got, c.want)
+				}
+			})
+		})
+	}
+}
+
 // TestPAWrites_ConsentCommandShowsActions (#1320 P2-S14c): /consent of
 // the built service. With PA_WRITES_ENABLED true it shows the consent to
 // actions to a principal who has consented to the data flow only, with a
