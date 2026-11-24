@@ -165,8 +165,8 @@ S2-C11:
   gaps:
     - half: "a caller in the service: a card's Approve hands the approval to the webhook's AfterCommit (pa.PostCommitApproval, P2-S5) and the tests pass it to DispatchApproved, but cmd/server builds no WriteExecutor and no connector.Cards, so nothing deployed invokes DispatchApproved"
       tracked_by: "#1320"
-    - half: "connector.PinFresh (P2-S4) given to an executor: nothing in cmd/server builds a WriteExecutor, and no runtime code may load the Phase 2 pin (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests"
-      tracked_by: "#1320"
+    - half: "connector.PinFresh (P2-S4) is not wired: no WriteExecutor is built in cmd/server, and the Phase 2 pin is not loadable at runtime (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
     - half: "the outcome against a real MCP server and its real timeout and 5xx bodies"
       tracked_by: "#1320"
     - half: "the upstream-silence markers anchored to the pinned servers' real wording: the bare \"timeout\" match also reads a rejected call whose error mentions a timeout argument as outcome_unknown, which is the safe direction and a less exact notice"
@@ -308,8 +308,8 @@ S2-C13:
   gaps:
     - half: "a caller in the service: a card's Approve hands the approval to the webhook's AfterCommit (pa.PostCommitApproval, P2-S5) and the tests pass it to DispatchApproved, but cmd/server builds no WriteExecutor and no connector.Cards, so nothing deployed invokes DispatchApproved"
       tracked_by: "#1320"
-    - half: "connector.PinFresh (P2-S4) given to an executor: nothing in cmd/server builds a WriteExecutor, and no runtime code may load the Phase 2 pin (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests"
-      tracked_by: "#1320"
+    - half: "connector.PinFresh (P2-S4) is not wired: no WriteExecutor is built in cmd/server, and the Phase 2 pin is not loadable at runtime (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
     - half: "the /disconnect command end to end against an in-flight write, with its reply sent before the call returns (P2-S12)"
       tracked_by: "#1320"
 
@@ -345,8 +345,8 @@ S2-X5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.493s
   gaps:
-    - half: "production wiring: nothing in cmd/server constructs connector.Cards or sets ConversationsConfig.Approvals (TestNoRuntimePhase2Use forbids NewCards outside tests), and its AfterCommit does not pass pa.PostCommitApproval to a WriteExecutor, so no card is emitted and no card button is handled outside tests"
-      tracked_by: "#1320"
+    - half: "production wiring: nothing in cmd/server constructs connector.Cards or sets ConversationsConfig.Approvals (TestNoRuntimePhase2Use forbids NewCards outside tests), and its AfterCommit does not pass pa.PostCommitApproval to a WriteExecutor, so no card is emitted and no card button is handled outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
 
 S2-I5:
   status: pending
@@ -692,8 +692,8 @@ S2-D7:
   gaps:
     - half: "a caller in the service: a card's Approve hands the approval to the webhook's AfterCommit (pa.PostCommitApproval, P2-S5) and the tests pass it to DispatchApproved, but cmd/server builds no WriteExecutor and no connector.Cards, so nothing deployed invokes DispatchApproved"
       tracked_by: "#1322"
-    - half: "connector.PinFresh (P2-S4) given to an executor: nothing in cmd/server builds a WriteExecutor, and no runtime code may load the Phase 2 pin (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests"
-      tracked_by: "#1322"
+    - half: "connector.PinFresh (P2-S4) is not wired: no WriteExecutor is built in cmd/server, and the Phase 2 pin is not loadable at runtime (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
     - half: "a card is byte for byte the sealed arguments only when they hold nothing safetext rewrites: a link-like token is shown defanged (a[.]b) while the call sends it as it is, and arguments that already hold a defang mark are refused card_unshowable. Owner decision: show such values raw on a card, or keep the defang (P2-S5 kept it)"
       tracked_by: "#1322"
 
@@ -749,8 +749,8 @@ S2-A1:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.475s
   gaps:
-    - half: "the Approve and Cancel callbacks of a card are built and tested (P2-S5, S2-A7); production wiring: nothing in cmd/server constructs connector.Cards or sets ConversationsConfig.Approvals (TestNoRuntimePhase2Use forbids NewCards outside tests), and its AfterCommit does not pass pa.PostCommitApproval to a WriteExecutor, so no card is emitted and no card button is handled outside tests"
-      tracked_by: "#1320"
+    - half: "the Approve and Cancel callbacks of a card are built and tested (P2-S5, S2-A7); production wiring: nothing in cmd/server constructs connector.Cards or sets ConversationsConfig.Approvals (TestNoRuntimePhase2Use forbids NewCards outside tests), and its AfterCommit does not pass pa.PostCommitApproval to a WriteExecutor, so no card is emitted and no card button is handled outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
 
 S2-A2:
   status: green
@@ -808,8 +808,8 @@ S2-A2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.802s
   gaps:
-    - half: "the card callbacks answer an expired approval to the principal (internal/pa.TestApprovalCard_ExpiredButtons, P2-S5) and the executor refuses one (P2-S3), in tests only; production wiring: nothing in cmd/server constructs connector.Cards or sets ConversationsConfig.Approvals (TestNoRuntimePhase2Use forbids NewCards outside tests), and its AfterCommit does not pass pa.PostCommitApproval to a WriteExecutor, so no card is emitted and no card button is handled outside tests"
-      tracked_by: "#1320"
+    - half: "the card callbacks answer an expired approval to the principal (internal/pa.TestApprovalCard_ExpiredButtons, P2-S5) and the executor refuses one (P2-S3), in tests only; production wiring: nothing in cmd/server constructs connector.Cards or sets ConversationsConfig.Approvals (TestNoRuntimePhase2Use forbids NewCards outside tests), and its AfterCommit does not pass pa.PostCommitApproval to a WriteExecutor, so no card is emitted and no card button is handled outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
 
 S2-A3:
   status: green
@@ -846,8 +846,8 @@ S2-A3:
   gaps:
     - half: "a caller in the service: a card's Approve hands the approval to the webhook's AfterCommit (pa.PostCommitApproval, P2-S5) and the tests pass it to DispatchApproved, but cmd/server builds no WriteExecutor and no connector.Cards, so nothing deployed invokes DispatchApproved"
       tracked_by: "#1320"
-    - half: "connector.PinFresh (P2-S4) given to an executor: nothing in cmd/server builds a WriteExecutor, and no runtime code may load the Phase 2 pin (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests"
-      tracked_by: "#1320"
+    - half: "connector.PinFresh (P2-S4) is not wired: no WriteExecutor is built in cmd/server, and the Phase 2 pin is not loadable at runtime (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
 
 S2-A4:
   status: green
@@ -917,8 +917,8 @@ S2-A4:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.829s
   gaps:
-    - half: "a callback tapped by another principal is refused end to end in the tests (S2-X5, P2-S5); production wiring: nothing in cmd/server constructs connector.Cards or sets ConversationsConfig.Approvals (TestNoRuntimePhase2Use forbids NewCards outside tests), and its AfterCommit does not pass pa.PostCommitApproval to a WriteExecutor, so no card is emitted and no card button is handled outside tests"
-      tracked_by: "#1320"
+    - half: "a callback tapped by another principal is refused end to end in the tests (S2-X5, P2-S5); production wiring: nothing in cmd/server constructs connector.Cards or sets ConversationsConfig.Approvals (TestNoRuntimePhase2Use forbids NewCards outside tests), and its AfterCommit does not pass pa.PostCommitApproval to a WriteExecutor, so no card is emitted and no card button is handled outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
 
 S2-A5:
   status: green
@@ -1028,8 +1028,8 @@ S2-A5:
   gaps:
     - half: "a caller in the service: a card's Approve hands the approval to the webhook's AfterCommit (pa.PostCommitApproval, P2-S5) and the tests pass it to DispatchApproved, but cmd/server builds no WriteExecutor and no connector.Cards, so nothing deployed invokes DispatchApproved"
       tracked_by: "#1320"
-    - half: "connector.PinFresh given to an executor: nothing in cmd/server builds a WriteExecutor, and no runtime code may load the Phase 2 pin (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests"
-      tracked_by: "#1320"
+    - half: "connector.PinFresh (P2-S4) is not wired: no WriteExecutor is built in cmd/server, and the Phase 2 pin is not loadable at runtime (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
     - half: "drift on a real MCP server through internal/pa/egress: the HTTP tests reach a fake server with the httptest client, because egress refuses loopback"
       tracked_by: "#1320"
 
@@ -1096,8 +1096,8 @@ S2-A6:
   gaps:
     - half: "a caller in the service: a card's Approve hands the approval to the webhook's AfterCommit (pa.PostCommitApproval, P2-S5) and the tests pass it to DispatchApproved, but cmd/server builds no WriteExecutor and no connector.Cards, so nothing deployed invokes DispatchApproved"
       tracked_by: "#1320"
-    - half: "connector.PinFresh given to an executor: nothing in cmd/server builds a WriteExecutor, and no runtime code may load the Phase 2 pin (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests"
-      tracked_by: "#1320"
+    - half: "connector.PinFresh (P2-S4) is not wired: no WriteExecutor is built in cmd/server, and the Phase 2 pin is not loadable at runtime (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
     - half: "owner decision: a transient listing failure ends the approval like any refusal (fail closed); refusing without consuming, so the tap can be repeated until the 5 minute expiry, was proposed and not decided"
       tracked_by: "#1320"
     - half: "a failed listing on a real MCP server through internal/pa/egress, and a metric or alert for dispatch-time listing failures (the read path counts its own)"
@@ -1139,8 +1139,8 @@ S2-A7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.634s
   gaps:
-    - half: "production wiring: nothing in cmd/server constructs connector.Cards or sets ConversationsConfig.Approvals (TestNoRuntimePhase2Use forbids NewCards outside tests), and its AfterCommit does not pass pa.PostCommitApproval to a WriteExecutor, so no card is emitted and no card button is handled outside tests"
-      tracked_by: "#1320"
+    - half: "production wiring: nothing in cmd/server constructs connector.Cards or sets ConversationsConfig.Approvals (TestNoRuntimePhase2Use forbids NewCards outside tests), and its AfterCommit does not pass pa.PostCommitApproval to a WriteExecutor, so no card is emitted and no card button is handled outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
     - half: "two taps handled by two replicas of the service against one Postgres: the concurrent test runs both in one process"
       tracked_by: "#1320"
 
@@ -1178,8 +1178,8 @@ S2-A10:
   gaps:
     - half: "the /permissions route and a check that it is the only writer of standing permissions: neither exists until P2-S10, which must also keep this test's enumeration current for any card it adds"
       tracked_by: "#1320"
-    - half: "production wiring: nothing in cmd/server constructs connector.Cards or sets ConversationsConfig.Approvals (TestNoRuntimePhase2Use forbids NewCards outside tests), and its AfterCommit does not pass pa.PostCommitApproval to a WriteExecutor, so no card is emitted and no card button is handled outside tests"
-      tracked_by: "#1320"
+    - half: "production wiring: nothing in cmd/server constructs connector.Cards or sets ConversationsConfig.Approvals (TestNoRuntimePhase2Use forbids NewCards outside tests), and its AfterCommit does not pass pa.PostCommitApproval to a WriteExecutor, so no card is emitted and no card button is handled outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
 
 S2-F3:
   status: green
@@ -1215,5 +1215,5 @@ S2-F3:
   gaps:
     - half: "a caller in the service: a card's Approve hands the approval to the webhook's AfterCommit (pa.PostCommitApproval, P2-S5) and the tests pass it to DispatchApproved, but cmd/server builds no WriteExecutor and no connector.Cards, so nothing deployed invokes DispatchApproved"
       tracked_by: "#1320"
-    - half: "connector.PinFresh (P2-S4) given to an executor: nothing in cmd/server builds a WriteExecutor, and no runtime code may load the Phase 2 pin (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests"
-      tracked_by: "#1320"
+    - half: "connector.PinFresh (P2-S4) is not wired: no WriteExecutor is built in cmd/server, and the Phase 2 pin is not loadable at runtime (TestNoRuntimePhase2Use), so no dispatch reaches the fresh listing outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
