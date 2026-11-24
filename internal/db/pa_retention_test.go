@@ -127,7 +127,7 @@ func seedPAPrincipalState(t *testing.T, s *Store, principal int64) {
 	conv := fmt.Sprintf("pcv_%d_%s", principal, randomSuffix(t))
 	t.Cleanup(func() {
 		for _, tb := range []string{"pa_consents", "pa_conversations", "pa_fragments", "pa_principal_locks",
-			"pa_callbacks", "pa_jobs", "pa_usage", "pa_rate", "pa_outbox"} {
+			"pa_callbacks", "pa_jobs", "pa_usage", "pa_rate", "pa_outbox", "pa_approvals", "pa_dispatches"} {
 			_, _ = s.DB.Exec(`DELETE FROM `+tb+` WHERE principal = $1`, principal)
 		}
 	})
@@ -147,6 +147,16 @@ func seedPAPrincipalState(t *testing.T, s *Store, principal int64) {
 		{`INSERT INTO pa_rate(principal, window_start_ms, count) VALUES($1, $2, 3)`, []any{principal, now}},
 		{`INSERT INTO pa_outbox(principal, job_id, kind, status, attempts, next_at_ms, lease_until_ms, created_at_ms, updated_at_ms)
 			VALUES($1, (SELECT id FROM pa_jobs WHERE principal = $1), 'reply', 'sending', 1, $2, $3, $2, $2)`, []any{principal, now, now + 60_000}},
+		// An approved card with its sealed arguments, and a call on the wire.
+		{`INSERT INTO pa_approvals(principal, id, approve_cb_id, cancel_cb_id, connection_id, authority_revision, server, tool,
+				class, schema_sha, description_sha, annotation_sha, args_sha, sealed_args, conversation_id, idempotency_key,
+				status, approver, created_at_ms, expires_at_ms, updated_at_ms)
+			VALUES($1, 'apr1', 'cba', 'cbc', 'pac_seed', 1, 'alice', 'alice_set_volume', 'write', 'h', 'h', 'h', 'h', $2, $3, $4,
+				'approved', $1, $5, $6, $5)`, []any{principal, []byte("sealed-args"), conv, "idem-a-" + conv, now, now + 300_000}},
+		{`INSERT INTO pa_dispatches(principal, id, approval_id, connection_id, authority_revision, server, tool, args_sha,
+				idempotency_key, status, lease_until_ms, created_at_ms, updated_at_ms)
+			VALUES($1, 'dsp1', 'apr0', 'pac_seed', 1, 'alice', 'alice_set_volume', 'h', $2, 'dispatching', $3, $4, $4)`,
+			[]any{principal, "idem-d-" + conv, now + 60_000, now}},
 	}
 	for _, st := range stmts {
 		if _, err := s.DB.ExecContext(ctx, st.q, st.args...); err != nil {
@@ -184,7 +194,7 @@ func paUsageStatus(t *testing.T, s *Store, principal int64) string {
 var paSeededRows = map[string]int{
 	"pa_outbox": 1, "pa_jobs": 1, "pa_callbacks": 1, "pa_fragments": 1, "pa_conversations": 1,
 	"pa_consents": 1, "pa_link_secrets": 2, "pa_connections": 2, "pa_principal_locks": 1,
-	"pa_usage": 1, "pa_rate": 1,
+	"pa_usage": 1, "pa_rate": 1, "pa_approvals": 1, "pa_dispatches": 1,
 }
 
 func TestHardDeleteAccount_PurgesPAState(t *testing.T) {
@@ -213,7 +223,7 @@ func TestHardDeleteAccount_PurgesPAState(t *testing.T) {
 		// Listed here, not taken from paPrincipalPurges, so dropping a table
 		// from that list fails this test.
 		purged := []string{"pa_outbox", "pa_jobs", "pa_callbacks", "pa_fragments", "pa_conversations",
-			"pa_consents", "pa_link_secrets", "pa_connections"}
+			"pa_consents", "pa_link_secrets", "pa_connections", "pa_approvals", "pa_dispatches"}
 		for _, p := range []int64{aliceLogin, aliceSession} {
 			for _, table := range purged {
 				if n := paRowsIn(t, s, table, p); n != 0 {

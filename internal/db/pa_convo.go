@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/pa/approval"
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 )
@@ -277,6 +278,12 @@ func (s *Store) ClosePAConversations(ctx context.Context, tx *sql.Tx, principal 
 		jobs.StatusPending, jobs.StatusHeld, jobs.StatusClaimed); err != nil {
 		return fmt.Errorf("close pa conversation: %w", err)
 	}
+	// So do its approvals that were not dispatched yet, with their sealed
+	// arguments (#1320): a card of a closed conversation can no longer be
+	// approved, and /new leaves no text behind.
+	if _, err := cancelPAApprovals(ctx, tx, principal, now.UnixMilli(), ""); err != nil {
+		return fmt.Errorf("close pa conversation: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM pa_fragments WHERE principal = $1 AND conversation_id IN
 			(SELECT id FROM pa_conversations WHERE principal = $1 AND closed_at_ms = 0)`,
@@ -303,6 +310,11 @@ func (s *Store) ForgetPAConversations(ctx context.Context, tx *sql.Tx, principal
 		return err
 	}
 	if err := deletePAOutboxNotices(ctx, tx, principal); err != nil {
+		return err
+	}
+	// Approvals carry sealed arguments derived from the conversation
+	// (#1320): they go with it.
+	if err := forgetPAApprovals(ctx, tx, principal); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pa_fragments WHERE principal = $1`, principal); err != nil {
@@ -612,6 +624,15 @@ func (s *Store) SweepPAState(ctx context.Context, now, updatesBefore time.Time) 
 		// consumed or not (#1338). A row that has not expired is kept, so
 		// a live secret is never deleted under its holder.
 		{&r.LinkSecrets, `DELETE FROM pa_link_secrets WHERE expires_at_ms < $1`, []any{now.Add(-PALinkSecretRetention).UnixMilli()}},
+		// Approvals (#1320). One past its five minutes is expired and loses
+		// its sealed arguments, tapped or not; its callbacks expire with
+		// it. Rows without arguments, and dispatch records, are deleted
+		// approval.Retention after they were created. A dispatching row is
+		// never touched here: SweepStalePADispatches resolves it first.
+		{new(int64), `UPDATE pa_approvals SET status = 'expired', sealed_args = NULL, finished_at_ms = $1, updated_at_ms = $1
+			WHERE status IN ('pending', 'approved') AND expires_at_ms <= $1`, []any{nowMS}},
+		{new(int64), `DELETE FROM pa_approvals WHERE status <> 'dispatching' AND created_at_ms < $1`, []any{now.Add(-approval.Retention).UnixMilli()}},
+		{new(int64), `DELETE FROM pa_dispatches WHERE status <> 'dispatching' AND created_at_ms < $1`, []any{now.Add(-approval.Retention).UnixMilli()}},
 	}
 	for _, st := range steps {
 		res, err := tx.ExecContext(ctx, st.q, st.args...)

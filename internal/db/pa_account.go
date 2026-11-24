@@ -112,6 +112,10 @@ var paPrincipalPurges = []struct{ table, q string }{
 	{"pa_outbox", `DELETE FROM pa_outbox WHERE principal = $1`},
 	{"pa_jobs", `DELETE FROM pa_jobs WHERE principal = $1`},
 	{"pa_callbacks", `DELETE FROM pa_callbacks WHERE principal = $1`},
+	// Every row, a dispatch on the wire included: like a claimed job, its
+	// finish then finds no row (approval.ErrNotFound).
+	{"pa_approvals", `DELETE FROM pa_approvals WHERE principal = $1`},
+	{"pa_dispatches", `DELETE FROM pa_dispatches WHERE principal = $1`},
 	{"pa_fragments", `DELETE FROM pa_fragments WHERE principal = $1`},
 	{"pa_conversations", `DELETE FROM pa_conversations WHERE principal = $1`},
 	{"pa_consents", `DELETE FROM pa_consents WHERE principal = $1`},

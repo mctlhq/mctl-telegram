@@ -577,6 +577,11 @@ func migrate(ctx context.Context, dbConn migrateDB, pg bool, ttlExemptTelegramID
 	if err := migratePAOutbox(ctx, dbConn, pg); err != nil {
 		return err
 	}
+	// Personal Assistant approval and dispatch ledger (issue #1320 slice
+	// P2-S2); DDL in pa_approvals.go.
+	if err := migratePAApprovals(ctx, dbConn, pg); err != nil {
+		return err
+	}
 	return dropLegacyColumns(ctx, dbConn, pg)
 }
 
