@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.148.0](https://github.com/mctlhq/mctl-telegram/compare/0.147.0...0.148.0) (2026-11-23)
+
+
+### Features
+
+* **oauth:** scope ceiling keyed by a client_id prefix ([070c076](https://github.com/mctlhq/mctl-telegram/commit/070c0765f42b413eda945522a7d6f8fb7bc92065))
+* **oauth:** scope ceiling keyed by a client_id prefix ([4be730d](https://github.com/mctlhq/mctl-telegram/commit/4be730de4317100645f244b042fa22aa8ba9362b))
+
 ## [0.147.0](https://github.com/mctlhq/mctl-telegram/compare/0.146.0...0.147.0) (2026-11-23)
 
 
