@@ -466,6 +466,11 @@ func transitionPAConnTx(ctx context.Context, tx *sql.Tx, principal int64, id str
 	if err := revokePAPermissionsOfConnTx(ctx, tx, principal, id, transitionAtMS(t)); err != nil {
 		return connection.Connection{}, err
 	}
+	// So does every approval bound to it that was not dispatched (T2
+	// "/disconnect" step 4, S2-C9), with one notice when there was any.
+	if err := cancelPAApprovalsOfConnTx(ctx, tx, principal, id, transitionAtMS(t)); err != nil {
+		return connection.Connection{}, err
+	}
 	return getPAConn(ctx, tx, principal, id, nil)
 }
 
@@ -617,7 +622,14 @@ func (s *Store) revokePAConnOnce(ctx context.Context, principal int64, id, reaso
 	if n != 1 {
 		return connection.Connection{}, connection.Sealed{}, false, connection.ErrConflict
 	}
-	if err := revokePAPermissionsOfConnTx(ctx, tx, principal, id, time.Now().UTC().UnixMilli()); err != nil {
+	nowMS := time.Now().UTC().UnixMilli()
+	if err := revokePAPermissionsOfConnTx(ctx, tx, principal, id, nowMS); err != nil {
+		return connection.Connection{}, connection.Sealed{}, false, err
+	}
+	// /disconnect step 4 (threat model T2, S2-C9): the approvals bound to
+	// the connection that were not dispatched are cancelled in the
+	// transaction that revokes it, and the principal is told once.
+	if err := cancelPAApprovalsOfConnTx(ctx, tx, principal, id, nowMS); err != nil {
 		return connection.Connection{}, connection.Sealed{}, false, err
 	}
 	c, err := getPAConn(ctx, tx, principal, id, nil)
@@ -661,7 +673,11 @@ func (s *Store) RevokePAConnectionAt(ctx context.Context, principal int64, id st
 		}
 		return connection.Connection{}, connection.ErrConflict
 	}
-	if err := revokePAPermissionsOfConnTx(ctx, tx, principal, id, time.Now().UTC().UnixMilli()); err != nil {
+	nowMS := time.Now().UTC().UnixMilli()
+	if err := revokePAPermissionsOfConnTx(ctx, tx, principal, id, nowMS); err != nil {
+		return connection.Connection{}, err
+	}
+	if err := cancelPAApprovalsOfConnTx(ctx, tx, principal, id, nowMS); err != nil {
 		return connection.Connection{}, err
 	}
 	c, err := getPAConn(ctx, tx, principal, id, nil)

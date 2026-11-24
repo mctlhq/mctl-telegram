@@ -108,6 +108,8 @@ var outboxTemplates = map[jobs.OutboxKind]safetext.Template{
 	jobs.OutboxWriteNotSent: safetext.TextWriteNotSent,
 	jobs.OutboxWriteFenced:  safetext.TextWriteFenced,
 	jobs.OutboxWriteUnknown: safetext.TextWriteUnknown,
+	// Approvals cancelled before anything was sent (#1320 slice P2-S12).
+	jobs.OutboxActionsCancelled: safetext.TextActionsCancelled,
 }
 
 // outboxKeyboard is the keyboard a row is sent with: the consent prompt's

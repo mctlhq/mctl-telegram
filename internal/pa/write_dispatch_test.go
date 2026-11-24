@@ -537,6 +537,16 @@ func TestS2A3_NonCanonicalStoredBytesAreRefused(t *testing.T) {
 
 // staleConsent leaves Alice with a consent record of an older text: not
 // withdrawn (which erases her approvals), but no longer satisfied.
+// disabledRow records an admin disable of Alice without what
+// SetPAPrincipalDisabled does to her approvals in the same transaction.
+func (e *writeEnv) disabledRow() {
+	if _, err := e.store.DB.Exec(
+		`INSERT INTO pa_principal_disables(principal, disabled_at_ms, disabled_by, reason) VALUES($1, $2, $3, 'test')`,
+		alice, e.h.Now().UnixMilli(), bob); err != nil {
+		e.t.Error(err)
+	}
+}
+
 func (e *writeEnv) staleConsent() {
 	e.t.Helper()
 	if _, err := e.store.DB.Exec(`UPDATE pa_consents SET version = 'v0-test' WHERE principal = $1`, alice); err != nil {
@@ -919,23 +929,17 @@ func TestWriteDispatch_Refusals(t *testing.T) {
 		{"class changed", func(e *writeEnv) { e.fresh.tool.Class = catalog.ClassDisclosure }, connector.ReasonToolChanged},
 		{"tier lowered", func(e *writeEnv) { e.fresh.tool.Tier = catalog.TierAuto }, connector.ReasonToolChanged},
 		{"principal off the allowlist", func(e *writeEnv) { e.denied.Store(true) }, connector.ReasonPrincipalNotAllowed},
-		{"principal disabled", func(e *writeEnv) {
-			if err := e.store.SetPAPrincipalDisabled(context.Background(), alice, bob, "test", e.h.Now()); err != nil {
-				e.t.Fatal(err)
-			}
-		}, connector.ReasonPrincipalDisabled},
+		// The disable row alone: SetPAPrincipalDisabled also cancels the
+		// approvals it finds (S2-C9, TestS2C9_CancelledCardAnswersCancelled),
+		// so the executor's own check is what refuses an approval that the
+		// disable did not see, one committed concurrently with it.
+		{"principal disabled", func(e *writeEnv) { e.disabledRow() }, connector.ReasonPrincipalDisabled},
 		{"consent not the current version", func(e *writeEnv) { e.staleConsent() }, connector.ReasonConsentGone},
 		{"audit unavailable", func(e *writeEnv) { e.sink.fail.Store(true) }, connector.ReasonAuditUnavailable},
 		{"consent stale after the first read", func(e *writeEnv) {
 			e.fresh.hook = e.staleConsent
 		}, connector.ReasonConsentGone},
-		{"disabled after the first read", func(e *writeEnv) {
-			e.fresh.hook = func() {
-				if err := e.store.SetPAPrincipalDisabled(context.Background(), alice, bob, "test", e.h.Now()); err != nil {
-					e.t.Error(err)
-				}
-			}
-		}, connector.ReasonPrincipalDisabled},
+		{"disabled after the first read", func(e *writeEnv) { e.fresh.hook = e.disabledRow }, connector.ReasonPrincipalDisabled},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -124,11 +124,11 @@ func (k OutboxKind) ConnectionLevel() bool {
 }
 
 // Approval-level kinds (#1320 slice P2-S3): what became of a call the
-// principal approved. A row belongs to one approval, not to a job, an
-// update or a connection, and is written in the transaction that ends the
-// approval or its dispatch. An approval gets at most one such row, whatever
-// its kind: the executor and the stale-dispatch sweep cannot both report
-// one call.
+// principal approved, or was asked to approve. A row belongs to one
+// approval, not to a job, an update or a connection, and is written in the
+// transaction that ends the approval or its dispatch. An approval gets at
+// most one such row, whatever its kind: the executor and the stale-dispatch
+// sweep cannot both report one call.
 const (
 	// OutboxWriteDone: the server answered the call without an error.
 	OutboxWriteDone OutboxKind = "write_done"
@@ -144,11 +144,19 @@ const (
 	// OutboxWriteUnknown: the call was sent and no usable answer came
 	// back (timeout, transport error, 5xx, a crash before the result).
 	OutboxWriteUnknown OutboxKind = "write_outcome_unknown"
+	// OutboxActionsCancelled: approvals that were waiting (pending, or
+	// approved and not yet sent) were cancelled because their connection
+	// ended, consent was withdrawn, the principal asked to forget, or an
+	// admin disabled the principal (#1320 slice P2-S12, S2-C9). One row
+	// answers for every approval one such change cancelled; it is keyed on
+	// one of them, so none of them gets a second report.
+	OutboxActionsCancelled OutboxKind = "actions_cancelled"
 )
 
 // ApprovalOutboxKinds lists the approval-level kinds.
 func ApprovalOutboxKinds() []OutboxKind {
-	return []OutboxKind{OutboxWriteDone, OutboxWriteFailed, OutboxWriteNotSent, OutboxWriteFenced, OutboxWriteUnknown}
+	return []OutboxKind{OutboxWriteDone, OutboxWriteFailed, OutboxWriteNotSent, OutboxWriteFenced, OutboxWriteUnknown,
+		OutboxActionsCancelled}
 }
 
 // ApprovalLevel reports whether k is an approval-level kind, whose rows
