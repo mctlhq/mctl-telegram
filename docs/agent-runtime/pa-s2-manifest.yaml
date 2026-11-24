@@ -1834,7 +1834,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.480s
   gaps:
-    - half: "alice_control_device can be neither granted nor lowered: the server lists no id for a device that is not a speaker, the tool has no card path, and nothing reads a device type, so its pin condition (allowed_type_prefixes) is answered \"cannot be checked\" and no rule exists for it"
+    - half: "alice_control_device can be neither granted nor lowered: the server lists no id for a device that is not a speaker, the tool has no card path, and nothing reads a device type, so its pin condition (allowed_type_prefixes) is answered \"cannot be checked\" and no rule exists for it; mctl-alice#206 (merged, not released) makes alice_list_devices return each device with id and type, which a type reader could use once the pin holds that surface; this slice does not build on it"
       tracked_by: "#1322"
     - half: "at dispatch the type is not read as a type string: the device must be in the fresh list of speakers or of lights, and a change of type shows as the device leaving that list, which is a refusal (device_not_listed, devices_unreadable) and not a card"
       tracked_by: "#1322"
