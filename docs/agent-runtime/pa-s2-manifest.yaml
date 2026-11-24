@@ -3224,7 +3224,7 @@ S2-A7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.097s
     - id: P2S14-SETf
-      guard: cmd/server/pa_tools.go:335
+      guard: cmd/server/pa_tools.go:329
       guard_text: "tools = append(tools, wt...)"
       mutation: "the tool resolver never offers a write tool"
       killed_by:
@@ -3923,9 +3923,9 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/linking	0.963s
     - id: P2S14c-F3g
-      guard: cmd/server/pa_tools.go:217
-      guard_text: "f, err := flags()\n\t\tif err != nil {\n\t\t\treturn false, err"
-      mutation: "paWritesSwitch answers the flags' value without an error when the flags could not be read"
+      guard: cmd/server/pa_writes.go:134
+      guard_text: "// read: the writes switch is unknown, so off.\n\t\treturn false, err"
+      mutation: "the writes switch (paWritesSwitch, read through paWritesEnabled) answers the flags' value without an error when the flags could not be read"
       killed_by:
         - cmd/server.TestPAWritesSwitch
       red: |-
@@ -3935,9 +3935,9 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.777s
     - id: P2S14c-F3h
-      guard: cmd/server/pa_tools.go:221
-      guard_text: "return f.Writes, f.WritesErr"
-      mutation: "paWritesSwitch drops the parse error of PA_WRITES_ENABLED"
+      guard: cmd/server/pa_writes.go:137
+      guard_text: "if f.WritesErr != nil {\n\t\treturn false, f.WritesErr"
+      mutation: "the writes switch (paWritesSwitch, read through paWritesEnabled) drops the parse error of PA_WRITES_ENABLED and answers the value"
       killed_by:
         - cmd/server.TestPAWritesSwitch
       red: |-
@@ -4300,7 +4300,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.771s
     - id: P2S14-SETf
-      guard: cmd/server/pa_tools.go:335
+      guard: cmd/server/pa_tools.go:329
       guard_text: "tools = append(tools, wt...)"
       mutation: "the tool resolver never offers a write tool"
       killed_by:

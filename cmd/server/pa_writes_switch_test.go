@@ -24,14 +24,14 @@ func TestPAWritesSwitch(t *testing.T) {
 		{"on", connector.Flags{Writes: true}, nil, true, false},
 		{"off", connector.Flags{}, nil, false, false},
 		{"flags unreadable", connector.Flags{Writes: true}, boom, false, true},
-		{"writes unreadable", connector.Flags{Writes: true, WritesErr: boom}, nil, true, true},
+		{"writes unreadable", connector.Flags{Writes: true, WritesErr: boom}, nil, false, true},
 	} {
 		on, err := paWritesSwitch(func() (connector.Flags, error) { return tc.flags, tc.err })()
 		if (err != nil) != tc.failed || (err == nil && on != tc.on) {
 			t.Fatalf("%s: %v, %v", tc.name, on, err)
 		}
-		if tc.failed && tc.err != nil && on {
-			t.Fatalf("%s: reads on although the flags could not be read", tc.name)
+		if tc.failed && on {
+			t.Fatalf("%s: reads on although the switch could not be read", tc.name)
 		}
 	}
 	// The real reader: an unparseable value is not "on".

@@ -209,17 +209,11 @@ func buildPATools(ctx context.Context, cfg *config.Config, tools *config.PATools
 	return t, nil
 }
 
-// paWritesSwitch reads PA_WRITES_ENABLED through flags, the dispatcher's
-// own reader. Any failed read is an error, which every caller treats as
-// off.
+// paWritesSwitch is paWritesEnabled as the switch /consent and /connect
+// read at every use: one reader of PA_WRITES_ENABLED for the startup
+// decision and for them. A failed read is off, with the error.
 func paWritesSwitch(flags func() (connector.Flags, error)) func() (bool, error) {
-	return func() (bool, error) {
-		f, err := flags()
-		if err != nil {
-			return false, err
-		}
-		return f.Writes, f.WritesErr
-	}
+	return func() (bool, error) { return paWritesEnabled(flags) }
 }
 
 // paServerMetadata fetches s's authorization server metadata and checks it
