@@ -129,8 +129,10 @@ type deviceWriteCall struct {
 	// is sent.
 	values []safetext.CardValue
 	// ints are the integer arguments the call sets, by argument name: what
-	// a standing permission's ceiling is compared with.
+	// a standing permission's ceiling is compared with. strs are the
+	// string arguments it sets, device aside.
 	ints map[string]int64
+	strs map[string]string
 }
 
 // writeDetail is what the card of a device write shows that the arguments
@@ -189,6 +191,12 @@ func precheckDeviceWrite(tool string, pinned catalog.PinnedTool, canonical []byt
 			call.ints[v.arg] = n
 		} else if text, ok = stringArg(args, v.arg); !ok || !slices.Contains(choices, text) {
 			return deviceWriteCall{}, &refusal{ReasonValueNotAllowed, http.StatusUnprocessableEntity}
+		}
+		if v.bound == nil {
+			if call.strs == nil {
+				call.strs = map[string]string{}
+			}
+			call.strs[v.arg] = text
 		}
 		call.values = append(call.values, safetext.CardValue{Kind: v.kind, Value: text})
 	}

@@ -161,6 +161,12 @@ type FreshTool struct {
 	AnnotationSHA  string
 	Tier           catalog.Tier
 	Class          catalog.Class
+	// Lowerable and Constraints are what the pin says of the tool, not
+	// the listing: whether a standing permission may lower it and on what
+	// condition. Only a lowered dispatch reads them; the zero value is
+	// "not lowerable".
+	Lowerable   catalog.Lowerable
+	Constraints *catalog.Constraints
 }
 
 // FreshSurface fetches a tool's definition with a fresh tools/list at
@@ -454,6 +460,15 @@ func (w *WriteExecutor) run(ctx context.Context, a approval.Approval, reason str
 		return refuse(ReasonToolChanged, true)
 	}
 	base.Tier = fresh.Tier
+	if low != nil {
+		// The pin, asked again here: a tool it does not make lowerable,
+		// or a call that does not meet the tool's condition, is not sent
+		// without a card whatever the caller decided.
+		pinned := catalog.PinnedTool{Class: fresh.Class, Lowerable: fresh.Lowerable, Constraints: fresh.Constraints}
+		if met, err := loweringCondition(pinned, low.Args); !lowerable(a.Tool, pinned) || err != nil || !met {
+			return refuse(ReasonNotLowerable, false)
+		}
+	}
 	if r := cancelRefusal(ctx, cctx); r != "" {
 		return refuse(r, true)
 	}

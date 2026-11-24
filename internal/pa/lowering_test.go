@@ -67,6 +67,7 @@ type pinFresh struct {
 	mu      sync.Mutex
 	calls   int
 	reclass map[string]catalog.Class
+	relower map[string]catalog.Lowerable
 }
 
 func (f *pinFresh) FreshTool(_ context.Context, req connector.FreshRequest) (connector.FreshTool, error) {
@@ -81,9 +82,14 @@ func (f *pinFresh) FreshTool(_ context.Context, req connector.FreshRequest) (con
 	if c, ok := f.reclass[req.Tool]; ok {
 		class = c
 	}
+	lowerable := pt.Lowerable
+	if l, ok := f.relower[req.Tool]; ok {
+		lowerable = l
+	}
 	return connector.FreshTool{
 		SchemaSHA: shaHex([]byte("schema")), DescriptionSHA: shaHex([]byte("description")),
 		AnnotationSHA: shaHex([]byte("annotations")), Tier: catalog.TierApprove, Class: class,
+		Lowerable: lowerable, Constraints: pt.Constraints,
 	}, nil
 }
 
@@ -700,6 +706,11 @@ func TestS2D1_ExecutorNeverSendsADisclosureWithoutACard(t *testing.T) {
 		if rows := e.approvals(alice); len(rows) != 0 {
 			t.Fatalf("ledger rows: %+v", rows)
 		}
+		// Refused before anything was read: the server was not even asked
+		// for its tools.
+		if n := e.fresh.asked(); n != 0 {
+			t.Fatalf("%d fresh listings for calls that are never lowered", n)
+		}
 	})
 }
 
@@ -895,5 +906,72 @@ func TestLowering_DispatchBindsItsBytes(t *testing.T) {
 		if tools, calls := e.lep.sent(); len(tools) != 1 || string(calls[0]) != volume5 {
 			t.Fatalf("sent %v %q", tools, calls)
 		}
+	})
+}
+
+// TestLowering_ExecutorChecksThePinAndTheCondition: handed a lowered call
+// directly, with a valid permission, the write executor still asks the
+// pin: a playback action outside the pin's list, a tool the pin does not
+// make lowerable and a tool it leaves unmarked are refused with nothing
+// sent and no ledger row.
+func TestLowering_ExecutorChecksThePinAndTheCondition(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newLowerEnv(t, s)
+		e.grant("prm_media", mediaTool, permissions.NoCeiling, kitchenID)
+		e.grant("prm_light", lightTool, permissions.NoCeiling, deskLampID)
+		rows := len(e.approvals(alice))
+		light := `{"device":"` + deskLampID + `","state":"on"}`
+		refused := func(name string, call connector.LoweredCall) {
+			t.Helper()
+			if out := e.dispatchLowered(call); out.Status != connector.StatusRefused || out.Reason != connector.ReasonNotLowerable {
+				t.Fatalf("%s: %+v", name, out)
+			}
+			e.nothingSent(name)
+			if n := len(e.approvals(alice)); n != rows {
+				t.Fatalf("%s: %d ledger rows, want %d", name, n, rows)
+			}
+		}
+		refused("an action outside the pin's list",
+			e.loweredCall("prm_media", mediaTool, `{"action":"shuffle","device":"`+kitchenID+`"}`, catalog.ClassWrite))
+		refused("no action",
+			e.loweredCall("prm_media", mediaTool, `{"device":"`+kitchenID+`"}`, catalog.ClassWrite))
+		e.fresh.relower = map[string]catalog.Lowerable{lightTool: catalog.LowerableNever}
+		refused("a tool the pin makes never lowerable", e.loweredCall("prm_light", lightTool, light, catalog.ClassWrite))
+		e.fresh.relower = map[string]catalog.Lowerable{lightTool: ""}
+		refused("a tool the pin leaves unmarked", e.loweredCall("prm_light", lightTool, light, catalog.ClassWrite))
+		e.fresh.relower = nil
+		for name, call := range map[string]connector.LoweredCall{
+			"an allowed action": e.loweredCall("prm_media", mediaTool, `{"action":"pause","device":"`+kitchenID+`"}`, catalog.ClassWrite),
+			"the light":         e.loweredCall("prm_light", lightTool, light, catalog.ClassWrite),
+		} {
+			if out := e.dispatchLowered(call); out.Status != connector.StatusOK {
+				t.Fatalf("%s: %+v", name, out)
+			}
+		}
+	})
+}
+
+// TestLowering_SirenAndAlarmScenesNeedACard: a light's permission lowers
+// a scene, but the siren and alarm scenes get a card, from the emitter and
+// from the executor alike.
+func TestLowering_SirenAndAlarmScenesNeedACard(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newLowerEnv(t, s)
+		e.grant("prm_light", lightTool, permissions.NoCeiling, deskLampID)
+		scene := func(name string) string { return `{"device":"` + deskLampID + `","scene":"` + name + `"}` }
+		e.carded("siren", lightTool, scene("siren"))
+		e.carded("alarm", lightTool, scene("alarm"))
+		e.noPermissionInAudit("siren and alarm")
+		if n := len(e.hook.handed()); n != 0 {
+			t.Fatalf("%d calls handed to the executor", n)
+		}
+		for _, name := range []string{"siren", "alarm"} {
+			out := e.dispatchLowered(e.loweredCall("prm_light", lightTool, scene(name), catalog.ClassWrite))
+			if out.Status != connector.StatusRefused || out.Reason != connector.ReasonPermissionGone {
+				t.Fatalf("%s handed to the executor: %+v", name, out)
+			}
+		}
+		e.nothingSent("siren and alarm")
+		e.lowered("another scene", "prm_light", lightTool, scene("night"))
 	})
 }

@@ -293,3 +293,27 @@ func TestS2D1_NoPermissionCoversADisclosure(t *testing.T) {
 		}
 	}
 }
+
+// TestCovers_SirenAndAlarmScenesNeedACard: a light's permission covers a
+// scene, but never the two that are made to be noticed.
+func TestCovers_SirenAndAlarmScenesNeedACard(t *testing.T) {
+	p, c := volumePermission()
+	p.Tool, c.Tool = "alice_set_light", "alice_set_light"
+	p.Ceiling, c.Ints = NoCeiling, nil
+	for _, strs := range []map[string]string{
+		nil, {"state": "on"}, {"scene": "night"}, {"scene": "party", "state": "on"}, {"state": "siren"}, {"scene": "Siren"},
+	} {
+		c.Strings = strs
+		if !p.Covers(c, now) {
+			t.Errorf("%v is not covered", strs)
+		}
+	}
+	for _, strs := range []map[string]string{
+		{"scene": "siren"}, {"scene": "alarm"}, {"scene": "alarm", "state": "on"},
+	} {
+		c.Strings = strs
+		if p.Covers(c, now) {
+			t.Errorf("%v is covered", strs)
+		}
+	}
+}

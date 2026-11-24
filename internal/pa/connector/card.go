@@ -324,7 +324,7 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) (*WriteOutcome, *refu
 	if write != nil && lowerable(req.Tool, pinned) {
 		covered = permissions.Call{
 			Principal: principal, ConnectionID: req.ConnectionID, AuthorityRevision: req.AuthorityRevision,
-			Server: req.Server, Tool: req.Tool, Device: write.device, Ints: write.ints,
+			Server: req.Server, Tool: req.Tool, Device: write.device, Ints: write.ints, Strings: write.strs,
 		}
 		in.ConditionMet, in.ConditionErr = loweringCondition(pinned, canonical)
 		perm, in.PermissionErr = c.coveringPermission(ctx, req, covered, now)

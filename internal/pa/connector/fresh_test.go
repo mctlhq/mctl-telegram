@@ -167,6 +167,10 @@ func TestPinFresh_ListsTheServerEveryCall(t *testing.T) {
 			got.Tier != catalog.TierApprove || got.Class != catalog.ClassWrite {
 			t.Fatalf("fresh %+v, want %+v", got, want)
 		}
+		// What the pin says about lowering comes back with it.
+		if pinned := freshPin(t, tools).Servers["tg"].Tools[freshWrite]; got.Lowerable != pinned.Lowerable || got.Constraints != pinned.Constraints {
+			t.Fatalf("fresh lowerable %q %v, the pin's %q %v", got.Lowerable, got.Constraints, pinned.Lowerable, pinned.Constraints)
+		}
 		if _, lists := f.seen(); lists != 2*i {
 			t.Fatalf("call %d: %d tools/list requests, want %d (two pages per call)", i, lists, 2*i)
 		}

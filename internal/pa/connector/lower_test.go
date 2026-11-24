@@ -124,16 +124,18 @@ func TestLoweringCondition(t *testing.T) {
 
 // TestLoweredTarget: the executor's own reading of a lowered call's bytes.
 func TestLoweredTarget(t *testing.T) {
-	device, ints, ok := loweredTarget("alice_set_volume", []byte(`{"device":"spk-kitchen-0001","level":5}`))
-	if !ok || device != "spk-kitchen-0001" || len(ints) != 1 || ints["level"] != 5 {
-		t.Fatalf("volume: %q %v %v", device, ints, ok)
+	device, ints, strs, ok := loweredTarget("alice_set_volume", []byte(`{"device":"spk-kitchen-0001","level":5}`))
+	if !ok || device != "spk-kitchen-0001" || len(ints) != 1 || ints["level"] != 5 || len(strs) != 0 {
+		t.Fatalf("volume: %q %v %v %v", device, ints, strs, ok)
 	}
-	device, ints, ok = loweredTarget("alice_set_light", []byte(`{"brightness":40,"color_temp_k":2700,"device":"lamp-desk-0003","state":"on"}`))
-	if !ok || device != "lamp-desk-0003" || len(ints) != 2 || ints["brightness"] != 40 || ints["color_temp_k"] != 2700 {
-		t.Fatalf("light: %q %v %v", device, ints, ok)
+	device, ints, strs, ok = loweredTarget("alice_set_light", []byte(`{"brightness":40,"color_temp_k":2700,"device":"lamp-desk-0003","scene":"siren","state":"on"}`))
+	if !ok || device != "lamp-desk-0003" || len(ints) != 2 || ints["brightness"] != 40 || ints["color_temp_k"] != 2700 ||
+		len(strs) != 2 || strs["scene"] != "siren" || strs["state"] != "on" {
+		t.Fatalf("light: %q %v %v %v", device, ints, strs, ok)
 	}
-	if device, ints, ok = loweredTarget("alice_media_control", []byte(`{"action":"pause","device":"spk-kitchen-0001"}`)); !ok || device != "spk-kitchen-0001" || len(ints) != 0 {
-		t.Fatalf("playback: %q %v %v", device, ints, ok)
+	if device, ints, strs, ok = loweredTarget("alice_media_control", []byte(`{"action":"pause","device":"spk-kitchen-0001"}`)); !ok ||
+		device != "spk-kitchen-0001" || len(ints) != 0 || len(strs) != 1 || strs["action"] != "pause" {
+		t.Fatalf("playback: %q %v %v %v", device, ints, strs, ok)
 	}
 	for name, c := range map[string][2]string{
 		"a tool that is not a device write": {"alice_say_phrase", `{"device":"spk-kitchen-0001","phrase":"hi"}`},
@@ -143,10 +145,12 @@ func TestLoweredTarget(t *testing.T) {
 		"a device that is a number":         {"alice_set_volume", `{"device":7,"level":5}`},
 		"a level 5.0":                       {"alice_set_volume", `{"device":"spk-kitchen-0001","level":5.0}`},
 		"a level in quotes":                 {"alice_set_volume", `{"device":"spk-kitchen-0001","level":"5"}`},
+		"a scene that is a number":          {"alice_set_light", `{"device":"lamp-desk-0003","scene":7}`},
+		"a scene that is a list":            {"alice_set_light", `{"device":"lamp-desk-0003","scene":["siren"]}`},
 		"not an object":                     {"alice_set_volume", `[5]`},
 		"null":                              {"alice_set_volume", `null`},
 	} {
-		if device, ints, ok := loweredTarget(c[0], []byte(c[1])); ok {
+		if device, ints, _, ok := loweredTarget(c[0], []byte(c[1])); ok {
 			t.Errorf("%s: read %q %v", name, device, ints)
 		}
 	}

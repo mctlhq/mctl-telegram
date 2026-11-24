@@ -24,7 +24,9 @@ package permissions
 //   - alice_set_volume: media devices; a ceiling is required and is the
 //     highest "level" (device units, 1 to 10) the permission covers;
 //   - alice_media_control: media devices; no ceiling;
-//   - alice_set_light: lights; no ceiling.
+//   - alice_set_light: lights; no ceiling. The "siren" and "alarm" scenes
+//     are never covered: they are made to be noticed, so each one gets a
+//     card.
 //
 // alice_control_device has none: the server lists no id for a device that
 // is not a speaker, so its type cannot be read, at a grant or at dispatch.
@@ -73,12 +75,14 @@ type toolRule struct {
 	// range a ceiling may be in: the range the pin states for the argument.
 	ceilingArg             string
 	ceilingMin, ceilingMax int64
+	// carded lists, by string argument, the values no permission covers.
+	carded map[string][]string
 }
 
 var toolRules = map[string]toolRule{
 	"alice_set_volume":    {typePrefix: TypeMediaDevice, ceilingArg: "level", ceilingMin: 1, ceilingMax: 10},
 	"alice_media_control": {typePrefix: TypeMediaDevice},
-	"alice_set_light":     {typePrefix: TypeLight},
+	"alice_set_light":     {typePrefix: TypeLight, carded: map[string][]string{"scene": {"siren", "alarm"}}},
 }
 
 // ruleOf returns the rule of tool. A tool the threat model makes never
@@ -168,8 +172,10 @@ type Call struct {
 	Tool              string
 	// Device is the device id the call targets, byte for byte.
 	Device string
-	// Ints are the integer arguments the call sets, by argument name.
-	Ints map[string]int64
+	// Ints are the integer arguments the call sets, by argument name, and
+	// Strings the string ones, the device aside.
+	Ints    map[string]int64
+	Strings map[string]string
 }
 
 // Covers reports whether p lets c run without a card at now. Every
@@ -181,7 +187,8 @@ type Call struct {
 //   - the tool has a rule, and p's ceiling is one the rule allows;
 //   - the device id is listed in p;
 //   - for a tool with a ceiling, the call sets the bounded argument and
-//     its value is not above the ceiling.
+//     its value is not above the ceiling;
+//   - the call sets no value the rule keeps on a card.
 //
 // A row this build does not understand covers nothing.
 func (p Permission) Covers(c Call, now time.Time) bool {
@@ -203,6 +210,11 @@ func (p Permission) Covers(c Call, now time.Time) bool {
 	if r.ceilingArg != "" {
 		v, set := c.Ints[r.ceilingArg]
 		if !set || v > p.Ceiling {
+			return false
+		}
+	}
+	for arg, values := range r.carded {
+		if v, set := c.Strings[arg]; set && slices.Contains(values, v) {
 			return false
 		}
 	}

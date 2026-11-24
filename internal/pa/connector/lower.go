@@ -19,7 +19,8 @@ package connector
 // permission the principal granted with /permissions may stand in for the
 // approval card of one call.
 //
-// It happens in two places, and neither trusts the other:
+// It happens in two places. The second checks again what it can read
+// itself, and one thing it cannot:
 //
 //   - Cards.Emit decides. Only a write to one device that passed every
 //     check its card would need (precheckDeviceWrite, deviceWriteTarget:
@@ -28,11 +29,19 @@ package connector
 //     conversation. A disclosure, alice_control_room,
 //     alice_trigger_scenario and alice_control_device are never looked up.
 //   - WriteExecutor.DispatchLowered sends. It runs the steps of an
-//     approved dispatch, the fresh tools/list among them, and inside the
-//     pre-dispatch transaction reads the taint and the permission row
+//     approved dispatch, the fresh tools/list among them. On its own it
+//     checks the class, that the tool has a rule and that the pin makes it
+//     lowerable, the tool's condition (the playback action), and it reads
+//     the device and the values from the bytes it will send. Inside the
+//     pre-dispatch transaction it reads the taint and the permission row
 //     again, by id, under the connection row's lock. Only then does it
 //     write the call's ledger row, already consumed, in that same
 //     transaction.
+//
+// The executor does not read the device list: it has no device reader.
+// That the device is still a speaker, or a light, is checked by Emit
+// alone, moments before; the executor checks the id against the permission
+// row. DispatchLowered therefore has one intended caller, Emit.
 //
 // Whatever cannot be read (the permissions, the taint, the devices) is a
 // card or a refusal, never a call. When the executor finds the permission
@@ -118,51 +127,61 @@ type LoweredCall struct {
 	Args []byte
 	// PermissionID is the standing permission that covered the call.
 	PermissionID string
-	// device and ints are the target and the integer arguments, read by
-	// the executor from Args: it does not take the caller's word for what
-	// the bytes say.
+	// device, ints and strs are the target and the arguments, read by the
+	// executor from Args: it does not take the caller's word for what the
+	// bytes say.
 	device string
 	ints   map[string]int64
+	strs   map[string]string
 }
 
 func (c LoweredCall) covered() permissions.Call {
 	return permissions.Call{
 		Principal: c.Binding.Principal, ConnectionID: c.Binding.ConnectionID,
 		AuthorityRevision: c.Binding.AuthorityRevision, Server: c.Binding.Server, Tool: c.Binding.Tool,
-		Device: c.device, Ints: c.ints,
+		Device: c.device, Ints: c.ints, Strings: c.strs,
 	}
 }
 
-// loweredTarget reads the device id and the integer arguments of a device
-// write from its canonical bytes, for the comparison with a permission. It
-// checks no value: the caller's checks did. ok is false for a tool that is
-// not a device write, bytes that are not an object, a missing device and
-// an integer that is not in its one plain spelling.
-func loweredTarget(tool string, canonical []byte) (device string, ints map[string]int64, ok bool) {
+// loweredTarget reads the device id and the arguments of a device write
+// from its canonical bytes, for the comparison with a permission. It
+// checks no value against the pin: the caller's checks did. ok is false
+// for a tool that is not a device write, bytes that are not an object, a
+// missing device, an integer that is not in its one plain spelling and a
+// string argument that is not a string.
+func loweredTarget(tool string, canonical []byte) (device string, ints map[string]int64, strs map[string]string, ok bool) {
 	spec, known := deviceWriteTools[tool]
 	if !known {
-		return "", nil, false
+		return "", nil, nil, false
 	}
 	var args map[string]json.RawMessage
 	if err := json.Unmarshal(canonical, &args); err != nil || args == nil {
-		return "", nil, false
+		return "", nil, nil, false
 	}
 	if device, ok = stringArg(args, spec.deviceArg); !ok || device == "" {
-		return "", nil, false
+		return "", nil, nil, false
 	}
-	ints = map[string]int64{}
+	ints, strs = map[string]int64{}, map[string]string{}
 	for _, v := range spec.values {
 		raw, present := args[v.arg]
-		if v.bound == nil || !present {
+		if !present {
+			continue
+		}
+		if v.bound == nil {
+			text, isString := stringArg(args, v.arg)
+			if !isString {
+				return "", nil, nil, false
+			}
+			strs[v.arg] = text
 			continue
 		}
 		n, err := strconv.ParseInt(string(raw), 10, 64)
 		if err != nil || strconv.FormatInt(n, 10) != string(raw) {
-			return "", nil, false
+			return "", nil, nil, false
 		}
 		ints[v.arg] = n
 	}
-	return device, ints, true
+	return device, ints, strs, true
 }
 
 // unlowered reports whether out is a lowered dispatch that sent and wrote
@@ -181,7 +200,9 @@ func unlowered(out WriteOutcome) bool {
 //
 // It refuses, before anything is read, a call that is not a write, or of a
 // tool no permission may lower: a disclosure never runs from here, whatever
-// the caller decided (S2-D1).
+// the caller decided (S2-D1). After the fresh tools/list it refuses a tool
+// the pin does not make lowerable and a call that does not meet the tool's
+// condition. It does not read the device list (see the file comment).
 func (w *WriteExecutor) DispatchLowered(ctx context.Context, call LoweredCall) (WriteOutcome, error) {
 	if w == nil || call.Binding.Validate() != nil || !permissions.ValidID(call.PermissionID) {
 		return WriteOutcome{}, fmt.Errorf("%w: lowered dispatch needs a binding and a permission", ErrInvalidCall)
@@ -200,7 +221,7 @@ func (w *WriteExecutor) DispatchLowered(ctx context.Context, call LoweredCall) (
 	}
 	reason := ""
 	target := false
-	call.device, call.ints, target = loweredTarget(call.Binding.Tool, call.Args)
+	call.device, call.ints, call.strs, target = loweredTarget(call.Binding.Tool, call.Args)
 	if call.Binding.Class != catalog.ClassWrite || !permissions.HasRule(call.Binding.Tool) || !target {
 		reason = ReasonNotLowerable
 	} else {
