@@ -112,6 +112,9 @@ type paRuntime struct {
 	mount      func(chi.Router)
 	tools      *paTools
 	dispatcher *connector.Dispatcher
+	// staleWrites resolves approved-call dispatch records nobody finished
+	// (slice P2-S3). Set with the dispatcher.
+	staleWrites *connector.StaleWriteSweeper
 	// menu sets menuCommands as the bot's command menu at Start; nil when
 	// the sender cannot (the wiring tests' recorder).
 	menu         paMenuSetter
@@ -260,6 +263,12 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 		if err != nil {
 			return nil, err
 		}
+		// The approval ledger's dispatch records have no other owner once
+		// their executor is gone (threat model T2, S2-C12): this resolves
+		// them to outcome_unknown with the notice and the audit entry. It
+		// dispatches nothing, and finds nothing while PA_WRITES_ENABLED is
+		// off.
+		rt.staleWrites = &connector.StaleWriteSweeper{Store: store, Executor: pt.executor}
 	}
 	return rt, nil
 }
@@ -356,6 +365,13 @@ func (r *paRuntime) Start(ctx context.Context) {
 		go func() {
 			defer r.wg.Done()
 			runPADispatcher(ctx, r.dispatcher, connector.PinRefreshInterval)
+		}()
+	}
+	if r.staleWrites != nil {
+		r.wg.Add(1)
+		go func() {
+			defer r.wg.Done()
+			r.staleWrites.Run(ctx, connector.StaleWriteSweepInterval)
 		}()
 	}
 }

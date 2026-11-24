@@ -91,6 +91,12 @@ var outboxTemplates = map[jobs.OutboxKind]safetext.Template{
 	jobs.OutboxPrincipalDisabled:  safetext.TextAssistantUnavailable,
 
 	jobs.OutboxConnectionExpired: safetext.TextConnectionExpired,
+
+	jobs.OutboxWriteDone:    safetext.TextWriteDone,
+	jobs.OutboxWriteFailed:  safetext.TextWriteFailed,
+	jobs.OutboxWriteNotSent: safetext.TextWriteNotSent,
+	jobs.OutboxWriteFenced:  safetext.TextWriteFenced,
+	jobs.OutboxWriteUnknown: safetext.TextWriteUnknown,
 }
 
 // outboxKeyboard is the keyboard a row is sent with: the consent prompt's

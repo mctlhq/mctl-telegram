@@ -55,6 +55,11 @@
 # gaps of each id name what the executor and the cards still owe. The same
 # change added lines to internal/db/pa_convo.go, so the P2S7 guards in that
 # file were pointed at their new line numbers; their code did not change.
+#
+# The P2S3-* records (S2-A1, S2-A3, S2-C11, S2-C12, S2-C13, S2-D7, S2-F3) ran
+# on the P2-S3 branch the same way, on sqlite, restored from saved bytes.
+# They cover the write executor, which has no caller and no FreshSurface
+# yet: both are gaps of every id P2-S3 turned green.
 
 S2-C9:
   status: pending
@@ -94,21 +99,69 @@ S2-C10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.997s
   gaps:
-    - half: "the executor running the consume under the connection lock before a real call (P2-S3)"
+    - half: "a test on Postgres of a concurrent /disconnect waiting on the row lock the executor takes in its pre-dispatch transaction (the lock was built in P2-S3 without it)"
       tracked_by: "#1320"
 
 S2-C11:
-  status: pending
+  status: green
   slice: P2-S3
-  tracked_by: "#1320"
-  note: "the server write executor records outcome_unknown and never retries"
+  note: "Write executor (#1320 P2-S3): a tools/call that failed in transport, ran out of time, answered 5xx or an unreadable body, or came back as the upstream's \"did not respond\" tool error is recorded as outcome_unknown, with the notice that the action may or may not have happened; the call is made once and nothing sends it again."
+  tests:
+    - internal/pa.TestS2C11_UnknownOutcomeIsNeverRetried
+  mutations:
+    - id: P2S3-C11a
+      guard: internal/pa/connector/dispatch_write.go:630
+      guard_text: "return ep.CallToolExact(ctx, token, tool, args)"
+      mutation: "a failed tools/call is sent a second time"
+      killed_by:
+        - internal/pa.TestS2C11_UnknownOutcomeIsNeverRetried
+      red: |-
+        --- FAIL: TestS2C11_UnknownOutcomeIsNeverRetried (1.12s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.592s
+    - id: P2S3-C11b
+      guard: internal/pa/connector/dispatch_write.go:665
+      guard_text: "case callErr != nil:\n\t\treturn StatusOutcomeUnknown, ReasonOutcomeUnknown"
+      mutation: "a transport failure is recorded as tool_error instead of outcome_unknown"
+      killed_by:
+        - internal/pa.TestS2C11_UnknownOutcomeIsNeverRetried
+      red: |-
+        --- FAIL: TestS2C11_UnknownOutcomeIsNeverRetried (1.12s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.558s
+    - id: P2S3-C11c
+      guard: internal/pa/connector/dispatch_write.go:672
+      guard_text: "case isErr && upstreamSilent(out):"
+      mutation: "the upstream's \"did not respond\" tool error is recorded as tool_error instead of outcome_unknown"
+      killed_by:
+        - internal/pa.TestS2C11_UnknownOutcomeIsNeverRetried
+      red: |-
+        --- FAIL: TestS2C11_UnknownOutcomeIsNeverRetried (1.12s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.614s
+  gaps:
+    - half: "a caller: nothing in the service invokes DispatchApproved until the cards (P2-S5)"
+      tracked_by: "#1320"
+    - half: "a FreshSurface implementation: without one every dispatch is refused no_write_path (P2-S4)"
+      tracked_by: "#1320"
+    - half: "the outcome against a real MCP server and its real timeout and 5xx bodies"
+      tracked_by: "#1320"
+    - half: "the upstream-silence markers anchored to the pinned servers' real wording: the bare \"timeout\" match also reads a rejected call whose error mentions a timeout argument as outcome_unknown, which is the safe direction and a less exact notice"
+      tracked_by: "#1320"
 
 S2-C12:
   status: green
   slice: P2-S2
-  note: "Commit-then-call ledger (store half, #1320 P2-S2): the dispatching record commits with the consumed receipt; SweepStalePADispatches moves a record whose lease ran out to outcome_unknown and its approval to done, and nothing makes it dispatchable again. Nothing in the service runs the sweep yet."
+  note: "Commit-then-call ledger (store half, #1320 P2-S2): the dispatching record commits with the consumed receipt; SweepStalePADispatches moves a record whose lease ran out to outcome_unknown and its approval to done, and nothing makes it dispatchable again. The service runs the sweep at start and every minute (P2-S3, connector.StaleWriteSweeper), with the outcome_unknown notice queued in the sweep's transaction and a result entry in the audit chain."
   tests:
     - internal/db.TestS2C12_CrashedDispatchBecomesOutcomeUnknown
+    - internal/pa.TestS2C12_StaleSweepOwnsTheRecord
   mutations:
     - id: P2S2-C12a
       guard: internal/db/pa_approvals.go:547
@@ -174,17 +227,74 @@ S2-C12:
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	1.282s
+    - id: P2S3-C12a
+      guard: internal/db/pa_approvals.go:574
+      guard_text: "if err := enqueueStaleWriteNotices(ctx, tx, out, nowMS); err != nil {"
+      mutation: "the stale sweep queues no notice for the records it moved"
+      killed_by:
+        - internal/pa.TestS2C12_StaleSweepOwnsTheRecord
+      red: |-
+        --- FAIL: TestS2C12_StaleSweepOwnsTheRecord (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.486s
+    - id: P2S3-C12b
+      guard: internal/pa/connector/dispatch_write.go:887
+      guard_text: "for _, d := range moved {\n\t\t// The record keeps hashes"
+      mutation: "the stale sweeper appends no audit entry for the records it moved"
+      killed_by:
+        - internal/pa.TestS2C12_StaleSweepOwnsTheRecord
+      red: |-
+        --- FAIL: TestS2C12_StaleSweepOwnsTheRecord (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.690s
   gaps:
-    - half: "the service running the sweep at start and on a timer, with the audit row and the notice of an unknown outcome (P2-S3)"
+    - half: "a real process kill between the pre-dispatch commit and the result"
       tracked_by: "#1320"
-    - half: "a real process kill between the pre-dispatch commit and the result (P2-S3)"
+    - half: "a committed record of a call that was never sent and could not be settled as refused is resolved by the sweep as outcome_unknown (dispatch_lease_expired), not under a reason of its own that says nothing was sent"
       tracked_by: "#1320"
 
 S2-C13:
-  status: pending
-  slice: P2-S12
-  tracked_by: "#1320"
-  note: "disconnect during an in-flight write fences its result"
+  status: green
+  slice: P2-S3
+  note: "Write executor (#1320 P2-S3): the result of a call whose connection was revoked while it was in flight is recorded fenced, by the connection manager's finish check and by the principal re-check in the finish transaction, and the notice says the action may already have happened. /disconnect cancels the call and does not wait for it."
+  tests:
+    - internal/pa.TestS2C13_ResultAfterDisconnectIsFenced
+  mutations:
+    - id: P2S3-C13a
+      guard: internal/pa/connector/dispatch_write.go:718
+      guard_text: "if fenceErr != nil {\n\t\tstatus, reason = StatusFenced, ReasonFenced\n\t}"
+      mutation: "a refused call.Finish (the connection was revoked during the call) no longer fences the result"
+      killed_by:
+        - internal/pa.TestS2C13_ResultAfterDisconnectIsFenced
+      red: |-
+        --- FAIL: TestS2C13_ResultAfterDisconnectIsFenced (0.08s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.491s
+    - id: P2S3-C13b
+      guard: internal/pa/connector/dispatch_write.go:735
+      guard_text: "if r := w.principalRefusal(fctx, tx, a, now); r != \"\" {"
+      mutation: "the finish transaction no longer re-checks the principal's state before recording the result"
+      killed_by:
+        - internal/pa.TestS2C13_ResultAfterDisconnectIsFenced
+      red: |-
+        --- FAIL: TestS2C13_ResultAfterDisconnectIsFenced (0.08s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.772s
+  gaps:
+    - half: "a caller: nothing in the service invokes DispatchApproved until the cards (P2-S5)"
+      tracked_by: "#1320"
+    - half: "a FreshSurface implementation: without one every dispatch is refused no_write_path (P2-S4)"
+      tracked_by: "#1320"
+    - half: "the /disconnect command end to end against an in-flight write, with its reply sent before the call returns (P2-S12)"
+      tracked_by: "#1320"
 
 S2-X5:
   status: pending
@@ -489,19 +599,54 @@ S2-D6:
   note: "trigger_scenario card shows the steps"
 
 S2-D7:
-  status: pending
+  status: green
   slice: P2-S3
-  tracked_by: "#1322"
-  note: "the executor sends exactly the approved arguments"
+  note: "Write executor (#1320 P2-S3): the stored canonical bytes of the approval are unsealed, checked against args_sha and written into the tools/call body as they are (Endpoint.CallToolExact); they are never decoded and marshalled again."
+  tests:
+    - internal/pa.TestS2D7_ApprovedBytesAreSentVerbatim
+    - internal/pa/connector.TestS2D7_CallToolExactSendsTheBytes
+  mutations:
+    - id: P2S3-D7a
+      guard: internal/pa/connector/mcpclient.go:249
+      guard_text: "body.Write(args)"
+      mutation: "CallToolExact re-marshals the arguments instead of writing the bytes"
+      killed_by:
+        - internal/pa/connector.TestS2D7_CallToolExactSendsTheBytes
+      red: |-
+        --- FAIL: TestS2D7_CallToolExactSendsTheBytes (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/connector
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.398s
+    - id: P2S3-D7b
+      guard: internal/pa/connector/dispatch_write.go:480
+      guard_text: "out, callErr := w.callOnce(cctx, ep, token, a.Tool, c.args)"
+      mutation: "the executor sends bytes that differ from the approved ones (`<` re-escaped)"
+      killed_by:
+        - internal/pa.TestS2D7_ApprovedBytesAreSentVerbatim
+      red: |-
+        --- FAIL: TestS2D7_ApprovedBytesAreSentVerbatim (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.525s
+  gaps:
+    - half: "a caller: nothing in the service invokes DispatchApproved until the cards (P2-S5)"
+      tracked_by: "#1322"
+    - half: "a FreshSurface implementation: without one every dispatch is refused no_write_path (P2-S4)"
+      tracked_by: "#1322"
+    - half: "the card showing the same bytes the executor sends (P2-S5)"
+      tracked_by: "#1322"
 
 S2-A1:
   status: green
   slice: P2-S2
-  note: "Single-use receipt (store half, #1320 P2-S2): ConsumePAApproval is one compare-and-set from approved to dispatching, and the dispatch record's unique idempotency key refuses a second dispatch even for a restored receipt. Nothing in the service calls it yet."
+  note: "Single-use receipt (store half, #1320 P2-S2): ConsumePAApproval is one compare-and-set from approved to dispatching, and the dispatch record's unique idempotency key refuses a second dispatch even for a restored receipt. The write executor (P2-S3) commits the consume before it sends the call. Nothing in the service calls the executor yet."
   tests:
     - internal/db.TestS2A1_ReceiptIsConsumedOnce
     - internal/db.TestS2A1_ConcurrentConsumesDispatchOnce
     - internal/db.TestS2A1_DispatchRecordRefusesASecondDispatch
+    - internal/pa.TestS2A1_ExecutorConsumesBeforeTheCall
   mutations:
     - id: P2S2-A1a
       guard: internal/db/pa_approvals.go:436
@@ -532,9 +677,19 @@ S2-A1:
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.929s
+    - id: P2S3-A1a
+      guard: internal/pa/connector/dispatch_write.go:612
+      guard_text: "if err := tx.Commit(); err != nil {\n\t\tslog.Error(\"pa write: pre-dispatch commit failed; call refused\""
+      mutation: "the pre-dispatch transaction is rolled back instead of committed before the call"
+      killed_by:
+        - internal/pa.TestS2A1_ExecutorConsumesBeforeTheCall
+      red: |-
+        --- FAIL: TestS2A1_ExecutorConsumesBeforeTheCall (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.475s
   gaps:
-    - half: "the executor consuming the receipt before the MCP call (P2-S3)"
-      tracked_by: "#1320"
     - half: "the Approve and Cancel callbacks of a card, double tap included (P2-S5)"
       tracked_by: "#1320"
 
@@ -598,10 +753,42 @@ S2-A2:
       tracked_by: "#1320"
 
 S2-A3:
-  status: pending
-  slice: P2-S2
-  tracked_by: "#1320"
-  note: "approval binds the argument hash"
+  status: green
+  slice: P2-S3
+  note: "Write executor (#1320 P2-S3): inside the pre-dispatch transaction the unsealed arguments must be canonical and hash to the approval's args_sha; anything else is refused args_changed and nothing is sent. The seal's AAD binds principal, approval id and args_sha (P2-S2)."
+  tests:
+    - internal/pa.TestS2A3_ChangedArgumentsAreRefused
+    - internal/pa.TestS2A3_NonCanonicalStoredBytesAreRefused
+  mutations:
+    - id: P2S3-A3a
+      guard: internal/pa/connector/dispatch_write.go:608
+      guard_text: "|| digest(args) != got.ArgsSHA {"
+      mutation: "the pre-dispatch transaction no longer compares the hash of the unsealed arguments with the approval's args_sha"
+      killed_by:
+        - internal/pa.TestS2A3_ChangedArgumentsAreRefused
+      red: |-
+        --- FAIL: TestS2A3_ChangedArgumentsAreRefused (0.07s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.492s
+    - id: P2S3-A3b
+      guard: internal/pa/connector/dispatch_write.go:608
+      guard_text: "!bytes.Equal(canonical, args)"
+      mutation: "the pre-dispatch transaction accepts stored bytes that are not in canonical form"
+      killed_by:
+        - internal/pa.TestS2A3_NonCanonicalStoredBytesAreRefused
+      red: |-
+        --- FAIL: TestS2A3_NonCanonicalStoredBytesAreRefused (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.510s
+  gaps:
+    - half: "a caller: nothing in the service invokes DispatchApproved until the cards (P2-S5)"
+      tracked_by: "#1320"
+    - half: "a FreshSurface implementation: without one every dispatch is refused no_write_path (P2-S4)"
+      tracked_by: "#1320"
 
 S2-A4:
   status: green
@@ -711,7 +898,38 @@ S2-A10:
   note: "grants only through /permissions, never from a card"
 
 S2-F3:
-  status: pending
+  status: green
   slice: P2-S3
-  tracked_by: "#1320"
-  note: "PA_WRITES_ENABLED re-checked at dispatch"
+  note: "Write executor (#1320 P2-S3): PA_WRITES_ENABLED, with the external-tools and per-server switches, is read at dispatch and again inside the pre-dispatch transaction; off or unreadable refuses writes_off, also for an approval made while it was on. Nothing sets the flag to true."
+  tests:
+    - internal/pa.TestS2F3_WritesFlagIsReadAtDispatch
+  mutations:
+    - id: P2S3-F3a
+      guard: internal/pa/connector/dispatch_write.go:255
+      guard_text: "if f.WritesErr != nil || !f.Writes {"
+      mutation: "the writes switch is never read: the flag check is `if false`"
+      killed_by:
+        - internal/pa.TestS2F3_WritesFlagIsReadAtDispatch
+      red: |-
+        --- FAIL: TestS2F3_WritesFlagIsReadAtDispatch (0.10s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.511s
+    - id: P2S3-F3b
+      guard: internal/pa/connector/dispatch_write.go:577
+      guard_text: "if out.reason = w.admit(ctx, tx, a, now); out.reason != \"\" {"
+      mutation: "the pre-dispatch transaction keeps the flags of the first check instead of reading them again"
+      killed_by:
+        - internal/pa.TestS2F3_WritesFlagIsReadAtDispatch
+      red: |-
+        --- FAIL: TestS2F3_WritesFlagIsReadAtDispatch (0.10s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.521s
+  gaps:
+    - half: "a caller: nothing in the service invokes DispatchApproved until the cards (P2-S5)"
+      tracked_by: "#1320"
+    - half: "a FreshSurface implementation: without one every dispatch is refused no_write_path (P2-S4)"
+      tracked_by: "#1320"

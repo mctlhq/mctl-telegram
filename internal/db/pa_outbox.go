@@ -8,7 +8,9 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
@@ -38,6 +40,7 @@ func paOutboxTable(pg bool, name string) string {
 			conversation_id TEXT NOT NULL DEFAULT '',
 			fragment_seq ` + intT + ` NOT NULL DEFAULT 0,
 			connection_id TEXT NOT NULL DEFAULT '',
+			approval_id TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL,
 			attempts ` + intT + ` NOT NULL DEFAULT 0,
 			sent_parts ` + intT + ` NOT NULL DEFAULT 0,
@@ -69,6 +72,16 @@ func paOutboxTable(pg bool, name string) string {
 // conversation-level update_id is a Telegram update id, always positive
 // (OutboxItem.Valid), so the two never meet. The previous build has no
 // template for a connection kind and fails such a row instead of sending.
+//
+// An approval-level row (#1320 slice P2-S3) is keyed by
+// idx_pa_outbox_approval, once per (principal, approval) whatever its
+// kind. It has no job and no connection, so idx_pa_outbox_update_v2 covers
+// it too; changing that index's predicate would break the ON CONFLICT
+// target of a replica on the previous build during a rollout, so the row
+// instead carries a negative update_id derived from its approval id
+// (paApprovalOutboxUpdateID), set by the INSERT itself. Two approvals of
+// one principal would have to collide on 62 bits of SHA-256 to meet there,
+// and if they did the second enqueue would fail, not be dropped.
 var paOutboxIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_pa_outbox_due ON pa_outbox(status, next_at_ms)`,
 	`CREATE INDEX IF NOT EXISTS idx_pa_outbox_principal ON pa_outbox(principal, id)`,
@@ -77,6 +90,8 @@ var paOutboxIndexes = []string{
 	`DROP INDEX IF EXISTS idx_pa_outbox_update`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_pa_outbox_connection ON pa_outbox(principal, connection_id, kind)
 	   WHERE connection_id <> ''`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_pa_outbox_approval ON pa_outbox(principal, approval_id)
+	   WHERE approval_id <> ''`,
 }
 
 // migratePAOutbox creates pa_outbox, or brings a table created before #1348
@@ -108,6 +123,10 @@ func migratePAOutbox(ctx context.Context, dbConn migrateDB, pg bool) error {
 		}
 	}
 	if err := addColumnIfMissing(ctx, dbConn, pg, "pa_outbox", "connection_id",
+		`TEXT NOT NULL DEFAULT ''`, `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("migrate pa outbox: %w", err)
+	}
+	if err := addColumnIfMissing(ctx, dbConn, pg, "pa_outbox", "approval_id",
 		`TEXT NOT NULL DEFAULT ''`, `TEXT NOT NULL DEFAULT ''`); err != nil {
 		return fmt.Errorf("migrate pa outbox: %w", err)
 	}
@@ -173,7 +192,7 @@ func rebuildSQLitePAOutbox(ctx context.Context, dbConn migrateDB) error {
 		return fmt.Errorf("migrate pa outbox: read columns: %w", err)
 	}
 	var keep []string
-	for _, c := range []string{"id", "principal", "job_id", "kind", "conversation_id", "fragment_seq", "connection_id", "status",
+	for _, c := range []string{"id", "principal", "job_id", "kind", "conversation_id", "fragment_seq", "connection_id", "approval_id", "status",
 		"attempts", "sent_parts", "next_at_ms", "lease_until_ms", "created_at_ms", "updated_at_ms"} {
 		if have[c] {
 			keep = append(keep, c)
@@ -203,6 +222,22 @@ func rebuildSQLitePAOutbox(ctx context.Context, dbConn migrateDB) error {
 func enqueuePAOutbox(ctx context.Context, tx *sql.Tx, item jobs.OutboxItem, nowMS int64) error {
 	if tx == nil || !item.Valid() {
 		return fmt.Errorf("%w: outbox item", jobs.ErrInvalid)
+	}
+	if item.Kind.ApprovalLevel() {
+		// Once per approval, whatever the kind: the first report of what
+		// became of an approved call is the only one. A second enqueue
+		// (the stale-dispatch sweep after the executor, or the reverse)
+		// is a no-op, never a second message.
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO pa_outbox(principal, job_id, update_id, kind, approval_id, status, attempts,
+			                       next_at_ms, created_at_ms, updated_at_ms)
+			 VALUES($1, NULL, $2, $3, $4, $5, 0, $6, $6, $6)
+			 ON CONFLICT (principal, approval_id) WHERE approval_id <> '' DO NOTHING`,
+			item.Principal, paApprovalOutboxUpdateID(item.ApprovalID), string(item.Kind), item.ApprovalID,
+			string(jobs.OutboxPending), nowMS); err != nil {
+			return fmt.Errorf("pa outbox: enqueue: %w", err)
+		}
+		return nil
 	}
 	if item.Kind.ConnectionLevel() {
 		// Once per connection and kind: a second enqueue for the same
@@ -258,6 +293,15 @@ func enqueuePAOutbox(ctx context.Context, tx *sql.Tx, item jobs.OutboxItem, nowM
 	return nil
 }
 
+// paApprovalOutboxUpdateID is the update_id stored on an approval-level
+// row: negative, never 0, and a function of the approval id alone (see
+// paOutboxIndexes). A conversation-level update_id is a Telegram update id,
+// always positive, so the two never meet.
+func paApprovalOutboxUpdateID(approvalID string) int64 {
+	sum := sha256.Sum256([]byte(approvalID))
+	return -int64(binary.BigEndian.Uint64(sum[:8])>>2) - 1
+}
+
 // enqueuePANotice records the message a Notice owes, in tx.
 func enqueuePANotice(ctx context.Context, tx *sql.Tx, n jobs.Notice, nowMS int64) error {
 	return enqueuePAOutbox(ctx, tx, jobs.OutboxItem{
@@ -275,14 +319,14 @@ func (s *Store) EnqueuePAOutbox(ctx context.Context, tx *sql.Tx, item jobs.Outbo
 
 // paOutboxColumns reads a conversation-level row's NULL job_id as 0.
 const paOutboxColumns = `id, principal, COALESCE(job_id, 0), update_id, kind, button, conversation_id, fragment_seq,
-	connection_id, attempts, sent_parts, status, next_at_ms`
+	connection_id, approval_id, attempts, sent_parts, status, next_at_ms`
 
 func scanPAOutbox(row interface{ Scan(...any) error }) (jobs.OutboxItem, error) {
 	var it jobs.OutboxItem
 	var kind, status string
 	var nextMS int64
 	if err := row.Scan(&it.ID, &it.Principal, &it.JobID, &it.UpdateID, &kind, &it.Button, &it.ConversationID, &it.FragmentSeq,
-		&it.ConnectionID, &it.Attempts, &it.SentParts, &status, &nextMS); err != nil {
+		&it.ConnectionID, &it.ApprovalID, &it.Attempts, &it.SentParts, &status, &nextMS); err != nil {
 		return jobs.OutboxItem{}, err
 	}
 	// An unknown kind is handed to the deliverer as is: it refuses to send
@@ -291,6 +335,10 @@ func scanPAOutbox(row interface{ Scan(...any) error }) (jobs.OutboxItem, error) 
 	// A connection row stores -id as its update_id (paOutboxIndexes); the
 	// item has none. Any other stored value is left for Valid to refuse.
 	if it.Kind.ConnectionLevel() && it.UpdateID == -it.ID {
+		it.UpdateID = 0
+	}
+	// An approval row stores a negative update_id too; the item has none.
+	if it.Kind.ApprovalLevel() && it.ApprovalID != "" && it.UpdateID == paApprovalOutboxUpdateID(it.ApprovalID) {
 		it.UpdateID = 0
 	}
 	return it, nil

@@ -312,11 +312,17 @@ func TestBuildPA_WiresToolsOnlyWhenEnabled(t *testing.T) {
 	f := fakePAServerNet(t, 4242003)
 	store := paTestStore(t)
 	_, off := buildEnabledPA(t, store)
+	if off.staleWrites != nil {
+		t.Fatal("stale write sweep wired without a tools runtime")
+	}
 	if off.tools != nil || off.dispatcher != nil || off.Links() != nil || off.Connections() != nil || f.built != 0 {
 		t.Fatalf("tools built with every server off (built %d)", f.built)
 	}
 	enablePAToolsEnv(t)
 	_, on := buildEnabledPA(t, paTestStore(t))
+	if on.staleWrites == nil || on.staleWrites.Store == nil || on.staleWrites.Executor != on.tools.executor {
+		t.Fatal("stale write sweep not wired to the store and the audited executor")
+	}
 	if on.tools == nil || on.dispatcher == nil || on.Links() == nil || on.Connections() == nil || f.built != 1 {
 		t.Fatalf("tools not built with tg enabled (built %d)", f.built)
 	}

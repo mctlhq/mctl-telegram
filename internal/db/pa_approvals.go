@@ -568,6 +568,12 @@ func (s *Store) SweepStalePADispatches(ctx context.Context, now time.Time) ([]ap
 	if _, err := tx.ExecContext(ctx, finishPAApprovalsOfDispatches, nowMS); err != nil {
 		return nil, approvalUnreadable("sweep dispatches: approvals", err)
 	}
+	// The principal is owed the same notice a call that timed out gets,
+	// written with the state change that owes it (P2-S3). The caller
+	// appends the audit result entries after the commit.
+	if err := enqueueStaleWriteNotices(ctx, tx, out, nowMS); err != nil {
+		return nil, approvalUnreadable("sweep dispatches: notice", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, approvalUnreadable("sweep dispatches: commit", err)
 	}

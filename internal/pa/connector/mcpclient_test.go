@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -233,6 +234,55 @@ func TestEndpoint_CallTool(t *testing.T) {
 
 // A call whose context was cancelled (fence, revoke, deadline) does not
 // send the bearer again to end the session.
+// TestS2D7_CallToolExactSendsTheBytes is S2-D7 at the wire: the server
+// receives the approved canonical argument bytes byte for byte, where
+// CallTool's json.Marshal would have escaped '<', '>' and '&' and so sent
+// bytes that hash to something else.
+func TestS2D7_CallToolExactSendsTheBytes(t *testing.T) {
+	const args = `{"text":"<b>1 & 2</b> 5.0 5e0","to":"Carol"}`
+	for _, sse := range []bool{false, true} {
+		f := &fakeServer{sse: sse}
+		out, err := testEndpoint(t, f).CallToolExact(context.Background(), tok, "send_message", []byte(args))
+		if err != nil || !strings.Contains(string(out), `"ok"`) {
+			t.Fatalf("out %q err %v", out, err)
+		}
+		if len(f.calls) != 1 {
+			t.Fatalf("%d calls", len(f.calls))
+		}
+		var p struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		}
+		if err := json.Unmarshal([]byte(f.calls[0]), &p); err != nil {
+			t.Fatal(err)
+		}
+		if p.Name != "send_message" || string(p.Arguments) != args {
+			t.Fatalf("server received %q for %q, want %q", p.Arguments, p.Name, args)
+		}
+		if got, want := sha256.Sum256(p.Arguments), sha256.Sum256([]byte(args)); got != want {
+			t.Fatal("received arguments do not hash to the approved hash")
+		}
+	}
+	// The marshalling path does change them: that is why it is not used.
+	f := &fakeServer{}
+	if _, err := testEndpoint(t, f).CallTool(context.Background(), tok, "send_message", json.RawMessage(args)); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(f.calls[0], "<b>") {
+		t.Fatal("CallTool now sends bytes verbatim; the S2-D7 note in mcpclient.go is out of date")
+	}
+	// Anything but one bare JSON object is refused before a request.
+	for _, bad := range []string{``, `[]`, `"x"`, ` {"a":1}`, `{"a":1} `, `{"a":1}{"b":2}`, `{"a":1},"x":{}`, `{"a":`} {
+		f := &fakeServer{}
+		if _, err := testEndpoint(t, f).CallToolExact(context.Background(), tok, "send_message", []byte(bad)); !errors.Is(err, ErrMCPProtocol) {
+			t.Errorf("%q: err %v, want ErrMCPProtocol", bad, err)
+		}
+		if len(f.bearers) != 0 {
+			t.Errorf("%q: %d requests made", bad, len(f.bearers))
+		}
+	}
+}
+
 func TestEndpoint_NoSessionCloseAfterCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
