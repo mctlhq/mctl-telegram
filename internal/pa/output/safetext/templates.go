@@ -250,4 +250,15 @@ var (
 	// running request was stopped for that reason (#1318). The same text
 	// for both, so the reply does not say which.
 	TextAssistantUnavailable = tpl("The assistant is not available for your account. /forget still deletes your conversations.", "Ассистент недоступен для вашего аккаунта. /forget по-прежнему удаляет ваши разговоры.")
+
+	// Tool status texts, shown as a draft while a read tool runs. Literals
+	// only: no model text, tool argument or chat title.
+	TextStatusReadingMessages   = tpl("Reading messages...", "Читаю сообщения...")
+	TextStatusSearchingMessages = tpl("Searching messages...", "Ищу сообщения...")
+	TextStatusListingChats      = tpl("Looking through chats...", "Просматриваю чаты...")
+	TextStatusListingFolders    = tpl("Looking through folders...", "Просматриваю папки...")
+	TextStatusListingTopics     = tpl("Looking through topics...", "Просматриваю темы...")
+	TextStatusCheckingAccount   = tpl("Checking the account...", "Проверяю аккаунт...")
+	TextStatusCheckingHome      = tpl("Checking the home...", "Проверяю дом...")
+	TextStatusUsingTool         = tpl("Working on it...", "Работаю над запросом...")
 )

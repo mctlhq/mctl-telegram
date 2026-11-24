@@ -140,6 +140,37 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []ChatMessage, tools []too
 // sent with at least one tool: providers refuse it on a request without
 // tools.
 func (c *OpenAIClient) chat(ctx context.Context, msgs []ChatMessage, wireTools []openAITool) (*ChatResult, error) {
+	resp, err := c.post(ctx, msgs, wireTools, false)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Choices []struct {
+			Message      ChatMessage `json:"message"`
+			FinishReason string      `json:"finish_reason"`
+		} `json:"choices"`
+		Usage *ChatUsage `json:"usage"`
+	}
+	dec := json.NewDecoder(io.LimitReader(resp.Body, 8<<20))
+	if err := dec.Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode chat response: %w", err)
+	}
+	if len(out.Choices) == 0 {
+		return nil, fmt.Errorf("decode chat response: no choices")
+	}
+	res := &ChatResult{Message: out.Choices[0].Message, FinishReason: out.Choices[0].FinishReason}
+	if out.Usage != nil {
+		res.Usage = *out.Usage
+		res.UsageReported = out.Usage.PromptTokens > 0 || out.Usage.CompletionTokens > 0
+	}
+	return res, nil
+}
+
+// post sends the chat request and returns a 2xx response, whose body the
+// caller closes. A non-2xx answer is a *ProviderError; its body is drained
+// and never kept.
+func (c *OpenAIClient) post(ctx context.Context, msgs []ChatMessage, wireTools []openAITool, stream bool) (*http.Response, error) {
 	hc := c.HTTP
 	if hc == nil {
 		hc = http.DefaultClient
@@ -148,14 +179,22 @@ func (c *OpenAIClient) chat(ctx context.Context, msgs []ChatMessage, wireTools [
 	if len(wireTools) > 0 {
 		toolChoice = "auto"
 	}
+	type streamOptions struct {
+		IncludeUsage bool `json:"include_usage"`
+	}
+	var opts *streamOptions
+	if stream {
+		opts = &streamOptions{IncludeUsage: true}
+	}
 	body, err := json.Marshal(struct {
-		Model      string        `json:"model"`
-		Messages   []ChatMessage `json:"messages"`
-		Tools      []openAITool  `json:"tools,omitempty"`
-		ToolChoice string        `json:"tool_choice,omitempty"`
-		Stream     bool          `json:"stream"`
-		MaxTokens  int           `json:"max_tokens,omitempty"`
-	}{Model: c.Model, Messages: msgs, Tools: wireTools, ToolChoice: toolChoice, Stream: false, MaxTokens: c.MaxOutputTokens})
+		Model         string         `json:"model"`
+		Messages      []ChatMessage  `json:"messages"`
+		Tools         []openAITool   `json:"tools,omitempty"`
+		ToolChoice    string         `json:"tool_choice,omitempty"`
+		Stream        bool           `json:"stream"`
+		MaxTokens     int            `json:"max_tokens,omitempty"`
+		StreamOptions *streamOptions `json:"stream_options,omitempty"`
+	}{Model: c.Model, Messages: msgs, Tools: wireTools, ToolChoice: toolChoice, Stream: stream, MaxTokens: c.MaxOutputTokens, StreamOptions: opts})
 	if err != nil {
 		return nil, fmt.Errorf("encode chat request: %w", err)
 	}
@@ -180,31 +219,12 @@ func (c *OpenAIClient) chat(ctx context.Context, msgs []ChatMessage, wireTools [
 	if err != nil {
 		return nil, fmt.Errorf("chat request: %w", err)
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		resp.Body.Close()
 		return nil, &ProviderError{Status: resp.StatusCode, RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())}
 	}
-	var out struct {
-		Choices []struct {
-			Message      ChatMessage `json:"message"`
-			FinishReason string      `json:"finish_reason"`
-		} `json:"choices"`
-		Usage *ChatUsage `json:"usage"`
-	}
-	dec := json.NewDecoder(io.LimitReader(resp.Body, 8<<20))
-	if err := dec.Decode(&out); err != nil {
-		return nil, fmt.Errorf("decode chat response: %w", err)
-	}
-	if len(out.Choices) == 0 {
-		return nil, fmt.Errorf("decode chat response: no choices")
-	}
-	res := &ChatResult{Message: out.Choices[0].Message, FinishReason: out.Choices[0].FinishReason}
-	if out.Usage != nil {
-		res.Usage = *out.Usage
-		res.UsageReported = out.Usage.PromptTokens > 0 || out.Usage.CompletionTokens > 0
-	}
-	return res, nil
+	return resp, nil
 }
 
 func parseRetryAfter(raw string, now time.Time) time.Duration {

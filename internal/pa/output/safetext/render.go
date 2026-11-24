@@ -154,6 +154,27 @@ func Render(model string, allow UserText) (Text, error) {
 	return Text{parts: parts}, nil
 }
 
+// RenderPartial renders text that is still being written, for a draft. The
+// trailing run of non-boundary characters may still grow into a different
+// token (a prefix of a disallowed URL can equal an allowed one), so it is
+// withheld: the text is cut after its last boundary character, then
+// rendered by Render, so every Render property holds for the result.
+// A text with no boundary renders empty.
+func RenderPartial(model string, allow UserText) (Text, error) {
+	if UTF16Len(model) > MaxParts*MaxPartUTF16 {
+		return Text{}, ErrTooLong
+	}
+	n := normalise(model)
+	if rs := []rune(n); len(rs) > 0 && !isBoundary(rs[len(rs)-1]) {
+		cut := len(rs)
+		for cut > 0 && !isBoundary(rs[cut-1]) {
+			cut--
+		}
+		n = string(rs[:cut])
+	}
+	return Render(n, allow)
+}
+
 // MaxParts is the most messages one Render or ServerText may produce. Eight
 // parts is about 32k characters, far above a normal assistant answer
 // (PA_MAX_CONTEXT_TOKENS is 32k tokens for the whole context), and small

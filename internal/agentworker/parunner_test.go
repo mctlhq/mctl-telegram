@@ -30,6 +30,17 @@ type paFake struct {
 	toolAuths []string
 	// toolDelay is how long /tool waits before answering.
 	toolDelay time.Duration
+	// drafts are the /draft texts in order. They are not in events: a
+	// draft is posted beside the run, in no fixed place of its order.
+	drafts []string
+	// lateDrafts counts the drafts that arrived after a reply.
+	lateDrafts int
+}
+
+func (f *paFake) draftTexts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.drafts...)
 }
 
 type paAnswer struct {
@@ -91,6 +102,17 @@ func (f *paFake) serve(w http.ResponseWriter, r *http.Request) {
 		d := f.toolDelay
 		f.mu.Unlock()
 		time.Sleep(d)
+	case PARouteDraft:
+		var m struct {
+			Text string `json:"text"`
+		}
+		_ = json.Unmarshal(body, &m)
+		f.mu.Lock()
+		f.drafts = append(f.drafts, m.Text)
+		if len(f.replies) > 0 {
+			f.lateDrafts++
+		}
+		f.mu.Unlock()
 	default:
 		w.WriteHeader(http.StatusNotFound)
 		return
