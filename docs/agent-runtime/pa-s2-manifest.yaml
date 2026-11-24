@@ -541,7 +541,7 @@ S2-C9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:407
+      guard: cmd/server/pa_writes.go:409
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -656,7 +656,7 @@ S2-C11:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.614s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:407
+      guard: cmd/server/pa_writes.go:409
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -820,7 +820,7 @@ S2-C13:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.772s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:407
+      guard: cmd/server/pa_writes.go:409
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -881,7 +881,7 @@ S2-X5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.493s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:407
+      guard: cmd/server/pa_writes.go:409
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -1328,7 +1328,7 @@ S2-D1:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.469s
     - id: P2S14D-OFFa
-      guard: cmd/server/pa_writes.go:288
+      guard: cmd/server/pa_writes.go:290
       guard_text: "if _, ok := connection.DefaultWriteScopes().Needs(server, tool); !ok {"
       mutation: "a listed tool that the compiled scope table does not name (alice_say_phrase, behind the quasar scope) no longer refuses the start"
       killed_by:
@@ -2803,7 +2803,7 @@ S2-D7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.497s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:407
+      guard: cmd/server/pa_writes.go:409
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -2885,7 +2885,7 @@ S2-A1:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.475s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:407
+      guard: cmd/server/pa_writes.go:409
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -2967,7 +2967,7 @@ S2-A2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.802s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:407
+      guard: cmd/server/pa_writes.go:409
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -3026,7 +3026,7 @@ S2-A3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.510s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:407
+      guard: cmd/server/pa_writes.go:409
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -3120,7 +3120,7 @@ S2-A4:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.829s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:407
+      guard: cmd/server/pa_writes.go:409
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -3241,7 +3241,7 @@ S2-A5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.532s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:407
+      guard: cmd/server/pa_writes.go:409
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -3344,7 +3344,7 @@ S2-A6:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/catalog	0.246s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:407
+      guard: cmd/server/pa_writes.go:409
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -3420,7 +3420,7 @@ S2-A7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.634s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:407
+      guard: cmd/server/pa_writes.go:409
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -3667,7 +3667,7 @@ S2-A8:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.318s
     - id: P2S14-GRNTa
-      guard: cmd/server/pa_writes.go:308
+      guard: cmd/server/pa_writes.go:310
       guard_text: "Validator: &permissions.Validator{Policy: policy, Devices: grantDevices, Rule: permissions.Rules{}},"
       mutation: "the grant validator is built without the device reader (connector.GrantDevices)"
       killed_by:
@@ -3934,7 +3934,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.318s
     - id: P2S14-GRNTa
-      guard: cmd/server/pa_writes.go:308
+      guard: cmd/server/pa_writes.go:310
       guard_text: "Validator: &permissions.Validator{Policy: policy, Devices: grantDevices, Rule: permissions.Rules{}},"
       mutation: "the grant validator is built without the device reader (connector.GrantDevices)"
       killed_by:
@@ -4030,7 +4030,7 @@ S2-A10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.811s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:407
+      guard: cmd/server/pa_writes.go:409
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -4054,7 +4054,7 @@ S2-A10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.318s
     - id: P2S14-GRNTa
-      guard: cmd/server/pa_writes.go:308
+      guard: cmd/server/pa_writes.go:310
       guard_text: "Validator: &permissions.Validator{Policy: policy, Devices: grantDevices, Rule: permissions.Rules{}},"
       mutation: "the grant validator is built without the device reader (connector.GrantDevices)"
       killed_by:
@@ -4466,7 +4466,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14c-F3x
-      guard: cmd/server/pa_writes.go:310
+      guard: cmd/server/pa_writes.go:312
       guard_text: "w.gate = newPAWriteGate(store, writes)"
       mutation: "buildPAWrites leaves the write path without an action gate"
       killed_by:
@@ -4526,7 +4526,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.247s
     - id: P2S14c-F3ac
-      guard: cmd/server/pa_writes.go:302
+      guard: cmd/server/pa_writes.go:304
       guard_text: "Writes: writes, Connections: store}"
       mutation: "buildPAWrites builds /permissions without the connection read: the conversations refuse the configuration and the service does not start with writes on"
       killed_by:
@@ -4609,7 +4609,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.757s
     - id: P2S14-SETa
-      guard: cmd/server/pa_writes.go:340
+      guard: cmd/server/pa_writes.go:342
       guard_text: "if w == nil || !f.ExternalTools || !f.Writes || f.WritesErr != nil ||"
       mutation: "a claim offers write tools with PA_WRITES_ENABLED read as false"
       killed_by:
@@ -4623,7 +4623,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.877s
     - id: P2S14-SETb
-      guard: cmd/server/pa_writes.go:340
+      guard: cmd/server/pa_writes.go:342
       guard_text: "if w == nil || !f.ExternalTools || !f.Writes || f.WritesErr != nil ||"
       mutation: "a claim offers write tools with PA_WRITES_ENABLED unreadable"
       killed_by:
@@ -4635,7 +4635,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.805s
     - id: P2S14-SETc
-      guard: cmd/server/pa_writes.go:340
+      guard: cmd/server/pa_writes.go:342
       guard_text: "if w == nil || !f.ExternalTools || !f.Writes || f.WritesErr != nil ||"
       mutation: "a claim offers write tools with PA_EXTERNAL_TOOLS_ENABLED off"
       killed_by:
@@ -4647,7 +4647,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.826s
     - id: P2S14-SETd
-      guard: cmd/server/pa_writes.go:341
+      guard: cmd/server/pa_writes.go:343
       guard_text: "!f.Servers[string(c.Server)] || f.ServerErrs[string(c.Server)] != nil {"
       mutation: "a claim offers a server's write tools with that server's switch off"
       killed_by:
@@ -4659,7 +4659,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.828s
     - id: P2S14-SETe
-      guard: cmd/server/pa_writes.go:345
+      guard: cmd/server/pa_writes.go:347
       guard_text: "if w.gate == nil || len(listed) == 0 {"
       mutation: "a write path without an action gate offers every listed write tool instead of none"
       killed_by:
@@ -4685,7 +4685,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.119s
     - id: P2S14-SETg
-      guard: cmd/server/pa_writes.go:348
+      guard: cmd/server/pa_writes.go:350
       guard_text: "got, withheld, err := w.gate.Offer(ctx, tx, principal, c.ID, slices.Clone(listed))"
       mutation: "an action gate that could not be read reads as \"no write tool\" instead of failing the claim"
       killed_by:
@@ -4699,7 +4699,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.252s
     - id: P2S14-SETh
-      guard: cmd/server/pa_writes.go:355
+      guard: cmd/server/pa_writes.go:357
       guard_text: "if slices.Contains(listed, tool) {"
       mutation: "the action gate can add a tool the write path does not list"
       killed_by:
@@ -4764,7 +4764,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.027s
     - id: P2S14-DISPa
-      guard: cmd/server/pa_writes.go:407
+      guard: cmd/server/pa_writes.go:409
       guard_text: "out, err := w.executor.DispatchApproved(dctx, principal, id)"
       mutation: "the webhook AfterCommit no longer hands an approved call to the write executor"
       killed_by:
@@ -4788,7 +4788,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.136s
     - id: P2S14D-OFFa
-      guard: cmd/server/pa_writes.go:288
+      guard: cmd/server/pa_writes.go:290
       guard_text: "if _, ok := connection.DefaultWriteScopes().Needs(server, tool); !ok {"
       mutation: "a listed tool that the compiled scope table does not name (alice_say_phrase, behind the quasar scope) no longer refuses the start"
       killed_by:

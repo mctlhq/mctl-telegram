@@ -284,7 +284,9 @@ func buildPAWrites(cfg *config.Config, pt *paTools, store *db.Store, sender paBo
 				return nil, fmt.Errorf("pa writes: %s is offered but has no approval card path", name)
 			}
 			// A tool the scope table does not name is held by no
-			// connection: the gate would never offer it.
+			// connection: the gate would never offer it. That a named
+			// scope is one a write connection asks for is the table's
+			// own check (connection.CheckScopeConfig), not this one.
 			if _, ok := connection.DefaultWriteScopes().Needs(server, tool); !ok {
 				return nil, fmt.Errorf("pa writes: %s is offered but no connection can hold its scope", name)
 			}

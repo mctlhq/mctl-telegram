@@ -24,8 +24,8 @@ package main
 // Carol's alice account through the OAuth pages, and then runs whole
 // turns: a Telegram update, the worker of internal/agentworker claiming
 // the job over HTTP and running it with a scripted model, the tool route,
-// the card, the tap. The alice server is a fake that lists one speaker in
-// structuredContent and records every call it is sent.
+// the card, the tap. The alice server is a fake that lists one speaker and one
+// light in structuredContent and records every call it is sent.
 //
 // What these tests are not: the evals as the threat model defines them
 // run on preview, against a real model, the released mctl-alice and a
@@ -153,7 +153,12 @@ func (e *paEval) turn(text string, steps ...agentworker.ChatMessage) (agentworke
 		e.t.Fatalf("claim of %q: %+v err %v", text, c, err)
 	}
 	e.tools = c.ToolSet
-	out, _ := w.Run(context.Background(), c)
+	out, err := w.Run(context.Background(), c)
+	if err != nil {
+		// Many turns are meant to end refused; the error is logged so
+		// an unexpected one can be read next to the outcome.
+		e.t.Logf("run of %q: %v", text, err)
+	}
 	e.settle()
 	return out, m
 }
