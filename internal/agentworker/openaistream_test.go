@@ -33,7 +33,7 @@ func TestChatStream_AssemblesTextToolCallsAndUsage(t *testing.T) {
 		`data: {"choices":[{"delta":{"content":"Let me "}}]}`,
 		`data: {"choices":[{"delta":{"content":"check."}}]}`,
 		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"tg__get","arguments":"{\"a\":"}}]}}]}`,
-		`data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"c2","function":{"name":"tg__obj","arguments":{"x":1}}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"c2","function":{"name":"tg__obj","arguments":{"x": 9007199254740993, "a":1}}}]}}]}`,
 		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]},"finish_reason":"tool_calls"}]}`,
 		`data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}`,
 		`data: [DONE]`, ``,
@@ -48,7 +48,9 @@ func TestChatStream_AssemblesTextToolCallsAndUsage(t *testing.T) {
 	if strings.Join(texts, "|") != "Let me |Let me check." {
 		t.Fatalf("texts %q", texts)
 	}
-	if len(res.Message.ToolCalls) != 2 || res.Message.ToolCalls[0].Arguments != `{"a":1}` || res.Message.ToolCalls[1].Arguments != `{"x":1}` {
+	if len(res.Message.ToolCalls) != 2 || res.Message.ToolCalls[0].Arguments != `{"a":1}` || res.Message.ToolCalls[1].Arguments != `{"x":9007199254740993,"a":1}` {
+		// Object-shaped arguments reach the tool as sent: an id above 2^53
+		// is not rounded and the keys keep their order.
 		t.Fatalf("tool calls %+v", res.Message.ToolCalls)
 	}
 	if !res.UsageReported || res.Usage.PromptTokens != 10 || res.FinishReason != "tool_calls" {

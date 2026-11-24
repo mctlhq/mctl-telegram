@@ -51,6 +51,8 @@ const (
 )
 
 type typingRun struct {
+	// ctx ends when the run is stopped; a draft send in flight ends with it.
+	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
 	last   time.Time // guarded by typingTracker.mu
@@ -116,7 +118,7 @@ func (t *typingTracker) begin(ref jobs.Ref, until time.Time) {
 	// The lease is on the run loop's clock; the timer runs on the remaining
 	// time.
 	ctx, cancel := context.WithTimeout(context.Background(), until.Sub(t.now()))
-	r := &typingRun{cancel: cancel, done: make(chan struct{}), last: t.now(), ref: ref, wake: make(chan struct{}, 1)}
+	r := &typingRun{ctx: ctx, cancel: cancel, done: make(chan struct{}), last: t.now(), ref: ref, wake: make(chan struct{}, 1)}
 	t.runs[job] = r
 	go t.loop(ctx, principal, job, r)
 }
@@ -164,10 +166,13 @@ func (t *typingTracker) stop(job int64) {
 	delete(t.runs, job)
 	t.mu.Unlock()
 	if ok {
+		// Cancel first: a draft send already in flight ends now instead of
+		// holding the answer back for its whole deadline. stopped is still
+		// set under sendMu, so nothing is sent after stop returns.
+		r.cancel()
 		r.sendMu.Lock()
 		r.stopped = true
 		r.sendMu.Unlock()
-		r.cancel()
 		<-r.done
 	}
 }
@@ -183,6 +188,9 @@ func (t *typingTracker) sendDraft(ctx context.Context, r *typingRun, principal, 
 	}
 	cctx, cancel := context.WithTimeout(ctx, draftCallDeadline)
 	defer cancel()
+	// A send made for a request runs on the request's context; it ends
+	// with the run all the same.
+	defer context.AfterFunc(r.ctx, cancel)()
 	if err := t.drafts.SendDraft(cctx, principal, draftID(job), text); err != nil {
 		return err
 	}
@@ -318,6 +326,11 @@ func (t *typingTracker) loop(ctx context.Context, principal, job int64, r *typin
 					}
 				}
 				if derr := t.sendDraft(ctx, r, principal, job, last); derr != nil {
+					// The next try waits a whole refresh period: a chat
+					// that refuses drafts is not asked again on every tick.
+					t.mu.Lock()
+					r.draftAt = t.now()
+					t.mu.Unlock()
 					slog.Debug("pa draft not refreshed", "job_id", job, "err", derr)
 				}
 			}

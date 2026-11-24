@@ -902,3 +902,98 @@ func TestPresence_ReclaimUpdatesRef(t *testing.T) {
 		t.Fatalf("checks asked about attempts %v after the re-claim; want attempt 2", asked)
 	}
 }
+
+// blockingDrafts is a draft sender whose call returns only when its
+// context ends, like a Bot API call that hangs.
+type blockingDrafts struct {
+	entered chan struct{}
+}
+
+func (b *blockingDrafts) SendDraft(ctx context.Context, _, _ int64, _ safetext.Text) error {
+	select {
+	case b.entered <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// TestPresence_StopDoesNotWaitForADraftInFlight: the reply is queued right
+// after stop returns, so a hanging sendMessageDraft must not hold it back
+// for the call's whole deadline. Both senders of a draft are covered: the
+// presence loop and a draft request.
+func TestPresence_StopDoesNotWaitForADraftInFlight(t *testing.T) {
+	ref := jobs.Ref{Principal: TestAliceID, JobID: 7, Attempt: 1, Digest: "d1"}
+	for name, send := range map[string]func(tr *typingTracker){
+		"loop": func(tr *typingTracker) { tr.showStatus(ref, safetext.ServerText(safetext.TextStatusUsingTool)) },
+		"request": func(tr *typingTracker) {
+			go tr.showDraft(context.Background(), ref, safetext.ServerText(safetext.TextStatusUsingTool))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			drafts := &blockingDrafts{entered: make(chan struct{}, 1)}
+			tr := newTypingTracker(&typingRecorder{}, time.Now)
+			tr.interval = time.Hour
+			tr.drafts = drafts
+			tr.begin(ref, time.Now().Add(time.Minute))
+			send(tr)
+			select {
+			case <-drafts.entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("no draft send started")
+			}
+			start := time.Now()
+			tr.stop(ref.JobID)
+			if d := time.Since(start); d > draftCallDeadline/2 {
+				t.Fatalf("stop waited %s for a draft send in flight", d)
+			}
+		})
+	}
+}
+
+// failingDrafts shows the first draft and refuses every later one.
+type failingDrafts struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (f *failingDrafts) SendDraft(context.Context, int64, int64, safetext.Text) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.calls == 1 {
+		return nil
+	}
+	return errors.New("injected draft failure")
+}
+
+func (f *failingDrafts) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+// TestPresence_FailedRefreshWaitsAWholePeriod: a chat that refuses drafts
+// is asked again once per refresh period, not on every tick, and the run
+// check is not repeated on every tick either.
+func TestPresence_FailedRefreshWaitsAWholePeriod(t *testing.T) {
+	ref := jobs.Ref{Principal: TestAliceID, JobID: 7, Attempt: 1, Digest: "d1"}
+	drafts := &failingDrafts{}
+	var checks atomic.Int64
+	tr := newTypingTracker(&typingRecorder{}, time.Now)
+	tr.interval = time.Millisecond
+	tr.refresh = 150 * time.Millisecond
+	tr.drafts = drafts
+	tr.check = func(context.Context, jobs.Ref) error { checks.Add(1); return nil }
+	tr.begin(ref, time.Now().Add(time.Minute))
+	t.Cleanup(func() { tr.stop(ref.JobID) })
+	if !tr.showDraft(context.Background(), ref, safetext.ServerText(safetext.TextStatusUsingTool)) {
+		t.Fatal("first draft not shown")
+	}
+	waitFor(t, "the first failed refresh", func() bool { return drafts.count() >= 2 })
+	// About a hundred ticks pass in less than one refresh period.
+	time.Sleep(100 * time.Millisecond)
+	if n, c := drafts.count(), checks.Load(); n > 3 || c > 3 {
+		t.Fatalf("after one failed refresh: %d sends and %d run checks within a refresh period", n, c)
+	}
+}

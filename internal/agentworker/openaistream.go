@@ -120,15 +120,13 @@ func (c *OpenAIClient) chatStream(ctx context.Context, msgs []ChatMessage, wireT
 					}
 					a.args.WriteString(frag)
 				default:
-					var v any
-					if err := json.Unmarshal(raw, &v); err != nil {
+					// Compact checks the JSON and keeps it as sent: decoding
+					// into any would round a large integer id and reorder keys.
+					var b bytes.Buffer
+					if err := json.Compact(&b, raw); err != nil {
 						return nil, errors.New("decode chat stream: malformed arguments")
 					}
-					b, err := json.Marshal(v)
-					if err != nil {
-						return nil, errors.New("decode chat stream: malformed arguments")
-					}
-					a.object = string(b)
+					a.object = b.String()
 				}
 			}
 		}
