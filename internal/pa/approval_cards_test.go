@@ -55,10 +55,12 @@ func cardPin() *catalog.Pin {
 // counter are the real ones.
 type cardJobs struct {
 	*failingJobs
+	// also names further approve-tier tools of the test's pin.
+	also map[string]bool
 }
 
 func (c *cardJobs) AdmitToolCall(ctx context.Context, j pa.PAJob, server, tool string) (pa.Policy, error) {
-	if server == "tg" && tool == writeTool {
+	if server == "tg" && (tool == writeTool || c.also[tool]) {
 		return c.failingJobs.AdmitToolCall(ctx, j, "tg", "get_messages")
 	}
 	return c.failingJobs.AdmitToolCall(ctx, j, server, tool)
@@ -98,7 +100,7 @@ func newCardEnv(t *testing.T, s *db.Store) *cardEnv {
 // newCardEnvOn is newCardEnv over pin. A non-nil fresh is the FreshSurface
 // of both the card and the executor, as one PinFresh will be in the
 // service; nil keeps the write env's fake.
-func newCardEnvOn(t *testing.T, s *db.Store, pin *catalog.Pin, fresh connector.FreshSurface) *cardEnv {
+func newCardEnvOn(t *testing.T, s *db.Store, pin *catalog.Pin, fresh connector.FreshSurface, opts ...func(*connector.CardConfig)) *cardEnv {
 	t.Helper()
 	var mutate func(*connector.WriteConfig)
 	if fresh != nil {
@@ -112,17 +114,27 @@ func newCardEnvOn(t *testing.T, s *db.Store, pin *catalog.Pin, fresh connector.F
 	if e.token, _, _, code = e.h.Claim(); code != http.StatusOK || e.token == "" {
 		t.Fatalf("claim: %d", code)
 	}
-	var err error
-	e.cards, err = connector.NewCards(connector.CardConfig{
+	cfg := connector.CardConfig{
 		Store: e.cstore, Sealer: e.sealer, Pin: pin, Fresh: fresh, Now: e.h.Now,
 		Deliver: func(ctx context.Context, p int64) { e.h.Loop().DeliverAfter(ctx, p) },
-	})
-	if err != nil {
+	}
+	for _, o := range opts {
+		o(&cfg)
+	}
+	var err error
+	if e.cards, err = connector.NewCards(cfg); err != nil {
 		t.Fatal(err)
+	}
+	// Every approve-tier tool of the pin is admitted like the write tool.
+	also := map[string]bool{}
+	for name, pt := range pin.Servers["tg"].Tools {
+		if pt.Tier == catalog.TierApprove {
+			also[name] = true
+		}
 	}
 	e.reconfigure(func(c *connector.DispatcherConfig) {
 		c.Cards = e.cards
-		c.Jobs = &cardJobs{failingJobs: e.jobs}
+		c.Jobs = &cardJobs{failingJobs: e.jobs, also: also}
 	})
 	e.h.EnableApprovalCards(e.cards, s, func(ctx context.Context, principal int64, id string) {
 		out, err := e.x.DispatchApproved(ctx, principal, id)

@@ -77,6 +77,16 @@
 # lines in internal/pa/runloop.go, internal/pa/conversation.go and
 # internal/pa/connector/dispatch.go, so the P2S7 guards in those files were
 # pointed at their new line numbers; their code did not change.
+#
+# The P2S6-* records (S2-D2, S2-D3, S2-D4) ran on the P2-S6 branch, cut from
+# b55d1955, the same way, on sqlite, restored from saved bytes; the tests
+# also pass on Postgres. P2-S6 built the checks a disclosure passes before
+# it gets a card and the disclosure card. Nothing constructs the cards or a
+# speaker reader outside tests, which is a gap of each id. The change moved
+# lines in internal/pa/connector/card.go, so the P2S5-A5c and P2S5-D7c
+# guards were pointed at their new line numbers; in P2S5-D7c the guarded
+# call is now an assignment (=) in the branch for a card that is not a
+# disclosure.
 
 S2-C9:
   status: pending
@@ -613,24 +623,234 @@ S2-D1:
     - internal/pa/gate.TestDecideNeverLowersWithoutEveryCondition
 
 S2-D2:
-  status: pending
+  status: green
   slice: P2-S6
-  tracked_by: "#1322"
-  note: "disclosure approval binds device id and argument hash"
+  note: "Disclosure target and binding (#1322 P2-S6): alice_say_phrase and alice_send_command get a card only for a device id that a speaker read made for this card lists, byte for byte; a name, a room, an unlisted id and an omitted device are refused (device_not_listed), and a read that failed, was empty or malformed is refused as devices_unreadable, never as not listed. The approval's args_sha is over all of the canonical arguments, the device id included, and the executor refuses stored arguments that do not hash to it (args_changed)."
+  tests:
+    - internal/pa.TestS2D2_TargetMustBeAListedDeviceID
+    - internal/pa.TestS2D2_ApprovalBindsTextAndDevice
+    - internal/pa.TestDisclosure_UnreadableSpeakersRefuse
+    - internal/pa/connector.TestAliceSpeakers_ReadsTheList
+    - internal/pa/connector.TestAliceSpeakers_UnreadableIsAnError
+  mutations:
+    - id: P2S6-D2a
+      guard: internal/pa/connector/card.go:254
+      guard_text: "sum := sha256.Sum256(canonical)"
+      mutation: "the approval hash leaves the device field out (at the card, the seal and the executor)"
+      killed_by:
+        - internal/pa.TestS2D2_ApprovalBindsTextAndDevice
+      red: |-
+        --- FAIL: TestS2D2_ApprovalBindsTextAndDevice (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.685s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.677s
+    - id: P2S6-D2b
+      guard: internal/pa/connector/disclosure.go:236
+      guard_text: "if s.ID == call.device {"
+      mutation: "a speaker's name is accepted as the target"
+      killed_by:
+        - internal/pa.TestS2D2_TargetMustBeAListedDeviceID
+      red: |-
+        --- FAIL: TestS2D2_TargetMustBeAListedDeviceID (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.718s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.563s
+    - id: P2S6-D2c
+      guard: internal/pa/connector/disclosure.go:203
+      guard_text: "if !hasDevice || device == \"\" {"
+      mutation: "an omitted device falls back to a default speaker instead of a refusal"
+      killed_by:
+        - internal/pa.TestS2D2_TargetMustBeAListedDeviceID
+      red: |-
+        --- FAIL: TestS2D2_TargetMustBeAListedDeviceID (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.726s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.547s
+    - id: P2S6-D2d
+      guard: internal/pa/connector/disclosure.go:222
+      guard_text: "if err != nil || len(speakers) == 0 {"
+      mutation: "a failed speaker read that came with a list is used"
+      killed_by:
+        - internal/pa.TestDisclosure_UnreadableSpeakersRefuse
+      red: |-
+        --- FAIL: TestDisclosure_UnreadableSpeakersRefuse (0.02s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.699s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.593s
+    - id: P2S6-D2e
+      guard: internal/pa/connector/alice_speakers.go:156
+      guard_text: "for _, l := range rest {"
+      mutation: "the speaker reader does not look at what follows the list, so a name with line breaks can end the list early after speaker lines of its own"
+      killed_by:
+        - internal/pa/connector.TestAliceSpeakers_UnreadableIsAnError
+      red: |-
+        --- FAIL: TestAliceSpeakers_UnreadableIsAnError (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.481s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.347s
+  gaps:
+    - half: "production wiring: nothing in cmd/server constructs connector.Cards (TestNoRuntimePhase2Use forbids NewCards outside tests) or a SpeakerReader, the Phase 2 pin is not loadable at runtime and the run loop admits no approve-tier tool, so no disclosure call reaches these checks outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
+    - half: "the speakers are read when the card is made and not again at dispatch: a speaker removed, renamed or moved to another room within the approval's five minutes is still called by its id. Owner decision: re-read at dispatch, or accept the window"
+      tracked_by: "#1322"
 
 S2-D3:
-  status: pending
+  status: green
   slice: P2-S6
-  tracked_by: "#1322"
-  note: "disclosure text cap of 1000 characters. The test is of the inert pin validation (#1370): catalog.MaxDisclosureText = 1000 and a text_cap over it is refused. No disclosure dispatch exists yet, so text over the cap is not refused at run time and the id stays pending."
+  note: "Disclosure text cap (#1322 P2-S6): the text of a disclosure is counted in characters (runes) against the pin's text_cap, which must be 1000, before anything is read or written; longer text is refused text_too_long with no approval row, and the principal is sent TextDisclosureTooLong once per run, offering to send it in parts. The server never cuts or splits the text. Text holding a link is refused text_has_link (Phase 2 default). catalog.MaxDisclosureText = 1000 and a text_cap over it is refused by the pin validation (#1370)."
   tests:
     - internal/pa/catalog.TestValidatePhase2Rules
+    - internal/pa.TestS2D3_TextCapIsCountedInCharacters
+    - internal/pa.TestDisclosure_TextRefusals
+    - internal/pa.TestDisclosure_OneCapForEveryTool
+  mutations:
+    - id: P2S6-D3a
+      guard: internal/pa/connector/disclosure.go:197
+      guard_text: "if utf8.RuneCountInString(text) > limit {"
+      mutation: "the cap counts bytes, so 1000 Cyrillic characters are refused"
+      killed_by:
+        - internal/pa.TestS2D3_TextCapIsCountedInCharacters
+      red: |-
+        --- FAIL: TestS2D3_TextCapIsCountedInCharacters (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.565s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.463s
+    - id: P2S6-D3b
+      guard: internal/pa/connector/disclosure.go:197
+      guard_text: "if utf8.RuneCountInString(text) > limit {"
+      mutation: "the cap is 1001 characters"
+      killed_by:
+        - internal/pa.TestS2D3_TextCapIsCountedInCharacters
+      red: |-
+        --- FAIL: TestS2D3_TextCapIsCountedInCharacters (0.08s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.660s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.565s
+    - id: P2S6-D3c
+      guard: internal/pa/connector/card.go:204
+      guard_text: "c.offerSplit(ctx, principal, req.JobID)"
+      mutation: "text over the cap is refused without the offer to split it"
+      killed_by:
+        - internal/pa.TestS2D3_TextCapIsCountedInCharacters
+      red: |-
+        --- FAIL: TestS2D3_TextCapIsCountedInCharacters (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	2.506s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.472s
+    - id: P2S6-D3d
+      guard: internal/pa/connector/disclosure.go:189
+      guard_text: "if limit != catalog.MaxDisclosureText {"
+      mutation: "a pin with a lower cap than the one the notice names gets a card path"
+      killed_by:
+        - internal/pa.TestDisclosure_OneCapForEveryTool
+      red: |-
+        --- FAIL: TestDisclosure_OneCapForEveryTool (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.636s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.522s
+  gaps:
+    - half: "production wiring: nothing in cmd/server constructs connector.Cards (TestNoRuntimePhase2Use forbids NewCards outside tests) or a SpeakerReader, the Phase 2 pin is not loadable at runtime and the run loop admits no approve-tier tool, so no disclosure call reaches these checks outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
 
 S2-D4:
-  status: pending
+  status: green
   slice: P2-S6
-  tracked_by: "#1322"
-  note: "disclosure card renders full text and device"
+  note: "Disclosure card (#1322 P2-S6): safetext.DisclosureCard shows the speaker's home, room, name and device id as the speaker read gave them and the whole text on a line of its own, exactly as it is sent, with the room warning on a phrase that is said aloud. The card is refused, never cut, when the text or the id could not be shown unchanged or the card does not fit one message. The speaker's names are sealed with the arguments (approval.SealWithDetail) and the delivered card is rebuilt from that blob."
+  tests:
+    - internal/pa.TestS2D4_CardShowsTheWholeTextAndTheSpeaker
+    - internal/pa/output/safetext.TestDisclosureCard_Layout
+    - internal/pa/output/safetext.TestDisclosureCard_RefusesWhatItCannotShow
+    - internal/pa/approval.TestSealer_Detail
+  mutations:
+    - id: P2S6-D4a
+      guard: internal/pa/output/safetext/card.go:162
+      guard_text: "b.WriteString(d.Phrase)"
+      mutation: "the card shows the first 100 characters of the text (and the whole-line check is dropped)"
+      killed_by:
+        - internal/pa.TestS2D4_CardShowsTheWholeTextAndTheSpeaker
+        - internal/pa/output/safetext.TestDisclosureCard_RefusesWhatItCannotShow
+      red: |-
+        --- FAIL: TestS2D4_CardShowsTheWholeTextAndTheSpeaker (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.988s
+        --- FAIL: TestDisclosureCard_RefusesWhatItCannotShow (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/output/safetext	0.388s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.698s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/output/safetext	0.253s
+    - id: P2S6-D4b
+      guard: internal/pa/connector/card.go:416
+      guard_text: "text, err = safetext.DisclosureCard(cardToolName(a.Server, a.Tool), string(args), d, tainted || terr != nil)"
+      mutation: "the delivered card of a disclosure is the plain card: no speaker, no text line, no warning"
+      killed_by:
+        - internal/pa.TestS2D4_CardShowsTheWholeTextAndTheSpeaker
+      red: |-
+        --- FAIL: TestS2D4_CardShowsTheWholeTextAndTheSpeaker (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.607s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.595s
+    - id: P2S6-D4c
+      guard: internal/pa/output/safetext/card.go:165
+      guard_text: "b.WriteString(TextCardRoomWarning.In(l))"
+      mutation: "the room warning is left off a spoken phrase"
+      killed_by:
+        - internal/pa.TestS2D4_CardShowsTheWholeTextAndTheSpeaker
+        - internal/pa/output/safetext.TestDisclosureCard_Layout
+      red: |-
+        --- FAIL: TestS2D4_CardShowsTheWholeTextAndTheSpeaker (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.604s
+        --- FAIL: TestDisclosureCard_Layout (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/output/safetext	0.832s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.502s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/output/safetext	0.604s
+    - id: P2S6-D4d
+      guard: internal/pa/connector/disclosure.go:248
+      guard_text: "Home: target.Home, Room: target.Room, Name: target.Name, ID: target.ID,"
+      mutation: "the card names the room and the name of another speaker than the target"
+      killed_by:
+        - internal/pa.TestS2D4_CardShowsTheWholeTextAndTheSpeaker
+      red: |-
+        --- FAIL: TestS2D4_CardShowsTheWholeTextAndTheSpeaker (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.651s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.546s
+  gaps:
+    - half: "production wiring: nothing in cmd/server constructs connector.Cards (TestNoRuntimePhase2Use forbids NewCards outside tests) or a SpeakerReader, the Phase 2 pin is not loadable at runtime and the run loop admits no approve-tier tool, so no disclosure call reaches these checks outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
+    - half: "the home: alice_list_devices reports no home or household, so a card built from connector.AliceSpeakers says the home was not reported by the service. Owner decision: have mctl-alice report it, or accept a card without a home"
+      tracked_by: "#1322"
+    - half: "connector.AliceSpeakers parses text that mctl-alice writes for a model; it is proven on synthetic results only and was never run against the real server, and any change of that text makes every disclosure refuse devices_unreadable. A structured device listing from mctl-alice would close it"
+      tracked_by: "#1322"
+    - half: "the speaker read made for a card is a tools/call that leaves no audit entry of its own"
+      tracked_by: "#1322"
 
 S2-D5:
   status: pending
@@ -678,8 +898,8 @@ S2-D7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.525s
     - id: P2S5-D7c
-      guard: internal/pa/connector/card.go:346
-      guard_text: "text, err := safetext.Card(cardToolName(a.Server, a.Tool), string(args), tainted || terr != nil)"
+      guard: internal/pa/connector/card.go:419
+      guard_text: "text, err = safetext.Card(cardToolName(a.Server, a.Tool), string(args), tainted || terr != nil)"
       mutation: "the card is rendered from other bytes than the sealed arguments (the last byte dropped)"
       killed_by:
         - internal/pa.TestS2D7_CardShowsTheBytesThatAreSent
@@ -1014,7 +1234,7 @@ S2-A5:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/catalog	0.261s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.474s
     - id: P2S5-A5c
-      guard: internal/pa/connector/card.go:225
+      guard: internal/pa/connector/card.go:259
       guard_text: "SchemaSHA: fresh.SchemaSHA, DescriptionSHA: fresh.DescriptionSHA, AnnotationSHA: fresh.AnnotationSHA,"
       mutation: "the card records another hash as the description hash of the definition it listed"
       killed_by:

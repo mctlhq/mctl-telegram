@@ -310,3 +310,58 @@ func TestSealer_Key(t *testing.T) {
 		t.Errorf("open after the caller cleared its key buffer: %v", err)
 	}
 }
+
+// TestSealer_Detail: card detail is sealed with the arguments, comes back
+// only through OpenWithDetail, and a blob of one version never opens as
+// the other.
+func TestSealer_Detail(t *testing.T) {
+	s := testSealer(t)
+	a, err := New(testBinding(), t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const detail = `{"speaker":{"id":"spk-kitchen-0001","name":"Kitchen speaker"}}`
+	sealed, err := s.SealWithDetail(a, []byte(testArgs), []byte(detail))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(sealed.SealedArgs, []byte("Kitchen")) || bytes.Contains(sealed.SealedArgs, []byte("level")) {
+		t.Fatal("the sealed blob contains plaintext")
+	}
+	args, got, err := s.OpenWithDetail(sealed)
+	if err != nil || string(args) != testArgs || string(got) != detail {
+		t.Fatalf("open with detail = %q, %q, %v", args, got, err)
+	}
+	// Open gives the arguments and nothing of the detail.
+	if only, err := s.Open(sealed); err != nil || string(only) != testArgs {
+		t.Fatalf("open = %q, %v", only, err)
+	}
+	// An approval sealed without detail has none.
+	plain, err := s.Seal(a, []byte(testArgs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args, got, err := s.OpenWithDetail(plain); err != nil || string(args) != testArgs || got != nil {
+		t.Fatalf("open of a blob without detail = %q, %q, %v", args, got, err)
+	}
+	// The version byte is authenticated: neither blob opens as the other.
+	for name, blob := range map[string][]byte{"detail as plain": sealed.SealedArgs, "plain as detail": plain.SealedArgs} {
+		flipped := sealed
+		flipped.SealedArgs = bytes.Clone(blob)
+		flipped.SealedArgs[0] ^= 0x03
+		if _, _, err := s.OpenWithDetail(flipped); !errors.Is(err, ErrUnreadable) {
+			t.Errorf("%s: err = %v, want ErrUnreadable", name, err)
+		}
+	}
+	// The detail is bound like the arguments.
+	other := sealed
+	other.ID = "pap_other"
+	if _, _, err := s.OpenWithDetail(other); !errors.Is(err, ErrUnreadable) {
+		t.Errorf("another approval's blob: err = %v, want ErrUnreadable", err)
+	}
+	for name, d := range map[string][]byte{"empty": nil, "too large": bytes.Repeat([]byte("a"), MaxDetailBytes+1)} {
+		if got, err := s.SealWithDetail(a, []byte(testArgs), d); !errors.Is(err, ErrInvalid) || got.SealedArgs != nil {
+			t.Errorf("%s detail: err = %v, blob %v", name, err, got.SealedArgs != nil)
+		}
+	}
+}

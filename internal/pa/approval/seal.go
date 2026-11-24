@@ -36,8 +36,14 @@ const KeyInfo = "mctl-pa-approval-args/v1"
 
 const (
 	sealVersion byte = 0x01
-	aadLabel         = "mctl-pa-approval-args/v1"
+	// sealVersionDetail is a blob that holds the arguments and, after
+	// them, the card detail SealWithDetail was given.
+	sealVersionDetail byte = 0x02
+	aadLabel               = "mctl-pa-approval-args/v1"
 )
+
+// MaxDetailBytes bounds the card detail sealed next to the arguments.
+const MaxDetailBytes = 8 << 10
 
 // MaxArgsBytes bounds the canonical arguments of one approval. A card is
 // refused over 4 KiB (T10), so nothing genuine comes near it.
@@ -98,6 +104,24 @@ func argsSHA256(b []byte) string {
 // a.ArgsSHA: the row then holds exactly the bytes the card showed and the
 // hash bound.
 func (s *Sealer) Seal(a Approval, canonicalArgs []byte) (Approval, error) {
+	return s.seal(a, canonicalArgs, nil)
+}
+
+// SealWithDetail is Seal with detail sealed into the same blob: what the
+// approval's card shows besides the arguments and what was read from the
+// server when the card was made (the target device of a disclosure, #1322
+// slice P2-S6). It is never sent anywhere: Open returns the arguments
+// only. It is in the blob, not in a column of its own, so that it leaves
+// the row with the arguments, in the same statement. detail must not be
+// empty.
+func (s *Sealer) SealWithDetail(a Approval, canonicalArgs, detail []byte) (Approval, error) {
+	if len(detail) == 0 || len(detail) > MaxDetailBytes {
+		return Approval{}, fmt.Errorf("%w: seal card detail", ErrInvalid)
+	}
+	return s.seal(a, canonicalArgs, detail)
+}
+
+func (s *Sealer) seal(a Approval, canonicalArgs, detail []byte) (Approval, error) {
 	if a.ID == "" || len(canonicalArgs) == 0 || len(canonicalArgs) > MaxArgsBytes {
 		return Approval{}, fmt.Errorf("%w: seal arguments", ErrInvalid)
 	}
@@ -119,11 +143,29 @@ func (s *Sealer) Seal(a Approval, canonicalArgs []byte) (Approval, error) {
 	if _, err := rand.Read(nonce); err != nil {
 		return Approval{}, err
 	}
-	out := make([]byte, 0, 1+len(nonce)+len(canonicalArgs)+gcm.Overhead())
-	out = append(out, sealVersion)
+	version, plain := sealVersion, canonicalArgs
+	if detail != nil {
+		// The arguments' length, the arguments, then the detail.
+		version = sealVersionDetail
+		plain = binary.BigEndian.AppendUint32(make([]byte, 0, 4+len(canonicalArgs)+len(detail)), uint32(len(canonicalArgs)))
+		plain = append(append(plain, canonicalArgs...), detail...)
+	}
+	out := make([]byte, 0, 1+len(nonce)+len(plain)+gcm.Overhead())
+	out = append(out, version)
 	out = append(out, nonce...)
-	a.SealedArgs = gcm.Seal(out, nonce, canonicalArgs, argsAAD(a.Principal, a.ID, a.ArgsSHA))
+	a.SealedArgs = gcm.Seal(out, nonce, plain, sealAAD(version, a.Principal, a.ID, a.ArgsSHA))
 	return a, nil
+}
+
+// sealAAD is the additional data of a blob of version. A version 1 blob
+// keeps the data it always had; a later version adds its own byte, so a
+// blob does not open as another version's.
+func sealAAD(version byte, principal int64, approvalID, argsSHA string) []byte {
+	aad := argsAAD(principal, approvalID, argsSHA)
+	if version != sealVersion {
+		aad = append(aad, version)
+	}
+	return aad
 }
 
 // Open returns the canonical arguments of a consumed approval, the exact
@@ -132,18 +174,40 @@ func (s *Sealer) Seal(a Approval, canonicalArgs []byte) (Approval, error) {
 // content that does not hash to ArgsSHA, and the hash is in the additional
 // data, so what opens here is what that hash names.
 func (s *Sealer) Open(a Approval) ([]byte, error) {
+	args, _, err := s.OpenWithDetail(a)
+	return args, err
+}
+
+// OpenWithDetail is Open that also returns the detail SealWithDetail was
+// given, nil for an approval sealed without one.
+func (s *Sealer) OpenWithDetail(a Approval) (args, detail []byte, err error) {
 	gcm, err := s.aead(a.Principal)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	ns := gcm.NonceSize()
-	if a.ID == "" || len(a.SealedArgs) < 1+ns || a.SealedArgs[0] != sealVersion {
-		return nil, fmt.Errorf("%w: sealed arguments", ErrUnreadable)
+	if a.ID == "" || len(a.SealedArgs) < 1+ns {
+		return nil, nil, fmt.Errorf("%w: sealed arguments", ErrUnreadable)
+	}
+	version := a.SealedArgs[0]
+	if version != sealVersion && version != sealVersionDetail {
+		return nil, nil, fmt.Errorf("%w: sealed arguments", ErrUnreadable)
 	}
 	nonce, body := a.SealedArgs[1:1+ns], a.SealedArgs[1+ns:]
-	pt, err := gcm.Open(nil, nonce, body, argsAAD(a.Principal, a.ID, a.ArgsSHA))
+	pt, err := gcm.Open(nil, nonce, body, sealAAD(version, a.Principal, a.ID, a.ArgsSHA))
 	if err != nil {
-		return nil, fmt.Errorf("%w: sealed arguments do not open", ErrUnreadable)
+		return nil, nil, fmt.Errorf("%w: sealed arguments do not open", ErrUnreadable)
 	}
-	return pt, nil
+	if version == sealVersion {
+		return pt, nil, nil
+	}
+	if len(pt) < 4 {
+		return nil, nil, fmt.Errorf("%w: sealed arguments", ErrUnreadable)
+	}
+	n := int(binary.BigEndian.Uint32(pt))
+	if n <= 0 || n >= len(pt)-4 {
+		// No arguments, or no detail after them.
+		return nil, nil, fmt.Errorf("%w: sealed arguments", ErrUnreadable)
+	}
+	return pt[4 : 4+n], pt[4+n:], nil
 }

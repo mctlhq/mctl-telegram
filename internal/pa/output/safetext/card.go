@@ -34,6 +34,53 @@ func CardTemplates() []Template {
 	return []Template{TextCardHead, TextCardAction, TextCardArgs, TextCardExternal, TextCardFoot}
 }
 
+// DisclosureCardTemplates lists every server text a disclosure card can
+// hold besides CardTemplates. TextCardHomeUnknown stands in for a home the
+// service did not report, one of TextCardPhrase and TextCardCommand is
+// present, and TextCardRoomWarning only on a text that is said aloud.
+func DisclosureCardTemplates() []Template {
+	return []Template{TextCardSpeaker, TextCardHome, TextCardHomeUnknown, TextCardRoom, TextCardDeviceName,
+		TextCardDeviceID, TextCardPhrase, TextCardCommand, TextCardRoomWarning}
+}
+
+// Disclosure is what a disclosure card shows besides the tool and the
+// arguments (threat model T6): the speaker the text goes to and the text.
+type Disclosure struct {
+	// Home, Room and Name are the speaker's, as the service listed them
+	// when the card was made; ID is its device id, the one in the
+	// arguments. An empty Home is shown as not reported, never left out.
+	Home, Room, Name, ID string
+	// Phrase is the whole text, exactly as it is sent.
+	Phrase string
+	// Spoken: the text is said aloud, so the card warns about the room.
+	Spoken bool
+}
+
+// ContainsLink reports whether s holds a token a bot message would have
+// to defang: a URL, a scheme-less domain, a t.me or tg:// link, a mention
+// or an address (threat model T14). A card shows such a token changed, so
+// a value that must be shown exactly is refused when this is true.
+func ContainsLink(s string) bool {
+	return neutralise(s, UserText{}) != s
+}
+
+// cardValue reports whether v can be shown on a card as it is.
+func cardValue(v string) bool {
+	if v == "" || strings.ContainsRune(v, '\n') || normalise(v) != v {
+		return false
+	}
+	// A value that already holds a defang mark would read the same as
+	// the value whose link was defanged here ("a[.]b" and "a.b"): two
+	// different calls behind one card. Refused, so that what a card
+	// shows names one value.
+	for _, mark := range []string{"[.]", "[:]", "[@]"} {
+		if strings.Contains(v, mark) {
+			return false
+		}
+	}
+	return true
+}
+
 // Card builds the text of an approval card (threat model T7, T14): the
 // registry templates of CardTemplates around the tool name and the
 // arguments of the call, in English and in Russian.
@@ -51,18 +98,38 @@ func CardTemplates() []Template {
 // The card is one message. A card that does not fit one is refused with
 // ErrTooLong, never cut: its buttons belong to all of it.
 func Card(tool, args string, external bool) (Text, error) {
-	for _, v := range []string{tool, args} {
-		if v == "" || strings.ContainsRune(v, '\n') || normalise(v) != v {
+	return card(tool, args, nil, external)
+}
+
+// DisclosureCard is Card for a disclosure (threat model T6, S2-D4): above
+// the arguments it shows the speaker (home, room, name and device id) and
+// the whole text on a line of its own, and, for a text that is said
+// aloud, TextCardRoomWarning.
+//
+// Every value is shown exactly or the card is refused (ErrCardUnshowable),
+// as in Card. The text and the device id are stricter: a card on which
+// either would be defanged is refused too, so the line the principal
+// reads is the text that is sent and the id it is sent to. The text is
+// never cut: a card that does not fit one message is ErrTooLong.
+func DisclosureCard(tool, args string, d Disclosure, external bool) (Text, error) {
+	for _, v := range []string{d.Room, d.Name, d.ID, d.Phrase} {
+		if !cardValue(v) {
 			return Text{}, ErrCardUnshowable
 		}
-		// A value that already holds a defang mark would read the same as
-		// the value whose link was defanged here ("a[.]b" and "a.b"): two
-		// different calls behind one card. Refused, so that what a card
-		// shows names one value.
-		for _, mark := range []string{"[.]", "[:]", "[@]"} {
-			if strings.Contains(v, mark) {
-				return Text{}, ErrCardUnshowable
-			}
+	}
+	if d.Home != "" && !cardValue(d.Home) {
+		return Text{}, ErrCardUnshowable
+	}
+	if strings.TrimSpace(d.Phrase) != d.Phrase || strings.TrimSpace(d.ID) != d.ID {
+		return Text{}, ErrCardUnshowable
+	}
+	return card(tool, args, &d, external)
+}
+
+func card(tool, args string, d *Disclosure, external bool) (Text, error) {
+	for _, v := range []string{tool, args} {
+		if !cardValue(v) {
+			return Text{}, ErrCardUnshowable
 		}
 	}
 	build := func(l Lang) (string, error) {
@@ -73,6 +140,32 @@ func Card(tool, args string, external bool) (Text, error) {
 		b.WriteString("\n")
 		b.WriteString(tool)
 		b.WriteString("\n\n")
+		idLine := ""
+		if d != nil {
+			home := d.Home
+			if home == "" {
+				home = TextCardHomeUnknown.In(l)
+			}
+			idLine = TextCardDeviceID.In(l) + " " + d.ID
+			b.WriteString(TextCardSpeaker.In(l))
+			b.WriteString("\n" + TextCardHome.In(l) + " " + home)
+			b.WriteString("\n" + TextCardRoom.In(l) + " " + d.Room)
+			b.WriteString("\n" + TextCardDeviceName.In(l) + " " + d.Name)
+			b.WriteString("\n" + idLine)
+			b.WriteString("\n\n")
+			if d.Spoken {
+				b.WriteString(TextCardPhrase.In(l))
+			} else {
+				b.WriteString(TextCardCommand.In(l))
+			}
+			b.WriteString("\n")
+			b.WriteString(d.Phrase)
+			b.WriteString("\n\n")
+			if d.Spoken {
+				b.WriteString(TextCardRoomWarning.In(l))
+				b.WriteString("\n\n")
+			}
+		}
 		b.WriteString(TextCardArgs.In(l))
 		b.WriteString("\n")
 		b.WriteString(args)
@@ -86,6 +179,14 @@ func Card(tool, args string, external bool) (Text, error) {
 		// next to it into a token. The templates hold none of their own
 		// (TestCard_ServerTextIsNotDefanged).
 		s := neutralise(b.String(), UserText{})
+		if d != nil {
+			// The text and the device id are on the card exactly as they
+			// are sent, each on a line of its own, or there is no card.
+			lines := strings.Split(s, "\n")
+			if !containsLine(lines, d.Phrase) || !containsLine(lines, idLine) {
+				return "", ErrCardUnshowable
+			}
+		}
 		if UTF16Len(s) > MaxPartUTF16 {
 			return "", ErrTooLong
 		}
@@ -100,4 +201,13 @@ func Card(tool, args string, external bool) (Text, error) {
 		return Text{}, err
 	}
 	return Text{parts: []string{en}, ru: []string{ru}}, nil
+}
+
+func containsLine(lines []string, want string) bool {
+	for _, l := range lines {
+		if l == want {
+			return true
+		}
+	}
+	return false
 }

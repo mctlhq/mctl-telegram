@@ -100,7 +100,11 @@ type CardConfig struct {
 	// Fresh reads the tool's definition as the server lists it now; the
 	// approval binds those hashes (T7).
 	Fresh FreshSurface
-	Now   func() time.Time
+	// Speakers reads a server's speakers for the card of a disclosure
+	// (disclosure.go), by server name. A disclosure on a server without a
+	// reader is refused (ReasonNoWritePath).
+	Speakers map[string]SpeakerReader
+	Now      func() time.Time
 	// Deliver is called after a card committed, to send it without
 	// waiting for the next outbox pass (pa.RunLoop.DeliverAfter). Optional.
 	Deliver func(ctx context.Context, principal int64)
@@ -161,8 +165,9 @@ func cardToolName(server, tool string) string { return tool + " (" + server + ")
 
 // Emit writes the approval, its two callbacks and the card for req in one
 // transaction and makes no downstream tool call. It returns nil when the
-// card is committed and the refusal otherwise; a refused call left nothing
-// behind.
+// card is committed and the refusal otherwise. A refused call left no
+// approval, callback or card behind; a disclosure refused for text over
+// the cap leaves the principal's notice of it (offerSplit).
 func (c *Cards) Emit(ctx context.Context, req CardRequest) *refusal {
 	principal := req.Policy.Principal().TelegramID()
 	pinned, ok := c.approveTool(req.Server, req.Tool)
@@ -188,6 +193,19 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) *refusal {
 	}
 	if err := pinned.CheckDeclaredArgs(canonical); err != nil {
 		return &refusal{ReasonBadRequest, http.StatusBadRequest}
+	}
+	// A disclosure has checks of its own (disclosure.go), ahead of the
+	// size limits: text over the cap is told apart from a card too large.
+	var disclosure *disclosureCall
+	if pinned.Class == catalog.ClassDisclosure {
+		call, ref := precheckDisclosure(req.Tool, pinned, canonical)
+		if ref != nil {
+			if ref.reason == ReasonTextTooLong {
+				c.offerSplit(ctx, principal, req.JobID)
+			}
+			return ref
+		}
+		disclosure = &call
 	}
 	if len(canonical) > MaxCardArgsBytes {
 		return &refusal{ReasonCardTooLarge, http.StatusRequestEntityTooLarge}
@@ -217,6 +235,22 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) *refusal {
 		return &refusal{ReasonToolChanged, http.StatusForbidden}
 	}
 
+	// The target of a disclosure is read now, after the definition: the
+	// card shows the speaker the server lists for this connection.
+	var detail []byte
+	if disclosure != nil {
+		shown, sealed, ref := c.disclosureTarget(ctx, req, *disclosure)
+		if ref != nil {
+			return ref
+		}
+		if _, err := safetext.DisclosureCard(cardToolName(req.Server, req.Tool), string(canonical), shown, true); err != nil {
+			return cardTextRefusal(err)
+		}
+		detail = sealed
+	}
+
+	// The hash is of all of the arguments, the device id among them: an
+	// approval is for one text to one device (S2-D2).
 	sum := sha256.Sum256(canonical)
 	now := c.cfg.Now()
 	a, err := approval.New(approval.Binding{
@@ -226,7 +260,11 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) *refusal {
 		ArgsSHA:        hex.EncodeToString(sum[:]),
 		ConversationID: req.Policy.ConversationID(), JobID: req.JobID,
 	}, now)
-	if err == nil {
+	switch {
+	case err != nil:
+	case detail != nil:
+		a, err = c.cfg.Sealer.SealWithDetail(a, canonical, detail)
+	default:
 		a, err = c.cfg.Sealer.Seal(a, canonical)
 	}
 	if err != nil {
@@ -272,6 +310,32 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) *refusal {
 		c.cfg.Deliver(ctx, principal)
 	}
 	return nil
+}
+
+// offerSplit queues the notice that a text for a speaker was over the cap
+// (S2-D3): the one refusal of a disclosure the principal is told about by
+// the server, once per job. Nothing else is written for the call. A notice
+// that cannot be queued changes nothing about the refusal.
+func (c *Cards) offerSplit(ctx context.Context, principal, jobID int64) {
+	tx, err := c.cfg.Store.BeginPAWrite(ctx, principal, false)
+	if err != nil {
+		slog.Warn("pa card: split offer not queued", "step", "begin", "err_type", errorKind(err))
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := c.cfg.Store.EnqueuePAOutbox(ctx, tx, jobs.OutboxItem{
+		Principal: principal, JobID: jobID, Kind: jobs.OutboxDisclosureTooLong,
+	}, c.cfg.Now()); err != nil {
+		slog.Warn("pa card: split offer not queued", "step", "enqueue", "err_type", errorKind(err))
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		slog.Warn("pa card: split offer not queued", "step", "commit", "err_type", errorKind(err))
+		return
+	}
+	if c.cfg.Deliver != nil {
+		c.cfg.Deliver(ctx, principal)
+	}
 }
 
 func (c *Cards) storeFailed(step string, err error) *refusal {
@@ -337,13 +401,23 @@ func (c *Cards) RenderApprovalCard(ctx context.Context, principal int64, approve
 	if a.Status != approval.StatusPending || len(a.SealedArgs) == 0 {
 		return pa.ApprovalCard{}, pa.ErrCardGone
 	}
-	args, err := c.cfg.Sealer.Open(a)
+	args, detail, err := c.cfg.Sealer.OpenWithDetail(a)
 	if err != nil {
 		return pa.ApprovalCard{}, err
 	}
 	// Unreadable taint is shown as external content, never as none (I9).
 	tainted, terr := c.cfg.Store.ReadPAConversationTaint(ctx, principal, a.ConversationID)
-	text, err := safetext.Card(cardToolName(a.Server, a.Tool), string(args), tainted || terr != nil)
+	var text safetext.Text
+	if a.Class == catalog.ClassDisclosure {
+		// A disclosure has its own card or none: without the speaker
+		// that was read for it, it is never shown as a plain card.
+		var d safetext.Disclosure
+		if d, err = disclosureOf(a.Tool, args, detail); err == nil {
+			text, err = safetext.DisclosureCard(cardToolName(a.Server, a.Tool), string(args), d, tainted || terr != nil)
+		}
+	} else {
+		text, err = safetext.Card(cardToolName(a.Server, a.Tool), string(args), tainted || terr != nil)
+	}
 	if err != nil {
 		return pa.ApprovalCard{}, err
 	}

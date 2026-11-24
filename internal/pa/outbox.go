@@ -76,6 +76,8 @@ var outboxTemplates = map[jobs.OutboxKind]safetext.Template{
 	jobs.OutboxRunFailed:        safetext.TextRunFailed,
 	jobs.OutboxRequestDropped:   safetext.TextRequestDropped,
 	jobs.OutboxPrincipalStopped: safetext.TextAssistantUnavailable,
+	// Refused before any card (#1322 slice P2-S6, S2-D3).
+	jobs.OutboxDisclosureTooLong: safetext.TextDisclosureTooLong,
 
 	jobs.OutboxConsentPrompt:      safetext.TextConsentPrompt,
 	jobs.OutboxConsentPromptRU:    safetext.TextConsentPromptRU,
