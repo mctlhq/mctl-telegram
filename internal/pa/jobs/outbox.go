@@ -124,11 +124,11 @@ func (k OutboxKind) ConnectionLevel() bool {
 }
 
 // Approval-level kinds (#1320 slice P2-S3): what became of a call the
-// principal approved, or was asked to approve. A row belongs to one approval, not to a job, an
-// update or a connection, and is written in the transaction that ends the
-// approval or its dispatch. An approval gets at most one such row, whatever
-// its kind: the executor and the stale-dispatch sweep cannot both report
-// one call.
+// principal approved, or was asked to approve. A row belongs to one
+// approval, not to a job, an update or a connection, and is written in the
+// transaction that ends the approval or its dispatch. An approval gets at
+// most one such row, whatever its kind: the executor and the stale-dispatch
+// sweep cannot both report one call.
 const (
 	// OutboxWriteDone: the server answered the call without an error.
 	OutboxWriteDone OutboxKind = "write_done"
