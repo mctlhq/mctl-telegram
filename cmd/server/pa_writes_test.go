@@ -43,23 +43,30 @@ import (
 const (
 	paKitchenID      = "spk-kitchen-0001"
 	paKitchenSpeaker = `{"id":"` + paKitchenID + `","name":"Kitchen speaker","type":"devices.types.smart_speaker.yandex.station","is_speaker":true,"room":"Kitchen","household":"Home"}`
-	// paSayCanonical is the canonical form of the arguments the tests send
-	// in another key order: what an approval seals and a dispatch sends.
-	paSayCanonical = `{"device":"` + paKitchenID + `","phrase":"Dinner is ready"}`
-	paSaySent      = `{ "phrase": "Dinner is ready", "device": "` + paKitchenID + `" }`
-	paSayTool      = "alice_say_phrase"
+	// paDeskLamp is a light of the same home.
+	paDeskLampID = "lamp-desk-0003"
+	paDeskLamp   = `{"id":"` + paDeskLampID + `","name":"Desk lamp","type":"devices.types.light","is_speaker":false,"room":"Study","household":"Home"}`
+	// paPlayCanonical is the canonical form of the arguments the tests
+	// send in another key order: what an approval seals and a dispatch
+	// sends. The call is eval A1: "play jazz on the kitchen speaker".
+	paPlayCanonical = `{"device":"` + paKitchenID + `","query":"jazz"}`
+	paPlaySent      = `{ "query": "jazz", "device": "` + paKitchenID + `" }`
+	paPlayTool      = "alice_play_music"
 )
 
 // paFakeAlice is the alice MCP endpoint: the committed tools/list of
-// mctl-alice, an identity, one speaker, and a record of every approved
+// mctl-alice, an identity, one speaker and one light, and a record of every approved
 // call's exact bytes.
 type paFakeAlice struct {
 	mu    sync.Mutex
 	reads []string
 	exact []string
-	// drifted makes the listing describe alice_say_phrase in other words
+	// drifted makes the listing describe alice_play_music in other words
 	// than the pin holds.
 	drifted atomic.Bool
+	// summary, when set, is the text alice_get_home_summary returns: a
+	// read whose content the tests choose.
+	summary atomic.Value
 }
 
 var _ connector.WriteEndpoint = (*paFakeAlice)(nil)
@@ -69,7 +76,7 @@ func (a *paFakeAlice) Server() string { return "alice" }
 func (a *paFakeAlice) ListTools(context.Context, connection.Secret) ([][]byte, error) {
 	page, err := os.ReadFile(filepath.Join("..", "..", "internal", "pa", "catalog", "testdata", "alice.tools.json"))
 	if a.drifted.Load() {
-		page = bytes.Replace(page, []byte("Make Alice speak a specific phrase aloud"), []byte("Make Alice speak any phrase aloud"), 1)
+		page = bytes.Replace(page, []byte("Start music on one Yandex Alice smart speaker"), []byte("Start any audio on one Yandex Alice smart speaker"), 1)
 	}
 	return [][]byte{page}, err
 }
@@ -81,8 +88,13 @@ func (a *paFakeAlice) CallTool(_ context.Context, _ connection.Secret, tool stri
 	switch tool {
 	case "alice_get_my_identity":
 		return []byte(`{"content":[{"type":"text","text":"{}"}],"structuredContent":{"account_id":"acct-carol-0001"}}`), nil
+	case "alice_get_home_summary":
+		if text, ok := a.summary.Load().(string); ok {
+			out, err := json.Marshal(map[string]any{"content": []map[string]string{{"type": "text", "text": text}}})
+			return out, err
+		}
 	case "alice_list_devices":
-		return []byte(`{"content":[{"type":"text","text":"one speaker"}],"structuredContent":{"only_speakers":false,"devices":[` + paKitchenSpeaker + `]}}`), nil
+		return []byte(`{"content":[{"type":"text","text":"two devices"}],"structuredContent":{"only_speakers":false,"devices":[` + paKitchenSpeaker + `,` + paDeskLamp + `]}}`), nil
 	}
 	return []byte(`{"content":[{"type":"text","text":"nothing"}]}`), nil
 }
@@ -206,27 +218,6 @@ func withPAGate(t *testing.T, g paWriteGate) {
 	t.Cleanup(func() { newPAWriteGate = prev })
 }
 
-// withPASayScope gives every write path the test builds a scope table
-// under which the listed alice tools need iot:control, the scope a write
-// connection is granted. Under the compiled table the tool these tests
-// call, alice_say_phrase, is held by no connection (paWriteScopes). A
-// bridge: it goes with paWriteScopes once these tests call a tool the
-// compiled table lets a connection hold (#1466).
-func withPASayScope(t *testing.T) {
-	t.Helper()
-	tools := map[string]string{}
-	for _, tool := range paWriteTools[connection.ServerAlice] {
-		tools[tool] = "iot:control"
-	}
-	ws, err := connection.NewWriteScopes(map[connection.Server]map[string]string{connection.ServerAlice: tools})
-	if err != nil {
-		t.Fatal(err)
-	}
-	prev := paWriteScopes
-	paWriteScopes = &ws
-	t.Cleanup(func() { paWriteScopes = prev })
-}
-
 // paPostgresStoreConn is a store on a fresh schema of TEST_DATABASE_URL.
 func paPostgresStoreConn(t *testing.T, dsn string) (*db.Store, *sql.DB) {
 	t.Helper()
@@ -301,8 +292,8 @@ type paWritesE2E struct {
 
 // newPAWritesE2E builds the runtime with PA_WRITES_ENABLED set to writes
 // and links Carol's alice account through the OAuth pages. The action
-// gate is the test's own (paTestGate) and the scope table the bridge of
-// withPASayScope.
+// gate is the test's own (paTestGate); the scope table is the compiled
+// one.
 func newPAWritesE2E(t *testing.T, store *db.Store, conn *sql.DB, writes string) *paWritesE2E {
 	t.Helper()
 	return newPAWritesE2EGate(t, store, conn, writes, false)
@@ -321,7 +312,6 @@ func newPAWritesE2EGate(t *testing.T, store *db.Store, conn *sql.DB, writes stri
 	t.Setenv(connector.WritesFlagEnv, writes)
 	if !shipped {
 		withPAGate(t, e.gate)
-		withPASayScope(t)
 	}
 	_, e.rt = buildEnabledPA(t, store)
 	e.mux = chi.NewRouter()
@@ -377,7 +367,7 @@ func (e *paWritesE2E) post(route, token, body string) *httptest.ResponseRecorder
 // claim sends Carol's message and claims its run as the worker does.
 func (e *paWritesE2E) claim() {
 	e.t.Helper()
-	e.text("tell the kitchen that dinner is ready")
+	e.text("play jazz on the kitchen speaker")
 	w := e.post(pa.RouteClaim, e.pool, "")
 	var claim struct {
 		Token       string   `json:"token"`
@@ -423,7 +413,7 @@ func (e *paWritesE2E) count(query string, args ...any) int {
 func (e *paWritesE2E) cards() []paSend {
 	var out []paSend
 	for _, s := range e.sent.get() {
-		if s.chat == e.user && len(s.buttons) == 2 && strings.Contains(s.text, "Dinner is ready") {
+		if s.chat == e.user && len(s.buttons) == 2 && strings.Contains(s.text, "jazz") {
 			out = append(out, s)
 		}
 	}
@@ -435,10 +425,10 @@ func (e *paWritesE2E) cards() []paSend {
 func (e *paWritesE2E) carded() paSend {
 	e.t.Helper()
 	e.claim()
-	if !slices.Contains(e.tools, "alice/"+paSayTool) {
-		e.t.Fatalf("writes on: tool set %v has no alice/%s", e.tools, paSayTool)
+	if !slices.Contains(e.tools, "alice/"+paPlayTool) {
+		e.t.Fatalf("writes on: tool set %v has no alice/%s", e.tools, paPlayTool)
 	}
-	if a := e.call(paSayTool, paSaySent); a.code != http.StatusOK || a.Status != connector.StatusApprovalPending {
+	if a := e.call(paPlayTool, paPlaySent); a.code != http.StatusOK || a.Status != connector.StatusApprovalPending {
 		e.t.Fatalf("write call: %+v", a)
 	}
 	cards := e.cards()
@@ -461,7 +451,7 @@ func (e *paWritesE2E) carded() paSend {
 // with the switch turned off between the card and the tap, the tap
 // dispatches nothing.
 func TestPAWrites_EndToEnd(t *testing.T) {
-	want := []string{paSayTool + " " + paSayCanonical}
+	want := []string{paPlayTool + " " + paPlayCanonical}
 	t.Run("approve dispatches once with the approved bytes", func(t *testing.T) {
 		forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
 			e := newPAWritesE2E(t, store, conn, "true")
@@ -470,7 +460,7 @@ func TestPAWrites_EndToEnd(t *testing.T) {
 			}
 			card := e.carded()
 			// The server's own rule: one card per run (S2-A7).
-			if a := e.call(paSayTool, `{"device":"`+paKitchenID+`","phrase":"And again"}`); a.code != http.StatusConflict || a.Stop != connector.ReasonCardAlreadySent {
+			if a := e.call(paPlayTool, `{"device":"`+paKitchenID+`","query":"blues"}`); a.code != http.StatusConflict || a.Stop != connector.ReasonCardAlreadySent {
 				t.Fatalf("a second write call of the run: %+v", a)
 			}
 			if n := e.count(`SELECT COUNT(*) FROM pa_approvals WHERE principal = $1`, e.user); n != 1 {
@@ -531,10 +521,10 @@ func TestPAWrites_EndToEnd(t *testing.T) {
 	t.Run("a drifted definition gets no card", func(t *testing.T) {
 		forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
 			e := newPAWritesE2E(t, store, conn, "true")
-			e.text("tell the kitchen dinner is ready")
+			e.text("play jazz on the kitchen speaker")
 			e.claim()
 			e.alice.drifted.Store(true)
-			if a := e.call(paSayTool, paSaySent); a.code == http.StatusOK || len(e.cards()) != 0 {
+			if a := e.call(paPlayTool, paPlaySent); a.code == http.StatusOK || len(e.cards()) != 0 {
 				t.Fatalf("a drifted tool got a card: %+v %v", a, e.cards())
 			}
 		})
@@ -611,7 +601,7 @@ func TestPAWrites_OffIsPhase1(t *testing.T) {
 						t.Fatalf("writes off: the claim offers %s (%v)", name, e.tools)
 					}
 				}
-				a := e.call(paSayTool, paSaySent)
+				a := e.call(paPlayTool, paPlaySent)
 				if a.code == http.StatusOK || a.Status != "" {
 					t.Fatalf("a forged write call was answered %+v", a)
 				}
@@ -634,10 +624,10 @@ func TestPAWrites_SwitchOffAtClaim(t *testing.T) {
 	e := newPAWritesE2E(t, store, conn, "true")
 	t.Setenv(connector.WritesFlagEnv, "false")
 	e.claim()
-	if slices.ContainsFunc(e.tools, func(s string) bool { return strings.Contains(s, paSayTool) }) || len(e.tools) == 0 {
+	if slices.ContainsFunc(e.tools, func(s string) bool { return strings.Contains(s, paPlayTool) }) || len(e.tools) == 0 {
 		t.Fatalf("PA_WRITES_ENABLED turned off: tool set %v", e.tools)
 	}
-	if a := e.call(paSayTool, paSaySent); a.code == http.StatusOK {
+	if a := e.call(paPlayTool, paPlaySent); a.code == http.StatusOK {
 		t.Fatalf("a forged write call was answered %+v", a)
 	}
 	if n := e.count(`SELECT COUNT(*) FROM pa_approvals`); n != 0 || len(e.alice.sent()) != 0 {
@@ -657,7 +647,7 @@ func TestPAWrites_OfferedByGate(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = tx.Rollback() })
 	const carol = 4242003
-	all := []string{"alice/alice_media_control", "alice/alice_play_music", "alice/alice_say_phrase", "alice/alice_send_command", "alice/alice_set_light", "alice/alice_set_volume"}
+	all := []string{"alice/alice_media_control", "alice/alice_play_music", "alice/alice_set_light", "alice/alice_set_volume"}
 	on := func() connector.Flags {
 		return connector.Flags{ExternalTools: true, Writes: true, Servers: map[string]bool{"alice": true}, ServerErrs: map[string]error{}}
 	}
@@ -682,9 +672,9 @@ func TestPAWrites_OfferedByGate(t *testing.T) {
 	}
 	// The gate narrows the list and cannot add to it.
 	gate.set(func(g *paTestGate) {
-		g.only = []string{paSayTool, "alice_trigger_scenario", "alice_list_devices", "tg_send_message"}
+		g.only = []string{paPlayTool, "alice_trigger_scenario", "alice_list_devices", "tg_send_message"}
 	})
-	if got, why := offered(w, on(), alice); !slices.Equal(got, []string{"alice/" + paSayTool}) || why != "" {
+	if got, why := offered(w, on(), alice); !slices.Equal(got, []string{"alice/" + paPlayTool}) || why != "" {
 		t.Fatalf("a gate that offers one tool and three unlisted: %v %q", got, why)
 	}
 	gate.set(func(g *paTestGate) { g.only = []string{} })
@@ -756,10 +746,10 @@ func TestPAWrites_NoGateOffersNothing(t *testing.T) {
 		}
 		e.rt.writes.gate = paShippedGate(store, nil)
 		e.claim()
-		if slices.ContainsFunc(e.tools, func(s string) bool { return strings.Contains(s, paSayTool) }) || len(e.tools) == 0 || e.hint != "" {
+		if slices.ContainsFunc(e.tools, func(s string) bool { return strings.Contains(s, paPlayTool) }) || len(e.tools) == 0 || e.hint != "" {
 			t.Fatalf("tool set %v hint %q", e.tools, e.hint)
 		}
-		if a := e.call(paSayTool, paSaySent); a.code == http.StatusOK || a.Status != "" {
+		if a := e.call(paPlayTool, paPlaySent); a.code == http.StatusOK || a.Status != "" {
 			t.Fatalf("a forged write call was answered %+v", a)
 		}
 		if n := e.count(`SELECT COUNT(*) FROM pa_approvals`); n != 0 || len(e.cards()) != 0 || len(e.alice.sent()) != 0 {
@@ -786,8 +776,8 @@ func TestPAWrites_ShippedGate(t *testing.T) {
 		}
 		return out
 	}
-	// What a write connection holds under the compiled table: the two
-	// listed tools behind the quasar scope are not among them.
+	// What a write connection holds under the compiled table: every
+	// listed tool.
 	held := []string{"alice/alice_media_control", "alice/alice_play_music", "alice/alice_set_light", "alice/alice_set_volume"}
 	for name, c := range map[string]struct {
 		set   func(e *paWritesE2E)
@@ -1144,8 +1134,8 @@ func TestPAWrites_GateDecidesTheClaim(t *testing.T) {
 		tools []string
 		hint  string
 	}{
-		"everything":            {func(*paTestGate) {}, []string{"alice/alice_media_control", "alice/alice_play_music", "alice/alice_say_phrase", "alice/alice_send_command", "alice/alice_set_light", "alice/alice_set_volume"}, ""},
-		"one tool":              {func(g *paTestGate) { g.only = []string{paSayTool} }, []string{"alice/" + paSayTool}, ""},
+		"everything":            {func(*paTestGate) {}, []string{"alice/alice_media_control", "alice/alice_play_music", "alice/alice_set_light", "alice/alice_set_volume"}, ""},
+		"one tool":              {func(g *paTestGate) { g.only = []string{paPlayTool} }, []string{"alice/" + paPlayTool}, ""},
 		"nothing, no reason":    {func(g *paTestGate) { g.only = []string{} }, nil, ""},
 		"no consent to actions": {func(g *paTestGate) { g.withheld = pa.ActionsHintConsent }, nil, pa.ActionsHintConsent},
 		"no write scope":        {func(g *paTestGate) { g.withheld = pa.ActionsHintScope }, nil, pa.ActionsHintScope},
@@ -1177,7 +1167,7 @@ func TestPAWrites_GateDecidesTheClaim(t *testing.T) {
 		store, conn := paTestStoreConn(t)
 		e := newPAWritesE2E(t, store, conn, "true")
 		e.gate.set(func(g *paTestGate) { g.err = os.ErrDeadlineExceeded })
-		e.text("tell the kitchen that dinner is ready")
+		e.text("play jazz on the kitchen speaker")
 		if w := e.post(pa.RouteClaim, e.pool, ""); w.Code == http.StatusOK {
 			t.Fatalf("claim with an unreadable gate: %d %s", w.Code, w.Body.String())
 		}
@@ -1193,7 +1183,7 @@ func TestPAWrites_GateDecidesTheClaim(t *testing.T) {
 // list is a change of what a model can ask for.
 func TestPAWriteTools_Table(t *testing.T) {
 	want := map[connection.Server][]string{
-		connection.ServerAlice: {"alice_media_control", "alice_play_music", "alice_say_phrase", "alice_send_command", "alice_set_light", "alice_set_volume"},
+		connection.ServerAlice: {"alice_media_control", "alice_play_music", "alice_set_light", "alice_set_volume"},
 	}
 	if len(paWriteTools) != len(want) {
 		t.Fatalf("servers %v", paWriteTools)
@@ -1239,11 +1229,14 @@ func TestBuildPAWrites_RefusesAHalfWiredStart(t *testing.T) {
 		"an endpoint that cannot send approved bytes": {ep: func() connector.MCPEndpoint { return paReadOnlyAlice{inner: &paFakeAlice{}} }},
 		// alice_trigger_scenario needs a reader of scenario steps; none
 		// exists.
-		"a tool whose reader is missing":   {tools: []string{"alice_trigger_scenario"}},
-		"a tool with no card":              {tools: []string{"alice_control_device"}},
-		"a tool the Phase 2 pin lacks":     {tools: []string{"alice_open_the_door"}},
-		"a read tool listed as a write":    {tools: []string{"alice_list_devices"}},
-		"one good tool and one without it": {tools: []string{paSayTool, "alice_trigger_scenario"}},
+		"a tool whose reader is missing": {tools: []string{"alice_trigger_scenario"}},
+		"a tool with no card":            {tools: []string{"alice_control_device"}},
+		"a tool the Phase 2 pin lacks":   {tools: []string{"alice_open_the_door"}},
+		"a read tool listed as a write":  {tools: []string{"alice_list_devices"}},
+		// In the pin, with a card path, behind a scope no write
+		// connection asks for.
+		"a tool no connection can hold":    {tools: []string{"alice_say_phrase"}},
+		"one good tool and one without it": {tools: []string{paPlayTool, "alice_trigger_scenario"}},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
