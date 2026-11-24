@@ -179,6 +179,13 @@ var (
 	TextCardBrightness = tpl("Brightness (percent, from 1 to 100):", "Яркость (в процентах, от 1 до 100):")
 	TextCardColorTemp  = tpl("Color temperature (kelvin, from 1500 to 6500):", "Цветовая температура (в кельвинах, от 1500 до 6500):")
 	TextCardScene      = tpl("Lighting scene:", "Световая сцена:")
+
+	// The card of a scenario call (#1322 slice P2-S9, S2-D6): ScenarioCard
+	// adds the scenario and every step of it, as the service listed them
+	// when the card was made.
+	TextCardScenario      = tpl("Scenario:", "Сценарий:")
+	TextCardScenarioID    = tpl("Scenario id:", "Идентификатор сценария:")
+	TextCardScenarioSteps = tpl("Running it does all of these steps:", "При запуске будут выполнены все эти шаги:")
 	// TextDisclosureTooLong refuses a disclosure whose text is over the
 	// cap (S2-D3). Nothing was sent and no card was made; the text is never
 	// cut or split by the server.

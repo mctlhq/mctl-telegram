@@ -82,6 +82,7 @@ func TestS2A10_CardOffersOnlyApproveAndCancel(t *testing.T) {
 	// No text of a card, and no label on it, offers to skip the next card.
 	texts := append(safetext.CardTemplates(), safetext.DisclosureCardTemplates()...)
 	texts = append(texts, safetext.DeviceWriteCardTemplates()...)
+	texts = append(texts, safetext.ScenarioCardTemplates()...)
 	for _, b := range ApprovalCardButtons() {
 		texts = append(texts, b.Label)
 	}

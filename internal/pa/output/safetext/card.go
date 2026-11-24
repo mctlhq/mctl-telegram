@@ -16,6 +16,7 @@ package safetext
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 )
 
@@ -54,6 +55,22 @@ type Disclosure struct {
 	Phrase string
 	// Spoken: the text is said aloud, so the card warns about the room.
 	Spoken bool
+}
+
+// ScenarioCardTemplates lists every server text a scenario card holds
+// besides CardTemplates.
+func ScenarioCardTemplates() []Template {
+	return []Template{TextCardScenario, TextCardDeviceName, TextCardScenarioID, TextCardScenarioSteps}
+}
+
+// Scenario is what a scenario card shows besides the tool and the
+// arguments (threat model T6, S2-D6): the scenario and what it does.
+type Scenario struct {
+	// ID and Name are the scenario's, as the service gave them when the
+	// card was made; ID is the one in the arguments.
+	ID, Name string
+	// Steps are every step of the scenario, in order.
+	Steps []string
 }
 
 // ContainsLink reports whether s holds a token a bot message would have
@@ -124,6 +141,79 @@ func DisclosureCard(tool, args string, d Disclosure, external bool) (Text, error
 		return Text{}, ErrCardUnshowable
 	}
 	return card(tool, args, &d, nil, external)
+}
+
+// ScenarioCard is Card for a call that runs a scenario (S2-D6): above the
+// arguments it shows the scenario's name and id and every one of its
+// steps, numbered, one to a line. A card without steps is never built:
+// no steps, or a step, name or id that cannot be shown as it is, is
+// ErrCardUnshowable, and a card that does not fit one message is
+// ErrTooLong. Steps are never left out or cut to make it fit.
+func ScenarioCard(tool, args string, sc Scenario, external bool) (Text, error) {
+	if len(sc.Steps) == 0 || !cardValue(sc.ID) || !cardValue(sc.Name) || strings.TrimSpace(sc.ID) != sc.ID {
+		return Text{}, ErrCardUnshowable
+	}
+	for _, step := range sc.Steps {
+		if !cardValue(step) || strings.TrimSpace(step) == "" {
+			return Text{}, ErrCardUnshowable
+		}
+	}
+	for _, v := range []string{tool, args} {
+		if !cardValue(v) {
+			return Text{}, ErrCardUnshowable
+		}
+	}
+	build := func(l Lang) (string, error) {
+		var b strings.Builder
+		b.WriteString(TextCardHead.In(l) + "\n\n" + TextCardAction.In(l) + "\n" + tool + "\n\n")
+		idLine := TextCardScenarioID.In(l) + " " + sc.ID
+		b.WriteString(TextCardScenario.In(l))
+		b.WriteString("\n" + TextCardDeviceName.In(l) + " " + sc.Name)
+		b.WriteString("\n" + idLine + "\n\n")
+		b.WriteString(TextCardScenarioSteps.In(l))
+		for i, step := range sc.Steps {
+			b.WriteString("\n" + strconv.Itoa(i+1) + ". " + step)
+		}
+		b.WriteString("\n\n" + TextCardArgs.In(l) + "\n" + args)
+		if external {
+			b.WriteString("\n\n" + TextCardExternal.In(l))
+		}
+		b.WriteString("\n\n" + TextCardFoot.In(l))
+		// As in card: one pass over the whole text.
+		s := neutralise(b.String(), UserText{})
+		// The id is on the card exactly, and every step has its line.
+		lines := strings.Split(s, "\n")
+		if !containsLine(lines, idLine) {
+			return "", ErrCardUnshowable
+		}
+		for i := range sc.Steps {
+			if !hasLinePrefix(lines, strconv.Itoa(i+1)+". ") {
+				return "", ErrCardUnshowable
+			}
+		}
+		if UTF16Len(s) > MaxPartUTF16 {
+			return "", ErrTooLong
+		}
+		return s, nil
+	}
+	en, err := build(LangEN)
+	if err != nil {
+		return Text{}, err
+	}
+	ru, err := build(LangRU)
+	if err != nil {
+		return Text{}, err
+	}
+	return Text{parts: []string{en}, ru: []string{ru}}, nil
+}
+
+func hasLinePrefix(lines []string, prefix string) bool {
+	for _, l := range lines {
+		if strings.HasPrefix(l, prefix) && len(l) > len(prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func card(tool, args string, d *Disclosure, w *DeviceWrite, external bool) (Text, error) {

@@ -89,7 +89,7 @@ func TestCard_LinksAreDefanged(t *testing.T) {
 // TestCard_ServerTextIsNotDefanged: the templates hold no link token of
 // their own, so the pass over the whole card leaves them as written.
 func TestCard_ServerTextIsNotDefanged(t *testing.T) {
-	for _, tp := range slices.Concat(CardTemplates(), DisclosureCardTemplates(), DeviceWriteCardTemplates()) {
+	for _, tp := range slices.Concat(CardTemplates(), DisclosureCardTemplates(), ScenarioCardTemplates(), DeviceWriteCardTemplates()) {
 		for _, l := range []Lang{LangEN, LangRU} {
 			if s := tp.In(l); neutralise(s, UserText{}) != s || s == "" {
 				t.Errorf("template %q changes under neutralise or is empty", s)
@@ -228,6 +228,77 @@ func TestDisclosureCard_RefusesWhatItCannotShow(t *testing.T) {
 	}
 	if !ContainsLink("see example.com") || ContainsLink("Dinner at 19:30. Table for 2!") {
 		t.Fatal("ContainsLink")
+	}
+}
+
+const scenarioArgs = `{"scenario":"scn-night-0000001"}`
+
+func testScenario() Scenario {
+	return Scenario{ID: "scn-night-0000001", Name: "Good night",
+		Steps: []string{"Turn off Kitchen lamp", "Set Bedroom speaker volume to 2", "Lock the front door"}}
+}
+
+// TestScenarioCard_Layout is S2-D6 at the builder: the scenario and every
+// step of it, numbered, above the arguments.
+func TestScenarioCard_Layout(t *testing.T) {
+	c, err := ScenarioCard("alice_trigger_scenario (alice)", scenarioArgs, testScenario(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := TextCardHead.String() + "\n\n" + TextCardAction.String() + "\nalice_trigger_scenario (alice)\n\n" +
+		"Scenario:\nName: Good night\nScenario id: scn-night-0000001\n\n" +
+		TextCardScenarioSteps.String() + "\n1. Turn off Kitchen lamp\n2. Set Bedroom speaker volume to 2\n3. Lock the front door\n\n" +
+		TextCardArgs.String() + "\n" + scenarioArgs + "\n\n" + TextCardFoot.String()
+	if got := c.String(); got != want {
+		t.Fatalf("card:\n got %q\nwant %q", got, want)
+	}
+	ru := c.In(LangRU).String()
+	for _, tp := range ScenarioCardTemplates() {
+		if !strings.Contains(ru, tp.In(LangRU)) || tp.In(LangRU) == tp.In(LangEN) {
+			t.Errorf("Russian card lacks %q", tp.In(LangRU))
+		}
+	}
+	if !strings.Contains(ru, "\n1. Turn off Kitchen lamp\n2. Set Bedroom speaker volume to 2\n3. Lock the front door\n") {
+		t.Fatalf("Russian card lacks the steps:\n%s", ru)
+	}
+	ext, err := ScenarioCard("alice_trigger_scenario (alice)", scenarioArgs, testScenario(), true)
+	if err != nil || !strings.Contains(ext.String(), TextCardExternal.String()) {
+		t.Fatalf("external card: %v", err)
+	}
+}
+
+// TestScenarioCard_NeverWithoutSteps: no steps, or a value that cannot be
+// shown, gives no card; steps are never dropped to make a card fit.
+func TestScenarioCard_NeverWithoutSteps(t *testing.T) {
+	set := func(f func(*Scenario)) Scenario {
+		sc := testScenario()
+		f(&sc)
+		return sc
+	}
+	for name, sc := range map[string]Scenario{
+		"no steps":             set(func(s *Scenario) { s.Steps = nil }),
+		"an empty list":        set(func(s *Scenario) { s.Steps = []string{} }),
+		"an empty step":        set(func(s *Scenario) { s.Steps[1] = "" }),
+		"a blank step":         set(func(s *Scenario) { s.Steps[1] = " " }),
+		"a two-line step":      set(func(s *Scenario) { s.Steps[0] = "Turn off Kitchen lamp\n9. Nothing else" }),
+		"a step with a bidi":   set(func(s *Scenario) { s.Steps[2] = "a‮b" }),
+		"no name":              set(func(s *Scenario) { s.Name = "" }),
+		"a two-line name":      set(func(s *Scenario) { s.Name = "Good night\n1. Nothing" }),
+		"no id":                set(func(s *Scenario) { s.ID = "" }),
+		"an id that is a link": set(func(s *Scenario) { s.ID = "scn.example.com" }),
+	} {
+		if _, err := ScenarioCard("alice_trigger_scenario (alice)", scenarioArgs, sc, false); !errors.Is(err, ErrCardUnshowable) {
+			t.Errorf("%s: err = %v, want ErrCardUnshowable", name, err)
+		}
+	}
+	long := set(func(s *Scenario) {
+		s.Steps = nil
+		for range 20 {
+			s.Steps = append(s.Steps, strings.Repeat("a", 250))
+		}
+	})
+	if _, err := ScenarioCard("alice_trigger_scenario (alice)", scenarioArgs, long, false); !errors.Is(err, ErrTooLong) {
+		t.Errorf("steps over one message: err = %v, want ErrTooLong", err)
 	}
 }
 

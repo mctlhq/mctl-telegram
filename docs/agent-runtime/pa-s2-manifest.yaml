@@ -88,6 +88,15 @@
 # call is now an assignment (=) in the branch for a card that is not a
 # disclosure.
 #
+# The P2S9-* records (S2-D6) ran on the P2-S9 branch, cut from the P2-S6
+# branch at b31b30d7, the same way, on sqlite, restored from saved bytes;
+# the tests also pass on Postgres. P2-S9 built the checks and the card of
+# alice_trigger_scenario over a ScenarioSteps reader that only tests
+# provide. The change moved lines in internal/pa/connector/card.go,
+# internal/pa/connector/disclosure.go and
+# internal/pa/output/safetext/card.go, so the P2S5 and P2S6 guards in those
+# files were pointed at their new line numbers; their code did not change.
+#
 # The P2S8-* records (S2-D2) ran on the P2-S8 branch, cut from fac5a5aa, the
 # same way, on sqlite, restored from saved bytes; the tests also pass on
 # Postgres. P2-S8 owns no S2 id: it built the checks and the card of a
@@ -98,7 +107,9 @@
 # internal/pa/connector/card.go, so the P2S5-A5c, P2S5-D7c, P2S6-D2a,
 # P2S6-D3c and P2S6-D4b guards were pointed at their new line numbers; in
 # P2S5-D7c the guarded call is now in the last branch, for a card that is
-# neither a disclosure nor a Phase 2 write.
+# neither a disclosure nor a Phase 2 write. The branch then merged main
+# with P2-S9: the P2S8 mutations were run again on the merged code, and
+# the guards of both slices were pointed at the merged line numbers.
 
 S2-C9:
   status: pending
@@ -637,7 +648,7 @@ S2-D1:
 S2-D2:
   status: green
   slice: P2-S6
-  note: "Disclosure target and binding (#1322 P2-S6): alice_say_phrase and alice_send_command get a card only for a device id that a speaker read made for this card lists, byte for byte; a name, a room, an unlisted id and an omitted device are refused (device_not_listed), and a read that failed, was empty or malformed is refused as devices_unreadable, never as not listed. The approval's args_sha is over all of the canonical arguments, the device id included, and the executor refuses stored arguments that do not hash to it (args_changed). Device writes (#1322 P2-S8): alice_media_control, alice_set_volume and alice_set_light get a card only for the id of a speaker, or of a light, that a read made for the card lists, and only for values the pin allows: an integer in its plain spelling inside integer_bounds, or a string the pinned schema lists. A value outside its range, 5.0, 5e0 and a quoted number are refused (value_not_allowed), never rounded or clamped, so the card shows the value in device units and args_sha binds that spelling. A Phase 2 write without a card of its own (alice_control_device, alice_control_room, alice_trigger_scenario) is refused, never shown as a plain card."
+  note: "Disclosure target and binding (#1322 P2-S6): alice_say_phrase and alice_send_command get a card only for a device id that a speaker read made for this card lists, byte for byte; a name, a room, an unlisted id and an omitted device are refused (device_not_listed), and a read that failed, was empty or malformed is refused as devices_unreadable, never as not listed. The approval's args_sha is over all of the canonical arguments, the device id included, and the executor refuses stored arguments that do not hash to it (args_changed). Device writes (#1322 P2-S8): alice_media_control, alice_set_volume and alice_set_light get a card only for the id of a speaker, or of a light, that a read made for the card lists, and only for values the pin allows: an integer in its plain spelling inside integer_bounds, or a string the pinned schema lists. A value outside its range, 5.0, 5e0 and a quoted number are refused (value_not_allowed), never rounded or clamped, so the card shows the value in device units and args_sha binds that spelling. A Phase 2 write without a card of its own (alice_control_device, alice_control_room) is refused, never shown as a plain card; alice_trigger_scenario has its own path (S2-D6)."
   tests:
     - internal/pa.TestS2D2_TargetMustBeAListedDeviceID
     - internal/pa.TestS2D2_ApprovalBindsTextAndDevice
@@ -653,7 +664,7 @@ S2-D2:
     - internal/pa.TestDeviceWrite_PinAndCardAgree
   mutations:
     - id: P2S6-D2a
-      guard: internal/pa/connector/card.go:280
+      guard: internal/pa/connector/card.go:307
       guard_text: "sum := sha256.Sum256(canonical)"
       mutation: "the approval hash leaves the device field out (at the card, the seal and the executor)"
       killed_by:
@@ -666,7 +677,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.677s
     - id: P2S6-D2b
-      guard: internal/pa/connector/disclosure.go:236
+      guard: internal/pa/connector/disclosure.go:239
       guard_text: "if s.ID == call.device {"
       mutation: "a speaker's name is accepted as the target"
       killed_by:
@@ -679,7 +690,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.563s
     - id: P2S6-D2c
-      guard: internal/pa/connector/disclosure.go:203
+      guard: internal/pa/connector/disclosure.go:206
       guard_text: "if !hasDevice || device == \"\" {"
       mutation: "an omitted device falls back to a default speaker instead of a refusal"
       killed_by:
@@ -692,7 +703,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.547s
     - id: P2S6-D2d
-      guard: internal/pa/connector/disclosure.go:222
+      guard: internal/pa/connector/disclosure.go:225
       guard_text: "if err != nil || len(speakers) == 0 {"
       mutation: "a failed speaker read that came with a list is used"
       killed_by:
@@ -835,7 +846,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.573s
     - id: P2S8-D2j
-      guard: internal/pa/connector/card.go:223
+      guard: internal/pa/connector/card.go:238
       guard_text: "} else if pinned.Class == catalog.ClassWrite && catalog.Phase2Tool(req.Tool) {"
       mutation: "a Phase 2 write without a card of its own falls through to the plain card of raw arguments"
       killed_by:
@@ -876,7 +887,7 @@ S2-D3:
     - internal/pa.TestDisclosure_OneCapForEveryTool
   mutations:
     - id: P2S6-D3a
-      guard: internal/pa/connector/disclosure.go:197
+      guard: internal/pa/connector/disclosure.go:200
       guard_text: "if utf8.RuneCountInString(text) > limit {"
       mutation: "the cap counts bytes, so 1000 Cyrillic characters are refused"
       killed_by:
@@ -889,7 +900,7 @@ S2-D3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.463s
     - id: P2S6-D3b
-      guard: internal/pa/connector/disclosure.go:197
+      guard: internal/pa/connector/disclosure.go:200
       guard_text: "if utf8.RuneCountInString(text) > limit {"
       mutation: "the cap is 1001 characters"
       killed_by:
@@ -902,7 +913,7 @@ S2-D3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.565s
     - id: P2S6-D3c
-      guard: internal/pa/connector/card.go:207
+      guard: internal/pa/connector/card.go:212
       guard_text: "c.offerSplit(ctx, principal, req.JobID)"
       mutation: "text over the cap is refused without the offer to split it"
       killed_by:
@@ -915,7 +926,7 @@ S2-D3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.472s
     - id: P2S6-D3d
-      guard: internal/pa/connector/disclosure.go:189
+      guard: internal/pa/connector/disclosure.go:192
       guard_text: "if limit != catalog.MaxDisclosureText {"
       mutation: "a pin with a lower cap than the one the notice names gets a card path"
       killed_by:
@@ -942,7 +953,7 @@ S2-D4:
     - internal/pa/approval.TestSealer_Detail
   mutations:
     - id: P2S6-D4a
-      guard: internal/pa/output/safetext/card.go:162
+      guard: internal/pa/output/safetext/card.go:252
       guard_text: "b.WriteString(d.Phrase)"
       mutation: "the card shows the first 100 characters of the text (and the whole-line check is dropped)"
       killed_by:
@@ -960,7 +971,7 @@ S2-D4:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.698s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/output/safetext	0.253s
     - id: P2S6-D4b
-      guard: internal/pa/connector/card.go:442
+      guard: internal/pa/connector/card.go:476
       guard_text: "text, err = safetext.DisclosureCard(cardToolName(a.Server, a.Tool), string(args), d, tainted || terr != nil)"
       mutation: "the delivered card of a disclosure is the plain card: no speaker, no text line, no warning"
       killed_by:
@@ -973,7 +984,7 @@ S2-D4:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.595s
     - id: P2S6-D4c
-      guard: internal/pa/output/safetext/card.go:165
+      guard: internal/pa/output/safetext/card.go:255
       guard_text: "b.WriteString(TextCardRoomWarning.In(l))"
       mutation: "the room warning is left off a spoken phrase"
       killed_by:
@@ -991,7 +1002,7 @@ S2-D4:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.502s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/output/safetext	0.604s
     - id: P2S6-D4d
-      guard: internal/pa/connector/disclosure.go:248
+      guard: internal/pa/connector/disclosure.go:251
       guard_text: "Home: target.Home, Room: target.Room, Name: target.Name, ID: target.ID,"
       mutation: "the card names the room and the name of another speaker than the target"
       killed_by:
@@ -1020,10 +1031,123 @@ S2-D5:
   note: "standing permission device allowlist; type read fresh at dispatch. Open question (#1323): the fresh type read at dispatch may belong to P2-S8 (Alice iot writes) or P2-S11 (lowering) rather than P2-S10."
 
 S2-D6:
-  status: pending
+  status: green
   slice: P2-S9
-  tracked_by: "#1322"
-  note: "trigger_scenario card shows the steps"
+  note: "alice_trigger_scenario (#1322 P2-S9): the card lists the scenario and every step of it, read through a connector.ScenarioSteps reader for that card and sealed with the arguments; a read that failed, or returned no steps, too many or steps that cannot be shown, is refused with no approval row and no call, never a card without steps. The scenario must be named by the id the read returned. A name or id that starts with mctl- is refused with or without a reader. No reader exists outside tests, so a deployed configuration refuses every call (no_write_path) before the tool listing is read."
+  tests:
+    - internal/pa.TestS2D6_ScenarioCardShowsEveryStep
+    - internal/pa.TestS2D6_UnreadableScenarioIsRefused
+    - internal/pa.TestS2D6_NoReaderRefusesBeforeAnythingIsRead
+    - internal/pa.TestS2D6_ServiceScenariosAreNeverRun
+    - internal/pa/output/safetext.TestScenarioCard_Layout
+    - internal/pa/output/safetext.TestScenarioCard_NeverWithoutSteps
+  mutations:
+    - id: P2S9-D6a
+      guard: internal/pa/connector/card.go:295
+      guard_text: "shown, sealed, ref := c.scenarioTarget(ctx, req, scenario)"
+      mutation: "a scenario whose steps could not be read gets the plain card, without steps"
+      killed_by:
+        - internal/pa.TestS2D6_UnreadableScenarioIsRefused
+        - internal/pa.TestS2D6_ServiceScenariosAreNeverRun
+      red: |-
+        --- FAIL: TestS2D6_UnreadableScenarioIsRefused (0.01s)
+        --- FAIL: TestS2D6_ServiceScenariosAreNeverRun (0.03s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.773s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.703s
+    - id: P2S9-D6b
+      guard: internal/pa/connector/scenario.go:145
+      guard_text: "if c.cfg.Scenarios[server] == nil {"
+      mutation: "a call without a steps reader is not refused before the tool listing is read"
+      killed_by:
+        - internal/pa.TestS2D6_NoReaderRefusesBeforeAnythingIsRead
+      red: |-
+        --- FAIL: TestS2D6_NoReaderRefusesBeforeAnythingIsRead (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.679s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.567s
+    - id: P2S9-D6c
+      guard: internal/pa/connector/scenario.go:142
+      guard_text: "if reservedScenario(name) {"
+      mutation: "a call that names an mctl- scenario is not refused"
+      killed_by:
+        - internal/pa.TestS2D6_ServiceScenariosAreNeverRun
+      red: |-
+        --- FAIL: TestS2D6_ServiceScenariosAreNeverRun (0.02s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.662s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.641s
+    - id: P2S9-D6d
+      guard: internal/pa/output/safetext/card.go:174
+      guard_text: "for i, step := range sc.Steps {"
+      mutation: "the card lists only the first step"
+      killed_by:
+        - internal/pa.TestS2D6_ScenarioCardShowsEveryStep
+        - internal/pa/output/safetext.TestScenarioCard_Layout
+      red: |-
+        --- FAIL: TestS2D6_ScenarioCardShowsEveryStep (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.977s
+        --- FAIL: TestScenarioCard_Layout (0.00s)
+        --- FAIL: TestScenarioCard_NeverWithoutSteps (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/output/safetext	0.351s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.760s
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/output/safetext	0.246s
+    - id: P2S9-D6e
+      guard: internal/pa/connector/scenario.go:178
+      guard_text: "if sc.ID != name {"
+      mutation: "a scenario named by its name, or a part of it, gets a card"
+      killed_by:
+        - internal/pa.TestS2D6_UnreadableScenarioIsRefused
+      red: |-
+        --- FAIL: TestS2D6_UnreadableScenarioIsRefused (0.02s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.702s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.558s
+    - id: P2S9-D6f
+      guard: internal/pa/connector/scenario.go:173
+      guard_text: "if reservedScenario(sc.ID) || reservedScenario(sc.Name) {"
+      mutation: "an mctl- scenario behind a plain id gets a card"
+      killed_by:
+        - internal/pa.TestS2D6_ServiceScenariosAreNeverRun
+      red: |-
+        --- FAIL: TestS2D6_ServiceScenariosAreNeverRun (0.03s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.667s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.558s
+    - id: P2S9-D6g
+      guard: internal/pa/connector/scenario.go:163
+      guard_text: "if err != nil || sc.ID == \"\" || sc.Name == \"\" || len(sc.Steps) == 0 || len(sc.Steps) > MaxScenarioSteps {"
+      mutation: "a failed steps read that came with a result is used"
+      killed_by:
+        - internal/pa.TestS2D6_UnreadableScenarioIsRefused
+      red: |-
+        --- FAIL: TestS2D6_UnreadableScenarioIsRefused (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.681s
+        FAIL
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.550s
+  gaps:
+    - half: "production wiring: nothing in cmd/server constructs connector.Cards (TestNoRuntimePhase2Use forbids NewCards outside tests), the Phase 2 pin is not loadable at runtime and the run loop admits no approve-tier tool, so no scenario call reaches these checks outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
+    - half: "no production ScenarioSteps reader: no mctl-alice tool returns a scenario's steps, so the half of the row that shows the steps is proven with a fake reader only and every real call would be refused. Owner decision: add a steps read to mctl-alice, or leave the tool always refused"
+      tracked_by: "#1322"
+    - half: "the steps are read when the card is made and not again at dispatch: a scenario edited within the approval's five minutes runs with other steps than the card listed"
+      tracked_by: "#1322"
 
 S2-D7:
   status: green
@@ -1059,7 +1183,7 @@ S2-D7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.525s
     - id: P2S5-D7c
-      guard: internal/pa/connector/card.go:455
+      guard: internal/pa/connector/card.go:489
       guard_text: "text, err = safetext.Card(cardToolName(a.Server, a.Tool), string(args), tainted || terr != nil)"
       mutation: "the card is rendered from other bytes than the sealed arguments (the last byte dropped)"
       killed_by:
@@ -1395,7 +1519,7 @@ S2-A5:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/catalog	0.261s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.474s
     - id: P2S5-A5c
-      guard: internal/pa/connector/card.go:285
+      guard: internal/pa/connector/card.go:312
       guard_text: "SchemaSHA: fresh.SchemaSHA, DescriptionSHA: fresh.DescriptionSHA, AnnotationSHA: fresh.AnnotationSHA,"
       mutation: "the card records another hash as the description hash of the definition it listed"
       killed_by:
