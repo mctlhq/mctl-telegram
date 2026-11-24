@@ -537,6 +537,8 @@ CIMD documents are fetched by the authorization server from MCTL. They are not M
 
 **Per-run call cap (owner decision on #1315, 2026-11-20).** A call the ledger admitted and a later connection check refused still counts toward the cap of 8. This fails closed: a refused call cannot be retried for free.
 
+**After a card (#1320 P2-S13).** A call answered `approval_pending` was not made: the principal was sent a card. It counts toward the cap like any admitted call. The worker gives the model one fixed sentence as its result, never text from the answer, and dispatches nothing more in that run, including the rest of the same batch, so one run asks for one approval. One model call without tools is left for the answer; a tool call in it ends the run. An answer with a status the worker does not know ends the run, and the call is not sent again.
+
 **Tests.**
 - S1-R1: each size limit is enforced.
 - S1-R2: the tool-call cap stops the loop.

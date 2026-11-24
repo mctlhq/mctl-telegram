@@ -14,7 +14,10 @@ package agentworker
 //     tool set, described from the pin), and send each call the model makes
 //     to the server (POST /api/pa/v1/jobs/tool, pa-job token), which
 //     executes it; the result goes back to the model as external data, and
-//     any refusal ends the run;
+//     any refusal ends the run; a call the server answers approval_pending
+//     was not made (the principal was sent a card): the model reads one
+//     fixed sentence, nothing more is dispatched in the run, and one model
+//     call without tools is left for the answer (#1320 slice P2-S13);
 //   - send the final answer (POST /api/pa/v1/jobs/reply) with the cost of
 //     the run, or with no cost at all when a turn's usage was not reported,
 //     which settles at the full reservation.
@@ -402,11 +405,16 @@ func (w *PAWorker) Run(ctx context.Context, c *PAClaim) (PAOutcome, error) {
 	var cost float64
 	costKnown := true
 	toolCalls := 0
+	// cardQueued: a call of this run was answered approval_pending, so the
+	// principal was sent a card. Nothing is dispatched after it.
+	cardQueued := false
 	for {
 		// Once the cap is used up the model is offered no tools: any call
-		// it made would end the run, so it is asked only to answer.
+		// it made would end the run, so it is asked only to answer. The
+		// same holds once a card was queued: the one model call left is
+		// the answer that tells the principal the action waits for them.
 		offer := tools
-		if toolCalls >= maxTools {
+		if toolCalls >= maxTools || cardQueued {
 			offer = nil
 		}
 		tokens := paContextTokens(msgs, offer)
@@ -427,6 +435,13 @@ func (w *PAWorker) Run(ctx context.Context, c *PAClaim) (PAOutcome, error) {
 			costKnown = false
 		}
 		if len(res.Message.ToolCalls) > 0 {
+			// A card is out and the model, offered no tools, asked for one
+			// anyway. The run ends here: a second model call after a card
+			// would be a loop, and a call dispatched now could queue a
+			// second card for one request.
+			if cardQueued {
+				return PAAbandoned, errors.New("pa worker: tool call after an approval card")
+			}
 			// Every call the model asks for counts toward the cap,
 			// dispatched or not. The cap is inclusive, as on the server
 			// (AdmitPAToolCall admits a call while fewer than MaxToolCalls
@@ -445,10 +460,19 @@ func (w *PAWorker) Run(ctx context.Context, c *PAClaim) (PAOutcome, error) {
 			}
 			msgs = append(msgs, ChatMessage{Role: "assistant", Content: res.Message.Content, ToolCalls: res.Message.ToolCalls})
 			for _, tc := range res.Message.ToolCalls {
-				content, out, err := w.callTool(ctx, c.Token, byName, tc, maxOutput)
+				if cardQueued {
+					// The rest of a batch whose earlier call queued a card
+					// is answered here and never sent: one run asks the
+					// principal for one thing. The calls were counted
+					// above.
+					msgs = append(msgs, ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: paToolAfterApproval})
+					continue
+				}
+				content, pending, out, err := w.callTool(ctx, c.Token, byName, tc, maxOutput)
 				if err != nil {
 					return out, err
 				}
+				cardQueued = pending
 				msgs = append(msgs, ChatMessage{Role: "tool", ToolCallID: tc.ID, Content: content})
 			}
 			continue
@@ -555,53 +579,79 @@ const (
 	paToolBadArgs     = "The tool arguments were not a JSON object. Nothing was run."
 	paToolArgsTooBig  = "The tool arguments were too large. Nothing was run."
 	paToolCut         = "(The tool output was cut at the size limit.)"
+	// paToolAfterApproval answers the calls that follow, in one batch, a
+	// call that now waits for the principal.
+	paToolAfterApproval = "Not run. An earlier action of this turn waits for the user's approval, and nothing else runs until the next message."
 )
 
+// PAStatusApprovalPending is the /tool status of a call that was not made:
+// the server sent the principal an approval card for it instead
+// (connector.StatusApprovalPending; a test in internal/pa/connector keeps
+// the two equal). The server answers it only for an approve-tier tool,
+// which no job is offered while PA_WRITES_ENABLED is off.
+const PAStatusApprovalPending = "approval_pending"
+
+// PAToolApprovalPending is what the model reads as the result of such a
+// call. It is the worker's own constant, equal to the sentence the server
+// sends (the same test keeps them equal), and the answer's output field is
+// never read for this status: no text from the wire reaches the model
+// unfenced.
+const PAToolApprovalPending = "Not done yet. The user was sent a card with this exact action and must approve it in Telegram. " +
+	"Do not repeat this call. Tell the user that the action waits for their approval."
+
 // callTool runs one tool call the model made and returns the tool message
-// content. A name outside the claim's tools, or arguments that are not a
-// JSON object, is answered here and never dispatched. Everything else is
-// sent to the server with the pa-job token, and its output comes back
-// wrapped as external data (T5). Any refusal from the server ends the run
-// (PAStopped); a transport failure or a malformed answer abandons it. A
-// call is never retried: the server counted it.
-func (w *PAWorker) callTool(ctx context.Context, token string, byName map[string]paToolRef, tc ToolCall, maxOutput int) (string, PAOutcome, error) {
+// content, and whether the call now waits for the principal's approval
+// (PAStatusApprovalPending): the content is then PAToolApprovalPending and
+// the caller dispatches nothing more in this run. A name outside the
+// claim's tools, or arguments that are not a JSON object, is answered here
+// and never dispatched. Everything else is sent to the server with the
+// pa-job token, and its output comes back wrapped as external data (T5).
+// Any refusal from the server ends the run (PAStopped); a transport
+// failure or a malformed answer abandons it. A call is never retried: the
+// server counted it.
+func (w *PAWorker) callTool(ctx context.Context, token string, byName map[string]paToolRef, tc ToolCall, maxOutput int) (content string, pending bool, out PAOutcome, err error) {
 	ref, ok := byName[tc.Name]
 	if !ok {
-		return paToolUnavailable, "", nil
+		return paToolUnavailable, false, "", nil
 	}
 	args := json.RawMessage(strings.TrimSpace(tc.Arguments))
 	if !paJSONObject(args) {
-		return paToolBadArgs, "", nil
+		return paToolBadArgs, false, "", nil
 	}
 	req := paToolRequest{Server: ref.Server, Tool: ref.Tool, Arguments: args}
 	if b, err := json.Marshal(req); err != nil || len(b)+1 > PAMaxToolRequestBytes {
 		// The server would refuse it as bad_request, ending the run; the
 		// model gets a fixed answer instead. +1: the encoder's newline.
-		return paToolArgsTooBig, "", nil
+		return paToolArgsTooBig, false, "", nil
 	}
 	var res paToolResponse
-	_, err := w.postTimeout(ctx, PARouteTool, token, req, &res, PAToolCallTimeout)
-	if err != nil {
+	if _, err := w.postTimeout(ctx, PARouteTool, token, req, &res, PAToolCallTimeout); err != nil {
 		var he *paHTTPError
 		if errors.As(err, &he) && he.Stop != "" {
-			return "", PAStopped, err
+			return "", false, PAStopped, err
 		}
-		return "", PAAbandoned, err
+		return "", false, PAAbandoned, err
 	}
 	kind := "tool_result"
 	switch res.Status {
 	case "ok":
 	case "tool_error":
 		kind = "tool_error"
+	case PAStatusApprovalPending:
+		// Nothing was called. res.Output is not read: the model gets the
+		// worker's fixed sentence, whatever the answer carried.
+		return PAToolApprovalPending, true, "", nil
 	default:
-		return "", PAAbandoned, errors.New("pa worker: tool answer without a known status")
+		// A status this worker does not know is not a success and not a
+		// pending card: the run ends, and the call is not sent again.
+		return "", false, PAAbandoned, errors.New("pa worker: tool answer without a known status")
 	}
 	output, cut := paCapOutput(res.Output, maxOutput)
-	content := paExternalBlock(paFragment{Kind: kind, Text: output})
+	content = paExternalBlock(paFragment{Kind: kind, Text: output})
 	if cut || res.Truncated {
 		content += "\n" + paToolCut
 	}
-	return content, "", nil
+	return content, false, "", nil
 }
 
 // paJSONObject reports whether raw is one JSON object.
