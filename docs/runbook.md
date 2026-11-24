@@ -147,18 +147,35 @@ service outage unless new authorization-code flows also fail.
   connections at their next refresh. A `redirect_uri` record may carry a
   ceiling too, with or without a `profile`: it bounds every client that
   authorizes with that exact callback, which is how a client without a
-  stable `client_id` (ChatGPT's per-install CIMD ids, dynamic registration)
-  gets one. When both match, the `client_id` ceiling wins. A refresh family
+  stable `client_id` gets one, provided every registration of the product
+  shares the callback (claude.ai, dynamic registration). A product that
+  registers one CIMD client per install shares neither: ChatGPT's
+  connectors use `https://chatgpt.com/oauth/<id>/client.json` and call back
+  to `https://chatgpt.com/connector/oauth/<id>`, Codex to
+  `http://127.0.0.1/callback/<id>`. Bound those with a `client_id_prefix`
+  record, `{"client_id_prefix": "https://chatgpt.com/oauth/",
+  "scope_ceiling": [...]}`: `https://`, a lowercase host name and a path
+  ending in `/` (`https://host/` covers the whole host). It bounds every
+  URL `client_id` on that host whose path starts with that path, carries a
+  ceiling only (no `profile`), and with `OAUTH_CIMD_ACCEPT=true` must be
+  reachable through `OAUTH_CIMD_ALLOWED_HOSTS`, or the server does not
+  start (`client_id_prefix ... can never match`). Before writing a
+  `redirect_uri` or `client_id_prefix` record, read the client's metadata
+  document (`curl <client_id>`) and copy the value from it: a record for a
+  callback the client does not use is accepted and bounds nobody. When
+  several ceilings match, the exact `client_id` wins, then the longest
+  `client_id_prefix`, then the `redirect_uri`. A refresh family
   that stored no `redirect_uri` is refused while any `redirect_uri`
-  ceiling exists (`authorize again`), never minted unbounded. A `null` or
+  ceiling exists (`authorize again`), never minted unbounded, unless its
+  `client_id` selects a ceiling of its own (exact or by prefix). A `null` or
   empty list, a blank,
   padded, space-joined or repeated entry, a repeated JSON key (a second
   `scope_ceiling` or `client_id` in one record) and a key spelled other
-  than exactly `client_id`, `redirect_uri`, `profile`, `scope_ceiling`
-  stop the server at startup
+  than exactly `client_id`, `client_id_prefix`, `redirect_uri`, `profile`,
+  `scope_ceiling` stop the server at startup
   (`MCP_CLIENT_PROFILES: record N: ...`), and so does an entry naming a
   scope the server never grants (`oauth init failed: ... scope ceiling for
-  client_id ...` or `... for redirect_uri ...`). A client without a ceiling keeps its grant exactly. The
+  client_id ...`, `... for client_id_prefix ...` or `... for redirect_uri ...`). A client without a ceiling keeps its grant exactly. The
   code-exchange log line carries `scope_ceiling_applied`; a bounded refresh
   logs `oauth: token refresh_token grant` with the same field. A principal
   holding nothing within the ceiling (for example a lookup admin, whose

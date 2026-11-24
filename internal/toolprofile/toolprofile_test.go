@@ -29,7 +29,7 @@ func TestParseBindings(t *testing.T) {
 	for name, tc := range map[string]struct{ raw, want string }{
 		"both keys":               {`[{"client_id":"claude.ai","redirect_uri":"https://claude.ai/cb","profile":"core-readonly"}]`, "names both client_id and redirect_uri"},
 		"unknown key":             {`[{"client_id":"claude.ai","profile":"core-readonly","scope":"x"}]`, "unknown field"},
-		"neither key":             {`[{"profile":"core-readonly"}]`, "client_id or redirect_uri is required"},
+		"neither key":             {`[{"profile":"core-readonly"}]`, "client_id, client_id_prefix or redirect_uri is required"},
 		"whitespace client_id":    {`[{"client_id":" claude.ai","profile":"core-readonly"}]`, "surrounding whitespace"},
 		"unknown profile":         {`[{"client_id":"claude.ai","profile":"core-readnoly"}]`, `unknown profile "core-readnoly"`},
 		"empty profile":           {`[{"client_id":"claude.ai"}]`, `unknown profile ""`},
@@ -267,5 +267,115 @@ func TestParseBindings_ScopeCeilingByRedirectURI(t *testing.T) {
 	}
 	if b.Empty() {
 		t.Fatal("a table with redirect_uri ceilings is not empty")
+	}
+}
+
+// TestParseBindings_ClientIDPrefix: a client_id_prefix record carries a scope
+// ceiling for every URL client_id below the prefix and nothing else.
+func TestParseBindings_ClientIDPrefix(t *testing.T) {
+	const ceiling = `"scope_ceiling":["telegram:dialogs:read"]`
+	b, err := ParseBindings(`[{"client_id_prefix":"https://chatgpt.com/oauth/",` + ceiling + `},{"client_id_prefix":"https://vendor.example.test/",` + ceiling + `}]`)
+	if err != nil {
+		t.Fatalf("ParseBindings: %v", err)
+	}
+	if b.Empty() {
+		t.Fatal("a table holding only client_id_prefix records reads as empty")
+	}
+	if len(b.ScopeCeilingByClientIDPrefix) != 2 || len(b.ScopeCeilingByClientID) != 0 || len(b.ScopeCeilingByRedirectURI) != 0 || len(b.ByClientID) != 0 {
+		t.Fatalf("records landed in the wrong table: %+v", b)
+	}
+
+	for name, tc := range map[string]struct{ rec, want string }{
+		"with client_id":      {`{"client_id":"x","client_id_prefix":"https://a.example.test/",` + ceiling + `}`, "exactly one"},
+		"with redirect_uri":   {`{"redirect_uri":"https://a.example.test/cb","client_id_prefix":"https://a.example.test/",` + ceiling + `}`, "exactly one"},
+		"with profile":        {`{"client_id_prefix":"https://a.example.test/","profile":"core-readonly",` + ceiling + `}`, "cannot bind a profile"},
+		"without ceiling":     {`{"client_id_prefix":"https://a.example.test/"}`, "needs a scope_ceiling"},
+		"null ceiling":        {`{"client_id_prefix":"https://a.example.test/","scope_ceiling":null}`, "is null"},
+		"empty ceiling":       {`{"client_id_prefix":"https://a.example.test/","scope_ceiling":[]}`, "is empty"},
+		"http":                {`{"client_id_prefix":"http://a.example.test/",` + ceiling + `}`, "must start with https://"},
+		"no scheme":           {`{"client_id_prefix":"a.example.test/oauth/",` + ceiling + `}`, "must start with https://"},
+		"bare host":           {`{"client_id_prefix":"https://a.example.test",` + ceiling + `}`, `must end with "/"`},
+		"no trailing slash":   {`{"client_id_prefix":"https://a.example.test/oauth",` + ceiling + `}`, `must end with "/"`},
+		"uppercase host":      {`{"client_id_prefix":"https://A.example.test/",` + ceiling + `}`, "not a lowercase host name"},
+		"port":                {`{"client_id_prefix":"https://a.example.test:443/",` + ceiling + `}`, "not a lowercase host name"},
+		"userinfo":            {`{"client_id_prefix":"https://u@a.example.test/",` + ceiling + `}`, "not a lowercase host name"},
+		"single label":        {`{"client_id_prefix":"https://localhost/",` + ceiling + `}`, "not a lowercase host name"},
+		"ip literal":          {`{"client_id_prefix":"https://192.0.2.1/",` + ceiling + `}`, "IP literal"},
+		"empty host":          {`{"client_id_prefix":"https:///oauth/",` + ceiling + `}`, "not a lowercase host name"},
+		"query":               {`{"client_id_prefix":"https://a.example.test/oauth/?x=1/",` + ceiling + `}`, "forbidden character"},
+		"percent":             {`{"client_id_prefix":"https://a.example.test/o%61uth/",` + ceiling + `}`, "forbidden character"},
+		"wildcard":            {`{"client_id_prefix":"https://a.example.test/*/",` + ceiling + `}`, "forbidden character"},
+		"dot segment":         {`{"client_id_prefix":"https://a.example.test/a/../",` + ceiling + `}`, "segment"},
+		"empty segment":       {`{"client_id_prefix":"https://a.example.test/a//",` + ceiling + `}`, "segment"},
+		"leading whitespace":  {`{"client_id_prefix":" https://a.example.test/",` + ceiling + `}`, "surrounding whitespace"},
+		"duplicate":           {`{"client_id_prefix":"https://a.example.test/",` + ceiling + `},{"client_id_prefix":"https://a.example.test/",` + ceiling + `}`, "duplicate client_id_prefix"},
+		"key alias":           {`{"CLIENT_ID_PREFIX":"https://a.example.test/",` + ceiling + `}`, "keys are matched exactly"},
+		"repeated key":        {`{"client_id_prefix":"https://a.example.test/","client_id_prefix":"https://b.example.test/",` + ceiling + `}`, "duplicate"},
+		"ceiling not a token": {`{"client_id_prefix":"https://a.example.test/","scope_ceiling":["a b"]}`, "not a single scope token"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := ParseBindings("[" + tc.rec + "]")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ParseBindings = %+v, %v; want an error containing %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestScopeCeilingFor_ClientIDPrefix: the exact client_id wins, then the
+// longest prefix, then the redirect_uri; a prefix ends on a segment boundary
+// and is compared against the client_id as a URL.
+func TestScopeCeilingFor_ClientIDPrefix(t *testing.T) {
+	b := Bindings{
+		ScopeCeilingByClientID:       map[string][]string{"https://chatgpt.com/oauth/pinned/client.json": {"exact"}},
+		ScopeCeilingByClientIDPrefix: map[string][]string{"https://chatgpt.com/oauth/": {"oauth"}, "https://chatgpt.com/oauth/codex/": {"codex"}, "https://whole.example.test/": {"host"}},
+		ScopeCeilingByRedirectURI:    map[string][]string{"https://shared.example.test/cb": {"redirect"}},
+	}
+	const cb = "https://shared.example.test/cb"
+	for name, tc := range map[string]struct{ clientID, redirectURI, want string }{
+		"connector":                  {"https://chatgpt.com/oauth/pXY-1/client.json", "https://chatgpt.com/connector/oauth/pXY-1", "oauth"},
+		"longest prefix":             {"https://chatgpt.com/oauth/codex/v9/client.json", "http://127.0.0.1/callback/v9", "codex"},
+		"exact beats prefix":         {"https://chatgpt.com/oauth/pinned/client.json", cb, "exact"},
+		"prefix beats redirect":      {"https://chatgpt.com/oauth/pXY-1/client.json", cb, "oauth"},
+		"no redirect_uri needed":     {"https://chatgpt.com/oauth/pXY-1/client.json", "", "oauth"},
+		"host-wide prefix":           {"https://whole.example.test/a/b.json", "", "host"},
+		"uppercase host":             {"https://CHATGPT.com/oauth/pXY-1/client.json", "", "oauth"},
+		"default port":               {"https://chatgpt.com:443/oauth/pXY-1/client.json", "", "oauth"},
+		"trailing dot host":          {"https://chatgpt.com./oauth/pXY-1/client.json", "", "oauth"},
+		"percent-encoded path":       {"https://chatgpt.com/%6Fauth/pXY-1/client.json", "", "oauth"},
+		"encoded separator":          {"https://chatgpt.com/oauth%2FpXY-1/client.json", "", "oauth"},
+		"sibling segment":            {"https://chatgpt.com/oauthx/pXY-1/client.json", "", ""},
+		"the prefix without a child": {"https://chatgpt.com/oauth", "", ""},
+		"other path":                 {"https://chatgpt.com/connector/oauth/pXY-1", "", ""},
+		"subdomain":                  {"https://evil.chatgpt.com/oauth/pXY-1/client.json", "", ""},
+		"host suffix":                {"https://notchatgpt.com/oauth/pXY-1/client.json", "", ""},
+		"host as path":               {"https://evil.example.test/chatgpt.com/oauth/x.json", "", ""},
+		"http":                       {"http://chatgpt.com/oauth/pXY-1/client.json", "", ""},
+		"not a URL":                  {"tgmcp_abc", "", ""},
+		"not a URL, redirect bound":  {"tgmcp_abc", cb, "redirect"},
+		"empty":                      {"", "", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, ok := b.ScopeCeilingFor(tc.clientID, tc.redirectURI)
+			if tc.want == "" {
+				if ok {
+					t.Fatalf("ScopeCeilingFor = %v, want no ceiling", got)
+				}
+				return
+			}
+			if !ok || len(got) != 1 || got[0] != tc.want {
+				t.Fatalf("ScopeCeilingFor = %v, %v; want the %q ceiling", got, ok, tc.want)
+			}
+			// ClientIDScopeCeiling answers the same question without the
+			// redirect_uri, so it must agree whenever the client_id decides.
+			own, ownOK := b.ClientIDScopeCeiling(tc.clientID)
+			if tc.want == "redirect" {
+				if ownOK {
+					t.Fatalf("ClientIDScopeCeiling = %v, want none: only the redirect_uri bounds this client", own)
+				}
+			} else if !ownOK || own[0] != tc.want {
+				t.Fatalf("ClientIDScopeCeiling = %v, %v; want the %q ceiling", own, ownOK, tc.want)
+			}
+		})
 	}
 }
