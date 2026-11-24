@@ -453,11 +453,8 @@ func TestLanding_UntestedClientsLabelled(t *testing.T) {
 	Landing("https://tg.mctl.ai", "/mcp", "https://tg.mctl.ai", true).ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
 	body := w.Body.String()
 	for _, label := range []string{
-		// The Cursor / VS Code snippets sit under one "not yet tested" tag in
-		// the "Other clients" tab; Windsurf is named in the FAQ answer, which
-		// carries the label too (TestUntestedClients_LabelledEverywhere).
-		`<span class="tag-untested">not yet tested</span>`,
-		"Gemini, Cursor, VS Code, Notion, Rayrun, Hermes Agent and other MCP clients are not yet tested",
+		"Cursor Desktop sign-in and a read-only tool call were verified. VS Code is not yet tested.",
+		"Gemini, VS Code, Notion, Rayrun, Hermes Agent and other MCP clients are not yet tested",
 		`href="mailto:support@mctl.ai">support@mctl.ai</a>`,
 		"Your client does not work? Write to",
 	} {
@@ -502,7 +499,7 @@ func TestUntestedClients_LabelledEverywhere(t *testing.T) {
 	for src, blocks := range sources {
 		for _, block := range blocks {
 			block = strings.Join(strings.Fields(block), " ")
-			for _, client := range []string{"Cursor", "VS Code", "Windsurf", "Notion", "Rayrun", "Hermes", "Gemini"} {
+			for _, client := range []string{"VS Code", "Windsurf", "Notion", "Rayrun", "Hermes", "Gemini"} {
 				if strings.Contains(block, client) && !strings.Contains(block, "not yet tested") && !strings.Contains(block, "not tested") {
 					t.Errorf("%s: %s is named without \"not yet tested\" or \"not tested\" in: %s", src, client, block)
 				}

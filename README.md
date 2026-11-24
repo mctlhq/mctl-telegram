@@ -12,9 +12,9 @@ assistants access to a user's own Telegram account. It reads dialogs and
 messages, searches, and sends only when the user has explicitly allowed
 it. It runs in production at
 `https://tg.mctl.ai/mcp`. Claude is the client we test against —
-claude.ai and the desktop and mobile apps — Claude Code, Grok and Town
-are observed working, and ChatGPT can add it by URL. It is a standard
-remote MCP server with OAuth, so other clients such as Cursor, VS Code,
+claude.ai and the desktop and mobile apps — Claude Code, Cursor Desktop,
+Grok and Town are observed working, and ChatGPT can add it by URL. It is a
+standard remote MCP server with OAuth, so other clients such as VS Code,
 Windsurf, Gemini, Notion and Rayrun may work, but they are not yet tested
 against tg.mctl.ai
 (per-client status: [docs/platforms/compatibility.md](docs/platforms/compatibility.md)).
@@ -156,12 +156,13 @@ deployment boundary.**
   metadata. Town runs under a restricted reply-only tool profile. Per-host
   status and evidence:
   [docs/platforms/compatibility.md](docs/platforms/compatibility.md).
-- **Cursor, VS Code, Windsurf, Gemini, Notion, Rayrun and others** (not yet tested): use
+- **Cursor Desktop:** use the [MCTL Assistant plugin](#cursor-plugin) or
+  add `https://tg.mctl.ai/mcp` as a Custom MCP server with OAuth. Direct
+  sign-in and a read-only call were verified on 2026-11-24.
+- **VS Code, Windsurf, Gemini, Notion, Rayrun and others** (not yet tested): use
   `https://tg.mctl.ai/mcp`; the client discovers OAuth from the well-known
   metadata. None of these has a verified sign-in against tg.mctl.ai, so
-  treat this as a starting point. A `cursor://` redirect is refused today
-  (only `https` and loopback redirects are accepted), so Cursor sign-in may
-  fail. Per-host status and evidence:
+  treat this as a starting point. Per-host status and evidence:
   [docs/platforms/compatibility.md](docs/platforms/compatibility.md).
 - **Agent platforms:** register with Dynamic Client Registration from a
   callback host on the allowlist, or publish a Client ID Metadata Document
@@ -174,6 +175,24 @@ default; sending can be turned on later on the account page
 (`https://tg.mctl.ai/telegram/connect/manage`) or with the `set_send_consent` tool. If an error comes
 back, [docs/troubleshooting.md](docs/troubleshooting.md) explains the error
 families clients actually hit.
+
+### Cursor plugin
+
+MCTL Assistant is an unofficial [Agent Plugin](https://agent-plugins.org/)
+that uses the Telegram API. To install it from this repository in Cursor Desktop:
+
+1. Copy the root `plugin.json` and `mcp.json` into
+   `~/.cursor/plugins/local/mctl-assistant/`.
+2. Run **Developer: Reload Window**, then open **Customize → MCPs** and
+   sign in to the server from the MCTL Assistant plugin. Use the default
+   **Read only** permission for a first connection.
+3. Ask Cursor to call `list_dialogs` to confirm the connection.
+
+See the [MCTL documentation](https://tg.mctl.ai/docs),
+[privacy policy](https://tg.mctl.ai/privacy), and
+[Cursor local plugin setup](https://cursor.com/docs/plugins#test-plugins-locally).
+The [MCTL Assistant publisher logo](assets/mctl-assistant.png) is included in
+this repository.
 
 ### Your own deployment
 

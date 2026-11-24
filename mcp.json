@@ -1,0 +1,9 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "mctl-assistant": {
+      "type": "streamable-http",
+      "url": "https://tg.mctl.ai/mcp"
+    }
+  }
+}
