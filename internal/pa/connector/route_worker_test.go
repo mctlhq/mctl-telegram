@@ -31,3 +31,18 @@ func TestPAToolTimeoutCoversDispatcher(t *testing.T) {
 		t.Fatalf("worker /tool timeout %v < dispatcher call timeout %v + %v", agentworker.PAToolCallTimeout, DefaultCallTimeout, toolCallMargin)
 	}
 }
+
+// TestPAApprovalPendingMatchesWorker (#1320 slice P2-S13): the status the
+// tool route answers for a call that now waits for the principal is the
+// one the worker ends its tool loop on, and the sentence the worker gives
+// its model is the one this package sends. The worker never reads the
+// answer's output for this status, so a drift here would not reach a
+// model; it would leave the two sides describing the card differently.
+func TestPAApprovalPendingMatchesWorker(t *testing.T) {
+	if agentworker.PAStatusApprovalPending != StatusApprovalPending {
+		t.Fatalf("agentworker.PAStatusApprovalPending = %q, want %q", agentworker.PAStatusApprovalPending, StatusApprovalPending)
+	}
+	if agentworker.PAToolApprovalPending != approvalPendingOutput {
+		t.Fatalf("agentworker.PAToolApprovalPending = %q, want %q", agentworker.PAToolApprovalPending, approvalPendingOutput)
+	}
+}
