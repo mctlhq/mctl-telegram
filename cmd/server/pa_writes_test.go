@@ -979,10 +979,10 @@ func TestPAWrites_ConsentCommandShowsActions(t *testing.T) {
 			}
 		})
 	})
-	// The conversation layer has a switch of its own (pa_wiring.go), read
-	// at every /consent: a service started with writes off has no write
-	// path to borrow one from, and still follows the flag.
-	t.Run("the switch is read at every use", func(t *testing.T) {
+	// A service started with writes off has no write path until it
+	// restarts: the flag turned on later does not make /consent ask for a
+	// consent to actions this process cannot carry out.
+	t.Run("no write path, flag turned on later", func(t *testing.T) {
 		forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
 			e := newPAWritesE2E(t, store, conn, "false")
 			if e.rt.writes != nil {
@@ -991,8 +991,25 @@ func TestPAWrites_ConsentCommandShowsActions(t *testing.T) {
 			e.exec(`DELETE FROM pa_action_consents WHERE principal = $1`, e.user)
 			t.Setenv(connector.WritesFlagEnv, "true")
 			e.text("/consent")
-			if got := e.last(); got.text != convo.ActionConsentText || got.button == "" {
-				t.Fatalf("/consent sent %q with button %q", got.text, got.button)
+			for _, m := range e.sent.get() {
+				if m.text == convo.ActionConsentText || m.text == convo.ActionConsentTextRU {
+					t.Fatal("/consent offered the consent to actions with no write path")
+				}
+			}
+		})
+	})
+	// Turning the flag off is read at once, with the write path built.
+	t.Run("flag turned off later", func(t *testing.T) {
+		forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
+			e := paBuiltGate(t, store, conn)
+			e.exec(`DELETE FROM pa_action_consents WHERE principal = $1`, e.user)
+			t.Setenv(connector.WritesFlagEnv, "false")
+			before := len(e.sent.get())
+			e.text("/consent")
+			for _, m := range e.sent.get()[before:] {
+				if m.text == convo.ActionConsentText || m.text == convo.ActionConsentTextRU {
+					t.Fatal("/consent offered the consent to actions after the flag was turned off")
+				}
 			}
 		})
 	})

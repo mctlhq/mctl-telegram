@@ -3463,7 +3463,7 @@ S2-A8:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14-PERMa
-      guard: cmd/server/pa_wiring.go:245
+      guard: cmd/server/pa_wiring.go:247
       guard_text: "convCfg.Approvals, convCfg.Permissions = pw.approvals, pw.permissions"
       mutation: "the conversations are built without the /permissions command"
       killed_by:
@@ -3729,7 +3729,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.524s
     - id: P2S14-PERMa
-      guard: cmd/server/pa_wiring.go:245
+      guard: cmd/server/pa_wiring.go:247
       guard_text: "convCfg.Approvals, convCfg.Permissions = pw.approvals, pw.permissions"
       mutation: "the conversations are built without the /permissions command"
       killed_by:
@@ -3837,7 +3837,7 @@ S2-A10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.102s
     - id: P2S14-PERMa
-      guard: cmd/server/pa_wiring.go:245
+      guard: cmd/server/pa_wiring.go:247
       guard_text: "convCfg.Approvals, convCfg.Permissions = pw.approvals, pw.permissions"
       mutation: "the conversations are built without the /permissions command"
       killed_by:
@@ -4515,9 +4515,9 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.973s
     - id: P2S14c-NTCd
-      guard: cmd/server/pa_wiring.go:237
-      guard_text: "convCfg.Writes = paWritesSwitch(pt.flags)"
-      mutation: "the conversation layer of a service started with writes off gets no writes switch, so /consent never shows the consent to actions when the flag turns on"
+      guard: cmd/server/pa_wiring.go:235
+      guard_text: "if pw != nil {"
+      mutation: "the conversation layer gets the live writes switch whenever a PA server is enabled, also in a service started with writes off, so /consent offers the consent to actions with no write path once the flag turns on"
       killed_by:
         - cmd/server.TestPAWrites_ConsentCommandShowsActions
       red: |-
@@ -4568,7 +4568,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/agentworker	0.405s
     - id: P2S14-HINTd
-      guard: cmd/server/pa_wiring.go:244
+      guard: cmd/server/pa_wiring.go:246
       guard_text: "loopCfg.Cards, loopCfg.ApproveTools, loopCfg.ActionsHint = pw.cards, pw.approveTools, pw.hint"
       mutation: "the run loop is built without the reason a claim was offered no write tool"
       killed_by:
