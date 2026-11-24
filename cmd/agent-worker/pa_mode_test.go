@@ -101,3 +101,30 @@ func TestValidatePABaseURL_PlainHTTP(t *testing.T) {
 		}
 	}
 }
+
+// TestPAWorkerFromEnv_Streaming: the worker streams only when
+// AGENT_PA_STREAMING says true, and a value that cannot be read refuses to
+// start instead of picking a side.
+func TestPAWorkerFromEnv_Streaming(t *testing.T) {
+	for _, tc := range []struct {
+		val  string
+		want bool
+		bad  bool
+	}{{"", false, false}, {"false", false, false}, {"true", true, false}, {"maybe", false, true}} {
+		t.Run("value="+tc.val, func(t *testing.T) {
+			paEnv(t)
+			t.Setenv("AGENT_PA_BASE_URL", "https://example.org/")
+			t.Setenv("AGENT_PA_STREAMING", tc.val)
+			w, err := paWorkerFromEnv("openai", "pool-token")
+			if tc.bad {
+				if err == nil || !strings.Contains(err.Error(), "AGENT_PA_STREAMING") {
+					t.Fatalf("err = %v, want one naming AGENT_PA_STREAMING", err)
+				}
+				return
+			}
+			if err != nil || w.Streaming != tc.want {
+				t.Fatalf("streaming = %v, %v; want %v", w, err, tc.want)
+			}
+		})
+	}
+}

@@ -364,10 +364,10 @@ type dispatchEnv struct {
 	refreshFn atomic.Pointer[connection.RefreshFunc]
 }
 
-func newDispatchEnv(t *testing.T, store *db.Store) *dispatchEnv {
+func newDispatchEnv(t *testing.T, store *db.Store, opts ...pa.HarnessOption) *dispatchEnv {
 	t.Helper()
 	ctx := context.Background()
-	e := &dispatchEnv{t: t, store: store, h: pa.NewDispatchHarness(t, store)}
+	e := &dispatchEnv{t: t, store: store, h: pa.NewDispatchHarness(t, store, opts...)}
 	for _, p := range []int64{alice, bob} {
 		if _, err := store.EnsureUserByTelegramID(ctx, p, "", "Alice"); err != nil {
 			t.Fatal(err)

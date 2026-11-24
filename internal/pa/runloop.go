@@ -36,6 +36,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"slices"
 	"sort"
 	"strconv"
@@ -57,6 +58,8 @@ const (
 	RouteClaim = "/api/pa/v1/jobs/claim"
 	RouteTurn  = "/api/pa/v1/jobs/turn"
 	RouteReply = "/api/pa/v1/jobs/reply"
+	// RouteDraft shows a partial answer as a Telegram draft (streaming.go).
+	RouteDraft = "/api/pa/v1/jobs/draft"
 )
 
 // maxReplyBody bounds a reply request. It is sized from the Render limit
@@ -150,6 +153,13 @@ type RunLoopConfig struct {
 	// Cards builds an approval card when its outbox row is sent (card.go).
 	// Optional: without it such a row cannot be built and fails.
 	Cards CardRenderer
+	// Drafts shows streamed partial answers and tool statuses as drafts
+	// (streaming.go). Optional; nil disables streaming entirely. It needs
+	// Typing, whose presence loop it extends.
+	Drafts DraftSender
+	// Getenv reads PA_STREAMING_ENABLED on every claim and draft. Optional;
+	// defaults to os.Getenv.
+	Getenv func(string) string
 }
 
 // RunLoop serves the run-loop routes and implements RunEnqueuer and
@@ -172,6 +182,9 @@ type RunLoop struct {
 	typing   *typingTracker
 	timer    *runTimer
 	cards    CardRenderer
+	drafts   DraftSender
+	getenv   func(string) string
+	limiter  *draftLimiter
 	// pending tracks the deliveries request paths started (deliverAfter).
 	pending sync.WaitGroup
 	// readTools is every tool the pin admits without approval, as
@@ -228,20 +241,56 @@ func NewRunLoop(cfg RunLoopConfig) (*RunLoop, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &RunLoop{
+	getenv := cfg.Getenv
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	loop := &RunLoop{
 		store: cfg.Store, sealer: cfg.Sealer, pool: cfg.Pool, minter: cfg.Minter, verifier: cfg.Verifier,
 		sender: cfg.Sender, tools: cfg.Tools, limits: cfg.Limits, budget: cfg.Budget, lease: lease, now: now,
 		readTools: read, modelTools: modelTools, metrics: cfg.Metrics, cbCount: cfg.CallbackMetrics,
 		allowed: cfg.Allowed, typing: newTypingTracker(cfg.Typing, now), timer: newRunTimer(cfg.Phases, now),
-		cards: cfg.Cards,
-	}, nil
+		cards: cfg.Cards, drafts: cfg.Drafts, getenv: getenv, limiter: newDraftLimiter(),
+	}
+	if loop.typing != nil && cfg.Drafts != nil {
+		loop.typing.drafts = cfg.Drafts
+		// A draft is only re-sent for a job that still runs under the same
+		// attempt, context and gate, with the flag still on. A read that
+		// fails is a refusal, like any other.
+		loop.typing.check = func(ctx context.Context, ref jobs.Ref) error {
+			if !loop.streaming() {
+				return errStreamingOff
+			}
+			_, err := loop.store.RunningPAJob(ctx, ref, loop.now(), loop.gate)
+			loop.droppedNotice(ctx, ref, err)
+			return err
+		}
+	}
+	return loop, nil
 }
 
-// Mount registers the three routes.
+// streaming reports whether draft streaming is on right now. It is read
+// again on every claim, draft, tool status and draft refresh. A flag that
+// cannot be read is not "on": nothing is streamed and no draft is sent,
+// and the fault is logged so it is not mistaken for a flag set to false.
+func (l *RunLoop) streaming() bool {
+	if l.drafts == nil || l.typing == nil {
+		return false
+	}
+	on, err := streamingOn(l.getenv)
+	if err != nil {
+		slog.Warn("pa streaming flag unreadable: drafts refused", "err", err)
+		return false
+	}
+	return on
+}
+
+// Mount registers the run-loop routes.
 func (l *RunLoop) Mount(mux interface{ Handle(string, http.Handler) }) {
 	mux.Handle(RouteClaim, http.HandlerFunc(l.serveClaim))
 	mux.Handle(RouteTurn, http.HandlerFunc(l.serveTurn))
 	mux.Handle(RouteReply, http.HandlerFunc(l.serveReply))
+	mux.Handle(RouteDraft, http.HandlerFunc(l.serveDraft))
 }
 
 // EnqueueRun implements RunEnqueuer, inside the update's transaction.
@@ -405,6 +454,8 @@ type (
 		Tools      []wireTool     `json:"tools,omitempty"`
 		Limits     wireLimits     `json:"limits"`
 		Fragments  []wireFragment `json:"fragments"`
+		// Streaming tells the worker it may post drafts (RouteDraft).
+		Streaming bool `json:"streaming,omitempty"`
 	}
 	turnRequest struct {
 		ContextTokens int `json:"context_tokens"`
@@ -547,9 +598,9 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 			MaxToolCalls: l.limits.MaxToolCalls, MaxContextTokens: l.limits.MaxContextTokens,
 			MaxToolOutputBytes: jobs.MaxToolOutputBytes, MaxJobCostUSD: l.budget.PerJobUSD,
 		},
-		Fragments: frags,
+		Fragments: frags, Streaming: l.streaming(),
 	})
-	l.typing.start(j.Principal, j.ID, j.LeaseUntil)
+	l.typing.begin(ref, j.LeaseUntil)
 }
 
 // claimTools is the model's view of exactly the job's signed tool set, in
@@ -695,20 +746,14 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 		l.stopRun(ctx, w, ref, err)
 		return
 	}
-	frags, err := l.loadFragments(ctx, cur.Principal, cur.ConversationID)
+	allow, err := l.typedAllowList(ctx, cur.Principal, cur.ConversationID)
 	if err != nil {
 		stop(w, err)
 		return
 	}
-	var typed []string
-	for _, f := range frags {
-		if f.Provenance == string(convo.ProvenanceUser) {
-			typed = append(typed, f.Text)
-		}
-	}
 	// Rendered here only to refuse an answer too long to send; the outbox
 	// renders the stored answer again when it sends it.
-	_, err = safetext.Render(req.Text, safetext.AllowFromUserText(typed...))
+	_, err = safetext.Render(req.Text, allow)
 	if overflow {
 		err = safetext.ErrTooLong
 	}
@@ -761,6 +806,75 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"queued": true})
 	l.timer.replied(ref.JobID)
 	l.deliverAfter(ctx, j.Principal)
+}
+
+// typedAllowList is the allow-list of URLs the principal typed in this
+// conversation: user-provenance fragments only.
+func (l *RunLoop) typedAllowList(ctx context.Context, principal int64, conversationID string) (safetext.UserText, error) {
+	frags, err := l.loadFragments(ctx, principal, conversationID)
+	if err != nil {
+		return safetext.UserText{}, err
+	}
+	var typed []string
+	for _, f := range frags {
+		if f.Provenance == string(convo.ProvenanceUser) {
+			typed = append(typed, f.Text)
+		}
+	}
+	return safetext.AllowFromUserText(typed...), nil
+}
+
+// draftRequest is a streamed partial answer.
+type draftRequest struct {
+	Text string `json:"text"`
+}
+
+// serveDraft shows a partial answer as a draft. It is presentation only:
+// nothing is stored or queued, every partial goes through
+// safetext.RenderPartial with the reply's allow-list, and a refused or
+// skipped draft changes no run. It answers like serveTurn when the job is
+// no longer running, and sends nothing then.
+func (l *RunLoop) serveDraft(w http.ResponseWriter, r *http.Request) {
+	ref, _, ok := l.verify(w, r)
+	if !ok {
+		return
+	}
+	if !l.streaming() {
+		writeJSON(w, http.StatusNotFound, stopResponse{Stop: "streaming_off"})
+		return
+	}
+	var req draftRequest
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxDraftBody))
+	if err != nil || json.Unmarshal(body, &req) != nil || strings.TrimSpace(req.Text) == "" {
+		writeJSON(w, http.StatusOK, map[string]bool{"shown": false})
+		return
+	}
+	if !l.limiter.allow(ref, l.now()) {
+		writeJSON(w, http.StatusTooManyRequests, stopResponse{Stop: "rate"})
+		return
+	}
+	ctx := r.Context()
+	cur, err := l.store.RunningPAJob(ctx, ref, l.now(), l.gate)
+	if err != nil {
+		l.stopRun(ctx, w, ref, err)
+		return
+	}
+	allow, cached := l.typing.cachedAllow(ref.JobID)
+	if !cached {
+		allow, err = l.typedAllowList(ctx, cur.Principal, cur.ConversationID)
+		if err != nil {
+			stop(w, err)
+			return
+		}
+		l.typing.setAllow(ref.JobID, allow)
+	}
+	text, err := safetext.RenderPartial(req.Text, allow)
+	if err != nil || text.Parts() != 1 || strings.TrimSpace(text.Part(0)) == "" {
+		writeJSON(w, http.StatusOK, map[string]bool{"shown": false})
+		return
+	}
+	shown := l.typing.showDraft(ctx, ref, text)
+	writeJSON(w, http.StatusOK, map[string]bool{"shown": shown})
 }
 
 // release undoes a claim whose token was never handed out and sends the
@@ -947,6 +1061,9 @@ func (l *RunLoop) AdmitToolCall(ctx context.Context, job PAJob, server, tool str
 		return Policy{}, err
 	}
 	l.typing.touch(job.ref.JobID)
+	if l.streaming() {
+		l.typing.showStatus(job.ref, safetext.ServerText(toolStatus(name)))
+	}
 	l.timer.toolStart(job.ref.JobID)
 	return policyFromJob(j, job.ref)
 }

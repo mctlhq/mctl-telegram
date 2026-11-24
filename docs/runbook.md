@@ -4249,6 +4249,31 @@ mctl-gitops vm-rules is part of enabling the PA (#1318).
   resumes after them. A reply whose conversation was closed, forgotten or
   withdrawn before it went out is dropped with it; `/forget` also deletes
   the principal's pending job notices.
+- **Draft streaming (#1431, `PA_STREAMING_ENABLED`).** Off by default. With
+  `PA_STREAMING_ENABLED=true` on the server and `AGENT_PA_STREAMING=true`
+  on the worker, a run shows its answer as it is written, and a fixed
+  status line while a tool runs ("Reading messages…"), as a Telegram
+  draft (`sendMessageDraft`) in the principal's private chat. The server
+  reads the flag from its environment on every claim, draft, tool status
+  and refresh; any value but `true`/`false` is logged as unreadable and
+  treated as off (drafts refused, replies unaffected). The answer is
+  streamed only with both switches on. The tool status line needs the
+  server flag alone, so it also shows for a worker that does not stream.
+  A server without the flag runs exactly as before. Turn the server flag on only once
+  every replica runs a build with the draft route; a worker that gets
+  `404` from it stops streaming that job and still replies. What does not
+  change with the flag on: the reply is stored, rendered, queued in the
+  outbox and sent once, and the run's cost is settled the same way (a
+  streamed model call that reports no usage settles at the full
+  reservation). Limits: at most one draft per 700 ms and 120 per attempt
+  per job (`429` beyond that, counted on the replica that got the
+  request); a shown draft is re-sent every 20 s, each time only after the
+  run gate (consent, conversation, allowlist, kill switches) passed again;
+  the typing status stops once the first draft is shown. Presence lives
+  on the replica that handed out the claim: a draft request that lands on
+  another replica is answered `{"shown": false}` and nothing is shown.
+  Rollback: set the flag to `false` (or unset it); drafts stop at the
+  next request and the one on screen lapses within about 30 s.
 - **Where a run's time goes.** `mctl_pa_run_phase_seconds{phase}` is a
   histogram per phase: `queue` (job created to claimed), `model` and `tool`
   (each summed over the run), `run` (claimed to reply) and `total` (created
