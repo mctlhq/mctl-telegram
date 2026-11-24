@@ -104,7 +104,12 @@ type CardConfig struct {
 	// (disclosure.go), by server name. A disclosure on a server without a
 	// reader is refused (ReasonNoWritePath).
 	Speakers map[string]SpeakerReader
-	Now      func() time.Time
+	// Scenarios reads the steps of a server's scenario for the card of a
+	// scenario call (scenario.go), by server name. A scenario call on a
+	// server without a reader is refused (ReasonNoWritePath): that is
+	// every server today.
+	Scenarios map[string]ScenarioSteps
+	Now       func() time.Time
 	// Deliver is called after a card committed, to send it without
 	// waiting for the next outbox pass (pa.RunLoop.DeliverAfter). Optional.
 	Deliver func(ctx context.Context, principal int64)
@@ -207,6 +212,17 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) *refusal {
 		}
 		disclosure = &call
 	}
+	// A scenario call needs a reader of its steps before anything else is
+	// read (scenario.go, S2-D6).
+	_, isScenario := scenarioTools[req.Tool]
+	scenario := ""
+	if isScenario {
+		name, ref := c.precheckScenario(req.Server, req.Tool, canonical)
+		if ref != nil {
+			return ref
+		}
+		scenario = name
+	}
 	if len(canonical) > MaxCardArgsBytes {
 		return &refusal{ReasonCardTooLarge, http.StatusRequestEntityTooLarge}
 	}
@@ -244,6 +260,18 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) *refusal {
 			return ref
 		}
 		if _, err := safetext.DisclosureCard(cardToolName(req.Server, req.Tool), string(canonical), shown, true); err != nil {
+			return cardTextRefusal(err)
+		}
+		detail = sealed
+	}
+	// The steps of a scenario are read now too: the card lists them, or
+	// there is no card.
+	if isScenario {
+		shown, sealed, ref := c.scenarioTarget(ctx, req, scenario)
+		if ref != nil {
+			return ref
+		}
+		if _, err := safetext.ScenarioCard(cardToolName(req.Server, req.Tool), string(canonical), shown, true); err != nil {
 			return cardTextRefusal(err)
 		}
 		detail = sealed
@@ -408,7 +436,14 @@ func (c *Cards) RenderApprovalCard(ctx context.Context, principal int64, approve
 	// Unreadable taint is shown as external content, never as none (I9).
 	tainted, terr := c.cfg.Store.ReadPAConversationTaint(ctx, principal, a.ConversationID)
 	var text safetext.Text
-	if a.Class == catalog.ClassDisclosure {
+	if _, isScenario := scenarioTools[a.Tool]; isScenario {
+		// A scenario's card lists its steps or is not built: it is never
+		// shown as a plain card.
+		var sc safetext.Scenario
+		if sc, err = scenarioOf(a.Tool, args, detail); err == nil {
+			text, err = safetext.ScenarioCard(cardToolName(a.Server, a.Tool), string(args), sc, tainted || terr != nil)
+		}
+	} else if a.Class == catalog.ClassDisclosure {
 		// A disclosure has its own card or none: without the speaker
 		// that was read for it, it is never shown as a plain card.
 		var d safetext.Disclosure

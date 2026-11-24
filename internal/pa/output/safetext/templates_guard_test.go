@@ -45,8 +45,10 @@ var fieldUsers = map[string]bool{
 	"WithRussian": true,
 	// The approval card (card.go): registry templates around values that
 	// are neutralised like model text. card is the one builder behind
-	// Card and DisclosureCard.
-	"card": true,
+	// Card and DisclosureCard; ScenarioCard builds the card of a scenario
+	// call the same way.
+	"card":         true,
+	"ScenarioCard": true,
 	// The /permissions screens (permission.go): registry templates around
 	// values held to a plain alphabet.
 	"PermissionScreen": true,

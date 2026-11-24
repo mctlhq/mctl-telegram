@@ -165,6 +165,12 @@ var (
 	TextCardPhrase      = tpl("Text the speaker will say aloud:", "Текст, который колонка произнесёт вслух:")
 	TextCardCommand     = tpl("Command the speaker will carry out as if it was said to it:", "Команда, которую колонка выполнит так, как если бы её произнесли:")
 	TextCardRoomWarning = tpl("Warning: everyone in the room will hear it, and it cannot be undone.", "Внимание: это услышат все, кто находится в комнате, и отменить это нельзя.")
+	// The card of a scenario call (#1322 slice P2-S9, S2-D6): ScenarioCard
+	// adds the scenario and every step of it, as the service listed them
+	// when the card was made.
+	TextCardScenario      = tpl("Scenario:", "Сценарий:")
+	TextCardScenarioID    = tpl("Scenario id:", "Идентификатор сценария:")
+	TextCardScenarioSteps = tpl("Running it does all of these steps:", "При запуске будут выполнены все эти шаги:")
 	// TextDisclosureTooLong refuses a disclosure whose text is over the
 	// cap (S2-D3). Nothing was sent and no card was made; the text is never
 	// cut or split by the server.
