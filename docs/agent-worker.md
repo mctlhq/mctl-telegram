@@ -183,6 +183,7 @@ only answers PA claims when `PA_ENABLED` is set there.
 |---|---|---|
 | `AGENT_WORKER_PA` | no | `true` selects the PA loop. Anything but `true`/`false` refuses to start. |
 | `AGENT_PA_BASE_URL` | in PA mode | mctl-telegram origin (`https://host`, no path); the PA routes are `/api/pa/v1/jobs/{claim,turn,reply}`. Plain `http` only for a cluster-local host (`*.svc`, `*.svc.cluster.local`) or loopback: the pool credential and job tokens travel to it. |
+| `AGENT_PA_STREAMING` | no | `true` lets the worker stream a job's model calls and post the growing answer to `/api/pa/v1/jobs/draft` (#1431). It only takes effect for a job whose claim says `"streaming": true`, which the server sends while its own `PA_STREAMING_ENABLED` is on. Anything but `true`/`false` refuses to start. A draft is presentation only: a failed or refused draft never changes a run, and a `404` from the draft route ends streaming for that job. |
 | `AGENT_RUNNER` | `openai` | The PA mode runs the model in-process with no tools; `claude` is refused. |
 | `AGENT_OPENAI_MAX_OUTPUT_TOKENS` | in PA mode | Bounds what the last model call can add past the job's cost limit. |
 | `MODEL_INPUT_USD_PER_MTOK`, `MODEL_OUTPUT_USD_PER_MTOK` | positive in PA mode | A zero price would report every run as free. |

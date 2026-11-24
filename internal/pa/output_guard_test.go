@@ -233,6 +233,7 @@ func TestS1O1_GuardDetects(t *testing.T) {
 		"sendMessage literal":      `package x; const m = "sendMessage"`,
 		"lower case method":        `package x; var m = "sendmessage"`,
 		"edit method":              `package x; var m = "editMessageText"`,
+		"draft method":             `package x; var m = "sendMessageDraft"`,
 		"answer method":            `package x; var m = "answerCallbackQuery"`,
 		"photo method":             `package x; var m = "sendPhoto"`,
 		"folded method":            `package x; var m = "send" + "Message"`,
