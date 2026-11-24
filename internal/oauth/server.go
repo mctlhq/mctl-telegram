@@ -451,6 +451,9 @@ type Config struct {
 	// (ScopeCeilingByClientID, #1326): an allowlist, keyed by exact
 	// client_id, that bounds every token minted for that client on the code
 	// exchange and on refresh, membership-granted admin scopes included. A
+	// ceiling may also be keyed by a client_id prefix
+	// (ScopeCeilingByClientIDPrefix), for a product that registers one
+	// client per install, or by redirect_uri (ScopeCeilingByRedirectURI). A
 	// client without a ceiling keeps today's grant. New refuses a ceiling
 	// that names a scope this server can never grant.
 	ClientProfiles toolprofile.Bindings
@@ -946,6 +949,24 @@ func New(ctx context.Context, cfg Config, store *db.Store) (*Server, error) {
 		for _, sc := range ceiling {
 			if !grantableScope(sc) {
 				return nil, fmt.Errorf("oauth: scope ceiling for client_id %q names %q, which this server never grants", id, sc)
+			}
+		}
+	}
+	// The same checks for ceilings keyed by a client_id prefix. Whether any
+	// client can be below the prefix depends on OAUTH_CIMD_ALLOWED_HOSTS,
+	// which the server binary checks in config.Load: here CIMD may be off on
+	// purpose (OAUTH_CIMD_ACCEPT is the switch that cuts every CIMD client
+	// off), and that must not stop the server from starting.
+	for prefix, ceiling := range cfg.ClientProfiles.ScopeCeilingByClientIDPrefix {
+		if err := toolprofile.ValidateClientIDPrefix(prefix); err != nil {
+			return nil, fmt.Errorf("oauth: scope ceiling for client_id_prefix %q: %w", prefix, err)
+		}
+		if len(ceiling) == 0 {
+			return nil, fmt.Errorf("oauth: scope ceiling for client_id_prefix %q is empty", prefix)
+		}
+		for _, sc := range ceiling {
+			if !grantableScope(sc) {
+				return nil, fmt.Errorf("oauth: scope ceiling for client_id_prefix %q names %q, which this server never grants", prefix, sc)
 			}
 		}
 	}
@@ -3263,7 +3284,8 @@ func (s *Server) applyClientScopeCeiling(clientID, redirectURI string, groups, s
 }
 
 // cimdClientMapped reports whether MCP_CLIENT_PROFILES names this CIMD client:
-// a client_id or redirect_uri profile binding, or a scope ceiling.
+// a client_id or redirect_uri profile binding, or a scope ceiling (by
+// client_id, client_id prefix or redirect_uri).
 func (s *Server) cimdClientMapped(clientID, redirectURI string) bool {
 	if _, ok := s.cfg.ClientProfiles.ScopeCeilingFor(clientID, redirectURI); ok {
 		return true
@@ -3307,10 +3329,10 @@ func (s *Server) profileFor(origin tokenOrigin) (string, error) {
 	// redirect_uri whether it does is unknown: a token minted without it would
 	// be wider than the operator allowed. This is checked before the client_id
 	// profile is returned, or a client with a profile and no client_id ceiling
-	// would skip it. A client_id ceiling wins over a redirect_uri one, so a
-	// client holding its own keeps refreshing.
+	// would skip it. A ceiling the client_id selects, exact or by prefix, wins
+	// over a redirect_uri one, so a client holding its own keeps refreshing.
 	if len(b.ScopeCeilingByRedirectURI) > 0 {
-		if _, own := b.ScopeCeilingByClientID[origin.ClientID]; !own {
+		if _, own := b.ClientIDScopeCeiling(origin.ClientID); !own {
 			return "", errProfileUnresolvable
 		}
 	}
