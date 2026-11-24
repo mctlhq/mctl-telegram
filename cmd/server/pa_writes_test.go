@@ -449,12 +449,17 @@ func TestPAWrites_EndToEnd(t *testing.T) {
 			e := newPAWritesE2E(t, store, conn, "true")
 			grants := func() int { return e.count(`SELECT COUNT(*) FROM pa_permissions WHERE principal = $1`, e.user) }
 			// A device the server does not list: read, and refused.
+			reads := len(e.alice.read())
 			e.text("/permissions grant alice_set_volume spk-attic-0009 5")
 			if s := e.last(); len(s.buttons) != 0 || s.button != "" || grants() != 0 {
 				t.Fatalf("a grant for an unlisted device: %+v, %d rows", s, grants())
 			}
+			// Refused after the listing was read, not for want of a reader.
+			if got := e.alice.read(); len(got) != reads+1 || got[len(got)-1] != "alice_list_devices" {
+				t.Fatalf("a grant for an unlisted device read %q", got[reads:])
+			}
 			// The listed speaker: a screen with a button, then one row.
-			reads := len(e.alice.read())
+			reads = len(e.alice.read())
 			e.text("/permissions grant alice_set_volume " + paKitchenID + " 5")
 			screen := e.last()
 			if !strings.Contains(screen.text, paKitchenID) || (screen.button == "" && len(screen.buttons) == 0) {
