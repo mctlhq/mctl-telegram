@@ -150,6 +150,7 @@ func newWriteEnv(t *testing.T, s *db.Store, mutate func(*connector.WriteConfig))
 	t.Helper()
 	e := &writeEnv{dispatchEnv: newDispatchEnv(t, s), ep: &writeEP{}}
 	e.h.Consent(alice)
+	e.h.ConsentActions(alice)
 	e.h.Text(alice, "please send it")
 	if err := s.DB.QueryRow(`SELECT id FROM pa_conversations WHERE principal = $1 AND closed_at_ms = 0`, alice).Scan(&e.conv); err != nil {
 		t.Fatalf("conversation: %v", err)
@@ -179,6 +180,7 @@ func newWriteEnv(t *testing.T, s *db.Store, mutate func(*connector.WriteConfig))
 		},
 		Allowed: func(int64) bool { return !e.denied.Load() },
 		Fresh:   e.fresh,
+		Scopes:  testWriteScopes(t),
 	}
 	if mutate != nil {
 		mutate(&cfg)

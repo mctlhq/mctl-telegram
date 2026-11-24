@@ -179,12 +179,18 @@ func (s State) WipesSecrets() bool {
 // rotation and nothing binds to it, so a routine refresh does not invalidate
 // a run's next call (S1-C3).
 type Connection struct {
-	ID                string
-	Principal         int64
-	Server            Server
-	State             State
-	AccountID         string
-	GrantedScope      string
+	ID           string
+	Principal    int64
+	Server       Server
+	State        State
+	AccountID    string
+	GrantedScope string
+	// RequestedScope is the canonical scope the connection asked for when
+	// it was made (RequestScope): empty for the read set, the write set
+	// for a connection made while writes were on. It is fixed at Begin and
+	// decides only which token responses are accepted; what the connection
+	// holds is GrantedScope.
+	RequestedScope    string
 	AuthorityRevision int64
 	TokenGeneration   int64
 	FailureReason     string

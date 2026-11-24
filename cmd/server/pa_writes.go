@@ -66,6 +66,15 @@ var paWriteTools = map[connection.Server][]string{
 	},
 }
 
+// paWriteScopes names the scope each write tool needs; nil, as shipped, is
+// the compiled table (connection.DefaultWriteScopes, #1320 P2-S14c). Under
+// that table alice_say_phrase and alice_send_command are held by no
+// connection: mctl-alice puts them behind its quasar scope, which a write
+// connection does not ask for, so the two are listed above and refused at
+// every check until that is decided. A variable so the wiring tests can
+// run a listed tool to the end; nothing else assigns it.
+var paWriteScopes *connection.WriteScopes
+
 // paWriteGate decides, inside the claim transaction, which of a
 // connection's write tools the principal may be offered: it holds the
 // consent to actions and the connection's grant holds the scope each tool
@@ -73,17 +82,45 @@ var paWriteTools = map[connection.Server][]string{
 // tool it may name why, as one of the pa.ActionsHint values; any other
 // reason is dropped. A failed read is an error, never an empty answer.
 //
-// The consent and scope checks are not this file's: the gate is the seam
-// the consent slice (P2-S14c, pa.ActionGate) plugs into.
+// The consent and scope checks are not this file's: they are
+// pa.ActionGate's (P2-S14c), which paActionGate adapts to this seam.
 type paWriteGate interface {
 	Offer(ctx context.Context, tx *sql.Tx, principal int64, connectionID string, tools []string) (offered []string, withheld string, err error)
 }
 
-// newPAWriteGate builds the action gate of a write path. No gate is wired
-// yet, and without one the write path offers no tool to anyone: every
-// card, tap and dispatch is built and reachable by no claim. A variable so
-// the wiring tests can put a gate in.
-var newPAWriteGate = func(store *db.Store, writes func() (bool, error)) paWriteGate { return nil }
+// paActionGate is pa.ActionGate behind the seam: the same answer, with the
+// reason it withheld a tool named as the hint a claim may carry.
+type paActionGate struct{ gate *pa.ActionGate }
+
+func (g paActionGate) Offer(ctx context.Context, tx *sql.Tx, principal int64, connectionID string, tools []string) ([]string, string, error) {
+	got, why, err := g.gate.Offer(ctx, tx, principal, connectionID, tools)
+	if err != nil {
+		return nil, "", err
+	}
+	switch why {
+	case pa.WithheldConsent:
+		return got, pa.ActionsHintConsent, nil
+	case pa.WithheldScope:
+		return got, pa.ActionsHintScope, nil
+	}
+	return got, "", nil
+}
+
+// newPAWriteGate builds the action gate of a write path: pa.ActionGate
+// over the store, the writes switch and the scope table the rest of the
+// write path uses. A write path with no gate offers no tool to anyone, so
+// buildPAWrites refuses to start without one. A variable so the wiring
+// tests can put a gate in.
+var newPAWriteGate = func(store *db.Store, writes func() (bool, error)) (paWriteGate, error) {
+	if store == nil {
+		return nil, errors.New("the action gate needs a store")
+	}
+	g, err := pa.NewActionGate(store, writes, paWriteScopes)
+	if err != nil {
+		return nil, err
+	}
+	return paActionGate{gate: g}, nil
+}
 
 // paApprovedDispatchTimeout bounds the dispatch of one approved call after
 // its update committed: the executor's own call deadline and the writes
@@ -222,7 +259,7 @@ func buildPAWrites(cfg *config.Config, pt *paTools, store *db.Store, sender paBo
 	w.executor, err = connector.NewWriteExecutor(connector.WriteConfig{
 		Store: store, Connections: pt.manager, Endpoints: endpoints, Executor: pt.executor,
 		Sealer: sealer, Flags: pt.flags, Allowed: allowed.Allowed, Fresh: fresh, Metrics: m,
-		Devices: devices,
+		Devices: devices, Scopes: paWriteScopes,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("pa writes: %w", err)
@@ -232,7 +269,7 @@ func buildPAWrites(cfg *config.Config, pt *paTools, store *db.Store, sender paBo
 	// list it.
 	w.cards, err = connector.NewCards(connector.CardConfig{
 		Store: store, Sealer: sealer, Pin: pin, Fresh: fresh, Speakers: speakers, Lights: lights,
-		Permissions: store, Lowered: w.executor,
+		Permissions: store, Lowered: w.executor, Scopes: paWriteScopes,
 		Deliver: func(ctx context.Context, principal int64) { w.deliverTo(ctx, principal) },
 	})
 	if err != nil {
@@ -253,17 +290,25 @@ func buildPAWrites(cfg *config.Config, pt *paTools, store *db.Store, sender paBo
 	}
 	policy := permissions.PinPolicy{Pin: pin}
 	writes := func() (bool, error) { return paWritesEnabled(pt.flags) }
-	w.permissions = &pa.PermissionsConfig{Grants: store, Policy: policy, Writes: writes}
+	// Connections: a grant is given only on a connection whose grant
+	// holds the tool's write scope (P2-S14c), read from the store.
+	w.permissions = &pa.PermissionsConfig{Grants: store, Policy: policy, Writes: writes, Connections: store, Scopes: paWriteScopes}
 	// A grant reads the devices it lists through grantDevices. It is nil
 	// only when no enabled server has such a reader; the Validator then
 	// refuses every grant devices_unreadable (S2-D5), which is fail closed.
 	w.commands = &pa.PermissionCommands{
-		Store: store, Sender: sender, Writes: writes,
+		Store: store, Sender: sender, Writes: writes, Scopes: paWriteScopes,
 		Validator: &permissions.Validator{Policy: policy, Devices: grantDevices, Rule: permissions.Rules{}},
 	}
-	w.gate = newPAWriteGate(store, writes)
+	w.gate, err = newPAWriteGate(store, writes)
+	if err != nil {
+		return nil, fmt.Errorf("pa writes: %w", err)
+	}
+	if w.gate == nil {
+		return nil, errors.New("pa writes: no action gate")
+	}
 	offered := slices.Sorted(maps.Keys(w.approveTools))
-	slog.Info("pa writes on", "env", connector.WritesFlagEnv, "tools", strings.Join(offered, ","), "gate", w.gate != nil)
+	slog.Info("pa writes on", "env", connector.WritesFlagEnv, "tools", strings.Join(offered, ","))
 	if w.gate == nil {
 		slog.Warn("pa writes: no action gate is wired, so no write tool is offered to any run")
 	}

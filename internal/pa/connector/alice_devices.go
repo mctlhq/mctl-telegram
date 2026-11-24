@@ -356,7 +356,10 @@ func (g *GrantDevices) ReadDevices(ctx context.Context, principal int64, connect
 		conn.AuthorityRevision != c.AuthorityRevision {
 		return nil, fmt.Errorf("%w: connection changed", ErrSpeakersUnreadable)
 	}
-	if want, ok := connection.CanonicalScope(conn.Server); !ok || conn.GrantedScope != want {
+	// The read set, or the write set of a connection that asked for it:
+	// a grant is given on a write connection, and both carry every read
+	// scope (connection.ScopeAccepted).
+	if !connection.ScopeAccepted(conn) {
 		return nil, fmt.Errorf("%w: scope", ErrSpeakersUnreadable)
 	}
 	devices, err := g.lister.Devices(ctx, SpeakerRequest{

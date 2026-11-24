@@ -214,6 +214,20 @@ func readErr(err error) error {
 // the principal lock itself, so it must not be called while the caller's
 // transaction holds that lock: it would wait for itself until ctx ends.
 func (m *Manager) Begin(ctx context.Context, principal int64, server Server) (Connection, error) {
+	return m.begin(ctx, principal, server, "")
+}
+
+// BeginForWrites is Begin for a connection that asks for the server's
+// write scopes too (WriteRequestScope). The linking flow calls it only
+// while PA_WRITES_ENABLED reads on; for a server without a write scope it
+// is Begin. What the connection asked for is fixed in its row here, so a
+// token response is judged against the request that was really made.
+func (m *Manager) BeginForWrites(ctx context.Context, principal int64, server Server) (Connection, error) {
+	wide, _ := WriteRequestScope(server)
+	return m.begin(ctx, principal, server, wide)
+}
+
+func (m *Manager) begin(ctx context.Context, principal int64, server Server, requested string) (Connection, error) {
 	if err := validPrincipal(principal); err != nil {
 		return Connection{}, err
 	}
@@ -240,6 +254,7 @@ func (m *Manager) Begin(ctx context.Context, principal int64, server Server) (Co
 	now := m.now().UTC()
 	c := Connection{
 		ID: id, Principal: principal, Server: server, State: StatePendingLink,
+		RequestedScope:    requested,
 		AuthorityRevision: 1, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := m.store.CreatePAConnection(ctx, c, Sealed{KEKID: m.kek.ID(), WrappedDEK: wrapped}, adm); err != nil {
@@ -362,7 +377,7 @@ func (m *Manager) CompleteExchangeWith(ctx context.Context, principal int64, id 
 	if err != nil {
 		return Connection{}, readErr(err)
 	}
-	check := VerifyTokenResponse(c.Server, tokenResponse)
+	check := VerifyTokenResponseFor(c.Server, c.RequestedScope, tokenResponse)
 	check.Tokens = check.Tokens.receivedAt(received)
 	if c.State != StatePendingReturn || c.AuthorityRevision != expectRevision {
 		// The connection moved (for example a /disconnect) while the code was
@@ -853,7 +868,7 @@ func (m *Manager) refresh(ctx context.Context, principal int64, id string, fn Re
 		return Connection{}, fmt.Errorf("%w: %w", ErrRefreshFailed, err)
 	}
 
-	check := VerifyTokenResponse(c.Server, raw)
+	check := VerifyTokenResponseFor(c.Server, c.RequestedScope, raw)
 	if check.Err == nil && check.Granted != c.GrantedScope {
 		check.Err = fmt.Errorf("%w: refresh changed the granted scope", ErrScopeMismatch)
 	}

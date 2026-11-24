@@ -204,8 +204,13 @@ type Store interface {
 	GetPAConsent(ctx context.Context, tx *sql.Tx, principal int64) (ConsentRecord, error)
 	// AcceptPAConsent records consent to version/textSHA256.
 	AcceptPAConsent(ctx context.Context, tx *sql.Tx, principal int64, version, textSHA256 string, now time.Time) error
+	// GetPAActionConsent and AcceptPAActionConsent are the same two for
+	// the consent to actions (ActionConsentVersion), a record of its own.
+	GetPAActionConsent(ctx context.Context, tx *sql.Tx, principal int64) (ConsentRecord, error)
+	AcceptPAActionConsent(ctx context.Context, tx *sql.Tx, principal int64, version, textSHA256 string, now time.Time) error
 	// WithdrawPAConsent marks consent withdrawn and deletes every
-	// conversation, fragment and pending callback of the principal.
+	// conversation, fragment and pending callback of the principal. The
+	// consent to actions is withdrawn with it.
 	WithdrawPAConsent(ctx context.Context, tx *sql.Tx, principal int64, now time.Time) error
 
 	// OpenPAConversation returns the principal's open, unexpired

@@ -146,6 +146,10 @@ type ConnectionRef struct {
 	ID                string
 	Server            string
 	AuthorityRevision int64
+	// GrantedScope and RequestedScope are the connection's own
+	// (connection.Connection), for the write-scope check of a grant.
+	GrantedScope   string
+	RequestedScope string
 }
 
 // deviceIDRE is the alphabet of a device id a permission may list. A dot,

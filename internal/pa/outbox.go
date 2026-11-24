@@ -101,7 +101,13 @@ var outboxTemplates = map[jobs.OutboxKind]safetext.Template{
 	jobs.OutboxPermissionRevoked:      safetext.TextPermissionRevoked,
 	jobs.OutboxPermissionRefused:      safetext.TextPermissionRefused,
 
-	jobs.OutboxConnectionExpired: safetext.TextConnectionExpired,
+	jobs.OutboxActionConsentPrompt:   safetext.TextActionConsentPrompt,
+	jobs.OutboxActionConsentPromptRU: safetext.TextActionConsentPromptRU,
+	jobs.OutboxActionConsentAccepted: safetext.TextActionConsentAccepted,
+
+	jobs.OutboxConnectionExpired:   safetext.TextConnectionExpired,
+	jobs.OutboxActionConsentNeeded: safetext.TextActionConsentNeeded,
+	jobs.OutboxWriteScopeNeeded:    safetext.TextWriteScopeNeeded,
 
 	jobs.OutboxWriteDone:    safetext.TextWriteDone,
 	jobs.OutboxWriteFailed:  safetext.TextWriteFailed,
@@ -123,7 +129,7 @@ func outboxKeyboard(it jobs.OutboxItem) (output.Keyboard, bool) {
 		return nil, false
 	}
 	label := safetext.LabelConsentAccept
-	if it.Kind == jobs.OutboxConsentPromptRU {
+	if it.Kind == jobs.OutboxConsentPromptRU || it.Kind == jobs.OutboxActionConsentPromptRU {
 		label = safetext.LabelConsentAcceptRU
 	}
 	return output.Keyboard{{{Label: label, Data: it.Button}}}, true

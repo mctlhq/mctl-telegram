@@ -132,6 +132,12 @@ func buildPATools(ctx context.Context, cfg *config.Config, tools *config.PATools
 	if !tools.AnyEnabled() {
 		return nil, nil
 	}
+	// The scope tables decide what a connection asks for and which write
+	// tool it may carry: a build whose tables do not hold together does
+	// not start.
+	if err := connection.CheckScopeConfig(); err != nil {
+		return nil, fmt.Errorf("pa tools: %w", err)
+	}
 	kek, err := connection.NewKEK(tools.KEK)
 	if err != nil {
 		return nil, fmt.Errorf("pa tools: KEK: %w", err)
@@ -192,12 +198,22 @@ func buildPATools(ctx context.Context, cfg *config.Config, tools *config.PATools
 		Messenger: linking.BotMessenger{Sender: sender},
 		// The same allowlist the webhook and the run loop check.
 		Allowed: pa.NewAllowlist(cfg.PAAllowedPrincipals),
+		// The same switch the dispatcher reads: while it is on, a new
+		// link asks for the server's write scopes too.
+		Writes: paWritesSwitch(t.flags),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("pa tools: linking: %w", err)
 	}
 	t.commands = &linking.Commands{Links: t.links, Connections: t.manager, Sender: sender, Servers: t.servers}
 	return t, nil
+}
+
+// paWritesSwitch is paWritesEnabled as the switch /consent and /connect
+// read at every use: one reader of PA_WRITES_ENABLED for the startup
+// decision and for them. A failed read is off, with the error.
+func paWritesSwitch(flags func() (connector.Flags, error)) func() (bool, error) {
+	return func() (bool, error) { return paWritesEnabled(flags) }
 }
 
 // paServerMetadata fetches s's authorization server metadata and checks it

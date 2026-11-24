@@ -34,6 +34,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connector"
+	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
 
@@ -156,7 +157,8 @@ func fakePAAliceNet(t *testing.T, principal int64, ep connector.MCPEndpoint) *pa
 
 // paTestGate is an action gate the wiring tests put in (newPAWriteGate):
 // it offers every tool it is asked about unless told otherwise. The real
-// gate, with its consent and scope checks, is P2-S14c's.
+// gate, with its consent and scope checks, is pa.ActionGate
+// (TestPAWrites_ShippedGate).
 type paTestGate struct {
 	mu sync.Mutex
 	// only, when set, is what the gate answers instead of everything.
@@ -200,8 +202,27 @@ var paShippedGate = newPAWriteGate
 func withPAGate(t *testing.T, g paWriteGate) {
 	t.Helper()
 	prev := newPAWriteGate
-	newPAWriteGate = func(*db.Store, func() (bool, error)) paWriteGate { return g }
+	newPAWriteGate = func(*db.Store, func() (bool, error)) (paWriteGate, error) { return g, nil }
 	t.Cleanup(func() { newPAWriteGate = prev })
+}
+
+// withPASayScope gives every write path the test builds a scope table
+// under which the listed alice tools need iot:control, the scope a write
+// connection is granted. Under the compiled table the tool these tests
+// call, alice_say_phrase, is held by no connection (paWriteScopes).
+func withPASayScope(t *testing.T) {
+	t.Helper()
+	tools := map[string]string{}
+	for _, tool := range paWriteTools[connection.ServerAlice] {
+		tools[tool] = "iot:control"
+	}
+	ws, err := connection.NewWriteScopes(map[connection.Server]map[string]string{connection.ServerAlice: tools})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := paWriteScopes
+	paWriteScopes = &ws
+	t.Cleanup(func() { paWriteScopes = prev })
 }
 
 // paPostgresStoreConn is a store on a fresh schema of TEST_DATABASE_URL.
@@ -287,6 +308,7 @@ func newPAWritesE2E(t *testing.T, store *db.Store, conn *sql.DB, writes string) 
 	enablePAAliceEnv(t)
 	t.Setenv(connector.WritesFlagEnv, writes)
 	withPAGate(t, e.gate)
+	withPASayScope(t)
 	_, e.rt = buildEnabledPA(t, store)
 	e.mux = chi.NewRouter()
 	e.rt.Mount(e.mux)
@@ -314,6 +336,19 @@ func newPAWritesE2E(t *testing.T, store *db.Store, conn *sql.DB, writes string) 
 		t.Fatalf("connections %+v err %v", conns, err)
 	}
 	e.connID = conns[0].ID
+	// Carol accepted the consent to actions (P2-S14c): without it every
+	// card and dispatch below is refused action_consent_required.
+	tx, err := conn.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AcceptPAActionConsent(context.Background(), tx, carol, convo.ActionConsentVersion,
+		convo.ActionConsentTextSHA256For(false), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
 	return e
 }
 
@@ -358,6 +393,18 @@ func (e *paWritesE2E) call(tool, args string) paToolAnswer {
 	// A card is queued in the call's transaction and sent after it.
 	e.rt.loop.WaitDeliveries()
 	return a
+}
+
+// exec changes rows directly, for a state no command leads to.
+func (e *paWritesE2E) exec(query string, args ...any) {
+	e.t.Helper()
+	res, err := e.conn.ExecContext(context.Background(), query, args...)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		e.t.Fatalf("%s: %d rows, %v", query, n, err)
+	}
 }
 
 func (e *paWritesE2E) count(query string, args ...any) int {
@@ -686,30 +733,85 @@ func TestPAWrites_OfferedByGate(t *testing.T) {
 	}
 }
 
-// TestPAWrites_NoGateOffersNothing: the service as it ships. No action
-// gate is wired (newPAWriteGate returns none until P2-S14c), so with
-// PA_WRITES_ENABLED and every other switch on the write path is built and
-// no claim is offered a write tool; a forged call of one is refused and
-// leaves nothing.
-func TestPAWrites_NoGateOffersNothing(t *testing.T) {
-	if g := paShippedGate(nil, nil); g != nil {
-		t.Fatalf("a gate is wired by default: %T", g)
+// TestPAWrites_ShippedGate: the gate the service ships with
+// (pa.ActionGate behind newPAWriteGate), under the compiled scope table. A
+// claim carries a write tool only for a principal who consented to actions
+// and a connection whose grant holds the tool's scope; otherwise it
+// carries none and says which of the two is missing. A start with no gate
+// is refused.
+func TestPAWrites_ShippedGate(t *testing.T) {
+	if g, err := paShippedGate(nil, func() (bool, error) { return true, nil }); err == nil {
+		t.Fatalf("a gate with no store: %T", g)
 	}
-	forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
-		e := newPAWritesE2E(t, store, conn, "true")
-		if e.rt.writes == nil {
-			t.Fatal("no write path")
+	shipped := func(t *testing.T, e *paWritesE2E, store *db.Store) {
+		t.Helper()
+		prev := paWriteScopes
+		paWriteScopes = nil
+		defer func() { paWriteScopes = prev }()
+		g, err := paShippedGate(store, func() (bool, error) { return true, nil })
+		if err != nil || g == nil {
+			t.Fatalf("shipped gate: %v %v", g, err)
 		}
-		e.rt.writes.gate = paShippedGate(store, nil)
-		e.claim()
-		if slices.ContainsFunc(e.tools, func(s string) bool { return strings.Contains(s, paSayTool) }) || len(e.tools) == 0 || e.hint != "" {
-			t.Fatalf("tool set %v hint %q", e.tools, e.hint)
+		e.rt.writes.gate = g
+	}
+	writeTools := func(tools []string) []string {
+		var out []string
+		for _, name := range tools {
+			if !strings.HasPrefix(name, "alice/alice_get_") && !strings.HasPrefix(name, "alice/alice_list_") {
+				out = append(out, name)
+			}
 		}
-		if a := e.call(paSayTool, paSaySent); a.code == http.StatusOK || a.Status != "" {
-			t.Fatalf("a forged write call was answered %+v", a)
-		}
-		if n := e.count(`SELECT COUNT(*) FROM pa_approvals`); n != 0 || len(e.cards()) != 0 || len(e.alice.sent()) != 0 {
-			t.Fatalf("%d approvals, cards %v, calls %v", n, e.cards(), e.alice.sent())
+		return out
+	}
+	t.Run("consent and scope", func(t *testing.T) {
+		forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
+			e := newPAWritesE2E(t, store, conn, "true")
+			shipped(t, e, store)
+			e.claim()
+			// alice_say_phrase and alice_send_command are listed and held
+			// by no connection under the compiled table (paWriteScopes).
+			want := []string{"alice/alice_media_control", "alice/alice_play_music", "alice/alice_set_light", "alice/alice_set_volume"}
+			if got := writeTools(e.tools); !slices.Equal(got, want) || e.hint != "" {
+				t.Fatalf("write tools %v hint %q, want %v", got, e.hint, want)
+			}
+		})
+	})
+	t.Run("no consent to actions", func(t *testing.T) {
+		forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
+			e := newPAWritesE2E(t, store, conn, "true")
+			shipped(t, e, store)
+			e.exec(`DELETE FROM pa_action_consents WHERE principal = $1`, e.user)
+			e.claim()
+			if got := writeTools(e.tools); len(got) != 0 || len(e.tools) == 0 || e.hint != pa.ActionsHintConsent {
+				t.Fatalf("write tools %v of %v, hint %q", got, e.tools, e.hint)
+			}
+			if a := e.call(paSayTool, paSaySent); a.code == http.StatusOK || a.Status != "" {
+				t.Fatalf("a forged write call was answered %+v", a)
+			}
+			if n := e.count(`SELECT COUNT(*) FROM pa_approvals`); n != 0 || len(e.cards()) != 0 || len(e.alice.sent()) != 0 {
+				t.Fatalf("%d approvals, cards %v, calls %v", n, e.cards(), e.alice.sent())
+			}
+		})
+	})
+	t.Run("a connection made for reading", func(t *testing.T) {
+		forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
+			e := newPAWritesE2E(t, store, conn, "true")
+			shipped(t, e, store)
+			read, ok := connection.CanonicalScope(connection.ServerAlice)
+			if !ok {
+				t.Fatal("alice has no read scope")
+			}
+			e.exec(`UPDATE pa_connections SET granted_scope = $1 WHERE id = $2`, read, e.connID)
+			e.claim()
+			if got := writeTools(e.tools); len(got) != 0 || len(e.tools) == 0 || e.hint != pa.ActionsHintScope {
+				t.Fatalf("write tools %v of %v, hint %q", got, e.tools, e.hint)
+			}
+		})
+	})
+	t.Run("no gate refuses the start", func(t *testing.T) {
+		withPAGate(t, nil)
+		if rt, err := buildPAWritesFor(t, &paFakeAlice{}, "true"); err == nil || rt != nil || !strings.Contains(err.Error(), "no action gate") {
+			t.Fatalf("a write path with no gate was built: %v", err)
 		}
 	})
 }

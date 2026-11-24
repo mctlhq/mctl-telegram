@@ -204,6 +204,25 @@ func (h *convoHarness) consent(user int64) {
 	}
 }
 
+// consentActions records user's consent to actions directly, as a press
+// of the action-consent prompt's button does. The prompt and its button
+// have tests of their own (action_consent_test.go).
+func (h *convoHarness) consentActions(user int64) {
+	h.t.Helper()
+	tx, err := h.store.DB.BeginTx(context.Background(), nil)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := h.store.AcceptPAActionConsent(context.Background(), tx, user, convo.ActionConsentVersion,
+		convo.ActionConsentTextSHA256For(false), h.now); err != nil {
+		h.t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
 func (h *convoHarness) count(q string, args ...any) int {
 	h.t.Helper()
 	var n int

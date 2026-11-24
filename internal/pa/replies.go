@@ -40,6 +40,10 @@ var replyKinds = map[Reply]jobs.OutboxKind{
 	ReplyPermissionGranted:      jobs.OutboxPermissionGranted,
 	ReplyPermissionRevoked:      jobs.OutboxPermissionRevoked,
 	ReplyPermissionRefused:      jobs.OutboxPermissionRefused,
+
+	ReplyActionConsentPrompt:   jobs.OutboxActionConsentPrompt,
+	ReplyActionConsentPromptRU: jobs.OutboxActionConsentPromptRU,
+	ReplyActionConsentAccepted: jobs.OutboxActionConsentAccepted,
 }
 
 // ErrUnknownReply is a Reply with no outbox kind: a programming error. It
