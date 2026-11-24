@@ -190,6 +190,12 @@ func TestActionConsent_DataFlowConsentAloneGetsNoAction(t *testing.T) {
 		if n := len(e.ep.sent()); n != 0 {
 			t.Fatalf("%d writes sent without the consent to actions", n)
 		}
+		// That approval was made by hand for the run this test calls from,
+		// and a run gets one card: it is removed, so the card asked for
+		// below is the run's first.
+		if _, err := s.DB.Exec(`DELETE FROM pa_approvals WHERE id = $1`, a.ID); err != nil {
+			t.Fatal(err)
+		}
 
 		// /permissions and a grant show the consent to actions; nothing is
 		// listed or granted.

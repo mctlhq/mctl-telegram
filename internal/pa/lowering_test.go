@@ -129,7 +129,20 @@ func (f *lowerEP) sent() ([]string, [][]byte) {
 type lowerStore struct {
 	*db.Store
 	failPermission, failTaint atomic.Bool
+	// manyCards lets one run get more than one card (S2-A7 is covered by
+	// TestS2A7_OneCardPerRunIsTheServersRule).
+	manyCards atomic.Bool
 }
+
+func (s *lowerStore) PAJobHasApproval(ctx context.Context, tx *sql.Tx, principal, jobID int64) (bool, error) {
+	if s.manyCards.Load() {
+		return false, nil
+	}
+	return s.Store.PAJobHasApproval(ctx, tx, principal, jobID)
+}
+
+// manyCardsPerRun is cardEnv's, for the store this env's emitter uses.
+func (e *lowerEnv) manyCardsPerRun() { e.cstore.manyCards.Store(true) }
 
 func (s *lowerStore) PAPermissionIn(ctx context.Context, tx *sql.Tx, principal int64, id string) (permissions.Permission, error) {
 	if s.failPermission.Load() {
@@ -472,6 +485,7 @@ func TestLowering_PermissionReplacesTheCardOfACleanRun(t *testing.T) {
 func TestLowering_CeilingAndDeviceBoundThePermission(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, s *db.Store) {
 		e := newLowerEnv(t, s)
+		e.manyCardsPerRun()
 		e.grant("prm_vol", volumeTool, 5, kitchenID)
 		e.grant("prm_light", lightTool, permissions.NoCeiling, deskLampID)
 		e.carded("one above the ceiling", volumeTool, volume6)
@@ -528,6 +542,7 @@ func TestS2D5_DeviceGoneOrUnreadableAtDispatchIsNotLowered(t *testing.T) {
 func TestS2I5_ReadThenWriteNeedsACard(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, s *db.Store) {
 		e := newLowerEnv(t, s)
+		e.manyCardsPerRun()
 		e.grant("prm_vol", volumeTool, 5, kitchenID)
 		e.grant("prm_light", lightTool, permissions.NoCeiling, deskLampID)
 
@@ -668,6 +683,7 @@ func TestS2D1_NoPermissionLowersADisclosure(t *testing.T) {
 func TestS2I9_DisclosureAfterAResetStillNeedsACard(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, s *db.Store) {
 		e := newLowerEnv(t, s)
+		e.manyCardsPerRun()
 		var rows, tainted int
 		if err := s.DB.QueryRow(`SELECT COUNT(*), COALESCE(SUM(tainted), 0) FROM pa_conversations WHERE principal = $1`,
 			alice).Scan(&rows, &tainted); err != nil || rows != 1 || tainted != 0 {
@@ -683,6 +699,7 @@ func TestS2I9_DisclosureAfterAResetStillNeedsACard(t *testing.T) {
 
 func (e *lowerEnv) forcedPermissionsLowerNothing() {
 	e.t.Helper()
+	e.manyCardsPerRun()
 	for i, tool := range []string{sayTool, commandTool, roomTool, scenarioRun, deviceTool} {
 		e.grant("prm_forced_"+string(rune('a'+i)), tool, permissions.NoCeiling, kitchenID, deskLampID)
 		e.grant("prm_forced5_"+string(rune('a'+i)), tool, 5, kitchenID, deskLampID)
@@ -998,6 +1015,7 @@ func TestLowering_ExecutorChecksThePinAndTheCondition(t *testing.T) {
 func TestLowering_SirenAndAlarmScenesNeedACard(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, s *db.Store) {
 		e := newLowerEnv(t, s)
+		e.manyCardsPerRun()
 		e.grant("prm_light", lightTool, permissions.NoCeiling, deskLampID)
 		scene := func(name string) string { return `{"device":"` + deskLampID + `","scene":"` + name + `"}` }
 		e.carded("siren", lightTool, scene("siren"))
@@ -1044,5 +1062,25 @@ func TestLowering_ExecutorMatchesThePermissionToTheCall(t *testing.T) {
 		if out := e.dispatchLowered(e.loweredCall("prm_light", lightTool, light, catalog.ClassWrite)); out.Status != connector.StatusOK {
 			t.Fatalf("the call's own permission: %+v", out)
 		}
+	})
+}
+
+// TestLowering_ALoweredWriteUsesTheRunsCard: a call a standing permission
+// handled leaves an approval row of the run, and "one approval card per
+// run" (S2-A7) counts every row. So a run that already wrote under a
+// permission gets no card afterwards: the call is refused, nothing is
+// sent, and a further call the permission covers still runs.
+func TestLowering_ALoweredWriteUsesTheRunsCard(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newLowerEnv(t, s)
+		e.grant("prm_vol", volumeTool, 5, kitchenID)
+		e.lowered("the granted call", "prm_vol", volumeTool, volume5)
+		cards := len(e.sentCards(alice))
+		e.refused("one above the ceiling, after a lowered write", volumeTool, volume6,
+			http.StatusConflict, connector.ReasonCardAlreadySent)
+		if got := len(e.sentCards(alice)); got != cards {
+			t.Fatalf("%d cards after the refusal, %d before", got, cards)
+		}
+		e.lowered("the granted call again", "prm_vol", volumeTool, volume5)
 	})
 }

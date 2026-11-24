@@ -467,6 +467,8 @@ type paE2E struct {
 	mux  *chi.Mux
 	user int64
 	upd  int64
+	// server is the server toCard connects: "tg" unless set.
+	server string
 }
 
 func newPAE2E(t *testing.T) *paE2E {
@@ -491,8 +493,12 @@ func (e *paE2E) send(kind, payload string) {
 	if code := postPAWebhook(e.mux, fmt.Sprintf(`{"update_id":%d,%q:%s}`, e.upd, kind, payload)); code != http.StatusOK {
 		e.t.Fatalf("%s update: status %d", kind, code)
 	}
+	// A write path's dispatch after the commit first: it ends by starting
+	// a delivery, which the wait below then covers.
+	e.rt.writes.wait()
 	e.rt.loop.WaitDeliveries()
 	e.rt.tools.commands.Wait()
+	e.rt.loop.WaitDeliveries()
 }
 
 func (e *paE2E) text(s string) {
@@ -531,7 +537,7 @@ func (e *paE2E) consent() {
 	e.t.Helper()
 	e.text("hello")
 	var button string
-	if err := e.conn.QueryRowContext(context.Background(), `SELECT id FROM pa_callbacks WHERE principal = ?`, e.user).Scan(&button); err != nil {
+	if err := e.conn.QueryRowContext(context.Background(), `SELECT id FROM pa_callbacks WHERE principal = $1`, e.user).Scan(&button); err != nil {
 		e.t.Fatal(err)
 	}
 	e.press(button)
@@ -545,7 +551,11 @@ func (e *paE2E) toCard() paSend {
 	text, last, do := e.text, e.last, e.do
 	sent, f, carol := e.sent, e.f, e.user
 	// /connect tg: the web_app button carries the link token.
-	text("/connect tg")
+	server := e.server
+	if server == "" {
+		server = "tg"
+	}
+	text("/connect " + server)
 	app := last()
 	// Exactly <base>/pa/link/app?link=<43-char token>: the recorder also ran
 	// it through a real output.Sender's checks (checkWebAppURL).
@@ -566,7 +576,7 @@ func (e *paE2E) toCard() paSend {
 		t.Fatalf("begin: %d %s", w.Code, w.Body.String())
 	}
 	cb := f.as.authorize(t, authz.URL)
-	w = do(http.MethodGet, "/pa/oauth/callback/tg?"+cb.Encode(), "", "")
+	w = do(http.MethodGet, "/pa/oauth/callback/"+server+"?"+cb.Encode(), "", "")
 	m := paHandoffField.FindStringSubmatch(w.Body.String())
 	if w.Code != http.StatusOK || m == nil {
 		t.Fatalf("callback: %d", w.Code)

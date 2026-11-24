@@ -31,13 +31,13 @@ package pa
 //     permissionButton, which handles that press, is the only caller of
 //     InsertPAPermission (TestS2A8_GrantInsertHasOneCaller).
 //
-// Nothing here is reachable in a deployed service yet: no production
-// wiring sets ConversationsConfig.Permissions or builds PermissionCommands,
-// so /permissions is answered "not available". With them wired, a grant is
+// All of it exists in a service only when cmd/server built the write path
+// (buildPAWrites, PA_WRITES_ENABLED true at startup, P2-S14); otherwise
+// /permissions is answered "not available". With it built, a grant is
 // still refused while PA_WRITES_ENABLED is off; listing and revoking work.
 // A permission is consulted at dispatch by connector.Cards and the write
-// executor (connector/lower.go, P2-S11), which no deployed wiring builds
-// either.
+// executor (connector/lower.go, P2-S11), which the same constructor
+// builds.
 
 import (
 	"context"

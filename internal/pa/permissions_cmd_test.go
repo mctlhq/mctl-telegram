@@ -675,6 +675,7 @@ func TestS2A8_NoJobRouteGrantsAPermission(t *testing.T) {
 // pressed card leaves the permission table and its callbacks empty.
 func TestS2A10_ApprovingACardGrantsNoPermission(t *testing.T) {
 	e := newPermEnv(t, sqliteStore(t))
+	e.manyCardsPerRun()
 	first := e.emit(`{"to":"Carol","text":"hi"}`)
 	if r := e.press(alice, first.approve); r == pa.ReplyUnknownButton {
 		t.Fatalf("approve answered %q", r)
@@ -829,7 +830,10 @@ func TestS2A8_GrantInsertHasOneCaller(t *testing.T) {
 	// only, and only the handler reads it.
 	check("PermissionGrants", idents["PermissionGrants"], []useSite{site(cmdFile, "(package)"), site(cmdFile, "(package)")})
 	for _, u := range idents["Grants"] {
-		if u != site(cmdFile, "(package)") && u != site(cmdFile, "permissionButton") && u != site(cmdFile, "valid") {
+		// buildPAWrites sets the field once, in the one constructor of the
+		// write path (P2-S14); it never calls through it.
+		if u != site(cmdFile, "(package)") && u != site(cmdFile, "permissionButton") && u != site(cmdFile, "valid") &&
+			u != site("cmd/server/pa_writes.go", "buildPAWrites") {
 			t.Errorf("the permission store is used at %v", u)
 		}
 	}

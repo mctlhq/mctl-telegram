@@ -19,10 +19,10 @@ package pa
 // what the webhook does when one is pressed. The card itself is written by
 // connector.Cards, in one transaction with its approval and its callbacks.
 //
-// Nothing here is reachable in a deployed service yet: no production
-// wiring sets ConversationsConfig.Approvals or RunLoopConfig.Cards, no
-// card is emitted while PA_WRITES_ENABLED is off, and the run loop admits
-// no approve-tier tool (TestRunLoopToolSetIsPhase1Reads).
+// It is reachable in a service only when cmd/server built the write path
+// (buildPAWrites, P2-S14), which alone sets ConversationsConfig.Approvals,
+// RunLoopConfig.Cards and the run loop's approve-tier tools. No card is
+// emitted while PA_WRITES_ENABLED is off (TestRunLoopToolSetIsPhase1Reads).
 
 import (
 	"context"

@@ -1,9 +1,13 @@
 package pa
 
-// phase2_inert_test.go keeps the Phase 2 primitives (P2-S1) out of the
-// running service: S1-I1 holds because the run loop's tool set comes from
-// the Phase 1 pin, and nothing but the catalog's own loader touches the
-// Phase 2 pin, the write-aware Authorize or the write gate.
+// phase2_inert_test.go keeps the Phase 2 primitives (P2-S1) behind one
+// switch. The write path is built in one function, cmd/server's
+// buildPAWrites (P2-S14), and only after that function saw
+// PA_WRITES_ENABLED read true: nothing else touches the Phase 2 pin, the
+// card emitter, the write executor or the run loop's approve-tier tools,
+// and nothing in that function does before its flag check. With the
+// switch off S1-I1 holds as before: the run loop's tool set is the Phase 1
+// pin's reads.
 
 import (
 	"fmt"
@@ -27,15 +31,37 @@ import (
 // is named with its receiver type ("Surface.Authorize"), so another func
 // or method called Authorize in the same file is not allowed.
 var phase2Idents = map[string]map[string]bool{
-	"LoadPinPhase2":   {},
+	"LoadPinPhase2":   {phase2Constructor: true},
 	"ValidatePhase2":  {"internal/pa/catalog/pin.go:LoadPinPhase2": true},
 	"pinPhase2JSON":   {"internal/pa/catalog/pin.go:LoadPinPhase2": true},
 	"AuthorizeWrites": {"internal/pa/catalog/surface.go:Surface.Authorize": true},
-	// The approval card emitter (#1320 slice P2-S5) exists and is tested,
-	// but no runtime code builds one: without it the tool route never
-	// takes the card path (connector.DispatcherConfig.Cards is nil).
-	"NewCards": {},
+	// The approval card emitter (#1320 slice P2-S5) and the write executor
+	// (P2-S4) are built by the write path's constructor only: without a
+	// card emitter the tool route never takes the card path
+	// (connector.DispatcherConfig.Cards is nil), and without an executor
+	// nothing dispatches an approved call.
+	"NewCards":         {phase2Constructor: true},
+	"NewWriteExecutor": {phase2Constructor: true},
+	// The approve-tier tools the run loop may sign into a claim: the
+	// field's declaration, the loop reading it, the constructor that
+	// builds the set, and buildPA handing that set to the loop.
+	"ApproveTools": {
+		phase2Constructor: true, "cmd/server/pa_wiring.go:buildPA": true,
+		"internal/pa/runloop.go:": true, "internal/pa/runloop.go:NewRunLoop": true,
+	},
 }
+
+// phase2Constructor is the one function that builds the write path, as
+// "<module-relative file>:<func>". phase2GateViolations requires its
+// check of PA_WRITES_ENABLED to stand before every Phase 2 identifier in
+// it.
+const (
+	phase2Constructor = "cmd/server/pa_writes.go:buildPAWrites"
+	// phase2FlagReader is the function whose result the constructor's
+	// check tests; cmd/server's tests prove it reads PA_WRITES_ENABLED and
+	// that unreadable is off.
+	phase2FlagReader = "paWritesEnabled"
+)
 
 // phase2PinFile is the Phase 2 pin, module-relative. Only phase2PinEmbedder
 // may embed it: a second //go:embed of the file would give runtime code a
@@ -51,7 +77,7 @@ const phase2Package = "github.com/mctlhq/mctl-telegram/internal/pa/gate"
 
 // phase2GateImporters are the files allowed to import the gate: the card
 // emitter, which calls gate.Decide for an approve-tier call and which
-// nothing constructs at runtime (NewCards above).
+// only the write path's constructor builds (NewCards above).
 var phase2GateImporters = map[string]bool{
 	"internal/pa/connector/card.go": true,
 }
@@ -62,7 +88,7 @@ var phase2GateImporters = map[string]bool{
 func TestNoRuntimePhase2Use(t *testing.T) {
 	root := moduleRoot(t)
 	fset := token.NewFileSet()
-	checked, sawLoader := 0, false
+	checked, sawLoader, sawConstructor := 0, false, false
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -93,6 +119,11 @@ func TestNoRuntimePhase2Use(t *testing.T) {
 		for _, v := range phase2Violations(fset, f, rel) {
 			t.Error(v)
 		}
+		gated, v := phase2GateViolations(fset, f, rel)
+		sawConstructor = sawConstructor || gated
+		for _, v := range v {
+			t.Error(v)
+		}
 		for _, v := range phase2EmbedViolations(fset, f, rel) {
 			t.Error(v)
 		}
@@ -103,6 +134,156 @@ func TestNoRuntimePhase2Use(t *testing.T) {
 	}
 	if checked < 50 || !sawLoader {
 		t.Fatalf("parsed %d files (loader seen: %v): the walk did not cover the module", checked, sawLoader)
+	}
+	// The constructor not being found is not "no violation": the flag
+	// check was then never looked at.
+	if !sawConstructor {
+		t.Fatalf("%s was not found: its flag check was not verified", phase2Constructor)
+	}
+}
+
+// phase2GateViolations checks the write path's constructor in f: among its
+// top-level statements there is
+//
+//	on, ... := paWritesEnabled(...)
+//	...
+//	if !on { return nil, nil }
+//
+// with no other assignment to on anywhere in the function, and every
+// Phase 2 identifier of the function stands after that if statement. So
+// the constructor cannot reach the Phase 2 pin, the card emitter or the
+// executor on a path where the flag did not read true. found reports
+// whether f holds the constructor at all.
+func phase2GateViolations(fset *token.FileSet, f *ast.File, rel string) (found bool, out []string) {
+	for _, decl := range f.Decls {
+		d, ok := decl.(*ast.FuncDecl)
+		if !ok || d.Recv != nil || d.Body == nil || rel+":"+d.Name.Name != phase2Constructor {
+			continue
+		}
+		found = true
+		fail := func(pos token.Pos, msg string) {
+			out = append(out, fmt.Sprintf("%s: %s %s (P2-S14)", fset.Position(pos), d.Name.Name, msg))
+		}
+		const flag = "on"
+		var read, gate ast.Stmt
+		for _, st := range d.Body.List {
+			if as, ok := st.(*ast.AssignStmt); ok && read == nil && len(as.Lhs) > 0 && len(as.Rhs) == 1 && as.Tok == token.DEFINE {
+				id, _ := as.Lhs[0].(*ast.Ident)
+				call, _ := as.Rhs[0].(*ast.CallExpr)
+				if id != nil && id.Name == flag && call != nil {
+					if fn, ok := call.Fun.(*ast.Ident); ok && fn.Name == phase2FlagReader {
+						read = st
+					}
+				}
+				continue
+			}
+			if is, ok := st.(*ast.IfStmt); ok && read != nil && gate == nil && isFlagGate(is, flag) {
+				gate = st
+			}
+		}
+		if read == nil || gate == nil {
+			fail(d.Pos(), "has no `"+flag+", ... := "+phase2FlagReader+"(...)` followed by `if !"+flag+" { return nil, nil }` at its top level")
+			continue
+		}
+		ast.Inspect(d.Body, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.AssignStmt:
+				if ast.Stmt(x) == read {
+					return true
+				}
+				for _, l := range x.Lhs {
+					if id, ok := l.(*ast.Ident); ok && id.Name == flag {
+						fail(x.Pos(), "assigns "+flag+" a second time")
+					}
+				}
+			case *ast.IncDecStmt, *ast.UnaryExpr:
+				// &on would let it change without an assignment.
+				if u, ok := x.(*ast.UnaryExpr); ok && u.Op == token.AND {
+					if id, ok := u.X.(*ast.Ident); ok && id.Name == flag {
+						fail(u.Pos(), "takes the address of "+flag)
+					}
+				}
+			case *ast.Ident:
+				if _, ok := phase2Idents[x.Name]; ok && x.Pos() < gate.End() {
+					fail(x.Pos(), "uses "+x.Name+" before its check of the writes flag")
+				}
+			}
+			return true
+		})
+	}
+	return found, out
+}
+
+// isFlagGate reports whether is is exactly `if !flag { return nil, nil }`:
+// no init statement, no else, nothing else in the body.
+func isFlagGate(is *ast.IfStmt, flag string) bool {
+	if is.Init != nil || is.Else != nil || len(is.Body.List) != 1 {
+		return false
+	}
+	not, ok := is.Cond.(*ast.UnaryExpr)
+	if !ok || not.Op != token.NOT {
+		return false
+	}
+	if id, ok := not.X.(*ast.Ident); !ok || id.Name != flag {
+		return false
+	}
+	ret, ok := is.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 2 {
+		return false
+	}
+	for _, r := range ret.Results {
+		if id, ok := r.(*ast.Ident); !ok || id.Name != "nil" {
+			return false
+		}
+	}
+	return true
+}
+
+// TestPhase2GateViolations_Detects proves the constructor check both ways.
+func TestPhase2GateViolations_Detects(t *testing.T) {
+	const rel = "cmd/server/pa_writes.go"
+	run := func(body string) (bool, []string) {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, "pa_writes.go", "package main\nfunc buildPAWrites(pt *paTools) (*paWrites, error) {\n"+body+"\n}", parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return phase2GateViolations(fset, f, rel)
+	}
+	const gate = "on, err := paWritesEnabled(pt.flags)\nif err != nil { log(err) }\nif !on { return nil, nil }\n"
+	const use = "pin, err := catalog.LoadPinPhase2()\n_ = connector.NewCards\n_ = connector.NewWriteExecutor\nreturn build(pin), err"
+	if found, v := run(gate + use); !found || len(v) != 0 {
+		t.Errorf("the gated constructor: found %v, reported %v", found, v)
+	}
+	bad := map[string]string{
+		"no flag check":         use,
+		"flag read, no return":  "on, err := paWritesEnabled(pt.flags)\n_ = on\n" + use,
+		"check after the pin":   "pin, err := catalog.LoadPinPhase2()\n" + gate + "return build(pin), err",
+		"check inverted":        "on, err := paWritesEnabled(pt.flags)\nif on { return nil, nil }\n" + use,
+		"check with an else":    "on, err := paWritesEnabled(pt.flags)\nif !on { return nil, nil } else { _ = err }\n" + use,
+		"check does not return": "on, err := paWritesEnabled(pt.flags)\nif !on { log(err) }\n" + use,
+		"check nested":          "on, err := paWritesEnabled(pt.flags)\nif pt != nil { if !on { return nil, nil } }\n" + use,
+		"another reader":        "on, err := somethingElse(pt.flags)\nif !on { return nil, nil }\n" + use,
+		"flag forced on":        gate + "on = true\n" + use,
+		"flag forced before":    "on, err := paWritesEnabled(pt.flags)\non = true\nif !on { return nil, nil }\n" + use,
+		"flag redeclared":       "on, err := paWritesEnabled(pt.flags)\non, ok := true, false\n_ = ok\nif !on { return nil, nil }\n" + use,
+		"flag by address":       "on, err := paWritesEnabled(pt.flags)\nset(&on)\nif !on { return nil, nil }\n" + use,
+		"executor before check": "_ = connector.NewWriteExecutor\n" + gate + use,
+	}
+	for name, body := range bad {
+		if found, v := run(body); !found || len(v) == 0 {
+			t.Errorf("%s: found %v, not reported", name, found)
+		}
+	}
+	// A file without the constructor: nothing is found, which the walk
+	// treats as a failure of its own.
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "x.go", "package main\nfunc other() {}", parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found, _ := phase2GateViolations(fset, f, rel); found {
+		t.Error("a file without the constructor reported it found")
 	}
 }
 
@@ -276,6 +457,11 @@ func TestPhase2Violations_Detects(t *testing.T) {
 		"pkg var":      `var g = catalog.LoadPinPhase2`,
 		"authorize":    `func f(s *catalog.Surface) { _, _ = s.AuthorizeWrites("x", time.Time{}, true) }`,
 		"gate import":  "import _ \"" + phase2Package + "\"",
+		"cards":        `func f() { _, _ = connector.NewCards(connector.CardConfig{}) }`,
+		"executor":     `func f() { _, _ = connector.NewWriteExecutor(connector.WriteConfig{}) }`,
+		"approve set":  `func f(c *RunLoopConfig) { c.ApproveTools = nil }`,
+		// The constructor's name in another file is not the constructor.
+		"constructor name": `func buildPAWrites() { _, _ = catalog.LoadPinPhase2() }`,
 		// A func or method named Authorize other than Surface.Authorize
 		// is not on the allowlist.
 		"plain Authorize": `func Authorize(s *catalog.Surface) { _, _ = s.AuthorizeWrites("x", time.Time{}, true) }`,
@@ -304,6 +490,20 @@ func TestPhase2Violations_Detects(t *testing.T) {
 		}
 		if v := phase2Violations(fset, f, "internal/pa/catalog/surface.go"); len(v) != 0 {
 			t.Errorf("allowlisted Surface.Authorize reported: %v", v)
+		}
+	}
+	// The write path's constructor, in its own file, is allowed.
+	{
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, "pa_writes.go", "package main\nfunc buildPAWrites() { _, _ = catalog.LoadPinPhase2(); _ = connector.NewCards; _ = connector.NewWriteExecutor; _ = pa.RunLoopConfig{ApproveTools: nil} }", parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v := phase2Violations(fset, f, "cmd/server/pa_writes.go"); len(v) != 0 {
+			t.Errorf("allowlisted constructor reported: %v", v)
+		}
+		if v := phase2Violations(fset, f, "cmd/server/pa_tools.go"); len(v) == 0 {
+			t.Error("the constructor's body in another file: not reported")
 		}
 	}
 	fset := token.NewFileSet()
