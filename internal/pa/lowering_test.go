@@ -247,6 +247,7 @@ func newLowerEnv(t *testing.T, s *db.Store) *lowerEnv {
 		},
 		Allowed: func(int64) bool { return !ce.denied.Load() },
 		Fresh:   l.fresh,
+		Scopes:  testWriteScopes(t),
 	})
 	if err != nil {
 		t.Fatal(err)

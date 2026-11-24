@@ -46,6 +46,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa/approval"
 	"github.com/mctlhq/mctl-telegram/internal/pa/catalog"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
+	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/gate"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
@@ -84,6 +85,11 @@ type CardStore interface {
 	// BeginPAWrite opens the transaction under the principal's lock.
 	BeginPAWrite(ctx context.Context, principal int64, budget bool) (*sql.Tx, error)
 	PAPrincipalDisabled(ctx context.Context, tx *sql.Tx, principal int64) (bool, error)
+	// GetPAActionConsent and LockPAConnection serve the two checks every
+	// card passes first (#1320 slice P2-S14c): the consent to actions and
+	// the connection's write scope.
+	GetPAActionConsent(ctx context.Context, tx *sql.Tx, principal int64) (convo.ConsentRecord, error)
+	LockPAConnection(ctx context.Context, tx *sql.Tx, principal int64, id string) (connection.Connection, error)
 	PAConversationTaintIn(ctx context.Context, tx *sql.Tx, principal int64, conversationID string) (bool, error)
 	CreatePAApproval(ctx context.Context, tx *sql.Tx, a approval.Approval) error
 	CreatePACallback(ctx context.Context, tx *sql.Tx, principal int64, id, action string, expiresAt time.Time) error
@@ -121,7 +127,10 @@ type CardConfig struct {
 	// either nothing is lowered: every admitted call gets a card.
 	Permissions PermissionLookup
 	Lowered     LoweredDispatcher
-	Now         func() time.Time
+	// Scopes names the scope each write tool needs; nil is the compiled
+	// table (connection.DefaultWriteScopes).
+	Scopes *connection.WriteScopes
+	Now    func() time.Time
 	// Deliver is called after a card committed, to send it without
 	// waiting for the next outbox pass (pa.RunLoop.DeliverAfter). Optional.
 	Deliver func(ctx context.Context, principal int64)
@@ -206,6 +215,13 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) (*WriteOutcome, *refu
 	early.Tainted = true
 	if d := gate.Decide(early); d.Outcome != gate.OutcomeCard {
 		return nil, gateRefusal(d, nil)
+	}
+	// Before the arguments are read and before anything is asked of the
+	// server: the consent to actions and the connection's write scope. A
+	// call refused here tells the principal why, once per connection.
+	if ref := c.actionsRefusal(ctx, principal, req); ref != nil {
+		c.notifyWithheld(ctx, principal, req.ConnectionID, ref.reason)
+		return nil, ref
 	}
 
 	canonical, err := catalog.CanonicalArgs(req.Args)
@@ -385,6 +401,11 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) (*WriteOutcome, *refu
 		return nil, &refusal{ReasonStateUnreadable, http.StatusServiceUnavailable}
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Read again in the transaction that writes the approval: neither
+	// answer is carried over from the check above.
+	if ref := c.actionsRefusalIn(ctx, tx, principal, req); ref != nil {
+		return nil, ref
+	}
 	in.PrincipalDisabled, in.PrincipalErr = c.cfg.Store.PAPrincipalDisabled(ctx, tx, principal)
 	in.Tainted, in.TaintErr = c.cfg.Store.PAConversationTaintIn(ctx, tx, principal, a.ConversationID)
 	// PermissionMatch is false here, so the gate cannot lower: what it
@@ -458,6 +479,88 @@ func (c *Cards) offerSplit(ctx context.Context, principal, jobID int64) {
 	}
 	if err := tx.Commit(); err != nil {
 		slog.Warn("pa card: split offer not queued", "step", "commit", "err_type", errorKind(err))
+		return
+	}
+	if c.cfg.Deliver != nil {
+		c.cfg.Deliver(ctx, principal)
+	}
+}
+
+// scopes is the table of write tools and their scopes.
+func (c *Cards) scopes() connection.WriteScopes {
+	if c.cfg.Scopes != nil {
+		return *c.cfg.Scopes
+	}
+	return connection.DefaultWriteScopes()
+}
+
+// actionsRefusal is actionsRefusalIn in a short transaction of its own
+// that changes nothing.
+func (c *Cards) actionsRefusal(ctx context.Context, principal int64, req CardRequest) *refusal {
+	tx, err := c.cfg.Store.BeginPAWrite(ctx, principal, false)
+	if err != nil {
+		return &refusal{ReasonStateUnreadable, http.StatusServiceUnavailable}
+	}
+	defer func() { _ = tx.Rollback() }()
+	return c.actionsRefusalIn(ctx, tx, principal, req)
+}
+
+// actionsRefusalIn refuses a call whose principal has not consented to
+// actions, or whose connection does not hold the write scope of its tool,
+// read in tx. A record or a row that cannot be read refuses as
+// unreadable: it is neither consent nor a scope.
+func (c *Cards) actionsRefusalIn(ctx context.Context, tx *sql.Tx, principal int64, req CardRequest) *refusal {
+	switch err := pa.RequireActionConsent(ctx, tx, c.cfg.Store, principal); {
+	case errors.Is(err, pa.ErrActionConsentRequired):
+		return &refusal{ReasonActionConsentRequired, http.StatusForbidden}
+	case err != nil:
+		return &refusal{ReasonStateUnreadable, http.StatusServiceUnavailable}
+	}
+	conn, err := c.cfg.Store.LockPAConnection(ctx, tx, principal, req.ConnectionID)
+	switch {
+	case errors.Is(err, connection.ErrNotFound):
+		return &refusal{ReasonConnectionUnbound, http.StatusForbidden}
+	case err != nil:
+		return &refusal{ReasonConnectionUnreadable, http.StatusServiceUnavailable}
+	case conn.Principal != principal || conn.ID != req.ConnectionID || string(conn.Server) != req.Server:
+		return &refusal{ReasonConnectionUnbound, http.StatusForbidden}
+	case !c.scopes().Holds(conn, req.Tool):
+		return &refusal{ReasonWriteScopeMissing, http.StatusForbidden}
+	}
+	return nil
+}
+
+// notifyWithheld queues the once-per-connection notice of a call refused
+// for the consent to actions or for the write scope, in a transaction of
+// its own. The refusal stands whether or not the notice could be queued.
+func (c *Cards) notifyWithheld(ctx context.Context, principal int64, connectionID, reason string) {
+	var why pa.WithheldReason
+	switch reason {
+	case ReasonActionConsentRequired:
+		why = pa.WithheldConsent
+	case ReasonWriteScopeMissing:
+		why = pa.WithheldScope
+	default:
+		return
+	}
+	kind, ok := pa.WithheldNotice(why)
+	if !ok {
+		return
+	}
+	tx, err := c.cfg.Store.BeginPAWrite(ctx, principal, false)
+	if err != nil {
+		slog.Warn("pa card: withheld notice not queued", "step", "begin", "err_type", errorKind(err))
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := c.cfg.Store.EnqueuePAOutbox(ctx, tx, jobs.OutboxItem{
+		Principal: principal, Kind: kind, ConnectionID: connectionID,
+	}, c.cfg.Now()); err != nil {
+		slog.Warn("pa card: withheld notice not queued", "step", "enqueue", "err_type", errorKind(err))
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		slog.Warn("pa card: withheld notice not queued", "step", "commit", "err_type", errorKind(err))
 		return
 	}
 	if c.cfg.Deliver != nil {

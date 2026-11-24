@@ -117,21 +117,43 @@ type ScopeCheck struct {
 	Err     error
 }
 
-// VerifyTokenResponse parses an OAuth token response (RFC 6749 section 5.1)
-// and checks, fail-closed, that its effective scope equals the server's
-// allowed set (threat model T8, S1-T9, S1-T10):
+// VerifyTokenResponse is VerifyTokenResponseFor for a connection that asked
+// for the read scope set only.
+func VerifyTokenResponse(server Server, raw []byte) ScopeCheck {
+	return VerifyTokenResponseFor(server, "", raw)
+}
+
+// VerifyTokenResponseFor parses an OAuth token response (RFC 6749 section
+// 5.1) and checks, fail-closed, its effective scope against what the
+// connection asked for (threat model T8, S1-T9, S1-T10):
 //
 //   - a missing "scope" field fails: the server did not report the
 //     effective scope, and "probably the requested one" is not an answer;
 //   - a non-string, empty, badly delimited, duplicated or out-of-charset
 //     value fails as unparseable;
-//   - an extra scope or a missing scope fails.
+//   - a connection that asked for the read set (requested is empty or the
+//     read set) must be granted exactly the read set;
+//   - a connection that asked for the write set (WriteRequestScope) must
+//     be granted exactly the write set or exactly the read set. The second
+//     is a narrowed grant: the principal, or the server, withheld the write
+//     scope. It is recorded as what it is, the read set, and the
+//     connection never holds a write scope it was not given;
+//   - any other set fails, a wider one included: nothing the server adds
+//     on its own is accepted.
 //
-// Every failure wraps ErrScopeMismatch or ErrTokenResponse.
-func VerifyTokenResponse(server Server, raw []byte) ScopeCheck {
+// Granted is always the reported set, never the requested one. Every
+// failure wraps ErrScopeMismatch or ErrTokenResponse.
+func VerifyTokenResponseFor(server Server, requested string, raw []byte) ScopeCheck {
 	allowed, ok := AllowedScopes(server)
 	if !ok {
 		return ScopeCheck{Err: fmt.Errorf("%w: unknown server", ErrScopeMismatch)}
+	}
+	read := strings.Join(allowed, " ")
+	wide, _ := WriteRequestScope(server)
+	if requested != "" && requested != read && requested != wide {
+		// A requested set this build does not ask for: the row is not one
+		// it wrote, and nothing is accepted for it.
+		return ScopeCheck{Err: fmt.Errorf("%w: unknown requested scope", ErrScopeMismatch)}
 	}
 	var fields map[string]json.RawMessage
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -182,11 +204,12 @@ func VerifyTokenResponse(server Server, raw []byte) ScopeCheck {
 		out.Err = err
 		return out
 	}
-	if !slices.Equal(got, allowed) {
+	granted := strings.Join(got, " ")
+	if !slices.Equal(got, allowed) && !(wide != "" && requested == wide && granted == wide) {
 		out.Err = fmt.Errorf("%w: got %d scopes, want exactly the %d allowed", ErrScopeMismatch, len(got), len(allowed))
 		return out
 	}
-	out.Granted = strings.Join(got, " ")
+	out.Granted = granted
 	return out
 }
 

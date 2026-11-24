@@ -759,8 +759,9 @@ func (d *Dispatcher) resolveConnection(ctx context.Context, policy pa.Policy, se
 		if !ok {
 			continue
 		}
-		want, ok := connection.CanonicalScope(c.Server)
-		if !ok || c.GrantedScope != want {
+		// The read set, or the write set of a connection that asked for
+		// it (#1320 slice P2-S14c): both carry every read scope.
+		if !connection.ScopeAccepted(c) {
 			return pa.ConnectionRevision{}, &refusal{ReasonScopeMismatch, http.StatusForbidden}
 		}
 		match = append(match, cr)

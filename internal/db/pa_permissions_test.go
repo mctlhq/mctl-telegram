@@ -361,7 +361,7 @@ func TestPAPermission_CallbackAndConnections(t *testing.T) {
 		w.seedConn(t, w.conn+"_exp", connection.ServerTG, connection.StateExpired)
 		refs, err := s.ActivePAConnectionRefs(ctx, alice)
 		must(t, err)
-		if len(refs) != 1 || refs[0] != (permissions.ConnectionRef{ID: w.conn, Server: "alice", AuthorityRevision: w.rev}) {
+		if len(refs) != 1 || refs[0] != (permissions.ConnectionRef{ID: w.conn, Server: "alice", AuthorityRevision: w.rev, GrantedScope: "home"}) {
 			t.Fatalf("refs %+v", refs)
 		}
 		for _, action := range []string{"approval_approve", "consent_accept:v1:x", "", "permission"} {

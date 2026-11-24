@@ -116,6 +116,7 @@ func newCardEnvOn(t *testing.T, s *db.Store, pin *catalog.Pin, fresh connector.F
 	}
 	cfg := connector.CardConfig{
 		Store: e.cstore, Sealer: e.sealer, Pin: pin, Fresh: fresh, Now: e.h.Now,
+		Scopes:  testWriteScopes(t),
 		Deliver: func(ctx context.Context, p int64) { e.h.Loop().DeliverAfter(ctx, p) },
 	}
 	for _, o := range opts {
@@ -481,7 +482,8 @@ func TestApprovalCard_Refusals(t *testing.T) {
 // nothing to bind the approval to, so no card.
 func TestApprovalCard_NoFreshSurface(t *testing.T) {
 	e := newCardEnv(t, sqliteStore(t))
-	cards, err := connector.NewCards(connector.CardConfig{Store: e.cstore, Sealer: e.sealer, Pin: cardPin(), Now: e.h.Now})
+	cards, err := connector.NewCards(connector.CardConfig{Store: e.cstore, Sealer: e.sealer, Pin: cardPin(), Now: e.h.Now,
+		Scopes: testWriteScopes(t)})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -130,6 +130,14 @@ type permEnv struct {
 // production wiring wires it yet.
 func newPermEnv(t *testing.T, s *db.Store) *permEnv {
 	t.Helper()
+	return newPermEnvScopes(t, s, testWriteScopes(t))
+}
+
+// newPermEnvScopes is newPermEnv with /permissions over scopes; nil is the
+// compiled table, under which only an alice connection that holds
+// iot:control can be granted anything.
+func newPermEnvScopes(t *testing.T, s *db.Store, scopes *connection.WriteScopes) *permEnv {
+	t.Helper()
 	e := &permEnv{cardEnv: newCardEnv(t, s), devices: &fakeDevices{}, rule: &allowRule{}, policy: &swapPolicy{}}
 	e.home = e.activeAlice(alice, "acct-alice-home")
 	e.bobHome = e.activeAlice(bob, "acct-bob-home")
@@ -143,8 +151,9 @@ func newPermEnv(t *testing.T, s *db.Store) *permEnv {
 		return e.writes.Load(), nil
 	}
 	e.validator = &permissions.Validator{Policy: e.policy, Devices: e.devices, Rule: e.rule}
-	e.cmds = &pa.PermissionCommands{Store: s, Validator: e.validator, Writes: writes, Now: e.h.Now}
-	e.h.EnablePermissions(&pa.PermissionsConfig{Grants: s, Policy: e.policy, Writes: writes}, e.cmds)
+	e.h.ConsentActions(bob)
+	e.cmds = &pa.PermissionCommands{Store: s, Validator: e.validator, Writes: writes, Scopes: scopes, Now: e.h.Now}
+	e.h.EnablePermissions(&pa.PermissionsConfig{Grants: s, Policy: e.policy, Writes: writes, Connections: s, Scopes: scopes}, e.cmds)
 	return e
 }
 
@@ -505,6 +514,7 @@ func TestPermissions_ConfirmationRechecks(t *testing.T) {
 			t.Fatalf("press after /consent withdraw answered %q", r)
 		}
 		e.h.Consent(alice)
+		e.h.ConsentActions(alice)
 		grant = e.button(e.one(alice, grantCmd), safetext.LabelPermissionGrant)
 		if _, err := s.DB.Exec(`UPDATE pa_consents SET state = $1 WHERE principal = $2`, string(convo.ConsentWithdrawn), alice); err != nil {
 			t.Fatal(err)
@@ -516,6 +526,7 @@ func TestPermissions_ConfirmationRechecks(t *testing.T) {
 			t.Fatalf("granted without consent: %+v", rows)
 		}
 		e.h.Consent(alice)
+		e.h.ConsentActions(alice)
 
 		// The button expired.
 		grant = e.button(e.one(alice, grantCmd), safetext.LabelPermissionGrant)

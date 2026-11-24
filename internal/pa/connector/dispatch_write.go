@@ -71,6 +71,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/pa"
 	"github.com/mctlhq/mctl-telegram/internal/pa/approval"
 	"github.com/mctlhq/mctl-telegram/internal/pa/catalog"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
@@ -97,6 +98,13 @@ const (
 	// the approval was made in is closed.
 	ReasonConsentGone        = "consent_gone"
 	ReasonConversationClosed = "conversation_closed"
+	// The principal has not consented to actions, withdrew that consent,
+	// or consented to another version or text of it (#1320 slice P2-S14c).
+	ReasonActionConsentRequired = "action_consent_required"
+	// The connection does not hold the write scope the tool needs: it was
+	// made for reading, the service narrowed its grant, or its granted
+	// scope cannot be read.
+	ReasonWriteScopeMissing = "write_scope_missing"
 	// A switch of the principal (disable, consent, conversation) could not
 	// be read.
 	ReasonStateUnreadable = "state_unreadable"
@@ -118,6 +126,7 @@ type WriteStore interface {
 	LockPAConnection(ctx context.Context, tx *sql.Tx, principal int64, id string) (connection.Connection, error)
 	PAPrincipalDisabled(ctx context.Context, tx *sql.Tx, principal int64) (bool, error)
 	GetPAConsent(ctx context.Context, tx *sql.Tx, principal int64) (convo.ConsentRecord, error)
+	GetPAActionConsent(ctx context.Context, tx *sql.Tx, principal int64) (convo.ConsentRecord, error)
 	PAConversationOpen(ctx context.Context, tx *sql.Tx, principal int64, conversationID string, now time.Time) error
 	// PAConversationTaintIn returns true with any error (S2-I10).
 	PAConversationTaintIn(ctx context.Context, tx *sql.Tx, principal int64, conversationID string) (bool, error)
@@ -194,6 +203,10 @@ type WriteConfig struct {
 	// Allowed is the preview allowlist (PA_ALLOWED_PRINCIPALS).
 	Allowed func(principal int64) bool
 	Fresh   FreshSurface
+	// Scopes names the scope each write tool needs; nil is the compiled
+	// table (connection.DefaultWriteScopes). A call is sent only on a
+	// connection whose granted scope holds its tool's scope.
+	Scopes  *connection.WriteScopes
 	Metrics Metrics
 	// CallTimeout bounds token, tools/list, the pre-dispatch transaction
 	// and tools/call of one dispatch; 0 is DefaultCallTimeout.
@@ -261,6 +274,14 @@ func (w *WriteExecutor) count(server string, status Status, reason string) {
 	}
 }
 
+// scopes is the table of write tools and their scopes.
+func (w *WriteExecutor) scopes() connection.WriteScopes {
+	if w.cfg.Scopes != nil {
+		return *w.cfg.Scopes
+	}
+	return connection.DefaultWriteScopes()
+}
+
 // flagsRefusal re-reads the switches and returns why server's writes are
 // off now, or "". Only values read without an error turn a write on.
 func (w *WriteExecutor) flagsRefusal(server string) string {
@@ -306,6 +327,15 @@ func (w *WriteExecutor) principalRefusal(ctx context.Context, tx *sql.Tx, a appr
 		return ReasonStateUnreadable
 	case !convo.Satisfied(rec):
 		return ReasonConsentGone
+	}
+	// The consent to actions, read in the same transaction. It is asked
+	// of every write, approved on a card or lowered by a permission, and
+	// again by the post-dispatch fence.
+	switch err := pa.RequireActionConsent(ctx, tx, w.cfg.Store, a.Principal); {
+	case errors.Is(err, pa.ErrActionConsentRequired):
+		return ReasonActionConsentRequired
+	case err != nil:
+		return ReasonStateUnreadable
 	}
 	err = w.cfg.Store.PAConversationOpen(ctx, tx, a.Principal, a.ConversationID, now)
 	switch {
@@ -442,8 +472,14 @@ func (w *WriteExecutor) run(ctx context.Context, a approval.Approval, reason str
 	if conn.ID != a.ConnectionID || conn.Principal != principal || string(conn.Server) != a.Server {
 		return refuse(ReasonConnectionUnbound, true)
 	}
-	if want, ok := connection.CanonicalScope(conn.Server); !ok || conn.GrantedScope != want {
+	// The scope the connection holds is the one its token response
+	// reported. A granted scope this build does not accept is a mismatch;
+	// an accepted one without the tool's write scope sends nothing.
+	if !connection.ScopeAccepted(conn) {
 		return refuse(ReasonScopeMismatch, true)
+	}
+	if !w.scopes().Holds(conn, a.Tool) {
+		return refuse(ReasonWriteScopeMissing, true)
 	}
 	if w.cfg.Fresh == nil {
 		return refuse(ReasonNoWritePath, true)
@@ -608,6 +644,10 @@ func (w *WriteExecutor) consume(ctx context.Context, a approval.Approval, dispat
 		out.reason = ReasonRevisionMismatch
 	case conn.Principal != a.Principal || conn.ID != a.ConnectionID || string(conn.Server) != a.Server:
 		out.reason = ReasonConnectionUnbound
+	case !w.scopes().Holds(conn, a.Tool):
+		// Read from the locked row, in the transaction that commits the
+		// dispatch: nothing is sent on a connection without the scope.
+		out.reason = ReasonWriteScopeMissing
 	}
 	if out.reason != "" {
 		return out

@@ -211,6 +211,10 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 	// The conversation's own answers (the consent prompt and its button,
 	// /new, /forget, /consent) are conversation-level outbox rows (#1348),
 	// written in the update's transaction and delivered after its commit.
+	var convWrites pa.WritesSwitch
+	if pt != nil {
+		convWrites = paWritesSwitch(pt.flags)
+	}
 	conv, err := pa.NewConversations(pa.ConversationsConfig{
 		Store: store, Sealer: sealer, TTL: cfg.PAConversationTTL, Runs: loop, Limiter: loop,
 		Replies: &pa.OutboxReplies{Store: store, Metrics: outboxCounter},
@@ -219,6 +223,9 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 		// "not available" in the transaction.
 		Linking: pt != nil,
 		Allowed: allowed,
+		// PA_WRITES_ENABLED, read where the dispatcher reads it: while it
+		// is on, /consent shows the consent to actions (#1320 P2-S14c).
+		Writes: convWrites,
 	})
 	if err != nil {
 		return nil, err

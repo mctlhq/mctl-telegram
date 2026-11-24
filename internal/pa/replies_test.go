@@ -296,7 +296,8 @@ func TestEveryReplyHasAKindAndATemplate(t *testing.T) {
 		ReplyNewConversation, ReplyForgotten, ReplyUnknownButton, ReplyRateLimited, ReplyMessageTooLong,
 		ReplyLinkingUnavailable, ReplyPrincipalDisabled,
 		ReplyApprovalCancelled, ReplyApprovalAlreadyDone, ReplyApprovalExpired,
-		ReplyPermissionsUnavailable, ReplyPermissionGranted, ReplyPermissionRevoked, ReplyPermissionRefused}
+		ReplyPermissionsUnavailable, ReplyPermissionGranted, ReplyPermissionRevoked, ReplyPermissionRefused,
+		ReplyActionConsentPrompt, ReplyActionConsentPromptRU, ReplyActionConsentAccepted}
 	if len(replyKinds) != len(all) || len(jobs.ConversationOutboxKinds()) != len(all) {
 		t.Fatalf("%d replies, %d mapped, %d kinds", len(all), len(replyKinds), len(jobs.ConversationOutboxKinds()))
 	}

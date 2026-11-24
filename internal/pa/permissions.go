@@ -49,6 +49,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output"
@@ -85,6 +86,14 @@ type PermissionGrants interface {
 	RevokePAPermission(ctx context.Context, tx *sql.Tx, principal int64, id string, now time.Time) error
 }
 
+// PermissionConnections reads the connection a grant names, in the
+// update's transaction, for its write scope (*db.Store; #1320 slice
+// P2-S14c). It is a read: a press still changes the permission table
+// through PermissionGrants only.
+type PermissionConnections interface {
+	LockPAConnection(ctx context.Context, tx *sql.Tx, principal int64, id string) (connection.Connection, error)
+}
+
 // WritesSwitch reads PA_WRITES_ENABLED. An error means it could not be
 // read, which is treated as off.
 type WritesSwitch func() (bool, error)
@@ -95,10 +104,24 @@ type PermissionsConfig struct {
 	// Policy is checked again when the grant button is pressed.
 	Policy permissions.ToolPolicy
 	Writes WritesSwitch
+	// Connections is required: a grant is refused unless its connection
+	// can be read and holds the tool's write scope.
+	Connections PermissionConnections
+	// Scopes names the scope each write tool needs; nil is the compiled
+	// table (connection.DefaultWriteScopes). A standing permission is
+	// granted only on a connection that holds its tool's scope.
+	Scopes *connection.WriteScopes
+}
+
+func (p *PermissionsConfig) scopes() connection.WriteScopes {
+	if p.Scopes != nil {
+		return *p.Scopes
+	}
+	return connection.DefaultWriteScopes()
 }
 
 func (p *PermissionsConfig) valid() bool {
-	return p.Grants != nil && p.Policy != nil && p.Writes != nil
+	return p.Grants != nil && p.Policy != nil && p.Writes != nil && p.Connections != nil
 }
 
 // writesOn reports whether writes are on; unreadable is off.
@@ -138,6 +161,18 @@ func (c *Conversations) handlePermissionsCommand(ctx context.Context, tx *sql.Tx
 	args := commandArgs(u.Fragments())
 	if len(args) > maxPermissionArgs {
 		args = args[:maxPermissionArgs]
+	}
+	// With writes on, the list and a grant need the consent to actions:
+	// the principal is shown its text here, and nothing else happens.
+	// Revoking only removes authority and is never held back by it.
+	if writesOn(c.permissions.Writes) && !(len(args) > 0 && strings.ToLower(args[0]) == permissionVerbRevoke) {
+		err := RequireActionConsent(ctx, tx, c.store, u.Principal().TelegramID())
+		if errors.Is(err, ErrActionConsentRequired) {
+			return c.promptActions(ctx, tx, u)
+		}
+		if err != nil {
+			return err
+		}
 	}
 	return setPostCommitPermission(ctx, PermissionAction{Args: args})
 }
@@ -200,6 +235,28 @@ func (c *Conversations) permissionButton(ctx context.Context, tx *sql.Tx, u Veri
 	}
 	if !writesOn(c.permissions.Writes) {
 		return c.reply(ctx, tx, u, ReplyPermissionsUnavailable, "")
+	}
+	// The consent to actions, read now: the screen may be older than its
+	// withdrawal or than a change of its text. Without it nothing is
+	// granted and the principal is shown the text.
+	err = RequireActionConsent(ctx, tx, c.store, principal)
+	if errors.Is(err, ErrActionConsentRequired) {
+		return c.promptActions(ctx, tx, u)
+	}
+	if err != nil {
+		return err
+	}
+	// The connection must hold the tool's write scope, as its token
+	// response reported it. A connection that cannot be read fails the
+	// update; one that is gone or holds no such scope grants nothing.
+	conn, err := c.permissions.Connections.LockPAConnection(ctx, tx, principal, prop.ConnectionID)
+	if err != nil && !errors.Is(err, connection.ErrNotFound) {
+		return err
+	}
+	if err != nil || conn.Principal != principal || string(conn.Server) != prop.Server ||
+		!c.permissions.scopes().Holds(conn, prop.Tool) {
+		slog.Warn("pa permissions: grant refused at confirmation", "reason", "write_scope")
+		return c.reply(ctx, tx, u, ReplyPermissionRefused, "")
 	}
 	if err := permissions.CheckTool(c.permissions.Policy, prop.Server, prop.Tool); err != nil {
 		slog.Warn("pa permissions: grant refused at confirmation", "reason", string(permissions.ReasonOf(err)))
@@ -301,6 +358,8 @@ type PermissionCommands struct {
 	Validator *permissions.Validator
 	Sender    PermissionSender
 	Writes    WritesSwitch
+	// Scopes is PermissionsConfig.Scopes: nil is the compiled table.
+	Scopes *connection.WriteScopes
 	// Now defaults to time.Now.
 	Now func() time.Time
 
@@ -460,6 +519,20 @@ func (c *PermissionCommands) grantScreen(ctx context.Context, principal int64, a
 	if err := c.Validator.Check(ctx, principal, prop, now); err != nil {
 		slog.Warn("pa permissions: grant refused", "reason", string(permissions.ReasonOf(err)))
 		return refused, nil
+	}
+	// The grant is one this build would give. A connection made for
+	// reading, or one whose grant the service narrowed, holds no write
+	// scope: the principal is told to connect the service again, and no
+	// button is issued.
+	scopes := connection.DefaultWriteScopes()
+	if c.Scopes != nil {
+		scopes = *c.Scopes
+	}
+	if !scopes.Holds(connection.Connection{
+		Server: connection.Server(on[0].Server), GrantedScope: on[0].GrantedScope, RequestedScope: on[0].RequestedScope,
+	}, tool) {
+		slog.Warn("pa permissions: grant refused", "reason", "write_scope")
+		return safetext.ServerText(safetext.TextWriteScopeNeeded), nil
 	}
 	text, err := safetext.PermissionScreen(safetext.TextPermissionGrantHead, safetext.PermissionView{
 		Tool: prop.Tool, Devices: prop.DeviceIDs, Ceiling: prop.Ceiling, ExpiresAt: time.UnixMilli(prop.ExpiresAtMS),

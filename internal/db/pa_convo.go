@@ -31,6 +31,10 @@ var _ convo.Store = (*Store)(nil)
 //
 //   - pa_consents: one row per principal, separate from AssistantInstall
 //     (T13). A withdrawn consent keeps its row in state 'withdrawn'.
+//   - pa_action_consents: the consent to actions (convo.ActionConsentVersion,
+//     #1320 slice P2-S14c), one row per principal, in the same shape. It is
+//     a table of its own so that accepting or changing it never rewrites
+//     the data-flow consent a run is bound to.
 //   - pa_conversations: expires_at_ms is created_at_ms + TTL and never
 //     moves. closed_at_ms > 0 means /new closed it; it is never loaded
 //     again. The partial unique index allows one open conversation per
@@ -49,6 +53,13 @@ func paConvoSchema(pg bool) []string {
 	}
 	return []string{
 		`CREATE TABLE IF NOT EXISTS pa_consents (
+			principal ` + intT + ` PRIMARY KEY,
+			version TEXT NOT NULL,
+			text_sha256 TEXT NOT NULL,
+			state TEXT NOT NULL,
+			updated_at_ms ` + intT + ` NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS pa_action_consents (
 			principal ` + intT + ` PRIMARY KEY,
 			version TEXT NOT NULL,
 			text_sha256 TEXT NOT NULL,
@@ -147,6 +158,19 @@ func rowRead(op string, err error) error {
 
 // GetPAConsent implements convo.Store.
 func (s *Store) GetPAConsent(ctx context.Context, tx *sql.Tx, principal int64) (convo.ConsentRecord, error) {
+	return getPAConsentRow(ctx, tx, "pa_consents", principal)
+}
+
+// GetPAActionConsent implements convo.Store: the principal's consent to
+// actions. ErrNotFound only when no row exists; every other failure wraps
+// ErrUnreadable.
+func (s *Store) GetPAActionConsent(ctx context.Context, tx *sql.Tx, principal int64) (convo.ConsentRecord, error) {
+	return getPAConsentRow(ctx, tx, "pa_action_consents", principal)
+}
+
+// getPAConsentRow reads the principal's row of one of the two consent
+// tables; table is a constant of this file, never a caller's value.
+func getPAConsentRow(ctx context.Context, tx *sql.Tx, table string, principal int64) (convo.ConsentRecord, error) {
 	if tx == nil || principal <= 0 {
 		return convo.ConsentRecord{}, fmt.Errorf("%w: consent lookup", convo.ErrInvalid)
 	}
@@ -156,7 +180,7 @@ func (s *Store) GetPAConsent(ctx context.Context, tx *sql.Tx, principal int64) (
 		updMS int64
 	)
 	err := tx.QueryRowContext(ctx,
-		`SELECT principal, version, text_sha256, state, updated_at_ms FROM pa_consents WHERE principal = $1`,
+		`SELECT principal, version, text_sha256, state, updated_at_ms FROM `+table+` WHERE principal = $1`,
 		principal).Scan(&rec.Principal, &rec.Version, &rec.TextSHA256, &state, &updMS)
 	if errors.Is(err, sql.ErrNoRows) {
 		return convo.ConsentRecord{}, convo.ErrNotFound
@@ -175,11 +199,22 @@ func (s *Store) GetPAConsent(ctx context.Context, tx *sql.Tx, principal int64) (
 
 // AcceptPAConsent implements convo.Store.
 func (s *Store) AcceptPAConsent(ctx context.Context, tx *sql.Tx, principal int64, version, textSHA256 string, now time.Time) error {
+	return acceptPAConsentRow(ctx, tx, "pa_consents", principal, version, textSHA256, now)
+}
+
+// AcceptPAActionConsent implements convo.Store: it records consent to the
+// action-consent version/textSHA256 and nothing else. The data-flow
+// consent row is not touched.
+func (s *Store) AcceptPAActionConsent(ctx context.Context, tx *sql.Tx, principal int64, version, textSHA256 string, now time.Time) error {
+	return acceptPAConsentRow(ctx, tx, "pa_action_consents", principal, version, textSHA256, now)
+}
+
+func acceptPAConsentRow(ctx context.Context, tx *sql.Tx, table string, principal int64, version, textSHA256 string, now time.Time) error {
 	if tx == nil || principal <= 0 || version == "" || textSHA256 == "" {
 		return fmt.Errorf("%w: consent accept", convo.ErrInvalid)
 	}
 	_, err := tx.ExecContext(ctx,
-		`INSERT INTO pa_consents(principal, version, text_sha256, state, updated_at_ms)
+		`INSERT INTO `+table+`(principal, version, text_sha256, state, updated_at_ms)
 		 VALUES($1, $2, $3, $4, $5)
 		 ON CONFLICT (principal) DO UPDATE SET version = excluded.version,
 		   text_sha256 = excluded.text_sha256, state = excluded.state, updated_at_ms = excluded.updated_at_ms`,
@@ -192,6 +227,9 @@ func (s *Store) AcceptPAConsent(ctx context.Context, tx *sql.Tx, principal int64
 
 // WithdrawPAConsent implements convo.Store. The consent row and the state
 // deletion share the caller's transaction: either both happen or neither.
+// The consent to actions is withdrawn with it, in the same statement
+// order: there is one withdrawal, and nothing of either consent survives
+// it.
 func (s *Store) WithdrawPAConsent(ctx context.Context, tx *sql.Tx, principal int64, now time.Time) error {
 	if tx == nil || principal <= 0 {
 		return fmt.Errorf("%w: consent withdraw", convo.ErrInvalid)
@@ -200,6 +238,11 @@ func (s *Store) WithdrawPAConsent(ctx context.Context, tx *sql.Tx, principal int
 		`UPDATE pa_consents SET state = $1, updated_at_ms = $2 WHERE principal = $3`,
 		string(convo.ConsentWithdrawn), now.UnixMilli(), principal); err != nil {
 		return fmt.Errorf("withdraw pa consent: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE pa_action_consents SET state = $1, updated_at_ms = $2 WHERE principal = $3`,
+		string(convo.ConsentWithdrawn), now.UnixMilli(), principal); err != nil {
+		return fmt.Errorf("withdraw pa consent: actions: %w", err)
 	}
 	if err := s.ForgetPAConversations(ctx, tx, principal); err != nil {
 		return err

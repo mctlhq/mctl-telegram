@@ -208,6 +208,12 @@ type Config struct {
 	// Required: every step of the flow refuses a principal not on it, or
 	// one an admin disabled, the same way the webhook refuses its updates.
 	Allowed Allowlist
+	// Writes reads PA_WRITES_ENABLED when a link starts (#1320 slice
+	// P2-S14c). On, a new connection asks for the server's write scopes
+	// too (connection.WriteRequestScope); off, unset or unreadable, it
+	// asks for the read set, as Phase 1 does. It decides only what is
+	// asked: what a connection holds is what its token response reports.
+	Writes func() (bool, error)
 	// Now defaults to time.Now.
 	Now func() time.Time
 }
@@ -362,7 +368,11 @@ func (s *Service) StartLink(ctx context.Context, principal pa.Principal, server 
 	if err := s.admitted(ctx, p); err != nil {
 		return "", err
 	}
-	c, err := s.cfg.Manager.Begin(ctx, p, server)
+	begin := s.cfg.Manager.Begin
+	if s.writesOn() {
+		begin = s.cfg.Manager.BeginForWrites
+	}
+	c, err := begin(ctx, p, server)
 	if err != nil {
 		return "", err
 	}
@@ -385,6 +395,16 @@ func (s *Service) StartLink(ctx context.Context, principal pa.Principal, server 
 	q.Set("link", tok)
 	u.RawQuery = q.Encode()
 	return u.String(), nil
+}
+
+// writesOn reports whether PA_WRITES_ENABLED reads on. A switch that is
+// not wired or cannot be read is off: the link asks for the read set.
+func (s *Service) writesOn() bool {
+	if s.cfg.Writes == nil {
+		return false
+	}
+	on, err := s.cfg.Writes()
+	return err == nil && on
 }
 
 // consume consumes a secret, mapping an expired one to the connection
@@ -453,15 +473,29 @@ func (s *Service) BeginOAuth(ctx context.Context, rawInitData, linkToken string)
 	}, now); err != nil {
 		return "", err
 	}
-	return authorizationURL(sc, server, state, verifier)
+	return authorizationURL(sc, c, state, verifier)
 }
 
-func authorizationURL(sc ServerConfig, server connection.Server, state, verifier string) (string, error) {
+// authorizationURL builds the authorization request of c. Its scope is the
+// one c's row says it asks for, fixed when the link started: the server's
+// read set, or its write set (connection.WriteRequestScope). Both come from
+// the compiled scope tables; a row that names anything else is refused.
+func authorizationURL(sc ServerConfig, c connection.Connection, state, verifier string) (string, error) {
 	u, err := url.Parse(sc.AuthorizationEndpoint)
 	if err != nil || u.Scheme != "https" {
 		return "", fmt.Errorf("%w: authorization endpoint", ErrConfig)
 	}
-	scope, _ := connection.CanonicalScope(server)
+	scope, ok := connection.CanonicalScope(c.Server)
+	if !ok {
+		return "", fmt.Errorf("%w: no scope for the server", ErrConfig)
+	}
+	if c.RequestedScope != "" && c.RequestedScope != scope {
+		wide, ok := connection.WriteRequestScope(c.Server)
+		if !ok || c.RequestedScope != wide {
+			return "", fmt.Errorf("%w: requested scope", ErrConfig)
+		}
+		scope = wide
+	}
 	ch := sha256.Sum256([]byte(verifier))
 	q := u.Query()
 	q.Set("response_type", "code")
