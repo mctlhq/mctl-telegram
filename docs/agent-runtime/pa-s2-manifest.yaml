@@ -119,6 +119,23 @@
 # and no device-type rule exists, so outside tests no permission can be
 # granted. The change moved lines in internal/pa/conversation.go, so the
 # P2S7-I8a guard was pointed at its new line; its code did not change.
+#
+# The P2S11-* records (S2-I5, S2-I9, S2-D1, S2-D5, S2-A9) ran on the P2-S11
+# branch, cut from f49ad63c, the same way, on sqlite, restored from saved
+# bytes; the tests also pass on Postgres. P2-S11 built the lowering of a
+# clean run's write under a standing permission (connector/lower.go) and
+# the grant rules (permissions/rules.go). Nothing in cmd/server gives the
+# card emitter a permission lookup or an executor, so no call is lowered
+# outside tests. Lowering has a barrier at each layer, so a record names
+# the test of the layer its mutation is in. Four mutations survived
+# because another barrier does the same check and were not recorded: the
+# emitter looking a permission up for any device write (the gate and the
+# rule table hold), and in the executor the digest compare, the canonical
+# compare (the sealer refuses both) and taking the revision from the
+# locked row (the row was just compared with the call's). The change moved
+# lines in dispatch_write.go, card.go, dispatch.go, device_write.go and
+# internal/db/pa_permissions.go: the guards of earlier slices were pointed
+# at their new lines; their code did not change.
 
 S2-C9:
   status: pending
@@ -169,7 +186,7 @@ S2-C11:
     - internal/pa.TestS2C11_UnknownOutcomeIsNeverRetried
   mutations:
     - id: P2S3-C11a
-      guard: internal/pa/connector/dispatch_write.go:630
+      guard: internal/pa/connector/dispatch_write.go:665
       guard_text: "return ep.CallToolExact(ctx, token, tool, args)"
       mutation: "a failed tools/call is sent a second time"
       killed_by:
@@ -181,7 +198,7 @@ S2-C11:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.592s
     - id: P2S3-C11b
-      guard: internal/pa/connector/dispatch_write.go:665
+      guard: internal/pa/connector/dispatch_write.go:700
       guard_text: "case callErr != nil:\n\t\treturn StatusOutcomeUnknown, ReasonOutcomeUnknown"
       mutation: "a transport failure is recorded as tool_error instead of outcome_unknown"
       killed_by:
@@ -193,7 +210,7 @@ S2-C11:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.558s
     - id: P2S3-C11c
-      guard: internal/pa/connector/dispatch_write.go:672
+      guard: internal/pa/connector/dispatch_write.go:707
       guard_text: "case isErr && upstreamSilent(out):"
       mutation: "the upstream's \"did not respond\" tool error is recorded as tool_error instead of outcome_unknown"
       killed_by:
@@ -299,7 +316,7 @@ S2-C12:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.486s
     - id: P2S3-C12b
-      guard: internal/pa/connector/dispatch_write.go:887
+      guard: internal/pa/connector/dispatch_write.go:922
       guard_text: "for _, d := range moved {\n\t\t// The record keeps hashes"
       mutation: "the stale sweeper appends no audit entry for the records it moved"
       killed_by:
@@ -324,7 +341,7 @@ S2-C13:
     - internal/pa.TestS2C13_ResultAfterDisconnectIsFenced
   mutations:
     - id: P2S3-C13a
-      guard: internal/pa/connector/dispatch_write.go:718
+      guard: internal/pa/connector/dispatch_write.go:753
       guard_text: "if fenceErr != nil {\n\t\tstatus, reason = StatusFenced, ReasonFenced\n\t}"
       mutation: "a refused call.Finish (the connection was revoked during the call) no longer fences the result"
       killed_by:
@@ -336,7 +353,7 @@ S2-C13:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.491s
     - id: P2S3-C13b
-      guard: internal/pa/connector/dispatch_write.go:735
+      guard: internal/pa/connector/dispatch_write.go:770
       guard_text: "if r := w.principalRefusal(fctx, tx, a, now); r != \"\" {"
       mutation: "the finish transaction no longer re-checks the principal's state before recording the result"
       killed_by:
@@ -391,13 +408,56 @@ S2-X5:
       tracked_by: "#1323"
 
 S2-I5:
-  status: pending
-  slice: P2-S5
-  tracked_by: "#1321"
-  note: "the card gate reads the durable taint; P2-S11 (lowering) must keep it. The tests are of the inert gate.Decide (#1370): rule 6 cards a tainted or unreadable taint. The card emitter (connector.Cards, P2-S5) calls Decide with the durable taint inside its transaction and the card warns about external content (internal/pa.TestApprovalCard_TaintedConversationIsFlagged), but no lowering exists, so 'even with a standing permission' cannot be shown yet and nothing deployed constructs the emitter: the id stays pending."
+  status: green
+  slice: P2-S11
+  note: "Lowering at dispatch (#1322 P2-S11): a standing permission replaces the card only in a run whose conversation is clean. The card emitter reads the durable taint under the principal's lock and asks gate.Decide (rule 6 cards a tainted or unreadable taint before any permission is considered); the write executor reads the taint again inside its pre-dispatch transaction and refuses a lowered call with run_tainted unless it read clean, and the call then gets a card. After a read in the run a covered write gets a card, nothing is sent and the executor is not asked; a read that lands between the decision and the dispatch ends the same way. Lowering has a barrier at each layer (the gate, the card emitter, permissions.Covers, the write executor), so some single mutations are caught only by the test of their own layer; each record names the test that went red."
   tests:
     - internal/pa/gate.TestDecideOrder
     - internal/pa/gate.TestDecideNeverLowersWithoutEveryCondition
+    - internal/pa.TestS2I5_ReadThenWriteNeedsACard
+    - internal/pa.TestS2I5_ExecutorRefusesATaintedRun
+  mutations:
+    - id: P2S11-I5a
+      guard: internal/pa/gate/decide.go:138
+      guard_text: "case in.TaintErr != nil || in.Tainted:"
+      mutation: "a tainted or unreadable taint no longer cards a call that has a permission"
+      killed_by:
+        - internal/pa.TestS2I5_ReadThenWriteNeedsACard
+      red: |-
+        --- FAIL: TestS2I5_ReadThenWriteNeedsACard (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.516s
+    - id: P2S11-I5b
+      guard: internal/pa/connector/lower.go:238
+      guard_text: "if taint != TaintClean {"
+      mutation: "the executor no longer refuses a lowered call in a tainted run"
+      killed_by:
+        - internal/pa.TestS2I5_ExecutorRefusesATaintedRun
+      red: |-
+        --- FAIL: TestS2I5_ExecutorRefusesATaintedRun (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.597s
+    - id: P2S11-I5c
+      guard: internal/pa/connector/card.go:434
+      guard_text: "in.Tainted, in.TaintErr = c.cfg.Store.PAConversationTaintIn(ctx, tx, principal, conversationID)"
+      mutation: "the card emitter decides a lowering without reading the taint"
+      killed_by:
+        - internal/pa.TestS2I5_ReadThenWriteNeedsACard
+      red: |-
+        --- FAIL: TestS2I5_ReadThenWriteNeedsACard (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.522s
+  gaps:
+    - half: "owner decision: the result of a lowered call is not handed to the model (the worker gets fixed server text) and does not taint the run, so a second covered write in the same clean run is lowered too; only a read taints"
+      tracked_by: "#1322"
+    - half: "production wiring: nothing in cmd/server constructs connector.Cards with Permissions and Lowered set, a WriteExecutor or a permissions.Validator with permissions.Rules (TestNoRuntimePhase2Use keeps the Phase 2 pin and NewCards out of the runtime), so no call is lowered and no grant passes the rule outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
 
 S2-I6:
   status: green
@@ -450,7 +510,7 @@ S2-I6:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.527s
     - id: P2S7-I6c
-      guard: internal/pa/connector/dispatch.go:535
+      guard: internal/pa/connector/dispatch.go:544
       guard_text: 'ferr = d.cfg.Jobs.RecordToolResult(fctx, job, out)'
       mutation: "dispatcher no longer records the tool result: `ferr = d.cfg.Jobs.RecordToolResult(fctx, job, out)` -> `_ = out`"
       killed_by:
@@ -585,13 +645,33 @@ S2-I8:
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.471s
 
 S2-I9:
-  status: pending
+  status: green
   slice: P2-S11
-  tracked_by: "#1321"
-  note: "a reset never lowers the disclosure card gate. The tests are of the inert gate.Decide (#1370): rule 4 cards a disclosure whatever the taint. Nothing in the runtime calls Decide yet, so the id stays pending. Moved from P2-S6 to P2-S11: the row needs standing permissions and lowering to exist."
+  note: "A reset is a new, clean conversation row (S2-I7), and a clean row lowers nothing for a disclosure: gate.Decide cards a disclosure in rule 4, before the taint is looked at, the card emitter looks a permission up only for a write with a lowering rule, and the executor refuses a lowered call of any other class. internal/pa.TestS2I9_DisclosureAfterAResetStillNeedsACard runs in a clean row with permission rows forced in for the disclosure tools: both disclosures get a card, nothing is sent, no permission is looked up, and a covered write in the same run is lowered, so the card is the disclosure rule and not a tainted run. Lowering has a barrier at each layer (the gate, the card emitter, permissions.Covers, the write executor), so some single mutations are caught only by the test of their own layer; each record names the test that went red."
   tests:
     - internal/pa/gate.TestDecideOrder
     - internal/pa/gate.TestDecideNeverLowersWithoutEveryCondition
+    - internal/pa.TestS2I9_DisclosureAfterAResetStillNeedsACard
+  mutations:
+    - id: P2S11-I9a
+      guard: internal/pa/gate/decide.go:133
+      guard_text: "case in.Class == catalog.ClassDisclosure:"
+      mutation: "a disclosure in a clean run, as after a reset, is no longer carded by rule 4"
+      killed_by:
+        - internal/pa/gate.TestDecideOrder
+      red: |-
+        --- FAIL: TestDecideOrder (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/gate
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/gate	0.227s
+  gaps:
+    - half: "the internal/pa test starts in a fresh conversation row instead of driving /new or the TTL through the bot and then running a job; that a reset yields such a row is S2-I7"
+      tracked_by: "#1320"
+    - half: "no single mutation turns the internal/pa test red: with rule 4 of the gate removed the emitter still looks no permission up for a disclosure, and with that removed the executor still refuses its class (records P2S11-D1b, P2S11-D1c under S2-D1)"
+      tracked_by: "#1320"
+    - half: "production wiring: nothing in cmd/server constructs connector.Cards with Permissions and Lowered set, a WriteExecutor or a permissions.Validator with permissions.Rules (TestNoRuntimePhase2Use keeps the Phase 2 pin and NewCards out of the runtime), so no call is lowered and no grant passes the rule outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
 
 S2-I10:
   status: green
@@ -632,7 +712,7 @@ S2-I10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.458s
     - id: P2S7-I10c
-      guard: internal/pa/connector/dispatch.go:588
+      guard: internal/pa/connector/dispatch.go:597
       guard_text: "\"pa dispatch: conversation taint unreadable, recorded as external\", \"err\", err)\n\t\treturn TaintExternal"
       mutation: "Dispatcher.taint read error recorded clean: `return TaintExternal` -> `return TaintClean` in the error branch"
       killed_by:
@@ -646,13 +726,70 @@ S2-I10:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.531s
 
 S2-D1:
-  status: pending
+  status: green
   slice: P2-S11
-  tracked_by: "#1322"
-  note: "disclosure class: card always. The tests are of the inert gate.Decide (#1370): rule 4 cards a disclosure ahead of taint and standing permissions. Nothing in the runtime calls Decide yet, so the id stays pending. Moved from P2-S6 to P2-S11: the row needs standing permissions and lowering to exist."
+  note: "Disclosure tools never run without a card (#1322 P2-S11). Four barriers, each tested on its own: gate.Decide cards a disclosure in rule 4, ahead of taint, permissions and conditions; connector.lowerable lets the emitter look a permission up only for a write the pin makes lowerable that has a rule in permissions.Rules (alice_set_volume, alice_media_control, alice_set_light); Permission.Covers covers nothing for a tool without a rule; WriteExecutor.DispatchLowered refuses not_lowerable, before anything is read or sent, a call whose class is not write, whose tool has no rule or whose bytes name no device. With permission rows forced into the store for alice_say_phrase, alice_send_command, alice_control_room, alice_trigger_scenario and alice_control_device in a clean run, the disclosures get their card, the others their refusal, nothing is sent and no permission is looked up. Settings: with PA_WRITES_ENABLED off or the principal disabled the gate answers never, which is a refusal. Lowering has a barrier at each layer (the gate, the card emitter, permissions.Covers, the write executor), so some single mutations are caught only by the test of their own layer; each record names the test that went red."
   tests:
     - internal/pa/gate.TestDecideOrder
     - internal/pa/gate.TestDecideNeverLowersWithoutEveryCondition
+    - internal/pa.TestS2D1_NoPermissionLowersADisclosure
+    - internal/pa.TestS2D1_ExecutorNeverSendsADisclosureWithoutACard
+    - internal/pa/permissions.TestS2D1_NoPermissionCoversADisclosure
+    - internal/pa/connector.TestLowerable_OnlyDeviceWritesWithARule
+  mutations:
+    - id: P2S11-D1a
+      guard: internal/pa/gate/decide.go:133
+      guard_text: "case in.Class == catalog.ClassDisclosure:"
+      mutation: "a permission lowers a disclosure at the gate"
+      killed_by:
+        - internal/pa/gate.TestDecideOrder
+      red: |-
+        --- FAIL: TestDecideOrder (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/gate
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/gate	0.333s
+    - id: P2S11-D1b
+      guard: internal/pa/connector/lower.go:271
+      guard_text: "return pinned.Class == catalog.ClassWrite &&"
+      mutation: "a permission is looked up for a disclosure"
+      killed_by:
+        - internal/pa/connector.TestLowerable_OnlyDeviceWritesWithARule
+      red: |-
+        --- FAIL: TestLowerable_OnlyDeviceWritesWithARule (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/connector
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.558s
+    - id: P2S11-D1c
+      guard: internal/pa/connector/lower.go:204
+      guard_text: "if call.Binding.Class != catalog.ClassWrite || !permissions.HasRule"
+      mutation: "the executor sends a lowered call whatever its class"
+      killed_by:
+        - internal/pa.TestS2D1_ExecutorNeverSendsADisclosureWithoutACard
+      red: |-
+        --- FAIL: TestS2D1_ExecutorNeverSendsADisclosureWithoutACard (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.613s
+    - id: P2S11-D1d
+      guard: internal/pa/permissions/rules.go:197
+      guard_text: "if !ok || !r.ceilingValid(p.Ceiling) {"
+      mutation: "a permission of a tool without a rule covers a call"
+      killed_by:
+        - internal/pa/permissions.TestS2D1_NoPermissionCoversADisclosure
+      red: |-
+        --- FAIL: TestS2D1_NoPermissionCoversADisclosure (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/permissions
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.329s
+  gaps:
+    - half: "the executor's rule check (permissions.HasRule) and its device read (loweredTarget) accept the same three tools today, so removing either alone changes no outcome; connector.TestLowerable_OnlyDeviceWritesWithARule pins that the two tables agree"
+      tracked_by: "#1320"
+    - half: "production wiring: nothing in cmd/server constructs connector.Cards with Permissions and Lowered set, a WriteExecutor or a permissions.Validator with permissions.Rules (TestNoRuntimePhase2Use keeps the Phase 2 pin and NewCards out of the runtime), so no call is lowered and no grant passes the rule outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
 
 S2-D2:
   status: green
@@ -673,7 +810,7 @@ S2-D2:
     - internal/pa.TestDeviceWrite_PinAndCardAgree
   mutations:
     - id: P2S6-D2a
-      guard: internal/pa/connector/card.go:307
+      guard: internal/pa/connector/card.go:336
       guard_text: "sum := sha256.Sum256(canonical)"
       mutation: "the approval hash leaves the device field out (at the card, the seal and the executor)"
       killed_by:
@@ -738,7 +875,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.347s
     - id: P2S8-D2a
-      guard: internal/pa/connector/device_write.go:181
+      guard: internal/pa/connector/device_write.go:183
       guard_text: "if err != nil || strconv.FormatInt(n, 10) != text || n < v.bound.Min || n > v.bound.Max {"
       mutation: "a value outside its range is clamped into it, as the server does, instead of refused"
       killed_by:
@@ -751,7 +888,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.483s
     - id: P2S8-D2b
-      guard: internal/pa/connector/device_write.go:181
+      guard: internal/pa/connector/device_write.go:183
       guard_text: "if err != nil || strconv.FormatInt(n, 10) != text || n < v.bound.Min || n > v.bound.Max {"
       mutation: "the upper bound of a number is one wider than the pin states"
       killed_by:
@@ -764,7 +901,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.563s
     - id: P2S8-D2c
-      guard: internal/pa/connector/device_write.go:181
+      guard: internal/pa/connector/device_write.go:183
       guard_text: "if err != nil || strconv.FormatInt(n, 10) != text || n < v.bound.Min || n > v.bound.Max {"
       mutation: "the lower bound of a number is one wider than the pin states"
       killed_by:
@@ -777,7 +914,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.476s
     - id: P2S8-D2d
-      guard: internal/pa/connector/device_write.go:181
+      guard: internal/pa/connector/device_write.go:183
       guard_text: "if err != nil || strconv.FormatInt(n, 10) != text || n < v.bound.Min || n > v.bound.Max {"
       mutation: "a number is read by its value, so 5.0 and 5e0 pass as 5"
       killed_by:
@@ -790,7 +927,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.537s
     - id: P2S8-D2e
-      guard: internal/pa/connector/device_write.go:282
+      guard: internal/pa/connector/device_write.go:288
       guard_text: "if d.ID == call.device {"
       mutation: "a device's name is accepted as the target"
       killed_by:
@@ -803,7 +940,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.473s
     - id: P2S8-D2f
-      guard: internal/pa/connector/device_write.go:195
+      guard: internal/pa/connector/device_write.go:201
       guard_text: "if _, present := args[spec.roomArg]; present {"
       mutation: "a room next to the device id is let through to the server"
       killed_by:
@@ -816,7 +953,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.487s
     - id: P2S8-D2g
-      guard: internal/pa/connector/device_write.go:248
+      guard: internal/pa/connector/device_write.go:254
       guard_text: "speakers, err := reader.Speakers(ctx, sreq)\n\t\tif err != nil {"
       mutation: "a failed speaker read that came with a list is used"
       killed_by:
@@ -829,7 +966,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.506s
     - id: P2S8-D2h
-      guard: internal/pa/connector/device_write.go:318
+      guard: internal/pa/connector/device_write.go:324
       guard_text: "Light: call.spec.light, Home: wd.Device.Home, Room: wd.Device.Room, Name: wd.Device.Name, ID: call.device,\n\t\tValues: call.values,"
       mutation: "the card that is sent shows fewer values than the sealed arguments set"
       killed_by:
@@ -842,7 +979,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.560s
     - id: P2S8-D2i
-      guard: internal/pa/connector/device_write.go:160
+      guard: internal/pa/connector/device_write.go:162
       guard_text: "if pinned.Constraints == nil || pinned.Constraints.IntegerBounds[v.arg] != *v.bound {"
       mutation: "the pin's bounds are not compared with the range the card's label names"
       killed_by:
@@ -855,7 +992,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.573s
     - id: P2S8-D2j
-      guard: internal/pa/connector/card.go:238
+      guard: internal/pa/connector/card.go:251
       guard_text: "} else if pinned.Class == catalog.ClassWrite && catalog.Phase2Tool(req.Tool) {"
       mutation: "a Phase 2 write without a card of its own falls through to the plain card of raw arguments"
       killed_by:
@@ -922,7 +1059,7 @@ S2-D3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.565s
     - id: P2S6-D3c
-      guard: internal/pa/connector/card.go:212
+      guard: internal/pa/connector/card.go:225
       guard_text: "c.offerSplit(ctx, principal, req.JobID)"
       mutation: "text over the cap is refused without the offer to split it"
       killed_by:
@@ -980,7 +1117,7 @@ S2-D4:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.698s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/output/safetext	0.253s
     - id: P2S6-D4b
-      guard: internal/pa/connector/card.go:476
+      guard: internal/pa/connector/card.go:550
       guard_text: "text, err = safetext.DisclosureCard(cardToolName(a.Server, a.Tool), string(args), d, tainted || terr != nil)"
       mutation: "the delivered card of a disclosure is the plain card: no speaker, no text line, no warning"
       killed_by:
@@ -1034,10 +1171,219 @@ S2-D4:
       tracked_by: "#1322"
 
 S2-D5:
-  status: pending
-  slice: P2-S10
-  tracked_by: "#1322"
-  note: "standing permission device allowlist; type read fresh at dispatch. P2-S10 built the grant-time half that needs no device type: a grant is refused for alice_control_room, alice_trigger_scenario, any never-lowerable or disclosure tool and any device id absent from a fresh device read (internal/pa/permissions.TestCheckTool, TestValidatorCheck, internal/pa.TestPermissions_GrantRefusals); with no device-type rule installed every grant is refused. The per-tool device-type allowlist and the type read at dispatch are P2-S11."
+  status: green
+  slice: P2-S11
+  note: "Standing permission rules (#1322 P2-S11, on the P2-S10 GrantRule hook). permissions.Rules refuses a grant for a tool without a rule (alice_control_device, alice_control_room, alice_trigger_scenario, the disclosures, anything unknown), for an empty device list, for a device whose type is not the tool's by exact dotted prefix (devices.types.media_device for alice_set_volume and alice_media_control, devices.types.light for alice_set_light) or is empty, and for a ceiling that is not valid for the tool; the Validator of P2-S10 refuses an id a fresh device read does not list. Ceiling: alice_set_volume requires one, 1 to 10, and it is the highest \"level\" a call may set; alice_media_control and alice_set_light have none, a grant that names one is refused and a stored one covers nothing. At dispatch Permission.Covers needs the device id listed in the permission and the level within the ceiling, on both sides of the dispatch (the emitter, then the executor from the bytes it will send); alice_media_control is lowered only for an action in the pin's playback_actions. The device is read again for every call: it must be in a fresh list of the connection's speakers (or lights, for alice_set_light), and a device that left the list, a failed read or an empty list is a refusal with nothing sent, whatever the permission says."
+  tests:
+    - internal/pa/permissions.TestS2D5_GrantRuleRefusals
+    - internal/pa/permissions.TestS2D5_ValidatorWithRules
+    - internal/pa/permissions.TestRules_AgreeWithThePhase2Pin
+    - internal/pa/permissions.TestCovers_OnlyTheGrantedCall
+    - internal/pa.TestS2D5_DeviceGoneOrUnreadableAtDispatchIsNotLowered
+    - internal/pa.TestLowering_CeilingAndDeviceBoundThePermission
+    - internal/pa/connector.TestLoweringCondition
+    - internal/pa/gate.TestDecideOrder
+    - internal/pa/gate.TestDecideNeverLowersWithoutEveryCondition
+  mutations:
+    - id: P2S11-D5a
+      guard: internal/pa/permissions/rules.go:81
+      guard_text: "\"alice_set_light\":     {typePrefix: TypeLight},"
+      mutation: "alice_control_device gets a rule"
+      killed_by:
+        - internal/pa/permissions.TestS2D5_GrantRuleRefusals
+        - internal/pa/permissions.TestS2D5_ValidatorWithRules
+      red: |-
+        --- FAIL: TestS2D5_GrantRuleRefusals (0.00s)
+        --- FAIL: TestS2D5_ValidatorWithRules (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/permissions
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.320s
+    - id: P2S11-D5b
+      guard: internal/pa/permissions/rules.go:87
+      guard_text: "if catalog.IsNeverLowerable(tool) {"
+      mutation: "alice_control_room and alice_trigger_scenario get the rule of a light"
+      killed_by:
+        - internal/pa/permissions.TestS2D5_GrantRuleRefusals
+      red: |-
+        --- FAIL: TestS2D5_GrantRuleRefusals (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/permissions
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.242s
+    - id: P2S11-D5c
+      guard: internal/pa/permissions/rules.go:146
+      guard_text: "if len(devices) == 0 {"
+      mutation: "a grant without devices passes the rule"
+      killed_by:
+        - internal/pa/permissions.TestS2D5_GrantRuleRefusals
+      red: |-
+        --- FAIL: TestS2D5_GrantRuleRefusals (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/permissions
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.293s
+    - id: P2S11-D5d
+      guard: internal/pa/permissions/rules.go:150
+      guard_text: "if !typeAllowed(r.typePrefix, d.Type) {"
+      mutation: "the device type is not checked at a grant"
+      killed_by:
+        - internal/pa/permissions.TestS2D5_GrantRuleRefusals
+        - internal/pa/permissions.TestS2D5_ValidatorWithRules
+      red: |-
+        --- FAIL: TestS2D5_GrantRuleRefusals (0.00s)
+        --- FAIL: TestS2D5_ValidatorWithRules (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/permissions
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.240s
+    - id: P2S11-D5e
+      guard: internal/pa/permissions/rules.go:113
+      guard_text: "strings.HasPrefix(deviceType, prefix+\".\"))"
+      mutation: "a type that only starts like the allowed one passes"
+      killed_by:
+        - internal/pa/permissions.TestS2D5_GrantRuleRefusals
+      red: |-
+        --- FAIL: TestS2D5_GrantRuleRefusals (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/permissions
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.239s
+    - id: P2S11-D5f
+      guard: internal/pa/permissions/rules.go:154
+      guard_text: "if !r.ceilingValid(ceiling) {"
+      mutation: "the ceiling is not checked at a grant"
+      killed_by:
+        - internal/pa/permissions.TestS2D5_GrantRuleRefusals
+        - internal/pa/permissions.TestS2D5_ValidatorWithRules
+      red: |-
+        --- FAIL: TestS2D5_GrantRuleRefusals (0.00s)
+        --- FAIL: TestS2D5_ValidatorWithRules (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/permissions
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.234s
+    - id: P2S11-D5g
+      guard: internal/pa/permissions/rules.go:122
+      guard_text: "return ceiling >= r.ceilingMin && ceiling <= r.ceilingMax"
+      mutation: "a ceiling one above the range passes (off by one)"
+      killed_by:
+        - internal/pa/permissions.TestS2D5_GrantRuleRefusals
+      red: |-
+        --- FAIL: TestS2D5_GrantRuleRefusals (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/permissions
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.295s
+    - id: P2S11-D5h
+      guard: internal/pa/permissions/rules.go:120
+      guard_text: "return ceiling == NoCeiling"
+      mutation: "a tool without a ceiling accepts one"
+      killed_by:
+        - internal/pa/permissions.TestS2D5_GrantRuleRefusals
+      red: |-
+        --- FAIL: TestS2D5_GrantRuleRefusals (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/permissions
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.208s
+    - id: P2S11-D5i
+      guard: internal/pa/connector/device_write.go:288
+      guard_text: "if d.ID == call.device {"
+      mutation: "a device the fresh read does not list is taken for a listed one"
+      killed_by:
+        - internal/pa.TestS2D5_DeviceGoneOrUnreadableAtDispatchIsNotLowered
+      red: |-
+        --- FAIL: TestS2D5_DeviceGoneOrUnreadableAtDispatchIsNotLowered (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.542s
+    - id: P2S11-D5j
+      guard: internal/pa/connector/device_write.go:254
+      guard_text: "speakers, err := reader.Speakers(ctx, sreq)"
+      mutation: "a speaker read that failed is taken for a list holding the device"
+      killed_by:
+        - internal/pa.TestS2D5_DeviceGoneOrUnreadableAtDispatchIsNotLowered
+      red: |-
+        --- FAIL: TestS2D5_DeviceGoneOrUnreadableAtDispatchIsNotLowered (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.518s
+    - id: P2S11-CEa
+      guard: internal/pa/permissions/rules.go:205
+      guard_text: "if !set || v > p.Ceiling {"
+      mutation: "a value one above the ceiling is covered (off by one)"
+      killed_by:
+        - internal/pa.TestLowering_CeilingAndDeviceBoundThePermission
+      red: |-
+        --- FAIL: TestLowering_CeilingAndDeviceBoundThePermission (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.491s
+    - id: P2S11-CEb
+      guard: internal/pa/permissions/rules.go:205
+      guard_text: "if !set || v > p.Ceiling {"
+      mutation: "a call that does not set the bounded argument is covered"
+      killed_by:
+        - internal/pa/permissions.TestCovers_OnlyTheGrantedCall
+      red: |-
+        --- FAIL: TestCovers_OnlyTheGrantedCall (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/permissions
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.298s
+    - id: P2S11-DVa
+      guard: internal/pa/permissions/rules.go:200
+      guard_text: "if c.Device == \"\" || !slices.Contains(p.DeviceIDs, c.Device) {"
+      mutation: "a device the permission does not list is covered"
+      killed_by:
+        - internal/pa.TestLowering_CeilingAndDeviceBoundThePermission
+      red: |-
+        --- FAIL: TestLowering_CeilingAndDeviceBoundThePermission (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.627s
+    - id: P2S11-CNa
+      guard: internal/pa/connector/lower.go:300
+      guard_text: "return slices.Contains(c.PlaybackActions.Values, action), nil"
+      mutation: "any playback action meets the condition"
+      killed_by:
+        - internal/pa/connector.TestLoweringCondition
+      red: |-
+        --- FAIL: TestLoweringCondition (0.01s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/connector
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.493s
+    - id: P2S11-CNb
+      guard: internal/pa/gate/decide.go:140
+      guard_text: "case in.Lowerable == catalog.LowerableConditional && (in.ConditionErr != nil || !in.ConditionMet):"
+      mutation: "an unmet condition does not card"
+      killed_by:
+        - internal/pa/gate.TestDecideOrder
+        - internal/pa/gate.TestDecideNeverLowersWithoutEveryCondition
+      red: |-
+        --- FAIL: TestDecideOrder (0.00s)
+        --- FAIL: TestDecideNeverLowersWithoutEveryCondition (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/gate
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/gate	0.209s
+  gaps:
+    - half: "alice_control_device can be neither granted nor lowered: the server lists no id for a device that is not a speaker, the tool has no card path, and nothing reads a device type, so its pin condition (allowed_type_prefixes) is answered \"cannot be checked\" and no rule exists for it"
+      tracked_by: "#1322"
+    - half: "at dispatch the type is not read as a type string: the device must be in the fresh list of speakers or of lights, and a change of type shows as the device leaving that list, which is a refusal (device_not_listed, devices_unreadable) and not a card"
+      tracked_by: "#1322"
+    - half: "no permissions.DeviceReader and no LightReader exists outside tests, and the type strings (devices.types.media_device, devices.types.light) are not verified against what the real server reports"
+      tracked_by: "#1322"
+    - half: "owner decision: alice_set_light has no ceiling, so a permission covers every brightness, colour temperature and scene the pin allows, the alarm and siren scenes included"
+      tracked_by: "#1322"
+    - half: "production wiring: nothing in cmd/server constructs connector.Cards with Permissions and Lowered set, a WriteExecutor or a permissions.Validator with permissions.Rules (TestNoRuntimePhase2Use keeps the Phase 2 pin and NewCards out of the runtime), so no call is lowered and no grant passes the rule outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
 
 S2-D6:
   status: green
@@ -1052,7 +1398,7 @@ S2-D6:
     - internal/pa/output/safetext.TestScenarioCard_NeverWithoutSteps
   mutations:
     - id: P2S9-D6a
-      guard: internal/pa/connector/card.go:295
+      guard: internal/pa/connector/card.go:308
       guard_text: "shown, sealed, ref := c.scenarioTarget(ctx, req, scenario)"
       mutation: "a scenario whose steps could not be read gets the plain card, without steps"
       killed_by:
@@ -1180,7 +1526,7 @@ S2-D7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.398s
     - id: P2S3-D7b
-      guard: internal/pa/connector/dispatch_write.go:480
+      guard: internal/pa/connector/dispatch_write.go:506
       guard_text: "out, callErr := w.callOnce(cctx, ep, token, a.Tool, c.args)"
       mutation: "the executor sends bytes that differ from the approved ones (`<` re-escaped)"
       killed_by:
@@ -1192,7 +1538,7 @@ S2-D7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.525s
     - id: P2S5-D7c
-      guard: internal/pa/connector/card.go:489
+      guard: internal/pa/connector/card.go:563
       guard_text: "text, err = safetext.Card(cardToolName(a.Server, a.Tool), string(args), tainted || terr != nil)"
       mutation: "the card is rendered from other bytes than the sealed arguments (the last byte dropped)"
       killed_by:
@@ -1251,7 +1597,7 @@ S2-A1:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.929s
     - id: P2S3-A1a
-      guard: internal/pa/connector/dispatch_write.go:612
+      guard: internal/pa/connector/dispatch_write.go:647
       guard_text: "if err := tx.Commit(); err != nil {\n\t\tslog.Error(\"pa write: pre-dispatch commit failed; call refused\""
       mutation: "the pre-dispatch transaction is rolled back instead of committed before the call"
       killed_by:
@@ -1334,7 +1680,7 @@ S2-A3:
     - internal/pa.TestS2A3_NonCanonicalStoredBytesAreRefused
   mutations:
     - id: P2S3-A3a
-      guard: internal/pa/connector/dispatch_write.go:608
+      guard: internal/pa/connector/dispatch_write.go:643
       guard_text: "|| digest(args) != got.ArgsSHA {"
       mutation: "the pre-dispatch transaction no longer compares the hash of the unsealed arguments with the approval's args_sha"
       killed_by:
@@ -1346,7 +1692,7 @@ S2-A3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.492s
     - id: P2S3-A3b
-      guard: internal/pa/connector/dispatch_write.go:608
+      guard: internal/pa/connector/dispatch_write.go:643
       guard_text: "!bytes.Equal(canonical, args)"
       mutation: "the pre-dispatch transaction accepts stored bytes that are not in canonical form"
       killed_by:
@@ -1446,7 +1792,7 @@ S2-A5:
     - internal/pa/connector.TestS2A5_FreshListingSeesDriftOverHTTP
   mutations:
     - id: P2S4-A5a
-      guard: internal/pa/connector/dispatch_write.go:428
+      guard: internal/pa/connector/dispatch_write.go:452
       guard_text: "if fresh.SchemaSHA != a.SchemaSHA || fresh.DescriptionSHA != a.DescriptionSHA ||"
       mutation: "the executor compares the fresh definition with the pin only: the three approval hashes are no longer compared"
       killed_by:
@@ -1528,7 +1874,7 @@ S2-A5:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/catalog	0.261s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.474s
     - id: P2S5-A5c
-      guard: internal/pa/connector/card.go:312
+      guard: internal/pa/connector/card.go:340
       guard_text: "SchemaSHA: fresh.SchemaSHA, DescriptionSHA: fresh.DescriptionSHA, AnnotationSHA: fresh.AnnotationSHA,"
       mutation: "the card records another hash as the description hash of the definition it listed"
       killed_by:
@@ -1668,7 +2014,7 @@ S2-A8:
     - internal/pa.TestS2A8_GrantInsertHasOneCaller
   mutations:
     - id: P2S10-A8a
-      guard: internal/pa/permissions.go:152
+      guard: internal/pa/permissions.go:154
       guard_text: "\t\tif prov != convo.ProvenanceUser {\n\t\t\treturn nil"
       mutation: "the /permissions arguments are read from a fragment of any provenance"
       killed_by:
@@ -1680,7 +2026,7 @@ S2-A8:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.838s
     - id: P2S10-A8b
-      guard: internal/pa/permissions.go:206
+      guard: internal/pa/permissions.go:208
       guard_text: "err = c.permissions.Grants.InsertPAPermission(ctx, tx, permissions.Permission{"
       mutation: "a second grant path: /api/pa/v1/jobs/reply inserts a permission when the answer text starts with \"/permissions grant \" (a new db.Store method called from serveReply)"
       killed_by:
@@ -1704,15 +2050,23 @@ S2-A8:
 S2-A9:
   status: green
   slice: P2-S10
-  note: "Standing permissions (#1320 P2-S10), the store: a lookup returns a permission only for the connection's current authority_revision and before expires_at_ms, and the listing joins the active connection at an equal revision; every revision bump (transition, /disconnect, RevokePAConnectionAt) marks the connection's permissions revoked in the same transaction; a grant longer than 30 days is refused by the insert. A read that fails, or a row that does not decode, is an error and never an empty list. Nothing consults a permission at dispatch yet (P2-S11)."
+  note: "Lowering (#1322 P2-S11): the write executor reads the permission row by id inside its pre-dispatch transaction, after it locked the connection row, and sends a lowered call only if the row is not revoked, not expired, at the connection's revision and still covers the device and the value; otherwise nothing is sent, no ledger row is written and the call gets a card. A lowered call runs the same steps as an approved one (fresh tools/list compare, pre-dispatch audit, one send, result), its ledger row is created, approved and consumed in that transaction, and its audit records carry approver=permission:<id>. Standing permissions (#1320 P2-S10), the store: a lookup returns a permission only for the connection's current authority_revision and before expires_at_ms, and the listing joins the active connection at an equal revision; every revision bump (transition, /disconnect, RevokePAConnectionAt) marks the connection's permissions revoked in the same transaction; a grant longer than 30 days is refused by the insert. A read that fails, or a row that does not decode, is an error and never an empty list. Nothing consults a permission at dispatch yet (P2-S11)."
   tests:
     - internal/db.TestS2A9_RevisionChangeRevokesPermission
     - internal/db.TestS2A9_ExpiredPermissionIsNotReturned
     - internal/db.TestS2A9_GrantLongerThan30DaysRefused
     - internal/pa.TestS2A9_RevisionChangeRevokesAGrantedPermission
+    - internal/pa.TestS2A9_PermissionGoneAtDispatchIsACard
+    - internal/db.TestPAPermission_ReadInTransaction
+    - internal/pa.TestLowering_PermissionReplacesTheCardOfACleanRun
+    - internal/pa.TestLowering_UnreadablePermissionsNeverLower
+    - internal/pa.TestLowering_DispatchBindsItsBytes
+    - internal/pa/connector.TestLoweredTarget
+    - internal/pa/gate.TestDecideOrder
+    - internal/pa/gate.TestDecideNeverLowersWithoutEveryCondition
   mutations:
     - id: P2S10-A9a
-      guard: internal/db/pa_permissions.go:232
+      guard: internal/db/pa_permissions.go:236
       guard_text: "AND p.revoked_at_ms = 0 AND p.authority_revision = $5 AND p.expires_at_ms > $6"
       mutation: "the lookup no longer compares the revision: `p.authority_revision = $5` -> `$5 = $5`"
       killed_by:
@@ -1724,7 +2078,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.601s
     - id: P2S10-A9b
-      guard: internal/db/pa_permissions.go:232
+      guard: internal/db/pa_permissions.go:236
       guard_text: "AND p.revoked_at_ms = 0 AND p.authority_revision = $5 AND p.expires_at_ms > $6"
       mutation: "the lookup no longer compares the expiry: `p.expires_at_ms > $6` -> `$6 = $6`"
       killed_by:
@@ -1736,7 +2090,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.601s
     - id: P2S10-A9c
-      guard: internal/db/pa_permissions.go:197
+      guard: internal/db/pa_permissions.go:200
       guard_text: "AND cn.state = $3 AND cn.authority_revision = p.authority_revision"
       mutation: "the listing no longer requires the connection to be at the permission's revision: predicate -> `AND 1 = 1`"
       killed_by:
@@ -1748,7 +2102,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.601s
     - id: P2S10-A9d
-      guard: internal/db/pa_permissions.go:196
+      guard: internal/db/pa_permissions.go:199
       guard_text: "WHERE p.principal = $1 AND p.revoked_at_ms = 0 AND p.expires_at_ms > $2"
       mutation: "the listing no longer compares the expiry: `p.expires_at_ms > $2` -> `$2 = $2`"
       killed_by:
@@ -1772,7 +2126,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.601s
     - id: P2S10-A9f
-      guard: internal/pa/permissions/permissions.go:225
+      guard: internal/pa/permissions/permissions.go:227
       guard_text: "if p.ExpiresAtMS <= nowMS || p.ExpiresAtMS > nowMS+MaxTTL.Milliseconds() {"
       mutation: "the 30-day limit on a grant is dropped"
       killed_by:
@@ -1783,9 +2137,149 @@ S2-A9:
         FAIL	github.com/mctlhq/mctl-telegram/internal/db
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.601s
+    - id: P2S11-A9a
+      guard: internal/pa/connector/lower.go:250
+      guard_text: "if p.ID != low.PermissionID || conn.AuthorityRevision != a.AuthorityRevision || !p.Covers(low.covered(), now) {"
+      mutation: "the executor does not check the row it re-read"
+      killed_by:
+        - internal/pa.TestS2A9_PermissionGoneAtDispatchIsACard
+      red: |-
+        --- FAIL: TestS2A9_PermissionGoneAtDispatchIsACard (0.21s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.735s
+    - id: P2S11-A9b
+      guard: internal/pa/permissions/rules.go:188
+      guard_text: "if !p.RevokedAt.IsZero() || !p.ExpiresAt.After(now) {"
+      mutation: "a revoked permission covers a call"
+      killed_by:
+        - internal/pa.TestS2A9_PermissionGoneAtDispatchIsACard
+      red: |-
+        --- FAIL: TestS2A9_PermissionGoneAtDispatchIsACard (0.21s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.728s
+    - id: P2S11-A9c
+      guard: internal/pa/permissions/rules.go:188
+      guard_text: "if !p.RevokedAt.IsZero() || !p.ExpiresAt.After(now) {"
+      mutation: "an expired permission covers a call"
+      killed_by:
+        - internal/pa.TestS2A9_PermissionGoneAtDispatchIsACard
+      red: |-
+        --- FAIL: TestS2A9_PermissionGoneAtDispatchIsACard (0.22s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.746s
+    - id: P2S11-A9d
+      guard: internal/pa/permissions/rules.go:192
+      guard_text: "p.AuthorityRevision <= 0 || p.AuthorityRevision != c.AuthorityRevision ||"
+      mutation: "a permission of another revision covers a call"
+      killed_by:
+        - internal/pa.TestS2A9_PermissionGoneAtDispatchIsACard
+      red: |-
+        --- FAIL: TestS2A9_PermissionGoneAtDispatchIsACard (0.21s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.641s
+    - id: P2S11-A9e
+      guard: internal/pa/connector/card.go:360
+      guard_text: "if !unlowered(out) {"
+      mutation: "a lowering that ended before anything was sent does not get a card"
+      killed_by:
+        - internal/pa.TestS2A9_PermissionGoneAtDispatchIsACard
+      red: |-
+        --- FAIL: TestS2A9_PermissionGoneAtDispatchIsACard (0.20s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.662s
+    - id: P2S11-A9g
+      guard: internal/db/pa_permissions.go:279
+      guard_text: "WHERE p.principal = $1 AND p.id = $2"
+      mutation: "the in-transaction read returns a row of any principal"
+      killed_by:
+        - internal/db.TestPAPermission_ReadInTransaction
+      red: |-
+        --- FAIL: TestPAPermission_ReadInTransaction (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.545s
+    - id: P2S11-UNa
+      guard: internal/pa/connector/lower.go:245
+      guard_text: "case err != nil:"
+      mutation: "an unreadable permission row is taken for a covering one"
+      killed_by:
+        - internal/pa.TestS2A9_PermissionGoneAtDispatchIsACard
+      red: |-
+        --- FAIL: TestS2A9_PermissionGoneAtDispatchIsACard (0.21s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.674s
+    - id: P2S11-UNb
+      guard: internal/pa/gate/decide.go:142
+      guard_text: "case in.PermissionErr == nil && in.PermissionMatch:"
+      mutation: "a permission read error does not stop a lowering at the gate"
+      killed_by:
+        - internal/pa/gate.TestDecideOrder
+        - internal/pa/gate.TestDecideNeverLowersWithoutEveryCondition
+      red: |-
+        --- FAIL: TestDecideOrder (0.00s)
+        --- FAIL: TestDecideNeverLowersWithoutEveryCondition (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/gate
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/gate	0.228s
+    - id: P2S11-BYc
+      guard: internal/pa/connector/lower.go:160
+      guard_text: "if err != nil || strconv.FormatInt(n, 10) != string(raw) {"
+      mutation: "an integer the executor cannot read is skipped instead of refused"
+      killed_by:
+        - internal/pa/connector.TestLoweredTarget
+      red: |-
+        --- FAIL: TestLoweredTarget (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/connector
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.454s
+    - id: P2S11-BYd
+      guard: internal/pa/connector/card.go:354
+      guard_text: "Binding: binding, Args: canonical, PermissionID: perm.ID,"
+      mutation: "the bytes handed to the executor are the worker's, not the canonical ones that were checked"
+      killed_by:
+        - internal/pa.TestLowering_PermissionReplacesTheCardOfACleanRun
+      red: |-
+        --- FAIL: TestLowering_PermissionReplacesTheCardOfACleanRun (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.611s
+    - id: P2S11-AUa
+      guard: internal/pa/connector/dispatch_write.go:395
+      guard_text: "base.Approver = permissionApprover(low.PermissionID)"
+      mutation: "the audit record of a lowered call does not name the permission"
+      killed_by:
+        - internal/pa.TestLowering_PermissionReplacesTheCardOfACleanRun
+      red: |-
+        --- FAIL: TestLowering_PermissionReplacesTheCardOfACleanRun (0.07s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.541s
   gaps:
-    - half: "nothing consults a standing permission at dispatch: the lowering of an approve-tier call, and the re-check of revision and expiry inside the pre-dispatch transaction, are P2-S11"
+    - half: "a revoke, an expiry or a revision change that commits after the executor's pre-dispatch transaction does not stop the lowered call that transaction admitted: as with an approved call, the fence ends at that commit"
       tracked_by: "#1320"
+    - half: "the ledger row of a lowered call (pa_approvals) carries the principal as approver; only the audit records name the permission (approver=permission:<id>), and the stale-dispatch sweep writes its result record from the ledger row"
+      tracked_by: "#1320"
+    - half: "a lowered call lists the server's tools twice (the emitter, then the executor), and the principal is told of the write by the notice an approved call sends; neither was measured or reviewed for wording"
+      tracked_by: "#1320"
+    - half: "production wiring: nothing in cmd/server constructs connector.Cards with Permissions and Lowered set, a WriteExecutor or a permissions.Validator with permissions.Rules (TestNoRuntimePhase2Use keeps the Phase 2 pin and NewCards out of the runtime), so no call is lowered and no grant passes the rule outside tests; the switch-on is P2-S14"
+      tracked_by: "#1323"
     - half: "revoked and expired rows are kept until the account is forgotten or deleted: no sweep or retention rule removes them"
       tracked_by: "#1320"
     - half: "no test on Postgres of a transition racing a Grant press: the insert locks the connection row with a no-op update before it reads it, and that ordering is not exercised under concurrency"
@@ -1815,7 +2309,7 @@ S2-A10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.432s
     - id: P2S10-A10a
-      guard: internal/pa/permissions.go:256
+      guard: internal/pa/permissions.go:258
       guard_text: "{Label: safetext.LabelPermissionRevoke, Verb: permissionVerbRevoke},"
       mutation: "a third button (the Approve label, verb \"always\") is added to the /permissions screen registry"
       killed_by:
@@ -1852,7 +2346,7 @@ S2-F3:
     - internal/pa.TestS2F3_WritesFlagIsReadAtDispatch
   mutations:
     - id: P2S3-F3a
-      guard: internal/pa/connector/dispatch_write.go:255
+      guard: internal/pa/connector/dispatch_write.go:265
       guard_text: "if f.WritesErr != nil || !f.Writes {"
       mutation: "the writes switch is never read: the flag check is `if false`"
       killed_by:
@@ -1864,7 +2358,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.511s
     - id: P2S3-F3b
-      guard: internal/pa/connector/dispatch_write.go:577
+      guard: internal/pa/connector/dispatch_write.go:603
       guard_text: "if out.reason = w.admit(ctx, tx, a, now); out.reason != \"\" {"
       mutation: "the pre-dispatch transaction keeps the flags of the first check instead of reading them again"
       killed_by:

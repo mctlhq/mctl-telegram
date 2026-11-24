@@ -35,7 +35,9 @@ package pa
 // wiring sets ConversationsConfig.Permissions or builds PermissionCommands,
 // so /permissions is answered "not available". With them wired, a grant is
 // still refused while PA_WRITES_ENABLED is off; listing and revoking work.
-// Nothing consults a permission at dispatch (P2-S11).
+// A permission is consulted at dispatch by connector.Cards and the write
+// executor (connector/lower.go, P2-S11), which no deployed wiring builds
+// either.
 
 import (
 	"context"

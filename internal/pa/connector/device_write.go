@@ -35,11 +35,10 @@ package connector
 // A Phase 2 write tool that is not in deviceWriteTools has no card path
 // here (alice_control_device, alice_control_room).
 //
-// These checks run on the card path only. All three tools can be lowered
-// by a standing permission, and nothing acts on a lowered outcome yet: the
-// code that will must run precheckDeviceWrite and deviceWriteTarget before
-// it sends a call without a card, or the server's rounding, clamping and
-// name matching come back.
+// All three tools can be lowered by a standing permission. A lowered call
+// passes the same checks: Cards.Emit runs precheckDeviceWrite and
+// deviceWriteTarget before it asks the gate, so a call that would get no
+// card is never sent without one (lower.go).
 //
 // Like the rest of the card path, none of this runs in a deployed service:
 // nothing constructs Cards outside tests.
@@ -129,6 +128,9 @@ type deviceWriteCall struct {
 	// values are what the card shows, each the text of the argument as it
 	// is sent.
 	values []safetext.CardValue
+	// ints are the integer arguments the call sets, by argument name: what
+	// a standing permission's ceiling is compared with.
+	ints map[string]int64
 }
 
 // writeDetail is what the card of a device write shows that the arguments
@@ -181,6 +183,10 @@ func precheckDeviceWrite(tool string, pinned catalog.PinnedTool, canonical []byt
 			if err != nil || strconv.FormatInt(n, 10) != text || n < v.bound.Min || n > v.bound.Max {
 				return deviceWriteCall{}, &refusal{ReasonValueNotAllowed, http.StatusUnprocessableEntity}
 			}
+			if call.ints == nil {
+				call.ints = map[string]int64{}
+			}
+			call.ints[v.arg] = n
 		} else if text, ok = stringArg(args, v.arg); !ok || !slices.Contains(choices, text) {
 			return deviceWriteCall{}, &refusal{ReasonValueNotAllowed, http.StatusUnprocessableEntity}
 		}

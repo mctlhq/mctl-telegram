@@ -23,6 +23,9 @@ package connector
 // WriteExecutor.DispatchApproved, and only after the principal pressed
 // Approve.
 //
+// A call a standing permission covers gets no card: Emit hands it to the
+// write executor (lower.go). Everything else stays a card or a refusal.
+//
 // Nothing here runs in a deployed service: no production wiring builds
 // Cards (TestNoRuntimePhase2Use fails on any non-test call of NewCards),
 // the run loop admits no approve-tier tool, and Emit refuses every call
@@ -46,6 +49,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa/gate"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
+	"github.com/mctlhq/mctl-telegram/internal/pa/permissions"
 )
 
 // MaxCardArgsBytes bounds the canonical arguments a card shows (threat
@@ -112,7 +116,12 @@ type CardConfig struct {
 	// server without a reader is refused (ReasonNoWritePath): that is
 	// every server today.
 	Scenarios map[string]ScenarioSteps
-	Now       func() time.Time
+	// Permissions reads the standing permissions that may cover a call,
+	// and Lowered sends a call one of them covers (lower.go). Without
+	// either nothing is lowered: every admitted call gets a card.
+	Permissions PermissionLookup
+	Lowered     LoweredDispatcher
+	Now         func() time.Time
 	// Deliver is called after a card committed, to send it without
 	// waiting for the next outbox pass (pa.RunLoop.DeliverAfter). Optional.
 	Deliver func(ctx context.Context, principal int64)
@@ -172,15 +181,19 @@ type CardRequest struct {
 func cardToolName(server, tool string) string { return tool + " (" + server + ")" }
 
 // Emit writes the approval, its two callbacks and the card for req in one
-// transaction and makes no downstream tool call. It returns nil when the
-// card is committed and the refusal otherwise. A refused call left no
-// approval, callback or card behind; a disclosure refused for text over
-// the cap leaves the principal's notice of it (offerSplit).
-func (c *Cards) Emit(ctx context.Context, req CardRequest) *refusal {
+// transaction and makes no downstream tool call. It returns (nil, nil)
+// when the card is committed and the refusal otherwise. A refused call
+// left no approval, callback or card behind; a disclosure refused for text
+// over the cap leaves the principal's notice of it (offerSplit).
+//
+// The one call Emit lets through without a card is a write to one device
+// that a standing permission covers in a clean conversation (lower.go): it
+// is sent by the write executor, and its outcome is returned.
+func (c *Cards) Emit(ctx context.Context, req CardRequest) (*WriteOutcome, *refusal) {
 	principal := req.Policy.Principal().TelegramID()
 	pinned, ok := c.approveTool(req.Server, req.Tool)
 	if !ok {
-		return &refusal{ReasonNoWritePath, http.StatusForbidden}
+		return nil, &refusal{ReasonNoWritePath, http.StatusForbidden}
 	}
 	in := gate.Input{
 		Writes: req.Flags.Writes, WritesErr: req.Flags.WritesErr,
@@ -192,15 +205,15 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) *refusal {
 	early := in
 	early.Tainted = true
 	if d := gate.Decide(early); d.Outcome != gate.OutcomeCard {
-		return gateRefusal(d, nil)
+		return nil, gateRefusal(d, nil)
 	}
 
 	canonical, err := catalog.CanonicalArgs(req.Args)
 	if err != nil {
-		return &refusal{ReasonBadRequest, http.StatusBadRequest}
+		return nil, &refusal{ReasonBadRequest, http.StatusBadRequest}
 	}
 	if err := pinned.CheckDeclaredArgs(canonical); err != nil {
-		return &refusal{ReasonBadRequest, http.StatusBadRequest}
+		return nil, &refusal{ReasonBadRequest, http.StatusBadRequest}
 	}
 	// A disclosure has checks of its own (disclosure.go), ahead of the
 	// size limits: text over the cap is told apart from a card too large.
@@ -211,7 +224,7 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) *refusal {
 			if ref.reason == ReasonTextTooLong {
 				c.offerSplit(ctx, principal, req.JobID)
 			}
-			return ref
+			return nil, ref
 		}
 		disclosure = &call
 	}
@@ -226,29 +239,29 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) *refusal {
 	if isScenario {
 		name, ref := c.precheckScenario(req.Server, req.Tool, canonical)
 		if ref != nil {
-			return ref
+			return nil, ref
 		}
 		scenario = name
 	} else if _, ok := deviceWriteTools[req.Tool]; ok && pinned.Class == catalog.ClassWrite {
 		call, ref := precheckDeviceWrite(req.Tool, pinned, canonical)
 		if ref != nil {
-			return ref
+			return nil, ref
 		}
 		write = &call
 	} else if pinned.Class == catalog.ClassWrite && catalog.Phase2Tool(req.Tool) {
-		return &refusal{ReasonNoWritePath, http.StatusForbidden}
+		return nil, &refusal{ReasonNoWritePath, http.StatusForbidden}
 	}
 	if len(canonical) > MaxCardArgsBytes {
-		return &refusal{ReasonCardTooLarge, http.StatusRequestEntityTooLarge}
+		return nil, &refusal{ReasonCardTooLarge, http.StatusRequestEntityTooLarge}
 	}
 	// The largest card these arguments can get, so that an approval is
 	// never written for a card that cannot be shown.
 	if _, err := safetext.Card(cardToolName(req.Server, req.Tool), string(canonical), true); err != nil {
-		return cardTextRefusal(err)
+		return nil, cardTextRefusal(err)
 	}
 
 	if c.cfg.Fresh == nil {
-		return &refusal{ReasonNoWritePath, http.StatusForbidden}
+		return nil, &refusal{ReasonNoWritePath, http.StatusForbidden}
 	}
 	fresh, err := c.cfg.Fresh.FreshTool(ctx, FreshRequest{
 		Principal: principal, ConnectionID: req.ConnectionID, AuthorityRevision: req.AuthorityRevision,
@@ -260,10 +273,10 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) *refusal {
 		if reason == ReasonInternal || reason == ReasonServerUnavailable || reason == ReasonListingStale {
 			code = http.StatusServiceUnavailable
 		}
-		return &refusal{reason, code}
+		return nil, &refusal{reason, code}
 	}
 	if fresh.Tier != catalog.TierApprove || fresh.Class != pinned.Class {
-		return &refusal{ReasonToolChanged, http.StatusForbidden}
+		return nil, &refusal{ReasonToolChanged, http.StatusForbidden}
 	}
 
 	// The target of a disclosure is read now, after the definition: the
@@ -272,20 +285,20 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) *refusal {
 	if disclosure != nil {
 		shown, sealed, ref := c.disclosureTarget(ctx, req, *disclosure)
 		if ref != nil {
-			return ref
+			return nil, ref
 		}
 		if _, err := safetext.DisclosureCard(cardToolName(req.Server, req.Tool), string(canonical), shown, true); err != nil {
-			return cardTextRefusal(err)
+			return nil, cardTextRefusal(err)
 		}
 		detail = sealed
 	}
 	if write != nil {
 		shown, sealed, ref := c.deviceWriteTarget(ctx, req, *write)
 		if ref != nil {
-			return ref
+			return nil, ref
 		}
 		if _, err := safetext.DeviceWriteCard(cardToolName(req.Server, req.Tool), string(canonical), shown, true); err != nil {
-			return cardTextRefusal(err)
+			return nil, cardTextRefusal(err)
 		}
 		detail = sealed
 	}
@@ -294,25 +307,67 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) *refusal {
 	if isScenario {
 		shown, sealed, ref := c.scenarioTarget(ctx, req, scenario)
 		if ref != nil {
-			return ref
+			return nil, ref
 		}
 		if _, err := safetext.ScenarioCard(cardToolName(req.Server, req.Tool), string(canonical), shown, true); err != nil {
-			return cardTextRefusal(err)
+			return nil, cardTextRefusal(err)
 		}
 		detail = sealed
+	}
+
+	// A standing permission is looked up only for a write to one device
+	// that just passed every check its card needs: the value and the
+	// device are the ones a card would show. Nothing else is ever lowered.
+	now := c.cfg.Now()
+	var perm *permissions.Permission
+	var covered permissions.Call
+	if write != nil && lowerable(req.Tool, pinned) {
+		covered = permissions.Call{
+			Principal: principal, ConnectionID: req.ConnectionID, AuthorityRevision: req.AuthorityRevision,
+			Server: req.Server, Tool: req.Tool, Device: write.device, Ints: write.ints,
+		}
+		in.ConditionMet, in.ConditionErr = loweringCondition(pinned, canonical)
+		perm, in.PermissionErr = c.coveringPermission(ctx, req, covered, now)
+		in.PermissionMatch = perm != nil
 	}
 
 	// The hash is of all of the arguments, the device id among them: an
 	// approval is for one text to one device (S2-D2).
 	sum := sha256.Sum256(canonical)
-	now := c.cfg.Now()
-	a, err := approval.New(approval.Binding{
+	binding := approval.Binding{
 		Principal: principal, ConnectionID: req.ConnectionID, AuthorityRevision: req.AuthorityRevision,
 		Server: req.Server, Tool: req.Tool, Class: pinned.Class,
 		SchemaSHA: fresh.SchemaSHA, DescriptionSHA: fresh.DescriptionSHA, AnnotationSHA: fresh.AnnotationSHA,
 		ArgsSHA:        hex.EncodeToString(sum[:]),
 		ConversationID: req.Policy.ConversationID(), JobID: req.JobID,
-	}, now)
+	}
+	if perm != nil {
+		// The gate is asked under the principal's lock, with the taint
+		// read there. A lowered call is not sent from inside that
+		// transaction: the executor opens its own and reads both again.
+		d, ref := c.decide(ctx, principal, binding.ConversationID, in)
+		if ref != nil {
+			return nil, ref
+		}
+		if d.Outcome == gate.OutcomeLowered {
+			out, err := c.cfg.Lowered.DispatchLowered(ctx, LoweredCall{
+				Binding: binding, Args: canonical, PermissionID: perm.ID,
+			})
+			if err != nil {
+				slog.Warn("pa card: lowered call not dispatched", "err", err)
+				return nil, &refusal{ReasonInternal, http.StatusInternalServerError}
+			}
+			if !unlowered(out) {
+				return &out, nil
+			}
+			// The permission or the clean run went away before anything
+			// was sent: the call gets a card after all.
+		}
+		// From here the call is decided as one without a permission.
+		in.PermissionMatch = false
+	}
+
+	a, err := approval.New(binding, now)
 	switch {
 	case err != nil:
 	case detail != nil:
@@ -322,47 +377,66 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) *refusal {
 	}
 	if err != nil {
 		slog.Warn("pa card: approval not built", "err", err)
-		return &refusal{ReasonInternal, http.StatusInternalServerError}
+		return nil, &refusal{ReasonInternal, http.StatusInternalServerError}
 	}
 
 	tx, err := c.cfg.Store.BeginPAWrite(ctx, principal, false)
 	if err != nil {
-		return &refusal{ReasonStateUnreadable, http.StatusServiceUnavailable}
+		return nil, &refusal{ReasonStateUnreadable, http.StatusServiceUnavailable}
 	}
 	defer func() { _ = tx.Rollback() }()
 	in.PrincipalDisabled, in.PrincipalErr = c.cfg.Store.PAPrincipalDisabled(ctx, tx, principal)
 	in.Tainted, in.TaintErr = c.cfg.Store.PAConversationTaintIn(ctx, tx, principal, a.ConversationID)
-	// No standing permission is read: none exists yet (P2-S10), so the
-	// gate cannot lower and every admitted call gets a card.
+	// PermissionMatch is false here, so the gate cannot lower: what it
+	// admits gets a card.
 	if d := gate.Decide(in); d.Outcome != gate.OutcomeCard {
-		return gateRefusal(d, in.PrincipalErr)
+		return nil, gateRefusal(d, in.PrincipalErr)
 	}
 	// One transaction: an approval without its card, or a card without
 	// its approval, never commits.
 	if err := c.cfg.Store.CreatePAApproval(ctx, tx, a); err != nil {
 		if errors.Is(err, approval.ErrBinding) {
-			return &refusal{ReasonConnectionUnbound, http.StatusForbidden}
+			return nil, &refusal{ReasonConnectionUnbound, http.StatusForbidden}
 		}
-		return c.storeFailed("approval", err)
+		return nil, c.storeFailed("approval", err)
 	}
 	if err := c.cfg.Store.CreatePACallback(ctx, tx, principal, a.ApproveCallbackID, pa.ActionApprovalApprove, a.ExpiresAt); err != nil {
-		return c.storeFailed("approve callback", err)
+		return nil, c.storeFailed("approve callback", err)
 	}
 	if err := c.cfg.Store.CreatePACallback(ctx, tx, principal, a.CancelCallbackID, pa.ActionApprovalCancel, a.ExpiresAt); err != nil {
-		return c.storeFailed("cancel callback", err)
+		return nil, c.storeFailed("cancel callback", err)
 	}
 	if err := c.cfg.Store.EnqueuePAOutbox(ctx, tx, jobs.OutboxItem{
 		Principal: principal, Kind: jobs.OutboxApprovalCard, Button: a.ApproveCallbackID,
 	}, now); err != nil {
-		return c.storeFailed("card", err)
+		return nil, c.storeFailed("card", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return c.storeFailed("commit", err)
+		return nil, c.storeFailed("commit", err)
 	}
 	if c.cfg.Deliver != nil {
 		c.cfg.Deliver(ctx, principal)
 	}
-	return nil
+	return nil, nil
+}
+
+// decide asks the gate about in under the principal's lock, with the
+// admin disable and the conversation's taint read in that transaction,
+// which changes nothing. A decision the card path cannot serve is the
+// refusal.
+func (c *Cards) decide(ctx context.Context, principal int64, conversationID string, in gate.Input) (gate.Decision, *refusal) {
+	tx, err := c.cfg.Store.BeginPAWrite(ctx, principal, false)
+	if err != nil {
+		return gate.Decision{}, &refusal{ReasonStateUnreadable, http.StatusServiceUnavailable}
+	}
+	defer func() { _ = tx.Rollback() }()
+	in.PrincipalDisabled, in.PrincipalErr = c.cfg.Store.PAPrincipalDisabled(ctx, tx, principal)
+	in.Tainted, in.TaintErr = c.cfg.Store.PAConversationTaintIn(ctx, tx, principal, conversationID)
+	d := gate.Decide(in)
+	if d.Outcome == gate.OutcomeNever {
+		return d, gateRefusal(d, in.PrincipalErr)
+	}
+	return d, nil
 }
 
 // offerSplit queues the notice that a text for a speaker was over the cap
