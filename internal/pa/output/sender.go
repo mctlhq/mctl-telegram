@@ -41,6 +41,7 @@ const (
 	botAPIBaseURL = "https://" + botAPIHost
 
 	methodSendMessage         = "sendMessage"
+	methodSendMessageDraft    = "sendMessageDraft"
 	methodAnswerCallbackQuery = "answerCallbackQuery"
 	methodSetMyCommands       = "setMyCommands"
 
@@ -310,6 +311,7 @@ func (s *Sender) SendWebApp(ctx context.Context, chatID int64, text safetext.Tex
 	if strings.TrimSpace(labelText) == "" {
 		return fmt.Errorf("%w: empty label", ErrInvalidKeyboard)
 	}
+	text = text.In(s.langs.Of(chatID))
 	if text.Parts() != 1 {
 		if text.Parts() == 0 {
 			return ErrEmptyText
@@ -473,6 +475,42 @@ func (s *Sender) SetCommands(ctx context.Context, cmds []Command) error {
 		}
 	}
 	return nil
+}
+
+// sendMessageDraftRequest has no parse_mode and no can_stop.
+type sendMessageDraftRequest struct {
+	ChatID  int64  `json:"chat_id"`
+	DraftID int64  `json:"draft_id"`
+	Text    string `json:"text"`
+}
+
+// SendDraft shows text as a draft in a private chat (sendMessageDraft): an
+// ephemeral preview that the persisted message replaces. text must be one
+// part, from Render, RenderPartial or ServerText. A draft with the same
+// draftID replaces the previous one. It is presentation only: nothing here
+// stores or queues anything.
+func (s *Sender) SendDraft(ctx context.Context, chatID, draftID int64, text safetext.Text) error {
+	if chatID <= 0 {
+		return ErrInvalidChat
+	}
+	if draftID == 0 {
+		return fmt.Errorf("%w: draft id 0", ErrInvalidConfig)
+	}
+	text = text.In(s.langs.Of(chatID))
+	if text.Parts() != 1 {
+		if text.Parts() == 0 {
+			return ErrEmptyText
+		}
+		return fmt.Errorf("%w: a draft must be one part", ErrPartTooLong)
+	}
+	p := text.Part(0)
+	if strings.TrimSpace(p) == "" {
+		return ErrEmptyText
+	}
+	if n := safetext.UTF16Len(p); n > safetext.MaxPartUTF16 {
+		return fmt.Errorf("%w: draft is %d UTF-16 units, limit %d", ErrPartTooLong, n, safetext.MaxPartUTF16)
+	}
+	return s.call(ctx, methodSendMessageDraft, sendMessageDraftRequest{ChatID: chatID, DraftID: draftID, Text: p})
 }
 
 // SendTyping shows the "typing" status in a private chat (sendChatAction).

@@ -298,3 +298,34 @@ func TestSender_SendTyping(t *testing.T) {
 		t.Fatalf("refused status: %v", err)
 	}
 }
+
+// SendDraft: the body is exactly chat_id, draft_id and text; it refuses a
+// zero draft id, a non-private chat and multi-part text.
+func TestSender_SendDraft(t *testing.T) {
+	f, s := newFake(t)
+	ctx := context.Background()
+	txt := mustRender(t, "Working on it.", safetext.UserText{})
+	if err := s.SendDraft(ctx, aliceChat, 7, txt); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.calls) != 1 || !strings.HasSuffix(f.calls[0].path, "/sendMessageDraft") {
+		t.Fatalf("calls = %+v", f.calls)
+	}
+	b := f.calls[0].body
+	if len(b) != 3 || b["chat_id"] != float64(aliceChat) || b["draft_id"] != float64(7) || b["text"] != "Working on it." {
+		t.Fatalf("body = %v", b)
+	}
+	if err := s.SendDraft(ctx, aliceChat, 0, txt); err == nil {
+		t.Fatal("draft id 0 accepted")
+	}
+	if err := s.SendDraft(ctx, -5, 7, txt); !errors.Is(err, ErrInvalidChat) {
+		t.Fatalf("group chat: %v", err)
+	}
+	long := mustRender(t, strings.Repeat("Bob wrote a long message. ", 400), safetext.UserText{})
+	if err := s.SendDraft(ctx, aliceChat, 7, long); !errors.Is(err, ErrPartTooLong) {
+		t.Fatalf("multi-part: %v", err)
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("refused drafts were sent: %d calls", len(f.calls))
+	}
+}

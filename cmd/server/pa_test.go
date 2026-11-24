@@ -156,7 +156,7 @@ func TestBuildPA_EnabledRoutes(t *testing.T) {
 	}
 	slices.Sort(routes)
 	routes = slices.Compact(routes)
-	want := []string{pa.WebhookPath, pa.RouteClaim, pa.RouteTurn, pa.RouteReply}
+	want := []string{pa.WebhookPath, pa.RouteClaim, pa.RouteTurn, pa.RouteReply, pa.RouteDraft}
 	slices.Sort(want)
 	if !slices.Equal(routes, want) {
 		t.Fatalf("PA_ENABLED on: routes = %v, want %v", routes, want)
@@ -333,6 +333,7 @@ type paSendRecorder struct {
 	sent     []paSend
 	answered []string
 	typing   int
+	drafts   int
 	// real is a production output.Sender built from the same token and
 	// Mini App URL buildPA passed: SendWebApp runs every one of its
 	// checks on what the wired runtime asked to send, so a test sees
@@ -354,6 +355,14 @@ func (r *paSendRecorder) AnswerCallback(_ context.Context, id string, _ safetext
 func (r *paSendRecorder) SendTyping(context.Context, int64) error {
 	r.mu.Lock()
 	r.typing++
+	r.mu.Unlock()
+	return nil
+}
+
+// SendDraft counts the drafts the wired run loop sent.
+func (r *paSendRecorder) SendDraft(context.Context, int64, int64, safetext.Text) error {
+	r.mu.Lock()
+	r.drafts++
 	r.mu.Unlock()
 	return nil
 }

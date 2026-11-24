@@ -86,9 +86,13 @@ func paWorkerFromEnv(runnerName, poolToken string) (*agentworker.PAWorker, error
 	if err != nil {
 		return nil, err
 	}
+	streaming, err := envBoolStrict("AGENT_PA_STREAMING")
+	if err != nil {
+		return nil, err
+	}
 	return &agentworker.PAWorker{
 		BaseURL: base, PoolToken: poolToken, Model: oc, Prices: prices,
-		Health: &agentworker.Health{}, Concurrency: concurrency,
+		Health: &agentworker.Health{}, Concurrency: concurrency, Streaming: streaming,
 	}, nil
 }
 

@@ -605,7 +605,7 @@ func TestS2A8_NoJobRouteGrantsAPermission(t *testing.T) {
 			`{"server":"permissions","tool":"grant","arguments":` + grantJSON + `}`,
 		}
 		routes := jobRoutes()
-		if !slices.Contains(routes, pa.RouteReply) || len(routes) != 4 {
+		if !slices.Contains(routes, pa.RouteReply) || len(routes) != 5 {
 			t.Fatalf("routes %v", routes)
 		}
 		// The reply route ends the job, so it goes last.

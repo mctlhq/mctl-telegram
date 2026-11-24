@@ -232,7 +232,7 @@ func (d *DispatchHarness) PostJobRoute(route, token, body string) int {
 }
 
 // JobRoutes are the routes the run loop mounts.
-func JobRoutes() []string { return []string{RouteClaim, RouteTurn, RouteReply} }
+func JobRoutes() []string { return []string{RouteClaim, RouteTurn, RouteReply, RouteDraft} }
 
 // PermissionKeyboard is permissionKeyboard.
 func PermissionKeyboard(verb, id string) (output.Keyboard, bool) { return permissionKeyboard(verb, id) }
