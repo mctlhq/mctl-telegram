@@ -1676,6 +1676,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			"user_agent", r.Header.Get("User-Agent"),
 			"client_id", clientID,
 			"redirect_uri_host", host,
+			"redirect_uri", redirectForLog(redirectURI),
 			"response_type", responseType,
 			"scope", scope,
 			"state_len", len(state),
@@ -2682,6 +2683,7 @@ func (s *Server) handleTokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		"user_agent", r.Header.Get("User-Agent"),
 		"client_id", clientID,
 		"user_id", uid,
+		"redirect_uri", redirectForLog(entry.RedirectURI),
 		"requested_scope", entry.Scope,
 		"granted_scope", strings.Join(scopes, " "),
 		"groups", strings.Join(groups, ","),
@@ -3061,6 +3063,7 @@ func (s *Server) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 	s.logger().Info("oauth: token refresh_token grant",
 		"client_id", rt.ClientID,
 		"user_id", rt.UserID,
+		"redirect_uri", redirectForLog(rt.RedirectURI),
 		"granted_scope", strings.Join(scopes, " "),
 		"groups", strings.Join(groups, ","),
 		"scope_ceiling_applied", ceilingApplied,
@@ -4071,4 +4074,20 @@ func (s *Server) logger() *slog.Logger {
 		return s.log
 	}
 	return slog.Default()
+}
+
+// redirectForLog reduces a redirect_uri to scheme, host and path for the grant
+// audit lines. The query and fragment are dropped (they can carry state or
+// codes); what is left is what a redirect_uri ceiling record must match, so an
+// operator can read the exact callback a client uses off the log instead of
+// guessing it. An unset value logs as "" and an unparseable one as "invalid".
+func redirectForLog(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "invalid"
+	}
+	return u.Scheme + "://" + u.Host + u.EscapedPath()
 }
