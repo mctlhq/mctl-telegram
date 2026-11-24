@@ -487,9 +487,14 @@ func TestPAEval_A6_DisconnectCancelsThePendingApproval(t *testing.T) {
 		if !e.grant(paVolumeTool + " " + paKitchenID + " 5") {
 			t.Fatal("the standing permission was not granted")
 		}
+		// The reply and the notice of the cancellation are two messages
+		// with no order between them, so the reply is looked for among
+		// what the command sent, not read as the last message.
+		before := len(e.sent.get())
 		e.text("/disconnect alice")
-		if got := e.last().text; got != safetext.ServerText(safetext.TextDisconnected).String() {
-			t.Fatalf("after /disconnect: %q", got)
+		want := safetext.ServerText(safetext.TextDisconnected).String()
+		if got := e.sent.get()[before:]; !slices.ContainsFunc(got, func(m paSend) bool { return m.text == want }) {
+			t.Fatalf("after /disconnect: %+v", got)
 		}
 		conns, err := e.rt.Connections().List(context.Background(), e.user)
 		if err != nil || len(conns) != 1 || conns[0].State != connection.StateRevoked {
@@ -667,9 +672,11 @@ func TestPAWrites_StandingPermission(t *testing.T) {
 			if button == "" {
 				button = screen[0].buttons[0]
 			}
+			pressed := len(e.sent.get())
 			e.press(button)
-			if got := e.last().text; got != safetext.ServerText(safetext.TextPermissionRevoked).String() {
-				t.Fatalf("after the revoke: %q", got)
+			revoked := safetext.ServerText(safetext.TextPermissionRevoked).String()
+			if got := e.sent.get()[pressed:]; !slices.ContainsFunc(got, func(m paSend) bool { return m.text == revoked }) {
+				t.Fatalf("after the revoke: %+v", got)
 			}
 			e.oneCard("a bit quieter in the kitchen", paVolumeTool, paVolume("5"))
 			e.noWrite("a covered call after the revoke")
