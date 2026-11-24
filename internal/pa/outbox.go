@@ -96,6 +96,11 @@ var outboxTemplates = map[jobs.OutboxKind]safetext.Template{
 	jobs.OutboxApprovalAlreadyDone: safetext.TextApprovalAlreadyDone,
 	jobs.OutboxApprovalExpired:     safetext.TextApprovalExpired,
 
+	jobs.OutboxPermissionsUnavailable: safetext.TextPermissionsUnavailable,
+	jobs.OutboxPermissionGranted:      safetext.TextPermissionGranted,
+	jobs.OutboxPermissionRevoked:      safetext.TextPermissionRevoked,
+	jobs.OutboxPermissionRefused:      safetext.TextPermissionRefused,
+
 	jobs.OutboxConnectionExpired: safetext.TextConnectionExpired,
 
 	jobs.OutboxWriteDone:    safetext.TextWriteDone,

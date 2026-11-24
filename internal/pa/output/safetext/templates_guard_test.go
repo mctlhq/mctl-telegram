@@ -49,6 +49,10 @@ var fieldUsers = map[string]bool{
 	// call the same way.
 	"card":         true,
 	"ScenarioCard": true,
+	// The /permissions screens (permission.go): registry templates around
+	// values held to a plain alphabet.
+	"PermissionScreen": true,
+	"PermissionList":   true,
 }
 
 // guardedFields are the unexported fields of Text and Template. Any

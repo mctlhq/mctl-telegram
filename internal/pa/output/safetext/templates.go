@@ -204,6 +204,35 @@ var (
 	CmdConnections = tpl("Show your connected accounts", "Показать подключённые аккаунты")
 	CmdDisconnect  = tpl("Disconnect your Telegram account", "Отключить ваш аккаунт Telegram")
 
+	// The /permissions screens (#1320 slice P2-S10, threat model T7).
+	// PermissionScreen puts them around the tool name, the device ids, the
+	// value limit and the expiry of a standing permission. They are not
+	// card texts: an approval card never offers a standing permission
+	// (S2-A10), and the only buttons that grant or revoke one are these
+	// two, on a screen /permissions sent.
+	LabelPermissionGrant       = tpl("Grant", "Разрешить")
+	LabelPermissionRevoke      = tpl("Revoke", "Отозвать")
+	TextPermissionsList        = tpl("Your standing permissions. Each one lets the assistant carry out one action on the listed devices without a confirmation from you:", "Ваши постоянные разрешения. Каждое позволяет ассистенту выполнять одно действие на перечисленных устройствах без вашего подтверждения:")
+	TextPermissionsNone        = tpl("You have no standing permissions.", "У вас нет постоянных разрешений.")
+	TextPermissionsUsage       = tpl("To add one, send /permissions grant, then the action, the device ids separated by commas and, if the action has one, the highest value. To remove one, send /permissions revoke and its id.", "Чтобы добавить разрешение, отправьте /permissions grant, затем действие, идентификаторы устройств через запятую и, если у действия оно есть, наибольшее значение. Чтобы удалить, отправьте /permissions revoke и идентификатор разрешения.")
+	TextPermissionsUnavailable = tpl("Standing permissions are not available.", "Постоянные разрешения недоступны.")
+	TextPermissionsFailed      = tpl("Your standing permissions could not be read. Please try again.", "Не удалось прочитать ваши постоянные разрешения. Пожалуйста, попробуйте ещё раз.")
+	TextPermissionGrantHead    = tpl("You are about to let the assistant carry out this action without a confirmation from you. Check every line. Nothing changes until you tap Grant.", "Вы собираетесь разрешить ассистенту выполнять это действие без вашего подтверждения. Проверьте каждую строку. Ничего не изменится, пока вы не нажмёте «Разрешить».")
+	TextPermissionGrantFoot    = tpl("The button works once and stops working within 5 minutes. To cancel, do nothing. You can revoke the permission at any time with /permissions.", "Кнопка срабатывает один раз и перестаёт действовать не позже чем через 5 минут. Чтобы отменить, ничего не делайте. Отозвать разрешение можно в любой момент через /permissions.")
+	TextPermissionRevokeHead   = tpl("Revoke this standing permission? The assistant will then need your confirmation for this action again.", "Отозвать это постоянное разрешение? После этого ассистенту снова потребуется ваше подтверждение для этого действия.")
+	TextPermissionRevokeFoot   = tpl("The button works once and stops working within 5 minutes.", "Кнопка срабатывает один раз и перестаёт действовать не позже чем через 5 минут.")
+	TextPermissionTool         = tpl("Action:", "Действие:")
+	TextPermissionDevices      = tpl("Devices:", "Устройства:")
+	TextPermissionCeiling      = tpl("Highest value:", "Наибольшее значение:")
+	TextPermissionNoCeiling    = tpl("Highest value: not limited by this permission", "Наибольшее значение: этим разрешением не ограничено")
+	TextPermissionExpires      = tpl("Expires (UTC):", "Истекает (UTC):")
+	TextPermissionID           = tpl("Id:", "Идентификатор:")
+	// The answers to the two buttons and to a refused request.
+	TextPermissionGranted = tpl("The standing permission is granted. Send /permissions to see or revoke it.", "Постоянное разрешение выдано. Отправьте /permissions, чтобы увидеть или отозвать его.")
+	TextPermissionRevoked = tpl("The standing permission is revoked.", "Постоянное разрешение отозвано.")
+	TextPermissionRefused = tpl("This standing permission cannot be granted, and nothing changed. The action may not allow one, a device may be missing from your device list, your connection may have changed, or you may have too many permissions already.", "Это постоянное разрешение выдать нельзя, ничего не изменилось. Возможно, действие его не допускает, устройства нет в вашем списке устройств, подключение изменилось или разрешений уже слишком много.")
+	TextPermissionGone    = tpl("There is no such standing permission. Send /permissions to see yours.", "Такого постоянного разрешения нет. Отправьте /permissions, чтобы увидеть ваши.")
+
 	// TextAssistantUnavailable refuses a principal an admin disabled or one
 	// not on the preview allowlist, and tells a principal whose queued or
 	// running request was stopped for that reason (#1318). The same text

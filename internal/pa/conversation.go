@@ -15,6 +15,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
+	"github.com/mctlhq/mctl-telegram/internal/pa/permissions"
 )
 
 // DefaultConversationTTL and MaxConversationTTL bound PA_CONVERSATION_TTL.
@@ -164,6 +165,11 @@ type ConversationsConfig struct {
 	// button is answered ReplyUnknownButton. No production wiring sets it
 	// yet.
 	Approvals ApprovalCallbacks
+	// Permissions is what /permissions and the buttons of its screens need
+	// (permissions.go, #1320 slice P2-S10). Optional: without it the
+	// command is answered ReplyPermissionsUnavailable and such a button
+	// ReplyUnknownButton. No production wiring sets it yet.
+	Permissions *PermissionsConfig
 	// Now defaults to time.Now.
 	Now func() time.Time
 }
@@ -182,7 +188,9 @@ type Conversations struct {
 	allowed PrincipalAllowlist
 	// approvals is nil unless approval cards are wired (card.go).
 	approvals ApprovalCallbacks
-	now       func() time.Time
+	// permissions is nil unless /permissions is wired (permissions.go).
+	permissions *PermissionsConfig
+	now         func() time.Time
 }
 
 var _ Handler = (*Conversations)(nil)
@@ -193,12 +201,15 @@ func NewConversations(cfg ConversationsConfig) (*Conversations, error) {
 		(cfg.Runs != nil && cfg.Limiter == nil) {
 		return nil, ErrConversationsConfig
 	}
+	if cfg.Permissions != nil && !cfg.Permissions.valid() {
+		return nil, ErrConversationsConfig
+	}
 	now := cfg.Now
 	if now == nil {
 		now = time.Now
 	}
 	return &Conversations{store: cfg.Store, sealer: cfg.Sealer, ttl: cfg.TTL, runs: cfg.Runs, replies: cfg.Replies, limiter: cfg.Limiter,
-		linking: cfg.Linking, allowed: cfg.Allowed, approvals: cfg.Approvals, now: now}, nil
+		linking: cfg.Linking, allowed: cfg.Allowed, approvals: cfg.Approvals, permissions: cfg.Permissions, now: now}, nil
 }
 
 // HandleUpdate implements Handler. Any error rolls back the update's dedup
@@ -364,6 +375,8 @@ func (c *Conversations) handleCommand(ctx context.Context, tx *sql.Tx, u Verifie
 		}
 	case CommandConnect, CommandDisconnect, CommandConnections:
 		return c.handleLinkCommand(ctx, tx, u, cmd, arg)
+	case CommandPermissions:
+		return c.handlePermissionsCommand(ctx, tx, u)
 	}
 	return fmt.Errorf("pa: unhandled command %q", cmd)
 }
@@ -428,6 +441,9 @@ func (c *Conversations) handleCallback(ctx context.Context, tx *sql.Tx, u Verifi
 	}
 	if c.approvals != nil && (action == ActionApprovalApprove || action == ActionApprovalCancel) {
 		return c.approvalButton(ctx, tx, u, action)
+	}
+	if c.permissions != nil && permissions.IsAction(action) {
+		return c.permissionButton(ctx, tx, u, action)
 	}
 	if !strings.HasPrefix(action, actionConsentAcceptPrefix) {
 		// An action this build does not know: the id is consumed and the
@@ -612,7 +628,8 @@ func userCommand(frags []convo.Fragment) (cmd, arg string, ok bool) {
 		name, _, _ := strings.Cut(fields[0], "@")
 		name = strings.ToLower(name)
 		switch name {
-		case CommandNew, CommandForget, CommandConsent, CommandConnect, CommandDisconnect, CommandConnections:
+		case CommandNew, CommandForget, CommandConsent, CommandConnect, CommandDisconnect, CommandConnections,
+			CommandPermissions:
 			if len(fields) > 1 {
 				arg = strings.ToLower(fields[1])
 			}

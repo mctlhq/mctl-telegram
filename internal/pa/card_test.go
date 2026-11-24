@@ -13,6 +13,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
+	"github.com/mctlhq/mctl-telegram/internal/pa/permissions"
 )
 
 // TestS2A10_CardOffersOnlyApproveAndCancel enumerates everything a card is
@@ -20,7 +21,10 @@ import (
 // every other outbox kind, the card's server texts and what a press can
 // reach in the ledger. A card has Approve and Cancel and no third thing:
 // no button, text or callback grants a standing permission (threat model
-// T7; standing permissions are created elsewhere, P2-S10).
+// T7). Standing permissions are granted only on a /permissions screen
+// (P2-S10): the card shares no button, label or callback action with one,
+// and TestS2A10_PermissionScreensRouteToTheirOwnCallbacks enumerates the
+// screens the same way.
 func TestS2A10_CardOffersOnlyApproveAndCancel(t *testing.T) {
 	want := []CardButton{
 		{Label: safetext.LabelApprove, Action: ActionApprovalApprove},
@@ -28,6 +32,19 @@ func TestS2A10_CardOffersOnlyApproveAndCancel(t *testing.T) {
 	}
 	if got := ApprovalCardButtons(); !slices.Equal(got, want) {
 		t.Fatalf("card buttons %+v, want exactly Approve and Cancel", got)
+	}
+
+	// Nothing of a /permissions screen is on a card, and no card action
+	// is one the /permissions handler takes.
+	for _, b := range ApprovalCardButtons() {
+		if permissions.IsAction(b.Action) {
+			t.Errorf("card action %q is a /permissions action", b.Action)
+		}
+		for _, pb := range PermissionScreenButtons() {
+			if b.Label == pb.Label {
+				t.Errorf("card button %q is also a /permissions button", b.Label.String())
+			}
+		}
 	}
 
 	kb, ok := approvalCardKeyboard(ApprovalCard{Approve: "cb-approve", Cancel: "cb-cancel"})
