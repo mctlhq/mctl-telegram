@@ -35,6 +35,12 @@ package connector
 // A Phase 2 write tool that is not in deviceWriteTools has no card path
 // here (alice_control_device, alice_control_room).
 //
+// These checks run on the card path only. All three tools can be lowered
+// by a standing permission, and nothing acts on a lowered outcome yet: the
+// code that will must run precheckDeviceWrite and deviceWriteTarget before
+// it sends a call without a card, or the server's rounding, clamping and
+// name matching come back.
+//
 // Like the rest of the card path, none of this runs in a deployed service:
 // nothing constructs Cards outside tests.
 

@@ -718,7 +718,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.347s
     - id: P2S8-D2a
-      guard: internal/pa/connector/device_write.go:175
+      guard: internal/pa/connector/device_write.go:181
       guard_text: "if err != nil || strconv.FormatInt(n, 10) != text || n < v.bound.Min || n > v.bound.Max {"
       mutation: "a value outside its range is clamped into it, as the server does, instead of refused"
       killed_by:
@@ -731,7 +731,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.483s
     - id: P2S8-D2b
-      guard: internal/pa/connector/device_write.go:175
+      guard: internal/pa/connector/device_write.go:181
       guard_text: "if err != nil || strconv.FormatInt(n, 10) != text || n < v.bound.Min || n > v.bound.Max {"
       mutation: "the upper bound of a number is one wider than the pin states"
       killed_by:
@@ -744,7 +744,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.563s
     - id: P2S8-D2c
-      guard: internal/pa/connector/device_write.go:175
+      guard: internal/pa/connector/device_write.go:181
       guard_text: "if err != nil || strconv.FormatInt(n, 10) != text || n < v.bound.Min || n > v.bound.Max {"
       mutation: "the lower bound of a number is one wider than the pin states"
       killed_by:
@@ -757,7 +757,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.476s
     - id: P2S8-D2d
-      guard: internal/pa/connector/device_write.go:175
+      guard: internal/pa/connector/device_write.go:181
       guard_text: "if err != nil || strconv.FormatInt(n, 10) != text || n < v.bound.Min || n > v.bound.Max {"
       mutation: "a number is read by its value, so 5.0 and 5e0 pass as 5"
       killed_by:
@@ -770,7 +770,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.537s
     - id: P2S8-D2e
-      guard: internal/pa/connector/device_write.go:276
+      guard: internal/pa/connector/device_write.go:282
       guard_text: "if d.ID == call.device {"
       mutation: "a device's name is accepted as the target"
       killed_by:
@@ -783,7 +783,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.473s
     - id: P2S8-D2f
-      guard: internal/pa/connector/device_write.go:189
+      guard: internal/pa/connector/device_write.go:195
       guard_text: "if _, present := args[spec.roomArg]; present {"
       mutation: "a room next to the device id is let through to the server"
       killed_by:
@@ -796,7 +796,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.487s
     - id: P2S8-D2g
-      guard: internal/pa/connector/device_write.go:243
+      guard: internal/pa/connector/device_write.go:248
       guard_text: "speakers, err := reader.Speakers(ctx, sreq)\n\t\tif err != nil {"
       mutation: "a failed speaker read that came with a list is used"
       killed_by:
@@ -809,7 +809,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.506s
     - id: P2S8-D2h
-      guard: internal/pa/connector/device_write.go:313
+      guard: internal/pa/connector/device_write.go:318
       guard_text: "Light: call.spec.light, Home: wd.Device.Home, Room: wd.Device.Room, Name: wd.Device.Name, ID: call.device,\n\t\tValues: call.values,"
       mutation: "the card that is sent shows fewer values than the sealed arguments set"
       killed_by:
@@ -822,7 +822,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.560s
     - id: P2S8-D2i
-      guard: internal/pa/connector/device_write.go:154
+      guard: internal/pa/connector/device_write.go:160
       guard_text: "if pinned.Constraints == nil || pinned.Constraints.IntegerBounds[v.arg] != *v.bound {"
       mutation: "the pin's bounds are not compared with the range the card's label names"
       killed_by:
@@ -857,6 +857,8 @@ S2-D2:
     - half: "alice_set_light has no card against the real server: alice_list_devices prints a device id for speakers only, so no LightReader of alice can be built and every alice_set_light call is refused no_write_path. mctl-alice must list the ids (and types) of the other devices, in a form a reader can parse, before a light can be a target"
       tracked_by: "#1322"
     - half: "the server still changes a value that is inside the pin's range: mctl-alice clamps volume, brightness and color temperature into the range the device itself reports, drops a value the device has no capability for, and reports success. The pin's range is refused here, the device's own range is not read. Closing it needs mctl-alice to refuse instead of clamping, or the device's ranges in the read made for the card"
+      tracked_by: "#1322"
+    - half: "the value and device checks of a device write run on the card path only (Cards.Emit). alice_set_volume and alice_set_light are lowerable and alice_media_control is conditionally lowerable, and nothing acts on gate.OutcomeLowered yet: the code that will send a lowered call without a card must run precheckDeviceWrite and deviceWriteTarget first, or the server's rounding, clamping and name matching come back for calls a standing permission covers"
       tracked_by: "#1322"
     - half: "alice_control_device and alice_control_room have no card path and are refused no_write_path. Owner decision: build the control_device card (it needs the device type from a fresh read and a temperature range), and whether control_room ever gets one"
       tracked_by: "#1322"
