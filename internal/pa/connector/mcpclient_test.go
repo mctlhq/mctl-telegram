@@ -20,14 +20,16 @@ import (
 // with the httptest TLS client: egress refuses loopback by design, and is
 // tested on its own in internal/pa/egress.
 type fakeServer struct {
-	mu       sync.Mutex
-	sse      bool
-	pages    []string // tools/list result objects, chained by cursor
-	status   int      // forced status for every request, 0 = normal
-	bearers  []string
-	sessions []string
-	methods  []string
-	badID    bool
+	mu    sync.Mutex
+	sse   bool
+	pages []string // tools/list result objects, chained by cursor
+	// pageStatus forces the status of the tools/list request for page i.
+	pageStatus map[int]int
+	status     int // forced status for every request, 0 = normal
+	bearers    []string
+	sessions   []string
+	methods    []string
+	badID      bool
 	// nullResult answers every request with "result": null.
 	nullResult bool
 	// noContentType sends the JSON body without a Content-Type.
@@ -89,6 +91,10 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		i := 0
 		if p.Cursor != "" {
 			_, _ = fmt.Sscanf(p.Cursor, "c%d", &i)
+		}
+		if st := f.pageStatus[i]; st != 0 {
+			w.WriteHeader(st)
+			return
 		}
 		result = f.pages[i]
 	case "tools/call":
