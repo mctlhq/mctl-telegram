@@ -110,8 +110,8 @@ type Connections interface {
 type Flags struct {
 	ExternalTools bool
 	// Writes is PA_WRITES_ENABLED: off makes every write and disclosure
-	// "never" (T11). The dispatcher does not read it yet: no write path
-	// exists (P2-S1), so it is inert until the approval engine uses it.
+	// "never" (T11). The read path does not look at it; the card path
+	// (Cards.Emit) hands it to the gate, and the write executor re-reads it.
 	// WritesErr is the error of reading it; when set, Writes is false and
 	// the gate decides writes off (gate.Input.WritesErr). It turns off
 	// writes only: reads keep their own switches (T11, S1-F1).
@@ -222,6 +222,11 @@ type DispatcherConfig struct {
 	// CallTimeout bounds token, tools/list and tools/call of one request;
 	// 0 is DefaultCallTimeout.
 	CallTimeout time.Duration
+	// Cards takes the calls of approve-tier tools: such a call gets an
+	// approval card and no downstream call (card.go, #1320 slice P2-S5).
+	// Optional, and nil in every deployed wiring: without it the tool
+	// route is the Phase 1 read path alone.
+	Cards *Cards
 }
 
 // Dispatcher serves RouteTool.
@@ -459,6 +464,22 @@ func (d *Dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// A token is never sent to another provider's endpoint.
 	if conn.ID != bound.ConnectionID || conn.Principal != principal || string(conn.Server) != req.Server {
 		d.refuse(w, r, with(base, ReasonConnectionUnbound), http.StatusForbidden)
+		return
+	}
+
+	if d.cfg.Cards != nil && d.cfg.Cards.Covers(req.Server, req.Tool) {
+		// An approve-tier tool is never called from here. The call was
+		// admitted and counted toward the run's call cap above (T10).
+		if ref := d.cfg.Cards.Emit(ctx, CardRequest{
+			Policy: policy, JobID: job.JobID(), ConnectionID: bound.ConnectionID,
+			AuthorityRevision: bound.AuthorityRevision, Server: req.Server, Tool: req.Tool,
+			Args: req.Arguments, Token: token, Flags: flags,
+		}); ref != nil {
+			d.refuse(w, r, with(base, ref.reason), ref.code)
+			return
+		}
+		d.count(req.Server, StatusApprovalPending, "")
+		writeJSON(w, http.StatusOK, toolResponse{Status: StatusApprovalPending, Output: approvalPendingOutput})
 		return
 	}
 

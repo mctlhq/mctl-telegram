@@ -83,6 +83,11 @@ const (
 	// OutboxPrincipalDisabled refuses an update of a disabled principal or
 	// one not on the allowlist (T11, #1318).
 	OutboxPrincipalDisabled OutboxKind = "principal_disabled"
+	// The answers to an approval card's buttons (#1320 slice P2-S5):
+	// Cancel pressed, and a button of a card that already ended.
+	OutboxApprovalCancelled   OutboxKind = "approval_cancelled"
+	OutboxApprovalAlreadyDone OutboxKind = "approval_already_done"
+	OutboxApprovalExpired     OutboxKind = "approval_expired"
 )
 
 // Connection-level kinds (#1318 slice C2b). A row belongs to one
@@ -141,6 +146,29 @@ func (k OutboxKind) ApprovalLevel() bool {
 	return slices.Contains(ApprovalOutboxKinds(), k)
 }
 
+// Card-level kinds (#1320 slice P2-S5). A row is the approval card of one
+// pending approval: it has no job, update, connection or approval id, only
+// the opaque id of the card's Approve callback in Button. The deliverer
+// reads the approval through that id, under the principal, and builds the
+// card and both of its buttons from the approval row, so nothing of the
+// card is stored here. It is not an approval-level row: an approval gets
+// one of those, the report of what became of it.
+const (
+	// OutboxApprovalCard asks the principal to approve or cancel one call.
+	OutboxApprovalCard OutboxKind = "approval_card"
+)
+
+// CardOutboxKinds lists the card-level kinds.
+func CardOutboxKinds() []OutboxKind {
+	return []OutboxKind{OutboxApprovalCard}
+}
+
+// CardLevel reports whether k is a card-level kind, whose rows have the
+// card's Approve callback id and nothing else.
+func (k OutboxKind) CardLevel() bool {
+	return slices.Contains(CardOutboxKinds(), k)
+}
+
 // CarriesButton reports whether a row of kind k is sent with one button,
 // the consent prompt's: such a row needs its callback id, any other row
 // must not have one.
@@ -150,7 +178,7 @@ func (k OutboxKind) CarriesButton() bool {
 
 // OutboxKinds lists every kind this build writes.
 func OutboxKinds() []OutboxKind {
-	return slices.Concat(jobOutboxKinds(), ConversationOutboxKinds(), ConnectionOutboxKinds(), ApprovalOutboxKinds())
+	return slices.Concat(jobOutboxKinds(), ConversationOutboxKinds(), ConnectionOutboxKinds(), ApprovalOutboxKinds(), CardOutboxKinds())
 }
 
 func jobOutboxKinds() []OutboxKind {
@@ -162,7 +190,8 @@ func ConversationOutboxKinds() []OutboxKind {
 	return []OutboxKind{OutboxConsentPrompt, OutboxConsentPromptRU, OutboxConsentAccepted, OutboxConsentWithdrawn, OutboxConsentStale,
 		OutboxNewConversation, OutboxForgotten, OutboxUnknownButton, OutboxRateLimited, OutboxMessageTooLong,
 		OutboxLinkingUnavailable,
-		OutboxPrincipalDisabled}
+		OutboxPrincipalDisabled,
+		OutboxApprovalCancelled, OutboxApprovalAlreadyDone, OutboxApprovalExpired}
 }
 
 // ConversationLevel reports whether k is a conversation-level kind, whose
@@ -229,7 +258,8 @@ type OutboxItem struct {
 	UpdateID int64
 	Kind     OutboxKind
 	// Button is the opaque callback id of an OutboxConsentPrompt's single
-	// button; empty for every other kind.
+	// button, or of an OutboxApprovalCard's Approve button; empty for
+	// every other kind.
 	Button string
 	// ConversationID and FragmentSeq name the assistant fragment of an
 	// OutboxReply; both are empty for every other kind.
@@ -268,6 +298,10 @@ func (o OutboxItem) Valid() bool {
 	}
 	if o.ConnectionID != "" {
 		return false
+	}
+	if o.Kind.CardLevel() {
+		return o.Button != "" && len(o.Button) <= MaxOutboxButton && o.JobID == 0 && o.UpdateID == 0 &&
+			o.ConversationID == "" && o.FragmentSeq == 0
 	}
 	if o.Kind.ConversationLevel() {
 		if o.JobID != 0 || o.UpdateID <= 0 || o.ConversationID != "" || o.FragmentSeq != 0 {

@@ -18,7 +18,9 @@
 // and hand the results here, read errors included, so that "could not
 // observe" is decided in one place and always fails closed (I9).
 //
-// No runtime code calls Decide yet (P2-S1). Reads never reach it: the
+// Decide's one caller is the approval card emitter (connector.Cards, P2-S5),
+// which no deployed wiring constructs (TestNoRuntimePhase2Use), so nothing
+// calls it at runtime yet. Reads never reach it: the
 // catalog grants auto reads (catalog.Surface.Authorize). The principal half
 // of Input comes from StorePrincipalStatus, the admin disable of #1318; the
 // run loop checks the same disable at every step on its own.

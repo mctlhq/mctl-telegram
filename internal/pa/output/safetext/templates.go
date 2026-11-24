@@ -141,6 +141,22 @@ var (
 	TextWriteNotSent = tpl("The action you approved was not carried out. Ask again if you still want it.", "Действие, которое вы подтвердили, не выполнено. Попросите ещё раз, если оно всё ещё нужно.")
 	TextWriteFenced  = tpl("The action you approved was stopped because your connection or settings changed. It may already have happened: please check before asking again.", "Действие, которое вы подтвердили, остановлено, потому что изменилось подключение или настройки. Оно могло уже произойти: проверьте, прежде чем просить снова.")
 	TextWriteUnknown = tpl("The service did not confirm the action you approved. It may or may not have happened, and it will not be repeated automatically: please check before asking again.", "Сервис не подтвердил действие, которое вы подтвердили. Оно могло произойти, а могло и нет, и автоматически повторяться не будет: проверьте, прежде чем просить снова.")
+	// The approval card (#1320 slice P2-S5, threat model T7, T14). Card
+	// puts them around the tool name and the exact arguments; nothing
+	// else of a card is server text. A card has two buttons, LabelApprove
+	// and LabelCancel, and never one that grants a standing permission
+	// (S2-A10).
+	LabelApprove     = tpl("Approve", "Подтвердить")
+	TextCardHead     = tpl("The assistant wants to do this on your behalf. Nothing happens until you tap Approve.", "Ассистент хочет выполнить это действие от вашего имени. Ничего не произойдёт, пока вы не нажмёте «Подтвердить».")
+	TextCardAction   = tpl("Action:", "Действие:")
+	TextCardArgs     = tpl("Exactly what will be sent:", "Что именно будет отправлено:")
+	TextCardExternal = tpl("Warning: this conversation contains content that did not come from you (forwarded text or results read from a service). The values above may come from that content. Check them carefully.", "Внимание: в этом разговоре есть содержимое, которое пришло не от вас (пересланный текст или результаты, прочитанные из сервиса). Значения выше могут быть взяты из него. Проверьте их внимательно.")
+	TextCardFoot     = tpl("The buttons work once and expire in 5 minutes.", "Кнопки срабатывают один раз и действуют 5 минут.")
+	// The answers to a card's buttons. A button of a card that already
+	// ended is answered from the approval's own state, for its owner only.
+	TextApprovalCancelled   = tpl("Cancelled. Nothing was sent.", "Отменено. Ничего не отправлено.")
+	TextApprovalAlreadyDone = tpl("You already approved this action. It is not carried out twice.", "Вы уже подтвердили это действие. Дважды оно не выполняется.")
+	TextApprovalExpired     = tpl("This approval is no longer valid. Nothing was sent. Ask again if you still want it.", "Это подтверждение больше не действует. Ничего не отправлено. Попросите ещё раз, если действие всё ещё нужно.")
 	// The bot's command menu (setMyCommands, output.Sender.SetCommands):
 	// one description per command.
 	CmdNew         = tpl("Start a new conversation", "Начать новый разговор")
