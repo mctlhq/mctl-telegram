@@ -131,6 +131,16 @@ var (
 	// the service stopped accepting a connection and it must be linked
 	// again (#1318 slice C2b).
 	TextConnectionExpired = tpl("One of your connections has expired and can no longer be used. Send /connections to see which one, then /connect to link it again.", "Одно из ваших подключений истекло и больше не работает. Отправьте /connections, чтобы увидеть какое, затем /connect, чтобы подключить снова.")
+	// What became of a call the principal approved (#1320 slice P2-S3,
+	// threat model T2 "Outcomes"). Server text only: no tool name, no
+	// argument and no tool output is rendered here. TextWriteFenced and
+	// TextWriteUnknown never say the action did not happen: a request that
+	// was sent may have been carried out.
+	TextWriteDone    = tpl("The action you approved is done.", "Действие, которое вы подтвердили, выполнено.")
+	TextWriteFailed  = tpl("The service answered the action you approved with an error.", "Сервис ответил ошибкой на действие, которое вы подтвердили.")
+	TextWriteNotSent = tpl("The action you approved was not carried out. Ask again if you still want it.", "Действие, которое вы подтвердили, не выполнено. Попросите ещё раз, если оно всё ещё нужно.")
+	TextWriteFenced  = tpl("The action you approved was stopped because your connection or settings changed. It may already have happened: please check before asking again.", "Действие, которое вы подтвердили, остановлено, потому что изменилось подключение или настройки. Оно могло уже произойти: проверьте, прежде чем просить снова.")
+	TextWriteUnknown = tpl("The service did not confirm the action you approved. It may or may not have happened, and it will not be repeated automatically: please check before asking again.", "Сервис не подтвердил действие, которое вы подтвердили. Оно могло произойти, а могло и нет, и автоматически повторяться не будет: проверьте, прежде чем просить снова.")
 	// The bot's command menu (setMyCommands, output.Sender.SetCommands):
 	// one description per command.
 	CmdNew         = tpl("Start a new conversation", "Начать новый разговор")

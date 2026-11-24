@@ -107,6 +107,40 @@ func (k OutboxKind) ConnectionLevel() bool {
 	return slices.Contains(ConnectionOutboxKinds(), k)
 }
 
+// Approval-level kinds (#1320 slice P2-S3): what became of a call the
+// principal approved. A row belongs to one approval, not to a job, an
+// update or a connection, and is written in the transaction that ends the
+// approval or its dispatch. An approval gets at most one such row, whatever
+// its kind: the executor and the stale-dispatch sweep cannot both report
+// one call.
+const (
+	// OutboxWriteDone: the server answered the call without an error.
+	OutboxWriteDone OutboxKind = "write_done"
+	// OutboxWriteFailed: the server ran the call and answered with a tool
+	// error.
+	OutboxWriteFailed OutboxKind = "write_failed"
+	// OutboxWriteNotSent: the call was not carried out: refused before
+	// anything was sent, or the server refused the token.
+	OutboxWriteNotSent OutboxKind = "write_not_sent"
+	// OutboxWriteFenced: the call was sent and its result discarded,
+	// because the connection, consent or conversation changed meanwhile.
+	OutboxWriteFenced OutboxKind = "write_fenced"
+	// OutboxWriteUnknown: the call was sent and no usable answer came
+	// back (timeout, transport error, 5xx, a crash before the result).
+	OutboxWriteUnknown OutboxKind = "write_outcome_unknown"
+)
+
+// ApprovalOutboxKinds lists the approval-level kinds.
+func ApprovalOutboxKinds() []OutboxKind {
+	return []OutboxKind{OutboxWriteDone, OutboxWriteFailed, OutboxWriteNotSent, OutboxWriteFenced, OutboxWriteUnknown}
+}
+
+// ApprovalLevel reports whether k is an approval-level kind, whose rows
+// have an approval id and nothing else.
+func (k OutboxKind) ApprovalLevel() bool {
+	return slices.Contains(ApprovalOutboxKinds(), k)
+}
+
 // CarriesButton reports whether a row of kind k is sent with one button,
 // the consent prompt's: such a row needs its callback id, any other row
 // must not have one.
@@ -116,7 +150,7 @@ func (k OutboxKind) CarriesButton() bool {
 
 // OutboxKinds lists every kind this build writes.
 func OutboxKinds() []OutboxKind {
-	return slices.Concat(jobOutboxKinds(), ConversationOutboxKinds(), ConnectionOutboxKinds())
+	return slices.Concat(jobOutboxKinds(), ConversationOutboxKinds(), ConnectionOutboxKinds(), ApprovalOutboxKinds())
 }
 
 func jobOutboxKinds() []OutboxKind {
@@ -204,6 +238,9 @@ type OutboxItem struct {
 	// ConnectionID is the connection a connection-level row is about;
 	// empty for every other kind.
 	ConnectionID string
+	// ApprovalID is the approval an approval-level row is about; empty
+	// for every other kind.
+	ApprovalID string
 	// Attempts counts claims, including the current one.
 	Attempts int
 	// SentParts counts the messages of this row the Bot API accepted, over
@@ -216,6 +253,13 @@ type OutboxItem struct {
 // Valid reports whether the item can be enqueued.
 func (o OutboxItem) Valid() bool {
 	if o.Principal <= 0 || !o.Kind.Valid() {
+		return false
+	}
+	if o.Kind.ApprovalLevel() {
+		return o.ApprovalID != "" && len(o.ApprovalID) <= MaxOutboxApprovalID && o.ConnectionID == "" && o.JobID == 0 &&
+			o.UpdateID == 0 && o.Button == "" && o.ConversationID == "" && o.FragmentSeq == 0
+	}
+	if o.ApprovalID != "" {
 		return false
 	}
 	if o.Kind.ConnectionLevel() {
@@ -249,6 +293,8 @@ const (
 	MaxOutboxButton = 64
 	// MaxOutboxConnectionID bounds a connection-level row's connection id.
 	MaxOutboxConnectionID = 128
+	// MaxOutboxApprovalID bounds an approval-level row's approval id.
+	MaxOutboxApprovalID = 64
 	// OutboxLease bounds one row's send. A row still sending after it
 	// becomes OutboxUnknown. A row is claimed right before its own send,
 	// which is bounded well inside the lease (pa.outboxSendTimeout).

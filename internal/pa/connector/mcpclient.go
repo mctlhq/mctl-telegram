@@ -217,6 +217,41 @@ func (e *Endpoint) CallTool(ctx context.Context, token connection.Secret, tool s
 	return res, err
 }
 
+// CallToolExact runs tools/call with args as the "arguments" member byte
+// for byte (threat model T7, S2-D7; #1320 slice P2-S3). CallTool hands its
+// arguments to encoding/json, which compacts a RawMessage and escapes '<',
+// '>', '&', U+2028 and U+2029 in it: the same JSON value, but not the bytes
+// an approval's args_sha names. Here the request body is assembled around
+// args instead, so what the server receives hashes to what the card showed.
+//
+// args must be exactly one JSON object with no byte outside it; anything
+// else is refused before a request is made. It is never retried here.
+func (e *Endpoint) CallToolExact(ctx context.Context, token connection.Secret, tool string, args []byte) ([]byte, error) {
+	if !jsonObject(args) || len(bytes.TrimSpace(args)) != len(args) {
+		return nil, fmt.Errorf("%w: tools/call arguments are not one JSON object", ErrMCPProtocol)
+	}
+	name, err := json.Marshal(tool)
+	if err != nil {
+		return nil, fmt.Errorf("%w: encode: %v", ErrMCPProtocol, err)
+	}
+	s, err := e.open(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	defer s.close(ctx)
+	id := e.ids.Add(1)
+	var body bytes.Buffer
+	body.WriteString(`{"jsonrpc":"2.0","id":`)
+	body.WriteString(strconv.FormatInt(id, 10))
+	body.WriteString(`,"method":"tools/call","params":{"name":`)
+	body.Write(name)
+	body.WriteString(`,"arguments":`)
+	body.Write(args)
+	body.WriteString(`}}`)
+	res, _, err := s.exchange(ctx, "tools/call", id, body.Bytes())
+	return res, err
+}
+
 func (s *session) notify(ctx context.Context, method string) error {
 	resp, err := s.post(ctx, rpcRequest{JSONRPC: "2.0", Method: method})
 	if err != nil {
@@ -231,7 +266,17 @@ func (s *session) notify(ctx context.Context, method string) error {
 
 func (s *session) call(ctx context.Context, method string, params any) (json.RawMessage, http.Header, error) {
 	id := s.e.ids.Add(1)
-	resp, err := s.post(ctx, rpcRequest{JSONRPC: "2.0", ID: &id, Method: method, Params: params})
+	body, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: &id, Method: method, Params: params})
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: encode: %v", ErrMCPProtocol, err)
+	}
+	return s.exchange(ctx, method, id, body)
+}
+
+// exchange posts one JSON-RPC request body, already encoded with id, and
+// returns the result of the response with that id.
+func (s *session) exchange(ctx context.Context, method string, id int64, reqBody []byte) (json.RawMessage, http.Header, error) {
+	resp, err := s.postBody(ctx, method, reqBody)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -274,6 +319,10 @@ func (s *session) post(ctx context.Context, m rpcRequest) (*http.Response, error
 	if err != nil {
 		return nil, fmt.Errorf("%w: encode: %v", ErrMCPProtocol, err)
 	}
+	return s.postBody(ctx, m.Method, body)
+}
+
+func (s *session) postBody(ctx context.Context, method string, body []byte) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.e.url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("%w: request: %v", ErrMCPProtocol, err)
@@ -288,7 +337,7 @@ func (s *session) post(ctx context.Context, m rpcRequest) (*http.Response, error
 	resp, err := s.e.client.Do(req)
 	if err != nil {
 		// The error names the URL, never the header.
-		return nil, fmt.Errorf("pa connector: %s %s: %w", s.e.server, m.Method, err)
+		return nil, fmt.Errorf("pa connector: %s %s: %w", s.e.server, method, err)
 	}
 	return resp, nil
 }
