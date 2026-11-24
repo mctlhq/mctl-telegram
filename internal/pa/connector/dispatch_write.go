@@ -158,8 +158,8 @@ type FreshTool struct {
 // catalog error where one applies, on a listing it could not read, on a
 // tool the pin does not have and on a definition that differs from the
 // pin; it never returns a cached or partial answer (I9). The executor
-// compares what it returns with the approval's hashes. The implementation
-// is slice P2-S4; a nil FreshSurface refuses every write.
+// compares what it returns with the approval's hashes. PinFresh (fresh.go,
+// slice P2-S4) implements it; a nil FreshSurface refuses every write.
 type FreshSurface interface {
 	FreshTool(ctx context.Context, req FreshRequest) (FreshTool, error)
 }

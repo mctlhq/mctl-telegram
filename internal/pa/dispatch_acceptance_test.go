@@ -199,6 +199,8 @@ func (f *fakeMCP) snapshot() (calls, bearers []string, lists int) {
 
 func (f *fakeMCP) setPages(p [][]byte) { f.mu.Lock(); f.pages = p; f.mu.Unlock() }
 
+func (f *fakeMCP) setListErr(err error) { f.mu.Lock(); f.listErr = err; f.mu.Unlock() }
+
 // tgPage is tg's tools/list as one page: the committed descriptor
 // snapshot, every tool, writes included.
 func tgPage(t *testing.T, mutate func(tools []map[string]any) []map[string]any) []byte {
