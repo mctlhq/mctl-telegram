@@ -67,7 +67,8 @@ func e2eUsage(t *testing.T, h *runLoopHarness, job int64) (cost float64, reporte
 // TestPARoutesMatchServer: the worker's copies of the routes are the
 // server's.
 func TestPARoutesMatchServer(t *testing.T) {
-	if agentworker.PARouteClaim != RouteClaim || agentworker.PARouteTurn != RouteTurn || agentworker.PARouteReply != RouteReply {
+	if agentworker.PARouteClaim != RouteClaim || agentworker.PARouteTurn != RouteTurn || agentworker.PARouteReply != RouteReply ||
+		agentworker.PARouteDraft != RouteDraft {
 		t.Fatal("agentworker PA routes differ from the run loop's")
 	}
 	if agentworker.PAMaxToolCalls != jobs.DefaultMaxToolCalls || agentworker.PAMaxContextTokens != jobs.DefaultMaxContextTokens {

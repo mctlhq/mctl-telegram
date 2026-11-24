@@ -889,7 +889,7 @@ S2-I6:
     - internal/pa.TestS2I6_FailedToolRecordIsAnError
   mutations:
     - id: P2S7-I6a
-      guard: internal/pa/runloop.go:887
+      guard: internal/pa/runloop.go:1002
       guard_text: 'return tainted, nil'
       mutation: "ConversationTainted returns the durable flag as clean: `return tainted, nil` -> `return tainted && false, nil`"
       killed_by:
@@ -962,7 +962,7 @@ S2-I6:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.443s
     - id: P2S7-I6f
-      guard: internal/pa/runloop.go:903
+      guard: internal/pa/runloop.go:1018
       guard_text: "convo.ProvenanceExternal, string(output)))\n\t\t\treturn err"
       mutation: "RecordToolResult swallows a failed fragment append: `return err` -> `_ = err; return nil`"
       killed_by:
@@ -1112,7 +1112,7 @@ S2-I10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.404s
     - id: P2S7-I10b
-      guard: internal/pa/runloop.go:885
+      guard: internal/pa/runloop.go:1000
       guard_text: 'return true, err'
       mutation: "ConversationTainted store error returns clean: `return true, err` -> `return false, err`"
       killed_by:
@@ -2771,7 +2771,7 @@ S2-A7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.412s
     - id: P2S14-PROMPTa
-      guard: internal/agentworker/parunner.go:148
+      guard: internal/agentworker/parunner.go:151
       guard_text: "slices.Sort(writes)"
       mutation: "the worker prompt is the approval variant whatever the claim offers"
       killed_by:
@@ -2785,7 +2785,7 @@ S2-A7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/agentworker	0.469s
     - id: P2S14-PROMPTb
-      guard: internal/agentworker/parunner.go:131
+      guard: internal/agentworker/parunner.go:134
       guard_text: "if !t.Approval {"
       mutation: "the worker prompt stays the read-only text when the claim offers a write tool"
       killed_by:
@@ -2799,7 +2799,7 @@ S2-A7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/agentworker	0.378s
     - id: P2S14-PROMPTc
-      guard: internal/pa/runloop.go:637
+      guard: internal/pa/runloop.go:689
       guard_text: "InputSchema: mt.InputSchema, Approval: l.approveTools[name]})"
       mutation: "the claim no longer marks an approve-tier tool"
       killed_by:
@@ -2866,7 +2866,7 @@ S2-A8:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.208s
     - id: P2S14-PERMa
-      guard: cmd/server/pa_wiring.go:239
+      guard: cmd/server/pa_wiring.go:240
       guard_text: "convCfg.Approvals, convCfg.Permissions = pw.approvals, pw.permissions"
       mutation: "the conversations are built without the /permissions command"
       killed_by:
@@ -3109,7 +3109,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.524s
     - id: P2S14-PERMa
-      guard: cmd/server/pa_wiring.go:239
+      guard: cmd/server/pa_wiring.go:240
       guard_text: "convCfg.Approvals, convCfg.Permissions = pw.approvals, pw.permissions"
       mutation: "the conversations are built without the /permissions command"
       killed_by:
@@ -3195,7 +3195,7 @@ S2-A10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.079s
     - id: P2S14-PERMa
-      guard: cmd/server/pa_wiring.go:239
+      guard: cmd/server/pa_wiring.go:240
       guard_text: "convCfg.Approvals, convCfg.Permissions = pw.approvals, pw.permissions"
       mutation: "the conversations are built without the /permissions command"
       killed_by:
@@ -3427,7 +3427,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.734s
     - id: P2S14-HINTa
-      guard: internal/pa/runloop.go:290
+      guard: internal/pa/runloop.go:339
       guard_text: "case ActionsHintConsent, ActionsHintScope:"
       mutation: "a claim passes any reason the gate gave to the worker, not only the two known ones"
       killed_by:
@@ -3444,7 +3444,7 @@ S2-F3:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.886s
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.035s
     - id: P2S14-HINTb
-      guard: internal/pa/runloop.go:286
+      guard: internal/pa/runloop.go:335
       guard_text: "if slices.ContainsFunc(tools, func(t wireTool) bool { return t.Approval }) {"
       mutation: "a claim that offers an approve-tier tool still carries a reason for offering none"
       killed_by:
@@ -3456,7 +3456,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.726s
     - id: P2S14-HINTc
-      guard: internal/agentworker/parunner.go:143
+      guard: internal/agentworker/parunner.go:146
       guard_text: "if hint, ok := paActionsHint[c.ActionsHint]; ok {"
       mutation: "the worker puts the reason text of the claim into the system prompt instead of its own fixed sentence"
       killed_by:
@@ -3468,7 +3468,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/agentworker	0.493s
     - id: P2S14-HINTd
-      guard: cmd/server/pa_wiring.go:238
+      guard: cmd/server/pa_wiring.go:239
       guard_text: "loopCfg.Cards, loopCfg.ApproveTools, loopCfg.ActionsHint = pw.cards, pw.approveTools, pw.hint"
       mutation: "the run loop is built without the reason a claim was offered no write tool"
       killed_by:
