@@ -152,6 +152,8 @@ S2-C11:
       tracked_by: "#1320"
     - half: "the outcome against a real MCP server and its real timeout and 5xx bodies"
       tracked_by: "#1320"
+    - half: "the upstream-silence markers anchored to the pinned servers' real wording: the bare \"timeout\" match also reads a rejected call whose error mentions a timeout argument as outcome_unknown, which is the safe direction and a less exact notice"
+      tracked_by: "#1320"
 
 S2-C12:
   status: green
@@ -251,6 +253,8 @@ S2-C12:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.690s
   gaps:
     - half: "a real process kill between the pre-dispatch commit and the result"
+      tracked_by: "#1320"
+    - half: "a committed record of a call that was never sent and could not be settled as refused is resolved by the sweep as outcome_unknown (dispatch_lease_expired), not under a reason of its own that says nothing was sent"
       tracked_by: "#1320"
 
 S2-C13:
