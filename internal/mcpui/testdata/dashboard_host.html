@@ -54,6 +54,9 @@ var UNREAD = {
 };
 
 var HOST_CONTEXT = {
+  protocolVersion: "2026-01-26",
+  hostInfo: { name: "mctl-fixture-host", version: "1.0.0" },
+  hostCapabilities: { serverTools: {} },
   hostContext: {
     theme: "light",
     locale: "ru",
@@ -150,21 +153,49 @@ function toolResult(args) {
   return {};
 }
 
+var triage = new URLSearchParams(location.search).get("view") === "triage";
+var initAccepted = false;
+var ready = false;
+
 window.addEventListener("message", function (event) {
   var frame = document.getElementById("app");
   if (event.source !== frame.contentWindow) return;
   var data = event.data;
   if (!data || data.jsonrpc !== "2.0") return;
+  if (data.method === "ui/notifications/initialized" && data.id == null && initAccepted) {
+    ready = true;
+    document.documentElement.dataset.handshake = "ready";
+    return;
+  }
   if (data.id == null) return;
   if (data.method === "ui/initialize") {
+    var params = data.params || {};
+    var expectedName = triage ? "mctl-telegram-triage" : "mctl-telegram-dashboard";
+    if (params.protocolVersion !== HOST_CONTEXT.protocolVersion ||
+        !params.appInfo || params.appInfo.name !== expectedName ||
+        typeof params.appInfo.version !== "string" || !params.appInfo.version ||
+        !params.appCapabilities || typeof params.appCapabilities !== "object" ||
+        Array.isArray(params.appCapabilities)) {
+      document.documentElement.dataset.handshake = "invalid";
+      event.source.postMessage({
+        jsonrpc: "2.0", id: data.id, error: { code: -32602, message: "Invalid initialization parameters" }
+      }, "*");
+      return;
+    }
+    initAccepted = true;
     reply(event.source, data.id, HOST_CONTEXT);
     return;
   }
+  if (!ready) return;
   if (data.method === "tools/list") {
-    reply(event.source, data.id, { tools: TOOLS });
+    reply(event.source, data.id, {
+      tools: triage ? TOOLS.filter(function (tool) { return tool.name === "get_unread_messages"; }) : TOOLS
+    });
     return;
   }
   if (data.method === "tools/call") {
+    if (triage && (!data.params || data.params.name !== "get_unread_messages")) return;
+    document.documentElement.dataset.lastTool = data.params && data.params.name;
     reply(event.source, data.id, { content: [{ type: "text", text: "ok" }], structuredContent: toolResult(data.params || {}) });
     return;
   }
@@ -174,6 +205,11 @@ window.addEventListener("message", function (event) {
 function boot() {
   var q = new URLSearchParams(location.search);
   var view = q.get("view") || "board";
+  if (triage) {
+    document.getElementById("which").textContent = "triage (read-only)";
+    document.getElementById("app").src = "triage.html";
+    return;
+  }
   var template = q.get("template") || "unread_pulse";
   document.getElementById("which").textContent = view === "editor" ? "editor" : template;
   var extra = "";
@@ -183,9 +219,13 @@ function boot() {
   document.getElementById("app").src = "dashboard.html?" + (view === "editor" ? "view=editor" : ("template=" + encodeURIComponent(template))) + extra;
 }
 
-Promise.all(NAMES.map(function (id) {
-  return fetch("templates/" + id + ".json").then(function (r) { return r.json(); }).then(function (doc) { TEMPLATES[id] = doc; });
-})).then(boot);
+if (triage) {
+  boot();
+} else {
+  Promise.all(NAMES.map(function (id) {
+    return fetch("templates/" + id + ".json").then(function (r) { return r.json(); }).then(function (doc) { TEMPLATES[id] = doc; });
+  })).then(boot);
+}
 </script>
 </body>
 </html>

@@ -39,7 +39,7 @@ const MIMEType = "text/html;profile=mcp-app"
 // intermediate build pipeline to thread a version through, and bumping this
 // by hand is exactly the "deliberate, reviewable change" the content-hash
 // test (see mcpui_test.go) also demands of any edit to triage.html.
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 //go:embed triage.html
 var triageHTML string
