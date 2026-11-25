@@ -41,7 +41,7 @@ func TestTriageHTMLHasNoExternalDeps(t *testing.T) {
 // rather than silent drift a client (or the report's content-hash claim)
 // would not notice.
 func TestTriageHTMLContentHash(t *testing.T) {
-	const wantHash = "390a03383cafc2a0272f5fac87e462306a365a07953f267f0760b999c7a50e88"
+	const wantHash = "eed387687b60d14a133922fe3bbe3dfbc97f154ef128eaec86fd82842be533ca"
 	sum := sha256.Sum256([]byte(triageHTML))
 	got := hex.EncodeToString(sum[:])
 	if got != wantHash {
@@ -177,7 +177,7 @@ func TestDashboardHTMLHasNoExternalDeps(t *testing.T) {
 func TestDashboardHTMLContentHash(t *testing.T) {
 	sum := sha256.Sum256([]byte(dashboardHTML))
 	got := hex.EncodeToString(sum[:])
-	const wantHash = "dc7f2a04a515ade57d48a78406ff93a8cc8953c67fcfe62b3b9e5373dfb3f90c"
+	const wantHash = "d601482184cf2a56cad2ca70aa5f376eead882c9ec30e7b35a9298111d38ed5d"
 	if got != wantHash {
 		t.Fatalf("dashboard.html sha256 = %s, want %s", got, wantHash)
 	}

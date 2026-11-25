@@ -13,7 +13,7 @@ const DashboardResourceURI = "ui://mctl-telegram/dashboard"
 
 // DashboardVersion is the build recorded for the dashboard document. The
 // URI does not change; drift is caught by TestDashboardHTMLContentHash.
-const DashboardVersion = "0.1.0"
+const DashboardVersion = "0.2.0"
 
 //go:embed dashboard.html
 var dashboardHTML string

@@ -958,9 +958,13 @@ function init() {
   });
   showView(currentView);
   setStatus(t("connecting"));
-  callHost("ui/initialize", {}).then(function (res) {
-    applyHost(res || {});
+  callHost("ui/initialize", {
+    appInfo: { name: "mctl-telegram-dashboard", version: "0.2.0" },
+    appCapabilities: {},
+    protocolVersion: "2026-01-26"
+  }).then(function (res) {
     sendToHost({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
+    applyHost(res || {});
     return callHost("tools/list", {});
   }).then(function (res) {
     (res && res.tools || []).forEach(function (tool) { availableTools[tool.name] = true; });
