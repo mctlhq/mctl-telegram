@@ -4,6 +4,11 @@ on:
   pull_request:
     branches: [main]
 
+# A manual rerun of an older revision must not cancel the current PR build.
+concurrency:
+  group: build-${{ github.run_attempt == 1 && format('pr-{0}', github.event.pull_request.number) || format('rerun-{0}', github.run_id) }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
