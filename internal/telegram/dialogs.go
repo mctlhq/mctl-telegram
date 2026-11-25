@@ -17,9 +17,28 @@ type Dialog struct {
 	Username        string    `json:"username,omitempty"`
 	UnreadCount     int       `json:"unread_count"`
 	LastMessageDate time.Time `json:"last_message_date,omitempty"`
-	// Archived is set only by a folder listing, for a member found in the
-	// archive.
+	// TopMessageID is Dialog.TopMessage, the latest message id. mark_read
+	// takes it as max_id. Omitted when Telegram did not report one.
+	TopMessageID int `json:"top_message_id,omitempty"`
+	// UnreadMentionsCount is Dialog.UnreadMentionsCount. Omitted when zero.
+	UnreadMentionsCount int `json:"unread_mentions_count,omitempty"`
+	// Pinned and Muted come from the dialog already returned by
+	// messages.getDialogs. Omitted when false so a dialog that carries
+	// neither marshals as it did before the fields existed.
+	Pinned bool `json:"pinned,omitempty"`
+	Muted  bool `json:"muted,omitempty"`
+	// Archived is true when the dialog is in the archive folder, and also
+	// when a folder listing found the member on the archive page.
 	Archived bool `json:"archived,omitempty"`
+	// IsBroadcast, IsMegagroup and IsForum split type "channel". Type stays
+	// "channel" for both a broadcast channel and a supergroup so existing
+	// callers keep working; these flags are how a client tells them apart.
+	// A channel peer present only as ChannelForbidden is marked broadcast,
+	// matching isBroadcastChannel. A peer missing from the reply is left
+	// out entirely, as before.
+	IsBroadcast bool `json:"is_broadcast,omitempty"`
+	IsMegagroup bool `json:"is_megagroup,omitempty"`
+	IsForum     bool `json:"is_forum,omitempty"`
 }
 
 // ListDialogs returns up to `limit` dialogs from the operator's main dialog
@@ -233,13 +252,15 @@ func dialogFromPeer(d *tg.Dialog, users map[int64]*tg.User, chats map[int64]tg.C
 		if title == "" {
 			title = u.Username
 		}
-		return &Dialog{
+		entry := &Dialog{
 			ID:          fmt.Sprintf("user:%d", u.ID),
 			Type:        "user",
 			Title:       title,
 			Username:    u.Username,
 			UnreadCount: d.UnreadCount,
 		}
+		applyDialogState(entry, d)
+		return entry
 	case *tg.PeerChat:
 		c, ok := chats[p.ChatID]
 		if !ok {
@@ -250,12 +271,14 @@ func dialogFromPeer(d *tg.Dialog, users map[int64]*tg.User, chats map[int64]tg.C
 		if ch != nil {
 			title = ch.Title
 		}
-		return &Dialog{
+		entry := &Dialog{
 			ID:          fmt.Sprintf("chat:%d", p.ChatID),
 			Type:        "chat",
 			Title:       title,
 			UnreadCount: d.UnreadCount,
 		}
+		applyDialogState(entry, d)
+		return entry
 	case *tg.PeerChannel:
 		c, ok := chats[p.ChannelID]
 		if !ok {
@@ -268,13 +291,56 @@ func dialogFromPeer(d *tg.Dialog, users map[int64]*tg.User, chats map[int64]tg.C
 			title = ch.Title
 			username = ch.Username
 		}
-		return &Dialog{
+		entry := &Dialog{
 			ID:          fmt.Sprintf("channel:%d", p.ChannelID),
 			Type:        "channel",
 			Title:       title,
 			Username:    username,
 			UnreadCount: d.UnreadCount,
+			// ChannelForbidden has no megagroup bit; isBroadcastChannel
+			// counts it as broadcast.
+			IsBroadcast: true,
 		}
+		if ch != nil {
+			entry.IsMegagroup = ch.Megagroup
+			entry.IsBroadcast = !ch.Megagroup
+			entry.IsForum = ch.Forum
+		}
+		applyDialogState(entry, d)
+		return entry
 	}
 	return nil
+}
+
+// applyDialogState copies the dialog flags messages.getDialogs already
+// returned. It does not make another Telegram call.
+func applyDialogState(entry *Dialog, d *tg.Dialog) {
+	if entry == nil || d == nil {
+		return
+	}
+	if d.TopMessage > 0 {
+		entry.TopMessageID = d.TopMessage
+	}
+	if d.UnreadMentionsCount > 0 {
+		entry.UnreadMentionsCount = d.UnreadMentionsCount
+	}
+	entry.Pinned = d.Pinned
+	if folderID, ok := d.GetFolderID(); ok && folderID == 1 {
+		entry.Archived = true
+	}
+	entry.Muted = dialogMuted(d.NotifySettings, time.Now())
+}
+
+// dialogMuted reports a dialog whose notify settings mute it right now.
+// mute_until in the future (including Telegram's "mute forever" timestamp)
+// and an explicit silent flag both count. Absent settings are not muted.
+func dialogMuted(n tg.PeerNotifySettings, now time.Time) bool {
+	if silent, ok := n.GetSilent(); ok && silent {
+		return true
+	}
+	until, ok := n.GetMuteUntil()
+	if !ok || until <= 0 {
+		return false
+	}
+	return int64(until) > now.Unix()
 }

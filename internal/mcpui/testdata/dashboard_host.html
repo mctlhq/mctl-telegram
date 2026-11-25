@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MCP Apps host</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #111; color: #eee; font: 13px/1.4 -apple-system, sans-serif; }
+  .hostbar { height: 36px; display: flex; align-items: center; gap: 12px; padding: 0 12px; background: #1b1b1b; border-bottom: 1px solid #333; }
+  .hostbar strong { font-weight: 650; }
+  iframe { width: 100%; height: calc(100vh - 36px); border: 0; background: #fff; }
+</style>
+</head>
+<body>
+<div class="hostbar">
+  <strong>MCP Apps host</strong>
+  <span id="which"></span>
+</div>
+<iframe id="app" title="Telegram dashboard"></iframe>
+<script>
+"use strict";
+
+var NAMES = ["unread_pulse", "groups_tiles", "folders_board", "forum_topics", "watchlist_digest"];
+var TEMPLATES = {};
+
+var DIALOGS = [
+  { id: "user:8511", type: "user", title: "Alice", username: "alice", unread_count: 3, last_message_date: "2026-11-25T09:10:00Z", top_message_id: 41, pinned: true },
+  { id: "user:4302", type: "user", title: "Bob", username: "bob", unread_count: 1, last_message_date: "2026-11-25T08:02:00Z", top_message_id: 18 },
+  { id: "user:4303", type: "user", title: "Carol", username: "carol", unread_count: 0, last_message_date: "2026-11-24T18:00:00Z", top_message_id: 7, muted: true },
+  { id: "user:8531", type: "user", title: "Dana", unread_count: 2, last_message_date: "2026-11-25T07:40:00Z", top_message_id: 12, unread_mentions_count: 1 },
+  { id: "chat:10", type: "chat", title: "Group", unread_count: 4, last_message_date: "2026-11-25T09:00:00Z", top_message_id: 90 },
+  { id: "channel:8522", type: "channel", title: "Team", username: "team", unread_count: 6, is_megagroup: true, is_forum: true, last_message_date: "2026-11-25T09:20:00Z", top_message_id: 120, unread_mentions_count: 2 },
+  { id: "channel:8521", type: "channel", title: "News", username: "news", unread_count: 15, is_broadcast: true, last_message_date: "2026-11-25T06:00:00Z", top_message_id: 400 }
+];
+
+function envelope(peer, body) {
+  return '<telegram-content origin="telegram" peer="' + peer + '" untrusted="true">' + body + "</telegram-content>";
+}
+
+var UNREAD = {
+  messages: [
+    { id: 41, peer: "user:8511", peer_title: "Alice", from: "Alice", text: envelope("user:redacted", "Need the notes before noon."), date: "2026-11-25T09:10:00Z" },
+    { id: 120, peer: "channel:8522", peer_title: "Team", from: "Bob", text: envelope("channel:redacted", "Standup moved to 11."), date: "2026-11-25T09:20:00Z" },
+    { id: 400, peer: "channel:8521", peer_title: "News", from: "News", text: envelope("channel:redacted", "Morning briefing."), date: "2026-11-25T06:00:00Z" }
+  ],
+  sponsored: [{
+    label: "Sponsored",
+    channel: "channel:8521",
+    title: "Sample offer",
+    text: envelope("channel:redacted", "A synthetic advertisement for this fixture."),
+    url: "example.test/offer",
+    button_text: "Open"
+  }],
+  sponsored_unavailable: []
+};
+
+var HOST_CONTEXT = {
+  hostContext: {
+    theme: "light",
+    locale: "ru",
+    styles: {
+      variables: {
+        "--color-background-primary": "#f7f4ef",
+        "--color-background-secondary": "#fffdf8",
+        "--color-text-primary": "#1c1915",
+        "--color-text-secondary": "#5c564c",
+        "--color-border-primary": "#e4dcd0",
+        "--color-text-accent": "#9a3412"
+      }
+    }
+  }
+};
+
+var TOOLS = [
+  "list_dialogs", "list_folders", "list_topics", "get_unread_messages", "get_messages", "search_messages",
+  "list_dashboard_templates", "get_dashboard_template", "save_dashboard_template", "delete_dashboard_template",
+  "prepare_dashboard_action", "mark_read", "save_draft"
+].map(function (name) { return { name: name }; });
+
+function reply(source, id, result) {
+  source.postMessage({ jsonrpc: "2.0", id: id, result: result }, "*");
+}
+
+function toolResult(args) {
+  var name = args.name;
+  var a = args.arguments || {};
+  if (name === "list_dashboard_templates") {
+    var rows = NAMES.map(function (id) {
+      return { id: id, title: (TEMPLATES[id] && TEMPLATES[id].title) || id, builtin: true };
+    });
+    return { templates: rows, quota: { used: 0, max: 20 } };
+  }
+  if (name === "get_dashboard_template") {
+    return { builtin: true, template: TEMPLATES[a.id] || TEMPLATES.unread_pulse };
+  }
+  if (name === "save_dashboard_template") {
+    var tpl = a.template || {};
+    return { id: tpl.id || "custom_pulse", title: tpl.title || "", saved: !a.dry_run, dry_run: !!a.dry_run, valid: true };
+  }
+  if (name === "list_dialogs") {
+    var dialogs = DIALOGS;
+    var scan = null;
+    if (a.folder) {
+      dialogs = a.folder === 2
+        ? DIALOGS.filter(function (d) { return d.is_broadcast; })
+        : DIALOGS.filter(function (d) { return d.type === "chat" || d.is_megagroup; });
+      scan = { scanned: 200, complete: a.folder !== 2 };
+    }
+    var out = { dialogs: dialogs };
+    if (scan) out.folder_scan = scan;
+    return out;
+  }
+  if (name === "list_folders") {
+    return { folders: [
+      { id: 1, title: "Work", kind: "folder", included_peers: 3 },
+      { id: 2, title: "News", kind: "folder", included_peers: 1 }
+    ] };
+  }
+  if (name === "list_topics") {
+    return {
+      topics: [
+        { id: 1, title: "General", pinned: true, unread_count: 2, unread_mentions_count: 1, last_message_date: "2026-11-25T09:20:00Z" },
+        { id: 2, title: "Release", unread_count: 5, unread_mentions_count: 3, last_message_date: "2026-11-25T08:15:00Z" },
+        { id: 3, title: "Design", unread_count: 0, unread_mentions_count: 0, last_message_date: "2026-11-24T16:00:00Z" }
+      ],
+      list: { total: 3, complete: true }
+    };
+  }
+  if (name === "get_unread_messages") return UNREAD;
+  if (name === "get_messages") {
+    var peer = a.peer;
+    var msgs = UNREAD.messages.filter(function (m) { return !peer || m.peer === peer; });
+    var body = {
+      messages: msgs.length ? msgs : [{ id: 3, peer: peer, peer_title: "", from: "Alice", text: envelope("user:redacted", "Last few lines of this chat."), date: "2026-11-25T09:00:00Z" }],
+      sponsored: [],
+      sponsored_unavailable: []
+    };
+    if (peer === "channel:8521") {
+      body.sponsored = UNREAD.sponsored;
+    }
+    return body;
+  }
+  if (name === "search_messages") {
+    var hitPeer = a.peer || "user:8511";
+    return {
+      messages: [{ id: 41, peer: hitPeer, peer_title: "Alice", from: "Alice", text: envelope("user:redacted", "notes for the watchlist"), date: "2026-11-25T09:10:00Z" }],
+      sponsored: [],
+      sponsored_unavailable: []
+    };
+  }
+  return {};
+}
+
+window.addEventListener("message", function (event) {
+  var frame = document.getElementById("app");
+  if (event.source !== frame.contentWindow) return;
+  var data = event.data;
+  if (!data || data.jsonrpc !== "2.0") return;
+  if (data.id == null) return;
+  if (data.method === "ui/initialize") {
+    reply(event.source, data.id, HOST_CONTEXT);
+    return;
+  }
+  if (data.method === "tools/list") {
+    reply(event.source, data.id, { tools: TOOLS });
+    return;
+  }
+  if (data.method === "tools/call") {
+    reply(event.source, data.id, { content: [{ type: "text", text: "ok" }], structuredContent: toolResult(data.params || {}) });
+    return;
+  }
+  reply(event.source, data.id, {});
+});
+
+function boot() {
+  var q = new URLSearchParams(location.search);
+  var view = q.get("view") || "board";
+  var template = q.get("template") || "unread_pulse";
+  document.getElementById("which").textContent = view === "editor" ? "editor" : template;
+  var extra = "";
+  ["peer", "query", "peers"].forEach(function (key) {
+    if (q.get(key)) extra += "&" + key + "=" + encodeURIComponent(q.get(key));
+  });
+  document.getElementById("app").src = "dashboard.html?" + (view === "editor" ? "view=editor" : ("template=" + encodeURIComponent(template))) + extra;
+}
+
+Promise.all(NAMES.map(function (id) {
+  return fetch("templates/" + id + ".json").then(function (r) { return r.json(); }).then(function (doc) { TEMPLATES[id] = doc; });
+})).then(boot);
+</script>
+</body>
+</html>

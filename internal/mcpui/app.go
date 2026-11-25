@@ -67,11 +67,15 @@ func Resource() mcplib.Resource {
 // exact URI. The returned slice always has exactly one element: the whole
 // document, inline, as text.
 func Contents(uri string) []mcplib.ResourceContents {
+	text := triageHTML
+	if uri == DashboardResourceURI {
+		text = dashboardHTML
+	}
 	return []mcplib.ResourceContents{
 		mcplib.TextResourceContents{
 			URI:      uri,
 			MIMEType: MIMEType,
-			Text:     triageHTML,
+			Text:     text,
 			Meta:     uiResourceMeta(),
 		},
 	}
@@ -120,9 +124,15 @@ func ExtensionCapability() map[string]any {
 // plus the send gate remain the only things that decide whether a call is
 // permitted. See the proposal's "Open questions" for the reasoning.
 func ToolMeta() map[string]any {
+	return ToolMetaFor(ResourceURI)
+}
+
+// ToolMetaFor is ToolMeta for a chosen ui:// document. visibility stays a
+// host hint: this server never reads it.
+func ToolMetaFor(uri string) map[string]any {
 	return map[string]any{
 		"ui": map[string]any{
-			"resourceUri": ResourceURI,
+			"resourceUri": uri,
 			"visibility":  []string{"model", "app"},
 		},
 	}

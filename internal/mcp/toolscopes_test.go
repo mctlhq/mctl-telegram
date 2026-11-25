@@ -87,8 +87,8 @@ var (
 // wrong entry in the table fails here instead of agreeing with itself.
 var (
 	selfTools     = []string{"get_my_audit_log", "get_my_identity", "get_my_send_status", "list_assistants"}
-	readTools     = []string{"get_media", "get_messages", "get_unread_messages", "list_dialogs", "list_folders", "list_topics", "prepare_get_media", "search_messages"}
-	writeTools    = []string{"delete_messages", "edit_message", "forward_messages", "mark_read", "pin_message", "prepare_pin_message", "prepare_send_message", "save_draft", "send_media", "send_message", "set_reaction"}
+	readTools     = []string{"delete_dashboard_template", "get_dashboard_template", "get_media", "get_messages", "get_unread_messages", "list_dashboard_templates", "list_dialogs", "list_folders", "list_topics", "prepare_get_media", "save_dashboard_template", "search_messages"}
+	writeTools    = []string{"delete_messages", "edit_message", "forward_messages", "mark_read", "pin_message", "prepare_dashboard_action", "prepare_pin_message", "prepare_send_message", "save_draft", "send_media", "send_message", "set_reaction"}
 	accountTools  = []string{"delete_fork", "delete_telegram_account", "disconnect_telegram_account", "fork_assistant", "get_my_notification_preferences", "install_assistant", "revoke_local_bridge_device", "set_my_notification_preferences", "set_send_consent", "update_fork", "update_install"}
 	lookupTools   = []string{"get_acquisition_report", "get_pa_principal_status", "get_user_audit_log", "list_telegram_identities"}
 	adminWrites   = []string{"mint_worker_token", "provision_local_account", "revoke_telegram_session", "revoke_worker_token", "set_account_mode", "set_account_send", "set_pa_principal_disabled", "set_telegram_access"}

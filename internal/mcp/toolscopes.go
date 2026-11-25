@@ -27,24 +27,29 @@ import (
 // boundary, not a replacement for them.
 var toolScopes = map[string][]string{
 	// Reads.
-	"list_dialogs":        {"telegram:dialogs:read"},
-	"list_folders":        {"telegram:dialogs:read"},
-	"list_topics":         {"telegram:messages:read"},
-	"get_unread_messages": {"telegram:messages:read"},
-	"get_messages":        {"telegram:messages:read"},
-	"search_messages":     {"telegram:messages:read"},
-	"prepare_get_media":   {"telegram:messages:read"},
-	"get_media":           {"telegram:messages:read"},
+	"list_dialogs":              {"telegram:dialogs:read"},
+	"list_dashboard_templates":  {"telegram:dialogs:read"},
+	"get_dashboard_template":    {"telegram:dialogs:read"},
+	"save_dashboard_template":   {"telegram:dialogs:read"},
+	"delete_dashboard_template": {"telegram:dialogs:read"},
+	"list_folders":              {"telegram:dialogs:read"},
+	"list_topics":               {"telegram:messages:read"},
+	"get_unread_messages":       {"telegram:messages:read"},
+	"get_messages":              {"telegram:messages:read"},
+	"search_messages":           {"telegram:messages:read"},
+	"prepare_get_media":         {"telegram:messages:read"},
+	"get_media":                 {"telegram:messages:read"},
 
 	// Writes to Telegram. prepare_send_message issues the confirmation a
 	// send consumes, so it is offered only to an identity that could send.
-	"prepare_send_message": {"telegram:messages:send"},
-	"send_message":         {"telegram:messages:send"},
-	"send_media":           {"telegram:messages:send"},
-	"edit_message":         {"telegram:messages:send"},
-	"delete_messages":      {"telegram:messages:send"},
-	"forward_messages":     {"telegram:messages:send"},
-	"set_reaction":         {"telegram:messages:send"},
+	"prepare_send_message":     {"telegram:messages:send"},
+	"prepare_dashboard_action": {"telegram:messages:send"},
+	"send_message":             {"telegram:messages:send"},
+	"send_media":               {"telegram:messages:send"},
+	"edit_message":             {"telegram:messages:send"},
+	"delete_messages":          {"telegram:messages:send"},
+	"forward_messages":         {"telegram:messages:send"},
+	"set_reaction":             {"telegram:messages:send"},
 	// save_draft delivers nothing, but it writes to the account, so it
 	// needs the send scope; it does not need send_enabled (#1175).
 	"save_draft": {"telegram:messages:send"},

@@ -35,6 +35,14 @@ func textSHA256(text string) string {
 // gate are the only server-side authority; see the proposal's "Open
 // questions" for why.
 func withUIResource() mcplib.ToolOption {
+	return withUIResourceURI(mcpui.ResourceURI)
+}
+
+// withUIResourceURI is withUIResource for a chosen ui:// document. The
+// triage tools keep mcpui.ResourceURI; the dashboard tools and the two
+// writes the dashboard may prepare (mark_read, save_draft) use the
+// dashboard document, and only when AppsEnabled is on.
+func withUIResourceURI(uri string) mcplib.ToolOption {
 	return func(t *mcplib.Tool) {
 		fields := map[string]any{}
 		var progressToken mcplib.ProgressToken
@@ -44,7 +52,7 @@ func withUIResource() mcplib.ToolOption {
 				fields[k] = v
 			}
 		}
-		for k, v := range mcpui.ToolMeta() {
+		for k, v := range mcpui.ToolMetaFor(uri) {
 			fields[k] = v
 		}
 		t.Meta = &mcplib.Meta{ProgressToken: progressToken, AdditionalFields: fields}
