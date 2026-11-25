@@ -199,6 +199,31 @@
       "reason": "Flag-gated MCP Apps (mctlhq/mctl-telegram#569) prototype affordance, registered only when MCP_APPS_ENABLED=true. It is a triage-App draft/confirm step, not a general client tool, and should not appear on the shared Cloudflare portal surface. An operator can flip this on later if a portal-facing use case appears; upstream_gates is intentionally omitted while disabled."
     },
     {
+      "name": "list_dashboard_templates",
+      "enabled": false,
+      "reason": "Flag-gated Telegram dashboard (MCP Apps). Lists built-in and per-account tg-dashboard/v1 templates. Registered only when MCP_APPS_ENABLED=true, so it stays off the shared portal surface. upstream_gates is omitted while disabled."
+    },
+    {
+      "name": "get_dashboard_template",
+      "enabled": false,
+      "reason": "Flag-gated Telegram dashboard (MCP Apps). Returns one tg-dashboard/v1 template document. Registered only when MCP_APPS_ENABLED=true, so it stays off the shared portal surface. upstream_gates is omitted while disabled."
+    },
+    {
+      "name": "save_dashboard_template",
+      "enabled": false,
+      "reason": "Flag-gated Telegram dashboard (MCP Apps). Validates and stores a custom template for the caller's account. It does not call Telegram. Registered only when MCP_APPS_ENABLED=true, so it stays off the shared portal surface. upstream_gates is omitted while disabled."
+    },
+    {
+      "name": "delete_dashboard_template",
+      "enabled": false,
+      "reason": "Flag-gated Telegram dashboard (MCP Apps). Deletes one custom template for the caller's account. Built-ins cannot be deleted. Registered only when MCP_APPS_ENABLED=true, so it stays off the shared portal surface. upstream_gates is omitted while disabled."
+    },
+    {
+      "name": "prepare_dashboard_action",
+      "enabled": false,
+      "reason": "Flag-gated Telegram dashboard (MCP Apps). Issues a confirmation for mark_read or save_draft and reports the write gate. It makes no Telegram call and rejects every other action. Registered only when MCP_APPS_ENABLED=true, so it stays off the shared portal surface. upstream_gates is omitted while disabled."
+    },
+    {
       "name": "provision_local_account",
       "enabled": true,
       "upstream_gates": [

@@ -355,8 +355,14 @@ func (s *Server) addTool(srv *mcpserver.MCPServer, tool mcplib.Tool, handler mcp
 // true. With the flag off this is exactly addTool: no tool carries Meta.
 // Used only for the tools the triage App composes (see apps.go).
 func (s *Server) addToolUI(srv *mcpserver.MCPServer, tool mcplib.Tool, handler mcpserver.ToolHandlerFunc) {
+	s.addToolUITo(srv, tool, handler, mcpui.ResourceURI)
+}
+
+// addToolUITo is addToolUI for a chosen ui:// document. The dashboard tools
+// and the two writes the dashboard prepares point at the dashboard document.
+func (s *Server) addToolUITo(srv *mcpserver.MCPServer, tool mcplib.Tool, handler mcpserver.ToolHandlerFunc, uri string) {
 	if s.AppsEnabled {
-		withUIResource()(&tool)
+		withUIResourceURI(uri)(&tool)
 	}
 	s.addTool(srv, tool, handler)
 }
@@ -369,6 +375,9 @@ func (s *Server) addToolUI(srv *mcpserver.MCPServer, tool mcplib.Tool, handler m
 func (s *Server) handleReadAppResource(ctx context.Context, req mcplib.ReadResourceRequest) ([]mcplib.ResourceContents, error) {
 	if auth.From(ctx) == nil {
 		return nil, errors.New("authentication required")
+	}
+	if req.Params.URI != mcpui.ResourceURI && req.Params.URI != mcpui.DashboardResourceURI {
+		return nil, errors.New("unknown resource")
 	}
 	return mcpui.Contents(req.Params.URI), nil
 }
@@ -476,6 +485,7 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 	)
 	if s.AppsEnabled {
 		srv.AddResource(mcpui.Resource(), s.handleReadAppResource)
+		srv.AddResource(mcpui.DashboardResource(), s.handleReadAppResource)
 	}
 	{
 		t, h := s.toolListDialogs()
@@ -520,6 +530,16 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 	if s.AppsEnabled {
 		t, h := s.toolPrepareSendMessage()
 		s.addToolUI(srv, t, h)
+		for _, reg := range []func() (mcplib.Tool, mcpserver.ToolHandlerFunc){
+			s.toolListDashboardTemplates,
+			s.toolGetDashboardTemplate,
+			s.toolSaveDashboardTemplate,
+			s.toolDeleteDashboardTemplate,
+			s.toolPrepareDashboardAction,
+		} {
+			t, h := reg()
+			s.addToolUITo(srv, t, h, mcpui.DashboardResourceURI)
+		}
 	}
 	{
 		t, h := s.toolSendMedia()
@@ -646,11 +666,13 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 	}
 	{
 		t, h := s.toolSaveDraft()
-		s.addTool(srv, t, h)
+		// Linked to the dashboard only while MCP Apps are on, so the App can
+		// call the write it prepared. The flag-off surface stays meta-free.
+		s.addToolUITo(srv, t, h, mcpui.DashboardResourceURI)
 	}
 	{
 		t, h := s.toolMarkRead()
-		s.addTool(srv, t, h)
+		s.addToolUITo(srv, t, h, mcpui.DashboardResourceURI)
 	}
 	for _, reg := range []func() (mcplib.Tool, mcpserver.ToolHandlerFunc){
 		s.toolPrepareBroadcast, s.toolListBroadcasts, s.toolGetBroadcast, s.toolCancelBroadcast,

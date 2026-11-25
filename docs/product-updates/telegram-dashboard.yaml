@@ -1,0 +1,54 @@
+schema: mctl-telegram.product-update/v1
+id: telegram-dashboard
+kind: new_tool
+title: A template dashboard for your Telegram account
+summary: >-
+  With MCP Apps enabled, the connector can show a tile dashboard built from
+  tg-dashboard/v1 templates. Five built-in templates cover unread chats,
+  groups, folders, forum topics, and a watchlist search. You can also save
+  your own templates on this server (the page itself cannot store them).
+  A template may only read chats and messages. The only actions it can
+  offer are marking a chat read and saving a draft, and both still go
+  through the existing send rules plus a confirmation that names the exact
+  chat and text. Sending and deleting are not available from a template.
+  list_dialogs now also reports whether a chat is a broadcast channel or a
+  supergroup, and whether it is pinned, muted, archived, or a forum, plus
+  the latest message id and unread mentions. A folder that was not fully
+  scanned is marked incomplete.
+locale: en
+delivery: docs_only
+high_value: false
+tools:
+  - list_dashboard_templates
+  - get_dashboard_template
+  - save_dashboard_template
+  - delete_dashboard_template
+  - prepare_dashboard_action
+  - list_dialogs
+  - mark_read
+  - save_draft
+evidence:
+  from: 0.149.0
+  changes:
+    - {tool: list_dashboard_templates, change: added}
+    - {tool: get_dashboard_template, change: added}
+    - {tool: save_dashboard_template, change: added}
+    - {tool: delete_dashboard_template, change: added}
+    - {tool: prepare_dashboard_action, change: added}
+    - {tool: list_dialogs, change: schema}
+    - {tool: list_dialogs, change: text}
+    - {tool: list_dialogs, change: schema, profile: core-readonly}
+    - {tool: list_dialogs, change: text, profile: core-readonly}
+    - {tool: list_dialogs, change: schema, profile: core-reply}
+    - {tool: list_dialogs, change: text, profile: core-reply}
+    - {tool: mark_read, change: schema}
+    - {tool: mark_read, change: text}
+    - {tool: save_draft, change: schema}
+    - {tool: save_draft, change: text}
+status: approved
+provenance:
+  author: mashkovd
+  assisted_by: grok-4.7
+  reviewed_by: mashkovd
+created_at: "2026-11-25"
+reviewed_at: "2026-11-25"

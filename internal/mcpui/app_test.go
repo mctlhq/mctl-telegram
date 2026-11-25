@@ -153,6 +153,64 @@ func TestExtensionCapability(t *testing.T) {
 	}
 }
 
+func TestDashboardHTMLHasNoExternalDeps(t *testing.T) {
+	for _, bad := range []string{
+		"innerHTML",
+		"insertAdjacentHTML",
+		"outerHTML",
+		"document.write",
+		"eval(",
+		"new Function",
+		"fetch(",
+		"XMLHttpRequest",
+		"import(",
+		"http://",
+		"https://",
+		"fonts.googleapis.com",
+	} {
+		if strings.Contains(dashboardHTML, bad) {
+			t.Errorf("dashboard.html must not contain %q", bad)
+		}
+	}
+}
+
+func TestDashboardHTMLContentHash(t *testing.T) {
+	sum := sha256.Sum256([]byte(dashboardHTML))
+	got := hex.EncodeToString(sum[:])
+	const wantHash = "dc7f2a04a515ade57d48a78406ff93a8cc8953c67fcfe62b3b9e5373dfb3f90c"
+	if got != wantHash {
+		t.Fatalf("dashboard.html sha256 = %s, want %s", got, wantHash)
+	}
+}
+
+func TestDashboardHTMLRejectsForeignMessageSources(t *testing.T) {
+	const guard = "if (event.source !== window.parent) return;"
+	if !strings.Contains(dashboardHTML, guard) {
+		t.Fatalf("dashboard.html must contain the host-sender guard %q", guard)
+	}
+	listener := strings.Index(dashboardHTML, `window.addEventListener("message"`)
+	if listener < 0 {
+		t.Fatal("dashboard.html has no message listener")
+	}
+	body := dashboardHTML[listener:]
+	if strings.Index(body, guard) > strings.Index(body, "var data = event.data;") {
+		t.Fatal("the sender guard must run before the handler inspects event.data")
+	}
+}
+
+func TestDashboardResource(t *testing.T) {
+	r := DashboardResource()
+	if r.URI != DashboardResourceURI || r.MIMEType != MIMEType {
+		t.Fatalf("resource = %+v", r)
+	}
+	contents := Contents(DashboardResourceURI)
+	tc, ok := contents[0].(mcplib.TextResourceContents)
+	if !ok || tc.Text != dashboardHTML || !strings.Contains(tc.Text, "tg-dashboard/v1") {
+		t.Fatal("dashboard contents do not match the embedded document")
+	}
+	assertCSPEmpty(t, tc.Meta)
+}
+
 func TestToolMeta(t *testing.T) {
 	meta := ToolMeta()
 	ui, ok := meta["ui"].(map[string]any)

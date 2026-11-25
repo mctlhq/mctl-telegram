@@ -53,6 +53,8 @@ const (
 var reviewerWriteRules = map[string]reviewerWriteRule{
 	// Reads.
 	"list_dialogs":                    reviewerRead,
+	"list_dashboard_templates":        reviewerRead,
+	"get_dashboard_template":          reviewerRead,
 	"list_folders":                    reviewerRead,
 	"list_topics":                     reviewerRead,
 	"get_unread_messages":             reviewerRead,
@@ -76,6 +78,9 @@ var reviewerWriteRules = map[string]reviewerWriteRule{
 	// caller's own state on this server. set_send_consent cannot widen the
 	// reviewer: the reviewer rules apply whatever send_enabled says.
 	"prepare_send_message":            reviewerNoTelegramWrite,
+	"prepare_dashboard_action":        reviewerNoTelegramWrite,
+	"save_dashboard_template":         reviewerNoTelegramWrite,
+	"delete_dashboard_template":       reviewerNoTelegramWrite,
 	"set_send_consent":                reviewerNoTelegramWrite,
 	"set_my_notification_preferences": reviewerNoTelegramWrite,
 

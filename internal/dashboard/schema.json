@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tg.mctl.ai/schemas/tg-dashboard/v1.json",
+  "title": "Telegram dashboard template",
+  "description": "Declarative tile grid for the flag-gated Telegram MCP App. schema is tg-dashboard/v1. Data sources may name only read tools. Actions may name only mark_read and save_draft.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "id", "title", "layout", "dataSources", "tiles"],
+  "properties": {
+    "schema": { "const": "tg-dashboard/v1" },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["columns", "gap"],
+      "properties": {
+        "columns": { "type": "integer", "minimum": 1, "maximum": 12 },
+        "gap": { "type": "integer", "minimum": 0, "maximum": 32 }
+      }
+    },
+    "refreshIntervalSec": { "type": "integer", "minimum": 15, "maximum": 300 },
+    "inputs": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "label"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$" },
+          "label": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "required": { "type": "boolean" }
+        }
+      }
+    },
+    "dataSources": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": { "$ref": "#/$defs/dataSource" }
+    },
+    "tiles": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 24,
+      "items": { "$ref": "#/$defs/tile" }
+    }
+  },
+  "$defs": {
+    "scalar": {
+      "anyOf": [
+        { "type": "string", "maxLength": 256 },
+        { "type": "number" },
+        { "type": "boolean" }
+      ]
+    },
+    "args": {
+      "type": "object",
+      "maxProperties": 8,
+      "additionalProperties": { "$ref": "#/$defs/scalar" }
+    },
+    "dataSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "tool"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$" },
+        "tool": {
+          "enum": [
+            "list_dialogs",
+            "list_folders",
+            "list_topics",
+            "get_unread_messages",
+            "get_messages",
+            "search_messages"
+          ]
+        },
+        "lazy": { "type": "boolean" },
+        "args": { "$ref": "#/$defs/args" }
+      }
+    },
+    "filter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "op", "value"],
+      "properties": {
+        "field": { "type": "string", "pattern": "^[a-z_][a-z0-9_]{0,31}$" },
+        "op": { "enum": ["eq", "neq", "in", "gt", "contains"] },
+        "value": {
+          "anyOf": [
+            { "type": "string", "maxLength": 80 },
+            { "type": "number" },
+            { "type": "boolean" },
+            {
+              "type": "array",
+              "maxItems": 8,
+              "items": { "type": "string", "maxLength": 40 }
+            }
+          ]
+        }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "label"],
+      "properties": {
+        "action": { "enum": ["mark_read", "save_draft"] },
+        "label": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "args": { "$ref": "#/$defs/args" }
+      }
+    },
+    "tile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "component", "colSpan", "props"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$" },
+        "component": {
+          "enum": [
+            "kpi",
+            "message_list",
+            "dialog_cards",
+            "folder_board",
+            "topic_cards",
+            "search_digest",
+            "banner"
+          ]
+        },
+        "colSpan": { "type": "integer", "minimum": 1, "maximum": 12 },
+        "props": {
+          "type": "object",
+          "maxProperties": 12,
+          "additionalProperties": { "$ref": "#/$defs/scalar" }
+        },
+        "filters": {
+          "type": "array",
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/filter" }
+        },
+        "actions": {
+          "type": "array",
+          "maxItems": 2,
+          "items": { "$ref": "#/$defs/action" }
+        }
+      }
+    }
+  }
+}
