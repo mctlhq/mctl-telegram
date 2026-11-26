@@ -1,6 +1,6 @@
 # Telegram Workspace validation and rollout
 
-[Operator issue #650](https://github.com/mctlhq/mctl-telegram/issues/650) owns the live evidence and disposition. As of 2026-11-26, provisioning and live validation are **BLOCKED_SECURITY**. The existing registration filter cannot prove the required named read-only surface, and the independent security and contract review for the isolated endpoint is pending.
+[Operator issue #650](https://github.com/mctlhq/mctl-telegram/issues/650) owns the live evidence and disposition. The product target is the existing `https://tg.mctl.ai/mcp` connector and its OAuth issuer and grants. Activation is pending independent review and host enforcement evidence. The baseline below records the original prototype assessment.
 
 ## Audit baseline
 
@@ -40,12 +40,18 @@ Reviewed mctl-api main `5a434bf`, including `internal/mcp/stats.go`, `internal/m
 
 The #569 proposal preferred attaching existing reads because the proposed `open_telegram_triage` had no business behavior beyond opening a view. A bounded snapshot gives `telegram_dashboard` its own coherent read-only contract in headless clients and lets hosts hydrate the first view deterministically. `open_telegram_workspace` is an alternate descriptive name. Prefer `telegram_dashboard` for consistency with `mctl_stats_dashboard` and describe it as the Telegram Workspace in discovery. Preserve the existing tools and resource contracts for existing clients. Version the new Workspace resource path on byte-changing releases and maintain bounded, byte-identical legacy resource aliases only where needed for cached metadata.
 
+## Shared connector authorization
+
+- Publish only the Workspace resource in production. Preserve the regular tool inventory, OAuth scopes, caller identity, consent, rate limits and confirmations. Legacy prototype resources and their additional tools stay off in Workspace-only mode.
+- The explicit App allowlist is `telegram_dashboard`, `list_dialogs`, `get_messages` and `search_messages`. All other tools are model-only, including mutating tools that use a read scope. ChatGPT's widget compatibility flag mirrors the standard visibility.
+- The authenticated host proxies calls to `/mcp`. MCP supplies no trusted signal identifying an iframe call versus a model call under that grant. The host must enforce the App allowlist, and the backend independently enforces OAuth scope, account ownership and existing write gates. A host that ignores App visibility cannot satisfy the shared deployment security requirement. Frontend code, annotations and client-supplied metadata are insufficient as authorization.
+- Review the checked-in bundle, resource CSP, safe text rendering and the narrow bridge methods together with the host visibility policy. Use a synthetic no-op tool declaration to test host denial under a grant that can call it as the model, without exercising a real write.
+
 ## Implementation sequence
 
-1. [#1483](https://github.com/mctlhq/mctl-telegram/issues/1483) and [isolation OpenSpec](../../openspec/changes/telegram-app-read-only-isolation/requirements.md). Add a fail-closed, endpoint-level registration allowlist. Independently review the security and contract design before provisioning. An isolated synthetic stage may validate the existing protocol only once the isolation and fixture gates pass.
-2. [#1482](https://github.com/mctlhq/mctl-telegram/issues/1482) and [Workspace OpenSpec](../../openspec/changes/telegram-workspace-dashboard/requirements.md). Evolve the existing embedded UI and Go reads into one server-owned Workspace bundle per release. Use standard lifecycle and caller identity, render the opening tool result, and refresh via the same read contract. Reuse the existing data, renderer and styles where suitable.
-3. Run [the operator runbook](../runbooks/telegram-workspace-validation.md) under #650 after independent review and an approved isolated deployment. Put evidence and any Portal limitation on that issue. #1443 consumes the Antigravity result for packaging. #784 tracks the broader capability layer. [Architecture #393](https://github.com/mctlhq/.github/issues/393) and [portability #376](https://github.com/mctlhq/.github/issues/376) define the shared standard and adoption gates.
+1. [#1482](https://github.com/mctlhq/mctl-telegram/issues/1482) and [Workspace OpenSpec](../../openspec/changes/telegram-workspace-dashboard/requirements.md) delivered the opener and workspace. [#1483](https://github.com/mctlhq/mctl-telegram/issues/1483) records the optional fixture isolation profile.
+2. Review the [shared-connector OpenSpec](../../openspec/changes/telegram-workspace-shared-connector/requirements.md) and run the preflight in the [operator runbook](../runbooks/telegram-workspace-validation.md). Record the independent security and contract verdict and host bridge enforcement on #650.
+3. Deploy a release containing Workspace-only mode with Apps disabled first. Activate through the approved [GitOps #3029](https://github.com/mctlhq/mctl-gitops/pull/3029) change using both `MCP_APPS_ENABLED=true` and `MCP_APPS_WORKSPACE_ONLY=true`. Roll back by disabling Apps. Keep the existing production OAuth, normal tool filters and send settings.
+4. Use the existing ChatGPT registration against `https://tg.mctl.ai/mcp`. Confirm authenticated discovery, native rendering and allowed reads. Verify existing tools and OAuth continue to work. Retain the broader host and Portal matrix in #650. #1443 consumes the Antigravity result and #784 tracks the broader capability layer.
 
-## Readiness recommendation
-
-Hold existing preview and production activation and connector submission for this validation. Keep #650 operator-owned. Complete the named allowlist, independently review endpoint and protocol isolation, and attest the isolated deployment before connecting hosts. Collect native ChatGPT, Claude and Antigravity evidence, semantic fallback, denial and cleanup evidence before making a production recommendation. A Portal limitation is recorded separately. Any production change requires its own human-approved GitOps path and rollback decision.
+Keep #650 open until the required real-host evidence and decision are recorded. Release, deployment health and CI establish separate facts from native rendering or iframe authorization.

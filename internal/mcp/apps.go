@@ -26,19 +26,44 @@ func textSHA256(text string) string {
 // other tool metadata. Registration and OAuth remain server-side controls.
 func withUIResourceURI(uri string) mcplib.ToolOption {
 	return func(t *mcplib.Tool) {
-		fields := map[string]any{}
-		var progressToken mcplib.ProgressToken
-		if t.Meta != nil {
-			progressToken = t.Meta.ProgressToken
-			for k, v := range t.Meta.AdditionalFields {
-				fields[k] = v
-			}
-		}
-		for k, v := range mcpui.ToolMetaFor(uri) {
+		mergeToolMeta(t, mcpui.ToolMetaFor(uri))
+	}
+}
+
+// setWorkspaceToolVisibility publishes a default-deny App allowlist for the
+// host bridge. The host must enforce it before proxying tools/call. The MCP
+// transport authenticates the host and has no trusted iframe origin signal.
+func setWorkspaceToolVisibility(tool *mcplib.Tool) {
+	visibility := []string{"model"}
+	appAccessible := false
+	switch tool.Name {
+	case "telegram_dashboard", "list_dialogs", "get_messages", "search_messages":
+		visibility = append(visibility, "app")
+		appAccessible = true
+	}
+	ui := map[string]any{"visibility": visibility}
+	if tool.Name == "telegram_dashboard" {
+		ui["resourceUri"] = mcpui.WorkspaceResourceURI
+	}
+	mergeToolMeta(tool, map[string]any{
+		"ui":                      ui,
+		"openai/widgetAccessible": appAccessible,
+	})
+}
+
+func mergeToolMeta(tool *mcplib.Tool, updates map[string]any) {
+	fields := map[string]any{}
+	var progressToken mcplib.ProgressToken
+	if tool.Meta != nil {
+		progressToken = tool.Meta.ProgressToken
+		for k, v := range tool.Meta.AdditionalFields {
 			fields[k] = v
 		}
-		t.Meta = &mcplib.Meta{ProgressToken: progressToken, AdditionalFields: fields}
 	}
+	for k, v := range updates {
+		fields[k] = v
+	}
+	tool.Meta = &mcplib.Meta{ProgressToken: progressToken, AdditionalFields: fields}
 }
 
 // prepareSendMessageResult is the success payload of prepare_send_message.

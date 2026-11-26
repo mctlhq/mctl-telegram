@@ -428,6 +428,18 @@ func TestLoadAppsEnabled(t *testing.T) {
 	}
 }
 
+func TestLoadAppsWorkspaceOnly(t *testing.T) {
+	t.Setenv("MCP_APPS_ENABLED", "true")
+	t.Setenv("MCP_APPS_WORKSPACE_ONLY", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.AppsEnabled || !cfg.AppsWorkspaceOnly {
+		t.Fatal("Workspace-only App configuration was not loaded")
+	}
+}
+
 // TestLoadBroadcastContentEnabled: BROADCAST_CONTENT_ENABLED defaults to
 // true, and "false" or any value that is not a true value switches broadcast
 // channel content off (issue #851).
