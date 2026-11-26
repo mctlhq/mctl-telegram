@@ -433,6 +433,8 @@ type Config struct {
 	AppsEnabled bool
 	// AppsWorkspaceOnly publishes only the read-only Workspace App when Apps are enabled.
 	AppsWorkspaceOnly bool // MCP_APPS_WORKSPACE_ONLY
+	// AppsPilot exposes Workspace to existing OAuth accounts in CanaryTelegramIDs.
+	AppsPilot bool // MCP_APPS_PILOT
 	// BroadcastContentEnabled lets the content tools return broadcast
 	// channel posts, with the channel's official sponsored messages attached
 	// (Telegram API terms §3.3). On by default. Turning it off restores the
@@ -782,6 +784,7 @@ func Load() (*Config, error) {
 		AgentKillSwitch:                 envBool("AGENT_KILL_SWITCH", false),
 		AppsEnabled:                     envBool("MCP_APPS_ENABLED", false),
 		AppsWorkspaceOnly:               envBool("MCP_APPS_WORKSPACE_ONLY", false),
+		AppsPilot:                       envBool("MCP_APPS_PILOT", false),
 		BroadcastContentEnabled:         broadcastContentFromEnv(),
 		EventsValkeyURL:                 os.Getenv("EVENTS_VALKEY_URL"),
 		EventsValkeyPassword:            os.Getenv("EVENTS_VALKEY_PASSWORD"),
@@ -871,6 +874,9 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("CANARY_TELEGRAM_IDS: %w", err)
 	}
 	c.CanaryTelegramIDs = canaryIDs
+	if c.AppsPilot && (c.AppsEnabled || !c.AuthRequired || c.AuthMode != "local-jwt" || len(canaryIDs) == 0) {
+		return nil, fmt.Errorf("MCP_APPS_PILOT requires MCP_APPS_ENABLED=false, authenticated local-jwt and CANARY_TELEGRAM_IDS")
+	}
 	if err := loadK8sSA(c); err != nil {
 		return nil, err
 	}

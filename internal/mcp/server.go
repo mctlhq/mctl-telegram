@@ -141,6 +141,8 @@ type Server struct {
 	AppsEnabled bool
 	// AppsWorkspaceOnly limits App resources and host-side tool visibility.
 	AppsWorkspaceOnly bool
+	// AppsPilot enables the read-only Workspace on interactive canary OAuth grants.
+	AppsPilot bool
 	// BroadcastContent is the BROADCAST_CONTENT_ENABLED switch handed to
 	// every content read, and to the Local Bridge daemon in the call's
 	// arguments. New turns it on; a bare &Server{} leaves it off, which
@@ -301,6 +303,12 @@ func (s *Server) WithAppsWorkspaceOnly(b bool) *Server {
 	return s
 }
 
+// WithAppsPilot enables the restricted Workspace pilot on the existing route.
+func (s *Server) WithAppsPilot(enabled bool) *Server {
+	s.AppsPilot = enabled
+	return s
+}
+
 func (s *Server) legacyAppsEnabled() bool {
 	return s.AppsEnabled && !s.AppsWorkspaceOnly && s.ToolFilter != config.TelegramWorkspaceReadOnly
 }
@@ -424,6 +432,28 @@ func withoutWorkspaceMedia(next mcpserver.ToolHandlerFunc) mcpserver.ToolHandler
 }
 
 func (s *Server) HTTPHandler() http.Handler {
+	normal := s.streamableHandler()
+	if !s.AppsPilot {
+		return normal
+	}
+	// Both handlers are constructed once. Keep the same stores, limiters and
+	// telemetry, and constrain the pilot at dispatch as well as discovery.
+	pilot := *s
+	pilot.AppsEnabled = true
+	pilot.AppsWorkspaceOnly = true
+	pilot.ToolFilter = config.TelegramWorkspaceReadOnly
+	restricted := pilot.streamableHandler()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := auth.From(r.Context())
+		if id != nil && id.Provider == "tg-mcp" && id.ClientID != "" && s.CanaryTelegramIDs.Contains(id.TelegramID) {
+			restricted.ServeHTTP(w, r)
+			return
+		}
+		normal.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) streamableHandler() http.Handler {
 	srv := s.newMCPServer()
 	s.initToolInvocationSeries(srv)
 	return mcpserver.NewStreamableHTTPServer(
