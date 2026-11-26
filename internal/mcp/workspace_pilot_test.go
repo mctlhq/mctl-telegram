@@ -36,7 +36,11 @@ func TestWorkspacePilotOnExistingRoute(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer conn.Close()
+			defer func() {
+				if err := conn.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
 			var init mcp.InitializeRequest
 			init.Params.ClientInfo = mcp.Implementation{Name: "workspace-pilot-test", Version: "1"}
 			init.Params.ProtocolVersion = mcp.ProtocolVersion20250618
