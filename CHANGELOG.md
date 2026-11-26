@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.150.4](https://github.com/mctlhq/mctl-telegram/compare/0.150.3...0.150.4) (2026-11-26)
+
+
+### Bug Fixes
+
+* **pa:** address review findings on failure alerts ([c516ed2](https://github.com/mctlhq/mctl-telegram/commit/c516ed2b86a789a64ae1b566ffe11b543331a32b))
+* **pa:** log failure reason and alert admins in bot ([e33bc14](https://github.com/mctlhq/mctl-telegram/commit/e33bc149e464a3076f2f6be18dc4133f0de8bf47))
+* **pa:** log failure reason and send direct PA bot alerts to admins ([4ee39ce](https://github.com/mctlhq/mctl-telegram/commit/4ee39ce910e90d6a344908f44fd53d16c011b3ee))
+
 ## [0.150.3](https://github.com/mctlhq/mctl-telegram/compare/0.150.2...0.150.3) (2026-11-26)
 
 

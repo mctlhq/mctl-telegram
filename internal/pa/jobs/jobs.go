@@ -24,6 +24,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -348,6 +349,74 @@ const (
 	NoticePrincipalDisabled
 )
 
+// FailureReason names why a PA job ended without an answer. Worker-reported
+// reasons arrive over RouteReply when text is empty; server reasons come
+// from lease expiry and repeated claim failures.
+type FailureReason string
+
+const (
+	FailureProviderRateLimit FailureReason = "provider_rate_limit"
+	FailureProviderServer    FailureReason = "provider_server"
+	FailureProviderRequest   FailureReason = "provider_request"
+	FailureProviderError     FailureReason = "provider_error"
+	FailureEmptyAnswer       FailureReason = "empty_answer"
+	FailureContextLimit      FailureReason = "context_limit"
+	FailureCostLimit         FailureReason = "cost_limit"
+	FailureToolCap           FailureReason = "tool_cap"
+	FailureToolError         FailureReason = "tool_error"
+	FailureToolAfterCard     FailureReason = "tool_after_card"
+	FailureLeaseShort        FailureReason = "lease_short"
+	FailureLeaseExpired      FailureReason = "lease_expired"
+	FailureClaimFailed       FailureReason = "claim_failed"
+	FailureTurnTimeout       FailureReason = "turn_timeout"
+	FailureReplyTimeout      FailureReason = "reply_timeout"
+	FailureDeadline          FailureReason = "deadline"
+	FailureInvalidClaim      FailureReason = "invalid_claim"
+	FailureAbandoned         FailureReason = "abandoned"
+)
+
+// FailureReasons lists the closed set of PA job failure reasons.
+func FailureReasons() []FailureReason {
+	return []FailureReason{
+		FailureProviderRateLimit,
+		FailureProviderServer,
+		FailureProviderRequest,
+		FailureProviderError,
+		FailureEmptyAnswer,
+		FailureContextLimit,
+		FailureCostLimit,
+		FailureToolCap,
+		FailureToolError,
+		FailureToolAfterCard,
+		FailureLeaseShort,
+		FailureLeaseExpired,
+		FailureClaimFailed,
+		FailureTurnTimeout,
+		FailureReplyTimeout,
+		FailureDeadline,
+		FailureInvalidClaim,
+		FailureAbandoned,
+	}
+}
+
+// Valid reports whether r is in the closed set of failure reasons.
+func (r FailureReason) Valid() bool {
+	return slices.Contains(FailureReasons(), r)
+}
+
+// WorkerReported reports whether r is a reason a worker may submit on
+// RouteReply when abandoning a claimed job.
+func (r FailureReason) WorkerReported() bool {
+	switch r {
+	case FailureProviderRateLimit, FailureProviderServer, FailureProviderRequest, FailureProviderError,
+		FailureEmptyAnswer, FailureContextLimit, FailureCostLimit, FailureToolCap, FailureToolError,
+		FailureToolAfterCard, FailureLeaseShort, FailureTurnTimeout, FailureReplyTimeout,
+		FailureDeadline, FailureInvalidClaim, FailureAbandoned:
+		return true
+	}
+	return false
+}
+
 // NoticeFor returns the notice a gate refusal owes the principal, if any:
 // a dropped conversation and a disabled or not-allowed principal are told,
 // a withdrawn consent is not (the withdrawal answered itself).
@@ -432,6 +501,14 @@ type FinishRequest struct {
 	Record func(ctx context.Context, tx *sql.Tx, j Job) error
 }
 
+// FailRequest cancels an abandoned run, holds its reservation, and queues
+// the failure notice Kind.
+type FailRequest struct {
+	Now  time.Time
+	Kind OutboxKind
+	Gate Gate
+}
+
 // ToolResultRequest records a tool result before the worker sees it
 // (#1321).
 type ToolResultRequest struct {
@@ -468,6 +545,9 @@ type Store interface {
 	AdmitPAToolCall(ctx context.Context, ref Ref, req ToolCallRequest) (Job, error)
 	// FinishPAJob settles the reservation and marks the job done.
 	FinishPAJob(ctx context.Context, ref Ref, req FinishRequest) (Job, error)
+	// FailPAJob cancels an abandoned claimed job, holds its reservation, and
+	// queues the failure notice.
+	FailPAJob(ctx context.Context, ref Ref, req FailRequest) (Job, error)
 	// RecordPAToolResult runs req.Record for the running job of ref,
 	// after the gate, in one transaction.
 	RecordPAToolResult(ctx context.Context, ref Ref, req ToolResultRequest) (Job, error)

@@ -464,8 +464,16 @@ func (w *PAWorker) loop(ctx context.Context) error {
 			}
 		}
 		if c != nil {
-			out, _ := w.Run(ctx, c)
-			slog.Info("pa worker: job finished", "job_id", c.JobID, "attempt", c.Attempt, "outcome", string(out))
+			out, err := w.Run(ctx, c)
+			if err != nil {
+				reason := paFailureReason(err)
+				slog.Warn("pa worker: job finished", "job_id", c.JobID, "attempt", c.Attempt, "outcome", string(out), "reason", string(reason), "err", err)
+				if out == PAAbandoned {
+					w.reportAbandoned(ctx, c.Token, reason)
+				}
+			} else {
+				slog.Info("pa worker: job finished", "job_id", c.JobID, "attempt", c.Attempt, "outcome", string(out))
+			}
 			continue
 		}
 		if waitContext(ctx, interval) != nil {
@@ -481,7 +489,7 @@ func (w *PAWorker) Run(ctx context.Context, c *PAClaim) (PAOutcome, error) {
 	// is measured on the worker's clock (Now), then run as a timeout.
 	remaining := c.LeaseUntil.Sub(w.now()) - paLeaseMargin
 	if remaining <= 0 {
-		return PAAbandoned, errors.New("pa worker: lease too short to run")
+		return PAAbandoned, fmt.Errorf("%w: lease too short to run", errPALeaseShort)
 	}
 	ctx, cancel := context.WithTimeout(ctx, remaining)
 	defer cancel()
@@ -495,7 +503,7 @@ func (w *PAWorker) Run(ctx context.Context, c *PAClaim) (PAOutcome, error) {
 	}
 	tools, byName, err := paClaimTools(c)
 	if err != nil {
-		return PAAbandoned, err
+		return PAAbandoned, fmt.Errorf("%w: %v", errPAInvalidClaim, err)
 	}
 	msgs := paMessages(c.Fragments)
 	// The fixed prompt, or its write variant when the claim offers a tool
@@ -530,7 +538,7 @@ func (w *PAWorker) Run(ctx context.Context, c *PAClaim) (PAOutcome, error) {
 		// Defence in depth: whatever the server would admit, the worker
 		// does not send more than its own ceiling.
 		if tokens > maxContext {
-			return PAAbandoned, errors.New("pa worker: context over the limit")
+			return PAAbandoned, fmt.Errorf("%w: %d > %d", errPAContextLimit, tokens, maxContext)
 		}
 		res, out, err := w.chat(ctx, c.Token, tokens, msgs, offer, dr)
 		if err != nil {
@@ -549,7 +557,7 @@ func (w *PAWorker) Run(ctx context.Context, c *PAClaim) (PAOutcome, error) {
 			// would be a loop, and a call dispatched now could queue a
 			// second card for one request.
 			if cardQueued {
-				return PAAbandoned, errors.New("pa worker: tool call after an approval card")
+				return PAAbandoned, errPAToolAfterCard
 			}
 			if dr != nil {
 				dr.reset()
@@ -562,13 +570,13 @@ func (w *PAWorker) Run(ctx context.Context, c *PAClaim) (PAOutcome, error) {
 			// since no model call could follow it.
 			toolCalls += len(res.Message.ToolCalls)
 			if toolCalls > maxTools {
-				return PAAbandoned, errors.New("pa worker: tool-call cap reached")
+				return PAAbandoned, errPAToolCap
 			}
 			// Another model call is only made while the spend so far is
 			// known and under the job limit. Unknown spend cannot be shown
 			// to be under it, so it ends the run too.
 			if !costKnown || cost >= maxCost {
-				return PAAbandoned, errors.New("pa worker: job cost limit reached or unknown")
+				return PAAbandoned, errPACostLimit
 			}
 			msgs = append(msgs, ChatMessage{Role: "assistant", Content: res.Message.Content, ToolCalls: res.Message.ToolCalls})
 			for _, tc := range res.Message.ToolCalls {
@@ -591,7 +599,7 @@ func (w *PAWorker) Run(ctx context.Context, c *PAClaim) (PAOutcome, error) {
 		}
 		answer := strings.TrimSpace(res.Message.Content)
 		if answer == "" {
-			return PAAbandoned, errors.New("pa worker: empty answer")
+			return PAAbandoned, errPAEmptyAnswer
 		}
 		var reported *float64
 		if costKnown {
@@ -615,7 +623,7 @@ func (w *PAWorker) turn(ctx context.Context, token string, tokens int) error {
 			return err
 		}
 		if werr := waitContext(ctx, backoff); werr != nil {
-			return err
+			return fmt.Errorf("%w: %v", errPATurnTimeout, err)
 		}
 		backoff = min(backoff*2, 8*time.Second)
 	}
@@ -645,9 +653,76 @@ func (w *PAWorker) reply(ctx context.Context, token, text string, cost *float64)
 			}
 		}
 		if werr := waitContext(ctx, backoff); werr != nil {
-			return PAAbandoned, err
+			return PAAbandoned, fmt.Errorf("%w: %v", errPAReplyTimeout, err)
 		}
 		backoff = min(backoff*2, 8*time.Second)
+	}
+}
+
+var (
+	errPALeaseShort    = errors.New("pa worker: lease too short to run")
+	errPAInvalidClaim  = errors.New("pa worker: invalid claim")
+	errPAContextLimit  = errors.New("pa worker: context over the limit")
+	errPAToolAfterCard = errors.New("pa worker: tool call after an approval card")
+	errPAToolCap       = errors.New("pa worker: tool-call cap reached")
+	errPACostLimit     = errors.New("pa worker: job cost limit reached or unknown")
+	errPAEmptyAnswer   = errors.New("pa worker: empty answer")
+	errPAToolError     = errors.New("pa worker: tool call failed")
+	errPATurnTimeout   = errors.New("pa worker: turn gate timed out")
+	errPAReplyTimeout  = errors.New("pa worker: reply submission timed out")
+)
+
+func paFailureReason(err error) jobs.FailureReason {
+	var pe *ProviderError
+	switch {
+	case errors.Is(err, errPALeaseShort):
+		return jobs.FailureLeaseShort
+	case errors.Is(err, errPAInvalidClaim):
+		return jobs.FailureInvalidClaim
+	case errors.Is(err, errPAContextLimit):
+		return jobs.FailureContextLimit
+	case errors.Is(err, errPAToolAfterCard):
+		return jobs.FailureToolAfterCard
+	case errors.Is(err, errPAToolCap):
+		return jobs.FailureToolCap
+	case errors.Is(err, errPACostLimit):
+		return jobs.FailureCostLimit
+	case errors.Is(err, errPAEmptyAnswer):
+		return jobs.FailureEmptyAnswer
+	case errors.Is(err, errPAToolError):
+		return jobs.FailureToolError
+	case errors.Is(err, errPATurnTimeout):
+		return jobs.FailureTurnTimeout
+	case errors.Is(err, errPAReplyTimeout):
+		return jobs.FailureReplyTimeout
+	case errors.As(err, &pe):
+		switch {
+		case pe.Status == http.StatusTooManyRequests:
+			return jobs.FailureProviderRateLimit
+		case pe.Status >= 500 && pe.Status <= 599:
+			return jobs.FailureProviderServer
+		case pe.Status >= 400 && pe.Status <= 499:
+			return jobs.FailureProviderRequest
+		default:
+			return jobs.FailureProviderError
+		}
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return jobs.FailureDeadline
+	default:
+		return jobs.FailureAbandoned
+	}
+}
+
+func (w *PAWorker) reportAbandoned(ctx context.Context, token string, reason jobs.FailureReason) {
+	if token == "" || !reason.WorkerReported() {
+		return
+	}
+	body := struct {
+		FailReason string `json:"fail_reason"`
+	}{FailReason: string(reason)}
+	_, err := w.postTimeout(ctx, PARouteReply, token, body, nil, 5*time.Second)
+	if err != nil {
+		slog.Debug("pa worker: abandon report ignored", "reason", string(reason), "err", err)
 	}
 }
 
@@ -755,7 +830,7 @@ func (w *PAWorker) callTool(ctx context.Context, token string, byName map[string
 		if errors.As(err, &he) && he.Stop != "" {
 			return "", false, PAStopped, err
 		}
-		return "", false, PAAbandoned, err
+		return "", false, PAAbandoned, fmt.Errorf("%w: %v", errPAToolError, err)
 	}
 	kind := "tool_result"
 	switch res.Status {
@@ -769,7 +844,7 @@ func (w *PAWorker) callTool(ctx context.Context, token string, byName map[string
 	default:
 		// A status this worker does not know is not a success and not a
 		// pending card: the run ends, and the call is not sent again.
-		return "", false, PAAbandoned, errors.New("pa worker: tool answer without a known status")
+		return "", false, PAAbandoned, fmt.Errorf("%w: tool answer without a known status", errPAToolError)
 	}
 	output, cut := paCapOutput(res.Output, maxOutput)
 	content = paExternalBlock(paFragment{Kind: kind, Text: output})

@@ -1095,6 +1095,44 @@ func (s *Store) FinishPAJob(ctx context.Context, ref jobs.Ref, req jobs.FinishRe
 	return j, nil
 }
 
+// FailPAJob implements jobs.Store: marks an abandoned claimed job cancelled,
+// holds its reservation at the full amount, and queues the failure notice.
+func (s *Store) FailPAJob(ctx context.Context, ref jobs.Ref, req jobs.FailRequest) (jobs.Job, error) {
+	if !ref.Valid() || req.Now.IsZero() || !jobs.IsFailureOutboxKind(req.Kind) {
+		return jobs.Job{}, fmt.Errorf("%w: fail", jobs.ErrInvalid)
+	}
+	tx, j, err := s.beginRunningLocked(ctx, ref, req.Now, true)
+	if err != nil {
+		return jobs.Job{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := runGate(ctx, tx, req.Gate, j, req.Now); err != nil {
+		return jobs.Job{}, err
+	}
+	nowMS := req.Now.UnixMilli()
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE pa_usage SET status = $1, updated_at_ms = $2
+		  WHERE job_id = $3 AND attempt = $4 AND status = $5`,
+		jobs.UsageHeld, nowMS, j.ID, j.Attempts, jobs.UsageReserved); err != nil {
+		return jobs.Job{}, fmt.Errorf("fail pa job: hold usage: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE pa_jobs SET status = $1, updated_at_ms = $2 WHERE id = $3`,
+		string(jobs.StatusCancelled), nowMS, j.ID); err != nil {
+		return jobs.Job{}, fmt.Errorf("fail pa job: %w", err)
+	}
+	if err := enqueuePAOutbox(ctx, tx, jobs.OutboxItem{
+		Principal: j.Principal, JobID: j.ID, Kind: req.Kind,
+	}, nowMS); err != nil {
+		return jobs.Job{}, fmt.Errorf("fail pa job: outbox: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return jobs.Job{}, fmt.Errorf("fail pa job: commit: %w", err)
+	}
+	j.Status = jobs.StatusCancelled
+	return j, nil
+}
+
 // RecordPAToolResult implements jobs.Store: the job must still be running
 // under ref with the gate passing, and req.Record stores the result in the
 // same transaction (#1321). Nothing is committed unless all of it holds.
