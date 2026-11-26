@@ -870,3 +870,27 @@ func TestLoadWorkspaceProfileFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadAppsPilot(t *testing.T) {
+	t.Setenv("MCP_APPS_PILOT", "true")
+	t.Setenv("MCP_APPS_ENABLED", "false")
+	t.Setenv("AUTH_REQUIRED", "true")
+	t.Setenv("AUTH_MODE", "local-jwt")
+	t.Setenv("CANARY_TELEGRAM_IDS", "8511")
+	c, err := Load()
+	if err != nil || !c.AppsPilot {
+		t.Fatalf("load Workspace pilot: %v", err)
+	}
+	for _, tc := range []struct{ variable, value string }{
+		{"MCP_APPS_ENABLED", "true"},
+		{"AUTH_REQUIRED", "false"},
+		{"CANARY_TELEGRAM_IDS", ""},
+	} {
+		t.Run(tc.variable, func(t *testing.T) {
+			t.Setenv(tc.variable, tc.value)
+			if _, err := Load(); err == nil {
+				t.Fatal("unsafe pilot configuration was accepted")
+			}
+		})
+	}
+}
