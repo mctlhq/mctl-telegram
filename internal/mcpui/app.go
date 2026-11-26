@@ -71,7 +71,7 @@ func Contents(uri string) []mcplib.ResourceContents {
 	switch uri {
 	case DashboardResourceURI:
 		text = dashboardHTML
-	case WorkspaceResourceURI, PreviousWorkspaceResourceURI:
+	case WorkspaceResourceURI, WorkspaceResourceV2URI, PreviousWorkspaceResourceURI:
 		text = workspaceHTML
 	}
 	return []mcplib.ResourceContents{
