@@ -82,6 +82,8 @@ jobs:
       # on #1421 and #1432 with no test failing; 20m keeps a real hang
       # bounded without failing on runner speed.
       - run: go test -race -timeout 20m ./...
+      - name: Test Workspace protocol negotiation
+        run: node --test internal/mcpui/testdata/workspace_handshake.test.mjs
       # The PA S1 gate in closing mode (#1317, #1318): any open gap in
       # docs/agent-runtime/pa-s1-manifest.yaml fails the build, so a gap
       # cannot be added back without this step being changed in review.
