@@ -37,6 +37,21 @@ For each row, record the outcome of these checks individually.
 - Trigger an allowed App-originated read and correlate it to the isolated principal and upstream audit outcome using sanitized request identifiers. Keep model-originated and UI-originated calls separately identified. Verify host theme, keyboard navigation, narrow and wide layout, and host-supported expansion.
 - Run headless independently and record a semantic text result. A model statement or tool success alone is insufficient for a native verdict. Use `REAL_HOST_VERIFIED`, `BLOCKED_BY_HOST`, `BLOCKED_BY_PORTAL`, `BLOCKED_SECURITY`, `UNSUPPORTED` or `UNMEASURED` with dated evidence. Record fixture results as fixtures.
 
+### Portability gates
+
+Use the [#376 gate definitions](https://github.com/mctlhq/mctl-gitops/blob/f64f79d1c/platform-gitops/agents-state/.github/proposals/issue-376-spike-mcp-apps-write-once-run-across-ai/design.md#6-gates-scope-outcome-table-and-decisions). Attach a dated verdict and immutable sanitized evidence path and SHA-256 for each applicable cell.
+
+| Gate | Required evidence |
+| --- | --- |
+| G1 Bundle | One canonical HTML SHA-256 per release. Compare the server-served digest and each observed digest across core hosts and measured routes. A Portal-only transformation with a matching upstream digest makes that route unsupported for this release. |
+| G2 Render and refresh | Observe an empty-input launch, refresh, filter and detail opening on direct MCP for ChatGPT, Claude and Antigravity. Record ChatGPT Web and Work independently. |
+| G3 Read semantics | On direct MCP for each core host, compare structured output from App-originated and model-originated reads with equivalent arguments and identity. Normalize timestamps using controlled synthetic data. |
+| G4 Headless | For each configured headless client, verify existing text results are byte-equal with Apps on and off using fixed input and data. Verify semantic text for the new opener separately, since it is introduced by the Workspace proposal. |
+| G5 Degradation | Require a pinned browser fixture that tests absent capabilities and both teardown and no-teardown cases, plus one verified core host on the same release. |
+| G6 Security | Record per-instance isolation and denial results (T7–T11 in #376), then capture comparable caller, policy and audit evidence for a UI read and a model read on each core host that passed G2. |
+
+A full adoption recommendation requires G2 and G3 on all three direct core hosts and G1, G4, G5 and G6. Apply #376's owner decision table for standard-only adoption, reviewed thin adapter metadata with the same bundle, or deferral. Keep unmeasured cells and Portal limitations visible in the result.
+
 ## 3. Troubleshooting
 
 | Observed failure | Next check |
