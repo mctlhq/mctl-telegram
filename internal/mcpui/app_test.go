@@ -237,7 +237,11 @@ func TestWorkspaceResource(t *testing.T) {
 	}
 	text := Contents(resource.URI)[0].(mcplib.TextResourceContents)
 	assertCSPEmpty(t, text.Meta)
-	const wantHash = "056225e73638e07d5d422f20324cc601b788b838e1986c3b1452c03821cd41de"
+	previous := Contents(PreviousWorkspaceResourceURI)[0].(mcplib.TextResourceContents)
+	if previous.URI != PreviousWorkspaceResourceURI || previous.Text != text.Text {
+		t.Fatal("cached Workspace descriptor must resolve to the current bundle")
+	}
+	const wantHash = "9ba211c18c47117c1cbb573343b8754405c1e528020306f0c4ca27eb4b24e8f3"
 	if hash := sha256.Sum256([]byte(text.Text)); hex.EncodeToString(hash[:]) != wantHash {
 		t.Fatalf("workspace resource digest = %x, want %s", hash, wantHash)
 	}

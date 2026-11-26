@@ -410,13 +410,14 @@ func (s *Server) addToolUITo(srv *mcpserver.MCPServer, tool mcplib.Tool, handler
 // matching the auth check every tool handler in this package performs via
 // auth.From(ctx).
 func (s *Server) handleReadAppResource(ctx context.Context, req mcplib.ReadResourceRequest) ([]mcplib.ResourceContents, error) {
-	if (s.AppsWorkspaceOnly || s.ToolFilter == config.TelegramWorkspaceReadOnly) && req.Params.URI != mcpui.WorkspaceResourceURI {
+	workspace := req.Params.URI == mcpui.WorkspaceResourceURI || req.Params.URI == mcpui.PreviousWorkspaceResourceURI
+	if (s.AppsWorkspaceOnly || s.ToolFilter == config.TelegramWorkspaceReadOnly) && !workspace {
 		return nil, errors.New("unknown resource")
 	}
 	if auth.From(ctx) == nil {
 		return nil, errors.New("authentication required")
 	}
-	if req.Params.URI != mcpui.ResourceURI && req.Params.URI != mcpui.DashboardResourceURI && req.Params.URI != mcpui.WorkspaceResourceURI {
+	if req.Params.URI != mcpui.ResourceURI && req.Params.URI != mcpui.DashboardResourceURI && !workspace {
 		return nil, errors.New("unknown resource")
 	}
 	return mcpui.Contents(req.Params.URI), nil
@@ -559,7 +560,10 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 			srv.AddResource(mcpui.Resource(), s.handleReadAppResource)
 			srv.AddResource(mcpui.DashboardResource(), s.handleReadAppResource)
 		}
-		srv.AddResource(mcpui.WorkspaceResource(), s.handleReadAppResource)
+		workspace := mcpui.WorkspaceResource()
+		srv.AddResource(workspace, s.handleReadAppResource)
+		workspace.URI = mcpui.PreviousWorkspaceResourceURI
+		srv.AddResource(workspace, s.handleReadAppResource)
 		t, h := s.toolTelegramDashboard()
 		s.addToolUITo(srv, t, h, mcpui.WorkspaceResourceURI)
 	}

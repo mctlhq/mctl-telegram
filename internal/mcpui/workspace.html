@@ -83,6 +83,8 @@ form,.search-fields { align-items:end; }
 </main>
 <script>
 "use strict";
+const PREFERRED_PROTOCOL_VERSION = "2026-01-26";
+const SUPPORTED_PROTOCOL_VERSIONS = new Set([PREFERRED_PROTOCOL_VERSION, "2025-11-21"]);
 const byId = id => document.getElementById(id);
 const navigation = [...document.querySelectorAll("[data-view]")];
 const pending = new Map();
@@ -465,9 +467,11 @@ byId("expand").addEventListener("click", async () => {
 request("ui/initialize", {
   appInfo:{name:"mctl-telegram-workspace", version:"1.0.0"},
   appCapabilities:{availableDisplayModes:["inline", "fullscreen"]},
-  protocolVersion:"2026-01-26"
+  protocolVersion:PREFERRED_PROTOCOL_VERSION
 }).then(result => {
-  if (result?.protocolVersion !== "2026-01-26") throw new Error("Unsupported MCP Apps protocol.");
+  if (!SUPPORTED_PROTOCOL_VERSIONS.has(result?.protocolVersion)) {
+    throw new Error("Unsupported MCP Apps protocol.");
+  }
   send({method:"ui/notifications/initialized", params:{}});
   ready = true;
   canCall = !!result.hostCapabilities?.serverTools;
