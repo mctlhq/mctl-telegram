@@ -608,11 +608,11 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 	// Committed to the outbox with the state change; owed whether or not
 	// the claim succeeded.
 	principals := make([]int64, 0, len(res.Notices)+1)
-	expired := false
+	expired := 0
 	for _, n := range res.Notices {
 		principals = append(principals, n.Principal)
 		if n.Kind == jobs.NoticeRunFailed {
-			expired = true
+			expired++
 		}
 	}
 	if err == nil && res.Outcome == jobs.ClaimHeld && res.Notify {
@@ -622,7 +622,7 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 	// and the token it carries must reach the worker whatever Telegram
 	// does.
 	defer l.deliverAfter(ctx, principals...)
-	if expired {
+	for range expired {
 		l.recordFailure(ctx, jobs.FailureLeaseExpired)
 	}
 	if err != nil {
@@ -848,6 +848,7 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{"abandoned": true})
+		l.typing.stop(ref.JobID)
 		l.timer.drop(ref.JobID)
 		l.deliverAfter(r.Context(), j.Principal)
 		l.recordFailure(r.Context(), reason)

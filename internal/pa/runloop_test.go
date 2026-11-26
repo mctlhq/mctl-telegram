@@ -1421,6 +1421,7 @@ func TestRunLoop_FailReasonNotifiesUserAndAdmins(t *testing.T) {
 	if w := h.post(RouteReply, c.Token, replyRequest{FailReason: string(jobs.FailureProviderRateLimit)}); w.Code != http.StatusOK {
 		t.Fatalf("fail_reason status = %d, want 200 (%s)", w.Code, w.Body.String())
 	}
+	h.loop.WaitDeliveries()
 	if js, us := h.jobStatus(c.JobID); js != "cancelled" || us != "held" {
 		t.Fatalf("job %s usage %s, want cancelled/held", js, us)
 	}
