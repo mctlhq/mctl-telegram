@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.150.1](https://github.com/mctlhq/mctl-telegram/compare/0.150.0...0.150.1) (2026-11-26)
+
+
+### Bug Fixes
+
+* isolate Telegram Workspace on the existing MCP connector ([ca66755](https://github.com/mctlhq/mctl-telegram/commit/ca66755c2c9ecda07c71d62fe8f2125c0e8d9195))
+* isolate Workspace app tools on the shared MCP connector ([b068830](https://github.com/mctlhq/mctl-telegram/commit/b06883097b2f12fc51cbe10a9f320ab485ed150e))
+
 ## [0.150.0](https://github.com/mctlhq/mctl-telegram/compare/0.149.0...0.150.0) (2026-11-26)
 
 
