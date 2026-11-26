@@ -9,6 +9,7 @@
 :root[data-theme="dark"] { --bg:#14161a; --card:#1d2025; --fg:#e7e9ec; --muted:#9aa1ab; --line:#414750; --accent:#ff986f; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#14161a; --card:#1d2025; --fg:#e7e9ec; --muted:#9aa1ab; --line:#414750; --accent:#ff986f; } }
 * { box-sizing:border-box; }
+html, body { min-height:12rem; }
 body { margin:0; color:var(--fg); background:var(--bg); font:14px/1.55 system-ui,sans-serif; }
 main { margin:auto; max-width:75rem; padding:clamp(.8rem,3vw,1.5rem); }
 header,nav,form,.search-fields,.row { display:flex; align-items:center; flex-wrap:wrap; gap:.55rem; }
@@ -90,6 +91,14 @@ let nextId = 0;
 let active = true;
 let ready = false;
 let canCall = false;
+let negotiatedProtocol = "";
+let bridgeFailed = false;
+// Newest first, the same order as @modelcontextprotocol/ext-apps
+// SUPPORTED_PROTOCOL_VERSIONS. The guest proposes [0] and keeps the host's
+// reply when it is in this list. 2026-01-26 sizes the view with
+// containerDimensions and treats size-changed as view-to-host. 2025-11-21
+// may still send viewport, and may also push size-changed to the view.
+const supportedProtocolVersions = ["2026-01-26", "2025-11-21"];
 let displayMode = "inline";
 let displayModes = [];
 let snapshot;
@@ -130,6 +139,7 @@ function callTool(name, args = {}) {
 }
 
 function applyContext(context = {}) {
+  if (!context || typeof context !== "object") context = {};
   if (context.theme === "dark" || context.theme === "light") {
     document.documentElement.dataset.theme = context.theme;
   }
@@ -137,21 +147,72 @@ function applyContext(context = {}) {
   if (context.displayMode) displayMode = context.displayMode;
   byId("expand").hidden = !displayModes.includes("fullscreen") || !displayModes.includes("inline");
   byId("expand").textContent = displayMode === "fullscreen" ? "Return inline" : "Expand";
+  applyBounds(context);
+}
+
+function applyBounds(context) {
+  const root = document.documentElement;
+  const modern = context.containerDimensions;
+  if (modern && typeof modern === "object") {
+    if (typeof modern.height === "number") {
+      root.style.height = "100%";
+      document.body.style.height = "100%";
+    } else if (typeof modern.maxHeight === "number" && modern.maxHeight > 0) {
+      root.style.maxHeight = modern.maxHeight + "px";
+    }
+    if (typeof modern.width === "number") {
+      root.style.width = "100%";
+    } else if (typeof modern.maxWidth === "number" && modern.maxWidth > 0) {
+      root.style.maxWidth = modern.maxWidth + "px";
+    }
+    return;
+  }
+  // Early 2025-11-21 hosts report the screen as viewport. width and height
+  // are not a fixed container; only the optional maxima constrain the view.
+  const legacy = context.viewport;
+  if (!legacy || typeof legacy !== "object") return;
+  if (typeof legacy.maxHeight === "number" && legacy.maxHeight > 0) root.style.maxHeight = legacy.maxHeight + "px";
+  if (typeof legacy.maxWidth === "number" && legacy.maxWidth > 0) root.style.maxWidth = legacy.maxWidth + "px";
 }
 
 let lastSize = "";
-const resize = new ResizeObserver(() => {
-  if (!ready || !active) return;
-  const width = document.documentElement.clientWidth;
-  const height = Math.ceil(document.querySelector("main").getBoundingClientRect().height);
+function reportSize(floor) {
+  if (!active) return;
+  const width = Math.ceil(document.documentElement.clientWidth);
+  let height = Math.ceil(document.querySelector("main").getBoundingClientRect().height);
+  if (typeof floor === "number" && height < floor) height = floor;
+  if (!(height > 0)) return;
   const size = width + ":" + height;
   if (size === lastSize) return;
   lastSize = size;
-  send({method:"ui/notifications/size-changed", params:{width, height}});
+  const params = {height};
+  if (width > 0) params.width = width;
+  send({method:"ui/notifications/size-changed", params});
+}
+const resize = new ResizeObserver(() => {
+  if (!active || (!ready && !bridgeFailed)) return;
+  reportSize();
 });
 
+function showBridgeError(message) {
+  if (!active) return;
+  bridgeFailed = true;
+  byId("status").textContent = message || "Could not connect to host.";
+  document.documentElement.style.minHeight = "12rem";
+  document.body.style.minHeight = "12rem";
+  resize.observe(document.querySelector("main"));
+  reportSize(192);
+}
+
 window.addEventListener("message", event => {
+  // Only the immediate parent may speak. A sibling frame can reach this
+  // document through parent.frames and the request ids are sequential, so a
+  // sibling could resolve an in-flight call or push a tool result. The
+  // double-iframe sandbox proxy is that parent: it re-posts host messages,
+  // which is how Grok's initialize reply arrives. A further ancestor is not
+  // accepted; a page that frames the host would otherwise be able to inject.
   if (event.source !== window.parent || !active) return;
+  if (typeof event.origin !== "string" || event.origin === "") return;
   const message = event.data;
   if (!message || message.jsonrpc !== "2.0") return;
   if (message.method === "ui/resource-teardown" && message.id != null) {
@@ -180,6 +241,13 @@ window.addEventListener("message", event => {
     else if (!snapshot) byId("status").textContent = "Telegram could not load the workspace.";
   } else if (message.method === "ui/notifications/host-context-changed") {
     applyContext(message.params);
+  } else if (negotiatedProtocol === "2025-11-21" && message.method === "ui/notifications/size-changed") {
+    const height = message.params && message.params.height;
+    if (typeof height === "number" && height > 0) {
+      const px = Math.ceil(height) + "px";
+      document.documentElement.style.minHeight = px;
+      document.body.style.minHeight = px;
+    }
   }
 });
 
@@ -465,9 +533,13 @@ byId("expand").addEventListener("click", async () => {
 request("ui/initialize", {
   appInfo:{name:"mctl-telegram-workspace", version:"1.0.0"},
   appCapabilities:{availableDisplayModes:["inline", "fullscreen"]},
-  protocolVersion:"2026-01-26"
+  protocolVersion:supportedProtocolVersions[0]
 }).then(result => {
-  if (result?.protocolVersion !== "2026-01-26") throw new Error("Unsupported MCP Apps protocol.");
+  if (!supportedProtocolVersions.includes(result?.protocolVersion)) {
+    const version = result?.protocolVersion ? ": " + result.protocolVersion : ".";
+    throw new Error("Unsupported MCP Apps protocol" + version);
+  }
+  negotiatedProtocol = result.protocolVersion;
   send({method:"ui/notifications/initialized", params:{}});
   ready = true;
   canCall = !!result.hostCapabilities?.serverTools;
@@ -478,8 +550,9 @@ request("ui/initialize", {
   if (snapshot) redrawOverview();
   showStatus();
   resize.observe(document.querySelector("main"));
+  reportSize();
 }).catch(error => {
-  if (active) byId("status").textContent = error.message;
+  showBridgeError(error && error.message);
 });
 </script>
 </body>
