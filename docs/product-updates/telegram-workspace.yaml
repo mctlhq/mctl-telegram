@@ -3,14 +3,9 @@ id: telegram-workspace
 kind: new_tool
 title: Open a read-only Telegram Workspace
 summary: >-
-  With MCP Apps enabled, telegram_dashboard opens a read-only workspace for
-  your connected Telegram account. It shows a bounded snapshot of recent
-  dialogs, unread activity, folders and account status. In supporting hosts,
-  you can refresh, filter dialogs, browse message history and search where
-  your read permissions allow. Clients without an interactive view receive a
-  text summary. Unavailable sections are identified explicitly. The workspace
-  does not send messages or modify your account. Availability depends on the
-  server configuration; live host compatibility is still being validated.
+  Telegram Workspace adds the read-only telegram_dashboard tool for recent
+  chats, unread activity, search and account status. Availability is limited
+  to configured MCP Apps endpoints.
 locale: en
 delivery: docs_only
 high_value: false
