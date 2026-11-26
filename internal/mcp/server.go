@@ -5,6 +5,7 @@ package mcp
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"sync/atomic"
 
@@ -404,23 +405,31 @@ func (s *Server) addToolUITo(srv *mcpserver.MCPServer, tool mcplib.Tool, handler
 	s.addTool(srv, tool, handler)
 }
 
-// handleReadAppResource serves the triage App document for resources/read.
+// handleReadAppResource serves an MCP App document for resources/read.
 // It requires an authenticated identity so an AUTH_REQUIRED=false deployment
 // does not serve the App body anonymously even though the flag is on --
 // matching the auth check every tool handler in this package performs via
 // auth.From(ctx).
 func (s *Server) handleReadAppResource(ctx context.Context, req mcplib.ReadResourceRequest) ([]mcplib.ResourceContents, error) {
-	workspace := req.Params.URI == mcpui.WorkspaceResourceURI || req.Params.URI == mcpui.PreviousWorkspaceResourceURI
+	version := mcpui.WorkspaceResourceVersion(req.Params.URI)
+	workspace := version != ""
 	if (s.AppsWorkspaceOnly || s.ToolFilter == config.TelegramWorkspaceReadOnly) && !workspace {
 		return nil, errors.New("unknown resource")
 	}
 	if auth.From(ctx) == nil {
+		if workspace {
+			slog.InfoContext(ctx, "mcp workspace resource read", "resource_version", version, "status", "authentication_required")
+		}
 		return nil, errors.New("authentication required")
 	}
 	if req.Params.URI != mcpui.ResourceURI && req.Params.URI != mcpui.DashboardResourceURI && !workspace {
 		return nil, errors.New("unknown resource")
 	}
-	return mcpui.Contents(req.Params.URI), nil
+	contents := mcpui.Contents(req.Params.URI)
+	if workspace {
+		slog.InfoContext(ctx, "mcp workspace resource read", "resource_version", version, "status", "ok")
+	}
+	return contents, nil
 }
 
 func withoutWorkspaceMedia(next mcpserver.ToolHandlerFunc) mcpserver.ToolHandlerFunc {
@@ -561,9 +570,10 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 			srv.AddResource(mcpui.DashboardResource(), s.handleReadAppResource)
 		}
 		workspace := mcpui.WorkspaceResource()
-		srv.AddResource(workspace, s.handleReadAppResource)
-		workspace.URI = mcpui.PreviousWorkspaceResourceURI
-		srv.AddResource(workspace, s.handleReadAppResource)
+		for _, uri := range []string{workspace.URI, mcpui.WorkspaceResourceV2URI, mcpui.PreviousWorkspaceResourceURI} {
+			workspace.URI = uri
+			srv.AddResource(workspace, s.handleReadAppResource)
+		}
 		t, h := s.toolTelegramDashboard()
 		s.addToolUITo(srv, t, h, mcpui.WorkspaceResourceURI)
 	}

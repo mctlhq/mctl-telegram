@@ -338,7 +338,8 @@ func TestWorkspaceOnlyOnSharedServer(t *testing.T) {
 		t.Errorf("app tools = %v, want %v", appTools, want)
 	}
 	resources := srv.ListResources()
-	if len(resources) != 2 || resources[mcpui.WorkspaceResourceURI] == nil || resources[mcpui.PreviousWorkspaceResourceURI] == nil {
+	if len(resources) != 3 || resources[mcpui.WorkspaceResourceURI] == nil ||
+		resources[mcpui.WorkspaceResourceV2URI] == nil || resources[mcpui.PreviousWorkspaceResourceURI] == nil {
 		t.Fatalf("shared mode must publish only the Workspace resource")
 	}
 	for _, uri := range []string{mcpui.ResourceURI, mcpui.DashboardResourceURI} {
