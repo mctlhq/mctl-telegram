@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -11,9 +12,33 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
+	"github.com/mctlhq/mctl-telegram/internal/mcpui"
 )
 
 const workspaceDialogLimit = 30
+
+// logWorkspaceDiscovery records the descriptor on the returned page after scope filtering.
+func logWorkspaceDiscovery(ctx context.Context, _ any, _ *mcplib.ListToolsRequest, page *mcplib.ListToolsResult) {
+	listed := false
+	version := ""
+	for _, tool := range page.Tools {
+		if tool.Name != "telegram_dashboard" {
+			continue
+		}
+		listed = true
+		if tool.Meta != nil {
+			ui, _ := tool.Meta.AdditionalFields["ui"].(map[string]any)
+			uri, _ := ui["resourceUri"].(string)
+			version = mcpui.WorkspaceResourceVersion(uri)
+			if uri != "" && version == "" {
+				version = "unknown"
+			}
+		}
+		break
+	}
+	slog.InfoContext(ctx, "mcp workspace discovery", "dashboard_listed", listed,
+		"resource_version", version, "has_next_page", page.NextCursor != "")
+}
 
 type workspaceAuditEntry struct {
 	Time   time.Time `json:"time"`

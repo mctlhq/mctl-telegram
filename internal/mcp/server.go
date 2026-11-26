@@ -525,6 +525,8 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 	// registered is late-bound: the hook is built before the server exists, and
 	// the set of registered tool names is stored once every tool is added.
 	var registered atomic.Pointer[map[string]struct{}]
+	hooks := s.firstCallHooks(s.jsonrpcHooks(&registered))
+	hooks.AddAfterListTools(logWorkspaceDiscovery)
 	opts := []mcpserver.ServerOption{
 		mcpserver.WithToolCapabilities(true),
 		// mctl-telegram#696: a single recording path for every tools/call
@@ -545,7 +547,7 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 		// Also inside recordToolCall, so a hidden-chat refusal is recorded
 		// like any other (hidden.go, mctl-telegram#1152).
 		mcpserver.WithToolHandlerMiddleware(s.hiddenScopeGuard),
-		mcpserver.WithHooks(s.firstCallHooks(s.jsonrpcHooks(&registered))),
+		mcpserver.WithHooks(hooks),
 		// Discovery and invocation follow the caller's scopes: mcp-go
 		// applies this filter on tools/list and again on tools/call, so a
 		// tool the identity may not use is neither shown nor callable. The
