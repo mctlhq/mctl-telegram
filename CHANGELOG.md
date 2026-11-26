@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.150.3](https://github.com/mctlhq/mctl-telegram/compare/0.150.2...0.150.3) (2026-11-26)
+
+
+### Bug Fixes
+
+* accept the earlier MCP Apps handshake in Telegram Workspace ([37d4d47](https://github.com/mctlhq/mctl-telegram/commit/37d4d47e3781dac661a3b446b7e50430e05e617a))
+* negotiate both supported MCP Apps versions in Telegram Workspace ([2ab43e8](https://github.com/mctlhq/mctl-telegram/commit/2ab43e8d0ce733937f60b1c3ca51b91d2736e367))
+
 ## [0.150.2](https://github.com/mctlhq/mctl-telegram/compare/0.150.1...0.150.2) (2026-11-26)
 
 
