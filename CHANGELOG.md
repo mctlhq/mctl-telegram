@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.150.0](https://github.com/mctlhq/mctl-telegram/compare/0.149.0...0.150.0) (2026-11-26)
+
+
+### Features
+
+* add a template-driven Telegram dashboard to the MCP App ([25cabf5](https://github.com/mctlhq/mctl-telegram/commit/25cabf54bd3c095912208b4202f5d1c54e5e4e1d))
+* add an isolated read-only Telegram Workspace ([393861d](https://github.com/mctlhq/mctl-telegram/commit/393861da9d1b39dae2471d1ecfff88bb4f7abbf5))
+* add an isolated read-only Telegram Workspace ([43b98c8](https://github.com/mctlhq/mctl-telegram/commit/43b98c8d7bdf9544957ece779d925fd9b2bc4dea))
+* template-driven Telegram dashboard in the MCP App ([389cb49](https://github.com/mctlhq/mctl-telegram/commit/389cb492a1e4a6e8910016c85ce03a414c1c4127))
+
+
+### Bug Fixes
+
+* send MCP Apps initialization parameters ([92027b5](https://github.com/mctlhq/mctl-telegram/commit/92027b53970c9223e0b92467902cd8b754002bf6))
+* send MCP Apps initialization parameters ([6b26c09](https://github.com/mctlhq/mctl-telegram/commit/6b26c095821188da713b83cde73510f2a99ba722))
+
 ## [0.149.0](https://github.com/mctlhq/mctl-telegram/compare/0.148.0...0.149.0) (2026-11-24)
 
 
