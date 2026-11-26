@@ -34,6 +34,7 @@ type toolClass struct {
 // toolClasses classifies every registered tool. A new tool must be added here
 // in the same change, or the coverage test fails.
 var toolClasses = map[string]toolClass{
+	"telegram_dashboard": {tier: tierRead, idempotent: true},
 	// Reads.
 	"draft_reply":                     {tier: tierRead, idempotent: false},
 	"get_acquisition_report":          {tier: tierRead, idempotent: true},

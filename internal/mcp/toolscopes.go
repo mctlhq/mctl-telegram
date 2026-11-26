@@ -27,6 +27,7 @@ import (
 // boundary, not a replacement for them.
 var toolScopes = map[string][]string{
 	// Reads.
+	"telegram_dashboard":        {"telegram:dialogs:read"},
 	"list_dialogs":              {"telegram:dialogs:read"},
 	"list_dashboard_templates":  {"telegram:dialogs:read"},
 	"get_dashboard_template":    {"telegram:dialogs:read"},

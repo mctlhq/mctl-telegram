@@ -48,6 +48,8 @@ const (
 // TestToolDialogScope_CoversRegistry fails for a tool missing here, so a new
 // tool cannot silently bypass the scope.
 var toolDialogScope = map[string]dialogScope{
+	// telegram_dashboard delegates its dialog reads to the scoped handlers.
+	"telegram_dashboard":       scopeExempt,
 	"delete_messages":          scopeDialogs,
 	"draft_reply":              scopeDialogs,
 	"edit_message":             scopeDialogs,

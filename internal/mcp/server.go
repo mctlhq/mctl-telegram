@@ -17,6 +17,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/bridge"
 	"github.com/mctlhq/mctl-telegram/internal/broadcast"
 	"github.com/mctlhq/mctl-telegram/internal/canaryguard"
+	"github.com/mctlhq/mctl-telegram/internal/config"
 	"github.com/mctlhq/mctl-telegram/internal/db"
 	"github.com/mctlhq/mctl-telegram/internal/edgectx"
 	"github.com/mctlhq/mctl-telegram/internal/mcpui"
@@ -329,13 +330,22 @@ func (s *Server) WithManageURL(url string) *Server {
 	return s
 }
 
-// toolPassesFilter reports whether a tool should be registered given the
-// active filter mode. An unrecognised filter is treated as "all" (safe default).
+// toolPassesFilter is the process-wide registration boundary. The isolated
+// profile's inventory is independent of tool annotations and OAuth scopes.
 func toolPassesFilter(tool mcplib.Tool, filter string) bool {
-	if filter != "read-only" {
+	switch filter {
+	case "", "all":
 		return true
+	case "read-only":
+		return tool.Annotations.ReadOnlyHint != nil && *tool.Annotations.ReadOnlyHint
+	case config.TelegramWorkspaceReadOnly:
+		switch tool.Name {
+		case "list_dialogs", "list_folders", "list_topics", "get_unread_messages",
+			"get_messages", "search_messages", "get_my_identity", "get_my_send_status", "telegram_dashboard":
+			return true
+		}
 	}
-	return tool.Annotations.ReadOnlyHint != nil && *tool.Annotations.ReadOnlyHint
+	return false
 }
 
 // addTool registers a (tool, handler) pair unless ToolFilter excludes the tool.
@@ -345,13 +355,17 @@ func (s *Server) addTool(srv *mcpserver.MCPServer, tool mcplib.Tool, handler mcp
 		idempotent := c.idempotent
 		tool.Annotations.IdempotentHint = &idempotent
 	}
-	if toolPassesFilter(tool, s.ToolFilter) {
-		srv.AddTool(tool, handler)
+	if !toolPassesFilter(tool, s.ToolFilter) {
+		return
 	}
+	if s.ToolFilter == config.TelegramWorkspaceReadOnly && (tool.Name == "get_messages" || tool.Name == "get_unread_messages") {
+		handler = withoutWorkspaceMedia(handler)
+	}
+	srv.AddTool(tool, handler)
 }
 
 // addToolUI registers a (tool, handler) pair like addTool, additionally
-// attaching the MCP Apps _meta.ui link (withUIResource) when s.AppsEnabled is
+// attaching the MCP Apps _meta.ui link (withUIResourceURI) when s.AppsEnabled is
 // true. With the flag off this is exactly addTool: no tool carries Meta.
 // Used only for the tools the triage App composes (see apps.go).
 func (s *Server) addToolUI(srv *mcpserver.MCPServer, tool mcplib.Tool, handler mcpserver.ToolHandlerFunc) {
@@ -361,7 +375,7 @@ func (s *Server) addToolUI(srv *mcpserver.MCPServer, tool mcplib.Tool, handler m
 // addToolUITo is addToolUI for a chosen ui:// document. The dashboard tools
 // and the two writes the dashboard prepares point at the dashboard document.
 func (s *Server) addToolUITo(srv *mcpserver.MCPServer, tool mcplib.Tool, handler mcpserver.ToolHandlerFunc, uri string) {
-	if s.AppsEnabled {
+	if s.AppsEnabled && (s.ToolFilter != config.TelegramWorkspaceReadOnly || uri == mcpui.WorkspaceResourceURI) {
 		withUIResourceURI(uri)(&tool)
 	}
 	s.addTool(srv, tool, handler)
@@ -373,13 +387,25 @@ func (s *Server) addToolUITo(srv *mcpserver.MCPServer, tool mcplib.Tool, handler
 // matching the auth check every tool handler in this package performs via
 // auth.From(ctx).
 func (s *Server) handleReadAppResource(ctx context.Context, req mcplib.ReadResourceRequest) ([]mcplib.ResourceContents, error) {
+	if s.ToolFilter == config.TelegramWorkspaceReadOnly && req.Params.URI != mcpui.WorkspaceResourceURI {
+		return nil, errors.New("unknown resource")
+	}
 	if auth.From(ctx) == nil {
 		return nil, errors.New("authentication required")
 	}
-	if req.Params.URI != mcpui.ResourceURI && req.Params.URI != mcpui.DashboardResourceURI {
+	if req.Params.URI != mcpui.ResourceURI && req.Params.URI != mcpui.DashboardResourceURI && req.Params.URI != mcpui.WorkspaceResourceURI {
 		return nil, errors.New("unknown resource")
 	}
 	return mcpui.Contents(req.Params.URI), nil
+}
+
+func withoutWorkspaceMedia(next mcpserver.ToolHandlerFunc) mcpserver.ToolHandlerFunc {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		if fetch, present := req.GetArguments()["fetch_media"]; present && fetch != false {
+			return mcplib.NewToolResultError("media downloads are disabled on this endpoint"), nil
+		}
+		return next(ctx, req)
+	}
 }
 
 func (s *Server) HTTPHandler() http.Handler {
@@ -484,8 +510,13 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 		opts...,
 	)
 	if s.AppsEnabled {
-		srv.AddResource(mcpui.Resource(), s.handleReadAppResource)
-		srv.AddResource(mcpui.DashboardResource(), s.handleReadAppResource)
+		if s.ToolFilter != config.TelegramWorkspaceReadOnly {
+			srv.AddResource(mcpui.Resource(), s.handleReadAppResource)
+			srv.AddResource(mcpui.DashboardResource(), s.handleReadAppResource)
+		}
+		srv.AddResource(mcpui.WorkspaceResource(), s.handleReadAppResource)
+		t, h := s.toolTelegramDashboard()
+		s.addToolUITo(srv, t, h, mcpui.WorkspaceResourceURI)
 	}
 	{
 		t, h := s.toolListDialogs()

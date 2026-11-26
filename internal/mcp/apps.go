@@ -22,26 +22,8 @@ func textSHA256(text string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// withUIResource returns a mcplib.ToolOption that sets a tool's _meta.ui
-// link to the triage App resource (mcpui.ToolMeta), preserving any existing
-// Meta.AdditionalFields and ProgressToken rather than clobbering them. It is
-// applied, only when s.AppsEnabled, to the tools the App composes -- see
-// addToolUI and newMCPServer. With the flag off no tool's builder ever calls
-// this, so no tool carries a non-nil Meta.
-//
-// visibility inside mcpui.ToolMeta() is a host-side hint (which tools a
-// conforming host lets the App itself invoke, versus model-only) -- it is
-// never consulted by any handler in this package. requireScope and the send
-// gate are the only server-side authority; see the proposal's "Open
-// questions" for why.
-func withUIResource() mcplib.ToolOption {
-	return withUIResourceURI(mcpui.ResourceURI)
-}
-
-// withUIResourceURI is withUIResource for a chosen ui:// document. The
-// triage tools keep mcpui.ResourceURI; the dashboard tools and the two
-// writes the dashboard may prepare (mark_read, save_draft) use the
-// dashboard document, and only when AppsEnabled is on.
+// withUIResourceURI adds the host-facing Apps binding without replacing
+// other tool metadata. Registration and OAuth remain server-side controls.
 func withUIResourceURI(uri string) mcplib.ToolOption {
 	return func(t *mcplib.Tool) {
 		fields := map[string]any{}

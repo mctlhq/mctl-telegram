@@ -44,6 +44,9 @@ const (
 // MinHumanInputPollInterval is the floor for HUMAN_INPUT_POLL_INTERVAL.
 const MinHumanInputPollInterval = 10 * time.Second
 
+// TelegramWorkspaceReadOnly is the isolated MCP Apps registration profile.
+const TelegramWorkspaceReadOnly = "telegram-workspace-read-only"
+
 type Config struct {
 	Addr          string
 	PublicBaseURL string
@@ -999,8 +1002,20 @@ func Load() (*Config, error) {
 		}
 		c.OAUTHCIMDAllowedHosts = hosts
 	}
-	if c.ToolFilter != "all" && c.ToolFilter != "read-only" {
-		return nil, fmt.Errorf("MCP_TOOL_FILTER must be \"all\" or \"read-only\", got %q", c.ToolFilter)
+	switch c.ToolFilter {
+	case "all", "read-only":
+	case TelegramWorkspaceReadOnly:
+		if !c.AppsEnabled || c.AllowSend || !c.AuthRequired || !strings.EqualFold(c.AuthMode, "local-jwt") {
+			return nil, errors.New("telegram-workspace-read-only requires MCP_APPS_ENABLED=true, ALLOW_SEND=false, AUTH_REQUIRED=true and AUTH_MODE=local-jwt")
+		}
+		if !c.OAUTHJWTSecretDedicated || !c.OAUTHJWTAudReq || c.OAUTHJWTAudience == "" || c.K8sSASubject != "" {
+			return nil, errors.New("telegram-workspace-read-only requires a dedicated OAuth signing key and mandatory audience, with Kubernetes ServiceAccount authentication disabled")
+		}
+		if c.PAEnabled || c.ManagedRuntimeEnabled || c.DemoReviewerEnabled {
+			return nil, errors.New("telegram-workspace-read-only requires PA, managed runtime and reviewer login disabled")
+		}
+	default:
+		return nil, fmt.Errorf("MCP_TOOL_FILTER must be \"all\", \"read-only\" or %q, got %q", TelegramWorkspaceReadOnly, c.ToolFilter)
 	}
 	// MCPPath must be an absolute path below the origin. A root value would
 	// shadow the landing page and the root MCP alias: cmd/server/main.go
@@ -1107,6 +1122,10 @@ func Load() (*Config, error) {
 	c.SessionTTLExemptTGIDs = parseInt64CSV(os.Getenv("SESSION_TTL_EXEMPT_TG_IDS"))
 	c.TGLoginClients = parseInt64CSV(os.Getenv("TG_LOGIN_CLIENTS"))
 	c.TGLoginLookupAdmins = parseInt64CSV(os.Getenv("TG_LOGIN_LOOKUP_ADMINS"))
+	if c.ToolFilter == TelegramWorkspaceReadOnly && (c.AutoApproveClients || len(c.TGLoginClients) != 1 ||
+		c.TGLoginClients[0] <= 0 || len(c.TGLoginAdmins) != 0 || len(c.TGLoginLookupAdmins) != 0) {
+		return nil, errors.New("telegram-workspace-read-only requires exactly one isolated TG_LOGIN_CLIENTS identity, with auto-approval and admin tiers disabled")
+	}
 	c.BroadcastOperators = parseInt64CSV(os.Getenv("BROADCAST_OPERATORS"))
 	c.TelegramOIDCSigningAlgs = parseStringCSV(os.Getenv("TELEGRAM_OIDC_SIGNING_ALGS"))
 
