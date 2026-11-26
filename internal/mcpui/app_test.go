@@ -237,13 +237,115 @@ func TestWorkspaceResource(t *testing.T) {
 	}
 	text := Contents(resource.URI)[0].(mcplib.TextResourceContents)
 	assertCSPEmpty(t, text.Meta)
-	const wantHash = "056225e73638e07d5d422f20324cc601b788b838e1986c3b1452c03821cd41de"
+	const wantHash = "4b939e8f4c201c60f3c8846def396fa1a7f8ef9f8c500f173f99e9f0b3da3b0b"
 	if hash := sha256.Sum256([]byte(text.Text)); hex.EncodeToString(hash[:]) != wantHash {
 		t.Fatalf("workspace resource digest = %x, want %s", hash, wantHash)
 	}
 	for _, forbidden := range []string{"tools/list", "innerHTML", "eval(", "fetch(", "XMLHttpRequest", "https://", "http://"} {
 		if strings.Contains(text.Text, forbidden) {
 			t.Errorf("workspace bundle contains %q", forbidden)
+		}
+	}
+}
+
+// TestWorkspaceNegotiatesProtocolVersions locks the Grok handshake (#1496).
+// The guest proposes the newest version it implements and accepts the host's
+// reply when that version is in the same list the ext-apps SDK negotiates.
+// 2025-11-21 stays on that list: Grok answers ui/initialize with it. An
+// unknown version must not pretend the bridge is ready, and must still
+// publish a non-zero size so the host does not keep an empty frame.
+func TestWorkspaceNegotiatesProtocolVersions(t *testing.T) {
+	const list = `const supportedProtocolVersions = ["2026-01-26", "2025-11-21"];`
+	if !strings.Contains(workspaceHTML, list) {
+		t.Fatalf("supported protocol list missing:\n%s", list)
+	}
+	if strings.Contains(workspaceHTML, `protocolVersion !== "2026-01-26"`) {
+		t.Fatal("workspace still rejects every protocol except 2026-01-26")
+	}
+	if !strings.Contains(workspaceHTML, `protocolVersion:supportedProtocolVersions[0]`) {
+		t.Fatal("ui/initialize must propose the newest supported version")
+	}
+	if !strings.Contains(workspaceHTML, `supportedProtocolVersions.includes(result?.protocolVersion)`) {
+		t.Fatal("the host reply must be accepted from the supported list")
+	}
+	if !strings.Contains(workspaceHTML, `negotiatedProtocol === "2025-11-21"`) {
+		t.Fatal("host-to-view size-changed must be limited to protocol 2025-11-21")
+	}
+	if !strings.Contains(workspaceHTML, "containerDimensions") || !strings.Contains(workspaceHTML, "context.viewport") {
+		t.Fatal("2026-01-26 containerDimensions and 2025-11-21 viewport must both be handled")
+	}
+	if !strings.Contains(workspaceHTML, "min-height:12rem") {
+		t.Fatal("html/body need a non-zero min-height")
+	}
+	errAt := strings.Index(workspaceHTML, "function showBridgeError")
+	if errAt < 0 {
+		t.Fatal("showBridgeError is missing")
+	}
+	errEnd := strings.Index(workspaceHTML[errAt:], "\nwindow.addEventListener")
+	if errEnd < 0 {
+		t.Fatal("showBridgeError is missing")
+	}
+	errFn := workspaceHTML[errAt : errAt+errEnd]
+	if strings.Contains(errFn, "ui/notifications/initialized") {
+		t.Fatal("an unsupported protocol must not send initialized")
+	}
+	if !strings.Contains(errFn, "reportSize(192)") {
+		t.Fatal("an unsupported protocol must send a non-zero size-changed")
+	}
+	initAt := strings.Index(workspaceHTML, "protocolVersion:supportedProtocolVersions[0]")
+	if initAt < 0 {
+		t.Fatal("ui/initialize call is missing")
+	}
+	rel := workspaceHTML[initAt:]
+	thenAt := strings.Index(rel, ".then(result => {")
+	thenEnd := strings.Index(rel, ".catch(error => {")
+	if thenAt < 0 || thenEnd < thenAt {
+		t.Fatal("initialize continuation is missing")
+	}
+	thenFn := rel[thenAt:thenEnd]
+	initialized := strings.Index(thenFn, "ui/notifications/initialized")
+	sized := strings.Index(thenFn, "reportSize()")
+	if initialized < 0 || sized < initialized {
+		t.Fatal("a successful handshake must send initialized before size-changed")
+	}
+	if !strings.Contains(rel[thenEnd:], "showBridgeError") {
+		t.Fatal("initialize failure must surface through showBridgeError")
+	}
+}
+
+// TestWorkspaceKeepsParentSource records the sandbox-proxy review (#1496).
+// Grok's proxy re-posts, so the initialize reply's source is window.parent.
+// Accepting a further ancestor would let a page that frames the host inject
+// a tool result. Origin is still checked before the body is read: sandbox
+// proxies use the origin string "null", which must not be treated as empty.
+func TestWorkspaceKeepsParentSource(t *testing.T) {
+	const guard = "if (event.source !== window.parent || !active) return;"
+	listener := strings.Index(workspaceHTML, `window.addEventListener("message"`)
+	if listener < 0 {
+		t.Fatal("workspace has no message listener")
+	}
+	body := workspaceHTML[listener:]
+	guardAt := strings.Index(body, guard)
+	originAt := strings.Index(body, `typeof event.origin !== "string" || event.origin === ""`)
+	dataAt := strings.Index(body, "const message = event.data;")
+	if guardAt < 0 || originAt < guardAt || dataAt < originAt {
+		t.Fatal("parent and origin checks must run before the handler reads event.data")
+	}
+	if !strings.Contains(body, `message.jsonrpc !== "2.0"`) {
+		t.Fatal("jsonrpc shape check missing")
+	}
+}
+
+// TestTriageAndDashboardDoNotPinProtocol checks the other MCP App documents.
+// They propose 2026-01-26 and do not reject a host that negotiates another
+// version, so they do not share workspace's strict check.
+func TestTriageAndDashboardDoNotPinProtocol(t *testing.T) {
+	for name, html := range map[string]string{"triage.html": triageHTML, "dashboard.html": dashboardHTML} {
+		if strings.Contains(html, `!== "2026-01-26"`) {
+			t.Errorf("%s rejects a negotiated protocol other than 2026-01-26", name)
+		}
+		if !strings.Contains(html, `protocolVersion: "2026-01-26"`) {
+			t.Errorf("%s no longer proposes 2026-01-26", name)
 		}
 	}
 }
