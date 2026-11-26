@@ -266,7 +266,8 @@ func TestAppResourceHandler_RequiresAuth(t *testing.T) {
 
 func TestWorkspaceOnlyOnSharedServer(t *testing.T) {
 	baselineServer := (&Server{AllowSend: true}).newMCPServer()
-	srv := (&Server{AllowSend: true, AppsEnabled: true, AppsWorkspaceOnly: true}).newMCPServer()
+	shared := &Server{AllowSend: true, AppsEnabled: true, AppsWorkspaceOnly: true}
+	srv := shared.newMCPServer()
 	ctx := auth.With(context.Background(), &auth.Identity{UserID: 1, Scopes: allToolScopes()})
 	baseline := make(map[string]mcp.Tool)
 	var existing mcp.ListToolsResult
@@ -339,6 +340,21 @@ func TestWorkspaceOnlyOnSharedServer(t *testing.T) {
 	resources := srv.ListResources()
 	if len(resources) != 1 || resources[mcpui.WorkspaceResourceURI] == nil {
 		t.Fatalf("shared mode must publish only the Workspace resource")
+	}
+	for _, uri := range []string{mcpui.ResourceURI, mcpui.DashboardResourceURI} {
+		var request mcp.ReadResourceRequest
+		request.Params.URI = uri
+		if _, err := shared.handleReadAppResource(ctx, request); err == nil {
+			t.Errorf("legacy resource %s was served by the Workspace handler", uri)
+		}
+	}
+	resource := callRPC(t, ctx, srv, "resources/read", map[string]any{"uri": mcpui.WorkspaceResourceURI})
+	var content struct {
+		Contents []mcp.TextResourceContents
+	}
+	if err := json.Unmarshal(resource.Result, &content); err != nil || resource.Error != nil ||
+		len(content.Contents) != 1 || content.Contents[0].MIMEType != mcpui.MIMEType {
+		t.Fatalf("Workspace resource missing or invalid: decode=%v, rpc=%+v", err, resource.Error)
 	}
 	readOnly := auth.With(context.Background(), &auth.Identity{UserID: 1, Scopes: []string{"telegram:dialogs:read", "telegram:messages:read"}})
 	send := callRPC(t, readOnly, srv, "tools/call", map[string]any{"name": "send_message"})

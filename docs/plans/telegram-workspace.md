@@ -50,7 +50,7 @@ The #569 proposal preferred attaching existing reads because the proposed `open_
 ## Implementation sequence
 
 1. [#1482](https://github.com/mctlhq/mctl-telegram/issues/1482) and [Workspace OpenSpec](../../openspec/changes/telegram-workspace-dashboard/requirements.md) delivered the opener and workspace. [#1483](https://github.com/mctlhq/mctl-telegram/issues/1483) records the optional fixture isolation profile.
-2. Review the shared-connector change and run the preflight in the [operator runbook](../runbooks/telegram-workspace-validation.md). Record the independent security and contract verdict and host bridge enforcement on #650.
+2. Review the [shared-connector OpenSpec](../../openspec/changes/telegram-workspace-shared-connector/requirements.md) and run the preflight in the [operator runbook](../runbooks/telegram-workspace-validation.md). Record the independent security and contract verdict and host bridge enforcement on #650.
 3. Deploy a release containing Workspace-only mode with Apps disabled first. Activate through the approved [GitOps #3029](https://github.com/mctlhq/mctl-gitops/pull/3029) change using both `MCP_APPS_ENABLED=true` and `MCP_APPS_WORKSPACE_ONLY=true`. Roll back by disabling Apps. Keep the existing production OAuth, normal tool filters and send settings.
 4. Use the existing ChatGPT registration against `https://tg.mctl.ai/mcp`. Confirm authenticated discovery, native rendering and allowed reads. Verify existing tools and OAuth continue to work. Retain the broader host and Portal matrix in #650. #1443 consumes the Antigravity result and #784 tracks the broader capability layer.
 
