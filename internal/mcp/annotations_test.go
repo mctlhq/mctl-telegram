@@ -26,6 +26,7 @@ func TestToolAnnotations(t *testing.T) {
 		{"get_messages", first(s.toolGetMessages()), true, false, true},
 		{"prepare_pin_message", first(s.toolPreparePinMessage()), false, false, false},
 		{"prepare_send_message", first(s.toolPrepareSendMessage()), false, false, false},
+		{"telegram_dashboard", first(s.toolTelegramDashboard()), true, false, true},
 		{"list_dashboard_templates", first(s.toolListDashboardTemplates()), true, false, false},
 		{"get_dashboard_template", first(s.toolGetDashboardTemplate()), true, false, false},
 		{"save_dashboard_template", first(s.toolSaveDashboardTemplate()), false, false, false},

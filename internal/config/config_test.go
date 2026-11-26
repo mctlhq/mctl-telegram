@@ -825,3 +825,36 @@ func TestLoadAgentLeadRetentionDefaultsTo90Days(t *testing.T) {
 		t.Fatalf("AGENT_LEAD_RETENTION_DAYS default = %d, want 90", cfg.AgentLeadRetentionDays)
 	}
 }
+
+func TestLoadWorkspaceProfileFailsClosed(t *testing.T) {
+	t.Setenv("MCP_TOOL_FILTER", TelegramWorkspaceReadOnly)
+	t.Setenv("MCP_APPS_ENABLED", "true")
+	t.Setenv("ALLOW_SEND", "false")
+	t.Setenv("AUTH_REQUIRED", "true")
+	t.Setenv("AUTH_MODE", "local-jwt")
+	t.Setenv("OAUTH_JWT_SIGNING_KEY", "synthetic-config-test-key")
+	t.Setenv("OAUTH_JWT_AUDIENCE", "synthetic-workspace")
+	t.Setenv("OAUTH_JWT_AUDIENCE_REQUIRED", "true")
+	t.Setenv("TG_LOGIN_CLIENTS", "8511")
+	t.Setenv("AUTO_APPROVE_CLIENTS", "false")
+
+	if _, err := Load(); err != nil {
+		t.Fatalf("isolated profile config: %v", err)
+	}
+	for key, bad := range map[string]string{
+		"ALLOW_SEND":                  "true",
+		"AUTH_REQUIRED":               "false",
+		"MCP_APPS_ENABLED":            "false",
+		"OAUTH_JWT_AUDIENCE_REQUIRED": "false",
+		"TG_LOGIN_CLIENTS":            "8511,8512",
+		"AUTO_APPROVE_CLIENTS":        "true",
+		"TG_LOGIN_ADMINS":             "8512",
+	} {
+		t.Run(key, func(t *testing.T) {
+			t.Setenv(key, bad)
+			if _, err := Load(); err == nil {
+				t.Fatal("unsafe config accepted")
+			}
+		})
+	}
+}

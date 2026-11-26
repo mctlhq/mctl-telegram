@@ -199,6 +199,11 @@
       "reason": "Flag-gated MCP Apps (mctlhq/mctl-telegram#569) prototype affordance, registered only when MCP_APPS_ENABLED=true. It is a triage-App draft/confirm step, not a general client tool, and should not appear on the shared Cloudflare portal surface. An operator can flip this on later if a portal-facing use case appears; upstream_gates is intentionally omitted while disabled."
     },
     {
+      "name": "telegram_dashboard",
+      "enabled": false,
+      "reason": "Read-only Workspace opener with an embedded MCP App. Keep it out of the shared Portal until the isolated host and resource contract is validated."
+    },
+    {
       "name": "list_dashboard_templates",
       "enabled": false,
       "reason": "Flag-gated Telegram dashboard (MCP Apps). Lists built-in and per-account tg-dashboard/v1 templates. Registered only when MCP_APPS_ENABLED=true, so it stays off the shared portal surface. upstream_gates is omitted while disabled."

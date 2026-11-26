@@ -68,8 +68,11 @@ func Resource() mcplib.Resource {
 // document, inline, as text.
 func Contents(uri string) []mcplib.ResourceContents {
 	text := triageHTML
-	if uri == DashboardResourceURI {
+	switch uri {
+	case DashboardResourceURI:
 		text = dashboardHTML
+	case WorkspaceResourceURI:
+		text = workspaceHTML
 	}
 	return []mcplib.ResourceContents{
 		mcplib.TextResourceContents{

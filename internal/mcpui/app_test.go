@@ -229,3 +229,21 @@ func TestToolMeta(t *testing.T) {
 		t.Error("ToolMeta emits the deprecated flat ui/resourceUri key")
 	}
 }
+
+func TestWorkspaceResource(t *testing.T) {
+	resource := WorkspaceResource()
+	if resource.URI != WorkspaceResourceURI || resource.MIMEType != MIMEType {
+		t.Fatalf("resource = %+v", resource)
+	}
+	text := Contents(resource.URI)[0].(mcplib.TextResourceContents)
+	assertCSPEmpty(t, text.Meta)
+	const wantHash = "056225e73638e07d5d422f20324cc601b788b838e1986c3b1452c03821cd41de"
+	if hash := sha256.Sum256([]byte(text.Text)); hex.EncodeToString(hash[:]) != wantHash {
+		t.Fatalf("workspace resource digest = %x, want %s", hash, wantHash)
+	}
+	for _, forbidden := range []string{"tools/list", "innerHTML", "eval(", "fetch(", "XMLHttpRequest", "https://", "http://"} {
+		if strings.Contains(text.Text, forbidden) {
+			t.Errorf("workspace bundle contains %q", forbidden)
+		}
+	}
+}

@@ -53,6 +53,7 @@ const (
 var reviewerWriteRules = map[string]reviewerWriteRule{
 	// Reads.
 	"list_dialogs":                    reviewerRead,
+	"telegram_dashboard":              reviewerRead,
 	"list_dashboard_templates":        reviewerRead,
 	"get_dashboard_template":          reviewerRead,
 	"list_folders":                    reviewerRead,
