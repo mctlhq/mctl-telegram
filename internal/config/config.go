@@ -51,13 +51,16 @@ type Config struct {
 	Addr          string
 	PublicBaseURL string
 	MCPPath       string
+	// MCPResourceBaseURL optionally advertises a distinct HTTPS origin for
+	// the isolated Workspace MCP route. PublicBaseURL remains its OAuth issuer.
+	MCPResourceBaseURL string
 	// AllowedOrigins is the Origin-header allowlist for the /mcp endpoint
 	// (DNS-rebinding protection). Requests with no Origin header are always
 	// allowed — server-to-server MCP clients (claude.ai, MCP Inspector, curl)
 	// send none, and an over-strict check would break them. A present Origin
 	// must match one of these entries (scheme://host[:port]) or the request is
 	// rejected with 403. Set via ALLOWED_ORIGINS (comma-separated); defaults to
-	// the PUBLIC_BASE_URL origin.
+	// the MCP resource origin (PUBLIC_BASE_URL unless overridden).
 	AllowedOrigins []string
 	AuthMode       string
 	AuthRequired   bool
@@ -755,6 +758,7 @@ func Load() (*Config, error) {
 		Addr:                            envOr("ADDR", ":8080"),
 		PublicBaseURL:                   envOr("PUBLIC_BASE_URL", "http://localhost:8080"),
 		MCPPath:                         envOr("MCP_PATH", "/mcp"),
+		MCPResourceBaseURL:              strings.TrimSpace(os.Getenv("MCP_RESOURCE_BASE_URL")),
 		AuthMode:                        authMode,
 		AuthRequired:                    envBool("AUTH_REQUIRED", false),
 		OperatorLogin:                   envOr("OPERATOR_GITHUB_LOGIN", "operator"),
@@ -1017,6 +1021,20 @@ func Load() (*Config, error) {
 	default:
 		return nil, fmt.Errorf("MCP_TOOL_FILTER must be \"all\", \"read-only\" or %q, got %q", TelegramWorkspaceReadOnly, c.ToolFilter)
 	}
+	if c.MCPResourceBaseURL != "" {
+		if c.ToolFilter != TelegramWorkspaceReadOnly {
+			return nil, errors.New("MCP_RESOURCE_BASE_URL requires the telegram-workspace-read-only profile")
+		}
+		resource, issuer := strings.TrimRight(c.MCPResourceBaseURL, "/"), strings.TrimRight(c.PublicBaseURL, "/")
+		if !strings.HasPrefix(resource, "https://") || originOf(resource) != resource ||
+			!strings.HasPrefix(issuer, "https://") || originOf(issuer) != issuer || strings.EqualFold(resource, issuer) {
+			return nil, errors.New("MCP_RESOURCE_BASE_URL and PUBLIC_BASE_URL must be distinct HTTPS origins")
+		}
+		if c.MCPPath != "/workspace/mcp" {
+			return nil, errors.New("MCP_RESOURCE_BASE_URL requires MCP_PATH=/workspace/mcp")
+		}
+		c.MCPResourceBaseURL = resource
+	}
 	// MCPPath must be an absolute path below the origin. A root value would
 	// shadow the landing page and the root MCP alias: cmd/server/main.go
 	// mounts the MCP handler at cfg.MCPPath and registers GET, POST and
@@ -1110,7 +1128,7 @@ func Load() (*Config, error) {
 	}
 	c.AllowedOrigins = parseStringCSV(os.Getenv("ALLOWED_ORIGINS"))
 	if len(c.AllowedOrigins) == 0 {
-		if origin := originOf(c.PublicBaseURL); origin != "" {
+		if origin := originOf(c.MCPBaseURL()); origin != "" {
 			c.AllowedOrigins = []string{origin}
 		} else {
 			slog.Warn("ALLOWED_ORIGINS is empty and PUBLIC_BASE_URL has no parseable origin; "+
@@ -1405,6 +1423,14 @@ func parseInt64CSV(s string) []int64 {
 		parts = append(parts, n)
 	}
 	return parts
+}
+
+// MCPBaseURL returns the public origin advertised for MCP discovery.
+func (c *Config) MCPBaseURL() string {
+	if c.MCPResourceBaseURL != "" {
+		return c.MCPResourceBaseURL
+	}
+	return c.PublicBaseURL
 }
 
 // originOf returns the scheme://host[:port] origin of a base URL, matching the

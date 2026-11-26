@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"slices"
+	"strings"
 
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 
@@ -30,16 +31,33 @@ func serverRoutes(cfg *config.Config, next http.Handler) http.Handler {
 	if cfg.ToolFilter != config.TelegramWorkspaceReadOnly {
 		return next
 	}
+	resourceHost, issuerHost := "", ""
+	if cfg.MCPResourceBaseURL != "" {
+		resourceHost = strings.TrimPrefix(cfg.MCPResourceBaseURL, "https://")
+		issuerHost = strings.TrimPrefix(strings.TrimRight(cfg.PublicBaseURL, "/"), "https://")
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var expectedHost string
 		switch r.URL.EscapedPath() {
-		case cfg.MCPPath, "/.well-known/oauth-protected-resource" + cfg.MCPPath,
-			"/.well-known/oauth-protected-resource", "/.well-known/oauth-authorization-server",
-			"/oauth/authorize", "/oauth/telegram/callback", "/oauth/token", "/oauth/revoke", "/oauth/register",
-			"/healthz", "/readyz":
-			next.ServeHTTP(w, r)
+		case cfg.MCPPath, "/.well-known/oauth-protected-resource" + cfg.MCPPath:
+			expectedHost = resourceHost
+		case "/.well-known/oauth-protected-resource":
+			if resourceHost != "" {
+				http.NotFound(w, r)
+				return
+			}
+		case "/.well-known/oauth-authorization-server", "/oauth/authorize", "/oauth/telegram/callback", "/oauth/token", "/oauth/revoke", "/oauth/register":
+			expectedHost = issuerHost
+		case "/healthz", "/readyz":
 		default:
 			http.NotFound(w, r)
+			return
 		}
+		if expectedHost != "" && !strings.EqualFold(r.Host, expectedHost) {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 
