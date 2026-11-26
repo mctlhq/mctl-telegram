@@ -364,3 +364,46 @@ func TestSender_SendDraftLanguage(t *testing.T) {
 		t.Fatalf("ru %q en %q", ru, en)
 	}
 }
+
+func TestSender_FetchPhoto(t *testing.T) {
+	pngBytes := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4")
+	filePath := "photos/file_1.png"
+	fileBytes := pngBytes
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/bot" + testToken + "/getFile":
+			_, _ = io.WriteString(w, `{"ok":true,"result":{"file_id":"AgACAgIAAx0C123456","file_size":`+
+				strings.TrimSpace(strings.ReplaceAll(`100`, "", ""))+`,"file_path":"`+filePath+`"}}`)
+		case "/file/bot" + testToken + "/photos/file_1.png", "/file/bot" + testToken + "/photos/bad.html":
+			_, _ = w.Write(fileBytes)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	s := &Sender{hc: srv.Client(), fileHC: srv.Client(), base: srv.URL, token: testToken}
+	ctx := context.Background()
+
+	got, err := s.FetchPhoto(ctx, "AgACAgIAAx0C123456")
+	if err != nil {
+		t.Fatalf("FetchPhoto valid png: %v", err)
+	}
+	if !strings.HasPrefix(got, "data:image/png;base64,") {
+		t.Fatalf("got %q, want data:image/png;base64, prefix", got)
+	}
+
+	if _, err := s.FetchPhoto(ctx, "../evil"); err == nil {
+		t.Fatal("accepted invalid file_id")
+	}
+
+	filePath = "../etc/passwd"
+	if _, err := s.FetchPhoto(ctx, "AgACAgIAAx0C123456"); err == nil {
+		t.Fatal("accepted path traversal file_path")
+	}
+
+	filePath = "photos/bad.html"
+	fileBytes = []byte("<html><script>alert(1)</script></html>")
+	if _, err := s.FetchPhoto(ctx, "AgACAgIAAx0C123456"); err == nil {
+		t.Fatal("accepted HTML payload as photo")
+	}
+}

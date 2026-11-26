@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 )
 
 // paFake is a scripted PA server: it records every request in order and
@@ -593,5 +595,52 @@ func TestPAWorker_LoopRunsClaimedJob(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("loop = %v", err)
+	}
+}
+
+func TestPAWorker_PhotoFragmentMultimodalAndTokens(t *testing.T) {
+	bigURI := "data:image/jpeg;base64," + strings.Repeat("QUJD", 50000)
+	frags := []paFragment{
+		{Kind: "photo", Provenance: "external", Text: "[photo]", ImageURL: bigURI},
+		{Kind: "caption", Provenance: "external", Text: "What is in this photo?"},
+	}
+	msgs := paMessages(frags)
+	if len(msgs) != 3 {
+		t.Fatalf("msgs = %d, want 3", len(msgs))
+	}
+	if len(msgs[1].ContentParts) != 2 || msgs[1].ContentParts[1].ImageURL == nil || msgs[1].ContentParts[1].ImageURL.URL != bigURI {
+		t.Fatalf("photo message parts = %+v", msgs[1].ContentParts)
+	}
+	if !strings.Contains(msgs[1].ContentParts[0].Text, `<external_data kind="photo">`) {
+		t.Fatalf("missing external_data wrapper on photo notice: %q", msgs[1].ContentParts[0].Text)
+	}
+	toks := paContextTokens(msgs, nil)
+	if toks > jobs.PhotoContextTokens+500 {
+		t.Fatalf("photo tokens %d exceeded bounded photo budget", toks)
+	}
+
+	var sentBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&sentBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"A cat."}}],"usage":{"prompt_tokens":10,"completion_tokens":2}}`))
+	}))
+	defer srv.Close()
+	c := &OpenAIClient{BaseURL: srv.URL, APIKey: "k", Model: "m", HTTP: srv.Client()}
+	res, err := c.ChatPA(context.Background(), msgs, nil)
+	if err != nil {
+		t.Fatalf("ChatPA: %v", err)
+	}
+	if res.Message.Content != "A cat." {
+		t.Fatalf("content = %q", res.Message.Content)
+	}
+	wireMsgs, ok := sentBody["messages"].([]any)
+	if !ok || len(wireMsgs) != 3 {
+		t.Fatalf("wire messages = %+v", sentBody["messages"])
+	}
+	photoMsg := wireMsgs[1].(map[string]any)
+	parts, ok := photoMsg["content"].([]any)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("wire photo content = %#v, want 2-part array", photoMsg["content"])
 	}
 }
