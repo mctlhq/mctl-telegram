@@ -139,6 +139,8 @@ type Server struct {
 	// default) reproduces today's tools-only surface byte-for-byte -- see
 	// WithAppsEnabled and newMCPServer.
 	AppsEnabled bool
+	// AppsWorkspaceOnly limits App resources and host-side tool visibility.
+	AppsWorkspaceOnly bool
 	// BroadcastContent is the BROADCAST_CONTENT_ENABLED switch handed to
 	// every content read, and to the Local Bridge daemon in the call's
 	// arguments. New turns it on; a bare &Server{} leaves it off, which
@@ -293,6 +295,16 @@ func (s *Server) WithAppsEnabled(b bool) *Server {
 	return s
 }
 
+// WithAppsWorkspaceOnly selects the Workspace-only App surface.
+func (s *Server) WithAppsWorkspaceOnly(b bool) *Server {
+	s.AppsWorkspaceOnly = b
+	return s
+}
+
+func (s *Server) legacyAppsEnabled() bool {
+	return s.AppsEnabled && !s.AppsWorkspaceOnly && s.ToolFilter != config.TelegramWorkspaceReadOnly
+}
+
 // WithBroadcastContent sets the BROADCAST_CONTENT_ENABLED switch. Returns
 // the receiver for chaining.
 func (s *Server) WithBroadcastContent(enabled bool) *Server {
@@ -361,6 +373,9 @@ func (s *Server) addTool(srv *mcpserver.MCPServer, tool mcplib.Tool, handler mcp
 	if s.ToolFilter == config.TelegramWorkspaceReadOnly && (tool.Name == "get_messages" || tool.Name == "get_unread_messages") {
 		handler = withoutWorkspaceMedia(handler)
 	}
+	if s.AppsEnabled && s.AppsWorkspaceOnly {
+		setWorkspaceToolVisibility(&tool)
+	}
 	srv.AddTool(tool, handler)
 }
 
@@ -375,7 +390,7 @@ func (s *Server) addToolUI(srv *mcpserver.MCPServer, tool mcplib.Tool, handler m
 // addToolUITo is addToolUI for a chosen ui:// document. The dashboard tools
 // and the two writes the dashboard prepares point at the dashboard document.
 func (s *Server) addToolUITo(srv *mcpserver.MCPServer, tool mcplib.Tool, handler mcpserver.ToolHandlerFunc, uri string) {
-	if s.AppsEnabled && (s.ToolFilter != config.TelegramWorkspaceReadOnly || uri == mcpui.WorkspaceResourceURI) {
+	if s.legacyAppsEnabled() || (s.AppsEnabled && uri == mcpui.WorkspaceResourceURI) {
 		withUIResourceURI(uri)(&tool)
 	}
 	s.addTool(srv, tool, handler)
@@ -387,7 +402,7 @@ func (s *Server) addToolUITo(srv *mcpserver.MCPServer, tool mcplib.Tool, handler
 // matching the auth check every tool handler in this package performs via
 // auth.From(ctx).
 func (s *Server) handleReadAppResource(ctx context.Context, req mcplib.ReadResourceRequest) ([]mcplib.ResourceContents, error) {
-	if s.ToolFilter == config.TelegramWorkspaceReadOnly && req.Params.URI != mcpui.WorkspaceResourceURI {
+	if (s.AppsWorkspaceOnly || s.ToolFilter == config.TelegramWorkspaceReadOnly) && req.Params.URI != mcpui.WorkspaceResourceURI {
 		return nil, errors.New("unknown resource")
 	}
 	if auth.From(ctx) == nil {
@@ -510,7 +525,7 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 		opts...,
 	)
 	if s.AppsEnabled {
-		if s.ToolFilter != config.TelegramWorkspaceReadOnly {
+		if s.legacyAppsEnabled() {
 			srv.AddResource(mcpui.Resource(), s.handleReadAppResource)
 			srv.AddResource(mcpui.DashboardResource(), s.handleReadAppResource)
 		}
@@ -558,7 +573,7 @@ func (s *Server) newMCPServer() *mcpserver.MCPServer {
 		t, h := s.toolGetMedia()
 		s.addTool(srv, t, h)
 	}
-	if s.AppsEnabled {
+	if s.legacyAppsEnabled() {
 		t, h := s.toolPrepareSendMessage()
 		s.addToolUI(srv, t, h)
 		for _, reg := range []func() (mcplib.Tool, mcpserver.ToolHandlerFunc){

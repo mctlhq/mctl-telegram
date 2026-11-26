@@ -431,6 +431,8 @@ type Config struct {
 	// it, with no redeploy of this repository required beyond the env change.
 	// Set via MCP_APPS_ENABLED.
 	AppsEnabled bool
+	// AppsWorkspaceOnly publishes only the read-only Workspace App when Apps are enabled.
+	AppsWorkspaceOnly bool // MCP_APPS_WORKSPACE_ONLY
 	// BroadcastContentEnabled lets the content tools return broadcast
 	// channel posts, with the channel's official sponsored messages attached
 	// (Telegram API terms §3.3). On by default. Turning it off restores the
@@ -779,6 +781,7 @@ func Load() (*Config, error) {
 		AgentEnabled:                    envBool("AGENT_ENABLED", false),
 		AgentKillSwitch:                 envBool("AGENT_KILL_SWITCH", false),
 		AppsEnabled:                     envBool("MCP_APPS_ENABLED", false),
+		AppsWorkspaceOnly:               envBool("MCP_APPS_WORKSPACE_ONLY", false),
 		BroadcastContentEnabled:         broadcastContentFromEnv(),
 		EventsValkeyURL:                 os.Getenv("EVENTS_VALKEY_URL"),
 		EventsValkeyPassword:            os.Getenv("EVENTS_VALKEY_PASSWORD"),
