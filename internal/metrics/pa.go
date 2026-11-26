@@ -37,10 +37,34 @@ var PAUpdateOutcomes = []string{
 // (pa.RunPhases(); TestPARunPhaseLabels in internal/pa keeps them equal).
 var PARunPhases = []string{"queue", "model", "tool", "run", "total"}
 
+// PAFailureReasons is the closed reason label set of mctl_pa_job_failures_total
+// (jobs.FailureReasons(); TestPAFailureReasonLabels in internal/pa keeps them equal).
+var PAFailureReasons = []string{
+	"provider_rate_limit",
+	"provider_server",
+	"provider_request",
+	"provider_error",
+	"empty_answer",
+	"context_limit",
+	"cost_limit",
+	"tool_cap",
+	"tool_error",
+	"tool_after_card",
+	"lease_short",
+	"lease_expired",
+	"claim_failed",
+	"turn_timeout",
+	"reply_timeout",
+	"deadline",
+	"invalid_claim",
+	"abandoned",
+}
+
 type paCollectors struct {
 	// phases is where a run's time went, per phase (internal/pa/timing.go).
-	phases  *prometheus.HistogramVec
-	updates *prometheus.CounterVec
+	phases      *prometheus.HistogramVec
+	jobFailures *prometheus.CounterVec
+	updates     *prometheus.CounterVec
 	outbox  *prometheus.CounterVec
 	answers *prometheus.CounterVec
 	checks  *prometheus.CounterVec
@@ -67,6 +91,10 @@ func newPACollectors() *paCollectors {
 			Help:    "Time a Personal Assistant run spent per phase: queue (created to claimed), model and tool (summed over the run), run (claimed to reply), total (created to reply). Only runs one replica saw end to end.",
 			Buckets: []float64{0.25, 0.5, 1, 2, 4, 8, 15, 30, 60, 120, 300},
 		}, []string{"phase"}),
+		jobFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "mctl_pa_job_failures_total",
+			Help: "Personal Assistant runs that ended without an answer, by closed failure reason.",
+		}, []string{"reason"}),
 		updates: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mctl_pa_updates_total",
 			Help: "PA webhook deliveries by outcome. bad_secret counts requests without the PA_WEBHOOK_SECRET token.",
@@ -121,6 +149,9 @@ func newPACollectors() *paCollectors {
 	for _, o := range PACallbackAnswerOutcomes {
 		c.answers.WithLabelValues(o).Add(0)
 	}
+	for _, r := range PAFailureReasons {
+		c.jobFailures.WithLabelValues(r).Add(0)
+	}
 	for _, r := range []string{"ok", "problem", "unreadable"} {
 		c.checks.WithLabelValues(r).Add(0)
 	}
@@ -128,7 +159,19 @@ func newPACollectors() *paCollectors {
 }
 
 func (c *paCollectors) collectors() []prometheus.Collector {
-	return []prometheus.Collector{c.phases, c.updates, c.outbox, c.answers, c.checks, c.problemChecks, c.up, c.ok, c.lastOK, c.problem, c.pending, c.lastErr}
+	return []prometheus.Collector{c.phases, c.jobFailures, c.updates, c.outbox, c.answers, c.checks, c.problemChecks, c.up, c.ok, c.lastOK, c.problem, c.pending, c.lastErr}
+}
+
+// CountPAJobFailure counts one PA run that ended without an answer. Satisfies
+// pa.FailureCounter. Unknown reasons map to "abandoned".
+func (r *Registry) CountPAJobFailure(reason string) {
+	for _, known := range PAFailureReasons {
+		if known == reason {
+			r.pa.jobFailures.WithLabelValues(reason).Inc()
+			return
+		}
+	}
+	r.pa.jobFailures.WithLabelValues("abandoned").Inc()
 }
 
 // CountPAUpdate counts one webhook delivery. Satisfies pa.Counter.

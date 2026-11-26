@@ -36,6 +36,7 @@ type paMetrics interface {
 	pa.Counter
 	pa.OutboxCounter
 	pa.CallbackCounter
+	pa.FailureCounter
 	pa.PhaseObserver
 	connector.Metrics
 }
@@ -211,15 +212,17 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 	var counter pa.Counter
 	var outboxCounter pa.OutboxCounter
 	var callbackCounter pa.CallbackCounter
+	var failureCounter pa.FailureCounter
 	var phases pa.PhaseObserver
 	if m != nil {
-		counter, outboxCounter, callbackCounter, phases = m, m, m, m
+		counter, outboxCounter, callbackCounter, failureCounter, phases = m, m, m, m, m
 	}
 	loopCfg := pa.RunLoopConfig{
 		Store: store, Sealer: sealer, Pool: pool, Minter: minter, Verifier: verifier, Sender: sender,
 		Tools:  resolver,
 		Limits: cfg.PALimits(), Budget: cfg.PABudget(),
-		Metrics: outboxCounter, CallbackMetrics: callbackCounter,
+		Metrics: outboxCounter, CallbackMetrics: callbackCounter, FailureMetrics: failureCounter,
+		Admins:  cfg.TGLoginAdmins,
 		Allowed: allowed, Typing: sender, Drafts: sender, Getenv: os.Getenv, Phases: phases,
 	}
 	convCfg := pa.ConversationsConfig{
