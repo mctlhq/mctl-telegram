@@ -858,3 +858,43 @@ func TestLoadWorkspaceProfileFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadWorkspaceBrandedMCPOrigin(t *testing.T) {
+	t.Setenv("MCP_TOOL_FILTER", TelegramWorkspaceReadOnly)
+	t.Setenv("MCP_APPS_ENABLED", "true")
+	t.Setenv("ALLOW_SEND", "false")
+	t.Setenv("AUTH_REQUIRED", "true")
+	t.Setenv("AUTH_MODE", "local-jwt")
+	t.Setenv("OAUTH_JWT_SIGNING_KEY", "synthetic-config-test-key")
+	t.Setenv("OAUTH_JWT_AUDIENCE", "synthetic-workspace")
+	t.Setenv("OAUTH_JWT_AUDIENCE_REQUIRED", "true")
+	t.Setenv("TG_LOGIN_CLIENTS", "8511")
+	t.Setenv("PUBLIC_BASE_URL", "https://workspace-auth.example.test")
+	t.Setenv("MCP_RESOURCE_BASE_URL", "https://tg.example.test")
+	t.Setenv("MCP_PATH", "/workspace/mcp")
+	t.Setenv("ALLOWED_ORIGINS", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MCPBaseURL() != "https://tg.example.test" || !reflect.DeepEqual(cfg.AllowedOrigins, []string{cfg.MCPBaseURL()}) {
+		t.Fatalf("MCP origin = %q, allowed origins = %v", cfg.MCPBaseURL(), cfg.AllowedOrigins)
+	}
+	for name, settings := range map[string]map[string]string{
+		"shared tool filter":   {"MCP_TOOL_FILTER": "all"},
+		"production MCP path":  {"MCP_PATH": "/mcp"},
+		"weak resource origin": {"MCP_RESOURCE_BASE_URL": "http://tg.example.test"},
+		"resource path":        {"MCP_RESOURCE_BASE_URL": "https://tg.example.test/extra"},
+		"userinfo":             {"MCP_RESOURCE_BASE_URL": "https://user@tg.example.test"},
+		"shared issuer":        {"PUBLIC_BASE_URL": "https://tg.example.test"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for key, value := range settings {
+				t.Setenv(key, value)
+			}
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "MCP_RESOURCE_BASE_URL") {
+				t.Fatalf("configuration error = %v, want a branded routing refusal", err)
+			}
+		})
+	}
+}

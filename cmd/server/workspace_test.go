@@ -56,9 +56,13 @@ func TestWorkspaceHTTPRequiresIsolatedOAuthIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := &config.Config{ToolFilter: config.TelegramWorkspaceReadOnly, TGLoginClients: []int64{alice}, MCPPath: "/mcp"}
+	cfg := &config.Config{
+		ToolFilter: config.TelegramWorkspaceReadOnly, TGLoginClients: []int64{alice},
+		MCPPath: "/workspace/mcp", PublicBaseURL: issuerURL, MCPResourceBaseURL: "https://tg.example.test",
+	}
+	mcpURL := cfg.MCPBaseURL() + cfg.MCPPath
 	srv := &mcpapp.Server{Store: store, AppsEnabled: true, ToolFilter: cfg.ToolFilter}
-	factory := auth.MCPMiddleware(workspaceMCPProvider(cfg, provider), true, nil, auth.ResourceMetadata{BaseURL: issuerURL, MCPPath: cfg.MCPPath})
+	factory := auth.MCPMiddleware(workspaceMCPProvider(cfg, provider), true, nil, auth.ResourceMetadata{BaseURL: cfg.MCPBaseURL(), MCPPath: cfg.MCPPath})
 	handler := serverRoutes(cfg, factory(srv.HTTPHandler()))
 	body := `{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"ui://mctl-telegram/workspace-1.html"}}`
 	for _, tc := range []struct {
@@ -76,7 +80,7 @@ func TestWorkspaceHTTPRequiresIsolatedOAuthIdentity(t *testing.T) {
 		{"excess scope", issuerURL, audience, alice, []string{"telegram:messages:send"}, http.StatusUnauthorized},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+			req := httptest.NewRequest(http.MethodPost, mcpURL, strings.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Accept", "application/json, text/event-stream")
 			if tc.issuer != "" {
@@ -93,7 +97,7 @@ func TestWorkspaceHTTPRequiresIsolatedOAuthIdentity(t *testing.T) {
 				req.Header.Set("Authorization", "Bearer "+token)
 			}
 			if tc.want == http.StatusOK {
-				init := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(
+				init := httptest.NewRequest(http.MethodPost, mcpURL, strings.NewReader(
 					`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"workspace-test","version":"1"}}}`))
 				init.Header = req.Header.Clone()
 				w := httptest.NewRecorder()
@@ -109,9 +113,44 @@ func TestWorkspaceHTTPRequiresIsolatedOAuthIdentity(t *testing.T) {
 			if w.Code != tc.want {
 				t.Fatalf("status %d, want %d", w.Code, tc.want)
 			}
+			if tc.want == http.StatusUnauthorized && !strings.Contains(w.Header().Get("WWW-Authenticate"),
+				`resource_metadata="https://tg.example.test/.well-known/oauth-protected-resource/workspace/mcp"`) {
+				t.Fatal("401 challenge did not advertise the branded protected-resource metadata")
+			}
 			if tc.want == http.StatusOK && !strings.Contains(w.Body.String(), "text/html;profile=mcp-app") {
 				t.Fatal("authenticated request did not return workspace HTML")
 			}
 		})
+	}
+}
+
+func TestWorkspaceBrandedRoutesKeepOAuthAndMCPOnSeparateHosts(t *testing.T) {
+	cfg := &config.Config{
+		ToolFilter:         config.TelegramWorkspaceReadOnly,
+		PublicBaseURL:      "https://workspace-auth.example.test",
+		MCPResourceBaseURL: "https://tg.example.test",
+		MCPPath:            "/workspace/mcp",
+	}
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler := serverRoutes(cfg, next)
+	for _, tc := range []struct {
+		host, path string
+		want       int
+	}{
+		{"tg.example.test", "/workspace/mcp", http.StatusNoContent},
+		{"tg.example.test", "/.well-known/oauth-protected-resource/workspace/mcp", http.StatusNoContent},
+		{"workspace-auth.example.test", "/workspace/mcp", http.StatusNotFound},
+		{"tg.example.test", "/oauth/token", http.StatusNotFound},
+		{"workspace-auth.example.test", "/oauth/token", http.StatusNoContent},
+		{"workspace-auth.example.test", "/.well-known/oauth-authorization-server", http.StatusNoContent},
+		{"workspace-auth.example.test", "/.well-known/oauth-protected-resource", http.StatusNotFound},
+		{"tg.example.test", "/.well-known/oauth-protected-resource", http.StatusNotFound},
+		{"tg.example.test", "/mcp", http.StatusNotFound},
+	} {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "https://"+tc.host+tc.path, nil))
+		if w.Code != tc.want {
+			t.Errorf("%s%s status %d, want %d", tc.host, tc.path, w.Code, tc.want)
+		}
 	}
 }

@@ -80,3 +80,26 @@ func TestProtectedResource_ResourceByPath(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkspaceProtectedResourceUsesBrandedRouteAndSeparateIssuer(t *testing.T) {
+	cfg := &config.Config{
+		ToolFilter:         config.TelegramWorkspaceReadOnly,
+		AuthMode:           "local-jwt",
+		PublicBaseURL:      "https://workspace-auth.example.test",
+		MCPResourceBaseURL: "https://tg.example.test",
+		MCPPath:            "/workspace/mcp",
+	}
+	h := protectedResource(cfg, selectAuthServer(cfg))
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-protected-resource/workspace/mcp", nil)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	var meta protectedResourceMetadata
+	if err := json.NewDecoder(rec.Body).Decode(&meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.Resource != "https://tg.example.test/workspace/mcp" ||
+		!reflect.DeepEqual(meta.AuthorizationServers, []string{cfg.PublicBaseURL}) ||
+		!reflect.DeepEqual(meta.ScopesSupported, []string{"telegram:dialogs:read", "telegram:messages:read"}) {
+		t.Fatalf("protected resource metadata = %+v", meta)
+	}
+}

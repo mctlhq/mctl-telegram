@@ -1768,3 +1768,24 @@ func TestMetadataDocumentMatchesHandler(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthorizationServerMetadataHonorsEndpointScopeCeiling(t *testing.T) {
+	for _, scopes := range [][]string{
+		{"telegram:dialogs:read", "telegram:messages:read"},
+		{},
+	} {
+		srv := &Server{cfg: Config{Issuer: testIssuer, EndpointScopeCeiling: scopes}}
+		req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
+		rec := httptest.NewRecorder()
+		srv.handleAuthorizationServerMetadata(rec, req)
+		var metadata struct {
+			Scopes []string `json:"scopes_supported"`
+		}
+		if err := json.NewDecoder(rec.Body).Decode(&metadata); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(metadata.Scopes, scopes) {
+			t.Errorf("scopes_supported = %#v, want %#v", metadata.Scopes, scopes)
+		}
+	}
+}

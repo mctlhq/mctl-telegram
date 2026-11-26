@@ -1579,6 +1579,9 @@ func MetadataDocument(issuer string) map[string]any {
 
 func (s *Server) handleAuthorizationServerMetadata(w http.ResponseWriter, _ *http.Request) {
 	body := MetadataDocument(s.cfg.Issuer)
+	if s.cfg.EndpointScopeCeiling != nil {
+		body["scopes_supported"] = s.cfg.EndpointScopeCeiling
+	}
 	// CIMD and private_key_jwt are announced together and only when
 	// advertising is on: announcing private_key_jwt alone could steer a DCR
 	// client toward a method /oauth/register never grants.

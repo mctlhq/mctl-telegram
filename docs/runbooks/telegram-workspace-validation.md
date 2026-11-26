@@ -10,6 +10,19 @@ The canonical evidence issue is [#650](https://github.com/mctlhq/mctl-telegram/i
 4. In a synthetic or instrumented preflight, verify server denial of direct authenticated named calls outside that list, using valid argument shapes. Include send and prepare, mark-read and draft, template mutation, account/admin and token/worker tools. Require dispatch denial and no handler side effect. Verify missing-scope, cross-principal, wrong-audience, expired/revoked and anonymous denial, including anonymous resource reads. Confirm allowed reads retain caller identity. Exercise refusals with fixtures before registering any live host. Keep actual writes out of the validation.
 5. Pin one Workspace bundle per release. Record the URI, MIME, SHA-256 of the decoded `resources/read` text bytes, build and route. Compare the actual bytes loaded by each host where observable with the reference. If the host prevents inspection, mark the hash as unobserved and record the limitation.
 
+### Routing on the Telegram hostname
+
+For a branded isolated route, set `MCP_PATH=/workspace/mcp` and
+`MCP_RESOURCE_BASE_URL=https://tg.mctl.ai`. Set `PUBLIC_BASE_URL` to the
+dedicated OAuth issuer's HTTPS origin. Route only the exact
+`/workspace/mcp` and `/.well-known/oauth-protected-resource/workspace/mcp`
+paths on `tg.mctl.ai` to the isolated service. Preserve the incoming Host
+header. Route the dedicated OAuth hostname to that same isolated service.
+Verify the MCP 401 challenge points at the path-qualified metadata, the
+metadata lists the dedicated issuer and only the approved read scopes, and
+each hostname rejects the other hostname's protected routes. Keep the
+shared `/mcp` and its OAuth metadata on the existing service.
+
 ## 2. Host observations
 
 Connect the isolated endpoint using a distinct least-privilege OAuth grant for each eligible host. Register direct MCP and an independently authorized isolated Portal mapping separately. Never repoint the shared Portal mapping for the test. Record eligibility, date, host and build, route, scopes, resource and digest, capabilities, MCP/UI handshake, and sanitized screenshot or recording references.

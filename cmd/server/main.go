@@ -520,6 +520,7 @@ func main() {
 	// "manage" nav/footer link rather than link to a 404 in shared-hmac mode.
 	showManage := strings.EqualFold(cfg.AuthMode, "local-jwt")
 	resourceMeta := auth.ResourceMetadata{BaseURL: cfg.PublicBaseURL, MCPPath: cfg.MCPPath}
+	mcpResourceMeta := auth.ResourceMetadata{BaseURL: cfg.MCPBaseURL(), MCPPath: cfg.MCPPath}
 
 	mux.Get("/healthz", healthz)
 	mux.Get("/readyz", healthz)
@@ -876,7 +877,7 @@ func main() {
 		slog.Error("k8s service account auth init failed; refusing to start", "err", err)
 		os.Exit(1)
 	}
-	mcpHandler := auth.MCPMiddleware(workspaceMCPProvider(cfg, mcpProvider), cfg.AuthRequired, m, resourceMeta)(
+	mcpHandler := auth.MCPMiddleware(workspaceMCPProvider(cfg, mcpProvider), cfg.AuthRequired, m, mcpResourceMeta)(
 		limiter.Middleware()(mcpSrv.HTTPHandler()),
 	)
 	// OriginGuard runs before auth: a present browser Origin must be on the
@@ -1566,7 +1567,11 @@ func protectedResource(cfg *config.Config, authServer string) http.HandlerFunc {
 	if authServer != "" {
 		authServers = []string{authServer}
 	}
-	base := strings.TrimRight(cfg.PublicBaseURL, "/")
+	base := strings.TrimRight(cfg.MCPBaseURL(), "/")
+	scopes := workspaceOAuthScopes(cfg)
+	if scopes == nil {
+		scopes = oauth.DCRNegotiableScopes
+	}
 	mcpAlias := "/.well-known/oauth-protected-resource" + cfg.MCPPath
 	return func(w http.ResponseWriter, r *http.Request) {
 		resource := base
@@ -1578,7 +1583,7 @@ func protectedResource(cfg *config.Config, authServer string) http.HandlerFunc {
 		_ = json.NewEncoder(w).Encode(protectedResourceMetadata{
 			Resource:             resource,
 			AuthorizationServers: authServers,
-			ScopesSupported:      oauth.DCRNegotiableScopes,
+			ScopesSupported:      scopes,
 		})
 	}
 }
