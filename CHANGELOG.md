@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.150.2](https://github.com/mctlhq/mctl-telegram/compare/0.150.1...0.150.2) (2026-11-26)
+
+
+### Bug Fixes
+
+* validate Telegram Workspace on the existing MCP canary ([3c84fb7](https://github.com/mctlhq/mctl-telegram/commit/3c84fb7fb0ab887dd94eb7c61b4fd34a5a2ae15c))
+
 ## [0.150.1](https://github.com/mctlhq/mctl-telegram/compare/0.150.0...0.150.1) (2026-11-26)
 
 
