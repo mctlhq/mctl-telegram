@@ -180,6 +180,14 @@ type RunLoopConfig struct {
 	// Getenv reads PA_STREAMING_ENABLED on every claim and draft. Optional;
 	// defaults to os.Getenv.
 	Getenv func(string) string
+	// Photos resolves inbound photo file_ids into bounded data URIs at claim
+	// time (#1501). Optional; nil degrades photo fragments to text placeholders.
+	Photos PhotoFetcher
+}
+
+// PhotoFetcher resolves a Telegram Bot API file_id to a bounded data URI.
+type PhotoFetcher interface {
+	FetchPhoto(ctx context.Context, fileID string) (string, error)
 }
 
 // RunLoop serves the run-loop routes and implements RunEnqueuer and
@@ -212,6 +220,7 @@ type RunLoop struct {
 	timer       *runTimer
 	cards       CardRenderer
 	drafts      DraftSender
+	photos      PhotoFetcher
 	getenv   func(string) string
 	limiter  *draftLimiter
 	// pending tracks the deliveries request paths started (deliverAfter).
@@ -293,7 +302,7 @@ func NewRunLoop(cfg RunLoopConfig) (*RunLoop, error) {
 		admins:  uniquePositiveIDs(cfg.Admins),
 		allowed: cfg.Allowed, typing: newTypingTracker(cfg.Typing, now), timer: newRunTimer(cfg.Phases, now),
 		cards: cfg.Cards, approveTools: approve, actionsHint: cfg.ActionsHint,
-		drafts: cfg.Drafts, getenv: getenv, limiter: newDraftLimiter(),
+		drafts: cfg.Drafts, photos: cfg.Photos, getenv: getenv, limiter: newDraftLimiter(),
 	}
 	if loop.typing != nil && cfg.Drafts != nil {
 		loop.typing.drafts = cfg.Drafts
@@ -503,6 +512,7 @@ type (
 		Kind       string `json:"kind"`
 		Provenance string `json:"provenance"`
 		Text       string `json:"text"`
+		ImageURL   string `json:"image_url,omitempty"`
 	}
 	wireLimits struct {
 		MaxJobCostUSD      float64 `json:"max_job_cost_usd"`
@@ -662,6 +672,7 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	frags = trimContext(frags, l.limits.MaxContextTokens)
+	frags = l.hydratePhotos(ctx, frags)
 	tools, err := l.claimTools(j.ToolSet)
 	if err != nil {
 		// build admitted only pinned reads, so this is a server bug; it
@@ -733,6 +744,58 @@ func (l *RunLoop) loadFragments(ctx context.Context, principal int64, conversati
 	return out, nil
 }
 
+func fragmentTokens(f wireFragment) int {
+	if f.Kind == string(convo.KindPhoto) {
+		return jobs.PhotoContextTokens
+	}
+	return jobs.EstimateTokens(f.Text)
+}
+
+const (
+	maxClaimPhotos     = 2
+	maxClaimPhotoBytes = 3 << 20
+	perPhotoFetchWait  = 10 * time.Second
+)
+
+// hydratePhotos resolves up to the newest maxClaimPhotos photo fragments in a
+// claimed conversation into bounded base64 data URIs. Raw file_ids never leave
+// the server; older or unreadable photos become plain text placeholders.
+func (l *RunLoop) hydratePhotos(ctx context.Context, frags []wireFragment) []wireFragment {
+	var photoIdx []int
+	for i, f := range frags {
+		if f.Kind == string(convo.KindPhoto) {
+			photoIdx = append(photoIdx, i)
+		}
+	}
+	if len(photoIdx) == 0 {
+		return frags
+	}
+	totalBytes := 0
+	// Walk newest-first so recent photos stay visible if there are many.
+	for n := len(photoIdx) - 1; n >= 0; n-- {
+		idx := photoIdx[n]
+		fileID := frags[idx].Text
+		frags[idx].Text = "[photo unavailable]"
+		if l.photos == nil || len(photoIdx)-n > maxClaimPhotos {
+			continue
+		}
+		fctx, cancel := context.WithTimeout(ctx, perPhotoFetchWait)
+		dataURI, err := l.photos.FetchPhoto(fctx, fileID)
+		cancel()
+		if err != nil {
+			slog.Warn("pa claim: photo fetch failed", "err", err)
+			continue
+		}
+		if totalBytes+len(dataURI) > maxClaimPhotoBytes {
+			continue
+		}
+		totalBytes += len(dataURI)
+		frags[idx].Text = "[photo]"
+		frags[idx].ImageURL = dataURI
+	}
+	return frags
+}
+
 // trimContext drops the oldest fragments until the estimate fits max
 // tokens (S1-R1). The newest user fragment is never dropped: it is what
 // the run answers. Fragments keep their order and marks.
@@ -745,7 +808,7 @@ func trimContext(frags []wireFragment, max int) []wireFragment {
 	}
 	total := 0
 	for _, f := range frags {
-		total += jobs.EstimateTokens(f.Text)
+		total += fragmentTokens(f)
 	}
 	keep := make([]bool, len(frags))
 	for i := range keep {
@@ -756,7 +819,7 @@ func trimContext(frags []wireFragment, max int) []wireFragment {
 			continue
 		}
 		keep[i] = false
-		total -= jobs.EstimateTokens(frags[i].Text)
+		total -= fragmentTokens(frags[i])
 	}
 	out := make([]wireFragment, 0, len(frags))
 	for i, f := range frags {

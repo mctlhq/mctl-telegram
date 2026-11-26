@@ -225,6 +225,9 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 		Admins:  cfg.TGLoginAdmins,
 		Allowed: allowed, Typing: sender, Drafts: sender, Getenv: os.Getenv, Phases: phases,
 	}
+	if pf, ok := sender.(pa.PhotoFetcher); ok {
+		loopCfg.Photos = pf
+	}
 	convCfg := pa.ConversationsConfig{
 		Store: store, Sealer: sealer, TTL: cfg.PAConversationTTL,
 		Replies: &pa.OutboxReplies{Store: store, Metrics: outboxCounter},

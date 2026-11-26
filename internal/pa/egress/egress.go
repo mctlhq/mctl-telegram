@@ -107,6 +107,9 @@ const (
 	// PurposeBotAPI is for the bot's own Telegram Bot API calls
 	// (internal/pa/output). The caller allows only the Bot API host.
 	PurposeBotAPI
+	// PurposeBotFile is for bounded Telegram Bot API file downloads
+	// (inbound photos, #1501). Same Bot API host allowlist, larger body cap.
+	PurposeBotFile
 )
 
 func (p Purpose) String() string {
@@ -123,6 +126,8 @@ func (p Purpose) String() string {
 		return "mcp"
 	case PurposeBotAPI:
 		return "botapi"
+	case PurposeBotFile:
+		return "botfile"
 	default:
 		return fmt.Sprintf("purpose(%d)", int(p))
 	}
@@ -146,6 +151,7 @@ var defaultLimits = map[Purpose]limits{
 	PurposeRevocation:   {timeout: 10 * time.Second, maxBody: 16 << 10},
 	PurposeMCP:          {timeout: 30 * time.Second, maxBody: 1 << 20},
 	PurposeBotAPI:       {timeout: 10 * time.Second, maxBody: 64 << 10},
+	PurposeBotFile:      {timeout: 15 * time.Second, maxBody: 2 << 20},
 }
 
 // ceilingLimits bound the Config overrides: a value above the ceiling is
@@ -157,6 +163,7 @@ var ceilingLimits = map[Purpose]limits{
 	PurposeRevocation:   {timeout: 30 * time.Second, maxBody: 64 << 10},
 	PurposeMCP:          {timeout: 5 * time.Minute, maxBody: 8 << 20},
 	PurposeBotAPI:       {timeout: 30 * time.Second, maxBody: 256 << 10},
+	PurposeBotFile:      {timeout: 30 * time.Second, maxBody: 4 << 20},
 }
 
 // Config configures one client.

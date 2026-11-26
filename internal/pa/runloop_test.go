@@ -1373,6 +1373,67 @@ func TestRunLoop_ContextNamesTheAcceptedText(t *testing.T) {
 	}
 }
 
+type fakePhotoFetcher struct {
+	byID map[string]string
+	err  error
+}
+
+func (f fakePhotoFetcher) FetchPhoto(_ context.Context, fileID string) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	if u, ok := f.byID[fileID]; ok {
+		return u, nil
+	}
+	return "", errors.New("photo not found")
+}
+
+func TestRunLoop_ClaimHydratesRecentPhotosAndTaints(t *testing.T) {
+	const dataURI1 = "data:image/jpeg;base64,/9j/4AAQ"
+	const dataURI2 = "data:image/png;base64,iVBORw0KGgo="
+	const dataURI3 = "data:image/webp;base64,UklGRg=="
+	h := newRunLoopHarness(t, func(c *RunLoopConfig, _ *runLoopHarness) {
+		c.Photos = fakePhotoFetcher{byID: map[string]string{
+			"photo_oldest_111": dataURI1,
+			"photo_middle_222": dataURI2,
+			"photo_latest_333": dataURI3,
+		}}
+	})
+	h.consent(aliceID)
+	for _, id := range []string{"photo_oldest_111", "photo_middle_222", "photo_latest_333"} {
+		if code := h.message(aliceID, map[string]any{
+			"caption": "look",
+			"photo":   []any{map[string]any{"file_id": id, "width": 800, "height": 600, "file_size": 1000}},
+		}); code != http.StatusOK {
+			t.Fatalf("message %s: %d", id, code)
+		}
+	}
+	c := h.mustClaim()
+	var photos []wireFragment
+	for _, f := range c.Fragments {
+		if f.Kind == string(convo.KindPhoto) {
+			photos = append(photos, f)
+		}
+	}
+	if len(photos) != 3 {
+		t.Fatalf("photo fragments = %d, want 3", len(photos))
+	}
+	if photos[0].ImageURL != "" || photos[0].Text != "[photo unavailable]" {
+		t.Fatalf("oldest photo = %+v, want stripped placeholder", photos[0])
+	}
+	if photos[1].ImageURL != dataURI2 || photos[1].Text != "[photo]" {
+		t.Fatalf("middle photo = %+v, want hydrated dataURI2", photos[1])
+	}
+	if photos[2].ImageURL != dataURI3 || photos[2].Text != "[photo]" {
+		t.Fatalf("latest photo = %+v, want hydrated dataURI3", photos[2])
+	}
+	for _, f := range photos {
+		if f.Provenance != string(convo.ProvenanceExternal) {
+			t.Fatalf("photo provenance = %q, want external", f.Provenance)
+		}
+	}
+}
+
 type failRecorder struct {
 	mu      sync.Mutex
 	reasons []string

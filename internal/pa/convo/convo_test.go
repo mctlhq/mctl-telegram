@@ -108,7 +108,7 @@ func TestFragment_S1I4(t *testing.T) {
 	if (Fragment{}).Provenance() != ProvenanceExternal {
 		t.Error("zero Fragment is not external")
 	}
-	for _, k := range []Kind{KindCaption, KindReply, KindQuote, KindTool} {
+	for _, k := range []Kind{KindCaption, KindReply, KindQuote, KindTool, KindPhoto} {
 		if f := NewFragment(k, ProvenanceUser, "x"); f.Provenance() != ProvenanceExternal {
 			t.Errorf("%s fragment marked user", k)
 		}

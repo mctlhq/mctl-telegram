@@ -88,6 +88,9 @@ const (
 	// MaxToolOutputBytes caps one tool output (T10); the executor (#1315)
 	// truncates with TruncateToolOutput.
 	MaxToolOutputBytes = 64 << 10
+	// PhotoContextTokens is the fixed token budget charged per attached photo
+	// in conversation context estimation (#1501).
+	PhotoContextTokens = 1200
 )
 
 // Limits are the per-principal and per-run caps (threat model T10).
