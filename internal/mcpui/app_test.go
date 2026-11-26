@@ -278,8 +278,11 @@ func TestWorkspaceNegotiatesProtocolVersions(t *testing.T) {
 		t.Fatal("html/body need a non-zero min-height")
 	}
 	errAt := strings.Index(workspaceHTML, "function showBridgeError")
+	if errAt < 0 {
+		t.Fatal("showBridgeError is missing")
+	}
 	errEnd := strings.Index(workspaceHTML[errAt:], "\nwindow.addEventListener")
-	if errAt < 0 || errEnd < 0 {
+	if errEnd < 0 {
 		t.Fatal("showBridgeError is missing")
 	}
 	errFn := workspaceHTML[errAt : errAt+errEnd]
@@ -305,7 +308,7 @@ func TestWorkspaceNegotiatesProtocolVersions(t *testing.T) {
 	if initialized < 0 || sized < initialized {
 		t.Fatal("a successful handshake must send initialized before size-changed")
 	}
-	if !strings.Contains(thenFn, "showBridgeError") && !strings.Contains(workspaceHTML[thenEnd:], "showBridgeError") {
+	if !strings.Contains(rel[thenEnd:], "showBridgeError") {
 		t.Fatal("initialize failure must surface through showBridgeError")
 	}
 }
