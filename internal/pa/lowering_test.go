@@ -678,16 +678,24 @@ func TestS2D1_NoPermissionLowersADisclosure(t *testing.T) {
 
 // TestS2I9_DisclosureAfterAResetStillNeedsACard: a reset is a new, clean
 // conversation row (S2-I7), which is what a job of a conversation that was
-// just reset runs in. In one, with permission rows forced in, a disclosure
-// still gets its card.
+// just reset runs in. The reset is the one Alice makes: the first run reads
+// external content, so its conversation is tainted, then /new goes through
+// the webhook and the next message starts a run in the new row. In it, with
+// permission rows forced in, a disclosure still gets its card.
 func TestS2I9_DisclosureAfterAResetStillNeedsACard(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, s *db.Store) {
 		e := newLowerEnv(t, s)
 		e.manyCardsPerRun()
-		var rows, tainted int
-		if err := s.DB.QueryRow(`SELECT COUNT(*), COALESCE(SUM(tainted), 0) FROM pa_conversations WHERE principal = $1`,
-			alice).Scan(&rows, &tainted); err != nil || rows != 1 || tainted != 0 {
-			t.Fatalf("conversations %d, tainted %d, %v: want one clean row", rows, tainted, err)
+		e.read()
+		before := e.conv
+		e.resetThroughTheBot()
+		if e.conv == before {
+			t.Fatal("/new left the run in the conversation it had")
+		}
+		var open, tainted int
+		if err := s.DB.QueryRow(`SELECT COUNT(*), COALESCE(SUM(tainted), 0) FROM pa_conversations WHERE principal = $1 AND closed_at_ms = 0`,
+			alice).Scan(&open, &tainted); err != nil || open != 1 || tainted != 0 {
+			t.Fatalf("open conversations %d, tainted %d, %v: want one clean row", open, tainted, err)
 		}
 		e.forcedPermissionsLowerNothing()
 		// The same run does lower a write it has a permission for, so the
@@ -695,6 +703,25 @@ func TestS2I9_DisclosureAfterAResetStillNeedsACard(t *testing.T) {
 		e.grant("prm_vol", volumeTool, 5, kitchenID)
 		e.lowered("a write in the same run", "prm_vol", volumeTool, volume5)
 	})
+}
+
+// resetThroughTheBot sends /new and then a message through the webhook, as
+// Alice would, and claims the run of the new conversation. The env's
+// conversation, job and token are that run's from here on.
+func (e *lowerEnv) resetThroughTheBot() {
+	e.t.Helper()
+	e.h.Text(alice, "/new")
+	e.h.Text(alice, "and now this")
+	if err := e.store.DB.QueryRow(`SELECT id FROM pa_conversations WHERE principal = $1 AND closed_at_ms = 0`, alice).Scan(&e.conv); err != nil {
+		e.t.Fatalf("conversation after /new: %v", err)
+	}
+	if err := e.store.DB.QueryRow(`SELECT id FROM pa_jobs WHERE principal = $1 ORDER BY id DESC LIMIT 1`, alice).Scan(&e.job); err != nil {
+		e.t.Fatalf("job after /new: %v", err)
+	}
+	var code int
+	if e.token, _, _, code = e.h.Claim(); code != http.StatusOK || e.token == "" {
+		e.t.Fatalf("claim after /new: %d", code)
+	}
 }
 
 func (e *lowerEnv) forcedPermissionsLowerNothing() {

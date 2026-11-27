@@ -192,6 +192,28 @@ func (s *Store) CreatePAApproval(ctx context.Context, tx *sql.Tx, a approval.App
 		return err
 	}
 	createdMS := a.CreatedAt.UnixMilli()
+	// The connection row is locked until this transaction ends, by an
+	// update that changes nothing, as InsertPAPermission does (S2-C9). A
+	// transition that does not hold the principal lock (the refresh
+	// flight, an expiry) then either committed first, and the update finds
+	// no row, or waits for this transaction and cancels the approval it
+	// can now see. Without it such a transition could commit between the
+	// read below and this insert becoming visible, and the approval would
+	// stay pending on a connection that ended: refused at the consume, but
+	// never cancelled and never reported. On SQLite the statement is a
+	// no-op under the write lock the transaction holds.
+	held, err := tx.ExecContext(ctx,
+		`UPDATE pa_connections SET authority_revision = authority_revision
+		  WHERE principal = $1 AND id = $2 AND state = $3 AND authority_revision = $4 AND server = $5`,
+		a.Principal, a.ConnectionID, string(connection.StateActive), a.AuthorityRevision, a.Server)
+	if err != nil {
+		return fmt.Errorf("create pa approval: lock connection: %w", err)
+	}
+	if n, err := held.RowsAffected(); err != nil {
+		return approvalUnreadable("create approval: lock connection: rows affected", err)
+	} else if n != 1 {
+		return fmt.Errorf("%w: connection %s", approval.ErrBinding, a.ConnectionID)
+	}
 	res, err := tx.ExecContext(ctx,
 		`INSERT INTO pa_approvals(principal, id, approve_cb_id, cancel_cb_id, connection_id, authority_revision,
 			server, tool, class, schema_sha, description_sha, annotation_sha, args_sha, sealed_args,
