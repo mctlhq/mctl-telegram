@@ -135,9 +135,22 @@ type scenarioEnv struct {
 // ScenarioSteps; a nil reader is the deployed shape: none.
 func newScenarioEnv(t *testing.T, s *db.Store, reader *fakeScenarios) *scenarioEnv {
 	t.Helper()
+	return newScenarioEnvWith(t, s, reader, reader)
+}
+
+// newScenarioEnvWith gives the card path and the write executor a reader
+// each: atDispatch is the one the executor reads the steps from again
+// right before it sends.
+func newScenarioEnvWith(t *testing.T, s *db.Store, reader, atDispatch *fakeScenarios) *scenarioEnv {
+	t.Helper()
 	fresh := &scenarioFresh{}
+	write := func(c *connector.WriteConfig) {
+		if atDispatch != nil {
+			c.Scenarios = map[string]connector.ScenarioSteps{"tg": atDispatch}
+		}
+	}
 	return &scenarioEnv{
-		disclosureEnv: &disclosureEnv{cardEnv: newCardEnvOn(t, s, scenarioPin(t), fresh, func(c *connector.CardConfig) {
+		disclosureEnv: &disclosureEnv{cardEnv: newCardEnvWith(t, s, scenarioPin(t), fresh, write, func(c *connector.CardConfig) {
 			if reader != nil {
 				c.Scenarios = map[string]connector.ScenarioSteps{"tg": reader}
 			}
@@ -206,6 +219,10 @@ func TestS2D6_ScenarioCardShowsEveryStep(t *testing.T) {
 		if sent := e.ep.sent(); len(sent) != 1 || string(sent[0]) != nightCall {
 			t.Fatalf("sent %q, want %q", sent, nightCall)
 		}
+		// One more read of the steps, made by the executor before it sent.
+		if !slices.Equal(reader.asked, []string{nightID, nightID}) {
+			t.Fatalf("scenario reads %v, want one for the card and one at dispatch", reader.asked)
+		}
 		// The most steps a card lists; one more is refused, not shortened.
 		many := nightScenario()
 		many.Steps = nil
@@ -272,6 +289,101 @@ func TestS2D6_UnreadableScenarioIsRefused(t *testing.T) {
 		e.noCalls()
 		if cards := e.sentCards(alice); len(cards) != 0 {
 			t.Fatalf("%d cards for refused scenarios", len(cards))
+		}
+	})
+}
+
+// TestS2D6_DispatchReadsTheStepsAgain (#1322 P2-S15c): the card lists
+// the steps a read made for it returned, and an approval lives for
+// minutes. The executor reads the scenario once more right before it
+// sends, and sends nothing unless it still has the id, the name and
+// exactly the steps of the card, in their order. A read that fails is not
+// "unchanged". The approval is spent either way and the principal is told
+// once.
+func TestS2D6_DispatchReadsTheStepsAgain(t *testing.T) {
+	edit := func(fn func(sc *connector.Scenario)) connector.Scenario {
+		sc := nightScenario()
+		fn(&sc)
+		return sc
+	}
+	cases := []struct {
+		name   string
+		now    connector.Scenario
+		err    error
+		reason string
+	}{
+		{"a step was replaced", edit(func(sc *connector.Scenario) { sc.Steps[2] = "Unlock the front door" }), nil, connector.ReasonScenarioChanged},
+		{"a step was added", edit(func(sc *connector.Scenario) { sc.Steps = append(sc.Steps, "Open the garage") }), nil, connector.ReasonScenarioChanged},
+		{"a step was removed", edit(func(sc *connector.Scenario) { sc.Steps = sc.Steps[:2] }), nil, connector.ReasonScenarioChanged},
+		{"the steps were reordered", edit(func(sc *connector.Scenario) { sc.Steps[0], sc.Steps[1] = sc.Steps[1], sc.Steps[0] }), nil, connector.ReasonScenarioChanged},
+		{"the scenario was renamed", edit(func(sc *connector.Scenario) { sc.Name = "Good morning" }), nil, connector.ReasonScenarioChanged},
+		{"the read failed", nightScenario(), connector.ErrScenarioUnreadable, connector.ReasonScenarioUnreadable},
+		{"the read has no steps", edit(func(sc *connector.Scenario) { sc.Steps = nil }), nil, connector.ReasonScenarioUnreadable},
+		{"the read has a blank step", edit(func(sc *connector.Scenario) { sc.Steps[1] = " " }), nil, connector.ReasonScenarioUnreadable},
+		{"the read is of another scenario", edit(func(sc *connector.Scenario) { sc.ID = "scn-other-0000002" }), nil, connector.ReasonScenarioNotListed},
+		{"the name is now one of the service's own", edit(func(sc *connector.Scenario) { sc.Name = "MCTL-say" }), nil, connector.ReasonScenarioReserved},
+	}
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		reader := &fakeScenarios{sc: nightScenario()}
+		e := newScenarioEnv(t, s, reader)
+		e.manyCardsPerRun()
+		notices := func() int {
+			e.h.Loop().WaitDeliveries()
+			return len(e.strings(`SELECT kind FROM pa_outbox WHERE kind = 'write_not_sent'`))
+		}
+		for i, tc := range cases {
+			reader.set(nightScenario(), nil)
+			row := e.emitTool(scenarioTool, nightCall)
+			reads, told, answered := reader.reads(), notices(), len(e.outcomesOf())
+			reader.set(tc.now, tc.err)
+			if code := e.h.Press(alice, row.approve); code != http.StatusOK {
+				t.Fatalf("%s: approve: %d", tc.name, code)
+			}
+			if sent := e.ep.sent(); len(sent) != 0 {
+				t.Fatalf("%s: sent %q for a scenario that is not the one on the card", tc.name, sent)
+			}
+			out := e.outcomesOf()
+			if len(out) != answered+1 || out[answered].Status != connector.StatusRefused || out[answered].Reason != tc.reason {
+				t.Fatalf("%s: outcomes %+v, want one more refusal %s", tc.name, out[answered:], tc.reason)
+			}
+			if n := reader.reads() - reads; n != 1 {
+				t.Fatalf("%s: %d scenario reads at dispatch, want one", tc.name, n)
+			}
+			if i == 0 {
+				_ = e.h.Press(alice, row.approve)
+				if sent := e.ep.sent(); len(sent) != 0 || reader.reads()-reads != 1 {
+					t.Fatalf("%s: a second tap: sent %q, %d reads", tc.name, sent, reader.reads()-reads)
+				}
+			}
+			if n := notices() - told; n != 1 {
+				t.Fatalf("%s: %d \"not carried out\" notices", tc.name, n)
+			}
+		}
+	})
+}
+
+// TestS2D6_DispatchNeedsAScenarioReader (#1322 P2-S15c): an executor
+// with no reader of scenario steps for the server sends no scenario call,
+// even one a card was made and approved for. That is the deployed shape
+// of the executor today.
+func TestS2D6_DispatchNeedsAScenarioReader(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		reader := &fakeScenarios{sc: nightScenario()}
+		e := newScenarioEnvWith(t, s, reader, nil)
+		row := e.emitTool(scenarioTool, nightCall)
+		if code := e.h.Press(alice, row.approve); code != http.StatusOK {
+			t.Fatalf("approve: %d", code)
+		}
+		e.h.Loop().WaitDeliveries()
+		if sent := e.ep.sent(); len(sent) != 0 {
+			t.Fatalf("sent %q with no scenario reader at dispatch", sent)
+		}
+		out := e.outcomesOf()
+		if len(out) != 1 || out[0].Status != connector.StatusRefused || out[0].Reason != connector.ReasonNoWritePath {
+			t.Fatalf("outcomes %+v", out)
+		}
+		if n := reader.reads(); n != 1 {
+			t.Fatalf("%d scenario reads, want the card's one", n)
 		}
 	})
 }

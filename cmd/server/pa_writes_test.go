@@ -67,6 +67,21 @@ type paFakeAlice struct {
 	// summary, when set, is the text alice_get_home_summary returns: a
 	// read whose content the tests choose.
 	summary atomic.Value
+	// hold, when set, keeps the next approved call on the wire until the
+	// test releases it (paAliceHold).
+	hold atomic.Pointer[paAliceHold]
+}
+
+// paAliceHold is one approved call held on the wire. entered is closed
+// when the server has the call, cancelled when the caller's context ends
+// while it is held, and the call returns only once release is closed: a
+// server that keeps working after its client gave up.
+type paAliceHold struct {
+	entered, cancelled, release chan struct{}
+}
+
+func newPAAliceHold() *paAliceHold {
+	return &paAliceHold{entered: make(chan struct{}), cancelled: make(chan struct{}), release: make(chan struct{})}
 }
 
 var _ connector.WriteEndpoint = (*paFakeAlice)(nil)
@@ -99,10 +114,19 @@ func (a *paFakeAlice) CallTool(_ context.Context, _ connection.Secret, tool stri
 	return []byte(`{"content":[{"type":"text","text":"nothing"}]}`), nil
 }
 
-func (a *paFakeAlice) CallToolExact(_ context.Context, _ connection.Secret, tool string, args []byte) ([]byte, error) {
+func (a *paFakeAlice) CallToolExact(ctx context.Context, _ connection.Secret, tool string, args []byte) ([]byte, error) {
 	a.mu.Lock()
 	a.exact = append(a.exact, tool+" "+string(args))
 	a.mu.Unlock()
+	if h := a.hold.Swap(nil); h != nil {
+		close(h.entered)
+		select {
+		case <-ctx.Done():
+			close(h.cancelled)
+			<-h.release
+		case <-h.release:
+		}
+	}
 	return []byte(`{"content":[{"type":"text","text":"done"}]}`), nil
 }
 
@@ -479,6 +503,18 @@ func TestPAWrites_EndToEnd(t *testing.T) {
 			e.press(card.buttons[0])
 			if got := e.alice.sent(); !slices.Equal(got, want) {
 				t.Fatalf("after Approve the server got %q, want %q", got, want)
+			}
+			// The device reads are in the audit chain as the service's own
+			// sink wrote them, an entry before and after each: one read
+			// for the card, one for the second write call above, and one
+			// right before the dispatch, whose pair names the approval
+			// (S2-D4).
+			listed := func(more string) int {
+				return e.count(`SELECT COUNT(*) FROM audit_logs WHERE tool_name = $1 AND call_path = $2 AND peer_redacted LIKE $3`,
+					connector.AuditToolPrefix+"alice/alice_list_devices", connector.AuditCallPath, "pa/v1 %"+more+"%")
+			}
+			if all, pre, ok, unapproved := listed(""), listed(" phase=pre_dispatch "), listed(" status=ok "), listed(" approval=- "); all != 6 || pre != 3 || ok != 3 || unapproved != 4 {
+				t.Fatalf("device reads in the audit chain: %d entries, %d pre-dispatch, %d ok, %d without an approval; want 6, 3, 3, 4", all, pre, ok, unapproved)
 			}
 			// A double tap, and a tap on Cancel after the approval.
 			e.press(card.buttons[0])

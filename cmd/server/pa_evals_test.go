@@ -54,6 +54,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/config"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/pa/approval"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connector"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
@@ -529,6 +530,101 @@ func TestPAEval_A6_DisconnectCancelsThePendingApproval(t *testing.T) {
 		e.press(card.buttons[0])
 		e.press(card.buttons[0])
 		e.noWrite("a tap after /disconnect")
+	})
+}
+
+// paWaitClosed fails the test unless ch is closed within the wait.
+func paWaitClosed(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+// post sends one update through the webhook and returns when the webhook
+// answered, without waiting for what the update left running: the helper
+// for a test that holds a call on the wire.
+func (e *paEval) post(kind, payload string) {
+	e.t.Helper()
+	e.upd++
+	if code := postPAWebhook(e.mux, fmt.Sprintf(`{"update_id":%d,%q:%s}`, e.upd, kind, payload)); code != http.StatusOK {
+		e.t.Fatalf("%s update: status %d", kind, code)
+	}
+}
+
+// TestS2C13_DisconnectDuringAnInFlightWrite is /disconnect, sent as Carol
+// sends it, while an approved call is on the wire (threat model T2,
+// "/disconnect" steps 1 and 2, and step 3 of the dispatch). The command
+// does not wait for the call: its reply is sent, the connection is revoked
+// and the call's context is cancelled while the server still holds the
+// call. When the call returns, its result is discarded: the record is
+// fenced, the audit result says fenced, and Carol is told the action may
+// already have happened. Nothing is sent twice.
+func TestS2C13_DisconnectDuringAnInFlightWrite(t *testing.T) {
+	forEachPAStore(t, func(t *testing.T, store *db.Store, conn *sql.DB) {
+		e := newPAEval(t, store, conn)
+		card := e.oneCard("play jazz on the kitchen speaker", paPlayTool, paPlaySent)
+		hold := newPAAliceHold()
+		released := false
+		release := func() {
+			if !released {
+				released = true
+				close(hold.release)
+			}
+		}
+		// Whatever fails below, the held call is let go before the
+		// store closes.
+		t.Cleanup(func() { release(); e.settle() })
+		e.alice.hold.Store(hold)
+
+		e.post("callback_query", fmt.Sprintf(`{"id":"cb","data":%q,"from":{"id":%d,"is_bot":false},`+
+			`"message":{"message_id":9,"date":1,"chat":{"id":%d,"type":"private"}}}`, card.buttons[0], e.user, e.user))
+		paWaitClosed(t, hold.entered, "the approved call to reach the server")
+		if n := e.count(`SELECT COUNT(*) FROM pa_dispatches WHERE principal = $1 AND status = 'dispatching'`, e.user); n != 1 {
+			t.Fatalf("%d dispatching records while the call is on the wire, want 1", n)
+		}
+
+		before := len(e.sent.get())
+		e.post("message", fmt.Sprintf(`{"message_id":7,"date":1,"text":"/disconnect alice",`+
+			`"from":{"id":%d,"is_bot":false,"first_name":"Carol"},"chat":{"id":%d,"type":"private"}}`, e.user, e.user))
+		e.rt.tools.commands.Wait()
+		// The command is over and the server still holds the call.
+		want := safetext.ServerText(safetext.TextDisconnected).String()
+		if got := e.sent.get()[before:]; !slices.ContainsFunc(got, func(m paSend) bool { return m.text == want }) {
+			t.Fatalf("/disconnect did not answer while the call was on the wire: %+v", got)
+		}
+		conns, err := e.rt.Connections().List(context.Background(), e.user)
+		if err != nil || len(conns) != 1 || conns[0].State != connection.StateRevoked {
+			t.Fatalf("after /disconnect: %+v err %v", conns, err)
+		}
+		paWaitClosed(t, hold.cancelled, "/disconnect to cancel the call on the wire")
+		if n := e.count(`SELECT COUNT(*) FROM pa_dispatches WHERE principal = $1 AND status = 'dispatching'`, e.user); n != 1 {
+			t.Fatalf("%d dispatching records before the call returned, want 1: /disconnect does not settle a call it did not make", n)
+		}
+
+		release()
+		e.settle()
+		var status string
+		if err := e.conn.QueryRowContext(context.Background(), `SELECT status FROM pa_dispatches WHERE principal = $1`, e.user).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status != string(approval.DispatchFenced) {
+			t.Fatalf("the dispatch record is %q after the call returned, want fenced", status)
+		}
+		fenced := safetext.ServerText(safetext.TextWriteFenced).String()
+		if got := e.sent.get()[before:]; !slices.ContainsFunc(got, func(m paSend) bool { return m.text == fenced }) {
+			t.Fatalf("Carol was not told the action may already have happened: %+v", got)
+		}
+		if n := e.count(`SELECT COUNT(*) FROM audit_logs WHERE tool_name = $1 AND status = 'fenced'`,
+			connector.AuditToolPrefix+"alice/"+paPlayTool); n != 1 {
+			t.Fatalf("%d fenced audit results for the call, want 1", n)
+		}
+		e.press(card.buttons[0])
+		if got := e.alice.sent(); len(got) != 1 {
+			t.Fatalf("the server was sent %q, want the one call", got)
+		}
 	})
 }
 

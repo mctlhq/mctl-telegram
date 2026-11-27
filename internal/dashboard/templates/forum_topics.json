@@ -1,0 +1,25 @@
+{
+  "schema": "tg-dashboard/v1",
+  "id": "forum_topics",
+  "title": "Темы форума",
+  "layout": { "columns": 12, "gap": 12 },
+  "refreshIntervalSec": 60,
+  "inputs": [
+    { "id": "peer", "label": "Форум", "required": true }
+  ],
+  "dataSources": [
+    {
+      "id": "topics",
+      "tool": "list_topics",
+      "args": { "peer": "@input:peer", "limit": 50 }
+    }
+  ],
+  "tiles": [
+    {
+      "id": "topics",
+      "component": "topic_cards",
+      "colSpan": 12,
+      "props": { "title": "Темы", "source": "topics" }
+    }
+  ]
+}

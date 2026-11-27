@@ -2,6 +2,7 @@ package pa
 
 import (
 	"encoding/json"
+	"regexp"
 	"slices"
 	"strconv"
 
@@ -229,6 +230,11 @@ func messageFragments(msg map[string]json.RawMessage) ([]convo.Fragment, bool) {
 	if !add(msg, "text", convo.KindText, textProv) || !add(msg, "caption", convo.KindCaption, convo.ProvenanceExternal) {
 		return nil, false
 	}
+	if photoFrag, hasPhoto, ok := photoFragment(msg); !ok {
+		return nil, false
+	} else if hasPhoto {
+		frags = append(frags, photoFrag)
+	}
 	for _, key := range []string{"reply_to_message", "quote"} {
 		raw, present := msg[key]
 		if !present || isNull(raw) {
@@ -245,11 +251,65 @@ func messageFragments(msg map[string]json.RawMessage) ([]convo.Fragment, bool) {
 		if !add(obj, "text", kind, convo.ProvenanceExternal) {
 			return nil, false
 		}
-		if key == "reply_to_message" && !add(obj, "caption", kind, convo.ProvenanceExternal) {
-			return nil, false
+		if key == "reply_to_message" {
+			if !add(obj, "caption", kind, convo.ProvenanceExternal) {
+				return nil, false
+			}
+			if photoFrag, hasPhoto, ok := photoFragment(obj); !ok {
+				return nil, false
+			} else if hasPhoto {
+				frags = append(frags, photoFrag)
+			}
 		}
 	}
 	return frags, true
+}
+
+const maxWebhookPhotoBytes = 2 << 20
+
+var photoFileIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{8,256}$`)
+
+type tgPhotoSize struct {
+	FileID   string `json:"file_id"`
+	Width    int    `json:"width"`
+	Height   int    `json:"height"`
+	FileSize int64  `json:"file_size"`
+}
+
+func photoFragment(obj map[string]json.RawMessage) (convo.Fragment, bool, bool) {
+	raw, present := obj["photo"]
+	if !present || isNull(raw) {
+		return convo.Fragment{}, false, true
+	}
+	var sizes []tgPhotoSize
+	if err := json.Unmarshal(raw, &sizes); err != nil {
+		return convo.Fragment{}, false, false
+	}
+	if len(sizes) == 0 {
+		return convo.Fragment{}, false, true
+	}
+	bestID := ""
+	bestPixels := -1
+	for _, s := range sizes {
+		if !photoFileIDPattern.MatchString(s.FileID) {
+			return convo.Fragment{}, false, false
+		}
+		if s.FileSize < 0 {
+			return convo.Fragment{}, false, false
+		}
+		if s.FileSize > maxWebhookPhotoBytes {
+			continue
+		}
+		pixels := s.Width * s.Height
+		if pixels >= bestPixels {
+			bestPixels = pixels
+			bestID = s.FileID
+		}
+	}
+	if bestID == "" {
+		return convo.Fragment{}, false, true
+	}
+	return convo.NewFragment(convo.KindPhoto, convo.ProvenanceExternal, bestID), true, true
 }
 
 func filterCallback(updateID int64, raw json.RawMessage) (VerifiedUpdate, string) {

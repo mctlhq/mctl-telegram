@@ -123,3 +123,36 @@ jobs:
               exit 1
               ;;
           esac
+
+      # Personal Assistant worker preview (uses the same agent-worker image with
+      # AGENT_WORKER_PA=true) so PA bot preview stays in sync with main.
+      - name: Dispatch agent-worker-pa-preview release-deploy
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          READ_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          SHORT_SHA="${SHA::7}"
+          VALUES=platform-gitops/services/labs/agent-worker-pa-preview/values.yaml
+          rc=0; GH_TOKEN="$READ_TOKEN" .github/scripts/gitops-values-present.sh "$VALUES" || rc=$?
+          case "$rc" in
+            0)
+              gh workflow run release-deploy.yaml \
+                --repo mctlhq/mctl-gitops \
+                --ref main \
+                -f repo=mctlhq/mctl-telegram \
+                -f git_ref="$SHA" \
+                -f image_name=ghcr.io/mctlhq/agent-worker-preview \
+                -f image_tag="main-${SHORT_SHA}" \
+                -f dockerfile_path=Dockerfile.agent-worker \
+                -f team_name=labs \
+                -f component_name=agent-worker-pa-preview
+              ;;
+            3)
+              echo "::notice::$VALUES not on mctl-gitops main; skipping agent-worker-pa-preview dispatch"
+              ;;
+            *)
+              echo "::error::could not read $VALUES on mctl-gitops main (rc=$rc)"
+              exit 1
+              ;;
+          esac

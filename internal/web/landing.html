@@ -202,13 +202,6 @@
   .tabpanel pre .c { color: var(--surface-fg-subtle); }
   .tabpanel .foot { margin: 6px 0 0; font-size: 13px; color: var(--surface-fg-subtle); text-align: center; }
   .tabpanel .after { margin: 0; text-align: center; color: var(--surface-fg-muted); }
-  .tag-untested {
-    align-self: center; padding: 2px 8px;
-    font-family: var(--font-mono); font-size: 10.5px; font-weight: 600;
-    letter-spacing: .08em; text-transform: uppercase;
-    border-radius: var(--mctl-radius-md);
-    background: var(--status-warn-soft); color: var(--status-warn-text);
-  }
 
   /* Your data: three cells divided by 1px gaps over the line colour. */
   .data-grid {
@@ -399,13 +392,12 @@
 
       <div class="tabpanel" id="panel-other" role="tabpanel" aria-labelledby="tab-other">
         <h3>Other clients</h3>
-        <span class="tag-untested">not yet tested</span>
         <pre><code><span class="c">// Cursor · ~/.cursor/mcp.json</span>
 { "mcpServers": { "mctl": { "url": "{{.MCPURL}}" } } }
 
 <span class="c">// VS Code · .vscode/mcp.json</span>
 { "servers": { "mctl": { "type": "http", "url": "{{.MCPURL}}" } } }</code></pre>
-        <p class="foot">Cursor sign-in may fail today: <code>cursor://</code> redirects are refused. Details in <a href="/docs#setup">/docs</a>.</p>
+        <p class="foot">Cursor Desktop sign-in and a read-only tool call were verified. VS Code is not yet tested. See the <a href="/docs#client-status">client status table</a>.</p>
       </div>
     </div>
   </section>
@@ -490,7 +482,7 @@
       </details>
       <details>
         <summary>Which assistants does it work with?</summary>
-        <p class="answer">Claude on web, desktop and mobile, ChatGPT by URL, Claude Code, Grok and Town work (see the <a href="/docs#client-status">client status table</a>). Gemini, Cursor, VS Code, Notion, Rayrun, Hermes Agent and other MCP clients are not yet tested, and some are not admitted yet. Your client does not work? Write to <a href="mailto:support@mctl.ai">support@mctl.ai</a>.</p>
+        <p class="answer">Claude on web, desktop and mobile, ChatGPT by URL, Claude Code, Cursor Desktop, Grok and Town work (see the <a href="/docs#client-status">client status table</a>). Gemini, VS Code, Notion, Rayrun, Hermes Agent and other MCP clients are not yet tested, and some are not admitted yet. Your client does not work? Write to <a href="mailto:support@mctl.ai">support@mctl.ai</a>.</p>
       </details>
       <details>
         <summary>Is it open source?</summary>

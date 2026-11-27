@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Telegram Workspace</title>
+<style>
+:root { color-scheme: light dark; --bg:#f4f5f7; --card:#fff; --fg:#1c1e22; --muted:#5c6570; --line:#d5d8de; --accent:#a63b0a; }
+:root[data-theme="dark"] { --bg:#14161a; --card:#1d2025; --fg:#e7e9ec; --muted:#9aa1ab; --line:#414750; --accent:#ff986f; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#14161a; --card:#1d2025; --fg:#e7e9ec; --muted:#9aa1ab; --line:#414750; --accent:#ff986f; } }
+* { box-sizing:border-box; }
+body { margin:0; color:var(--fg); background:var(--bg); font:14px/1.55 system-ui,sans-serif; }
+main { margin:auto; max-width:75rem; padding:clamp(.8rem,3vw,1.5rem); }
+header,nav,form,.search-fields,.row { display:flex; align-items:center; flex-wrap:wrap; gap:.55rem; }
+header { justify-content:space-between; margin-bottom:.65rem; }
+h1,h2,h3,p { margin:0; }
+h1 { font-size:1.4rem; }
+h2 { font-size:1.15rem; margin:.8rem 0 .45rem; }
+h3 { font-size:1rem; margin:.65rem 0 .25rem; }
+nav { margin-bottom:.7rem; }
+button,input,select { padding:.4rem .65rem; color:var(--fg); background:var(--card); border:1px solid var(--line); border-radius:.45rem; font:inherit; max-width:100%; }
+button { cursor:pointer; }
+button[aria-current="page"] { color:var(--accent); border-color:currentColor; font-weight:650; }
+button:disabled { opacity:.55; cursor:default; }
+:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+label, small, .muted { color:var(--muted); }
+label { display:grid; gap:.12rem; }
+form,.search-fields { align-items:end; }
+.card,.stat { border:1px solid var(--line); border-radius:.55rem; background:var(--card); padding:.65rem .8rem; overflow-wrap:anywhere; }
+#recent,#dialogs,#history,#hits,#account { display:grid; gap:.45rem; margin:.45rem 0; }
+.stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(9rem,100%),1fr)); gap:.45rem; }
+.stat strong { display:block; font-size:1.5rem; }
+.body { white-space:pre-wrap; margin:.35rem 0; }
+#status,#folder-note { color:var(--muted); margin:.4rem 0; }
+#expand[hidden], [hidden] { display:none; }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>Telegram Workspace</h1>
+  <div class="row"><button id="expand" hidden>Expand</button><button id="refresh" disabled>Refresh</button></div>
+</header>
+<nav aria-label="Workspace">
+  <button data-view="overview" aria-current="page">Overview</button>
+  <button data-view="inbox">Inbox</button>
+  <button data-view="search">Search</button>
+  <button data-view="security">Account &amp; Security</button>
+</nav>
+<p id="status" role="status">Connecting to host…</p>
+
+<section id="overview" aria-label="Overview">
+  <h2>Recent dialogs</h2>
+  <p id="sample" class="muted"></p>
+  <div id="stats" class="stats"></div>
+  <div id="recent"></div>
+</section>
+<section id="inbox" hidden aria-label="Inbox">
+  <form id="filters">
+    <label>Folder<select id="folder"><option value="">All chats</option></select></label>
+    <label>Chat type<select id="kind"><option value="">All types</option><option value="user">Private</option><option value="group">Groups</option><option value="channel">Channels</option></select></label>
+    <label><span>Unread only</span><input id="unread" type="checkbox"></label>
+  </form>
+  <p id="folder-note" role="status"></p>
+  <div id="dialogs"></div>
+  <h2 id="history-title" tabindex="-1">Message history</h2>
+  <div id="history" aria-live="polite"></div>
+</section>
+<section id="search" hidden aria-label="Search">
+  <div id="search-form" class="search-fields" role="search">
+    <label>Search messages<input id="query" type="search" required maxlength="256"></label>
+    <label>Conversation<select id="search-peer"><option value="">All permitted conversations</option></select></label>
+    <label>From (UTC)<input id="min-date" type="date"></label>
+    <label>Through (UTC)<input id="max-date" type="date"></label>
+    <button id="run-search" type="button" disabled>Search</button>
+  </div>
+  <div id="hits" aria-live="polite"></div>
+</section>
+<section id="security" hidden aria-label="Account and security">
+  <h2>Account &amp; Security</h2>
+  <div id="account"></div>
+</section>
+</main>
+<script>
+"use strict";
+const PREFERRED_PROTOCOL_VERSION = "2026-01-26";
+const SUPPORTED_PROTOCOL_VERSIONS = new Set([PREFERRED_PROTOCOL_VERSION, "2025-11-21"]);
+const byId = id => document.getElementById(id);
+const navigation = [...document.querySelectorAll("[data-view]")];
+const pending = new Map();
+let nextId = 0;
+let active = true;
+let ready = false;
+let canCall = false;
+let displayMode = "inline";
+let displayModes = [];
+let snapshot;
+let inboxRows = [];
+let folderRequest = 0;
+let historyRequest = 0;
+let searchRequest = 0;
+let refreshing = false;
+
+function send(message) {
+  window.parent.postMessage({jsonrpc:"2.0", ...message}, "*");
+}
+
+function request(method, params) {
+  return new Promise((resolve, reject) => {
+    if (!active) {
+      reject(new Error("Workspace closed"));
+      return;
+    }
+    const id = ++nextId;
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error("Host request timed out"));
+    }, 20000);
+    pending.set(id, {resolve, reject, timer});
+    send({id, method, params});
+  });
+}
+
+function callTool(name, args = {}) {
+  if (!canCall) return Promise.reject(new Error("Interactive reads are unavailable in this host."));
+  return request("tools/call", {name, arguments:args}).then(result => {
+    if (!result || result.isError || !result.structuredContent) {
+      throw new Error("Telegram could not complete this read.");
+    }
+    return result.structuredContent;
+  });
+}
+
+function applyContext(context = {}) {
+  if (context.theme === "dark" || context.theme === "light") {
+    document.documentElement.dataset.theme = context.theme;
+  }
+  if (Array.isArray(context.availableDisplayModes)) displayModes = context.availableDisplayModes;
+  if (context.displayMode) displayMode = context.displayMode;
+  byId("expand").hidden = !displayModes.includes("fullscreen") || !displayModes.includes("inline");
+  byId("expand").textContent = displayMode === "fullscreen" ? "Return inline" : "Expand";
+}
+
+let lastSize = "";
+const resize = new ResizeObserver(() => {
+  if (!ready || !active) return;
+  const width = document.documentElement.clientWidth;
+  const height = Math.ceil(document.querySelector("main").getBoundingClientRect().height);
+  const size = width + ":" + height;
+  if (size === lastSize) return;
+  lastSize = size;
+  send({method:"ui/notifications/size-changed", params:{width, height}});
+});
+
+window.addEventListener("message", event => {
+  if (event.source !== window.parent || !active) return;
+  const message = event.data;
+  if (!message || message.jsonrpc !== "2.0") return;
+  if (message.method === "ui/resource-teardown" && message.id != null) {
+    send({id:message.id, result:{}});
+    active = false;
+    canCall = false;
+    resize.disconnect();
+    for (const call of pending.values()) {
+      clearTimeout(call.timer);
+      call.reject(new Error("Workspace closed"));
+    }
+    pending.clear();
+    return;
+  }
+  if (!message.method && pending.has(message.id) && ("result" in message || "error" in message)) {
+    const call = pending.get(message.id);
+    pending.delete(message.id);
+    clearTimeout(call.timer);
+    if (message.error) call.reject(new Error("Host declined the request"));
+    else call.resolve(message.result);
+    return;
+  }
+  if (message.id != null) return;
+  if (message.method === "ui/notifications/tool-result") {
+    if (!message.params?.isError) acceptSnapshot(message.params?.structuredContent);
+    else if (!snapshot) byId("status").textContent = "Telegram could not load the workspace.";
+  } else if (message.method === "ui/notifications/host-context-changed") {
+    applyContext(message.params);
+  }
+});
+
+function item(tag, text, className) {
+  const node = document.createElement(tag);
+  if (text != null) node.textContent = String(text);
+  if (className) node.className = className;
+  return node;
+}
+
+function dateText(value) {
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) && date.getUTCFullYear() > 1 ? date.toLocaleString() : "";
+}
+
+function dialogLabel(dialog) {
+  return dialog.title || dialog.username || dialog.id;
+}
+
+function dialogCard(dialog) {
+  const node = item("article", null, "card");
+  const name = item("button", dialogLabel(dialog));
+  name.disabled = !canCall;
+  name.addEventListener("click", () => {
+    selectView("inbox");
+    showHistory(dialog.id, dialogLabel(dialog), undefined, true);
+  });
+  node.append(name, item("p", [
+    dateText(dialog.last_message_date),
+    dialog.unread_count > 0 ? dialog.unread_count + " unread" : "",
+    dialog.unread_mentions_count > 0 ? dialog.unread_mentions_count + " mentions" : ""
+  ].filter(Boolean).join(" · "), "muted"));
+  return node;
+}
+
+function choices(select, options) {
+  const value = select.value;
+  while (select.options.length > 1) select.remove(1);
+  for (const [id, title] of options) {
+    const option = item("option", title);
+    option.value = id;
+    select.append(option);
+  }
+  select.value = [...select.options].some(option => option.value === value) ? value : "";
+}
+
+function flag(value) {
+  return value == null ? "Unavailable" : value ? "Yes" : "No";
+}
+
+function redrawOverview() {
+  const dialogs = snapshot.dialogs?.dialogs || [];
+  const stats = byId("stats");
+  stats.replaceChildren();
+  byId("sample").textContent = snapshot.dialogs ?
+    "Counts cover " + dialogs.length + " recent dialogs in this snapshot." : "Recent dialogs unavailable.";
+  const figures = [];
+  if (snapshot.dialogs) {
+    figures.push(
+      ["Unread messages", dialogs.reduce((n, row) => n + (row.unread_count || 0), 0)],
+      ["Dialogs with unread", dialogs.filter(row => row.unread_count > 0).length],
+      ["Unread mentions", dialogs.reduce((n, row) => n + (row.unread_mentions_count || 0), 0)]
+    );
+  }
+  if (snapshot.folders) figures.push(["Chat folders", snapshot.folders.folders?.length || 0]);
+  for (const [label, number] of figures) {
+    const cell = item("article", null, "stat");
+    cell.append(item("strong", number), item("span", label, "muted"));
+    stats.append(cell);
+  }
+  byId("recent").replaceChildren(...dialogs.slice(0, 5).map(dialogCard));
+  if (snapshot.dialogs && dialogs.length === 0) byId("recent").textContent = "No recent dialogs.";
+  choices(byId("folder"), (snapshot.folders?.folders || []).map(row => [row.id, row.title]));
+  choices(byId("search-peer"), dialogs.map(row => [row.id, dialogLabel(row)]));
+}
+
+function redrawAccount() {
+  const identity = snapshot.identity;
+  const sendStatus = snapshot.send;
+  const own = item("article", null, "card");
+  const account = identity?.connected_account || identity;
+  const name = account?.display_name || (account?.username ? "@" + account.username : "Unavailable");
+  own.append(item("h3", name),
+    item("p", "Telegram session connected: " + flag(identity?.connected ?? sendStatus?.connected)),
+    item("p", "Account send consent: " + flag(sendStatus?.send_enabled)),
+    item("p", "This credential has send permission: " + flag(sendStatus?.has_send_scope)),
+    item("p", "Workspace capabilities: read-only."));
+  if (Array.isArray(snapshot.read_scopes) && snapshot.read_scopes.length) {
+    own.append(item("p", "Granted Telegram reads: " + snapshot.read_scopes.join(", ")));
+  }
+  const audit = item("article", null, "card");
+  audit.append(item("h3", "Recent account audit"));
+  for (const entry of snapshot.audit || []) {
+    audit.append(item("p", [dateText(entry.time), entry.tool, entry.status].filter(Boolean).join(" · ")));
+  }
+  if (!snapshot.audit?.length) {
+    audit.append(item("p", snapshot.unavailable?.includes("audit") ? "Audit unavailable." : "No audit entries.", "muted"));
+  }
+  byId("account").replaceChildren(own, audit);
+}
+
+function acceptSnapshot(value) {
+  if (!value || value.schema !== "telegram-workspace/v1") return;
+  if (snapshot && Date.parse(value.updated_at) < Date.parse(snapshot.updated_at)) return;
+  snapshot = value;
+  showStatus();
+  redrawOverview();
+  redrawAccount();
+  loadFolder();
+}
+
+function showStatus() {
+  if (!snapshot) {
+    byId("status").textContent = "Waiting for the initial Telegram snapshot…";
+    return;
+  }
+  const messages = ["Updated " + dateText(snapshot.updated_at)];
+  if (snapshot.unavailable?.length) messages.push("Unavailable: " + snapshot.unavailable.join(", "));
+  if (ready && !canCall) messages.push("This host only displays the snapshot.");
+  byId("status").textContent = messages.join(" · ");
+}
+
+function kindOf(dialog) {
+  if (dialog.is_megagroup || dialog.type === "chat") return "group";
+  return dialog.type;
+}
+
+function redrawInbox() {
+  const kind = byId("kind").value;
+  const unread = byId("unread").checked;
+  const rows = inboxRows.filter(row => (!kind || kindOf(row) === kind) && (!unread || row.unread_count > 0));
+  byId("dialogs").replaceChildren(...rows.map(dialogCard));
+  if (!rows.length) byId("dialogs").textContent = "No conversations match these filters.";
+}
+
+async function loadFolder() {
+  const requestId = ++folderRequest;
+  const folder = byId("folder").value;
+  inboxRows = snapshot?.dialogs?.dialogs || [];
+  byId("folder-note").textContent = snapshot?.dialogs ? "" : "Recent dialogs unavailable.";
+  redrawInbox();
+  if (!folder) return;
+  byId("folder-note").textContent = "Loading folder…";
+  byId("dialogs").replaceChildren();
+  try {
+    const result = await callTool("list_dialogs", {folder:Number(folder), limit:50});
+    if (!active || requestId !== folderRequest) return;
+    inboxRows = result.dialogs || [];
+    byId("folder-note").textContent = result.folder_scan?.complete === false ?
+      "Telegram only scanned part of this folder. Some chats may be missing." : "";
+    redrawInbox();
+  } catch (error) {
+    if (active && requestId === folderRequest) byId("folder-note").textContent = error.message;
+  }
+}
+
+function untrustedText(text) {
+  const value = String(text || "");
+  const envelope = /^<telegram-content origin="telegram" peer="[^"]*" untrusted="true">([\s\S]*)<\/telegram-content>$/.exec(value);
+  return envelope ? envelope[1] : value;
+}
+
+function messageCard(message) {
+  const node = item("article", null, "card");
+  node.append(item("strong", message.from || message.peer_title || ""),
+    item("p", untrustedText(message.text) || (message.media_info ? "Media attachment" : ""), "body"),
+    item("small", [dateText(message.date), message.peer + "#" + message.id, "Telegram content"].filter(Boolean).join(" · ")));
+  return node;
+}
+
+async function showHistory(peer, label, before, focus) {
+  const requestId = ++historyRequest;
+  const history = byId("history");
+  const title = byId("history-title");
+  title.textContent = label;
+  if (focus) title.focus();
+  history.textContent = "Loading message history…";
+  try {
+    const result = await callTool("get_messages", {peer, limit:12, ...(before ? {before_id:before} : {})});
+    if (!active || requestId !== historyRequest) return;
+    history.replaceChildren(...(result.messages || []).map(messageCard));
+    if (!result.messages?.length) history.textContent = "No messages on this page.";
+    if (result.next_before_id) {
+      const more = item("button", "Older messages");
+      more.addEventListener("click", () => showHistory(peer, label, result.next_before_id, true));
+      history.append(more);
+    }
+  } catch (error) {
+    if (active && requestId === historyRequest) history.textContent = error.message;
+  }
+}
+
+async function search() {
+  if (!canCall) return;
+  const requestId = ++searchRequest;
+  const hits = byId("hits");
+  const query = byId("query").value.trim();
+  if (!query) { hits.textContent = "Enter a search term."; return; }
+  const args = {query, limit:30};
+  for (const [key, field] of [["peer", "search-peer"], ["min_date", "min-date"], ["max_date", "max-date"]]) {
+    if (byId(field).value) args[key] = byId(field).value;
+  }
+  hits.textContent = "Searching Telegram…";
+  try {
+    const result = await callTool("search_messages", args);
+    if (!active || requestId !== searchRequest) return;
+    const groups = new Map();
+    for (const message of result.messages || []) {
+      if (!groups.has(message.peer)) groups.set(message.peer, []);
+      groups.get(message.peer).push(message);
+    }
+    hits.replaceChildren();
+    if (!groups.size) hits.textContent = "No matching messages.";
+    for (const messages of groups.values()) {
+      hits.append(item("h3", messages[0].peer_title || messages[0].peer));
+      for (const message of messages) {
+        const card = messageCard(message);
+        const context = item("details");
+        context.append(item("summary", "Earlier context"));
+        context.addEventListener("toggle", async () => {
+          if (!context.open || context.children.length > 1) return;
+          const panel = item("div", "Loading context…");
+          context.append(panel);
+          try {
+            const result = await callTool("get_messages", {peer:message.peer, before_id:message.id, limit:5});
+            if (!active || !panel.isConnected) return;
+            panel.replaceChildren(...(result.messages || []).map(messageCard));
+            if (!result.messages?.length) panel.textContent = "No earlier messages on this page.";
+          } catch (error) {
+            if (active) panel.textContent = error.message;
+          }
+        });
+        card.append(context);
+        hits.append(card);
+      }
+    }
+  } catch (error) {
+    if (active && requestId === searchRequest) hits.textContent = error.message;
+  }
+}
+
+function selectView(view) {
+  for (const button of navigation) {
+    const selected = button.dataset.view === view;
+    byId(button.dataset.view).hidden = !selected;
+    if (selected) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  }
+}
+
+for (const button of navigation) button.addEventListener("click", () => selectView(button.dataset.view));
+byId("folder").addEventListener("change", loadFolder);
+byId("kind").addEventListener("change", redrawInbox);
+byId("unread").addEventListener("change", redrawInbox);
+byId("run-search").addEventListener("click", search);
+byId("query").addEventListener("keydown", event => {
+  if (event.key === "Enter" && !event.isComposing) search();
+});
+byId("refresh").addEventListener("click", async () => {
+  if (refreshing) return;
+  refreshing = true;
+  byId("refresh").disabled = true;
+  byId("status").textContent = "Refreshing Telegram…";
+  try {
+    const value = await callTool("telegram_dashboard");
+    if (active) acceptSnapshot(value);
+  } catch (error) {
+    if (active) byId("status").textContent = error.message;
+  } finally {
+    refreshing = false;
+    byId("refresh").disabled = !canCall;
+  }
+});
+byId("expand").addEventListener("click", async () => {
+  try {
+    const result = await request("ui/request-display-mode", {mode:displayMode === "fullscreen" ? "inline" : "fullscreen"});
+    if (active) applyContext({displayMode:result.mode});
+  } catch (error) {
+    if (active) byId("status").textContent = error.message;
+  }
+});
+
+request("ui/initialize", {
+  appInfo:{name:"mctl-telegram-workspace", version:"1.0.0"},
+  appCapabilities:{availableDisplayModes:["inline", "fullscreen"]},
+  protocolVersion:PREFERRED_PROTOCOL_VERSION
+}).then(result => {
+  if (!SUPPORTED_PROTOCOL_VERSIONS.has(result?.protocolVersion)) {
+    throw new Error("Unsupported MCP Apps protocol.");
+  }
+  send({method:"ui/notifications/initialized", params:{}});
+  ready = true;
+  canCall = !!result.hostCapabilities?.serverTools;
+  byId("refresh").disabled = !canCall;
+  byId("run-search").disabled = !canCall;
+  byId("folder").disabled = !canCall;
+  applyContext(result.hostContext);
+  if (snapshot) redrawOverview();
+  showStatus();
+  resize.observe(document.querySelector("main"));
+}).catch(error => {
+  if (active) byId("status").textContent = error.message;
+});
+</script>
+</body>
+</html>

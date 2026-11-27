@@ -152,7 +152,8 @@ func (c LoweredCall) covered() permissions.Call {
 
 // loweredTarget reads the device id and the arguments of a device write
 // from its canonical bytes, for the comparison with a permission. It
-// checks no value against the pin: the caller's checks did. ok is false
+// checks no value against the pin: the executor runs precheckDeviceWrite
+// on the same bytes for that (dispatch_write.go; S2-D2). ok is false
 // for a tool that is not a device write, bytes that are not an object, a
 // missing device, an integer that is not in its one plain spelling and a
 // string argument that is not a string.

@@ -428,6 +428,18 @@ func TestLoadAppsEnabled(t *testing.T) {
 	}
 }
 
+func TestLoadAppsWorkspaceOnly(t *testing.T) {
+	t.Setenv("MCP_APPS_ENABLED", "true")
+	t.Setenv("MCP_APPS_WORKSPACE_ONLY", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.AppsEnabled || !cfg.AppsWorkspaceOnly {
+		t.Fatal("Workspace-only App configuration was not loaded")
+	}
+}
+
 // TestLoadBroadcastContentEnabled: BROADCAST_CONTENT_ENABLED defaults to
 // true, and "false" or any value that is not a true value switches broadcast
 // channel content off (issue #851).
@@ -823,5 +835,62 @@ func TestLoadAgentLeadRetentionDefaultsTo90Days(t *testing.T) {
 	}
 	if cfg.AgentLeadRetentionDays != 90 {
 		t.Fatalf("AGENT_LEAD_RETENTION_DAYS default = %d, want 90", cfg.AgentLeadRetentionDays)
+	}
+}
+
+func TestLoadWorkspaceProfileFailsClosed(t *testing.T) {
+	t.Setenv("MCP_TOOL_FILTER", TelegramWorkspaceReadOnly)
+	t.Setenv("MCP_APPS_ENABLED", "true")
+	t.Setenv("ALLOW_SEND", "false")
+	t.Setenv("AUTH_REQUIRED", "true")
+	t.Setenv("AUTH_MODE", "local-jwt")
+	t.Setenv("OAUTH_JWT_SIGNING_KEY", "synthetic-config-test-key")
+	t.Setenv("OAUTH_JWT_AUDIENCE", "synthetic-workspace")
+	t.Setenv("OAUTH_JWT_AUDIENCE_REQUIRED", "true")
+	t.Setenv("TG_LOGIN_CLIENTS", "8511")
+	t.Setenv("AUTO_APPROVE_CLIENTS", "false")
+
+	if _, err := Load(); err != nil {
+		t.Fatalf("isolated profile config: %v", err)
+	}
+	for key, bad := range map[string]string{
+		"ALLOW_SEND":                  "true",
+		"AUTH_REQUIRED":               "false",
+		"MCP_APPS_ENABLED":            "false",
+		"OAUTH_JWT_AUDIENCE_REQUIRED": "false",
+		"TG_LOGIN_CLIENTS":            "8511,8512",
+		"AUTO_APPROVE_CLIENTS":        "true",
+		"TG_LOGIN_ADMINS":             "8512",
+	} {
+		t.Run(key, func(t *testing.T) {
+			t.Setenv(key, bad)
+			if _, err := Load(); err == nil {
+				t.Fatal("unsafe config accepted")
+			}
+		})
+	}
+}
+
+func TestLoadAppsPilot(t *testing.T) {
+	t.Setenv("MCP_APPS_PILOT", "true")
+	t.Setenv("MCP_APPS_ENABLED", "false")
+	t.Setenv("AUTH_REQUIRED", "true")
+	t.Setenv("AUTH_MODE", "local-jwt")
+	t.Setenv("CANARY_TELEGRAM_IDS", "8511")
+	c, err := Load()
+	if err != nil || !c.AppsPilot {
+		t.Fatalf("load Workspace pilot: %v", err)
+	}
+	for _, tc := range []struct{ variable, value string }{
+		{"MCP_APPS_ENABLED", "true"},
+		{"AUTH_REQUIRED", "false"},
+		{"CANARY_TELEGRAM_IDS", ""},
+	} {
+		t.Run(tc.variable, func(t *testing.T) {
+			t.Setenv(tc.variable, tc.value)
+			if _, err := Load(); err == nil {
+				t.Fatal("unsafe pilot configuration was accepted")
+			}
+		})
 	}
 }

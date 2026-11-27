@@ -1,5 +1,121 @@
 # Changelog
 
+## [0.150.4](https://github.com/mctlhq/mctl-telegram/compare/0.150.3...0.150.4) (2026-11-26)
+
+
+### Bug Fixes
+
+* **pa:** address review findings on failure alerts ([c516ed2](https://github.com/mctlhq/mctl-telegram/commit/c516ed2b86a789a64ae1b566ffe11b543331a32b))
+* **pa:** log failure reason and alert admins in bot ([e33bc14](https://github.com/mctlhq/mctl-telegram/commit/e33bc149e464a3076f2f6be18dc4133f0de8bf47))
+* **pa:** log failure reason and send direct PA bot alerts to admins ([4ee39ce](https://github.com/mctlhq/mctl-telegram/commit/4ee39ce910e90d6a344908f44fd53d16c011b3ee))
+
+## [0.150.3](https://github.com/mctlhq/mctl-telegram/compare/0.150.2...0.150.3) (2026-11-26)
+
+
+### Bug Fixes
+
+* accept the earlier MCP Apps handshake in Telegram Workspace ([37d4d47](https://github.com/mctlhq/mctl-telegram/commit/37d4d47e3781dac661a3b446b7e50430e05e617a))
+* negotiate both supported MCP Apps versions in Telegram Workspace ([2ab43e8](https://github.com/mctlhq/mctl-telegram/commit/2ab43e8d0ce733937f60b1c3ca51b91d2736e367))
+
+## [0.150.2](https://github.com/mctlhq/mctl-telegram/compare/0.150.1...0.150.2) (2026-11-26)
+
+
+### Bug Fixes
+
+* validate Telegram Workspace on the existing MCP canary ([3c84fb7](https://github.com/mctlhq/mctl-telegram/commit/3c84fb7fb0ab887dd94eb7c61b4fd34a5a2ae15c))
+
+## [0.150.1](https://github.com/mctlhq/mctl-telegram/compare/0.150.0...0.150.1) (2026-11-26)
+
+
+### Bug Fixes
+
+* isolate Telegram Workspace on the existing MCP connector ([ca66755](https://github.com/mctlhq/mctl-telegram/commit/ca66755c2c9ecda07c71d62fe8f2125c0e8d9195))
+* isolate Workspace app tools on the shared MCP connector ([b068830](https://github.com/mctlhq/mctl-telegram/commit/b06883097b2f12fc51cbe10a9f320ab485ed150e))
+
+## [0.150.0](https://github.com/mctlhq/mctl-telegram/compare/0.149.0...0.150.0) (2026-11-26)
+
+
+### Features
+
+* add a template-driven Telegram dashboard to the MCP App ([25cabf5](https://github.com/mctlhq/mctl-telegram/commit/25cabf54bd3c095912208b4202f5d1c54e5e4e1d))
+* add an isolated read-only Telegram Workspace ([393861d](https://github.com/mctlhq/mctl-telegram/commit/393861da9d1b39dae2471d1ecfff88bb4f7abbf5))
+* add an isolated read-only Telegram Workspace ([43b98c8](https://github.com/mctlhq/mctl-telegram/commit/43b98c8d7bdf9544957ece779d925fd9b2bc4dea))
+* template-driven Telegram dashboard in the MCP App ([389cb49](https://github.com/mctlhq/mctl-telegram/commit/389cb492a1e4a6e8910016c85ce03a414c1c4127))
+
+
+### Bug Fixes
+
+* send MCP Apps initialization parameters ([92027b5](https://github.com/mctlhq/mctl-telegram/commit/92027b53970c9223e0b92467902cd8b754002bf6))
+* send MCP Apps initialization parameters ([6b26c09](https://github.com/mctlhq/mctl-telegram/commit/6b26c095821188da713b83cde73510f2a99ba722))
+
+## [0.149.0](https://github.com/mctlhq/mctl-telegram/compare/0.148.0...0.149.0) (2026-11-24)
+
+
+### Features
+
+* **agents:** issue-1431-feat-pa-stream-the-answer-and-tool-statu ([94508b3](https://github.com/mctlhq/mctl-telegram/commit/94508b3fe9efd1313b43a7d43f0a1e77b07814bf))
+* **oauth:** log the redirect_uri path on authorize and grant lines ([4b20a1c](https://github.com/mctlhq/mctl-telegram/commit/4b20a1c00d24c5cf67c4badeb17556f899ac6742))
+* **pa:** add the durable approval and dispatch ledger ([4d40056](https://github.com/mctlhq/mctl-telegram/commit/4d40056faf3bae0dc917ec0b98bec33a42badbd9))
+* **pa:** add the durable approval and dispatch ledger ([0ad5e31](https://github.com/mctlhq/mctl-telegram/commit/0ad5e3121282b1f20123defc7180f816d38d6862)), closes [#1320](https://github.com/mctlhq/mctl-telegram/issues/1320)
+* **pa:** alice account source through alice_get_my_identity ([4d0a081](https://github.com/mctlhq/mctl-telegram/commit/4d0a081b955236e8e02c633ee6528d4074c4a6b8))
+* **pa:** alice account source through alice_get_my_identity ([6e66439](https://github.com/mctlhq/mctl-telegram/commit/6e66439aa4877a5663cd9cd402a999ae089a78a5)), closes [#1312](https://github.com/mctlhq/mctl-telegram/issues/1312)
+* **pa:** alice play_music card, structured device reader, re-read ([555e59c](https://github.com/mctlhq/mctl-telegram/commit/555e59c9a507fe141a0b997d8195b6da0e792711))
+* **pa:** alice play_music card, structured device reader, re-read ([b5ca7e8](https://github.com/mctlhq/mctl-telegram/commit/b5ca7e8914c205cdc11775ddbcd8bb96e25a3a41)), closes [#1322](https://github.com/mctlhq/mctl-telegram/issues/1322)
+* **pa:** alice_trigger_scenario card lists steps or refuses (P2-S9) ([8fbfe1e](https://github.com/mctlhq/mctl-telegram/commit/8fbfe1e7c49e47490b415d0c9fadd8136ad5a7f0))
+* **pa:** alice_trigger_scenario card lists steps or refuses (P2-S9) ([0d9d7a7](https://github.com/mctlhq/mctl-telegram/commit/0d9d7a740781017c1f0ac5f52f4d0fa04df251d6)), closes [#1322](https://github.com/mctlhq/mctl-telegram/issues/1322)
+* **pa:** approval cards and approve/cancel callbacks (P2-S5) ([b55d195](https://github.com/mctlhq/mctl-telegram/commit/b55d19553b037e1111244f5cf9134b87cc2efc7b))
+* **pa:** approval cards and their approve/cancel callbacks (P2-S5) ([1bb8ec8](https://github.com/mctlhq/mctl-telegram/commit/1bb8ec8999ec00feed3a8c76f2d61dd9720ea8b5)), closes [#1320](https://github.com/mctlhq/mctl-telegram/issues/1320)
+* **pa:** cancel approvals and permissions when authority ends ([d42dcc6](https://github.com/mctlhq/mctl-telegram/commit/d42dcc68d9439649e0317b2f0c85ab1c5f835594))
+* **pa:** cancel approvals and permissions when authority ends ([4f3049f](https://github.com/mctlhq/mctl-telegram/commit/4f3049f659792a6e2c4b172ab966a5317a1eda30)), closes [#1320](https://github.com/mctlhq/mctl-telegram/issues/1320)
+* package MCTL Assistant as a Cursor plugin ([fb37259](https://github.com/mctlhq/mctl-telegram/commit/fb37259133502ca11754201697b7fca0c2fafb43))
+* package MCTL Assistant as a Cursor plugin ([d2b0869](https://github.com/mctlhq/mctl-telegram/commit/d2b08695c121200bdc902a69d2e867f8203bda7e))
+* **pa:** consent to actions and the alice write scope ([146895d](https://github.com/mctlhq/mctl-telegram/commit/146895d16b8d08b220cb60824b34dd96d6839213)), closes [#1320](https://github.com/mctlhq/mctl-telegram/issues/1320)
+* **pa:** consent to actions and the alice write scope (P2-S14c) ([369f3ae](https://github.com/mctlhq/mctl-telegram/commit/369f3ae19f360c999c7ef71693ae730c88609760))
+* **pa:** disclosure checks and card for alice speakers (P2-S6) ([fac5a5a](https://github.com/mctlhq/mctl-telegram/commit/fac5a5aa47a5d0764ebff77631f1c40952b50866))
+* **pa:** disclosure checks and card for alice speakers (P2-S6) ([e75cc80](https://github.com/mctlhq/mctl-telegram/commit/e75cc80b35e3c784dfae2e67d49e5cacb7dc3609)), closes [#1322](https://github.com/mctlhq/mctl-telegram/issues/1322)
+* **pa:** end the worker's tool loop on approval_pending ([2733b87](https://github.com/mctlhq/mctl-telegram/commit/2733b87d10722df1bf9b34b8fa7ada717a632a7d)), closes [#1320](https://github.com/mctlhq/mctl-telegram/issues/1320)
+* **pa:** end the worker's tool loop on approval_pending (P2-S13) ([f66c8a7](https://github.com/mctlhq/mctl-telegram/commit/f66c8a7bbe8e06c04794381ef56b0af1b914e205))
+* **pa:** gate notices at the claim, no write asks without a write path ([4593f54](https://github.com/mctlhq/mctl-telegram/commit/4593f54f4df355f46a2255fde6cc191d1e870b6e))
+* **pa:** list the server fresh at write dispatch (P2-S4) ([e4c612b](https://github.com/mctlhq/mctl-telegram/commit/e4c612b8ffcfbe38e273f84053024e9577e89ebc))
+* **pa:** list the server fresh at write dispatch (P2-S4) ([1f9e959](https://github.com/mctlhq/mctl-telegram/commit/1f9e959d11078abb3ff60b01164b8718b123b85a)), closes [#1320](https://github.com/mctlhq/mctl-telegram/issues/1320)
+* **pa:** lower a clean run's write under a standing permission ([cfce113](https://github.com/mctlhq/mctl-telegram/commit/cfce1134bdeb6c6004b97cc0c623efc4c0c1c98b))
+* **pa:** lower a clean run's write under a standing permission ([798f587](https://github.com/mctlhq/mctl-telegram/commit/798f58701fe2e9c32bb2890e8d931f420d2fcdde)), closes [#1320](https://github.com/mctlhq/mctl-telegram/issues/1320) [#1322](https://github.com/mctlhq/mctl-telegram/issues/1322)
+* **pa:** offer four write tools, run A1-A7 in process (P2-S14d) ([3da701c](https://github.com/mctlhq/mctl-telegram/commit/3da701cea6c9cfacdab5b45496976269b241ed4b))
+* **pa:** offer only the tools a write connection can hold ([5f29be3](https://github.com/mctlhq/mctl-telegram/commit/5f29be3d6d7e05d67d119060e51cfc7061036a88)), closes [#1323](https://github.com/mctlhq/mctl-telegram/issues/1323)
+* **pa:** put the action gate into the write path's seam ([48e26ec](https://github.com/mctlhq/mctl-telegram/commit/48e26ec711941809d131eb60444d0949a098d87d)), closes [#1320](https://github.com/mctlhq/mctl-telegram/issues/1320) [#1323](https://github.com/mctlhq/mctl-telegram/issues/1323)
+* **pa:** put the action gate into the write path's seam (P2-S14c) ([3a3ff18](https://github.com/mctlhq/mctl-telegram/commit/3a3ff188ffd9adb305bc514c724426f7a97222c9))
+* **pa:** queue the action gate's notice at the claim (P2-S14c) ([20e0ea9](https://github.com/mctlhq/mctl-telegram/commit/20e0ea97f72cf1d9ed9a0b9ad17b06db38284329)), closes [#1320](https://github.com/mctlhq/mctl-telegram/issues/1320)
+* **pa:** refuse-not-clamp checks and card for alice device writes ([9806a89](https://github.com/mctlhq/mctl-telegram/commit/9806a89bffadb24e2b63558275ffe9725919163d)), closes [#1322](https://github.com/mctlhq/mctl-telegram/issues/1322)
+* **pa:** refuse-not-clamp checks and card for alice device writes (P2-S8) ([739004d](https://github.com/mctlhq/mctl-telegram/commit/739004db4c1db9667c882a3ba1cb5cfe9891342e))
+* **pa:** standing permissions store and /permissions command ([f49ad63](https://github.com/mctlhq/mctl-telegram/commit/f49ad63c711c114d189d2aca3960781607c20a41))
+* **pa:** standing permissions store and /permissions command ([e61a456](https://github.com/mctlhq/mctl-telegram/commit/e61a456fc728293ec650c22a4cd026039345365b)), closes [#1320](https://github.com/mctlhq/mctl-telegram/issues/1320)
+* **pa:** stream the answer and tool status as drafts ([5b8edb9](https://github.com/mctlhq/mctl-telegram/commit/5b8edb97b2fe6be64df0790199bb03c02d22cfee))
+* **pa:** time each run's phases and show typing once a run is queued ([70df41e](https://github.com/mctlhq/mctl-telegram/commit/70df41e03e9546e4fc33552d2a45da3cee7a9a27))
+* **pa:** wire the light and grant readers and the music card ([e1a18c8](https://github.com/mctlhq/mctl-telegram/commit/e1a18c8dcccac5c7055f4ae917e562f4799ebef7))
+* **pa:** wire the light and grant readers and the music card ([bdf9ccd](https://github.com/mctlhq/mctl-telegram/commit/bdf9ccd7981b447c5b62f39399023d2fb0176cb7)), closes [#1323](https://github.com/mctlhq/mctl-telegram/issues/1323)
+* **pa:** wire the Phase 2 write path behind PA_WRITES_ENABLED ([4a55ba3](https://github.com/mctlhq/mctl-telegram/commit/4a55ba3463c75f620b69db427173bb3b4de696ee))
+* **pa:** wire the Phase 2 write path behind PA_WRITES_ENABLED ([2b7e20f](https://github.com/mctlhq/mctl-telegram/commit/2b7e20feda0284ee8e251b0e9f9d012ca52b4173)), closes [#1323](https://github.com/mctlhq/mctl-telegram/issues/1323)
+* **pa:** write executor for approved calls (P2-S3) ([10bd408](https://github.com/mctlhq/mctl-telegram/commit/10bd40804fc97cd3e5ea8e45d016939d92927c3f))
+* **pa:** write executor for approved calls (P2-S3) ([a5fd7d8](https://github.com/mctlhq/mctl-telegram/commit/a5fd7d8a2b7cedbe00f064712ff4dca6acc4004c)), closes [#1320](https://github.com/mctlhq/mctl-telegram/issues/1320)
+
+
+### Bug Fixes
+
+* align Cursor plugin publisher metadata ([e220a99](https://github.com/mctlhq/mctl-telegram/commit/e220a992642cea27b56e0bc56594efa8f56e5925))
+* **pa:** ask for the consent to actions only with a write path ([d6b1bc1](https://github.com/mctlhq/mctl-telegram/commit/d6b1bc13f51bd18e1f8016485bfaa66794308d59)), closes [#1320](https://github.com/mctlhq/mctl-telegram/issues/1320)
+* **pa:** ask for the write scope only with a write path ([294237f](https://github.com/mctlhq/mctl-telegram/commit/294237fc328d0a7e976522e00e817bf5cf39d56f)), closes [#1320](https://github.com/mctlhq/mctl-telegram/issues/1320)
+* **pa:** card wording and log redaction from review ([028ac81](https://github.com/mctlhq/mctl-telegram/commit/028ac816fbd59d14576dd2155a66608556a0bf0f)), closes [#1320](https://github.com/mctlhq/mctl-telegram/issues/1320)
+* **pa:** do not hold the reply behind a draft send ([e167615](https://github.com/mctlhq/mctl-telegram/commit/e167615f0f6379783c76f61bb5a410ceda05a716)), closes [#1431](https://github.com/mctlhq/mctl-telegram/issues/1431)
+* **pa:** do not strand an approval a failed consume moved ([f499604](https://github.com/mctlhq/mctl-telegram/commit/f499604ca2a97dc52a9ca07afcb6e10561aa5e34)), closes [#1320](https://github.com/mctlhq/mctl-telegram/issues/1320)
+* **pa:** executor asks the pin before a lowered call is sent ([4f830a9](https://github.com/mctlhq/mctl-telegram/commit/4f830a9418120bb35a60192bc7aab09a1db8eb8b)), closes [#1322](https://github.com/mctlhq/mctl-telegram/issues/1322)
+* **pa:** fail closed on unreadable streaming state ([93c48b7](https://github.com/mctlhq/mctl-telegram/commit/93c48b7153c79a97376828b8b7823fe294c66763)), closes [#1431](https://github.com/mctlhq/mctl-telegram/issues/1431)
+* **pa:** lock the connection row and re-check consent on a grant ([ef24be5](https://github.com/mctlhq/mctl-telegram/commit/ef24be55c3b4d9a619347305446d9126b88eccfe)), closes [#1320](https://github.com/mctlhq/mctl-telegram/issues/1320)
+* **pa:** re-check the reserved scenario prefix when a card is rebuilt ([8c583cd](https://github.com/mctlhq/mctl-telegram/commit/8c583cd3a96829f18ff9d396a4d6ee557499d1c2)), closes [#1322](https://github.com/mctlhq/mctl-telegram/issues/1322)
+* **pa:** re-pin the alice tools to mctl-alice 2.17.1 ([cc87a4d](https://github.com/mctlhq/mctl-telegram/commit/cc87a4d36bba04f86c5a511276ebd65dd4d0b97c))
+* **pa:** refuse speaker lists a name could forge; one text cap ([b31b30d](https://github.com/mctlhq/mctl-telegram/commit/b31b30d752e6b45e44283d99d7d6720015f5cbc5)), closes [#1322](https://github.com/mctlhq/mctl-telegram/issues/1322)
+* **pa:** skip a draft send once the run is cancelled ([e5aba3d](https://github.com/mctlhq/mctl-telegram/commit/e5aba3d020c1e1d0a1e7461914d8524436dacf87)), closes [#1431](https://github.com/mctlhq/mctl-telegram/issues/1431)
+* use the vector MCTL Assistant mark ([e776449](https://github.com/mctlhq/mctl-telegram/commit/e7764492fe90c07ac2ecc7f664b4dabee1f4cbea))
+
 ## [0.148.0](https://github.com/mctlhq/mctl-telegram/compare/0.147.0...0.148.0) (2026-11-23)
 
 

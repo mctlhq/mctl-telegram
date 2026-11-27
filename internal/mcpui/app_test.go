@@ -41,7 +41,7 @@ func TestTriageHTMLHasNoExternalDeps(t *testing.T) {
 // rather than silent drift a client (or the report's content-hash claim)
 // would not notice.
 func TestTriageHTMLContentHash(t *testing.T) {
-	const wantHash = "390a03383cafc2a0272f5fac87e462306a365a07953f267f0760b999c7a50e88"
+	const wantHash = "eed387687b60d14a133922fe3bbe3dfbc97f154ef128eaec86fd82842be533ca"
 	sum := sha256.Sum256([]byte(triageHTML))
 	got := hex.EncodeToString(sum[:])
 	if got != wantHash {
@@ -153,6 +153,64 @@ func TestExtensionCapability(t *testing.T) {
 	}
 }
 
+func TestDashboardHTMLHasNoExternalDeps(t *testing.T) {
+	for _, bad := range []string{
+		"innerHTML",
+		"insertAdjacentHTML",
+		"outerHTML",
+		"document.write",
+		"eval(",
+		"new Function",
+		"fetch(",
+		"XMLHttpRequest",
+		"import(",
+		"http://",
+		"https://",
+		"fonts.googleapis.com",
+	} {
+		if strings.Contains(dashboardHTML, bad) {
+			t.Errorf("dashboard.html must not contain %q", bad)
+		}
+	}
+}
+
+func TestDashboardHTMLContentHash(t *testing.T) {
+	sum := sha256.Sum256([]byte(dashboardHTML))
+	got := hex.EncodeToString(sum[:])
+	const wantHash = "d601482184cf2a56cad2ca70aa5f376eead882c9ec30e7b35a9298111d38ed5d"
+	if got != wantHash {
+		t.Fatalf("dashboard.html sha256 = %s, want %s", got, wantHash)
+	}
+}
+
+func TestDashboardHTMLRejectsForeignMessageSources(t *testing.T) {
+	const guard = "if (event.source !== window.parent) return;"
+	if !strings.Contains(dashboardHTML, guard) {
+		t.Fatalf("dashboard.html must contain the host-sender guard %q", guard)
+	}
+	listener := strings.Index(dashboardHTML, `window.addEventListener("message"`)
+	if listener < 0 {
+		t.Fatal("dashboard.html has no message listener")
+	}
+	body := dashboardHTML[listener:]
+	if strings.Index(body, guard) > strings.Index(body, "var data = event.data;") {
+		t.Fatal("the sender guard must run before the handler inspects event.data")
+	}
+}
+
+func TestDashboardResource(t *testing.T) {
+	r := DashboardResource()
+	if r.URI != DashboardResourceURI || r.MIMEType != MIMEType {
+		t.Fatalf("resource = %+v", r)
+	}
+	contents := Contents(DashboardResourceURI)
+	tc, ok := contents[0].(mcplib.TextResourceContents)
+	if !ok || tc.Text != dashboardHTML || !strings.Contains(tc.Text, "tg-dashboard/v1") {
+		t.Fatal("dashboard contents do not match the embedded document")
+	}
+	assertCSPEmpty(t, tc.Meta)
+}
+
 func TestToolMeta(t *testing.T) {
 	meta := ToolMeta()
 	ui, ok := meta["ui"].(map[string]any)
@@ -169,5 +227,27 @@ func TestToolMeta(t *testing.T) {
 	// The deprecated flat key must never appear anywhere in the map.
 	if _, present := meta["ui/resourceUri"]; present {
 		t.Error("ToolMeta emits the deprecated flat ui/resourceUri key")
+	}
+}
+
+func TestWorkspaceResource(t *testing.T) {
+	resource := WorkspaceResource()
+	if resource.URI != WorkspaceResourceURI || resource.MIMEType != MIMEType {
+		t.Fatalf("resource = %+v", resource)
+	}
+	text := Contents(resource.URI)[0].(mcplib.TextResourceContents)
+	assertCSPEmpty(t, text.Meta)
+	previous := Contents(PreviousWorkspaceResourceURI)[0].(mcplib.TextResourceContents)
+	if previous.URI != PreviousWorkspaceResourceURI || previous.Text != text.Text {
+		t.Fatal("cached Workspace descriptor must resolve to the current bundle")
+	}
+	const wantHash = "9ba211c18c47117c1cbb573343b8754405c1e528020306f0c4ca27eb4b24e8f3"
+	if hash := sha256.Sum256([]byte(text.Text)); hex.EncodeToString(hash[:]) != wantHash {
+		t.Fatalf("workspace resource digest = %x, want %s", hash, wantHash)
+	}
+	for _, forbidden := range []string{"tools/list", "innerHTML", "eval(", "fetch(", "XMLHttpRequest", "https://", "http://"} {
+		if strings.Contains(text.Text, forbidden) {
+			t.Errorf("workspace bundle contains %q", forbidden)
+		}
 	}
 }

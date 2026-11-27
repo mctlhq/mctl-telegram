@@ -67,7 +67,7 @@ func TestReviewerWriteRules_CoverEveryRegisteredTool(t *testing.T) {
 	want := map[reviewerWriteRule][]string{
 		reviewerAllowlistedPeer: {"send_message", "send_reply"},
 		reviewerAccountGuard:    {"delete_telegram_account", "disconnect_telegram_account"},
-		reviewerNoTelegramWrite: {"prepare_send_message", "set_my_notification_preferences", "set_send_consent"},
+		reviewerNoTelegramWrite: {"delete_dashboard_template", "prepare_dashboard_action", "prepare_send_message", "save_dashboard_template", "set_my_notification_preferences", "set_send_consent"},
 	}
 	got := map[reviewerWriteRule][]string{}
 	for name, rule := range reviewerWriteRules {

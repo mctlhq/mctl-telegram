@@ -93,5 +93,6 @@ func (f *PinFresh) FreshTool(ctx context.Context, req FreshRequest) (FreshTool, 
 		Class:          def.Class,
 		Lowerable:      rule.Lowerable,
 		Constraints:    rule.Constraints,
+		InputSchema:    string(rule.InputSchema),
 	}, nil
 }

@@ -64,6 +64,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -180,6 +181,10 @@ type FreshTool struct {
 	// "not lowerable".
 	Lowerable   catalog.Lowerable
 	Constraints *catalog.Constraints
+	// InputSchema is the pin's input schema of the tool, the one whose
+	// hash is SchemaSHA. A lowered dispatch reads the values a string
+	// argument may take from it. A string, so that FreshTool stays comparable.
+	InputSchema string
 }
 
 // FreshSurface fetches a tool's definition with a fresh tools/list at
@@ -215,7 +220,11 @@ type WriteConfig struct {
 	// is sent, by server name (device_recheck.go). A call to a device on
 	// a server without a reader is refused (ReasonNoWritePath).
 	Devices map[string]DeviceLister
-	Metrics Metrics
+	// Scenarios reads a server's scenario right before a call that runs
+	// one is sent, by server name (scenario.go). A scenario call on a
+	// server without a reader is refused (ReasonNoWritePath).
+	Scenarios map[string]ScenarioSteps
+	Metrics   Metrics
 	// CallTimeout bounds token, tools/list, the pre-dispatch transaction
 	// and tools/call of one dispatch; 0 is DefaultCallTimeout.
 	CallTimeout time.Duration
@@ -534,8 +543,22 @@ func (w *WriteExecutor) run(ctx context.Context, a approval.Approval, reason str
 		// The pin, asked again here: a tool it does not make lowerable,
 		// or a call that does not meet the tool's condition, is not sent
 		// without a card whatever the caller decided.
-		pinned := catalog.PinnedTool{Class: fresh.Class, Lowerable: fresh.Lowerable, Constraints: fresh.Constraints}
+		pinned := catalog.PinnedTool{Class: fresh.Class, Lowerable: fresh.Lowerable, Constraints: fresh.Constraints, InputSchema: json.RawMessage(fresh.InputSchema)}
 		if met, err := loweringCondition(pinned, low.Args); !lowerable(a.Tool, pinned) || err != nil || !met {
+			return refuse(ReasonNotLowerable, false)
+		}
+		// No card stands behind the call, so the checks a card's value
+		// passed are made here again, on the bytes that will be sent and
+		// against the pin as just read: the spelling and the range of
+		// every value, the arguments the tool may carry and the device
+		// id. The caller ran them (precheckDeviceWrite); the executor
+		// does not take its word for it (S2-D2).
+		if _, ref := precheckDeviceWrite(a.Tool, pinned, low.Args); ref != nil {
+			// A value the pin does not allow is named as that; any other
+			// failed check is a call this path does not carry.
+			if ref.reason == ReasonValueNotAllowed {
+				return refuse(ReasonValueNotAllowed, false)
+			}
 			return refuse(ReasonNotLowerable, false)
 		}
 	}
@@ -584,6 +607,18 @@ func (w *WriteExecutor) run(ctx context.Context, a approval.Approval, reason str
 	// or differs, and the record says "refused", not "unknown".
 	if targetsDevice(a.Tool) {
 		if r := w.recheckTarget(cctx, a, token, c.args, c.detail, low != nil); r != "" {
+			if w.settleUnsent(ctx, a, dispatchID) {
+				w.record(ctx, base, StatusRefused, r, nil)
+			}
+			return WriteOutcome{Status: StatusRefused, Reason: r, DispatchID: dispatchID}
+		}
+	}
+
+	// A scenario's steps are read again in the same place and for the
+	// same reason: what runs must be what the card listed (S2-D6;
+	// scenario.go).
+	if _, ok := scenarioTools[a.Tool]; ok {
+		if r := w.recheckScenario(cctx, a, token, c.args, c.detail); r != "" {
 			if w.settleUnsent(ctx, a, dispatchID) {
 				w.record(ctx, base, StatusRefused, r, nil)
 			}

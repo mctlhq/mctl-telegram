@@ -56,6 +56,14 @@ const (
 	OutboxBudgetHold OutboxKind = "budget_hold"
 	// OutboxRunFailed is NoticeRunFailed.
 	OutboxRunFailed OutboxKind = "run_failed"
+	// OutboxRunFailedRateLimit, OutboxRunFailedProvider, OutboxRunFailedContext,
+	// OutboxRunFailedBudget and OutboxRunFailedTimeout are specific failure
+	// notices reported by the worker when a run is abandoned without an answer.
+	OutboxRunFailedRateLimit OutboxKind = "run_failed_rate_limit"
+	OutboxRunFailedProvider  OutboxKind = "run_failed_provider"
+	OutboxRunFailedContext   OutboxKind = "run_failed_context"
+	OutboxRunFailedBudget    OutboxKind = "run_failed_budget"
+	OutboxRunFailedTimeout   OutboxKind = "run_failed_timeout"
 	// OutboxRequestDropped is NoticeDropped.
 	OutboxRequestDropped OutboxKind = "request_dropped"
 	// OutboxPrincipalStopped is NoticePrincipalDisabled.
@@ -218,7 +226,9 @@ func OutboxKinds() []OutboxKind {
 }
 
 func jobOutboxKinds() []OutboxKind {
-	return []OutboxKind{OutboxReply, OutboxReplyTooLong, OutboxBudgetHold, OutboxRunFailed, OutboxRequestDropped, OutboxPrincipalStopped,
+	return []OutboxKind{OutboxReply, OutboxReplyTooLong, OutboxBudgetHold, OutboxRunFailed,
+		OutboxRunFailedRateLimit, OutboxRunFailedProvider, OutboxRunFailedContext, OutboxRunFailedBudget, OutboxRunFailedTimeout,
+		OutboxRequestDropped, OutboxPrincipalStopped,
 		OutboxDisclosureTooLong}
 }
 
@@ -263,6 +273,36 @@ func OutboxKindOf(k NoticeKind) OutboxKind {
 		return OutboxPrincipalStopped
 	}
 	return OutboxRunFailed
+}
+
+// IsFailureOutboxKind reports whether k is one of the job-level failure
+// notice outbox kinds.
+func IsFailureOutboxKind(k OutboxKind) bool {
+	switch k {
+	case OutboxRunFailed, OutboxRunFailedRateLimit, OutboxRunFailedProvider,
+		OutboxRunFailedContext, OutboxRunFailedBudget, OutboxRunFailedTimeout:
+		return true
+	}
+	return false
+}
+
+// OutboxKindForFailure maps a closed FailureReason to the user-facing job
+// failure outbox kind.
+func OutboxKindForFailure(r FailureReason) OutboxKind {
+	switch r {
+	case FailureProviderRateLimit:
+		return OutboxRunFailedRateLimit
+	case FailureProviderServer, FailureProviderRequest, FailureProviderError:
+		return OutboxRunFailedProvider
+	case FailureContextLimit:
+		return OutboxRunFailedContext
+	case FailureCostLimit, FailureToolCap:
+		return OutboxRunFailedBudget
+	case FailureTurnTimeout, FailureReplyTimeout, FailureDeadline, FailureLeaseExpired, FailureLeaseShort:
+		return OutboxRunFailedTimeout
+	default:
+		return OutboxRunFailed
+	}
 }
 
 // OutboxStatus is the state of a pa_outbox row.
