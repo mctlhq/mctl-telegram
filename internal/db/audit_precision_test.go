@@ -10,15 +10,15 @@ import (
 // An audit row written with a clock finer than a microsecond, as on Linux,
 // still verifies after it is read back from either store.
 func TestAuditChainVerifiesAfterASubMicrosecondClock(t *testing.T) {
-	real := auditNow
-	t.Cleanup(func() { auditNow = real })
-	auditNow = func() time.Time { return real().Truncate(time.Microsecond).Add(123 * time.Nanosecond) }
+	orig := auditNow
+	t.Cleanup(func() { auditNow = orig })
+	auditNow = func() time.Time { return orig().Truncate(time.Microsecond).Add(123 * time.Nanosecond) }
 
 	check := func(t *testing.T, s *Store) {
 		ctx := context.Background()
 		// Postgres is reused between runs: a user of its own, so that the
 		// chain verified here holds only the rows written here.
-		tgID := real().UnixNano()
+		tgID := orig().UnixNano()
 		uid, err := s.EnsureUserByTelegramID(ctx, tgID, "alice_tg", "Alice")
 		if err != nil {
 			t.Fatalf("user: %v", err)
