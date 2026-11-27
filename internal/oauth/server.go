@@ -3295,7 +3295,8 @@ const ceilingLeavesNoScopeDescription = "this account holds no scope within this
 func (s *Server) applyClientScopeCeiling(clientID, redirectURI string, groups, scopes []string) (outGroups, outScopes []string, applied bool) {
 	ceiling, ok := s.cfg.ClientProfiles.ScopeCeilingFor(clientID, redirectURI)
 	outGroups, outScopes = applyScopeCeiling(ceiling, ok, groups, scopes)
-	if !ok && ((s.cimdEnabled() && cimd.IsCIMDURL(clientID)) || isDynamicClientID(clientID)) {
+	if !ok && ((s.cimdEnabled() && cimd.IsCIMDURL(clientID)) ||
+		(isDynamicClientID(clientID) && !isLoopbackRedirectURI(redirectURI))) {
 		// A CIMD client reaches this server on the strength of a document
 		// the operator did not author, and a dynamically registered client
 		// (RFC 7591: tgmcp_ random, tgdcr_ pinned) on a registration anyone
@@ -3305,7 +3306,11 @@ func (s *Server) applyClientScopeCeiling(clientID, redirectURI string, groups, s
 		// (#1414). narrowGrant keeps those scopes because a client cannot
 		// ask for them; without this a client that requested one read scope
 		// still held admin:users, and a DCR client signed in by an admin
-		// inherited the admin's whole entitlement. The built-in self-connect
+		// inherited the admin's whole entitlement. A loopback redirect (RFC
+		// 8252 §7.3) is the one exception: the client is a program on the
+		// signed-in user's own machine, such as the admin CLI or a coding
+		// agent, whose port changes on every run so no record can name it.
+		// The built-in self-connect
 		// client and preregistered clients are neither CIMD nor dynamic, so
 		// they are untouched.
 		outGroups, outScopes = withoutMembership(scopes)
@@ -3326,6 +3331,18 @@ const dynamicClientIDPrefix = "tgmcp_"
 func isDynamicClientID(clientID string) bool {
 	return strings.HasPrefix(clientID, dynamicClientIDPrefix) ||
 		strings.HasPrefix(clientID, db.PinnedClientIDPrefix)
+}
+
+// isLoopbackRedirectURI reports whether raw is an http redirect to a loopback
+// host (RFC 8252 section 7.3) with no userinfo, the only shape a program on the
+// user's own machine uses. A redirect that does not parse, or that is not
+// plainly loopback, is not: "could not tell" must never read as "local".
+func isLoopbackRedirectURI(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "http" || u.User != nil {
+		return false
+	}
+	return isLoopbackHost(u.Hostname())
 }
 
 // cimdClientMapped reports whether MCP_CLIENT_PROFILES names this CIMD client:

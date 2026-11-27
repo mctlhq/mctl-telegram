@@ -78,3 +78,29 @@ func TestIsDynamicClientID(t *testing.T) {
 		}
 	}
 }
+
+// A program on the user's own machine registers a loopback callback whose
+// port changes on every run, so no scope_ceiling record can name it. It keeps
+// what the signed-in account holds; any other callback does not.
+func TestDCRClient_LoopbackRedirectKeepsMembership(t *testing.T) {
+	srv := newTestServer(t, withDanaInEveryAdminMembership)
+	admin := []string{"platform-admins", "admins"}
+	for _, id := range []string{dcrRandomClientID, dcrPinnedClientID} {
+		for redirect, wantKept := range map[string]bool{
+			"http://127.0.0.1:51088/callback": true,
+			"http://localhost:57549/cb":       true,
+			"http://[::1]:50095/callback":     true,
+			"https://claude.ai/cb":            false,
+			"https://127.0.0.1:1/cb":          false,
+			"http://127.0.0.1.evil.test/cb":   false,
+			"http://evil.test@127.0.0.1/cb":   false,
+			"":                                false,
+		} {
+			groups, scopes, _ := srv.applyClientScopeCeiling(id, redirect, admin, adminEntitlement)
+			kept := strings.Contains(strings.Join(scopes, " "), "admin:users") && len(groups) > 0
+			if kept != wantKept {
+				t.Errorf("%s redirect %q: membership kept = %v, want %v (scopes=%v groups=%v)", id, redirect, kept, wantKept, scopes, groups)
+			}
+		}
+	}
+}
