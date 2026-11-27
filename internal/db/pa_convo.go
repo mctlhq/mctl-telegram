@@ -21,8 +21,10 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/approval"
+	"github.com/mctlhq/mctl-telegram/internal/pa/auditevent"
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
+	"github.com/mctlhq/mctl-telegram/internal/pa/permissions"
 )
 
 var _ convo.Store = (*Store)(nil)
@@ -324,7 +326,7 @@ func (s *Store) ClosePAConversations(ctx context.Context, tx *sql.Tx, principal 
 	// So do its approvals that were not dispatched yet, with their sealed
 	// arguments (#1320): a card of a closed conversation can no longer be
 	// approved, and /new leaves no text behind.
-	if _, err := cancelPAApprovals(ctx, tx, principal, now.UnixMilli(), ""); err != nil {
+	if _, err := cancelPAApprovals(ctx, tx, principal, now.UnixMilli(), "", auditevent.ReasonConversationClosed); err != nil {
 		return fmt.Errorf("close pa conversation: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -366,7 +368,7 @@ func (s *Store) ForgetPAConversations(ctx context.Context, tx *sql.Tx, principal
 	// move no connection's revision, so nothing else would revoke them
 	// (P2-S12; consent is the basis of every action taken for the
 	// principal).
-	if err := revokePAPermissionsOfPrincipalTx(ctx, tx, principal, nowMS); err != nil {
+	if err := revokePAPermissionsOfPrincipalTx(ctx, tx, principal, nowMS, auditevent.ReasonDataForgotten); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pa_fragments WHERE principal = $1`, principal); err != nil {
@@ -685,6 +687,9 @@ func (s *Store) SweepPAState(ctx context.Context, now, updatesBefore time.Time) 
 			WHERE status IN ('pending', 'approved') AND expires_at_ms <= $1`, []any{nowMS}},
 		{new(int64), `DELETE FROM pa_approvals WHERE created_at_ms < $1 AND NOT EXISTS (SELECT 1 FROM pa_dispatches d WHERE d.principal = pa_approvals.principal AND d.approval_id = pa_approvals.id AND d.status = 'dispatching')`, []any{now.Add(-approval.Retention).UnixMilli()}},
 		{new(int64), `DELETE FROM pa_dispatches WHERE status <> 'dispatching' AND created_at_ms < $1`, []any{now.Add(-approval.Retention).UnixMilli()}},
+		// Standing permissions that stopped counting permissions.Retention
+		// ago (S2-A9).
+		{new(int64), sweepEndedPAPermissions, []any{now.Add(-permissions.Retention).UnixMilli()}},
 	}
 	for _, st := range steps {
 		res, err := tx.ExecContext(ctx, st.q, st.args...)

@@ -42,4 +42,13 @@ func TestPAPinGauges(t *testing.T) {
 	if testutil.ToFloat64(r.PADispatchTotal.WithLabelValues("tg", "refused", "flag_off")) != 1 {
 		t.Fatal("dispatch not counted")
 	}
+	r.PreparePAWriteListingRefusals("alice", []string{"server_unavailable", "tool_changed"})
+	if n := testutil.CollectAndCount(r.PAWriteListingRefusals); n != 2 {
+		t.Fatalf("%d write listing refusal series prepared, want 2", n)
+	}
+	r.CountPAWriteListingRefusal("alice", "tool_changed")
+	if testutil.ToFloat64(r.PAWriteListingRefusals.WithLabelValues("alice", "tool_changed")) != 1 ||
+		testutil.ToFloat64(r.PAWriteListingRefusals.WithLabelValues("alice", "server_unavailable")) != 0 {
+		t.Fatal("write listing refusal not counted under its reason")
+	}
 }

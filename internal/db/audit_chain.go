@@ -56,6 +56,23 @@ func hashAuditEntry(prev []byte, userID int64, tool, peer, status, errCol string
 	return h.Sum(nil)
 }
 
+// matchesTruncatedTime reports whether want is the hash of a time that a
+// Postgres timestamp stores as stored: stored, plus 1 to 999 nanoseconds.
+// Rows written before created_at was truncated were hashed over the full
+// value, which was not kept. Every other field must still match exactly, so
+// what is left open is the part of the time below a microsecond.
+func matchesTruncatedTime(stored time.Time, want []byte, hashAt func(time.Time) []byte) bool {
+	if stored.Nanosecond()%int(time.Microsecond) != 0 {
+		return false
+	}
+	for ns := time.Duration(1); ns < time.Microsecond; ns++ {
+		if bytesEqual(hashAt(stored.Add(ns)), want) {
+			return true
+		}
+	}
+	return false
+}
+
 // auditEdgeMarker opens the correlation block inside the hash input.
 const auditEdgeMarker = 0x01
 

@@ -121,6 +121,10 @@ type paRuntime struct {
 	// staleWrites resolves approved-call dispatch records nobody finished
 	// (slice P2-S3). Set with the dispatcher.
 	staleWrites *connector.StaleWriteSweeper
+	// auditEvents appends the queued audit events of permission and
+	// approval changes to the audit chain (slice P2-S15a). Set with the
+	// dispatcher, like staleWrites.
+	auditEvents *connector.AuditEventSweeper
 	// menu sets menuCommands as the bot's command menu at Start; nil when
 	// the sender cannot (the wiring tests' recorder).
 	menu         paMenuSetter
@@ -312,6 +316,10 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 		// dispatches nothing, and finds nothing while no write path is
 		// built.
 		rt.staleWrites = &connector.StaleWriteSweeper{Store: store, Executor: pt.executor}
+		// Events are queued by /permissions, by a cancelled approval and
+		// by a connection that ends; while no write path was ever built
+		// there is none to find.
+		rt.auditEvents = &connector.AuditEventSweeper{Store: store}
 	}
 	return rt, nil
 }
@@ -415,6 +423,13 @@ func (r *paRuntime) Start(ctx context.Context) {
 		go func() {
 			defer r.wg.Done()
 			r.staleWrites.Run(ctx, connector.StaleWriteSweepInterval)
+		}()
+	}
+	if r.auditEvents != nil {
+		r.wg.Add(1)
+		go func() {
+			defer r.wg.Done()
+			r.auditEvents.Run(ctx, connector.AuditEventSweepInterval)
 		}()
 	}
 }

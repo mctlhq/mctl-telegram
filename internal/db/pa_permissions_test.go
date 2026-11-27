@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -448,6 +449,80 @@ func TestPAPermission_ReadInTransaction(t *testing.T) {
 		must(t, err)
 		if _, err := read(alice, "prm_tx"); !errors.Is(err, permissions.ErrUnreadable) || errors.Is(err, permissions.ErrNotFound) {
 			t.Fatalf("an undecodable row: %v", err)
+		}
+	})
+}
+
+// TestS2A9_EndedPermissionsAreSwept: a permission that was revoked, or
+// whose expiry passed, permissions.Retention ago is deleted by the
+// conversation sweep. One that still counts is kept whatever its age, and
+// so is one that ended more recently.
+func TestS2A9_EndedPermissionsAreSwept(t *testing.T) {
+	paConvoDialects(t, func(t *testing.T, s *Store, alice, bob int64) {
+		ctx := context.Background()
+		wa, wb := newPAPermWorld(t, s, alice), newPAPermWorld(t, s, bob)
+		long := func(w paPermWorld, id string) permissions.Permission {
+			p := w.perm(id)
+			p.ExpiresAt = t0.Add(permissions.MaxTTL)
+			return p
+		}
+		// All granted at t0. The sweep runs ten days later.
+		now := t0.Add(10 * 24 * time.Hour)
+		ret := permissions.Retention
+		for _, id := range []string{"prm_live", "prm_revoked_old", "prm_revoked_new"} {
+			must(t, wa.insert(t, long(wa, id), t0))
+		}
+		must(t, wb.insert(t, long(wb, "prm_bob_old"), t0))
+		must(t, wb.insert(t, long(wb, "prm_bob_live"), t0))
+		revoke := func(principal int64, id string, at time.Time) {
+			t.Helper()
+			must(t, inTx(t, s, func(tx *sql.Tx) error { return s.RevokePAPermission(ctx, tx, principal, id, at) }))
+		}
+		revoke(alice, "prm_revoked_old", now.Add(-ret-time.Minute))
+		revoke(alice, "prm_revoked_new", now.Add(-ret+time.Minute))
+		revoke(bob, "prm_bob_old", now.Add(-ret-time.Minute))
+		// Expired rows are made by moving the expiry: a grant cannot be
+		// made with one in the past.
+		for id, exp := range map[string]time.Time{"prm_expired_old": now.Add(-ret - time.Minute), "prm_expired_new": now.Add(-ret + time.Minute)} {
+			must(t, wa.insert(t, long(wa, id), t0))
+			_, err := s.DB.Exec(`UPDATE pa_permissions SET expires_at_ms = $3 WHERE principal = $1 AND id = $2`, alice, id, exp.UnixMilli())
+			must(t, err)
+		}
+		ids := func(principal int64) []string {
+			t.Helper()
+			rows, err := s.DB.Query(`SELECT id FROM pa_permissions WHERE principal = $1 ORDER BY id`, principal)
+			must(t, err)
+			defer func() { _ = rows.Close() }()
+			var out []string
+			for rows.Next() {
+				var id string
+				must(t, rows.Scan(&id))
+				out = append(out, id)
+			}
+			must(t, rows.Err())
+			return out
+		}
+		if _, err := s.SweepPAState(ctx, now, now.Add(-48*time.Hour)); err != nil {
+			t.Fatalf("sweep: %v", err)
+		}
+		if got, want := ids(alice), []string{"prm_expired_new", "prm_live", "prm_revoked_new"}; !slices.Equal(got, want) {
+			t.Fatalf("alice's rows after the sweep: %v, want %v", got, want)
+		}
+		if got, want := ids(bob), []string{"prm_bob_live"}; !slices.Equal(got, want) {
+			t.Fatalf("bob's rows after the sweep: %v, want %v", got, want)
+		}
+		// The row in force still lowers; the two that ended do not, swept
+		// or not.
+		if got := wa.list(t, now); len(got) != 1 || got[0].ID != "prm_live" {
+			t.Fatalf("active permissions after the sweep: %+v", got)
+		}
+		// Once their retention has passed the other two go as well.
+		later := now.Add(2 * time.Minute)
+		if _, err := s.SweepPAState(ctx, later, later.Add(-48*time.Hour)); err != nil {
+			t.Fatalf("second sweep: %v", err)
+		}
+		if got, want := ids(alice), []string{"prm_live"}; !slices.Equal(got, want) {
+			t.Fatalf("alice's rows after the second sweep: %v, want %v", got, want)
 		}
 	})
 }

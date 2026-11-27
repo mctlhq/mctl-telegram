@@ -101,18 +101,23 @@ func (s *Store) PAConversationTaintIn(ctx context.Context, tx *sql.Tx, principal
 	return tainted != 0, nil
 }
 
-// enqueueStaleWriteNotices queues, in the sweep's transaction, the
-// outcome_unknown notice of every dispatch record the sweep moved: the
-// principal is told the call may or may not have happened in the same
-// commit that stops it from ever being sent again. An approval that already
-// has a notice keeps that one.
+// enqueueStaleWriteNotices queues, in the sweep's transaction, the notice
+// of every dispatch record the sweep moved: the principal is told the call
+// may or may not have happened, or, for a record the sweep ended as
+// refused because its request was never made, that it was not carried
+// out, in the same commit that stops it from ever being sent again. An
+// approval that already has a notice keeps that one.
 func enqueueStaleWriteNotices(ctx context.Context, tx *sql.Tx, moved []approval.Dispatch, nowMS int64) error {
 	for _, d := range moved {
 		if d.ApprovalID == "" {
 			continue
 		}
+		kind := jobs.OutboxWriteUnknown
+		if d.Status == approval.DispatchRefused {
+			kind = jobs.OutboxWriteNotSent
+		}
 		if err := enqueuePAOutbox(ctx, tx, jobs.OutboxItem{
-			Principal: d.Principal, Kind: jobs.OutboxWriteUnknown, ApprovalID: d.ApprovalID,
+			Principal: d.Principal, Kind: kind, ApprovalID: d.ApprovalID,
 		}, nowMS); err != nil {
 			return err
 		}

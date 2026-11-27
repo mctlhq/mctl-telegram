@@ -4419,6 +4419,16 @@ descriptor changed or disappeared is denied (`tool_changed`); a tool the pin
 does not know is denied (`not_pinned`) and is not drift. Everything here is
 inert unless `PA_ENABLED` and `PA_EXTERNAL_TOOLS_ENABLED` are both on.
 
+The write executor asks the server for the tool once more, uncached, before
+it sends an approved or lowered write. A write that this listing refuses is
+counted in `mctl_pa_write_listing_refusals_total{server,reason}`: the
+listing could not be read or used (`server_unavailable`, `listing_stale`,
+`internal`), or the tool in it is not the one the pin and the card name
+(`not_pinned`, `no_write_path`, `unknown_server`, `tool_changed`). The same
+refusal is in `mctl_pa_dispatch_total{status="refused"}` under the same
+reason, where it cannot be told from a refusal that asked no listing. No
+alert reads the counter yet. It stays at 0 while `PA_WRITES_ENABLED` is off.
+
 <a id="mctlpapindrift"></a>
 ### MctlPAPinDrift
 

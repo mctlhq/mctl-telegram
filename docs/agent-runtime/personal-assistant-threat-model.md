@@ -191,6 +191,8 @@ Preview end-to-end evals are separate (see [Acceptance evals](#acceptance-evals)
 
 A crash between steps 1 and 3 leaves a `dispatching` record. On restart, that record becomes `outcome_unknown`. It is never re-dispatched, because the receipt is already consumed.
 
+One case is told apart. Between steps 1 and 2 the executor marks the record as sent, in a statement of its own that succeeds only while the record is `dispatching` and its lease has not run out, and it makes no call without that mark. A record left without the mark was therefore never sent: the sweep ends it as `refused` (`dispatch_never_sent`) and the principal is told the call was not made. A record that carries the mark, or one written before the mark existed, becomes `outcome_unknown` as above. Neither is re-dispatched.
+
 **`/disconnect`:**
 1. sets `revoked` and bumps `authority_revision`, which does not wait for any in-flight call, so no new dispatch can pass step 1;
 2. cancels the in-flight call's context;
@@ -612,6 +614,30 @@ After the call, the connection is re-read (S1-C7) and so is the job row: a
 result that arrives after the job was cancelled, its consent withdrawn or its
 conversation closed is discarded (`fenced`). One deadline (60s by default)
 bounds opening the token, `tools/list` and `tools/call`.
+
+**Changes that are not calls** (#1320 slice P2-S15a). A standing permission
+granted or revoked, and an approval cancelled, are recorded in the same chain
+with the status `permission_granted`, `permission_revoked` or
+`approval_cancelled`. The record (`pa-event/v1`, a different first token from
+the call record's `pa/v1`) holds the principal, the server and tool, the
+connection id and its `authority_revision`, the permission or approval id,
+for an approval the digest of its arguments, the time of the change and a
+closed reason: `by_principal`, `connection_changed`, `conversation_closed`,
+`data_forgotten` or `principal_disabled`. It holds no arguments, no device
+ids, no ceiling and no operator identity; a value outside the identifier
+alphabet is refused, not escaped.
+
+The change and the chain are two transactions, so the statement that makes
+the change writes a `pa_audit_events` row in its own transaction: a change
+whose event cannot be queued does not commit, and a rolled back change leaves
+no event. A sweep (every minute, on the replica that serves writes) deletes
+each row in the transaction that appends it to the chain, so an event is
+appended once. An event that cannot be appended stays queued and is tried
+again; the pass that left it is logged as an error. The row's own time is the
+append time, the change time is in the record. Account deletion deletes the
+queued rows with the chain; `/forget` and a consent withdrawal keep them. A
+permission that ran out at its expiry, and an approval that expired or was
+refused, are not events: nothing changed them.
 
 Message bodies and tool outputs are never logged, only digests. `/log` shows a principal their own entries.
 
