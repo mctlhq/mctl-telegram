@@ -2423,7 +2423,15 @@ type AuditChainVerification struct {
 // cannot be retroactively verified. The walk continues past them so a
 // post-M3.1 chain is still checked, but the audit page should make the
 // pre-M3.1 gap visible to the user.
+//
+// On Postgres a row hashed over a time finer than a microsecond, which
+// was written before the time was truncated, is verified by trying the
+// values the stored one was cut from (matchesTruncatedTime).
 func (s *Store) VerifyAuditChain(ctx context.Context, userID int64) (AuditChainVerification, error) {
+	pg, err := dialectOf(s.DB)
+	if err != nil {
+		return AuditChainVerification{}, fmt.Errorf("verify audit: %w", err)
+	}
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT id, tool_name, peer_redacted, status, error, created_at, prev_hash, entry_hash, call_path,
 		 	edge_request_id, edge_route, mcp_method, mcp_name, protocol_version
@@ -2486,8 +2494,17 @@ func (s *Store) VerifyAuditChain(ctx context.Context, userID int64) (AuditChainV
 				Reason:     "prev_hash does not chain to the previous entry's entry_hash",
 			}, nil
 		}
-		recomputed := hashAuditEntry(prevHash, userID, tool, peer.String, status, errCol.String, callPath, createdAt, edge)
-		if !bytesEqual(recomputed, entryHash) {
+		hashAt := func(at time.Time) []byte {
+			return hashAuditEntry(prevHash, userID, tool, peer.String, status, errCol.String, callPath, at, edge)
+		}
+		matches := bytesEqual(hashAt(createdAt), entryHash)
+		if !matches && pg {
+			if err := ctx.Err(); err != nil {
+				return AuditChainVerification{}, fmt.Errorf("verify audit: %w", err)
+			}
+			matches = matchesTruncatedTime(createdAt, entryHash, hashAt)
+		}
+		if !matches {
 			return AuditChainVerification{
 				OK:         false,
 				Verified:   verified,
