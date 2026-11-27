@@ -189,8 +189,15 @@ func (r *AliceDevices) Devices(ctx context.Context, req SpeakerRequest) ([]Devic
 	return devices, nil
 }
 
-// Speakers implements SpeakerReader: the listed devices the server calls
-// speakers. A listing without one is ErrNoSuchDevices.
+// IsSmartSpeaker reports whether d is a target of the speaker tools: the
+// server calls it a speaker and its type is devices.types.smart_speaker or
+// continues it after a dot.
+func (d Device) IsSmartSpeaker() bool {
+	return d.Speaker && permissions.TypeHasPrefix(d.Type, permissions.TypeSmartSpeaker)
+}
+
+// Speakers implements SpeakerReader: the listed smart speakers
+// (Device.IsSmartSpeaker). A listing without one is ErrNoSuchDevices.
 func (r *AliceDevices) Speakers(ctx context.Context, req SpeakerRequest) ([]Speaker, error) {
 	devices, err := r.Devices(ctx, req)
 	if err != nil {
@@ -198,7 +205,7 @@ func (r *AliceDevices) Speakers(ctx context.Context, req SpeakerRequest) ([]Spea
 	}
 	var out []Speaker
 	for _, d := range devices {
-		if d.Speaker {
+		if d.IsSmartSpeaker() {
 			out = append(out, Speaker{ID: d.ID, Name: d.Name, Room: d.Room, Home: d.Home, Type: d.Type})
 		}
 	}

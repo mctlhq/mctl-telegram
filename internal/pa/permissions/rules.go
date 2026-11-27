@@ -54,11 +54,10 @@ import (
 //
 // TypeSmartSpeaker is what mctl-alice reports for a speaker with the
 // assistant ("devices.types.smart_speaker.yandex.station.mini"): the only
-// devices alice_set_volume and alice_media_control get a card for.
-// TypeMediaDevice is the type the threat model names for them; no speaker
-// reports it, and it stays allowed for a device that does.
+// devices a speaker tool is offered, carded or lowered for. A television or
+// a set-top box (devices.types.media_device) is none of them, whether or
+// not the listing calls it a speaker (owner decision D12, 2026-11-27).
 const (
-	TypeMediaDevice  = "devices.types.media_device"
 	TypeSmartSpeaker = "devices.types.smart_speaker"
 	TypeLight        = "devices.types.light"
 )
@@ -89,7 +88,7 @@ type toolRule struct {
 	carded map[string][]string
 }
 
-var speakerTypes = []string{TypeSmartSpeaker, TypeMediaDevice}
+var speakerTypes = []string{TypeSmartSpeaker}
 
 var toolRules = map[string]toolRule{
 	"alice_set_volume":    {typePrefixes: speakerTypes, ceilingArg: "level", ceilingMin: 1, ceilingMax: 10},
