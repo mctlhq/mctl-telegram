@@ -47,7 +47,7 @@ func phase2Policy(t *testing.T) PinPolicy {
 // TestS2D5_GrantRuleRefusals: Rules refuses every grant shape S2-D5 names,
 // each for its own reason, and admits the three shapes that have a rule.
 func TestS2D5_GrantRuleRefusals(t *testing.T) {
-	speakers := []Device{{ID: "dev-1", Type: speakerType}, {ID: "dev-2", Type: TypeMediaDevice}}
+	speakers := []Device{{ID: "dev-1", Type: speakerType}, {ID: "dev-2", Type: TypeSmartSpeaker}}
 	lights := []Device{{ID: "dev-3", Type: lightType}, {ID: "dev-4", Type: lightType + ".strip"}}
 	for _, ok := range []struct {
 		tool    string
@@ -85,7 +85,8 @@ func TestS2D5_GrantRuleRefusals(t *testing.T) {
 		{"a type that only contains the word", "alice_set_light", []Device{{ID: "dev-5", Type: "devices.types.socket.light"}}, NoCeiling, ErrRuleDeviceType},
 		{"a type that only starts like it", "alice_set_light", []Device{{ID: "dev-5", Type: lightType + "house"}}, NoCeiling, ErrRuleDeviceType},
 		{"a speaker type that only starts like it", "alice_set_volume", []Device{{ID: "dev-5", Type: TypeSmartSpeaker + "phone"}}, 5, ErrRuleDeviceType},
-		{"a media type that only starts like it", "alice_media_control", []Device{{ID: "dev-5", Type: TypeMediaDevice + "s"}}, NoCeiling, ErrRuleDeviceType},
+		{"a television", "alice_media_control", []Device{{ID: "dev-5", Type: "devices.types.media_device.tv"}}, NoCeiling, ErrRuleDeviceType},
+		{"a set-top box under a volume permission", "alice_set_volume", []Device{{ID: "dev-5", Type: "devices.types.media_device"}}, 5, ErrRuleDeviceType},
 		{"a light type ending in a dot", "alice_set_light", []Device{{ID: "dev-5", Type: "devices.types.ligh.t"}}, NoCeiling, ErrRuleDeviceType},
 		{"a device without a type", "alice_set_volume", []Device{{ID: "dev-1"}}, 5, ErrRuleDeviceType},
 		{"volume without a ceiling", "alice_set_volume", speakers, NoCeiling, ErrRuleCeiling},
@@ -170,7 +171,7 @@ func TestRules_AgreeWithThePhase2Pin(t *testing.T) {
 			t.Errorf("%s has a rule but the pin does not make it a lowerable write: %+v", name, pt)
 			continue
 		}
-		speaker := slices.Equal(r.typePrefixes, []string{TypeSmartSpeaker, TypeMediaDevice})
+		speaker := slices.Equal(r.typePrefixes, []string{TypeSmartSpeaker})
 		if !speaker && !slices.Equal(r.typePrefixes, []string{TypeLight}) {
 			t.Errorf("%s: device types %q", name, r.typePrefixes)
 		}
@@ -344,8 +345,7 @@ func TestTypeHasPrefix_IsExactAndDotted(t *testing.T) {
 		{"devices.types.smart_speaker.yandex.station.mini", TypeSmartSpeaker, true},
 		{"devices.types.smart_speaker", TypeSmartSpeaker, true},
 		{"devices.types.smart_speakers", TypeSmartSpeaker, false},
-		{"devices.types.media_device.tv", TypeMediaDevice, true},
-		{"devices.types.thermostat", TypeMediaDevice, false},
+		{"devices.types.thermostat", TypeSmartSpeaker, false},
 	} {
 		if got := TypeHasPrefix(tc.deviceType, tc.prefix); got != tc.want {
 			t.Errorf("TypeHasPrefix(%q, %q) = %v, want %v", tc.deviceType, tc.prefix, got, tc.want)
@@ -357,7 +357,7 @@ func TestTypeHasPrefix_IsExactAndDotted(t *testing.T) {
 	}{
 		{"alice_set_volume", speakerType, true},
 		{"alice_media_control", speakerType, true},
-		{"alice_set_volume", "devices.types.media_device.tv", true},
+		{"alice_set_volume", "devices.types.media_device.tv", false},
 		{"alice_set_volume", lightType, false},
 		{"alice_set_volume", "", false},
 		{"alice_set_light", lightType, true},

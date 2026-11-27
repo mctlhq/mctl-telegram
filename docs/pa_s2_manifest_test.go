@@ -47,7 +47,79 @@ type s2Entry struct {
 	Note      string       `yaml:"note"`
 	Tests     []string     `yaml:"tests"`
 	Mutations []s2Mutation `yaml:"mutations"`
-	Gaps      []paGap      `yaml:"gaps"`
+	Gaps      []s2Gap      `yaml:"gaps"`
+}
+
+// s2Gap is a gap of an S2 row. A gap with neither disposition is open and
+// blocks a closing run. A disposed gap stays listed: what it says is still
+// true, and it no longer blocks.
+type s2Gap struct {
+	paGap `yaml:",inline"`
+	// Accepted names the owner decisions that accept the limit the gap
+	// describes (agent-runtime/pa-s2-owner-decisions.md, "### D<n>").
+	Accepted []string `yaml:"accepted"`
+	// Eval names the acceptance evals of the threat model that have to
+	// show on a deployed service what the gap says is unshown (owner
+	// decision D24).
+	Eval []string `yaml:"eval"`
+}
+
+func (g s2Gap) disposed() bool { return len(g.Accepted) > 0 || len(g.Eval) > 0 }
+
+const s2DecisionsPath = "agent-runtime/pa-s2-owner-decisions.md"
+
+var (
+	s2DecisionRowRe = regexp.MustCompile(`(?m)^### (D[1-9][0-9]*) `)
+	s2EvalRowRe     = regexp.MustCompile(`(?m)^- (A[1-9][0-9]*): `)
+)
+
+func s2Rows(re *regexp.Regexp, doc []byte) map[string]bool {
+	out := map[string]bool{}
+	for _, m := range re.FindAllSubmatch(doc, -1) {
+		out[string(m[1])] = true
+	}
+	return out
+}
+
+// checkS2Dispositions returns every disposition of a gap that does not
+// hold: one that names nothing, names a decision or an eval that is not
+// written down, repeats a name, or claims both kinds.
+func checkS2Dispositions(manifest map[string]s2Entry, decisions, evals map[string]bool) []string {
+	var problems []string
+	for id, e := range manifest {
+		for _, g := range e.Gaps {
+			bad := func(format string, args ...any) {
+				problems = append(problems, fmt.Sprintf("%s: gap %q: ", id, g.Half)+fmt.Sprintf(format, args...))
+			}
+			if g.Accepted != nil && g.Eval != nil {
+				bad("is both accepted and moved to an eval: split it")
+			}
+			for _, d := range []struct {
+				field, what string
+				refs        []string
+				known       map[string]bool
+			}{
+				{"accepted", "an owner decision of " + s2DecisionsPath, g.Accepted, decisions},
+				{"eval", "an acceptance eval of the threat model", g.Eval, evals},
+			} {
+				if d.refs != nil && len(d.refs) == 0 {
+					bad("%s names nothing", d.field)
+				}
+				seen := map[string]bool{}
+				for _, r := range d.refs {
+					if !d.known[r] {
+						bad("%s %q is not %s", d.field, r, d.what)
+					}
+					if seen[r] {
+						bad("%s %q listed twice", d.field, r)
+					}
+					seen[r] = true
+				}
+			}
+		}
+	}
+	sort.Strings(problems)
+	return problems
 }
 
 // s2Mutation records one deliberate break of a guard and the tests it
@@ -123,7 +195,11 @@ func checkS2Manifest(ids []string, manifest map[string]s2Entry, funcs map[string
 			problems = append(problems, fmt.Sprintf("%s: in the manifest but not an S2 id of the threat model", id))
 		}
 		mapped[id] = map[string]bool{}
-		problems = append(problems, checkGaps(id, e.Gaps)...)
+		gaps := make([]paGap, 0, len(e.Gaps))
+		for _, g := range e.Gaps {
+			gaps = append(gaps, g.paGap)
+		}
+		problems = append(problems, checkGaps(id, gaps)...)
 		problems = append(problems, checkTestRefs(id, e.Tests, funcs, mapped[id])...)
 		if e.Slice != "" && !s2SliceRe.MatchString(e.Slice) {
 			problems = append(problems, fmt.Sprintf("%s: slice %q is not P2-S<n>", id, e.Slice))
@@ -237,7 +313,7 @@ func guardTextProblem(ls []string, line int, text string) string {
 	return "is not on"
 }
 
-// openS2Items lists every pending id and every gap of the manifest,
+// openS2Items lists every pending id and every gap without a disposition,
 // sorted.
 func openS2Items(manifest map[string]s2Entry) []string {
 	var out []string
@@ -246,7 +322,25 @@ func openS2Items(manifest map[string]s2Entry) []string {
 			out = append(out, fmt.Sprintf("%s: %s (slice %s, tracked by %s)", id, e.Status, e.Slice, e.TrackedBy))
 		}
 		for _, g := range e.Gaps {
+			if g.disposed() {
+				continue
+			}
 			out = append(out, fmt.Sprintf("%s: gap %s (tracked by %s)", id, g.Half, g.TrackedBy))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// disposedS2Items lists the gaps that no longer block, with what disposed
+// of each, sorted: they stay visible in every run.
+func disposedS2Items(manifest map[string]s2Entry) []string {
+	var out []string
+	for id, e := range manifest {
+		for _, g := range e.Gaps {
+			if g.disposed() {
+				out = append(out, fmt.Sprintf("%s: gap %s (accepted %v, eval %v)", id, g.Half, g.Accepted, g.Eval))
+			}
 		}
 	}
 	sort.Strings(out)
@@ -308,6 +402,22 @@ func s2TreeProblems(t *testing.T, root string) (problems, open []string, ids int
 		t.Fatalf("%s: %v", s2ManifestPath, err)
 	}
 	problems = checkS2Manifest(modelIDs, manifest, repoTestFuncs(t, root), repoGuardLines(root))
+	// The decisions are read only when a gap names one. A record that cannot
+	// be read then fails the run: it is not read as "no such decision".
+	var decisions []byte
+	for _, e := range manifest {
+		if slices.ContainsFunc(e.Gaps, func(g s2Gap) bool { return g.Accepted != nil }) {
+			decisions, err = os.ReadFile(filepath.Join(root, "docs", s2DecisionsPath))
+			if err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	problems = append(problems, checkS2Dispositions(manifest, s2Rows(s2DecisionRowRe, decisions), s2Rows(s2EvalRowRe, doc))...)
+	for _, o := range disposedS2Items(manifest) {
+		t.Logf("disposed S2 item: %s", o)
+	}
 	problems = append(problems, s2ClosingProblems(manifest, paGateClosing(s2GateClosingEnv))...)
 	return problems, openS2Items(manifest), len(modelIDs)
 }
@@ -700,17 +810,17 @@ func TestPAS2ManifestCheckDetects(t *testing.T) {
 		}, `S2-A2: slice "P2-S5/P2-S11" is not P2-S<n>`},
 		{"pending with gaps", func(f *s2Fixture) {
 			f.m["S2-A2"] = s2Entry{Status: s2StatusPending, Slice: "P2-S2", TrackedBy: "#1320",
-				Gaps: []paGap{{Half: "x", TrackedBy: "#1320"}}}
+				Gaps: []s2Gap{{paGap: paGap{Half: "x", TrackedBy: "#1320"}}}}
 		}, "S2-A2: pending with gaps"},
 		// Gaps.
 		{"gap without tracked_by", func(f *s2Fixture) {
 			e := f.green()
-			e.Gaps = []paGap{{Half: "card gate"}}
+			e.Gaps = []s2Gap{{paGap: paGap{Half: "card gate"}}}
 			f.set(e)
 		}, `S2-A1: gap "card gate" is not tracked by an issue`},
 		{"gap without a half", func(f *s2Fixture) {
 			e := f.green()
-			e.Gaps = []paGap{{TrackedBy: "#1321"}}
+			e.Gaps = []s2Gap{{paGap: paGap{TrackedBy: "#1321"}}}
 			f.set(e)
 		}, "S2-A1: a gap without a half"},
 	}
@@ -744,7 +854,7 @@ func TestPAS2ManifestCheckDetects(t *testing.T) {
 		"pending id": newS2Fixture().m,
 		"open gap": {"S2-A1": func() s2Entry {
 			e := newS2Fixture().green()
-			e.Gaps = []paGap{{Half: "card gate", TrackedBy: "#1321"}}
+			e.Gaps = []s2Gap{{paGap: paGap{Half: "card gate", TrackedBy: "#1321"}}}
 			return e
 		}()},
 	} {
@@ -857,11 +967,90 @@ func TestParseS2ManifestStrict(t *testing.T) {
 func TestOpenS2Items(t *testing.T) {
 	got := openS2Items(map[string]s2Entry{
 		"S2-B1": {Status: s2StatusPending, Slice: "P2-S2", TrackedBy: "#1320"},
-		"S2-A1": {Status: s2StatusGreen, Gaps: []paGap{{Half: "a", TrackedBy: "#1321"}}},
+		"S2-A1": {Status: s2StatusGreen, Gaps: []s2Gap{{paGap: paGap{Half: "a", TrackedBy: "#1321"}}}},
 		"S2-C1": {Status: s2StatusGreen},
 	})
 	want := []string{"S2-A1: gap a (tracked by #1321)", "S2-B1: pending (slice P2-S2, tracked by #1320)"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("open items %v, want %v", got, want)
+	}
+}
+
+// TestPAS2Dispositions: a disposed gap stops blocking a closing run only
+// when what it names is written down; every other shape is reported.
+func TestPAS2Dispositions(t *testing.T) {
+	decisions := s2Rows(s2DecisionRowRe, []byte("### D1 a\n#### D2 not a row\ntext ### D3 neither\n"))
+	evals := s2Rows(s2EvalRowRe, []byte("- A1: x\n  - A2: indented\nA3: no bullet\n"))
+	gap := func(accepted, eval []string) map[string]s2Entry {
+		return map[string]s2Entry{"S2-A1": {Status: s2StatusGreen, Gaps: []s2Gap{{
+			paGap: paGap{Half: "card gate", TrackedBy: "#1321"}, Accepted: accepted, Eval: eval}}}}
+	}
+	for name, m := range map[string]map[string]s2Entry{
+		"accepted": gap([]string{"D1"}, nil),
+		"eval":     gap(nil, []string{"A1"}),
+	} {
+		if p := checkS2Dispositions(m, decisions, evals); len(p) != 0 {
+			t.Errorf("%s: problems %v", name, p)
+		}
+		if p := s2ClosingProblems(m, true); len(p) != 0 {
+			t.Errorf("%s: a disposed gap blocks: %v", name, p)
+		}
+		if d := disposedS2Items(m); len(d) != 1 {
+			t.Errorf("%s: disposed items %v, want the gap", name, d)
+		}
+	}
+	for _, tc := range []struct {
+		name           string
+		accepted, eval []string
+		want           string
+	}{
+		{"unknown decision", []string{"D9"}, nil, `accepted "D9" is not an owner decision`},
+		{"a heading that is no row", []string{"D2"}, nil, `accepted "D2" is not an owner decision`},
+		{"unknown eval", nil, []string{"A2"}, `eval "A2" is not an acceptance eval`},
+		{"a decision named as an eval", nil, []string{"D1"}, `eval "D1" is not an acceptance eval`},
+		{"empty accepted", []string{}, nil, "accepted names nothing"},
+		{"empty eval", nil, []string{}, "eval names nothing"},
+		{"repeated", []string{"D1", "D1"}, nil, `accepted "D1" listed twice`},
+		{"both kinds", []string{"D1"}, []string{"A1"}, "is both accepted and moved to an eval"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := checkS2Dispositions(gap(tc.accepted, tc.eval), decisions, evals)
+			if !slices.ContainsFunc(p, func(s string) bool { return strings.Contains(s, tc.want) }) {
+				t.Fatalf("problems %v, want one containing %q", p, tc.want)
+			}
+		})
+	}
+	if p := s2ClosingProblems(gap([]string{}, nil), true); len(p) == 0 {
+		t.Error("a gap with an empty disposition does not block")
+	}
+}
+
+// TestPAS2DispositionsOnTheTree runs the same check through the path the
+// gate takes, with a decision record beside the threat model.
+func TestPAS2DispositionsOnTheTree(t *testing.T) {
+	root := s2TreeFixture(t, "x/x.go:3")
+	write := func(path, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, "docs", path), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "docs", s2ManifestPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	green, _, _ := strings.Cut(string(raw), "S2-A2:")
+	write(s2ManifestPath, green+"  gaps:\n    - half: x\n      tracked_by: \"#1\"\n      accepted: [D1]\n"+
+		"S2-A2:\n  status: pending\n  slice: P2-S2\n  tracked_by: \"#1\"\n")
+	write(s2DecisionsPath, "### D1 yes\n")
+	t.Setenv(s2GateClosingEnv, "")
+	if p, open, _ := s2TreeProblems(t, root); len(p) != 0 || len(open) != 1 {
+		t.Fatalf("problems %v, open %v; want none and the pending id only", p, open)
+	}
+	write(s2DecisionsPath, "### D2 another\n")
+	if p, _, _ := s2TreeProblems(t, root); !slices.ContainsFunc(p, func(s string) bool {
+		return strings.Contains(s, `accepted "D1" is not an owner decision`)
+	}) {
+		t.Fatalf("problems %v, want the unknown decision", p)
 	}
 }

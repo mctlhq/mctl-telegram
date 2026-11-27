@@ -90,7 +90,7 @@ func (f *fakeDevices) ReadDevices(_ context.Context, _ int64, _ string) ([]permi
 func (f *fakeDevices) set(ids ...string) {
 	ds := make([]permissions.Device, 0, len(ids))
 	for _, id := range ids {
-		ds = append(ds, permissions.Device{ID: id, Type: "devices.types.media_device.speaker"})
+		ds = append(ds, permissions.Device{ID: id, Type: "devices.types.smart_speaker.yandex.station"})
 	}
 	f.devices.Store(&ds)
 }

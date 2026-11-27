@@ -424,11 +424,12 @@ func TestAliceDevices_NoDeviceOfTheKindIsNotUnreadable(t *testing.T) {
 	}
 }
 
-// TestAliceDevices_KindsDoNotCross: a speaker is what the server says is
-// one, a light is a device of the light type that is not a speaker, and a
-// type is matched whole or up to a dot: neither reader serves the other
-// kind, and a type that only starts with the letters of "light" is no
-// light.
+// TestAliceDevices_KindsDoNotCross: a speaker is a device of the smart
+// speaker type that the server also calls a speaker, a light is a device of
+// the light type that is not a speaker, and a type is matched whole or up
+// to a dot: neither reader serves the other kind, a television with the
+// assistant is no target (D12), and a type that only starts with the
+// letters of "light" is no light.
 func TestAliceDevices_KindsDoNotCross(t *testing.T) {
 	dev := func(id, typ string, speaker bool) string {
 		t := `null`
@@ -441,6 +442,9 @@ func TestAliceDevices_KindsDoNotCross(t *testing.T) {
 		dev("spk-00000001", "devices.types.smart_speaker.yandex.station", true),
 		dev("spk-00000002", "devices.types.light", true), // a speaker by capability with a light's type
 		dev("spk-00000003", "", true),
+		dev("spk-00000004", "devices.types.media_device.tv", true), // a television with the assistant
+		dev("spk-00000005", "devices.types.smart_speakerphone", true),
+		dev("spk-00000006", "devices.types.smart_speaker", true),
 		dev("lgt-00000001", "devices.types.light", false),
 		dev("lgt-00000002", "devices.types.light.ceiling", false),
 		dev("lgt-00000003", "devices.types.lighting", false),
@@ -455,7 +459,7 @@ func TestAliceDevices_KindsDoNotCross(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ids := speakerIDs(speakers); !slices.Equal(ids, []string{"spk-00000001", "spk-00000002", "spk-00000003"}) {
+	if ids := speakerIDs(speakers); !slices.Equal(ids, []string{"spk-00000001", "spk-00000006"}) {
 		t.Fatalf("speakers %v", ids)
 	}
 	lights, err := r.Lights(context.Background(), aliceReq)

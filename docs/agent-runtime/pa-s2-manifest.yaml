@@ -2,9 +2,9 @@
 #
 # PHASE 2 WRITES CANNOT BE ENABLED WHILE ANY ID BELOW IS PENDING OR ANY GAP IS
 # OPEN. PA_WRITES_ENABLED stays off on every environment until this file has
-# no pending id and no gap. Slice P2-S14 closes the gate: it runs the check
-# with PA_S2_GATE_CLOSING=1 (the phase2_gate=closed mode), which fails on any
-# pending id or gap.
+# no pending id and no open gap. The gate is closed by the check run with
+# PA_S2_GATE_CLOSING=1 (the phase2_gate=closed mode), which fails on any
+# pending id or open gap.
 #
 # Every S2 row of personal-assistant-threat-model.md has exactly one entry
 # here, in threat model order. docs/pa_s2_manifest_test.go fails when a row is
@@ -40,6 +40,14 @@
 #   slice: the slice that delivered it (optional). gaps: parts of the row
 #   that have no guard yet, each with a half and tracked_by, as in the S1
 #   manifest.
+#   A gap is open unless it has one of two dispositions, and a disposed gap
+#   stays listed:
+#     accepted  owner decisions that accept the limit the gap describes,
+#               each a "### D<n>" row of pa-s2-owner-decisions.md
+#     eval      acceptance evals of the threat model that have to show on a
+#               deployed service what the gap says is unshown, each a
+#               "- A<n>:" row (owner decision D24)
+#   A gap does not take both: split it.
 #
 # Print the open items with: go test -v ./docs -run TestPAS2Manifest
 #
@@ -268,6 +276,12 @@
 # because their guards moved into scenarioReadProblem, which the card path
 # and the dispatch-time read share. Every other guard in the files this
 # change touched was pointed at its new line number; its code did not
+#
+# The P2S16-D12* records (S2-D5) ran on the branch that applied the owner
+# decisions of 2026-11-27, on sqlite: the mutation applied, the killing
+# tests red, the file restored from the bytes read before it, the same
+# tests green. That change made the speaker tools take smart speakers only
+# and gave a gap its two dispositions (accepted, eval).
 #
 # The P2S15A-A8* and P2S15A-C9c to -C9g records (S2-A8, S2-C9) ran on the
 # third P2-S15a branch, cut from 3da701ce, the same way, on SQLite and
@@ -724,10 +738,13 @@ S2-C9:
   gaps:
     - half: "queued jobs are not cancelled by /disconnect (threat model T2 step 4 names them): a job is bound to no connection, and its next call on the ended connection is refused by the revision check (#1318)"
       tracked_by: "#1320"
+      accepted: [D1]
     - half: "owner decision: a consent withdrawal, /forget and an admin disable revoke the standing permissions, so they do not come back with a new consent or a re-enable. The owner decided the approvals and had not decided the permissions"
       tracked_by: "#1320"
+      accepted: [D6]
     - half: "after /forget and a consent withdrawal the approval rows are deleted, so a tap on such a card is answered as an unknown button, and a disabled principal's tap is answered by the disable refusal: the \"cancelled\" answer is given after a connection ended only"
       tracked_by: "#1320"
+      accepted: [D3]
 
 S2-C10:
   status: green
@@ -845,8 +862,10 @@ S2-C11:
   gaps:
     - half: "the outcome against a real MCP server and its real timeout and 5xx bodies"
       tracked_by: "#1320"
+      eval: [A8]
     - half: "the upstream-silence markers anchored to the pinned servers' real wording: the bare \"timeout\" match also reads a rejected call whose error mentions a timeout argument as outcome_unknown, which is the safe direction and a less exact notice"
       tracked_by: "#1320"
+      accepted: [D4]
 
 S2-C12:
   status: green
@@ -1078,6 +1097,7 @@ S2-C12:
   gaps:
     - half: "a real process kill between the pre-dispatch commit and the result"
       tracked_by: "#1320"
+      eval: [A9]
 
 S2-C13:
   status: green
@@ -1282,8 +1302,10 @@ S2-I5:
   gaps:
     - half: "owner decision: the result of a lowered call is not handed to the model (the worker gets fixed server text) and does not taint the run, so a second covered write in the same clean run is lowered too; only a read taints"
       tracked_by: "#1322"
+      accepted: [D7]
     - half: "lowering runs end to end in process only: cmd/server.TestPAWrites_StandingPermission (P2-S14d) makes a grant with /permissions on a write connection and, through the service's own constructor and the worker of internal/agentworker, has a covered call lowered and sent once, a call above the ceiling carded and a revoke bring the card back; cmd/server.TestPAEval_A4_InjectionMakesNoUnapprovedCall has the same grant lower nothing once the conversation holds external content. No deployed service has a permission row: PA_WRITES_ENABLED is off everywhere, so a lowered call never reached a real mctl-alice"
       tracked_by: "#1323"
+      eval: [A11]
 
 S2-I6:
   status: green
@@ -1519,8 +1541,10 @@ S2-I9:
   gaps:
     - half: "no mutation turns internal/pa.TestS2I9_DisclosureAfterAResetStillNeedsACard red where it checks the disclosure, and a double one does not either. Measured in P2-S15a: rule 4 of the gate removed, the class check of the emitter's permission lookup removed and the class check of the executor removed, each alone and all three together, leave the test green, because the emitter builds the call a permission could cover only from the device and the value that the card of a device write reads, and a disclosure has neither. Each of the three is killed by the test of its own layer (P2S11-I9a, P2S11-D1b, P2S11-D1c), and this row's test goes red on the reset itself (P2S15A-I9a). So the row's proof of the disclosure rule is the layer tests plus the behaviour seen end to end, not a mutation of this test"
       tracked_by: "#1320"
+      accepted: [D25]
     - half: "lowering runs end to end in process only: cmd/server.TestPAWrites_StandingPermission (P2-S14d) makes a grant with /permissions on a write connection and, through the service's own constructor and the worker of internal/agentworker, has a covered call lowered and sent once, a call above the ceiling carded and a revoke bring the card back; cmd/server.TestPAEval_A4_InjectionMakesNoUnapprovedCall has the same grant lower nothing once the conversation holds external content. No deployed service has a permission row: PA_WRITES_ENABLED is off everywhere, so a lowered call never reached a real mctl-alice"
       tracked_by: "#1323"
+      eval: [A11]
 
 S2-I10:
   status: green
@@ -1627,7 +1651,7 @@ S2-D1:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.496s
     - id: P2S11-D1d
-      guard: internal/pa/permissions/rules.go:232
+      guard: internal/pa/permissions/rules.go:231
       guard_text: "if !ok || !r.ceilingValid(p.Ceiling) {"
       mutation: "a permission of a tool without a rule covers a call"
       killed_by:
@@ -1680,10 +1704,13 @@ S2-D1:
   gaps:
     - half: "the executor's rule check (permissions.HasRule) and its device read (loweredTarget) accept the same three tools today, so removing either alone changes no outcome; connector.TestLowerable_OnlyDeviceWritesWithARule pins that the two tables agree"
       tracked_by: "#1320"
+      accepted: [D22]
     - half: "lowering runs end to end in process only: cmd/server.TestPAWrites_StandingPermission (P2-S14d) makes a grant with /permissions on a write connection and, through the service's own constructor and the worker of internal/agentworker, has a covered call lowered and sent once, a call above the ceiling carded and a revoke bring the card back; cmd/server.TestPAEval_A4_InjectionMakesNoUnapprovedCall has the same grant lower nothing once the conversation holds external content. No deployed service has a permission row: PA_WRITES_ENABLED is off everywhere, so a lowered call never reached a real mctl-alice"
       tracked_by: "#1323"
+      eval: [A11]
     - half: "alice_say_phrase and alice_send_command are in the Phase 2 pin and are not offered (P2-S14d): mctl-alice holds both behind its quasar scope (src/tools/handlers.ts TOOL_SCOPES at 5f6755b7), and a write connection asks for iot:control and iot:view only (owner decision 2026-11-21). The checks of a disclosure and its card are built and tested in internal/pa and cannot be reached through the service: a call of either tool is refused tool_not_in_set (cmd/server.TestPAEval_A3_DisclosureToolIsNotOffered), and a start that lists one is refused. So this row is proven in package tests only, and acceptance eval A3 cannot pass as written. Owner decision: hold alice_say_phrase behind iot:control in mctl-alice, ask for the quasar scope, or reword A3 and accept that Phase 2 offers no disclosure tool"
       tracked_by: "#1322"
+      accepted: [D17]
 
 S2-D2:
   status: green
@@ -1772,7 +1799,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.593s
     - id: P2S14B-D2e
-      guard: internal/pa/connector/alice_devices.go:336
+      guard: internal/pa/connector/alice_devices.go:343
       guard_text: "if d.Name, ok = aliceLabel(l, \"name\"); !ok {"
       mutation: "the device reader skips a device it cannot name instead of failing the whole read"
       killed_by:
@@ -1975,7 +2002,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.483s
     - id: P2S14B-D2f
-      guard: internal/pa/connector/alice_devices.go:308
+      guard: internal/pa/connector/alice_devices.go:315
       guard_text: "return bad(\"no structured listing\")"
       mutation: "a device listing without structured content is read as an empty list"
       killed_by:
@@ -1988,7 +2015,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.428s
     - id: P2S14B-D2g
-      guard: internal/pa/connector/alice_devices.go:331
+      guard: internal/pa/connector/alice_devices.go:338
       guard_text: "if seen[d.ID] {"
       mutation: "the device reader accepts a listing that has one id twice"
       killed_by:
@@ -2042,7 +2069,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.545s
     - id: P2S14B-D2k
-      guard: internal/pa/connector/alice_devices.go:202
+      guard: internal/pa/connector/alice_devices.go:209
       guard_text: "out = append(out, Speaker{ID: d.ID, Name: d.Name, Room: d.Room, Home: d.Home, Type: d.Type})\n\t\t}\n\t}\n\tif len(out) == 0 {"
       mutation: "a listing read in full that holds no speaker is returned as an empty list instead of ErrNoSuchDevices, which the card path reads as unreadable"
       killed_by:
@@ -2163,20 +2190,31 @@ S2-D2:
   gaps:
     - half: "device writes run end to end in process only: cmd/server.TestPAWrites_EveryOfferedToolRunsEndToEnd (P2-S14d) takes alice_media_control, alice_set_volume, alice_set_light and alice_play_music from the model's call through the card and the tap to the bytes the alice server is sent, against a fake server that lists one speaker and one light in structuredContent. No call has reached a real mctl-alice or a real device"
       tracked_by: "#1323"
-    - half: "the structured device listing is in mctl-alice main (5f6755b7, PR #206) and in no release: against the released 2.18.0, whose alice_list_devices result has no structuredContent, every device read is unreadable and every device write, disclosure and alice_play_music call is refused devices_unreadable. There is no fallback to the text listing, by design. connector.AliceDevices is proven on fixtures copied from mctl-alice's own tests at that commit and was never run against a real server"
+      eval: [A1, A2, A12]
+    - half: "the structured device listing is in mctl-alice 2.19.0 (released 2026-11-24) and was read once through the portal; connector.AliceDevices itself is proven on fixtures copied from mctl-alice's tests at 5f6755b7 and has not read a real server"
       tracked_by: "#1322"
-    - half: "mctl-alice main (5f6755b7, unreleased) refuses a value outside the range the device itself reports, or one the device has no capability for, instead of clamping or dropping it; the released 2.18.0 still clamps and reports success. This was read in the source and its tests, not run, and the device's own range is still not read for the card, so such a call gets a card and is then refused by the server. P2-S15c looked for a source of that range and found none: the structured listing of alice_list_devices holds id, name, type, is_speaker, room and household and no range or capability, so reading it needs a change in mctl-alice first"
+      eval: [A12]
+    - half: "mctl-alice 2.19.0 refuses a value outside the range the device itself reports, or one the device has no capability for, instead of clamping or dropping it: this was read in the source and its tests, not run"
       tracked_by: "#1322"
+      eval: [A12]
+    - half: "the device's own range is not read for the card, so a value the device does not take gets a card and is then refused by the server: the structured listing of alice_list_devices holds id, name, type, is_speaker, room and household and no range or capability (P2-S15c), so reading it needs a change in mctl-alice first"
+      tracked_by: "#1322"
+      accepted: [D26]
     - half: "alice_control_device and alice_control_room have no card path and are refused no_write_path. The structured listing now gives the id and type a control_device card would need; the card, its temperature range and the room's device list are not built. Owner decision: accept as a documented limitation, or build them"
       tracked_by: "#1322"
+      accepted: [D18]
     - half: "how mctl-alice carries out an approved alice_set_volume or alice_media_control was read in its source, not run: with a Quasar cookie it sends a voice command to the speaker and falls back to the IoT action when that fails, so one approved call may reach the speaker twice"
       tracked_by: "#1322"
+      accepted: [D13]
     - half: "the device is read again and then called in two requests: a change between the re-read and the call is not seen, and the read is of mctl-alice's listing, which the server may serve from a cache of its own"
       tracked_by: "#1322"
-    - half: "the re-read at dispatch runs after the approval is consumed, so a refusal there spends the approval and the principal must ask again; a process that dies during the read leaves a dispatch record that the stale sweep resolves as outcome_unknown although nothing was sent (as S2-C12's gap)"
+      accepted: [D15]
+    - half: "the re-read at dispatch runs after the approval is consumed, so a refusal there spends the approval and the principal must ask again"
       tracked_by: "#1322"
+      accepted: [D2]
     - half: "alice_play_music: a speaker that lacks the capability the server sends the command through is not visible in the listing, so it gets a card and the approved call is refused by the server"
       tracked_by: "#1322"
+      accepted: [D14]
 
 S2-D3:
   status: green
@@ -2658,8 +2696,10 @@ S2-D4:
   gaps:
     - half: "the music query rules and the spoken prefix are PA's copy of mctl-alice's, and the pin hashes the tool's schema, description and annotations only. Since P2-S15c the copy is held in CI to mctl-alice's rule file at the commit the pin names (testdata/alice_music_query.ts), so the copy cannot drift from the pinned upstream unnoticed. What is still not compared is the server that is deployed: one released from another commit, with another rule or prefix and the same schema, description and annotations, is not noticed until the pin and the snapshot are moved to that commit. Until then a card could show a command the server no longer sends, or be refused here for a query the server would take. The rule function itself is compared by its cases and by a digest of the file that makes a human re-read the port, not by a program"
       tracked_by: "#1322"
+      accepted: [D27]
     - half: "alice_say_phrase and alice_send_command are in the Phase 2 pin and are not offered (P2-S14d): mctl-alice holds both behind its quasar scope (src/tools/handlers.ts TOOL_SCOPES at 5f6755b7), and a write connection asks for iot:control and iot:view only (owner decision 2026-11-21). The checks of a disclosure and its card are built and tested in internal/pa and cannot be reached through the service: a call of either tool is refused tool_not_in_set (cmd/server.TestPAEval_A3_DisclosureToolIsNotOffered), and a start that lists one is refused. So this row is proven in package tests only, and acceptance eval A3 cannot pass as written. Owner decision: hold alice_say_phrase behind iot:control in mctl-alice, ask for the quasar scope, or reword A3 and accept that Phase 2 offers no disclosure tool"
       tracked_by: "#1322"
+      accepted: [D17]
 
 S2-D5:
   status: green
@@ -2688,7 +2728,7 @@ S2-D5:
     - cmd/server.TestPAWrites_StandingPermission
   mutations:
     - id: P2S11-D5a
-      guard: internal/pa/permissions/rules.go:96
+      guard: internal/pa/permissions/rules.go:95
       guard_text: "\"alice_media_control\": {typePrefixes: speakerTypes},"
       mutation: "alice_control_device gets a rule"
       killed_by:
@@ -2703,7 +2743,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.311s
     - id: P2S11-D5b
-      guard: internal/pa/permissions/rules.go:103
+      guard: internal/pa/permissions/rules.go:102
       guard_text: "if catalog.IsNeverLowerable(tool) {"
       mutation: "alice_control_room and alice_trigger_scenario get the rule of a light"
       killed_by:
@@ -2715,7 +2755,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	3.731s
     - id: P2S11-D5c
-      guard: internal/pa/permissions/rules.go:178
+      guard: internal/pa/permissions/rules.go:177
       guard_text: "if len(devices) == 0 {"
       mutation: "a grant without devices passes the rule"
       killed_by:
@@ -2727,7 +2767,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.605s
     - id: P2S11-D5d
-      guard: internal/pa/permissions/rules.go:182
+      guard: internal/pa/permissions/rules.go:181
       guard_text: "if !r.typeAllowed(d.Type) {"
       mutation: "the device type is not checked at a grant"
       killed_by:
@@ -2742,7 +2782,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.242s
     - id: P2S11-D5e
-      guard: internal/pa/permissions/rules.go:131
+      guard: internal/pa/permissions/rules.go:130
       guard_text: "strings.HasPrefix(deviceType, prefix+\".\"))"
       mutation: "a type that only starts like the allowed one passes"
       killed_by:
@@ -2754,7 +2794,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.464s
     - id: P2S11-D5f
-      guard: internal/pa/permissions/rules.go:186
+      guard: internal/pa/permissions/rules.go:185
       guard_text: "if !r.ceilingValid(ceiling) {"
       mutation: "the ceiling is not checked at a grant"
       killed_by:
@@ -2768,7 +2808,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.213s
     - id: P2S11-D5g
-      guard: internal/pa/permissions/rules.go:154
+      guard: internal/pa/permissions/rules.go:153
       guard_text: "return ceiling >= r.ceilingMin && ceiling <= r.ceilingMax"
       mutation: "a ceiling one above the range passes (off by one)"
       killed_by:
@@ -2780,7 +2820,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.220s
     - id: P2S11-D5h
-      guard: internal/pa/permissions/rules.go:152
+      guard: internal/pa/permissions/rules.go:151
       guard_text: "return ceiling == NoCeiling"
       mutation: "a tool without a ceiling accepts one"
       killed_by:
@@ -2816,7 +2856,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.451s
     - id: P2S11-CEa
-      guard: internal/pa/permissions/rules.go:240
+      guard: internal/pa/permissions/rules.go:239
       guard_text: "if !set || v > p.Ceiling {"
       mutation: "a value one above the ceiling is covered (off by one)"
       killed_by:
@@ -2828,7 +2868,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.554s
     - id: P2S11-CEb
-      guard: internal/pa/permissions/rules.go:240
+      guard: internal/pa/permissions/rules.go:239
       guard_text: "if !set || v > p.Ceiling {"
       mutation: "a call that does not set the bounded argument is covered"
       killed_by:
@@ -2840,7 +2880,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.332s
     - id: P2S11-DVa
-      guard: internal/pa/permissions/rules.go:235
+      guard: internal/pa/permissions/rules.go:234
       guard_text: "if c.Device == \"\" || !slices.Contains(p.DeviceIDs, c.Device) {"
       mutation: "a device the permission does not list is covered"
       killed_by:
@@ -2914,7 +2954,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.390s
     - id: P2S11-SCa
-      guard: internal/pa/permissions/rules.go:245
+      guard: internal/pa/permissions/rules.go:244
       guard_text: "if v, set := c.Strings[arg]; set && slices.Contains(values, v) {"
       mutation: "a permission covers the siren and alarm scenes"
       killed_by:
@@ -2950,7 +2990,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.512s
     - id: P2S11-PMa
-      guard: internal/pa/permissions/rules.go:228
+      guard: internal/pa/permissions/rules.go:227
       guard_text: "p.Server == \"\" || p.Server != c.Server || p.Tool != c.Tool {"
       mutation: "a permission of one tool covers a call of another"
       killed_by:
@@ -2962,7 +3002,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.579s
     - id: P2S11-PMb
-      guard: internal/pa/permissions/rules.go:228
+      guard: internal/pa/permissions/rules.go:227
       guard_text: "p.Server == \"\" || p.Server != c.Server || p.Tool != c.Tool {"
       mutation: "a permission of one server covers a call to another"
       killed_by:
@@ -2973,8 +3013,34 @@ S2-D5:
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.480s
+    - id: P2S16-D12a
+      guard: internal/pa/permissions/rules.go:91
+      guard_text: "var speakerTypes = []string{TypeSmartSpeaker}"
+      mutation: "the speaker rule also takes devices.types.media_device, a television or a set-top box"
+      killed_by:
+        - internal/pa/permissions.TestS2D5_GrantRuleRefusals
+        - internal/pa/permissions.TestTypeHasPrefix_IsExactAndDotted
+      red: |-
+        --- FAIL: TestS2D5_GrantRuleRefusals (0.00s)
+        --- FAIL: TestTypeHasPrefix_IsExactAndDotted (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.334s
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/permissions	0.232s
+    - id: P2S16-D12b
+      guard: internal/pa/connector/alice_devices.go:208
+      guard_text: "if d.IsSmartSpeaker() {"
+      mutation: "the speaker reader serves every device the listing calls a speaker, whatever its type"
+      killed_by:
+        - internal/pa/connector.TestAliceDevices_KindsDoNotCross
+      red: |-
+        --- FAIL: TestAliceDevices_KindsDoNotCross (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.471s
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.373s
     - id: P2S14B-D5a
-      guard: internal/pa/permissions/rules.go:131
+      guard: internal/pa/permissions/rules.go:130
       guard_text: "(deviceType == prefix || strings.HasPrefix(deviceType, prefix+\".\"))"
       mutation: "a device type is matched by plain prefix, without the dot boundary"
       killed_by:
@@ -3025,7 +3091,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.681s
     - id: P2S14B-D5d
-      guard: internal/pa/connector/alice_devices.go:397
+      guard: internal/pa/connector/alice_devices.go:404
       guard_text: "if c.ID != connectionID || c.Principal != principal || string(c.Server) != aliceServer || c.State != connection.StateActive {"
       mutation: "the grant's device reader reads through a connection of another principal"
       killed_by:
@@ -3052,14 +3118,16 @@ S2-D5:
   gaps:
     - half: "alice_control_device can be neither granted nor lowered: it has no card path and no rule, and its pin condition (allowed_type_prefixes) is answered \"cannot be checked\". The structured listing (mctl-alice#206, merged, not released) reports the id and type that rule would need, and P2-S14b reads it. Owner decision: accept as a documented limitation, or build it"
       tracked_by: "#1322"
+      accepted: [D18]
     - half: "a lowered call whose device changed between the emitter's read and the executor's is refused (device_changed, device_not_listed, devices_unreadable) and not turned into a card: the principal is told it was not carried out and the next call gets a card or a refusal from the emitter"
       tracked_by: "#1322"
-    - half: "owner decision: the speaker tools' rule accepts devices.types.smart_speaker.*, which is what mctl-alice reports for a speaker, and still devices.types.media_device, the ADR's word, which Yandex gives a television or a set-top box (a speaker tool reaches one only if the listing also flags it is_speaker). The type strings were read in mctl-alice's source and tests at 5f6755b7, not from a real account. Drop media_device from the rule, or keep it"
-      tracked_by: "#1322"
+      accepted: [D10]
     - half: "owner decision: alice_set_light has no ceiling, so a permission covers every brightness, colour temperature and scene the pin allows except siren and alarm, which this slice keeps on a card; whether other scenes or a brightness ceiling belong there is not decided"
       tracked_by: "#1322"
+      accepted: [D11]
     - half: "lowering runs end to end in process only: cmd/server.TestPAWrites_StandingPermission (P2-S14d) makes a grant with /permissions on a write connection and, through the service's own constructor and the worker of internal/agentworker, has a covered call lowered and sent once, a call above the ceiling carded and a revoke bring the card back; cmd/server.TestPAEval_A4_InjectionMakesNoUnapprovedCall has the same grant lower nothing once the conversation holds external content. No deployed service has a permission row: PA_WRITES_ENABLED is off everywhere, so a lowered call never reached a real mctl-alice"
       tracked_by: "#1323"
+      eval: [A11]
 
 S2-D6:
   status: green
@@ -3258,8 +3326,10 @@ S2-D6:
   gaps:
     - half: "cmd/server builds connector.Cards without a ScenarioSteps reader (P2-S14; none exists), so alice_trigger_scenario is not offered to a model, every call of it is refused, and a start that lists it is refused (cmd/server.TestBuildPAWrites_RefusesAHalfWiredStart): the checks of this row run in tests only"
       tracked_by: "#1323"
+      accepted: [D19]
     - half: "no production ScenarioSteps reader: no mctl-alice tool returns a scenario's steps, so the row is proven with a fake reader only, on the card path and (P2-S15c) on the read made again at dispatch, and every real call would be refused. A reader, when one is built, must record its reads in the audit chain as connector.AliceDevices does; the interface does not make it. Owner decision: add a steps read to mctl-alice, or leave the tool always refused"
       tracked_by: "#1322"
+      accepted: [D19]
 
 S2-D7:
   status: green
@@ -3335,6 +3405,7 @@ S2-D7:
   gaps:
     - half: "a card is byte for byte the sealed arguments only when they hold nothing safetext rewrites: a link-like token is shown defanged (a[.]b) while the call sends it as it is, and arguments that already hold a defang mark are refused card_unshowable. Owner decision: show such values raw on a card, or keep the defang (P2-S5 kept it)"
       tracked_by: "#1322"
+      accepted: [D16]
 
 S2-A1:
   status: green
@@ -3787,6 +3858,7 @@ S2-A5:
   gaps:
     - half: "drift on a real MCP server through internal/pa/egress: the HTTP tests reach a fake server with the httptest client, because egress refuses loopback"
       tracked_by: "#1320"
+      eval: [A8]
 
 S2-A6:
   status: green
@@ -3913,7 +3985,11 @@ S2-A6:
   gaps:
     - half: "owner decision: a transient listing failure ends the approval like any refusal (fail closed); refusing without consuming, so the tap can be repeated until the 5 minute expiry, was proposed and not decided"
       tracked_by: "#1320"
-    - half: "a failed listing on a real MCP server through internal/pa/egress. A write refused by the executor's own listing is counted (mctl_pa_write_listing_refusals_total, P2S15A-A6a to -A6c); no alert reads the counter, and the listing the card emitter makes when the call is decided is not in it"
+      accepted: [D2]
+    - half: "a failed listing on a real MCP server through internal/pa/egress"
+      tracked_by: "#1320"
+      eval: [A8]
+    - half: "a write refused by the executor's own listing is counted (mctl_pa_write_listing_refusals_total, P2S15A-A6a to -A6c), but no alert reads the counter, and the listing the card emitter makes when the call is decided is not in it"
       tracked_by: "#1320"
 
 S2-A7:
@@ -4094,8 +4170,10 @@ S2-A7:
   gaps:
     - half: "two taps handled by two replicas of the service against one Postgres: the concurrent test runs both in one process"
       tracked_by: "#1320"
+      eval: [A10]
     - half: "a run whose model asks for a tool again after a card is abandoned (P2-S13), so the principal gets the card and, when the lease runs out, the run-failed notice. Owner decision: keep that, or end such a run with a fixed reply"
       tracked_by: "#1320"
+      accepted: [D5]
 
 S2-A8:
   status: green
@@ -4227,7 +4305,7 @@ S2-A8:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.088s
     - id: P2S14-SCPa
-      guard: internal/pa/connector/alice_devices.go:412
+      guard: internal/pa/connector/alice_devices.go:419
       guard_text: "if !connection.ScopeAccepted(conn) {"
       mutation: "a grant reads devices only on a connection made for reading, so on a write connection every grant is refused devices_unreadable"
       killed_by:
@@ -4489,7 +4567,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.673s
     - id: P2S11-A9b
-      guard: internal/pa/permissions/rules.go:223
+      guard: internal/pa/permissions/rules.go:222
       guard_text: "if !p.RevokedAt.IsZero() || !p.ExpiresAt.After(now) {"
       mutation: "a revoked permission covers a call"
       killed_by:
@@ -4501,7 +4579,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.658s
     - id: P2S11-A9c
-      guard: internal/pa/permissions/rules.go:223
+      guard: internal/pa/permissions/rules.go:222
       guard_text: "if !p.RevokedAt.IsZero() || !p.ExpiresAt.After(now) {"
       mutation: "an expired permission covers a call"
       killed_by:
@@ -4513,7 +4591,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.663s
     - id: P2S11-A9d
-      guard: internal/pa/permissions/rules.go:227
+      guard: internal/pa/permissions/rules.go:226
       guard_text: "p.AuthorityRevision <= 0 || p.AuthorityRevision != c.AuthorityRevision ||"
       mutation: "a permission of another revision covers a call"
       killed_by:
@@ -4636,7 +4714,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.088s
     - id: P2S14-SCPa
-      guard: internal/pa/connector/alice_devices.go:412
+      guard: internal/pa/connector/alice_devices.go:419
       guard_text: "if !connection.ScopeAccepted(conn) {"
       mutation: "a grant reads devices only on a connection made for reading, so on a write connection every grant is refused devices_unreadable"
       killed_by:
@@ -4772,10 +4850,13 @@ S2-A9:
   gaps:
     - half: "a revoke, an expiry or a revision change that commits after the executor's pre-dispatch transaction does not stop the lowered call that transaction admitted: as with an approved call, the fence ends at that commit"
       tracked_by: "#1320"
+      accepted: [D9]
     - half: "a lowered call lists the server's tools twice (the emitter, then the executor), and the principal is told of the write by the notice an approved call sends; neither was measured or reviewed for wording"
       tracked_by: "#1320"
+      eval: [A11]
     - half: "lowering runs end to end in process only: cmd/server.TestPAWrites_StandingPermission (P2-S14d) makes a grant with /permissions on a write connection and, through the service's own constructor and the worker of internal/agentworker, has a covered call lowered and sent once, a call above the ceiling carded and a revoke bring the card back; cmd/server.TestPAEval_A4_InjectionMakesNoUnapprovedCall has the same grant lower nothing once the conversation holds external content. No deployed service has a permission row: PA_WRITES_ENABLED is off everywhere, so a lowered call never reached a real mctl-alice"
       tracked_by: "#1323"
+      eval: [A11]
 
 S2-A10:
   status: green
@@ -4860,7 +4941,7 @@ S2-A10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.088s
     - id: P2S14-SCPa
-      guard: internal/pa/connector/alice_devices.go:412
+      guard: internal/pa/connector/alice_devices.go:419
       guard_text: "if !connection.ScopeAccepted(conn) {"
       mutation: "a grant reads devices only on a connection made for reading, so on a write connection every grant is refused devices_unreadable"
       killed_by:
@@ -5699,9 +5780,13 @@ S2-F3:
   gaps:
     - half: "the action gate is wired and no deployed service has run it: cmd/server newPAWriteGate returns pa.ActionGate over the store, the writes switch and the compiled scope table, and cmd/server.TestPAWrites_ShippedGate claims through it in process (data-flow consent only, a view-only or narrowed connection, the consent and a write connection), and the cmd/server TestPAEval_A* tests run whole turns through it. A claim the gate leaves without a write tool for the consent or the scope queues the gate's notice in its own transaction, once per connection (cmd/server.TestPAWrites_GateNoticeOncePerConnection); the notice leaves with the next outbox pass, and how long that is in a deployed service was not measured. A process started with writes off has no write path until it restarts: there /consent does not offer the consent to actions and /connect asks for the read scopes, whatever the flag reads later. cmd/server.TestPAWrites_StartsAsPreviewWill builds the runtime with both servers on and writes on, as preview will be started, with stand-in hosts and a fake authorization server metadata; the real environment, its secrets and its hosts were not used. PA_WRITES_ENABLED is off everywhere, so no real claim, alice connection or worker hint has passed through it."
       tracked_by: "#1323"
+      eval: [A12]
     - half: "the alice authorization server was read, not called: that it lists iot:control in scopes_supported, puts no scope ceiling on this client and reports the granted scope in the token response is taken from the mctl-alice source; no exchange ran against it"
       tracked_by: "#1320"
+      eval: [A12]
     - half: "owner decision: a token response without a scope field, or with an unparseable one, still fails the connection (S1-T9) instead of leaving it view-only; and the two notices are sent once per connection for its whole life, not once per request or per day"
       tracked_by: "#1320"
-    - half: "the acceptance evals A1 to A7 ran in process only (cmd/server.TestPAEval_A1_PlayMusicOneCardRunsOnce to TestPAEval_A7_ToolOutsideTheOfferIsRefusedAtTheServer, P2-S14d): the service's own constructor, the worker of internal/agentworker with a scripted model, a fake alice server. None ran on preview against a real model, a released mctl-alice or a real speaker, which is where the threat model has them gate the pilot. Three do not match their wording: A2 says \"volume 55\" and the pinned alice_set_volume takes a level from 1 to 10, so the test shows 55 refused and a level shown and sent as it is; A3 cannot pass while alice_say_phrase is not offered; and A4 plants its text in an alice read, not in a tg chat, because the tests link one server"
+      accepted: [D20, D21]
+    - half: "the acceptance evals A1 to A7 ran in process only (cmd/server.TestPAEval_A1_PlayMusicOneCardRunsOnce to TestPAEval_A7_ToolOutsideTheOfferIsRefusedAtTheServer, P2-S14d): the service's own constructor, the worker of internal/agentworker with a scripted model, a fake alice server. None ran on preview against a real model, a real mctl-alice or a real speaker, which is where the threat model has them gate the pilot. A4 in process plants its text in an alice read, not in a tg chat, because the tests link one server"
       tracked_by: "#1323"
+      eval: [A1, A2, A3, A4, A5, A6, A7]

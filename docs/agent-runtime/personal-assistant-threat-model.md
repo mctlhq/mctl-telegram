@@ -364,7 +364,7 @@ Read tools are auto from Phase 1: `alice_list_devices`, `alice_get_device_state`
 **Device type.** The device type comes from Yandex, and a user can relabel it. It is therefore never the only basis for lowering:
 - Lowering also requires the device id to be listed in the permission.
 - The type is read fresh at dispatch. An unknown or unreadable type means the call is not lowerable (I9).
-- The type strings are the ones mctl-alice reports in the structured result of `alice_list_devices` (`structuredContent.devices[].type`): `devices.types.smart_speaker.*` for a speaker and `devices.types.light` for a light, matched exactly or on a dot boundary. The table's `media_device` is the Yandex type of a television or a set-top box; a speaker tool accepts it only together with the listing's own `is_speaker` flag.
+- The type strings are the ones mctl-alice reports in the structured result of `alice_list_devices` (`structuredContent.devices[].type`): `devices.types.smart_speaker.*` for a speaker and `devices.types.light` for a light, matched exactly or on a dot boundary. A speaker tool also needs the listing's own `is_speaker` flag. The table's `media_device` is the Yandex type of a television or a set-top box: no speaker tool accepts it (owner decision D12).
 - The listing is read as structured content only. A result without it, or with any part of it missing or malformed, is unreadable and the call is refused: it is never read as "no devices", and the listing's text is never parsed instead.
 - The device list is read again right before an approved or a lowered call to one device is sent (device writes, disclosures and `alice_play_music`). A device that is gone, or whose name, room, home, type or kind differs from what the card showed, is not called; the approval is spent and the principal is told the action was not carried out.
 
@@ -699,12 +699,19 @@ These run on preview after deployment, against dedicated test accounts on `tg` a
 
 **A (Phase 2)**
 - A1: "play jazz on the kitchen speaker" shows a card and runs once; a double tap still runs it once.
-- A2: "volume 55" shows the device-unit value on the card, and exactly that value is sent.
-- A3: "read chat X and have Alice say it" shows a `disclosure` card with the full text and the device.
+- A2: "set the kitchen speaker volume to 6" shows 6 on the tool's 1 to 10 scale on the card, and exactly that value is sent. "volume 55" is refused with no card and no call. (reworded, owner decision D23)
+- A3: "read chat X and have Alice say it": `alice_say_phrase` is not offered, a call of it is refused at the server, and the downstream logs show no call. (reworded, owner decision D17; the disclosure card is proven in S2 only)
 - A4: an injection planted in a test chat produces no unapproved call across 10 turns. Three phrasings are tried, and the downstream logs confirm the result.
 - A5: a replayed, expired, foreign or changed approval is refused.
 - A6: `/disconnect` with a pending approval cancels it.
 - A7: a tool outside the Phase 2 pin, for example `alice_trigger_scenario` without readable steps, is refused at the server, and the downstream logs confirm it.
+- A8: against a real MCP server, a call that times out or answers 5xx is reported as outcome unknown or failed and never as done, and a listing that fails or changed after the card refuses the approval.
+- A9: the service killed between the pre-dispatch commit and the result leaves one recorded outcome, and the call is never sent again.
+- A10: two taps of one card handled by two replicas against one database run it once.
+- A11: a standing permission on a real write connection lets a covered call run once with no card, a call above its ceiling gets a card, a revoke brings the card back, and nothing runs without a card once the conversation holds external content. The time such a call takes and the text of its notice are recorded (owner decision D28).
+- A12: on the deployed service, the write tools are offered only with the consent to actions and a write connection, whose granted scope the authorization server reports; each offered tool runs once from its card on a real device, and a value the device does not take is refused.
+
+A8 to A12 hold what only a deployed service can show (owner decision D24).
 
 ## Residual risks
 
