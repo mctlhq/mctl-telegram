@@ -2291,6 +2291,9 @@ func previousAuditHash(ctx context.Context, tx *sql.Tx, userID int64) ([]byte, e
 // request that caused it.
 const auditWriteTimeout = 5 * time.Second
 
+// auditNow is the clock of an audit row. Tests replace it.
+var auditNow = time.Now
+
 // LogToolCall writes one audit row. Errors are non-fatal to the caller —
 // audit must never block a user request — but a write that fails leaves a
 // gap in the per-user hash chain that VerifyAuditChain will report.
@@ -2338,7 +2341,10 @@ func (s *Store) LogToolCallChecked(ctx context.Context, c ToolCall) error {
 	defer cancel()
 	userID, tool, peerRedacted, status := c.UserID, c.Tool, c.PeerRedacted, c.Status
 	errMsg, callPath, reason := c.ErrMsg, c.CallPath, c.Reason
-	createdAt := time.Now().UTC()
+	// Microseconds are what Postgres keeps of a timestamp. The hash covers
+	// created_at in nanoseconds, so a finer value would never verify again
+	// once read back.
+	createdAt := auditNow().UTC().Truncate(time.Microsecond)
 	// The error column is free text, and peer-resolution failures format the
 	// caller's peer verbatim (`peer "channel:<id>" could not be accessed`,
 	// `peer "@handle" not found`). peer_redacted is masked by every caller,
