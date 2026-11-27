@@ -3295,18 +3295,37 @@ const ceilingLeavesNoScopeDescription = "this account holds no scope within this
 func (s *Server) applyClientScopeCeiling(clientID, redirectURI string, groups, scopes []string) (outGroups, outScopes []string, applied bool) {
 	ceiling, ok := s.cfg.ClientProfiles.ScopeCeilingFor(clientID, redirectURI)
 	outGroups, outScopes = applyScopeCeiling(ceiling, ok, groups, scopes)
-	if !ok && s.cimdEnabled() && cimd.IsCIMDURL(clientID) {
+	if !ok && ((s.cimdEnabled() && cimd.IsCIMDURL(clientID)) || isDynamicClientID(clientID)) {
 		// A CIMD client reaches this server on the strength of a document
-		// the operator did not author, so membership scopes (admin:users,
-		// admin:users:read, admin:broadcast) and tier groups reach it only
-		// through a scope_ceiling that names them (#1414). narrowGrant keeps
-		// those scopes because a client cannot ask for them; without this a
-		// client that requested one read scope still held admin:users.
+		// the operator did not author, and a dynamically registered client
+		// (RFC 7591: tgmcp_ random, tgdcr_ pinned) on a registration anyone
+		// can make. Neither is a client the operator vetted, so membership
+		// scopes (admin:users, admin:users:read, admin:broadcast) and tier
+		// groups reach it only through a scope_ceiling that names them
+		// (#1414). narrowGrant keeps those scopes because a client cannot
+		// ask for them; without this a client that requested one read scope
+		// still held admin:users, and a DCR client signed in by an admin
+		// inherited the admin's whole entitlement. The built-in self-connect
+		// client and preregistered clients are neither CIMD nor dynamic, so
+		// they are untouched.
 		outGroups, outScopes = withoutMembership(scopes)
 	}
 	endpointCeiling := s.cfg.EndpointScopeCeiling
 	outGroups, outScopes = applyScopeCeiling(endpointCeiling, endpointCeiling != nil, outGroups, outScopes)
 	return outGroups, outScopes, ok || endpointCeiling != nil
+}
+
+// dynamicClientIDPrefix starts every client_id the server draws for a
+// random RFC 7591 registration; a pinned registration starts
+// db.PinnedClientIDPrefix instead.
+const dynamicClientIDPrefix = "tgmcp_"
+
+// isDynamicClientID reports whether clientID was issued by /oauth/register.
+// internal/oauth refuses a preregistered client_id with the pinned prefix, so
+// neither prefix can be carried by a static client or by mctl_self_connect.
+func isDynamicClientID(clientID string) bool {
+	return strings.HasPrefix(clientID, dynamicClientIDPrefix) ||
+		strings.HasPrefix(clientID, db.PinnedClientIDPrefix)
 }
 
 // cimdClientMapped reports whether MCP_CLIENT_PROFILES names this CIMD client:
@@ -3528,7 +3547,7 @@ func (s *Server) handleClientRegistration(w http.ResponseWriter, r *http.Request
 			}
 		}
 	}
-	clientID := "tgmcp_" + randomToken(16)
+	clientID := dynamicClientIDPrefix + randomToken(16)
 	if pinned {
 		req.RedirectURIs = canonicalRedirectSet(req.RedirectURIs)
 		clientID = pinnedClientID(req.RedirectURIs)
