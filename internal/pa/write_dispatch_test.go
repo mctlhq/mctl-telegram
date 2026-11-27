@@ -1201,7 +1201,7 @@ func TestS2C12_CommittedAndNeverSentIsNotUnknown(t *testing.T) {
 				}
 				fs.finishErr = fmt.Errorf("%w: injected", approval.ErrUnreadable)
 			}},
-		{"the lease ran out before the mark", connector.ReasonLeaseExpired,
+		{"the lease ran out before the mark", connector.ReasonNeverSent,
 			func(e *writeEnv, fs *markFaultStore, sweeper connector.StaleWriteSweeper) {
 				fs.mark = func(ctx context.Context, principal int64, id string, _ time.Time) error {
 					e.h.Advance(approval.MaxDispatchLease + time.Minute)

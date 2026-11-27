@@ -646,9 +646,10 @@ func (w *WriteExecutor) run(ctx context.Context, a approval.Approval, reason str
 	switch err := markErr; {
 	case errors.Is(err, approval.ErrDispatchStale):
 		// The lease ran out and the sweep ended the record, or is about
-		// to: it writes the one result entry and the notice.
-		w.count(a.Server, StatusRefused, ReasonLeaseExpired)
-		return WriteOutcome{Status: StatusRefused, Reason: ReasonLeaseExpired, DispatchID: dispatchID}
+		// to: it writes the one result entry and the notice. The record
+		// has no mark, so the reason is the one the sweep gives it.
+		w.count(a.Server, StatusRefused, ReasonNeverSent)
+		return WriteOutcome{Status: StatusRefused, Reason: ReasonNeverSent, DispatchID: dispatchID}
 	case err != nil:
 		slog.Error("pa write: dispatch not marked as sent; call refused", "server", a.Server, "err", err)
 		if w.settleUnsent(ctx, a, dispatchID) {
