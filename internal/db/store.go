@@ -2291,6 +2291,9 @@ func previousAuditHash(ctx context.Context, tx *sql.Tx, userID int64) ([]byte, e
 // request that caused it.
 const auditWriteTimeout = 5 * time.Second
 
+// auditNow is the clock of an audit row. Tests replace it.
+var auditNow = time.Now
+
 // LogToolCall writes one audit row. Errors are non-fatal to the caller —
 // audit must never block a user request — but a write that fails leaves a
 // gap in the per-user hash chain that VerifyAuditChain will report.
@@ -2338,7 +2341,10 @@ func (s *Store) LogToolCallChecked(ctx context.Context, c ToolCall) error {
 	defer cancel()
 	userID, tool, peerRedacted, status := c.UserID, c.Tool, c.PeerRedacted, c.Status
 	errMsg, callPath, reason := c.ErrMsg, c.CallPath, c.Reason
-	createdAt := time.Now().UTC()
+	// Microseconds are what Postgres keeps of a timestamp. The hash covers
+	// created_at in nanoseconds, so a finer value would never verify again
+	// once read back.
+	createdAt := auditNow().UTC().Truncate(time.Microsecond)
 	// The error column is free text, and peer-resolution failures format the
 	// caller's peer verbatim (`peer "channel:<id>" could not be accessed`,
 	// `peer "@handle" not found`). peer_redacted is masked by every caller,
@@ -2417,7 +2423,15 @@ type AuditChainVerification struct {
 // cannot be retroactively verified. The walk continues past them so a
 // post-M3.1 chain is still checked, but the audit page should make the
 // pre-M3.1 gap visible to the user.
+//
+// On Postgres a row hashed over a time finer than a microsecond, which
+// was written before the time was truncated, is verified by trying the
+// values the stored one was cut from (matchesTruncatedTime).
 func (s *Store) VerifyAuditChain(ctx context.Context, userID int64) (AuditChainVerification, error) {
+	pg, err := dialectOf(s.DB)
+	if err != nil {
+		return AuditChainVerification{}, fmt.Errorf("verify audit: %w", err)
+	}
 	rows, err := s.DB.QueryContext(ctx,
 		`SELECT id, tool_name, peer_redacted, status, error, created_at, prev_hash, entry_hash, call_path,
 		 	edge_request_id, edge_route, mcp_method, mcp_name, protocol_version
@@ -2480,8 +2494,17 @@ func (s *Store) VerifyAuditChain(ctx context.Context, userID int64) (AuditChainV
 				Reason:     "prev_hash does not chain to the previous entry's entry_hash",
 			}, nil
 		}
-		recomputed := hashAuditEntry(prevHash, userID, tool, peer.String, status, errCol.String, callPath, createdAt, edge)
-		if !bytesEqual(recomputed, entryHash) {
+		hashAt := func(at time.Time) []byte {
+			return hashAuditEntry(prevHash, userID, tool, peer.String, status, errCol.String, callPath, at, edge)
+		}
+		matches := bytesEqual(hashAt(createdAt), entryHash)
+		if !matches && pg {
+			if err := ctx.Err(); err != nil {
+				return AuditChainVerification{}, fmt.Errorf("verify audit: %w", err)
+			}
+			matches = matchesTruncatedTime(createdAt, entryHash, hashAt)
+		}
+		if !matches {
 			return AuditChainVerification{
 				OK:         false,
 				Verified:   verified,
