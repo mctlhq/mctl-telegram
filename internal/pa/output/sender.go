@@ -17,13 +17,16 @@ package output
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptrace"
 	"net/netip"
 	"net/url"
+	"path"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -100,9 +103,10 @@ type Config struct {
 
 // Sender sends bot messages. It is safe for concurrent use.
 type Sender struct {
-	hc    *http.Client
-	base  string
-	token string
+	hc     *http.Client
+	fileHC *http.Client
+	base   string
+	token  string
 	// webApp is the only URL a web_app button may open (SendWebApp), nil
 	// when none is configured.
 	webApp *url.URL
@@ -130,7 +134,15 @@ func NewSender(cfg Config) (*Sender, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pa output: egress client: %w", err)
 	}
-	s := &Sender{hc: hc, base: botAPIBaseURL, token: cfg.Token, langs: cfg.Languages}
+	fileHC, err := egress.New(egress.Config{
+		Purpose:        egress.PurposeBotFile,
+		AllowedHosts:   []string{botAPIHost},
+		DeniedPrefixes: cfg.DeniedPrefixes,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("pa output: egress file client: %w", err)
+	}
+	s := &Sender{hc: hc, fileHC: fileHC, base: botAPIBaseURL, token: cfg.Token, langs: cfg.Languages}
 	if cfg.WebAppURL != "" {
 		u, err := parseWebAppBase(cfg.WebAppURL)
 		if err != nil {
@@ -527,6 +539,10 @@ func (s *Sender) SendTyping(ctx context.Context, chatID int64) error {
 // request was written, and an explicit ok:false answer (*APIError). Every
 // other failure wraps ErrOutcomeUnknown.
 func (s *Sender) call(ctx context.Context, method string, body any) error {
+	return s.callInto(ctx, method, body, nil)
+}
+
+func (s *Sender) callInto(ctx context.Context, method string, body, result any) error {
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("pa output %s: encode: %w", method, err)
@@ -561,9 +577,10 @@ func (s *Sender) call(ctx context.Context, method string, body any) error {
 		return fmt.Errorf("%w: pa output %s: read body: %s", ErrOutcomeUnknown, method, s.redact(err.Error()))
 	}
 	var env struct {
-		OK          *bool  `json:"ok"`
-		ErrorCode   int    `json:"error_code"`
-		Description string `json:"description"`
+		OK          *bool           `json:"ok"`
+		Result      json.RawMessage `json:"result"`
+		ErrorCode   int             `json:"error_code"`
+		Description string          `json:"description"`
 		Parameters  *struct {
 			RetryAfter int `json:"retry_after"`
 		} `json:"parameters"`
@@ -582,7 +599,96 @@ func (s *Sender) call(ctx context.Context, method string, body any) error {
 		// ok:true on an error status is not an answer the Bot API gives.
 		return fmt.Errorf("%w: pa output %s: ok:true with HTTP %d", ErrOutcomeUnknown, method, resp.StatusCode)
 	}
+	if result != nil {
+		if len(env.Result) == 0 {
+			return fmt.Errorf("pa output %s: missing result", method)
+		}
+		if err := json.Unmarshal(env.Result, result); err != nil {
+			return fmt.Errorf("pa output %s: decode result: %w", method, err)
+		}
+	}
 	return nil
+}
+
+const maxBotPhotoBytes = 2 << 20
+
+var botFileIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{8,256}$`)
+
+// FetchPhoto resolves a Telegram Bot API file_id through getFile and
+// downloads the bounded image bytes through the egress client, returning a
+// base64 data URI for model vision input (#1501).
+func (s *Sender) FetchPhoto(ctx context.Context, fileID string) (string, error) {
+	if !botFileIDPattern.MatchString(fileID) {
+		return "", errors.New("pa output: invalid photo file_id")
+	}
+	var info struct {
+		FilePath string `json:"file_path"`
+		FileSize int64  `json:"file_size"`
+	}
+	if err := s.callInto(ctx, "getFile", struct {
+		FileID string `json:"file_id"`
+	}{FileID: fileID}, &info); err != nil {
+		return "", err
+	}
+	if info.FileSize < 0 || info.FileSize > maxBotPhotoBytes {
+		return "", fmt.Errorf("pa output: photo size %d exceeds limit", info.FileSize)
+	}
+	rel, ok := cleanBotFilePath(info.FilePath)
+	if !ok {
+		return "", errors.New("pa output: invalid getFile file_path")
+	}
+	hc := s.fileHC
+	if hc == nil {
+		hc = s.hc
+	}
+	endpoint := strings.TrimRight(s.base, "/") + "/file/bot" + s.token + "/" + rel
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", errors.New("pa output: build file request failed")
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return "", fmt.Errorf("pa output getFile download: %s", s.redact(err.Error()))
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		return "", fmt.Errorf("pa output getFile download: HTTP %d", resp.StatusCode)
+	}
+	raw, err := egress.ReadBody(resp)
+	if err != nil {
+		return "", fmt.Errorf("pa output getFile download: %s", s.redact(err.Error()))
+	}
+	if len(raw) == 0 || int64(len(raw)) > maxBotPhotoBytes {
+		return "", errors.New("pa output: photo body empty or too large")
+	}
+	mime := http.DetectContentType(raw)
+	switch mime {
+	case "image/jpeg", "image/png", "image/webp", "image/gif":
+	default:
+		return "", fmt.Errorf("pa output: unsupported photo mime type %q", mime)
+	}
+	return "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(raw), nil
+}
+
+func cleanBotFilePath(raw string) (string, bool) {
+	if raw == "" || strings.HasPrefix(raw, "/") || strings.ContainsAny(raw, `?#\`) {
+		return "", false
+	}
+	for _, seg := range strings.Split(raw, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return "", false
+		}
+	}
+	cleaned := path.Clean(raw)
+	if cleaned == "." || strings.HasPrefix(cleaned, "/") || strings.HasPrefix(cleaned, "..") {
+		return "", false
+	}
+	return cleaned, true
 }
 
 func (s *Sender) redact(msg string) string {

@@ -1,0 +1,26 @@
+schema: mctl-telegram.product-update/v1
+id: telegram-workspace
+kind: new_tool
+title: Open a read-only Telegram Workspace
+summary: >-
+  Telegram Workspace adds the read-only telegram_dashboard tool for recent
+  chats, unread activity, search and account status. Availability is limited
+  to configured MCP Apps endpoints.
+locale: en
+delivery: docs_only
+high_value: false
+tools:
+  - telegram_dashboard
+evidence:
+  from: 0.149.0
+  changes:
+    - {tool: telegram_dashboard, change: added}
+  links:
+    - https://github.com/mctlhq/mctl-telegram/pull/1485
+status: approved
+provenance:
+  author: chatgpt
+  assisted_by: gpt-6.2
+  reviewed_by: mashkovd
+created_at: "2026-11-26"
+reviewed_at: "2026-11-26"

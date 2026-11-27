@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/auth"
 	"github.com/mctlhq/mctl-telegram/internal/auth/localjwt"
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output"
@@ -1368,5 +1370,179 @@ func TestRunLoop_ContextNamesTheAcceptedText(t *testing.T) {
 	}
 	if rc.ConsentSHA256 != convo.ConsentTextSHA256RU() || rc.ConsentVersion != convo.ConsentVersion {
 		t.Fatalf("context consent %s %s, want the Russian text's hash", rc.ConsentVersion, rc.ConsentSHA256)
+	}
+}
+
+type fakePhotoFetcher struct {
+	byID map[string]string
+	err  error
+}
+
+func (f fakePhotoFetcher) FetchPhoto(_ context.Context, fileID string) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	if u, ok := f.byID[fileID]; ok {
+		return u, nil
+	}
+	return "", errors.New("photo not found")
+}
+
+func TestRunLoop_ClaimHydratesRecentPhotosAndTaints(t *testing.T) {
+	const dataURI1 = "data:image/jpeg;base64,/9j/4AAQ"
+	const dataURI2 = "data:image/png;base64,iVBORw0KGgo="
+	const dataURI3 = "data:image/webp;base64,UklGRg=="
+	h := newRunLoopHarness(t, func(c *RunLoopConfig, _ *runLoopHarness) {
+		c.Photos = fakePhotoFetcher{byID: map[string]string{
+			"photo_oldest_111": dataURI1,
+			"photo_middle_222": dataURI2,
+			"photo_latest_333": dataURI3,
+		}}
+	})
+	h.consent(aliceID)
+	for _, id := range []string{"photo_oldest_111", "photo_middle_222", "photo_latest_333"} {
+		if code := h.message(aliceID, map[string]any{
+			"caption": "look",
+			"photo":   []any{map[string]any{"file_id": id, "width": 800, "height": 600, "file_size": 1000}},
+		}); code != http.StatusOK {
+			t.Fatalf("message %s: %d", id, code)
+		}
+	}
+	c := h.mustClaim()
+	var photos []wireFragment
+	for _, f := range c.Fragments {
+		if f.Kind == string(convo.KindPhoto) {
+			photos = append(photos, f)
+		}
+	}
+	if len(photos) != 3 {
+		t.Fatalf("photo fragments = %d, want 3", len(photos))
+	}
+	if photos[0].ImageURL != "" || photos[0].Text != "[photo unavailable]" {
+		t.Fatalf("oldest photo = %+v, want stripped placeholder", photos[0])
+	}
+	if photos[1].ImageURL != dataURI2 || photos[1].Text != "[photo]" {
+		t.Fatalf("middle photo = %+v, want hydrated dataURI2", photos[1])
+	}
+	if photos[2].ImageURL != dataURI3 || photos[2].Text != "[photo]" {
+		t.Fatalf("latest photo = %+v, want hydrated dataURI3", photos[2])
+	}
+	for _, f := range photos {
+		if f.Provenance != string(convo.ProvenanceExternal) {
+			t.Fatalf("photo provenance = %q, want external", f.Provenance)
+		}
+	}
+}
+
+type failRecorder struct {
+	mu      sync.Mutex
+	reasons []string
+}
+
+func (f *failRecorder) CountPAJobFailure(reason string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reasons = append(f.reasons, reason)
+}
+
+func TestPAFailureReasonLabelsAndAlertsComplete(t *testing.T) {
+	reasons := jobs.FailureReasons()
+	metricLabels := make([]string, 0, len(reasons))
+	for _, r := range reasons {
+		metricLabels = append(metricLabels, string(r))
+		if tpl, ok := alertTemplates[r]; !ok || tpl == (safetext.Template{}) {
+			t.Fatalf("missing alert template for %q", r)
+		}
+		if kind := jobs.OutboxKindForFailure(r); !jobs.IsFailureOutboxKind(kind) {
+			t.Fatalf("OutboxKindForFailure(%q) = %q, not a failure kind", r, kind)
+		}
+		if _, ok := outboxTemplates[jobs.OutboxKindForFailure(r)]; !ok {
+			t.Fatalf("missing outbox template for %q", r)
+		}
+	}
+	slices.Sort(metricLabels)
+	got := slices.Clone(metrics.PAFailureReasons)
+	slices.Sort(got)
+	if !slices.Equal(metricLabels, got) {
+		t.Fatalf("failure reasons %v != metrics.PAFailureReasons %v", metricLabels, got)
+	}
+}
+
+func TestRunLoop_FailReasonNotifiesUserAndAdmins(t *testing.T) {
+	const adminID = int64(210408407)
+	fc := &failRecorder{}
+	h := newRunLoopHarness(t, func(c *RunLoopConfig, _ *runLoopHarness) {
+		c.Admins = []int64{adminID, adminID, 0, -5}
+		c.FailureMetrics = fc
+	})
+	h.consent(aliceID)
+	h.text(aliceID, "hello")
+	c := h.mustClaim()
+
+	if w := h.post(RouteReply, c.Token, replyRequest{FailReason: string(jobs.FailureProviderRateLimit)}); w.Code != http.StatusOK {
+		t.Fatalf("fail_reason status = %d, want 200 (%s)", w.Code, w.Body.String())
+	}
+	h.loop.WaitDeliveries()
+	if js, us := h.jobStatus(c.JobID); js != "cancelled" || us != "held" {
+		t.Fatalf("job %s usage %s, want cancelled/held", js, us)
+	}
+	sentUser := h.sender.to(aliceID)
+	wantUser := safetext.ServerText(safetext.TextRunFailedRateLimit).String()
+	if len(sentUser) != 1 || sentUser[0] != wantUser {
+		t.Fatalf("user got %q, want %q", sentUser, wantUser)
+	}
+	sentAdmin := h.sender.to(adminID)
+	wantAdmin := safetext.ServerText(safetext.TextAlertPARunFailedProviderRateLimit).String()
+	if len(sentAdmin) != 1 || sentAdmin[0] != wantAdmin {
+		t.Fatalf("admin got %q, want %q", sentAdmin, wantAdmin)
+	}
+	if !slices.Equal(fc.reasons, []string{string(jobs.FailureProviderRateLimit)}) {
+		t.Fatalf("recorded failure reasons = %v", fc.reasons)
+	}
+}
+
+func TestRunLoop_FailReasonRejectsInvalidAndMixedBodies(t *testing.T) {
+	h := newRunLoopHarness(t)
+	h.consent(aliceID)
+	h.text(aliceID, "hello")
+	c := h.mustClaim()
+	cost := 0.01
+	for name, body := range map[string]replyRequest{
+		"unknown reason":       {FailReason: "bogus"},
+		"server-only reason":   {FailReason: string(jobs.FailureLeaseExpired)},
+		"with text":            {Text: "answer", FailReason: string(jobs.FailureEmptyAnswer)},
+		"with cost":            {CostUSD: &cost, FailReason: string(jobs.FailureEmptyAnswer)},
+	} {
+		if w := h.post(RouteReply, c.Token, body); w.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", name, w.Code)
+		}
+	}
+	if js, _ := h.jobStatus(c.JobID); js != "claimed" {
+		t.Fatalf("job status = %s after rejected fail_reason, want claimed", js)
+	}
+}
+
+func TestRunLoop_LeaseExpiryAlertsAdmins(t *testing.T) {
+	const adminID = int64(210408407)
+	fc := &failRecorder{}
+	h := newRunLoopHarness(t, func(c *RunLoopConfig, _ *runLoopHarness) {
+		c.Admins = []int64{adminID}
+		c.FailureMetrics = fc
+	})
+	h.consent(aliceID)
+	h.text(aliceID, "hello")
+	_ = h.mustClaim()
+	h.now = h.now.Add(jobs.DefaultLease + time.Second)
+	if w := h.post(RouteClaim, h.pool, nil); w.Code != http.StatusNoContent {
+		t.Fatalf("claim status = %d", w.Code)
+	}
+	h.loop.WaitDeliveries()
+	if !slices.Equal(fc.reasons, []string{string(jobs.FailureLeaseExpired)}) {
+		t.Fatalf("recorded failure reasons = %v", fc.reasons)
+	}
+	sentAdmin := h.sender.to(adminID)
+	wantAdmin := safetext.ServerText(safetext.TextAlertPARunFailedLeaseExpired).String()
+	if len(sentAdmin) != 1 || sentAdmin[0] != wantAdmin {
+		t.Fatalf("admin got %q, want %q", sentAdmin, wantAdmin)
 	}
 }

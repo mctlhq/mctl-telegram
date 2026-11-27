@@ -1,0 +1,29 @@
+{
+  "schema": "tg-dashboard/v1",
+  "id": "groups_tiles",
+  "title": "Группы",
+  "layout": { "columns": 12, "gap": 12 },
+  "refreshIntervalSec": 60,
+  "dataSources": [
+    { "id": "dialogs", "tool": "list_dialogs", "args": { "limit": 100 } },
+    {
+      "id": "preview",
+      "tool": "get_messages",
+      "lazy": true,
+      "args": { "peer": "@tile:id", "limit": 3 }
+    }
+  ],
+  "tiles": [
+    {
+      "id": "groups",
+      "component": "dialog_cards",
+      "colSpan": 12,
+      "props": {
+        "title": "Группы и супергруппы",
+        "source": "dialogs",
+        "kind": "groups",
+        "preview": "preview"
+      }
+    }
+  ]
+}

@@ -208,8 +208,9 @@ Inputs:
   query — optional substring filter, case-insensitive, matches title or @username.
   folder — optional chat folder id from list_folders; only that folder's dialogs are returned.
 
-Output: JSON array of {id, type, title, username, unread_count, last_message_date}.
+Output: {dialogs: [{id, type, title, username, unread_count, last_message_date, top_message_id, unread_mentions_count, pinned, muted, archived, is_broadcast, is_megagroup, is_forum}], folder_scan}.
 Dialog ids are returned in canonical form ("user:<id>", "chat:<id>", "channel:<id>") usable by the other tools.
+type is "user", "chat", or "channel". A broadcast channel and a supergroup are both type "channel"; is_broadcast and is_megagroup distinguish them, and is_forum marks a forum supergroup. pinned, muted, archived, the mention count and the channel flags are omitted when false or zero. top_message_id is the latest message id (the max_id mark_read accepts).
 With folder, the 200 most recent dialogs and 100 archived ones are checked against the folder's rules,
 and folder_scan says how many were checked and whether that was every dialog (complete=false means a
 member may be missing).`),

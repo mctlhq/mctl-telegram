@@ -1,10 +1,12 @@
 package agentworker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -12,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 )
 
 // paFake is a scripted PA server: it records every request in order and
@@ -593,5 +597,121 @@ func TestPAWorker_LoopRunsClaimedJob(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("loop = %v", err)
+	}
+}
+
+func TestPAWorker_PhotoFragmentMultimodalAndTokens(t *testing.T) {
+	bigURI := "data:image/jpeg;base64," + strings.Repeat("QUJD", 50000)
+	frags := []paFragment{
+		{Kind: "photo", Provenance: "external", Text: "[photo]", ImageURL: bigURI},
+		{Kind: "caption", Provenance: "external", Text: "What is in this photo?"},
+	}
+	msgs := paMessages(frags)
+	if len(msgs) != 3 {
+		t.Fatalf("msgs = %d, want 3", len(msgs))
+	}
+	if len(msgs[1].ContentParts) != 2 || msgs[1].ContentParts[1].ImageURL == nil || msgs[1].ContentParts[1].ImageURL.URL != bigURI {
+		t.Fatalf("photo message parts = %+v", msgs[1].ContentParts)
+	}
+	if !strings.Contains(msgs[1].ContentParts[0].Text, `<external_data kind="photo">`) {
+		t.Fatalf("missing external_data wrapper on photo notice: %q", msgs[1].ContentParts[0].Text)
+	}
+	toks := paContextTokens(msgs, nil)
+	if toks > jobs.PhotoContextTokens+500 {
+		t.Fatalf("photo tokens %d exceeded bounded photo budget", toks)
+	}
+
+	var sentBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&sentBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"A cat."}}],"usage":{"prompt_tokens":10,"completion_tokens":2}}`))
+	}))
+	defer srv.Close()
+	c := &OpenAIClient{BaseURL: srv.URL, APIKey: "k", Model: "m", HTTP: srv.Client()}
+	res, err := c.ChatPA(context.Background(), msgs, nil)
+	if err != nil {
+		t.Fatalf("ChatPA: %v", err)
+	}
+	if res.Message.Content != "A cat." {
+		t.Fatalf("content = %q", res.Message.Content)
+	}
+	wireMsgs, ok := sentBody["messages"].([]any)
+	if !ok || len(wireMsgs) != 3 {
+		t.Fatalf("wire messages = %+v", sentBody["messages"])
+	}
+	photoMsg := wireMsgs[1].(map[string]any)
+	parts, ok := photoMsg["content"].([]any)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("wire photo content = %#v, want 2-part array", photoMsg["content"])
+	}
+}
+
+func TestPAWorker_LoopLogsAndReportsAbandonedReason(t *testing.T) {
+	cases := []struct {
+		name       string
+		model      PAModel
+		wantReason jobs.FailureReason
+	}{
+		{
+			name:       "provider 400 request",
+			model:      &paScriptModel{errs: []error{&ProviderError{Status: 400}}},
+			wantReason: jobs.FailureProviderRequest,
+		},
+		{
+			name:       "empty answer",
+			model:      &paScriptModel{results: []*ChatResult{{UsageReported: true, Message: ChatMessage{Content: "   "}}}},
+			wantReason: jobs.FailureEmptyAnswer,
+		},
+		{
+			name:       "provider 429 rate limit",
+			model:      &paScriptModel{errs: []error{&ProviderError{Status: 429, RetryAfter: time.Hour}}},
+			wantReason: jobs.FailureProviderRateLimit,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, srv := newPAFake(t)
+			f.on(PARouteClaim, paAnswer{200, paClaimFor(time.Now())}, paAnswer{204, nil})
+			f.on(PARouteReply, paAnswer{200, map[string]bool{"abandoned": true}})
+
+			var logBuf bytes.Buffer
+			old := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			defer slog.SetDefault(old)
+
+			w := newTestPAWorker(srv, tc.model)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- w.Loop(ctx) }()
+
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				f.mu.Lock()
+				n := len(f.replies)
+				f.mu.Unlock()
+				if n == 1 {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("no abandon report; events %v", f.log())
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatalf("loop = %v", err)
+			}
+			f.mu.Lock()
+			rep := f.replies[0]
+			f.mu.Unlock()
+			if got, _ := rep["fail_reason"].(string); got != string(tc.wantReason) {
+				t.Fatalf("reported fail_reason = %q, want %q", got, tc.wantReason)
+			}
+			logs := logBuf.String()
+			if !strings.Contains(logs, "reason="+string(tc.wantReason)) || !strings.Contains(logs, "err=") {
+				t.Fatalf("logs missing reason or err: %s", logs)
+			}
+		})
 	}
 }

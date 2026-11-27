@@ -94,10 +94,17 @@ Inputs (required):
            list_dialogs shows it.
   max_id — integer id of the newest message to mark read.
 Inputs (optional):
-  topic_id — forum topic to mark read (forum supergroups only).`),
+  topic_id — forum topic to mark read (forum supergroups only).
+  confirmation_id — one-shot id from prepare_dashboard_action, bound to this
+    exact (peer, max_id, topic_id). When supplied it is consumed before the
+    send gate, and a mismatched, reused, or foreign id is refused. The send
+    gate stays authoritative: the confirmation does not grant a read receipt
+    the gate would refuse. Omitting it leaves this tool unchanged. The
+    prepare tool exists only while MCP Apps are enabled.`),
 		mcplib.WithString("peer", mcplib.Required(), mcplib.Description("Chat to mark read.")),
 		mcplib.WithNumber("max_id", mcplib.Required(), mcplib.Description("ID of the newest message to mark read; later messages stay unread.")),
 		mcplib.WithNumber("topic_id", mcplib.Description("Forum topic to mark read; forum supergroups only.")),
+		mcplib.WithString("confirmation_id", mcplib.Description("Optional one-shot id from prepare_dashboard_action, bound to this exact (peer, max_id, topic_id).")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
@@ -111,6 +118,9 @@ Inputs (optional):
 		topicID, bad := optionalTopicArg(args)
 		if bad != nil {
 			return bad, nil
+		}
+		if refused := s.rejectDashboardConfirmation(ctx, id, "mark_read", peer, stringArg(args, "confirmation_id", ""), HashDashboardAction("mark_read", peer, "", maxID, topicID, false), startedAt); refused != nil {
+			return refused, nil
 		}
 		// The full send gate, send_enabled included: a read receipt is
 		// visible to the other side (owner decision on #1175).

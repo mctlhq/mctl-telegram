@@ -1,0 +1,24 @@
+{
+  "schema": "tg-dashboard/v1",
+  "id": "folders_board",
+  "title": "Папки",
+  "layout": { "columns": 12, "gap": 12 },
+  "refreshIntervalSec": 90,
+  "dataSources": [
+    { "id": "folders", "tool": "list_folders" },
+    {
+      "id": "members",
+      "tool": "list_dialogs",
+      "lazy": true,
+      "args": { "folder": "@tile:id", "limit": 30 }
+    }
+  ],
+  "tiles": [
+    {
+      "id": "board",
+      "component": "folder_board",
+      "colSpan": 12,
+      "props": { "title": "Папки чатов", "source": "folders", "members": "members" }
+    }
+  ]
+}

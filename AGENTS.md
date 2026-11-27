@@ -11,6 +11,8 @@ This file is a helper for Codex and other AI coding agents. Canonical contributo
 - SQLite (local dev) or Postgres (production)
 
 ## Key paths
+- [Telegram Workspace plan](docs/plans/telegram-workspace.md) — active MCP Apps
+  audit, isolation and operator validation under #650.
 - `docs/plans/local-bridge-review.md` — active Local Bridge 0.62.1 review,
   manual verification procedure and result log.
 - `cmd/server/main.go` — HTTP + MCP entrypoint

@@ -100,7 +100,8 @@ func TestPAWebhookGauges_Problems(t *testing.T) {
 func TestPACounters_PreCreated(t *testing.T) {
 	f := paFamilies(t, New())
 	if f["mctl_pa_outbox_total"] != len(PAOutboxOutcomes) || f["mctl_pa_updates_total"] != len(PAUpdateOutcomes) ||
-		f["mctl_pa_callback_answers_total"] != len(PACallbackAnswerOutcomes) {
+		f["mctl_pa_callback_answers_total"] != len(PACallbackAnswerOutcomes) ||
+		f["mctl_pa_job_failures_total"] != len(PAFailureReasons) {
 		t.Fatalf("families %v", f)
 	}
 }

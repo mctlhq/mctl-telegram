@@ -457,6 +457,10 @@ type Config struct {
 	// client without a ceiling keeps today's grant. New refuses a ceiling
 	// that names a scope this server can never grant.
 	ClientProfiles toolprofile.Bindings
+	// EndpointScopeCeiling bounds all grants when a deployment has a
+	// restricted purpose, including clients without a per-client ceiling.
+	EndpointScopeCeiling []string
+	EndpointTelegramID   int64 // Zero leaves the existing identity policy in place.
 	// CIMD resolves an https URL client_id as an OAuth Client ID Metadata
 	// Document (mctl-telegram#773). Nil (the default) means CIMD is off and a
 	// URL client_id is handled like any other unregistered client_id. When
@@ -1331,6 +1335,10 @@ func cancelEnableFlow(e *enableSession) bool {
 	return false
 }
 
+func (s *Server) endpointIdentityAllowed(tgID int64) bool {
+	return s.cfg.EndpointTelegramID == 0 || tgID == s.cfg.EndpointTelegramID
+}
+
 // ResolveScopes maps a Telegram identity to a scope set. Four tiers, checked
 // in this order:
 //   - admins (TG_LOGIN_ADMINS env) → platform-admins: full telegram:* plus
@@ -1354,6 +1362,9 @@ func cancelEnableFlow(e *enableSession) bool {
 // client send. A DB error resolving the client tier is returned so the caller
 // fails the token issuance rather than silently under-granting.
 func (s *Server) ResolveScopes(ctx context.Context, tgID int64) (groups, scopes []string, err error) {
+	if !s.endpointIdentityAllowed(tgID) {
+		return nil, nil, nil
+	}
 	if s.cfg.AdminTelegramIDs[tgID] {
 		granted := []string{
 			"telegram:dialogs:read",
@@ -2044,6 +2055,11 @@ func (s *Server) handleTelegramCallback(w http.ResponseWriter, r *http.Request) 
 		// and is not handled here — fail loudly rather than mint a token for an
 		// unresolved identity.
 		http.Error(w, "telegram id_token carried no usable Telegram user id", http.StatusUnauthorized)
+		return
+	}
+
+	if !s.endpointIdentityAllowed(identity.TelegramID) {
+		http.Error(w, "Telegram account is not permitted on this endpoint", http.StatusForbidden)
 		return
 	}
 
@@ -3234,7 +3250,12 @@ func writeRevokeSuccess(w http.ResponseWriter) {
 // would mint a token wider than its client's ceiling, so the mint refuses
 // it with errScopeCeilingViolated instead (#1326).
 func (s *Server) mintAccessToken(origin tokenOrigin, tgID int64, tgUsername string, groups, scopes []string) (string, error) {
-	if ceiling, ok := s.cfg.ClientProfiles.ScopeCeilingFor(origin.ClientID, origin.RedirectURI); ok && !withinScopeCeiling(ceiling, groups, scopes) {
+	if !s.endpointIdentityAllowed(tgID) {
+		return "", errors.New("oauth: Telegram account is not permitted on this endpoint")
+	}
+	ceiling, hasClientCeiling := s.cfg.ClientProfiles.ScopeCeilingFor(origin.ClientID, origin.RedirectURI)
+	if (hasClientCeiling && !withinScopeCeiling(ceiling, groups, scopes)) ||
+		(s.cfg.EndpointScopeCeiling != nil && !withinScopeCeiling(s.cfg.EndpointScopeCeiling, groups, scopes)) {
 		s.logger().Error("oauth: refusing to mint a token wider than its client's scope ceiling",
 			"client_id", origin.ClientID, "scopes", strings.Join(scopes, " "), "groups", len(groups))
 		return "", errScopeCeilingViolated
@@ -3283,7 +3304,9 @@ func (s *Server) applyClientScopeCeiling(clientID, redirectURI string, groups, s
 		// client that requested one read scope still held admin:users.
 		outGroups, outScopes = withoutMembership(scopes)
 	}
-	return outGroups, outScopes, ok
+	endpointCeiling := s.cfg.EndpointScopeCeiling
+	outGroups, outScopes = applyScopeCeiling(endpointCeiling, endpointCeiling != nil, outGroups, outScopes)
+	return outGroups, outScopes, ok || endpointCeiling != nil
 }
 
 // cimdClientMapped reports whether MCP_CLIENT_PROFILES names this CIMD client:

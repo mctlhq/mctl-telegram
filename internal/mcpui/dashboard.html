@@ -1,0 +1,1005 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Telegram dashboard</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: var(--color-background-primary, #f4f5f7);
+    --fg: var(--color-text-primary, #1c1e22);
+    --muted: var(--color-text-secondary, #5c6570);
+    --card: var(--color-background-secondary, #ffffff);
+    --border: var(--color-border-primary, #d5d8de);
+    --accent: var(--color-text-accent, #c2410c);
+    --danger: #b42318;
+    --ok: #067647;
+    --warn: #b54708;
+    --gap: 12px;
+    --cols: 12;
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--color-background-primary, #14161a);
+    --fg: var(--color-text-primary, #e7e9ec);
+    --muted: var(--color-text-secondary, #9aa1ab);
+    --card: var(--color-background-secondary, #1d2025);
+    --border: var(--color-border-primary, #2a2e35);
+    --accent: var(--color-text-accent, #e25a3c);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--color-background-primary, #14161a);
+      --fg: var(--color-text-primary, #e7e9ec);
+      --muted: var(--color-text-secondary, #9aa1ab);
+      --card: var(--color-background-secondary, #1d2025);
+      --border: var(--color-border-primary, #2a2e35);
+      --accent: var(--color-text-accent, #e25a3c);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  #root { padding: 12px; }
+  .toolbar, .inputs, .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .toolbar { margin-bottom: 10px; }
+  .inputs { margin-bottom: 10px; }
+  input, select, textarea, button {
+    background: var(--card);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font: inherit;
+  }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .status { color: var(--muted); margin: 0 0 10px; min-height: 1.2em; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
+    gap: var(--gap);
+  }
+  .tile { min-width: 0; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+  }
+  .kpi .value { font-size: 28px; font-weight: 650; }
+  .kpi .label, .muted, .card-head { color: var(--muted); font-size: 12px; }
+  .card-head { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+  .card-from { font-weight: 600; color: var(--fg); }
+  .card-snippet { white-space: pre-wrap; word-break: break-word; }
+  .badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    margin-right: 4px;
+  }
+  .badge.unread { color: var(--accent); border-color: var(--accent); }
+  .badge.untrusted { color: var(--danger); border-color: var(--danger); }
+  .badge.sponsored { color: var(--warn); border-color: var(--warn); font-weight: 700; }
+  .banner {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin-bottom: 10px;
+    color: var(--muted);
+  }
+  .banner.warning { border-color: var(--warn); color: var(--warn); }
+  .section-title { font-weight: 650; margin: 0 0 8px; }
+  .sponsored-head { margin: 10px 0 6px; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--warn); }
+  .card.sponsored { border-style: dashed; }
+  .columns { display: flex; gap: 12px; overflow-x: auto; align-items: flex-start; }
+  .column { min-width: 220px; flex: 1; }
+  .editor {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 12px;
+  }
+  textarea.code { width: 100%; min-height: 360px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .confirm {
+    margin-top: 8px;
+    border-top: 1px dashed var(--border);
+    padding-top: 8px;
+  }
+  .verdict.real { color: var(--ok); }
+  .verdict.dry { color: var(--muted); }
+  .empty { color: var(--muted); padding: 12px 0; }
+  @media (max-width: 800px) {
+    .editor { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div id="root">
+  <div class="toolbar">
+    <button id="view-board" type="button" class="primary"></button>
+    <button id="view-editor" type="button"></button>
+    <select id="template-select"></select>
+    <button id="refresh-button" type="button"></button>
+  </div>
+  <div id="inputs" class="inputs"></div>
+  <div id="status" class="status"></div>
+  <div id="board"></div>
+  <div id="editor" style="display:none">
+    <div class="editor">
+      <div>
+        <textarea id="editor-text" class="code" spellcheck="false"></textarea>
+        <div class="toolbar" style="margin-top:8px">
+          <button id="check-button" type="button"></button>
+          <button id="save-button" type="button" class="primary"></button>
+          <button id="delete-button" type="button"></button>
+        </div>
+        <div id="editor-status" class="status"></div>
+      </div>
+      <div id="preview"></div>
+    </div>
+  </div>
+</div>
+<script>
+"use strict";
+
+// Chrome strings live in one dictionary so a second locale is a table, not
+// a rewrite. The shipped default is Russian. The host locale can select
+// English. Template titles and tile labels are the template author's text.
+var I18N = {
+  ru: {
+    board: "Дашборд",
+    editor: "Редактор",
+    refresh: "Обновить",
+    check: "Проверить",
+    save: "Сохранить",
+    del: "Удалить",
+    connecting: "Подключение к хосту…",
+    connected: "Загрузка шаблонов…",
+    failed: "Не удалось подключиться: ",
+    loading: "Загрузка…",
+    updated: "Обновлено. Опрос каждые ",
+    seconds: " с.",
+    noTemplates: "Нет шаблонов.",
+    incomplete: "Список неполный: папка просмотрена не до конца, часть чатов может отсутствовать.",
+    topicsIncomplete: "Список тем неполный.",
+    empty: "Нет данных.",
+    untrusted: "недоверенные данные · Telegram",
+    sponsoredSection: "Реклама",
+    sponsoredUnavailable: "Рекламные сообщения канала не загрузились. Это не значит, что их нет.",
+    preview: "Превью",
+    previewLoading: "Загрузка превью…",
+    previewFailed: "Превью не загрузилось: ",
+    markRead: "Прочитано",
+    draft: "Черновик",
+    prepare: "Подготовить",
+    confirm: "Подтвердить",
+    preparing: "Подготовка…",
+    willApply: "Сервер выполнит действие.",
+    willNot: "Сервер отклонит действие: ",
+    peer: "Чат",
+    maxId: "До сообщения",
+    draftText: "Текст черновика",
+    needText: "Введите текст черновика. Пустая строка очищает черновик — для этого оставьте поле пустым и подтвердите.",
+    changed: "Текст изменился после подготовки. Подготовьте ещё раз.",
+    noWrite: "Эти действия недоступны в этом подключении.",
+    saved: "Шаблон сохранён.",
+    deleted: "Шаблон удалён.",
+    builtinLocked: "Встроенный шаблон нельзя изменить.",
+    valid: "Схема принята.",
+    invalidJson: "Не JSON: ",
+    needInputs: "Заполните поля и нажмите «Обновить».",
+    unread: "непрочит.",
+    mentions: "упоминания",
+    pinned: "закреп",
+    muted: "без звука",
+    archived: "архив",
+    forum: "форум",
+    broadcast: "канал",
+    megagroup: "супергруппа",
+    group: "группа",
+    folderIncomplete: "неполный"
+  },
+  en: {
+    board: "Dashboard",
+    editor: "Editor",
+    refresh: "Refresh",
+    check: "Check",
+    save: "Save",
+    del: "Delete",
+    connecting: "Connecting to host…",
+    connected: "Loading templates…",
+    failed: "Could not connect: ",
+    loading: "Loading…",
+    updated: "Updated. Polling every ",
+    seconds: "s.",
+    noTemplates: "No templates.",
+    incomplete: "Incomplete: the folder scan did not cover every dialog.",
+    topicsIncomplete: "The topic list is incomplete.",
+    empty: "Nothing to show.",
+    untrusted: "untrusted · Telegram",
+    sponsoredSection: "Sponsored",
+    sponsoredUnavailable: "Sponsored messages for this channel could not be loaded. That is not the same as there being none.",
+    preview: "Preview",
+    previewLoading: "Loading preview…",
+    previewFailed: "Preview failed: ",
+    markRead: "Mark read",
+    draft: "Draft",
+    prepare: "Prepare",
+    confirm: "Confirm",
+    preparing: "Preparing…",
+    willApply: "The server will apply this.",
+    willNot: "The server will refuse this: ",
+    peer: "Chat",
+    maxId: "Up to message",
+    draftText: "Draft text",
+    needText: "Type the draft. An empty box clears it — leave it empty and confirm only if that is what you want.",
+    changed: "The text changed after prepare. Prepare again.",
+    noWrite: "These actions are not available on this connection.",
+    saved: "Template saved.",
+    deleted: "Template deleted.",
+    builtinLocked: "A built-in template cannot be changed.",
+    valid: "Schema accepted.",
+    invalidJson: "Not JSON: ",
+    needInputs: "Fill in the fields and press Refresh.",
+    unread: "unread",
+    mentions: "mentions",
+    pinned: "pinned",
+    muted: "muted",
+    archived: "archived",
+    forum: "forum",
+    broadcast: "channel",
+    megagroup: "supergroup",
+    group: "group",
+    folderIncomplete: "incomplete"
+  }
+};
+var locale = "ru";
+function t(key) {
+  var table = I18N[locale] || I18N.ru;
+  if (table[key] != null) return table[key];
+  return I18N.ru[key] != null ? I18N.ru[key] : key;
+}
+
+var pending = Object.create(null);
+var nextId = 1;
+var availableTools = Object.create(null);
+var templates = [];
+var current = null;
+var results = Object.create(null);
+var inputValues = Object.create(null);
+var currentView = "board";
+var pollTimer = null;
+
+var ENVELOPE_HEAD = '<telegram-content origin="telegram" peer="';
+var ENVELOPE_MID = '" untrusted="true">';
+var ENVELOPE_TAIL = "</telegram-content>";
+
+var EDITOR_STARTER = {
+  schema: "tg-dashboard/v1",
+  id: "custom_pulse",
+  title: "Мой шаблон",
+  layout: { columns: 12, gap: 12 },
+  refreshIntervalSec: 60,
+  dataSources: [{ id: "dialogs", tool: "list_dialogs", args: { limit: 20 } }],
+  tiles: [
+    { id: "kpi_dialogs", component: "kpi", colSpan: 6, props: { label: "Чаты с непрочитанным", value: "@data:dialogs.stats.unread_dialogs" } },
+    { id: "cards", component: "dialog_cards", colSpan: 12, props: { title: "Диалоги", source: "dialogs", kind: "all" } }
+  ]
+};
+
+function sendToHost(message) {
+  window.parent.postMessage(message, "*");
+}
+function callHost(method, params) {
+  var id = "app-" + (nextId++);
+  return new Promise(function (resolve, reject) {
+    pending[id] = { resolve: resolve, reject: reject };
+    sendToHost({ jsonrpc: "2.0", id: id, method: method, params: params || {} });
+  });
+}
+function callTool(name, args) {
+  return callHost("tools/call", { name: name, arguments: args || {} }).then(function (result) {
+    if (result && result.isError) {
+      var msg = "tool call failed";
+      if (result.content && result.content.length && result.content[0].text) msg = result.content[0].text;
+      throw new Error(msg);
+    }
+    return (result && result.structuredContent) || {};
+  });
+}
+window.addEventListener("message", function (event) {
+  if (event.source !== window.parent) return;
+  var data = event.data;
+  if (!data || typeof data !== "object") return;
+  if (data.id !== undefined && data.id !== null && pending[data.id]) {
+    var p = pending[data.id];
+    delete pending[data.id];
+    if (data.error) p.reject(new Error(data.error.message || "host error"));
+    else p.resolve(data.result);
+    return;
+  }
+  if (data.method === "ui/notifications/host-context-changed") applyHost(data.params || {});
+  else if (data.method === "ui/notifications/size-changed" && data.params && typeof data.params.height === "number") {
+    document.body.style.minHeight = data.params.height + "px";
+  }
+});
+
+function applyHost(result) {
+  var ctx = result && (result.hostContext || result.host || result) || {};
+  if (ctx.theme === "light" || ctx.theme === "dark") document.documentElement.setAttribute("data-theme", ctx.theme);
+  var loc = ctx.locale || "";
+  if (typeof loc === "string" && loc.toLowerCase().indexOf("en") === 0) locale = "en";
+  var vars = ctx.styles && (ctx.styles.variables || ctx.styles.cssVariables);
+  if (!vars && ctx.css && ctx.css.variables) vars = ctx.css.variables;
+  if (vars && typeof vars === "object") {
+    Object.keys(vars).forEach(function (k) {
+      if (typeof k === "string" && k.indexOf("--") === 0 && typeof vars[k] === "string" && vars[k].length < 200) {
+        document.documentElement.style.setProperty(k, vars[k]);
+      }
+    });
+  }
+  labelChrome();
+}
+
+function el(tag, className) {
+  var node = document.createElement(tag);
+  if (className) node.className = className;
+  return node;
+}
+function textEl(tag, className, str) {
+  var node = el(tag, className);
+  node.textContent = str == null ? "" : String(str);
+  return node;
+}
+function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+function setStatus(msg) { document.getElementById("status").textContent = msg; }
+function labelChrome() {
+  document.getElementById("view-board").textContent = t("board");
+  document.getElementById("view-editor").textContent = t("editor");
+  document.getElementById("refresh-button").textContent = t("refresh");
+  document.getElementById("check-button").textContent = t("check");
+  document.getElementById("save-button").textContent = t("save");
+  document.getElementById("delete-button").textContent = t("del");
+}
+
+function unwrapEnvelope(raw) {
+  if (typeof raw !== "string" || raw === "") return { body: "", matched: false };
+  if (raw.slice(0, ENVELOPE_HEAD.length) !== ENVELOPE_HEAD) return { body: raw, matched: false };
+  var midIndex = raw.indexOf(ENVELOPE_MID, ENVELOPE_HEAD.length);
+  if (midIndex === -1) return { body: raw, matched: false };
+  var tailStart = raw.length - ENVELOPE_TAIL.length;
+  if (tailStart < 0 || raw.slice(tailStart) !== ENVELOPE_TAIL) return { body: raw, matched: false };
+  var bodyStart = midIndex + ENVELOPE_MID.length;
+  if (bodyStart > tailStart) return { body: raw, matched: false };
+  return { body: raw.slice(bodyStart, tailStart), matched: true };
+}
+function formatDate(v) {
+  if (v == null || v === "") return "";
+  if (typeof v === "number") {
+    try { return new Date(v * 1000).toISOString().slice(0, 16).replace("T", " "); } catch (e) { return String(v); }
+  }
+  if (typeof v === "string") return v.replace("T", " ").replace(/\.\d+Z$/, "").replace("Z", "").slice(0, 16);
+  return "";
+}
+
+function normalize(tool, raw) {
+  raw = raw || {};
+  if (tool === "list_dialogs") {
+    var dialogs = raw.dialogs || [];
+    var stats = { unread_dialogs: 0, unread_messages: 0, unread_mentions: 0, groups: 0 };
+    dialogs.forEach(function (d) {
+      if ((d.unread_count || 0) > 0) stats.unread_dialogs++;
+      stats.unread_messages += d.unread_count || 0;
+      stats.unread_mentions += d.unread_mentions_count || 0;
+      if (d.type === "chat" || d.is_megagroup) stats.groups++;
+    });
+    return { dialogs: dialogs, stats: stats, folder_scan: raw.folder_scan || null };
+  }
+  if (tool === "get_unread_messages" || tool === "get_messages" || tool === "search_messages") {
+    return {
+      messages: raw.messages || [],
+      sponsored: raw.sponsored || [],
+      sponsored_unavailable: raw.sponsored_unavailable || [],
+      folder_scan: raw.folder_scan || null
+    };
+  }
+  if (tool === "list_folders") return { folders: raw.folders || [] };
+  if (tool === "list_topics") return { topics: raw.topics || [], list: raw.list || null };
+  return raw;
+}
+
+var NUMERIC_ARGS = { limit: 1, folder: 1, before_id: 1, topic_id: 1, max_id: 1 };
+function resolveValue(value, tile) {
+  if (typeof value !== "string") return value;
+  if (value.indexOf("@input:") === 0) return inputValues[value.slice(7)];
+  if (value.indexOf("@tile:") === 0) return tile ? tile[value.slice(6)] : value;
+  if (value.indexOf("@data:") === 0) return lookupData(value);
+  return value;
+}
+function lookupData(expr) {
+  var path = expr.slice(6).split(".");
+  var cur = results[path[0]];
+  for (var i = 1; i < path.length && cur != null; i++) cur = cur[path[i]];
+  return cur == null ? "" : cur;
+}
+function resolveArgs(args, tile) {
+  var out = {};
+  Object.keys(args || {}).forEach(function (k) {
+    var v = resolveValue(args[k], tile);
+    if (v == null) return;
+    if (typeof v === "string" && v.trim() === "") return;
+    if (NUMERIC_ARGS[k] && typeof v === "string" && /^-?\d+$/.test(v)) v = Number(v);
+    out[k] = v;
+  });
+  return out;
+}
+
+function sourceById(id) {
+  var list = (current && current.dataSources) || [];
+  for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
+  return null;
+}
+function fetchSource(src, tile) {
+  if (src.tool === "search_messages") return fetchSearch(src);
+  return callTool(src.tool, resolveArgs(src.args, tile)).then(function (raw) { return normalize(src.tool, raw); });
+}
+function fetchSearch(src) {
+  var args = resolveArgs(src.args, null);
+  var peer = args.peer;
+  if (typeof peer === "string" && peer.indexOf(",") >= 0) {
+    var peers = peer.split(",").map(function (s) { return s.trim(); }).filter(Boolean).slice(0, 5);
+    return Promise.all(peers.map(function (p) {
+      var one = {};
+      Object.keys(args).forEach(function (k) { one[k] = args[k]; });
+      one.peer = p;
+      return callTool(src.tool, one);
+    })).then(function (pages) {
+      var merged = { messages: [], sponsored: [], sponsored_unavailable: [] };
+      pages.forEach(function (raw) {
+        var n = normalize(src.tool, raw);
+        merged.messages = merged.messages.concat(n.messages);
+        merged.sponsored = merged.sponsored.concat(n.sponsored);
+        merged.sponsored_unavailable = merged.sponsored_unavailable.concat(n.sponsored_unavailable);
+      });
+      return merged;
+    });
+  }
+  return callTool(src.tool, args).then(function (raw) { return normalize(src.tool, raw); });
+}
+
+function applyFilters(items, filters) {
+  return (items || []).filter(function (item) {
+    return (filters || []).every(function (f) {
+      var v = item[f.field];
+      if (f.op === "eq") return v === f.value;
+      if (f.op === "neq") return v !== f.value;
+      if (f.op === "gt") return Number(v) > Number(f.value);
+      if (f.op === "contains") return String(v == null ? "" : v).toLowerCase().indexOf(String(f.value).toLowerCase()) >= 0;
+      if (f.op === "in" && Array.isArray(f.value)) return f.value.indexOf(v) !== -1;
+      return true;
+    });
+  });
+}
+
+function renderSponsored(parent, items, unavailable) {
+  if (unavailable && unavailable.length) parent.appendChild(textEl("div", "banner warning", t("sponsoredUnavailable")));
+  if (!items || !items.length) return;
+  parent.appendChild(textEl("div", "sponsored-head", t("sponsoredSection")));
+  items.forEach(function (ad) {
+    var card = el("div", "card sponsored");
+    var head = el("div", "card-head");
+    head.appendChild(textEl("span", "badge sponsored", ad.label || "Sponsored"));
+    head.appendChild(textEl("span", "card-from", ad.title || ad.channel || ""));
+    card.appendChild(head);
+    var body = unwrapEnvelope(ad.text || "");
+    card.appendChild(textEl("div", "card-snippet", body.body));
+    if (ad.button_text) card.appendChild(textEl("div", "muted", ad.button_text));
+    if (ad.url) card.appendChild(textEl("div", "muted", ad.url));
+    if (ad.sponsor_info) card.appendChild(textEl("div", "muted", ad.sponsor_info));
+    parent.appendChild(card);
+  });
+}
+
+function kindBadge(d) {
+  if (d.is_forum) return t("forum");
+  if (d.is_megagroup) return t("megagroup");
+  if (d.is_broadcast) return t("broadcast");
+  if (d.type === "chat") return t("group");
+  return d.type || "";
+}
+function messageCard(m, actions) {
+  var card = el("div", "card");
+  var head = el("div", "card-head");
+  head.appendChild(textEl("span", "card-from", (m.from || "") + (m.peer_title ? " · " + m.peer_title : "")));
+  head.appendChild(textEl("span", null, formatDate(m.date)));
+  card.appendChild(head);
+  var unwrapped = unwrapEnvelope(m.text);
+  var snippet = el("div", "card-snippet");
+  snippet.appendChild(document.createTextNode(unwrapped.body));
+  snippet.appendChild(textEl("span", "badge untrusted", t("untrusted")));
+  card.appendChild(snippet);
+  card.appendChild(textEl("div", "muted", (m.peer || "") + " #" + (m.id != null ? m.id : "")));
+  appendActions(card, actions, m);
+  return card;
+}
+function dialogCard(d, tile) {
+  var card = el("div", "card");
+  var head = el("div", "card-head");
+  head.appendChild(textEl("span", "card-from", d.title || d.username || d.id || ""));
+  head.appendChild(textEl("span", "badge unread", (d.unread_count || 0) + " " + t("unread")));
+  card.appendChild(head);
+  var meta = el("div", "muted");
+  meta.appendChild(textEl("span", "badge", kindBadge(d)));
+  if (d.pinned) meta.appendChild(textEl("span", "badge", t("pinned")));
+  if (d.muted) meta.appendChild(textEl("span", "badge", t("muted")));
+  if (d.archived) meta.appendChild(textEl("span", "badge", t("archived")));
+  if (d.unread_mentions_count) meta.appendChild(textEl("span", "badge", d.unread_mentions_count + " " + t("mentions")));
+  meta.appendChild(document.createTextNode(" " + formatDate(d.last_message_date) + " · " + (d.username ? "@" + d.username : d.id || "")));
+  card.appendChild(meta);
+  if (tile && tile.props && tile.props.preview) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = t("preview");
+    var holder = el("div", "confirm");
+    btn.addEventListener("click", function () { loadPreview(tile.props.preview, d, holder); });
+    var row = el("div", "row");
+    row.appendChild(btn);
+    card.appendChild(row);
+    card.appendChild(holder);
+  }
+  return card;
+}
+function loadPreview(sourceId, dialog, holder) {
+  var src = sourceById(sourceId);
+  clear(holder);
+  if (!src) return;
+  holder.appendChild(textEl("div", "status", t("previewLoading")));
+  var tile = { id: dialog.id, peer: dialog.id };
+  fetchSource(src, tile).then(function (data) {
+    clear(holder);
+    (data.messages || []).forEach(function (m) {
+      var row = el("div", "card-snippet");
+      row.appendChild(textEl("span", "card-from", (m.from || "") + ": "));
+      row.appendChild(document.createTextNode(unwrapEnvelope(m.text).body));
+      holder.appendChild(row);
+    });
+    renderSponsored(holder, data.sponsored, data.sponsored_unavailable);
+    if (!(data.messages || []).length && !(data.sponsored || []).length) holder.appendChild(textEl("div", "empty", t("empty")));
+  }).catch(function (err) {
+    clear(holder);
+    holder.appendChild(textEl("div", "status", t("previewFailed") + err.message));
+  });
+}
+
+function canWrite() {
+  return availableTools.prepare_dashboard_action && (availableTools.mark_read || availableTools.save_draft);
+}
+function appendActions(parent, actions, item) {
+  if (!actions || !actions.length) return;
+  var row = el("div", "row");
+  if (!canWrite()) {
+    row.appendChild(textEl("span", "muted", t("noWrite")));
+    parent.appendChild(row);
+    return;
+  }
+  actions.forEach(function (act) {
+    if (act.action === "mark_read" && !availableTools.mark_read) return;
+    if (act.action === "save_draft" && !availableTools.save_draft) return;
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = act.label || (act.action === "mark_read" ? t("markRead") : t("draft"));
+    btn.addEventListener("click", function () { openAction(act, item); });
+    row.appendChild(btn);
+  });
+  parent.appendChild(row);
+  parent.appendChild(el("div", "confirm"));
+}
+function openAction(act, item) {
+  var card = item && item.__card;
+  var holder = card ? card.querySelector(".confirm") : null;
+  if (!holder) return;
+  clear(holder);
+  var args = resolveArgs(act.args || {}, item);
+  if (!args.peer && item.peer) args.peer = item.peer;
+  if (act.action === "mark_read" && (args.max_id == null) && item.id != null) args.max_id = item.id;
+  holder.appendChild(textEl("div", null, t("peer") + ": " + (args.peer || "")));
+  if (act.action === "mark_read") holder.appendChild(textEl("div", null, t("maxId") + ": " + (args.max_id != null ? args.max_id : "")));
+  var area = null;
+  if (act.action === "save_draft") {
+    holder.appendChild(textEl("div", null, t("draftText")));
+    area = document.createElement("textarea");
+    if (typeof args.text === "string") area.value = args.text;
+    holder.appendChild(area);
+  }
+  var verdict = el("div", "verdict");
+  holder.appendChild(verdict);
+  var confirmBtn = document.createElement("button");
+  confirmBtn.type = "button";
+  confirmBtn.textContent = t("confirm");
+  confirmBtn.disabled = true;
+  var prepared = null;
+  function prepare() {
+    var payload = { action: act.action, peer: String(args.peer || "") };
+    if (act.action === "mark_read") payload.max_id = Number(args.max_id);
+    if (act.action === "save_draft") {
+      payload.text = area ? area.value : "";
+      if (args.overwrite === true) payload.overwrite = true;
+    }
+    if (args.topic_id != null) payload.topic_id = Number(args.topic_id);
+    verdict.textContent = t("preparing");
+    verdict.className = "verdict";
+    confirmBtn.disabled = true;
+    callTool("prepare_dashboard_action", payload).then(function (res) {
+      prepared = { id: res.confirmation_id, text: payload.text, payload: payload };
+      if (res.will_apply) {
+        verdict.textContent = t("willApply");
+        verdict.className = "verdict real";
+      } else {
+        verdict.textContent = t("willNot") + (res.dry_reason || "");
+        verdict.className = "verdict dry";
+      }
+      confirmBtn.disabled = !res.confirmation_id;
+    }).catch(function (err) {
+      verdict.textContent = err.message;
+      verdict.className = "verdict dry";
+    });
+  }
+  if (act.action === "save_draft") {
+    var prep = document.createElement("button");
+    prep.type = "button";
+    prep.textContent = t("prepare");
+    prep.addEventListener("click", prepare);
+    holder.appendChild(prep);
+  } else {
+    prepare();
+  }
+  confirmBtn.addEventListener("click", function () {
+    if (!prepared) return;
+    if (act.action === "save_draft" && area && area.value !== prepared.text) {
+      verdict.textContent = t("changed");
+      verdict.className = "verdict dry";
+      confirmBtn.disabled = true;
+      return;
+    }
+    var call = { peer: prepared.payload.peer, confirmation_id: prepared.id };
+    var tool = act.action;
+    if (act.action === "mark_read") call.max_id = prepared.payload.max_id;
+    if (act.action === "save_draft") {
+      call.text = prepared.text == null ? "" : prepared.text;
+      if (prepared.payload.overwrite) call.overwrite = true;
+    }
+    if (prepared.payload.topic_id != null) call.topic_id = prepared.payload.topic_id;
+    verdict.textContent = t("loading");
+    callTool(tool, call).then(function (res) {
+      verdict.textContent = res.notice || t("willApply");
+      verdict.className = "verdict real";
+      confirmBtn.disabled = true;
+    }).catch(function (err) {
+      verdict.textContent = err.message;
+      verdict.className = "verdict dry";
+    });
+  });
+  holder.appendChild(confirmBtn);
+}
+
+function renderTile(tile, host) {
+  var wrap = el("div", "tile");
+  wrap.style.gridColumn = "span " + Math.max(1, tile.colSpan || 1);
+  var comp = tile.component;
+  if (comp === "banner") {
+    wrap.appendChild(textEl("div", "banner " + (tile.props.tone === "warning" ? "warning" : ""), String(resolveValue(tile.props.text, null) || "")));
+    host.appendChild(wrap);
+    return;
+  }
+  if (comp === "kpi") {
+    var card = el("div", "card kpi");
+    var value = resolveValue(tile.props.value, null);
+    card.appendChild(textEl("div", "value", value === "" ? "0" : value));
+    card.appendChild(textEl("div", "label", resolveValue(tile.props.label, null)));
+    wrap.appendChild(card);
+    host.appendChild(wrap);
+    return;
+  }
+  var title = tile.props && tile.props.title;
+  if (title) wrap.appendChild(textEl("div", "section-title", String(resolveValue(title, null))));
+  if (comp === "message_list" || comp === "search_digest") {
+    var data = results[tile.props.source] || {};
+    var msgs = applyFilters(data.messages || [], tile.filters);
+    if (!msgs.length) wrap.appendChild(textEl("div", "empty", t("empty")));
+    msgs.forEach(function (m) {
+      var card = messageCard(m, tile.actions);
+      m.__card = card;
+      wrap.appendChild(card);
+    });
+    renderSponsored(wrap, data.sponsored, data.sponsored_unavailable);
+    host.appendChild(wrap);
+    return;
+  }
+  if (comp === "dialog_cards") {
+    var dialogs = ((results[tile.props.source] || {}).dialogs) || [];
+    if (tile.props.kind === "groups") dialogs = dialogs.filter(function (d) { return d.type === "chat" || d.is_megagroup; });
+    dialogs = applyFilters(dialogs, tile.filters);
+    if (!dialogs.length) wrap.appendChild(textEl("div", "empty", t("empty")));
+    dialogs.forEach(function (d) { wrap.appendChild(dialogCard(d, tile)); });
+    host.appendChild(wrap);
+    return;
+  }
+  if (comp === "topic_cards") {
+    var block = results[tile.props.source] || {};
+    if (block.list && block.list.complete === false) wrap.appendChild(textEl("div", "banner warning", t("topicsIncomplete")));
+    var topics = block.topics || [];
+    if (!topics.length) wrap.appendChild(textEl("div", "empty", t("empty")));
+    topics.forEach(function (topic) {
+      var card = el("div", "card");
+      var head = el("div", "card-head");
+      head.appendChild(textEl("span", "card-from", topic.title || ("#" + topic.id)));
+      head.appendChild(textEl("span", "badge unread", (topic.unread_count || 0) + " " + t("unread")));
+      card.appendChild(head);
+      var meta = el("div", "muted");
+      meta.appendChild(textEl("span", "badge", (topic.unread_mentions_count || 0) + " " + t("mentions")));
+      if (topic.pinned) meta.appendChild(textEl("span", "badge", t("pinned")));
+      meta.appendChild(document.createTextNode(" " + formatDate(topic.last_message_date)));
+      card.appendChild(meta);
+      wrap.appendChild(card);
+    });
+    host.appendChild(wrap);
+    return;
+  }
+  if (comp === "folder_board") {
+    var folders = ((results[tile.props.source] || {}).folders) || [];
+    var columns = el("div", "columns");
+    wrap.appendChild(columns);
+    host.appendChild(wrap);
+    var memberSrc = sourceById(tile.props.members);
+    if (!memberSrc) {
+      if (!folders.length) columns.appendChild(textEl("div", "empty", t("empty")));
+      return;
+    }
+    return Promise.all(folders.slice(0, 8).map(function (folder) {
+      var col = el("div", "column");
+      col.appendChild(textEl("div", "section-title", folder.title || ("#" + folder.id)));
+      col.appendChild(textEl("div", "muted", t("loading")));
+      columns.appendChild(col);
+      return fetchSource(memberSrc, { id: folder.id, peer: folder.id }).then(function (data) {
+        clear(col);
+        col.appendChild(textEl("div", "section-title", folder.title || ("#" + folder.id)));
+        if (data.folder_scan && data.folder_scan.complete === false) {
+          col.appendChild(textEl("div", "banner warning", t("folderIncomplete")));
+        }
+        var dialogs = data.dialogs || [];
+        if (!dialogs.length) col.appendChild(textEl("div", "empty", t("empty")));
+        dialogs.forEach(function (d) { col.appendChild(dialogCard(d, null)); });
+      }).catch(function (err) {
+        clear(col);
+        col.appendChild(textEl("div", "section-title", folder.title || ""));
+        col.appendChild(textEl("div", "status", err.message));
+      });
+    }));
+  }
+}
+
+function boardIncomplete() {
+  var ids = Object.keys(results);
+  for (var i = 0; i < ids.length; i++) {
+    var block = results[ids[i]];
+    if (block && block.folder_scan && block.folder_scan.complete === false) return true;
+  }
+  return false;
+}
+
+function renderBoard(template, host) {
+  clear(host);
+  host.classList.add("grid");
+  host.style.setProperty("--cols", String((template.layout && template.layout.columns) || 12));
+  host.style.setProperty("--gap", ((template.layout && template.layout.gap) || 0) + "px");
+  if (boardIncomplete()) host.appendChild(textEl("div", "banner warning", t("incomplete")));
+  var extra = [];
+  (template.tiles || []).forEach(function (tile) {
+    var job = renderTile(tile, host);
+    if (job && job.then) extra.push(job);
+  });
+  return Promise.all(extra);
+}
+
+function readInputs() {
+  var nodes = document.querySelectorAll("#inputs input");
+  nodes.forEach(function (node) { inputValues[node.getAttribute("data-input")] = node.value.trim(); });
+}
+function renderInputs(template) {
+  var host = document.getElementById("inputs");
+  clear(host);
+  var params = new URLSearchParams(window.location.search);
+  (template.inputs || []).forEach(function (input) {
+    var field = document.createElement("input");
+    field.type = "text";
+    field.placeholder = input.label || input.id;
+    field.setAttribute("data-input", input.id);
+    var preset = inputValues[input.id] || params.get(input.id) || "";
+    if (preset) {
+      field.value = preset;
+      inputValues[input.id] = preset;
+    }
+    host.appendChild(field);
+  });
+}
+function inputsMissing(template) {
+  var missing = false;
+  (template.inputs || []).forEach(function (input) {
+    if (input.required && !inputValues[input.id]) missing = true;
+  });
+  return missing;
+}
+
+function runTemplate(template, host) {
+  current = template;
+  results = Object.create(null);
+  readInputs();
+  if (inputsMissing(template)) {
+    setStatus(t("needInputs"));
+    clear(host);
+    document.documentElement.setAttribute("data-ready", "1");
+    return Promise.resolve();
+  }
+  setStatus(t("loading"));
+  var jobs = (template.dataSources || []).filter(function (src) { return !src.lazy; }).map(function (src) {
+    return fetchSource(src, null).then(function (data) { results[src.id] = data; });
+  });
+  return Promise.all(jobs).then(function () {
+    return renderBoard(template, host);
+  }).then(function () {
+    var sec = Math.max(15, template.refreshIntervalSec || 60);
+    setStatus(t("updated") + sec + t("seconds"));
+    document.documentElement.setAttribute("data-ready", "1");
+  }).catch(function (err) {
+    setStatus(t("failed") + err.message);
+    document.documentElement.setAttribute("data-ready", "1");
+  });
+}
+
+function armPoll() {
+  if (pollTimer) clearInterval(pollTimer);
+  if (!current) return;
+  var sec = Math.max(15, current.refreshIntervalSec || 60);
+  pollTimer = setInterval(function () {
+    if (currentView === "board" && current) runTemplate(current, document.getElementById("board"));
+  }, sec * 1000);
+}
+
+function fillTemplateSelect() {
+  var sel = document.getElementById("template-select");
+  clear(sel);
+  templates.forEach(function (row) {
+    var opt = document.createElement("option");
+    opt.value = row.id;
+    opt.textContent = row.title || row.id;
+    sel.appendChild(opt);
+  });
+}
+function loadTemplate(id) {
+  return callTool("get_dashboard_template", { id: id }).then(function (res) {
+    var tpl = res.template;
+    renderInputs(tpl);
+    return runTemplate(tpl, document.getElementById("board")).then(function () { armPoll(); });
+  });
+}
+
+function showView(view) {
+  currentView = view;
+  document.getElementById("board").style.display = view === "board" ? "" : "none";
+  document.getElementById("editor").style.display = view === "editor" ? "" : "none";
+  document.getElementById("template-select").style.display = view === "board" ? "" : "none";
+  document.getElementById("refresh-button").style.display = view === "board" ? "" : "none";
+  document.getElementById("inputs").style.display = view === "board" ? "" : "none";
+}
+
+function editorTemplate() {
+  var raw = document.getElementById("editor-text").value;
+  var parsed;
+  try { parsed = JSON.parse(raw); } catch (e) { throw new Error(t("invalidJson") + e.message); }
+  return parsed;
+}
+function previewEditor() {
+  var status = document.getElementById("editor-status");
+  var parsed;
+  try { parsed = editorTemplate(); } catch (e) { status.textContent = e.message; return; }
+  if (!availableTools.save_dashboard_template) {
+    status.textContent = t("valid");
+    var prev = current;
+    runTemplate(parsed, document.getElementById("preview")).then(function () { current = prev; });
+    return;
+  }
+  status.textContent = t("loading");
+  callTool("save_dashboard_template", { template: parsed, dry_run: true }).then(function () {
+    status.textContent = t("valid");
+    var prev = current;
+    return runTemplate(parsed, document.getElementById("preview")).then(function () { current = prev; });
+  }).catch(function (err) { status.textContent = err.message; });
+}
+
+function init() {
+  labelChrome();
+  var params = new URLSearchParams(window.location.search);
+  if (params.get("view") === "editor") currentView = "editor";
+  var startId = params.get("template") || "";
+  document.getElementById("editor-text").value = JSON.stringify(EDITOR_STARTER, null, 2);
+  document.getElementById("view-board").addEventListener("click", function () { showView("board"); });
+  document.getElementById("view-editor").addEventListener("click", function () { showView("editor"); previewEditor(); });
+  document.getElementById("refresh-button").addEventListener("click", function () {
+    if (current) runTemplate(current, document.getElementById("board"));
+  });
+  document.getElementById("template-select").addEventListener("change", function (ev) { loadTemplate(ev.target.value); });
+  document.getElementById("check-button").addEventListener("click", previewEditor);
+  document.getElementById("save-button").addEventListener("click", function () {
+    var status = document.getElementById("editor-status");
+    var parsed;
+    try { parsed = editorTemplate(); } catch (e) { status.textContent = e.message; return; }
+    status.textContent = t("loading");
+    callTool("save_dashboard_template", { template: parsed }).then(function () {
+      status.textContent = t("saved");
+      return refreshTemplateList(parsed.id);
+    }).catch(function (err) { status.textContent = err.message; });
+  });
+  document.getElementById("delete-button").addEventListener("click", function () {
+    var status = document.getElementById("editor-status");
+    var parsed;
+    try { parsed = editorTemplate(); } catch (e) { status.textContent = e.message; return; }
+    callTool("delete_dashboard_template", { id: parsed.id }).then(function () {
+      status.textContent = t("deleted");
+      return refreshTemplateList("");
+    }).catch(function (err) { status.textContent = err.message; });
+  });
+  showView(currentView);
+  setStatus(t("connecting"));
+  callHost("ui/initialize", {
+    appInfo: { name: "mctl-telegram-dashboard", version: "0.2.0" },
+    appCapabilities: {},
+    protocolVersion: "2026-01-26"
+  }).then(function (res) {
+    sendToHost({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
+    applyHost(res || {});
+    return callHost("tools/list", {});
+  }).then(function (res) {
+    (res && res.tools || []).forEach(function (tool) { availableTools[tool.name] = true; });
+    labelChrome();
+    if (currentView === "editor") {
+      previewEditor();
+      return;
+    }
+    setStatus(t("connected"));
+    return refreshTemplateList(startId);
+  }).catch(function (err) {
+    setStatus(t("failed") + err.message);
+    document.documentElement.setAttribute("data-ready", "1");
+  });
+}
+function refreshTemplateList(selectId) {
+  return callTool("list_dashboard_templates", {}).then(function (res) {
+    templates = res.templates || [];
+    fillTemplateSelect();
+    if (!templates.length) {
+      setStatus(t("noTemplates"));
+      document.documentElement.setAttribute("data-ready", "1");
+      return;
+    }
+    var id = selectId;
+    var known = false;
+    templates.forEach(function (row) { if (row.id === id) known = true; });
+    if (!known) id = templates[0].id;
+    document.getElementById("template-select").value = id;
+    return loadTemplate(id);
+  });
+}
+
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+else init();
+</script>
+</body>
+</html>
