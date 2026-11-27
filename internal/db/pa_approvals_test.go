@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/mctlhq/mctl-telegram/internal/pa/approval"
 	"github.com/mctlhq/mctl-telegram/internal/pa/catalog"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
+	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 )
 
 // Store tests of the approval and dispatch ledger (#1320 slice P2-S2). They
@@ -562,6 +564,10 @@ func TestS2C12_CrashedDispatchBecomesOutcomeUnknown(t *testing.T) {
 		_, live, err := paConsume(t, s, bob, b.ID, t0.Add(100*time.Second))
 		must(t, err)
 
+		// The request is made, so the record carries the sent mark.
+		must(t, s.MarkPADispatchSent(ctx, alice, d.ID, consumedAt.Add(time.Second)))
+		must(t, s.MarkPADispatchSent(ctx, bob, live.ID, t0.Add(101*time.Second)))
+
 		// The process dies here: no FinishPADispatch. A new Store on the
 		// same database is the restarted process.
 		restarted := &Store{DB: s.DB, Crypt: s.Crypt}
@@ -629,6 +635,128 @@ func TestS2C12_CrashedDispatchBecomesOutcomeUnknown(t *testing.T) {
 			t.Fatalf("bob's finished dispatch is %v, want fenced", got)
 		}
 		noArgsOutsideOpen(t, s, alice, bob)
+	})
+}
+
+// paOutboxApprovalKinds lists the kinds of the approval-level outbox rows of
+// principal, oldest first.
+func paOutboxApprovalKinds(t *testing.T, s *Store, principal int64) []string {
+	t.Helper()
+	rows, err := s.DB.Query(`SELECT kind FROM pa_outbox WHERE principal = $1 AND approval_id <> '' ORDER BY id`, principal)
+	must(t, err)
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var k string
+		must(t, rows.Scan(&k))
+		out = append(out, k)
+	}
+	must(t, rows.Err())
+	return out
+}
+
+// S2-C12: a dispatch record that was committed and whose request was never
+// made is not reported as "may have happened". The sweep ends it as
+// refused, with the "not carried out" notice; one that carries the sent
+// mark, and one written by a build that recorded no send state, stay
+// outcome_unknown.
+func TestS2C12_UnsentDispatchIsSweptAsRefused(t *testing.T) {
+	paApprovalDialects(t, func(t *testing.T, s *Store, alice, bob int64) {
+		ctx := context.Background()
+		w := seedPAApprovalWorld(t, s, alice)
+		wb := seedPAApprovalWorld(t, s, bob)
+		consumedAt := t0.Add(time.Minute)
+
+		// Alice: one call committed and never sent, one sent.
+		unsent := w.approved(t, t0)
+		_, du, err := paConsume(t, s, alice, unsent.ID, consumedAt)
+		must(t, err)
+		if du.Send != approval.SendUnsent {
+			t.Fatalf("a fresh dispatch record has send state %q, want unsent", du.Send)
+		}
+		sent := w.approved(t, t0)
+		_, ds, err := paConsume(t, s, alice, sent.ID, consumedAt)
+		must(t, err)
+		must(t, s.MarkPADispatchSent(ctx, alice, ds.ID, consumedAt.Add(time.Second)))
+		// The mark is taken once, by the principal the record is filed
+		// under, and only for a record that exists.
+		for name, err := range map[string]error{
+			"twice":             s.MarkPADispatchSent(ctx, alice, ds.ID, consumedAt.Add(2*time.Second)),
+			"another principal": s.MarkPADispatchSent(ctx, bob, du.ID, consumedAt.Add(2*time.Second)),
+			"no record":         s.MarkPADispatchSent(ctx, alice, "no-such-dispatch", consumedAt.Add(2*time.Second)),
+		} {
+			if !errors.Is(err, approval.ErrDispatchStale) {
+				t.Fatalf("mark %s: err = %v, want ErrDispatchStale", name, err)
+			}
+		}
+		if err := s.MarkPADispatchSent(ctx, 0, ds.ID, consumedAt); !errors.Is(err, approval.ErrInvalid) {
+			t.Fatalf("mark without a principal: err = %v, want ErrInvalid", err)
+		}
+
+		// Bob: a record a build without the send state wrote.
+		old := wb.approved(t, t0)
+		_, do, err := paConsume(t, s, bob, old.ID, consumedAt)
+		must(t, err)
+		_, err = s.DB.Exec(`UPDATE pa_dispatches SET send_state = '' WHERE principal = $1 AND id = $2`, bob, do.ID)
+		must(t, err)
+
+		// A mark that arrives when the lease has run out is refused: the
+		// sweep may end the record at any moment.
+		if err := s.MarkPADispatchSent(ctx, alice, du.ID, du.LeaseUntil); !errors.Is(err, approval.ErrDispatchStale) {
+			t.Fatalf("mark at the end of the lease: err = %v, want ErrDispatchStale", err)
+		}
+
+		swept, err := s.SweepStalePADispatches(ctx, du.LeaseUntil)
+		must(t, err)
+		got := map[string]approval.DispatchStatus{}
+		for _, d := range swept {
+			got[d.ID] = d.Status
+		}
+		want := map[string]approval.DispatchStatus{
+			du.ID: approval.DispatchRefused,
+			ds.ID: approval.DispatchOutcomeUnknown,
+			do.ID: approval.DispatchOutcomeUnknown,
+		}
+		if len(got) != len(want) || got[du.ID] != want[du.ID] || got[ds.ID] != want[ds.ID] || got[do.ID] != want[do.ID] {
+			t.Fatalf("sweep ended %v, want %v", got, want)
+		}
+		for id, st := range map[string]string{du.ID: "refused", ds.ID: "outcome_unknown"} {
+			var status string
+			must(t, s.DB.QueryRow(`SELECT status FROM pa_dispatches WHERE principal = $1 AND id = $2`, alice, id).Scan(&status))
+			if status != st {
+				t.Fatalf("dispatch %s is %q in the table, want %q", id, status, st)
+			}
+		}
+		for _, id := range []string{unsent.ID, sent.ID} {
+			if r := readPAApprovalRow(t, s, alice, id); r.status != "done" || r.sealed != nil {
+				t.Fatalf("approval %s after the sweep: %+v, want done without arguments", id, r)
+			}
+		}
+		// The notice says what happened: one "not carried out", one "may
+		// have happened" for alice; "may have happened" for bob.
+		kinds := paOutboxApprovalKinds(t, s, alice)
+		slices.Sort(kinds)
+		if !slices.Equal(kinds, []string{string(jobs.OutboxWriteNotSent), string(jobs.OutboxWriteUnknown)}) {
+			t.Fatalf("alice's notices: %v, want one not-sent and one unknown", kinds)
+		}
+		if kinds := paOutboxApprovalKinds(t, s, bob); !slices.Equal(kinds, []string{string(jobs.OutboxWriteUnknown)}) {
+			t.Fatalf("bob's notices: %v, want one unknown", kinds)
+		}
+		// The mark cannot land after the sweep, so nothing is sent for a
+		// record the sweep reported as not sent.
+		if err := s.MarkPADispatchSent(ctx, alice, du.ID, consumedAt.Add(3*time.Second)); !errors.Is(err, approval.ErrDispatchStale) {
+			t.Fatalf("mark after the sweep: err = %v, want ErrDispatchStale", err)
+		}
+		// A send state this build does not know is unreadable, not unsent.
+		_, err = s.DB.Exec(`UPDATE pa_dispatches SET send_state = 'half' WHERE principal = $1 AND id = $2`, alice, du.ID)
+		must(t, err)
+		err = inTx(t, s, func(tx *sql.Tx) error {
+			_, err := s.FinishPADispatch(ctx, tx, alice, du.ID, approval.DispatchOK, consumedAt.Add(4*time.Second))
+			return err
+		})
+		if !errors.Is(err, approval.ErrUnreadable) {
+			t.Fatalf("a dispatch row with an unknown send state: err = %v, want ErrUnreadable", err)
+		}
 	})
 }
 

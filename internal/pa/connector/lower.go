@@ -288,6 +288,9 @@ func (w *WriteExecutor) lower(ctx context.Context, tx *sql.Tx, a *approval.Appro
 	if p.ID != low.PermissionID || conn.AuthorityRevision != a.AuthorityRevision || !p.Covers(low.covered(), now) {
 		return ReasonPermissionGone
 	}
+	// The ledger row names the permission, and so does the dispatch
+	// record the consume writes from it: nobody approved this call.
+	a.PermissionID = p.ID
 	if err := w.cfg.Store.CreatePAApproval(ctx, tx, *a); err != nil {
 		if errors.Is(err, approval.ErrBinding) {
 			return ReasonConnectionUnbound
