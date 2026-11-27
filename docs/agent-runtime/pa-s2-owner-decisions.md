@@ -150,3 +150,32 @@ A gap of [pa-s2-manifest.yaml](pa-s2-manifest.yaml) that names one of these in `
 - Cost: Actions go on for the owner's account on preview once the gate closes on code and on this page; the pilot still waits for A1 to A7 on preview.
 - Decision: Confirmed.
 - Done: such a gap names its acceptance evals in `eval`; A8 to A12 were added for what A1 to A7 do not cover.
+
+## Second set, 2026-11-27
+
+The six gaps the first set did not cover. The owner chose to close two of them with code (the listing refusals of S2-A6 and the audit event queue of S2-A8), to accept three and to move one to an acceptance eval.
+
+### D25 One S2-I9 test no mutation turns red
+
+- Behaviour: no mutation turns TestS2I9_DisclosureAfterAResetStillNeedsACard red where it checks the disclosure. The rule is proven by the tests of each layer and end to end.
+- Cost: evidence only. No behaviour differs.
+- Decision: Accept.
+
+### D26 A card does not know the device's own range
+
+- Behaviour: a value the device does not take gets a card, and the approved call is refused by the server. mctl-alice's listing reports no range.
+- Cost: a wasted tap. Nothing wrong is carried out.
+- Decision: Accept. Reading the range needs a change in mctl-alice first.
+
+### D27 Music query rules are not compared with the deployed server
+
+- Behaviour: the copy of mctl-alice's rules is held in CI to the commit the pin names, not to the server that runs.
+- Cost: after an unpinned upstream change a card could show a command the server no longer sends, or a query could be refused here.
+- Decision: Accept.
+
+### D28 A call under a standing permission lists the tools twice
+
+- Behaviour: the emitter and the executor each list the server's tools, and the principal gets the notice an approved call sends. Neither was measured or reviewed for wording.
+- Cost: latency and wording, to be seen on a real service.
+- Decision: Look at both in acceptance eval A11.
+

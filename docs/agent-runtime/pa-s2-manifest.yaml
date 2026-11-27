@@ -1541,6 +1541,7 @@ S2-I9:
   gaps:
     - half: "no mutation turns internal/pa.TestS2I9_DisclosureAfterAResetStillNeedsACard red where it checks the disclosure, and a double one does not either. Measured in P2-S15a: rule 4 of the gate removed, the class check of the emitter's permission lookup removed and the class check of the executor removed, each alone and all three together, leave the test green, because the emitter builds the call a permission could cover only from the device and the value that the card of a device write reads, and a disclosure has neither. Each of the three is killed by the test of its own layer (P2S11-I9a, P2S11-D1b, P2S11-D1c), and this row's test goes red on the reset itself (P2S15A-I9a). So the row's proof of the disclosure rule is the layer tests plus the behaviour seen end to end, not a mutation of this test"
       tracked_by: "#1320"
+      accepted: [D25]
     - half: "lowering runs end to end in process only: cmd/server.TestPAWrites_StandingPermission (P2-S14d) makes a grant with /permissions on a write connection and, through the service's own constructor and the worker of internal/agentworker, has a covered call lowered and sent once, a call above the ceiling carded and a revoke bring the card back; cmd/server.TestPAEval_A4_InjectionMakesNoUnapprovedCall has the same grant lower nothing once the conversation holds external content. No deployed service has a permission row: PA_WRITES_ENABLED is off everywhere, so a lowered call never reached a real mctl-alice"
       tracked_by: "#1323"
       eval: [A11]
@@ -2198,6 +2199,7 @@ S2-D2:
       eval: [A12]
     - half: "the device's own range is not read for the card, so a value the device does not take gets a card and is then refused by the server: the structured listing of alice_list_devices holds id, name, type, is_speaker, room and household and no range or capability (P2-S15c), so reading it needs a change in mctl-alice first"
       tracked_by: "#1322"
+      accepted: [D26]
     - half: "alice_control_device and alice_control_room have no card path and are refused no_write_path. The structured listing now gives the id and type a control_device card would need; the card, its temperature range and the room's device list are not built. Owner decision: accept as a documented limitation, or build them"
       tracked_by: "#1322"
       accepted: [D18]
@@ -2694,6 +2696,7 @@ S2-D4:
   gaps:
     - half: "the music query rules and the spoken prefix are PA's copy of mctl-alice's, and the pin hashes the tool's schema, description and annotations only. Since P2-S15c the copy is held in CI to mctl-alice's rule file at the commit the pin names (testdata/alice_music_query.ts), so the copy cannot drift from the pinned upstream unnoticed. What is still not compared is the server that is deployed: one released from another commit, with another rule or prefix and the same schema, description and annotations, is not noticed until the pin and the snapshot are moved to that commit. Until then a card could show a command the server no longer sends, or be refused here for a query the server would take. The rule function itself is compared by its cases and by a digest of the file that makes a human re-read the port, not by a program"
       tracked_by: "#1322"
+      accepted: [D27]
     - half: "alice_say_phrase and alice_send_command are in the Phase 2 pin and are not offered (P2-S14d): mctl-alice holds both behind its quasar scope (src/tools/handlers.ts TOOL_SCOPES at 5f6755b7), and a write connection asks for iot:control and iot:view only (owner decision 2026-11-21). The checks of a disclosure and its card are built and tested in internal/pa and cannot be reached through the service: a call of either tool is refused tool_not_in_set (cmd/server.TestPAEval_A3_DisclosureToolIsNotOffered), and a start that lists one is refused. So this row is proven in package tests only, and acceptance eval A3 cannot pass as written. Owner decision: hold alice_say_phrase behind iot:control in mctl-alice, ask for the quasar scope, or reword A3 and accept that Phase 2 offers no disclosure tool"
       tracked_by: "#1322"
       accepted: [D17]
@@ -4850,6 +4853,7 @@ S2-A9:
       accepted: [D9]
     - half: "a lowered call lists the server's tools twice (the emitter, then the executor), and the principal is told of the write by the notice an approved call sends; neither was measured or reviewed for wording"
       tracked_by: "#1320"
+      eval: [A11]
     - half: "lowering runs end to end in process only: cmd/server.TestPAWrites_StandingPermission (P2-S14d) makes a grant with /permissions on a write connection and, through the service's own constructor and the worker of internal/agentworker, has a covered call lowered and sent once, a call above the ceiling carded and a revoke bring the card back; cmd/server.TestPAEval_A4_InjectionMakesNoUnapprovedCall has the same grant lower nothing once the conversation holds external content. No deployed service has a permission row: PA_WRITES_ENABLED is off everywhere, so a lowered call never reached a real mctl-alice"
       tracked_by: "#1323"
       eval: [A11]

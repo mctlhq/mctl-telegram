@@ -708,7 +708,7 @@ These run on preview after deployment, against dedicated test accounts on `tg` a
 - A8: against a real MCP server, a call that times out or answers 5xx is reported as outcome unknown or failed and never as done, and a listing that fails or changed after the card refuses the approval.
 - A9: the service killed between the pre-dispatch commit and the result leaves one recorded outcome, and the call is never sent again.
 - A10: two taps of one card handled by two replicas against one database run it once.
-- A11: a standing permission on a real write connection lets a covered call run once with no card, a call above its ceiling gets a card, a revoke brings the card back, and nothing runs without a card once the conversation holds external content.
+- A11: a standing permission on a real write connection lets a covered call run once with no card, a call above its ceiling gets a card, a revoke brings the card back, and nothing runs without a card once the conversation holds external content. The time such a call takes and the text of its notice are recorded (owner decision D28).
 - A12: on the deployed service, the write tools are offered only with the consent to actions and a write connection, whose granted scope the authorization server reports; each offered tool runs once from its card on a real device, and a value the device does not take is refused.
 
 A8 to A12 hold what only a deployed service can show (owner decision D24).
