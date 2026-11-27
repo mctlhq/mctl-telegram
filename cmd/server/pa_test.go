@@ -91,6 +91,10 @@ func postPAWebhook(mux http.Handler, body string) int {
 	return w.Code
 }
 
+// paE2EMetrics is what the next buildEnabledPA runtime counts to; nil, as
+// in most tests, counts nowhere.
+var paE2EMetrics paMetrics
+
 // buildEnabledPA loads the enabled configuration through config.Load and
 // builds the runtime on store.
 func buildEnabledPA(t *testing.T, store *db.Store) (*config.Config, *paRuntime) {
@@ -100,7 +104,7 @@ func buildEnabledPA(t *testing.T, store *db.Store) (*config.Config, *paRuntime) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt, err := buildPA(context.Background(), cfg, store, localjwt.NewRevocationCache(store, localjwt.DefaultRevocationCacheTTL), nil)
+	rt, err := buildPA(context.Background(), cfg, store, localjwt.NewRevocationCache(store, localjwt.DefaultRevocationCacheTTL), paE2EMetrics)
 	if err != nil || rt == nil {
 		t.Fatalf("PA_ENABLED on: runtime=%v err=%v", rt, err)
 	}

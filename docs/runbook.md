@@ -4419,15 +4419,43 @@ descriptor changed or disappeared is denied (`tool_changed`); a tool the pin
 does not know is denied (`not_pinned`) and is not drift. Everything here is
 inert unless `PA_ENABLED` and `PA_EXTERNAL_TOOLS_ENABLED` are both on.
 
-The write executor asks the server for the tool once more, uncached, before
-it sends an approved or lowered write. A write that this listing refuses is
+The card emitter asks the server for the tool, uncached, when a write is
+decided, and the write executor once more before it sends an approved or
+lowered write. A call that either listing refuses is
 counted in `mctl_pa_write_listing_refusals_total{server,reason}`: the
 listing could not be read or used (`server_unavailable`, `listing_stale`,
 `internal`), or the tool in it is not the one the pin and the card name
 (`not_pinned`, `no_write_path`, `unknown_server`, `tool_changed`). The same
 refusal is in `mctl_pa_dispatch_total{status="refused"}` under the same
-reason, where it cannot be told from a refusal that asked no listing. No
-alert reads the counter yet. It stays at 0 while `PA_WRITES_ENABLED` is off.
+reason when the executor refused it, where it cannot be told from a refusal
+that asked no listing. `MctlPAWriteListingRefused` reads the counter. It stays
+at 0 while `PA_WRITES_ENABLED` is off.
+
+<a id="mctlpawritelistingrefused"></a>
+### MctlPAWriteListingRefused
+
+A write was refused because of the server's fresh `tools/list`
+(`mctl_pa_write_listing_refusals_total{server,reason}` grew). Nothing was
+sent, and the principal was told.
+
+1. `server_unavailable` or `listing_stale`: check the server and its last
+   release, and `mctl_pa_pin_listing_failures_total`.
+2. `tool_changed` or `not_pinned`: follow `MctlPAPinDrift`.
+3. `no_write_path`, `unknown_server` or `internal`: a wiring defect. Switch
+   writes off (`PA_WRITES_ENABLED=false`) and read the server log.
+
+<a id="mctlpaauditeventsstuck"></a>
+### MctlPAAuditEventsStuck
+
+The minute sweep that appends queued audit events (a permission granted or
+revoked, an approval cancelled) to the per-user audit chain keeps failing.
+`mctl_pa_audit_events_queued` is the queue after the last pass; it is absent
+while the queue cannot be counted.
+
+1. `queue_unreadable`: check the database.
+2. `append_failed`: the log line `pa audit event not appended` names the queue
+   id, the tries and the error. The event stays queued; fix the cause and the
+   next pass appends it. Do not delete the row.
 
 <a id="mctlpapindrift"></a>
 ### MctlPAPinDrift

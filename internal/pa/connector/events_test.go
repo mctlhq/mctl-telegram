@@ -16,10 +16,15 @@ package connector
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/mctlhq/mctl-telegram/internal/db"
+	"github.com/mctlhq/mctl-telegram/internal/metrics"
 	"github.com/mctlhq/mctl-telegram/internal/pa/auditevent"
 )
 
@@ -28,6 +33,13 @@ type fakeEventQueue struct {
 	err    error
 	limit  int
 	render func(auditevent.Event) (db.ToolCall, error)
+
+	queued   int64
+	countErr error
+}
+
+func (f *fakeEventQueue) CountPAAuditEvents(context.Context) (int64, error) {
+	return f.queued, f.countErr
 }
 
 func (f *fakeEventQueue) DrainPAAuditEvents(_ context.Context, limit int, render func(auditevent.Event) (db.ToolCall, error)) (db.PAAuditDrain, error) {
@@ -75,5 +87,74 @@ func TestS2A8_AuditEventSweepReportsWhatItLeft(t *testing.T) {
 	e.Tool = "alice set volume"
 	if _, err := q.render(e); !errors.Is(err, ErrUnrecordable) {
 		t.Fatalf("an event that does not render: %v, want ErrUnrecordable", err)
+	}
+}
+
+// TestS2A8_AuditEventSweepIsCounted: each pass publishes the queue it left
+// and what it could not do. A queue that could not be read or counted has
+// no gauge, never 0; a pass cut off by shutdown publishes nothing.
+func TestS2A8_AuditEventSweepIsCounted(t *testing.T) {
+	ctx := context.Background()
+	reg := metrics.New()
+	q := &fakeEventQueue{res: db.PAAuditDrain{Appended: 1, Failed: 2, Dropped: 3}, queued: 2}
+	s := AuditEventSweeper{Store: q, Metrics: reg}
+	problem := func(p string) float64 {
+		return testutil.ToFloat64(reg.PAAuditEventSweepProblems.WithLabelValues(p))
+	}
+	check := func(when string, unreadable, failed, dropped float64) {
+		t.Helper()
+		got := []float64{problem(AuditProblemQueueUnreadable), problem(AuditProblemAppendFailed), problem(AuditProblemDropped)}
+		if want := []float64{unreadable, failed, dropped}; !slices.Equal(got, want) {
+			t.Fatalf("%s: problems %v, want %v", when, got, want)
+		}
+	}
+	gauge := func(when string, series int, value float64) {
+		t.Helper()
+		if n := testutil.CollectAndCount(reg.PAAuditEventsQueued); n != series {
+			t.Fatalf("%s: %d queue series, want %d", when, n, series)
+		}
+		if series == 1 {
+			if v := testutil.ToFloat64(reg.PAAuditEventsQueued.WithLabelValues()); v != value {
+				t.Fatalf("%s: queue %v, want %v", when, v, value)
+			}
+		}
+	}
+	gauge("before any pass", 0, 0)
+	if _, err := s.SweepOnce(ctx); err == nil {
+		t.Fatal("a pass that left events was clean")
+	}
+	check("failed appends", 0, 2, 3)
+	gauge("failed appends", 1, 2)
+
+	q.res, q.countErr = db.PAAuditDrain{}, errors.New("injected: count")
+	if _, err := s.SweepOnce(ctx); err == nil {
+		t.Fatal("a pass that could not count the queue was clean")
+	}
+	check("count failed", 1, 2, 3)
+	gauge("count failed", 0, 0)
+
+	q.countErr, q.queued = nil, 0
+	if _, err := s.SweepOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	gauge("emptied", 1, 0)
+
+	q.err = errors.New("injected: queue unreadable")
+	if _, err := s.SweepOnce(ctx); err == nil {
+		t.Fatal("an unreadable queue was a clean pass")
+	}
+	check("queue unreadable", 2, 2, 3)
+	gauge("queue unreadable", 0, 0)
+
+	done, cancel := context.WithCancel(ctx)
+	cancel()
+	_, _ = s.SweepOnce(done)
+	check("shutting down", 2, 2, 3)
+
+	// Run creates every series at 0 before its first pass.
+	fresh := metrics.New()
+	AuditEventSweeper{Store: &fakeEventQueue{}, Metrics: fresh}.Run(done, time.Hour)
+	if n := testutil.CollectAndCount(fresh.PAAuditEventSweepProblems); n != len(AuditEventProblems) || len(AuditEventProblems) != 3 {
+		t.Fatalf("%d problem series after Run, want one per problem", n)
 	}
 }

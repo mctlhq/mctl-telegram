@@ -283,6 +283,11 @@
 # tests green. That change made the speaker tools take smart speakers only
 # and gave a gap its two dispositions (accepted, eval).
 #
+# The P2S16-A6* (S2-A6) and P2S16-A8* (S2-A8) records ran on the branch that
+# added the card's listing refusal count, the audit event queue metrics and
+# their alerts, on sqlite, with the same apply, red, restore, green steps.
+# The alert rules themselves are tested by promtool in CI.
+#
 # The P2S15A-A8* and P2S15A-C9c to -C9g records (S2-A8, S2-C9) ran on the
 # third P2-S15a branch, cut from 3da701ce, the same way, on SQLite and
 # against a local PostgreSQL 16. The slice gives the audit chain a record
@@ -800,7 +805,7 @@ S2-C11:
     - cmd/server.TestPAWrites_EndToEnd
   mutations:
     - id: P2S3-C11a
-      guard: internal/pa/connector/dispatch_write.go:838
+      guard: internal/pa/connector/dispatch_write.go:839
       guard_text: "return ep.CallToolExact(ctx, token, tool, args)"
       mutation: "a failed tools/call is sent a second time"
       killed_by:
@@ -812,7 +817,7 @@ S2-C11:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.592s
     - id: P2S3-C11b
-      guard: internal/pa/connector/dispatch_write.go:873
+      guard: internal/pa/connector/dispatch_write.go:874
       guard_text: "case callErr != nil:\n\t\treturn StatusOutcomeUnknown, ReasonOutcomeUnknown"
       mutation: "a transport failure is recorded as tool_error instead of outcome_unknown"
       killed_by:
@@ -824,7 +829,7 @@ S2-C11:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.558s
     - id: P2S3-C11c
-      guard: internal/pa/connector/dispatch_write.go:880
+      guard: internal/pa/connector/dispatch_write.go:881
       guard_text: "case isErr && upstreamSilent(out):"
       mutation: "the upstream's \"did not respond\" tool error is recorded as tool_error instead of outcome_unknown"
       killed_by:
@@ -954,7 +959,7 @@ S2-C12:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.486s
     - id: P2S3-C12b
-      guard: internal/pa/connector/dispatch_write.go:1097
+      guard: internal/pa/connector/dispatch_write.go:1098
       guard_text: "for _, d := range moved {\n\t\t// The record keeps hashes"
       mutation: "the stale sweeper appends no audit entry for the records it moved"
       killed_by:
@@ -1002,7 +1007,7 @@ S2-C12:
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.570s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.606s
     - id: P2S15A-C12c
-      guard: internal/pa/connector/dispatch_write.go:644
+      guard: internal/pa/connector/dispatch_write.go:645
       guard_text: "markErr := w.cfg.Store.MarkPADispatchSent(mctx, principal, dispatchID, w.now())"
       mutation: "the executor sends the request without marking the record as sent"
       killed_by:
@@ -1016,7 +1021,7 @@ S2-C12:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	1.719s
     - id: P2S15A-C12d
-      guard: internal/pa/connector/dispatch_write.go:654
+      guard: internal/pa/connector/dispatch_write.go:655
       guard_text: "slog.Error(\"pa write: dispatch not marked as sent; call refused\", \"server\", a.Server, \"err\", err)"
       mutation: "a mark that could not be written does not stop the request"
       killed_by:
@@ -1028,7 +1033,7 @@ S2-C12:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	2.341s
     - id: P2S15A-C12i
-      guard: internal/pa/connector/dispatch_write.go:651
+      guard: internal/pa/connector/dispatch_write.go:652
       guard_text: "w.count(a.Server, StatusRefused, ReasonNeverSent)"
       mutation: "a mark refused because the lease ran out is counted and returned under dispatch_lease_expired, the reason of a call that may have been sent"
       killed_by:
@@ -1040,7 +1045,7 @@ S2-C12:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.599s
     - id: P2S15A-C12e
-      guard: internal/pa/connector/dispatch_write.go:647
+      guard: internal/pa/connector/dispatch_write.go:648
       guard_text: "case errors.Is(err, approval.ErrDispatchStale):"
       mutation: "a mark refused because the lease ran out does not stop the request"
       killed_by:
@@ -1066,7 +1071,7 @@ S2-C12:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.726s
     - id: P2S15A-C12g
-      guard: internal/pa/connector/dispatch_write.go:1102
+      guard: internal/pa/connector/dispatch_write.go:1103
       guard_text: "if d.Status == approval.DispatchRefused {"
       mutation: "the sweeper writes the result entry of a never-sent record as outcome_unknown (dispatch_lease_expired)"
       killed_by:
@@ -1109,7 +1114,7 @@ S2-C13:
     - cmd/server.TestS2C13_DisconnectDuringAnInFlightWrite
   mutations:
     - id: P2S3-C13a
-      guard: internal/pa/connector/dispatch_write.go:926
+      guard: internal/pa/connector/dispatch_write.go:927
       guard_text: "if fenceErr != nil {\n\t\tstatus, reason = StatusFenced, ReasonFenced\n\t}"
       mutation: "a refused call.Finish (the connection was revoked during the call) no longer fences the result"
       killed_by:
@@ -1121,7 +1126,7 @@ S2-C13:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.491s
     - id: P2S3-C13b
-      guard: internal/pa/connector/dispatch_write.go:943
+      guard: internal/pa/connector/dispatch_write.go:944
       guard_text: "if r := w.principalRefusal(fctx, tx, a, now); r != \"\" {"
       mutation: "the finish transaction no longer re-checks the principal's state before recording the result"
       killed_by:
@@ -1169,7 +1174,7 @@ S2-C13:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.175s
     - id: P2S15A-C13b
-      guard: internal/pa/connector/dispatch_write.go:926
+      guard: internal/pa/connector/dispatch_write.go:927
       guard_text: "if fenceErr != nil {"
       mutation: "the write executor keeps the result of a call whose connection ended while it was on the wire (the connection manager's fence is ignored)"
       killed_by:
@@ -1264,7 +1269,7 @@ S2-I5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.508s
     - id: P2S11-I5c
-      guard: internal/pa/connector/card.go:495
+      guard: internal/pa/connector/card.go:513
       guard_text: "in.Tainted, in.TaintErr = c.cfg.Store.PAConversationTaintIn(ctx, tx, principal, conversationID)"
       mutation: "the card emitter decides a lowering without reading the taint"
       killed_by:
@@ -1359,7 +1364,7 @@ S2-I6:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.527s
     - id: P2S7-I6c
-      guard: internal/pa/connector/dispatch.go:550
+      guard: internal/pa/connector/dispatch.go:551
       guard_text: 'ferr = d.cfg.Jobs.RecordToolResult(fctx, job, out)'
       mutation: "dispatcher no longer records the tool result: `ferr = d.cfg.Jobs.RecordToolResult(fctx, job, out)` -> `_ = out`"
       killed_by:
@@ -1585,7 +1590,7 @@ S2-I10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.458s
     - id: P2S7-I10c
-      guard: internal/pa/connector/dispatch.go:603
+      guard: internal/pa/connector/dispatch.go:604
       guard_text: "\"pa dispatch: conversation taint unreadable, recorded as external\", \"err\", err)\n\t\treturn TaintExternal"
       mutation: "Dispatcher.taint read error recorded clean: `return TaintExternal` -> `return TaintClean` in the error branch"
       killed_by:
@@ -1745,7 +1750,7 @@ S2-D2:
     - internal/pa/connector.TestPinFresh_ListsTheServerEveryCall
   mutations:
     - id: P2S6-D2a
-      guard: internal/pa/connector/card.go:383
+      guard: internal/pa/connector/card.go:401
       guard_text: "sum := sha256.Sum256(canonical)"
       mutation: "the approval hash leaves the device field out (at the card, the seal and the executor)"
       killed_by:
@@ -1929,7 +1934,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.573s
     - id: P2S8-D2j
-      guard: internal/pa/connector/card.go:285
+      guard: internal/pa/connector/card.go:301
       guard_text: "} else if pinned.Class == catalog.ClassWrite && catalog.Phase2Tool(req.Tool) {"
       mutation: "a Phase 2 write without a card of its own falls through to the plain card of raw arguments"
       killed_by:
@@ -1942,7 +1947,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.476s
     - id: P2S14B-D2a
-      guard: internal/pa/connector/dispatch_write.go:608
+      guard: internal/pa/connector/dispatch_write.go:609
       guard_text: "if targetsDevice(a.Tool) {"
       mutation: "the executor does not read the device list again before it sends"
       killed_by:
@@ -2162,7 +2167,7 @@ S2-D2:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.823s
     - id: P2S15c-D2a
-      guard: internal/pa/connector/dispatch_write.go:556
+      guard: internal/pa/connector/dispatch_write.go:557
       guard_text: "if _, ref := precheckDeviceWrite(a.Tool, pinned, low.Args); ref != nil {"
       mutation: "the write executor does not repeat the value checks of a lowered call: a level outside the pin's range, a state the schema does not list and an argument no card shows are sent on the caller's word"
       killed_by:
@@ -2255,7 +2260,7 @@ S2-D3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.565s
     - id: P2S6-D3c
-      guard: internal/pa/connector/card.go:250
+      guard: internal/pa/connector/card.go:266
       guard_text: "c.offerSplit(ctx, principal, req.JobID)"
       mutation: "text over the cap is refused without the offer to split it"
       killed_by:
@@ -2337,7 +2342,7 @@ S2-D4:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.698s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/output/safetext	0.253s
     - id: P2S6-D4b
-      guard: internal/pa/connector/card.go:690
+      guard: internal/pa/connector/card.go:708
       guard_text: "text, err = safetext.DisclosureCard(cardToolName(a.Server, a.Tool), string(args), d, tainted || terr != nil)"
       mutation: "the delivered card of a disclosure is the plain card: no speaker, no text line, no warning"
       killed_by:
@@ -2918,7 +2923,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/gate	0.328s
     - id: P2S11-XPa
-      guard: internal/pa/connector/dispatch_write.go:547
+      guard: internal/pa/connector/dispatch_write.go:548
       guard_text: "if met, err := loweringCondition(pinned, low.Args); !lowerable(a.Tool, pinned) || err != nil || !met {"
       mutation: "the executor sends a lowered call that does not meet the tool condition"
       killed_by:
@@ -2930,7 +2935,7 @@ S2-D5:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.575s
     - id: P2S11-XPb
-      guard: internal/pa/connector/dispatch_write.go:547
+      guard: internal/pa/connector/dispatch_write.go:548
       guard_text: "if met, err := loweringCondition(pinned, low.Args); !lowerable(a.Tool, pinned) || err != nil || !met {"
       mutation: "the executor does not ask whether the pin makes the tool lowerable"
       killed_by:
@@ -3146,7 +3151,7 @@ S2-D6:
     - internal/pa.TestS2D6_DispatchNeedsAScenarioReader
   mutations:
     - id: P2S9-D6a
-      guard: internal/pa/connector/card.go:352
+      guard: internal/pa/connector/card.go:370
       guard_text: "shown, sealed, ref := c.scenarioTarget(ctx, req, scenario)"
       mutation: "a scenario whose steps could not be read gets the plain card, without steps"
       killed_by:
@@ -3259,7 +3264,7 @@ S2-D6:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.231s
     - id: P2S15c-D6a
-      guard: internal/pa/connector/dispatch_write.go:620
+      guard: internal/pa/connector/dispatch_write.go:621
       guard_text: "if _, ok := scenarioTools[a.Tool]; ok {"
       mutation: "the write executor does not read a scenario's steps again before it sends"
       killed_by:
@@ -3355,7 +3360,7 @@ S2-D7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.398s
     - id: P2S3-D7b
-      guard: internal/pa/connector/dispatch_write.go:672
+      guard: internal/pa/connector/dispatch_write.go:673
       guard_text: "out, callErr := w.callOnce(cctx, ep, token, a.Tool, c.args)"
       mutation: "the executor sends bytes that differ from the approved ones (`<` re-escaped)"
       killed_by:
@@ -3367,7 +3372,7 @@ S2-D7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.525s
     - id: P2S5-D7c
-      guard: internal/pa/connector/card.go:713
+      guard: internal/pa/connector/card.go:731
       guard_text: "text, err = safetext.Card(cardToolName(a.Server, a.Tool), string(args), tainted || terr != nil)"
       mutation: "the card is rendered from other bytes than the sealed arguments (the last byte dropped)"
       killed_by:
@@ -3450,7 +3455,7 @@ S2-A1:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.929s
     - id: P2S3-A1a
-      guard: internal/pa/connector/dispatch_write.go:820
+      guard: internal/pa/connector/dispatch_write.go:821
       guard_text: "if err := tx.Commit(); err != nil {\n\t\tslog.Error(\"pa write: pre-dispatch commit failed; call refused\""
       mutation: "the pre-dispatch transaction is rolled back instead of committed before the call"
       killed_by:
@@ -3579,7 +3584,7 @@ S2-A3:
     - cmd/server.TestPAEval_A5_ReplayedExpiredForeignChanged
   mutations:
     - id: P2S3-A3a
-      guard: internal/pa/connector/dispatch_write.go:816
+      guard: internal/pa/connector/dispatch_write.go:817
       guard_text: "|| digest(args) != got.ArgsSHA {"
       mutation: "the pre-dispatch transaction no longer compares the hash of the unsealed arguments with the approval's args_sha"
       killed_by:
@@ -3591,7 +3596,7 @@ S2-A3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.492s
     - id: P2S3-A3b
-      guard: internal/pa/connector/dispatch_write.go:816
+      guard: internal/pa/connector/dispatch_write.go:817
       guard_text: "!bytes.Equal(canonical, args)"
       mutation: "the pre-dispatch transaction accepts stored bytes that are not in canonical form"
       killed_by:
@@ -3724,7 +3729,7 @@ S2-A5:
     - cmd/server.TestPAEval_A5_ReplayedExpiredForeignChanged
   mutations:
     - id: P2S4-A5a
-      guard: internal/pa/connector/dispatch_write.go:536
+      guard: internal/pa/connector/dispatch_write.go:537
       guard_text: "if fresh.SchemaSHA != a.SchemaSHA || fresh.DescriptionSHA != a.DescriptionSHA ||"
       mutation: "the executor compares the fresh definition with the pin only: the three approval hashes are no longer compared"
       killed_by:
@@ -3806,7 +3811,7 @@ S2-A5:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/catalog	0.261s
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.474s
     - id: P2S5-A5c
-      guard: internal/pa/connector/card.go:387
+      guard: internal/pa/connector/card.go:405
       guard_text: "SchemaSHA: fresh.SchemaSHA, DescriptionSHA: fresh.DescriptionSHA, AnnotationSHA: fresh.AnnotationSHA,"
       mutation: "the card records another hash as the description hash of the definition it listed"
       killed_by:
@@ -3865,12 +3870,55 @@ S2-A6:
   slice: P2-S4
   note: "Fresh listing at dispatch (#1320 P2-S4): a tools/list that fails (5xx, refused token, timeout), answers a body that is not a listing, is cut off, or fails or is malformed on a later page after a first page that has the tool, is a failed read: PinFresh returns no definition, keeps no earlier listing to fall back to, and the dispatch is refused server_unavailable with no tools/call. The refusal ends the approval, like every refusal before the receipt is consumed."
   tests:
+    - internal/pa.TestS2A6_ListingRefusalAtTheCardIsCounted
+    - cmd/server.TestPAWrites_CountsListingRefusalsAndTheAuditQueue
     - internal/pa.TestS2A6_FailedFreshListingIsRefused
     - internal/pa/catalog.TestS2A6_ObserveToolRefusesUnreadListing
     - internal/pa/connector.TestS2A6_FreshListingOverHTTPIsNeverPartial
     - cmd/server.TestPAWrites_EndToEnd
     - internal/pa.TestS2A6_ListingRefusalAtDispatchIsCounted
   mutations:
+    - id: P2S16-A6a
+      guard: internal/pa/connector/card.go:322
+      guard_text: "c.countListingRefusal(req.Server, reason)"
+      mutation: "the card emitter does not count a call its fresh listing refused"
+      killed_by:
+        - internal/pa.TestS2A6_ListingRefusalAtTheCardIsCounted
+        - cmd/server.TestPAWrites_CountsListingRefusalsAndTheAuditQueue
+      red: |-
+        --- FAIL: TestS2A6_ListingRefusalAtTheCardIsCounted (0.10s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.670s
+        --- FAIL: TestPAWrites_CountsListingRefusalsAndTheAuditQueue (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/cmd/server	0.864s
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.555s
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.843s
+    - id: P2S16-A6b
+      guard: internal/pa/connector/card.go:330
+      guard_text: "c.countListingRefusal(req.Server, ReasonToolChanged)"
+      mutation: "the card emitter does not count a listed tool of another class or tier"
+      killed_by:
+        - internal/pa.TestS2A6_ListingRefusalAtTheCardIsCounted
+      red: |-
+        --- FAIL: TestS2A6_ListingRefusalAtTheCardIsCounted (0.09s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa	0.655s
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.573s
+    - id: P2S16-A6c
+      guard: cmd/server/pa_writes.go:287
+      guard_text: "Lowered: w.executor, Metrics: m,"
+      mutation: "the service builds the card emitter without the registry"
+      killed_by:
+        - cmd/server.TestPAWrites_CountsListingRefusalsAndTheAuditQueue
+      red: |-
+        --- FAIL: TestPAWrites_CountsListingRefusalsAndTheAuditQueue (0.06s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/cmd/server	0.879s
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.763s
     - id: P2S4-A6a
       guard: internal/pa/connector/fresh.go:82
       guard_text: "def, err := f.pin.ObserveTool(req.Server, req.Tool, pages, fetchErr)"
@@ -3947,7 +3995,7 @@ S2-A6:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.136s
     - id: P2S15A-A6a
-      guard: internal/pa/connector/dispatch_write.go:532
+      guard: internal/pa/connector/dispatch_write.go:533
       guard_text: "reason := PinRefusalReason(err)"
       mutation: "a failed listing at dispatch is not counted"
       killed_by:
@@ -3959,7 +4007,7 @@ S2-A6:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	6.069s
     - id: P2S15A-A6b
-      guard: internal/pa/connector/dispatch_write.go:538
+      guard: internal/pa/connector/dispatch_write.go:539
       guard_text: "w.countListingRefusal(a.Server, ReasonToolChanged)"
       mutation: "a listed tool that differs from the card is not counted"
       killed_by:
@@ -3989,8 +4037,6 @@ S2-A6:
     - half: "a failed listing on a real MCP server through internal/pa/egress"
       tracked_by: "#1320"
       eval: [A8]
-    - half: "a write refused by the executor's own listing is counted (mctl_pa_write_listing_refusals_total, P2S15A-A6a to -A6c), but no alert reads the counter, and the listing the card emitter makes when the call is decided is not in it"
-      tracked_by: "#1320"
 
 S2-A7:
   status: green
@@ -4063,7 +4109,7 @@ S2-A7:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.119s
     - id: P2S14-A7a
-      guard: internal/pa/connector/card.go:453
+      guard: internal/pa/connector/card.go:471
       guard_text: "} else if carded {"
       mutation: "the tool route no longer refuses a second card in a run"
       killed_by:
@@ -4080,7 +4126,7 @@ S2-A7:
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.533s
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.154s
     - id: P2S14-A7b
-      guard: internal/pa/connector/card.go:451
+      guard: internal/pa/connector/card.go:469
       guard_text: "PAJobHasApproval(ctx, tx, principal, req.JobID); err != nil {"
       mutation: "a failed read of the run's earlier cards reads as no card yet"
       killed_by:
@@ -4180,6 +4226,9 @@ S2-A8:
   slice: P2-S10
   note: "Standing permissions (#1320 P2-S10): a permission is inserted by one function with one caller, the handler of a pressed Grant button of a /permissions screen, whose callback id was consumed for the principal who pressed. /permissions is a command only as the text of a user message; an assistant or external fragment that reads \"/permissions grant ...\" is not parsed. The four job-token routes are driven with payloads that name a grant and the table stays empty; a static scan finds no other writer of pa_permissions. The worker (#1320 P2-S13): its tool path (#1318 C3) and its approval_pending handling go through the tool route and add no route and no pseudo-tool; a static scan of internal/agentworker and cmd/agent-worker finds exactly the four routes that the route test drives. A tool the worker calls is a (server, tool) pair of the claim that the server executes downstream, so no tool reachable from the worker writes pa_permissions (the single-writer scan). P2-S14c (#1320): with writes on, /permissions (list and grant) first needs the consent to actions and shows its text instead; the Grant press reads the consent and the connection's write scope again, and a connection without the tool's scope gets the fixed \"connect the service again\" text and no button. Revoking is never held back."
   tests:
+    - internal/pa/connector.TestS2A8_AuditEventSweepIsCounted
+    - internal/db.TestPAAuditEvents_UnreadableQueueIsAnError
+    - cmd/server.TestPAWrites_CountsListingRefusalsAndTheAuditQueue
     - internal/pa.TestS2A8_OnlyUserTextIsAPermissionsCommand
     - internal/pa.TestS2A8_NoJobRouteGrantsAPermission
     - internal/pa.TestS2A8_GrantInsertHasOneCaller
@@ -4194,6 +4243,78 @@ S2-A8:
     - cmd/server.TestS2A8_StartRunsTheAuditEventSweep
     - internal/pa/auditevent.TestS2A8_EventRecordHoldsIdsAndClosedLabelsOnly
   mutations:
+    - id: P2S16-A8a
+      guard: internal/pa/connector/events.go:130
+      guard_text: "s.Metrics.ForgetPAAuditEventsQueued()"
+      mutation: "a queue that cannot be counted keeps the last gauge"
+      killed_by:
+        - internal/pa/connector.TestS2A8_AuditEventSweepIsCounted
+      red: |-
+        --- FAIL: TestS2A8_AuditEventSweepIsCounted (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.476s
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.379s
+    - id: P2S16-A8b
+      guard: internal/pa/connector/events.go:129
+      guard_text: "s.Metrics.CountPAAuditEventProblem(AuditProblemQueueUnreadable, 1)"
+      mutation: "an unreadable queue is not counted"
+      killed_by:
+        - internal/pa/connector.TestS2A8_AuditEventSweepIsCounted
+      red: |-
+        --- FAIL: TestS2A8_AuditEventSweepIsCounted (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.491s
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.356s
+    - id: P2S16-A8c
+      guard: internal/pa/connector/events.go:132
+      guard_text: "return fmt.Errorf(\"pa audit event sweep: queue not counted: %w\", err)"
+      mutation: "a pass that could not count the queue is reported clean"
+      killed_by:
+        - internal/pa/connector.TestS2A8_AuditEventSweepIsCounted
+      red: |-
+        --- FAIL: TestS2A8_AuditEventSweepIsCounted (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.476s
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.390s
+    - id: P2S16-A8d
+      guard: cmd/server/pa_wiring.go:325
+      guard_text: "rt.auditEvents.Metrics = m"
+      mutation: "the service builds the audit event sweeper without the registry"
+      killed_by:
+        - cmd/server.TestPAWrites_CountsListingRefusalsAndTheAuditQueue
+      red: |-
+        --- FAIL: TestPAWrites_CountsListingRefusalsAndTheAuditQueue (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/cmd/server	0.863s
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.761s
+    - id: P2S16-A8e
+      guard: internal/db/pa_audit_events.go:114
+      guard_text: "return 0, fmt.Errorf(\"count pa audit events: %w\", err)"
+      mutation: "an unreadable queue counts as empty"
+      killed_by:
+        - internal/db.TestPAAuditEvents_UnreadableQueueIsAnError
+      red: |-
+        --- FAIL: TestPAAuditEvents_UnreadableQueueIsAnError (0.05s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/db	0.528s
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/db	0.422s
+    - id: P2S16-A8f
+      guard: internal/pa/connector/events.go:147
+      guard_text: "s.Metrics.CountPAAuditEventProblem(p, 0)"
+      mutation: "the problem series do not exist before the first problem"
+      killed_by:
+        - internal/pa/connector.TestS2A8_AuditEventSweepIsCounted
+      red: |-
+        --- FAIL: TestS2A8_AuditEventSweepIsCounted (0.00s)
+        FAIL
+        FAIL	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.493s
+      green: |-
+        ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.368s
     - id: P2S10-A8a
       guard: internal/pa/permissions.go:186
       guard_text: "\t\tif prov != convo.ProvenanceUser {\n\t\t\treturn nil"
@@ -4281,7 +4402,7 @@ S2-A8:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14-PERMa
-      guard: cmd/server/pa_wiring.go:257
+      guard: cmd/server/pa_wiring.go:258
       guard_text: "convCfg.Approvals, convCfg.Permissions = pw.approvals, pw.permissions"
       mutation: "the conversations are built without the /permissions command"
       killed_by:
@@ -4367,7 +4488,7 @@ S2-A8:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.617s
     - id: P2S15A-A8e
-      guard: internal/db/pa_audit_events.go:202
+      guard: internal/db/pa_audit_events.go:211
       guard_text: "`DELETE FROM pa_audit_events WHERE id = $1 RETURNING `+paAuditEventCols, id).Scan("
       mutation: "the drain appends an event and leaves it queued: every pass appends it again"
       killed_by:
@@ -4381,7 +4502,7 @@ S2-A8:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.624s
     - id: P2S15A-A8f
-      guard: internal/db/pa_audit_events.go:228
+      guard: internal/db/pa_audit_events.go:237
       guard_text: "if err := logToolCallTx(ctx, tx, c); err != nil {"
       mutation: "the drain takes an event off the queue without appending it to the chain"
       killed_by:
@@ -4395,7 +4516,7 @@ S2-A8:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.649s
     - id: P2S15A-A8g
-      guard: internal/db/pa_audit_events.go:223
+      guard: internal/db/pa_audit_events.go:232
       guard_text: "c, err := render(e)"
       mutation: "an event that could not be rendered is deleted from the queue"
       killed_by:
@@ -4407,7 +4528,7 @@ S2-A8:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/db	0.569s
     - id: P2S15A-A8h
-      guard: internal/pa/connector/events.go:80
+      guard: internal/pa/connector/events.go:104
       guard_text: "if res.Failed > 0 {"
       mutation: "a pass that left events queued is reported as a clean pass"
       killed_by:
@@ -4419,7 +4540,7 @@ S2-A8:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.378s
     - id: P2S15A-A8i
-      guard: cmd/server/pa_wiring.go:432
+      guard: cmd/server/pa_wiring.go:436
       guard_text: "r.auditEvents.Run(ctx, connector.AuditEventSweepInterval)"
       mutation: "the runtime does not run the audit event sweep"
       killed_by:
@@ -4454,9 +4575,6 @@ S2-A8:
         FAIL	github.com/mctlhq/mctl-telegram/internal/pa/auditevent
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/auditevent	0.231s
-  gaps:
-    - half: "a queued audit event that cannot be appended to the chain (pa_audit_events, P2-S15a) stays queued and is tried every minute; the failing pass is an error in the log only: no metric counts the queue and no alert reads it. An event of a principal that has no users row when the sweep runs has no chain to go to and is dropped with a warning"
-      tracked_by: "#1320"
 
 S2-A9:
   status: green
@@ -4603,7 +4721,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.659s
     - id: P2S11-A9e
-      guard: internal/pa/connector/card.go:407
+      guard: internal/pa/connector/card.go:425
       guard_text: "if !unlowered(out) {"
       mutation: "a lowering that ended before anything was sent does not get a card"
       killed_by:
@@ -4666,7 +4784,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa/connector	0.359s
     - id: P2S11-BYd
-      guard: internal/pa/connector/card.go:401
+      guard: internal/pa/connector/card.go:419
       guard_text: "Binding: binding, Args: canonical, PermissionID: perm.ID,"
       mutation: "the bytes handed to the executor are the worker's, not the canonical ones that were checked"
       killed_by:
@@ -4678,7 +4796,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.520s
     - id: P2S11-AUa
-      guard: internal/pa/connector/dispatch_write.go:471
+      guard: internal/pa/connector/dispatch_write.go:472
       guard_text: "base.Approver = permissionApprover(low.PermissionID)"
       mutation: "the audit record of a lowered call does not name the permission"
       killed_by:
@@ -4690,7 +4808,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.524s
     - id: P2S14-PERMa
-      guard: cmd/server/pa_wiring.go:257
+      guard: cmd/server/pa_wiring.go:258
       guard_text: "convCfg.Approvals, convCfg.Permissions = pw.approvals, pw.permissions"
       mutation: "the conversations are built without the /permissions command"
       killed_by:
@@ -4776,7 +4894,7 @@ S2-A9:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	6.769s
     - id: P2S15A-A9d
-      guard: internal/pa/connector/dispatch_write.go:1131
+      guard: internal/pa/connector/dispatch_write.go:1132
       guard_text: "if d.PermissionID != \"\" {"
       mutation: "the stale sweep's result entry of a lowered call names the principal as approver"
       killed_by:
@@ -4917,7 +5035,7 @@ S2-A10:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	1.086s
     - id: P2S14-PERMa
-      guard: cmd/server/pa_wiring.go:257
+      guard: cmd/server/pa_wiring.go:258
       guard_text: "convCfg.Approvals, convCfg.Permissions = pw.approvals, pw.permissions"
       mutation: "the conversations are built without the /permissions command"
       killed_by:
@@ -5002,7 +5120,7 @@ S2-F3:
     - cmd/server.TestPAWrites_PreviewOffersTheFourTools
   mutations:
     - id: P2S3-F3a
-      guard: internal/pa/connector/dispatch_write.go:332
+      guard: internal/pa/connector/dispatch_write.go:333
       guard_text: "if f.WritesErr != nil || !f.Writes {"
       mutation: "the writes switch is never read: the flag check is `if false`"
       killed_by:
@@ -5014,7 +5132,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.511s
     - id: P2S3-F3b
-      guard: internal/pa/connector/dispatch_write.go:776
+      guard: internal/pa/connector/dispatch_write.go:777
       guard_text: "if out.reason = w.admit(ctx, tx, a, now); out.reason != \"\" {"
       mutation: "the pre-dispatch transaction keeps the flags of the first check instead of reading them again"
       killed_by:
@@ -5164,7 +5282,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14c-F3l
-      guard: internal/pa/connector/card.go:552
+      guard: internal/pa/connector/card.go:570
       guard_text: "return &refusal{ReasonActionConsentRequired, http.StatusForbidden}"
       mutation: "the card emitter does not refuse a write call of a principal without the consent to actions"
       killed_by:
@@ -5176,7 +5294,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14c-F3m
-      guard: internal/pa/connector/dispatch_write.go:376
+      guard: internal/pa/connector/dispatch_write.go:377
       guard_text: "return ReasonActionConsentRequired"
       mutation: "the write executor sends an approved action of a principal without the consent to actions"
       killed_by:
@@ -5298,7 +5416,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14c-F3t
-      guard: internal/pa/connector/card.go:564
+      guard: internal/pa/connector/card.go:582
       guard_text: "case !c.scopes().Holds(conn, req.Tool):"
       mutation: "the card emitter does not check the connection's write scope"
       killed_by:
@@ -5310,7 +5428,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14c-F3u
-      guard: internal/pa/connector/dispatch_write.go:521
+      guard: internal/pa/connector/dispatch_write.go:522
       guard_text: "if !w.scopes().Holds(conn, a.Tool) {"
       mutation: "the executor does not check the write scope before it asks the server for its tools"
       killed_by:
@@ -5322,7 +5440,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/pa	0.794s
     - id: P2S14c-F3v
-      guard: internal/pa/connector/dispatch_write.go:765
+      guard: internal/pa/connector/dispatch_write.go:766
       guard_text: "case !w.scopes().Holds(conn, a.Tool):"
       mutation: "the transaction that commits the dispatch does not check the write scope of the locked connection row"
       killed_by:
@@ -5456,7 +5574,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/cmd/server	0.975s
     - id: P2S14c-NTCd
-      guard: cmd/server/pa_wiring.go:245
+      guard: cmd/server/pa_wiring.go:246
       guard_text: "if pw != nil {"
       mutation: "the conversation layer gets the live writes switch whenever a PA server is enabled, also in a service started with writes off, so /consent offers the consent to actions with no write path once the flag turns on"
       killed_by:
@@ -5704,7 +5822,7 @@ S2-F3:
       green: |-
         ok  	github.com/mctlhq/mctl-telegram/internal/agentworker	0.405s
     - id: P2S14-HINTd
-      guard: cmd/server/pa_wiring.go:256
+      guard: cmd/server/pa_wiring.go:257
       guard_text: "loopCfg.Cards, loopCfg.ApproveTools, loopCfg.ActionsHint = pw.cards, pw.approveTools, pw.hint"
       mutation: "the run loop is built without the reason a claim was offered no write tool"
       killed_by:

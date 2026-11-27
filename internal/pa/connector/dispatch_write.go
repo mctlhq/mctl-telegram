@@ -289,14 +289,15 @@ func (w *WriteExecutor) callTimeout() time.Duration {
 }
 
 // WriteListingRefusalReasons is the closed reason label set of
-// mctl_pa_write_listing_refusals_total: why the fresh tools/list the
-// executor reads for one dispatch (S2-A6) let nothing be sent. The server
+// mctl_pa_write_listing_refusals_total: why the fresh tools/list read for
+// one call, by the card emitter when it is decided or by the executor
+// before it is sent (S2-A6), let nothing happen. The server
 // could not be listed or its listing was unusable (server_unavailable,
 // listing_stale), the tool is not in the listing or not a write the pin
 // allows (not_pinned, no_write_path, unknown_server), it differs from the
 // pin or from what the card bound (tool_changed), or the error is one the
 // executor does not know (internal). The read path counts its own failed
-// listings in mctl_pa_pin_listing_failures_total; a write refused for the
+// listings in mctl_pa_pin_listing_failures_total; a dispatch refused for the
 // same cause is also in mctl_pa_dispatch_total, under a reason it shares
 // with refusals that asked no listing.
 var WriteListingRefusalReasons = []string{

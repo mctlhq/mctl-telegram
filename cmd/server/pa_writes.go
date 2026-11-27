@@ -284,7 +284,7 @@ func buildPAWrites(cfg *config.Config, pt *paTools, store *db.Store, sender paBo
 	// list it.
 	w.cards, err = connector.NewCards(connector.CardConfig{
 		Store: store, Sealer: sealer, Pin: pin, Fresh: fresh, Speakers: speakers, Lights: lights,
-		Permissions: store, Lowered: w.executor,
+		Permissions: store, Lowered: w.executor, Metrics: m,
 		Deliver: func(ctx context.Context, principal int64) { w.deliverTo(ctx, principal) },
 	})
 	if err != nil {

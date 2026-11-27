@@ -1052,6 +1052,51 @@ func TestS2A6_ListingRefusalAtDispatchIsCounted(t *testing.T) {
 	}
 }
 
+// TestS2A6_ListingRefusalAtTheCardIsCounted: a call that the listing read
+// for its card refused is counted in the executor's counter under the
+// reason of the refusal; a call whose card was made counts nothing.
+func TestS2A6_ListingRefusalAtTheCardIsCounted(t *testing.T) {
+	cases := []struct {
+		name   string
+		set    func(e *cardEnv)
+		reason string
+	}{
+		{"the server cannot be listed", func(e *cardEnv) { e.fresh.err = catalog.ErrServerUnavailable }, connector.ReasonServerUnavailable},
+		{"the listed tool is not the pinned one", func(e *cardEnv) { e.fresh.err = catalog.ErrToolChanged }, connector.ReasonToolChanged},
+		{"the listed tool is of another class", func(e *cardEnv) { e.fresh.tool.Class = catalog.ClassRead }, connector.ReasonToolChanged},
+		{"the listing agrees", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := metrics.New()
+			e := newCardEnvOn(t, sqliteStore(t), cardPin(), nil, func(c *connector.CardConfig) { c.Metrics = reg })
+			if tc.set != nil {
+				tc.set(e)
+			}
+			a := e.call(e.token, writeCall(writeArgs))
+			e.h.Loop().WaitDeliveries()
+			total := 0.0
+			for _, r := range connector.WriteListingRefusalReasons {
+				v := testutil.ToFloat64(reg.PAWriteListingRefusals.WithLabelValues("tg", r))
+				if r == tc.reason && v != 1 {
+					t.Fatalf("%s counted %v times (answer %+v)", r, v, a)
+				}
+				total += v
+			}
+			if tc.reason == "" {
+				if total != 0 || a.Status != connector.StatusApprovalPending {
+					t.Fatalf("a made card: %v counted, answer %+v", total, a)
+				}
+				return
+			}
+			if total != 1 || !strings.Contains(a.raw, tc.reason) {
+				t.Fatalf("%v counted in all, answer %+v, want one %s", total, a, tc.reason)
+			}
+			e.nothingWritten()
+		})
+	}
+}
+
 // TestWriteDispatch_NotApproved: an approval nobody approved, another
 // principal's approval and an unknown id are refused without a call, and
 // a pending approval is left pending for its card.

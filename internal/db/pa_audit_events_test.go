@@ -421,10 +421,25 @@ func TestPAAuditEvents_DrainKeepsWhatItCannotAppend(t *testing.T) {
 func TestPAAuditEvents_UnreadableQueueIsAnError(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
+	if n, err := s.CountPAAuditEvents(ctx); err != nil || n != 0 {
+		t.Fatalf("an empty queue counts %d, %v", n, err)
+	}
+	for range 2 {
+		if _, err := s.DB.Exec(`INSERT INTO pa_audit_events(principal, kind, subject, server, tool, connection_id, authority_revision, created_at_ms)
+			VALUES (4242001, 'permission_revoked', 'prm_1', 'alice', 'alice_set_volume', 'pac_1', 1, 1000)`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := s.CountPAAuditEvents(ctx); err != nil || n != 2 {
+		t.Fatalf("two queued events count %d, %v", n, err)
+	}
 	if _, err := s.DB.Exec(`ALTER TABLE pa_audit_events RENAME TO pa_audit_events_gone`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DrainPAAuditEvents(ctx, 10, paEventRow); err == nil {
 		t.Fatal("the drain of an unreadable queue reported a clean pass")
+	}
+	if n, err := s.CountPAAuditEvents(ctx); err == nil {
+		t.Fatalf("an unreadable queue counts %d", n)
 	}
 }

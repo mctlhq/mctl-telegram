@@ -29,7 +29,28 @@ import (
 // (*db.Store): a permission granted or revoked, an approval cancelled.
 type AuditEventStore interface {
 	DrainPAAuditEvents(ctx context.Context, limit int, render func(auditevent.Event) (db.ToolCall, error)) (db.PAAuditDrain, error)
+	CountPAAuditEvents(ctx context.Context) (int64, error)
 }
+
+// AuditEventMetrics is what the sweeper reports (*metrics.Registry).
+type AuditEventMetrics interface {
+	SetPAAuditEventsQueued(n int64)
+	ForgetPAAuditEventsQueued()
+	CountPAAuditEventProblem(problem string, n int)
+}
+
+// The closed label set of mctl_pa_audit_event_sweep_problems_total: a pass
+// that could not read or count the queue, an event that was not appended
+// and is still queued, and an event dropped because its principal has no
+// users row.
+const (
+	AuditProblemQueueUnreadable = "queue_unreadable"
+	AuditProblemAppendFailed    = "append_failed"
+	AuditProblemDropped         = "dropped"
+)
+
+// AuditEventProblems lists them, to create each series at 0.
+var AuditEventProblems = []string{AuditProblemQueueUnreadable, AuditProblemAppendFailed, AuditProblemDropped}
 
 const (
 	// AuditEventSweepInterval is how often queued events are appended to
@@ -64,6 +85,8 @@ func AuditEventRow(e auditevent.Event) (db.ToolCall, error) {
 // stays queued and is tried again.
 type AuditEventSweeper struct {
 	Store AuditEventStore
+	// Metrics is optional.
+	Metrics AuditEventMetrics
 }
 
 // SweepOnce runs one pass. The error is that of a queue that could not be
@@ -74,13 +97,42 @@ func (s AuditEventSweeper) SweepOnce(ctx context.Context) (db.PAAuditDrain, erro
 		return db.PAAuditDrain{}, errors.New("pa audit event sweep: no store")
 	}
 	res, err := s.Store.DrainPAAuditEvents(ctx, AuditEventSweepLimit, AuditEventRow)
+	countErr := s.report(ctx, res, err)
 	if err != nil {
 		return res, err
 	}
 	if res.Failed > 0 {
 		return res, fmt.Errorf("pa audit event sweep: %d events not appended, still queued", res.Failed)
 	}
-	return res, nil
+	return res, countErr
+}
+
+// report publishes one pass: its problems, and how many events are queued
+// after it. The error is that of a queue that could not be counted. A pass
+// cut off by ctx ending reports nothing: a shutdown is no problem of the
+// queue.
+func (s AuditEventSweeper) report(ctx context.Context, res db.PAAuditDrain, drainErr error) error {
+	if s.Metrics == nil || ctx.Err() != nil {
+		return nil
+	}
+	s.Metrics.CountPAAuditEventProblem(AuditProblemAppendFailed, res.Failed)
+	s.Metrics.CountPAAuditEventProblem(AuditProblemDropped, res.Dropped)
+	var (
+		queued int64
+		err    = drainErr
+	)
+	if err == nil {
+		queued, err = s.Store.CountPAAuditEvents(ctx)
+	}
+	if err != nil {
+		if ctx.Err() == nil {
+			s.Metrics.CountPAAuditEventProblem(AuditProblemQueueUnreadable, 1)
+			s.Metrics.ForgetPAAuditEventsQueued()
+		}
+		return fmt.Errorf("pa audit event sweep: queue not counted: %w", err)
+	}
+	s.Metrics.SetPAAuditEventsQueued(queued)
+	return nil
 }
 
 // Run sweeps every interval (AuditEventSweepInterval if 0) until ctx ends,
@@ -88,6 +140,12 @@ func (s AuditEventSweeper) SweepOnce(ctx context.Context) (db.PAAuditDrain, erro
 func (s AuditEventSweeper) Run(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = AuditEventSweepInterval
+	}
+	if s.Metrics != nil {
+		// Each series exists at 0, so that increase() sees the first one.
+		for _, p := range AuditEventProblems {
+			s.Metrics.CountPAAuditEventProblem(p, 0)
+		}
 	}
 	pass := func() {
 		res, err := s.SweepOnce(ctx)
