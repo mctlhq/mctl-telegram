@@ -133,18 +133,19 @@ func (s *Store) DrainPAAuditEvents(ctx context.Context, limit int, render func(a
 		return out, errors.New("drain pa audit events: no limit or no renderer")
 	}
 	type key struct {
-		id   int64
-		kind string
+		id    int64
+		kind  string
+		tries int64
 	}
 	rows, err := s.DB.QueryContext(ctx,
-		`SELECT id, kind FROM pa_audit_events ORDER BY tries, id LIMIT $1`, limit)
+		`SELECT id, kind, tries FROM pa_audit_events ORDER BY tries, id LIMIT $1`, limit)
 	if err != nil {
 		return out, fmt.Errorf("drain pa audit events: list: %w", err)
 	}
 	var keys []key
 	for rows.Next() {
 		var k key
-		if err := rows.Scan(&k.id, &k.kind); err != nil {
+		if err := rows.Scan(&k.id, &k.kind, &k.tries); err != nil {
 			_ = rows.Close()
 			return out, fmt.Errorf("drain pa audit events: scan: %w", err)
 		}
@@ -161,10 +162,13 @@ func (s *Store) DrainPAAuditEvents(ctx context.Context, limit int, render func(a
 		switch {
 		case err != nil:
 			out.Failed++
-			slog.Error("pa audit event not appended; kept for the next pass", "kind", k.kind, "err", err)
+			// The queue id is a local serial: it finds a stuck row and
+			// carries nothing of the principal.
+			slog.Error("pa audit event not appended; kept for the next pass",
+				"queue_id", k.id, "tries", k.tries, "kind", k.kind, "err", err)
 			if _, uerr := s.DB.ExecContext(ctx,
 				`UPDATE pa_audit_events SET tries = tries + 1 WHERE id = $1`, k.id); uerr != nil {
-				slog.Error("pa audit event: failed append not counted", "err", uerr)
+				slog.Error("pa audit event: failed append not counted", "queue_id", k.id, "err", uerr)
 			}
 		case res == paAuditAppended:
 			out.Appended++
