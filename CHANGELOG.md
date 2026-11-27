@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.151.0](https://github.com/mctlhq/mctl-telegram/compare/0.150.4...0.151.0) (2026-11-27)
+
+
+### Features
+
+* **pa:** alert on listing refusals and a stuck audit queue ([fed843b](https://github.com/mctlhq/mctl-telegram/commit/fed843b52d89106f6cefdd9a416fdd47067e8657))
+* **pa:** alert on listing refusals and a stuck audit queue ([c05224c](https://github.com/mctlhq/mctl-telegram/commit/c05224c22eeb6d8dc681335ba9b0f8f28ce97a8e))
+* **pa:** apply the S2 owner decisions ([5e34405](https://github.com/mctlhq/mctl-telegram/commit/5e344055a96849af4e03d5cec996d88ada9f8c23))
+* **pa:** apply the S2 owner decisions ([317c9b3](https://github.com/mctlhq/mctl-telegram/commit/317c9b3d26a0fce41a2f82fe558a1b9332338715))
+* **pa:** close the code-closable [#1322](https://github.com/mctlhq/mctl-telegram/issues/1322) manifest gaps (P2-S15c) ([a67c2df](https://github.com/mctlhq/mctl-telegram/commit/a67c2df463cfead56f930f26cf61ad018ff699d5))
+* **pa:** record permission and approval changes in the audit chain ([5302420](https://github.com/mctlhq/mctl-telegram/commit/5302420876a32ea6fb162e0f3801247660735db1))
+* **pa:** support inbound photo/vision input ([#1501](https://github.com/mctlhq/mctl-telegram/issues/1501)) ([38fe5b4](https://github.com/mctlhq/mctl-telegram/commit/38fe5b41030758b539c6fa61b2bfc8bfdf9a0632))
+* **pa:** tell a never-sent write from an unknown one in the ledger ([c74249b](https://github.com/mctlhq/mctl-telegram/commit/c74249b9cbd01c88a54e7f86e1431e0f4db116f2))
+
+
+### Bug Fixes
+
+* **audit:** hash created_at at the precision Postgres keeps ([08b2938](https://github.com/mctlhq/mctl-telegram/commit/08b293841a8e317eb3ee60cff9b833c87903b197))
+* **audit:** hash created_at at the precision Postgres keeps ([8f54c4d](https://github.com/mctlhq/mctl-telegram/commit/8f54c4d9778a22524ac7e5f2d09ae83d660788d6))
+* **audit:** verify Postgres rows hashed below a microsecond ([f116a5d](https://github.com/mctlhq/mctl-telegram/commit/f116a5d13bcd77a5eae30dafa8c1111de6ec0577))
+* **audit:** verify Postgres rows hashed below a microsecond ([d3854d6](https://github.com/mctlhq/mctl-telegram/commit/d3854d6095610f5f138c51b7fcdced840909e4d1))
+* **oauth:** keep membership scopes for loopback DCR clients ([5f90add](https://github.com/mctlhq/mctl-telegram/commit/5f90add6c285722843a31a66b56dc4a33204c445))
+* **oauth:** keep membership scopes for loopback DCR clients ([8c15369](https://github.com/mctlhq/mctl-telegram/commit/8c1536978f4c2bfc3d97f12cd230412e22cc5104))
+* **oauth:** strip membership scopes from dynamically registered clients ([806c04f](https://github.com/mctlhq/mctl-telegram/commit/806c04faf52f1696dacd67be716c5050c81adf33))
+* **oauth:** strip membership scopes from dynamically registered clients ([5bda97e](https://github.com/mctlhq/mctl-telegram/commit/5bda97ee6051335749262667fc9f061a39ef72a8))
+* **pa:** order approval creation and admin disable with their cancel ([94d7a7f](https://github.com/mctlhq/mctl-telegram/commit/94d7a7f06c82002967c3d388357ddf48ac8c1279))
+* **pa:** report a mark refused by an expired lease as never sent ([b289ff5](https://github.com/mctlhq/mctl-telegram/commit/b289ff5a9ebb9efe1331dfeac06ff0e31f0350e6))
+* **pa:** report a mark refused by an expired lease as never sent ([dd802d1](https://github.com/mctlhq/mctl-telegram/commit/dd802d1bec8caf3b151c155f666f3ae116ae2124))
+
 ## [0.150.4](https://github.com/mctlhq/mctl-telegram/compare/0.150.3...0.150.4) (2026-11-26)
 
 
