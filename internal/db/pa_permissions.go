@@ -39,6 +39,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/mctlhq/mctl-telegram/internal/pa/auditevent"
 	"github.com/mctlhq/mctl-telegram/internal/pa/catalog"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 	"github.com/mctlhq/mctl-telegram/internal/pa/permissions"
@@ -195,7 +196,8 @@ func (s *Store) InsertPAPermission(ctx context.Context, tx *sql.Tx, p permission
 	if n != 1 {
 		return permissions.Refuse(permissions.ReasonConnectionChange)
 	}
-	return nil
+	// The grant's audit event, in the transaction of the grant (S2-A8).
+	return enqueuePAPermissionEvent(ctx, tx, p.Principal, p.ID, auditevent.PermissionGranted, "", nowMS)
 }
 
 // ListActivePAPermissions returns principal's permissions that still
@@ -321,7 +323,7 @@ func (s *Store) RevokePAPermission(ctx context.Context, tx *sql.Tx, principal in
 	if n != 1 {
 		return permissions.ErrNotFound
 	}
-	return nil
+	return enqueuePAPermissionEvent(ctx, tx, principal, id, auditevent.PermissionRevoked, auditevent.ReasonByPrincipal, now.UnixMilli())
 }
 
 // paRevokedAtMS keeps a revocation mark from being 0, which means "not
@@ -340,11 +342,60 @@ func paRevokedAtMS(nowMS int64) int64 {
 // permission never outlives the revision it was granted at, even for a
 // reader that forgot the revision predicate. A failure fails the change.
 func revokePAPermissionsOfConnTx(ctx context.Context, tx *sql.Tx, principal int64, connectionID string, nowMS int64) error {
-	if _, err := tx.ExecContext(ctx,
+	rows, err := tx.QueryContext(ctx,
 		`UPDATE pa_permissions SET revoked_at_ms = $1
-		  WHERE principal = $2 AND connection_id = $3 AND revoked_at_ms = 0`,
-		paRevokedAtMS(nowMS), principal, connectionID); err != nil {
+		  WHERE principal = $2 AND connection_id = $3 AND revoked_at_ms = 0
+		 RETURNING id`,
+		paRevokedAtMS(nowMS), principal, connectionID)
+	if err != nil {
 		return fmt.Errorf("pa connection: revoke standing permissions: %w", err)
+	}
+	if err := enqueuePARevokedEvents(ctx, tx, rows, principal, auditevent.ReasonConnectionChanged, nowMS); err != nil {
+		return fmt.Errorf("pa connection: revoke standing permissions: %w", err)
+	}
+	return nil
+}
+
+// enqueuePAPermissionEvent queues, in tx, the event of kind for
+// principal's permission id, read from its row. The row must exist: an
+// event for a permission that is not there is a bug in the caller, and
+// fails the change.
+func enqueuePAPermissionEvent(ctx context.Context, tx *sql.Tx, principal int64, id string, kind auditevent.Kind, reason string, nowMS int64) error {
+	if !auditevent.ValidReason(kind, reason) || kind == auditevent.ApprovalCancelled {
+		return fmt.Errorf("pa audit event: %s with reason %q is not a permission event", kind, reason)
+	}
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO pa_audit_events(`+paAuditEventCols+`)
+		 SELECT principal, $3, id, server, tool, connection_id, authority_revision, '', $4, $5
+		   FROM pa_permissions WHERE principal = $1 AND id = $2`,
+		principal, id, string(kind), reason, nowMS)
+	return paAuditEventQueued(res, err, kind, id)
+}
+
+// enqueuePARevokedEvents queues the revocation event of every permission
+// id in rows, the RETURNING of the statement that revoked them, in the
+// transaction of that statement (S2-A8): a revocation without its event
+// does not commit.
+func enqueuePARevokedEvents(ctx context.Context, tx *sql.Tx, rows *sql.Rows, principal int64, reason string, nowMS int64) error {
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return permissionUnreadable("revoked ids: scan", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return permissionUnreadable("revoked ids: close", err)
+	}
+	if err := rows.Err(); err != nil {
+		return permissionUnreadable("revoked ids: rows", err)
+	}
+	for _, id := range ids {
+		if err := enqueuePAPermissionEvent(ctx, tx, principal, id, auditevent.PermissionRevoked, reason, nowMS); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -355,10 +406,17 @@ func revokePAPermissionsOfConnTx(ctx context.Context, tx *sql.Tx, principal int6
 // transaction of that change: none of them moves a connection's revision,
 // so without it the permissions would be in force again the moment consent
 // is given again or the disable is cleared. A failure fails the change.
-func revokePAPermissionsOfPrincipalTx(ctx context.Context, tx *sql.Tx, principal int64, nowMS int64) error {
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE pa_permissions SET revoked_at_ms = $1 WHERE principal = $2 AND revoked_at_ms = 0`,
-		paRevokedAtMS(nowMS), principal); err != nil {
+//
+// reason is the auditevent reason of the change, for the event queued for
+// each permission it revoked.
+func revokePAPermissionsOfPrincipalTx(ctx context.Context, tx *sql.Tx, principal int64, nowMS int64, reason string) error {
+	rows, err := tx.QueryContext(ctx,
+		`UPDATE pa_permissions SET revoked_at_ms = $1 WHERE principal = $2 AND revoked_at_ms = 0 RETURNING id`,
+		paRevokedAtMS(nowMS), principal)
+	if err != nil {
+		return fmt.Errorf("pa principal: revoke standing permissions: %w", err)
+	}
+	if err := enqueuePARevokedEvents(ctx, tx, rows, principal, reason, nowMS); err != nil {
 		return fmt.Errorf("pa principal: revoke standing permissions: %w", err)
 	}
 	return nil

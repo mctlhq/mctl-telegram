@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/approval"
+	"github.com/mctlhq/mctl-telegram/internal/pa/auditevent"
 	"github.com/mctlhq/mctl-telegram/internal/pa/catalog"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
@@ -400,7 +401,16 @@ func (s *Store) endPAApproval(ctx context.Context, tx *sql.Tx, principal int64, 
 
 // CancelPAApproval implements approval.Store.
 func (s *Store) CancelPAApproval(ctx context.Context, tx *sql.Tx, principal int64, id string, now time.Time) (approval.Approval, error) {
-	return s.endPAApproval(ctx, tx, principal, id, approval.StatusCancelled, now)
+	a, err := s.endPAApproval(ctx, tx, principal, id, approval.StatusCancelled, now)
+	if err != nil {
+		return approval.Approval{}, err
+	}
+	// The principal's own Cancel: its audit event, in the transaction of
+	// the cancellation (S2-C9).
+	if err := enqueuePAApprovalCancelled(ctx, tx, principal, id, auditevent.ReasonByPrincipal, now.UnixMilli()); err != nil {
+		return approval.Approval{}, approvalUnreadable("cancel approval", err)
+	}
+	return a, nil
 }
 
 // RefusePAApproval implements approval.Store.
@@ -414,7 +424,11 @@ func (s *Store) RefusePAApproval(ctx context.Context, tx *sql.Tx, principal int6
 // ids it cancelled. A consumed receipt is left as it is: a call on the
 // wire is ended by its executor's post-dispatch check (fenced) or by the
 // stale sweep (outcome_unknown), never by a cancel.
-func cancelPAApprovals(ctx context.Context, tx *sql.Tx, principal, nowMS int64, connectionID string) ([]string, error) {
+//
+// reason is the auditevent reason of the change that cancels them: an
+// audit event is queued in tx for each cancelled approval (S2-C9), and a
+// cancellation whose event cannot be queued does not commit.
+func cancelPAApprovals(ctx context.Context, tx *sql.Tx, principal, nowMS int64, connectionID, reason string) ([]string, error) {
 	where := `status IN ('pending', 'approved') AND ($2 = '' OR connection_id = $2)`
 	if err := deletePAApprovalCallbacks(ctx, tx, principal, where, connectionID); err != nil {
 		return nil, err
@@ -440,6 +454,11 @@ func cancelPAApprovals(ctx context.Context, tx *sql.Tx, principal, nowMS int64, 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("cancel pa approvals: %w", err)
 	}
+	for _, id := range ids {
+		if err := enqueuePAApprovalCancelled(ctx, tx, principal, id, reason, nowMS); err != nil {
+			return nil, approvalUnreadable("cancel approvals", err)
+		}
+	}
 	return ids, nil
 }
 
@@ -455,8 +474,8 @@ func cancelPAApprovals(ctx context.Context, tx *sql.Tx, principal, nowMS int64, 
 // Any failure fails tx: the caller's change (the revocation, the
 // withdrawal, the disable) does not commit without the cancellation, nor
 // the cancellation without its notice.
-func cancelPAApprovalsWithNotice(ctx context.Context, tx *sql.Tx, principal, nowMS int64, connectionID string) (int64, error) {
-	ids, err := cancelPAApprovals(ctx, tx, principal, nowMS, connectionID)
+func cancelPAApprovalsWithNotice(ctx context.Context, tx *sql.Tx, principal, nowMS int64, connectionID, reason string) (int64, error) {
+	ids, err := cancelPAApprovals(ctx, tx, principal, nowMS, connectionID, reason)
 	if err != nil || len(ids) == 0 {
 		return 0, err
 	}
@@ -481,7 +500,7 @@ func cancelPAApprovalsOfConnTx(ctx context.Context, tx *sql.Tx, principal int64,
 		// An empty id would cancel every approval of the principal.
 		return fmt.Errorf("%w: cancel approvals of a connection", approval.ErrInvalid)
 	}
-	if _, err := cancelPAApprovalsWithNotice(ctx, tx, principal, nowMS, connectionID); err != nil {
+	if _, err := cancelPAApprovalsWithNotice(ctx, tx, principal, nowMS, connectionID, auditevent.ReasonConnectionChanged); err != nil {
 		return fmt.Errorf("pa connection: %w", err)
 	}
 	return nil
@@ -493,7 +512,7 @@ func (s *Store) CancelPAApprovalsForConnection(ctx context.Context, tx *sql.Tx, 
 	if tx == nil || principal <= 0 || connectionID == "" || now.IsZero() {
 		return 0, fmt.Errorf("%w: cancel approvals of a connection", approval.ErrInvalid)
 	}
-	ids, err := cancelPAApprovals(ctx, tx, principal, now.UnixMilli(), connectionID)
+	ids, err := cancelPAApprovals(ctx, tx, principal, now.UnixMilli(), connectionID, auditevent.ReasonConnectionChanged)
 	return int64(len(ids)), err
 }
 
@@ -508,7 +527,7 @@ func (s *Store) CancelPAApprovalsForConnection(ctx context.Context, tx *sql.Tx, 
 // (cancelPAApprovalsWithNotice, #1320 slice P2-S12); the rows then go like
 // the rest. The notice names no call and survives the deletion.
 func forgetPAApprovals(ctx context.Context, tx *sql.Tx, principal int64, nowMS int64) error {
-	if _, err := cancelPAApprovalsWithNotice(ctx, tx, principal, nowMS, ""); err != nil {
+	if _, err := cancelPAApprovalsWithNotice(ctx, tx, principal, nowMS, "", auditevent.ReasonDataForgotten); err != nil {
 		return err
 	}
 	if err := deletePAApprovalCallbacks(ctx, tx, principal, `status <> 'dispatching'`); err != nil {

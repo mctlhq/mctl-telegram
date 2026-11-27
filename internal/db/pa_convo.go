@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-telegram/internal/pa/approval"
+	"github.com/mctlhq/mctl-telegram/internal/pa/auditevent"
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 	"github.com/mctlhq/mctl-telegram/internal/pa/jobs"
 	"github.com/mctlhq/mctl-telegram/internal/pa/permissions"
@@ -325,7 +326,7 @@ func (s *Store) ClosePAConversations(ctx context.Context, tx *sql.Tx, principal 
 	// So do its approvals that were not dispatched yet, with their sealed
 	// arguments (#1320): a card of a closed conversation can no longer be
 	// approved, and /new leaves no text behind.
-	if _, err := cancelPAApprovals(ctx, tx, principal, now.UnixMilli(), ""); err != nil {
+	if _, err := cancelPAApprovals(ctx, tx, principal, now.UnixMilli(), "", auditevent.ReasonConversationClosed); err != nil {
 		return fmt.Errorf("close pa conversation: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -367,7 +368,7 @@ func (s *Store) ForgetPAConversations(ctx context.Context, tx *sql.Tx, principal
 	// move no connection's revision, so nothing else would revoke them
 	// (P2-S12; consent is the basis of every action taken for the
 	// principal).
-	if err := revokePAPermissionsOfPrincipalTx(ctx, tx, principal, nowMS); err != nil {
+	if err := revokePAPermissionsOfPrincipalTx(ctx, tx, principal, nowMS, auditevent.ReasonDataForgotten); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM pa_fragments WHERE principal = $1`, principal); err != nil {

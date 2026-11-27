@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/mctlhq/mctl-telegram/internal/pa/auditevent"
 	"github.com/mctlhq/mctl-telegram/internal/pa/convo"
 )
 
@@ -76,10 +77,10 @@ func (s *Store) SetPAPrincipalDisabled(ctx context.Context, principal, by int64,
 	// principal, and this ends the cards and keeps a later re-enable from
 	// bringing a permission back. The principal gets one notice when an
 	// approval was cancelled. A failure here fails the disable.
-	if _, err := cancelPAApprovalsWithNotice(ctx, tx, principal, now.UnixMilli(), ""); err != nil {
+	if _, err := cancelPAApprovalsWithNotice(ctx, tx, principal, now.UnixMilli(), "", auditevent.ReasonPrincipalDisabled); err != nil {
 		return fmt.Errorf("set pa principal disabled: %w", err)
 	}
-	if err := revokePAPermissionsOfPrincipalTx(ctx, tx, principal, now.UnixMilli()); err != nil {
+	if err := revokePAPermissionsOfPrincipalTx(ctx, tx, principal, now.UnixMilli(), auditevent.ReasonPrincipalDisabled); err != nil {
 		return fmt.Errorf("set pa principal disabled: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
