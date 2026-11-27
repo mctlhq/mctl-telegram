@@ -44,7 +44,7 @@ func (s *Server) loadProfile(w http.ResponseWriter, ctx context.Context, userID 
 // policy-denial metric; the response keeps its 400 and message.
 func (s *Server) denyJobBinding(w http.ResponseWriter, ctx context.Context, userID int64, tool, surface, msg string) {
 	s.m.CountPolicyDenial(string(policy.DenyJobBindingMismatch), surface)
-	if err := s.auditChecked(ctx, userID, tool, "denied", "conversation binding: "+string(policy.DenyJobBindingMismatch)+": "+msg); err != nil {
+	if err := s.auditDenied(ctx, userID, tool, auditErrBinding(policy.DenyJobBindingMismatch), policy.DenyJobBindingMismatch); err != nil {
 		writeBindingAuditFailure(w, tool, err)
 		return
 	}
@@ -339,6 +339,7 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 	switch result.Decision {
 	case policy.Deny:
 		base.Status = db.ActionDenied
+		base.DenyCode = string(result.DenyCode())
 		actionID, err = s.Store.InsertAgentAction(ctx, base)
 	case policy.RequireApproval:
 		base.Status = db.ActionPendingApproval
@@ -479,7 +480,13 @@ func (s *Server) handleProposeReply(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	s.audit(ctx, id.UserID, "propose_reply", "ok", "")
+	// A denied action already left its own denial audit row, in the same
+	// transaction as the insert (#1271); a successful "ok" row for the call
+	// would contradict it, so it is written only for a call that did not end
+	// denied. This reads the persisted row, so a replay is judged the same way.
+	if persisted.Status != db.ActionDenied {
+		s.audit(ctx, id.UserID, "propose_reply", "ok", "")
+	}
 	responseReasons := result.Reasons
 	if persisted.PolicyReasons != "" {
 		responseReasons = strings.Split(persisted.PolicyReasons, "; ")
@@ -783,7 +790,7 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 		JobID: req.JobID, Attempt: req.Attempt, ConversationID: req.ConversationID, UserID: id.UserID,
 		ActionType: actionType, Intent: req.Intent, Payload: req.Text,
 		PolicyDecision: string(result.Decision), PolicyReasons: strings.Join(result.Reasons, "; "),
-		Status: status,
+		Status: status, DenyCode: string(result.DenyCode()),
 	})
 	if errors.Is(err, db.ErrAgentJobNotFound) {
 		// Covers both a truly bogus/foreign job_id and InsertAgentAction's
@@ -816,7 +823,9 @@ func (s *Server) handleOwnerFacing(w http.ResponseWriter, r *http.Request, actio
 		persistedReasons = strings.Split(persisted.PolicyReasons, "; ")
 	}
 	if persisted.Status == db.ActionDenied {
-		s.audit(ctx, id.UserID, tool, "denied", persisted.PolicyReasons)
+		// No tool audit row: the agent_action_denied row written in the
+		// transition's own transaction is the authoritative record, and a
+		// tool row would carry the reason prose and duplicate on replay.
 		writeJSON(w, http.StatusOK, map[string]any{
 			"action_id": actionID, "decision": persisted.PolicyDecision, "reasons": persistedReasons,
 		})

@@ -27,6 +27,27 @@ import (
 //     call_path and were hashed over fields 1–7 only; omitting the field
 //     here for NULL keeps those pre-M4 chains valid after the column lands.
 func hashAuditEntry(prev []byte, userID int64, tool, peer, status, errCol string, callPath sql.NullString, createdAt time.Time, edge auditEdge) []byte {
+	return hashAuditEntryWithDenyCode(prev, userID, tool, peer, status, errCol, callPath, createdAt, edge, sql.NullString{})
+}
+
+// auditDenyCodeMarker opens the deny-code block inside the hash input (#1271).
+const auditDenyCodeMarker = 0x02
+
+// hashAuditEntryWithDenyCode is hashAuditEntry plus field 10:
+//
+//  10. deny_code -- appended ONLY when denyCode.Valid, as marker byte 0x02
+//     followed by the len-prefixed code. It follows the correlation block, so
+//     a NULL code leaves every earlier row hashing exactly as before. The
+//     marker differs from auditEdgeMarker (0x01), so the two optional blocks
+//     cannot be confused. A non-NULL empty code is encoded (and differs from
+//     NULL); writers never store one.
+//
+// Compatibility: a verifier built before this field existed recomputes a
+// non-NULL-code row without the block and reports it as tampered. Rolling
+// back to such a binary after denial rows with a code exist therefore makes
+// VerifyAuditChain fail on those rows; there is no discriminator that lets an
+// old verifier recognise the unknown block.
+func hashAuditEntryWithDenyCode(prev []byte, userID int64, tool, peer, status, errCol string, callPath sql.NullString, createdAt time.Time, edge auditEdge, denyCode sql.NullString) []byte {
 	h := sha256.New()
 	h.Write(prev)
 	writeBE64(h, uint64(userID))
@@ -52,6 +73,10 @@ func hashAuditEntry(prev []byte, userID int64, tool, peer, status, errCol string
 		writeLenPrefixed(h, []byte(edge.MCPMethod))
 		writeLenPrefixed(h, []byte(edge.MCPName))
 		writeLenPrefixed(h, []byte(edge.ProtocolVersion))
+	}
+	if denyCode.Valid {
+		h.Write([]byte{auditDenyCodeMarker})
+		writeLenPrefixed(h, []byte(denyCode.String))
 	}
 	return h.Sum(nil)
 }

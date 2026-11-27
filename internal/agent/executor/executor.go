@@ -265,7 +265,7 @@ func (e *Executor) Approve(ctx context.Context, userID int64, code string) error
 	// or was written without one. It is denied as it stands, never rewritten
 	// to the current revision and never grandfathered (#1266).
 	if action.InstallRevision == 0 {
-		if ok, err := e.Store.DenyAgentAction(ctx, userID, action.ID, db.ActionPendingApproval, policy.ReasonLegacyInstallRevisionMissing); err != nil {
+		if ok, err := e.Store.DenyAgentAction(ctx, userID, action.ID, db.ActionPendingApproval, policy.ReasonLegacyInstallRevisionMissing, string(policy.DenyLegacyInstallRevisionMissing)); err != nil {
 			return fmt.Errorf("deny legacy-revision draft: %w", err)
 		} else if !ok {
 			return ErrLostRace
@@ -278,7 +278,7 @@ func (e *Executor) Approve(ctx context.Context, userID int64, code string) error
 		return fmt.Errorf("load profile: %w", err)
 	}
 	if err == nil && action.InstallRevision != profile.InstallRevision {
-		if ok, err := e.Store.DenyAgentAction(ctx, userID, action.ID, db.ActionPendingApproval, policy.ReasonInstallChanged); err != nil {
+		if ok, err := e.Store.DenyAgentAction(ctx, userID, action.ID, db.ActionPendingApproval, policy.ReasonInstallChanged, string(policy.DenyInstallChanged)); err != nil {
 			return fmt.Errorf("deny stale-install draft: %w", err)
 		} else if !ok {
 			// Decided elsewhere meanwhile: report that, not this denial.
@@ -642,9 +642,11 @@ func legacyRevisionDenial(r policy.Result) policy.Result {
 // keeps the status-only transition it always had.
 func (e *Executor) denyForPolicy(ctx context.Context, action db.AgentAction, from string, result policy.Result) (bool, error) {
 	if result.Decision == policy.Deny && result.Code == policy.DenyLegacyInstallRevisionMissing {
-		return e.Store.DenyAgentAction(ctx, action.UserID, action.ID, from, policy.ReasonLegacyInstallRevisionMissing)
+		return e.Store.DenyAgentAction(ctx, action.UserID, action.ID, from, policy.ReasonLegacyInstallRevisionMissing, string(policy.DenyLegacyInstallRevisionMissing))
 	}
-	return e.Store.UpdateAgentActionStatus(ctx, action.UserID, action.ID, from, db.ActionDenied)
+	// DenyCode() is "unknown" for a RequireApproval escalation, which has no
+	// code of its own.
+	return e.Store.DenyAgentActionCode(ctx, action.UserID, action.ID, from, string(result.DenyCode()))
 }
 
 func (e *Executor) recentAgentSends(ctx context.Context, userID, conversationID int64, since time.Time) ([]time.Time, error) {
@@ -960,7 +962,7 @@ func (e *Executor) endHeldRetry(ctx context.Context, action db.AgentAction, conv
 		}
 		return err
 	}
-	ok, err := e.Store.DenyAgentAction(ctx, action.UserID, action.ID, db.ActionExecuting, denyReason)
+	ok, err := e.Store.DenyAgentAction(ctx, action.UserID, action.ID, db.ActionExecuting, denyReason, db.DenyCodeUnknown)
 	if err != nil {
 		return fmt.Errorf("deny held retry: %w", err)
 	}
@@ -1023,7 +1025,7 @@ func (e *Executor) settleRefusal(ctx context.Context, action db.AgentAction, con
 			return true, e.markDeliveryUnknown(ctx, action, conv,
 				"delivery unknown: Telegram refused a retry ("+refused.Class+") after an attempt that may have been delivered")
 		}
-		if ok, err := e.Store.DenyAgentAction(ctx, action.UserID, action.ID, db.ActionExecuting, "send refused by Telegram: "+refused.Class); err != nil {
+		if ok, err := e.Store.DenyAgentAction(ctx, action.UserID, action.ID, db.ActionExecuting, "send refused by Telegram: "+refused.Class, db.DenyCodeUnknown); err != nil {
 			return true, fmt.Errorf("deny refused send: %w", err)
 		} else if !ok {
 			return true, ErrLostRace
@@ -1241,7 +1243,7 @@ func (e *Executor) denySuperseded(ctx context.Context, action db.AgentAction, ki
 	// A lost compare-and-set is deliberately not ErrLostRace here: what
 	// usually wins it is the listener denying the same draft for the same
 	// edit or delete, so "superseded" stays the true answer.
-	if _, err := e.Store.DenyAgentActionWithReason(ctx, action.UserID, action.ID, db.ActionApproved, reason); err != nil {
+	if _, err := e.Store.DenyAgentActionWithReason(ctx, action.UserID, action.ID, db.ActionApproved, reason, string(policy.DenySourceSuperseded)); err != nil {
 		return fmt.Errorf("deny superseded draft: %w", err)
 	}
 	return fmt.Errorf("%w: %s", ErrSourceSuperseded, reason)

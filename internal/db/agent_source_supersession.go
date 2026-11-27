@@ -122,25 +122,25 @@ func (s *Store) JobSourceSuperseded(ctx context.Context, userID, jobID int64) (s
 
 // DenyAgentActionWithReason moves one action from `from` to denied and
 // records reason in policy_reasons, releasing the approval code. Returns false
-// when the row was no longer in `from`.
-func (s *Store) DenyAgentActionWithReason(ctx context.Context, userID, id int64, from, reason string) (bool, error) {
-	if tos, ok := allowedActionTransitions[from]; !ok {
-		return false, fmt.Errorf("%w: %s -> %s", ErrInvalidActionTransition, from, ActionDenied)
-	} else if _, ok := tos[ActionDenied]; !ok {
-		return false, fmt.Errorf("%w: %s -> %s", ErrInvalidActionTransition, from, ActionDenied)
+// when the row was no longer in `from`. code is the stable deny code stored
+// with the denial and on its same-transaction audit row (see DenyAgentAction).
+func (s *Store) DenyAgentActionWithReason(ctx context.Context, userID, id int64, from, reason, code string) (bool, error) {
+	if err := checkDenyTransition(from); err != nil {
+		return false, err
 	}
-	res, err := s.DB.ExecContext(ctx,
+	code = normalizeDenyCode(code)
+	denied, err := s.denyActionsTx(ctx, code,
 		`UPDATE agent_actions
 		    SET status = $1, approval_code = NULL, approval_code_hash = NULL,
-		        approval_code_encrypted = NULL, policy_reasons = $2, updated_at = $3
-		  WHERE id = $4 AND user_id = $5 AND status = $6`,
-		ActionDenied, reason, time.Now().UTC(), id, userID, from,
+		        approval_code_encrypted = NULL, policy_reasons = $2, updated_at = $3, deny_code = $7
+		  WHERE id = $4 AND user_id = $5 AND status = $6
+		  RETURNING id, user_id`,
+		ActionDenied, reason, time.Now().UTC(), id, userID, from, code,
 	)
 	if err != nil {
 		return false, fmt.Errorf("deny agent action: %w", err)
 	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
+	return len(denied) > 0, nil
 }
 
 // MessageDeleteResult reports what RecordMessageDelete changed.
@@ -302,10 +302,12 @@ func (s *Store) recordMessageDeleteInChat(ctx context.Context, userID, selfTGID,
 	out.Recorded = 1
 
 	now := time.Now().UTC()
-	res, err := tx.ExecContext(ctx,
+	// One audit row per action actually moved to denied, in this same
+	// transaction as the transition (#1271).
+	denied, err := denyUpdateReturning(ctx, tx,
 		`UPDATE agent_actions
 		    SET status = $1, approval_code = NULL, approval_code_hash = NULL,
-		        approval_code_encrypted = NULL, policy_reasons = $2, updated_at = $3
+		        approval_code_encrypted = NULL, policy_reasons = $2, updated_at = $3, deny_code = $10
 		  WHERE user_id = $4
 		    AND status IN ($5, $6, $7)
 		    AND job_id IN (
@@ -314,21 +316,25 @@ func (s *Store) recordMessageDeleteInChat(ctx context.Context, userID, selfTGID,
 		          JOIN incoming_events e
 		            ON e.event_id = j.event_id AND e.user_id = j.user_id
 		         WHERE j.user_id = $4 AND e.chat_tg_id = $8 AND e.message_id = $9
-		    )`,
+		    )
+		  RETURNING id, user_id`,
 		ActionDenied, ReasonSourceDeleted, now, userID,
-		ActionProposed, ActionPendingApproval, ActionApproved, chatTGID, messageID,
+		ActionProposed, ActionPendingApproval, ActionApproved, chatTGID, messageID, DenyCodeSourceSuperseded,
 	)
 	if err != nil {
 		return out, fmt.Errorf("deny actions for deleted message: %w", err)
 	}
-	out.DeniedActions, _ = res.RowsAffected()
+	if err := auditDeniedActions(ctx, tx, denied, DenyCodeSourceSuperseded); err != nil {
+		return out, err
+	}
+	out.DeniedActions = int64(len(denied))
 
 	// A first-time pending job has no coalesced members (they are attached
 	// when the head is claimed). A head that went back to pending through a
 	// retry or a stale requeue keeps its frozen members, and closing it here
 	// closes their messages too. Running it would end the same way: the
 	// propose check supersedes the whole turn (#962).
-	res, err = tx.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
 		`UPDATE agent_jobs
 		    SET status = $1, last_error = $2, updated_at = $3
 		  WHERE user_id = $4 AND status = $5
