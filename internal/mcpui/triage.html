@@ -592,7 +592,11 @@ function init() {
     if (ev.key === "Enter") runQuery();
   });
 
-  callHost("ui/initialize", {})
+  callHost("ui/initialize", {
+    appInfo: { name: "mctl-telegram-triage", version: "0.2.0" },
+    appCapabilities: {},
+    protocolVersion: "2026-01-26"
+  })
     .then(function () {
       notifyHost("ui/notifications/initialized", {});
       return callHost("tools/list", {});

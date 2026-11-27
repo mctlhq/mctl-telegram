@@ -46,6 +46,16 @@ func (s *Store) SetPAPrincipalDisabled(ctx context.Context, principal, by int64,
 		return fmt.Errorf("set pa principal disabled: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	// The principal's lock, first: every transaction that creates an
+	// approval or grants a permission holds it (BeginPAWrite, the webhook
+	// update), so one that is still open commits before the cancellation
+	// and the revocation below run and is seen by them, and one that
+	// starts later waits and reads the disable (S2-C9). Without the lock
+	// an approval committed by a concurrent transaction stayed pending,
+	// with no "cancelled" card and no notice.
+	if err := s.LockPAPrincipal(ctx, tx, principal); err != nil {
+		return fmt.Errorf("set pa principal disabled: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO pa_principal_disables(principal, disabled_at_ms, disabled_by, reason) VALUES($1, $2, $3, $4)
 		 ON CONFLICT (principal) DO UPDATE SET disabled_at_ms = excluded.disabled_at_ms,

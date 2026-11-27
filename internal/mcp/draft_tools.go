@@ -92,11 +92,17 @@ Inputs (required):
          as two); "" clears the draft.
 Inputs (optional):
   overwrite — replace a different draft already in the chat (default false).
-  topic_id  — forum topic to leave the draft in (forum supergroups only).`),
+  topic_id  — forum topic to leave the draft in (forum supergroups only).
+  confirmation_id — one-shot id from prepare_dashboard_action, bound to this
+    exact (peer, text, overwrite, topic_id). When supplied it is consumed
+    before the write gate, and a mismatched, reused, or foreign id is refused.
+    The write gate stays authoritative. Omitting it leaves this tool unchanged.
+    The prepare tool exists only while MCP Apps are enabled.`),
 		mcplib.WithString("peer", mcplib.Required(), mcplib.Description("Chat to leave the draft in.")),
 		mcplib.WithString("text", mcplib.Required(), mcplib.Description("Draft text, plain text, at most 4096 UTF-16 units; empty clears the draft.")),
 		mcplib.WithBoolean("overwrite", mcplib.Description("Replace a different unsent draft already in the chat (default false).")),
 		mcplib.WithNumber("topic_id", mcplib.Description("Forum topic to leave the draft in; forum supergroups only.")),
+		mcplib.WithString("confirmation_id", mcplib.Description("Optional one-shot id from prepare_dashboard_action, bound to this exact (peer, text, overwrite, topic_id).")),
 	)
 	handler := func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		startedAt := time.Now()
@@ -117,11 +123,12 @@ Inputs (optional):
 		if peer == "" {
 			return mcplib.NewToolResultError("peer is required"), nil
 		}
-		if strings.TrimSpace(text) == "" {
-			text = ""
-		}
+		text = dashboardDraftText(text)
 		if n := replyTextUnits(text); n > maxReplyText {
 			return mcplib.NewToolResultError(fmt.Sprintf("text must be at most %d UTF-16 units (it is %d; most emoji count as two)", maxReplyText, n)), nil
+		}
+		if refused := s.rejectDashboardConfirmation(ctx, id, "save_draft", peer, stringArg(args, "confirmation_id", ""), HashDashboardAction("save_draft", peer, text, 0, topicID, overwrite), startedAt); refused != nil {
+			return refused, nil
 		}
 		// The send gate without the per-account send_enabled flag: a draft
 		// is delivered to nobody, so the flag that guards delivery does

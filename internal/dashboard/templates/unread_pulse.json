@@ -1,0 +1,49 @@
+{
+  "schema": "tg-dashboard/v1",
+  "id": "unread_pulse",
+  "title": "Пульс непрочитанного",
+  "layout": { "columns": 12, "gap": 12 },
+  "refreshIntervalSec": 60,
+  "dataSources": [
+    { "id": "dialogs", "tool": "list_dialogs", "args": { "limit": 100 } },
+    { "id": "unread", "tool": "get_unread_messages", "args": { "limit": 30 } }
+  ],
+  "tiles": [
+    {
+      "id": "kpi_dialogs",
+      "component": "kpi",
+      "colSpan": 4,
+      "props": { "label": "Чаты с непрочитанным", "value": "@data:dialogs.stats.unread_dialogs" }
+    },
+    {
+      "id": "kpi_messages",
+      "component": "kpi",
+      "colSpan": 4,
+      "props": { "label": "Непрочитанные сообщения", "value": "@data:dialogs.stats.unread_messages" }
+    },
+    {
+      "id": "kpi_mentions",
+      "component": "kpi",
+      "colSpan": 4,
+      "props": { "label": "Упоминания", "value": "@data:dialogs.stats.unread_mentions" }
+    },
+    {
+      "id": "priority",
+      "component": "message_list",
+      "colSpan": 12,
+      "props": { "title": "Сначала личные и группы", "source": "unread" },
+      "actions": [
+        {
+          "action": "mark_read",
+          "label": "Прочитано",
+          "args": { "peer": "@tile:peer", "max_id": "@tile:id" }
+        },
+        {
+          "action": "save_draft",
+          "label": "Черновик",
+          "args": { "peer": "@tile:peer" }
+        }
+      ]
+    }
+  ]
+}

@@ -859,7 +859,12 @@ func TestS2A8_GrantInsertHasOneCaller(t *testing.T) {
 		site(dbFile, "RevokePAPermission"), site(dbFile, "revokePAPermissionsOfConnTx"),
 		site(dbFile, "revokePAPermissionsOfPrincipalTx"),
 	})
-	check("DELETE FROM pa_permissions", literals["delete from pa_permissions"], []useSite{site("internal/db/pa_account.go", "(package)")})
+	// Deleting: the account purge, and the retention statement of the
+	// conversation sweep, which removes only rows that already ended
+	// (TestS2A9_EndedPermissionsAreSwept).
+	check("DELETE FROM pa_permissions", literals["delete from pa_permissions"], []useSite{
+		site("internal/db/pa_account.go", "(package)"), site(dbFile, "(package)"),
+	})
 	// No other file names the table in SQL at all.
 	for _, u := range literals["pa_permissions"] {
 		if u.file != dbFile && u.file != "internal/db/pa_account.go" {

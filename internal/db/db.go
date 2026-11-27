@@ -1192,6 +1192,19 @@ func sqliteSchema() []string {
 			hidden_at DATETIME NOT NULL,
 			PRIMARY KEY (user_id, peer)
 		)`,
+		// Dashboard templates (MCP Apps). One row per custom template for
+		// one account. The body is the validated tg-dashboard/v1 document.
+		// Built-in templates are not stored here. No message text is copied
+		// into this table by the server; the body is the template the
+		// account author saved.
+		`CREATE TABLE IF NOT EXISTS dashboard_templates (
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			template_id TEXT NOT NULL,
+			title TEXT NOT NULL,
+			body TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (user_id, template_id)
+		)`,
 	}
 }
 
@@ -1519,6 +1532,15 @@ func pgSchema() []string {
 			title TEXT NOT NULL DEFAULT '',
 			hidden_at TIMESTAMPTZ NOT NULL,
 			PRIMARY KEY (user_id, peer)
+		)`,
+		// Dashboard templates (MCP Apps). See the sqliteSchema comment.
+		`CREATE TABLE IF NOT EXISTS dashboard_templates (
+			user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			template_id TEXT NOT NULL,
+			title TEXT NOT NULL,
+			body TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (user_id, template_id)
 		)`,
 	}
 }

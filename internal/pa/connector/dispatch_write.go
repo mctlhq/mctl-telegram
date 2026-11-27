@@ -64,6 +64,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -114,6 +115,10 @@ const (
 	ReasonDispatchTimeout   = "dispatch_timeout"
 	// The stale-dispatch sweep resolved a record whose lease ran out.
 	ReasonLeaseExpired = "dispatch_lease_expired"
+	// The stale-dispatch sweep ended a record whose request was never
+	// made: the executor committed the dispatch, did not send, and could
+	// not settle the record itself (S2-C12). Nothing was sent.
+	ReasonNeverSent = "dispatch_never_sent"
 )
 
 // WriteStore is the part of *db.Store the write executor uses.
@@ -176,6 +181,10 @@ type FreshTool struct {
 	// "not lowerable".
 	Lowerable   catalog.Lowerable
 	Constraints *catalog.Constraints
+	// InputSchema is the pin's input schema of the tool, the one whose
+	// hash is SchemaSHA. A lowered dispatch reads the values a string
+	// argument may take from it. A string, so that FreshTool stays comparable.
+	InputSchema string
 }
 
 // FreshSurface fetches a tool's definition with a fresh tools/list at
@@ -211,7 +220,11 @@ type WriteConfig struct {
 	// is sent, by server name (device_recheck.go). A call to a device on
 	// a server without a reader is refused (ReasonNoWritePath).
 	Devices map[string]DeviceLister
-	Metrics Metrics
+	// Scenarios reads a server's scenario right before a call that runs
+	// one is sent, by server name (scenario.go). A scenario call on a
+	// server without a reader is refused (ReasonNoWritePath).
+	Scenarios map[string]ScenarioSteps
+	Metrics   Metrics
 	// CallTimeout bounds token, tools/list, the pre-dispatch transaction
 	// and tools/call of one dispatch; 0 is DefaultCallTimeout.
 	CallTimeout time.Duration
@@ -232,6 +245,9 @@ func NewWriteExecutor(cfg WriteConfig) (*WriteExecutor, error) {
 	for name, ep := range cfg.Endpoints {
 		if ep == nil || ep.Server() != name {
 			return nil, fmt.Errorf("pa connector: write endpoint %q does not serve that name", name)
+		}
+		if cfg.Metrics != nil {
+			cfg.Metrics.PreparePAWriteListingRefusals(name, WriteListingRefusalReasons)
 		}
 	}
 	return &WriteExecutor{cfg: cfg}, nil
@@ -270,6 +286,29 @@ func (w *WriteExecutor) callTimeout() time.Duration {
 		return w.cfg.CallTimeout
 	}
 	return DefaultCallTimeout
+}
+
+// WriteListingRefusalReasons is the closed reason label set of
+// mctl_pa_write_listing_refusals_total: why the fresh tools/list the
+// executor reads for one dispatch (S2-A6) let nothing be sent. The server
+// could not be listed or its listing was unusable (server_unavailable,
+// listing_stale), the tool is not in the listing or not a write the pin
+// allows (not_pinned, no_write_path, unknown_server), it differs from the
+// pin or from what the card bound (tool_changed), or the error is one the
+// executor does not know (internal). The read path counts its own failed
+// listings in mctl_pa_pin_listing_failures_total; a write refused for the
+// same cause is also in mctl_pa_dispatch_total, under a reason it shares
+// with refusals that asked no listing.
+var WriteListingRefusalReasons = []string{
+	ReasonServerUnavailable, ReasonListingStale, ReasonNotPinned, ReasonNoWritePath,
+	ReasonUnknownServer, ReasonToolChanged, ReasonInternal,
+}
+
+// countListingRefusal counts a write that the fresh listing refused.
+func (w *WriteExecutor) countListingRefusal(server, reason string) {
+	if w.cfg.Metrics != nil {
+		w.cfg.Metrics.CountPAWriteListingRefusal(server, reason)
+	}
 }
 
 func (w *WriteExecutor) count(server string, status Status, reason string) {
@@ -490,10 +529,13 @@ func (w *WriteExecutor) run(ctx context.Context, a approval.Approval, reason str
 		Server: a.Server, Tool: a.Tool, Token: token,
 	})
 	if err != nil {
-		return refuse(PinRefusalReason(err), true)
+		reason := PinRefusalReason(err)
+		w.countListingRefusal(a.Server, reason)
+		return refuse(reason, true)
 	}
 	if fresh.SchemaSHA != a.SchemaSHA || fresh.DescriptionSHA != a.DescriptionSHA ||
 		fresh.AnnotationSHA != a.AnnotationSHA || fresh.Class != a.Class || fresh.Tier != catalog.TierApprove {
+		w.countListingRefusal(a.Server, ReasonToolChanged)
 		return refuse(ReasonToolChanged, true)
 	}
 	base.Tier = fresh.Tier
@@ -501,8 +543,22 @@ func (w *WriteExecutor) run(ctx context.Context, a approval.Approval, reason str
 		// The pin, asked again here: a tool it does not make lowerable,
 		// or a call that does not meet the tool's condition, is not sent
 		// without a card whatever the caller decided.
-		pinned := catalog.PinnedTool{Class: fresh.Class, Lowerable: fresh.Lowerable, Constraints: fresh.Constraints}
+		pinned := catalog.PinnedTool{Class: fresh.Class, Lowerable: fresh.Lowerable, Constraints: fresh.Constraints, InputSchema: json.RawMessage(fresh.InputSchema)}
 		if met, err := loweringCondition(pinned, low.Args); !lowerable(a.Tool, pinned) || err != nil || !met {
+			return refuse(ReasonNotLowerable, false)
+		}
+		// No card stands behind the call, so the checks a card's value
+		// passed are made here again, on the bytes that will be sent and
+		// against the pin as just read: the spelling and the range of
+		// every value, the arguments the tool may carry and the device
+		// id. The caller ran them (precheckDeviceWrite); the executor
+		// does not take its word for it (S2-D2).
+		if _, ref := precheckDeviceWrite(a.Tool, pinned, low.Args); ref != nil {
+			// A value the pin does not allow is named as that; any other
+			// failed check is a call this path does not carry.
+			if ref.reason == ReasonValueNotAllowed {
+				return refuse(ReasonValueNotAllowed, false)
+			}
 			return refuse(ReasonNotLowerable, false)
 		}
 	}
@@ -558,8 +614,52 @@ func (w *WriteExecutor) run(ctx context.Context, a approval.Approval, reason str
 		}
 	}
 
+	// A scenario's steps are read again in the same place and for the
+	// same reason: what runs must be what the card listed (S2-D6;
+	// scenario.go).
+	if _, ok := scenarioTools[a.Tool]; ok {
+		if r := w.recheckScenario(cctx, a, token, c.args, c.detail); r != "" {
+			if w.settleUnsent(ctx, a, dispatchID) {
+				w.record(ctx, base, StatusRefused, r, nil)
+			}
+			return WriteOutcome{Status: StatusRefused, Reason: r, DispatchID: dispatchID}
+		}
+	}
+
+	// A call cancelled by now is refused before the record is marked, so
+	// that the record still says "unsent" if it cannot be settled here.
 	if r := cancelRefusal(ctx, cctx); r != "" {
-		// Cancelled between the commit and the request: nothing was sent,
+		if w.settleUnsent(ctx, a, dispatchID) {
+			w.record(ctx, base, StatusRefused, r, nil)
+		}
+		return WriteOutcome{Status: StatusRefused, Reason: r, DispatchID: dispatchID}
+	}
+
+	// The record is marked as sent in a statement of its own, and only
+	// then is the request made (S2-C12). A record the mark did not reach
+	// was not sent, and the stale sweep says so instead of "unknown". The
+	// statement has its own deadline: the device read above may have used
+	// up the one the local writes started with.
+	mctx, mcancel := context.WithTimeout(context.WithoutCancel(ctx), writeSettleTimeout)
+	markErr := w.cfg.Store.MarkPADispatchSent(mctx, principal, dispatchID, w.now())
+	mcancel()
+	switch err := markErr; {
+	case errors.Is(err, approval.ErrDispatchStale):
+		// The lease ran out and the sweep ended the record, or is about
+		// to: it writes the one result entry and the notice. The record
+		// has no mark, so the reason is the one the sweep gives it.
+		w.count(a.Server, StatusRefused, ReasonNeverSent)
+		return WriteOutcome{Status: StatusRefused, Reason: ReasonNeverSent, DispatchID: dispatchID}
+	case err != nil:
+		slog.Error("pa write: dispatch not marked as sent; call refused", "server", a.Server, "err", err)
+		if w.settleUnsent(ctx, a, dispatchID) {
+			w.record(ctx, base, StatusRefused, ReasonStateUnreadable, nil)
+		}
+		return WriteOutcome{Status: StatusRefused, Reason: ReasonStateUnreadable, DispatchID: dispatchID}
+	}
+
+	if r := cancelRefusal(ctx, cctx); r != "" {
+		// Cancelled between the mark and the request: nothing was sent,
 		// and the record says so rather than "unknown".
 		if w.settleUnsent(ctx, a, dispatchID) {
 			w.record(ctx, base, StatusRefused, r, nil)
@@ -919,8 +1019,8 @@ func (w *WriteExecutor) burn(ctx context.Context, a approval.Approval) {
 // out" notice, if the commit happened; the approval as refused if it did
 // not. It reports whether the caller may append the refused result entry.
 // It may not when a dispatch record may still be dispatching: the stale
-// sweep then resolves it (outcome_unknown) and writes the one result entry
-// itself.
+// sweep then ends it and writes the one result entry itself, as refused
+// (dispatch_never_sent) while the record does not carry the sent mark.
 func (w *WriteExecutor) settleUnsent(ctx context.Context, a approval.Approval, dispatchID string) bool {
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeSettleTimeout)
 	defer cancel()
@@ -958,19 +1058,21 @@ func (w *WriteExecutor) settleUnsent(ctx context.Context, a approval.Approval, d
 	return true
 }
 
-// StaleDispatchStore is the ledger's restart sweep (*db.Store). It moves
-// every dispatching record whose lease ran out to outcome_unknown and
-// queues the principal's notice in the same transaction.
+// StaleDispatchStore is the ledger's restart sweep (*db.Store). It ends
+// every dispatching record whose lease ran out, as refused when its
+// request was never made and as outcome_unknown otherwise, and queues the
+// principal's notice in the same transaction.
 type StaleDispatchStore interface {
 	SweepStalePADispatches(ctx context.Context, now time.Time) ([]approval.Dispatch, error)
 }
 
 // StaleWriteSweeper owns the dispatch records no executor finished: a
 // crash between the pre-dispatch commit and the result, or a result that
-// could not be written (threat model T2, S2-C12). The store resolves them
-// to outcome_unknown, never to anything dispatchable, and queues the "may
-// or may not have happened" notice; the sweeper appends the audit result
-// entry each one still lacks.
+// could not be written (threat model T2, S2-C12). The store resolves them,
+// never to anything dispatchable: a record whose request may have been
+// made to outcome_unknown, with the "may or may not have happened" notice,
+// and a record that was never sent to refused, with the "not carried out"
+// notice. The sweeper appends the audit result entry each one still lacks.
 type StaleWriteSweeper struct {
 	Store StaleDispatchStore
 	// Executor supplies the audit sink, its alert hook and the clock.
@@ -996,6 +1098,12 @@ func (s StaleWriteSweeper) SweepOnce(ctx context.Context) (int, error) {
 		// The record keeps hashes and ids only. The pre-dispatch entry
 		// carries the call's tier, class and taint under the same call id;
 		// here the taint is the conservative one.
+		status, reason := StatusOutcomeUnknown, ReasonLeaseExpired
+		if d.Status == approval.DispatchRefused {
+			// The store ends a record as refused only when its request
+			// was never made.
+			status, reason = StatusRefused, ReasonNeverSent
+		}
 		s.Executor.appendDetached(ctx, Entry{
 			CallID:            d.ID,
 			Phase:             PhaseResult,
@@ -1007,13 +1115,23 @@ func (s StaleWriteSweeper) SweepOnce(ctx context.Context) (int, error) {
 			ArgsSHA256:        d.ArgsSHA,
 			Taint:             TaintExternal,
 			ApprovalID:        recordable(d.ApprovalID, invalidMarker),
-			Approver:          strconv.FormatInt(d.Principal, 10),
-			Status:            StatusOutcomeUnknown,
-			Reason:            ReasonLeaseExpired,
+			Approver:          staleApprover(d),
+			Status:            status,
+			Reason:            reason,
 			At:                s.Executor.now(),
 		})
 	}
 	return len(moved), nil
+}
+
+// staleApprover is the approver of a record the sweep ended, read from
+// the ledger: the standing permission of a lowered call, which no
+// principal approved, and the principal otherwise.
+func staleApprover(d approval.Dispatch) string {
+	if d.PermissionID != "" {
+		return recordable(permissionApprover(d.PermissionID), invalidMarker)
+	}
+	return strconv.FormatInt(d.Principal, 10)
 }
 
 // Run sweeps every interval (StaleWriteSweepInterval if 0) until ctx ends.
@@ -1027,7 +1145,7 @@ func (s StaleWriteSweeper) Run(ctx context.Context, interval time.Duration) {
 		if n, err := s.SweepOnce(ctx); err != nil {
 			slog.Warn("pa stale write sweep failed", "err", err)
 		} else if n > 0 {
-			slog.Warn("pa stale write sweep: dispatches resolved to outcome_unknown", "records", n)
+			slog.Warn("pa stale write sweep: dispatches whose lease ran out were ended", "records", n)
 		}
 		select {
 		case <-ctx.Done():

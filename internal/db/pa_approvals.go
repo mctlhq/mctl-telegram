@@ -104,6 +104,22 @@ func migratePAApprovals(ctx context.Context, dbConn migrateDB, pg bool) error {
 			return fmt.Errorf("migrate pa approvals: %w", err)
 		}
 	}
+	// Columns added after the tables shipped (#1320 slice P2-S15a). Their
+	// default is what a row written before them, or by a replica that
+	// does not know them yet, means: no standing permission, and a send
+	// state nobody recorded.
+	for _, c := range []struct{ table, column string }{
+		// The standing permission a lowered call stands on (S2-A9).
+		{"pa_approvals", "permission_id"},
+		{"pa_dispatches", "permission_id"},
+		// approval.SendState: whether the request was made (S2-C12).
+		{"pa_dispatches", "send_state"},
+	} {
+		if err := addColumnIfMissing(ctx, dbConn, pg, c.table, c.column,
+			`TEXT NOT NULL DEFAULT ''`, `TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("migrate pa approvals: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -114,7 +130,7 @@ func approvalUnreadable(op string, err error) error {
 // paApprovalCols never includes sealed_args: only the consume returns it.
 const paApprovalCols = `principal, id, approve_cb_id, cancel_cb_id, connection_id, authority_revision,
 	server, tool, class, schema_sha, description_sha, annotation_sha, args_sha, conversation_id, job_id,
-	idempotency_key, status, approver, created_at_ms, expires_at_ms, finished_at_ms`
+	idempotency_key, status, approver, created_at_ms, expires_at_ms, finished_at_ms, permission_id`
 
 // scanPAApproval reads one row. sealed, when not nil, receives the
 // sealed_args column that the caller appended to paApprovalCols. A status
@@ -128,7 +144,7 @@ func scanPAApproval(r paRowScanner, sealed *[]byte) (approval.Approval, error) {
 	)
 	dest := []any{&a.Principal, &a.ID, &a.ApproveCallbackID, &a.CancelCallbackID, &a.ConnectionID, &a.AuthorityRevision,
 		&a.Server, &a.Tool, &class, &a.SchemaSHA, &a.DescriptionSHA, &a.AnnotationSHA, &a.ArgsSHA, &a.ConversationID, &a.JobID,
-		&a.IdempotencyKey, &status, &a.Approver, &createdMS, &expMS, &doneMS}
+		&a.IdempotencyKey, &status, &a.Approver, &createdMS, &expMS, &doneMS, &a.PermissionID}
 	if sealed != nil {
 		dest = append(dest, sealed)
 	}
@@ -150,24 +166,26 @@ func scanPAApproval(r paRowScanner, sealed *[]byte) (approval.Approval, error) {
 }
 
 const paDispatchCols = `principal, id, approval_id, connection_id, authority_revision, server, tool, args_sha,
-	idempotency_key, status, lease_until_ms, created_at_ms, finished_at_ms`
+	idempotency_key, status, lease_until_ms, created_at_ms, finished_at_ms, send_state, permission_id`
 
 func scanPADispatch(r paRowScanner) (approval.Dispatch, error) {
 	var (
 		d                          approval.Dispatch
-		status                     string
+		status, send               string
 		leaseMS, createdMS, doneMS int64
 	)
 	if err := r.Scan(&d.Principal, &d.ID, &d.ApprovalID, &d.ConnectionID, &d.AuthorityRevision, &d.Server, &d.Tool,
-		&d.ArgsSHA, &d.IdempotencyKey, &status, &leaseMS, &createdMS, &doneMS); err != nil {
+		&d.ArgsSHA, &d.IdempotencyKey, &status, &leaseMS, &createdMS, &doneMS, &send, &d.PermissionID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return approval.Dispatch{}, approval.ErrNotFound
 		}
 		return approval.Dispatch{}, approvalUnreadable("scan dispatch", err)
 	}
-	d.Status = approval.DispatchStatus(status)
-	if !d.Status.Valid() || d.Principal <= 0 || d.ID == "" || d.IdempotencyKey == "" {
-		return approval.Dispatch{}, fmt.Errorf("%w: dispatch row has an invalid status or key", approval.ErrUnreadable)
+	d.Status, d.Send = approval.DispatchStatus(status), approval.SendState(send)
+	// A send state this build does not know is unreadable, never "unsent":
+	// that reading is what lets the sweep say nothing was sent.
+	if !d.Status.Valid() || !d.Send.Valid() || d.Principal <= 0 || d.ID == "" || d.IdempotencyKey == "" {
+		return approval.Dispatch{}, fmt.Errorf("%w: dispatch row has an invalid status, send state or key", approval.ErrUnreadable)
 	}
 	d.CreatedAt = time.UnixMilli(createdMS).UTC()
 	if leaseMS > 0 {
@@ -193,13 +211,37 @@ func (s *Store) CreatePAApproval(ctx context.Context, tx *sql.Tx, a approval.App
 		return err
 	}
 	createdMS := a.CreatedAt.UnixMilli()
+	// The connection row is locked until this transaction ends, by an
+	// update that changes nothing, as InsertPAPermission does (S2-C9). A
+	// transition that does not hold the principal lock (the refresh
+	// flight, an expiry) then either committed first, and the update finds
+	// no row, or waits for this transaction and cancels the approval it
+	// can now see. Without it such a transition could commit between the
+	// read below and this insert becoming visible, and the approval would
+	// stay pending on a connection that ended: refused at the consume, but
+	// never cancelled and never reported. On SQLite the statement is a
+	// no-op under the write lock the transaction holds.
+	held, err := tx.ExecContext(ctx,
+		`UPDATE pa_connections SET authority_revision = authority_revision
+		  WHERE principal = $1 AND id = $2 AND state = $3 AND authority_revision = $4 AND server = $5`,
+		a.Principal, a.ConnectionID, string(connection.StateActive), a.AuthorityRevision, a.Server)
+	if err != nil {
+		return fmt.Errorf("create pa approval: lock connection: %w", err)
+	}
+	if n, err := held.RowsAffected(); err != nil {
+		return approvalUnreadable("create approval: lock connection: rows affected", err)
+	} else if n != 1 {
+		return fmt.Errorf("%w: connection %s", approval.ErrBinding, a.ConnectionID)
+	}
 	res, err := tx.ExecContext(ctx,
 		`INSERT INTO pa_approvals(principal, id, approve_cb_id, cancel_cb_id, connection_id, authority_revision,
 			server, tool, class, schema_sha, description_sha, annotation_sha, args_sha, sealed_args,
-			conversation_id, job_id, idempotency_key, status, approver, created_at_ms, expires_at_ms, updated_at_ms)
+			conversation_id, job_id, idempotency_key, status, approver, created_at_ms, expires_at_ms, updated_at_ms,
+			permission_id)
 		 SELECT cv.principal, $1, $2, $3, cn.id, cn.authority_revision,
 			$4, $5, $6, $7, $8, $9, $10, $11,
-			cv.id, $12, $13, $14, 0, $15, $16, $17
+			cv.id, $12, $13, $14, 0, $15, $16, $17,
+			$25
 		 FROM pa_conversations cv JOIN pa_connections cn ON cn.principal = cv.principal
 		 WHERE cv.principal = $18 AND cv.id = $19 AND cv.closed_at_ms = 0 AND cv.expires_at_ms > $20
 		   AND cn.id = $21 AND cn.state = $22 AND cn.authority_revision = $23 AND cn.server = $24`,
@@ -207,7 +249,8 @@ func (s *Store) CreatePAApproval(ctx context.Context, tx *sql.Tx, a approval.App
 		a.Server, a.Tool, string(a.Class), a.SchemaSHA, a.DescriptionSHA, a.AnnotationSHA, a.ArgsSHA, a.SealedArgs,
 		a.JobID, a.IdempotencyKey, string(approval.StatusPending), createdMS, a.CreatedAt.Add(approval.TTL).UnixMilli(), createdMS,
 		a.Principal, a.ConversationID, createdMS,
-		a.ConnectionID, string(connection.StateActive), a.AuthorityRevision, a.Server)
+		a.ConnectionID, string(connection.StateActive), a.AuthorityRevision, a.Server,
+		a.PermissionID)
 	if err != nil {
 		return fmt.Errorf("create pa approval: %w", err)
 	}
@@ -316,7 +359,8 @@ func (s *Store) ApprovePAApproval(ctx context.Context, tx *sql.Tx, principal int
 	}
 	nowMS := now.UnixMilli()
 	a, err := scanPAApproval(tx.QueryRowContext(ctx,
-		`UPDATE pa_approvals SET status = $1, approver = principal, updated_at_ms = $2
+		`UPDATE pa_approvals SET status = $1,
+			approver = CASE WHEN permission_id = '' THEN principal ELSE 0 END, updated_at_ms = $2
 		 WHERE principal = $3 AND id = $4 AND status = $5 AND expires_at_ms > $2
 		 RETURNING `+paApprovalCols,
 		string(approval.StatusApproved), nowMS, principal, id, string(approval.StatusPending)), nil)
@@ -552,11 +596,12 @@ func (s *Store) ConsumePAApproval(ctx context.Context, tx *sql.Tx, req approval.
 	leaseMS := req.Now.Add(req.Lease).UnixMilli()
 	res, err := tx.ExecContext(ctx,
 		`INSERT INTO pa_dispatches(principal, id, approval_id, connection_id, authority_revision, server, tool,
-			args_sha, idempotency_key, status, lease_until_ms, created_at_ms, updated_at_ms)
-		 VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			args_sha, idempotency_key, status, lease_until_ms, created_at_ms, updated_at_ms, send_state, permission_id)
+		 VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		 ON CONFLICT (idempotency_key) DO NOTHING`,
 		a.Principal, req.DispatchID, a.ID, a.ConnectionID, a.AuthorityRevision, a.Server, a.Tool,
-		a.ArgsSHA, a.IdempotencyKey, string(approval.DispatchDispatching), leaseMS, nowMS, nowMS)
+		a.ArgsSHA, a.IdempotencyKey, string(approval.DispatchDispatching), leaseMS, nowMS, nowMS,
+		string(approval.SendUnsent), a.PermissionID)
 	if err != nil {
 		return approval.Approval{}, approval.Dispatch{}, approvalUnreadable("consume: dispatch record", err)
 	}
@@ -576,6 +621,7 @@ func (s *Store) ConsumePAApproval(ctx context.Context, tx *sql.Tx, req approval.
 		Principal: a.Principal, ID: req.DispatchID, ApprovalID: a.ID, ConnectionID: a.ConnectionID,
 		AuthorityRevision: a.AuthorityRevision, Server: a.Server, Tool: a.Tool, ArgsSHA: a.ArgsSHA,
 		IdempotencyKey: a.IdempotencyKey, Status: approval.DispatchDispatching,
+		Send: approval.SendUnsent, PermissionID: a.PermissionID,
 		LeaseUntil: time.UnixMilli(leaseMS).UTC(), CreatedAt: time.UnixMilli(nowMS).UTC(),
 	}, nil
 }
@@ -585,6 +631,33 @@ func (s *Store) ConsumePAApproval(ctx context.Context, tx *sql.Tx, req approval.
 const finishPAApprovalsOfDispatches = `UPDATE pa_approvals SET status = 'done', finished_at_ms = $1, updated_at_ms = $1
 	WHERE status = 'dispatching' AND EXISTS (SELECT 1 FROM pa_dispatches d
 		WHERE d.principal = pa_approvals.principal AND d.approval_id = pa_approvals.id AND d.status <> 'dispatching')`
+
+// MarkPADispatchSent implements approval.Store. One statement, committed
+// before the request: the row lock orders it with the stale sweep, so
+// either the mark is on the row the sweep reads or the sweep ended the
+// record first and the mark, and with it the request, is refused.
+func (s *Store) MarkPADispatchSent(ctx context.Context, principal int64, dispatchID string, now time.Time) error {
+	if principal <= 0 || dispatchID == "" || now.IsZero() {
+		return fmt.Errorf("%w: mark dispatch sent", approval.ErrInvalid)
+	}
+	nowMS := now.UnixMilli()
+	res, err := s.DB.ExecContext(ctx,
+		`UPDATE pa_dispatches SET send_state = $1, updated_at_ms = $2
+		  WHERE principal = $3 AND id = $4 AND status = $5 AND send_state = $6 AND lease_until_ms > $2`,
+		string(approval.SendSent), nowMS, principal, dispatchID,
+		string(approval.DispatchDispatching), string(approval.SendUnsent))
+	if err != nil {
+		return approvalUnreadable("mark dispatch sent", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return approvalUnreadable("mark dispatch sent: rows affected", err)
+	}
+	if n != 1 {
+		return approval.ErrDispatchStale
+	}
+	return nil
+}
 
 // FinishPADispatch implements approval.Store.
 func (s *Store) FinishPADispatch(ctx context.Context, tx *sql.Tx, principal int64, dispatchID string, status approval.DispatchStatus, now time.Time) (approval.Dispatch, error) {
@@ -616,10 +689,13 @@ func (s *Store) FinishPADispatch(ctx context.Context, tx *sql.Tx, principal int6
 }
 
 // SweepStalePADispatches implements approval.Store: the restart sweep of
-// T2. The only status it writes is outcome_unknown, and the only approval
-// status done: a crashed dispatch is never made dispatchable again. A
-// record whose lease has not run out belongs to a call that may still be
-// in flight on another replica, and is left alone.
+// T2. It writes two statuses and the approval status done, so a crashed
+// dispatch is never made dispatchable again: refused for a record whose
+// request was never made (send_state is still 'unsent'; MarkPADispatchSent
+// can no longer succeed on it once this statement has run), and
+// outcome_unknown for every other, a record without a send state
+// included. A record whose lease has not run out belongs to a call that
+// may still be in flight on another replica, and is left alone.
 func (s *Store) SweepStalePADispatches(ctx context.Context, now time.Time) ([]approval.Dispatch, error) {
 	if now.IsZero() {
 		return nil, fmt.Errorf("%w: sweep dispatches", approval.ErrInvalid)
@@ -631,10 +707,12 @@ func (s *Store) SweepStalePADispatches(ctx context.Context, now time.Time) ([]ap
 	defer func() { _ = tx.Rollback() }()
 	nowMS := now.UnixMilli()
 	rows, err := tx.QueryContext(ctx,
-		`UPDATE pa_dispatches SET status = $1, lease_until_ms = 0, finished_at_ms = $2, updated_at_ms = $2
+		`UPDATE pa_dispatches SET status = CASE WHEN send_state = $4 THEN $5 ELSE $1 END,
+			lease_until_ms = 0, finished_at_ms = $2, updated_at_ms = $2
 		 WHERE status = $3 AND lease_until_ms <= $2
 		 RETURNING `+paDispatchCols,
-		string(approval.DispatchOutcomeUnknown), nowMS, string(approval.DispatchDispatching))
+		string(approval.DispatchOutcomeUnknown), nowMS, string(approval.DispatchDispatching),
+		string(approval.SendUnsent), string(approval.DispatchRefused))
 	if err != nil {
 		return nil, approvalUnreadable("sweep dispatches", err)
 	}
@@ -656,7 +734,8 @@ func (s *Store) SweepStalePADispatches(ctx context.Context, now time.Time) ([]ap
 	if _, err := tx.ExecContext(ctx, finishPAApprovalsOfDispatches, nowMS); err != nil {
 		return nil, approvalUnreadable("sweep dispatches: approvals", err)
 	}
-	// The principal is owed the same notice a call that timed out gets,
+	// The principal is owed the notice of what the sweep decided, the one
+	// a call that timed out gets or the one of a call that was not sent,
 	// written with the state change that owes it (P2-S3). The caller
 	// appends the audit result entries after the commit.
 	if err := enqueueStaleWriteNotices(ctx, tx, out, nowMS); err != nil {

@@ -726,3 +726,26 @@ func TestScopeCeiling_GraceEmptyRefusalIsLogged(t *testing.T) {
 		t.Fatalf("grace-replay empty refusal not logged with client_id, family_id and path:\n%s", out)
 	}
 }
+
+func TestWorkspaceEndpointOAuthCeilingAndIdentity(t *testing.T) {
+	reads := strings.Fields(ceilingTwoRead)
+	srv := newTestServer(t, func(c *Config) {
+		c.EndpointScopeCeiling = reads
+		c.EndpointTelegramID = danaTelegramID
+	})
+	origin := tokenOrigin{ClientID: "claude.ai", RedirectURIKnown: true}
+	adminGroups := []string{"platform-admins", "admins"}
+	groups, scopes, bounded := srv.applyClientScopeCeiling(origin.ClientID, origin.RedirectURI, adminGroups, adminEntitlement)
+	if !bounded || len(groups) != 0 || strings.Join(scopes, " ") != ceilingTwoRead {
+		t.Fatalf("workspace grant groups=%v scopes=%v bounded=%v", groups, scopes, bounded)
+	}
+	if _, err := srv.mintAccessToken(origin, danaTelegramID, "dana_tg", adminGroups, adminEntitlement); !errors.Is(err, errScopeCeilingViolated) {
+		t.Fatalf("unbounded mint error = %v", err)
+	}
+	if _, err := srv.mintAccessToken(origin, 0, "", groups, scopes); err == nil {
+		t.Fatal("minted token for an identity outside the workspace")
+	}
+	if _, err := srv.mintAccessToken(origin, danaTelegramID, "dana_tg", groups, scopes); err != nil {
+		t.Fatalf("bounded mint failed: %v", err)
+	}
+}

@@ -152,7 +152,8 @@ func (c LoweredCall) covered() permissions.Call {
 
 // loweredTarget reads the device id and the arguments of a device write
 // from its canonical bytes, for the comparison with a permission. It
-// checks no value against the pin: the caller's checks did. ok is false
+// checks no value against the pin: the executor runs precheckDeviceWrite
+// on the same bytes for that (dispatch_write.go; S2-D2). ok is false
 // for a tool that is not a device write, bytes that are not an object, a
 // missing device, an integer that is not in its one plain spelling and a
 // string argument that is not a string.
@@ -287,6 +288,9 @@ func (w *WriteExecutor) lower(ctx context.Context, tx *sql.Tx, a *approval.Appro
 	if p.ID != low.PermissionID || conn.AuthorityRevision != a.AuthorityRevision || !p.Covers(low.covered(), now) {
 		return ReasonPermissionGone
 	}
+	// The ledger row names the permission, and so does the dispatch
+	// record the consume writes from it: nobody approved this call.
+	a.PermissionID = p.ID
 	if err := w.cfg.Store.CreatePAApproval(ctx, tx, *a); err != nil {
 		if errors.Is(err, approval.ErrBinding) {
 			return ReasonConnectionUnbound

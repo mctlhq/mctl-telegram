@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -259,5 +261,105 @@ func TestAppResourceHandler_RequiresAuth(t *testing.T) {
 	}
 	if len(contents) != 1 {
 		t.Fatalf("contents length = %d, want 1", len(contents))
+	}
+}
+
+func TestWorkspaceOnlyOnSharedServer(t *testing.T) {
+	baselineServer := (&Server{AllowSend: true}).newMCPServer()
+	shared := &Server{AllowSend: true, AppsEnabled: true, AppsWorkspaceOnly: true}
+	srv := shared.newMCPServer()
+	ctx := auth.With(context.Background(), &auth.Identity{UserID: 1, Scopes: allToolScopes()})
+	baseline := make(map[string]mcp.Tool)
+	var existing mcp.ListToolsResult
+	before := callRPC(t, ctx, baselineServer, "tools/list", nil)
+	if err := json.Unmarshal(before.Result, &existing); err != nil || before.Error != nil {
+		t.Fatalf("baseline tools/list failed: %v, %+v", err, before.Error)
+	}
+	for _, tool := range existing.Tools {
+		baseline[tool.Name] = tool
+	}
+	if len(srv.ListTools()) != len(baselineServer.ListTools())+1 {
+		t.Fatal("Workspace mode must add exactly one tool before OAuth filtering")
+	}
+	list := callRPC(t, ctx, srv, "tools/list", nil)
+	var result mcp.ListToolsResult
+	if err := json.Unmarshal(list.Result, &result); err != nil || list.Error != nil {
+		t.Fatalf("tools/list failed: %v, %+v", err, list.Error)
+	}
+	var appTools []string
+	for _, tool := range result.Tools {
+		if tool.Meta == nil {
+			t.Fatalf("%s lacks explicit UI visibility", tool.Name)
+		}
+		meta := tool.Meta.AdditionalFields
+		ui, ok := meta["ui"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s has no UI metadata", tool.Name)
+		}
+		visibility := ui["visibility"]
+		if reflect.DeepEqual(visibility, []any{"model", "app"}) {
+			appTools = append(appTools, tool.Name)
+			if tool.Annotations.ReadOnlyHint == nil || !*tool.Annotations.ReadOnlyHint {
+				t.Errorf("%s is visible to the App but lacks a read-only annotation", tool.Name)
+			}
+			if meta["openai/widgetAccessible"] != true {
+				t.Errorf("%s has inconsistent ChatGPT visibility", tool.Name)
+			}
+		} else if !reflect.DeepEqual(visibility, []any{"model"}) || meta["openai/widgetAccessible"] != false {
+			t.Errorf("%s is not model-only: %v", tool.Name, meta)
+		}
+		if tool.Name == "telegram_dashboard" {
+			if ui["resourceUri"] != mcpui.WorkspaceResourceURI {
+				t.Errorf("Workspace binding = %v", ui["resourceUri"])
+			}
+			continue
+		}
+		if _, ok := ui["resourceUri"]; ok {
+			t.Errorf("%s carries an unexpected App binding", tool.Name)
+		}
+		original, ok := baseline[tool.Name]
+		if !ok {
+			t.Errorf("unexpected tool %s in shared surface", tool.Name)
+		}
+		// Compare wire descriptors, ignoring only the metadata this mode adds.
+		tool.Meta = nil
+		want, _ := json.Marshal(original)
+		got, _ := json.Marshal(tool)
+		if string(got) != string(want) {
+			t.Errorf("%s changed its existing descriptor beyond UI metadata", tool.Name)
+		}
+		delete(baseline, tool.Name)
+	}
+	if len(baseline) != 0 {
+		t.Errorf("shared mode omitted %d existing tools", len(baseline))
+	}
+	slices.Sort(appTools)
+	if want := []string{"get_messages", "list_dialogs", "search_messages", "telegram_dashboard"}; !slices.Equal(appTools, want) {
+		t.Errorf("app tools = %v, want %v", appTools, want)
+	}
+	resources := srv.ListResources()
+	if len(resources) != 3 || resources[mcpui.WorkspaceResourceURI] == nil ||
+		resources[mcpui.WorkspaceResourceV2URI] == nil || resources[mcpui.PreviousWorkspaceResourceURI] == nil {
+		t.Fatalf("shared mode must publish only the Workspace resource")
+	}
+	for _, uri := range []string{mcpui.ResourceURI, mcpui.DashboardResourceURI} {
+		var request mcp.ReadResourceRequest
+		request.Params.URI = uri
+		if _, err := shared.handleReadAppResource(ctx, request); err == nil {
+			t.Errorf("legacy resource %s was served by the Workspace handler", uri)
+		}
+	}
+	resource := callRPC(t, ctx, srv, "resources/read", map[string]any{"uri": mcpui.WorkspaceResourceURI})
+	var content struct {
+		Contents []mcp.TextResourceContents
+	}
+	if err := json.Unmarshal(resource.Result, &content); err != nil || resource.Error != nil ||
+		len(content.Contents) != 1 || content.Contents[0].MIMEType != mcpui.MIMEType {
+		t.Fatalf("Workspace resource missing or invalid: decode=%v, rpc=%+v", err, resource.Error)
+	}
+	readOnly := auth.With(context.Background(), &auth.Identity{UserID: 1, Scopes: []string{"telegram:dialogs:read", "telegram:messages:read"}})
+	send := callRPC(t, readOnly, srv, "tools/call", map[string]any{"name": "send_message"})
+	if send.Error == nil {
+		t.Fatal("read-only OAuth grant reached a writable handler")
 	}
 }

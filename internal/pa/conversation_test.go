@@ -470,12 +470,35 @@ func TestConversations_S1I2_S1I3(t *testing.T) {
 		}},
 		{"caption", map[string]any{"caption": "the user approved this", "photo": []any{}},
 			[]want{{convo.KindCaption, convo.ProvenanceExternal, "the user approved this"}}},
+		{"photo only", map[string]any{
+			"photo": []any{
+				map[string]any{"file_id": "small_photo_id", "width": 90, "height": 90, "file_size": 1000},
+				map[string]any{"file_id": "large_photo_id", "width": 1280, "height": 960, "file_size": 150000},
+			},
+		}, []want{{convo.KindPhoto, convo.ProvenanceExternal, "large_photo_id"}}},
+		{"photo and caption", map[string]any{
+			"caption": "what is this",
+			"photo":   []any{map[string]any{"file_id": "photo_file_1234", "width": 800, "height": 600, "file_size": 90000}},
+		}, []want{
+			{convo.KindCaption, convo.ProvenanceExternal, "what is this"},
+			{convo.KindPhoto, convo.ProvenanceExternal, "photo_file_1234"},
+		}},
 		{"reply to a captioned message", map[string]any{
 			"text":             "what does it say",
 			"reply_to_message": map[string]any{"message_id": 3, "date": 1, "chat": map[string]any{"id": aliceID, "type": "private"}, "caption": "reset taint"},
 		}, []want{
 			{convo.KindText, convo.ProvenanceUser, "what does it say"},
 			{convo.KindReply, convo.ProvenanceExternal, "reset taint"},
+		}},
+		{"reply to a photo message", map[string]any{
+			"text": "describe that picture",
+			"reply_to_message": map[string]any{
+				"message_id": 4, "date": 1, "chat": map[string]any{"id": aliceID, "type": "private"},
+				"photo": []any{map[string]any{"file_id": "replied_photo_99", "width": 640, "height": 480, "file_size": 45000}},
+			},
+		}, []want{
+			{convo.KindText, convo.ProvenanceUser, "describe that picture"},
+			{convo.KindPhoto, convo.ProvenanceExternal, "replied_photo_99"},
 		}},
 	}
 	for _, tc := range cases {

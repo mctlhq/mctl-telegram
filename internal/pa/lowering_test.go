@@ -89,7 +89,7 @@ func (f *pinFresh) FreshTool(_ context.Context, req connector.FreshRequest) (con
 	return connector.FreshTool{
 		SchemaSHA: shaHex([]byte("schema")), DescriptionSHA: shaHex([]byte("description")),
 		AnnotationSHA: shaHex([]byte("annotations")), Tier: catalog.TierApprove, Class: class,
-		Lowerable: lowerable, Constraints: pt.Constraints,
+		Lowerable: lowerable, Constraints: pt.Constraints, InputSchema: string(pt.InputSchema),
 	}, nil
 }
 
@@ -104,11 +104,19 @@ type lowerEP struct {
 	mu    sync.Mutex
 	tools []string
 	calls [][]byte
+	// onCall runs while a call is on the wire.
+	onCall func()
 }
 
 func (f *lowerEP) Server() string { return "tg" }
 
 func (f *lowerEP) CallToolExact(_ context.Context, tok connection.Secret, tool string, args []byte) ([]byte, error) {
+	f.mu.Lock()
+	onCall := f.onCall
+	f.mu.Unlock()
+	if onCall != nil {
+		onCall()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.tools = append(f.tools, tool)
@@ -406,6 +414,11 @@ func (e *lowerEnv) lowered(name, id, tool, args string) {
 	if len(made) != 1 || made[0].status != "done" {
 		e.t.Fatalf("%s: ledger rows of the call %+v", name, made)
 	}
+	// The ledger names the permission, on both rows, and no approver:
+	// nobody tapped (S2-A9).
+	if perm, approver := e.ledgerPermission(made[0].id); perm != [2]string{id, id} || approver != 0 {
+		e.t.Fatalf("%s: ledger rows carry permission %v and approver %d, want %s on both and no approver", name, perm, approver, id)
+	}
 	audit := e.auditOf(tool)
 	if len(audit) < 2 {
 		e.t.Fatalf("%s: audit %+v", name, audit)
@@ -430,6 +443,68 @@ func (e *lowerEnv) lowered(name, id, tool, args string) {
 	if e.tainted() {
 		e.t.Fatalf("%s: a lowered call tainted the conversation", name)
 	}
+}
+
+// ledgerPermission reads what the ledger says stood behind a call: the
+// permission on the approval row and on its dispatch record, and the
+// approver of the approval row.
+func (e *lowerEnv) ledgerPermission(approvalID string) (perm [2]string, approver int64) {
+	e.t.Helper()
+	if err := e.store.DB.QueryRow(`SELECT permission_id, approver FROM pa_approvals WHERE principal = $1 AND id = $2`,
+		alice, approvalID).Scan(&perm[0], &approver); err != nil {
+		e.t.Fatal(err)
+	}
+	if err := e.store.DB.QueryRow(`SELECT permission_id FROM pa_dispatches WHERE principal = $1 AND approval_id = $2`,
+		alice, approvalID).Scan(&perm[1]); err != nil {
+		e.t.Fatal(err)
+	}
+	return perm, approver
+}
+
+// TestS2A9_LedgerNamesThePermissionOfALoweredCall: the ledger rows of a
+// lowered call name the standing permission and carry no approver, so a
+// record written from the ledger alone says who stood behind the call. The
+// stale sweep writes such a record: for a lowered call whose executor is
+// gone its result entry names the permission, as the pre-dispatch entry
+// did, and not the principal. A call the principal approved keeps the
+// principal as approver and names no permission.
+func TestS2A9_LedgerNamesThePermissionOfALoweredCall(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newLowerEnv(t, s)
+		e.grant("prm_vol", volumeTool, 5, kitchenID)
+		sweeper := connector.StaleWriteSweeper{Store: s, Executor: &connector.Executor{Sink: e.sink, Now: e.h.Now}}
+		// The lease runs out while the call is on the wire and the sweep
+		// ends the record: the executor that comes back writes no more.
+		e.lep.onCall = func() {
+			e.h.Advance(approval.MaxDispatchLease + time.Minute)
+			if n, err := sweeper.SweepOnce(context.Background()); err != nil || n != 1 {
+				t.Errorf("sweep: %d %v, want 1", n, err)
+			}
+		}
+		out := e.dispatchLowered(e.loweredCall("prm_vol", volumeTool, volume5, catalog.ClassWrite))
+		if out.Status != connector.StatusOutcomeUnknown {
+			t.Fatalf("outcome %+v, want outcome_unknown", out)
+		}
+		rows := e.approvals(alice)
+		if len(rows) != 1 {
+			t.Fatalf("ledger rows %+v, want the one of the lowered call", rows)
+		}
+		if perm, approver := e.ledgerPermission(rows[0].id); perm != [2]string{"prm_vol", "prm_vol"} || approver != 0 {
+			t.Fatalf("ledger rows carry permission %v and approver %d", perm, approver)
+		}
+		audit := e.auditOf(volumeTool)
+		if len(audit) != 2 || audit[0].status != "dispatching" || audit[1].status != "outcome_unknown" {
+			t.Fatalf("audit %+v, want one pre-dispatch and one result entry", audit)
+		}
+		for i, r := range audit {
+			if got := field(r.peer, "approver"); got != "permission:prm_vol" {
+				t.Errorf("audit record %d names approver %q, want permission:prm_vol (%s)", i, got, r.peer)
+			}
+		}
+		if field(audit[1].peer, "reason") != connector.ReasonLeaseExpired || field(audit[1].peer, "approval") != rows[0].id {
+			t.Fatalf("sweep result entry %s", audit[1].peer)
+		}
+	})
 }
 
 const (
@@ -678,16 +753,24 @@ func TestS2D1_NoPermissionLowersADisclosure(t *testing.T) {
 
 // TestS2I9_DisclosureAfterAResetStillNeedsACard: a reset is a new, clean
 // conversation row (S2-I7), which is what a job of a conversation that was
-// just reset runs in. In one, with permission rows forced in, a disclosure
-// still gets its card.
+// just reset runs in. The reset is the one Alice makes: the first run reads
+// external content, so its conversation is tainted, then /new goes through
+// the webhook and the next message starts a run in the new row. In it, with
+// permission rows forced in, a disclosure still gets its card.
 func TestS2I9_DisclosureAfterAResetStillNeedsACard(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, s *db.Store) {
 		e := newLowerEnv(t, s)
 		e.manyCardsPerRun()
-		var rows, tainted int
-		if err := s.DB.QueryRow(`SELECT COUNT(*), COALESCE(SUM(tainted), 0) FROM pa_conversations WHERE principal = $1`,
-			alice).Scan(&rows, &tainted); err != nil || rows != 1 || tainted != 0 {
-			t.Fatalf("conversations %d, tainted %d, %v: want one clean row", rows, tainted, err)
+		e.read()
+		before := e.conv
+		e.resetThroughTheBot()
+		if e.conv == before {
+			t.Fatal("/new left the run in the conversation it had")
+		}
+		var open, tainted int
+		if err := s.DB.QueryRow(`SELECT COUNT(*), COALESCE(SUM(tainted), 0) FROM pa_conversations WHERE principal = $1 AND closed_at_ms = 0`,
+			alice).Scan(&open, &tainted); err != nil || open != 1 || tainted != 0 {
+			t.Fatalf("open conversations %d, tainted %d, %v: want one clean row", open, tainted, err)
 		}
 		e.forcedPermissionsLowerNothing()
 		// The same run does lower a write it has a permission for, so the
@@ -695,6 +778,25 @@ func TestS2I9_DisclosureAfterAResetStillNeedsACard(t *testing.T) {
 		e.grant("prm_vol", volumeTool, 5, kitchenID)
 		e.lowered("a write in the same run", "prm_vol", volumeTool, volume5)
 	})
+}
+
+// resetThroughTheBot sends /new and then a message through the webhook, as
+// Alice would, and claims the run of the new conversation. The env's
+// conversation, job and token are that run's from here on.
+func (e *lowerEnv) resetThroughTheBot() {
+	e.t.Helper()
+	e.h.Text(alice, "/new")
+	e.h.Text(alice, "and now this")
+	if err := e.store.DB.QueryRow(`SELECT id FROM pa_conversations WHERE principal = $1 AND closed_at_ms = 0`, alice).Scan(&e.conv); err != nil {
+		e.t.Fatalf("conversation after /new: %v", err)
+	}
+	if err := e.store.DB.QueryRow(`SELECT id FROM pa_jobs WHERE principal = $1 ORDER BY id DESC LIMIT 1`, alice).Scan(&e.job); err != nil {
+		e.t.Fatalf("job after /new: %v", err)
+	}
+	var code int
+	if e.token, _, _, code = e.h.Claim(); code != http.StatusOK || e.token == "" {
+		e.t.Fatalf("claim after /new: %d", code)
+	}
 }
 
 func (e *lowerEnv) forcedPermissionsLowerNothing() {
@@ -1005,6 +1107,44 @@ func TestLowering_ExecutorChecksThePinAndTheCondition(t *testing.T) {
 			if out := e.dispatchLowered(call); out.Status != connector.StatusOK {
 				t.Fatalf("%s: %+v", name, out)
 			}
+		}
+	})
+}
+
+// TestS2D2_ExecutorRepeatsTheValueChecksOfALoweredCall (#1322 P2-S15c):
+// a lowered call has no card, so the executor makes the checks a card's
+// value passed on the bytes it was handed, against the pin as it just
+// read it. A number outside the pinned range, a string the schema does
+// not list and an argument the tool's card could not show are refused;
+// nothing is sent and no ledger row is written, whatever the permission
+// covers.
+func TestS2D2_ExecutorRepeatsTheValueChecksOfALoweredCall(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newLowerEnv(t, s)
+		e.grant("prm_volume", volumeTool, 10, kitchenID)
+		e.grant("prm_light", lightTool, permissions.NoCeiling, deskLampID)
+		rows := len(e.approvals(alice))
+		for name, c := range map[string]struct {
+			id, tool, args, reason string
+		}{
+			"a level above the pinned range":   {"prm_volume", volumeTool, `{"device":"` + kitchenID + `","level":11}`, connector.ReasonValueNotAllowed},
+			"a level below the pinned range":   {"prm_volume", volumeTool, `{"device":"` + kitchenID + `","level":0}`, connector.ReasonValueNotAllowed},
+			"a state the schema does not list": {"prm_light", lightTool, `{"device":"` + deskLampID + `","state":"blink"}`, connector.ReasonValueNotAllowed},
+			"a brightness above the range":     {"prm_light", lightTool, `{"brightness":101,"device":"` + deskLampID + `"}`, connector.ReasonValueNotAllowed},
+			"an argument no card shows":        {"prm_volume", volumeTool, `{"device":"` + kitchenID + `","extra":1,"level":5}`, connector.ReasonNotLowerable},
+		} {
+			out := e.dispatchLowered(e.loweredCall(c.id, c.tool, c.args, catalog.ClassWrite))
+			if out.Status != connector.StatusRefused || out.Reason != c.reason || out.DispatchID != "" {
+				t.Fatalf("%s: %+v, want refused %s", name, out, c.reason)
+			}
+			e.nothingSent(name)
+			if n := len(e.approvals(alice)); n != rows {
+				t.Fatalf("%s: %d ledger rows, want %d", name, n, rows)
+			}
+		}
+		// The same call with a value in range is sent.
+		if out := e.dispatchLowered(e.loweredCall("prm_volume", volumeTool, `{"device":"`+kitchenID+`","level":5}`, catalog.ClassWrite)); out.Status != connector.StatusOK {
+			t.Fatalf("a level in range: %+v", out)
 		}
 	})
 }

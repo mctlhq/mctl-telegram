@@ -251,7 +251,7 @@ func buildPAWrites(cfg *config.Config, pt *paTools, store *db.Store, sender paBo
 			// the speaker or the light through it, the executor reads the
 			// device again before it sends, and a grant reads the devices
 			// it lists.
-			r, err := connector.NewAliceDevices(pin, pt.endpoints[name])
+			r, err := connector.NewAliceDevices(pin, pt.endpoints[name], pt.executor)
 			if err != nil {
 				return nil, fmt.Errorf("pa writes: %w", err)
 			}

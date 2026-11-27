@@ -12,11 +12,52 @@ import (
 	"time"
 )
 
+type ChatImageURL struct {
+	URL string `json:"url"`
+}
+
+type ChatContentPart struct {
+	Type     string        `json:"type"`
+	Text     string        `json:"text,omitempty"`
+	ImageURL *ChatImageURL `json:"image_url,omitempty"`
+}
+
 type ChatMessage struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	Role         string            `json:"role"`
+	Content      string            `json:"content,omitempty"`
+	ContentParts []ChatContentPart `json:"-"`
+	ToolCallID   string            `json:"tool_call_id,omitempty"`
+	ToolCalls    []ToolCall        `json:"tool_calls,omitempty"`
+}
+
+// MarshalJSON serializes Content as a multimodal parts array when ContentParts
+// is populated, preserving the plain string wire format for all text messages.
+func (m ChatMessage) MarshalJSON() ([]byte, error) {
+	if len(m.ContentParts) > 0 {
+		return json.Marshal(struct {
+			Role       string            `json:"role"`
+			Content    []ChatContentPart `json:"content"`
+			ToolCallID string            `json:"tool_call_id,omitempty"`
+			ToolCalls  []ToolCall        `json:"tool_calls,omitempty"`
+		}{
+			Role:       m.Role,
+			Content:    m.ContentParts,
+			ToolCallID: m.ToolCallID,
+			ToolCalls:  m.ToolCalls,
+		})
+	}
+	type plainChatMessage struct {
+		Role       string     `json:"role"`
+		Content    string     `json:"content,omitempty"`
+		ToolCallID string     `json:"tool_call_id,omitempty"`
+		ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	}
+	return json.Marshal(plainChatMessage{
+		Role:       m.Role,
+		Content:    m.Content,
+		ToolCallID: m.ToolCallID,
+		ToolCalls:  m.ToolCalls,
+	})
 }
 
 type ToolCall struct {

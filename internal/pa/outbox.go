@@ -73,7 +73,12 @@ const outboxButtonMinLife = 5 * time.Minute
 var outboxTemplates = map[jobs.OutboxKind]safetext.Template{
 	jobs.OutboxReplyTooLong:     safetext.TextReplyTooLong,
 	jobs.OutboxBudgetHold:       safetext.TextBudgetHold,
-	jobs.OutboxRunFailed:        safetext.TextRunFailed,
+	jobs.OutboxRunFailed:          safetext.TextRunFailed,
+	jobs.OutboxRunFailedRateLimit: safetext.TextRunFailedRateLimit,
+	jobs.OutboxRunFailedProvider:  safetext.TextRunFailedProvider,
+	jobs.OutboxRunFailedContext:   safetext.TextRunFailedContext,
+	jobs.OutboxRunFailedBudget:    safetext.TextRunFailedBudget,
+	jobs.OutboxRunFailedTimeout:   safetext.TextRunFailedTimeout,
 	jobs.OutboxRequestDropped:   safetext.TextRequestDropped,
 	jobs.OutboxPrincipalStopped: safetext.TextAssistantUnavailable,
 	// Refused before any card (#1322 slice P2-S6, S2-D3).

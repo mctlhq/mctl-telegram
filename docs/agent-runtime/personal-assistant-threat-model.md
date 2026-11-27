@@ -191,6 +191,8 @@ Preview end-to-end evals are separate (see [Acceptance evals](#acceptance-evals)
 
 A crash between steps 1 and 3 leaves a `dispatching` record. On restart, that record becomes `outcome_unknown`. It is never re-dispatched, because the receipt is already consumed.
 
+One case is told apart. Between steps 1 and 2 the executor marks the record as sent, in a statement of its own that succeeds only while the record is `dispatching` and its lease has not run out, and it makes no call without that mark. A record left without the mark was therefore never sent: the sweep ends it as `refused` (`dispatch_never_sent`) and the principal is told the call was not made. A record that carries the mark, or one written before the mark existed, becomes `outcome_unknown` as above. Neither is re-dispatched.
+
 **`/disconnect`:**
 1. sets `revoked` and bumps `authority_revision`, which does not wait for any in-flight call, so no new dispatch can pass step 1;
 2. cancels the in-flight call's context;

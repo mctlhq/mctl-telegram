@@ -34,6 +34,7 @@ type toolClass struct {
 // toolClasses classifies every registered tool. A new tool must be added here
 // in the same change, or the coverage test fails.
 var toolClasses = map[string]toolClass{
+	"telegram_dashboard": {tier: tierRead, idempotent: true},
 	// Reads.
 	"draft_reply":                     {tier: tierRead, idempotent: false},
 	"get_acquisition_report":          {tier: tierRead, idempotent: true},
@@ -49,6 +50,8 @@ var toolClasses = map[string]toolClass{
 	"get_user_audit_log":              {tier: tierRead, idempotent: true},
 	"list_assistants":                 {tier: tierRead, idempotent: true},
 	"list_broadcasts":                 {tier: tierRead, idempotent: true},
+	"list_dashboard_templates":        {tier: tierRead, idempotent: true},
+	"get_dashboard_template":          {tier: tierRead, idempotent: true},
 	"list_dialogs":                    {tier: tierRead, idempotent: true},
 	"list_folders":                    {tier: tierRead, idempotent: true},
 	"list_topics":                     {tier: tierRead, idempotent: true},
@@ -56,14 +59,17 @@ var toolClasses = map[string]toolClass{
 	"prepare_get_media":               {tier: tierRead, idempotent: false},
 	"search_messages":                 {tier: tierRead, idempotent: true},
 	// Writes that destroy nothing.
-	"fork_assistant":       {tier: tierWrite, idempotent: false},
-	"prepare_broadcast":    {tier: tierWrite, idempotent: false},
-	"prepare_pin_message":  {tier: tierWrite, idempotent: false},
-	"prepare_send_message": {tier: tierWrite, idempotent: false},
-	"update_fork":          {tier: tierWrite, idempotent: false},
+	"fork_assistant":           {tier: tierWrite, idempotent: false},
+	"prepare_broadcast":        {tier: tierWrite, idempotent: false},
+	"prepare_pin_message":      {tier: tierWrite, idempotent: false},
+	"prepare_send_message":     {tier: tierWrite, idempotent: false},
+	"prepare_dashboard_action": {tier: tierWrite, idempotent: false},
+	"save_dashboard_template":  {tier: tierWrite, idempotent: false},
+	"update_fork":              {tier: tierWrite, idempotent: false},
 	// Destructive.
 	"cancel_broadcast":                {tier: tierDestructive, idempotent: false},
 	"delete_fork":                     {tier: tierDestructive, idempotent: false},
+	"delete_dashboard_template":       {tier: tierDestructive, idempotent: false},
 	"delete_messages":                 {tier: tierDestructive, idempotent: false},
 	"delete_telegram_account":         {tier: tierDestructive, idempotent: false},
 	"disconnect_telegram_account":     {tier: tierDestructive, idempotent: false},

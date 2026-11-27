@@ -1480,3 +1480,35 @@ func TestLoadPAFragments_ScanErrorIsRowFault(t *testing.T) {
 		t.Fatalf("a fragment row that does not scan: %v, want a row fault", err)
 	}
 }
+
+func TestPAJobs_FailPAJobHoldsUsageAndEnqueuesOutbox(t *testing.T) {
+	s := newTestStore(t)
+	f := newPAFixture(t, s)
+	f.enqueue(paAlice, "c1")
+	j := f.claim().Job
+
+	if _, err := s.FailPAJob(context.Background(), ref(j), jobs.FailRequest{Now: f.now, Kind: jobs.OutboxReply, Gate: okGate}); !errors.Is(err, jobs.ErrInvalid) {
+		t.Fatalf("non-failure outbox kind: %v, want ErrInvalid", err)
+	}
+	got, err := s.FailPAJob(context.Background(), ref(j), jobs.FailRequest{Now: f.now, Kind: jobs.OutboxRunFailedRateLimit, Gate: okGate})
+	if err != nil {
+		t.Fatalf("FailPAJob: %v", err)
+	}
+	if got.Status != jobs.StatusCancelled {
+		t.Fatalf("job status = %s, want cancelled", got.Status)
+	}
+	var usageStatus string
+	if err := s.DB.QueryRow(`SELECT status FROM pa_usage WHERE job_id = $1 AND attempt = $2`, j.ID, j.Attempts).Scan(&usageStatus); err != nil {
+		t.Fatal(err)
+	}
+	if usageStatus != jobs.UsageHeld {
+		t.Fatalf("usage status = %s, want %s", usageStatus, jobs.UsageHeld)
+	}
+	var kind string
+	if err := s.DB.QueryRow(`SELECT kind FROM pa_outbox WHERE principal = $1 AND job_id = $2`, paAlice, j.ID).Scan(&kind); err != nil {
+		t.Fatal(err)
+	}
+	if kind != string(jobs.OutboxRunFailedRateLimit) {
+		t.Fatalf("outbox kind = %s, want %s", kind, jobs.OutboxRunFailedRateLimit)
+	}
+}

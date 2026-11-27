@@ -139,7 +139,10 @@ func seedPAPrincipalState(t *testing.T, s *Store, principal int64) {
 		{`INSERT INTO pa_consents(principal, version, text_sha256, state, updated_at_ms) VALUES($1, 'v1', 'sha', 'accepted', $2)`, []any{principal, now}},
 		{`INSERT INTO pa_conversations(id, principal, created_at_ms, expires_at_ms, closed_at_ms) VALUES($1, $2, $3, $4, 0)`, []any{conv, principal, now, now + 3_600_000}},
 		{`INSERT INTO pa_fragments(conversation_id, seq, principal, kind, provenance, sealed, created_at_ms) VALUES($1, 1, $2, 'user', 'mark', $3, $4)`, []any{conv, principal, []byte("sealed"), now}},
-		{`INSERT INTO pa_principal_locks(principal, locked_at_ms) VALUES($1, $2)`, []any{principal, now}},
+		// A principal an admin disabled already has its lock row: the
+		// disable takes the lock (S2-C9).
+		{`INSERT INTO pa_principal_locks(principal, locked_at_ms) VALUES($1, $2)
+			ON CONFLICT (principal) DO UPDATE SET locked_at_ms = excluded.locked_at_ms`, []any{principal, now}},
 		{`INSERT INTO pa_callbacks(principal, id, action, expires_at_ms) VALUES($1, 'cb1', 'confirm', $2)`, []any{principal, now + 600_000}},
 		{`INSERT INTO pa_jobs(principal, conversation_id, update_id, consent_version, status, lease_until_ms, created_at_ms, updated_at_ms)
 			VALUES($1, $2, 1, 'v1', 'claimed', $3, $4, $4)`, []any{principal, conv, now + 60_000, now}},

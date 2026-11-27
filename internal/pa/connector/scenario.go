@@ -42,8 +42,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 
+	"github.com/mctlhq/mctl-telegram/internal/pa/approval"
 	"github.com/mctlhq/mctl-telegram/internal/pa/connection"
 	"github.com/mctlhq/mctl-telegram/internal/pa/output/safetext"
 )
@@ -58,6 +60,9 @@ const (
 	// ReasonScenarioUnreadable: the steps could not be read, or the read
 	// was empty or malformed. That is not "a scenario without steps".
 	ReasonScenarioUnreadable = "scenario_unreadable"
+	// ReasonScenarioChanged: the scenario read again at dispatch is not
+	// the one the card listed: another name, or other steps.
+	ReasonScenarioChanged = "scenario_changed"
 )
 
 // reservedScenarioPrefix marks the scenarios the alice server creates for
@@ -148,6 +153,70 @@ func (c *Cards) precheckScenario(server, tool string, canonical []byte) (string,
 	return name, nil
 }
 
+// scenarioReadProblem is the reason a read of the scenario name names
+// cannot be used, or "". The card path and the dispatch-time read both
+// ask it, so the two accept exactly the same answers.
+func scenarioReadProblem(sc Scenario, err error, name string) string {
+	if err != nil || sc.ID == "" || sc.Name == "" || len(sc.Steps) == 0 || len(sc.Steps) > MaxScenarioSteps {
+		return ReasonScenarioUnreadable
+	}
+	for _, step := range sc.Steps {
+		if strings.TrimSpace(step) == "" {
+			return ReasonScenarioUnreadable
+		}
+	}
+	// The call may name the scenario by a name that only now resolves to
+	// one of the service's own.
+	if reservedScenario(sc.ID) || reservedScenario(sc.Name) {
+		return ReasonScenarioReserved
+	}
+	// The id, byte for byte: what is approved is this scenario, not
+	// whatever the name matches when the call is made.
+	if sc.ID != name {
+		return ReasonScenarioNotListed
+	}
+	return ""
+}
+
+// recheckScenario is the read of a scenario's steps the write executor
+// makes right before it sends (#1322 P2-S15c; S2-D6). A card lists the
+// steps a read made for it returned, sealed with the arguments. An
+// approval lives for minutes, and a scenario can be edited in that time,
+// so the executor reads the steps once more, after the receipt was
+// consumed, and sends nothing unless the scenario still has that id, that
+// name and exactly those steps in that order. It returns the reason the
+// dispatch is refused for, or "".
+//
+// Whatever cannot be read refuses: no reader for the server
+// (ReasonNoWritePath), a failed, empty or malformed read
+// (ReasonScenarioUnreadable), sealed steps this build cannot read
+// (ReasonApprovalUnreadable). No reader exists outside tests, so a
+// deployed configuration refuses here as it does on the card path.
+func (w *WriteExecutor) recheckScenario(ctx context.Context, a approval.Approval, token connection.Secret, args, detail []byte) string {
+	if digest(args) != a.ArgsSHA {
+		return ReasonArgsChanged
+	}
+	sealed, err := scenarioOf(a.Tool, args, detail)
+	if err != nil {
+		return ReasonApprovalUnreadable
+	}
+	reader := w.cfg.Scenarios[a.Server]
+	if reader == nil {
+		return ReasonNoWritePath
+	}
+	now, err := reader.ScenarioSteps(ctx, ScenarioRequest{
+		Principal: a.Principal, ConnectionID: a.ConnectionID, AuthorityRevision: a.AuthorityRevision,
+		Server: a.Server, Token: token, Scenario: sealed.ID,
+	})
+	if r := scenarioReadProblem(now, err, sealed.ID); r != "" {
+		return r
+	}
+	if now.Name != sealed.Name || !slices.Equal(now.Steps, sealed.Steps) {
+		return ReasonScenarioChanged
+	}
+	return ""
+}
+
 // scenarioTarget reads the scenario name would run and returns what the
 // card shows and the detail to seal with the arguments.
 func (c *Cards) scenarioTarget(ctx context.Context, req CardRequest, name string) (shown safetext.Scenario, detail []byte, ref *refusal) {
@@ -160,23 +229,14 @@ func (c *Cards) scenarioTarget(ctx context.Context, req CardRequest, name string
 		Principal: req.Policy.Principal().TelegramID(), ConnectionID: req.ConnectionID,
 		AuthorityRevision: req.AuthorityRevision, Server: req.Server, Token: req.Token, Scenario: name,
 	})
-	if err != nil || sc.ID == "" || sc.Name == "" || len(sc.Steps) == 0 || len(sc.Steps) > MaxScenarioSteps {
-		return shown, nil, unreadable
-	}
-	for _, step := range sc.Steps {
-		if strings.TrimSpace(step) == "" {
-			return shown, nil, unreadable
-		}
-	}
-	// The call may name the scenario by a name that only now resolves to
-	// one of the service's own.
-	if reservedScenario(sc.ID) || reservedScenario(sc.Name) {
+	switch scenarioReadProblem(sc, err, name) {
+	case "":
+	case ReasonScenarioReserved:
 		return shown, nil, &refusal{ReasonScenarioReserved, http.StatusForbidden}
-	}
-	// The id, byte for byte: what is approved is this scenario, not
-	// whatever the name matches when the call is made.
-	if sc.ID != name {
+	case ReasonScenarioNotListed:
 		return shown, nil, &refusal{ReasonScenarioNotListed, http.StatusUnprocessableEntity}
+	default:
+		return shown, nil, unreadable
 	}
 	detail, err = json.Marshal(cardDetail{Scenario: &detailScenario{ID: sc.ID, Name: sc.Name, Steps: sc.Steps}})
 	if err != nil {

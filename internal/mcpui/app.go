@@ -39,7 +39,7 @@ const MIMEType = "text/html;profile=mcp-app"
 // intermediate build pipeline to thread a version through, and bumping this
 // by hand is exactly the "deliberate, reviewable change" the content-hash
 // test (see mcpui_test.go) also demands of any edit to triage.html.
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 //go:embed triage.html
 var triageHTML string
@@ -67,11 +67,18 @@ func Resource() mcplib.Resource {
 // exact URI. The returned slice always has exactly one element: the whole
 // document, inline, as text.
 func Contents(uri string) []mcplib.ResourceContents {
+	text := triageHTML
+	switch uri {
+	case DashboardResourceURI:
+		text = dashboardHTML
+	case WorkspaceResourceURI, WorkspaceResourceV2URI, PreviousWorkspaceResourceURI:
+		text = workspaceHTML
+	}
 	return []mcplib.ResourceContents{
 		mcplib.TextResourceContents{
 			URI:      uri,
 			MIMEType: MIMEType,
-			Text:     triageHTML,
+			Text:     text,
 			Meta:     uiResourceMeta(),
 		},
 	}
@@ -120,9 +127,15 @@ func ExtensionCapability() map[string]any {
 // plus the send gate remain the only things that decide whether a call is
 // permitted. See the proposal's "Open questions" for the reasoning.
 func ToolMeta() map[string]any {
+	return ToolMetaFor(ResourceURI)
+}
+
+// ToolMetaFor is ToolMeta for a chosen ui:// document. visibility stays a
+// host hint: this server never reads it.
+func ToolMetaFor(uri string) map[string]any {
 	return map[string]any{
 		"ui": map[string]any{
-			"resourceUri": ResourceURI,
+			"resourceUri": uri,
 			"visibility":  []string{"model", "app"},
 		},
 	}

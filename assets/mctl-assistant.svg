@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">MCTL Assistant</title>
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="1" y2="1" gradientUnits="objectBoundingBox">
+      <stop offset="0" stop-color="#25242B"/>
+      <stop offset="1" stop-color="#141318"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" fill="url(#plate)"/>
+  <polyline points="144,344 144,172 256,267 368,172 368,284" fill="none" stroke="#F8F3EA" stroke-width="38" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="368" cy="344" r="19" fill="#FF815F"/>
+</svg>
