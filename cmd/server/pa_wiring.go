@@ -39,6 +39,7 @@ type paMetrics interface {
 	pa.FailureCounter
 	pa.PhaseObserver
 	connector.Metrics
+	connector.AuditEventMetrics
 }
 
 // paLoop is the part of *pa.RunLoop the server's lifecycle drives.
@@ -320,6 +321,9 @@ func buildPA(ctx context.Context, cfg *config.Config, store *db.Store, rc *local
 		// by a connection that ends; while no write path was ever built
 		// there is none to find.
 		rt.auditEvents = &connector.AuditEventSweeper{Store: store}
+		if m != nil {
+			rt.auditEvents.Metrics = m
+		}
 	}
 	return rt, nil
 }

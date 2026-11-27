@@ -49,13 +49,20 @@ type paMetrics struct {
 	// PADispatchTotal counts dispatcher outcomes: an executed call's status
 	// (reason "") or a refusal's reason (status "refused").
 	PADispatchTotal *prometheus.CounterVec
-	// PAWriteListingRefusals counts writes refused at dispatch because of
-	// the fresh tools/list the write executor reads for that one call:
+	// PAWriteListingRefusals counts calls refused because of the fresh
+	// tools/list read for that one call, for its card or at dispatch:
 	// the listing could not be read or used, or the tool in it is not the
 	// one the pin and the card name. The reason set is closed
 	// (connector.WriteListingRefusalReasons) and every reason of every
 	// write endpoint exists at 0 from the executor's construction.
 	PAWriteListingRefusals *prometheus.CounterVec
+	// PAAuditEventsQueued is the number of audit events still queued after
+	// the last sweep. It has no labels; it is a vector so that it can be
+	// absent, which it is while the queue could not be counted.
+	PAAuditEventsQueued *prometheus.GaugeVec
+	// PAAuditEventSweepProblems counts what a sweep of that queue could
+	// not do (connector.AuditEventProblems).
+	PAAuditEventSweepProblems *prometheus.CounterVec
 }
 
 func newPAMetrics(reg *prometheus.Registry) paMetrics {
@@ -82,11 +89,19 @@ func newPAMetrics(reg *prometheus.Registry) paMetrics {
 		}, []string{"server", "status", "reason"}),
 		PAWriteListingRefusals: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mctl_pa_write_listing_refusals_total",
-			Help: "PA writes refused at dispatch because of the tool's fresh tools/list, by server and reason.",
+			Help: "PA calls refused, for a card or at dispatch, because of the tool's fresh tools/list, by server and reason.",
 		}, []string{"server", "reason"}),
+		PAAuditEventsQueued: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "mctl_pa_audit_events_queued",
+			Help: "PA audit events still queued after the last sweep; absent while the queue cannot be counted.",
+		}, nil),
+		PAAuditEventSweepProblems: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "mctl_pa_audit_event_sweep_problems_total",
+			Help: "PA audit event sweep problems: passes that could not read the queue, events not appended, events dropped.",
+		}, []string{"problem"}),
 	}
 	reg.MustRegister(m.PAPinDrift, m.PAPinListingUnknown, m.PAPinDeniedTools, m.PAPinListingFailures, m.PADispatchTotal,
-		m.PAWriteListingRefusals)
+		m.PAWriteListingRefusals, m.PAAuditEventsQueued, m.PAAuditEventSweepProblems)
 	return m
 }
 
@@ -133,8 +148,8 @@ func (r *Registry) CountPADispatch(server, status, reason string) {
 	r.PADispatchTotal.WithLabelValues(server, status, reason).Inc()
 }
 
-// CountPAWriteListingRefusal counts one write refused at dispatch because
-// of the tool's fresh listing.
+// CountPAWriteListingRefusal counts one call refused because of the tool's
+// fresh listing.
 func (r *Registry) CountPAWriteListingRefusal(server, reason string) {
 	r.PAWriteListingRefusals.WithLabelValues(server, reason).Inc()
 }
@@ -145,4 +160,20 @@ func (r *Registry) PreparePAWriteListingRefusals(server string, reasons []string
 	for _, reason := range reasons {
 		r.PAWriteListingRefusals.WithLabelValues(server, reason).Add(0)
 	}
+}
+
+// SetPAAuditEventsQueued records how many audit events are queued.
+func (r *Registry) SetPAAuditEventsQueued(n int64) {
+	r.PAAuditEventsQueued.WithLabelValues().Set(float64(n))
+}
+
+// ForgetPAAuditEventsQueued removes the queue gauge: a queue that could
+// not be counted is not an empty one.
+func (r *Registry) ForgetPAAuditEventsQueued() {
+	r.PAAuditEventsQueued.Reset()
+}
+
+// CountPAAuditEventProblem adds n to one sweep problem.
+func (r *Registry) CountPAAuditEventProblem(problem string, n int) {
+	r.PAAuditEventSweepProblems.WithLabelValues(problem).Add(float64(n))
 }

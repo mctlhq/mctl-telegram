@@ -106,11 +106,20 @@ type CardStore interface {
 	ReadPAConversationTaint(ctx context.Context, principal int64, conversationID string) (bool, error)
 }
 
+// ListingRefusalCounter counts a call the fresh listing refused
+// (*metrics.Registry; WriteListingRefusalReasons).
+type ListingRefusalCounter interface {
+	CountPAWriteListingRefusal(server, reason string)
+}
+
 // CardConfig wires Cards. Store, Sealer and Pin are required; without
 // Fresh every card is refused (ReasonNoWritePath).
 type CardConfig struct {
-	Store  CardStore
-	Sealer *approval.Sealer
+	// Metrics counts a call that the listing read for its card refused,
+	// in the counter the write executor uses. Optional.
+	Metrics ListingRefusalCounter
+	Store   CardStore
+	Sealer  *approval.Sealer
 	// Pin names the approve-tier tools. It is the pin the write path runs
 	// on: the Phase 2 pin, loaded only with the write path (P2-S14).
 	Pin *catalog.Pin
@@ -161,6 +170,13 @@ func NewCards(cfg CardConfig) (*Cards, error) {
 		cfg.Now = time.Now
 	}
 	return &Cards{cfg: cfg}, nil
+}
+
+// countListingRefusal counts a call the card's fresh listing refused.
+func (c *Cards) countListingRefusal(server, reason string) {
+	if c.cfg.Metrics != nil {
+		c.cfg.Metrics.CountPAWriteListingRefusal(server, reason)
+	}
 }
 
 // approveTool returns the pin entry of server/tool when the tool runs only
@@ -303,6 +319,7 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) (*WriteOutcome, *refu
 	})
 	if err != nil {
 		reason := PinRefusalReason(err)
+		c.countListingRefusal(req.Server, reason)
 		code := http.StatusForbidden
 		if reason == ReasonInternal || reason == ReasonServerUnavailable || reason == ReasonListingStale {
 			code = http.StatusServiceUnavailable
@@ -310,6 +327,7 @@ func (c *Cards) Emit(ctx context.Context, req CardRequest) (*WriteOutcome, *refu
 		return nil, &refusal{reason, code}
 	}
 	if fresh.Tier != catalog.TierApprove || fresh.Class != pinned.Class {
+		c.countListingRefusal(req.Server, ReasonToolChanged)
 		return nil, &refusal{ReasonToolChanged, http.StatusForbidden}
 	}
 

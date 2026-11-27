@@ -107,6 +107,15 @@ func paAuditEventQueued(res sql.Result, err error, kind auditevent.Kind, id stri
 	return nil
 }
 
+// CountPAAuditEvents returns how many audit events are queued.
+func (s *Store) CountPAAuditEvents(ctx context.Context) (int64, error) {
+	var n int64
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM pa_audit_events`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count pa audit events: %w", err)
+	}
+	return n, nil
+}
+
 // PAAuditDrain counts one DrainPAAuditEvents pass.
 type PAAuditDrain struct {
 	// Appended rows are in the audit chain and off the queue.
