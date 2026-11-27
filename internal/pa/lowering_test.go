@@ -89,7 +89,7 @@ func (f *pinFresh) FreshTool(_ context.Context, req connector.FreshRequest) (con
 	return connector.FreshTool{
 		SchemaSHA: shaHex([]byte("schema")), DescriptionSHA: shaHex([]byte("description")),
 		AnnotationSHA: shaHex([]byte("annotations")), Tier: catalog.TierApprove, Class: class,
-		Lowerable: lowerable, Constraints: pt.Constraints,
+		Lowerable: lowerable, Constraints: pt.Constraints, InputSchema: string(pt.InputSchema),
 	}, nil
 }
 
@@ -1032,6 +1032,44 @@ func TestLowering_ExecutorChecksThePinAndTheCondition(t *testing.T) {
 			if out := e.dispatchLowered(call); out.Status != connector.StatusOK {
 				t.Fatalf("%s: %+v", name, out)
 			}
+		}
+	})
+}
+
+// TestS2D2_ExecutorRepeatsTheValueChecksOfALoweredCall (#1322 P2-S15c):
+// a lowered call has no card, so the executor makes the checks a card's
+// value passed on the bytes it was handed, against the pin as it just
+// read it. A number outside the pinned range, a string the schema does
+// not list and an argument the tool's card could not show are refused;
+// nothing is sent and no ledger row is written, whatever the permission
+// covers.
+func TestS2D2_ExecutorRepeatsTheValueChecksOfALoweredCall(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, s *db.Store) {
+		e := newLowerEnv(t, s)
+		e.grant("prm_volume", volumeTool, 10, kitchenID)
+		e.grant("prm_light", lightTool, permissions.NoCeiling, deskLampID)
+		rows := len(e.approvals(alice))
+		for name, c := range map[string]struct {
+			id, tool, args, reason string
+		}{
+			"a level above the pinned range":   {"prm_volume", volumeTool, `{"device":"` + kitchenID + `","level":11}`, connector.ReasonValueNotAllowed},
+			"a level below the pinned range":   {"prm_volume", volumeTool, `{"device":"` + kitchenID + `","level":0}`, connector.ReasonValueNotAllowed},
+			"a state the schema does not list": {"prm_light", lightTool, `{"device":"` + deskLampID + `","state":"blink"}`, connector.ReasonValueNotAllowed},
+			"a brightness above the range":     {"prm_light", lightTool, `{"brightness":101,"device":"` + deskLampID + `"}`, connector.ReasonValueNotAllowed},
+			"an argument no card shows":        {"prm_volume", volumeTool, `{"device":"` + kitchenID + `","extra":1,"level":5}`, connector.ReasonNotLowerable},
+		} {
+			out := e.dispatchLowered(e.loweredCall(c.id, c.tool, c.args, catalog.ClassWrite))
+			if out.Status != connector.StatusRefused || out.Reason != c.reason || out.DispatchID != "" {
+				t.Fatalf("%s: %+v, want refused %s", name, out, c.reason)
+			}
+			e.nothingSent(name)
+			if n := len(e.approvals(alice)); n != rows {
+				t.Fatalf("%s: %d ledger rows, want %d", name, n, rows)
+			}
+		}
+		// The same call with a value in range is sent.
+		if out := e.dispatchLowered(e.loweredCall("prm_volume", volumeTool, `{"device":"`+kitchenID+`","level":5}`, catalog.ClassWrite)); out.Status != connector.StatusOK {
+			t.Fatalf("a level in range: %+v", out)
 		}
 	})
 }

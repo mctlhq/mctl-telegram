@@ -698,7 +698,7 @@ func main() {
 	accountHandlers.Register(accountMux)
 	mux.Mount("/api/account", auth.Middleware(provider, true, m, resourceMeta)(accountMux))
 
-	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithVersion(version).WithLimiter(limiter).WithMetrics(m).WithPeerCache(peerCache).WithToolFilter(cfg.ToolFilter).WithAppsEnabled(cfg.AppsEnabled).WithBroadcastContent(cfg.BroadcastContentEnabled).WithConnectFunnel(funnel).WithCanaryGuard(cfg.CanaryTelegramIDs)
+	mcpSrv := mcpapp.New(store, pool, cfg.AllowSend).WithVersion(version).WithLimiter(limiter).WithMetrics(m).WithPeerCache(peerCache).WithToolFilter(cfg.ToolFilter).WithAppsEnabled(cfg.AppsEnabled).WithAppsWorkspaceOnly(cfg.AppsWorkspaceOnly).WithAppsPilot(cfg.AppsPilot).WithBroadcastContent(cfg.BroadcastContentEnabled).WithConnectFunnel(funnel).WithCanaryGuard(cfg.CanaryTelegramIDs)
 	// Broadcast operator tools (issue-439): prepare/list/get/cancel over MCP.
 	// Approval lives only on the web page registered with the manage routes.
 	mcpSrv.WithBroadcast(broadcastSvc, strings.TrimRight(cfg.PublicBaseURL, "/")+"/telegram/connect/broadcasts")
@@ -876,7 +876,7 @@ func main() {
 		slog.Error("k8s service account auth init failed; refusing to start", "err", err)
 		os.Exit(1)
 	}
-	mcpHandler := auth.MCPMiddleware(mcpProvider, cfg.AuthRequired, m, resourceMeta)(
+	mcpHandler := auth.MCPMiddleware(workspaceMCPProvider(cfg, mcpProvider), cfg.AuthRequired, m, resourceMeta)(
 		limiter.Middleware()(mcpSrv.HTTPHandler()),
 	)
 	// OriginGuard runs before auth: a present browser Origin must be on the
@@ -962,7 +962,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           mux,
+		Handler:           serverRoutes(cfg, mux),
 		ReadHeaderTimeout: 10 * time.Second,
 		// ConnContext stores the TCP peer address in the request context before
 		// any middleware runs. metricsHandler reads socketPeerKey to enforce the
@@ -1197,6 +1197,8 @@ func registerOAuth(ctx context.Context, cfg *config.Config, store *db.Store, mux
 	srv, err := oauth.New(ctx, oauth.Config{
 		Issuer:                       strings.TrimRight(cfg.PublicBaseURL, "/"),
 		JWTSecret:                    []byte(cfg.OAUTHJWTSecret),
+		EndpointScopeCeiling:         workspaceOAuthScopes(cfg),
+		EndpointTelegramID:           workspaceTelegramID(cfg),
 		JWTAudience:                  cfg.OAUTHJWTAudience,
 		TelegramOIDCClientID:         cfg.TelegramOIDCClientID,
 		TelegramOIDCClientSecret:     cfg.TelegramOIDCClientSecret,

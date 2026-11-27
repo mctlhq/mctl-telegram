@@ -62,7 +62,34 @@ var (
 	TextBudgetHold = tpl("The assistant has reached its spending limit for now. Your request is on hold until the limit resets. If the conversation expires first, you will be told and can send it again.", "Ассистент пока исчерпал лимит расходов. Ваш запрос ждёт, пока лимит не обновится. Если разговор истечёт раньше, вам об этом сообщат, и запрос можно будет отправить снова.")
 	// TextRunFailed is sent when a request ended without an answer: the
 	// run's lease expired, or it failed repeatedly (#1313 slice d1).
-	TextRunFailed = tpl("The assistant could not finish your request. Please send it again.", "Ассистенту не удалось выполнить запрос. Пожалуйста, отправьте его ещё раз.")
+	TextRunFailed          = tpl("The assistant could not finish your request. Please send it again.", "Ассистенту не удалось выполнить запрос. Пожалуйста, отправьте его ещё раз.")
+	TextRunFailedRateLimit = tpl("The AI provider is temporarily rate-limited. Please try again in a minute.", "Провайдер ИИ временно ограничил частоту запросов. Попробуйте повторить через минуту.")
+	TextRunFailedProvider  = tpl("The AI provider returned an error and could not finish your request. Please try again later.", "Провайдер ИИ вернул ошибку и не смог выполнить запрос. Попробуйте отправить его позже.")
+	TextRunFailedContext   = tpl("This conversation has grown too long to process. Send /new to start a fresh conversation.", "Этот разговор стал слишком длинным для обработки. Отправьте /new, чтобы начать новый разговор.")
+	TextRunFailedBudget    = tpl("This request exceeded the per-request processing limit. Try breaking it into smaller questions.", "Запрос превысил лимит обработки одного сообщения. Попробуйте разбить его на более короткие вопросы.")
+	TextRunFailedTimeout   = tpl("The assistant timed out before finishing your request. Please send it again.", "Время обработки запроса истекло. Пожалуйста, отправьте его ещё раз.")
+
+	// Operator PA failure alerts sent directly via the PA bot to configured
+	// TG_LOGIN_ADMINS. Kept strictly fixed literals with no prompt or
+	// provider body text (T14).
+	TextAlertPARunFailedProviderRateLimit = tpl("[PA Alert] Run failed: provider rate limit (429).", "[PA Alert] Ошибка PA: провайдер ограничил частоту запросов (429).")
+	TextAlertPARunFailedProviderServer    = tpl("[PA Alert] Run failed: provider 5xx/server error.", "[PA Alert] Ошибка PA: серверная ошибка провайдера (5xx).")
+	TextAlertPARunFailedProviderRequest   = tpl("[PA Alert] Run failed: provider 4xx request rejected.", "[PA Alert] Ошибка PA: провайдер отклонил запрос (4xx).")
+	TextAlertPARunFailedProviderError     = tpl("[PA Alert] Run failed: provider transport or decode error.", "[PA Alert] Ошибка PA: ошибка транспорта или ответа провайдера.")
+	TextAlertPARunFailedEmptyAnswer       = tpl("[PA Alert] Run failed: model returned empty answer.", "[PA Alert] Ошибка PA: модель вернула пустой ответ.")
+	TextAlertPARunFailedContextLimit      = tpl("[PA Alert] Run failed: context window limit reached.", "[PA Alert] Ошибка PA: превышен лимит контекста.")
+	TextAlertPARunFailedCostLimit         = tpl("[PA Alert] Run failed: per-job cost limit reached or usage unknown.", "[PA Alert] Ошибка PA: превышен лимит стоимости или неизвестен usage.")
+	TextAlertPARunFailedToolCap           = tpl("[PA Alert] Run failed: tool call limit reached.", "[PA Alert] Ошибка PA: достигнут лимит вызовов инструментов.")
+	TextAlertPARunFailedToolError         = tpl("[PA Alert] Run failed: tool dispatch failed.", "[PA Alert] Ошибка PA: ошибка вызова инструмента.")
+	TextAlertPARunFailedToolAfterCard     = tpl("[PA Alert] Run failed: model requested a tool after approval card.", "[PA Alert] Ошибка PA: модель запросила инструмент после карточки подтверждения.")
+	TextAlertPARunFailedLeaseShort        = tpl("[PA Alert] Run failed: claim lease too short.", "[PA Alert] Ошибка PA: слишком короткий lease при захвате задачи.")
+	TextAlertPARunFailedLeaseExpired      = tpl("[PA Alert] Run failed: job lease expired before reply.", "[PA Alert] Ошибка PA: истёк lease задачи до получения ответа.")
+	TextAlertPARunFailedClaimFailed       = tpl("[PA Alert] Run failed: claim failed repeatedly and was cancelled.", "[PA Alert] Ошибка PA: задача отменена после повторных ошибок claim.")
+	TextAlertPARunFailedTurnTimeout       = tpl("[PA Alert] Run failed: turn gate 503 timed out.", "[PA Alert] Ошибка PA: таймаут turn gate (503).")
+	TextAlertPARunFailedReplyTimeout      = tpl("[PA Alert] Run failed: reply submission timed out.", "[PA Alert] Ошибка PA: таймаут отправки ответа на сервер.")
+	TextAlertPARunFailedDeadline          = tpl("[PA Alert] Run failed: worker deadline exceeded.", "[PA Alert] Ошибка PA: истёк таймаут выполнения на воркере.")
+	TextAlertPARunFailedInvalidClaim      = tpl("[PA Alert] Run failed: invalid claim payload.", "[PA Alert] Ошибка PA: некорректный payload задачи.")
+	TextAlertPARunFailedAbandoned         = tpl("[PA Alert] Run failed: worker abandoned run.", "[PA Alert] Ошибка PA: воркер прервал выполнение задачи.")
 	// TextRequestDropped is sent when a queued or held request is dropped
 	// because its conversation closed or expired first (#1313 slice d1).
 	TextRequestDropped = tpl("Your earlier request could not be answered before the conversation expired. Please send it again.", "На ваш предыдущий запрос не удалось ответить до истечения разговора. Пожалуйста, отправьте его ещё раз.")

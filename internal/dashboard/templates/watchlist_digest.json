@@ -1,0 +1,37 @@
+{
+  "schema": "tg-dashboard/v1",
+  "id": "watchlist_digest",
+  "title": "Подборка по списку",
+  "layout": { "columns": 12, "gap": 12 },
+  "refreshIntervalSec": 120,
+  "inputs": [
+    { "id": "query", "label": "Ключевое слово", "required": true },
+    { "id": "peers", "label": "Чаты через запятую" }
+  ],
+  "dataSources": [
+    {
+      "id": "hits",
+      "tool": "search_messages",
+      "args": { "query": "@input:query", "peer": "@input:peers", "limit": 20 }
+    }
+  ],
+  "tiles": [
+    {
+      "id": "digest",
+      "component": "search_digest",
+      "colSpan": 12,
+      "props": {
+        "title": "Совпадения",
+        "source": "hits",
+        "peers": "@input:peers"
+      },
+      "actions": [
+        {
+          "action": "save_draft",
+          "label": "Черновик",
+          "args": { "peer": "@tile:peer" }
+        }
+      ]
+    }
+  ]
+}

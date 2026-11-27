@@ -142,6 +142,11 @@ type RunLoopConfig struct {
 	// CallbackMetrics counts callback answers (AnswerCallbackAfter).
 	// Optional.
 	CallbackMetrics CallbackCounter
+	// FailureMetrics counts PA jobs that ended without an answer. Optional.
+	FailureMetrics FailureCounter
+	// Admins receives direct PA bot alerts when a run fails without an answer
+	// (TG_LOGIN_ADMINS). Optional; empty sends no operator alert.
+	Admins []int64
 	// Allowed is the preview allowlist (PA_ALLOWED_PRINCIPALS), re-checked
 	// at every step by gate. Required; an empty list allows nobody.
 	Allowed PrincipalAllowlist
@@ -175,29 +180,47 @@ type RunLoopConfig struct {
 	// Getenv reads PA_STREAMING_ENABLED on every claim and draft. Optional;
 	// defaults to os.Getenv.
 	Getenv func(string) string
+	// Photos resolves inbound photo file_ids into bounded data URIs at claim
+	// time (#1501). Optional; nil degrades photo fragments to text placeholders.
+	Photos PhotoFetcher
+}
+
+// PhotoFetcher resolves a Telegram Bot API file_id to a bounded data URI.
+type PhotoFetcher interface {
+	FetchPhoto(ctx context.Context, fileID string) (string, error)
+}
+
+// RunLoop serves the run-loop routes and implements RunEnqueuer and
+// Limiter for Conversations.
+// FailureCounter counts PA runs that ended without an answer (*metrics.Registry).
+type FailureCounter interface {
+	CountPAJobFailure(reason string)
 }
 
 // RunLoop serves the run-loop routes and implements RunEnqueuer and
 // Limiter for Conversations.
 type RunLoop struct {
-	store    RunLoopStore
-	sealer   *convo.Sealer
-	pool     PoolAuthenticator
-	minter   JobMinter
-	verifier JobVerifier
-	sender   BotSender
-	tools    ToolResolver
-	limits   jobs.Limits
-	budget   jobs.Budget
-	lease    time.Duration
-	now      func() time.Time
-	metrics  OutboxCounter
-	cbCount  CallbackCounter
-	allowed  PrincipalAllowlist
-	typing   *typingTracker
-	timer    *runTimer
-	cards    CardRenderer
-	drafts   DraftSender
+	store       RunLoopStore
+	sealer      *convo.Sealer
+	pool        PoolAuthenticator
+	minter      JobMinter
+	verifier    JobVerifier
+	sender      BotSender
+	tools       ToolResolver
+	limits      jobs.Limits
+	budget      jobs.Budget
+	lease       time.Duration
+	now         func() time.Time
+	metrics     OutboxCounter
+	cbCount     CallbackCounter
+	failMetrics FailureCounter
+	admins      []int64
+	allowed     PrincipalAllowlist
+	typing      *typingTracker
+	timer       *runTimer
+	cards       CardRenderer
+	drafts      DraftSender
+	photos      PhotoFetcher
 	getenv   func(string) string
 	limiter  *draftLimiter
 	// pending tracks the deliveries request paths started (deliverAfter).
@@ -275,10 +298,11 @@ func NewRunLoop(cfg RunLoopConfig) (*RunLoop, error) {
 	loop := &RunLoop{
 		store: cfg.Store, sealer: cfg.Sealer, pool: cfg.Pool, minter: cfg.Minter, verifier: cfg.Verifier,
 		sender: cfg.Sender, tools: cfg.Tools, limits: cfg.Limits, budget: cfg.Budget, lease: lease, now: now,
-		readTools: read, modelTools: modelTools, metrics: cfg.Metrics, cbCount: cfg.CallbackMetrics,
+		readTools: read, modelTools: modelTools, metrics: cfg.Metrics, cbCount: cfg.CallbackMetrics, failMetrics: cfg.FailureMetrics,
+		admins:  uniquePositiveIDs(cfg.Admins),
 		allowed: cfg.Allowed, typing: newTypingTracker(cfg.Typing, now), timer: newRunTimer(cfg.Phases, now),
 		cards: cfg.Cards, approveTools: approve, actionsHint: cfg.ActionsHint,
-		drafts: cfg.Drafts, getenv: getenv, limiter: newDraftLimiter(),
+		drafts: cfg.Drafts, photos: cfg.Photos, getenv: getenv, limiter: newDraftLimiter(),
 	}
 	if loop.typing != nil && cfg.Drafts != nil {
 		loop.typing.drafts = cfg.Drafts
@@ -488,6 +512,7 @@ type (
 		Kind       string `json:"kind"`
 		Provenance string `json:"provenance"`
 		Text       string `json:"text"`
+		ImageURL   string `json:"image_url,omitempty"`
 	}
 	wireLimits struct {
 		MaxJobCostUSD      float64 `json:"max_job_cost_usd"`
@@ -532,7 +557,8 @@ type (
 		Text string `json:"text"`
 		// CostUSD is the run's reported cost; absent settles at the full
 		// reservation.
-		CostUSD *float64 `json:"cost_usd"`
+		CostUSD    *float64 `json:"cost_usd"`
+		FailReason string   `json:"fail_reason,omitempty"`
 	}
 	stopResponse struct {
 		Stop string `json:"stop"`
@@ -592,8 +618,12 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 	// Committed to the outbox with the state change; owed whether or not
 	// the claim succeeded.
 	principals := make([]int64, 0, len(res.Notices)+1)
+	expired := 0
 	for _, n := range res.Notices {
 		principals = append(principals, n.Principal)
+		if n.Kind == jobs.NoticeRunFailed {
+			expired++
+		}
 	}
 	if err == nil && res.Outcome == jobs.ClaimHeld && res.Notify {
 		principals = append(principals, res.Job.Principal)
@@ -602,6 +632,9 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 	// and the token it carries must reach the worker whatever Telegram
 	// does.
 	defer l.deliverAfter(ctx, principals...)
+	for range expired {
+		l.recordFailure(ctx, jobs.FailureLeaseExpired)
+	}
 	if err != nil {
 		stop(w, err)
 		return
@@ -639,6 +672,7 @@ func (l *RunLoop) serveClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	frags = trimContext(frags, l.limits.MaxContextTokens)
+	frags = l.hydratePhotos(ctx, frags)
 	tools, err := l.claimTools(j.ToolSet)
 	if err != nil {
 		// build admitted only pinned reads, so this is a server bug; it
@@ -710,6 +744,58 @@ func (l *RunLoop) loadFragments(ctx context.Context, principal int64, conversati
 	return out, nil
 }
 
+func fragmentTokens(f wireFragment) int {
+	if f.Kind == string(convo.KindPhoto) {
+		return jobs.PhotoContextTokens
+	}
+	return jobs.EstimateTokens(f.Text)
+}
+
+const (
+	maxClaimPhotos     = 2
+	maxClaimPhotoBytes = 3 << 20
+	perPhotoFetchWait  = 10 * time.Second
+)
+
+// hydratePhotos resolves up to the newest maxClaimPhotos photo fragments in a
+// claimed conversation into bounded base64 data URIs. Raw file_ids never leave
+// the server; older or unreadable photos become plain text placeholders.
+func (l *RunLoop) hydratePhotos(ctx context.Context, frags []wireFragment) []wireFragment {
+	var photoIdx []int
+	for i, f := range frags {
+		if f.Kind == string(convo.KindPhoto) {
+			photoIdx = append(photoIdx, i)
+		}
+	}
+	if len(photoIdx) == 0 {
+		return frags
+	}
+	totalBytes := 0
+	// Walk newest-first so recent photos stay visible if there are many.
+	for n := len(photoIdx) - 1; n >= 0; n-- {
+		idx := photoIdx[n]
+		fileID := frags[idx].Text
+		frags[idx].Text = "[photo unavailable]"
+		if l.photos == nil || len(photoIdx)-n > maxClaimPhotos {
+			continue
+		}
+		fctx, cancel := context.WithTimeout(ctx, perPhotoFetchWait)
+		dataURI, err := l.photos.FetchPhoto(fctx, fileID)
+		cancel()
+		if err != nil {
+			slog.Warn("pa claim: photo fetch failed", "err", err)
+			continue
+		}
+		if totalBytes+len(dataURI) > maxClaimPhotoBytes {
+			continue
+		}
+		totalBytes += len(dataURI)
+		frags[idx].Text = "[photo]"
+		frags[idx].ImageURL = dataURI
+	}
+	return frags
+}
+
 // trimContext drops the oldest fragments until the estimate fits max
 // tokens (S1-R1). The newest user fragment is never dropped: it is what
 // the run answers. Fragments keep their order and marks.
@@ -722,7 +808,7 @@ func trimContext(frags []wireFragment, max int) []wireFragment {
 	}
 	total := 0
 	for _, f := range frags {
-		total += jobs.EstimateTokens(f.Text)
+		total += fragmentTokens(f)
 	}
 	keep := make([]bool, len(frags))
 	for i := range keep {
@@ -733,7 +819,7 @@ func trimContext(frags []wireFragment, max int) []wireFragment {
 			continue
 		}
 		keep[i] = false
-		total -= jobs.EstimateTokens(frags[i].Text)
+		total -= fragmentTokens(frags[i])
 	}
 	out := make([]wireFragment, 0, len(frags))
 	for i, f := range frags {
@@ -801,7 +887,37 @@ func (l *RunLoop) serveReply(w http.ResponseWriter, r *http.Request) {
 	case err == nil:
 		err = json.Unmarshal(body, &req)
 	}
-	if !overflow && (err != nil || strings.TrimSpace(req.Text) == "" || (req.CostUSD != nil && !(*req.CostUSD >= 0))) {
+	if !overflow && err != nil {
+		writeJSON(w, http.StatusBadRequest, stopResponse{Stop: "invalid"})
+		return
+	}
+	if !overflow && req.FailReason != "" {
+		if strings.TrimSpace(req.Text) != "" || req.CostUSD != nil {
+			writeJSON(w, http.StatusBadRequest, stopResponse{Stop: "invalid"})
+			return
+		}
+		reason := jobs.FailureReason(req.FailReason)
+		if !reason.WorkerReported() {
+			writeJSON(w, http.StatusBadRequest, stopResponse{Stop: "invalid"})
+			return
+		}
+		j, err := l.store.FailPAJob(r.Context(), ref, jobs.FailRequest{
+			Now:  l.now(),
+			Kind: jobs.OutboxKindForFailure(reason),
+			Gate: l.gate,
+		})
+		if err != nil {
+			l.stopRun(r.Context(), w, ref, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"abandoned": true})
+		l.typing.stop(ref.JobID)
+		l.timer.drop(ref.JobID)
+		l.deliverAfter(r.Context(), j.Principal)
+		l.recordFailure(r.Context(), reason)
+		return
+	}
+	if !overflow && (strings.TrimSpace(req.Text) == "" || (req.CostUSD != nil && !(*req.CostUSD >= 0))) {
 		writeJSON(w, http.StatusBadRequest, stopResponse{Stop: "invalid"})
 		return
 	}
@@ -958,6 +1074,9 @@ func (l *RunLoop) release(ctx context.Context, ref jobs.Ref, mode jobs.ReleaseMo
 	}
 	if n != nil {
 		l.deliverAfter(ctx, n.Principal)
+		if n.Kind == jobs.NoticeRunFailed {
+			l.recordFailure(ctx, jobs.FailureClaimFailed)
+		}
 	}
 }
 
@@ -1207,4 +1326,68 @@ func (l *RunLoop) droppedNotice(ctx context.Context, ref jobs.Ref, err error) {
 		// The store wrote the notice with the cancellation.
 		l.deliverAfter(ctx, ref.Principal)
 	}
+}
+
+func uniquePositiveIDs(ids []int64) []int64 {
+	var out []int64
+	for _, id := range ids {
+		if id > 0 && !slices.Contains(out, id) {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// recordFailure counts reason and notifies configured TG_LOGIN_ADMINS directly
+// through the PA bot using fixed server templates (never prompt/body text).
+func (l *RunLoop) recordFailure(ctx context.Context, reason jobs.FailureReason) {
+	if !reason.Valid() {
+		reason = jobs.FailureAbandoned
+	}
+	if l.failMetrics != nil {
+		l.failMetrics.CountPAJobFailure(string(reason))
+	}
+	if len(l.admins) == 0 {
+		return
+	}
+	msg := safetext.ServerText(alertTemplateFor(reason))
+	l.pending.Add(1)
+	go func() {
+		defer l.pending.Done()
+		actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outboxSendTimeout)
+		defer cancel()
+		for _, adminID := range l.admins {
+			if err := l.sender.SendFrom(actx, adminID, msg, nil, 0, nil); err != nil {
+				slog.Warn("pa operator alert failed", "admin", adminID, "reason", string(reason), "err", err)
+			}
+		}
+	}()
+}
+
+var alertTemplates = map[jobs.FailureReason]safetext.Template{
+	jobs.FailureProviderRateLimit: safetext.TextAlertPARunFailedProviderRateLimit,
+	jobs.FailureProviderServer:    safetext.TextAlertPARunFailedProviderServer,
+	jobs.FailureProviderRequest:   safetext.TextAlertPARunFailedProviderRequest,
+	jobs.FailureProviderError:     safetext.TextAlertPARunFailedProviderError,
+	jobs.FailureEmptyAnswer:       safetext.TextAlertPARunFailedEmptyAnswer,
+	jobs.FailureContextLimit:      safetext.TextAlertPARunFailedContextLimit,
+	jobs.FailureCostLimit:         safetext.TextAlertPARunFailedCostLimit,
+	jobs.FailureToolCap:           safetext.TextAlertPARunFailedToolCap,
+	jobs.FailureToolError:         safetext.TextAlertPARunFailedToolError,
+	jobs.FailureToolAfterCard:     safetext.TextAlertPARunFailedToolAfterCard,
+	jobs.FailureLeaseShort:        safetext.TextAlertPARunFailedLeaseShort,
+	jobs.FailureLeaseExpired:      safetext.TextAlertPARunFailedLeaseExpired,
+	jobs.FailureClaimFailed:       safetext.TextAlertPARunFailedClaimFailed,
+	jobs.FailureTurnTimeout:       safetext.TextAlertPARunFailedTurnTimeout,
+	jobs.FailureReplyTimeout:      safetext.TextAlertPARunFailedReplyTimeout,
+	jobs.FailureDeadline:          safetext.TextAlertPARunFailedDeadline,
+	jobs.FailureInvalidClaim:      safetext.TextAlertPARunFailedInvalidClaim,
+	jobs.FailureAbandoned:         safetext.TextAlertPARunFailedAbandoned,
+}
+
+func alertTemplateFor(reason jobs.FailureReason) safetext.Template {
+	if tpl, ok := alertTemplates[reason]; ok {
+		return tpl
+	}
+	return safetext.TextAlertPARunFailedAbandoned
 }

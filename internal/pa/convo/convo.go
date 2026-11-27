@@ -60,11 +60,14 @@ const (
 	// KindTool is tool output, stored by the run loop when the dispatcher
 	// returns a tool result to the worker (#1321): always external.
 	KindTool Kind = "tool"
+	// KindPhoto is an inbound Telegram photo file reference (resolved to a
+	// bounded image at claim time): always external (#1501).
+	KindPhoto Kind = "photo"
 )
 
 // Kinds lists every valid Kind, for stores that must find rows of any other.
 func Kinds() []Kind {
-	return []Kind{KindText, KindCaption, KindReply, KindQuote, KindAssistant, KindTool}
+	return []Kind{KindText, KindCaption, KindReply, KindQuote, KindAssistant, KindTool, KindPhoto}
 }
 
 // Valid reports whether k is a kind this build knows.
@@ -85,7 +88,7 @@ func Taints(kind Kind, prov Provenance) bool {
 	switch kind {
 	case KindAssistant:
 		return false
-	case KindCaption, KindReply, KindQuote, KindTool:
+	case KindCaption, KindReply, KindQuote, KindTool, KindPhoto:
 		return true
 	}
 	return prov.Effective() != ProvenanceUser
@@ -101,11 +104,11 @@ type Fragment struct {
 
 // NewFragment builds a fragment. A mark that is not exactly user is stored
 // as external, so nothing unmarked can ever be written (S1-I4). Captions,
-// replies, quotes and tool output are external whatever the caller says.
+// replies, quotes, tool output and photos are external whatever the caller says.
 func NewFragment(kind Kind, prov Provenance, text string) Fragment {
 	p := prov.Effective()
 	switch kind {
-	case KindCaption, KindReply, KindQuote, KindTool:
+	case KindCaption, KindReply, KindQuote, KindTool, KindPhoto:
 		p = ProvenanceExternal
 	}
 	return Fragment{kind: kind, prov: p, text: text}

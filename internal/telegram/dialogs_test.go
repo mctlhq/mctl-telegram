@@ -116,6 +116,55 @@ func TestDialogEntries_DoesNotInventDates(t *testing.T) {
 	})
 }
 
+func TestDialogEntries_ChannelKindsAndFlags(t *testing.T) {
+	users := map[int64]*tg.User{
+		8511: {ID: 8511, FirstName: "Alice"},
+	}
+	news := &tg.Channel{ID: 8521, Title: "News", Broadcast: true}
+	team := &tg.Channel{ID: 8522, Title: "Team", Megagroup: true, Forum: true}
+	chats := map[int64]tg.ChatClass{
+		8521: news,
+		8522: team,
+		8523: &tg.ChannelForbidden{ID: 8523},
+	}
+	alice := &tg.Dialog{Peer: &tg.PeerUser{UserID: 8511}, TopMessage: 9, UnreadCount: 2, UnreadMentionsCount: 1, Pinned: true}
+	alice.SetFolderID(1)
+	alice.NotifySettings.SetMuteUntil(int(time.Now().Add(time.Hour).Unix()))
+	dialogs := []tg.DialogClass{
+		alice,
+		&tg.Dialog{Peer: &tg.PeerChannel{ChannelID: 8521}, TopMessage: 40, UnreadCount: 3},
+		&tg.Dialog{Peer: &tg.PeerChannel{ChannelID: 8522}, TopMessage: 7, UnreadCount: 1, UnreadMentionsCount: 4},
+		&tg.Dialog{Peer: &tg.PeerChannel{ChannelID: 8523}, TopMessage: 1},
+	}
+	got := dialogEntries(dialogs, users, chats, nil, "")
+	if len(got) != 4 {
+		t.Fatalf("got %d dialogs, want 4", len(got))
+	}
+	byID := map[string]Dialog{}
+	for _, d := range got {
+		byID[d.ID] = d
+	}
+	a := byID["user:8511"]
+	if !a.Pinned || !a.Muted || !a.Archived || a.TopMessageID != 9 || a.UnreadMentionsCount != 1 {
+		t.Errorf("alice flags = %+v", a)
+	}
+	if a.IsBroadcast || a.IsMegagroup || a.IsForum {
+		t.Errorf("alice is not a channel: %+v", a)
+	}
+	n := byID["channel:8521"]
+	if n.Type != "channel" || !n.IsBroadcast || n.IsMegagroup || n.IsForum || n.TopMessageID != 40 {
+		t.Errorf("news = %+v", n)
+	}
+	tm := byID["channel:8522"]
+	if tm.Type != "channel" || tm.IsBroadcast || !tm.IsMegagroup || !tm.IsForum || tm.UnreadMentionsCount != 4 {
+		t.Errorf("team = %+v", tm)
+	}
+	f := byID["channel:8523"]
+	if !f.IsBroadcast || f.IsMegagroup || f.Title != "" {
+		t.Errorf("forbidden channel = %+v", f)
+	}
+}
+
 func TestDialogsTopMessages(t *testing.T) {
 	msg := &tg.Message{ID: 1, Date: 1700000000, PeerID: &tg.PeerUser{UserID: 1}}
 	full := &tg.MessagesDialogs{Messages: []tg.MessageClass{msg}}

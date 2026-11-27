@@ -22,33 +22,48 @@ func textSHA256(text string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// withUIResource returns a mcplib.ToolOption that sets a tool's _meta.ui
-// link to the triage App resource (mcpui.ToolMeta), preserving any existing
-// Meta.AdditionalFields and ProgressToken rather than clobbering them. It is
-// applied, only when s.AppsEnabled, to the tools the App composes -- see
-// addToolUI and newMCPServer. With the flag off no tool's builder ever calls
-// this, so no tool carries a non-nil Meta.
-//
-// visibility inside mcpui.ToolMeta() is a host-side hint (which tools a
-// conforming host lets the App itself invoke, versus model-only) -- it is
-// never consulted by any handler in this package. requireScope and the send
-// gate are the only server-side authority; see the proposal's "Open
-// questions" for why.
-func withUIResource() mcplib.ToolOption {
+// withUIResourceURI adds the host-facing Apps binding without replacing
+// other tool metadata. Registration and OAuth remain server-side controls.
+func withUIResourceURI(uri string) mcplib.ToolOption {
 	return func(t *mcplib.Tool) {
-		fields := map[string]any{}
-		var progressToken mcplib.ProgressToken
-		if t.Meta != nil {
-			progressToken = t.Meta.ProgressToken
-			for k, v := range t.Meta.AdditionalFields {
-				fields[k] = v
-			}
-		}
-		for k, v := range mcpui.ToolMeta() {
+		mergeToolMeta(t, mcpui.ToolMetaFor(uri))
+	}
+}
+
+// setWorkspaceToolVisibility publishes a default-deny App allowlist for the
+// host bridge. The host must enforce it before proxying tools/call. The MCP
+// transport authenticates the host and has no trusted iframe origin signal.
+func setWorkspaceToolVisibility(tool *mcplib.Tool) {
+	visibility := []string{"model"}
+	appAccessible := false
+	switch tool.Name {
+	case "telegram_dashboard", "list_dialogs", "get_messages", "search_messages":
+		visibility = append(visibility, "app")
+		appAccessible = true
+	}
+	ui := map[string]any{"visibility": visibility}
+	if tool.Name == "telegram_dashboard" {
+		ui["resourceUri"] = mcpui.WorkspaceResourceURI
+	}
+	mergeToolMeta(tool, map[string]any{
+		"ui":                      ui,
+		"openai/widgetAccessible": appAccessible,
+	})
+}
+
+func mergeToolMeta(tool *mcplib.Tool, updates map[string]any) {
+	fields := map[string]any{}
+	var progressToken mcplib.ProgressToken
+	if tool.Meta != nil {
+		progressToken = tool.Meta.ProgressToken
+		for k, v := range tool.Meta.AdditionalFields {
 			fields[k] = v
 		}
-		t.Meta = &mcplib.Meta{ProgressToken: progressToken, AdditionalFields: fields}
 	}
+	for k, v := range updates {
+		fields[k] = v
+	}
+	tool.Meta = &mcplib.Meta{ProgressToken: progressToken, AdditionalFields: fields}
 }
 
 // prepareSendMessageResult is the success payload of prepare_send_message.

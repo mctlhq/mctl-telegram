@@ -360,7 +360,7 @@ func TestS1E4_RedirectRefusedOutsideDiscovery(t *testing.T) {
 		}
 		inner.ServeHTTP(w, r)
 	}))
-	for _, p := range []Purpose{PurposeRegistration, PurposeToken, PurposeRevocation, PurposeMCP, PurposeBotAPI} {
+	for _, p := range []Purpose{PurposeRegistration, PurposeToken, PurposeRevocation, PurposeMCP, PurposeBotAPI, PurposeBotFile} {
 		c := h.client(t, Config{Purpose: p})
 		if _, err := do(t, c, "https://"+hostMCP+"/a"); !errors.Is(err, ErrRedirect) {
 			t.Errorf("%v: want ErrRedirect, got %v", p, err)
@@ -377,7 +377,7 @@ func TestS1E4_RedirectWithoutLocationRefused(t *testing.T) {
 	h := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusFound)
 	}))
-	for _, p := range []Purpose{PurposeRegistration, PurposeToken, PurposeRevocation, PurposeMCP, PurposeBotAPI} {
+	for _, p := range []Purpose{PurposeRegistration, PurposeToken, PurposeRevocation, PurposeMCP, PurposeBotAPI, PurposeBotFile} {
 		c := h.client(t, Config{Purpose: p})
 		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://"+hostMCP+"/", nil)
 		resp, err := c.Do(req)

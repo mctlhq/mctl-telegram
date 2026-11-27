@@ -231,6 +231,38 @@ func HashMediaPayload(peer string, messageID int64) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// HashDashboardAction is the canonical hash for a dashboard prepare/confirm
+// pair. action is "mark_read" or "save_draft". n is max_id for mark_read and
+// unused (zero) for save_draft. flag is overwrite for save_draft. The fields
+// are separated by NUL so a value cannot slide into the next field.
+func HashDashboardAction(action, peer, text string, n, topicID int, flag bool) string {
+	h := sha256.New()
+	write := func(b []byte) {
+		h.Write(b)
+		h.Write([]byte{0})
+	}
+	write([]byte(action))
+	write([]byte(peer))
+	write([]byte(text))
+	var buf [8]byte
+	putInt := func(v int) {
+		u := uint64(int64(v))
+		for i := 0; i < 8; i++ {
+			buf[7-i] = byte(u >> (8 * i))
+		}
+		h.Write(buf[:])
+		h.Write([]byte{0})
+	}
+	putInt(n)
+	putInt(topicID)
+	if flag {
+		h.Write([]byte{1})
+	} else {
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // HashPinPayload is the equivalent for pin_message.
 func HashPinPayload(peer string, messageID int64, unpin bool) string {
 	h := sha256.New()

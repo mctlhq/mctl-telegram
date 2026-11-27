@@ -44,6 +44,9 @@ const (
 // MinHumanInputPollInterval is the floor for HUMAN_INPUT_POLL_INTERVAL.
 const MinHumanInputPollInterval = 10 * time.Second
 
+// TelegramWorkspaceReadOnly is the isolated MCP Apps registration profile.
+const TelegramWorkspaceReadOnly = "telegram-workspace-read-only"
+
 type Config struct {
 	Addr          string
 	PublicBaseURL string
@@ -428,6 +431,10 @@ type Config struct {
 	// it, with no redeploy of this repository required beyond the env change.
 	// Set via MCP_APPS_ENABLED.
 	AppsEnabled bool
+	// AppsWorkspaceOnly publishes only the read-only Workspace App when Apps are enabled.
+	AppsWorkspaceOnly bool // MCP_APPS_WORKSPACE_ONLY
+	// AppsPilot exposes Workspace to existing OAuth accounts in CanaryTelegramIDs.
+	AppsPilot bool // MCP_APPS_PILOT
 	// BroadcastContentEnabled lets the content tools return broadcast
 	// channel posts, with the channel's official sponsored messages attached
 	// (Telegram API terms §3.3). On by default. Turning it off restores the
@@ -776,6 +783,8 @@ func Load() (*Config, error) {
 		AgentEnabled:                    envBool("AGENT_ENABLED", false),
 		AgentKillSwitch:                 envBool("AGENT_KILL_SWITCH", false),
 		AppsEnabled:                     envBool("MCP_APPS_ENABLED", false),
+		AppsWorkspaceOnly:               envBool("MCP_APPS_WORKSPACE_ONLY", false),
+		AppsPilot:                       envBool("MCP_APPS_PILOT", false),
 		BroadcastContentEnabled:         broadcastContentFromEnv(),
 		EventsValkeyURL:                 os.Getenv("EVENTS_VALKEY_URL"),
 		EventsValkeyPassword:            os.Getenv("EVENTS_VALKEY_PASSWORD"),
@@ -865,6 +874,9 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("CANARY_TELEGRAM_IDS: %w", err)
 	}
 	c.CanaryTelegramIDs = canaryIDs
+	if c.AppsPilot && (c.AppsEnabled || !c.AuthRequired || c.AuthMode != "local-jwt" || len(canaryIDs) == 0) {
+		return nil, fmt.Errorf("MCP_APPS_PILOT requires MCP_APPS_ENABLED=false, authenticated local-jwt and CANARY_TELEGRAM_IDS")
+	}
 	if err := loadK8sSA(c); err != nil {
 		return nil, err
 	}
@@ -999,8 +1011,20 @@ func Load() (*Config, error) {
 		}
 		c.OAUTHCIMDAllowedHosts = hosts
 	}
-	if c.ToolFilter != "all" && c.ToolFilter != "read-only" {
-		return nil, fmt.Errorf("MCP_TOOL_FILTER must be \"all\" or \"read-only\", got %q", c.ToolFilter)
+	switch c.ToolFilter {
+	case "all", "read-only":
+	case TelegramWorkspaceReadOnly:
+		if !c.AppsEnabled || c.AllowSend || !c.AuthRequired || !strings.EqualFold(c.AuthMode, "local-jwt") {
+			return nil, errors.New("telegram-workspace-read-only requires MCP_APPS_ENABLED=true, ALLOW_SEND=false, AUTH_REQUIRED=true and AUTH_MODE=local-jwt")
+		}
+		if !c.OAUTHJWTSecretDedicated || !c.OAUTHJWTAudReq || c.OAUTHJWTAudience == "" || c.K8sSASubject != "" {
+			return nil, errors.New("telegram-workspace-read-only requires a dedicated OAuth signing key and mandatory audience, with Kubernetes ServiceAccount authentication disabled")
+		}
+		if c.PAEnabled || c.ManagedRuntimeEnabled || c.DemoReviewerEnabled {
+			return nil, errors.New("telegram-workspace-read-only requires PA, managed runtime and reviewer login disabled")
+		}
+	default:
+		return nil, fmt.Errorf("MCP_TOOL_FILTER must be \"all\", \"read-only\" or %q, got %q", TelegramWorkspaceReadOnly, c.ToolFilter)
 	}
 	// MCPPath must be an absolute path below the origin. A root value would
 	// shadow the landing page and the root MCP alias: cmd/server/main.go
@@ -1107,6 +1131,10 @@ func Load() (*Config, error) {
 	c.SessionTTLExemptTGIDs = parseInt64CSV(os.Getenv("SESSION_TTL_EXEMPT_TG_IDS"))
 	c.TGLoginClients = parseInt64CSV(os.Getenv("TG_LOGIN_CLIENTS"))
 	c.TGLoginLookupAdmins = parseInt64CSV(os.Getenv("TG_LOGIN_LOOKUP_ADMINS"))
+	if c.ToolFilter == TelegramWorkspaceReadOnly && (c.AutoApproveClients || len(c.TGLoginClients) != 1 ||
+		c.TGLoginClients[0] <= 0 || len(c.TGLoginAdmins) != 0 || len(c.TGLoginLookupAdmins) != 0) {
+		return nil, errors.New("telegram-workspace-read-only requires exactly one isolated TG_LOGIN_CLIENTS identity, with auto-approval and admin tiers disabled")
+	}
 	c.BroadcastOperators = parseInt64CSV(os.Getenv("BROADCAST_OPERATORS"))
 	c.TelegramOIDCSigningAlgs = parseStringCSV(os.Getenv("TELEGRAM_OIDC_SIGNING_ALGS"))
 
