@@ -480,6 +480,18 @@ func TestPAWrites_EndToEnd(t *testing.T) {
 			if got := e.alice.sent(); !slices.Equal(got, want) {
 				t.Fatalf("after Approve the server got %q, want %q", got, want)
 			}
+			// The device reads are in the audit chain as the service's own
+			// sink wrote them, an entry before and after each: one read
+			// for the card, one for the second write call above, and one
+			// right before the dispatch, whose pair names the approval
+			// (S2-D4).
+			listed := func(more string) int {
+				return e.count(`SELECT COUNT(*) FROM audit_logs WHERE tool_name = $1 AND call_path = $2 AND peer_redacted LIKE $3`,
+					connector.AuditToolPrefix+"alice/alice_list_devices", connector.AuditCallPath, "pa/v1 %"+more+"%")
+			}
+			if all, pre, ok, unapproved := listed(""), listed(" phase=pre_dispatch "), listed(" status=ok "), listed(" approval=- "); all != 6 || pre != 3 || ok != 3 || unapproved != 4 {
+				t.Fatalf("device reads in the audit chain: %d entries, %d pre-dispatch, %d ok, %d without an approval; want 6, 3, 3, 4", all, pre, ok, unapproved)
+			}
 			// A double tap, and a tap on Cancel after the approval.
 			e.press(card.buttons[0])
 			e.press(card.buttons[1])

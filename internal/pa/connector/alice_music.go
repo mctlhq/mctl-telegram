@@ -40,10 +40,14 @@ package connector
 //
 // The card shows the speaker, the query and the whole command. The fixed
 // words are this file's copy of the server's constant: the pin binds the
-// tool's schema, description and annotations, none of which state them, so
-// a server that changed only those words would send another command than
-// the card shows and nothing here would notice (recorded as a gap of
-// S2-D4).
+// tool's schema, description and annotations, none of which state them.
+// The copy is held to the server's rule file as it is at the commit the
+// pin names (testdata/alice_music_query.ts, checked by
+// TestS2D4_MusicRulesMatchThePinnedUpstream, #1322 P2-S15c): the fixed
+// words, the numbers, the class of characters and both word lists. A
+// server deployed from another commit than the pin names is not seen by
+// that check, and one that changed only those words would send another
+// command than the card shows (recorded as a gap of S2-D4).
 //
 // The tool is never lowered: no standing permission has a rule for it, the
 // pin and catalog.IsNeverLowerable both say never, and Cards.Emit looks no

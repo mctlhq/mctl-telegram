@@ -41,8 +41,9 @@ package connector
 // (ReasonApprovalUnreadable). A device that is not in a listing read in
 // full is ReasonDeviceNotListed.
 //
-// A scenario has no such read: no tool reports a scenario's steps, so its
-// card path has no reader at all (scenario.go).
+// A scenario's steps are read again in the same place by recheckScenario
+// (scenario.go). No tool reports a scenario's steps, so no reader of them
+// exists outside tests and a deployed executor refuses there.
 
 import (
 	"context"
@@ -149,7 +150,7 @@ func (w *WriteExecutor) recheckTarget(ctx context.Context, a approval.Approval, 
 	}
 	devices, err := lister.Devices(ctx, SpeakerRequest{
 		Principal: a.Principal, ConnectionID: a.ConnectionID, AuthorityRevision: a.AuthorityRevision,
-		Server: a.Server, Token: token,
+		Server: a.Server, Token: token, ApprovalID: a.ID,
 	})
 	if err != nil {
 		// Could not read is not "the device is gone".
